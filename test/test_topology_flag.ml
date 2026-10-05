@@ -331,6 +331,36 @@ let test_control_wiring_typechecks () =
     Alcotest.failf "a diagnostic in the control plane's wiring:\n%s" err;
   expect_ok (rc, "", err)
 
+(* A protocol branch labelled like a prelude constructor (`none`, `some`,
+   `ok`, `err`, `nil`, `cons`) gives its message type a constructor of that
+   name. The control plane's wiring, spliced into the same entry module, used
+   bare `None`/`Some`/`Ok`/`Err`/`Nil`/`Cons`, which then became ambiguous:
+   49 errors in the wiring, each calling itself a compiler bug, though the
+   same protocol built fine without [control]. The wiring qualifies them now.
+   specs/progress/2026-10-04-lab-control-wiring-none-ctor-ambiguous.md *)
+let labels_protocol = {|
+  @[endpoints]
+  protocol Labels do
+    choose by A:
+      none -> A -> B : Int
+      some -> A -> B : Int
+      ok -> A -> B : Int
+      err -> A -> B : Int
+      nil -> A -> B : Int
+      cons -> A -> B : Int
+    end
+  end
+|}
+
+let test_control_wiring_survives_prelude_labels () =
+  let (rc, _, err) =
+    run ~src:(entry_src ~back:(hook ^ serve_one) ~extra:labels_protocol ())
+      ~digest_text:(digest ~control:{|,
+  "control": { "candidates": "control", "port": 7947 }|} ()) () in
+  if contains err "ambiguous" then
+    Alcotest.failf "a prelude-named protocol branch made the wiring ambiguous:\n%s" err;
+  expect_ok (rc, "", err)
+
 let tests = [
   Alcotest.test_case "a function role: main is generated and typechecks" `Quick test_function_role_generates_main;
   Alcotest.test_case "an actor role: main is generated and typechecks" `Quick test_actor_role_generates_main;
@@ -350,4 +380,5 @@ let tests = [
   Alcotest.test_case "IO.Foreign in a non-isolated pool, when opted in" `Quick test_foreign_needs_isolation;
   Alcotest.test_case "--topology-pools names a pool that exists" `Quick test_unknown_pool_flag;
   Alcotest.test_case "the control plane's generated wiring typechecks" `Quick test_control_wiring_typechecks;
+  Alcotest.test_case "a branch labelled none/some/ok/err/nil/cons leaves the wiring well-typed" `Quick test_control_wiring_survives_prelude_labels;
 ]

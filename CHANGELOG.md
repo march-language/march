@@ -193,6 +193,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A protocol branch named `none`, `some`, `ok`, `err`, `nil` or `cons` no longer breaks the
+  build.** Such a label gives the protocol's message type a constructor of the same name,
+  and the code `@[endpoints]`, `derive` and the control plane's `[control]` wiring generate
+  used the prelude's `Some`, `None`, `Ok`, `Err`, `Nil` and `Cons` unqualified, so they
+  became ambiguous: up to 49 errors, each blaming the compiler. Generated code now names
+  them `Option.None`, `Result.Ok`, `List.Cons` and so on.
+
 - **A pushed topology no longer takes away the control plane's leader.** Re-reading a
   topology (a signed push from `forge deploy` or `forge topology apply`, SIGHUP, or a restart)
   closed the control plane's own `Ctl.Control` role on every node, because the topology file
