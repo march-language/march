@@ -18,6 +18,10 @@ native_actor_init_params: coverage audit (user + stdlib): 123 enforced, 0 inert 
 native_actor_init_params: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_init_params_schema: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_actor_init_params_schema: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_inspect_block: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_actor_inspect_block: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_inspect_state: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_actor_inspect_state: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_mailbox_alarm: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_actor_mailbox_alarm: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_message_record_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -638,6 +642,8 @@ native_user_fn_named_own: coverage audit (user + stdlib): 123 enforced, 0 inert 
 native_user_fn_named_own: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_uuid_v7_dns_parity: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_uuid_v7_dns_parity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_vault_churn_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_vault_churn_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_new_same_name: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_vault_new_same_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_niche_unsafe_element: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

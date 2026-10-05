@@ -19,8 +19,11 @@
   threshold. Ours is polled (`Actor.over_mailbox`); a threshold callback fired
   from the send path when a mailbox crosses a limit would remove the timer.
   Watch the lock discipline: it must not re-serialise the lock-free send path.
-- **Per-actor state inspection.** No equivalent of `sys:get_state/1`.
-  `get_actor_field` exists but needs a Pid and a field index.
+> **State inspection landed 2026-10-05** — `Actor.inspect_state(d, pid,
+> timeout_ms)` (needs `Cap(Actor.Debug)`); see
+> `specs/progress/2026-10-05-observe-r4a-inspect-state.md`. Reading it from
+> outside the process (the observe socket's signed `STATE` verb) is R4b.
+
 - **Tracing.** No `erlang:trace` equivalent — no way to watch one actor's
   message flow without editing the program.
 

@@ -101,9 +101,15 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
      state for a dying actor — but reusing the write-back keeps the field
      ownership balanced: the loads MOVE fields out of the Lin actor record, and
      without the EReuse the actor would still point at fields [state] freed. *)
-  let lower_handler ?(on_stop = false) (h : Ast.actor_handler) : Tir.fn_def =
+  (* [~inspect:true] (observe plan R4) builds the state renderer
+     [Name_inspect] through the same glue: no params, and a synthesized body
+     [actor_inspect_store(to_string(state)); state] in place of a user body,
+     so the fields are written back exactly as on_stop's are. *)
+  let lower_handler ?(on_stop = false) ?(inspect = false) (h : Ast.actor_handler) : Tir.fn_def =
+    let on_stop = on_stop || inspect in
     let fn_name =
-      if on_stop then name ^ Tir_names.actor_on_stop_suffix
+      if inspect then name ^ Tir_names.actor_inspect_suffix
+      else if on_stop then name ^ Tir_names.actor_on_stop_suffix
       else name ^ "_" ^ h.ah_msg.txt in
 
     (* Handler params (after the implicit $actor) *)
@@ -153,6 +159,57 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
        See specs/progress/2026-09-13-send-to-self-delivers.md. *)
     let self_name = Tir_names.actor_self_binder in
     let body_tir =
+      if inspect then begin
+        (* "{ f1: to_string(v1), f2: ... }" in DECLARATION order, each field
+           rendered by to_string at its own static type (so mono resolves the
+           field type's Show, e.g. Option's "Some(3)"), which is exactly what
+           the interpreter prints (lib/eval/eval.ml, "$sys_inspect"). The
+           record as a whole is not handed to to_string: the erased record
+           renderer sorts the fields and cannot see a niche-encoded Option. *)
+        let st_ty = Tir.TCon (name ^ Tir_names.actor_state_suffix, []) in
+        let st = { Tir.v_name = "state"; v_ty = st_ty; v_lin = Tir.Unr } in
+        let concat_v = { Tir.v_name = "string_concat";
+                         v_ty = Tir.TFn ([Tir.TString; Tir.TString], Tir.TString); v_lin = Tir.Unr } in
+        let store_v = { Tir.v_name = "actor_inspect_store";
+                        v_ty = Tir.TFn ([Tir.TString], Tir.TUnit); v_lin = Tir.Unr } in
+        let counter = ref 0 in
+        let fresh ty = incr counter;
+          { Tir.v_name = Printf.sprintf "$insp%d" !counter; v_ty = ty; v_lin = Tir.Unr } in
+        let fields = List.map (fun (f : Ast.field) ->
+            (f.fld_name.txt, Lower_types.lower_ty f.fld_ty,
+             Ast.inspect_field_placeholder f.fld_ty)) actor.actor_state in
+        (* acc ++ piece, as a let chain; k receives the new accumulator.
+           The first piece is a literal and starts the accumulator itself. *)
+        let append acc_atom piece k =
+          let v = fresh Tir.TString in
+          Tir.ELet (v, Tir.EApp (concat_v, [acc_atom; piece]), k (Tir.AVar v)) in
+        let rec go acc = function
+          | [] ->
+            (match acc with
+             | None -> Tir.EApp (store_v, [Tir.ALit (Ast.LitString "{}")])
+             | Some a -> append a (Tir.ALit (Ast.LitString " }")) (fun final ->
+                 Tir.EApp (store_v, [final])))
+          | (fname, fty, placeholder) :: rest ->
+            let with_label k = match acc with
+              | None -> k (Tir.ALit (Ast.LitString ("{ " ^ fname ^ ": ")))
+              | Some a -> append a (Tir.ALit (Ast.LitString (", " ^ fname ^ ": "))) k in
+            (match placeholder with
+             | Some text ->
+               (* No Show for a function-typed field: print the placeholder. *)
+               with_label (fun a1 ->
+                 append a1 (Tir.ALit (Ast.LitString text)) (fun a2 -> go (Some a2) rest))
+             | None ->
+               let fv = fresh fty in
+               let sv = fresh Tir.TString in
+               let to_string_v = { Tir.v_name = "to_string";
+                                   v_ty = Tir.TFn ([fty], Tir.TString); v_lin = Tir.Unr } in
+               Tir.ELet (fv, Tir.EField (Tir.AVar st, fname),
+                 Tir.ELet (sv, Tir.EApp (to_string_v, [Tir.AVar fv]),
+                   with_label (fun a1 ->
+                     append a1 (Tir.AVar sv) (fun a2 -> go (Some a2) rest)))))
+        in
+        go None fields
+      end else
       (* A handler param named `self` shadows it, as in the typechecker; the
          param is already registered above. *)
       if List.exists (fun (p : Ast.param) -> p.param_name.txt = self_name) h.ah_params
@@ -283,6 +340,14 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
     match actor.actor_on_stop with
     | None -> []
     | Some h -> [lower_handler ~on_stop:true h]
+  in
+  (* The state renderer every actor type gets (observe plan R4). The handler
+     record only supplies an (empty) param list and a name; its body is
+     never lowered. *)
+  let inspect_fns =
+    let dummy_name = { Ast.txt = "$inspect"; span = Ast.dummy_span } in
+    [lower_handler ~inspect:true
+       { Ast.ah_msg = dummy_name; ah_params = []; ah_body = Ast.ELit (Ast.LitAtom "unit", Ast.dummy_span) }]
   in
 
   (* ── 4. Dispatch function ────────────────────────────────── *)
@@ -660,6 +725,34 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
       in
       wrap spawn_body_with_sup
   in
+  (* ── 5d. inspect registration (observe plan R4) ───────────────────── *)
+  (* Every actor type registers its state renderer, keyed like on_stop's:
+       let $reg_inspect = register_actor_inspect(Name_dispatch, Name_inspect)
+     The runtime probes a lock-free table and returns at once once the type
+     is there, so a re-registration on every spawn costs one probe. *)
+  let spawn_body_final =
+    let reg_var : Tir.var = {
+      v_name = "register_actor_inspect";
+      v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit], Tir.TUnit);
+      v_lin  = Tir.Unr;
+    } in
+    let inspect_fn_var : Tir.var = {
+      v_name = name ^ Tir_names.actor_inspect_suffix;
+      v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TUnit);
+      v_lin  = Tir.Unr;
+    } in
+    let rec wrap (e : Tir.expr) : Tir.expr =
+      match e with
+      | Tir.ELet (v, (Tir.EAlloc _ as alloc), rest) when v.Tir.v_name = "$spawned" ->
+        Tir.ELet (v, alloc,
+          Tir.ELet ({ v_name = "$reg_inspect"; v_ty = Tir.TUnit; v_lin = Tir.Unr },
+            Tir.EApp (reg_var, [Tir.AVar dispatch_fn_ptr_var; Tir.AVar inspect_fn_var]),
+            rest))
+      | Tir.ELet (v, rhs, body) -> Tir.ELet (v, rhs, wrap body)
+      | other -> other
+    in
+    wrap spawn_body_final
+  in
   let spawn_fn : Tir.fn_def = {
     fn_name   = name ^ Tir_names.actor_spawn_suffix;
     fn_params = init_params;
@@ -674,5 +767,5 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
   let state_record = Tir.TDRecord (name ^ Tir_names.actor_state_suffix, state_fields_sorted) in
 
   let type_defs = [state_record; msg_variant; actor_record] in
-  let fn_defs   = handler_fns @ on_stop_fns @ [dispatch_fn; spawn_fn] in
+  let fn_defs   = handler_fns @ on_stop_fns @ inspect_fns @ [dispatch_fn; spawn_fn] in
   (type_defs, fn_defs)
