@@ -645,13 +645,16 @@
 ; todo it serves (specs/todos/2026-08-12-vault-toward-ets-semantics.md) says
 ; not to partition the per-table write mutex without a workload that
 ; measurably serialises on it, so this exists to produce that number: T
-; threads each rewriting their OWN key, ratio against a solo run. Its
-; assertion is loose on purpose (it fails only if the result is worse than
-; plain serialisation) -- the printed ratio is the deliverable, and a
-; scaling assertion belongs here only once the lock is actually partitioned.
+; threads each rewriting their OWN key, ratio against a solo run. The ratio
+; is printed, not asserted: what fails the run is a lock count, not a time.
+; vault_lock_probe.h is force-included (-include) into every source below so
+; each pthread_mutex_lock call is tallied per mutex, and the run fails if one
+; mutex covers at least half of every thread's distinct-key writes (the
+; header of test_vault_write_scale.c has the why: wall time could not tell a
+; global lock from the shards on a loaded 4-vCPU runner).
 (rule
  (targets test_vault_write_scale_runner)
- (deps    test_vault_write_scale.c
+ (deps    test_vault_write_scale.c vault_lock_probe.h
           ../runtime/march_runtime.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
@@ -665,6 +668,7 @@
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -include vault_lock_probe.h
                -o %{targets}
                test_vault_write_scale.c ../runtime/march_runtime.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
