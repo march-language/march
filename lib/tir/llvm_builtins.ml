@@ -1057,6 +1057,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_sched_stat(i64 %which)" };
   { march_name = "observe_query"; c_name = Some "march_observe_query"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_observe_query(ptr %line)" };
+  { march_name = "observe_count_send"; c_name = Some "march_observe_count_send"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_observe_count_send()" };
   { march_name = "actor_set_mailbox_limit"; c_name = Some "march_actor_set_mbox_limit"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_actor_set_mbox_limit(ptr %pid, i64 %limit, i64 %policy)" };
   { march_name = "run_until_idle"; c_name = Some "march_run_until_idle"; ret_ty = Some Tir.TUnit;
@@ -1894,6 +1896,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_mailbox_size";
   PDeclare "march_sched_stat";
   PDeclare "march_observe_query";
+  PDeclare "march_observe_count_send";
   PDeclare "march_actor_set_mbox_limit";
   PDeclare "march_run_until_idle";
   PDeclare "march_register_resource";

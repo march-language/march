@@ -14771,6 +14771,7 @@ declare void @march_dist_monitor_register_pid(i64 %target_pid, ptr %node, i64 %w
 declare i64  @march_mailbox_size(ptr %pid)
 declare i64  @march_sched_stat(i64 %which)
 declare ptr  @march_observe_query(ptr %line)
+declare void @march_observe_count_send()
 declare void @march_actor_set_mbox_limit(ptr %pid, i64 %limit, i64 %policy)
 declare void @march_run_until_idle()
 declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)
