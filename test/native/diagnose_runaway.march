@@ -1,0 +1,42 @@
+-- A runaway mailbox for `forge diagnose` (R3 of the observe plan): "sink"
+-- stalls in its first handler while a producer task sends to it every
+-- millisecond, so its queue grows across any window and it holds all of the
+-- node's queued messages. test/dune runs `forge diagnose --socket` against
+-- it and expects exit 2 with a critical mailbox.growth.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  actor Sink do
+    state { n : Int }
+    init  { n: 0 }
+    on Stall() do
+      sleep_ms(120000)
+      state
+    end
+    on Item(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  fn produce(sink, k : Int) do
+    if k > 0 do
+      let _ = send(sink, Item(1))
+      sleep_ms(1)
+      produce(sink, k - 1)
+    else
+      ()
+    end
+  end
+
+  fn main(_io : Cap(IO)) do
+    let sink = spawn(Sink)
+    let _r = Actor.register(sink, "sink")
+    let _ = send(sink, Stall())
+    let t = Task.async(fn -> produce(sink, 120000))
+    println("ready")
+    let _ = Task.await(t)
+    ()
+  end
+end

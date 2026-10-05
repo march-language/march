@@ -412,6 +412,44 @@ let build_activate6_lines ~name ~impl ~cas ~migrate ~epoch ~cap_root ~role_caps 
   let wire_head = Printf.sprintf "ACTIVATE6 %s %s %s" name impl cas in
   (signed, wire_head)
 
+(** ACTIVATE7 (review 2026-10-04, dd12 P1): ACTIVATE5, or with [role_caps]
+    ACTIVATE6, plus [so] — the BLAKE3 (hex) of the patch .so's BYTES — in the
+    signed message, between epoch and cap_root.  [cas] stays the compilation
+    hash (the CAS key); nothing before v7 signed the bytes, so whoever could
+    write a node's CAS chose what a signed line loaded.  The server hashes the
+    artifact and refuses bytes that are not [so] before mapping any of them.
+      signed    = "ACTIVATE7 <name> <impl> <cas> <migrate> epoch:<N> so_blake3:<so>
+                   cap_root:<hex>[ role_caps:<..>] callers:<csv>"
+      wire_head = "ACTIVATE7 <name> <impl> <cas>"  (caller appends
+                  " <sig_b64> <migrate> epoch:<N> so_blake3:<so> cap_root:<hex>
+                   [role_caps:<..> ]caps:<csv> [roles:<..> ]callers:<csv>", see
+                  {!activate7_command}) *)
+let build_activate7_lines ~name ~impl ~cas ~so ~migrate ~epoch ~cap_root ?role_caps ~callers_csv ()
+  : string * string =
+  let roles = match role_caps with Some rc -> " role_caps:" ^ rc | None -> "" in
+  let signed = Printf.sprintf "ACTIVATE7 %s %s %s %d epoch:%d so_blake3:%s cap_root:%s%s callers:%s"
+    name impl cas migrate epoch so cap_root roles callers_csv in
+  let wire_head = Printf.sprintf "ACTIVATE7 %s %s %s" name impl cas in
+  (signed, wire_head)
+
+(** The ACTIVATE7 wire line for [wire_head] and its signature.  [roles] is
+    the (role_caps, roles) pair of {!role_blocks}, when the manifest has
+    ROLE lines. *)
+let activate7_command ~wire_head ~sig_b64 ~so ~migrate ~epoch ~cap_root ~caps_csv ?roles ~callers_csv ()
+  : string =
+  match roles with
+  | None ->
+    Printf.sprintf "%s %s %d epoch:%d so_blake3:%s cap_root:%s caps:%s callers:%s"
+      wire_head sig_b64 migrate epoch so cap_root caps_csv callers_csv
+  | Some (role_caps, roles) ->
+    Printf.sprintf "%s %s %d epoch:%d so_blake3:%s cap_root:%s role_caps:%s caps:%s roles:%s callers:%s"
+      wire_head sig_b64 migrate epoch so cap_root role_caps caps_csv roles callers_csv
+
+(** The BLAKE3 (hex) of the file at [path]: what ACTIVATE7 signs and what
+    CAS_CHECK/CAS_PUT carry as [so_blake3:]. *)
+let artifact_digest (path : string) : string =
+  March_cas.Blake3.hash_string (In_channel.with_open_bin path In_channel.input_all)
+
 (** The two role blocks of an ACTIVATE6 from a manifest's ROLE lines:
     [(role_caps, roles)], both sorted by role name.  Each root is
     {!fn_cap_root} over the role's closure, the recipe the server's
@@ -761,6 +799,9 @@ let describe_release_refusal (resp : string) : string option =
     Some (resp ^ ": the node holds a different release with the same number (a concurrent deploy); re-run")
   else if resp = "ERR release_required" then
     Some (resp ^ ": the node only accepts sequenced releases; this forge sent an unwrapped line")
+  else if resp = "ERR artifact_digest_required" then
+    Some (resp ^ ": the node only accepts activations that sign the artifact's bytes (ACTIVATE7); \
+                 --no-cap-gate sends ACTIVATE3, which does not")
   else None
 
 let query_hcr_info_connected conn : (hcr_info, string) result =
@@ -992,14 +1033,22 @@ let parse_versions conn =
 
 (* ─── CAS operations ─────────────────────────────────────────────────────── *)
 
-let cas_check conn hash =
-  send_line conn (Printf.sprintf "CAS_CHECK %s" hash);
+(* [digest] (the bytes' BLAKE3, {!artifact_digest}) makes both verbs about
+   the bytes, not only the key: CAS_CHECK answers PRESENT only when the node
+   holds exactly those bytes (so a stale or substituted artifact is uploaded
+   again), and CAS_PUT refuses bytes that do not hash to it.  A server from
+   before ACTIVATE7 answers CAS_CHECK with ERR bad_hash (an upload follows)
+   and ignores the extra CAS_PUT field. *)
+let so_field = function Some d -> " so_blake3:" ^ d | None -> ""
+
+let cas_check ?digest conn hash =
+  send_line conn (Printf.sprintf "CAS_CHECK %s%s" hash (so_field digest));
   let resp = recv_line conn in
   resp = "PRESENT"
 
-let cas_put conn hash path =
+let cas_put ?digest conn hash path =
   let size = (Unix.stat path).Unix.st_size in
-  send_line conn (Printf.sprintf "CAS_PUT %s %d" hash size);
+  send_line conn (Printf.sprintf "CAS_PUT %s %d%s" hash size (so_field digest));
   let resp = recv_line conn in
   if resp <> "READY" then
     failwith (Printf.sprintf "CAS_PUT: server not ready: %s" resp);
@@ -1391,23 +1440,20 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
           end;
 
           (* 6. CAS_PUT the .so if not already present *)
-          (* NOTE (2026-07-04): the former skew check SHA-256-hashed the .so
-             to `manifest.cas_hash`, but cas_hash is the compiler's BLAKE3
-             *compilation hash* (blake3 of impl_hash+target+identities+flags,
-             March_cas.Cas.compilation_hash), NOT a SHA-256 of the .so bytes — the
-             two are different algorithms over different inputs and can never be
-             equal, so the check aborted every real deploy. It was dead-broken and
-             unexercised since it landed (df4fec3f, ACTIVATE3). Removed here to
-             unblock deploys. Proper manifest/binary skew detection needs a real
-             content hash recorded in the manifest (e.g. a `# so_blake3 <hex>` line
-             written by bin/main.ml after linking, verified here with the same
-             blake3) — tracked as a follow-up. Integrity today rests on the
-             ed25519 signature over (impl_hash, cas_hash) and the server keying the
-             artifact by cas_hash. *)
+          (* cas_hash is the compiler's *compilation hash* (blake3 of
+             impl_hash+target+identities+flags, March_cas.Cas.compilation_hash),
+             the CAS key, NOT a digest of the .so bytes.  Integrity rests on
+             ACTIVATE7's signed so_blake3, the blake3 of the bytes uploaded here,
+             which the server checks before it maps anything (review
+             2026-10-04, dd12 P1: before it, whoever could write a node's CAS
+             chose what a signed line loaded). *)
           let cas_hash = manifest.cas_hash in
-          if not (cas_check conn cas_hash) then begin
+          (* The digest of the bytes this deploy signs (ACTIVATE7) and
+             uploads: computed once, from the file uploaded. *)
+          let so_digest = artifact_digest so_path in
+          if not (cas_check ~digest:so_digest conn cas_hash) then begin
             Printf.printf "Uploading artifact %s...\n%!" so_path;
-            cas_put conn cas_hash so_path;
+            cas_put ~digest:so_digest conn cas_hash so_path;
             Printf.printf "Artifact uploaded.\n%!"
           end else
             Printf.printf "Artifact already on server (cache hit).\n%!";
@@ -1551,7 +1597,8 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                forged between the signature and the server.
 
                Phase 5C Part C, Task C4 (revised 2026-07-04 for granularity):
-               emit ACTIVATE4 (cap_root admission) when this manifest carries
+               emit the cap_root-admitting verb (today ACTIVATE7, which also
+               signs the artifact's bytes) when this manifest carries
                per-fn caps= fields and the operator hasn't forced the legacy
                path with --no-cap-gate. A genuinely pre-Phase-5C legacy
                manifest (no fn line anywhere carries caps=) always falls back
@@ -1574,48 +1621,38 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
               let fn_caps_sorted = List.sort String.compare fm.fn_caps in
               let caps_csv = String.concat "," fn_caps_sorted in
               let this_cap_root = fn_cap_root fm.fn_caps in
-              (* A manifest with ROLE lines needs ACTIVATE6 (the server's
-                 per-role admission); else a message-type change (bit 2)
-                 needs ACTIVATE5; otherwise ACTIVATE4, so an older server
-                 keeps working. *)
-              let (signed, wire_head, role_fields) =
-                if manifest.roles <> [] then begin
-                  let (role_caps, roles) = role_blocks manifest.roles in
-                  let (signed, wire_head) =
-                    build_activate6_lines ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
-                      ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
-                      ~role_caps ~callers_csv in
-                  (signed, wire_head, Some (role_caps, roles))
-                end else begin
-                  let build = if migrate_required land 2 <> 0
-                    then build_activate5_lines else build_activate4_lines in
-                  let (signed, wire_head) =
-                    build ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
-                      ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
-                      ~callers_csv
-                  in
-                  (signed, wire_head, None)
-                end
+              (* ACTIVATE7: the signed digest of the bytes (so_blake3), with
+                 the ROLE blocks when the manifest has ROLE lines (the
+                 server's per-role admission).  Always v7: a server that
+                 cannot check the bytes answers ERR unknown_command, and an
+                 older verb would ask it to load bytes nobody signed. *)
+              let role_fields =
+                if manifest.roles <> [] then Some (role_blocks manifest.roles) else None in
+              let (signed, wire_head) =
+                build_activate7_lines ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
+                  ~so:so_digest ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
+                  ?role_caps:(Option.map fst role_fields) ~callers_csv ()
               in
               let sig_bytes = March_ed25519.Ed25519.sign_str signed sk in
               let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
-              let cmd = match role_fields with
-                | None ->
-                  Printf.sprintf "%s %s %d epoch:%d cap_root:%s caps:%s callers:%s"
-                    wire_head sig_b64 migrate_required epoch_n this_cap_root caps_csv callers_csv
-                | Some (role_caps, roles) ->
-                  Printf.sprintf "%s %s %d epoch:%d cap_root:%s role_caps:%s caps:%s roles:%s callers:%s"
-                    wire_head sig_b64 migrate_required epoch_n this_cap_root role_caps
-                    caps_csv roles callers_csv in
+              let cmd =
+                activate7_command ~wire_head ~sig_b64 ~so:so_digest ~migrate:migrate_required
+                  ~epoch:epoch_n ~cap_root:this_cap_root ~caps_csv ?roles:role_fields
+                  ~callers_csv () in
               let cmd = as_release conn ~sk cmd in
               let resp = send_waiting ~send_line ~recv_line conn cmd in
               if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
                 Printf.printf "  activated: %s\n%!" fm.fn_name;
                 incr activated
-              end else if resp = "ERR unknown_command" && role_fields <> None then begin
+              end else if resp = "ERR unknown_command" then begin
                 Printf.eprintf
-                  "  FAILED %s: server predates per-role admission (ACTIVATE6); upgrade the server or re-run with --no-cap-gate\n%!"
+                  "  FAILED %s: server predates signed artifact digests (ACTIVATE7); upgrade the server binary\n%!"
                   fm.fn_name;
+                incr failed
+              end else if resp = "ERR artifact_digest" then begin
+                Printf.eprintf
+                  "  FAILED %s: artifact_digest — the bytes the server holds under %s are not the ones this deploy signed (replaced after the upload?); deploy rejected, re-run\n%!"
+                  fm.fn_name cas_hash;
                 incr failed
               end else if resp = "ERR role_cap_tamper" then begin
                 Printf.eprintf
@@ -1629,11 +1666,6 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                      "  FAILED %s: role %s's capability closure reaches %s, which this node's capability policy does not allow; deploy rejected\n%!"
                      fm.fn_name role cap
                  | _ -> Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name resp);
-                incr failed
-              end else if resp = "ERR unknown_command" then begin
-                Printf.eprintf
-                  "  FAILED %s: server predates capability admission (Phase 5C); upgrade the server or re-run with --no-cap-gate\n%!"
-                  fm.fn_name;
                 incr failed
               end else if resp = "ERR cap_tamper" then begin
                 Printf.eprintf

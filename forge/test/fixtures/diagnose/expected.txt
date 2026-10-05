@@ -1,0 +1,11 @@
+healthy: 
+mailbox_growth_warning: mailbox.growth/warning
+mailbox_growth_critical: mailbox.growth/critical
+mailbox_over_limit: mailbox.over_limit/warning
+sched_saturated: sched.saturated/warning
+sched_imbalance: sched.idle_imbalance/warning
+crash_loop_critical: crash.loop/critical
+crash_loop_warning: crash.loop/warning
+rc_climb: rc.climb/warning
+rc_climb_with_actors: 
+epoch_stuck: epoch.old_units/warning,epoch.stuck/warning
