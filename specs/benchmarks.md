@@ -1487,3 +1487,31 @@ to the features it exercises. Quick reference:
 | JsonStream / streaming JSON | `json_stream` (tiny-token), `json_stream_strings` (string-heavy) |
 | actor / mailbox / scheduler / supervision changes | `scripts/actor-load.sh` (all four scenarios: `fanin`, `churn`, `callstorm`, `crashloop`) |
 | interpreter (`lib/eval/eval.ml`) / REPL-JIT (`lib/jit/`) changes | `bench/run_interp_bench.sh` (interp vs. compiled vs. repl-clang vs. repl-orc A-B over `bench/interp/`) |
+
+## scripts/compile-time-bench.sh — compile-time scenarios (cold / warm / per-edit)
+
+Not a runtime benchmark: it measures the **compiler**. Phase B0 of
+`specs/plans/incremental-codegen-cas-plan.md`, the measurement that decides whether the
+plan's incremental-compilation phases are worth building. Drives `march --compile --timings`
+over `bench/compile_time_probe.march`, `bench/tree_transform.march` and `examples/topology_app`
+under six scenarios (cold caches; warm no-change; comment-only edit; leaf body edit; signature
+edit; record layout edit) and folds the `[timings]` stamps into three buckets: front end (through
+`typecheck`), whole-program TIR (`lower`…`opt`), back end (`llvm-emit` + `clang`).
+
+```
+scripts/compile-time-bench.sh                      # all corpora, --opt 2, 3 runs each
+scripts/compile-time-bench.sh --opt 0 --corpus small
+```
+
+Rows go to `bench/results/<date>-compile-time-<arch>.tsv`; medians print on stdout. Edit
+scenarios apply a *different* edit on every run so each is a fresh cache miss. Signature and
+layout edits run only on the probe (it carries `-- BENCH:*` markers so the edited program still
+compiles); `tree_transform` and `topology_app` get a leaf edit through a known literal, and the
+table prints `n/a` where no safe recipe exists. `topology_app` is staged as a whole forge project
+and compiled the way `forge run` compiles it (`--topology .forge/topology.json`, the digest
+`forge topology check` writes), so `forge/bin/main.exe` must be built too.
+
+Reading it: the plan's §3 gate asks whether, for the edit scenarios at `--opt 2`, the back-end
+bucket is more than ~60% of wall time and the `topology` total is over ~10 s. Below that, the
+unit-split/object-cache work is not where the time goes. Commit the first full table once as
+`specs/plans/incremental-codegen-cas-baseline.md`; do not hand-maintain numbers here.
