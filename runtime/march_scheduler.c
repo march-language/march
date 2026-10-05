@@ -2416,6 +2416,18 @@ void march_sched_request_stop(march_proc *p) {
 void march_sched_run(void) {
     atomic_store_explicit(&g_all_done, 0, memory_order_relaxed);
 
+    /* Resolve the preemption signal (a getenv) NOW, while this is the only
+     * thread that can run March code.  march_sched_preempt_start used to be
+     * the first to ask, and it runs AFTER the workers below are created: a
+     * worker can steal `main` and run it while this thread is still in
+     * preempt_start, and `main`'s Process.set_env (setenv, which reallocs
+     * and frees environ) racing that getenv crashed it on a freed environ
+     * entry -- "fatal SIGSEGV ... addr=0x4.. sched=-1", pc in getenv, in the
+     * two-node cert_* scenarios whose nodes set their env at the top of
+     * main.  Cached after the first call, so every later caller (daemon,
+     * workers, stop) reads an atomic, never the environment. */
+    (void)march_preempt_signal();
+
     /* Single-scheduler fast path: no worker threads needed.
      *
      * The preemption daemon IS still needed.  This path used to return without
