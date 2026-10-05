@@ -154,6 +154,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Calling a let-bound generic lambda that returns a Float no longer leaks.** A
+  lambda such as `let keep = fn (p, x) -> p`, called in the function that defines
+  it with Float arguments, leaked one Float box per call in compiled code. The
+  compiler now keeps the call site's result type on the direct call, so the box
+  is released after it is read.
 - **Topology now reports two roles that share one endpoint on a node.** Two roles
   placed on one node that serve the same protocol role through the same offer
   function want the same endpoint name, so the second could never be offered;

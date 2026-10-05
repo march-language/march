@@ -88,6 +88,36 @@ let shadowing (self : self_clo) (names : string list) : self_clo =
   | Some (clo_param, _) when List.exists (String.equal clo_param) names -> None
   | s -> s
 
+(** Does [e] end, in some tail position, in an indirect call through a closure
+    [env] knows? Then converting it loses the call site's result type; see the
+    ELet arm of [go]. *)
+let rec calls_known_in_tail (env : clo_env) (e : Tir.expr) : bool =
+  match e with
+  | Tir.ECallPtr (Tir.AVar c, _) -> List.mem_assoc c.Tir.v_name env
+  | Tir.ELet (_, _, b) | Tir.ESeq (_, b) -> calls_known_in_tail env b
+  | Tir.ECase (_, brs, def) ->
+    List.exists (fun (br : Tir.branch) -> calls_known_in_tail env br.Tir.br_body) brs
+    || (match def with Some d -> calls_known_in_tail env d | None -> false)
+  | _ -> false
+
+(** Give each converted apply-fn call in a TAIL position of [e] the call site's
+    result type [ty] (as a [TFn] return on the callee var, which [go] creates
+    as an untyped [TPtr TUnit] code address). Non-tail calls are untouched:
+    their result type is their own binder's, handled where that binder is. *)
+let rec retype_tail_apply (ty : Tir.ty) (e : Tir.expr) : Tir.expr =
+  match e with
+  | Tir.EApp (av, (Tir.AVar c :: _ as call_args))
+    when av.Tir.v_ty = Tir.TPtr Tir.TUnit && Tir_names.is_apply_fn av.Tir.v_name ->
+    let params = match c.Tir.v_ty with Tir.TFn (ps, _) -> ps | _ -> [] in
+    Tir.EApp ({ av with Tir.v_ty = Tir.TFn (Tir.TPtr Tir.TUnit :: params, ty) }, call_args)
+  | Tir.ELet (x, r, b) -> Tir.ELet (x, r, retype_tail_apply ty b)
+  | Tir.ESeq (a, b) -> Tir.ESeq (a, retype_tail_apply ty b)
+  | Tir.ECase (a, brs, def) ->
+    Tir.ECase (a, List.map (fun (br : Tir.branch) ->
+        { br with Tir.br_body = retype_tail_apply ty br.Tir.br_body }) brs,
+               Option.map (retype_tail_apply ty) def)
+  | other -> other
+
 let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = function
 
   (* ── Track closure allocations ──────────────────────────────────────── *)
@@ -146,6 +176,21 @@ let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = 
                          v_lin = Tir.Unr } in
        Tir.EApp (apply_var, Tir.AVar v :: args)
      | None -> Tir.ECallPtr (Tir.AVar v, args))
+
+  (* ── A known call whose result is bound: keep the call-site type ──── *)
+  (* The converted callee is typed [TPtr TUnit] (a code address), which loses
+     the call site's concrete RESULT type.  For an apply fn whose declared
+     return stayed erased ([TVar] -- a let-generalized lambda such as
+     [let keep = fn (p, x) -> p]), that type is the only thing that tells the
+     emitter the erased result is a Float box only this call site holds, which
+     it must unbox AND release ([erased_float_return] in Llvm_emit_call).
+     Without it the box was unboxed and dropped on the floor: one leaked box
+     per call (specs/todos/2026-10-02-known-call-generic-lambda-float-leak.md).
+     The binder's type is that result type, so record it on the callee as a
+     [TFn] return. *)
+  | Tir.ELet (v, rhs, body) when calls_known_in_tail env rhs ->
+    let rhs' = retype_tail_apply v.Tir.v_ty (go ~changed ~self env rhs) in
+    Tir.ELet (v, rhs', go ~changed ~self:(shadowing self [v.Tir.v_name]) env body)
 
   (* ── Recursive traversal ────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->

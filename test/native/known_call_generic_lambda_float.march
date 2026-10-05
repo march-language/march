@@ -1,0 +1,89 @@
+-- Leak guard: a DIRECT call to a let-generalized lambda that returns a Float
+-- (specs/todos/2026-10-02-known-call-generic-lambda-float-leak.md).
+--
+-- `let keep = fn (p, x) -> p` is generalized, so its apply fn's parameters and
+-- return stay erased (TVar) after Mono and a Float crosses it boxed. When the
+-- closure is allocated in the same function, Known_call turns the call into a
+-- direct call, but typed the callee as an opaque code address, losing the call
+-- site's Float result type; the emitter then unboxed the returned box without
+-- releasing it, one leaked box per call. Known_call now records the binder's
+-- type on the callee, so the emitter's erased-Float-return release fires.
+--
+-- Every leg prints its value (a use-after-free that changes a result fails the
+-- golden) and checks live_allocs stays flat. The Int and String legs must not
+-- be released at all: an over-release there would double free.
+mod Main do
+  needs IO.Console
+
+  pfn flat(label : String, before : Int, r : String) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 100))
+  end
+
+  pfn keep_first(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let keep = fn (p, x) -> p
+      keep_first(n - 1, acc +. keep(1.0, int_to_float(n)))
+    end
+  end
+
+  pfn keep_second(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let last = fn (p, x) -> x
+      keep_second(n - 1, acc +. last(1.0, int_to_float(n)))
+    end
+  end
+
+  pfn forward(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let ap = fn (f, x) -> f(x)
+      forward(n - 1, acc +. ap(fn y -> y *. 2.0, int_to_float(n)))
+    end
+  end
+
+  pfn ints(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let keep = fn (p, x) -> p
+      ints(n - 1, acc + keep(n, 7))
+    end
+  end
+
+  pfn strs(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let keep = fn (p, x) -> p
+      let s = keep(int_to_string(n), "x")
+      strs(n - 1, acc + string_length(s))
+    end
+  end
+
+  -- The call in a nested tail position of a binding (an inner let, a case).
+  pfn nested(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let keep = fn (p, x) -> p
+      let v = if n % 2 == 0 do keep(2.0, 0.5) else keep(int_to_float(n), 0.25) end
+      nested(n - 1, acc +. v)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let n = 20000
+    let a = live_allocs()
+    flat("generic lambda returns its first Float", a, float_to_string(keep_first(n, 0.0)))
+    let b = live_allocs()
+    flat("generic lambda returns its second Float", b, float_to_string(keep_second(n, 0.0)))
+    let c = live_allocs()
+    flat("generic lambda forwards a Float", c, float_to_string(forward(n, 0.0)))
+    let d = live_allocs()
+    flat("generic lambda returns an Int", d, int_to_string(ints(n, 0)))
+    let e = live_allocs()
+    flat("generic lambda returns a String", e, int_to_string(strs(n, 0)))
+    let f = live_allocs()
+    flat("call in a nested tail position", f, float_to_string(nested(n, 0.0)))
+  end
+end
