@@ -1,0 +1,289 @@
+-- Diagnose: the findings `forge diagnose` reports, for a program to run on
+-- itself (design section 5.3; R3 of specs/plans/2026-09-28-observe-recon-shell-plan.md).
+--
+-- Each finding is a pure function over two observe SNAPSHOT envelopes taken
+-- a window apart. `run` takes those snapshots of the running program (through
+-- the same in-process query `Recon` uses); `findings` takes any two envelopes,
+-- so the checks are tested on fixtures with no live node.
+--
+-- forge/lib/diagnose.ml is the same list in OCaml, for forge. Both are tested
+-- against forge/test/fixtures/diagnose (expected.txt names each fixture's
+-- findings), so a threshold changed in one place and not the other fails a
+-- test. Change them together.
+mod Diagnose do
+  needs Actor.Introspect
+
+  -- One finding: its id (e.g. "mailbox.growth"), "warning" or "critical",
+  -- the pids (or scheduler ids, or epochs) that triggered it, and what to
+  -- look at next.
+  type Finding = { id : String, severity : String, rows : List(Int), next : String }
+
+  -- ── Reading envelopes ─────────────────────────────────────────────────
+
+  pfn get(j : Json.JsonValue, key : String) : Json.JsonValue do
+    unwrap_or(Json.get(j, key), Json.Null)
+  end
+
+  pfn int_of(j : Json.JsonValue) : Int do
+    match j do
+      Json.Number(f) -> float_to_int(f)
+      _ -> 0
+    end
+  end
+
+  pfn num_at(j : Json.JsonValue, key : String) : Int do int_of(get(j, key)) end
+
+  pfn list_at(j : Json.JsonValue, key : String) : List(Json.JsonValue) do
+    match get(j, key) do
+      Json.Array(xs) -> xs
+      _ -> Nil
+    end
+  end
+
+  pfn str_at(j : Json.JsonValue, key : String) : String do
+    match get(j, key) do
+      Json.Str(s) -> s
+      _ -> ""
+    end
+  end
+
+  pfn section(env : Json.JsonValue, name : String) : Json.JsonValue do
+    get(get(env, "data"), name)
+  end
+
+  pfn actors(env : Json.JsonValue) : List(Json.JsonValue) do
+    list_at(section(env, "actors"), "actors")
+  end
+
+  pfn waiting(a : Json.JsonValue) : Int do num_at(a, "mbox") + num_at(a, "held") end
+
+  pfn pid(a : Json.JsonValue) : Int do num_at(a, "pid") end
+
+  pfn finding(id : String, sev : String, rows : List(Int), next : String) : Finding do
+    { id: id, severity: sev, rows: rows, next: next }
+  end
+
+  -- ── The findings ──────────────────────────────────────────────────────
+
+  pfn before_waiting(b : Json.JsonValue, p : Int) : Int do
+    match List.find(actors(b), fn r -> pid(r) == p) do
+      Some(r) -> waiting(r)
+      None -> 0
+    end
+  end
+
+  -- 1. An actor's waiting work grew across the window (to at least 10);
+  --    critical when one actor holds over half of a node queue of 100+.
+  pfn mailbox_growth(b : Json.JsonValue, a : Json.JsonValue) : List(Finding) do
+    let grew = List.filter(actors(a), fn r ->
+      waiting(r) - before_waiting(b, pid(r)) > 0 && waiting(r) >= 10)
+    match grew do
+      Nil -> Nil
+      _ ->
+        let queued = num_at(section(a, "mem"), "queued_messages")
+        let hog = List.any(grew, fn r -> queued >= 100 && 2 * waiting(r) > queued)
+        let sorted = List.sort_by(grew, fn (x, y) ->
+          waiting(x) - before_waiting(b, pid(x)) > waiting(y) - before_waiting(b, pid(y)))
+        [finding("mailbox.growth", if hog do "critical" else "warning" end,
+                 List.map(List.take(sorted, 5), pid),
+                 "forge observe ACTORS mbox 20, then ACTOR <pid> for the deepest")]
+    end
+  end
+
+  -- 2. Actors at their limit under a drop policy while the node dropped.
+  pfn mailbox_over_limit(b : Json.JsonValue, a : Json.JsonValue) : List(Finding) do
+    let dropped_b = num_at(section(b, "sched"), "msgs_dropped")
+    let dropped_a = num_at(section(a, "sched"), "msgs_dropped")
+    let at_limit = List.filter(actors(a), fn r ->
+      let lim = num_at(r, "mbox_limit")
+      let pol = str_at(r, "mbox_policy")
+      lim > 0 && waiting(r) >= lim && (pol == "drop_new" || pol == "drop_old"))
+    match at_limit do
+      Nil -> Nil
+      _ ->
+        if dropped_a > dropped_b do
+          [finding("mailbox.over_limit", "warning", List.map(at_limit, pid),
+                   "the node dropped messages: raise the limit or shed load upstream")]
+        else Nil end
+    end
+  end
+
+  pfn idle(env : Json.JsonValue) : List((Int, Int)) do
+    List.map(list_at(section(env, "sched"), "threads"), fn t -> (num_at(t, "id"), num_at(t, "idle_ms")))
+  end
+
+  pfn lookup(xs : List((Int, Int)), k : Int) : Option(Int) do
+    match xs do
+      Nil -> None
+      Cons((key, v), rest) -> if key == k do Some(v) else lookup(rest, k) end
+    end
+  end
+
+  -- Per scheduler over the window: (id, idle ms, wall ms).  The checks
+  -- below compare by cross-multiplication, never by a rounded percentage, so
+  -- they agree exactly with forge's float comparisons.
+  pfn windows(b : Json.JsonValue, a : Json.JsonValue) : List((Int, Int, Int)) do
+    let wall = num_at(a, "at_ms") - num_at(b, "at_ms")
+    if wall <= 0 do Nil
+    else
+      let ib = idle(b)
+      List.filter_map(idle(a), fn t ->
+        match t do
+          (id, i1) ->
+            match lookup(ib, id) do
+              Some(i0) -> Some((id, i1 - i0, wall))
+              None -> None
+            end
+        end)
+    end
+  end
+
+  -- utilisation = 1 - idle/wall:  > 0.95, > 0.8, < 0.2.
+  pfn over95(t : (Int, Int, Int)) : Bool do match t do (_, i, w) -> 100 * i < 5 * w end end
+  pfn over80(t : (Int, Int, Int)) : Bool do match t do (_, i, w) -> 100 * i < 20 * w end end
+  pfn under20(t : (Int, Int, Int)) : Bool do match t do (_, i, w) -> 100 * i > 80 * w end end
+
+  pfn ids(xs : List((Int, Int, Int))) : List(Int) do
+    List.map(xs, fn t -> match t do (id, _, _) -> id end)
+  end
+
+  -- 3. A scheduler over 95% with work queued; or one over 80% while another
+  --    is under 20%.
+  pfn sched_findings(b : Json.JsonValue, a : Json.JsonValue) : List(Finding) do
+    let u = windows(b, a)
+    let runq = num_at(section(a, "sched"), "runq")
+    let hot = List.filter(u, over95)
+    let saturated =
+      match hot do
+        Nil -> Nil
+        _ -> if runq > 0 do
+               [finding("sched.saturated", "warning", ids(hot),
+                        "forge observe TOP slices 10 1000: who is using the CPU")]
+             else Nil end
+      end
+    let imbalance =
+      if List.length(u) >= 2 && List.any(u, over80) && List.any(u, under20) do
+        [finding("sched.idle_imbalance", "warning", ids(u),
+                 "one scheduler carries the load: look for pinned actors or one hot actor")]
+      else Nil end
+    List.append(saturated, imbalance)
+  end
+
+  pfn firsts(xs : List((Int, Int))) : List(Int) do
+    List.map(xs, fn t -> match t do (k, _) -> k end)
+  end
+
+  -- Crash-ring entries per supervisor within [ms] of the after snapshot.
+  pfn crash_counts(a : Json.JsonValue, ms : Int) : List((Int, Int)) do
+    let now = num_at(a, "at_ms")
+    List.fold_left(list_at(section(a, "crashes"), "crashes"), Nil, fn (acc, e) ->
+      match get(e, "supervisor") do
+        Json.Number(f) ->
+          if now - num_at(e, "at_ms") > ms do acc
+          else
+            let s = float_to_int(f)
+            let n = unwrap_or(lookup(acc, s), 0)
+            Cons((s, n + 1), List.filter(acc, fn t -> match t do (k, _) -> k != s end))
+          end
+        _ -> acc
+      end)
+  end
+
+  -- 4. A supervisor whose children crashed 3+ times: critical within the
+  --    last minute, warning within the last hour.
+  pfn crash_loop(_b : Json.JsonValue, a : Json.JsonValue) : List(Finding) do
+    let looping = fn ms -> List.filter(crash_counts(a, ms), fn t -> match t do (_, n) -> n >= 3 end)
+    let next = "forge observe CRASHES 20, then ACTOR <supervisor>"
+    match looping(60000) do
+      Nil ->
+        match looping(3600000) do
+          Nil -> Nil
+          hour -> [finding("crash.loop", "warning", firsts(hour), next)]
+        end
+      minute -> [finding("crash.loop", "critical", firsts(minute), next)]
+    end
+  end
+
+  -- 5. Live heap objects up more than 10% with the actor count flat (±5%).
+  pfn rc_climb(b : Json.JsonValue, a : Json.JsonValue) : List(Finding) do
+    match (get(section(b, "mem"), "live_objects"), get(section(a, "mem"), "live_objects")) do
+      (Json.Number(f0), Json.Number(f1)) ->
+        let o0 = float_to_int(f0)
+        let o1 = float_to_int(f1)
+        let a0 = num_at(section(b, "mem"), "actors")
+        let a1 = num_at(section(a, "mem"), "actors")
+        let d = if a1 > a0 do a1 - a0 else a0 - a1 end
+        let base = if a0 > 1 do a0 else 1 end
+        if o0 >= 1000 && o1 * 10 > o0 * 11 && d * 20 <= base do
+          [finding("rc.climb", "warning", [o0, o1],
+                   "heap objects climb with no new actors: a leak; compare SNAPSHOT mem over minutes")]
+        else Nil end
+      _ -> Nil
+    end
+  end
+
+  -- 6. A draining epoch; and units pinned two or more epochs behind.
+  pfn epoch_findings(_b : Json.JsonValue, a : Json.JsonValue) : List(Finding) do
+    let e = section(a, "epochs")
+    let cur = num_at(e, "current")
+    let pins = list_at(e, "pins")
+    let draining = List.filter(pins, fn p ->
+      match get(p, "draining") do
+        Json.Bool(true) -> true
+        _ -> false
+      end)
+    let old = List.filter(pins, fn p -> num_at(p, "epoch") <= cur - 2 && num_at(p, "pins") > 0)
+    let epochs = fn ps -> List.map(ps, fn p -> num_at(p, "epoch"))
+    let stuck = match draining do
+      Nil -> Nil
+      _ -> [finding("epoch.stuck", "warning", epochs(draining),
+                    "forge hot-reload status: an old epoch is still draining")]
+    end
+    let behind = match old do
+      Nil -> Nil
+      _ -> [finding("epoch.old_units", "warning", epochs(old),
+                    "units still run code two or more deploys old: ACTORS epoch 20")]
+    end
+    List.append(stuck, behind)
+  end
+
+  -- ── Running them ──────────────────────────────────────────────────────
+
+  doc """
+  Every finding over two SNAPSHOT envelopes (as the observe socket or
+  `observe_query` returns them), `before` taken a window ahead of `after`.
+  Nil means none fired; probes this backend cannot run (cluster suspicion,
+  lost global names) are not in the list at all.
+  """
+  fn findings(before : Json.JsonValue, after : Json.JsonValue) : List(Finding) do
+    List.concat([mailbox_growth(before, after), mailbox_over_limit(before, after),
+                 sched_findings(before, after), crash_loop(before, after),
+                 rc_climb(before, after), epoch_findings(before, after)])
+  end
+
+  doc """
+  Run the findings on this program: two snapshots `window_ms` apart, with
+  this green thread asleep between them.
+
+      match Diagnose.run(c, 1000) do
+        Nil -> ()
+        fs -> List.each(fs, fn f -> println(f.id ++ ": " ++ f.next))
+      end
+  """
+  fn run(_c : Cap(Actor.Introspect), window_ms : Int) : List(Finding) do
+    match Json.parse(observe_query("SNAPSHOT")) do
+      Ok(before) ->
+        sleep_ms(window_ms)
+        match Json.parse(observe_query("SNAPSHOT")) do
+          Ok(after) -> findings(before, after)
+          Err(_) -> Nil
+        end
+      Err(_) -> Nil
+    end
+  end
+
+  doc "\"id/severity\" for each finding, sorted: the form forge's fixture test compares."
+  fn ids_of(fs : List(Finding)) : List(String) do
+    List.sort_by(List.map(fs, fn f -> f.id ++ "/" ++ f.severity), fn (x, y) -> x < y)
+  end
+end

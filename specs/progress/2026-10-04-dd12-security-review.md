@@ -43,7 +43,7 @@ test/hcr_deploy.exe`. The cert findings compile/run their own `.march` repros.
 ### P1
 - **CAS artifact bytes are never bound to the signed `cas_hash`; a signed
   ACTIVATE loads unverified code.**
-  `specs/todos/2026-10-04-dd12-review-cas-artifact-unverified.md`.
+  `specs/progress/2026-10-04-dd12-review-cas-artifact-unverified.md` (fixed).
   `CAS_PUT` stores client-declared-hash bytes without hashing them; `activate_items`
   only `access(F_OK)`+`dlopen`s; `cas_hash` is a compilation hash, not a byte
   hash, and no signed digest of the `.so` bytes exists anywhere. Reachable
@@ -79,7 +79,7 @@ test/hcr_deploy.exe`. The cert findings compile/run their own `.march` repros.
 
 ### P3
 - **The local reload socket is created without an explicit mode** (owner-only
-  only by umask). `specs/todos/2026-10-04-dd12-review-reload-socket-permissions.md`.
+  only by umask). `specs/progress/2026-10-04-dd12-review-reload-socket-permissions.md` (fixed).
   Under a permissive umask any local user can connect and reach every verb
   (including the P1 CAS poisoning). Code-confirmed (no `chmod`/`fchmod`/`umask`
   around `bind`).

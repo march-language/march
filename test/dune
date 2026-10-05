@@ -900,7 +900,7 @@
 
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (run ./test_reload_activate4_runner reload_keys.txt)))
 
 ; The stub patch the reload test's epoch-model case uploads and activates.
@@ -913,9 +913,20 @@
              -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
              -o hcr_stub.so hcr_stub_so.c ../runtime/march_hcr_identity.c")))
 
+; The attacker's bytes of the dd12 review's CAS-substitution repro: the same
+; exports and identity markers as hcr_stub.so, other code (hcr_stub_so.c).
+(rule
+ (targets hcr_evil.so)
+ (deps    hcr_stub_so.c ../runtime/march_hcr_identity.c ../runtime/march_hcr_identity.h)
+ (action  (run bash -c
+            "%{cc} -shared -fPIC -DHCR_STUB_EVIL \
+             -DMARCH_HCR_TRIPLE=arm64-apple-macosx26.0.0 \
+             -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
+             -o hcr_evil.so hcr_stub_so.c ../runtime/march_hcr_identity.c")))
+
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 
@@ -923,7 +934,7 @@
 ; role closure, including roles the node does not serve.
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy_all.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy_all.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy_all.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy-all))))
 
@@ -933,7 +944,7 @@
 ; different base build do not replay.  Each server lifetime is a forked child.
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (run ./test_reload_activate4_runner reload_keys.txt restore)))
 
 ; ── HCR capability-lattice anti-drift check ───────────────────────────────
@@ -2674,6 +2685,57 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/recon_basic.expected interp_recon_basic.out)))
+
+; stdlib/diagnose.march against the shared fixtures, compiled and
+; interpreted: the output must equal forge/test/fixtures/diagnose/expected.txt,
+; the file forge's OCaml findings (forge/test/test_diagnose.ml) are held to.
+(rule
+ (targets native_diagnose_fixtures native_diagnose_fixtures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (source_tree ../forge/test/fixtures/diagnose)
+       (file native/diagnose_fixtures.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_diagnose_fixtures native/diagnose_fixtures.march)
+   (with-stdout-to native_diagnose_fixtures.out (system "./native_diagnose_fixtures")))))
+
+(rule
+ (alias runtest)
+ (action (diff ../forge/test/fixtures/diagnose/expected.txt native_diagnose_fixtures.out)))
+
+(rule
+ (targets interp_diagnose_fixtures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (source_tree ../forge/test/fixtures/diagnose)
+       (file native/diagnose_fixtures.march))
+ (action
+  (with-stdout-to interp_diagnose_fixtures.out
+    (run %{exe:../bin/main.exe} native/diagnose_fixtures.march))))
+
+(rule
+ (alias runtest)
+ (action (diff ../forge/test/fixtures/diagnose/expected.txt interp_diagnose_fixtures.out)))
+
+; `forge diagnose` against a real compiled node with a runaway mailbox: exit
+; 2 and a critical mailbox.growth; and exit 3 when the socket is not there.
+(rule
+ (targets native_diagnose_runaway native_diagnose_runaway.out)
+ (deps (file %{exe:../bin/main.exe}) (file %{exe:../forge/bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/diagnose_runaway.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_diagnose_runaway native/diagnose_runaway.march)
+   (with-stdout-to native_diagnose_runaway.out
+    (system "rm -f diag_ra.sock diag_ra.prog; MARCH_OBSERVE_SOCKET=diag_ra.sock ./native_diagnose_runaway > diag_ra.prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready diag_ra.prog 2>/dev/null && break; sleep 0.1; done; sleep 0.3; %{exe:../forge/bin/main.exe} diagnose --socket diag_ra.sock --window 500 --json > diag_ra.json; echo \"exit=$?\"; grep -o '\"id\":\"[^\"]*\",\"severity\":\"[^\"]*\"' diag_ra.json; %{exe:../forge/bin/main.exe} top --socket diag_ra.sock --once | grep -c ' sink ' | sed 's/^/top rows naming sink: /'; %{exe:../forge/bin/main.exe} status --socket diag_ra.sock --json | grep -o '\"deepest\":{\"pid\":0,\"name\":\"sink\"'; kill $prog 2>/dev/null; wait $prog 2>/dev/null; %{exe:../forge/bin/main.exe} diagnose --socket diag_ra.sock --window 10 > /dev/null 2>&1; echo \"unreachable exit=$?\"; rm -f diag_ra.sock diag_ra.prog diag_ra.json; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/diagnose_runaway.expected native_diagnose_runaway.out)))
 ; ── Leak guard: compiled actors leaked every received message, every state
 ; record a handler returned and the Some(()) of a statement `send`; a nominal
 ; record read only through its fields leaked with every heap field. Red before

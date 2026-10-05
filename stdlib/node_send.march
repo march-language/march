@@ -169,7 +169,12 @@ mod NodeSend do
     else
     match NetKernel.send_frame(fd, encode_msg_schema(seq, to, type_tag, schema, payload)) do
       Err(_) -> Err(NoConnection)
-      Ok(_) -> Ok(())
+      Ok(_) ->
+        -- A remote send never reaches march_sched_send, so count it on the
+        -- sender here (its msgs_out: Recon, forge top). Every typed and raw
+        -- remote send comes through this function.
+        observe_count_send(())
+        Ok(())
     end end
   end
 

@@ -12,7 +12,7 @@ Items, each its own PR; tick as they land and add a dated
 - [x] R0 observe socket thread, JSON writer, test harness ([progress](../progress/2026-10-01-observe-r0-socket.md))
 - [x] R1 snapshot layer + observe verbs (no new counters) ([progress](../progress/2026-10-02-observe-r1-snapshot-verbs.md); the cluster section split out to [its own todo](2026-10-02-observe-r1-cluster-section.md))
 - [x] R2 counters, scheduler idle time, crash ring (A/B per commit) ([progress](../progress/2026-10-02-observe-r2-counters-crash-ring.md))
-- [ ] R3 `Recon` observe tier, `forge top`, `forge diagnose`, `forge status`
+- [x] R3 `Recon` observe tier, `forge top`, `forge diagnose`, `forge status` ([R3a](../progress/2026-10-04-observe-r3a-recon.md), [R3b-d](../progress/2026-10-04-observe-r3b-diagnose-top-status.md))
 - [ ] R4 debug tier: `Actor.Debug`, `inspect_state`, signed `STATE`/`MESSAGES`, nonces
 - [ ] R5 shell groundwork: body hashing, pinned NAME_IDs, per-function attach check, fragment emission, cap-marker check (security review before R6)
 - [ ] R6 `forge rpc` / `forge shell` / `forge eval` over signed `EVAL`
