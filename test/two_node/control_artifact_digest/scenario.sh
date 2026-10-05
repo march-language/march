@@ -2,12 +2,15 @@
 # activation loaded unverified artifact bytes). A release (v1 -> v2) goes
 # through the control plane as forge sends it, so every node holds v2's
 # operator-signed ACTIVATE7 line in its persisted patch stack. Then, through a
-# candidate's control API (unauthenticated: anyone who reaches the port can
-# send CAS_PUT), the attacker replaces v2's bytes in that node's CAS with
+# candidate's control API, the attacker replaces v2's bytes in that node's CAS with
 # another patch of the same build -- identity markers and all -- whose
 # `Ver.version` is 666, and the node restarts. The signed line still
 # verifies; the bytes do not hash to its signed so_blake3, so the node does
 # not replay it: it comes back on its base build, never on the attacker's code.
+# The API's own gate (#776: a CAS_PUT only for a hash a signed release staged
+# on the same connection names) refuses an unstaged upload, and is passed by
+# re-staging the operator's current release, which is not a secret: it only
+# limits who may fill the CAS, and the digest is what stops the substitution.
 # Along the way: a CAS_PUT that names the signed digest refuses other bytes,
 # and CAS_CHECK with the digest tells the substituted artifact from the real
 # one (so forge uploads it again).
@@ -36,13 +39,25 @@ api=$(ctl_api_ep a)
 r=$("$HCR" api "$api" "CAS_CHECK $art so_blake3:$good")
 [ "$r" = PRESENT ] || fail "node a does not hold the signed bytes of $art: $r"
 
+# The control API takes an upload only for a hash a signed release staged
+# on the same connection (#776), so an unstaged one is refused outright.
+r=$("$HCR" api-put "$api" - "$art" "$work/p3/v3.so")
+[ "$r" = "ERR not_staged" ] || fail "an unstaged CAS_PUT through the API was not refused: $r"
+
+# But a signed release is not a secret: it crossed the network, and anyone
+# can stage the operator's current one, which names v2's artifact. Past that
+# gate, only the bytes' digest stands between the attacker and the CAS copy.
+rel=$(ls "$work/nodes/a/control/releases/"*.release 2>/dev/null | sort | tail -1)
+[ -n "$rel" ] || fail "node a holds no release to stage"
+
 # A CAS_PUT that names the signed digest refuses other bytes.
-r=$("$HCR" api-put "$api" "$art" "$work/p3/v3.so" "$good")
+r=$("$HCR" api-put "$api" "$rel" "$art" "$work/p3/v3.so" "$good")
 [ "$r" = "ERR digest_mismatch" ] || fail "a digested CAS_PUT of other bytes was not refused: $r"
 
-# Without a digest the API stores whatever it is sent (its authentication is
-# a separate fix): the attacker's bytes are now node a's copy of v2.
-r=$("$HCR" api-put "$api" "$art" "$work/p3/v3.so")
+# Without a digest the API stores whatever it is sent for a staged hash: the
+# attacker's bytes are now node a's copy of v2. What keeps them from running
+# is the signed so_blake3 the node checks at load, below.
+r=$("$HCR" api-put "$api" "$rel" "$art" "$work/p3/v3.so")
 case "$r" in OK*) ;; *) fail "the substitution did not reach the CAS: $r" ;; esac
 r=$("$HCR" api "$api" "CAS_CHECK $art so_blake3:$good")
 [ "$r" = MISSING ] || fail "CAS_CHECK with the signed digest did not see the substitution: $r"
