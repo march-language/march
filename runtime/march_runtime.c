@@ -1478,8 +1478,22 @@ void *march_string_join(void *list, void *sep) {
 
 /* ── I/O ─────────────────────────────────────────────────────────────── */
 
+/* A shell fragment's output goes to its capture buffer, not stdout
+ * (march_shell.c sets the running proc's out_capture).  1 when captured. */
+static int capture_output(const char *data, size_t n) {
+    march_proc *p = march_sched_current();
+    march_out_capture *c = p ? p->out_capture : NULL;
+    if (!c) return 0;
+    size_t room = c->len < c->cap ? c->cap - c->len : 0;
+    size_t take = n < room ? n : room;
+    if (take && c->buf) { memcpy(c->buf + c->len, data, take); c->len += take; }
+    c->dropped += n - take;
+    return 1;
+}
+
 void march_print(void *s) {
     march_string *ms = (march_string *)s;
+    if (capture_output(ms->data, (size_t)ms->len)) return;
     write(1, ms->data, (size_t)ms->len);
 }
 
@@ -1490,13 +1504,13 @@ void march_print(void *s) {
 void march_print_int(int64_t n) {
     char buf[32];
     int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
-    if (len > 0) write(1, buf, (size_t)len);
+    if (len > 0 && !capture_output(buf, (size_t)len)) write(1, buf, (size_t)len);
 }
 
 void march_print_float(double f) {
     char buf[64];
     int len = march_format_float_ocaml(buf, f);
-    if (len > 0) write(1, buf, (size_t)len);
+    if (len > 0 && !capture_output(buf, (size_t)len)) write(1, buf, (size_t)len);
 }
 
 /* Serialises march_println against itself across OS threads.  See the comment
@@ -1532,6 +1546,7 @@ void march_println(void *s) {
      * guarantee; the writev stays because halving the syscall count is worth
      * keeping and because it keeps the critical section to one syscall.
      * (specs/progress/2026-08-21-println-writev-not-atomic-across-threads.md) */
+    if (capture_output(ms->data, (size_t)ms->len)) { capture_output("\n", 1); return; }
     struct iovec iov[2];
     iov[0].iov_base = ms->data;
     iov[0].iov_len  = (size_t)ms->len;

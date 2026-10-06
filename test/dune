@@ -12306,3 +12306,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/observe_debug_nokey.expected native_observe_debug_nokey.out)))
+
+; ── The shell listener (runtime/march_shell.c), R6 of the observe plan ────
+; specs/progress/2026-10-06-shell-node-listener.md. shell_check.exe signs
+; EVALs of hand-written C fragments (test/shell/frag_*.c) against a
+; --hot-reload --signing-pubkey node: a result and its captured println, a
+; replay, another key, the shell policy, a panic, a cancelled endless loop,
+; a missing entry, a stale epoch, four sessions with their own slot ranges
+; and a refused fifth, and the audit lines. Node side only: no March input
+; is compiled here.
+(executable
+ (name shell_check)
+ (modules shell_check)
+ (libraries unix march_ed25519))
+
+(rule
+ (targets native_shell_node.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (glob_files shell/*.c)
+       (file native/shell_node.march))
+ (action
+  (with-stdout-to native_shell_node.out
+   (system "rm -rf sh_t; mkdir -p sh_t/frags; ./shell_check.exe keygen sh_t/pk sh_t/sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_t/pk) -o sh_t/node native/shell_node.march > sh_t/build 2>&1 || { cat sh_t/build; exit 1; }; for f in ok panic loop; do if [ \"$(uname)\" = Darwin ]; then %{cc} -shared -fPIC -undefined dynamic_lookup -o sh_t/frags/frag_$f.so shell/frag_$f.c; else %{cc} -shared -fPIC -o sh_t/frags/frag_$f.so shell/frag_$f.c; fi; done; : > sh_t/policy; S=/tmp/march-shell-test-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_t/policy MARCH_AUDIT_LOG=sh_t/audit ./sh_t/node > sh_t/prog 2>&1 & prog=$!; ./shell_check.exe run $S.shell sh_t/prog sh_t/sk sh_t/policy sh_t/audit sh_t/frags; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_t $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_node.expected native_shell_node.out)))

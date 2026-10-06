@@ -225,6 +225,15 @@ double  march_unbox_float(void *p);
 #define MARCH_SIMD_TAG ((int32_t)-4)
 /* Allocate a 32-byte SIMD vector box (rc=1, tag=MARCH_SIMD_TAG, kind in pad). */
 void   *march_simd_alloc(int64_t kind);
+/* Output captured from one shell fragment (march_shell.c): the print
+ * primitives append here instead of writing to stdout while the running
+ * proc's [out_capture] points at one.  Capped at [cap] bytes; [dropped]
+ * counts what did not fit. */
+typedef struct march_out_capture {
+    char   *buf;
+    size_t  len, cap;
+    size_t  dropped;
+} march_out_capture;
 /* Report an out-of-bounds SIMD load/store index and terminate. Noreturn. */
 void    march_simd_bounds_panic(int64_t i, int64_t lanes, int64_t len);
 void    march_simd_lane_panic(int64_t i, int64_t lanes);

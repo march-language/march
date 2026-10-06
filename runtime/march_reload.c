@@ -3109,6 +3109,12 @@ static void *reload_server_thread(void *arg) {
     return NULL;
 }
 
+/* The shell listener (march_shell.c, `<socket>.shell`).  This weak no-op
+ * stands in where a harness links the reload server without that file. */
+__attribute__((weak)) void march_shell_server_start(const char *reload_socket_path) {
+    (void)reload_socket_path;
+}
+
 void march_reload_server_start(const char *socket_path) {
     if (!socket_path || socket_path[0] == '\0') return;
     strncpy(g_socket_path, socket_path, sizeof(g_socket_path) - 1);
@@ -3161,6 +3167,7 @@ void march_reload_server_start(const char *socket_path) {
     pthread_attr_setstacksize(&attr, 4u << 20);
     pthread_create(&tid, &attr, reload_server_thread, NULL);
     pthread_attr_destroy(&attr);
+    march_shell_server_start(g_socket_path);
 }
 
 #else  /* non-POSIX stub */
