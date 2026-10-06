@@ -223,6 +223,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A locally bound generic lambda no longer leaks memory when it returns a
+  Float.** `let keep = fn (p, x) -> p` called directly with Float arguments,
+  as in `keep(1.0, x)`, leaked one boxed Float per call in compiled code. The
+  interpreter was unaffected.
 - **Parse errors on the command line now point at the token the message is
   about, not the token after it.** `if x then 1 end` used to put the caret
   under `end` (or under the next line) while the message talked about `then`;
