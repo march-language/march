@@ -6039,6 +6039,34 @@ let test_fast_math_emits_fast_attr () =
     (let re = Str.regexp "fadd fast" in
      (try ignore (Str.search_forward re ir_normal 0); true with Not_found -> false))
 
+(* ── by-name record field read on a scalar-typed operand ─────────── *)
+
+(* A field read whose operand's TIR type says "scalar" (here [Int]) has no
+   statically known record shape, so it takes the by-name
+   march_record_field_dyn path.  The operand emits as i64 (the lazy Int63
+   funnel untags it), and splicing that in as the call's `ptr` produced IR
+   clang rejects ("'%w63…' defined with type 'i64' but expected 'ptr'",
+   seen 2026-10-04 compiling a main-less topology app).  The emitter must
+   refuse with a diagnostic naming the operand instead of writing invalid
+   IR. *)
+let test_field_dyn_on_scalar_operand_refused () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let body = March_tir.Tir.EField (March_tir.Tir.AVar x, "factor") in
+  let fd = { March_tir.Tir.fn_name = "field_of_int"; fn_params = [x];
+             fn_ret_ty = March_tir.Tir.TInt; fn_body = body;
+             fn_kind = March_tir.Tir.FnNormal } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = [];
+            tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
+  match March_tir.Llvm_emit.emit_module m with
+  | _ir ->
+    Alcotest.fail "expected the emitter to refuse a field read on an Int; it wrote IR"
+  | exception Failure msg ->
+    let mentions sub =
+      try ignore (Str.search_forward (Str.regexp_string sub) msg 0); true
+      with Not_found -> false in
+    Alcotest.(check bool) ("names the field and operand: " ^ msg) true
+      (mentions ".factor" && mentions "`x`" && mentions "Int")
+
 (* ── Constant propagation ───────────────────────────────────────── *)
 
 (* Helpers for cprop tests: build a function body with a let-chain,
@@ -16761,6 +16789,7 @@ let codegen_suites =
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
+        Alcotest.test_case "field_dyn_on_scalar_operand_refused" `Quick test_field_dyn_on_scalar_operand_refused;
       ]);
       ("llvm_emit correctness", [
         Alcotest.test_case "ctor_no_collision_different_tags" `Quick
