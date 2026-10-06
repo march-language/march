@@ -44,8 +44,7 @@ module Ast = March_ast.Ast
 let decls_of_source ~(file : string) (mod_name : string) (src : string) : Ast.decl list =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = file };
-  let m = March_parser.Parser.module_
-      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   let m = March_desugar.Desugar.desugar_module m in
   ignore mod_name;
   [Ast.DMod (m.Ast.mod_name, Ast.Public, m.Ast.mod_decls, Ast.dummy_span)]
@@ -602,8 +601,7 @@ let test_type_search_zero_arg_not_return_only () =
 
 let parse_ty_str (s : string) : March_ast.Ast.ty =
   let lexbuf = Lexing.from_string s in
-  March_parser.Parser.ty_eof
-    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  March_parser.Parse.ty_of_lexbuf lexbuf
 
 let test_parse_ty_eof_arrow () =
   match parse_ty_str "List(a) -> Int" with

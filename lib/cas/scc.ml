@@ -18,53 +18,62 @@ type scc =
 
 (* ── Reference extraction ────────────────────────────────────────────────── *)
 
-(** Collect the set of top-level function names referenced in an expression.
+(** The set of definition names a reference is checked against.  A hash set,
+    not a list: it is the whole program's definitions (stdlib included), so a
+    [List.mem] per reference made [deps_of] O(references x definitions), which
+    measured ~4.4 s of a topology_app compile, cache hits included (2026-10-05). *)
+type known = (string, unit) Hashtbl.t
+
+let known_of_names (names : string list) : known =
+  let t = Hashtbl.create (2 * List.length names + 1) in
+  List.iter (fun n -> Hashtbl.replace t n ()) names;
+  t
+
+(** Collect the top-level function names referenced in an expression,
+    prepended to [acc] (unordered, with duplicates).
     Only captures names that appear as [EApp] function variable names or as
     [AVar] at the top level (a simple heuristic sufficient for TIR). *)
-let rec refs_in_expr (known : string list) (e : expr) : string list =
+let rec refs_in_expr (known : known) (acc : string list) (e : expr) : string list =
+  let atoms acc l = List.fold_left (refs_in_atom known) acc l in
   match e with
-  | EAtom (AVar v)            -> if List.mem v.v_name known then [v.v_name] else []
-  | EAtom (ADefRef did)       -> if List.mem did.did_name known then [did.did_name] else []
-  | EAtom (ALit _)            -> []
-  | EApp (fn_v, args)         ->
-    let direct = if List.mem fn_v.v_name known then [fn_v.v_name] else [] in
-    let from_args = List.concat_map (refs_in_atom known) args in
-    direct @ from_args
-  | ECallPtr (fn_a, args)     ->
-    refs_in_atom known fn_a @ List.concat_map (refs_in_atom known) args
-  | ELet (_, e1, e2)          -> refs_in_expr known e1 @ refs_in_expr known e2
+  | EAtom a                   -> refs_in_atom known acc a
+  | EApp (fn_v, args)         -> atoms (add_name known acc fn_v.v_name) args
+  | ECallPtr (fn_a, args)     -> atoms (refs_in_atom known acc fn_a) args
+  | ELet (_, e1, e2)
+  | ESeq (e1, e2)             -> refs_in_expr known (refs_in_expr known acc e1) e2
   | ELetRec (fns, body)       ->
-    List.concat_map (fun fd -> refs_in_expr known fd.fn_body) fns
-    @ refs_in_expr known body
+    let acc = List.fold_left (fun acc fd -> refs_in_expr known acc fd.fn_body) acc fns in
+    refs_in_expr known acc body
   | ECase (a, brs, def)       ->
-    refs_in_atom known a
-    @ List.concat_map (fun br -> refs_in_expr known br.br_body) brs
-    @ Option.value ~default:[] (Option.map (refs_in_expr known) def)
-  | ETuple atoms              -> List.concat_map (refs_in_atom known) atoms
-  | ERecord fields            -> List.concat_map (fun (_, a) -> refs_in_atom known a) fields
-  | EField (a, _)             -> refs_in_atom known a
+    let acc = refs_in_atom known acc a in
+    let acc = List.fold_left (fun acc br -> refs_in_expr known acc br.br_body) acc brs in
+    (match def with Some d -> refs_in_expr known acc d | None -> acc)
+  | ETuple atoms'             -> atoms acc atoms'
+  | ERecord fields            -> List.fold_left (fun acc (_, a) -> refs_in_atom known acc a) acc fields
+  | EField (a, _)             -> refs_in_atom known acc a
   | EUpdate (a, fields)       ->
-    refs_in_atom known a @ List.concat_map (fun (_, av) -> refs_in_atom known av) fields
+    List.fold_left (fun acc (_, av) -> refs_in_atom known acc av)
+      (refs_in_atom known acc a) fields
   | EAlloc (_, args)
-  | EStackAlloc (_, args)     -> List.concat_map (refs_in_atom known) args
+  | EStackAlloc (_, args)     -> atoms acc args
   | EFree a | EIncRC a | EDecRC a
-  | EAtomicIncRC a | EAtomicDecRC a -> refs_in_atom known a
-  | EReuse (a, _, args)       ->
-    refs_in_atom known a @ List.concat_map (refs_in_atom known) args
+  | EAtomicIncRC a | EAtomicDecRC a -> refs_in_atom known acc a
+  | EReuse (a, _, args)       -> atoms (refs_in_atom known acc a) args
   | EAllocHole (tok, _, args, _) ->
-    (match tok with Some a -> refs_in_atom known a | None -> [])
-    @ List.concat_map (refs_in_atom known) args
-  | ESetField (o, _, v)       -> refs_in_atom known o @ refs_in_atom known v
-  | ESeq (e1, e2)             -> refs_in_expr known e1 @ refs_in_expr known e2
+    let acc = match tok with Some a -> refs_in_atom known acc a | None -> acc in
+    atoms acc args
+  | ESetField (o, _, v)       -> refs_in_atom known (refs_in_atom known acc o) v
 
-and refs_in_atom known = function
-  | AVar v    -> if List.mem v.v_name known then [v.v_name] else []
-  | ADefRef did -> if List.mem did.did_name known then [did.did_name] else []
-  | ALit _    -> []
+and refs_in_atom known acc = function
+  | AVar v      -> add_name known acc v.v_name
+  | ADefRef did -> add_name known acc did.did_name
+  | ALit _      -> acc
 
-(** Direct dependencies of [fd.fn_name] within the set [known_names]. *)
-let deps_of (known_names : string list) (fd : fn_def) : string list =
-  let raw = refs_in_expr known_names fd.fn_body in
+and add_name known acc n = if Hashtbl.mem known n then n :: acc else acc
+
+(** Direct dependencies of [fd.fn_name] within the set [known]. *)
+let deps_of (known : known) (fd : fn_def) : string list =
+  let raw = refs_in_expr known [] fd.fn_body in
   (* Deduplicate; a fn may reference itself — keep self-refs *)
   List.sort_uniq String.compare raw
 
@@ -77,7 +86,7 @@ type node_state = {
 }
 
 let compute_sccs (fns : fn_def list) : scc list =
-  let names = List.map (fun fd -> fd.fn_name) fns in
+  let known = known_of_names (List.map (fun fd -> fd.fn_name) fns) in
   let fn_map = Hashtbl.create (List.length fns) in
   List.iter (fun fd -> Hashtbl.replace fn_map fd.fn_name fd) fns;
 
@@ -95,7 +104,7 @@ let compute_sccs (fns : fn_def list) : scc list =
 
     (* Visit successors *)
     let fd = Hashtbl.find fn_map name in
-    let successors = deps_of names fd in
+    let successors = deps_of known fd in
     List.iter (fun w ->
       match Hashtbl.find_opt state w with
       | None ->

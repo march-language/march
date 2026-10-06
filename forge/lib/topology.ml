@@ -700,7 +700,7 @@ let parse_source ~path (src : string) : (Ast.module_, string) result =
   try
     let lexbuf = Lexing.from_string src in
     lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-    Ok (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+    Ok (March_parser.Parse.module_of_lexbuf lexbuf)
   with exn -> Error (Printexc.to_string exn)
 
 let parse_module path : (Ast.module_, string) result =

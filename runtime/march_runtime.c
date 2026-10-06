@@ -8070,14 +8070,70 @@ void march_actor_inspect_store(void *s) {
     p->inspect_out = s;
 }
 
+/* An inspect request from a thread that is not a green thread (the observe
+ * socket's STATE verb): it cannot receive a reply message, so it waits on
+ * this instead.  Two references, the asker's and the request's; whichever
+ * drops the last frees it, so an asker that timed out never leaves the
+ * answering actor a dangling pointer.  A request still queued when its actor
+ * dies is freed with the mailbox (shallowly) and its reference leaks: one
+ * small allocation per such request. */
+typedef struct inspect_waiter {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    int             refs;
+    int             done;
+    int             ok;      /* 1: text is the state; 0: text is the reason */
+    char           *text;    /* malloc'd */
+} inspect_waiter;
+
+static void inspect_waiter_release(inspect_waiter *w) {
+    pthread_mutex_lock(&w->mu);
+    int last = --w->refs == 0;
+    pthread_mutex_unlock(&w->mu);
+    if (!last) return;
+    pthread_mutex_destroy(&w->mu);
+    pthread_cond_destroy(&w->cv);
+    free(w->text);
+    free(w);
+}
+
+static char *dup_march_string(void *s) {
+    march_string *ms = (march_string *)s;
+    size_t n = IS_HEAP_PTR(s) ? (size_t)ms->len : 0;
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    if (n) memcpy(out, ms->data, n);
+    out[n] = '\0';
+    return out;
+}
+
 /* Reply to an inspect request with [result] (an owned Result(String,
- * String)), consuming the request. */
+ * String)), consuming the request.  The request is a two-field record:
+ * field 0 the green-thread asker's reply-ref, or 0 for an external asker,
+ * whose inspect_waiter is field 1. */
 static void inspect_reply(void *request, void *result) {
+    void *reply_ref = (void *)(uintptr_t)MARCH_FIELD(request, 0);
+    inspect_waiter *w = (inspect_waiter *)(uintptr_t)MARCH_FIELD(request, 1);
     /* march_decrc is shallow: freeing the request hands its one reference
      * to the reply-ref over to march_actor_reply, which retires it. */
-    void *reply_ref = (void *)(uintptr_t)MARCH_FIELD(request, 0);
     march_decrc(request);
-    march_actor_reply(reply_ref, result);
+    if (reply_ref) {
+        march_actor_reply(reply_ref, result);
+        return;
+    }
+    /* External: copy the text out, release the Result (and its String). */
+    void *str = (void *)(uintptr_t)MARCH_FIELD(result, 0);
+    int ok = ((march_hdr *)result)->tag == 0;
+    char *text = dup_march_string(str);
+    march_decrc(str);
+    march_decrc(result);
+    pthread_mutex_lock(&w->mu);
+    w->ok = ok;
+    w->text = text;
+    w->done = 1;
+    pthread_cond_signal(&w->cv);
+    pthread_mutex_unlock(&w->mu);
+    inspect_waiter_release(w);
 }
 
 /* Answer an inspect request between handlers: run the type's renderer under
@@ -8149,9 +8205,10 @@ void *march_actor_inspect(void *actor, int64_t timeout_ms) {
     MARCH_SET_TAG(reply_ref, MARCH_CALL_REPLY_TAG);
     MARCH_FIELD(reply_ref, 0) = (caller->pid << 1) | 1;
     MARCH_FIELD(reply_ref, 1) = corr;
-    void *request = march_alloc(24);
+    void *request = march_alloc(32);
     MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
     MARCH_FIELD(request, 0) = (int64_t)(uintptr_t)reply_ref;
+    MARCH_FIELD(request, 1) = 0;
     march_reclaim_enter();
     march_actor_meta *meta = find_meta(actor);
     march_proc *gt = meta ? meta_gt(meta) : NULL;
@@ -8173,6 +8230,58 @@ void *march_actor_inspect(void *actor, int64_t timeout_ms) {
     if (ok) return inner;
     march_decrc(inner);
     return mk_err_cstr("timeout");
+}
+
+/* Actor.inspect_state for a thread that is not a green thread: the observe
+ * socket's STATE verb (march_observe_debug.c).  See march_observe.h. */
+void *march_pid_of_int(int64_t n);
+
+int march_actor_inspect_external(int64_t pid, int64_t timeout_ms, char **out) {
+    *out = NULL;
+    void *actor = march_pid_of_int(pid);          /* owned, or the dead sentinel */
+    if (!actor_alive_load(actor)) {
+        march_decrc(actor);
+        *out = strdup("dead");
+        return 0;
+    }
+    inspect_waiter *w = (inspect_waiter *)calloc(1, sizeof *w);
+    if (!w) { march_decrc(actor); *out = strdup("out of memory"); return 0; }
+    pthread_mutex_init(&w->mu, NULL);
+    pthread_cond_init(&w->cv, NULL);
+    w->refs = 2;
+    void *request = march_alloc(32);
+    MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
+    MARCH_FIELD(request, 0) = 0;
+    MARCH_FIELD(request, 1) = (int64_t)(uintptr_t)w;
+    march_reclaim_enter();
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? meta_gt(meta) : NULL;
+    int rc = gt ? march_sched_send_unlimited(gt, request) : MARCH_SEND_DEAD;
+    march_reclaim_exit();
+    march_decrc(actor);
+    if (rc != MARCH_SEND_OK) {
+        march_decrc(request);
+        w->refs = 1;                               /* the request never held it */
+        inspect_waiter_release(w);
+        *out = strdup("dead");
+        return 0;
+    }
+    struct timespec dl;
+    clock_gettime(CLOCK_REALTIME, &dl);
+    int64_t ns = (int64_t)dl.tv_nsec + (timeout_ms % 1000) * 1000000;
+    dl.tv_sec += (time_t)(timeout_ms / 1000 + ns / 1000000000);
+    dl.tv_nsec = (long)(ns % 1000000000);
+    pthread_mutex_lock(&w->mu);
+    while (!w->done)
+        if (pthread_cond_timedwait(&w->cv, &w->mu, &dl) == ETIMEDOUT) break;
+    int done = w->done, ok = w->ok;
+    char *text = w->text;
+    w->text = NULL;
+    pthread_mutex_unlock(&w->mu);
+    inspect_waiter_release(w);
+    if (!done) { *out = strdup("timeout"); return 0; }
+    *out = text ? text : strdup("");
+    return ok;
 }
 
 

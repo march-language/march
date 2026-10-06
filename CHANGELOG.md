@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Signed debug requests on the observe socket.** `forge observe --state PID`
+  returns a running actor's state (what `Actor.inspect_state` returns inside
+  the program), and `forge observe --crashes-full` returns recent crashes with
+  their panic messages. A node answers only if it was built with
+  `--hot-reload --signing-pubkey`, the request is signed by that deploy key,
+  and its `$MARCH_DEBUG_POLICY` file lists the verb (no file: nothing is
+  allowed). Each request carries a nonce and a 30 s expiry, so a captured
+  request cannot be replayed, and every attempt is written to the audit log.
 - **A multi-host lab, and `examples/lab_app`.** `scripts/lab/run.sh` starts four
   Debian containers on a private Docker network, deploys `examples/lab_app` (a
   three-role choreography with a loop, a choice, an actor-hosted role placed
@@ -160,6 +168,21 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Faster `--compile` once whole-program optimisation is done.** Two lookups
+  that scanned every definition in the program (stdlib included) for each name
+  reference, one in the CAS dependency hashing and one in the allocation-contract
+  checks, now use a hash table or compute the name once. On
+  `examples/topology_app` at `--opt 2` that took ~7 s of CPU off every compile
+  that gets past optimisation: a comment-only edit (a cached-binary hit) went
+  from 11.2 s to 4.3 s and a one-function edit from 26.0 s to 18.4 s. Cache
+  keys are unchanged, so existing caches stay valid. `--timings` now reports
+  the two phases as `alloc-contract` and `cas-hash`.
+- **Parse errors are now emitted by `--check-json`.** A file that does not
+  parse used to produce an empty NDJSON stream (the error went to stderr
+  only); it now produces one line per syntax error, with `code` set to
+  `parse_error`, `syntax_error` or `lex_error`. Every `--check-json` line also
+  gains `labels` (the secondary source spans, each with its message) and
+  `notes`. Existing fields are unchanged and `forge fix` ignores the new ones.
 - **A call to an unknown function is now a compile error, not a link error.**
   When native code generation met a direct call to a name that is neither a
   function in the program, an extern, nor a runtime builtin, it used to emit a
@@ -247,6 +270,23 @@ git log is authoritative for exact commits.
   nothing to talk to. Roles the build places itself are now pinned, and a re-read leaves
   them alone.
 
+- **Parse errors on the command line now point at the token the message is
+  about, not the token after it.** `if x then 1 end` used to put the caret
+  under `end` (or under the next line) while the message talked about `then`;
+  `march`, `march fmt`, `march test` and the REPL now underline `then`, the
+  position the editor integration already showed.
+- **A stray character or an unterminated string is now an ordinary error.**
+  `march`, `march test` and `march fmt` used to die with `Fatal error:
+  exception Lexer_error(...)` and an OCaml backtrace on a character the
+  lexer rejects or a string that never closes; they now print the error with
+  its source line and exit 1, like any other syntax error. A file on
+  `MARCH_LIB_PATH` with such an error no longer aborts the whole compile.
+- **A cold `$HOME` stdlib cache no longer compiles differently from a warm one.** The first
+  compile after a cold cache used the live stdlib type environment, whose type variables the program
+  could link, so it produced different IR (an extra specialised clone, shifted lambda ids) and a
+  different compilation-cache key than every later compile of the same source.
+- `forge top -n` and `forge observe -n` also accept `--count`; `--n` was
+  documented but never parsed.
 - **Compiling a file with no `main` no longer emits the whole standard
   library.** A module with no `main`, tests or exports (a library file, or a
   topology app compiled without its `--topology` digest) kept all ~8,000
