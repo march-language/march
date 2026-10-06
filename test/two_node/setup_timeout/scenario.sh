@@ -15,6 +15,9 @@
 # A and B wait 5 s (room for a slow CI box to start C); C gives up on B
 # after 1 s, well inside that.
 export MARCH_SESSION_CONNECT_MS=5000
+# The deadline is what this scenario tests, and node_b.expected prints it: keep
+# it unscaled under ASan (scripts/two-node.sh, TIME_SCALE).
+TIME_SCALE_EXEMPT=MARCH_SESSION_CONNECT_MS
 export TRI_A_ADDR=127.0.0.1:$PORT_A
 export TRI_B_ADDR=127.0.0.1:$PORT
 

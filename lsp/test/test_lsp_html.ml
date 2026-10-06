@@ -422,6 +422,72 @@ let test_cross_file_interface_resolves () =
     List.exists (fun m -> contains_sub m "Unknown interface") msgs in
   Alcotest.(check bool) "cross-file impl: no 'Unknown interface'" false has_unknown_iface
 
+(* A git dep's lib paths come from forge's own resolver: the version
+   forge.lock names, and only its lib/. The LSP used to resolve a git dep to
+   the whole cache container ~/.march/cas/deps/<name>, which holds one
+   directory per cached version, so every version's test/ and priv/ trees
+   landed on the search path, along with every other version's lib/. *)
+let test_dep_lib_paths_follow_forge_lock () =
+  let home = Filename.temp_file "march_lsp_home_" "" in
+  Sys.remove home;
+  let write path content =
+    let rec mkdir_p d =
+      if not (Sys.file_exists d) then begin
+        mkdir_p (Filename.dirname d);
+        (try Sys.mkdir d 0o755 with Sys_error _ -> ())
+      end
+    in
+    mkdir_p (Filename.dirname path);
+    let oc = open_out path in
+    output_string oc content; close_out oc
+  in
+  let install coord answer =
+    let dir = String.concat "/" [home; ".march/cas/deps/widget"; coord] in
+    write (dir ^ "/forge.toml") "[package]\nname = \"widget\"\n";
+    write (dir ^ "/lib/widget.march")
+      (Printf.sprintf "mod Widget do\n  fn answer() : %s do %s end\nend\n"
+         (if answer = "" then "String" else "Int")
+         (if answer = "" then "\"old\"" else answer));
+    (* A dep's own test/ and priv/ trees are not library code: these do not
+       even typecheck. *)
+    write (dir ^ "/test/widget_test.march")
+      "mod WidgetTest do\n  fn broken() : Int do \"not an int\" end\nend\n";
+    write (dir ^ "/priv/migrations/m1.march")
+      "mod M1 do\n  fn broken() : Int do \"not an int\" end\nend\n";
+    dir
+  in
+  let locked = install "bbbb2222" "42" in
+  let _other = install "aaaa1111" "" in
+  let app_src = "mod App do\n  fn go() : Int do Widget.answer() + 1 end\nend\n" in
+  let root = mk_forge_project [ "lib/app.march", app_src ] in
+  let oc = open_out (Filename.concat root "forge.toml") in
+  output_string oc
+    "[package]\nname=\"xf\"\nversion=\"0.1.0\"\ntype=\"app\"\n[deps]\n\
+     widget = { git = \"https://example.invalid/widget.git\", branch = \"main\" }\n";
+  close_out oc;
+  March_forge.Resolver_lockfile.write (Filename.concat root "forge.lock")
+    [ March_forge.Resolver_lockfile.{
+        name = "widget"; version = None;
+        source = "git:https://example.invalid/widget.git";
+        commit = Some "bbbb2222"; hash = "sha256:00"; checksum = None } ]
+    ~manifest_hash:"sha256:test";
+  let prev_home = Sys.getenv_opt "HOME" in
+  Unix.putenv "HOME" home;
+  Fun.protect ~finally:(fun () ->
+      match prev_home with Some h -> Unix.putenv "HOME" h | None -> ())
+    (fun () ->
+       let paths = March_lsp_lib.Forge_config.project_lib_paths root in
+       let dep_paths =
+         List.filter (fun p -> contains_sub p ".march/cas/deps") paths in
+       Alcotest.(check (list string)) "only the locked version's lib/"
+         [locked ^ "/lib"] dep_paths;
+       let a = An.analyse ~filename:(Filename.concat root "lib/app.march")
+           ~src:app_src in
+       let msgs = List.map (fun (d : Lsp.Types.Diagnostic.t) ->
+           match d.message with `String s -> s | `MarkupContent m -> m.value)
+           a.An.diagnostics in
+       Alcotest.(check (list string)) "the locked Widget typechecks the app" [] msgs)
+
 let test_unknown_interface_still_errors () =
   (* The fix must not suppress a genuinely-undeclared interface. *)
   let model_src =
