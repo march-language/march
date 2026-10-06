@@ -1,0 +1,127 @@
+-- Regression: NativeArray fold(map) and sum(map) fusion (phase C of
+-- specs/plans/2026-09-28-nativearray-fusion-plan.md).
+--
+-- Fusion.run_nativearr composes `fold(map(a, f), z, g)` into ONE fold whose
+-- callback is the substituted composition of f and g (the fold stays strict
+-- and in order). Native_map_inline's sum-map peephole fuses `sum(map(a, f))`
+-- and `sum(map2(a, b, f))` into one loop with no intermediate array, adding in
+-- the same reassociating way as the runtime's own `sum`. Every line below must
+-- print the same value compiled and interpreted (the .expected file IS the
+-- interpreter's output); the IR-shape rule in test/dune pins how many fused
+-- loops, map loops and runtime calls the program has.
+--
+-- Float inputs are multiples of 0.5 so that every sum is exact and a
+-- reassociated sum equals the in-order one. Captured values are read at run
+-- time so constant propagation cannot turn a capturing lambda into a
+-- non-capturing one.
+mod Main do
+  needs IO.Console
+
+  pfn ints_from(i : Int, n : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc else ints_from(i - 1, n, Cons(i, acc)) end
+  end
+
+  pfn ints(n : Int) : List(Int) do ints_from(n - 1, n, Nil) end
+
+  pfn halves_from(i : Int, acc : List(Float)) : List(Float) do
+    if i < 0 do acc else halves_from(i - 1, Cons(int_to_float(i) *. 0.5 -. 100.0, acc)) end
+  end
+
+  pfn halves(n : Int) : List(Float) do halves_from(n - 1, Nil) end
+
+  -- NOT fused (sum): the callback is a parameter, not a lambda literal.
+  pfn sum_param(a : NativeIntArr, f : Int -> Int) : Int do
+    NativeArray.sum_int(NativeArray.map_int(a, f))
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let a = NativeArray.from_list_int(ints(1000))
+    let a2 = NativeArray.from_list_int(ints(1000))
+    let small = NativeArray.from_list_int(Cons(1, Cons(2, Cons(7, Nil))))
+    let b = NativeArray.from_list_float(halves(1000))
+    let b2 = NativeArray.from_list_float(halves(1000))
+    let c = NativeArray.from_list_u8(Cons(1, Cons(2, Cons(3, Cons(200, Nil)))))
+    let d = NativeArray.from_list_i32(Cons(1, Cons(-2, Cons(3000, Cons(5, Nil)))))
+    let e = NativeArray.from_list_f32(Cons(1.0, Cons(2.0, Cons(10.0, Nil))))
+    let ei = NativeArray.from_list_int(Nil)
+    let ef = NativeArray.from_list_float(Nil)
+    let k = NativeArray.length_int(small)
+    let kf = int_to_float(k)
+
+    -- ── fold(map): fused into one fold ────────────────────────────────────
+    println("fold int: " ++ int_to_string(
+      NativeArray.fold_int(NativeArray.map_int(small, fn x -> x * 3), 1, fn (s, x) -> s * 2 + x)))
+    println("fold int capturing: " ++ int_to_string(
+      NativeArray.fold_int(NativeArray.map_int(a, fn x -> x + k), 0, fn (s, x) -> s + x * k)))
+    println("fold float: " ++ float_to_string(
+      NativeArray.fold_float(NativeArray.map_float(b, fn x -> x *. 0.5), 0.0, fn (s, x) -> s +. x)))
+    println("fold float in order: " ++ float_to_string(
+      NativeArray.fold_float(NativeArray.map_float(b, fn x -> x *. kf), 0.5, fn (s, x) -> s *. 0.5 +. x)))
+    println("fold u8 wraps: " ++ int_to_string(
+      NativeArray.fold_u8(NativeArray.map_u8(c, fn x -> x * 100), 0, fn (s, x) -> s + x)))
+    println("fold i32 wraps: " ++ int_to_string(
+      NativeArray.fold_i32(NativeArray.map_i32(d, fn x -> x * 1000000), 0, fn (s, x) -> s + x)))
+    println("fold of a map chain: " ++ int_to_string(
+      NativeArray.fold_int(NativeArray.map_int(NativeArray.map_int(a, fn x -> x * 2), fn y -> y - k), 7,
+        fn (s, x) -> s + x)))
+    println("fold empty: " ++ int_to_string(
+      NativeArray.fold_int(NativeArray.map_int(ei, fn x -> x * 2), 42, fn (s, x) -> s + x)))
+
+    -- ── sum(map) and sum(map2): one fused loop ────────────────────────────
+    println("sum int: " ++ int_to_string(NativeArray.sum_int(NativeArray.map_int(a, fn x -> x * 3))))
+    println("sum int capturing: " ++ int_to_string(
+      NativeArray.sum_int(NativeArray.map_int(a, fn x -> x * k - 1))))
+    println("sum float: " ++ float_to_string(
+      NativeArray.sum_float(NativeArray.map_float(b, fn x -> x *. 2.0))))
+    println("sum float capturing: " ++ float_to_string(
+      NativeArray.sum_float(NativeArray.map_float(b, fn x -> x +. kf))))
+    println("sum f32 rounds: " ++ float_to_string(
+      NativeArray.sum_f32(NativeArray.map_f32(e, fn x -> x /. 3.0))))
+    println("sum u8 wraps: " ++ int_to_string(NativeArray.sum_u8(NativeArray.map_u8(c, fn x -> x * 7))))
+    println("sum i32 wraps: " ++ int_to_string(
+      NativeArray.sum_i32(NativeArray.map_i32(d, fn x -> x * 1000000))))
+    println("dot float: " ++ float_to_string(
+      NativeArray.sum_float(NativeArray.map2_float(b, b2, fn (x, y) -> x *. y))))
+    println("sum map2 int capturing: " ++ int_to_string(
+      NativeArray.sum_int(NativeArray.map2_int(a, a2, fn (x, y) -> x * y + k))))
+    println("sum of a map chain: " ++ float_to_string(
+      NativeArray.sum_float(NativeArray.map_float(NativeArray.map_float(b, fn x -> x *. 2.0), fn y -> y +. 1.0))))
+    println("sum empty: " ++ int_to_string(NativeArray.sum_int(NativeArray.map_int(ei, fn x -> x + 1)))
+      ++ " " ++ float_to_string(NativeArray.sum_float(NativeArray.map_float(ef, fn x -> x +. 1.0))))
+
+    -- ── NOT fused, must stay correct ──────────────────────────────────────
+    let twice = NativeArray.map_int(a, fn x -> x + 1)
+    println("intermediate used twice: " ++ int_to_string(NativeArray.sum_int(twice))
+      ++ " " ++ int_to_string(NativeArray.length_int(twice)))
+    let read_first = NativeArray.map_int(a, fn x -> x - 1)
+    let len_first = NativeArray.length_int(read_first)
+    println("read before the sum: " ++ int_to_string(len_first + NativeArray.sum_int(read_first)))
+    println("fold of map2: " ++ int_to_string(
+      NativeArray.fold_int(NativeArray.map2_int(a, a2, fn (x, y) -> x - y + 1), 0, fn (s, x) -> s + x)))
+    println("impure fold callback: " ++ int_to_string(
+      NativeArray.fold_int(NativeArray.map_int(small, fn x -> x * 10), 0, fn (s, x) ->
+        let _ = println("  visit " ++ int_to_string(x))
+        s + x)))
+    let as_acc = NativeArray.fold_int(small, NativeArray.map_int(a, fn x -> x * 5), fn (acc, x) -> acc)
+    println("map as the fold accumulator: " ++ int_to_string(NativeArray.length_int(as_acc)))
+    println("fold f32 of a map: " ++ float_to_string(
+      NativeArray.fold_f32(NativeArray.map_f32(e, fn x -> x *. 0.5), 0.0, fn (s, x) -> s +. x)))
+    println("sum through a parameter: " ++ int_to_string(sum_param(a, fn x -> x * 2)))
+
+    -- ── no leak: the fused loops allocate nothing per call ───────────────
+    let before = live_allocs()
+    let r = leak_loop(200, a, b, k, 0)
+    let grew = live_allocs() - before
+    println("leak loop: " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 50))
+  end
+
+  pfn leak_loop(n : Int, a : NativeIntArr, b : NativeFloatArr, k : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let s1 = NativeArray.sum_int(NativeArray.map_int(a, fn x -> x * k))
+      let s2 = NativeArray.fold_int(NativeArray.map_int(a, fn x -> x + k), 0, fn (s, x) -> s + x)
+      let s3 = NativeArray.sum_float(NativeArray.map2_float(b, b, fn (x, y) -> x *. y +. int_to_float(k)))
+      leak_loop(n - 1, a, b, k, acc + s1 - s2 + float_to_int(s3) % 7)
+    end
+  end
+end

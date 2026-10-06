@@ -634,8 +634,176 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
   | Tir.ESeq (e1, e2) -> Tir.ESeq (rewrite_expr e1, rewrite_expr e2)
   | other -> other
 
-let run (m : Tir.tir_module) : Tir.tir_module =
+(* ── Sum-map peephole (2026-10-06, phase C of
+   specs/plans/2026-09-28-nativearray-fusion-plan.md) ──────────────────────
+
+   After [rewrite_expr], a sum over a map that became an inline loop has
+   this shape (the map builtins borrow their array, and Perceus drops the
+   intermediate right after the sum, which only borrows it too):
+
+     let t = (..lets and RC ops..; __native_<w>_arr_map(2)_inline[_unboxed](args)) in
+     ..
+       let r = native_<w>_arr_sum(t) in
+       dec_rc t;
+       k
+     ..
+
+   where [t] has exactly those two uses. It becomes
+
+     let t' = (..same..; __native_<w>_arr_summap(2)_inline[_unboxed](args)) in
+     ..
+       let r = t' in
+       k
+     ..
+
+   one loop, no intermediate array, so its allocation and its drop both go.
+   The closure's reference moves with the arguments unchanged, and the
+   arrays are borrowed by both loops alike. Computing the sum where the map
+   was computed is safe: the sum has no effect and cannot fail, and the map
+   (with its callback's effects) ran there anyway. The sum binding is looked
+   for only along lets, sequences and case arms, never inside a lambda, where
+   it could run any number of times.
+
+   Only the two callee shapes the fold loop also uses are taken: an Int
+   family map (tagged ptr ABI) or a Float family map through the unboxed
+   clone. A Float map still on the boxed path keeps the separate loops.
+   [Fusion.run_nativearr] has already composed any map chain feeding the
+   sum, so [sum(map(map(a, f), g))] arrives here as one map. *)
+let sum_map_widths =
+  [ "native_int_arr"; "native_float_arr"; "native_f32_arr"; "native_i32_arr"; "native_u8_arr" ]
+
+(** [(summap inline name, sum builtin)] for a map/map2 inline-loop name the
+    peephole may fuse. *)
+let summap_name_of (map_inline : string) : (string * string) option =
+  let has_suffix suf s =
+    let ls = String.length suf and ln = String.length s in
+    ln >= ls && String.sub s (ln - ls) ls = suf
+  in
+  let strip_suffix suf s = String.sub s 0 (String.length s - String.length suf) in
+  if String.length map_inline < 2 || String.sub map_inline 0 2 <> "__" then None
+  else
+    let rest = String.sub map_inline 2 (String.length map_inline - 2) in
+    let (rest, unboxed) =
+      if has_suffix "_unboxed" rest then (strip_suffix "_unboxed" rest, true) else (rest, false) in
+    let split =
+      if has_suffix "_map2_inline" rest then Some (strip_suffix "_map2_inline" rest, "_summap2_inline")
+      else if has_suffix "_map_inline" rest then Some (strip_suffix "_map_inline" rest, "_summap_inline")
+      else None in
+    match split with
+    | Some (prefix, sfx) when List.mem prefix sum_map_widths ->
+      let float_family = prefix = "native_float_arr" || prefix = "native_f32_arr" in
+      if float_family <> unboxed then None
+      else Some ("__" ^ prefix ^ sfx ^ (if unboxed then "_unboxed" else ""), prefix ^ "_sum")
+    | _ -> None
+
+let is_drop_of (t : Tir.var) : Tir.expr -> bool = function
+  | Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v) | Tir.EFree (Tir.AVar v) ->
+    v.Tir.v_name = t.Tir.v_name
+  | _ -> false
+
+(** The map-inline call a let RHS returns, through its own lets and
+    sequences, with a function rebuilding the RHS around a replacement call
+    of the given result type. Also takes the shape Perceus leaves when the
+    mapped array dies at the call, the result bound and returned after the
+    array's drop:
+
+      let x = __..._map_inline(a, f) in dec_rc a; x *)
+let rec tail_map_call (e : Tir.expr)
+  : (Tir.var * Tir.atom list * (Tir.ty -> Tir.expr -> Tir.expr)) option =
+  let rec returns_after_rc (x : Tir.var) = function
+    | Tir.EAtom (Tir.AVar y) -> y.Tir.v_name = x.Tir.v_name
+    | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EIncRC _ | Tir.EAtomicIncRC _ | Tir.EFree _) as op, b) ->
+      count_uses x.Tir.v_name op = 0 && returns_after_rc x b
+    | _ -> false
+  in
+  match e with
+  | Tir.EApp (mv, margs) when summap_name_of mv.Tir.v_name <> None ->
+    Some (mv, margs, fun _ c -> c)
+  | Tir.ELet (x, Tir.EApp (mv, margs), b)
+    when summap_name_of mv.Tir.v_name <> None && returns_after_rc x b ->
+    let retype ty = function
+      | Tir.EAtom (Tir.AVar y) -> Tir.EAtom (Tir.AVar { y with Tir.v_ty = ty })
+      | other -> other in
+    let rec retype_tail ty = function
+      | Tir.ESeq (op, b) -> Tir.ESeq (op, retype_tail ty b)
+      | other -> retype ty other in
+    Some (mv, margs, fun ty c -> Tir.ELet ({ x with Tir.v_ty = ty }, c, retype_tail ty b))
+  | Tir.ELet (x, r, b) ->
+    Option.map (fun (mv, a, k) -> (mv, a, fun ty c -> Tir.ELet (x, r, k ty c))) (tail_map_call b)
+  | Tir.ESeq (a, b) ->
+    Option.map (fun (mv, args, k) -> (mv, args, fun ty c -> Tir.ESeq (a, k ty c))) (tail_map_call b)
+  | _ -> None
+
+(** Replace the one [let r = sum_b(t) in drop t; k] in [e] by
+    [let r = t' in k]; [None] when it is not found along lets, sequences and
+    case arms. *)
+let rec replace_sum_of (t : Tir.var) (sum_b : string) (t' : Tir.var) (e : Tir.expr)
+  : Tir.expr option =
+  let go = replace_sum_of t sum_b t' in
+  match e with
+  | Tir.ELet (r, Tir.EApp (sv, [ Tir.AVar t1 ]), Tir.ESeq (drop, k))
+    when sv.Tir.v_name = sum_b && t1.Tir.v_name = t.Tir.v_name && is_drop_of t drop ->
+    Some (Tir.ELet (r, Tir.EAtom (Tir.AVar t'), k))
+  | Tir.ELet (x, rhs, body) when x.Tir.v_name <> t.Tir.v_name ->
+    (match go rhs with
+     | Some rhs' -> Some (Tir.ELet (x, rhs', body))
+     | None -> Option.map (fun b -> Tir.ELet (x, rhs, b)) (go body))
+  | Tir.ESeq (a, b) ->
+    (match go a with
+     | Some a' -> Some (Tir.ESeq (a', b))
+     | None -> Option.map (fun b' -> Tir.ESeq (a, b')) (go b))
+  | Tir.ECase (a, brs, def) ->
+    let rec over acc = function
+      | [] -> None
+      | (br : Tir.branch) :: rest ->
+        (match go br.Tir.br_body with
+         | Some b' -> Some (List.rev_append acc ({ br with Tir.br_body = b' } :: rest))
+         | None -> over (br :: acc) rest)
+    in
+    (match over [] brs with
+     | Some brs' -> Some (Tir.ECase (a, brs', def))
+     | None ->
+       (match def with
+        | Some d -> Option.map (fun d' -> Tir.ECase (a, brs, Some d')) (go d)
+        | None -> None))
+  | _ -> None
+
+let rec fuse_sum_map (e : Tir.expr) : Tir.expr =
+  match e with
+  | Tir.ELet (t, rhs, body) ->
+    let rhs = fuse_sum_map rhs in
+    let body = fuse_sum_map body in
+    let fused =
+      match tail_map_call rhs with
+      | Some (mv, margs, rebuild) when count_uses t.Tir.v_name body = 2 ->
+        let (sname, sum_b) = Option.get (summap_name_of mv.Tir.v_name) in
+        let sum_ty =
+          if sum_b = "native_float_arr_sum" || sum_b = "native_f32_arr_sum" then Tir.TFloat
+          else Tir.TInt in
+        let t' = { t with Tir.v_name = t.Tir.v_name ^ "$summap"; v_ty = sum_ty } in
+        (match replace_sum_of t sum_b t' body with
+         | Some body' ->
+           Some (Tir.ELet (t', rebuild sum_ty (Tir.EApp ({ mv with Tir.v_name = sname }, margs)), body'))
+         | None -> None)
+      | _ -> None
+    in
+    (match fused with Some e' -> e' | None -> Tir.ELet (t, rhs, body))
+  | Tir.ELetRec (fns, body) ->
+    Tir.ELetRec (List.map (fun fn -> { fn with Tir.fn_body = fuse_sum_map fn.Tir.fn_body }) fns,
+                 fuse_sum_map body)
+  | Tir.ECase (a, brs, def) ->
+    Tir.ECase (a, List.map (fun (br : Tir.branch) -> { br with Tir.br_body = fuse_sum_map br.Tir.br_body }) brs,
+               Option.map fuse_sum_map def)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (fuse_sum_map e1, fuse_sum_map e2)
+  | other -> other
+
+(** [~sum_map:false] ([MARCH_NO_NATIVEARR_FUSION=1], via [Contract_pipeline])
+    skips the sum-map peephole; the map/map2/fold inline loops are unaffected. *)
+let run ?(sum_map = true) (m : Tir.tir_module) : Tir.tir_module =
   let apply_fns = apply_fn_table m in
   let extra_fns = ref [] in
-  let new_fns = List.map (fun fn -> { fn with Tir.fn_body = rewrite_expr apply_fns extra_fns fn.Tir.fn_body }) m.Tir.tm_fns in
+  let new_fns = List.map (fun fn ->
+      let body = rewrite_expr apply_fns extra_fns fn.Tir.fn_body in
+      let body = if sum_map then fuse_sum_map body else body in
+      { fn with Tir.fn_body = body }) m.Tir.tm_fns in
   { m with Tir.tm_fns = new_fns @ !extra_fns }

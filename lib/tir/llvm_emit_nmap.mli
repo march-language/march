@@ -46,3 +46,19 @@ val emit_native_fold_inline_loop :
   apply_name:string ->
   clo_reg:string ->
   string * string
+
+(** Decode a [__native_<w>_arr_summap(2)_inline(_unboxed)] name into its
+    width, array count (1 or 2) and unboxed flag; [None] for anything else. *)
+val decode_nsummap_inline_call : string -> (nmap_width * int * bool) option
+
+(** Emit the fused [sum(map(..))] / [sum(map2(..))] loop; returns the boundary
+    type ([double] or [i64]) and the sum. *)
+val emit_native_summap_inline_loop :
+  emit_atom:(Llvm_ctx.ctx -> Tir.atom -> string * string) ->
+  Llvm_ctx.ctx ->
+  width:nmap_width ->
+  unboxed:bool ->
+  arr_atoms:Tir.atom list ->
+  apply_name:string ->
+  clo_reg:string ->
+  string * string
