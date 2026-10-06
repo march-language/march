@@ -49,14 +49,14 @@ done
 # bytes on macOS, and two long paths cut to one name collide.
 socks=$(mktemp -d /tmp/hs.XXXXXX)
 export HCR_DRIVE_MS=12000
-# The nodes run SWIM at its default 3 s suspect timeout, except under
-# AddressSanitizer (the sanitize gate), where they get 15 s. Measured
-# 2026-09-29 in a 2-CPU ubuntu container: under ASan the two nodes suspect
-# and declare each other dead ~9 s into the drive and lose sessions, and do
-# so just the same with both deploys skipped, so it is ASan load, not the
-# deploy (each deploy took 35-57 ms and activated only the app's changed
-# functions). specs/progress/2026-09-29-hot-deploy-swim-default-timeout.md
-if [ -n "${MARCH_SANITIZE:-}" ]; then export HCR_SUSPECT_MS=15000; fi
+# The nodes run SWIM at its default timeouts, which the harness stretches
+# under AddressSanitizer (the sanitize gate; scripts/two-node.sh, TIME_SCALE).
+# Measured 2026-09-29 in a 2-CPU ubuntu container: under ASan, at the default
+# 3 s suspect timeout, the two nodes suspect and declare each other dead ~9 s
+# into the drive and lose sessions, and do so just the same with both deploys
+# skipped, so it is ASan load, not the deploy (each deploy took 35-57 ms and
+# activated only the app's changed functions).
+# specs/progress/2026-09-29-hot-deploy-swim-default-timeout.md
 export MARCH_HOT_RELOAD_SOCKET=$socks/a.sock
 start_node a
 wait_line a "node-a: offering"

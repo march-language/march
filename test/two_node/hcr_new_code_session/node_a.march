@@ -96,12 +96,10 @@ mod HcrSessionA do
   end
 
   fn main(c : Cap(IO)) do
-    -- The default SWIM timeouts, except under AddressSanitizer: there
-    -- scenario.sh sets HCR_SUSPECT_MS to 15 s, because ASan load alone
-    -- (no deploy needed) makes the nodes suspect each other at 3 s.
-    let base = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "hcr-secret", 1)
-    let suspect_ms = Env.get_int("HCR_SUSPECT_MS", 0)
-    let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end
+    -- The default SWIM timeouts, which scripts/two-node.sh stretches under
+    -- AddressSanitizer (MARCH_SWIM_*_MS): ASan load alone (no deploy
+    -- needed) made the nodes suspect each other at the default 3 s.
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "hcr-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
