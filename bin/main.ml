@@ -1033,6 +1033,7 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
   let fn_tbl = Hashtbl.create 1024 in
   List.iter (fun (fd : March_tir.Tir.fn_def) -> Hashtbl.replace fn_tbl fd.March_tir.Tir.fn_name fd) tir.March_tir.Tir.tm_fns;
   let all_names = Hashtbl.fold (fun n _ acc -> n :: acc) fn_tbl [] in
+  let known = March_cas.Scc.known_of_names all_names in
   let counter_re = Str.regexp "\\$\\([A-Za-z_]*\\)[0-9]+\\|_i[0-9]+\\|'_[0-9]+" in
   let canon_text fd =
     let seen = Hashtbl.create 16 in
@@ -1055,7 +1056,7 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
     | None -> let h = canon fd in Hashtbl.replace own n h; h in
   let is_slot = HR.is_slot_fn cfg in
   let rec fold_deps visiting fd =
-    March_cas.Scc.deps_of all_names fd
+    March_cas.Scc.deps_of known fd
     |> List.filter (fun c ->
          not (List.mem c visiting)
          && String.equal (HR.module_of_name c) ""
@@ -1321,8 +1322,13 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
             (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
   (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
+     (* [src=] digests only the source/TIR-derived input, so unlike [ch=]
+        (which folds in the compiler executable's own digest) it is comparable
+        across two compiler builds: a refactor of the CAS hashing must leave it
+        unchanged. *)
      Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] src=%s ch=%s\n%!"
-       target_label (String.concat "," cas_flags) src_hash ch);
+       target_label (String.concat "," cas_flags)
+       (March_cas.Blake3.hash_string src_hash) ch);
   (cas_flags, ch)
 
 (* ------------------------------------------------------------------ *)
@@ -3342,6 +3348,9 @@ let compile filename =
         let target_label = cas_target_label target in
         let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
         let h_sccs = March_cas.Pipeline.hash_module tir in
+        (* Its own stamp so --timings does not fold the SCC build + Merkle
+           hashing into the next stamp (llvm-emit, or nothing on a cache hit). *)
+        stamp "cas-hash";
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
         (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" = Some "2" then
            List.iter (fun sc ->
