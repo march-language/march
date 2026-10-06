@@ -2050,14 +2050,19 @@ let qualify_module_refs ?(entry_prefix = "") (decls : decl list) : decl list =
     genuine self-references, including nested ones like
     [Outer.Inner.wrapped] whose next segment ("Inner") IS a nested DMod
     declared directly in the entry's own [decls]. *)
-let strip_entry_self_qual (mod_name : string) (decls : decl list) : decl list =
+let strip_entry_self_qual ?(members_of : decl list option) (mod_name : string)
+    (decls : decl list) : decl list =
   let prefix = mod_name ^ "." in
   let plen = String.length prefix in
+  (* Whose members count as "ours": the decls being rewritten, or (the
+     remote shell, whose input is a separate module typed against the
+     program) the entry module's own decls. *)
+  let owner = Option.value members_of ~default:decls in
   (* [externs:true] — an extern `fn` IS a member of the entry module, so a
      self-qualified `Foo.my_extern` must be stripped like any other member. *)
-  let direct_names = collect_direct_names ~externs:true decls in
+  let direct_names = collect_direct_names ~externs:true owner in
   let nested_mod_names =
-    List.filter_map (function DMod (n, _, _, _) -> Some n.txt | _ -> None) decls
+    List.filter_map (function DMod (n, _, _, _) -> Some n.txt | _ -> None) owner
   in
   let names_something_of_ours (suffix : string) : bool =
     let head = match String.index_opt suffix '.' with

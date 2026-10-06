@@ -30,6 +30,10 @@ git log is authoritative for exact commits.
   (`console`, `clock`, `intro`, `debug`), and the node allows only those in
   its `$MARCH_SHELL_POLICY` file. A panic or a timeout ends only that input,
   and a deploy ends the session. Every input is audited with its source.
+  Inputs can call the program's own functions and its `MARCH_LIB_PATH`
+  libraries, a Depot query for example. The policy does not yet see the
+  capabilities an input reaches through that code, only the pre-bound ones
+  it names.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when

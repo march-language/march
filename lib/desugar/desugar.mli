@@ -27,6 +27,14 @@ val desugar_expr : March_ast.Ast.expr -> March_ast.Ast.expr
 val desugar_ty : March_ast.Ast.ty -> March_ast.Ast.ty
 val desugar_decl : March_ast.Ast.decl -> March_ast.Ast.decl
 
+(** Strip a leading [mod_name ^ "."] from references naming one of that
+    module's own members ([Foo.bar] -> [bar]), as the entry module's desugar
+    does.  [members_of] (default: [decls]) says whose members count: the
+    remote shell passes the program's entry decls to rewrite an input. *)
+val strip_entry_self_qual :
+  ?members_of:March_ast.Ast.decl list ->
+  string -> March_ast.Ast.decl list -> March_ast.Ast.decl list
+
 val inject_defaults :
   (string * March_ast.Ast.interface_def) list ->
   March_ast.Ast.decl -> March_ast.Ast.decl

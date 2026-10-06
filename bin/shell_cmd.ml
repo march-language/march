@@ -163,6 +163,7 @@ type session = {
   sk : bytes;
   jit : March_jit.Repl_jit.t;
   mutable tc_env : TC.env;
+  program_name : string;
   program_decls : Ast.decl list;
   program_type_map : (Ast.span, TC.ty) Hashtbl.t;
   mutable limit : int;          (* 0 = no limit *)
@@ -234,7 +235,7 @@ let compile s ?store_as text =
   | Ok m ->
     (try
        Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple s.jit ~tc_env:s.tc_env
-               ~program_decls:s.program_decls ~program_type_map:s.program_type_map
+               ~program_name:s.program_name ~program_decls:s.program_decls ~program_type_map:s.program_type_map
                ?store_as m)
      with e -> report_error e; None)
 
@@ -282,7 +283,7 @@ let eval_expr s src ~limit =
                 (match parse_module text with
                  | Ok m ->
                    (try Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple s.jit ~tc_env:s.tc_env
-                                  ~program_decls:s.program_decls
+                                  ~program_name:s.program_name ~program_decls:s.program_decls
                                   ~program_type_map:s.program_type_map m)
                     with _ -> None)
                  | Error _ -> None)
@@ -431,8 +432,8 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
     | _ -> Printf.eprintf "march shell: %s\n" hello; exit 1 in
   let jit = March_jit.Repl_jit.create_shell () in
   March_jit.Repl_jit.shell_set_slot_base jit lo;
-  March_jit.Repl_jit.shell_prepare jit ~program ~type_map;
-  let s = { conn; epoch; sk; jit; tc_env; program_decls = program.Ast.mod_decls;
+  let s = { conn; epoch; sk; jit; tc_env; program_name = program.Ast.mod_name.Ast.txt;
+            program_decls = program.Ast.mod_decls;
             program_type_map = type_map; limit = default_limit; timeout_ms; n = 0; bound = [];
             failed = false; triple = field hello "triple" } in
   let interactive = inputs = None && Unix.isatty Unix.stdin in
