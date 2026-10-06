@@ -143,3 +143,30 @@ SIGSEGV, SIGBUS, SIGILL or SIGFPE in it. It applies to every off-scheduler
 spawner, including the reload server's hard-drain procs. Red: the Linux
 session test crashes without it. Green: the whole session passes on Linux
 and macOS.
+
+## Fragments are compiled for the node's platform
+
+Testing `forge shell` over ssh exposed that the client compiled fragments for
+its own platform. A Linux node cannot `dlopen` a Mach-O, so a shell from a
+Mac to a Linux server could not have worked. The node's `HELLO` now reports
+its target (`triple:<llvm triple>`, from the `MARCH_HCR_TRIPLE` the driver
+already passes to `--hot-reload` builds). `Repl_jit.shell_compile ?triple`
+compiles for it with `--target=`. From macOS to Linux it links with lld and
+`-nostdlib`: a fragment needs no libc or sysroot, since every runtime symbol
+binds at the node's `dlopen`. The export rules (Mach-O
+`-exported_symbol` or ELF version script) follow the target, not the host.
+A macOS node cannot be targeted from Linux, and the shell says so.
+
+Verified 2026-10-06 against a Docker container (`march-amdr-repro`, Linux
+aarch64) running sshd and the node, from this Mac, through forge's own ssh
+tunnel (`FORGE_SSH_CONFIG`, `[hot-reload] ssh_host`):
+- `forge rpc '1 + 41'` printed `42` and exited 0, and `forge rpc
+  'Actor.list(intro)'` printed `[Pid(0)]`;
+- an interactive `forge shell` (under a pty) bound `c`, sent `Bump(99)`, read
+  `{ n: 100 }` back with `inspect_state`, and printed `hello over ssh` on the
+  Mac, which never appeared in the node's stdout;
+- `limit: 4` cut a 999-element list;
+- all 7 inputs were audited `ok` on the node.
+
+Cross-architecture (an arm64 Mac to an x86-64 node) is untested: the
+fragment IR is emitted for the host and only re-targeted by clang.

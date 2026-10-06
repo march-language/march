@@ -150,6 +150,7 @@ type shell_fragment = {
     against the program the node runs.  [store_as] makes it an init fragment
     that stores its value in that slot. *)
 val shell_compile :
+  ?triple:string ->
   t ->
   tc_env:March_typecheck.Typecheck.env ->
   program_decls:March_ast.Ast.decl list ->

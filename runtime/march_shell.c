@@ -9,9 +9,11 @@
  * deploy.  Line protocol, one request line and one reply line:
  *
  *   HELLO
- *     -> OK epoch:<E> slots:<lo>-<hi>
+ *     -> OK epoch:<E> slots:<lo>-<hi> triple:<llvm triple>
  *        The session attaches at code epoch E and owns the march_repl_set
  *        slots lo..hi (released, values dropped, when the connection closes).
+ *        The triple is what the client must compile fragments for: the
+ *        operator's machine is often not the node's platform.
  *   EVAL <sig> name:<sym> [kind:value|init] epoch:<E> nonce:<hex> not_after_ms:<t>
  *        timeout_ms:<t> caps:<csv|-> src_b64:<b64> so_b64:<b64>
  *     -> OK <b64 result> out:<b64> | PANIC <b64 msg> out:<b64>
@@ -80,6 +82,13 @@
 #define SHELL_TIMEOUT_MAX_MS 30000
 #define SHELL_OUT_CAP        ((size_t)256 << 10)
 #define SHELL_RESULT_CAP     ((size_t)1 << 20)
+
+/* The node's target, from the driver's hot-reload identity flags. */
+#ifdef MARCH_HCR_TRIPLE
+#define SHELL_TRIPLE MARCH_HCR_TRIPLE
+#else
+#define SHELL_TRIPLE "unknown"
+#endif
 
 int64_t march_repl_get(int64_t slot);
 void    march_repl_set(int64_t slot, int64_t val);
@@ -639,9 +648,10 @@ static void *session_thread(void *arg) {
                 epoch = march_epoch_current();
                 hello = 1;
             }
-            char b[128];
-            snprintf(b, sizeof b, "OK epoch:%u slots:%d-%d", epoch,
-                     range * SHELL_SLOTS_PER, range * SHELL_SLOTS_PER + SHELL_SLOTS_PER - 1);
+            char b[256];
+            snprintf(b, sizeof b, "OK epoch:%u slots:%d-%d triple:%s", epoch,
+                     range * SHELL_SLOTS_PER, range * SHELL_SLOTS_PER + SHELL_SLOTS_PER - 1,
+                     SHELL_TRIPLE);
             send_line(fd, b);
         } else if (strncmp(buf, "EVAL ", 5) == 0) {
             if (!hello) { send_line(fd, "ERR no_hello"); continue; }

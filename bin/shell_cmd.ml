@@ -170,6 +170,7 @@ type session = {
   mutable n : int;
   mutable bound : string list;  (* `let` names, newest first *)
   mutable failed : bool;        (* some input failed (exit 1 with --shell-inputs) *)
+  triple : string option;       (* the node's target, from HELLO *)
 }
 
 exception Session_over of string
@@ -232,7 +233,7 @@ let compile s ?store_as text =
     List.iter (fun (d : March_errors.Errors.diagnostic) -> Printf.printf "error: %s\n%!" d.message) e; None
   | Ok m ->
     (try
-       Some (m, March_jit.Repl_jit.shell_compile s.jit ~tc_env:s.tc_env
+       Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple s.jit ~tc_env:s.tc_env
                ~program_decls:s.program_decls ~program_type_map:s.program_type_map
                ?store_as m)
      with e -> report_error e; None)
@@ -280,7 +281,7 @@ let eval_expr s src ~limit =
       (match (if quiet then
                 (match parse_module text with
                  | Ok m ->
-                   (try Some (m, March_jit.Repl_jit.shell_compile s.jit ~tc_env:s.tc_env
+                   (try Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple s.jit ~tc_env:s.tc_env
                                   ~program_decls:s.program_decls
                                   ~program_type_map:s.program_type_map m)
                     with _ -> None)
@@ -433,7 +434,7 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
   March_jit.Repl_jit.shell_prepare jit ~program ~type_map;
   let s = { conn; epoch; sk; jit; tc_env; program_decls = program.Ast.mod_decls;
             program_type_map = type_map; limit = default_limit; timeout_ms; n = 0; bound = [];
-            failed = false } in
+            failed = false; triple = field hello "triple" } in
   let interactive = inputs = None && Unix.isatty Unix.stdin in
   let lines = match inputs with
     | Some text -> ref (String.split_on_char '\n' text)

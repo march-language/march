@@ -1940,7 +1940,7 @@ let shell_program_decls (decls : March_ast.Ast.decl list) =
     and makes the entry return nothing useful (an init fragment); otherwise
     the entry returns the value of [main] (a String: the caller wraps the
     input in its renderer).  Raises [Typecheck_failed] / [Failure]. *)
-let shell_compile ctx ~tc_env ~(program_decls : March_ast.Ast.decl list)
+let shell_compile ?triple ctx ~tc_env ~(program_decls : March_ast.Ast.decl list)
     ~(program_type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t)
     ?store_as (m : March_ast.Ast.module_) : shell_fragment =
   let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
@@ -1984,10 +1984,25 @@ let shell_compile ctx ~tc_env ~(program_decls : March_ast.Ast.decl list)
   let oc = open_out ll in
   output_string oc ir;
   close_out oc;
+  (* Compile for the NODE's platform ([triple], from its HELLO), which is
+     often not this machine's: a Linux node cannot load a Mach-O.  From macOS
+     to Linux, the system clang cross-compiles with lld; a fragment links
+     against nothing (every runtime symbol binds at the node's dlopen), so no
+     target libc or sysroot is needed. *)
+  let target_is_mac = match triple with
+    | Some t -> contains_sub t "apple" || contains_sub t "darwin"
+    | None -> is_macos () in
+  if target_is_mac && not (is_macos ()) then
+    failwith "shell: this node runs macOS; its fragments must be compiled on macOS";
+  let target_flags = match triple with
+    | Some t when t <> "" && t <> "unknown" ->
+      Printf.sprintf " --target=%s%s" t
+        (if (not target_is_mac) && is_macos () then " -fuse-ld=lld -nostdlib" else "")
+    | _ -> "" in
   (* Export the entry only: every other symbol is local, so references inside
      the fragment bind to the fragment's own copies. *)
   let export_flags =
-    if is_macos () then
+    if target_is_mac then
       Printf.sprintf " -undefined dynamic_lookup -Wl,-exported_symbol,_%s" entry
     else begin
       let vs = base ^ ".map" in
@@ -1997,8 +2012,8 @@ let shell_compile ctx ~tc_env ~(program_decls : March_ast.Ast.decl list)
       Printf.sprintf " -Wl,--version-script=%s -Wl,-Bsymbolic" (Filename.quote vs)
     end in
   let log = base ^ ".clang.log" in
-  let cmd = Printf.sprintf "%s -shared -fPIC -O1 -Wno-override-module -x ir %s -o %s%s > %s 2>&1"
-      ctx.clang (Filename.quote ll) (Filename.quote so) export_flags (Filename.quote log) in
+  let cmd = Printf.sprintf "%s%s -shared -fPIC -O1 -Wno-override-module -x ir %s -o %s%s > %s 2>&1"
+      ctx.clang target_flags (Filename.quote ll) (Filename.quote so) export_flags (Filename.quote log) in
   let rc = time_phase "clang" (fun () -> Sys.command cmd) in
   if rc <> 0 then begin
     let msg = try In_channel.with_open_text log In_channel.input_all with _ -> "" in
