@@ -518,8 +518,11 @@ let insert_apply_fn_clo_drop ~(repl : bool) (body : Tir.expr) : Tir.expr =
   | Tir.ELet (_, e1, _) when is_clo_source e1 && prefix_has_fv_extraction body ->
     splice None body
   | _ ->
-    (* Case (3) above: under the REPL/JIT only, and only for an apply fn whose
-       body never mentions $clo at all.  The [not (mem clo ..)] test is what
+    (* Case (3) above: only where capture-free lambdas are heap closures (the
+       REPL/JIT, and any --hot-reload build, where [Llvm_emit] turns static
+       lambdas off for the whole module; [repl] carries both, see [perceus]'s
+       [?heap_lambdas]), and only for an apply fn whose body never mentions
+       $clo at all.  The [not (mem clo ..)] test is what
        separates this from case (2): a self-recursive capture-free apply fn
        DOES mention $clo (its self-binding alias) and already releases the
        reference through that alias, so it must fall through untouched. *)
@@ -924,8 +927,16 @@ let print_perceus_stats ~(label : string) ~(before : rc_counts) ~(after : rc_cou
       live after the call; a post-call EDecRC is emitted instead when the arg
       is the caller's last use. *)
 let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
+    ?(heap_lambdas : bool = false)
     ?(borrow_map : Borrow.borrow_map option) ?(k_table : Kind.table option)
     (m : Tir.tir_module) : Tir.tir_module =
+  (* [heap_lambdas]: capture-free lambdas are materialised as heap closures
+     rather than one immortal global, as under --hot-reload (Llvm_emit's
+     static-lambda arm is off whenever [hr_config] is set).  Their apply fns
+     then need the REPL's case-(3) [$clo] drop, or every call leaks the
+     closure it was handed: one 24-byte object per [show] of a List under
+     --hot-reload, found by LeakSanitizer during observe R4b. *)
+  let clo_drop = repl || heap_lambdas in
   let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   (* Reset the fresh-name counter per module so that compiling the same module
      twice produces identical IR.  A monotonic counter that survives across
@@ -985,7 +996,7 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
              else s
            ) base (List.mapi (fun i p -> (i, p)) fn.Tir.fn_params)
          in
-         insert_rc ~module_env ~repl ~borrowed fn)
+         insert_rc ~module_env ~repl:clo_drop ~borrowed fn)
   in
   let fns' =
     fns_after_insert
