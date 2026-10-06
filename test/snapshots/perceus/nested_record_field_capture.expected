@@ -34,5 +34,7 @@ inc_rc my_id;
 let $p17 : V = enc(h) in
 dec_rc $p17;
 let $t16 : String = my_id.node_id in
-println($t16)
+let $rc_2 : () = println($t16) in
+dec_rc my_id;
+$rc_2
 

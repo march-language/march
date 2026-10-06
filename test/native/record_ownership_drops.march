@@ -1,0 +1,71 @@
+-- Leak guard: four ways a record (or a hashed string) used to outlive its last
+-- use in compiled code, each the shape of a per-session leak in the cluster
+-- node (specs/progress/2026-10-06-record-ownership-drops.md):
+--   1. a record used only as an update base on one branch, released on the
+--      other (GlobalRegistry.unregister_own);
+--   2. a record passed to a function and then used as an update base
+--      (ClusterNode.core_register_ok's identity_of(st, ..) beside { st with .. });
+--   3. a nominal record held as a Map value under its short name while its
+--      definition is qualified (GlobalRegistry.Names' Map(String, Entry)),
+--      dropped through the Names drop helper (the old registry still shared
+--      when the update ran, as when it sits in ClusterNode's state);
+--   4. a fresh string hashed with Crypto.sha256 (Merkle.leaf/branch).
+-- SIGNAL: "no growth" (live_allocs() delta <= 0) printed as a boolean.
+mod Main do
+  needs IO.Console
+
+  type St = { items : List(Int), name : String, n : Int }
+
+  -- The old state, released when the loop moves on, drops its [reg] through
+  -- the Names drop helper, whose map leaves hold the short-named Entry.
+  pfn swap_reg(st : ClusterNode.CnState, i : Int, n : Int) : Int do
+    if i >= n do GlobalRegistry.size(st.reg) else
+      let r = GlobalRegistry.register_at(st.reg, "fixed", "me", 1, i, GlobalRegistry.next_clock(st.reg, "fixed", "me"))
+      swap_reg({ st with reg: r }, i + 1, n)
+    end
+  end
+
+  pfn times(n : Int, f : () -> Int) : Int do
+    if n <= 0 do 0 else f() + times(n - 1, f) end
+  end
+
+  pfn flat(name : String, f : () -> Int) : () do
+    let _ = times(3, f)
+    let a0 = live_allocs()
+    let _ = times(200, f)
+    let d = live_allocs() - a0
+    println(name ++ ", no growth: " ++ bool_to_string(d <= 0))
+  end
+
+  pfn mk(i : Int) : St do { items: Cons(i, Cons(i + 1, Nil)), name: "s" ++ int_to_string(i), n: i } end
+
+  pfn guarded(o : Option(St)) : Option(St) do
+    match o do
+      Some(e) -> if e.n >= 0 && e.name != "" do Some({ e with items: Cons(7, Nil), n: 0 }) else None end
+      None -> None
+    end
+  end
+
+  pfn opt_n(o : Option(St)) : Int do
+    match o do
+      Some(e) -> e.n
+      None -> 0
+    end
+  end
+
+  pfn peek(st : St, k : Int) : Int do if k > 0 do List.length(st.items) else st.n end end
+
+  pfn passed_then_updated(st : St, i : Int, n : Int) : Int do
+    if i >= n do st.n else
+      let st2 = { st with items: Cons(peek(st, i), Nil), n: i }
+      passed_then_updated(st2, i + 1, n)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    flat("update base on one branch, released on the other", fn () -> opt_n(guarded(Some(mk(1)))))
+    flat("record passed to a function, then updated", fn () -> passed_then_updated(mk(1), 0, 5))
+    flat("nominal record in a Map, dropped through its holder", fn () -> swap_reg(ClusterNode.core_new(ClusterNode.config("a", 7000, "", Nil, "s", 1), 1), 0, 5))
+    flat("sha256 of a fresh string", fn () -> string_byte_length(Crypto.sha256("k" ++ int_to_string(live_allocs()))))
+  end
+end

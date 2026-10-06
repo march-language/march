@@ -228,6 +228,17 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled code no longer leaks records whose ownership differs between branches.**
+  A record released on one path of a `match` or `if` was leaked on the others. A record
+  passed to a function and then updated (`{ st with .. }`) was never released at all. A
+  record type named without its module inside another type was freed without its fields.
+  Cluster nodes hit all three on every session (registry entries, the node's whole old
+  state).
+- **`Crypto.sha256`, `sha512`, `md5`, the HMAC, signing and base64 builtins no longer leak
+  their argument.** Compiled code leaked every string or `Bytes` it hashed or encoded. The
+  cluster registry rehashes its Merkle tree on every update, so a node leaked one string
+  per registry entry per update. With these fixes a cluster session leaves about 160
+  objects behind instead of about 730.
 - **A locally bound generic lambda no longer leaks memory when it returns a
   Float.** `let keep = fn (p, x) -> p` called directly with Float arguments,
   as in `keep(1.0, x)`, leaked one boxed Float per call in compiled code. The
