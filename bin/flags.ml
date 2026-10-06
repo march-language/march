@@ -18,6 +18,11 @@ let dump_role_authority = ref false
 let dump_phases    = ref false
 let do_timings     = ref false
 let emit_llvm      = ref false
+(* --dump-impl-hashes: write <basename>.hashes beside the .ll, one line per
+   post-TIR definition `symbol<TAB>impl_hash<TAB>sig_hash`, sorted by symbol.
+   Read-only view of the CAS hashing (Pipeline.hash_module); consumed by
+   scripts/determinism-oracle.sh. *)
+let dump_impl_hashes = ref false
 let do_compile     = ref false
 (* --jit: run a whole program through the in-process ORC JIT (the REPL's
    backend) instead of the tree-walking interpreter.  Experimental; see the
