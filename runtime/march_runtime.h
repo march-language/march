@@ -91,6 +91,13 @@ void march_clo_register_drops(void **pairs, int64_t n);
    object was freed, 0 otherwise (0 also for a non-heap pointer). */
 int64_t march_decrc_local_freed(void *p);
 
+/* RC trace site ids (--rc-trace; see march_rc_site in march_runtime.c):
+   compiled code stores the id of the call site it is about to execute, the
+   trace writer reads and resets it; the constructor of a --rc-trace module
+   registers the id -> "<fn>#<ordinal>" table. */
+void march_rc_site_set(int32_t site);
+void march_rc_sites_register(const char **names, int32_t n);
+
 /* Non-atomic reference counting — only safe for values provably owned by a
    single thread (no actor send in their lifetime).  Faster than atomic ops
    because they avoid memory barriers; the compiler may also optimize them

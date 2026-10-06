@@ -1,0 +1,38 @@
+-- A DELIBERATE leak with a known answer, for the --rc-trace report
+-- (scripts/gc-trace-report.py; specs/progress/2026-10-06-rc-trace-site-ids.md).
+-- `retain` binds the runtime's march_incrc directly, so each leak_loop
+-- iteration takes one reference nothing releases: three live Strings at exit,
+-- every one allocated at a `leak_loop#N:march_string_concat` site and retained
+-- at a `leak_loop#N:march_incrc` site, while balanced_loop's hundred strings
+-- are all freed.  test/test_rc_trace.ml compiles this with --rc-trace, runs it
+-- under MARCH_TRACE_GC=1 and asserts the report says exactly that.  It is NOT
+-- a dune diff fixture: its only purpose is to leak.
+mod Main do
+  needs IO
+  needs Ffi
+  needs IO.Foreign
+  extern "rt" : Cap(Ffi) do
+    fn retain(s : String) : Unit = "march_incrc"
+    fn live_allocs() : Int = "march_live_allocs"
+  end
+  pfn leak_loop(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = "leaked-" ++ int_to_string(n)
+      retain(s)
+      leak_loop(n - 1, acc + String.byte_size(s))
+    end
+  end
+  pfn balanced_loop(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = "fine-" ++ int_to_string(n)
+      balanced_loop(n - 1, acc + String.byte_size(s))
+    end
+  end
+  fn main(_cap : Cap(IO)) : Unit do
+    let base = live_allocs()
+    let a = balanced_loop(100, 0)
+    let b = leak_loop(3, 0)
+    println("sum: " ++ int_to_string(a + b))
+    println("delta: " ++ int_to_string(live_allocs() - base))
+  end
+end
