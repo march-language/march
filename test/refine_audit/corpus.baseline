@@ -450,6 +450,8 @@ native_qualified_type_name_render: coverage audit (user + stdlib): 123 enforced,
 native_qualified_type_name_render: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_rc_inline_fast_path: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_rc_inline_fast_path: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_rc_trace_leak_site: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_rc_trace_leak_site: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_receive_in_handler_at_exit: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_receive_in_handler_at_exit: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_recon_basic: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
