@@ -444,9 +444,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-core_check_certs"><span class="sb-kind" style="color:var(--fn)">F</span>core_check_certs</a>
 <a class="sl" href="ClusterNode.html#fn-core_dial_failed"><span class="sb-kind" style="color:var(--fn)">F</span>core_dial_failed</a>
 <a class="sl" href="ClusterNode.html#fn-core_dialed"><span class="sb-kind" style="color:var(--fn)">F</span>core_dialed</a>
+<a class="sl" href="ClusterNode.html#fn-core_dialed_bound"><span class="sb-kind" style="color:var(--fn)">F</span>core_dialed_bound</a>
 <a class="sl" href="ClusterNode.html#fn-core_frame"><span class="sb-kind" style="color:var(--fn)">F</span>core_frame</a>
 <a class="sl" href="ClusterNode.html#fn-core_link_closed"><span class="sb-kind" style="color:var(--fn)">F</span>core_link_closed</a>
 <a class="sl" href="ClusterNode.html#fn-core_linked"><span class="sb-kind" style="color:var(--fn)">F</span>core_linked</a>
+<a class="sl" href="ClusterNode.html#fn-core_linked_bound"><span class="sb-kind" style="color:var(--fn)">F</span>core_linked_bound</a>
 <a class="sl" href="ClusterNode.html#fn-core_local_down"><span class="sb-kind" style="color:var(--fn)">F</span>core_local_down</a>
 <a class="sl" href="ClusterNode.html#fn-core_lookup"><span class="sb-kind" style="color:var(--fn)">F</span>core_lookup</a>
 <a class="sl" href="ClusterNode.html#fn-core_member"><span class="sb-kind" style="color:var(--fn)">F</span>core_member</a>
@@ -1798,6 +1800,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NetKernel.html#fn-handshake_addr"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_addr</a>
 <a class="sl" href="NetKernel.html#fn-handshake_auth"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_auth</a>
 <a class="sl" href="NetKernel.html#fn-handshake_role"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_role</a>
+<a class="sl" href="NetKernel.html#fn-link_binding"><span class="sb-kind" style="color:var(--fn)">F</span>link_binding</a>
 <a class="sl" href="NetKernel.html#fn-mac_failure_limit"><span class="sb-kind" style="color:var(--fn)">F</span>mac_failure_limit</a>
 <a class="sl" href="NetKernel.html#fn-note_raw_refused"><span class="sb-kind" style="color:var(--fn)">F</span>note_raw_refused</a>
 <a class="sl" href="NetKernel.html#fn-off_frame_rejected"><span class="sb-kind" style="color:var(--fn)">F</span>off_frame_rejected</a>
@@ -1845,12 +1848,15 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeCert.html#fn-has_flag"><span class="sb-kind" style="color:var(--fn)">F</span>has_flag</a>
 <a class="sl" href="NodeCert.html#fn-has_role"><span class="sb-kind" style="color:var(--fn)">F</span>has_role</a>
 <a class="sl" href="NodeCert.html#fn-is_revoked"><span class="sb-kind" style="color:var(--fn)">F</span>is_revoked</a>
+<a class="sl" href="NodeCert.html#fn-issued_ms"><span class="sb-kind" style="color:var(--fn)">F</span>issued_ms</a>
 <a class="sl" href="NodeCert.html#fn-issuer_uri"><span class="sb-kind" style="color:var(--fn)">F</span>issuer_uri</a>
 <a class="sl" href="NodeCert.html#fn-key_from_hex"><span class="sb-kind" style="color:var(--fn)">F</span>key_from_hex</a>
 <a class="sl" href="NodeCert.html#fn-keypair"><span class="sb-kind" style="color:var(--fn)">F</span>keypair</a>
 <a class="sl" href="NodeCert.html#fn-keypair_from_seed"><span class="sb-kind" style="color:var(--fn)">F</span>keypair_from_seed</a>
 <a class="sl" href="NodeCert.html#fn-node_name"><span class="sb-kind" style="color:var(--fn)">F</span>node_name</a>
 <a class="sl" href="NodeCert.html#fn-node_uri"><span class="sb-kind" style="color:var(--fn)">F</span>node_uri</a>
+<a class="sl" href="NodeCert.html#fn-order_problem"><span class="sb-kind" style="color:var(--fn)">F</span>order_problem</a>
+<a class="sl" href="NodeCert.html#fn-ordered_serial"><span class="sb-kind" style="color:var(--fn)">F</span>ordered_serial</a>
 <a class="sl" href="NodeCert.html#fn-public_key"><span class="sb-kind" style="color:var(--fn)">F</span>public_key</a>
 <a class="sl" href="NodeCert.html#fn-revocation_from_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_from_bytes</a>
 <a class="sl" href="NodeCert.html#fn-revocation_from_text"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_from_text</a>
@@ -1861,6 +1867,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeCert.html#fn-revokes"><span class="sb-kind" style="color:var(--fn)">F</span>revokes</a>
 <a class="sl" href="NodeCert.html#fn-sign"><span class="sb-kind" style="color:var(--fn)">F</span>sign</a>
 <a class="sl" href="NodeCert.html#fn-sign_revocation"><span class="sb-kind" style="color:var(--fn)">F</span>sign_revocation</a>
+<a class="sl" href="NodeCert.html#fn-supersedes"><span class="sb-kind" style="color:var(--fn)">F</span>supersedes</a>
 <a class="sl" href="NodeCert.html#fn-to_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>to_bytes</a>
 <a class="sl" href="NodeCert.html#fn-to_text"><span class="sb-kind" style="color:var(--fn)">F</span>to_text</a>
 <a class="sl" href="NodeCert.html#fn-verify"><span class="sb-kind" style="color:var(--fn)">F</span>verify</a>
@@ -2761,6 +2768,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Topology.html#fn-offered"><span class="sb-kind" style="color:var(--fn)">F</span>offered</a>
 <a class="sl" href="Topology.html#fn-offering"><span class="sb-kind" style="color:var(--fn)">F</span>offering</a>
 <a class="sl" href="Topology.html#fn-on_label"><span class="sb-kind" style="color:var(--fn)">F</span>on_label</a>
+<a class="sl" href="Topology.html#fn-pinned"><span class="sb-kind" style="color:var(--fn)">F</span>pinned</a>
 <a class="sl" href="Topology.html#fn-place"><span class="sb-kind" style="color:var(--fn)">F</span>place</a>
 <a class="sl" href="Topology.html#fn-placement_of_json"><span class="sb-kind" style="color:var(--fn)">F</span>placement_of_json</a>
 <a class="sl" href="Topology.html#fn-placement_text"><span class="sb-kind" style="color:var(--fn)">F</span>placement_text</a>
@@ -2913,6 +2921,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-handshake_addr"><div class="ih"><span class="badge bfn">fn</span><span class="name">handshake_addr</span><span class="sig">handshake_addr(fd : Int, my_id : NodeIdentity.Identity, secret : String, my_nonce : String,</span><a class="anchor-link" href="#fn-handshake_addr" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-handshake_auth"><div class="ih"><span class="badge bfn">fn</span><span class="name">handshake_auth</span><span class="sig">handshake_auth(fd : Int, my_id : NodeIdentity.Identity, auth : ClusterAuth.Auth, my_nonce : String,</span><a class="anchor-link" href="#fn-handshake_auth" title="Link">#</a></div><div class="ib"><p>The handshake, in either mode ([auth]): send a hello, read the peer's, check the modes agree, prove ourselves bound to the peer's nonce, check the peer's proof bound to ours. Shared-secret mode: an HMAC of the nonce under the secret (wire-compatible with pre-11a nodes). Certificate mode: the hello carries our certificate and an ephemeral X25519 key; we verify the peer's certificate (operator signature, expiry, revocation, name) and its ed25519 signature over our nonce and the transcript. When both sides support it, the connection's frames are sealed from then on (NetFrame.seal; <code>mac</code> in the result). [role] names the connection (&quot;control&quot;/&quot;data&quot;), [addr] is our advertised address (&quot;&quot; for none), [timeout_ms] bounds the whole exchange (&lt;= 0: no bound).</p></div></div>
 <div class="item" id="fn-handshake_role"><div class="ih"><span class="badge bfn">fn</span><span class="name">handshake_role</span><span class="sig">handshake_role(fd : Int, my_id : NodeIdentity.Identity, secret : String,</span><a class="anchor-link" href="#fn-handshake_role" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="fn-link_binding"><div class="ih"><span class="badge bfn">fn</span><span class="name">link_binding</span><span class="sig">link_binding(fd : Int) : <a href="Bytes.html#type-Bytes">Bytes</a></span><a class="anchor-link" href="#fn-link_binding" title="Link">#</a></div><div class="ib"><p>The handshake transcript of [fd]'s sealed connection (empty when it has none: unsealed, or never handshaked here).</p></div></div>
 <div class="item" id="fn-mac_failure_limit"><div class="ih"><span class="badge bfn">fn</span><span class="name">mac_failure_limit</span><span class="sig">mac_failure_limit() : Int do 3 end</span><a class="anchor-link" href="#fn-mac_failure_limit" title="Link">#</a></div><div class="ib"><p>Frames that may fail their MAC on one connection before it is closed.</p></div></div>
 <div class="item" id="fn-note_raw_refused"><div class="ih"><span class="badge bfn">fn</span><span class="name">note_raw_refused</span><span class="sig">note_raw_refused(_fd : Int) : ()</span><a class="anchor-link" href="#fn-note_raw_refused" title="Link">#</a></div><div class="ib"><p>Record a raw frame refused on a connection (<code>raw_allowed</code> false): counted in <code>raw_refused()</code>.</p></div></div>
 <div class="item" id="fn-off_frame_rejected"><div class="ih"><span class="badge bfn">fn</span><span class="name">off_frame_rejected</span><span class="sig">off_frame_rejected(id : Int) : () do Vault.drop(mac_hooks(), int_to_string(id)) end</span><a class="anchor-link" href="#fn-off_frame_rejected" title="Link">#</a></div><div class="ib"></div></div>
