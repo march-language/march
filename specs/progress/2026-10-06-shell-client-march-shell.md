@@ -119,3 +119,27 @@ too. Checked by hand against a live node: `forge rpc --socket S '1 + 41'`
 prints `42` and exits 0; `'Actor.list(intro)'` prints `[Pid(0)]`; `'panic("x")'`
 prints `** panic: x` and exits 1. Several matching hosts are refused with a
 pointer to `--env` (no fan-out yet, R11). Documented in `docs/observe.md`.
+
+## A scheduler bug the shell found: green threads spawned off-scheduler ran with every signal blocked
+
+On Linux, the node died with a bare `Segmentation fault` on the third input
+of the session test (`List.range(1, 100)` rendered at the default limit). No
+`march: fatal` line appeared, even with `MARCH_DEBUG_RUNTIME=1`. gdb showed
+33 nested 96-byte `go$apply` frames hitting the guard page of a 4 KiB
+initial green-thread stack: the ordinary lazy-growth fault. The handler
+never ran because SIGSEGV was blocked.
+
+`getcontext()` stores the calling thread's signal mask in the new
+context, and every swap into it restores that mask. The shell task is
+spawned from the listener's session thread, which blocks all signals. So
+the task ran with SIGSEGV blocked, and its first stack-growth fault killed
+the process. macOS uses 16 KiB pages, so the initial stack was 16 KiB there
+and never had to grow in the test.
+
+The fix (`runtime/march_scheduler.c`): the first `sched_loop` records the
+schedulers' own signal mask. `sched_spawn_common`, when called from a
+non-scheduler thread, gives the new context that mask, and never blocks
+SIGSEGV, SIGBUS, SIGILL or SIGFPE in it. It applies to every off-scheduler
+spawner, including the reload server's hard-drain procs. Red: the Linux
+session test crashes without it. Green: the whole session passes on Linux
+and macOS.

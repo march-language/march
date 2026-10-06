@@ -246,6 +246,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- A green thread started from a runtime thread that is not a scheduler (the
+  hot-reload server's drain, the new shell listener) no longer inherits that
+  thread's blocked signals. With SIGSEGV blocked, the first time its stack
+  had to grow killed the whole process silently on Linux.
 - A call of another module's function with too few arguments
   (`List.map([1, 2])`) is now a type error. It used to typecheck, then fail
   at run time: an `arity mismatch` panic interpreted, a crash compiled, and a

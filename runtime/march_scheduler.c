@@ -1650,6 +1650,18 @@ static uint32_t spawn_code_epoch(int from_parent) {
     }
 }
 
+/* The signal mask scheduler threads run green threads under, recorded by the
+ * first sched_loop.  getcontext() stores the CALLING thread's mask in the
+ * new context, and every swap into it restores that mask on the scheduler
+ * thread.  A proc spawned from a thread that blocks signals (the observe and
+ * shell listener threads block all of them) would therefore run with SIGSEGV
+ * blocked, and the first lazy stack-growth fault on its green stack would
+ * kill the whole process without a word (Linux, 4 KiB pages: 33 nested
+ * 96-byte frames were enough).  sched_spawn_common gives such a proc this
+ * mask instead. */
+static sigset_t   g_sched_sigmask;
+static _Atomic int g_sched_sigmask_set;
+
 static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
                                       int is_daemon, int pinned,
                                       int follow_current) {
@@ -1727,6 +1739,18 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
     p->ctx->uc_stack.ss_sp   = p->stack_base;
     p->ctx->uc_stack.ss_size = MARCH_STACK_INITIAL;
     p->ctx->uc_link          = NULL; /* Trampoline manages the return explicitly. */
+    /* Spawned from a thread that is not a scheduler: run under the
+     * schedulers' mask, not the caller's (see g_sched_sigmask).  Whatever
+     * happens to the mask record, the synchronous fault signals the
+     * stack-growth handler depends on are never blocked in a green thread. */
+    if (!tl_sched) {
+        if (atomic_load_explicit(&g_sched_sigmask_set, memory_order_acquire))
+            p->ctx->uc_sigmask = g_sched_sigmask;
+        sigdelset(&p->ctx->uc_sigmask, SIGSEGV);
+        sigdelset(&p->ctx->uc_sigmask, SIGBUS);
+        sigdelset(&p->ctx->uc_sigmask, SIGILL);
+        sigdelset(&p->ctx->uc_sigmask, SIGFPE);
+    }
 
     /* Pass the proc pointer as two 32-bit ints (makecontext portability). */
     uintptr_t addr  = (uintptr_t)(void *)p;
@@ -1879,6 +1903,13 @@ static void sched_loop(march_scheduler *sched) {
      * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
      * so it can run even when the green thread's stack is exhausted. */
     setup_alt_stack();
+    if (!atomic_load_explicit(&g_sched_sigmask_set, memory_order_acquire)) {
+        sigset_t m;
+        if (pthread_sigmask(SIG_SETMASK, NULL, &m) == 0) {
+            g_sched_sigmask = m;
+            atomic_store_explicit(&g_sched_sigmask_set, 1, memory_order_release);
+        }
+    }
 
 #ifdef MARCH_TSAN_BUILD
     /* Capture this OS thread's own native execution as a TSan fiber, once,

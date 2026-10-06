@@ -14,5 +14,5 @@ Ok({ n: 42 })
 ** panic: List.head: empty list
 error: I cannot find `nosuchfn`.
 4
-exit=0
+exit=1
 node stdout lines from the shell: 0
