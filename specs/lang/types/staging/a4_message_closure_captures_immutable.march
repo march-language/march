@@ -1,0 +1,18 @@
+-- Phase 0 accept fixture: a message carrying a closure that captures only
+-- immutable values. Nothing here is a mutable buffer, so the send is fine.
+mod Main do
+  actor Runner do
+    state { n : Int }
+    init { n: 0 }
+    on Run(f : Int -> Int) do
+      { n: f(state.n) }
+    end
+  end
+  fn main() : Int do
+    let k = 5
+    let tags = ["a", "b"]
+    let s = spawn(Runner)
+    send(s, Run(fn x -> x + k + List.length(tags)))
+    0
+  end
+end

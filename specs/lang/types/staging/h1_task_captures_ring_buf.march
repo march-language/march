@@ -1,0 +1,14 @@
+-- H1: Task.async never checks what its closure captures, so two tasks can
+-- mutate one RingBuf at once. Type-checks today (Phase 0 of
+-- specs/plans/2026-09-25-send-data-race-freedom-plan.md).
+mod Main do
+  needs IO.Spawn
+  fn main(_s : Cap(IO.Spawn)) : Int do
+    let rb = RingBuf.make(4)
+    let t1 = Task.async(fn () -> RingBuf.push(rb, 1))
+    let t2 = Task.async(fn () -> RingBuf.push(rb, 2))
+    let _ = Task.await(t1)
+    let _ = Task.await(t2)
+    RingBuf.size(rb)
+  end
+end
