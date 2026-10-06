@@ -1178,7 +1178,7 @@ let rm_rf_temp_dir path =
     `main_exe` itself is the same never-legitimately-absent binary
     `find_main_exe` already asserts on, so any failure here is a real
     compiler bug and must fail loudly with the captured output. *)
-let emit_llvm_ir_to_file ~main_exe ~src () : [ `Ok of string | `Failed of int * string ] =
+let emit_llvm_ir_to_file ?(extra_flags = "") ~main_exe ~src () : [ `Ok of string | `Failed of int * string ] =
   let tmp_dir = Filename.temp_file "march_ir_verify" "" in
   Sys.remove tmp_dir;
   Unix.mkdir tmp_dir 0o755;
@@ -1194,8 +1194,10 @@ let emit_llvm_ir_to_file ~main_exe ~src () : [ `Ok of string | `Failed of int * 
   output_string oc contents;
   close_out oc;
   let ll_path = Filename.concat tmp_dir (base ^ ".ll") in
-  let cmd = Printf.sprintf "cd %s && %s --emit-llvm %s </dev/null"
-    (Filename.quote tmp_dir) (Filename.quote main_exe) (Filename.quote (Filename.basename march_copy)) in
+  let cmd = Printf.sprintf "cd %s && %s --emit-llvm%s %s </dev/null"
+    (Filename.quote tmp_dir) (Filename.quote main_exe)
+    (if extra_flags = "" then "" else " " ^ extra_flags)
+    (Filename.quote (Filename.basename march_copy)) in
   let (rc, output) = run_capture cmd in
   if rc = 0 && Sys.file_exists ll_path then `Ok ll_path
   else begin

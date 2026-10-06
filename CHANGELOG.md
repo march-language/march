@@ -19,6 +19,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
+  March function gets a `DISubprogram` at its defining line (lifted lambdas at
+  the lambda's line, specialisations at the generic's), and the link gets `-g`,
+  so `lldb`/`gdb` backtraces, ASan reports and `perf` profiles name March
+  functions and files instead of `march_main + 1400`. The IR also carries a
+  `!march.provenance` node per function recording where the compiler derived it
+  from (monomorphisation, lambda lifting, fusion, specialisation). Off by
+  default; the emitted code is unchanged when off. `--dump-provenance` prints
+  the same table as text. Distinct from `--debug`, the interpreter's debugger.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when

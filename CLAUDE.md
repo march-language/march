@@ -252,6 +252,7 @@ lib/eval/                     tree-walking interpreter: eval (evaluator),
                              +eval_{types,prim,builtins,runtime,net,session,simd}
 lib/tir/                    typed IR: lower (+lower_state/types/match/decls/expr/actor/tests), mono, defun,
                              perceus (+perceus_core/liveness/elide/fbip/scrut), borrow, fusion,
+                             provenance (fn_name -> origin side table; --debug-info / !march.provenance),
                              llvm_emit (+llvm_ctx/builtins/eq/data/case/calls/tco/toplevel/repl,
                              and the per-arm bodies in llvm_emit_{arith,alloc,call,data,html,task,tcoarm,simd,nmap}),
                              builtin_name (closed variant for builtin dispatch),

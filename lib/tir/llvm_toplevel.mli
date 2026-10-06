@@ -38,6 +38,15 @@ type target_config =
     the choice changes the emitted binary. *)
 val pin_main : bool ref
 
+val debug_info : bool ref
+(** --debug-info: a DISubprogram (and [!dbg]) per emitted function plus the
+    [!march.provenance] named metadata; off by default so the emitted text
+    is byte-identical to before.  Driver-set; never set for REPL fragments. *)
+
+val attach_call_dbg : string -> string
+(** Text pass: give every call inside a `define … !dbg !N` body the location
+    [!N+1] (the function's own line).  Exposed for tests. *)
+
 val is_wasm_target : target_config -> bool
 val is_wasm32 : target_config -> bool
 external get_native_triple : unit -> string = "march_tir_native_triple"

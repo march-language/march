@@ -170,8 +170,11 @@ let try_unboxed_variant (apply_fns : (string, Tir.fn_def) Hashtbl.t)
     match Hashtbl.find_opt apply_fns apply_var.Tir.v_name with
     | Some fn when is_all_float_signature fn ->
       let unboxed_name = unboxed_name_of fn.Tir.fn_name in
-      if not (List.exists (fun f -> f.Tir.fn_name = unboxed_name) !extra_fns) then
-        extra_fns := { fn with Tir.fn_name = unboxed_name } :: !extra_fns;
+      if not (List.exists (fun f -> f.Tir.fn_name = unboxed_name) !extra_fns) then begin
+        Provenance.record unboxed_name ~from:fn.Tir.fn_name
+          ~derived:(Provenance.Clone_of (fn.Tir.fn_name, "unboxed")) ~pass:"native_map_inline" ();
+        extra_fns := { fn with Tir.fn_name = unboxed_name } :: !extra_fns
+      end;
       Some { Tir.v_name = unboxed_name; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr }
     | _ -> None
 
