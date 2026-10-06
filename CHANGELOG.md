@@ -235,6 +235,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A cluster session no longer leaves its party behind.** Each finished session leaked the
+  party record, the session capability's closures and the handles of thirteen session
+  tables. Every session operation (send, receive, register, close) also leaked a
+  reference. A session now leaves about 90 objects behind instead of about 160.
+
 - **A program that declares a type with a stdlib type's name (`Value`, `State`, `Event`,
   `Error`, ...) no longer crashes when compiled.** Dropping a value of the stdlib type
   (a `Msgpack.Value`, say) segfaulted, because the drop only knew the program's own type.

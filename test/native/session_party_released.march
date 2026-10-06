@@ -1,0 +1,62 @@
+-- A cluster session's party is released when the session ends
+-- (specs/progress/2026-10-06-session-ops-leak.md). The session capability is
+-- the Ops record, but a reference released as Cap(Session.Live) is released as
+-- one cell, so when the capability's last holder let go its ten closures --
+-- each capturing the Party -- leaked, and with them the Party's thirteen Vault
+-- table handles: ~64 objects per session. (Vault.live_tables() does not see it:
+-- a closed table's data is freed at the close, only its handle cell leaks.)
+-- SIGNAL: live objects left per session stay under 120. What is left is the
+-- registry's per-session names (tombstones, kept by design) and the session's
+-- endpoint state: ~92 after the fix, ~156 before it.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Process
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Ping do
+    ask: Client -> Server : String
+    answer: Server -> Client : String
+  end
+
+  pfn server(s : Cap(Session.Live), st : Ping_Server.Entry) : Ping_Server.Yield do
+    Ping_Server.recv_Ask(s, st, fn (m, st1) -> Ping_Server.close(s, Ping_Server.send_Answer(s, st1, m)))
+  end
+
+  pfn client(s : Cap(Session.Live), st : Ping_Client.Entry) : Ping_Client.Yield do
+    Ping_Client.recv_Answer(s, Ping_Client.send_Ask(s, st, "hi"), fn (_r, st1) -> Ping_Client.close(s, st1))
+  end
+
+  pfn rounds(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Int do
+    if n <= 0 do 0 else
+      let bad = match Ping_Run.initiate_Client(io, node, fn (s, st) -> client(s, st)) do
+        Ok(_) -> 0
+        Err(_) -> 1
+      end
+      bad + rounds(io, node, n - 1)
+    end
+  end
+
+  fn main(io : Cap(IO)) : () do
+    let node = match ClusterNode.start(io, ClusterNode.config("party-1", 0, "", Nil, "party-secret", 1)) do
+      Ok(h) -> h
+      Err(e) -> panic(e)
+    end
+    match Ping_Run.offer_Server(io, node, 64, fn (s, st) -> server(s, st)) do
+      Ok(_) -> ()
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+    sleep_ms(300)
+    let _ = rounds(io, node, 3)
+    sleep_ms(200)
+    let a0 = live_allocs()
+    let bad = rounds(io, node, 20)
+    sleep_ms(300)
+    let per = (live_allocs() - a0) / 20
+    println("sessions failed: " ++ int_to_string(bad))
+    println("objects left per session under 120: " ++ bool_to_string(per < 120))
+    Process.exit(0)
+  end
+end

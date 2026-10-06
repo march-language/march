@@ -12073,6 +12073,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/local_colliding_type.expected native_local_colliding_type.out)))
+
+; ── A cluster session's party is released when it ends (2026-10-06): live
+; objects left per session under 120 (RED before: ~156, the party's Ops
+; closures, the Party and its table handles).
+(rule
+ (targets native_session_party_released native_session_party_released.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/session_party_released.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_session_party_released
+        native/session_party_released.march)
+   (with-stdout-to native_session_party_released.out
+        (system "./native_session_party_released")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/session_party_released.expected native_session_party_released.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),

@@ -425,58 +425,8 @@ let variant_ctors (env : env) (name : string)
   | Some _ as found -> found
   | None -> find_variant_by_suffix env name
 
-(** A nominal record named by its SHORT name where the type definition
-    carries the qualified one: [GlobalRegistry.Names]' constructor field is
-    [Map(String, Entry)] while the record is declared as
-    [GlobalRegistry.Entry].  The exact lookup missed, so every map leaf's
-    entry was freed shallowly and its [VectorClock] leaked, three objects per
-    registry update (specs/progress/2026-10-06-nominal-record-short-name-drop.md).
-    Resolved only when exactly one record has that last segment; two or more
-    stay unresolved (shallow), as [find_variant_by_suffix] does for variants. *)
-let record_fields_by_suffix (k_table : Kind.table) (n : string)
-  : (string * Tir.ty) list option =
-  if String.contains n '.' then None
-  else
-    let sfx = "." ^ n in
-    let sl = String.length sfx in
-    let ends q =
-      let ql = String.length q in
-      String.equal q n || (ql > sl && String.equal (String.sub q (ql - sl) sl) sfx) in
-    let defs = Kind.type_defs k_table in
-    (* A variant with the same short name makes the name ambiguous: the use
-       site may be that variant, and a record's layout would be wrong. *)
-    let variant_shares = List.exists (function
-        | Tir.TDVariant (q, _) -> ends q
-        | _ -> false) defs in
-    (* The declared field types name other modules' types QUALIFIED
-       ([reg : GlobalRegistry.Names]), but every value of those types is built
-       and matched under the BARE name, and the representation follows that
-       spelling: [Names] is Boxed where [GlobalRegistry.Names] classifies as a
-       newtype.  Dropping the field under the qualified name dropped the box's
-       pointer as its own payload, a use-after-free in the session probe
-       (ASAN: __drop$CnState then __drop$HEntry_String_Entry on one cell).
-       The structural record a use site carries spells them bare, so do the
-       same here. *)
-    let rec bare (t : Tir.ty) : Tir.ty =
-      match t with
-      | Tir.TCon (q, args) ->
-        let short = match String.rindex_opt q '.' with
-          | Some i -> String.sub q (i + 1) (String.length q - i - 1)
-          | None -> q in
-        Tir.TCon (short, List.map bare args)
-      | Tir.TFn (ps, r) -> Tir.TFn (List.map bare ps, bare r)
-      | Tir.TTuple ts -> Tir.TTuple (List.map bare ts)
-      | Tir.TRecord fs -> Tir.TRecord (List.map (fun (k, v) -> (k, bare v)) fs)
-      | Tir.TPtr t -> Tir.TPtr (bare t)
-      | t -> t
-    in
-    let hits = if variant_shares then [] else List.filter_map (function
-        | Tir.TDRecord (q, _) when ends q ->
-          Option.map (List.map (fun (k, t) -> (k, bare t))) (Kind.record_fields k_table q)
-        | _ -> None) defs in
-    match hits with
-    | [ fields ] -> Some fields
-    | _ -> None
+(** See [Kind.record_fields_short]. *)
+let record_fields_by_suffix = Kind.record_fields_short
 
 (** The (accessor, type) pairs of a record or tuple, in layout order, or
     [None] for any other type.  Records are keyed by field name and sorted, as

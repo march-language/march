@@ -428,7 +428,14 @@ let is_aggregate_ty (env : env) : Tir.ty -> bool = function
      value it owned, and an actor handler that returned a new state leaked
      one record per message
      (specs/progress/2026-10-01-compiled-actor-and-nominal-record-leaks.md). *)
-  | Tir.TCon (n, _) -> Kind.is_record_type env.k_table n
+  | Tir.TCon (n, _) ->
+    Kind.is_record_type env.k_table n
+    (* ... or named by its short name ([Ops] for [Session.Ops]): without this
+       a [d : Ops] read only through its fields was neither an aggregate (no
+       scope-end drop) nor released at its last use, and every Session
+       operation leaked a reference to the session's Ops
+       (specs/progress/2026-10-06-session-ops-leak.md). *)
+    || Kind.record_fields_short env.k_table n <> None
   | _ -> false
 
 (** Result type of a primitive operator application whose callee variable
