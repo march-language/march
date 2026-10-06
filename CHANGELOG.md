@@ -19,6 +19,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A remote shell on a running node: `march --shell`.** Against a node built
+  with `--hot-reload --signing-pubkey`, `march --shell <reload socket>.shell
+  app.march` typechecks the app once, then compiles each input into a small
+  signed library that the node loads and runs as a task. It prints the result
+  and anything the input printed. `let` bindings persist across inputs; a
+  trailing `limit: N` shortens long lists. Capabilities are pre-bound
+  (`console`, `clock`, `intro`, `debug`), and the node allows only those in
+  its `$MARCH_SHELL_POLICY` file. A panic or a timeout ends only that input,
+  and a deploy ends the session. Every input is audited with its source.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when

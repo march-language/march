@@ -214,8 +214,19 @@ let keygen pk_file sk_file =
   write_file pk_file (March_ed25519.Ed25519.pk_to_base64 pk);
   write_file sk_file (Bytes.to_string sk)
 
+(* A key where `march --shell` (forge's Cmd_hot_reload.read_sk_raw) looks
+   for it: <home>/.march/ed25519_secret.key, base64. *)
+let keygen_home pk_file home =
+  let pk, sk = March_ed25519.Ed25519.keygen () in
+  write_file pk_file (March_ed25519.Ed25519.pk_to_base64 pk);
+  let dir = Filename.concat home ".march" in
+  (try Unix.mkdir home 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  (try Unix.mkdir dir 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  write_file (Filename.concat dir "ed25519_secret.key") (b64_encode (Bytes.to_string sk) ^ "\n")
+
 let () =
   match Array.to_list Sys.argv |> List.tl with
   | [ "keygen"; pk; sk ] -> keygen pk sk
+  | [ "keygen-home"; pk; home ] -> keygen_home pk home
   | [ "run"; sock; prog; sk; policy; log; frags ] -> run sock prog sk policy log frags
   | _ -> prerr_endline "usage: shell_check keygen|run ..."; exit 2

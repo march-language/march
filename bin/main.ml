@@ -2560,6 +2560,14 @@ let compile filename =
       if is_user_file d then
         Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
     ) diags;
+  (* --shell: the program typechecked as the node's build did; hand it to the
+     remote shell instead of running or compiling it (bin/shell_cmd.ml). *)
+  (match !shell_socket with
+   | Some socket ->
+     if frontend_rejected then exit 1;
+     Shell_cmd.run ~socket ~program:desugared ~type_map ~tc_env:typecheck_env
+       ~timeout_ms:!shell_timeout_ms ~inputs:!shell_inputs
+   | None -> ());
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
   (* --jit: replace the tree-walking interpreter with the in-process ORC JIT
      for this run.  Every diagnostic above has already been produced and
@@ -5291,6 +5299,12 @@ let () =
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
+    ("--shell",      Arg.String (fun p -> shell_socket := Some p),
+     "<socket> A remote shell on the node serving <socket> (its `<reload socket>.shell`): typecheck the program once, then compile each input into a signed fragment the node runs");
+    ("--shell-timeout-ms", Arg.Int (fun n -> shell_timeout_ms := n),
+     "<ms> With --shell: how long each input may run on the node (default 10000, max 30000)");
+    ("--shell-inputs", Arg.String (fun f -> shell_inputs := Some (In_channel.with_open_bin f In_channel.input_all)),
+     "<file> With --shell: read the inputs from <file>, one per line, instead of the terminal");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
     ("--jit",        Arg.Set jit_mode,
      " Run the program through the in-process ORC JIT instead of the interpreter (experimental)");

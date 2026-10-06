@@ -777,13 +777,13 @@ the fragment spawns is not captured; it goes where their output always goes.
 
 **Pre-bound caps.** The user never types a cap's construction. `__eval`
 takes the caps the shell policy grants, under fixed names: `console`,
-`clock`, `intro` (`Actor.Introspect`), `dbg` (`Actor.Debug`), and so on.
+`clock`, `intro` (`Actor.Introspect`), `debug` (`Actor.Debug`), and so on.
 `:caps` lists them. An input that needs a cap the policy does not grant is
 refused before it is compiled, naming the cap.
 
 **Confirmation.** An input asks `y/N` before it runs, naming what it would
 do, if it uses a cap outside the read set (`console`, `clock`, `intro`,
-`dbg`), or if the input itself calls `send`, `kill`, `Actor.stop`, or a
+`debug`), or if the input itself calls `send`, `kill`, `Actor.stop`, or a
 `Recon` write (`replace_state`, `suspend`, `resume`), directly or in a lambda
 it defines. Calls into app functions are not looked inside: the question
 guards against slips, while the shell policy is the security boundary.

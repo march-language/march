@@ -12,8 +12,8 @@
  *     -> OK epoch:<E> slots:<lo>-<hi>
  *        The session attaches at code epoch E and owns the march_repl_set
  *        slots lo..hi (released, values dropped, when the connection closes).
- *   EVAL <sig> name:<sym> epoch:<E> nonce:<hex> not_after_ms:<t> timeout_ms:<t>
- *        caps:<csv|-> src_b64:<b64> so_b64:<b64>
+ *   EVAL <sig> name:<sym> [kind:value|init] epoch:<E> nonce:<hex> not_after_ms:<t>
+ *        timeout_ms:<t> caps:<csv|-> src_b64:<b64> so_b64:<b64>
  *     -> OK <b64 result> out:<b64> | PANIC <b64 msg> out:<b64>
  *        | TIMEOUT out:<b64> | TIMEOUT uncancellable | ERR <code> [detail]
  *   BYE
@@ -28,7 +28,9 @@
  *
  * The fragment's entry `name` is a zero-argument function returning the
  * rendered result String (the client generates it; capabilities are erased
- * to null pointers, as for `main`).  It runs as a task at the current epoch,
+ * to null pointers, as for `main`).  With `kind:init` it returns nothing: it
+ * stores a `let`'s value in the session's slot, and the reply's result is
+ * empty.  It runs as a task at the current epoch,
  * under a crash trap and a cancellation landing, with its print output
  * captured.  On timeout the task is cancelled the way a drain's hard deadline
  * cancels tasks.
@@ -174,6 +176,7 @@ typedef struct shell_run {
     int               state;
     _Atomic int64_t   pid;           /* the task, once it runs; -1 before */
     void           *(*entry)(void);
+    int               init;          /* kind:init: entry returns nothing */
     char             *text;          /* result or panic message (malloc'd) */
     size_t            text_len;
     march_out_capture out;
@@ -215,13 +218,20 @@ static void shell_task(void *arg) {
         self->out_capture = &r->out;
     }
     if (setjmp(jb) == 0) {
-        void *s = r->entry();
-        march_string *ms = (march_string *)s;
-        size_t n = IS_HEAP_PTR(s) ? (size_t)ms->len : 0;
-        if (n > SHELL_RESULT_CAP) n = SHELL_RESULT_CAP;
-        char *t = (char *)malloc(n + 1);
-        if (t) { if (n) memcpy(t, ms->data, n); t[n] = '\0'; }
-        march_decrc(s);
+        char *t;
+        size_t n = 0;
+        if (r->init) {
+            ((void (*)(void))r->entry)();
+            t = (char *)calloc(1, 1);
+        } else {
+            void *s = r->entry();
+            march_string *ms = (march_string *)s;
+            n = IS_HEAP_PTR(s) ? (size_t)ms->len : 0;
+            if (n > SHELL_RESULT_CAP) n = SHELL_RESULT_CAP;
+            t = (char *)malloc(n + 1);
+            if (t) { if (n) memcpy(t, ms->data, n); t[n] = '\0'; }
+            march_decrc(s);
+        }
         if (self) { self->crash_jmp = saved_crash; self->task_jmp = saved_task; self->out_capture = NULL; }
         run_finish(r, RUN_OK, t, t ? n : 0);
     } else if (self && atomic_load(&self->cancel_requested)) {
@@ -389,7 +399,7 @@ static void audit(const char *name, const char *caps, const char *nonce,
 /* ── EVAL ────────────────────────────────────────────────────────────── */
 
 typedef struct {
-    const char *name, *nonce, *caps, *src_b64, *so_b64;
+    const char *name, *kind, *nonce, *caps, *src_b64, *so_b64;
     int64_t epoch, not_after_ms, timeout_ms;
 } eval_req;
 
@@ -406,6 +416,7 @@ static int parse_eval(char *rest, eval_req *q) {
         *colon = '\0';
         const char *k = w, *v = colon + 1;
         if      (strcmp(k, "name") == 0)         q->name = v;
+        else if (strcmp(k, "kind") == 0)         q->kind = v;
         else if (strcmp(k, "nonce") == 0)        q->nonce = v;
         else if (strcmp(k, "caps") == 0)         q->caps = v;
         else if (strcmp(k, "src_b64") == 0)      q->src_b64 = v;
@@ -501,6 +512,7 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
         detail[0] = ' ';
     }
     if (!why && q.timeout_ms > SHELL_TIMEOUT_MAX_MS) why = "bad_args";
+    if (!why && q.kind && strcmp(q.kind, "value") != 0 && strcmp(q.kind, "init") != 0) why = "bad_args";
     if (why) {
         audit(q.name, q.caps, q.nonce, srcs, src_n, why);
         char buf[320];
@@ -550,6 +562,7 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
     r->state = RUN_PENDING;
     atomic_store(&r->pid, -1);
     r->entry = entry;
+    r->init = q.kind && strcmp(q.kind, "init") == 0;
     r->out.buf = (char *)malloc(SHELL_OUT_CAP);
     r->out.cap = r->out.buf ? SHELL_OUT_CAP : 0;
     if (!march_sched_spawn(shell_task, r)) {

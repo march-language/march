@@ -18,6 +18,11 @@ let dump_role_authority = ref false
 let dump_phases    = ref false
 let do_timings     = ref false
 let emit_llvm      = ref false
+(* `march --shell <socket> app.march`: a remote shell on the node serving
+   that `<reload socket>.shell` (bin/shell_cmd.ml). *)
+let shell_socket   : string option ref = ref None
+let shell_timeout_ms = ref 10_000
+let shell_inputs   : string option ref = ref None
 let do_compile     = ref false
 (* --jit: run a whole program through the in-process ORC JIT (the REPL's
    backend) instead of the tree-walking interpreter.  Experimental; see the
