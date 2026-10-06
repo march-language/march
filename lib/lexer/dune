@@ -1,5 +1,6 @@
-(ocamllex lexer)
-
+; lexer.mll is compiled as part of march_parser (see lib/parser/dune for
+; why); this library re-exports it so `March_lexer.Lexer` keeps working.
 (library
  (name march_lexer)
- (libraries march_parser march_errors))
+ (modules lexer)
+ (libraries march_parser))

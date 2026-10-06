@@ -179,25 +179,18 @@ let read_file path =
     and the 1-based line and column it stopped at, so callers can build a
     positioned diagnostic instead of a flat string. *)
 let parse_march_file_pos path src =
-  let lexbuf = Lexing.from_string src in
-  lexbuf.Lexing.lex_curr_p <-
-    { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  try
-    let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-    let m = match March_ast.Span_remap.load_sidecar path with
-      | Some tbl -> March_ast.Span_remap.remap_module tbl m
-      | None -> m
-    in
-    Ok m
-  with
-  | March_errors.Errors.ParseError (msg, _hint, pos) ->
-    let open Lexing in
-    Error (Printf.sprintf "parse error: %s" msg, pos.pos_lnum,
-           pos.pos_cnum - pos.pos_bol + 1)
-  | March_parser.Parser.Error ->
-    let pos = Lexing.lexeme_start_p lexbuf in
-    let open Lexing in
-    Error ("parse error", pos.pos_lnum, pos.pos_cnum - pos.pos_bol + 1)
+  match March_parser.Parse.module_ ~filename:path ~stuck:"" src with
+  | Ok m ->
+    Ok (match March_ast.Span_remap.load_sidecar path with
+        | Some tbl -> March_ast.Span_remap.remap_module tbl m
+        | None -> m)
+  | Error diags ->
+    let (d : March_errors.Errors.diagnostic) = List.hd diags in
+    let msg =
+      if d.message = "" then "parse error"
+      else Printf.sprintf "parse error: %s" d.message in
+    Error (msg, d.span.March_ast.Ast.start_line,
+           d.span.March_ast.Ast.start_col + 1)
 
 (** Parse a .march source file.  Returns [Ok module_ast] or [Error msg]
     with the path and line folded into [msg]. *)

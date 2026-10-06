@@ -1366,20 +1366,13 @@ let resolve_imports ~source_file m =
 let fmt_file filename =
   let src = read_file filename in
   let formatted =
-    try March_format.Format.format_source ~filename src
-    with
-    | March_errors.Errors.ParseError (msg, hint, _) ->
-      Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg
-           (Lexing.from_string src));
-      exit 1
-    | March_parser.Parser.Error ->
-      let lexbuf = Lexing.from_string src in
-      lexbuf.Lexing.lex_curr_p <-
-        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
-      Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename
-           ~msg:"Parse error (cannot format)" lexbuf);
+    match March_format.Format.format_source_result ~filename
+            ~stuck:"Parse error (cannot format)" src with
+    | Ok formatted -> formatted
+    | Error diags ->
+      List.iter (fun d ->
+        Printf.eprintf "%s\n"
+          (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
       exit 1
   in
   formatted <> src, formatted
@@ -1476,30 +1469,15 @@ let run_test_cmd args =
         Printf.eprintf "march test: %s\n" msg; exit 1
     in
     if !verbose then Printf.printf "%s\n%!" filename;
-    let lexbuf = Lexing.from_string src in
-    lexbuf.Lexing.lex_curr_p <-
-      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
     let module_ast =
-      try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-      with
-      | March_errors.Errors.ParseError (msg, hint, _) ->
-        Printf.eprintf "\n%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
-        exit 1
-      | March_parser.Parser.Error ->
-        Printf.eprintf "\n%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename ~msg:"Parse error:" lexbuf);
+      match March_parser.Parse.module_ ~filename ~stuck:"Parse error:" src with
+      | Ok m -> m
+      | Error diags ->
+        List.iter (fun d ->
+          Printf.eprintf "\n%s\n"
+            (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
         exit 1
     in
-    let parse_errs = March_parser.Parse_errors.take_parse_errors () in
-    if parse_errs <> [] then begin
-      List.iter (fun (msg, _hint, pos) ->
-        let open Lexing in
-        Printf.eprintf "%s:%d:%d: error: %s\n"
-          filename pos.pos_lnum (pos.pos_cnum - pos.pos_bol) msg
-      ) parse_errs;
-      exit 1
-    end;
     let desugar_errors = March_errors.Errors.create () in
     let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
     if March_errors.Errors.has_errors desugar_errors then begin
@@ -1638,13 +1616,14 @@ let run_test_cmd args =
          following statement (see March_doctest.Doctest.extract) parses as
          a block body; a single bare expression degenerates to itself. *)
       let wrapped = "do\n" ^ src ^ "\nend" in
-      let lexbuf = Lexing.from_string wrapped in
       let expr =
-        try March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-        with
-        | March_errors.Errors.ParseError (msg, _, _) ->
-          failwith ("doctest parse error: " ^ msg)
-        | March_parser.Parser.Error ->
+        match March_parser.Parse.expr wrapped with
+        | Ok e -> e
+        | Error (d :: _)
+          when d.March_errors.Errors.code
+               = Some March_parser.Parse.code_parse_error ->
+          failwith ("doctest parse error: " ^ d.March_errors.Errors.message)
+        | Error _ ->
           failwith ("doctest parse error in: " ^ src)
       in
       March_desugar.Desugar.desugar_expr expr
@@ -2163,9 +2142,6 @@ let compile filename =
     if !do_timings then
       Printf.eprintf "[timings] %6.3fs  %s\n%!" (Unix.gettimeofday () -. t_compile_start) label
   in
-  let lexbuf = Lexing.from_string src in
-  lexbuf.Lexing.lex_curr_p <-
-    { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   (* Parse *)
   (* A hard parse failure (unlike a desugar/typecheck error) produces no
      [module_ast] at all — [compile] exits right here, well before the
@@ -2176,14 +2152,16 @@ let compile filename =
      to stdout in this case, so it gets its own short-circuit here rather
      than falling through to the plain-text-only exit. There is no AST to
      serialize, so "module" is JSON null. *)
-  let emit_core_ast_parse_failure (diag : March_errors.Errors.diagnostic) =
+  let emit_core_ast_parse_failure (diags : March_errors.Errors.diagnostic list) =
     if !emit_core_ast_file <> None then begin
       let doc =
         March_dump.Dump.json_obj [
           ("format_version", "3");
           ("verdict", March_dump.Dump.json_string "reject");
           ("diagnostics",
-           March_dump.Dump.json_list [March_errors.Errors.render_diagnostic_json diag]);
+           March_dump.Dump.json_list
+             (List.map (March_errors.Errors.render_diagnostic_json ~related:false)
+                diags));
           ("module", "null");
           ("schemes", "[]");
           ("instantiations", "[]");
@@ -2194,32 +2172,23 @@ let compile filename =
     end
   in
   let module_ast =
-    try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-    with
-    | March_errors.Errors.ParseError (msg, hint, _) ->
-      Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
-      emit_core_ast_parse_failure
-        (March_errors.Errors.parse_error_diagnostic ~filename ?hint ~msg lexbuf);
-      exit 1
-    | March_parser.Parser.Error ->
-      Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename ~msg:"I got stuck here:" lexbuf);
-      emit_core_ast_parse_failure
-        (March_errors.Errors.parse_error_diagnostic ~filename ~msg:"I got stuck here:" lexbuf);
+    match March_parser.Parse.module_ ~filename src with
+    | Ok m -> m
+    | Error diags ->
+      List.iter (fun d ->
+        Printf.eprintf "%s\n"
+          (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
+      emit_core_ast_parse_failure diags;
+      (* --check-json: the same NDJSON stream type errors use, so tooling
+         sees a syntax error as a diagnostic rather than as "no output".
+         Unlike the post-typecheck --check-json exit below this stays exit 1,
+         as a parse failure always has. *)
+      if !check_json then
+        List.iter (fun d ->
+          print_string (March_errors.Errors.render_diagnostic_json d ^ "\n"))
+          diags;
       exit 1
   in
-  (* Display any declaration-level parse errors collected during recovery *)
-  let parse_errs = March_parser.Parse_errors.take_parse_errors () in
-  let has_parse_errors = parse_errs <> [] in
-  List.iter (fun (msg, hint, pos) ->
-      let open Lexing in
-      Printf.eprintf "%s:%d:%d: error: %s\n"
-        filename pos.pos_lnum (pos.pos_cnum - pos.pos_bol) msg;
-      (match hint with
-       | None -> ()
-       | Some h -> Printf.eprintf "hint: %s\n" h)
-    ) parse_errs;
   stamp "parse";
   (* Apply .march.spans sidecar remapping if present *)
   let module_ast =
@@ -2306,8 +2275,7 @@ let compile filename =
       lexbuf.Lexing.lex_curr_p <-
         { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "<cap-dispatch>" };
       let m =
-        March_parser.Parser.module_
-          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+        March_parser.Parse.module_of_lexbuf lexbuf
       in
       let d = March_desugar.Desugar.desugar_module m in
       { desugared with
@@ -2521,7 +2489,8 @@ let compile filename =
   let diags = dedupe_cap_hints (March_errors.Errors.sorted errors) in
   let is_user_file = user_diag ~filename ~user_files in
   (* The front-end half of --check's accept/reject condition (has_user_errors
-     || has_parse_errors || has_resolve_errors || has_desugar_errors), hoisted
+     || has_resolve_errors || has_desugar_errors; a parse error never gets
+     this far, [compile] exits at the parse step), hoisted
      here so --emit-core-ast can reuse it without running the human-readable
      diagnostic-printing loop below (mirrors --check-json's short-circuit,
      which also runs before that loop).  It is NOT the whole condition:
@@ -2538,7 +2507,7 @@ let compile filename =
     exit 0
   end;
   let frontend_rejected =
-    has_user_errors || has_parse_errors || has_resolve_errors
+    has_user_errors || has_resolve_errors
     || has_desugar_errors
   in
   (* Allocation contracts (`cap no_alloc`, @[no_alloc]) and the
@@ -4776,20 +4745,13 @@ let run_check_cmd ?(emit_caps = false) files =
       with Sys_error msg ->
         Printf.eprintf "march: %s\n" msg; exit 1
     in
-    let lexbuf = Lexing.from_string src in
-    lexbuf.Lexing.lex_curr_p <-
-      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
     let module_ast =
-      try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-      with
-      | March_errors.Errors.ParseError (msg, hint, _) ->
-        Printf.eprintf "%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
-        exit 1
-      | March_parser.Parser.Error ->
-        Printf.eprintf "%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename
-             ~msg:"I got stuck here:" lexbuf);
+      match March_parser.Parse.module_ ~filename src with
+      | Ok m -> m
+      | Error diags ->
+        List.iter (fun d ->
+          Printf.eprintf "%s\n"
+            (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
         exit 1
     in
     let desugared = March_desugar.Desugar.desugar_module module_ast in
@@ -5259,8 +5221,7 @@ let () =
       lexbuf.Lexing.lex_curr_p <-
         { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
       let module_ast =
-        March_parser.Parser.module_
-          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+        March_parser.Parse.module_of_lexbuf lexbuf in
       let desugared = March_desugar.Desugar.desugar_module module_ast in
       let stdlib_decls = load_stdlib () in
       if not (is_shipped_stdlib_file path) then

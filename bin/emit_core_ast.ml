@@ -25,7 +25,7 @@ let run ~(topology : string option) ~(filename : string) ~(user_files : string l
     let diagnostics_json =
       diags
       |> List.filter is_user_file
-      |> List.map March_errors.Errors.render_diagnostic_json
+      |> List.map (March_errors.Errors.render_diagnostic_json ~related:false)
       |> March_dump.Dump.json_list
     in
     let module_json = March_dump.Ast_json.module_to_json ~types:type_map user_ast in

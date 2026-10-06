@@ -54,7 +54,7 @@ let add_fresh_actor pid name =
 
 let parse_and_desugar src =
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   March_desugar.Desugar.desugar_module m
 
 let eval_module src =
@@ -641,8 +641,7 @@ let test_one_for_all_cleans_resources () =
 
 let parse_supervise src =
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_
-            (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   let rec find = function
     | [] -> Alcotest.fail "no actor with a supervise block in source"
     | March_ast.Ast.DActor (_, _, ad, _) :: rest ->
@@ -760,8 +759,7 @@ let test_soft_keywords_remain_identifiers () =
      end\n"
   in
   let lexbuf = Lexing.from_string src in
-  (match March_parser.Parser.module_
-           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf with
+  (match March_parser.Parse.module_of_lexbuf lexbuf with
    | _ -> ()
    | exception e ->
      Alcotest.failf "soft keywords must stay usable as identifiers: %s"

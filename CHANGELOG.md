@@ -168,6 +168,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Parse errors are now emitted by `--check-json`.** A file that does not
+  parse used to produce an empty NDJSON stream (the error went to stderr
+  only); it now produces one line per syntax error, with `code` set to
+  `parse_error`, `syntax_error` or `lex_error`. Every `--check-json` line also
+  gains `labels` (the secondary source spans, each with its message) and
+  `notes`. Existing fields are unchanged and `forge fix` ignores the new ones.
 - **A call to an unknown function is now a compile error, not a link error.**
   When native code generation met a direct call to a name that is neither a
   function in the program, an extern, nor a runtime builtin, it used to emit a
@@ -208,6 +214,17 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Parse errors on the command line now point at the token the message is
+  about, not the token after it.** `if x then 1 end` used to put the caret
+  under `end` (or under the next line) while the message talked about `then`;
+  `march`, `march fmt`, `march test` and the REPL now underline `then`, the
+  position the editor integration already showed.
+- **A stray character or an unterminated string is now an ordinary error.**
+  `march`, `march test` and `march fmt` used to die with `Fatal error:
+  exception Lexer_error(...)` and an OCaml backtrace on a character the
+  lexer rejects or a string that never closes; they now print the error with
+  its source line and exit 1, like any other syntax error. A file on
+  `MARCH_LIB_PATH` with such an error no longer aborts the whole compile.
 - **A cold `$HOME` stdlib cache no longer compiles differently from a warm one.** The first
   compile after a cold cache used the live stdlib type environment, whose type variables the program
   could link, so it produced different IR (an extra specialised clone, shifted lambda ids) and a
