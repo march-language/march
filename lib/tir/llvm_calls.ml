@@ -167,6 +167,51 @@ let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
    internal-compiler-error report (exit 3). *)
 exception Ambiguous_iface_call of string
 
+(* A direct call whose callee is neither a function in the module
+   ([top_fns]), an extern ([extern_map]), a C runtime symbol (["march_"]
+   prefix) nor a runtime builtin ([Builtin_table]).  The emitter used to
+   [declare] such a name and let the linker fail (or resolve it to an
+   unrelated same-named C symbol); it is now a compile-time error.  The
+   message names the callee and the enclosing function: TIR carries no
+   source spans. *)
+exception Unknown_callee of string
+
+let unknown_callee ctx (name : string) : 'a =
+  let where =
+    if ctx.Llvm_ctx.cur_emit_fn = "" then ""
+    else Printf.sprintf " (called from `%s`)" ctx.Llvm_ctx.cur_emit_fn
+  in
+  raise (Unknown_callee (Printf.sprintf
+    "`%s`%s is not a function in scope and not a runtime builtin" name where))
+
+(** The one surviving on-use forward [declare]: a JIT fragment's call to a
+    function an earlier fragment compiled ([Llvm_ctx.is_repl_prior_fn]),
+    typed from the call site and resolved by dlopen.  Deduped per module. *)
+let declare_prior_fragment_fn ctx ~(fname : string) ~(ret_ty : string)
+    ~(arg_pairs : (string * string) list) : unit =
+  if not (Hashtbl.mem ctx.Llvm_ctx.unknown_decls fname) then begin
+    Hashtbl.replace ctx.Llvm_ctx.unknown_decls fname ();
+    let param_strs = List.mapi (fun i (ty, _) ->
+        Printf.sprintf "%s %%arg%d" ty i) arg_pairs in
+    Buffer.add_string ctx.Llvm_ctx.preamble
+      (Printf.sprintf "declare %s @%s(%s)\n" ret_ty fname
+         (String.concat ", " param_strs))
+  end
+
+(** The emitter's "is this direct callee known?" test, shared by the
+    general-call arm and the global-[ECallPtr] arm.  [v_name] is the callee
+    as written in TIR (builtins are bare names), [resolved_name] its
+    module-qualified form, [fname] the C symbol it mangles to. *)
+let is_known_callee ctx ~(v_name : string) ~(resolved_name : string)
+    ~(fname : string) : bool =
+  Hashtbl.mem ctx.Llvm_ctx.top_fns resolved_name
+  || Hashtbl.mem ctx.Llvm_ctx.extern_map resolved_name
+  (* Runtime symbols lowering calls by their C name; declared by the
+     preamble, so an undeclared one is an LLVM "undefined value" error, not
+     a silent link. *)
+  || Tir_names.has_runtime_prefix fname
+  || Builtin_table.is_builtin v_name
+
 (** Concrete type name of an unresolved call's dispatch argument, or [None]
     if it is erased.  The distinction decides which of the two very different
     failures below the user is actually looking at. *)

@@ -6039,6 +6039,34 @@ let test_fast_math_emits_fast_attr () =
     (let re = Str.regexp "fadd fast" in
      (try ignore (Str.search_forward re ir_normal 0); true with Not_found -> false))
 
+(* ── by-name record field read on a scalar-typed operand ─────────── *)
+
+(* A field read whose operand's TIR type says "scalar" (here [Int]) has no
+   statically known record shape, so it takes the by-name
+   march_record_field_dyn path.  The operand emits as i64 (the lazy Int63
+   funnel untags it), and splicing that in as the call's `ptr` produced IR
+   clang rejects ("'%w63…' defined with type 'i64' but expected 'ptr'",
+   seen 2026-10-04 compiling a main-less topology app).  The emitter must
+   refuse with a diagnostic naming the operand instead of writing invalid
+   IR. *)
+let test_field_dyn_on_scalar_operand_refused () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let body = March_tir.Tir.EField (March_tir.Tir.AVar x, "factor") in
+  let fd = { March_tir.Tir.fn_name = "field_of_int"; fn_params = [x];
+             fn_ret_ty = March_tir.Tir.TInt; fn_body = body;
+             fn_kind = March_tir.Tir.FnNormal } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = [];
+            tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
+  match March_tir.Llvm_emit.emit_module m with
+  | _ir ->
+    Alcotest.fail "expected the emitter to refuse a field read on an Int; it wrote IR"
+  | exception Failure msg ->
+    let mentions sub =
+      try ignore (Str.search_forward (Str.regexp_string sub) msg 0); true
+      with Not_found -> false in
+    Alcotest.(check bool) ("names the field and operand: " ^ msg) true
+      (mentions ".factor" && mentions "`x`" && mentions "Int")
+
 (* ── Constant propagation ───────────────────────────────────────── *)
 
 (* Helpers for cprop tests: build a function body with a let-chain,
@@ -8394,8 +8422,17 @@ let test_int_tag_wrapper_ir () =
      tagging but could not carry a *polymorphic* return, e.g. a lambda whose body
      is a dynamic record-field read — the dispatch read the tagged generic value
      as a raw scalar.  Uniform ptr ABI fixes both.) *)
+  (* [map] is defined locally: the test lowers without the stdlib, and an
+     undefined callee is a compile error (Llvm_calls.Unknown_callee), no
+     longer a silent `declare`. *)
   let src = {|mod Test do
     fn inc_fn(x : Int) : Int do x + 1 end
+    fn map(xs : List(Int), f : Int -> Int) : List(Int) do
+      match xs do
+        Nil -> Nil
+        Cons(h, t) -> Cons(f(h), map(t, f))
+      end
+    end
     fn list_apply(f : Int -> Int, xs : List(Int)) : List(Int) do
       map(xs, f)
     end
@@ -13708,15 +13745,20 @@ let test_iface_guard_fires_ecallptr () =
 
 (** Negative control: an impl-mangled fn is registered but its dot-suffix
     (`render`) does not match the bare callee (`describe`), so the guard
-    must NOT fire and the call must fall through to the pre-existing
-    forward-declare behavior.  Pins the predicate against false positives. *)
+    must NOT fire and the call must fall through to the unknown-callee
+    diagnostic ([Llvm_calls.Unknown_callee]; formerly a silent forward
+    declare).  Pins the predicate against false positives. *)
 let test_iface_guard_negative_control () =
   let m = iface_guard_module ~impl_name:"Pretty$Int.render"
       ~main_body:(bare_describe_call
                     (fun f args -> March_tir.Tir.EApp (f, args))) in
-  let ir = March_tir.Llvm_emit.emit_module m in
-  Alcotest.(check bool) "non-matching bare call falls through to a declare"
-    true (ir_contains ir "declare ptr @describe")
+  match March_tir.Llvm_emit.emit_module m with
+  | (_ : string) -> Alcotest.fail "unknown bare callee `describe` emitted IR"
+  | exception March_tir.Llvm_calls.Ambiguous_iface_call msg ->
+    Alcotest.failf "iface guard fired on a non-matching impl: %s" msg
+  | exception March_tir.Llvm_calls.Unknown_callee msg ->
+    Alcotest.(check bool) ("names `describe` (got: " ^ msg ^ ")")
+      true (ir_contains msg "`describe`")
 (* ── Scrutinee-borrowed conservatism: cross-branch double dec_rc (P0) ────
    found during Wave 2 Task 4's TIR snapshot audit
    (test/snapshots/perceus/scrutinee_borrowed_conservatism.expected).  When a
@@ -14432,6 +14474,8 @@ declare ptr  @march_vault_drop(ptr %table, ptr %key)
 declare ptr  @march_vault_update(ptr %table, ptr %key, ptr %f)
 declare i64  @march_vault_size(ptr %table)
 declare ptr  @march_vault_keys(ptr %table)
+declare ptr  @march_vault_reap(ptr %table, ptr %key)
+declare ptr  @march_vault_close(ptr %table)
 declare ptr  @march_vault_ns_set(ptr %ns, ptr %key, ptr %value)
 declare ptr  @march_vault_ns_get(ptr %ns, ptr %key)
 declare ptr  @march_vault_ns_drop(ptr %ns, ptr %key)
@@ -14737,6 +14781,7 @@ declare double @march_unix_time()
 declare i64    @march_unix_time_ms()
 declare i64  @march_peak_rss_bytes()
 declare i64  @march_live_allocs()
+declare i64  @march_vault_live_tables()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
 declare ptr  @march_tcp_connect_timeout(ptr %host, i64 %port, i64 %timeout_ms)
 ; HTTP client builtins
@@ -14908,7 +14953,7 @@ let test_builtin_group_total () =
   in
   Alcotest.(check int) "arith" 22 (count March_tir.Llvm_emit.Bg_arith);
   Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
-  Alcotest.(check int) "record" 17 (count March_tir.Llvm_emit.Bg_record)
+  Alcotest.(check int) "record" 18 (count March_tir.Llvm_emit.Bg_record)
 
 let test_builtin_name_roundtrip () =
   List.iter
@@ -14921,7 +14966,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 64
+  Alcotest.(check int) "constructor count" 65
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)
@@ -14964,6 +15009,114 @@ let test_every_builtin_c_name_is_declared () =
   Alcotest.(check (list string))
     "every builtin c_name is declared in some preamble (or compiler-defined)"
     [] missing
+
+(* ── Builtin_table: the one "is this callee a builtin?" answer ─────────── *)
+
+let test_builtin_table_sorted_unique () =
+  let all = March_tir.Builtin_table.all in
+  Alcotest.(check (list string)) "sorted and duplicate-free"
+    (List.sort_uniq compare all) all;
+  List.iter (fun n ->
+      Alcotest.(check bool) (n ^ ": is_builtin") true
+        (March_tir.Builtin_table.is_builtin n)) all;
+  Alcotest.(check bool) "nonexistent_fn is not a builtin" false
+    (March_tir.Builtin_table.is_builtin "nonexistent_fn")
+
+(* Every row of Llvm_builtins.builtins and every Builtin_name.t member is in
+   the table.  The Builtin_name union is NOT redundant: 24 dispatched names
+   (int_div, negate, task_cancel, signal_watch, ...) have a dedicated emit
+   arm and no row. *)
+let test_builtin_table_covers_sources () =
+  List.iter (fun (b : March_tir.Llvm_builtins.builtin) ->
+      Alcotest.(check bool) (b.march_name ^ " in table") true
+        (March_tir.Builtin_table.is_builtin b.march_name))
+    March_tir.Llvm_builtins.builtins;
+  List.iter (fun c ->
+      let n = March_tir.Builtin_name.to_string c in
+      Alcotest.(check bool) (n ^ " in table") true
+        (March_tir.Builtin_table.is_builtin n))
+    March_tir.Builtin_name.all;
+  (* The emitter's former hard-coded I/O list. *)
+  List.iter (fun n ->
+      Alcotest.(check bool) (n ^ " in table") true
+        (March_tir.Builtin_table.is_builtin n);
+      Alcotest.(check bool) (n ^ " has a ret_ty") true
+        (March_tir.Builtin_table.ret_ty n <> None))
+    [ "panic"; "panic_"; "todo_"; "unreachable_"; "println"; "print";
+      "print_stderr"; "io_read_line"; "read_line"; "io_read_byte"; "read_byte" ]
+
+(* Every member either has a ret_ty override or is a Builtin_name (a
+   dedicated emit arm types it) or carries no C symbol (operators and
+   constant-folded names emitted as native instructions).  A row with a C
+   symbol, no ret_ty and no arm would be typed only from the call site: list
+   them explicitly so a new one is a deliberate choice. *)
+(* [main] mangles to the compiler-defined [march_main]; its type is the
+   program's own [main]. *)
+let builtin_table_call_site_typed : string list = [ "main" ]
+
+let test_builtin_table_ret_ty_or_special () =
+  let unexplained =
+    List.filter (fun n ->
+        March_tir.Builtin_table.ret_ty n = None
+        && March_tir.Builtin_name.of_string n = None
+        && (match List.find_opt (fun (b : March_tir.Llvm_builtins.builtin) ->
+            b.march_name = n) March_tir.Llvm_builtins.builtins with
+          | Some { c_name = Some _; _ } -> true
+          | _ -> false))
+      March_tir.Builtin_table.all
+  in
+  Alcotest.(check (list string)) "builtins with a C symbol but no ret_ty / arm"
+    builtin_table_call_site_typed unexplained
+
+let unknown_callee_module mk =
+  let open March_tir.Tir in
+  let var = { v_name = "nonexistent_fn"; v_ty = TFn ([ TInt ], TString); v_lin = Unr } in
+  { tm_name = "UnknownCallee"; tm_types = []; tm_externs = []; tm_exports = [];
+    tm_tests = []; tm_io_fns = [];
+    tm_fns = [ { fn_name = "main"; fn_params = []; fn_ret_ty = TString;
+                 fn_body = mk var [ ALit (March_ast.Ast.LitInt 1) ];
+                 fn_kind = FnNormal } ] }
+
+let assert_unknown_callee ~label m =
+  match March_tir.Llvm_emit.emit_module m with
+  | ir ->
+    Alcotest.failf "%s: unknown callee emitted IR (declare present: %b)" label
+      (ir_contains ir "@nonexistent_fn(")
+  | exception March_tir.Llvm_calls.Unknown_callee msg ->
+    Alcotest.(check bool) (label ^ ": names the callee (got: " ^ msg ^ ")") true
+      (ir_contains msg "`nonexistent_fn`");
+    Alcotest.(check bool) (label ^ ": names the caller (got: " ^ msg ^ ")") true
+      (ir_contains msg "called from `main`");
+    Alcotest.(check bool) (label ^ ": says not a builtin (got: " ^ msg ^ ")") true
+      (ir_contains msg "not a runtime builtin")
+
+let test_unknown_callee_eapp () =
+  assert_unknown_callee ~label:"EApp"
+    (unknown_callee_module (fun f args -> March_tir.Tir.EApp (f, args)))
+
+(* The one surviving on-use declare: a JIT fragment calling a function an
+   earlier fragment compiled.  Bound, the name gets a declare; the same module
+   with the binding removed (or naming a different fn) is an error again. *)
+let test_unknown_callee_repl_prior_fragment () =
+  let m = unknown_callee_module (fun f args -> March_tir.Tir.EApp (f, args)) in
+  let prior = Hashtbl.create 1 in
+  Hashtbl.replace prior "nonexistent_fn" ();
+  let ir = March_tir.Llvm_ctx.with_repl_prior_fns prior (fun () ->
+      March_tir.Llvm_emit.emit_module m) in
+  Alcotest.(check bool) "prior-fragment fn is declared on use" true
+    (ir_contains ir "declare ptr @nonexistent_fn(i64 %arg0)");
+  let other = Hashtbl.create 1 in
+  Hashtbl.replace other "some_other_fn" ();
+  (match March_tir.Llvm_ctx.with_repl_prior_fns other (fun () ->
+       March_tir.Llvm_emit.emit_module m) with
+   | _ -> Alcotest.fail "a name not in the prior-fragment table emitted IR"
+   | exception March_tir.Llvm_calls.Unknown_callee _ -> ());
+  assert_unknown_callee ~label:"binding restored" m
+
+let test_unknown_callee_ecallptr () =
+  assert_unknown_callee ~label:"ECallPtr"
+    (unknown_callee_module (fun f args ->
+         March_tir.Tir.(ECallPtr (AVar f, args))))
 
 let test_preamble_byte_identical_native () =
   let buf = Buffer.create 4096 in
@@ -16636,6 +16789,7 @@ let codegen_suites =
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
+        Alcotest.test_case "field_dyn_on_scalar_operand_refused" `Quick test_field_dyn_on_scalar_operand_refused;
       ]);
       ("llvm_emit correctness", [
         Alcotest.test_case "ctor_no_collision_different_tags" `Quick
@@ -17102,6 +17256,18 @@ let codegen_suites =
             test_builtin_name_roundtrip;
           Alcotest.test_case "every Builtin_name has an emit group" `Quick
             test_builtin_group_total;
+          Alcotest.test_case "Builtin_table.all sorted, unique, members" `Quick
+            test_builtin_table_sorted_unique;
+          Alcotest.test_case "Builtin_table covers rows, Builtin_name, I/O list" `Quick
+            test_builtin_table_covers_sources;
+          Alcotest.test_case "Builtin_table: ret_ty or explicitly special" `Quick
+            test_builtin_table_ret_ty_or_special;
+          Alcotest.test_case "unknown EApp callee is Unknown_callee, no declare" `Quick
+            test_unknown_callee_eapp;
+          Alcotest.test_case "unknown ECallPtr callee is Unknown_callee, no declare" `Quick
+            test_unknown_callee_ecallptr;
+          Alcotest.test_case "JIT prior-fragment fn keeps its on-use declare" `Quick
+            test_unknown_callee_repl_prior_fragment;
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick
             test_preamble_byte_identical_native;
           Alcotest.test_case "native, REPL preamble byte-identical (W3C2.4 / H2)" `Quick

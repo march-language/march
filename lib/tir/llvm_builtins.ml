@@ -417,6 +417,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_vault_size(ptr %table)" };
   { march_name = "vault_keys"; c_name = Some "march_vault_keys"; ret_ty = Some (Tir.TCon ("List", [Tir.TPtr Tir.TUnit]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_vault_keys(ptr %table)" };
+  { march_name = "vault_reap"; c_name = Some "march_vault_reap"; ret_ty = Some (Tir.TCon ("List", [Tir.TPtr Tir.TUnit]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_vault_reap(ptr %table, ptr %key)" };
+  { march_name = "vault_close"; c_name = Some "march_vault_close"; ret_ty = Some (Tir.TCon ("List", [Tir.TPtr Tir.TUnit]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_vault_close(ptr %table)" };
   { march_name = "vault_ns_set"; c_name = Some "march_vault_ns_set"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_vault_ns_set(ptr %ns, ptr %key, ptr %value)" };
   { march_name = "vault_ns_get"; c_name = Some "march_vault_ns_get"; ret_ty = Some (Tir.TCon ("Option", [Tir.TPtr Tir.TUnit]));
@@ -981,6 +985,8 @@ let builtins : builtin list = [
      peak_rss_bytes above. Exact and platform-independent — see typecheck.ml. *)
   { march_name = "live_allocs"; c_name = Some "march_live_allocs"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_live_allocs()" };
+  { march_name = "vault_live_tables"; c_name = Some "march_vault_live_tables"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_vault_live_tables()" };
   { march_name = "tcp_connect"; c_name = Some "march_tcp_connect"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_connect(ptr %host, i64 %port)" };
   { march_name = "tcp_connect_timeout"; c_name = Some "march_tcp_connect_timeout"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
@@ -1561,6 +1567,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_vault_update";
   PDeclare "march_vault_size";
   PDeclare "march_vault_keys";
+  PDeclare "march_vault_reap";
+  PDeclare "march_vault_close";
   PDeclare "march_vault_ns_set";
   PDeclare "march_vault_ns_get";
   PDeclare "march_vault_ns_drop";
@@ -1868,6 +1876,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_unix_time_ms";
   PDeclare "march_peak_rss_bytes";
   PDeclare "march_live_allocs";
+  PDeclare "march_vault_live_tables";
   PDeclare "march_tcp_connect";
   PDeclare "march_tcp_connect_timeout";
   PComment "; HTTP client builtins";

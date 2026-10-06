@@ -81,25 +81,72 @@ mod Vault do
     end
   end
 
+  -- Every write below that can DISPLACE a value (an overwrite, a removal,
+  -- a replaced list) ends with `reap`: the compiled runtime does not release
+  -- what a write displaced (it cannot release a type-erased value deeply --
+  -- a record's fields, a list's spine), it buries it, and `vault_reap`
+  -- hands it back here as a `List(v)` to be dropped at the table's element
+  -- type. A write that skipped the reap would not leak: whatever it buried
+  -- is collected by the next reap of the same key's shard, or when the
+  -- table is closed. (The interpreter's GC owns its values; its reap is
+  -- always empty.)
+  pfn reap(table, key) : Unit do
+    let _ = vault_reap(table, key)
+    ()
+  end
+
   doc "Insert or overwrite a key-value pair. Alias for `set`.  Removes any previous TTL."
   fn put(table, key, value) do
-    vault_set(table, key, value)
+    set(table, key, value)
   end
 
   doc "Remove a key from the table. Alias for `drop`.  No-op if the key does not exist."
   fn delete(table, key) do
-    vault_drop(table, key)
+    drop(table, key)
   end
 
   doc "Remove all entries from the table, leaving it empty."
   fn clear(table) do
     let ks = vault_keys(table)
-    List.each(ks, fn k -> vault_drop(table, k))
+    List.each(ks, fn k -> drop(table, k))
+  end
+
+  doc """
+  Retire a table: unregister its name (so `whereis` and `open` no longer find
+  it, and a later `new` of the same name makes a fresh table) and release
+  everything it holds.  The table's memory is freed once the last handle to
+  it is gone.
+
+  For a table with one owner -- per-session or per-request state -- close it
+  when the owner is done: a table that is never closed stays registered,
+  with its contents, for the life of the process.  A handle used after the
+  close still works, on an empty, unregistered table, so a task that
+  outlives its owner by a little reads `None` rather than crashing.
+
+      let t = Vault.new("request_" ++ id)
+      Vault.set(t, "user", u)
+      ...
+      Vault.close(t)
+  """
+  fn close(table) : Unit do
+    let _ = vault_close(table)
+    ()
+  end
+
+  doc """
+  The number of Vault tables this process holds: created and not yet freed.
+  A leak gauge: a long-running program whose count keeps rising is making
+  tables it never `close`s.  Always counts what the runtime holds, so a
+  closed table still counts until its last handle is dropped.
+  """
+  fn live_tables() : Int do
+    vault_live_tables()
   end
 
   doc "Insert or overwrite a key-value pair.  Removes any previous TTL."
   fn set(table, key, value) do
     vault_set(table, key, value)
+    reap(table, key)
   end
 
   doc """
@@ -109,6 +156,7 @@ mod Vault do
   """
   fn set_ttl(table, key, value, ttl_secs) do
     vault_set_ttl(table, key, value, ttl_secs)
+    reap(table, key)
   end
 
   doc "Look up a key.  Returns Some(value) if present and not expired, None otherwise."
@@ -119,6 +167,7 @@ mod Vault do
   doc "Remove a key from the table.  No-op if the key does not exist."
   fn drop(table, key) do
     vault_drop(table, key)
+    reap(table, key)
   end
 
   doc """
@@ -130,6 +179,7 @@ mod Vault do
   """
   fn update(table, key, f) do
     vault_update(table, key, f)
+    reap(table, key)
   end
 
   doc """
@@ -142,7 +192,9 @@ mod Vault do
   exactly one receives `true`. Use it as a lock or an idempotency claim.
   """
   fn put_new(table, key, value) : Bool do
-    vault_put_new(table, key, value, 0)
+    let won = vault_put_new(table, key, value, 0)
+    reap(table, key)
+    won
   end
 
   doc """
@@ -150,7 +202,9 @@ mod Vault do
   caller that crashes after claiming the key does not hold it forever.
   """
   fn put_new_ttl(table, key, value, ttl_secs) : Bool do
-    vault_put_new(table, key, value, ttl_secs)
+    let won = vault_put_new(table, key, value, ttl_secs)
+    reap(table, key)
+    won
   end
 
   doc """
@@ -176,6 +230,7 @@ mod Vault do
   """
   fn push_capped(table, key, value, max) : Unit do
     vault_push_capped(table, key, value, max)
+    reap(table, key)
   end
 
   doc """
@@ -259,7 +314,7 @@ mod Vault do
       Vault.ns_set("my_ns", "key", 42)
   """
   fn ns_set(ns, key, value) do
-    vault_ns_set(ns, key, value)
+    set(open(ns), key, value)
   end
 
   doc """
@@ -277,7 +332,10 @@ mod Vault do
 
   doc "Remove a key from a named vault namespace.  No-op if the namespace or key is absent."
   fn ns_drop(ns, key) do
-    vault_ns_drop(ns, key)
+    match vault_whereis(ns) do
+    Some(t) -> drop(t, key)
+    None    -> ()
+    end
   end
 
 end

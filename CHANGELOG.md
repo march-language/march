@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A multi-host lab, and `examples/lab_app`.** `scripts/lab/run.sh` starts four
+  Debian containers on a private Docker network, deploys `examples/lab_app` (a
+  three-role choreography with a loop, a choice, an actor-hosted role placed
+  `count = 1`, role grants and a `[control]` section) to them with the real `forge`
+  over ssh, and checks hot deploys, restarts on persisted patches and failover, with
+  sessions flowing throughout. It runs on demand, not in CI; see the Multi-host Lab
+  docs page. Its first runs filed nine bugs under `specs/todos/2026-10-0[45]-lab-*`,
+  among them a pushed topology closing the control plane's leader role on every node.
 - **`Actor.inspect_state`: read a running actor's state.** The `sys:get_state`
   equivalent. `Actor.inspect_state(Actor.debug(io), pid, timeout_ms)` returns
   the actor's state fields as `{ count: 3, tags: [a, b], best: Some(3) }`,
@@ -159,6 +167,13 @@ git log is authoritative for exact commits.
   `vendor/notty/` until a fixed release is on opam, and the `js_of_ocaml < 6.4.0`
   cap is lifted (6.4.1 compiles the browser bundle). Compiler speed is unchanged
   within noise.
+
+  When native code generation met a direct call to a name that is neither a
+  function in the program, an extern, nor a runtime builtin, it used to emit a
+  forward `declare` and leave the failure to the linker (or link the call to an
+  unrelated C symbol of the same name). It now stops with
+  ``error: `foo` (called from `bar`) is not a function in scope and not a
+  runtime builtin`` and exits 1.
 - **Chained `NativeArray` maps compile to one loop.** With the optimizer on,
   `map_*(map_*(a, f), g)`, a `map2_*` with a mapped input on either side, and a
   `map_*` of a `map2_*` are rewritten into a single call whose callback is the
@@ -192,6 +207,52 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiling a file with no `main` no longer emits the whole standard
+  library.** A module with no `main`, tests or exports (a library file, or a
+  topology app compiled without its `--topology` digest) kept all ~8,000
+  stdlib functions, so a one-line file took minutes in `llvm-emit` and `clang`
+  and wrote 45 MB of IR. It now compiles the functions the file declares and
+  what they reach: a topology app's IR went from 47 MB to 8 MB. Shared-object,
+  hot-reload, JS and WASM-island builds are unchanged.
+- **A record field read on a value the compiler typed as a scalar now stops
+  with an internal error naming it,** instead of writing LLVM IR that clang
+  rejects (`'%w63…' defined with type 'i64' but expected 'ptr'`).
+- **Security: a node can no longer be rolled back to an older certificate, and a
+  recorded certificate update cannot be replayed (step-12 security review).**
+  A node now refuses a replacement certificate issued before the one it holds.
+  `forge cluster cert` serials now start with the issue time in unix
+  milliseconds (`<ms>-<random>`); the signed certificate format is unchanged.
+  The control plane's Agent also keeps its certificate-release floor on disk
+  (`$MARCH_CONTROL_DIR/cert-floor-<node>`). Before, a restart lost the floor, and
+  a compromised leader could replay an older, genuinely signed cert release to
+  restore removed roles or flags. A `CERT_UPDATE` (live certificate
+  replacement on a link) is now signed over that link's handshake transcript
+  and a per-link counter. Before, an update recorded off the wire could be
+  replayed on a link made with a leaked old key, and that link then survived
+  the old certificate's revocation. The frame format changed: a peer from
+  before this change refuses the new update (and is refused by it), then
+  redials under the new certificate when the old one expires, as a peer from
+  before live replacement does.
+- **A session no longer fails to form when its access point is replaced mid-invitation.**
+  When a hosting actor re-offered a role (for example after a hot deploy moved it
+  to a new protocol version) and closed the old offer, an initiator that had
+  just invited the old offer waited out the whole setup time (20 s) and then
+  failed with `NoOffer(.., "<node> did not answer")`: the invitation reached a
+  node whose offer had already dropped its route, so no one answered it.
+  `SessionNode.initiate` now notices the offer's name was unregistered, withdraws
+  the invitation, and looks again for the replacement offer, as it already did
+  for an offer that refused with "closing".
+- **Vault writes release what they replace, and session tables are freed.**
+  Overwriting or dropping a Vault entry released only the old value's own cell,
+  never its fields or list spine, so `Vault.set` of a record in a loop grew
+  without bound (100,000 overwrites of a 50-string record: 576 MB). Writes now
+  hand the displaced value back to the typed wrapper, which drops it at its
+  type; a Vault(Float) write no longer leaks a box either. New `Vault.close(t)`
+  unregisters, empties and frees a table (a handle used afterwards sees an empty
+  table), and `Vault.live_tables()` counts the tables a process holds. Every
+  `SessionNode` session closes its 13 tables when it ends, by any path, and
+  `Session.in_process()` gained `close`; before, each session kept about 300 KB
+  of tables for the life of the process.
 - **A compiled program that calls `Process.set_env` at the top of `main` no
   longer crashes, now and then, at startup.** On Linux the runtime read
   the environment from the main thread while `main` was already running on a

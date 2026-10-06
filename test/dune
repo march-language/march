@@ -2622,6 +2622,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/builtin_borrow_leak_probe.expected native_builtin_borrow_leak_probe.out)))
 
+; ── A Vault write released only the displaced value's own cell, never its
+; children; a closed table must be freed. live_allocs() deltas per operation,
+; booleans in the golden. Red on main: every displaced-value leg.
+; specs/progress/2026-10-01-session-node-vault-tables-leak.md
+(rule
+ (targets native_vault_churn_leak_probe native_vault_churn_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/vault_churn_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_vault_churn_leak_probe
+        native/vault_churn_leak_probe.march)
+   (with-stdout-to native_vault_churn_leak_probe.out
+        (system "./native_vault_churn_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/vault_churn_leak_probe.expected native_vault_churn_leak_probe.out)))
+
 ; ── Compiled `to_string(())` printed `0` (the interpreter prints `()`): the
 ; unit value is typed as the empty tuple, so Mono keyed the Show lookup
 ; "$Tuple0" and fell through to the generic runtime formatter. Both backends
@@ -7914,6 +7935,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/cluster_node_vaults_unnamed.expected native_cluster_node_vaults_unnamed.out)))
 
+; ── a superseded certificate is not taken back after a restart ────────────
+; Security review, dd step 12b (specs/progress/2026-10-04-dd12-review-cert-
+; downgrade-after-restart.md): a replayed cert-only release whose certificate
+; a later release replaced is refused by the REAL ClusterNode.replace_cert
+; even with the Agent's in-memory floor gone (a fresh Vault models the
+; restart), because the certificate was issued before the one in use; a
+; later, shorter-lived re-issue is still taken. Ephemeral port.
+(rule
+ (targets native_cert_downgrade_after_restart native_cert_downgrade_after_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file native/cert_downgrade_after_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_cert_downgrade_after_restart
+        native/cert_downgrade_after_restart.march)
+   (with-stdout-to native_cert_downgrade_after_restart.out
+        (system "./native_cert_downgrade_after_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/cert_downgrade_after_restart.expected native_cert_downgrade_after_restart.out)))
+
 ; ── NodeSend loopback: a one-way actor message to a GlobalPid over TCP ──
 ; Distributed actors 1/4 (specs/progress/2026-09-14-remote-send-to-a-global-pid.md):
 ; ACTOR_MSG delivered into a remote actor's mailbox and answered by the same
@@ -12036,6 +12080,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/branch_alias_tail_drop.expected native_branch_alias_tail_drop.out)))
+
+;; A module with no entry point of its own (no `main`, tests or exports) must
+;; root the functions the FILE declares for codegen, not fail open and keep the
+;; whole prepended stdlib: before 2026-10-04 this fixture emitted ~7,900
+;; definitions (45 MB of IR, minutes of llvm-emit + clang), and a topology app
+;; compiled without its --topology digest took ~20x longer in llvm-emit than
+;; with it (specs/progress/2026-10-04-mainless-compile-emits-whole-stdlib.md).
+;; Pins both halves: the user's functions are still emitted (`helper`, and
+;; `shout` dragging in what it reaches), and the count stays small.
+(rule
+ (targets mainless_prunes_stdlib_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/mainless_prunes_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/mainless_prunes_stdlib.march)
+   (with-stdout-to mainless_prunes_stdlib_llvm_check.out
+    (run bash -c
+     "defs=$(grep -c '^define ' native/mainless_prunes_stdlib.ll); \
+      helper=$(grep -c '^define .*@helper(' native/mainless_prunes_stdlib.ll); \
+      shout=$(grep -c '^define .*@shout(' native/mainless_prunes_stdlib.ll); \
+      echo \"$defs $helper $shout\"")))))
+
+(rule
+ (alias runtest)
+ (deps mainless_prunes_stdlib_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r defs helper shout < mainless_prunes_stdlib_llvm_check.out; \
+    test \"$helper\" -eq 1 -a \"$shout\" -eq 1 -a \"$defs\" -lt 300 || { echo \"mainless_prunes_stdlib: expected @helper and @shout defined and <300 definitions (the whole stdlib is ~7,900) -- found defs=$defs helper=$helper shout=$shout\" >&2; exit 1; }")))
 
 ; ── Actor.inspect_state (observe R4a) ────────────────────────────────────
 ; specs/progress/2026-10-04-observe-r4a-inspect-state.md. The state fixture

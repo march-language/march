@@ -312,7 +312,8 @@ let builtin_names : StringSet.t =
       "vault_new"; "vault_whereis"; "vault_set"; "vault_set_ttl"; "vault_get";
       "vault_drop"; "vault_update"; "vault_put_new"; "vault_incr";
       "vault_push_capped"; "vault_size"; "vault_keys"; "vault_ns_set";
-      "vault_ns_get"; "vault_ns_drop" ]
+      "vault_ns_get"; "vault_ns_drop"; "vault_reap"; "vault_close";
+      "vault_live_tables" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

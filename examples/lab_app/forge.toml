@@ -1,0 +1,5 @@
+[package]
+name = "lab_app"
+version = "0.1.0"
+# The multi-host lab's app (scripts/lab/, docs/lab.md). A topology app: there
+# is no `main` in src/lab_app.march; it is generated from topology.toml.
