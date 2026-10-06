@@ -240,6 +240,10 @@ git log is authoritative for exact commits.
   kept them), so `take_pos(b)` was skipped even when `a` was a refined
   parameter or a positive literal. It is now proved, and a violating value is
   reported through the alias. Non-`Int` aliases still carry nothing.
+- A `--hot-reload` build no longer leaks a small object each time it calls a
+  lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
+  a list, `Actor.inspect_state` of an actor with a list field). Ordinary
+  builds were not affected.
 - **The language server resolves dependencies the way `forge build` does.**
   It used to put every cached version of a git dependency on its search path,
   including each version's `test/` and `priv/` files, and it missed registry
