@@ -257,6 +257,14 @@ git log is authoritative for exact commits.
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary
   builds were not affected.
+- **NativeArray operations no longer leak the array they read.** In compiled
+  code, `map`, `map2`, `fold`, `from_list`, the width conversions and the
+  DataFrame column reductions kept a reference to their input that nothing
+  released, so a chain like `map(map(a, f), g)` leaked its whole intermediate
+  array on every call, and `from_list` leaked its list. A `map` or `map2` over
+  Float or f32 arrays whose callback could not be inlined also leaked two
+  Float boxes per element, and `DataFrame.filter` leaked each column it
+  filtered.
 - **The language server resolves dependencies the way `forge build` does.**
   It used to put every cached version of a git dependency on its search path,
   including each version's `test/` and `priv/` files, and it missed registry
