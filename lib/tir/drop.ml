@@ -1392,7 +1392,7 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
      (specs/progress/2026-10-05-dropped-closure-captures.md).  For each closure
      type whose environment OWNS its captures (the same [owning] gate, for the
      same reason: a borrowing environment's captures are released by its
-     scope), [__clodrop$<clo>($clo)] loads and drops every capture.  The
+     scope), [$clodrop$<clo>($clo)] loads and drops every capture.  The
      LLVM backend registers it with the runtime under the apply function's
      address, and a release of a function-typed value calls
      [march_clo_release], which runs it when that release frees the cell. *)

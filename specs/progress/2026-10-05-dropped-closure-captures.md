@@ -8,8 +8,13 @@ function's address. Filed as `specs/todos/2026-10-04-dropped-closure-leaks-its-c
 - `lib/tir/drop.ml` (`Drop.run`): for each closure type whose environment OWNS its
   captures (the same `owning_apply_fns` gate the apply-function release uses: a
   borrowing environment's captures are its scope's to release), a function
-  `__clodrop$<clo>($clo)` that loads every RC'd capture and drops it with `drop_op`, so
+  `$clodrop$<clo>($clo)` that loads every RC'd capture and drops it with `drop_op`, so
   a captured list or closure is dropped deep.
+  The name starts with `$` because it embeds the closure struct's name, and so the
+  global lambda counter: hot-reload manifest diffs (forge's deploy plan,
+  `forge/test/test_hcr_manifest_diff.ml`) treat a leading `$` as a generated name an
+  edit may renumber. First spelled `__clodrop$`, every one-line edit to
+  examples/topology_app reported 17 non-generated functions removed.
 - `lib/tir/dce.ml`: nothing in TIR calls it; an allocation (or reuse) of the closure
   type is what keeps it alive.
 - `lib/tir/llvm_emit.ml`: the release of a function-typed value (`EDecRC` /
