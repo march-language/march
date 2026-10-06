@@ -551,10 +551,16 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
       else begin
         let cont_lbls = Array.init nf (fun i ->
           if i = 0 then "" else flbl (Printf.sprintf "f%d" i)) in
+        (* A TUPLE slot is uniform ([Llvm_emit_data.emit_tuple]): an Int is
+           tagged, a Float BOXED.  Loading that Float slot as a raw double
+           compared the two box pointers, so `(1, 2.5) == (1, 2.5)` was false
+           compiled.  A record stores a Float inline, at its value type. *)
+        let is_tuple = match ty with Tir.TTuple _ -> true | _ -> false in
         List.iteri (fun fi fty ->
           if fi > 0 then lbl cont_lbls.(fi);
           let off = 16 + fi * 8 in
-          let llt = field_load_llty fty in
+          let boxed_float = is_tuple && fty = Tir.TFloat in
+          let llt = if boxed_float then "ptr" else field_load_llty fty in
           let fgpa = frsh "fgpa" in let fgpb = frsh "fgpb" in
           let fva  = frsh "fva"  in let fvb  = frsh "fvb"  in
           e (Printf.sprintf "%s = getelementptr i8, ptr %%a, i64 %d" fgpa off);
@@ -566,6 +572,13 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
            | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) ->
              let c = frsh "c" in
              e (Printf.sprintf "%s = icmp eq i64 %s, %s" c fva fvb);
+             e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+           | Tir.TFloat when boxed_float ->
+             let da = frsh "da" in let db = frsh "db" in
+             e (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" da fva);
+             e (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" db fvb);
+             let c = frsh "c" in
+             e (Printf.sprintf "%s = fcmp oeq double %s, %s" c da db);
              e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
            | Tir.TFloat ->
              let c = frsh "c" in
@@ -585,12 +598,10 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
                 e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
                 e (Printf.sprintf "%s = zext i1 %s to i64" ok c))
            | _ ->
-             let pa = frsh "pa" in let pb = frsh "pb" in
-             e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pa fva);
-             e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pb fvb);
-             let c = frsh "c" in
-             e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
-             e (Printf.sprintf "%s = zext i1 %s to i64" ok c));
+             (* Generic (TVar) slot: compare by runtime shape, as the ADT
+                path does; pointer identity made `(k, v) == (k, v)` false
+                for a string or boxed value from two allocations. *)
+             e (Printf.sprintf "%s = call i64 @march_poly_eq(ptr %s, ptr %s)" ok fva fvb));
           let oki = frsh "oki" in
           e (Printf.sprintf "%s = icmp ne i64 %s, 0" oki ok);
           let nxt = if fi = nf - 1 then lbl_eq else cont_lbls.(fi + 1) in

@@ -1,0 +1,20 @@
+-- H2: check_sendable walks TArrow's argument and result types, not the
+-- closure's environment, so a message carrying a closure over a RingBuf
+-- passes. Type-checks today.
+mod Main do
+  actor Runner do
+    state { n : Int }
+    init { n: 0 }
+    on Run(f : Int -> Unit) do
+      f(state.n)
+      { n: state.n + 1 }
+    end
+  end
+  fn main() : Int do
+    let rb = RingBuf.make(4)
+    let s = spawn(Runner)
+    send(s, Run(fn x -> RingBuf.push(rb, x)))
+    RingBuf.push(rb, 0)
+    RingBuf.size(rb)
+  end
+end

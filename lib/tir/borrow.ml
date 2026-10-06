@@ -253,6 +253,31 @@ let extern_borrow_table : (string * bool list) list = [
   ("char_is_digit",        [true]);
   ("char_is_alphanumeric", [true]);
   ("char_is_whitespace",   [true]);
+  (* Hashes, MACs, signatures and base64, audited 2026-10-06: each C entry
+     (march_extras.c, march_nacl.c, march_runtime.c's iolist hash) copies or
+     reads its String/Bytes arguments and returns a fresh value; none stores,
+     returns or releases an argument.  Left owned, every call leaked its
+     input: Merkle.leaf/branch hash a fresh string per node, so the cluster
+     registry's root_hash leaked one string per entry and per branch on every
+     update, ~480 objects per session (specs/progress/2026-10-06-crypto-builtins-borrow.md). *)
+  ("iolist_hash_fnv1a",    [true]);
+  ("md5",                  [true]);
+  ("sha256",               [true]);
+  ("stdlib_sha256",        [true]);
+  ("sha512",               [true]);
+  ("stdlib_sha512",        [true]);
+  ("hmac_sha256",          [true; true]);
+  ("stdlib_hmac_sha256",   [true; true]);
+  ("hmac_sha256_bytes",    [true; true]);
+  ("pbkdf2_sha256",        [true; true; false; false]);
+  ("ed25519_seed_keypair", [true]);
+  ("ed25519_sign",         [true; true]);
+  ("ed25519_verify",       [true; true; true]);
+  ("x25519",               [true; true]);
+  ("base64_encode",        [true]);
+  ("stdlib_base64_encode", [true]);
+  ("base64_decode",        [true]);
+  ("stdlib_base64_decode", [true]);
   ("string_to_lowercase",  [true]);
   ("reload_request",       [true]);
   ("string_to_uppercase",  [true]);
@@ -476,12 +501,7 @@ let extern_owned_builtins : string list = [
     "actor_inspect_store";
     "panic_"; "unreachable_"; "todo_"; "print_stderr";
     "list_append"; "list_concat";
-    "iolist_hash_fnv1a"; "md5"; "sha256";
-    "stdlib_sha256"; "sha512"; "stdlib_sha512"; "hmac_sha256";
-    "stdlib_hmac_sha256"; "hmac_sha256_bytes"; "pbkdf2_sha256";
-    "ed25519_seed_keypair"; "ed25519_sign"; "ed25519_verify"; "x25519";
-    "base64_encode"; "stdlib_base64_encode"; "base64_decode";
-    "stdlib_base64_decode"; "bytes_to_u8_arr"; "u8_arr_to_bytes";
+    "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
     "logger_add_context"; "logger_add_field"; "spawn";
     "spawn_supervised"; "actor_call"; "actor_reply";

@@ -1,0 +1,54 @@
+-- Built with --hot-reload Main (see test/dune). A --hot-reload build has no
+-- static closures, so a capture-free lambda is a heap closure, and its apply
+-- fn must release the reference each call hands it (Perceus's case-3 drop,
+-- formerly REPL-only). Red before the fix: every leg leaked one 24-byte
+-- closure per iteration and printed `flat: false`.
+mod Main do
+  needs IO.Console
+
+  fn shows(xs : List(String), k : Int, acc : Int) : Int do
+    if k <= 0 do
+      acc
+    else
+      shows(xs, k - 1, acc + string_length(to_string(xs)))
+    end
+  end
+
+  fn maps(xs : List(Int), k : Int, acc : Int) : Int do
+    if k <= 0 do
+      acc
+    else
+      let ys = List.map(xs, fn x -> x + 1)
+      maps(xs, k - 1, acc + List.length(ys))
+    end
+  end
+
+  fn folds(xs : List(Int), k : Int, acc : Int) : Int do
+    if k <= 0 do
+      acc
+    else
+      folds(xs, k - 1, acc + List.fold_left(xs, 0, fn (a, x) -> a + x))
+    end
+  end
+
+  fn report(name : String, a0 : Int, a1 : Int) : Unit do
+    println(name ++ " flat: " ++ (if a1 - a0 < 100 do "true" else "false" end))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let xs = ["a", "b", "c"]
+    let ns = [1, 2, 3]
+    let a0 = live_allocs()
+    let _ = shows(xs, 10000, 0)
+    let a1 = live_allocs()
+    report("show of a List", a0, a1)
+    let b0 = live_allocs()
+    let _ = maps(ns, 10000, 0)
+    let b1 = live_allocs()
+    report("map with a capture-free lambda", b0, b1)
+    let c0 = live_allocs()
+    let _ = folds(ns, 10000, 0)
+    let c1 = live_allocs()
+    report("fold with a capture-free lambda", c0, c1)
+  end
+end

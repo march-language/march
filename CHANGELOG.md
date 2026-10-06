@@ -22,6 +22,13 @@ git log is authoritative for exact commits.
 - **Several native libraries per project.** forge.toml can declare `[[ffi]]`
   once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
   links all of them, in order. A single `[ffi]` table works as before.
+
+- **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
+  `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
+  line per post-TIR definition, sorted, straight from the CAS hashing that keys
+  the compilation cache. `scripts/determinism-oracle.sh` compiles the IR-oracle
+  corpus under a cold and a warm private `$HOME` from two cwds and fails on any
+  difference in the IR or these hashes; CI runs it as the `determinism` job.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
@@ -176,6 +183,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
+  install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
+  source needed no changes. The REPL's `notty` dependency (0.2.3 does not
+  compile on OCaml 5.4+) is now vendored from the community fork under
+  `vendor/notty/` until a fixed release is on opam, and the `js_of_ocaml < 6.4.0`
+  cap is lifted (6.4.1 compiles the browser bundle). Compiler speed is unchanged
+  within noise.
 - **Faster `--compile` once whole-program optimisation is done.** Two lookups
   that scanned every definition in the program (stdlib included) for each name
   reference, one in the CAS dependency hashing and one in the allocation-contract
@@ -231,6 +245,40 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
+  variable alias used to drop every fact about its value (`let b = a + 0`
+  kept them), so `take_pos(b)` was skipped even when `a` was a refined
+  parameter or a positive literal. It is now proved, and a violating value is
+  reported through the alias. Non-`Int` aliases still carry nothing.
+- **Tuples can be compared with `==` and `!=`.** `(1, ["x"]) == (1, ["x"])`
+  used to be rejected with "does not implement interface `Eq`". A tuple is now
+  `Eq` when every component is. Compiled code also compared a tuple's Float
+  component by address instead of by value, so `(1, 2.5) == (1, 2.5)` was
+  false in compiled code (for example inside `List.member`). Tuples are still
+  not ordered with `<`.
+
+- A `--hot-reload` build no longer leaks a small object each time it calls a
+  lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
+  a list, `Actor.inspect_state` of an actor with a list field). Ordinary
+  builds were not affected.
+- **The language server resolves dependencies the way `forge build` does.**
+  It used to put every cached version of a git dependency on its search path,
+  including each version's `test/` and `priv/` files, and it missed registry
+  and transitive dependencies. Editors then showed errors from files the build
+  never reads. It now uses the version `forge.lock` names, and only that
+  version's `lib/`.
+
+- **Compiled code no longer leaks records whose ownership differs between branches.**
+  A record released on one path of a `match` or `if` was leaked on the others. A record
+  passed to a function and then updated (`{ st with .. }`) was never released at all. A
+  record type named without its module inside another type was freed without its fields.
+  Cluster nodes hit all three on every session (registry entries, the node's whole old
+  state).
+- **`Crypto.sha256`, `sha512`, `md5`, the HMAC, signing and base64 builtins no longer leak
+  their argument.** Compiled code leaked every string or `Bytes` it hashed or encoded. The
+  cluster registry rehashes its Merkle tree on every update, so a node leaked one string
+  per registry entry per update. With these fixes a cluster session leaves about 160
+  objects behind instead of about 730.
 - **A locally bound generic lambda no longer leaks memory when it returns a
   Float.** `let keep = fn (p, x) -> p` called directly with Float arguments,
   as in `keep(1.0, x)`, leaked one boxed Float per call in compiled code. The

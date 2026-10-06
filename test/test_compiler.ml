@@ -4917,6 +4917,31 @@ let test_letfn_two_distinct_errors_both_report () =
   Alcotest.(check int) "distinct Bool/Int error still reported"
     1 (count_errors_matching ctx "expected `Bool` but got `Int`.")
 
+(* A tuple is Eq when every component is (2026-10-06): no impl can be written
+   for every arity, and both backends compare tuples component-wise. *)
+let test_tuple_eq_structural_accepts () =
+  let ctx = typecheck {|mod M do
+  needs IO.Console
+    fn main(_cap_console : Cap(IO.Console)) do
+      let a = (1, "x") == (1, "x")
+      let b = ((1, "s"), 2.5, true) != ((1, "s"), 2.0, false)
+      if a && b do println("y") else println("n") end
+    end
+  end|} in
+  Alcotest.(check bool) "tuple of Eq components accepted" false (has_errors ctx)
+
+(* ...and only then: a component without Eq still rejects the tuple. *)
+let test_tuple_eq_component_without_eq_rejects () =
+  let ctx = typecheck {|mod M do
+  needs IO.Console
+    type Hue = Rood | Bloo
+    fn main(_cap_console : Cap(IO.Console)) do
+      if (1, Rood) == (1, Bloo) do println("y") else println("n") end
+    end
+  end|} in
+  Alcotest.(check bool) "tuple with a non-Eq component rejected" true
+    (count_errors_matching ctx "`(Int, Hue)` does not implement interface `Eq`." >= 1)
+
 (* ── Finding 15: generic when-constraint re-checked at call sites ───────── *)
 
 (* An explicit `when Eq(a)` bound on an UNANNOTATED generic parameter must be
@@ -18343,6 +18368,8 @@ let compiler_suites =
       ( "generic_when_constraints", [
           Alcotest.test_case "finding 15: unsatisfied generic bound rejects"  `Quick test_generic_when_constraint_unsatisfied_rejects;
           Alcotest.test_case "finding 15: satisfied generic bound accepts"    `Quick test_generic_when_constraint_satisfied_accepts;
+          Alcotest.test_case "tuple of Eq components is Eq"                   `Quick test_tuple_eq_structural_accepts;
+          Alcotest.test_case "tuple with a non-Eq component is not Eq"        `Quick test_tuple_eq_component_without_eq_rejects;
           Alcotest.test_case "finding 15: unconstrained generic accepts"      `Quick test_generic_no_constraint_accepts;
         ] );
       ( "test_body_constraints", [

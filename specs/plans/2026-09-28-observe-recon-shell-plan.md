@@ -478,10 +478,12 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
    median round trip. 2026-10-05: the same patch **without** a `main`, which
    is what a fragment is, takes 82 s (C18). The local REPL's warm
    incremental pipeline, per input: ~10 ms typecheck through opt, 2–3 ms IR
-   emit, ~130 ms clang, ~190 ms `dlopen` (`MARCH_JIT_PROFILE=1`). First task
-   of R5: re-measure the REPL numbers on the conduit test app (a mid-size
-   project) and the node-side `dlopen` of a ~10-function fragment, since
-   those set R6's latency budget.
+   emit, ~130 ms clang, ~190 ms `dlopen` (`MARCH_JIT_PROFILE=1`). **Done 2026-10-06**
+   ([progress](../progress/2026-10-06-observe-r5-1-shell-latency.md)): a warm
+   input's compile + load is ~37 ms p50 on Linux (clang 27 ms, `dlopen`
+   0.1 ms) and ~255 ms on macOS, where `dlopen` of every new binary file
+   costs ~150 ms. R6's gate runs against a Linux node; macOS numbers are
+   recorded beside it.
 2. **Body hashing** (C14): `CAS_PUT` computes BLAKE3 of the received bytes and
    stores the digest beside the artifact. New signed verbs (EVAL) sign
    `so_blake3:<hex>`, and the server compares it with the stored digest before
@@ -593,10 +595,13 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
 **Why.** The shell is only used if it answers about as fast as a local
 REPL. Design §6.9 is the user-facing spec; this item builds it.
 
-**Target (the gate).** On a warm session against a local socket, an
-expression over existing functions answers in **p50 ≤ 300 ms, p95 ≤ 600 ms**,
-excluding the expression's own run time, on the conduit test app at load
-< 10. Over ssh: one network round trip more, nothing else. Attaching may take
+**Target (the gate).** On a warm session against a local socket to a
+**Linux** node, an expression over existing functions answers in **p50 ≤
+300 ms, p95 ≤ 600 ms**, excluding the expression's own run time, at load
+< 10. R5.1 measured ~37 ms p50 for compile + load on Linux, so most of the
+budget is for the round trip and the node's work. A macOS node pays ~150 ms
+per input in `dlopen` (the OS checks every new binary file); its numbers are
+recorded, not gated. Over ssh: one network round trip more, nothing else. Attaching may take
 a few seconds and says so.
 
 **What.**

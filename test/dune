@@ -1704,6 +1704,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; uniquely-held set panicked "non-exhaustive pattern match" compiled while the
 ; interpreter printed the size.  Needs the stdlib (SortedSet), hence
 ; (source_tree ../stdlib).
+; Tuple `==`: Eq when every component is; compiled compares a tuple's boxed
+; Float slot by value (it compared box pointers before).
+(rule
+ (targets native_tuple_eq native_tuple_eq.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/tuple_eq.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tuple_eq native/tuple_eq.march)
+   (with-stdout-to native_tuple_eq.out (system "./native_tuple_eq")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_eq.expected native_tuple_eq.out)))
+
 (rule
  (targets native_aggregate_param_field_alias native_aggregate_param_field_alias.out)
  (deps (file %{exe:../bin/main.exe})
@@ -2783,6 +2800,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_message_record_leak_probe.expected native_actor_message_record_leak_probe.out)))
+
+; ── Leak guard: a --hot-reload build has no static closures, so a
+; capture-free lambda is a heap closure that its apply fn must release
+; (Perceus.perceus ~heap_lambdas). Red before the fix: all three legs read
+; `flat: false` (one 24-byte closure per iteration).
+; specs/progress/2026-10-06-hot-reload-capture-free-lambda-leak.md
+(rule
+ (targets native_hot_reload_lambda_leak_probe native_hot_reload_lambda_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/hot_reload_lambda_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 --hot-reload Main -o native_hot_reload_lambda_leak_probe
+        native/hot_reload_lambda_leak_probe.march)
+   (with-stdout-to native_hot_reload_lambda_leak_probe.out
+        (system "./native_hot_reload_lambda_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/hot_reload_lambda_leak_probe.expected native_hot_reload_lambda_leak_probe.out)))
 
 ; ── The observe socket (runtime/march_observe.c), R0 of
 ; specs/plans/2026-09-28-observe-recon-shell-plan.md. test_observe drives the
@@ -10423,6 +10462,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nclones boxcalls ngeneral nchecks < native_arr_map2_inline_llvm_check.out; \
     test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 -a \"$ngeneral\" -eq 1 -a \"$nchecks\" -ge 1 || { echo \"expected 2 unboxed \\$mapfast\\$ clones (zero boxing calls), 1 general non-inlined native_int_arr_map2 call (reused-closure fallback), >=1 length-check call (found clones=$nclones boxcalls=$boxcalls general=$ngeneral checks=$nchecks)\" >&2; exit 1; }")))
 
+;  Direct (Known_call) call to a let-generalized lambda returning a Float
+; (specs/progress/2026-10-02-known-call-generic-lambda-float-leak.md). The
+; .expected file IS the interpreter's output, including every "flat: true".
+(rule
+ (targets known_call_generic_lambda_float known_call_generic_lambda_float.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/known_call_generic_lambda_float.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o known_call_generic_lambda_float
+        native/known_call_generic_lambda_float.march)
+   (with-stdout-to known_call_generic_lambda_float.out
+        (system "./known_call_generic_lambda_float")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/known_call_generic_lambda_float.expected known_call_generic_lambda_float.out)))
+
 ;  Inline refcount fast path (lib/tir/llvm_rc_inline.ml,
 ; specs/plans/2026-09-30-inline-rc-fast-path.md). Correctness and no leak: the
 ; .expected file IS the interpreter's output, including its "flat: true" line.
@@ -12015,6 +12074,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/dropped_closure_captures.expected native_dropped_closure_captures.out)))
+
+; ── Records released on every path; nominal records and hashed strings deep
+; (2026-10-06). Four per-session leaks of the cluster node in their minimal
+; shapes; RED before the fixes on legs 1, 2, 3 and 4 respectively.
+(rule
+ (targets native_record_ownership_drops native_record_ownership_drops.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_ownership_drops.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_record_ownership_drops
+        native/record_ownership_drops.march)
+   (with-stdout-to native_record_ownership_drops.out
+        (system "./native_record_ownership_drops")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_ownership_drops.expected native_record_ownership_drops.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),
