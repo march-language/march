@@ -3619,7 +3619,7 @@ let test_lexer_keyword_dbg () =
 
 let test_parse_dbg () =
   let lexbuf = Lexing.from_string "dbg()" in
-  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let e = March_parser.Parse.expr_of_lexbuf lexbuf in
   Alcotest.(check bool) "parses dbg() as EDbg" true
     (match e with March_ast.Ast.EDbg _ -> true | _ -> false)
 
@@ -3679,7 +3679,7 @@ let test_trace_recording () =
   March_eval.Eval.debug_ctx := Some ctx;
   let src = "1 + 2" in
   let lexbuf = Lexing.from_string src in
-  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let e = March_parser.Parse.expr_of_lexbuf lexbuf in
   let e' = March_desugar.Desugar.desugar_expr e in
   let _v = March_eval.Eval.eval_expr March_eval.Eval.base_env e' in
   let frames_recorded = ctx.March_eval.Eval.dc_trace.March_eval.Eval.rb_size in
@@ -3691,7 +3691,7 @@ let test_trace_navigation () =
   March_debug.Debug.install ctx;
   let src = "1 + 2 + 3" in
   let lexbuf = Lexing.from_string src in
-  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let e = March_parser.Parse.expr_of_lexbuf lexbuf in
   let e' = March_desugar.Desugar.desugar_expr e in
   ignore (March_eval.Eval.eval_expr March_eval.Eval.base_env e');
   let n = March_debug.Debug.frame_count ctx in
@@ -3723,7 +3723,7 @@ mod Test do
 end
 |} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   let m' = March_desugar.Desugar.desugar_module m in
   (try March_eval.Eval.run_module m'
    with
@@ -3756,7 +3756,7 @@ mod DebugTest do
 end
 |} in
   let lexbuf = Lexing.from_string src in
-  let m  = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m  = March_parser.Parse.module_of_lexbuf lexbuf in
   let m' = March_desugar.Desugar.desugar_module m in
   (try March_eval.Eval.run_module m'
    with
@@ -3781,7 +3781,7 @@ let test_trace_overflow () =
   March_debug.Debug.install ctx;
   let src = "1 + 2 + 3 + 4" in
   let lexbuf = Lexing.from_string src in
-  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let e = March_parser.Parse.expr_of_lexbuf lexbuf in
   let e' = March_desugar.Desugar.desugar_expr e in
   ignore (March_eval.Eval.eval_expr March_eval.Eval.base_env e');
   March_debug.Debug.uninstall ();

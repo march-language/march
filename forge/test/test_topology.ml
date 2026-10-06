@@ -125,7 +125,7 @@ let with_project ?(base = base_toml) ?(prod = prod_toml) f =
 let index_of_shop () =
   let idx = Topology.empty_index () in
   let lexbuf = Lexing.from_string shop_march in
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   Topology.index_module idx m;
   idx
 

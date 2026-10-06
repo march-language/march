@@ -243,6 +243,7 @@ bin/main.ml                 compiler entry point (parse→desugar→typecheck→
 lib/ast/ast.ml              AST types (span, expr, pattern, decl, …)
 lib/lexer/lexer.mll         ocamllex lexer
 lib/parser/parser.mly       menhir parser
+lib/parser/parse.ml         the ONE parse entry point (owns the token filter + parse-error → diagnostic)
 lib/desugar/desugar.ml      pipe desugar, multi-head fn → single EMatch clause
                              (+desugar_derive: derive/satisfy expansion + span uniquification)
 lib/typecheck/                bidirectional HM type inference: typecheck (inference core),
@@ -341,7 +342,7 @@ fn ->
 
 ## Pipeline
 
-1. Parse (`March_parser.Parser.module_`)
+1. Parse (`March_parser.Parse.module_`: lexer → token filter → menhir, syntax errors returned as diagnostics)
 2. Desugar (`March_desugar.Desugar.desugar_module`)
 3. Typecheck (`March_typecheck.Typecheck.check_module`): prints diagnostics, exits 1 on errors
 4. Eval (`March_eval.Eval.run_module`): calls `main()` if present

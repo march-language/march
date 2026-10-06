@@ -353,7 +353,7 @@ let test_letq_in_lambda () =
 let test_parse_unary_minus () =
   (* -x  parses as  negate(x) *)
   let lexbuf = Lexing.from_string "-x" in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.EApp (March_ast.Ast.EVar n, [_], _) ->
     Alcotest.(check string) "unary minus becomes negate" "negate" n.txt
@@ -387,7 +387,7 @@ let test_parse_negative_lit_pattern () =
 let test_parse_list_literal () =
   (* [1, 2, 3]  →  Cons(1, Cons(2, Cons(3, Nil))) *)
   let lexbuf = Lexing.from_string "[1, 2, 3]" in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ECon (n, [_; _], _) when n.txt = "Cons" -> ()
   | _ -> Alcotest.fail "expected Cons(1, Cons(...))"
@@ -395,7 +395,7 @@ let test_parse_list_literal () =
 let test_parse_zero_arg_lambda_sugar () =
   (* `fn -> expr` should parse identically to `fn () -> expr` *)
   let lexbuf = Lexing.from_string "fn -> 42" in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELam ([], March_ast.Ast.ELit (March_ast.Ast.LitInt 42, _), _) -> ()
   | _ -> Alcotest.fail "expected ELam([], ELit(42))"
@@ -1265,7 +1265,7 @@ let test_parse_use_names () =
 (* String interpolation *)
 let parse_expr_str src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  March_parser.Parse.expr_of_lexbuf lexbuf
 
 (* Interpolation emits ONE shape: a `++` chain, at every length.  desugar then
    collapses chains of 3+ into string_concat3, so the parser does not need a
@@ -1429,7 +1429,7 @@ let test_repl_inspect_type_and_value () =
   let env = ref March_eval.Eval.base_env in
   let src = "42 + 1" in
   let lexbuf = Lexing.from_string src in
-  match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+  match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in
@@ -2217,16 +2217,11 @@ let test_multi_error_recovery_collects () =
     @@@ garbage
     fn ok2() do 1 end
   end|} in
-  (* May raise ParseError (lexer error) or succeed with errors in buffer.
-     Either way, at least one error is reported. *)
+  (* The first bad token aborts the parse with an exception (there is no
+     recovery buffer: a parse either returns an AST or raises). *)
   let has_error =
-    (try
-       ignore (parse_module src);
-       let errs = March_parser.Parse_errors.take_parse_errors () in
-       errs <> []
-     with _ ->
-       ignore (March_parser.Parse_errors.take_parse_errors ());
-       true)
+    (try ignore (parse_module src); false
+     with _ -> true)
   in
   Alcotest.(check bool) "multi-error recovery reports at least one error" true has_error
 
@@ -2236,7 +2231,7 @@ let test_type_map_populated () =
   end|} in
   let m = March_desugar.Desugar.desugar_module
     (let lexbuf = Lexing.from_string src in
-     March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf) in
+     March_parser.Parse.module_of_lexbuf lexbuf) in
   let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
   Alcotest.(check bool) "type map is non-empty" true
     (Hashtbl.length type_map > 0)
@@ -2247,7 +2242,7 @@ let test_type_map_fn_recorded () =
   end|} in
   let m = March_desugar.Desugar.desugar_module
     (let lexbuf = Lexing.from_string src in
-     March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf) in
+     March_parser.Parse.module_of_lexbuf lexbuf) in
   let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
   Alcotest.(check bool) "type map has many entries" true
     (Hashtbl.length type_map >= 3)
@@ -5186,7 +5181,7 @@ let test_main_wrong_arity_rejected () =
     fn main(x : Int) : () do () end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let ast = March_parser.Parse.module_of_lexbuf lexbuf in
   let errors = March_errors.Errors.create () in
   ignore (March_desugar.Desugar.desugar_module ~errors ast);
   Alcotest.(check bool) "wrong-arity main rejected" true
@@ -5530,7 +5525,7 @@ end|} in
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = file };
   let m = March_desugar.Desugar.desugar_module
-      (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf) in
+      (March_parser.Parse.module_of_lexbuf lexbuf) in
   let open March_coverage.Coverage in
   reset ();
   coverage_enabled := true;

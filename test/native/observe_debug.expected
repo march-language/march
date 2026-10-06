@@ -1,0 +1,17 @@
+ok: HELP lists STATE in the debug tier
+ok: a request signed by another key: bad_signature
+ok: a garbage signature: bad_signature
+ok: a request with its pid changed after signing: bad_signature
+ok: no policy entry: policy
+ok: a valid STATE: the actor's rendered state
+ok: the same request again: replay
+ok: an expired request: expired
+ok: a request valid for 2 minutes: not_after_too_far
+ok: a short nonce: bad_nonce
+ok: an unknown argument: bad_args
+ok: STATE of a pid that is not running: dead
+ok: CRASHES_FULL carries the crash message
+ok: CRASHES (observe tier) still does not
+ok: CRASHES_FULL once the policy drops it: policy
+ok: every attempt is audited, in order
+ok: audit lines name the node's key

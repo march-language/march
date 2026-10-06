@@ -142,6 +142,42 @@ let test_hosts_of () =
   Alcotest.(check bool) "no host at all is an error" true
     (match Cmd_observe.hosts_of (hr []) ~env:"" with Error _ -> true | Ok _ -> false)
 
+(* The signed debug request: what march_observe_debug.c verifies is the line
+   without its signature word, signed by the deploy key. *)
+let test_signed_request () =
+  let pk, sk = March_ed25519.Ed25519.keygen () in
+  let line = Observe_client.signed_request ~sk ~nonce:"00112233445566778899aabbccddeeff"
+      ~now_ms:1_000_000 "STATE" [ "pid:7"; "timeout_ms:500" ] in
+  match String.split_on_char ' ' line with
+  | verb :: sig_b64 :: rest ->
+    Alcotest.(check string) "verb first" "STATE" verb;
+    Alcotest.(check (list string)) "fields after the signature"
+      [ "nonce:00112233445566778899aabbccddeeff"; "not_after_ms:1030000"; "pid:7"; "timeout_ms:500" ] rest;
+    let signed = String.concat " " (verb :: rest) in
+    let raw = Cmd_hot_reload.b64_decode_raw sig_b64 in
+    let ok = match raw with
+      | Some b -> March_ed25519.Ed25519.verify (Bytes.of_string signed) (Bytes.sub b 0 64) pk
+      | None -> false in
+    Alcotest.(check bool) "the signature verifies over the line without it" true ok;
+    let bad = match raw with
+      | Some b -> March_ed25519.Ed25519.verify (Bytes.of_string (signed ^ "x")) (Bytes.sub b 0 64) pk
+      | None -> true in
+    Alcotest.(check bool) "and over nothing else" false bad
+  | _ -> Alcotest.fail line
+
+let test_explain_debug_error () =
+  let has sub s =
+    let n = String.length s and m = String.length sub in
+    let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in go 0 in
+  Alcotest.(check bool) "expired names the clock" true
+    (has "ahead" (Observe_client.explain_debug_error "observe: expired"));
+  Alcotest.(check bool) "too far names the clock" true
+    (has "behind" (Observe_client.explain_debug_error "observe: not_after_too_far"));
+  Alcotest.(check bool) "policy names the file" true
+    (has "MARCH_DEBUG_POLICY" (Observe_client.explain_debug_error "n1: observe: policy"));
+  Alcotest.(check string) "anything else unchanged" "observe: busy"
+    (Observe_client.explain_debug_error "observe: busy")
+
 let () =
   Random.self_init ();
   Alcotest.run "observe_client" [
@@ -155,6 +191,8 @@ let () =
       Alcotest.test_case "no socket" `Quick test_query_no_socket;
       Alcotest.test_case "multi-line request refused" `Quick test_query_rejects_multiline;
       Alcotest.test_case "query_socket uses the path as given" `Quick test_query_socket;
+      Alcotest.test_case "signed debug request" `Quick test_signed_request;
+      Alcotest.test_case "debug refusals explained" `Quick test_explain_debug_error;
     ];
     "forge observe", [
       Alcotest.test_case "request line" `Quick test_request_of;

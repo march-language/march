@@ -19,8 +19,7 @@ let parse_source ~filename ~src : Ast.decl list option =
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   try
     let m =
-      March_parser.Parser.module_
-        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+      March_parser.Parse.module_of_lexbuf lexbuf
     in
     let m = March_desugar.Desugar.desugar_module m in
     Some m.Ast.mod_decls

@@ -97,6 +97,14 @@ for each variable reference in the whole program (stdlib included), which is
 O(references × definitions). Blake3 and serialisation barely register. A post-TIR cache **hit**
 pays this cost too: most of topology's 8.0 s comment edit is this scan.
 
+**Update (2026-10-05, after the fix).** The window was two scans, not one. With stamps on it
+(`alloc-contract`, `cas-hash`), the `String.rindex`/`find_dollar` frames turned out to be
+`Alloc_contract.decl_of` re-stripping a name once per decl, at ~3.3 s, beside ~4.4 s of
+`Scc.refs_in_expr` (both measured under load). Both are fixed. The window is now ~0.6 s, and the topology
+comment edit takes 4.3 s and the leaf edit 18.4 s (wall, the same loaded box: before, 11.2 s and
+26.0 s). See `specs/progress/2026-10-05-post-opt-name-scans-quadratic.md`. Re-run B0 on a quiet
+machine before reading the gate off these.
+
 ## Reading against §3, criterion 1
 
 > B0 shows a warm leaf-edit compile of `examples/topology_app` at `--opt 2` over ~10 s with the

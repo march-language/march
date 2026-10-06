@@ -680,8 +680,7 @@ let test_formatting_edit_equals_march_fmt () =
     let expected =
       let lexbuf = Lexing.from_string fixture_text in
       let m =
-        March_parser.Parser.module_
-          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+        March_parser.Parse.module_of_lexbuf lexbuf
       in
       March_format.Format.format_module ~src:fixture_text m
     in
