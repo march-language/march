@@ -2375,6 +2375,11 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Data-race freedom, written down.** `actors.md` says what a message may
+  carry (a linear value moves, everything else is immutable or copy-on-write),
+  `linear-types.md` has a `RingBuf` section and the module-level `let` rule,
+  `memory-model.md` states the acquire-ordering guarantee behind every in-place
+  write, and `parallelism.md` says which captured values parallel code may touch.
 - **Observing a running node** (`docs/observe.md`), an operator's guide to the
   observe socket and `forge observe`/`top`/`status`/`diagnose`: turning the
   socket on and what it costs, the protocol and error codes, every verb with a

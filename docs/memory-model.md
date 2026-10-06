@@ -387,7 +387,21 @@ the disjointness proof.
 
 This is exactly the property the `parallel` benchmark relies on: sibling subtrees
 have independent RC chains, so in-place reuse stays correct on both sides with no
-locking. The same idea scales to actor message passing; see the
+locking.
+
+One ordering detail makes the "RC == 1, so write in place" step sound when the
+other reference *was* held by another thread a moment ago. Dropping a reference
+is an acquire-release decrement (`march_decrc`), which releases that thread's
+last reads of the object. The sole-ownership test on the writer's side is an
+**acquire** load (`march_rc_is_unique` in the C runtime, `load atomic …
+acquire` in emitted code), so the in-place write that follows is ordered after
+those reads. With a relaxed load the pair would be a data race under the C11
+model, invisible on x86 and covered by a control dependency on arm64 in
+practice, but a race all the same; it is the same reason Rust's `Arc::get_mut`
+uses `Acquire`. The cost is nothing on x86-64 (an acquire load is a plain
+`mov`) and one `ldar` instead of `ldr` on arm64. Native arrays, which are
+copy-on-write values that may be sent and captured by tasks, lean on this
+directly; FBIP reuse of any value has the same shape. The same idea scales to actor message passing; see the
 [parallelism](/docs/parallel-collections/) guide, and
 [linear types]({{ site.baseurl }}/docs/linear-types/) for the ownership-transfer
 ("zero-copy send") case where a `linear` value is *guaranteed* RC == 1.

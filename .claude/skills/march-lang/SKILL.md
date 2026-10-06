@@ -676,7 +676,7 @@ Functions always in scope without `use`:
 
 **CRDT** / **VectorClock** / **Merkle** — conflict-free replicated data types, causal clocks, Merkle trees for anti-entropy
 
-**ConsistentHash** / **PeerRegistry** / **RingBuf** — consistent hashing, peer tracking, ring buffers
+**ConsistentHash** / **PeerRegistry** / **RingBuf** — consistent hashing, peer tracking, ring buffers (`RingBuf` is linear: every operation consumes the buffer and hands it back, readers as `(answer, rb)`; end it with `to_list` or `drop`)
 
 ### Additional Collections
 

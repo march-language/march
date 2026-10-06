@@ -124,18 +124,25 @@ send(counter, Reset())
 
 The message is the constructor applied to its arguments. The actor handles it according to its `on` clause.
 
-**A message payload may not carry a mutable-buffer type** (`RingBuf`, `NativeIntArr`,
-`NativeFloatArr`, `NativeF32Arr`, `NativeI32Arr`, `NativeU8Arr`; the latter five are
-`NativeArray`'s real backing types, a stdlib function namespace rather than a type of
-its own, and any other type registered in `non_sendable_types`,
-`lib/typecheck/typecheck.ml`); these types are
-single-actor-owned by design, so sharing one across an actor boundary would let two
-actors alias the same mutable state. The check runs once, at the moment the message
-constructor is *applied* (`Increment(rb)`), not at whichever builtin later moves the
-resulting value, so it covers `send`, `send_checked`, `Actor.cast`, `Actor.call`, and
-storing the message in a variable before sending it, uniformly, with one rule (fixed
-2026-08-07; see the `ci_is_actor_msg` field in `typecheck.ml`'s `ctor_info` for how a
-message constructor is distinguished from an ordinary one).
+**A linear value moves on send, and everything else is immutable or copy-on-write**,
+so there is nothing a message may not carry. A `RingBuf` is `always_linear`: putting
+one in a message is its one consuming use, the sender cannot touch it afterwards, and
+the receiver is its sole owner (the same for `spawn(Recent, rb)`). A native array
+(`NativeIntArr` and the other `NativeArray` backing types) is a copy-on-write value:
+the first write to a shared array copies it, so the sender and the actor each see
+only their own writes. Ordinary data is immutable. Until 2026-10-06 these six types
+sat in a `non_sendable_types` denylist that rejected them in message payloads; that
+list is empty now and stays in `lib/typecheck/typecheck_exhaustive.ml` only as the
+enforcement point for the rule in `memory-model.md`: a builtin type that writes
+memory another reference could observe must be linear or copy-on-write before it may
+exist at all. (The check still runs at the moment a message constructor is *applied*,
+for any future entry; see the `ci_is_actor_msg` field in `typecheck.ml`'s
+`ctor_info`.)
+
+```march
+let rb = RingBuf.make(8)
+send(worker, Take(rb))     -- consumes rb; the worker now owns the buffer
+```
 
 **Message names share one flat global constructor namespace.** A handler `on Msg(…)`
 registers `Msg` as an ordinary constructor; there is no per-actor message namespace,
