@@ -12054,6 +12054,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/erased_option_read.expected native_erased_option_read.out)))
+
+; ── A local type with a stdlib type's short name (2026-10-06): both kinds of
+; value dropped deep. RED before: SIGSEGV dropping the Msgpack.Value.
+(rule
+ (targets native_local_colliding_type native_local_colliding_type.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/local_colliding_type.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_local_colliding_type
+        native/local_colliding_type.march)
+   (with-stdout-to native_local_colliding_type.out
+        (system "./native_local_colliding_type")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/local_colliding_type.expected native_local_colliding_type.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),

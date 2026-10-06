@@ -235,6 +235,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A program that declares a type with a stdlib type's name (`Value`, `State`, `Event`,
+  `Error`, ...) no longer crashes when compiled.** Dropping a value of the stdlib type
+  (a `Msgpack.Value`, say) segfaulted, because the drop only knew the program's own type.
+
 - **Reading a record field whose type is never pinned down (`record_get(r, "y")` printed
   or shown) no longer double-frees or leaks in compiled code.** The result was released
   once too often, a use-after-free that only showed under ASAN. Showing it leaked one

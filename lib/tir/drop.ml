@@ -382,6 +382,17 @@ let droppable_ctors (env : env) (ty : Tir.ty)
     in
     if concrete_niche then None else
     (match Kind.repr_of env.k_table ty with
+     (* A short name several modules declare names ALL of their values, so its
+        drop must take every candidate's constructors, even when one candidate
+        answers the exact lookup: the entry module's own types are registered
+        under the bare name, so a user [type Value] made [Value] resolve to it
+        alone, and a dropped [Msgpack.Value] reached the drop's [unreachable]
+        default (SIGSEGV, compiled only;
+        specs/progress/2026-10-06-local-type-named-like-stdlib-value.md).  When
+        the union is refused the drop stays shallow: a leak, not a crash. *)
+     | Kind.Boxed when not (String.contains name '.')
+                       && Hashtbl.mem env.collision_set name ->
+       colliding_union env name ty_args
      | Kind.Boxed ->
        (match (match Kind.find_variant env.k_table name with
                | Some _ as found -> found
