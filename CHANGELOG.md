@@ -235,6 +235,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
+  variable alias used to drop every fact about its value (`let b = a + 0`
+  kept them), so `take_pos(b)` was skipped even when `a` was a refined
+  parameter or a positive literal. It is now proved, and a violating value is
+  reported through the alias. Non-`Int` aliases still carry nothing.
 - **The language server resolves dependencies the way `forge build` does.**
   It used to put every cached version of a git dependency on its search path,
   including each version's `test/` and `priv/` files, and it missed registry
