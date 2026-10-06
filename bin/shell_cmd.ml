@@ -169,9 +169,13 @@ type session = {
   timeout_ms : int;
   mutable n : int;
   mutable bound : string list;  (* `let` names, newest first *)
+  mutable failed : bool;        (* some input failed (exit 1 with --shell-inputs) *)
 }
 
 exception Session_over of string
+
+(* The current input failed (refused, panicked, timed out, did not compile). *)
+let last_failed = ref false
 
 let nonce_n = ref 0
 let fresh_nonce () =
@@ -213,6 +217,7 @@ let parse_module text =
   | Error e -> Error e
 
 let report_error e =
+  last_failed := true;
   Printf.printf "error: %s\n%!"
     (match e with
      | March_jit.Repl_jit.Typecheck_failed m -> m
@@ -223,6 +228,7 @@ let report_error e =
 let compile s ?store_as text =
   match parse_module text with
   | Error e ->
+    last_failed := true;
     List.iter (fun (d : March_errors.Errors.diagnostic) -> Printf.printf "error: %s\n%!" d.message) e; None
   | Ok m ->
     (try
@@ -235,6 +241,7 @@ let compile s ?store_as text =
 let print_reply ~show_result r =
   let out = match field r "out" with Some o -> b64_decode o | None -> "" in
   if out <> "" then print_string out;
+  last_failed := not (starts_with r "OK ");
   match words r with
   | "OK" :: v :: _ -> if show_result then print_endline (b64_decode v); true
   | "PANIC" :: m :: _ -> Printf.printf "** panic: %s\n%!" (b64_decode m); false
@@ -425,7 +432,8 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
   March_jit.Repl_jit.shell_set_slot_base jit lo;
   March_jit.Repl_jit.shell_prepare jit ~program ~type_map;
   let s = { conn; epoch; sk; jit; tc_env; program_decls = program.Ast.mod_decls;
-            program_type_map = type_map; limit = default_limit; timeout_ms; n = 0; bound = [] } in
+            program_type_map = type_map; limit = default_limit; timeout_ms; n = 0; bound = [];
+            failed = false } in
   let interactive = inputs = None && Unix.isatty Unix.stdin in
   let lines = match inputs with
     | Some text -> ref (String.split_on_char '\n' text)
@@ -442,11 +450,17 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
     try
       let rec loop () =
         match next_line () with
-        | None -> 0
-        | Some l -> (try handle s l with Unix.Unix_error (e, f, _) ->
-            raise (Session_over (Printf.sprintf "%s: %s" f (Unix.error_message e)))); loop ()
+        | None -> ()
+        | Some l ->
+          last_failed := false;
+          (try handle s l with Unix.Unix_error (e, f, _) ->
+             raise (Session_over (Printf.sprintf "%s: %s" f (Unix.error_message e))));
+          if !last_failed then s.failed <- true;
+          loop ()
       in
-      loop ()
+      loop ();
+      (* Scripted (--shell-inputs, forge rpc): fail when any input did. *)
+      if inputs <> None && s.failed then 1 else 0
     with Session_over "" -> 0
        | Session_over m -> print_endline m; 2
   in

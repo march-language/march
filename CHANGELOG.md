@@ -19,10 +19,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
-- **A remote shell on a running node: `march --shell`.** Against a node built
-  with `--hot-reload --signing-pubkey`, `march --shell <reload socket>.shell
-  app.march` typechecks the app once, then compiles each input into a small
-  signed library that the node loads and runs as a task. It prints the result
+- **A remote shell on a running node: `forge shell` and `forge rpc`.**
+  Against a node built with `--hot-reload --signing-pubkey`, `forge shell`
+  (or `march --shell <reload socket>.shell app.march`) typechecks the
+  project once. It then compiles each input into a small signed library that
+  the node loads and runs as a task. `forge rpc 'expr'` runs one input and
+  exits 1 if it did not run. It prints the result
   and anything the input printed. `let` bindings persist across inputs; a
   trailing `limit: N` shortens long lists. Capabilities are pre-bound
   (`console`, `clock`, `intro`, `debug`), and the node allows only those in

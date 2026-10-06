@@ -106,3 +106,16 @@ reaches. Plus the node's ~150 ms first-`dlopen` of each new file on macOS
   inspecting existing actors works.
 - **Latency:** clang per fragment; caching emitted support functions per
   session is the obvious lever.
+
+## forge shell / forge rpc
+
+`forge/lib/cmd_shell.ml` with `forge shell [--socket P | --env E]
+[--timeout-ms N]` and `forge rpc ... 'expr'`. It finds the entry and
+`MARCH_LIB_PATH` as `forge build` does (`Project.entry`,
+`Cmd_build.lib_path_env`), opens an ssh tunnel to `<reload socket>.shell` for
+a remote host, and runs `march --shell` (with `--shell-inputs` for rpc).
+`march --shell` exits 1 when any scripted input failed, so `forge rpc` does
+too. Checked by hand against a live node: `forge rpc --socket S '1 + 41'`
+prints `42` and exits 0; `'Actor.list(intro)'` prints `[Pid(0)]`; `'panic("x")'`
+prints `** panic: x` and exits 1. Several matching hosts are refused with a
+pointer to `--env` (no fan-out yet, R11). Documented in `docs/observe.md`.
