@@ -244,8 +244,18 @@ two_node_sweep() {
   # --list and the sweep would quietly cover zero scenarios.
   list=$("$root/scripts/two-node.sh" --list "${SANITIZE_TWO_NODE_SHARD:-1/1}") \
     || { echo "ERROR: scripts/two-node.sh --list failed" >&2; exit 2; }
+  # Compile every node up front, TWO_NODE_JOBS at a time, so the serial loop
+  # below only runs scenarios. Compiling is most of a scenario's time, and the
+  # parallel part ends before any scenario's deadline starts. A node that
+  # fails here is compiled again by its scenario, which reports the error.
+  # MARCH_SANITIZE=1 is part of the prebuilt stamp, so these are ASan builds.
+  # $list unquoted: one word per scenario.
+  # shellcheck disable=SC2086
+  MARCH_BIN="$bin" MARCH_SANITIZE=1 \
+    "$root/scripts/two-node.sh" --precompile "$work/two-node-prebuilt" $list
   for s in $list; do
     MARCH_BIN="$bin" MARCH_SANITIZE=1 TWO_NODE_TIMEOUT="${TWO_NODE_ASAN_TIMEOUT:-240}" \
+    TWO_NODE_PREBUILT="$work/two-node-prebuilt" \
       "$root/scripts/two-node.sh" "$s" >"$work/two-node-$s.log" 2>&1; rc=$?
     if [ $rc -eq 3 ]; then
       echo "  [two-node/$s] SKIP (needs root)"; skip=$((skip+1))
