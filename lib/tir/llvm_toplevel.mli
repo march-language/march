@@ -47,6 +47,11 @@ val attach_call_dbg : string -> string
 (** Text pass: give every call inside a `define … !dbg !N` body the location
     [!N+1] (the function's own line).  Exposed for tests. *)
 
+(** Sanitizer builds: emit the checks that need compiled-code cooperation
+    (the TRMC hole fill's null assertion). Set by bin/main.ml from the
+    sanitize predicate. *)
+val rc_checks : bool ref
+
 val is_wasm_target : target_config -> bool
 val is_wasm32 : target_config -> bool
 external get_native_triple : unit -> string = "march_tir_native_triple"

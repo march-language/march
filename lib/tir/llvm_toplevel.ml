@@ -213,6 +213,9 @@ let attach_call_dbg (ir : string) : string =
   if String.length ir > 0 && ir.[String.length ir - 1] = '\n'
   then String.sub s 0 (String.length s - 1) else s
 
+(** See [Llvm_builtins.rc_checks] (the preamble declares the check). *)
+let rc_checks = Llvm_builtins.rc_checks
+
 let is_wasm_target = function
   | Native | LinuxGnu _ | Js -> false
   | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown -> true

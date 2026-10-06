@@ -276,6 +276,8 @@ native_js_self_tail_call_rc_drop: coverage audit (user + stdlib): 123 enforced, 
 native_js_self_tail_call_rc_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_known_call_generic_lambda_float: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_known_call_generic_lambda_float: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_lazy_niche: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_lazy_niche: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_let_shadow_rebind: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -362,6 +364,8 @@ native_native_float_box_abi_leak_probe: coverage audit (user + stdlib): 123 enfo
 native_native_float_box_abi_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nativearr_map_fusion: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_nativearr_map_fusion: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nativearray_builtin_borrow_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_nativearray_builtin_borrow_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_actor_msg_from_parent: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_nested_actor_msg_from_parent: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_actor_same_name: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -452,6 +456,8 @@ native_qualified_type_name_render: coverage audit (user + stdlib): 123 enforced,
 native_qualified_type_name_render: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_rc_inline_fast_path: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_rc_inline_fast_path: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_rc_trace_leak_site: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_rc_trace_leak_site: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_receive_in_handler_at_exit: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_receive_in_handler_at_exit: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_recon_basic: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -630,6 +636,8 @@ native_tuple_destructure_leak_probe: coverage audit (user + stdlib): 123 enforce
 native_tuple_destructure_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_rc: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_rc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_tuple_eq: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_tuple_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_scalar_fields: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_tuple_scalar_fields: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_show: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

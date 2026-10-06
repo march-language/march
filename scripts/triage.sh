@@ -383,6 +383,7 @@ else
     fi
   fi
   echo "           leak symptom? cd $T/src && MARCH_TRACE_GC=1 $T/compiled.bin && $MARCH analyze-trace"
+  echo "           who leaked?    $MARCH --rc-trace --compile -o $T/traced.bin FILE && cd $T/src && MARCH_TRACE_GC=1 $T/traced.bin; scripts/gc-trace-report.py trace/gc"
 fi
 
 # ── next ─────────────────────────────────────────────────────────────────

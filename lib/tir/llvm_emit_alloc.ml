@@ -418,7 +418,7 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
        let (_, rv) = emit_atom ctx reuse_atom in
        let rc = fresh ctx "rhrc" in
        emit ctx (Printf.sprintf
-                   "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
+                   "%s = load atomic i64, ptr %s acquire, align 8" rc rv);
        let uniq = fresh ctx "rhuniq" in
        emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" uniq rc);
        let reuse_lbl = fresh_block ctx "rhole_reuse" in
@@ -727,12 +727,15 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       let v_coerced = coerce ctx v_ty v_val field_ty in
       (field_ty, v_coerced)
     ) args in
-    (* Load RC and check if uniquely owned.  Use atomic monotonic load so
-       this is data-race-free even if borrow inference's "process-local" proof
-       is later weakened — the cost of a relaxed atomic load is negligible
-       relative to the march_decrc on the fresh-branch path. *)
+    (* Load RC and check if uniquely owned.  An ACQUIRE atomic load, not a
+       relaxed one: another thread that dropped its reference did so with
+       march_decrc's acq_rel RMW, which releases that thread's last reads of
+       the cell; only an acquire here orders them before the in-place write
+       on the reuse path, otherwise the pair is a C11 data race.  Free on
+       x86-64, one ldar on arm64 (march_rc_is_unique in march_runtime.h is
+       the C twin; keep them in step). *)
     let rc = fresh ctx "rc" in
-    emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
+    emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s acquire, align 8" rc rv);
     let is_unique = fresh ctx "uniq" in
     emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" is_unique rc);
     let reuse_lbl = fresh_block ctx "fbip_reuse" in
@@ -825,7 +828,7 @@ let emit_reuse_uniform ~emit_atom ctx (reuse_atom : Tir.atom)
     let (_, rv) = emit_atom ctx reuse_atom in
     let arg_vals = arg_vals_of () in
     let rc = fresh ctx "rc" in
-    emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
+    emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s acquire, align 8" rc rv);
     let is_unique = fresh ctx "uniq" in
     emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" is_unique rc);
     let reuse_lbl = fresh_block ctx "fbip_reuse" in
