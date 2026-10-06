@@ -1,0 +1,3 @@
+show of a List flat: true
+map with a capture-free lambda flat: true
+fold with a capture-free lambda flat: true
