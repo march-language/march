@@ -882,6 +882,8 @@ let ensure_runtime_so () =
       ^ (opt_file (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_observe.c")) (* observe socket *)
       ^ (opt_file (Filename.concat runtime_dir "march_observe_snapshot.c")) (* observe verbs *)
+      ^ (opt_file (Filename.concat runtime_dir "march_observe_debug.c")) (* signed debug verbs *)
+      ^ (opt_file (Filename.concat runtime_dir "march_sig.c")) (* deploy-key signatures, nonces, audit log *)
       ^ (opt_file (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
     in
     (* OpenSSL flags: needed when march_tls.c is included. *)
