@@ -489,9 +489,7 @@ let insert_apply_fn_clo_drop ~(repl : bool) (body : Tir.expr) : Tir.expr =
         $clo, so ordinary RC insertion has nothing to release, while the
         apply-fn param-0 pin in [Borrow.infer_module] means every caller
         transfers a reference in.  Natively that is fine (the immortal global
-        absorbs it); under [ctx.repl], and in a hot-reload build (which
-        disables static lambdas outright, see Llvm_emit's static-lambda arm;
-        [perceus ~heap_lambdas]), it is a fresh [march_alloc] per
+        absorbs it); under [ctx.repl] it is a fresh [march_alloc] per
         materialization that nobody frees — one leaked allocation per use,
         measured at exactly 2,000 over a 2,000-iteration REPL fragment.  Hence
         the [repl]-gated arm at the bottom of this function: it fires for
@@ -520,8 +518,11 @@ let insert_apply_fn_clo_drop ~(repl : bool) (body : Tir.expr) : Tir.expr =
   | Tir.ELet (_, e1, _) when is_clo_source e1 && prefix_has_fv_extraction body ->
     splice None body
   | _ ->
-    (* Case (3) above: under the REPL/JIT only, and only for an apply fn whose
-       body never mentions $clo at all.  The [not (mem clo ..)] test is what
+    (* Case (3) above: only where capture-free lambdas are heap closures (the
+       REPL/JIT, and any --hot-reload build, where [Llvm_emit] turns static
+       lambdas off for the whole module; [repl] carries both, see [perceus]'s
+       [?heap_lambdas]), and only for an apply fn whose body never mentions
+       $clo at all.  The [not (mem clo ..)] test is what
        separates this from case (2): a self-recursive capture-free apply fn
        DOES mention $clo (its self-binding alias) and already releases the
        reference through that alias, so it must fall through untouched. *)
@@ -929,6 +930,13 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
     ?(heap_lambdas : bool = false)
     ?(borrow_map : Borrow.borrow_map option) ?(k_table : Kind.table option)
     (m : Tir.tir_module) : Tir.tir_module =
+  (* [heap_lambdas]: capture-free lambdas are materialised as heap closures
+     rather than one immortal global, as under --hot-reload (Llvm_emit's
+     static-lambda arm is off whenever [hr_config] is set).  Their apply fns
+     then need the REPL's case-(3) [$clo] drop, or every call leaks the
+     closure it was handed: one 24-byte object per [show] of a List under
+     --hot-reload, found by LeakSanitizer during observe R4b. *)
+  let clo_drop = repl || heap_lambdas in
   let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   (* Reset the fresh-name counter per module so that compiling the same module
      twice produces identical IR.  A monotonic counter that survives across
@@ -988,11 +996,7 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
              else s
            ) base (List.mapi (fun i p -> (i, p)) fn.Tir.fn_params)
          in
-         (* [heap_lambdas]: codegen gives capture-free lambdas no static
-            closure (a hot-reload build, Llvm_emit's static-lambda arm), so
-            each is a real allocation, released like the REPL's (case 3 of
-            [insert_apply_fn_clo_drop]). *)
-         insert_rc ~module_env ~repl:(repl || heap_lambdas) ~borrowed fn)
+         insert_rc ~module_env ~repl:clo_drop ~borrowed fn)
   in
   let fns' =
     fns_after_insert

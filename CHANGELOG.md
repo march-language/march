@@ -235,9 +235,16 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
-- **A `--hot-reload` build no longer leaks a closure per call of a capture-free lambda.**
-  `to_string` of a list, `List.map(xs, fn x -> x * 2)` and the like each leaked one
-  closure per call in a hot-reload build (normal builds were not affected).
+- A `--hot-reload` build no longer leaks a small object each time it calls a
+  lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
+  a list, `Actor.inspect_state` of an actor with a list field). Ordinary
+  builds were not affected.
+- **The language server resolves dependencies the way `forge build` does.**
+  It used to put every cached version of a git dependency on its search path,
+  including each version's `test/` and `priv/` files, and it missed registry
+  and transitive dependencies. Editors then showed errors from files the build
+  never reads. It now uses the version `forge.lock` names, and only that
+  version's `lib/`.
 
 - **A value matched by `_` inside a tuple or constructor pattern is now fully freed.** In
   `match pop(q) do (None, _) -> ...`, the value the `_` stood for was freed without its

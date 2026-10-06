@@ -1,2 +1,0 @@
-to_string of a List(String), no growth: true
-capture-free lambdas passed to List, no growth: true
