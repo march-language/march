@@ -101,18 +101,7 @@ let check what ~old ~new_ ~expect ~slots =
   Alcotest.(check (list string)) (what ^ ": every change reaches a changed slot") []
     (Deploy_plan.undeliverable ~slots ~changed:d.changed new_)
 
-(* The first compile in an empty HOME runs with a cold ~/.cache/march and
-   specializes the stdlib differently (2026-10-01: no
-   `Topology.offer_actor_role$...`, two functions more; filed as
-   specs/todos/2026-10-01-cold-stdlib-cache-changes-specializations.md), which
-   would show here as stdlib functions that "changed". Not what this test is
-   about: compile once to warm the cache, and diff only warm builds. *)
-let warm = lazy (
-  let dir = project [ getenv_abs "TOPOLOGY_APP_DIR" ] in
-  ignore (manifest ~entry_module:"TopologyApp" dir "warmup"))
-
 let topology_base = lazy (
-  Lazy.force warm;
   let dir = project [ getenv_abs "TOPOLOGY_APP_DIR" ] in
   manifest ~entry_module:"TopologyApp" dir "v1")
 
@@ -132,7 +121,6 @@ let test_topology_closure_edit () =
 
 let test_entry_module_edit () =
   let fx = getenv_abs "UPGRADE_FIXTURES_DIR" in
-  Lazy.force warm;
   let srcs = [ Filename.concat fx "v1"; Filename.concat fx "entry_v1" ] in
   let old = manifest ~entry_module:"UpgradeApp" (project srcs) "v1" in
   let dir = project srcs in

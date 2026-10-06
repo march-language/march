@@ -12259,7 +12259,99 @@ end|}
         Alcotest.(check (triple int int int)) "baseline ledger" (1, 0, 1)
           (proved, violated, skipped);
         Alcotest.(check bool) "no sort-conflict skip" false
-          (List.mem "sort-conflict" (skip_reasons src))) ]
+          (List.mem "sort-conflict" (skip_reasons src)));
+
+    (* The exclusion above was wider than its cause: an `Int` alias mixes no
+       sorts, yet `let b = a` dropped `a`'s facts while `let b = a + 0` kept
+       them.  A bare variable is now admitted when the typechecker's span
+       table says it is `Int` (the rule `let c = if … else x end` already
+       used), so these use [typed_ledger]. *)
+    gated "an Int alias of a refined parameter carries its fact" (fun () ->
+        (* RED before: 0 proved / 1 skipped (unconstrained-subject on `b`). *)
+        let proved, violated, skipped, _rs =
+          typed_ledger
+            {|mod IA1 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn f(a : {Int | _ > 0}) : Int do
+    let b = a
+    pos(b)
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "proved" (1, 0, 0)
+          (proved, violated, skipped));
+
+    gated "an Int alias chain carries a literal's fact" (fun () ->
+        let proved, violated, skipped, _rs =
+          typed_ledger
+            {|mod IA2 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn f() : Int do
+    let a = 5
+    let b = a
+    pos(b)
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "proved" (1, 0, 0)
+          (proved, violated, skipped));
+
+    (* The negative bracket: the alias must carry a BAD value through too,
+       or IA2 could pass by an equality that constrains nothing. *)
+    gated "an Int alias chain carries a violating value" (fun () ->
+        let proved, violated, skipped, _rs =
+          typed_ledger
+            {|mod IA3 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn f() : Int do
+    let a = 0 - 5
+    let b = a
+    pos(b)
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "violated" (0, 1, 0)
+          (proved, violated, skipped));
+
+    (* Rebinding the aliased name retires `b == a` (it mentions `a`), so the
+       call goes back to undecided; it must never read the NEW `a` and
+       falsely violate. *)
+    gated "rebinding the aliased name retires the alias" (fun () ->
+        let _p, violated, _s, _rs =
+          typed_ledger
+            {|mod IA4 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn f() : Int do
+    let a = 5
+    let b = a
+    let a = 0 - 1
+    pos(b)
+  end
+end|}
+        in
+        Alcotest.(check int) "no false violation" 0 violated);
+
+    (* OA1 again WITH the type table: the `Option` alias must still be
+       turned away now that the table can admit an `Int` one. *)
+    gated "a typed Option alias is still not admitted" (fun () ->
+        let proved, violated, skipped, rs =
+          typed_ledger
+            {|mod IA5 do
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn f(x : Option(Int)) : Int do
+    let u = x
+    match x do
+      Some(v) -> unwrap(x)
+      None -> 0
+    end
+  end
+  fn g(x : Option(Int)) : Int do unwrap(x) end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "baseline ledger" (1, 0, 1)
+          (proved, violated, skipped);
+        Alcotest.(check bool) "no sort-conflict skip" false
+          (List.mem "sort-conflict" rs)) ]
 
 (* ── Task 1: arithmetic actuals reflect through the subject's own scope ──
    `pos(i + 1)` is spelled `EApp (EVar "+", [i; 1])`.  [reflect_scalar]'s

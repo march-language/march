@@ -765,12 +765,14 @@ jobs:
         timeout-minutes: 12
         uses: ./.github/actions/march-setup
 
+      # forge/bin/main.exe is here for the determinism job: its topology_app
+      # leg needs `forge topology check` to write the --topology digest.
       - name: Build compiler + oracle binaries
         timeout-minutes: 10
         run: |
           eval $(opam env)
           dune shutdown 2>/dev/null || true
-          dune build bin/main.exe test/test_oracle.exe test/test_properties.exe
+          dune build bin/main.exe forge/bin/main.exe test/test_oracle.exe test/test_properties.exe
 
       - name: Upload built exes
         uses: actions/upload-artifact@v4
@@ -779,6 +781,7 @@ jobs:
           retention-days: 1
           path: |
             _build/default/bin/main.exe
+            _build/default/forge/bin/main.exe
             _build/default/test/test_oracle.exe
             _build/default/test/test_properties.exe
 
@@ -852,6 +855,60 @@ jobs:
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
           MARCH_ROOT="$PWD" \
           ./_build/default/test/test_oracle.exe
+
+  # Determinism oracle (incremental-codegen plan A5): the same source compiled
+  # under a cold and a warm private $HOME and from two cwds must emit
+  # byte-identical LLVM IR and per-definition CAS hashes.  Cache warmth once
+  # changed the TIR of an unchanged program (PRs #805/#807), which both
+  # missed the post-TIR cache and meant the compiler's output depended on
+  # state outside the source.  B1 (deterministic symbols) cites this job as
+  # its acceptance check.  Linux-only: the property is about the compiler's
+  # process state, not the OS.  Runs --self-test first so a vacuous oracle
+  # (one that cannot go red) fails the job rather than passing it.
+  # Like cross-linux-oracle, no OCaml toolchain: it runs the ubuntu
+  # ocaml-build exe, which only needs libblake3.so at process start.
+  determinism:
+    runs-on: ubuntu-24.04
+    needs: [ocaml-build]
+    # Sized from a measured run (specs/progress/2026-10-06-determinism-oracle.md):
+    # 13 CPU-s per program × 417 programs ≈ 91 CPU-min, ~23 min on a 4-vCPU
+    # runner at the dev box's per-core speed; 70 allows ~2.5x slower cores.
+    # Tighten after a few CI data points.
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (blake3, the compiler's only runtime .so)
+        run: |
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo ldconfig
+
+      - name: Download prebuilt exes
+        uses: actions/download-artifact@v4
+        with:
+          name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
+          path: _build/default
+      - name: Restore exec bits (the artifact zip does not preserve them)
+        run: |
+          for f in _build/default/bin/main.exe _build/default/forge/bin/main.exe; do
+            [ -f "$f" ] || { echo "::error::$f missing from the ocaml-build artifact"; exit 1; }
+            chmod +x "$f"
+          done
+
+      - name: Self-test (the oracle must go RED on a perturbed stdlib)
+        timeout-minutes: 5
+        run: scripts/determinism-oracle.sh --self-test
+
+      - name: Determinism oracle over the full corpus
+        timeout-minutes: 60
+        run: scripts/determinism-oracle.sh --corpus all
 
   # Differential-oracle CI (test/test_properties.ml's "oracle: interp = compiled"
   # group, ~1090 QCheck-generated compile-vs-interpret comparisons). This is NOT

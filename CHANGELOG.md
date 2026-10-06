@@ -19,6 +19,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
+  `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
+  line per post-TIR definition, sorted, straight from the CAS hashing that keys
+  the compilation cache. `scripts/determinism-oracle.sh` compiles the IR-oracle
+  corpus under a cold and a warm private `$HOME` from two cwds and fails on any
+  difference in the IR or these hashes; CI runs it as the `determinism` job.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
@@ -235,6 +241,18 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
+  variable alias used to drop every fact about its value (`let b = a + 0`
+  kept them), so `take_pos(b)` was skipped even when `a` was a refined
+  parameter or a positive literal. It is now proved, and a violating value is
+  reported through the alias. Non-`Int` aliases still carry nothing.
+- **Tuples can be compared with `==` and `!=`.** `(1, ["x"]) == (1, ["x"])`
+  used to be rejected with "does not implement interface `Eq`". A tuple is now
+  `Eq` when every component is. Compiled code also compared a tuple's Float
+  component by address instead of by value, so `(1, 2.5) == (1, 2.5)` was
+  false in compiled code (for example inside `List.member`). Tuples are still
+  not ordered with `<`.
+
 - A `--hot-reload` build no longer leaks a small object each time it calls a
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary

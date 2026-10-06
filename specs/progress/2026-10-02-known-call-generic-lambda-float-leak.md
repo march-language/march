@@ -56,3 +56,12 @@ Regression: three new legs in `test/native/closure_call_arg_ownership_probe.marc
 position). All three print `flat: false` with the old `known_call.ml` and
 `flat: true` with the fix. `Hof_spec` still specializes only on concrete
 lambdas: its own `EApp` carries no call-site type.
+
+## Follow-up 2026-10-06: wider regression fixture
+
+`test/native/known_call_generic_lambda_float.march` (dune rule in `test/dune`) adds
+six leak-checked legs at 20000 calls each: a lambda returning its first or second
+Float, one forwarding a Float through a closure argument, Int and String results
+(which must not be released), and a call in a nested tail position of a binding
+(an `if` inside a `let`). The `.expected` file is the interpreter's output. On the
+pre-#811 compiler the four Float legs leak; on main all six are flat.

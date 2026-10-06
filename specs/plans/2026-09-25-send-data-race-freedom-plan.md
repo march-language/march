@@ -2,6 +2,9 @@
 
 **Date:** 2026-09-25. **Revised:** 2026-10-01 (review against `main` at
 `9a140833`; every `file:line` below is as of that commit).
+**Design spec:** `specs/2026-10-06-linear-ringbuf-and-sendable-arrays-design.md`
+states the resulting language semantics (what is accepted, what is rejected
+and with which error, the migration); this plan is the implementation order.
 **Todo:** `specs/todos/2026-09-25-send-marker-and-closure-capture-checks.md`
 **Scope:** items A, B and C of the data-race review:
 - **(A)** make sendability a structural, derivable property of types, usable as a bound;
