@@ -63,8 +63,7 @@ mod Main do
     end
   end
 
-  -- IO.Process: ClusterNode.config reads its timing overrides from the
-  -- environment (env_ms), and the grant is a ceiling on the whole program.
+  -- IO.Process: ClusterNode.config reads its env overrides (System.env).
   fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) : () do
     flat("update base on one branch, released on the other", fn () -> opt_n(guarded(Some(mk(1)))))
     flat("record passed to a function, then updated", fn () -> passed_then_updated(mk(1), 0, 5))
