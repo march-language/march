@@ -342,6 +342,14 @@ let compile_fragment ctx (ir : string) : fragment_handle =
 let is_c_runtime_fn name =
   March_tir.Llvm_builtins.has_c_mapping name
 
+(** Run an emit with this session's already-compiled functions visible to
+    the emitter as callable by name ([Llvm_ctx.with_repl_prior_fns]): a
+    fragment can call a fn from an earlier fragment (a `:load`ed module's
+    `Mod.f`) that is not in its own TIR, and only the on-use `declare` lets
+    dlopen bind it.  Any other unknown callee is still an error. *)
+let with_prior_fns ctx f =
+  March_tir.Llvm_ctx.with_repl_prior_fns ctx.compiled_fns f
+
 (** Classify functions into (new_fns, extern_fns) WITHOUT touching compiled_fns.
     - new_fns:    not yet compiled → will be defined in this fragment.
     - extern_fns: already compiled in a prior fragment or stdlib prelude →
@@ -1075,7 +1083,7 @@ let register_module_decl ctx ~tc_env (d : March_ast.Ast.decl) =
       if new_fns <> [] then begin
         ignore (next_id ctx);
         let sw = fresh_wrap_state ctx in
-        let ir = March_tir.Llvm_emit.emit_fns_fragment
+        let ir = with_prior_fns ctx @@ fun () -> March_tir.Llvm_emit.emit_fns_fragment
           ~types:tir.March_tir.Tir.tm_types ~fns:new_fns ~extern_fns
           ~session_wraps:sw ~repl:true () in
         (try
@@ -1199,7 +1207,7 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
       ~new_name:jit_main tir.March_tir.Tir.tm_fns in
   let (new_fns, extern_fns) = partition_fns ctx all_fns in
   let sw = fresh_wrap_state ctx in
-  let ir = March_tir.Llvm_emit.emit_fns_fragment
+  let ir = with_prior_fns ctx @@ fun () -> March_tir.Llvm_emit.emit_fns_fragment
       ~types:all_types ~fns:new_fns ~extern_fns ~session_wraps:sw ~repl:true () in
   let mangled = March_tir.Llvm_emit.mangle_extern jit_main in
   (* No ctx here; the REPL never unboxes, so the empty table's spelling is
@@ -1273,7 +1281,7 @@ let run_expr ctx ~tc_env m =
   (* Advance counter only when we are about to emit — keeps counter in sync with artifacts. *)
   let n = next_id ctx in
   let sw = fresh_wrap_state ctx in
-  let ir = time_phase "emit_ir" (fun () ->
+  let ir = time_phase "emit_ir" (fun () -> with_prior_fns ctx @@ fun () ->
     March_tir.Llvm_emit.emit_repl_expr
       ~n ~ret_ty
       ~prev_slots:(prev_slots_of ctx)
@@ -1472,7 +1480,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let pn = next_id ctx in
     let slot = alloc_slot ctx in
     let sw = fresh_wrap_state ctx in
-    let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
+    let ir = with_prior_fns ctx @@ fun () -> March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
       ~n:pn ~bind_name ~dest_slot:slot ~prev_slots
       ~helper_fns ~extern_fns ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
@@ -1509,7 +1517,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     (* Advance counter only when about to emit. *)
     let n = next_id ctx in
     let sw = fresh_wrap_state ctx in
-    let ir = March_tir.Llvm_emit.emit_repl_decl
+    let ir = with_prior_fns ctx @@ fun () -> March_tir.Llvm_emit.emit_repl_decl
       ~n ~name:bind_name
       ~val_ty:main_fn.fn_ret_ty
       ~dest_slot:slot
@@ -1705,7 +1713,7 @@ let precompile_stdlib ctx
         tir.March_tir.Tir.tm_fns in
       if stdlib_fns <> [] then begin
         let sw = fresh_wrap_state ctx in
-        let ir = March_tir.Llvm_emit.emit_fns_fragment
+        let ir = with_prior_fns ctx @@ fun () -> March_tir.Llvm_emit.emit_fns_fragment
           ~types:tir.March_tir.Tir.tm_types ~fns:stdlib_fns
           ~session_wraps:sw ~repl:true () in
         let n = next_id ctx in

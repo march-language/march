@@ -504,6 +504,40 @@ let user_fn_names_of ~stdlib_files (m : March_ast.Ast.module_) :
   walk m.March_ast.Ast.mod_decls;
   user_fn_names
 
+(* A TIR function name's bare stem: module prefix and monomorphization suffix
+   stripped (`M.helper$Int` -> `helper`), the spelling [user_fn_names_of]
+   records. *)
+let tir_fn_stem n =
+  let n =
+    match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+    | None -> n
+  in
+  match String.index_opt n '$' with
+  | Some i -> String.sub n 0 i
+  | None -> n
+
+(* Whether TIR function [n] is one THIS file declares.  The stem comparison
+   strips the module prefix, so on its own it also matched every STDLIB
+   function sharing a user function's bare name: a main-less module declaring
+   `add` rooted `BigInt.add`, `Decimal.add`, `DateTime.add`, `Forge.add`,
+   `PeerRegistry.add` and `CRDT.GCounter.add`, whose 172 reachable functions
+   include console IO — and the ceiling then charged `IO.Console` to a module
+   that never mentions it
+   (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md).  A
+   prefixed name is the user's own only if the prefix is not a stdlib module;
+   the entry module's own functions are bare.  Shared by the --cap-strict
+   ceiling's DCE roots and a main-less executable's codegen roots. *)
+let is_user_tir_fn ~user_fns ~stdlib_mods n =
+  Hashtbl.mem user_fns (tir_fn_stem n)
+  && (let pre_mono =
+        match String.index_opt n '$' with
+        | Some i -> String.sub n 0 i
+        | None -> n in
+      match String.rindex_opt pre_mono '.' with
+      | None -> true
+      | Some i -> not (List.mem (String.sub pre_mono 0 i) stdlib_mods))
+
 (* MIRRORS the local [impl_ty_key] inside Typecheck's [check_module_needs] —
    the producer of the "Iface$Ty.method" closure keys this file must match.
    Four stable arms; if a fifth impl-target shape ever lands there, the
@@ -2897,16 +2931,7 @@ let compile filename =
         user_fn_names_of ~stdlib_files:(stdlib_span_files stdlib_decls)
           desugared
       in
-      let stem n =
-        let n =
-          match String.rindex_opt n '.' with
-          | Some i -> String.sub n (i + 1) (String.length n - i - 1)
-          | None -> n
-        in
-        match String.index_opt n '$' with
-        | Some i -> String.sub n 0 i
-        | None -> n
-      in
+      let stem = tir_fn_stem in
       (* The PRELUDE's functions are the complement of [user_fns] at the top
          level: stdlib-span [DFn]s, unwrapped into the entry module, so their
          TIR names are BARE exactly like the user's own.  They must be
@@ -2938,28 +2963,7 @@ let compile filename =
              (`MyMod.println`) see-through. *)
           not (String.contains n '.') && Hashtbl.mem prelude_fns (stem n))
         (March_tir.Dce.prune_unreachable
-           ~extra_root:(fun n ->
-             (* The stem comparison strips the module prefix, so on its own
-                it also matched every STDLIB function sharing a user
-                function's bare name: a main-less module declaring `add`
-                rooted `BigInt.add`, `Decimal.add`, `DateTime.add`,
-                `Forge.add`, `PeerRegistry.add` and `CRDT.GCounter.add`, whose
-                172 reachable functions include console IO — and the ceiling
-                then charged `IO.Console` to a module that never mentions it.
-                The discriminator was the NAME, not the signature: a scalar
-                helper that collides with nothing compiled clean, and a heap
-                helper renamed to `add` did not
-                (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md).
-                A prefixed name is the user's own only if the prefix is not a
-                stdlib module; the entry module's own functions are bare. *)
-             Hashtbl.mem user_fns (stem n)
-             && (let pre_mono =
-                   match String.index_opt n '$' with
-                   | Some i -> String.sub n 0 i
-                   | None -> n in
-                 match String.rindex_opt pre_mono '.' with
-                 | None -> true
-                 | Some i -> not (List.mem (String.sub pre_mono 0 i) stdlib_mods)))
+           ~extra_root:(is_user_tir_fn ~user_fns ~stdlib_mods)
            ~fail_open:false pre_opt_tir)
     in
     (* --cap-strict: `needs` as a hard ceiling.  Deliberately checked here,
@@ -3116,6 +3120,35 @@ let compile filename =
     cap_state := Some (cap_attrib, cap_decls)
     in
     let contract_decls = March_tir.Alloc_contract.collect desugared in
+    (* A program with no entry point of its own (no `main`, no tests, no
+       exports) gives DCE no roots, and codegen then fails open and keeps
+       EVERY function: the whole prepended stdlib, ~8,000 of them, 45 MB of
+       IR and minutes of llvm-emit + clang for a file whose only declaration
+       is `fn f(x) = x + 1`.  Measured on a topology app compiled without its
+       `--topology` digest (forge generates its `main`): 47 MB of IR and
+       llvm-emit ~20x slower than the same app with the digest
+       (specs/progress/2026-10-04-mainless-compile-emits-whole-stdlib.md).
+       Root the functions this FILE declares instead, as the --cap-strict
+       ceiling already does: they still compile, and what they reach comes
+       along.  Not for a shared object, a hot-reload build or a JS/WASM-island
+       target, whose roots are exports and symbols a loader looks up, nor when
+       the file declares nothing (fail open as before). *)
+    let mainless_roots =
+      if !compile_so || !hot_reload_prefix <> None || is_js_target
+         || parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown
+         || March_tir.Dce.root_names ~fail_open:false tir <> []
+      then []
+      else begin
+        let user_fns =
+          user_fn_names_of ~stdlib_files:(stdlib_span_files stdlib_decls)
+            desugared in
+        let stdlib_mods = stdlib_module_names stdlib_decls in
+        List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
+            let n = fn.March_tir.Tir.fn_name in
+            if is_user_tir_fn ~user_fns ~stdlib_mods n then Some n else None)
+          tir.March_tir.Tir.tm_fns
+      end
+    in
     let pipe =
       try
       March_tir.Contract_pipeline.run
@@ -3134,7 +3167,7 @@ let compile filename =
         ~extra_roots:(if !report_contracts
                       then List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
                           d.March_tir.Alloc_contract.d_name) contract_decls
-                      else [])
+                      else mainless_roots)
         ~opt:!opt_enabled tir
       with March_tir.Mono.Repr_disagreement msg ->
         (* A real defect in the program or the stdlib manifest, not a compiler
@@ -4518,6 +4551,12 @@ let compile filename =
         with several `derive Json` in scope), not a compiler bug: render it
         as an ordinary diagnostic and exit 1, distinct from the
         internal-compiler-error path below (exit 3). *)
+     Printf.eprintf "error: %s\n%!" msg;
+     exit 1
+   | March_tir.Llvm_calls.Unknown_callee msg ->
+     (* A direct call to a name that is neither in scope nor a runtime
+        builtin.  Formerly a silent `declare` and a link failure; now a
+        diagnostic (exit 1) naming the callee and its enclosing function. *)
      Printf.eprintf "error: %s\n%!" msg;
      exit 1
    | exn ->
