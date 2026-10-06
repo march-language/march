@@ -142,15 +142,6 @@ type spec_state = {
   mutable pending : (string * string * string) list;
 }
 
-let rec has_tvar (t : Tir.ty) : bool =
-  match t with
-  | Tir.TVar _ -> true
-  | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TString | Tir.TUnit -> false
-  | Tir.TTuple ts | Tir.TCon (_, ts) -> List.exists has_tvar ts
-  | Tir.TRecord fs -> List.exists (fun (_, t) -> has_tvar t) fs
-  | Tir.TFn (ps, r) -> List.exists has_tvar ps || has_tvar r
-  | Tir.TPtr t -> has_tvar t
-
 (** Specialize only on a lambda whose signature is concrete. A let-generalized
     lambda (`let keep = fn (p, x) -> p`, parameters still [TVar] after Mono)
     takes erased Float arguments under an ownership protocol that only the
@@ -161,12 +152,7 @@ let rec has_tvar (t : Tir.ty) : bool =
     legs). The [$clo] parameter is an opaque pointer and is not checked. *)
 let concrete_apply (st : spec_state) (apply : string) : bool =
   match Hashtbl.find_opt st.fns apply with
-  | Some fd ->
-    (match fd.Tir.fn_params with
-     | _clo :: rest ->
-       not (has_tvar fd.Tir.fn_ret_ty)
-       && not (List.exists (fun (p : Tir.var) -> has_tvar p.Tir.v_ty) rest)
-     | [] -> false)
+  | Some fd -> Known_call.concrete_apply_sig fd
   | None -> false
 
 (** The clone of [g] for closure index [i] bound to apply fn [apply], minting it

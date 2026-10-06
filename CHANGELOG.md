@@ -228,6 +228,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A locally bound generic lambda no longer leaks memory when it returns a
+  Float.** `let keep = fn (p, x) -> p` called directly with Float arguments,
+  as in `keep(1.0, x)`, leaked one boxed Float per call in compiled code. The
+  interpreter was unaffected.
+
 - **`char_to_int`, `char_is_digit`, `char_is_alphanumeric` and `char_is_whitespace` no
   longer leak their argument.** Compiled code leaked the one-character string on every call.
   `Msgpack` calls `char_to_int` for each byte of every string it encodes, so every cluster
