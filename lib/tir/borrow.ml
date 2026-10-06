@@ -74,6 +74,11 @@ let extern_borrow_table : (string * bool list) list = [
     ("actor_reply_retain", [true]);
   ("actor_cast",        [true; false]);
   ("march_send",        [true; false]);
+    (* march_actor_call reads the pid to find the target and never releases
+       it; the sentinel message is released (its tag is all it needs).  Listed
+       as owned until 2026-10-06, so every call leaked a reference to the
+       callee's actor record, and with it the whole record once it died. *)
+  ("actor_call",        [true; false]);
   ("kill",              [true]);
   ("march_kill",        [true]);
   ("actor_stop",        [true; false]);
@@ -504,7 +509,7 @@ let extern_owned_builtins : string list = [
     "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
     "logger_add_context"; "logger_add_field"; "spawn";
-    "spawn_supervised"; "actor_call"; "actor_reply";
+    "spawn_supervised"; "actor_reply";
     "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
     "file_exists"; "dir_exists"; "file_open"; "file_close"; "file_read";
     "file_read_line"; "file_read_chunk"; "file_write"; "file_append";

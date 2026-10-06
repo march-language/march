@@ -38,6 +38,11 @@ let rec free_vars : Tir.expr -> StringSet.t = function
        never from TIR: an allocation of the closure is what keeps it alive. *)
     List.fold_left (fun s a -> StringSet.union s (free_atom a))
       (StringSet.singleton (Tir_names.clo_drop_fn_name clo)) atoms
+  | Tir.EAlloc (Tir.TCon (actor, _), atoms) when Tir_names.is_actor_struct_name actor ->
+    (* Likewise an actor's state-release function, called by the runtime as
+       the actor's thread exits. *)
+    List.fold_left (fun s a -> StringSet.union s (free_atom a))
+      (StringSet.singleton (Tir_names.actor_drop_fn_name actor)) atoms
   | Tir.ETuple atoms | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
     List.fold_left (fun s a -> StringSet.union s (free_atom a)) StringSet.empty atoms
   | Tir.ERecord fields ->

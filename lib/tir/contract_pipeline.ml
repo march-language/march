@@ -189,7 +189,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      be taken against the SAME one — re-deriving it after RC insertion could
      disagree.  See [Escape]'s module doc. *)
   let borrow_map = Borrow.infer_module ~k_table:k0 tir in
-  let tir = Perceus.perceus ~k_table:k0 ~borrow_map tir in
+  let tir = Perceus.perceus ~heap_lambdas:(hot_reload <> None) ~k_table:k0 ~borrow_map tir in
   snap "tir-perceus" tir;
   stamp "perceus";
   (* Deep-drop synthesis (lib/tir/drop.ml).  Skipped for the JS target, whose

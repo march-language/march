@@ -489,7 +489,9 @@ let insert_apply_fn_clo_drop ~(repl : bool) (body : Tir.expr) : Tir.expr =
         $clo, so ordinary RC insertion has nothing to release, while the
         apply-fn param-0 pin in [Borrow.infer_module] means every caller
         transfers a reference in.  Natively that is fine (the immortal global
-        absorbs it); under [ctx.repl] it is a fresh [march_alloc] per
+        absorbs it); under [ctx.repl], and in a hot-reload build (which
+        disables static lambdas outright, see Llvm_emit's static-lambda arm;
+        [perceus ~heap_lambdas]), it is a fresh [march_alloc] per
         materialization that nobody frees — one leaked allocation per use,
         measured at exactly 2,000 over a 2,000-iteration REPL fragment.  Hence
         the [repl]-gated arm at the bottom of this function: it fires for
@@ -924,6 +926,7 @@ let print_perceus_stats ~(label : string) ~(before : rc_counts) ~(after : rc_cou
       live after the call; a post-call EDecRC is emitted instead when the arg
       is the caller's last use. *)
 let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
+    ?(heap_lambdas : bool = false)
     ?(borrow_map : Borrow.borrow_map option) ?(k_table : Kind.table option)
     (m : Tir.tir_module) : Tir.tir_module =
   let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
@@ -985,7 +988,11 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
              else s
            ) base (List.mapi (fun i p -> (i, p)) fn.Tir.fn_params)
          in
-         insert_rc ~module_env ~repl ~borrowed fn)
+         (* [heap_lambdas]: codegen gives capture-free lambdas no static
+            closure (a hot-reload build, Llvm_emit's static-lambda arm), so
+            each is a real allocation, released like the REPL's (case 3 of
+            [insert_apply_fn_clo_drop]). *)
+         insert_rc ~module_env ~repl:(repl || heap_lambdas) ~borrowed fn)
   in
   let fns' =
     fns_after_insert

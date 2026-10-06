@@ -235,6 +235,20 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A `--hot-reload` build no longer leaks a closure per call of a capture-free lambda.**
+  `to_string` of a list, `List.map(xs, fn x -> x * 2)` and the like each leaked one
+  closure per call in a hot-reload build (normal builds were not affected).
+
+- **A value matched by `_` inside a tuple or constructor pattern is now fully freed.** In
+  `match pop(q) do (None, _) -> ...`, the value the `_` stood for was freed without its
+  contents, so a dropped `Deque` leaked both of its lists. This also cost a cluster node a
+  few objects for each frame it queued.
+
+- **A dead actor's memory is released.** An actor that was killed or stopped kept its
+  state (lists, maps, strings, closures) allocated for the rest of the program, and an
+  actor that had ever been the target of `Actor.call` was never freed at all, because
+  each call leaked a reference to it.
+
 - **A cluster session no longer leaves its party behind.** Each finished session leaked the
   party record, the session capability's closures and the handles of thirteen session
   tables. Every session operation (send, receive, register, close) also leaked a

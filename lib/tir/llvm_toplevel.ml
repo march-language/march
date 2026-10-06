@@ -640,20 +640,33 @@ let emit_atom_show_table ctx =
     (its environment owns its captures) and that is still allocated.  An
     apply function seen with two closure types (none should be) is left out:
     a wrong layout is worse than a leak.  main's prologue calls it once,
-    before the scheduler starts. *)
+    before the scheduler starts.  An actor allocation registers the same way:
+    field 0 is the dispatch function's closure value, whose trampoline is
+    paired with the actor's state release ([Drop.run]'s [$actordrop$]), which
+    the actor's thread runs as it exits. *)
 let clo_drop_registration (m : Tir.tir_module) : string =
   let defined = Hashtbl.create 1024 in
   List.iter (fun (fn : Tir.fn_def) -> Hashtbl.replace defined fn.Tir.fn_name ()) m.Tir.tm_fns;
   let pairs : (string, string option) Hashtbl.t = Hashtbl.create 64 in
   let note clo atoms =
     match atoms with
-    | Tir.AVar f :: _ when Tir_names.is_clo_struct clo ->
-      let drop = Tir_names.clo_drop_fn_name clo in
+    | Tir.AVar f :: _ when Tir_names.is_clo_struct clo
+                         || Tir_names.is_actor_struct_name clo ->
+      (* A closure's key is its apply function, the code pointer at +16.  An
+         actor's field 0 holds its dispatch function as a function VALUE, a
+         closure cell whose code pointer is the dispatch's [$clo_wrap]
+         trampoline; the runtime looks the actor up by that. *)
+      let (key, drop) =
+        if Tir_names.is_clo_struct clo then
+          (Llvm_builtins.mangle_extern f.Tir.v_name, Tir_names.clo_drop_fn_name clo)
+        else
+          (Llvm_builtins.mangle_extern f.Tir.v_name ^ "$clo_wrap",
+           Tir_names.actor_drop_fn_name clo) in
       if Hashtbl.mem defined f.Tir.v_name && Hashtbl.mem defined drop then
-        (match Hashtbl.find_opt pairs f.Tir.v_name with
-         | None -> Hashtbl.replace pairs f.Tir.v_name (Some drop)
+        (match Hashtbl.find_opt pairs key with
+         | None -> Hashtbl.replace pairs key (Some drop)
          | Some (Some d) when d = drop -> ()
-         | Some _ -> Hashtbl.replace pairs f.Tir.v_name None)
+         | Some _ -> Hashtbl.replace pairs key None)
     | _ -> ()
   in
   let rec walk (e : Tir.expr) =
@@ -679,7 +692,7 @@ let clo_drop_registration (m : Tir.tir_module) : string =
     "\ndefine internal void @march_clo_drops_register() {\nentry:\n  ret void\n}\n"
   else
     let elems = String.concat ", " (List.concat_map (fun (apply, drop) ->
-        [ "ptr @" ^ Llvm_builtins.mangle_extern apply;
+        [ "ptr @" ^ apply;
           "ptr @" ^ Llvm_builtins.mangle_extern drop ]) entries) in
     Printf.sprintf
       "\n@march_clo_drop_pairs = private constant [%d x ptr] [%s]\n\

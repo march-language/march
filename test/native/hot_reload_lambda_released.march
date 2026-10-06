@@ -1,0 +1,37 @@
+-- Compiled with --hot-reload Main (see test/dune). A capture-free lambda is a
+-- heap closure in a hot-reload build (the static-closure optimization is off
+-- there), and its apply function never released the reference each call hands
+-- it: one leaked closure per `to_string` of a List(String) (Show$List's
+-- per-element lambda), in an actor handler or anywhere else
+-- (specs/progress/2026-10-06-hot-reload-show-list-closure-leak.md).
+-- SIGNAL: the live-object count does not grow over 100 calls (RED before: 100
+-- and 200). It may drop by one: the probe's own lambda is a heap closure here
+-- too, released after its last use.
+mod Main do
+  needs IO.Console
+
+  pfn shown(i : Int) : Int do
+    let xs = ["x", int_to_string(i)]
+    string_byte_length(to_string(xs)) * 0
+  end
+
+  pfn applied(i : Int) : Int do
+    List.fold_left(List.map([i, i + 1], fn x -> x * 2), 0, fn (a, b) -> a + b) * 0
+  end
+
+  pfn times(n : Int, f : (Int) -> Int, acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, f, acc + f(n)) end
+  end
+
+  pfn probe(name : String, f : (Int) -> Int) : () do
+    let _ = times(3, f, 0)
+    let a0 = live_allocs()
+    let _ = times(100, f, 0)
+    println(name ++ ", no growth: " ++ bool_to_string(live_allocs() - a0 <= 0))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    probe("to_string of a List(String)", fn i -> shown(i))
+    probe("capture-free lambdas passed to List", fn i -> applied(i))
+  end
+end
