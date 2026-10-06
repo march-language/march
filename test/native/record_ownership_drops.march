@@ -13,6 +13,7 @@
 -- SIGNAL: "no growth" (live_allocs() delta <= 0) printed as a boolean.
 mod Main do
   needs IO.Console
+  needs IO.Process
 
   type St = { items : List(Int), name : String, n : Int }
 
@@ -62,7 +63,8 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : () do
+  -- IO.Process: ClusterNode.config reads its SWIM timings from the environment.
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) : () do
     flat("update base on one branch, released on the other", fn () -> opt_n(guarded(Some(mk(1)))))
     flat("record passed to a function, then updated", fn () -> passed_then_updated(mk(1), 0, 5))
     flat("nominal record in a Map, dropped through its holder", fn () -> swap_reg(ClusterNode.core_new(ClusterNode.config("a", 7000, "", Nil, "s", 1), 1), 0, 5))

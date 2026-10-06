@@ -10552,13 +10552,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nloops nruntime boxcalls < native_arr_fold_inline_llvm_check.out; \
     test \"$nloops\" -eq 11 -a \"$nruntime\" -eq 3 -a \"$boxcalls\" -eq 0 || { echo \"expected 11 inline fold loops, 3 runtime folds, 0 boxing calls in unboxed clones (found loops=$nloops runtime=$nruntime boxcalls=$boxcalls)\" >&2; exit 1; }")))
 
+;  NativeArray builtins that only READ their array/list argument borrow it
+; (specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md).
+; Every leg's live_allocs stays flat; the .expected file IS the interpreter's
+; output, including every "flat: true".
+(rule
+ (targets nativearray_builtin_borrow_leak_probe nativearray_builtin_borrow_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearray_builtin_borrow_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nativearray_builtin_borrow_leak_probe
+        native/nativearray_builtin_borrow_leak_probe.march)
+   (with-stdout-to nativearray_builtin_borrow_leak_probe.out
+        (system "./nativearray_builtin_borrow_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nativearray_builtin_borrow_leak_probe.expected
+               nativearray_builtin_borrow_leak_probe.out)))
+
 ;  NativeArray map / map2 chain fusion (phase B of
 ; specs/plans/2026-09-28-nativearray-fusion-plan.md, Fusion.run_nativearr).
 ; Correctness: every line matches the interpreter (the .expected file IS the
 ; interpreter's output), including the negative cases that must not fuse.
 ; Shape: main (with the two negative helper fns inlined into it) has exactly
-; 21 inline map loops, 8 inline map2 loops and 1 runtime map call after
-; fusion; with MARCH_NO_NATIVEARR_FUSION=1 the same program has 47 / 8 / 2.
+; 22 inline map loops, 8 inline map2 loops and no runtime map call after
+; fusion. The parameter-callback case is not FUSED (Fusion runs before Opt
+; inlines the helper), but since the map builtins borrow their array
+; (specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md)
+; Native_map_inline sees its closure through the deeper alias chain and
+; inlines that map too; before, it stayed one runtime call (21 / 8 / 1).
 (rule
  (targets nativearr_map_fusion nativearr_map_fusion.out)
  (deps (file %{exe:../bin/main.exe})
@@ -10595,7 +10621,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action
   (run bash -c
    "read -r nmap nmap2 nruntime < nativearr_map_fusion_llvm_check.out; \
-    test \"$nmap\" -eq 21 -a \"$nmap2\" -eq 8 -a \"$nruntime\" -eq 1 || { echo \"expected 21 inline map loops, 8 inline map2 loops, 1 runtime map call in main (found map=$nmap map2=$nmap2 runtime=$nruntime)\" >&2; exit 1; }")))
+    test \"$nmap\" -eq 22 -a \"$nmap2\" -eq 8 -a \"$nruntime\" -eq 0 || { echo \"expected 22 inline map loops, 8 inline map2 loops, 0 runtime map calls in main (found map=$nmap map2=$nmap2 runtime=$nruntime)\" >&2; exit 1; }")))
 
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined

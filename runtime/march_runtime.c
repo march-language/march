@@ -11737,9 +11737,22 @@ static inline int64_t clo_call_int_int(void *clo, int64_t x) {
     void *wire_ret = clo_apply_ptr(clo, wire_arg);
     return (int64_t)(intptr_t)wire_ret >> 1;
 }
+/* Float boxes cross the closure ABI owned by the caller both ways: the
+ * callee takes its own reference to an argument box it keeps
+ * (march_clo_param_own), and returns a box the caller owns. So the argument
+ * box is released after the call and the returned box after it is read --
+ * exactly what native_float_arr_fold does. Before 2026-10-06 neither was
+ * released: two leaked boxes per element of every runtime Float/f32 map
+ * (specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md).
+ * An identity callback returns the argument box itself with its own extra
+ * reference, so the two releases are still balanced. */
 static inline double clo_call_dbl_dbl(void *clo, double x) {
-    void *wire_ret = clo_apply_ptr(clo, march_alloc_float(x));
-    return march_unbox_float(wire_ret);
+    void *arg = march_alloc_float(x);
+    void *wire_ret = clo_apply_ptr(clo, arg);
+    double r = march_unbox_float(wire_ret);
+    march_decrc(wire_ret);
+    march_decrc(arg);
+    return r;
 }
 
 /* Two-argument variants for native_{int,float}_arr_map2 (a genuine 2-param
@@ -11757,8 +11770,14 @@ static inline int64_t clo_call_int_int_int(void *clo, int64_t x, int64_t y) {
     return (int64_t)(intptr_t)wire_ret >> 1;
 }
 static inline double clo_call_dbl_dbl_dbl(void *clo, double x, double y) {
-    void *wire_ret = clo_apply_ptr2(clo, march_alloc_float(x), march_alloc_float(y));
-    return march_unbox_float(wire_ret);
+    void *ax = march_alloc_float(x);
+    void *ay = march_alloc_float(y);
+    void *wire_ret = clo_apply_ptr2(clo, ax, ay);
+    double r = march_unbox_float(wire_ret);
+    march_decrc(wire_ret);
+    march_decrc(ax);
+    march_decrc(ay);
+    return r;
 }
 
 /* ── Stable sort of a List by a comparator: Array.sort_by, RRB.Vec.sort_by ──
