@@ -1,0 +1,25 @@
+-- Tuples are Eq when every component is, and both backends compare them
+-- component-wise. Compiled `==` read a tuple's Float slot as a raw double,
+-- but a tuple stores a Float BOXED (uniform slots), so it compared the two
+-- box pointers: `(1, 2.5) == (1, 2.5)` was false compiled, true interpreted.
+mod Main do
+  needs IO.Console
+  type Color = Red | Green(Int)
+  derive Eq for Color
+
+  fn same(a : (Int, String), b : (Int, String)) : Bool do a == b end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(bool_to_string((1, ["x"]) == (1, ["x"])))
+    println(bool_to_string((1, ["x"]) == (1, ["y"])))
+    println(bool_to_string((1, 2) == (1, 3)))
+    println(bool_to_string((1, 2.5) == (1, 2.0 +. 0.5)))
+    println(bool_to_string((1, 2.5) != (1, 2.5)))
+    println(bool_to_string((1, "a", 2.5) != (1, "a", 2.5)))
+    println(bool_to_string(((1, 2.5), Some("q")) == ((1, 2.5), Some("q"))))
+    println(bool_to_string((Green(3), Red) == (Green(3), Red)))
+    println(bool_to_string((Green(3), Red) == (Green(4), Red)))
+    println(bool_to_string(same((7, "s"), (7, "s" ++ ""))))
+    println(bool_to_string(List.any([(1, "a"), (2, "b")], fn p -> p == (2, "b"))))
+  end
+end

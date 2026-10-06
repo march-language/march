@@ -246,6 +246,13 @@ git log is authoritative for exact commits.
   kept them), so `take_pos(b)` was skipped even when `a` was a refined
   parameter or a positive literal. It is now proved, and a violating value is
   reported through the alias. Non-`Int` aliases still carry nothing.
+- **Tuples can be compared with `==` and `!=`.** `(1, ["x"]) == (1, ["x"])`
+  used to be rejected with "does not implement interface `Eq`". A tuple is now
+  `Eq` when every component is. Compiled code also compared a tuple's Float
+  component by address instead of by value, so `(1, 2.5) == (1, 2.5)` was
+  false in compiled code (for example inside `List.member`). Tuples are still
+  not ordered with `<`.
+
 - A `--hot-reload` build no longer leaks a small object each time it calls a
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary

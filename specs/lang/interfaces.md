@@ -221,6 +221,12 @@ end
 neq(1, 2)          -- true (once `impl Eq(Int)` above is in scope)
 ```
 
+**Tuples.** A tuple is `Eq` when every component is: `(1, ["x"]) == (1,
+["x"])` is `true`, with the components compared left to right. No `impl` is
+needed, and none could be written for every arity. A tuple with a component
+that is not `Eq` (a function, or an ADT without `derive Eq`) is rejected as
+before. Tuples are not `Ord` yet: `(1, 2) < (1, 3)` is rejected.
+
 ### `Ord(a)`: Ordering
 
 ```march
