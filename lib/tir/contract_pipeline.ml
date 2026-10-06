@@ -45,7 +45,8 @@ let hof_spec_env_disabled : bool Lazy.t =
       | _ -> false)
 
 (** Escape hatch: [MARCH_NO_NATIVEARR_FUSION=1] turns off the NativeArray
-    map/map2 chain fusion ([Fusion.run_nativearr]) for A/B runs and
+    map/map2/fold chain fusion ([Fusion.run_nativearr]) and the sum-map
+    peephole ([Native_map_inline.run ~sum_map]) for A/B runs and
     bisection.  Read once per process; part of the CAS key (bin/main.ml). *)
 let nativearr_fusion_env_disabled : bool Lazy.t =
   lazy (match Sys.getenv_opt "MARCH_NO_NATIVEARR_FUSION" with
@@ -256,7 +257,9 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   in
   (* P10 Phase 2: inline non-capturing NativeArray.map closures.  Native/wasm
      only — Js_emit has no codegen arm for the synthetic call. *)
-  let tir = if is_js then tir else Native_map_inline.run tir in
+  let tir =
+    if is_js then tir
+    else Native_map_inline.run ~sum_map:(not (Lazy.force nativearr_fusion_env_disabled)) tir in
   snap "tir-native-map-inline" tir;
   (* Hof_spec.redirect_unboxed: a direct call to a Float/Int-signature apply fn
      goes to a clone emitted with native double/i64 parameters, so nothing is
