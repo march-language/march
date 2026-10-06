@@ -5443,22 +5443,16 @@ let test_parse_match_wildcard_only () =
 
 let test_parse_error_empty_fn_body () =
   (* fn with do but no body before end — must not propagate uncaught exception *)
-  (try
-    ignore (parse_module {|mod T do fn bad() do end end|});
-    ignore (March_parser.Parse_errors.take_parse_errors ())
-   with _ ->
-    ignore (try March_parser.Parse_errors.take_parse_errors () with _ -> []));
+  (try ignore (parse_module {|mod T do fn bad() do end end|})
+   with _ -> ());
   Alcotest.(check bool) "empty fn body: no uncaught exception" true true
 
 let test_parse_error_type_no_variants () =
   let has_error =
     try
       ignore (parse_module {|mod T do type Foo = end|});
-      let errs = March_parser.Parse_errors.take_parse_errors () in
-      errs <> []
-    with _ ->
-      ignore (try March_parser.Parse_errors.take_parse_errors () with _ -> []);
-      true
+      false
+    with _ -> true
   in
   Alcotest.(check bool) "type with no variants: error reported" true has_error
 
@@ -5485,11 +5479,8 @@ let test_parse_error_recovery_two_bad_decls () =
   let has_error =
     (try
        ignore (parse_module src);
-       let errs = March_parser.Parse_errors.take_parse_errors () in
-       errs <> []
-     with _ ->
-       ignore (March_parser.Parse_errors.take_parse_errors ());
-       true)
+       false
+     with _ -> true)
   in
   Alcotest.(check bool) "two bad decls: at least one error collected" true has_error
 
@@ -5503,12 +5494,8 @@ let test_parse_error_valid_decls_survive_recovery () =
   end|} in
   let m_opt =
     (try
-       let m = parse_module src in
-       ignore (March_parser.Parse_errors.take_parse_errors ());
-       Some m
-     with _ ->
-       ignore (March_parser.Parse_errors.take_parse_errors ());
-       None)
+       Some (parse_module src)
+     with _ -> None)
   in
   (* We only assert we don't crash; recovered parse may have partial decls *)
   Alcotest.(check bool) "recovery: valid decls survive without exception" true true;

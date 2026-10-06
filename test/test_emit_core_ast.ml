@@ -489,12 +489,43 @@ let test_verdict_matches_check (rel, expected) () =
   Alcotest.(check int) (rel ^ ": --emit-core-ast exit") expected_exit emit_exit;
   Alcotest.(check int) (rel ^ ": --check exit agrees") expected_exit (run_check rel)
 
+(* `--check-json` on a file that does not parse.  The parse path used to
+   print to stderr and exit before the NDJSON branch, so tooling saw an empty
+   stream.  It must now carry the parse diagnostic -- with its code and with
+   the grammar's hint as a note -- and still exit 1.  And `--emit-core-ast`
+   must NOT grow the `labels`/`notes` fields: its document is versioned. *)
+let test_check_json_carries_parse_errors () =
+  let rel = "specs/lang/grammar/reject/r01_then_keyword_rejected.march" in
+  let q = Filename.quote in
+  let tmp_out = Filename.temp_file "march_check_json" ".stdout" in
+  let exit_code =
+    Sys.command
+      (Printf.sprintf "cd %s && %s --check-json %s > %s 2>/dev/null"
+         (q project_root) (q march_abs) (q rel) (q tmp_out)) in
+  let out = read_file tmp_out in
+  (try Sys.remove tmp_out with _ -> ());
+  Alcotest.(check int) "--check-json exit on a parse error" 1 exit_code;
+  let lines = List.filter (fun l -> l <> "") (String.split_on_char '\n' out) in
+  Alcotest.(check int) "exactly one NDJSON line" 1 (List.length lines);
+  assert_contains out "\"code\":\"parse_error\"";
+  assert_contains out "I don't recognize `then` here";
+  (* caret on the `then` (line 4, col 12), not on the token after it *)
+  assert_contains out "\"start_line\":4,\"start_col\":12,";
+  assert_contains out "\"labels\":[]";
+  assert_contains out "\"notes\":[\"if cond do";
+  let (core, _) = run_emit_core_ast rel in
+  Alcotest.(check bool) "--emit-core-ast keeps its diagnostic shape" false
+    (has_substring core "\"notes\"" || has_substring core "\"labels\"")
+
 let suite =
   List.map
     (fun case -> Alcotest.test_case case.label `Quick (test_case_matches_fixture case))
     cases
   @ [ Alcotest.test_case
-        "module_caps present + format_version 3 (A3)" `Quick test_module_caps_and_v3 ]
+        "module_caps present + format_version 3 (A3)" `Quick test_module_caps_and_v3;
+      Alcotest.test_case
+        "--check-json carries parse errors, with notes" `Quick
+        test_check_json_carries_parse_errors ]
   @ List.map
       (fun ((rel, expected) as c) ->
          Alcotest.test_case

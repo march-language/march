@@ -70,3 +70,49 @@ let query_socket (path : string) (request : string) : (Yojson.Safe.t, string) re
   match single_line request with
   | Error _ as e -> e
   | Ok () -> Remote.use_socket path (exchange request)
+
+(* ── Signed debug requests (R4) ──────────────────────────────────────── *)
+
+(** How long a signed debug request stays valid.  The node refuses one whose
+    [not_after_ms] has passed or is more than 60 s ahead of its own clock, so
+    this tolerates up to 30 s of clock skew either way. *)
+let debug_window_ms = 30_000
+
+(** [signed_request ~sk ~nonce ~now_ms verb fields]: the request line for a
+    debug verb, e.g. [STATE <sig> nonce:… not_after_ms:… pid:7].  The
+    signature covers the line without its signature word, which is what
+    runtime/march_observe_debug.c verifies.  Pure, for tests. *)
+let signed_request ~(sk : bytes) ~(nonce : string) ~(now_ms : int)
+    (verb : string) (fields : string list) : string =
+  let body =
+    String.concat " "
+      (Printf.sprintf "nonce:%s" nonce
+       :: Printf.sprintf "not_after_ms:%d" (now_ms + debug_window_ms)
+       :: fields) in
+  let sig_b64 =
+    March_ed25519.Ed25519.sig_to_base64
+      (March_ed25519.Ed25519.sign_str (verb ^ " " ^ body) sk) in
+  Printf.sprintf "%s %s %s" verb sig_b64 body
+
+(** 16 random bytes as hex: unique per request, which is all a nonce needs. *)
+let fresh_nonce () : string =
+  let ic = open_in_bin "/dev/urandom" in
+  let b = really_input_string ic 16 in
+  close_in ic;
+  String.concat "" (List.init 16 (fun i -> Printf.sprintf "%02x" (Char.code b.[i])))
+
+(** A debug verb's refusal, said in words an operator can act on. *)
+let explain_debug_error (m : string) : string =
+  let code =
+    match String.rindex_opt m ':' with
+    | Some i -> String.trim (String.sub m (i + 1) (String.length m - i - 1))
+    | None -> m in
+  match code with
+  | "signing_not_configured" ->
+    m ^ " (the node was not built with --hot-reload and --signing-pubkey, so it accepts no debug request)"
+  | "bad_signature" -> m ^ " (the node's key is not this machine's ~/.march/ed25519_secret.key)"
+  | "expired" -> m ^ " (the node's clock is more than 30 s ahead of this machine's)"
+  | "not_after_too_far" -> m ^ " (the node's clock is more than 30 s behind this machine's)"
+  | "policy" -> m ^ " (the verb is not listed in the node's $MARCH_DEBUG_POLICY file)"
+  | "replay" -> m ^ " (the node has already seen this request's nonce)"
+  | _ -> m

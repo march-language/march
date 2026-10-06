@@ -1,0 +1,55 @@
+-- The observe socket's signed debug verbs, STATE and CRASHES_FULL (R4 of
+-- specs/plans/2026-09-28-observe-recon-shell-plan.md), against a live
+-- --hot-reload --signing-pubkey build.  One supervised child has crashed with
+-- a message only CRASHES_FULL may show; Counter holds { n: 5, tags: [x] }.
+--
+-- The program prints its Counter's pid and "ready", then sleeps;
+-- test/observe_debug_check.ml queries the socket, asserts, and kills it.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  actor W do
+    state { n : Int }
+    init  { n: 0 }
+    on Boom() do
+      panic("debug-crash-message-plugh")
+    end
+  end
+
+  actor Sup do
+    state { a : Int }
+    init  { a: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      W a
+    end
+  end
+
+  actor Counter do
+    state { n : Int, tags : List(String) }
+    init  { n: 0, tags: ["x"] }
+    on Bump(k : Int) do
+      { state with n: state.n + k }
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let _s = spawn(Sup)
+    -- Children are spawned before their supervisor: the lowest pid is W.
+    match Actor.list(intro) do
+      Cons(first, _) -> send(first, Boom())
+      Nil -> None
+    end
+    let c = spawn(Counter)
+    send(c, Bump(5))
+    sleep_ms(300)
+    println("counter " ++ int_to_string(pid_to_int(c)))
+    println("ready")
+    sleep_ms(120000)
+  end
+end

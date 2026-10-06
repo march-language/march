@@ -301,6 +301,10 @@ let verbs = [
   "ACTORS", actors; "ACTOR", actor; "TREE", tree; "NAMES", names;
   "MEM", mem; "SCHED", sched; "EPOCHS", epochs; "CRASHES", crashes;
   "TOP", top; "SNAPSHOT", snapshot;
+  (* The signed debug verbs (runtime/march_observe_debug.c) need a deploy
+     key compiled into the binary; an interpreted program never has one. *)
+  "STATE", (fun _ _ -> raise (Bad "signing_not_configured"));
+  "CRASHES_FULL", (fun _ _ -> raise (Bad "signing_not_configured"));
 ]
 
 (** The reply envelope for one request line, as a JSON string. *)

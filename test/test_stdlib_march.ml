@@ -67,7 +67,7 @@ let load_stdlib_decls name =
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
   try
-    let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    let m = March_parser.Parse.module_of_lexbuf lexbuf in
     let m = March_desugar.Desugar.desugar_module m in
     if name = "prelude.march" then
       (* Unwrap outer mod so prelude globals are in scope directly *)
@@ -210,7 +210,7 @@ let parse_test_file filename =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   March_desugar.Desugar.desugar_module m
 
 (** Run a stdlib test file using the native test runner.

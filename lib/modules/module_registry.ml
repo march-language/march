@@ -231,8 +231,7 @@ let parse_file path src =
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
   try
-    Ok (March_parser.Parser.module_
-          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+    Ok (March_parser.Parse.module_of_lexbuf lexbuf)
   with _ -> Error (Printf.sprintf "Failed to parse %s" path)
 
 let ensure_loaded mod_name =

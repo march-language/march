@@ -3619,7 +3619,7 @@ let test_lexer_keyword_dbg () =
 
 let test_parse_dbg () =
   let lexbuf = Lexing.from_string "dbg()" in
-  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let e = March_parser.Parse.expr_of_lexbuf lexbuf in
   Alcotest.(check bool) "parses dbg() as EDbg" true
     (match e with March_ast.Ast.EDbg _ -> true | _ -> false)
 
@@ -3679,7 +3679,7 @@ let test_trace_recording () =
   March_eval.Eval.debug_ctx := Some ctx;
   let src = "1 + 2" in
   let lexbuf = Lexing.from_string src in
-  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let e = March_parser.Parse.expr_of_lexbuf lexbuf in
   let e' = March_desugar.Desugar.desugar_expr e in
   let _v = March_eval.Eval.eval_expr March_eval.Eval.base_env e' in
   let frames_recorded = ctx.March_eval.Eval.dc_trace.March_eval.Eval.rb_size in
@@ -3691,7 +3691,7 @@ let test_trace_navigation () =
   March_debug.Debug.install ctx;
   let src = "1 + 2 + 3" in
   let lexbuf = Lexing.from_string src in
-  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let e = March_parser.Parse.expr_of_lexbuf lexbuf in
   let e' = March_desugar.Desugar.desugar_expr e in
   ignore (March_eval.Eval.eval_expr March_eval.Eval.base_env e');
   let n = March_debug.Debug.frame_count ctx in
@@ -3723,7 +3723,7 @@ mod Test do
 end
 |} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   let m' = March_desugar.Desugar.desugar_module m in
   (try March_eval.Eval.run_module m'
    with
@@ -3756,7 +3756,7 @@ mod DebugTest do
 end
 |} in
   let lexbuf = Lexing.from_string src in
-  let m  = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m  = March_parser.Parse.module_of_lexbuf lexbuf in
   let m' = March_desugar.Desugar.desugar_module m in
   (try March_eval.Eval.run_module m'
    with
@@ -3781,7 +3781,7 @@ let test_trace_overflow () =
   March_debug.Debug.install ctx;
   let src = "1 + 2 + 3 + 4" in
   let lexbuf = Lexing.from_string src in
-  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let e = March_parser.Parse.expr_of_lexbuf lexbuf in
   let e' = March_desugar.Desugar.desugar_expr e in
   ignore (March_eval.Eval.eval_expr March_eval.Eval.base_env e');
   March_debug.Debug.uninstall ();
@@ -6038,6 +6038,34 @@ let test_fast_math_emits_fast_attr () =
   Alcotest.(check bool) "normal IR does not contain 'fadd fast'" false
     (let re = Str.regexp "fadd fast" in
      (try ignore (Str.search_forward re ir_normal 0); true with Not_found -> false))
+
+(* ── by-name record field read on a scalar-typed operand ─────────── *)
+
+(* A field read whose operand's TIR type says "scalar" (here [Int]) has no
+   statically known record shape, so it takes the by-name
+   march_record_field_dyn path.  The operand emits as i64 (the lazy Int63
+   funnel untags it), and splicing that in as the call's `ptr` produced IR
+   clang rejects ("'%w63…' defined with type 'i64' but expected 'ptr'",
+   seen 2026-10-04 compiling a main-less topology app).  The emitter must
+   refuse with a diagnostic naming the operand instead of writing invalid
+   IR. *)
+let test_field_dyn_on_scalar_operand_refused () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let body = March_tir.Tir.EField (March_tir.Tir.AVar x, "factor") in
+  let fd = { March_tir.Tir.fn_name = "field_of_int"; fn_params = [x];
+             fn_ret_ty = March_tir.Tir.TInt; fn_body = body;
+             fn_kind = March_tir.Tir.FnNormal } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = [];
+            tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
+  match March_tir.Llvm_emit.emit_module m with
+  | _ir ->
+    Alcotest.fail "expected the emitter to refuse a field read on an Int; it wrote IR"
+  | exception Failure msg ->
+    let mentions sub =
+      try ignore (Str.search_forward (Str.regexp_string sub) msg 0); true
+      with Not_found -> false in
+    Alcotest.(check bool) ("names the field and operand: " ^ msg) true
+      (mentions ".factor" && mentions "`x`" && mentions "Int")
 
 (* ── Constant propagation ───────────────────────────────────────── *)
 
@@ -16762,6 +16790,7 @@ let codegen_suites =
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
+        Alcotest.test_case "field_dyn_on_scalar_operand_refused" `Quick test_field_dyn_on_scalar_operand_refused;
       ]);
       ("llvm_emit correctness", [
         Alcotest.test_case "ctor_no_collision_different_tags" `Quick

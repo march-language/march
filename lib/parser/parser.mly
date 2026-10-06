@@ -17,15 +17,6 @@
 
   let mk_name id loc = { txt = id; span = mk_span loc }
 
-  (* ── Multi-error recovery ────────────────────────────────────────────── *)
-
-  (** Delegate to Parse_errors module so callers outside the parser can
-      access collected errors via March_parser.Parse_errors.take_parse_errors. *)
-  let _collect_parse_error = Parse_errors.collect_parse_error
-
-  (** Collect a parse error into the buffer and then raise [ParseError].
-      Use this in sub-production error rules where Menhir requires the action
-      to abort (assert false is generated after the action otherwise). *)
   (* Shared by the `doc`-on-a-non-function rules in [decl]. *)
   let doc_not_on_decl_msg =
     "`doc` goes before a function; use a `--` comment here."
@@ -34,8 +25,9 @@
       "`doc \"...\"` attaches a doc string to a `fn` or `pfn`. %s don't carry one \xe2\x80\x94 write `-- ...` on the line above instead."
       what)
 
+  (** Raise [ParseError] from an `error` production.  [pos] is the position
+      the message is about; [Parse] renders the diagnostic there. *)
   let error_raise msg hint pos =
-    Parse_errors.collect_parse_error msg hint pos;
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
   (* `backoff base 25 cap 5000 jitter 25%` — the labels are parsed as ordinary

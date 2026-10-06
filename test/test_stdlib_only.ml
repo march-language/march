@@ -34,8 +34,7 @@ let typecheck_as ~file src =
   let lexbuf = Lexing.from_string src in
   Lexing.set_filename lexbuf file;
   let m =
-    March_parser.Parser.module_
-      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+    March_parser.Parse.module_of_lexbuf lexbuf
   in
   let (errors, _) =
     March_typecheck.Typecheck.check_module (March_desugar.Desugar.desugar_module m)

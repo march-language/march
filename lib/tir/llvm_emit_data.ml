@@ -155,6 +155,23 @@ let emit_record ~emit_atom ctx (fields : (string * Tir.atom) list)
       (List.map (fun (nm, atom) -> (nm, atom_tir_ty atom)) sorted);
     ("ptr", ptr)
 
+(* The record operand of a by-name field read.  It must already be a pointer:
+   a record is a heap cell.  An atom that emits as anything else is typed as
+   a scalar in the TIR (an `Int`-typed var is untagged to i64 by the lazy
+   Int63 funnel, `%w63…`), so its bits are no longer the cell's address and
+   no coercion can recover them; splicing it in as `ptr` only defers the
+   failure to clang ("defined with type 'i64' but expected 'ptr'").  Fail
+   here instead, naming the operand and its TIR type. *)
+let dyn_record_obj ~emit_atom ctx (obj_atom : Tir.atom) (obj_ty : Tir.ty)
+    (field_name : string) : string =
+  let (ty, v) = emit_atom ctx obj_atom in
+  if ty <> "ptr" then
+    failwith (Printf.sprintf
+      "llvm_emit: field `.%s` read from `%s`, whose TIR type `%s` emits as \
+       %s, not a record pointer"
+      field_name (Pp.string_of_atom obj_atom) (Pp.string_of_ty obj_ty) ty);
+  v
+
 (** Body of the [EField] arm. *)
 let emit_field ~emit_atom ctx (obj_atom : Tir.atom) (field_name : string)
   : string * string =
@@ -179,7 +196,7 @@ let emit_field ~emit_atom ctx (obj_atom : Tir.atom) (field_name : string)
            convention (ints low-bit tagged) — consumers coerce ptr→i64 with
            an untagging ashr.  Cells without shape metadata fall back to the
            legacy raw slot-0 read inside the C helper. *)
-        let (_, obj_val) = emit_atom ctx obj_atom in
+        let obj_val = dyn_record_obj ~emit_atom ctx obj_atom obj_ty field_name in
         let ng = intern_string ctx field_name in
         let res = fresh ctx "cr" in
         emit ctx (Printf.sprintf
@@ -203,7 +220,7 @@ let emit_field ~emit_atom ctx (obj_atom : Tir.atom) (field_name : string)
               records.  It consults the runtime shape recorded at construction
               and returns ints low-bit tagged, which is exactly the generic
               ADT-slot convention the consuming coercion expects. *)
-           let (_, obj_val) = emit_atom ctx obj_atom in
+           let obj_val = dyn_record_obj ~emit_atom ctx obj_atom obj_ty field_name in
            let ng = intern_string ctx field_name in
            let res = fresh ctx "cr" in
            emit ctx (Printf.sprintf

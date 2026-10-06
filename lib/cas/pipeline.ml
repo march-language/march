@@ -127,7 +127,7 @@ let hash_module (m : tir_module) : hashed_scc list =
   (* Build a name → fn_def lookup table *)
   let fn_table = Hashtbl.create (List.length m.tm_fns) in
   List.iter (fun fd -> Hashtbl.replace fn_table fd.fn_name fd) m.tm_fns;
-  let all_names = List.map (fun fd -> fd.fn_name) m.tm_fns in
+  let known = Scc.known_of_names (List.map (fun fd -> fd.fn_name) m.tm_fns) in
   (* name → impl_hash, populated as each SCC is processed (earlier SCCs only). *)
   let resolved : (string, string) Hashtbl.t =
     Hashtbl.create (List.length m.tm_fns) in
@@ -164,7 +164,7 @@ let hash_module (m : tir_module) : hashed_scc list =
   let merkle_hash_fn (fd : fn_def) : Hash.hashed_fn =
     let base = Hash.hash_fn_def fd in
     let dep_hashes =
-      Scc.deps_of all_names fd
+      Scc.deps_of known fd
       |> List.filter_map (fun n -> Hashtbl.find_opt resolved n)
     in
     let type_hashes = type_closure_hashes (add_tycons_of_fn [] fd) in

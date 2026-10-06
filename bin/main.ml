@@ -160,13 +160,14 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
      sweeps the same shared dir on start, but a user who only ever runs the
      CLI would otherwise never clear them. *)
   March_repl.Repl.sweep_stale_cache_tmps cache_dir;
-  let load_from_cache () =
-    try
-      if Sys.file_exists cache_path then begin
-        let ic = open_in_bin cache_path in
-        let (cached_env : March_typecheck.Typecheck.env) = Marshal.from_channel ic in
+  (* [next ()] yields the next Marshal-encoded piece, in file order.  The file
+     reader and the cold path's in-memory round trip below both go through
+     this one decoder, so the two cannot drift apart. *)
+  let decode_pieces (rd : < next : 'a. unit -> 'a >) =
+        let next () = rd#next () in
+        let (cached_env : March_typecheck.Typecheck.env) = next () in
         let (cached_tm : (March_ast.Ast.span * March_typecheck.Typecheck.ty) list) =
-          Marshal.from_channel ic in
+          next () in
         (* Restore the two PROCESS-GLOBAL side-tables a from-scratch stdlib
            check would have advanced/populated as a side effect, and that a
            cache hit otherwise skips entirely:
@@ -204,18 +205,25 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
                reproduced in the golden corpus. Restored defensively for
                the same reason the round-1 fix insisted on byte-identical
                diagnostics rather than "close enough". *)
-        let (cached_counter : int) = Marshal.from_channel ic in
+        let (cached_counter : int) = next () in
         let (cached_record_names : (string * string option) list) =
-          Marshal.from_channel ic in
-        close_in ic;
+          next () in
         List.iter (fun (k, v) -> Hashtbl.replace type_map k v) cached_tm;
         if cached_counter > !March_typecheck.Typecheck._counter then
           March_typecheck.Typecheck._counter := cached_counter;
         List.iter (fun (k, v) -> Hashtbl.replace March_typecheck.Typecheck._record_names k v)
           cached_record_names;
-        Some { cached_env with
-               March_typecheck.Typecheck.errors = March_errors.Errors.create ();
-               type_map }
+        { cached_env with
+          March_typecheck.Typecheck.errors = March_errors.Errors.create ();
+          type_map }
+  in
+  let load_from_cache () =
+    try
+      if Sys.file_exists cache_path then begin
+        let ic = open_in_bin cache_path in
+        let env = Fun.protect ~finally:(fun () -> close_in_noerr ic)
+            (fun () -> decode_pieces (object method next : 'a. unit -> 'a = fun () -> Marshal.from_channel ic end)) in
+        Some env
       end else None
     with _ -> None
   in
@@ -232,6 +240,24 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
     let errors = March_errors.Errors.create () in
     let (_errs, _tm, final_env) =
       March_typecheck.Typecheck.check_module_core ~errors synthetic in
+    (* Encode the four pieces ONCE, up front.  The cold path hands the typechecker
+       the DECODED copy of these exact bytes, never [final_env] itself: a live
+       env and its type_map share mutable tvar cells, so the user module's
+       pass 2 could link a stdlib fn's generic [Pid('a)] annotation to one
+       concrete type and lowering would then emit a different TIR (an extra
+       mono clone, shifted lambda uids, a different post-TIR CAS key) than the
+       warm path, whose Marshal round trip severs that sharing.  Cold and warm
+       must see the same state. *)
+    let pieces =
+      let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+        final_env.March_typecheck.Typecheck.type_map [] in
+      let record_names_list =
+        Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+          March_typecheck.Typecheck._record_names [] in
+      [ Marshal.to_string (March_repl.Repl.marshalable_tc_env final_env) [];
+        Marshal.to_string tm_list [];
+        Marshal.to_string !March_typecheck.Typecheck._counter [];
+        Marshal.to_string record_names_list [] ] in
     (try
       mkdir_p cache_dir;
       let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
@@ -246,20 +272,12 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
           (try close_out oc with _ -> ());
           if Sys.file_exists tmp then (try Sys.remove tmp with _ -> ()))
         (fun () ->
-          Marshal.to_channel oc (March_repl.Repl.marshalable_tc_env final_env) [];
-          let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
-            final_env.March_typecheck.Typecheck.type_map [] in
-          Marshal.to_channel oc tm_list [];
+          List.iter (output_string oc) pieces;
           (* Snapshot the two process-global side-tables RIGHT NOW — the
              point where a from-scratch run would hand off from "stdlib
              checked" to "start checking the user's own file" — so a later
              cache hit can restore them to this exact point. See the long
              comment on [load_from_cache] above for why both matter. *)
-          Marshal.to_channel oc !March_typecheck.Typecheck._counter [];
-          let record_names_list =
-            Hashtbl.fold (fun k v acc -> (k, v) :: acc)
-              March_typecheck.Typecheck._record_names [] in
-          Marshal.to_channel oc record_names_list [];
           close_out oc;
           Sys.rename tmp cache_path)
     with e ->
@@ -267,9 +285,13 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
         "[warn] could not save the stdlib typecheck cache (%s); stdlib will be \
          re-typechecked on every invocation\n%!"
         (Printexc.to_string e));
-    { final_env with
-      March_typecheck.Typecheck.errors = March_errors.Errors.create ();
-      type_map = final_env.March_typecheck.Typecheck.type_map }
+    let rest = ref pieces in
+    decode_pieces (object
+      method next : 'a. unit -> 'a = fun () ->
+        match !rest with
+        | p :: tl -> rest := tl; Marshal.from_string p 0
+        | [] -> assert false
+    end)
 
 (* Substring test used by the MARCH_DUMP_TXT stage filter (see snap_tir). *)
 let contains_substring (hay : string) (needle : string) =
@@ -481,6 +503,40 @@ let user_fn_names_of ~stdlib_files (m : March_ast.Ast.module_) :
   in
   walk m.March_ast.Ast.mod_decls;
   user_fn_names
+
+(* A TIR function name's bare stem: module prefix and monomorphization suffix
+   stripped (`M.helper$Int` -> `helper`), the spelling [user_fn_names_of]
+   records. *)
+let tir_fn_stem n =
+  let n =
+    match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+    | None -> n
+  in
+  match String.index_opt n '$' with
+  | Some i -> String.sub n 0 i
+  | None -> n
+
+(* Whether TIR function [n] is one THIS file declares.  The stem comparison
+   strips the module prefix, so on its own it also matched every STDLIB
+   function sharing a user function's bare name: a main-less module declaring
+   `add` rooted `BigInt.add`, `Decimal.add`, `DateTime.add`, `Forge.add`,
+   `PeerRegistry.add` and `CRDT.GCounter.add`, whose 172 reachable functions
+   include console IO — and the ceiling then charged `IO.Console` to a module
+   that never mentions it
+   (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md).  A
+   prefixed name is the user's own only if the prefix is not a stdlib module;
+   the entry module's own functions are bare.  Shared by the --cap-strict
+   ceiling's DCE roots and a main-less executable's codegen roots. *)
+let is_user_tir_fn ~user_fns ~stdlib_mods n =
+  Hashtbl.mem user_fns (tir_fn_stem n)
+  && (let pre_mono =
+        match String.index_opt n '$' with
+        | Some i -> String.sub n 0 i
+        | None -> n in
+      match String.rindex_opt pre_mono '.' with
+      | None -> true
+      | Some i -> not (List.mem (String.sub pre_mono 0 i) stdlib_mods))
 
 (* MIRRORS the local [impl_ty_key] inside Typecheck's [check_module_needs] —
    the producer of the "Iface$Ty.method" closure keys this file must match.
@@ -977,6 +1033,7 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
   let fn_tbl = Hashtbl.create 1024 in
   List.iter (fun (fd : March_tir.Tir.fn_def) -> Hashtbl.replace fn_tbl fd.March_tir.Tir.fn_name fd) tir.March_tir.Tir.tm_fns;
   let all_names = Hashtbl.fold (fun n _ acc -> n :: acc) fn_tbl [] in
+  let known = March_cas.Scc.known_of_names all_names in
   let counter_re = Str.regexp "\\$\\([A-Za-z_]*\\)[0-9]+\\|_i[0-9]+\\|'_[0-9]+" in
   let canon_text fd =
     let seen = Hashtbl.create 16 in
@@ -999,7 +1056,7 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
     | None -> let h = canon fd in Hashtbl.replace own n h; h in
   let is_slot = HR.is_slot_fn cfg in
   let rec fold_deps visiting fd =
-    March_cas.Scc.deps_of all_names fd
+    March_cas.Scc.deps_of known fd
     |> List.filter (fun c ->
          not (List.mem c visiting)
          && String.equal (HR.module_of_name c) ""
@@ -1265,8 +1322,13 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
             (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
   (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
-     Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] ch=%s\n%!"
-       target_label (String.concat "," cas_flags) ch);
+     (* [src=] digests only the source/TIR-derived input, so unlike [ch=]
+        (which folds in the compiler executable's own digest) it is comparable
+        across two compiler builds: a refactor of the CAS hashing must leave it
+        unchanged. *)
+     Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] src=%s ch=%s\n%!"
+       target_label (String.concat "," cas_flags)
+       (March_cas.Blake3.hash_string src_hash) ch);
   (cas_flags, ch)
 
 (* ------------------------------------------------------------------ *)
@@ -1310,20 +1372,13 @@ let resolve_imports ~source_file m =
 let fmt_file filename =
   let src = read_file filename in
   let formatted =
-    try March_format.Format.format_source ~filename src
-    with
-    | March_errors.Errors.ParseError (msg, hint, _) ->
-      Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg
-           (Lexing.from_string src));
-      exit 1
-    | March_parser.Parser.Error ->
-      let lexbuf = Lexing.from_string src in
-      lexbuf.Lexing.lex_curr_p <-
-        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
-      Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename
-           ~msg:"Parse error (cannot format)" lexbuf);
+    match March_format.Format.format_source_result ~filename
+            ~stuck:"Parse error (cannot format)" src with
+    | Ok formatted -> formatted
+    | Error diags ->
+      List.iter (fun d ->
+        Printf.eprintf "%s\n"
+          (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
       exit 1
   in
   formatted <> src, formatted
@@ -1420,30 +1475,15 @@ let run_test_cmd args =
         Printf.eprintf "march test: %s\n" msg; exit 1
     in
     if !verbose then Printf.printf "%s\n%!" filename;
-    let lexbuf = Lexing.from_string src in
-    lexbuf.Lexing.lex_curr_p <-
-      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
     let module_ast =
-      try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-      with
-      | March_errors.Errors.ParseError (msg, hint, _) ->
-        Printf.eprintf "\n%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
-        exit 1
-      | March_parser.Parser.Error ->
-        Printf.eprintf "\n%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename ~msg:"Parse error:" lexbuf);
+      match March_parser.Parse.module_ ~filename ~stuck:"Parse error:" src with
+      | Ok m -> m
+      | Error diags ->
+        List.iter (fun d ->
+          Printf.eprintf "\n%s\n"
+            (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
         exit 1
     in
-    let parse_errs = March_parser.Parse_errors.take_parse_errors () in
-    if parse_errs <> [] then begin
-      List.iter (fun (msg, _hint, pos) ->
-        let open Lexing in
-        Printf.eprintf "%s:%d:%d: error: %s\n"
-          filename pos.pos_lnum (pos.pos_cnum - pos.pos_bol) msg
-      ) parse_errs;
-      exit 1
-    end;
     let desugar_errors = March_errors.Errors.create () in
     let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
     if March_errors.Errors.has_errors desugar_errors then begin
@@ -1582,13 +1622,14 @@ let run_test_cmd args =
          following statement (see March_doctest.Doctest.extract) parses as
          a block body; a single bare expression degenerates to itself. *)
       let wrapped = "do\n" ^ src ^ "\nend" in
-      let lexbuf = Lexing.from_string wrapped in
       let expr =
-        try March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-        with
-        | March_errors.Errors.ParseError (msg, _, _) ->
-          failwith ("doctest parse error: " ^ msg)
-        | March_parser.Parser.Error ->
+        match March_parser.Parse.expr wrapped with
+        | Ok e -> e
+        | Error (d :: _)
+          when d.March_errors.Errors.code
+               = Some March_parser.Parse.code_parse_error ->
+          failwith ("doctest parse error: " ^ d.March_errors.Errors.message)
+        | Error _ ->
           failwith ("doctest parse error in: " ^ src)
       in
       March_desugar.Desugar.desugar_expr expr
@@ -2107,9 +2148,6 @@ let compile filename =
     if !do_timings then
       Printf.eprintf "[timings] %6.3fs  %s\n%!" (Unix.gettimeofday () -. t_compile_start) label
   in
-  let lexbuf = Lexing.from_string src in
-  lexbuf.Lexing.lex_curr_p <-
-    { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   (* Parse *)
   (* A hard parse failure (unlike a desugar/typecheck error) produces no
      [module_ast] at all — [compile] exits right here, well before the
@@ -2120,14 +2158,16 @@ let compile filename =
      to stdout in this case, so it gets its own short-circuit here rather
      than falling through to the plain-text-only exit. There is no AST to
      serialize, so "module" is JSON null. *)
-  let emit_core_ast_parse_failure (diag : March_errors.Errors.diagnostic) =
+  let emit_core_ast_parse_failure (diags : March_errors.Errors.diagnostic list) =
     if !emit_core_ast_file <> None then begin
       let doc =
         March_dump.Dump.json_obj [
           ("format_version", "3");
           ("verdict", March_dump.Dump.json_string "reject");
           ("diagnostics",
-           March_dump.Dump.json_list [March_errors.Errors.render_diagnostic_json diag]);
+           March_dump.Dump.json_list
+             (List.map (March_errors.Errors.render_diagnostic_json ~related:false)
+                diags));
           ("module", "null");
           ("schemes", "[]");
           ("instantiations", "[]");
@@ -2138,32 +2178,23 @@ let compile filename =
     end
   in
   let module_ast =
-    try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-    with
-    | March_errors.Errors.ParseError (msg, hint, _) ->
-      Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
-      emit_core_ast_parse_failure
-        (March_errors.Errors.parse_error_diagnostic ~filename ?hint ~msg lexbuf);
-      exit 1
-    | March_parser.Parser.Error ->
-      Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename ~msg:"I got stuck here:" lexbuf);
-      emit_core_ast_parse_failure
-        (March_errors.Errors.parse_error_diagnostic ~filename ~msg:"I got stuck here:" lexbuf);
+    match March_parser.Parse.module_ ~filename src with
+    | Ok m -> m
+    | Error diags ->
+      List.iter (fun d ->
+        Printf.eprintf "%s\n"
+          (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
+      emit_core_ast_parse_failure diags;
+      (* --check-json: the same NDJSON stream type errors use, so tooling
+         sees a syntax error as a diagnostic rather than as "no output".
+         Unlike the post-typecheck --check-json exit below this stays exit 1,
+         as a parse failure always has. *)
+      if !check_json then
+        List.iter (fun d ->
+          print_string (March_errors.Errors.render_diagnostic_json d ^ "\n"))
+          diags;
       exit 1
   in
-  (* Display any declaration-level parse errors collected during recovery *)
-  let parse_errs = March_parser.Parse_errors.take_parse_errors () in
-  let has_parse_errors = parse_errs <> [] in
-  List.iter (fun (msg, hint, pos) ->
-      let open Lexing in
-      Printf.eprintf "%s:%d:%d: error: %s\n"
-        filename pos.pos_lnum (pos.pos_cnum - pos.pos_bol) msg;
-      (match hint with
-       | None -> ()
-       | Some h -> Printf.eprintf "hint: %s\n" h)
-    ) parse_errs;
   stamp "parse";
   (* Apply .march.spans sidecar remapping if present *)
   let module_ast =
@@ -2250,8 +2281,7 @@ let compile filename =
       lexbuf.Lexing.lex_curr_p <-
         { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "<cap-dispatch>" };
       let m =
-        March_parser.Parser.module_
-          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+        March_parser.Parse.module_of_lexbuf lexbuf
       in
       let d = March_desugar.Desugar.desugar_module m in
       { desugared with
@@ -2465,7 +2495,8 @@ let compile filename =
   let diags = dedupe_cap_hints (March_errors.Errors.sorted errors) in
   let is_user_file = user_diag ~filename ~user_files in
   (* The front-end half of --check's accept/reject condition (has_user_errors
-     || has_parse_errors || has_resolve_errors || has_desugar_errors), hoisted
+     || has_resolve_errors || has_desugar_errors; a parse error never gets
+     this far, [compile] exits at the parse step), hoisted
      here so --emit-core-ast can reuse it without running the human-readable
      diagnostic-printing loop below (mirrors --check-json's short-circuit,
      which also runs before that loop).  It is NOT the whole condition:
@@ -2482,7 +2513,7 @@ let compile filename =
     exit 0
   end;
   let frontend_rejected =
-    has_user_errors || has_parse_errors || has_resolve_errors
+    has_user_errors || has_resolve_errors
     || has_desugar_errors
   in
   (* Allocation contracts (`cap no_alloc`, @[no_alloc]) and the
@@ -2875,16 +2906,7 @@ let compile filename =
         user_fn_names_of ~stdlib_files:(stdlib_span_files stdlib_decls)
           desugared
       in
-      let stem n =
-        let n =
-          match String.rindex_opt n '.' with
-          | Some i -> String.sub n (i + 1) (String.length n - i - 1)
-          | None -> n
-        in
-        match String.index_opt n '$' with
-        | Some i -> String.sub n 0 i
-        | None -> n
-      in
+      let stem = tir_fn_stem in
       (* The PRELUDE's functions are the complement of [user_fns] at the top
          level: stdlib-span [DFn]s, unwrapped into the entry module, so their
          TIR names are BARE exactly like the user's own.  They must be
@@ -2916,28 +2938,7 @@ let compile filename =
              (`MyMod.println`) see-through. *)
           not (String.contains n '.') && Hashtbl.mem prelude_fns (stem n))
         (March_tir.Dce.prune_unreachable
-           ~extra_root:(fun n ->
-             (* The stem comparison strips the module prefix, so on its own
-                it also matched every STDLIB function sharing a user
-                function's bare name: a main-less module declaring `add`
-                rooted `BigInt.add`, `Decimal.add`, `DateTime.add`,
-                `Forge.add`, `PeerRegistry.add` and `CRDT.GCounter.add`, whose
-                172 reachable functions include console IO — and the ceiling
-                then charged `IO.Console` to a module that never mentions it.
-                The discriminator was the NAME, not the signature: a scalar
-                helper that collides with nothing compiled clean, and a heap
-                helper renamed to `add` did not
-                (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md).
-                A prefixed name is the user's own only if the prefix is not a
-                stdlib module; the entry module's own functions are bare. *)
-             Hashtbl.mem user_fns (stem n)
-             && (let pre_mono =
-                   match String.index_opt n '$' with
-                   | Some i -> String.sub n 0 i
-                   | None -> n in
-                 match String.rindex_opt pre_mono '.' with
-                 | None -> true
-                 | Some i -> not (List.mem (String.sub pre_mono 0 i) stdlib_mods)))
+           ~extra_root:(is_user_tir_fn ~user_fns ~stdlib_mods)
            ~fail_open:false pre_opt_tir)
     in
     (* --cap-strict: `needs` as a hard ceiling.  Deliberately checked here,
@@ -3094,6 +3095,35 @@ let compile filename =
     cap_state := Some (cap_attrib, cap_decls)
     in
     let contract_decls = March_tir.Alloc_contract.collect desugared in
+    (* A program with no entry point of its own (no `main`, no tests, no
+       exports) gives DCE no roots, and codegen then fails open and keeps
+       EVERY function: the whole prepended stdlib, ~8,000 of them, 45 MB of
+       IR and minutes of llvm-emit + clang for a file whose only declaration
+       is `fn f(x) = x + 1`.  Measured on a topology app compiled without its
+       `--topology` digest (forge generates its `main`): 47 MB of IR and
+       llvm-emit ~20x slower than the same app with the digest
+       (specs/progress/2026-10-04-mainless-compile-emits-whole-stdlib.md).
+       Root the functions this FILE declares instead, as the --cap-strict
+       ceiling already does: they still compile, and what they reach comes
+       along.  Not for a shared object, a hot-reload build or a JS/WASM-island
+       target, whose roots are exports and symbols a loader looks up, nor when
+       the file declares nothing (fail open as before). *)
+    let mainless_roots =
+      if !compile_so || !hot_reload_prefix <> None || is_js_target
+         || parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown
+         || March_tir.Dce.root_names ~fail_open:false tir <> []
+      then []
+      else begin
+        let user_fns =
+          user_fn_names_of ~stdlib_files:(stdlib_span_files stdlib_decls)
+            desugared in
+        let stdlib_mods = stdlib_module_names stdlib_decls in
+        List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
+            let n = fn.March_tir.Tir.fn_name in
+            if is_user_tir_fn ~user_fns ~stdlib_mods n then Some n else None)
+          tir.March_tir.Tir.tm_fns
+      end
+    in
     let pipe =
       try
       March_tir.Contract_pipeline.run
@@ -3112,7 +3142,7 @@ let compile filename =
         ~extra_roots:(if !report_contracts
                       then List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
                           d.March_tir.Alloc_contract.d_name) contract_decls
-                      else [])
+                      else mainless_roots)
         ~opt:!opt_enabled tir
       with March_tir.Mono.Repr_disagreement msg ->
         (* A real defect in the program or the stdlib manifest, not a compiler
@@ -3318,7 +3348,24 @@ let compile filename =
         let target_label = cas_target_label target in
         let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
         let h_sccs = March_cas.Pipeline.hash_module tir in
+        (* Its own stamp so --timings does not fold the SCC build + Merkle
+           hashing into the next stamp (llvm-emit, or nothing on a cache hit). *)
+        stamp "cas-hash";
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
+        (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" = Some "2" then
+           List.iter (fun sc ->
+             let nm = match sc with
+               | March_cas.Pipeline.HSingle { hs_hdef } ->
+                 (match hs_hdef.March_cas.Cas.hd_def with
+                  | March_cas.Cas.FnDef fd -> fd.March_tir.Tir.fn_name
+                  | March_cas.Cas.TypeDef _ -> "<type>")
+               | March_cas.Pipeline.HGroup { hg_hdefs; _ } ->
+                 "{" ^ String.concat "," (List.map (fun (hd : March_cas.Cas.hashed_def) ->
+                   match hd.March_cas.Cas.hd_def with
+                   | March_cas.Cas.FnDef fd -> fd.March_tir.Tir.fn_name
+                   | March_cas.Cas.TypeDef _ -> "<type>") hg_hdefs) ^ "}" in
+             Printf.eprintf "MARCH_SCC: %s %s\n" (March_cas.Pipeline.scc_impl_hash sc) nm)
+             h_sccs);
         (* Hot Code Reload: per-function impl_hash map (qualified fn name →
            64-char hex Merkle root) so the baseline dispatch-table publish can
            carry real hashes instead of null. Built from the same CAS hashing
@@ -3573,6 +3620,8 @@ let compile filename =
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_observe.c")) (* observe socket *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_observe_snapshot.c")) (* observe verbs *)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_observe_debug.c")) (* signed debug verbs *)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_sig.c")) (* deploy-key signatures, nonces, audit log *)
               ^ (if hcr_identity_flags <> "" then opt_file2 hcr_identity_c2 else "")
               ^ (opt_file2 (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
             in
@@ -4712,20 +4761,13 @@ let run_check_cmd ?(emit_caps = false) files =
       with Sys_error msg ->
         Printf.eprintf "march: %s\n" msg; exit 1
     in
-    let lexbuf = Lexing.from_string src in
-    lexbuf.Lexing.lex_curr_p <-
-      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
     let module_ast =
-      try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-      with
-      | March_errors.Errors.ParseError (msg, hint, _) ->
-        Printf.eprintf "%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
-        exit 1
-      | March_parser.Parser.Error ->
-        Printf.eprintf "%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename
-             ~msg:"I got stuck here:" lexbuf);
+      match March_parser.Parse.module_ ~filename src with
+      | Ok m -> m
+      | Error diags ->
+        List.iter (fun d ->
+          Printf.eprintf "%s\n"
+            (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
         exit 1
     in
     let desugared = March_desugar.Desugar.desugar_module module_ast in
@@ -5195,8 +5237,7 @@ let () =
       lexbuf.Lexing.lex_curr_p <-
         { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
       let module_ast =
-        March_parser.Parser.module_
-          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+        March_parser.Parse.module_of_lexbuf lexbuf in
       let desugared = March_desugar.Desugar.desugar_module module_ast in
       let stdlib_decls = load_stdlib () in
       if not (is_shipped_stdlib_file path) then
