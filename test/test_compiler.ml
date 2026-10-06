@@ -7292,13 +7292,23 @@ let test_derive_spans_keyed_by_decl () =
     | March_ast.Ast.DFn (fd, _) -> fd.March_ast.Ast.fn_name.March_ast.Ast.span
     | _ -> Alcotest.fail "expected a DFn" in
   let module D = March_desugar.Desugar_derive in
-  let r1 = D.respan_derived_decl d1 in
-  let _ = D.respan_derived_decl d2 in
-  let _ = D.respan_derived_decl d2 in
-  let r1' = D.respan_derived_decl d1 in
-  let r2 = D.respan_derived_decl d2 in
-  Alcotest.(check bool) "the same decl gets the same spans" true (r1 = r1');
+  let in_scope scope f = D.with_salt_scope scope f in
+  (* "This process": d1, then other work in the module. *)
+  D.reset_salt_counts ();
+  let r1 = in_scope "M" (fun () -> D.respan_derived_decl d1) in
+  let r2 = in_scope "M" (fun () -> D.respan_derived_decl d2) in
+  let r1_again = in_scope "M" (fun () -> D.respan_derived_decl d1) in
+  (* "Another process" (a cached stdlib module): the same module from scratch. *)
+  D.reset_salt_counts ();
+  let _ = in_scope "Other" (fun () -> D.respan_derived_decl d2) in
+  let r1' = in_scope "M" (fun () -> D.respan_derived_decl d1) in
+  let r1_other_mod = in_scope "N" (fun () -> D.respan_derived_decl d1) in
+  Alcotest.(check bool) "same module, same decl: same spans in every process" true (r1 = r1');
   Alcotest.(check bool) "a different decl gets a different key" true (name_span r1 <> name_span r2);
+  Alcotest.(check bool) "a repeat in one module gets a different key" true
+    (name_span r1 <> name_span r1_again);
+  Alcotest.(check bool) "the same decl in another module gets a different key" true
+    (name_span r1 <> name_span r1_other_mod);
   Alcotest.(check string) "still synthetic" "<none>" (name_span r1).March_ast.Ast.file;
   Alcotest.(check bool) "positive line" true ((name_span r1).March_ast.Ast.start_line > 0)
 

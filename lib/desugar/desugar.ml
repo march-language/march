@@ -2194,6 +2194,10 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   let saved_ctx = !expr_err_ctx in
   expr_err_ctx := caller_ctx;
   Fun.protect ~finally:(fun () -> expr_err_ctx := saved_ctx) @@ fun () ->
+  (* Generated code's synthetic spans are salted with the module they are
+     generated in (Desugar_derive.decl_salt). *)
+  Desugar_derive.reset_salt_counts ();
+  Desugar_derive.with_salt_scope m.mod_name.txt @@ fun () ->
   check_app_main_exclusivity errors m.mod_decls;
   check_main_signature errors m.mod_decls;
   (* `@[endpoints]` protocols expand into generated nested modules here, ahead
@@ -2215,10 +2219,14 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
      qualified name (`Outer.P_Msg`) from outside.  Before this only the file's
      top level was expanded, so a protocol in `mod Outer` generated nothing
      and every use of `P_A` was "Unknown module". *)
+  let nested scope name = if scope = "" then name else scope ^ "." ^ name in
   let rec expand_endpoints (decls : decl list) : decl list =
+    let scope = Desugar_derive.current_salt_scope () in
     let decls =
       List.map (function
-          | DMod (nm, vis, ds, sp) -> DMod (nm, vis, expand_endpoints ds, sp)
+          | DMod (nm, vis, ds, sp) ->
+            DMod (nm, vis, Desugar_derive.with_salt_scope (nested scope nm.txt)
+                    (fun () -> expand_endpoints ds), sp)
           | d -> d) decls
     in
     match Desugar_endpoints.expand errors decls with
@@ -2276,7 +2284,9 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
           (* [expand_defaults_decl]'s own [DMod] arm recurses for default-arg
              variants; going through it here keeps that, and adds the derive
              and satisfy expansion at every level. *)
-          [DMod (name, vis, expand_level type_defs inner, sp)]
+          let scope = nested (Desugar_derive.current_salt_scope ()) name.txt in
+          [DMod (name, vis, Desugar_derive.with_salt_scope scope
+                   (fun () -> expand_level type_defs inner), sp)]
         | _ -> expand_defaults_decl d
       ) decls
   in
