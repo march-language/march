@@ -1,0 +1,87 @@
+-- Two-node harness, scenario "cert_update_replay": node-a, the victim. It
+-- dials node-b through node-c (the proxy) and reports every certificate
+-- update it takes or refuses from node-b. See scenario.sh.
+mod CertUpdateReplayA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn me() : String do "node-a" end
+  pfn other() : String do "node-b" end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn once(flags : Vault(Int), key : String, line : String) : () do
+    if Vault.incr(flags, key, 1) == 1 do println(me() ++ ": " ++ line) else () end
+  end
+
+  pfn wait_linked(h : Cap(ClusterNode.Live), flags : Vault(Int), stop : String) : () do
+    if File.exists(stop) do () else
+      match ClusterNode.peer_cert(h, ClusterNode.node_id_of(other())) do
+        Some(_) -> once(flags, "linked", "linked to " ++ other())
+        None ->
+          sleep_ms(50)
+          wait_linked(h, flags, stop)
+      end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_A")))
+    Process.set_env("MARCH_CLUSTER_NODES", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_C")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg0 = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    -- node-c never answers a SWIM probe, so with the default 3 s suspect
+    -- timeout node-a drops node-c's link soon after it forms (under ASan,
+    -- before a replay lands). A long one keeps the link up for the test;
+    -- node-b's own departure is seen from its link closing, not from SWIM.
+    let swim = { cfg0.swim with suspect_timeout_ms: 600000 }
+    let cfg = { cfg0 with swim: swim }
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let flags = Vault.new("replay_flags")
+        let b = ClusterNode.node_id_of(other())
+        -- Every security and member event, on stderr: what the harness
+        -- prints when a wait times out.
+        let _ = ClusterNode.subscribe(h, fn e -> IO.warn(me() ++ " event: " ++ to_string(e)))
+        let _ = ClusterNode.on_security_event(h, fn ev ->
+          let _ = IO.warn(me() ++ " security: " ++ ClusterNode.security_text(ev))
+          match ev do
+            ClusterNode.CertReplaced(id, _) ->
+              if id == b do
+                let n = Vault.incr(flags, "replaced", 1)
+                println(me() ++ ": " ++ other() ++ "'s certificate replaced (" ++ int_to_string(n) ++ ")")
+              else () end
+            ClusterNode.CertRefused(id, why) ->
+              if id == b do once(flags, "refused", "refused " ++ other() ++ "'s certificate update: " ++ why) else () end
+            _ -> ()
+          end)
+        println(me() ++ ": up")
+        let stop = Env.require("CLUSTER_STOP_FILE")
+        wait_linked(h, flags, stop)
+        wait_file(stop)
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

@@ -222,6 +222,13 @@ let extern_borrow_table : (string * bool list) list = [
   ("vault_ns_set",         [true; true; true]);
   ("vault_ns_get",         [true; true]);
   ("vault_ns_drop",        [true; true]);
+  (* A write no longer releases what it displaces (march_decrc frees one
+     cell, never its children): it buries it, and vault_reap hands it back to
+     the typed wrapper (stdlib/vault.march) to drop at its static type;
+     vault_close does the same for a retired table's contents.  Both only
+     read the table and key.  specs/progress/2026-10-01-session-node-vault-tables-leak.md *)
+  ("vault_reap",           [true; true]);
+  ("vault_close",          [true]);
   ("string_byte_at",       [true; false]);
   ("string_grapheme_count",[true]);
   ("string_is_empty",      [true]);
@@ -237,6 +244,15 @@ let extern_borrow_table : (string * bool list) list = [
   ("char_is_lowercase",    [true]);
   ("char_to_uppercase",    [true]);
   ("char_to_lowercase",    [true]);
+  (* The rest of the family, audited 2026-10-05: each reads data[0] and neither
+     stores nor releases the String.  Left owned, every call leaked its
+     argument -- Msgpack's str_to_bytes calls char_to_int once per byte of
+     every string it encodes, so a cluster node leaked one object per byte of
+     every name and hash in every registry frame it built. *)
+  ("char_to_int",          [true]);
+  ("char_is_digit",        [true]);
+  ("char_is_alphanumeric", [true]);
+  ("char_is_whitespace",   [true]);
   ("string_to_lowercase",  [true]);
   ("reload_request",       [true]);
   ("string_to_uppercase",  [true]);
@@ -427,7 +443,7 @@ let is_simd_builtin (fn_name : string) : bool =
 
 (** Builtins with a heap ([ptr]) parameter that are deliberately OWNED: each
     either consumes its argument (it stores or frees it -- e.g. [send]'s
-    message, [vault_set]'s value) or has not been audited yet and keeps the
+    message) or has not been audited yet and keeps the
     pre-2026-09-13 default.
 
     Every [in_is_builtin] row of [Llvm_builtins.builtins] with a [ptr]
@@ -458,8 +474,7 @@ let extern_owned_builtins : string list = [
     (* actor_inspect_store keeps its String in the proc's inspect_out slot
        until the actor loop sends it as the reply (observe plan R4). *)
     "actor_inspect_store";
-    "panic_"; "unreachable_"; "todo_"; "print_stderr"; "char_to_int";
-    "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
+    "panic_"; "unreachable_"; "todo_"; "print_stderr";
     "list_append"; "list_concat";
     "iolist_hash_fnv1a"; "md5"; "sha256";
     "stdlib_sha256"; "sha512"; "stdlib_sha512"; "hmac_sha256";

@@ -78,6 +78,7 @@ type t =
   | Vault_ns_set
   | Vault_push_capped
   | Vault_put_new
+  | Vault_reap
   | Vault_set
   | Vault_set_ttl
   | Vault_update
@@ -147,6 +148,7 @@ let to_string = function
   | Vault_ns_set -> "vault_ns_set"
   | Vault_push_capped -> "vault_push_capped"
   | Vault_put_new -> "vault_put_new"
+  | Vault_reap -> "vault_reap"
   | Vault_set -> "vault_set"
   | Vault_set_ttl -> "vault_set_ttl"
   | Vault_update -> "vault_update"
@@ -167,7 +169,7 @@ let all =
     Task_reductions; Task_spawn; Task_spawn_steal; Task_spawn_with_cancel;
     Task_yield; To_string; Vault_drop; Vault_get; Vault_incr;
     Vault_ns_drop; Vault_ns_get; Vault_ns_set; Vault_push_capped;
-    Vault_put_new; Vault_set; Vault_set_ttl; Vault_update ]
+    Vault_put_new; Vault_reap; Vault_set; Vault_set_ttl; Vault_update ]
 
 let table : (string, t) Hashtbl.t =
   let h = Hashtbl.create 64 in

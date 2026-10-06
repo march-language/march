@@ -1,0 +1,51 @@
+-- Leak guard: a closure released WITHOUT being called releases its captures.
+-- An apply function releases its environment's captures when it frees the
+-- environment; anywhere else (dropped from a list, never applied) the value is
+-- of a function type, which names no layout, so the cell was freed and every
+-- capture leaked: each SessionNode session leaked the Party its handlers
+-- captured, and each registry push the frame its unused `Send` lambda held
+-- (specs/progress/2026-10-05-dropped-closure-captures.md).
+-- SIGNAL: "no growth" (live_allocs() delta <= 0) as a boolean, so the golden
+-- is deterministic. RED without the fix: the first three legs leak 1, 1 and
+-- 21 objects per iteration.
+mod Main do
+  needs IO.Console
+
+  pfn mk(i : Int) : Int -> Int do
+    let s = "cap" ++ int_to_string(i)
+    fn a -> a + string_byte_length(s)
+  end
+
+  pfn mk_list(n : Int) : Int -> Int do
+    let xs = List.range(0, n)
+    fn a -> a + List.length(xs)
+  end
+
+  pfn times(n : Int, f : (Int) -> Int) : Int do
+    if n <= 0 do 0 else f(n) + times(n - 1, f) end
+  end
+
+  pfn flat(name : String, f : (Int) -> Int) : () do
+    let _ = times(3, f)
+    let a0 = live_allocs()
+    let _ = times(200, f)
+    let d = live_allocs() - a0
+    println(name ++ ", no growth: " ++ bool_to_string(d <= 0))
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    flat("closure in a list, dropped", fn i ->
+      let l = Cons(mk(i), Nil)
+      List.length(l))
+    flat("closure never applied", fn i ->
+      let c = mk(i)
+      let _ = c
+      1)
+    flat("closure capturing a list, dropped", fn i ->
+      let l = Cons(mk_list(20), Nil)
+      List.length(l) + i * 0)
+    flat("closure called, then dropped", fn i ->
+      let c = mk(i)
+      c(1))
+  end
+end

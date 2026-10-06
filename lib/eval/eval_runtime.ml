@@ -625,11 +625,19 @@ let rec vault_key_of_value (v : value) : string =
        | VTimerRef _    -> "a TimerRef"
        | _              -> "an unsupported value")
 
+(** Tables retired by [vault_close]: no longer registered and holding no
+    data.  A handle that outlived the close (a task still running when its
+    session ended) finds an empty, unregistered table, as the compiled
+    runtime's does; here that is a fresh throwaway one, so a closed table
+    costs one entry in this set rather than its sixteen shards. *)
+let vault_closed : (int, unit) Hashtbl.t = Hashtbl.create 8
+
 (** Resolve a vault handle; panics with a clear message on bad handles. *)
 let vault_lookup (id : int) : vault_table =
   match Hashtbl.find_opt vault_registry id with
-  | None     -> eval_error "Vault: invalid table handle %d" id
   | Some tbl -> tbl
+  | None when Hashtbl.mem vault_closed id -> vault_make_table id ""
+  | None     -> eval_error "Vault: invalid table handle %d" id
 
 (** Return the shard responsible for the pre-computed key string [k].
     Uses the string's structural hash masked to a non-negative value. *)

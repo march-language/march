@@ -178,9 +178,10 @@ type ctx = {
      binding takes a march_env* + returns the bare Ok payload, and the call site
      wraps the result into Ok/Err. *)
   raises_externs : (string, unit) Hashtbl.t;
-  (* Tracks forward declarations emitted for unknown functions (interface dispatch
-     calls that are not resolved at compile time due to type erasure). Maps
-     function LLVM name → declare string to avoid duplicate declarations. *)
+  (* Per-module dedup of `declare`s added to the preamble on first use: LLVM
+     intrinsics in the SIMD arm, and a JIT fragment's calls to functions
+     compiled in earlier fragments ([repl_prior_fns]).  Any other unknown
+     direct callee is a compile error ([Llvm_calls.Unknown_callee]). *)
   unknown_decls : (string, unit) Hashtbl.t;
   (* REPL fn-fragment prev-slot loaders (bare binding name → ()).  Populated by
      Llvm_repl.emit_slot_loader_fns for each `define @<name>()` loader it emits.
@@ -332,6 +333,25 @@ let unboxed_field_llvm_ty : Tir.ty -> string = function
                 "LLVM emit: unboxed aggregate has non-scalar field type %s \
                  (Kind.build should have rejected the type)"
                 (Tir.show_ty other))
+
+(* Functions a REPL/JIT session compiled in EARLIER fragments, bound by
+   [Repl_jit] around each fragment emit.  A fragment may call one by name
+   without it being in the fragment's own TIR; such a call keeps the on-use
+   `declare` (resolved by dlopen against the earlier fragment) instead of
+   being an [Llvm_calls.Unknown_callee] error.  [None] outside a JIT emit, so
+   an ordinary compile never consults it.  Dynamically scoped rather than a
+   ctx field because five REPL entry points build their own ctx. *)
+let repl_prior_fns : (string, unit) Hashtbl.t option ref = ref None
+
+let with_repl_prior_fns (tbl : (string, unit) Hashtbl.t) (f : unit -> 'a) : 'a =
+  let saved = !repl_prior_fns in
+  repl_prior_fns := Some tbl;
+  Fun.protect ~finally:(fun () -> repl_prior_fns := saved) f
+
+let is_repl_prior_fn (name : string) : bool =
+  match !repl_prior_fns with
+  | Some tbl -> Hashtbl.mem tbl name
+  | None -> false
 
 let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
     ?(hot_reload=None) ?(hr_names=Hot_reload.Name_table.build [])

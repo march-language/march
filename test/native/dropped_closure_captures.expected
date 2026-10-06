@@ -1,0 +1,4 @@
+closure in a list, dropped, no growth: true
+closure never applied, no growth: true
+closure capturing a list, dropped, no growth: true
+closure called, then dropped, no growth: true

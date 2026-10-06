@@ -11,8 +11,7 @@
 let parse_and_desugar src =
   let lexbuf = Lexing.from_string src in
   let m =
-    March_parser.Parser.module_
-      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+    March_parser.Parse.module_of_lexbuf lexbuf
   in
   March_desugar.Desugar.desugar_module m
 

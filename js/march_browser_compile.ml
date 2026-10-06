@@ -36,8 +36,7 @@ let parse_stdlib_src filename src =
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   try
-    let m = March_parser.Parser.module_
-        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    let m = March_parser.Parse.module_of_lexbuf lexbuf in
     let m = March_desugar.Desugar.desugar_module m in
     if filename = "prelude.march" then
       match m.March_ast.Ast.mod_decls with
@@ -80,20 +79,20 @@ let load_browser_stdlib () : March_ast.Ast.decl list =
 
 (** Compile user source to JS. Returns (js_opt, errors). *)
 let compile_to_js source =
-  let lexbuf = Lexing.from_string source in
-  lexbuf.Lexing.lex_curr_p <-
-    { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "playground.march" };
   match
-    (try
-       let m = March_parser.Parser.module_
-           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-       Ok (March_desugar.Desugar.desugar_module m)
-     with
-     | March_errors.Errors.ParseError (msg, _hint, pos) ->
-       Error [Printf.sprintf "line %d: parse error: %s" pos.Lexing.pos_lnum msg]
-     | March_parser.Parser.Error ->
-       let pos = Lexing.lexeme_start_p lexbuf in
-       Error [Printf.sprintf "line %d: parse error" pos.Lexing.pos_lnum])
+    (match March_parser.Parse.module_ ~filename:"playground.march" ~stuck:""
+             source with
+     | Ok m ->
+       (* Desugar reports some user-facing errors as [ParseError] too. *)
+       (try Ok (March_desugar.Desugar.desugar_module m)
+        with March_errors.Errors.ParseError (msg, _hint, pos) ->
+          Error [Printf.sprintf "line %d: parse error: %s" pos.Lexing.pos_lnum msg])
+     | Error diags ->
+       Error (List.map (fun (d : March_errors.Errors.diagnostic) ->
+           let line = d.span.March_ast.Ast.start_line in
+           if d.message = "" then Printf.sprintf "line %d: parse error" line
+           else Printf.sprintf "line %d: parse error: %s" line d.message)
+         diags))
   with
   | Error errs -> (None, errs)
   | Ok user_mod ->

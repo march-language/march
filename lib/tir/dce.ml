@@ -33,6 +33,11 @@ let rec free_vars : Tir.expr -> StringSet.t = function
         StringSet.union s (StringSet.diff (free_vars b.Tir.br_body) bound)
       ) (free_atom a) branches in
     Option.fold ~none:bf ~some:(fun d -> StringSet.union bf (free_vars d)) default
+  | Tir.EAlloc (Tir.TCon (clo, _), atoms) when Tir_names.is_clo_struct clo ->
+    (* A heap closure's capture-release function is called by the runtime,
+       never from TIR: an allocation of the closure is what keeps it alive. *)
+    List.fold_left (fun s a -> StringSet.union s (free_atom a))
+      (StringSet.singleton (Tir_names.clo_drop_fn_name clo)) atoms
   | Tir.ETuple atoms | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
     List.fold_left (fun s a -> StringSet.union s (free_atom a)) StringSet.empty atoms
   | Tir.ERecord fields ->
@@ -42,6 +47,9 @@ let rec free_vars : Tir.expr -> StringSet.t = function
     List.fold_left (fun s (_, v) -> StringSet.union s (free_atom v)) (free_atom a) fields
   | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
   | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> free_atom a
+  | Tir.EReuse (a, Tir.TCon (clo, _), args) when Tir_names.is_clo_struct clo ->
+    List.fold_left (fun s v -> StringSet.union s (free_atom v))
+      (StringSet.add (Tir_names.clo_drop_fn_name clo) (free_atom a)) args
   | Tir.EReuse (a, _, args)  ->
     List.fold_left (fun s v -> StringSet.union s (free_atom v)) (free_atom a) args
   | Tir.EAllocHole (tok, _, args, _) ->

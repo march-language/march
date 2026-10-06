@@ -11,8 +11,7 @@ let parse decls =
   let src = "mod M do\n" ^ decls ^ "\nend\n" in
   let lb = Lexing.from_string src in
   March_desugar.Desugar.desugar_module
-    (March_parser.Parser.module_
-       (March_parser.Token_filter.make March_lexer.Lexer.token) lb)
+    (March_parser.Parse.module_of_lexbuf lb)
 
 (* ── Increment 0: check_module_with_env_full ─────────────────────────────── *)
 

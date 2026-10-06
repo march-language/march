@@ -760,6 +760,22 @@ let emit_atom_as ctx ty a =
   let (actual_ty, v) = emit_atom ctx a in
   coerce ctx actual_ty v ty
 
+(** A Vault builtin's table / key / value argument, coerced to the uniform
+    [ptr] form, plus the box to release after the call when the coerce made
+    one (a Float, boxed by the ("double","ptr") arm).  Every Vault builtin
+    BORROWS these (lib/tir/borrow.ml; the C side takes its own reference to a
+    value it keeps), so a box made here is this call site's alone.  Before the
+    family borrowed, a Vault(Float) write leaked one box per call. *)
+let emit_vault_arg ctx (boxes : string list ref) a =
+  let (actual_ty, v) = emit_atom ctx a in
+  let v' = coerce ctx actual_ty v "ptr" in
+  if actual_ty = "double" then boxes := v' :: !boxes;
+  v'
+
+let release_vault_boxes ctx (boxes : string list ref) =
+  List.iter (fun b -> emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b)) !boxes;
+  boxes := []
+
 (* ── Data-representation helpers (GEP/alloc/ctor-lookup/record-shape) ───
    Moved to [Llvm_data] (Wave 3 Task 5, chunk 2): emit_load_tag/emit_store_tag/
    emit_store_field/emit_load_field, emit_heap_alloc/emit_stack_alloc,
@@ -971,11 +987,20 @@ let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Vault_incr | Builtin_name.Vault_ns_drop
   | Builtin_name.Vault_ns_get | Builtin_name.Vault_ns_set
   | Builtin_name.Vault_push_capped | Builtin_name.Vault_put_new
-  | Builtin_name.Vault_set | Builtin_name.Vault_set_ttl
-  | Builtin_name.Vault_update ->
+  | Builtin_name.Vault_reap | Builtin_name.Vault_set
+  | Builtin_name.Vault_set_ttl | Builtin_name.Vault_update ->
     Bg_record
   | Builtin_name.String_concat_n ->
     Bg_string
+
+(* The release for a value: a closure (a function-typed value) goes through
+   [march_clo_release], which releases its captures when the release frees it
+   (specs/progress/2026-10-05-dropped-closure-captures.md); anything else
+   through [default]. *)
+let decrc_fn_for (atom : Tir.atom) (default : string) : string =
+  match atom with
+  | Tir.AVar { Tir.v_ty = Tir.TFn _; _ } -> "march_clo_release"
+  | _ -> default
 
 let rec emit_expr ctx (e : Tir.expr) : string * string =
   match e with
@@ -1839,32 +1864,38 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      trailing ttl/max stay i64. *)
   | Tir.EApp (f, [tbl; key; value])
     when Builtin_name.is Builtin_name.Vault_set f.Tir.v_name ->
-    let vt = emit_atom_as ctx "ptr" tbl in
-    let vk = emit_atom_as ctx "ptr" key in
-    let vv = emit_atom_as ctx "ptr" value in
+    let bx = ref [] in
+    let vt = emit_vault_arg ctx bx tbl in
+    let vk = emit_vault_arg ctx bx key in
+    let vv = emit_vault_arg ctx bx value in
     emit ctx (Printf.sprintf
       "call ptr @march_vault_set(ptr %s, ptr %s, ptr %s)" vt vk vv);
+    release_vault_boxes ctx bx;
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; value; ttl])
     when Builtin_name.is Builtin_name.Vault_set_ttl f.Tir.v_name ->
-    let vt = emit_atom_as ctx "ptr" tbl in
-    let vk = emit_atom_as ctx "ptr" key in
-    let vv = emit_atom_as ctx "ptr" value in
+    let bx = ref [] in
+    let vt = emit_vault_arg ctx bx tbl in
+    let vk = emit_vault_arg ctx bx key in
+    let vv = emit_vault_arg ctx bx value in
     let vttl = emit_atom_as ctx "i64" ttl in
     emit ctx (Printf.sprintf
       "call ptr @march_vault_set_ttl(ptr %s, ptr %s, ptr %s, i64 %s)" vt vk vv vttl);
+    release_vault_boxes ctx bx;
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; value; ttl])
     when Builtin_name.is Builtin_name.Vault_put_new f.Tir.v_name ->
-    let vt = emit_atom_as ctx "ptr" tbl in
-    let vk = emit_atom_as ctx "ptr" key in
-    let vv = emit_atom_as ctx "ptr" value in
+    let bx = ref [] in
+    let vt = emit_vault_arg ctx bx tbl in
+    let vk = emit_vault_arg ctx bx key in
+    let vv = emit_vault_arg ctx bx value in
     let vttl = emit_atom_as ctx "i64" ttl in
     let r = fresh ctx "ar" in
     emit ctx (Printf.sprintf
       "%s = call i64 @march_vault_put_new(ptr %s, ptr %s, ptr %s, i64 %s)" r vt vk vv vttl);
+    release_vault_boxes ctx bx;
     ("i64", r)
 
   (* ── actor_register: March-level arg order is (pid, name) — matching
@@ -1884,12 +1915,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   | Tir.EApp (f, [tbl; key; value; maxn])
     when Builtin_name.is Builtin_name.Vault_push_capped f.Tir.v_name ->
-    let vt = emit_atom_as ctx "ptr" tbl in
-    let vk = emit_atom_as ctx "ptr" key in
-    let vv = emit_atom_as ctx "ptr" value in
+    let bx = ref [] in
+    let vt = emit_vault_arg ctx bx tbl in
+    let vk = emit_vault_arg ctx bx key in
+    let vv = emit_vault_arg ctx bx value in
     let vmax = emit_atom_as ctx "i64" maxn in
     emit ctx (Printf.sprintf
       "call ptr @march_vault_push_capped(ptr %s, ptr %s, ptr %s, i64 %s)" vt vk vv vmax);
+    release_vault_boxes ctx bx;
     ("i64", "0")
 
   (* ── Vault READS/deletes: the KEY needs the same ptr coercion the write
@@ -1905,57 +1938,84 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      See specs/progress/2026-08-20-vault-non-string-key-native-crash.md. *)
   | Tir.EApp (f, [tbl; key])
     when Builtin_name.is Builtin_name.Vault_get f.Tir.v_name ->
-    let vt = emit_atom_as ctx "ptr" tbl in
-    let vk = emit_atom_as ctx "ptr" key in
+    let bx = ref [] in
+    let vt = emit_vault_arg ctx bx tbl in
+    let vk = emit_vault_arg ctx bx key in
     let r  = fresh ctx "vg" in
     emit ctx (Printf.sprintf
       "%s = call ptr @march_vault_get(ptr %s, ptr %s)" r vt vk);
+    release_vault_boxes ctx bx;
     ("ptr", emit_vault_opt_reencode ctx r (fn_ret_tir f.Tir.v_ty))
 
   | Tir.EApp (f, [tbl; key])
     when Builtin_name.is Builtin_name.Vault_drop f.Tir.v_name ->
-    let vt = emit_atom_as ctx "ptr" tbl in
-    let vk = emit_atom_as ctx "ptr" key in
+    let bx = ref [] in
+    let vt = emit_vault_arg ctx bx tbl in
+    let vk = emit_vault_arg ctx bx key in
     emit ctx (Printf.sprintf
       "call ptr @march_vault_drop(ptr %s, ptr %s)" vt vk);
+    release_vault_boxes ctx bx;
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; fn_atom])
     when Builtin_name.is Builtin_name.Vault_update f.Tir.v_name ->
-    let vt = emit_atom_as ctx "ptr" tbl in
-    let vk = emit_atom_as ctx "ptr" key in
+    let bx = ref [] in
+    let vt = emit_vault_arg ctx bx tbl in
+    let vk = emit_vault_arg ctx bx key in
     let vf = emit_atom_as ctx "ptr" fn_atom in
     emit ctx (Printf.sprintf
       "call ptr @march_vault_update(ptr %s, ptr %s, ptr %s)" vt vk vf);
+    release_vault_boxes ctx bx;
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; delta])
     when Builtin_name.is Builtin_name.Vault_incr f.Tir.v_name ->
-    let vt = emit_atom_as ctx "ptr" tbl in
-    let vk = emit_atom_as ctx "ptr" key in
+    let bx = ref [] in
+    let vt = emit_vault_arg ctx bx tbl in
+    let vk = emit_vault_arg ctx bx key in
     let vd = emit_atom_as ctx "i64" delta in
     let r  = fresh ctx "vi" in
     emit ctx (Printf.sprintf
       "%s = call i64 @march_vault_incr(ptr %s, ptr %s, i64 %s)" r vt vk vd);
+    release_vault_boxes ctx bx;
     ("i64", r)
 
   | Tir.EApp (f, [ns; key; value])
     when Builtin_name.is Builtin_name.Vault_ns_set f.Tir.v_name ->
-    let vn = emit_atom_as ctx "ptr" ns in
-    let vk = emit_atom_as ctx "ptr" key in
-    let vv = emit_atom_as ctx "ptr" value in
+    let bx = ref [] in
+    let vn = emit_vault_arg ctx bx ns in
+    let vk = emit_vault_arg ctx bx key in
+    let vv = emit_vault_arg ctx bx value in
     emit ctx (Printf.sprintf
       "call ptr @march_vault_ns_set(ptr %s, ptr %s, ptr %s)" vn vk vv);
+    release_vault_boxes ctx bx;
     ("i64", "0")
 
   | Tir.EApp (f, [ns; key])
     when Builtin_name.is Builtin_name.Vault_ns_get f.Tir.v_name ->
-    let vn = emit_atom_as ctx "ptr" ns in
-    let vk = emit_atom_as ctx "ptr" key in
+    let bx = ref [] in
+    let vn = emit_vault_arg ctx bx ns in
+    let vk = emit_vault_arg ctx bx key in
     let r  = fresh ctx "vng" in
     emit ctx (Printf.sprintf
       "%s = call ptr @march_vault_ns_get(ptr %s, ptr %s)" r vn vk);
+    release_vault_boxes ctx bx;
     ("ptr", emit_vault_opt_reencode ctx r (fn_ret_tir f.Tir.v_ty))
+
+  (* vault_reap's key must hash to the shard the write it follows buried
+     into, so it gets the writers' tagged key form too: through the general
+     path an Int key would reach march_vault_reap raw and reap another shard,
+     leaving the displaced value buried until the table is closed. *)
+  | Tir.EApp (f, [tbl; key])
+    when Builtin_name.is Builtin_name.Vault_reap f.Tir.v_name ->
+    let bx = ref [] in
+    let vt = emit_vault_arg ctx bx tbl in
+    let vk = emit_vault_arg ctx bx key in
+    let r  = fresh ctx "vr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_vault_reap(ptr %s, ptr %s)" r vt vk);
+    release_vault_boxes ctx bx;
+    ("ptr", r)
 
   | Tir.EApp (f, [ns; key])
     when Builtin_name.is Builtin_name.Vault_ns_drop f.Tir.v_name ->
@@ -2457,7 +2517,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
     if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" v);
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for atom "march_decrc_local") v);
     ("i64", "0")
 
   | Tir.EAtomicIncRC atom
@@ -2479,7 +2539,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EAtomicDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
     if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" v);
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for atom "march_decrc") v);
     ("i64", "0")
 
   | Tir.EFree atom

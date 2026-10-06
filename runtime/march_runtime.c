@@ -515,6 +515,95 @@ void march_decrc(void *p) {
     }
 }
 
+/* ── Releasing a closure that dies without being called ───────────────────
+ * An apply function releases its environment's captures when IT frees the
+ * environment.  A closure released anywhere else (dropped from a list, a
+ * record, a Vault, or never applied) is a value of a function type at that
+ * site, which names no layout, so the release used to free the cell and leak
+ * every capture.  The compiler synthesizes a capture-release function per
+ * closure type whose environment owns its captures and registers it here
+ * under the closure's apply function (field 0), once, from main's prologue
+ * (march_clo_register_drops).  march_clo_release runs it when the release
+ * frees the cell.  A closure with no entry -- a runtime trampoline, a type
+ * whose environment borrows, one built by a hot patch or REPL fragment,
+ * which do not register -- is released exactly as before: never a crash,
+ * at worst the old leak.  See specs/progress/2026-10-05-dropped-closure-captures.md.
+ *
+ * Registration happens before the scheduler starts, so lookups need no lock. */
+typedef void (*march_clo_drop_fn)(void *clo);
+typedef struct { void *apply; march_clo_drop_fn drop; } march_clo_drop_entry;
+static march_clo_drop_entry *g_clo_drops = NULL;
+static size_t g_clo_drops_cap = 0;   /* a power of two, or 0 */
+static size_t g_clo_drops_n = 0;
+
+static size_t clo_drop_slot(void *apply, size_t cap) {
+    uintptr_t h = (uintptr_t)apply;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+    return (size_t)h & (cap - 1);
+}
+
+static void clo_drop_insert(march_clo_drop_entry *tab, size_t cap, void *apply, march_clo_drop_fn drop) {
+    size_t i = clo_drop_slot(apply, cap);
+    while (tab[i].apply && tab[i].apply != apply) i = (i + 1) & (cap - 1);
+    tab[i].apply = apply;
+    tab[i].drop = drop;
+}
+
+void march_clo_register_drops(void **pairs, int64_t n) {
+    if (n <= 0) return;
+    size_t want = g_clo_drops_n + (size_t)n;
+    if (want * 2 > g_clo_drops_cap) {
+        size_t cap = g_clo_drops_cap ? g_clo_drops_cap : 64;
+        while (want * 2 > cap) cap *= 2;
+        march_clo_drop_entry *tab = calloc(cap, sizeof *tab);
+        if (!tab) return;   /* out of memory: keep the old (shallow) behaviour */
+        for (size_t i = 0; i < g_clo_drops_cap; i++)
+            if (g_clo_drops[i].apply)
+                clo_drop_insert(tab, cap, g_clo_drops[i].apply, g_clo_drops[i].drop);
+        free(g_clo_drops);
+        g_clo_drops = tab;
+        g_clo_drops_cap = cap;
+    }
+    for (int64_t k = 0; k < n; k++) {
+        void *apply = pairs[2 * k];
+        if (!apply) continue;
+        clo_drop_insert(g_clo_drops, g_clo_drops_cap, apply, (march_clo_drop_fn)pairs[2 * k + 1]);
+    }
+    g_clo_drops_n = want;
+}
+
+static march_clo_drop_fn clo_drop_lookup(void *apply) {
+    if (!g_clo_drops_cap || !apply) return NULL;
+    size_t i = clo_drop_slot(apply, g_clo_drops_cap);
+    while (g_clo_drops[i].apply) {
+        if (g_clo_drops[i].apply == apply) return g_clo_drops[i].drop;
+        i = (i + 1) & (g_clo_drops_cap - 1);
+    }
+    return NULL;
+}
+
+void march_clo_release(void *p) {
+    if (!IS_HEAP_PTR(p)) return;
+    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
+    march_clo_drop_fn drop = clo_drop_lookup(*(void **)((char *)p + 16));
+    if (!drop) { march_decrc(p); return; }
+    int32_t tag  = ((march_hdr *)p)->tag;
+    int64_t prev = atomic_fetch_sub_explicit(
+        (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
+    if (gc_trace_on())
+        gc_emit(prev == 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
+    if (prev == 1) {
+        drop(p);            /* releases the captures; reads the cell, frees nothing of it */
+        march_run_resource_dtor(p);
+        MARCH_FREE_BUMP();
+        free(p);
+    } else if (prev < 1) {
+        fprintf(stderr, "march: RC underflow in march_clo_release (rc was %lld) at %p — aborting\n",
+                (long long)prev, p);
+        abort();
+    }
+}
+
 int64_t march_decrc_freed(void *p) {
     if (!IS_HEAP_PTR(p)) return 1;
     /* Immortal: not freed, so the caller must not release its children. */
@@ -7981,14 +8070,70 @@ void march_actor_inspect_store(void *s) {
     p->inspect_out = s;
 }
 
+/* An inspect request from a thread that is not a green thread (the observe
+ * socket's STATE verb): it cannot receive a reply message, so it waits on
+ * this instead.  Two references, the asker's and the request's; whichever
+ * drops the last frees it, so an asker that timed out never leaves the
+ * answering actor a dangling pointer.  A request still queued when its actor
+ * dies is freed with the mailbox (shallowly) and its reference leaks: one
+ * small allocation per such request. */
+typedef struct inspect_waiter {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    int             refs;
+    int             done;
+    int             ok;      /* 1: text is the state; 0: text is the reason */
+    char           *text;    /* malloc'd */
+} inspect_waiter;
+
+static void inspect_waiter_release(inspect_waiter *w) {
+    pthread_mutex_lock(&w->mu);
+    int last = --w->refs == 0;
+    pthread_mutex_unlock(&w->mu);
+    if (!last) return;
+    pthread_mutex_destroy(&w->mu);
+    pthread_cond_destroy(&w->cv);
+    free(w->text);
+    free(w);
+}
+
+static char *dup_march_string(void *s) {
+    march_string *ms = (march_string *)s;
+    size_t n = IS_HEAP_PTR(s) ? (size_t)ms->len : 0;
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    if (n) memcpy(out, ms->data, n);
+    out[n] = '\0';
+    return out;
+}
+
 /* Reply to an inspect request with [result] (an owned Result(String,
- * String)), consuming the request. */
+ * String)), consuming the request.  The request is a two-field record:
+ * field 0 the green-thread asker's reply-ref, or 0 for an external asker,
+ * whose inspect_waiter is field 1. */
 static void inspect_reply(void *request, void *result) {
+    void *reply_ref = (void *)(uintptr_t)MARCH_FIELD(request, 0);
+    inspect_waiter *w = (inspect_waiter *)(uintptr_t)MARCH_FIELD(request, 1);
     /* march_decrc is shallow: freeing the request hands its one reference
      * to the reply-ref over to march_actor_reply, which retires it. */
-    void *reply_ref = (void *)(uintptr_t)MARCH_FIELD(request, 0);
     march_decrc(request);
-    march_actor_reply(reply_ref, result);
+    if (reply_ref) {
+        march_actor_reply(reply_ref, result);
+        return;
+    }
+    /* External: copy the text out, release the Result (and its String). */
+    void *str = (void *)(uintptr_t)MARCH_FIELD(result, 0);
+    int ok = ((march_hdr *)result)->tag == 0;
+    char *text = dup_march_string(str);
+    march_decrc(str);
+    march_decrc(result);
+    pthread_mutex_lock(&w->mu);
+    w->ok = ok;
+    w->text = text;
+    w->done = 1;
+    pthread_cond_signal(&w->cv);
+    pthread_mutex_unlock(&w->mu);
+    inspect_waiter_release(w);
 }
 
 /* Answer an inspect request between handlers: run the type's renderer under
@@ -8060,9 +8205,10 @@ void *march_actor_inspect(void *actor, int64_t timeout_ms) {
     MARCH_SET_TAG(reply_ref, MARCH_CALL_REPLY_TAG);
     MARCH_FIELD(reply_ref, 0) = (caller->pid << 1) | 1;
     MARCH_FIELD(reply_ref, 1) = corr;
-    void *request = march_alloc(24);
+    void *request = march_alloc(32);
     MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
     MARCH_FIELD(request, 0) = (int64_t)(uintptr_t)reply_ref;
+    MARCH_FIELD(request, 1) = 0;
     march_reclaim_enter();
     march_actor_meta *meta = find_meta(actor);
     march_proc *gt = meta ? meta_gt(meta) : NULL;
@@ -8084,6 +8230,58 @@ void *march_actor_inspect(void *actor, int64_t timeout_ms) {
     if (ok) return inner;
     march_decrc(inner);
     return mk_err_cstr("timeout");
+}
+
+/* Actor.inspect_state for a thread that is not a green thread: the observe
+ * socket's STATE verb (march_observe_debug.c).  See march_observe.h. */
+void *march_pid_of_int(int64_t n);
+
+int march_actor_inspect_external(int64_t pid, int64_t timeout_ms, char **out) {
+    *out = NULL;
+    void *actor = march_pid_of_int(pid);          /* owned, or the dead sentinel */
+    if (!actor_alive_load(actor)) {
+        march_decrc(actor);
+        *out = strdup("dead");
+        return 0;
+    }
+    inspect_waiter *w = (inspect_waiter *)calloc(1, sizeof *w);
+    if (!w) { march_decrc(actor); *out = strdup("out of memory"); return 0; }
+    pthread_mutex_init(&w->mu, NULL);
+    pthread_cond_init(&w->cv, NULL);
+    w->refs = 2;
+    void *request = march_alloc(32);
+    MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
+    MARCH_FIELD(request, 0) = 0;
+    MARCH_FIELD(request, 1) = (int64_t)(uintptr_t)w;
+    march_reclaim_enter();
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? meta_gt(meta) : NULL;
+    int rc = gt ? march_sched_send_unlimited(gt, request) : MARCH_SEND_DEAD;
+    march_reclaim_exit();
+    march_decrc(actor);
+    if (rc != MARCH_SEND_OK) {
+        march_decrc(request);
+        w->refs = 1;                               /* the request never held it */
+        inspect_waiter_release(w);
+        *out = strdup("dead");
+        return 0;
+    }
+    struct timespec dl;
+    clock_gettime(CLOCK_REALTIME, &dl);
+    int64_t ns = (int64_t)dl.tv_nsec + (timeout_ms % 1000) * 1000000;
+    dl.tv_sec += (time_t)(timeout_ms / 1000 + ns / 1000000000);
+    dl.tv_nsec = (long)(ns % 1000000000);
+    pthread_mutex_lock(&w->mu);
+    while (!w->done)
+        if (pthread_cond_timedwait(&w->cv, &w->mu, &dl) == ETIMEDOUT) break;
+    int done = w->done, ok = w->ok;
+    char *text = w->text;
+    w->text = NULL;
+    pthread_mutex_unlock(&w->mu);
+    inspect_waiter_release(w);
+    if (!done) { *out = strdup("timeout"); return 0; }
+    *out = text ? text : strdup("");
+    return ok;
 }
 
 

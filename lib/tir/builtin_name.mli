@@ -63,6 +63,7 @@ type t =
   | Vault_ns_set
   | Vault_push_capped
   | Vault_put_new
+  | Vault_reap
   | Vault_set
   | Vault_set_ttl
   | Vault_update

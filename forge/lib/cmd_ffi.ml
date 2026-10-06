@@ -24,8 +24,7 @@ let parse_file path : (Ast.decl list, string) result =
     let lexbuf = Lexing.from_string src in
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-    let m = March_parser.Parser.module_
-        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    let m = March_parser.Parse.module_of_lexbuf lexbuf in
     Ok m.Ast.mod_decls
   with
   | Sys_error msg -> Error msg

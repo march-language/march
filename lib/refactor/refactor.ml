@@ -52,8 +52,7 @@ let parse_string ~filename src : Ast.module_ option =
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   try
-    Some (March_parser.Parser.module_
-            (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+    Some (March_parser.Parse.module_of_lexbuf lexbuf)
   with _ -> None
 
 (* ------------------------------------------------------------------ *)

@@ -697,19 +697,10 @@ let rec check_actors ~config ~file ~acc decls =
 (* ------------------------------------------------------------------ *)
 
 let parse_and_check ~filename ~src =
-  let lexbuf = Lexing.from_string src in
-  lexbuf.Lexing.lex_curr_p <-
-    { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   match
-    (try
-       Result.Ok
-         (March_parser.Parser.module_
-            (March_parser.Token_filter.make March_lexer.Lexer.token)
-            lexbuf)
-     with
-     | Err.ParseError (msg, _hint, _pos) -> Result.Error msg
-     | March_parser.Parser.Error          -> Result.Error "parse error"
-     | March_lexer.Lexer.Lexer_error msg  -> Result.Error msg)
+    Result.map_error
+      (fun diags -> (List.hd diags : Err.diagnostic).message)
+      (March_parser.Parse.module_ ~filename ~stuck:"parse error" src)
   with
   | Result.Error msg -> Result.Error msg
   | Result.Ok raw_ast ->

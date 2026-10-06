@@ -13,12 +13,14 @@
 #   whole-program TIR   lower … opt                  (t[opt]  - t[typecheck])
 #   back end            llvm-emit + clang            (t[clang] - t[opt])
 #
-# The back-end bucket also holds everything between the `opt` stamp and the
-# `llvm-emit` stamp that has no stamp of its own: the alloc-contract analyses
-# and the CAS SCC build + hashing before the post-TIR cache lookup.  On
-# topology_app (2026-10-05) that was ~5.7 s of an 18.8 s compile, nearly all
-# of it in lib/cas/scc.ml.  A tir-hit row's wall minus its stamped buckets is
-# that cost; subtract it before reading back% as "LLVM + clang".
+# The back-end bucket also holds what runs between the `opt` stamp and the
+# `llvm-emit` stamp.  That work has its own stamps since 2026-10-05:
+# `alloc-contract` (the @[no_alloc] allocation-contract analyses) and `cas-hash` (the
+# CAS SCC build + Merkle hashing before the post-TIR cache lookup).  Before
+# then they were unstamped, and on topology_app they were ~5.7 s of an 18.8 s
+# compile, mostly two quadratic name scans (lib/cas/scc.ml and
+# Alloc_contract.decl_of), both fixed.  A tir-hit row's wall minus its stamped
+# buckets is that cost, plus process start-up and the artifact copy.
 #
 # Scenarios, per corpus program:
 #
