@@ -223,6 +223,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **The language server resolves dependencies the way `forge build` does.**
+  It used to put every cached version of a git dependency on its search path,
+  including each version's `test/` and `priv/` files, and it missed registry
+  and transitive dependencies. Editors then showed errors from files the build
+  never reads. It now uses the version `forge.lock` names, and only that
+  version's `lib/`.
+
 - **`char_to_int`, `char_is_digit`, `char_is_alphanumeric` and `char_is_whitespace` no
   longer leak their argument.** Compiled code leaked the one-character string on every call.
   `Msgpack` calls `char_to_int` for each byte of every string it encodes, so every cluster

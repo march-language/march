@@ -33,6 +33,7 @@ let () =
     "cross-file", [
       "interface resolves across files", `Quick, test_cross_file_interface_resolves;
       "unknown interface still errors",  `Quick, test_unknown_interface_still_errors;
+      "dep lib paths follow forge.lock",  `Quick, test_dep_lib_paths_follow_forge_lock;
     ];
     "navigation extras", [
       "go to implementation", `Quick, test_implementation;
