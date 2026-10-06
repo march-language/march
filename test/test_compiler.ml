@@ -7270,6 +7270,45 @@ let test_derive_eq_single_ctor_no_unreachable_arm () =
     (List.length (List.filter (fun (d : March_errors.Errors.diagnostic) ->
          contains_substring d.message "never be reached") (warnings ctx)))
 
+(* Derive-generated spans are keyed by the generated decl, not a process-wide
+   counter (specs/progress/2026-10-05-derive-span-cache-collision.md).
+   The stdlib's desugared AST is cached on disk with the spans of the process
+   that wrote it; with a counter, a later compile of another program minted
+   the same spans for its own derived nodes and lowered them with the cached
+   nodes' types.  So: the same decl gets the same spans whatever was respanned
+   before it, and a different decl gets different ones. *)
+let test_derive_spans_keyed_by_decl () =
+  let decls src = (parse_module src).March_ast.Ast.mod_decls in
+  let d1 = List.hd (decls {|mod T do
+    fn f(x : Int) : Int do x + 1 end
+  end|}) in
+  let d2 = List.hd (decls {|mod T do
+    fn g(x : Int) : Int do x * 2 end
+  end|}) in
+  let name_span = function
+    | March_ast.Ast.DFn (fd, _) -> fd.March_ast.Ast.fn_name.March_ast.Ast.span
+    | _ -> Alcotest.fail "expected a DFn" in
+  let module D = March_desugar.Desugar_derive in
+  let in_scope scope f = D.with_salt_scope scope f in
+  (* "This process": d1, then other work in the module. *)
+  D.reset_salt_counts ();
+  let r1 = in_scope "M" (fun () -> D.respan_derived_decl d1) in
+  let r2 = in_scope "M" (fun () -> D.respan_derived_decl d2) in
+  let r1_again = in_scope "M" (fun () -> D.respan_derived_decl d1) in
+  (* "Another process" (a cached stdlib module): the same module from scratch. *)
+  D.reset_salt_counts ();
+  let _ = in_scope "Other" (fun () -> D.respan_derived_decl d2) in
+  let r1' = in_scope "M" (fun () -> D.respan_derived_decl d1) in
+  let r1_other_mod = in_scope "N" (fun () -> D.respan_derived_decl d1) in
+  Alcotest.(check bool) "same module, same decl: same spans in every process" true (r1 = r1');
+  Alcotest.(check bool) "a different decl gets a different key" true (name_span r1 <> name_span r2);
+  Alcotest.(check bool) "a repeat in one module gets a different key" true
+    (name_span r1 <> name_span r1_again);
+  Alcotest.(check bool) "the same decl in another module gets a different key" true
+    (name_span r1 <> name_span r1_other_mod);
+  Alcotest.(check string) "still synthetic" "<none>" (name_span r1).March_ast.Ast.file;
+  Alcotest.(check bool) "positive line" true ((name_span r1).March_ast.Ast.start_line > 0)
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -17835,6 +17874,7 @@ let compiler_suites =
           Alcotest.test_case "container: Option dropped"                  `Quick test_linear_container_option_dropped;
           Alcotest.test_case "container: used once / records ok"          `Quick test_linear_container_ok;
           Alcotest.test_case "derive Eq: no unreachable arm"              `Quick test_derive_eq_single_ctor_no_unreachable_arm;
+          Alcotest.test_case "derive spans keyed by the decl"             `Quick test_derive_spans_keyed_by_decl;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;

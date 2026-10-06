@@ -1,5 +1,15 @@
 # `[P2]` A protocol branch labelled `none` breaks the control-plane wiring of a `[control]` app
 
+**FIXED 2026-10-05, wider than filed.** Labels `ok` and `err` broke more than the wiring: the
+code `@[endpoints]` and `derive` generate for the protocol itself used bare `Ok`/`Err`, so
+such a protocol failed even without `[control]`. Every prelude constructor in generated
+code is now qualified: `Option.Some/None`, `Result.Ok/Err`, `List.Nil/Cons`, in
+lib/desugar/control_wiring.march (276 sites, rewritten outside strings and comments),
+lib/desugar/desugar_endpoints.ml and lib/desugar/desugar_derive.ml (89 constructor-helper
+calls). Test: `topology_flag` "a branch labelled none/some/ok/err/nil/cons leaves the
+wiring well-typed" (a `[control]` app with all six labels), red against the old wiring;
+the quick suite passes with the generator change.
+
 Found 2026-10-04 by the multi-host lab (`scripts/lab/`, docs/lab.md) while writing its app.
 
 A topology app whose `topology.toml` has a `[control]` section gets

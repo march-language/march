@@ -1,0 +1,125 @@
+-- Scenario "cert_order": node-c offers Stock, and hosts Ledger in one actor
+-- as the lab does; see scenario.sh.
+mod CertOrderC do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  -- The multi-host lab's protocol (examples/lab_app), less the role grants.
+  @[endpoints]
+  protocol Order do
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : String
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : String
+        out  -> Stock -> Shop : String
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  -- Certificate mode, from the files scenario.sh made with `forge cluster`.
+  pfn config(me : String, port_var : String, seeds : String) : ClusterNode.CnConfig do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me)
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int(port_var)))
+    Process.set_env("MARCH_CLUSTER_NODES", seeds)
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+  end
+
+  pfn stock(s : Cap(Session.Live), st : Order_Stock.Entry) : Order_Stock.Yield do
+    Order_Stock.recv_Want(s, st, fn (n, st1) ->
+      if n == 1 do println("stock: a session on node-c") else () end
+      if n < 3 do
+        let st2 = Order_Stock.choose_have(s, st1, "have " ++ int_to_string(n))
+        stock(s, Order_Stock.send_Book(s, st2, n))
+      else
+        let st2 = Order_Stock.choose_out(s, st1, "out")
+        Order_Stock.close(s, Order_Stock.send_Skip(s, st2, n))
+      end)
+  end
+
+  actor LedgerActor do
+    state { sessions : LinearMap(String, Order_Ledger.Parked_Ledger) }
+    init  { sessions: LinearMap.empty_string() }
+    on Start(sid : String, s : Cap(Session.Live)) do
+      let parked = Order_Ledger.await_have_out(s, Order_Ledger.register(s, 0))
+      match LinearMap.put(state.sessions, sid, parked) do
+        (None, m) -> { state with sessions: m }
+        (Some(old), m) ->
+          Order_Ledger.take_closed(Order_Ledger.cancel(s, old))
+          panic("Start: session " ++ sid ++ " is already hosted")
+      end
+    end
+    on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match LinearMap.take_slot(state.sessions, sid) do
+        (None, slot) ->
+          println("ledger: dropped a message for session " ++ sid)
+          { state with sessions: LinearMap.vacate(slot) }
+        (Some(parked), slot) ->
+          match Order_Ledger.resume(parked, from, msg, ep) do
+            Got_Book(n, st) ->
+              let st2 = Order_Ledger.send_Booked(s, st, "booked " ++ int_to_string(n))
+              { state with sessions: LinearMap.fill(slot, Order_Ledger.await_have_out(s, st2)) }
+            Got_Skip(_n, st) ->
+              Order_Ledger.take_closed(Order_Ledger.finish(s, st))
+              { state with sessions: LinearMap.vacate(slot) }
+          end
+      end
+    end
+    on Cancel(sid : String, s : Cap(Session.Live), _role : Int, cause : String, _ep : Int) do
+      match LinearMap.take(state.sessions, sid) do
+        (None, m) -> { state with sessions: m }
+        (Some(parked), m) ->
+          println("ledger: session cancelled: " ++ cause)
+          Order_Ledger.take_closed(Order_Ledger.cancel(s, parked))
+          { state with sessions: m }
+      end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    match ClusterNode.start(c, config("node-c", "MARCH_PORT_C", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")))) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-c: never joined") end
+        let srv = spawn(LedgerActor)
+        let start = fn (sid, s) ->
+          let _ = send(srv, Start(sid, s))
+          ()
+        let deliver = fn (sid, s, from, msg, ep) ->
+          let _ = send(srv, Deliver(sid, s, from, msg, ep))
+          ()
+        let cancel = fn (sid, s, role, cause, ep) ->
+          let _ = send(srv, Cancel(sid, s, role, cause, ep))
+          ()
+        match Order_Run.offer_hosted_Ledger(c, h, 16, srv, start, deliver, cancel) do
+          Err(e) -> panic(Order_Run.error_message(e))
+          Ok(_) ->
+            match Order_Run.offer_Stock(c, h, 8, fn (s, st) -> stock(s, st)) do
+              Err(e) -> panic(Order_Run.error_message(e))
+              Ok(_) ->
+                println("node-c: offering")
+                sleep_ms(600000)
+            end
+        end
+    end
+  end
+end

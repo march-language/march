@@ -1283,6 +1283,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_decrc_local", "declare void @march_decrc_local(ptr %p)");
   ("march_decrc_local_freed", "declare i64  @march_decrc_local_freed(ptr %p)");
   ("march_clo_param_own", "declare void @march_clo_param_own(ptr %p)");
+  ("march_clo_release", "declare void @march_clo_release(ptr %p)");
   ("march_clo_float_arg", "declare ptr  @march_clo_float_arg(ptr %p)");
   ("march_free", "declare void @march_free(ptr %p)");
   ("march_tco_defer_push", "declare ptr  @march_tco_defer_push(ptr %buf, ptr %release, ptr %v)");
@@ -1402,6 +1403,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_decrc_local";
   PDeclare "march_decrc_local_freed";
   PDeclare "march_clo_param_own";
+  PDeclare "march_clo_release";
   PDeclare "march_clo_float_arg";
   PDeclare "march_free";
   PDeclare "march_tco_defer_push";

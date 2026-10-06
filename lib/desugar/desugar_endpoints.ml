@@ -712,14 +712,14 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) ?(hel
   let decode =
     fn "decode" [ ("b", t_bytes) ] (tycon tname [])
       (match_ (app "Json.parse" [ app "Bytes.to_string" [ var "b" ] ])
-         [ ( pcon "Ok" [ pvar "jv" ],
+         [ ( pcon "Result.Ok" [ pvar "jv" ],
              block
                [ let_ ~ty:(tycon "Result" [ tycon tname []; t_string ]) "r" (app "from_json" [ var "jv" ]);
                  match_ (var "r")
-                   [ (pcon "Ok" [ pvar "m" ], var "m");
-                     ( pcon "Err" [ pvar "e" ],
+                   [ (pcon "Result.Ok" [ pvar "m" ], var "m");
+                     ( pcon "Result.Err" [ pvar "e" ],
                        app "panic" [ string_concat (lit_str (proto ^ ": undecodable message: ")) (var "e") ] ) ] ] );
-           ( pcon "Err" [ pvar "e" ],
+           ( pcon "Result.Err" [ pvar "e" ],
              app "panic" [ string_concat (lit_str (proto ^ ": message is not JSON: ")) (var "e") ] ) ])
   in
   (* `try_decode`: what the generated receive handlers use, so an
@@ -729,18 +729,18 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) ?(hel
   let try_decode =
     fn "try_decode" [ ("b", t_bytes) ] (tycon "Result" [ tycon tname []; t_string ])
       (match_ (app "Json.parse" [ app "Bytes.to_string" [ var "b" ] ])
-         [ ( pcon "Ok" [ pvar "jv" ],
+         [ ( pcon "Result.Ok" [ pvar "jv" ],
              block
                [ let_ ~ty:(tycon "Result" [ tycon tname []; t_string ]) "r" (app "from_json" [ var "jv" ]);
                  match_ (var "r")
-                   [ (pcon "Ok" [ pvar "m" ], con "Ok" [ var "m" ]);
-                     (pcon "Err" [ pvar "e" ], con "Err" [ string_concat (lit_str "undecodable message: ") (var "e") ]) ] ] );
-           (pcon "Err" [ pvar "e" ], con "Err" [ string_concat (lit_str "message is not JSON: ") (var "e") ]) ])
+                   [ (pcon "Result.Ok" [ pvar "m" ], con "Result.Ok" [ var "m" ]);
+                     (pcon "Result.Err" [ pvar "e" ], con "Result.Err" [ string_concat (lit_str "undecodable message: ") (var "e") ]) ] ] );
+           (pcon "Result.Err" [ pvar "e" ], con "Result.Err" [ string_concat (lit_str "message is not JSON: ") (var "e") ]) ])
   in
   (* 1-based, in order of first appearance; see [roles_of]. *)
   let role_fns = List.mapi (fun i r -> fn ("role_" ^ r) [] t_int (lit_int (i + 1))) roles in
   let index_of r = 1 + Option.get (List.find_index (fun x -> x = r) roles) in
-  let int_list rs = List.fold_right (fun r acc -> con "Cons" [ lit_int (index_of r); acc ]) rs (con "Nil" []) in
+  let int_list rs = List.fold_right (fun r acc -> con "List.Cons" [ lit_int (index_of r); acc ]) rs (con "List.Nil" []) in
   (* `peers_<R>()`: the role indices [R] exchanges a message with; see [peers_of]. *)
   let peer_fns = List.map (fun (r, ps) -> fn ("peers_" ^ r) [] (tycon "List" [ t_int ]) (int_list ps)) peers in
   (* `role_names()`: every role's name with its index, for
@@ -748,8 +748,8 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) ?(hel
   let role_names =
     fn "role_names" [] (tycon "List" [ TyTuple [ t_string; t_int ] ])
       (List.fold_right
-         (fun r acc -> con "Cons" [ ETuple ([ lit_str r; lit_int (index_of r) ], sp); acc ])
-         roles (con "Nil" []))
+         (fun r acc -> con "List.Cons" [ ETuple ([ lit_str r; lit_int (index_of r) ], sp); acc ])
+         roles (con "List.Nil" []))
   in
   (* `others_<R>()`: every role but [R], ascending -- the roles an initiator
      fills from access points (it needs all of them, not only its peers). *)
@@ -769,13 +769,13 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) ?(hel
      OTHER fingerprints a role at this fingerprint may form a session with,
      computed from the previous version given with `--protocol-baseline`.
      Empty means "same fingerprint only" for every role. *)
-  let str_list xs = List.fold_right (fun x acc -> con "Cons" [ lit_str x; acc ]) xs (con "Nil" []) in
+  let str_list xs = List.fold_right (fun x acc -> con "List.Cons" [ lit_str x; acc ]) xs (con "List.Nil" []) in
   let compat_fn =
     fn "compat" [] (tycon "List" [ TyTuple [ t_string; t_string; tycon "List" [ t_string ] ] ])
       (List.fold_right
          (fun (f, r, acc_fps) acc ->
-            con "Cons" [ ETuple ([ lit_str f; lit_str r; str_list acc_fps ], sp); acc ])
-         compat (con "Nil" []))
+            con "List.Cons" [ ETuple ([ lit_str f; lit_str r; str_list acc_fps ], sp); acc ])
+         compat (con "List.Nil" []))
   in
   (* `compat_by_role()`: the same rows keyed by role number, as `SessionNode`'s
      offers and initiators read them (they know roles by number). *)
@@ -783,8 +783,8 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) ?(hel
     fn "compat_by_role" [] (tycon "List" [ TyTuple [ t_int; tycon "List" [ t_string ] ] ])
       (List.fold_right
          (fun (_, r, acc_fps) acc ->
-            con "Cons" [ ETuple ([ lit_int (index_of r); str_list acc_fps ], sp); acc ])
-         compat (con "Nil" []))
+            con "List.Cons" [ ETuple ([ lit_int (index_of r); str_list acc_fps ], sp); acc ])
+         compat (con "List.Nil" []))
   in
   (* `role_fingerprint(i)`: the fingerprint role [i] offers and initiates
      under -- this build's, except the chooser's in an expand build (D21,
@@ -876,7 +876,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
       [ var "s"; ep; role_idx from;
         lam [ "_from"; "msg"; "ep1" ]
           (match_ (app (msg ^ ".try_decode") [ var "msg" ])
-             [ ( pcon "Ok" [ pvar "m" ],
+             [ ( pcon "Result.Ok" [ pvar "m" ],
                  match_ (var "m")
                    (List.map
                       (fun (ctor, cb, next_nm) ->
@@ -885,7 +885,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                       arms
                     @ unexpected_arm (List.length arms)
                         (fail_with (lit_str (Printf.sprintf "%s, role %s: unexpected message" proto role)))) );
-               ( pcon "Err" [ pvar "e" ],
+               ( pcon "Result.Err" [ pvar "e" ],
                  fail_with (string_concat (lit_str (Printf.sprintf "%s, role %s: " proto role)) (var "e")) ) ]) ]
   in
   (* ── failure (specs/todos/2026-09-18-choreography-failure-handling.md) ──
@@ -953,8 +953,8 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                         [ var "d_msgs";
                           lam [ "d_b" ]
                             (match_ (app (msg ^ ".try_decode") [ var "d_b" ])
-                               [ (pcon "Ok" [ pvar "d_m" ], con "Some" [ var "d_m" ]);
-                                 (pcon "Err" [ PatWild sp ], con "None" []) ]) ];
+                               [ (pcon "Result.Ok" [ pvar "d_m" ], con "Option.Some" [ var "d_m" ]);
+                                 (pcon "Result.Err" [ PatWild sp ], con "Option.None" []) ]) ];
                       con drained_name [ con "Secret" [] ] ]);
                var "d_ep" ]) ]
   in
@@ -1307,11 +1307,11 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                           | None -> delivered
                           | Some (nm, crash_nx) ->
                             match_ (app "Session.crash_cause" [ var "msg" ])
-                              [ ( pcon "Some" [ pvar "cause" ],
+                              [ ( pcon "Option.Some" [ pvar "cause" ],
                                   con ("Crashed_" ^ nm)
                                     [ ERecord ([ (n "role", var "from"); (n "cause", var "cause") ], sp);
                                       con crash_nx [ var "ep" ] ] );
-                                (pcon "None" [], delivered) ]
+                                (pcon "Option.None" [], delivered) ]
                         in
                         ( pcon ("Awaiting_" ^ this) [ pvar "ep0"; PatWild sp ],
                           EIf
@@ -1418,12 +1418,12 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   let mismatch_arms ~covered this expected =
     (if covered >= List.length step_ctors then []
      else
-       [ ( pcon "Cons" [ pvar "other"; PatWild sp ],
+       [ ( pcon "List.Cons" [ pvar "other"; PatWild sp ],
            consume_panic this
              (string_concat
                 (lit_str (Printf.sprintf "%s: script: in state %s expected %s, but the next step is " where this expected))
                 (app "step_name" [ var "other" ])) ) ])
-    @ [ ( pcon "Nil" [],
+    @ [ ( pcon "List.Nil" [],
           consume_panic this
             (lit_str (Printf.sprintf "%s: script: in state %s expected %s, but the script has no steps left" where this expected)) ) ]
   in
@@ -1444,7 +1444,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              let nx = state_of next in
              Some
                (match_ (var "steps")
-                  (( pcon "Cons" [ pcon ("Send_" ^ ctor) [ pvar "v" ]; pvar "rest" ],
+                  (( pcon "List.Cons" [ pcon ("Send_" ^ ctor) [ pvar "v" ]; pvar "rest" ],
                      app (script_fn nx) [ var "s"; app ("send_" ^ ctor) [ var "s"; var "st"; var "v" ]; var "rest" ] )
                    :: mismatch_arms ~covered:1 this ("Send_" ^ ctor)))
            | LChoose brs ->
@@ -1453,7 +1453,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                   (List.map
                      (fun (lbl, _, _, _, next) ->
                         let nx = state_of next in
-                        ( pcon "Cons" [ pcon ("Choose_" ^ lbl) [ pvar "v" ]; pvar "rest" ],
+                        ( pcon "List.Cons" [ pcon ("Choose_" ^ lbl) [ pvar "v" ]; pvar "rest" ],
                           app (script_fn nx) [ var "s"; app ("choose_" ^ lbl) [ var "s"; var "st"; var "v" ]; var "rest" ] ))
                      brs
                    @ mismatch_arms ~covered:(List.length brs) this (expecting (List.map (fun (lbl, _, _, _, _) -> "Choose_" ^ lbl) brs))))
@@ -1461,7 +1461,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              let nx = state_of next in
              Some
                (match_ (var "steps")
-                  (( pcon "Cons" [ pcon ("Expect_" ^ ctor) [ pvar "k" ]; pvar "rest" ],
+                  (( pcon "List.Cons" [ pcon ("Expect_" ^ ctor) [ pvar "k" ]; pvar "rest" ],
                      app ("recv_" ^ ctor) [ var "s"; var "st"; expect_cb nx ] )
                    :: mismatch_arms ~covered:1 this ("Expect_" ^ ctor)))
            | LOffer (_, brs) ->
@@ -1471,7 +1471,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                (match_ (var "steps")
                   (List.map
                      (fun (_, ctor_i, nx_i) ->
-                        ( pcon "Cons" [ pcon ("Expect_" ^ ctor_i) [ pvar "k" ]; pvar "rest" ],
+                        ( pcon "List.Cons" [ pcon ("Expect_" ^ ctor_i) [ pvar "k" ]; pvar "rest" ],
                           app offer_name
                             ([ var "s"; var "st" ]
                              @ List.map
@@ -1499,7 +1499,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                (match_ (var "steps")
                   (List.map
                      (fun (_, ctor_i, nx_i) ->
-                        ( pcon "Cons" [ pcon ("Expect_" ^ ctor_i) [ pvar "k" ]; pvar "rest" ],
+                        ( pcon "List.Cons" [ pcon ("Expect_" ^ ctor_i) [ pvar "k" ]; pvar "rest" ],
                           app fn_name
                             ([ var "s"; var "st" ]
                              @ List.map
@@ -1509,7 +1509,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                                  cbs
                              @ [ crashed_cb ("Expect_" ^ ctor_i) ]) ))
                      cbs
-                   @ [ ( pcon "Cons" [ pcon cname [ pvar "k" ]; pvar "rest" ],
+                   @ [ ( pcon "List.Cons" [ pcon cname [ pvar "k" ]; pvar "rest" ],
                          app fn_name
                            ([ var "s"; var "st" ]
                             @ List.map
@@ -1520,8 +1520,8 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
            | LEnd ->
              Some
                (match_ (var "steps")
-                  [ (pcon "Nil" [], app "close" [ var "s"; var "st" ]);
-                    ( pcon "Cons" [ pvar "other"; PatWild sp ],
+                  [ (pcon "List.Nil" [], app "close" [ var "s"; var "st" ]);
+                    ( pcon "List.Cons" [ pvar "other"; PatWild sp ],
                       consume_panic this
                         (string_concat
                            (lit_str (Printf.sprintf "%s: script: the protocol has ended, but the script goes on with " where))

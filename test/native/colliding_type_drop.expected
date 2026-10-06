@@ -1,0 +1,4 @@
+Msgpack.Bin dropped, no growth: true
+Msgpack.Array dropped, no growth: true
+Msgpack.decode of a frame dropped, no growth: true
+Msgpack.encode of a string, no growth: true

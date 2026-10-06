@@ -11935,6 +11935,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/topology_conflict.expected topology_conflict.out)))
 
+; ── A pushed topology leaves pinned roles alone (lab finding, 2026-10-05) ──
+; Ctl.Control is placed by the generated main and a digest cannot name it;
+; apply_desired used to place it nowhere on every re-read (no leader).
+(rule
+ (targets topology_pinned_bin topology_pinned.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file session/topology_pinned.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o topology_pinned_bin session/topology_pinned.march)
+   (with-stdout-to topology_pinned.out (system "./topology_pinned_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/topology_pinned.expected topology_pinned.out)))
+
 ; ── Aggregate drop: boxed Float / niche Option / erased fields (2026-10-02) ──
 ; A dying tuple, List(Float) cell, Option-holding tuple, and a frame tuple
 ; destructured in a polymorphic local fn must give back everything they own.
@@ -11956,6 +11972,49 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/aggregate_drop_erased_fields.expected native_aggregate_drop_erased_fields.out)))
+
+; ── Colliding short type names: a deep drop for each (2026-10-05) ───────────
+; Msgpack.Value, Config.Value and DataFrame.Value share the short name `Value`,
+; which every use site carries; the drop pass found no constructors and freed
+; each dying cell shallowly (~1 object per byte of every decoded cluster
+; message). RED without the fix: all three legs "no growth: false".
+(rule
+ (targets native_colliding_type_drop native_colliding_type_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/colliding_type_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_colliding_type_drop
+        native/colliding_type_drop.march)
+   (with-stdout-to native_colliding_type_drop.out
+        (system "./native_colliding_type_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/colliding_type_drop.expected native_colliding_type_drop.out)))
+
+; ── A closure released without being called releases its captures (2026-10-05)
+; The release of a function-typed value goes through march_clo_release, which
+; runs the capture drop registered for the closure's apply function. RED
+; without it: the first three legs "no growth: false".
+(rule
+ (targets native_dropped_closure_captures native_dropped_closure_captures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/dropped_closure_captures.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_dropped_closure_captures
+        native/dropped_closure_captures.march)
+   (with-stdout-to native_dropped_closure_captures.out
+        (system "./native_dropped_closure_captures")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/dropped_closure_captures.expected native_dropped_closure_captures.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),

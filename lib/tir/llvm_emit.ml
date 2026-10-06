@@ -993,6 +993,15 @@ let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.String_concat_n ->
     Bg_string
 
+(* The release for a value: a closure (a function-typed value) goes through
+   [march_clo_release], which releases its captures when the release frees it
+   (specs/progress/2026-10-05-dropped-closure-captures.md); anything else
+   through [default]. *)
+let decrc_fn_for (atom : Tir.atom) (default : string) : string =
+  match atom with
+  | Tir.AVar { Tir.v_ty = Tir.TFn _; _ } -> "march_clo_release"
+  | _ -> default
+
 let rec emit_expr ctx (e : Tir.expr) : string * string =
   match e with
 
@@ -2508,7 +2517,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
     if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" v);
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for atom "march_decrc_local") v);
     ("i64", "0")
 
   | Tir.EAtomicIncRC atom
@@ -2530,7 +2539,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EAtomicDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
     if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" v);
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for atom "march_decrc") v);
     ("i64", "0")
 
   | Tir.EFree atom

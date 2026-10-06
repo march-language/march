@@ -97,7 +97,9 @@ mod Topology do
   -- (capacity from the topology, changeable by a reload); `role` and
   -- `actor_role` fix the capacity in the code they are given (capacity 0,
   -- the argument `open` receives is ignored).
-  type TopoRole = { name : String, place : TopoPlacement, capacity : Int,
+  -- `pinned`: the build places this role itself and a pushed topology does
+  -- not move it (`pinned`, below).
+  type TopoRole = { name : String, place : TopoPlacement, capacity : Int, pinned : Bool,
                 open : Int -> Result(TopoOpened, SessionNode.RunError) }
 
   doc """
@@ -106,7 +108,7 @@ mod Topology do
   M.f(env, s, caps..., st))`.
   """
   fn role(name : String, place : TopoPlacement, open : () -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
-    { name: name, place: place, capacity: 0,
+    { name: name, place: place, capacity: 0, pinned: false,
       open: fn _ ->
         match open() do
           Ok(o) -> Ok({ ap: o, alive: fn _ -> true, capacity: 0, stop: fn _ -> () })
@@ -122,7 +124,7 @@ mod Topology do
   """
   fn offer_role(name : String, place : TopoPlacement, capacity : Int,
                 open : Int -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
-    { name: name, place: place, capacity: capacity,
+    { name: name, place: place, capacity: capacity, pinned: false,
       open: fn cap ->
         match open(cap) do
           Ok(o) -> Ok({ ap: o, alive: fn _ -> true, capacity: cap, stop: fn _ -> () })
@@ -155,7 +157,7 @@ mod Topology do
   fn offer_actor_role(name : String, place : TopoPlacement, capacity : Int, mk : () -> Pid(a),
                       open : Pid(a) -> Int -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
     let spare = Vault.new("topology_spare_" ++ name ++ "_" ++ int_to_string(next_id()))
-    { name: name, place: place, capacity: capacity,
+    { name: name, place: place, capacity: capacity, pinned: false,
       open: fn cap ->
         let host = match Vault.get(spare, "h") do
           Some(h) -> h
@@ -770,16 +772,31 @@ mod Topology do
 
   doc """
   [base] (the roles this build contains, as the generated `main` placed
-  them) under [desired]: a role the digest no longer serves here is
-  `PlaceNowhere`; otherwise its placement and (unless fixed by the build,
-  capacity 0) its capacity come from the digest.
+  them) under [desired]: a pinned role is left as the build placed it; a
+  role the digest no longer serves here is `PlaceNowhere`; otherwise its
+  placement and (unless fixed by the build, capacity 0) its capacity come
+  from the digest.
   """
   fn apply_desired(base : List(TopoRole), desired : List(TopoDesired)) : List(TopoRole) do
     List.map(base, fn r ->
-      match List.find(desired, fn d -> d.d_name == r.name) do
-        None -> { r with place: PlaceNowhere }
-        Some(d) -> { r with place: d.d_place, capacity: if r.capacity == 0 do 0 else d.d_capacity end }
+      if r.pinned do r else
+        match List.find(desired, fn d -> d.d_name == r.name) do
+          None -> { r with place: PlaceNowhere }
+          Some(d) -> { r with place: d.d_place, capacity: if r.capacity == 0 do 0 else d.d_capacity end }
+        end
       end)
+  end
+
+  doc """
+  [r], pinned: a pushed topology leaves its placement and capacity as the
+  build set them (`apply_desired`). For roles the generated `main` adds
+  itself and a topology digest cannot name, such as the control plane's
+  `Ctl.Control` (placed from `[control]`): without the pin, every re-read of
+  the topology (a signed push, SIGHUP, or a restart onto a verified copy)
+  would place it nowhere, and the cluster would lose its leader.
+  """
+  fn pinned(r : TopoRole) : TopoRole do
+    { r with pinned: true }
   end
 
   pfn find_role(roles : List(TopoRole), name : String) : Option(TopoRole) do

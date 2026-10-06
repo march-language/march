@@ -264,6 +264,78 @@ let find_variant_by_suffix (env : env) (name : string)
             | _ -> None)
     | _ -> None
 
+(* A short type name that several modules declare ([Collision_set]: three
+   stdlib [Value]s -- Msgpack's, Config's, DataFrame's -- plus [Level],
+   [State], [Event], ...).  By design the static type stays the bare short
+   name at every use site (see [Collision_set]'s module doc), so neither the
+   exact lookup nor [find_variant_by_suffix] (which refuses a collision) finds
+   the constructors, and every dying cell of such a type was freed shallowly:
+   a dropped [Msgpack.Bin] orphaned its whole byte list, ~1 object per byte of
+   every cluster message decoded (the multi-host lab's nodes grew ~400,000
+   objects per session and were OOM-killed in two minutes).
+
+   Colliding types are forced Boxed and every one of their constructors
+   carries a globally unique tag, registered under its fully qualified
+   [ctor_info] key ("Msgpack.Value.Bin"), which [Llvm_case] accepts as a
+   branch tag as is.  So the drop of a colliding short name destructures the
+   UNION of every candidate's constructors, each named by its qualified key:
+   the dying cell's tag selects exactly one branch, with that candidate's
+   field types.  Each candidate is substituted with [ty_args] on its own; a
+   candidate that is not a plain Boxed variant, or whose type parameters do
+   not line up with [ty_args], leaves the name unresolved (a shallow free is
+   a leak; a destructuring drop against the wrong layout would be worse). *)
+let colliding_union (env : env) (name : string) (ty_args : Tir.ty list)
+  : (string * Tir.ty list) list option =
+  if String.contains name '.' then None
+  else
+    match Hashtbl.find_opt env.collision_set name with
+    | None -> None
+    | Some candidates ->
+      let per_candidate qualified =
+        match Kind.find_variant env.k_table qualified with
+        | None -> None
+        | Some ctors ->
+          let niche =
+            match Kind.niche_repr_of_concrete env.k_table qualified with
+            | Some (Kind.Niche _) -> true
+            | _ -> false in
+          let params = type_params_of ctors in
+          if niche || List.length params <> List.length ty_args then None
+          else
+            let subst = List.combine params ty_args in
+            Some (List.map (fun (cn, ftys) ->
+                (qualified ^ "." ^ cn, List.map (apply_subst subst) ftys)) ctors)
+      in
+      let rec all acc = function
+        | [] -> Some (List.concat (List.rev acc))
+        | c :: rest ->
+          (match per_candidate c with
+           | Some cs -> all (cs :: acc) rest
+           | None -> None)
+      in
+      (* The tag only names the candidate when the constructor's key was
+         qualified at the construction.  [Lower_expr] qualifies it only for the
+         narrow impl-bearing collisions; any other construction keys bare
+         ("Row.Row") and [Llvm_data.ctor_entry]'s suffix scan gives it the tag
+         of whichever same-named type registered first.  So when two
+         candidates share a constructor name, a cell built as one carries the
+         other's tag (test/native/niche_ctor_ambiguity: a nested
+         [Inner.Row.Row] was tagged [DataFrame.Row.Row], and the union drop
+         freed its List(Int) as a List((String, Value))).  Such a shared name
+         is only safe when every sharer has the same fields; otherwise stay
+         shallow. *)
+      let short q = match String.rindex_opt q '.' with
+        | Some i -> String.sub q (i + 1) (String.length q - i - 1)
+        | None -> q in
+      let consistent ctors =
+        List.for_all (fun (q, ftys) ->
+            List.for_all (fun (q', ftys') ->
+                not (String.equal (short q) (short q')) || ftys = ftys')
+              ctors) ctors in
+      (match all [] (List.sort String.compare candidates) with
+       | Some ctors when consistent ctors -> Some ctors
+       | _ -> None)
+
 let droppable_ctors (env : env) (ty : Tir.ty)
   : (string * Tir.ty list) list option =
   match ty with
@@ -322,7 +394,7 @@ let droppable_ctors (env : env) (ty : Tir.ty)
           in
           Some (List.map (fun (cn, ftys) ->
               (cn, List.map (apply_subst subst) ftys)) ctors)
-        | None -> None)
+        | None -> colliding_union env name ty_args)
      (* Unboxed: an inline struct of scalars.  No cell to free and no heap
         field to recurse into, so there is nothing for a [__drop$T] helper to
         do — the same answer as the erased reprs, for a different reason. *)
@@ -333,6 +405,11 @@ let droppable_ctors (env : env) (ty : Tir.ty)
     suffix (see [find_variant_by_suffix]). *)
 let variant_ctors (env : env) (name : string)
   : (string * Tir.ty list) list option =
+  (* NOT the collision union of [colliding_union]: this feeds the niche path
+     ([erased_payload]), which would pick one candidate's constructor for a
+     value whose real type it cannot tell, and treat a newtype or a box with
+     the wrong layout (test/native/niche_ctor_ambiguity crashed that way).
+     Only [droppable_ctors], behind its Boxed check, may use the union. *)
   match Kind.find_variant env.k_table name with
   | Some _ as found -> found
   | None -> find_variant_by_suffix env name
@@ -1306,6 +1383,45 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
            f.Tir.fn_params
        | None -> ());
       { f with Tir.fn_body = rewrite env body }) m.Tir.tm_fns in
+  (* Capture releases for closures dropped without being called.  An apply
+     function releases its environment's captures when IT frees the
+     environment ([rewrite_apply_clo_drop]); a closure released anywhere else
+     -- dropped from a list, a record, a Vault, or never applied -- is a value
+     of a function type, which names no layout, so that release freed the
+     cell alone and leaked every capture
+     (specs/progress/2026-10-05-dropped-closure-captures.md).  For each closure
+     type whose environment OWNS its captures (the same [owning] gate, for the
+     same reason: a borrowing environment's captures are released by its
+     scope), [$clodrop$<clo>($clo)] loads and drops every capture.  The
+     LLVM backend registers it with the runtime under the apply function's
+     address, and a release of a function-typed value calls
+     [march_clo_release], which runs it when that release frees the cell. *)
+  let clo_drops =
+    List.filter_map (function
+        | Tir.TDClosure (clo, _ :: cap_tys) ->
+          (match apply_name_of_clo clo with
+           | Some apply when Hashtbl.mem owning apply ->
+             let clo_var =
+               { Tir.v_name = Tir_names.clo_param_name; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+             let caps = List.filteri (fun _ (v, _) -> Kind.needs_rc_of env.k_table v.Tir.v_ty)
+                 (List.mapi (fun i ty ->
+                      ({ Tir.v_name = Printf.sprintf "$cap%d" (i + 1); v_ty = ty; v_lin = Tir.Unr },
+                       Tir_names.fv_field (i + 1))) cap_tys) in
+             if caps = [] then None
+             else begin
+               let rec chain = function
+                 | [] -> Tir.ETuple []
+                 | op :: rest -> Tir.ESeq (op, chain rest)
+               in
+               let releases = chain (List.map (fun (v, _) -> drop_op env v) caps) in
+               let body = List.fold_right (fun (v, field) acc ->
+                   Tir.ELet (v, Tir.EField (Tir.AVar clo_var, field), acc)) caps releases in
+               Some { Tir.fn_name = Tir_names.clo_drop_fn_name clo; fn_params = [clo_var];
+                      fn_ret_ty = Tir.TUnit; fn_body = body; fn_kind = Tir.FnNormal }
+             end
+           | _ -> None)
+        | _ -> None) m.Tir.tm_types
+  in
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
-  { m with Tir.tm_fns = fns @ List.rev env.fns }
+  { m with Tir.tm_fns = fns @ clo_drops @ List.rev env.fns }
