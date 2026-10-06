@@ -492,11 +492,39 @@ let load_stdlib_file path =
   in
   if src = "" then []
   else
-    let lexbuf = Lexing.from_string src in
-    lexbuf.Lexing.lex_curr_p <-
-      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+    let fatal diags =
+      List.iter (fun d ->
+        Printf.eprintf "%s\n%!"
+          (March_errors.Errors.render_diagnostic ~src ~filename:path d)) diags;
+      Printf.eprintf
+        "This is a stdlib source file, so this is a compiler-installation \
+         problem rather than something wrong with your program.\n%!";
+      exit 1
+    in
+    let parsed =
+      match March_parser.Parse.module_ ~filename:path src with
+      | Ok m -> m
+      | Error diags ->
+        (* A stdlib file that does not parse is FATAL, not a skipped module.
+           This used to print one unbannered line to stderr and return [], so
+           loading continued with the module silently absent — and the failure
+           the user actually saw was `Unknown module \`Session\`` from the
+           typechecker, pointing nowhere near the real cause. The stderr line
+           was easy to miss: it is emitted before the program's own
+           diagnostics and carries no `-- ERROR --` banner, so it reads as
+           noise rather than as the error.
+
+           There is no situation in which continuing without a stdlib module
+           is what the user wants — the manifest test already treats an
+           UNLISTED module as a correctness bug (silent miscompilation at a
+           niche-eligible type), and a listed-but-unparseable one is strictly
+           worse. So render the real parse error, at the real position in the
+           real file, through the same banner renderer user files get, and
+           exit. *)
+        fatal diags
+    in
     (try
-       let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+       let m = parsed in
        let basename = Filename.basename path in
        (* prelude.march's own members are unwrapped into global scope below
           (matching TIR's entry-module unwrapping), so its bare intra-module
@@ -518,35 +546,10 @@ let load_stdlib_file path =
                               m.March_ast.Ast.mod_decls,
                               March_ast.Ast.dummy_span)]
      with
-     (* A stdlib file that does not parse is FATAL, not a skipped module.
-        This used to print one unbannered line to stderr and return [], so
-        loading continued with the module silently absent — and the failure the
-        user actually saw was `Unknown module \`Session\`` from the typechecker,
-        pointing nowhere near the real cause. The stderr line was easy to miss:
-        it is emitted before the program's own diagnostics and carries no
-        `-- ERROR --` banner, so it reads as noise rather than as the error.
-
-        There is no situation in which continuing without a stdlib module is
-        what the user wants — the manifest test already treats an UNLISTED
-        module as a correctness bug (silent miscompilation at a niche-eligible
-        type), and a listed-but-unparseable one is strictly worse. So render the
-        real parse error, at the real position in the real file, through the
-        same banner renderer user files get, and exit. *)
-     | March_errors.Errors.ParseError (msg, hint, _) ->
-       Printf.eprintf "%s\n%!"
-         (March_errors.Errors.render_parse_error ~src ~filename:path ?hint ~msg lexbuf);
-       Printf.eprintf
-         "This is a stdlib source file, so this is a compiler-installation \
-          problem rather than something wrong with your program.\n%!";
-       exit 1
-     | March_parser.Parser.Error ->
-       Printf.eprintf "%s\n%!"
-         (March_errors.Errors.render_parse_error ~src ~filename:path
-            ~msg:"I got stuck here:" lexbuf);
-       Printf.eprintf
-         "This is a stdlib source file, so this is a compiler-installation \
-          problem rather than something wrong with your program.\n%!";
-       exit 1
+     (* Desugar reports some user-facing errors as [ParseError] too. *)
+     | March_errors.Errors.ParseError (msg, hint, pos) ->
+       fatal [March_errors.Errors.parse_error_diagnostic_at
+                ~filename:path ?hint ~src ~msg pos]
      | exn ->
        Printf.eprintf "[stdlib] error in %s: %s\n%!" path (Printexc.to_string exn); [])
 

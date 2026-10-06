@@ -47,8 +47,7 @@ let load_stdlib_file path =
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     (try
        let m =
-         March_parser.Parser.module_
-           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+         March_parser.Parse.module_of_lexbuf lexbuf
        in
        let m = March_desugar.Desugar.desugar_module m in
        let basename = Filename.basename path in
@@ -2386,20 +2385,8 @@ let analyse ~filename ~src : t =
      file can print a name like `y55` instead of `a`. Reset once per analysis
      pass so each pass's fresh variables again name from "a". *)
   Tc.reset_tvar_display_names ();
-  let lexbuf = Lexing.from_string src in
-  lexbuf.Lexing.lex_curr_p <-
-    { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   let parse_result =
-    try
-      Ok (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
-    with
-    | Err.ParseError (msg, hint, pos) ->
-      Error (`ParseError (msg, hint, pos))
-    | March_parser.Parser.Error ->
-      Error (`MenhirError (Lexing.lexeme_start_p lexbuf))
-    | March_lexer.Lexer.Lexer_error msg ->
-      Error (`LexerError (msg, Lexing.lexeme_start_p lexbuf))
-  in
+    March_parser.Parse.module_ ~filename ~stuck:"Parse error" src in
   let doc = Utf16.build src in
   let make_empty_with diag =
     { src;
@@ -2455,32 +2442,27 @@ let analyse ~filename ~src : t =
       proof_cap_defs    = Hashtbl.create 0;
       no_alloc_candidates = [] }
   in
-  let make_parse_diag pos msg =
+  (* A parse diagnostic as the editor shows it: a one-column range at the
+     diagnostic's start, the hint folded into the message. *)
+  let make_parse_diag (d : Err.diagnostic) =
     let sp : Ast.span = {
+      d.span with
       file = filename;
-      start_line = pos.Lexing.pos_lnum;
-      start_col  = pos.Lexing.pos_cnum - pos.Lexing.pos_bol;
-      end_line   = pos.Lexing.pos_lnum;
-      end_col    = pos.Lexing.pos_cnum - pos.Lexing.pos_bol + 1;
+      end_line = d.span.start_line;
+      end_col  = d.span.start_col + 1;
     } in
+    let msg = match d.notes with
+      | h :: _ -> d.message ^ "\nHint: " ^ h
+      | []     -> d.message
+    in
     Lsp.Types.Diagnostic.create
       ~range:(Pos.span_to_lsp_range sp)
       ~severity:Lsp.Types.DiagnosticSeverity.Error
       ~message:(`String msg) ~source:"march" ()
   in
   match parse_result with
-  | Error (`ParseError (msg, hint, pos)) ->
-    let full_msg = match hint with
-      | Some h -> msg ^ "\nHint: " ^ h
-      | None   -> msg
-    in
-    make_empty_with (make_parse_diag pos full_msg)
-
-  | Error (`MenhirError pos) ->
-    make_empty_with (make_parse_diag pos "Parse error")
-
-  | Error (`LexerError (msg, pos)) ->
-    make_empty_with (make_parse_diag pos msg)
+  | Error diags ->
+    make_empty_with (make_parse_diag (List.hd diags))
 
   | Ok raw_ast ->
     (* Desugar-level user errors (pipe-into-match, bad derive/satisfy, …)
@@ -3438,8 +3420,7 @@ let run_tir_pass (a : t) : t =
       lexbuf.Lexing.lex_curr_p <-
         { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = a.filename };
       let raw =
-        March_parser.Parser.module_
-          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+        March_parser.Parse.module_of_lexbuf lexbuf
       in
       let desugared = March_desugar.Desugar.desugar_module raw in
       (* Run the SAME post-lower pipeline the build runs

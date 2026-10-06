@@ -183,8 +183,7 @@ let scan_file tbl path =
     close_in ic;
     let lexbuf = Lexing.from_string src in
     let m =
-      March_parser.Parser.module_
-        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+      March_parser.Parse.module_of_lexbuf lexbuf
     in
     find_in_decls tbl path m.March_ast.Ast.mod_decls
   with _ ->

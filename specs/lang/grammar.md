@@ -83,14 +83,11 @@ last one is commonly called that:
    of the filtered stream* `token_filter` produces, not the lexer's raw
    output.
 3. **menhir** (`lib/parser/parser.mly`), the context-free grammar proper.
-   Every parse entry point wires the same three-stage composition,
-   `March_parser.Parser.module_ (March_parser.Token_filter.make
-   March_lexer.Lexer.token) lexbuf`, visible verbatim at, e.g.,
-   `bin/main.ml:123` (and repeated at each of the compiler's other parse
-   call sites: `lib/repl/repl.ml`, `lib/format/format.ml`,
-   `lib/resolver/resolver.ml`, `lib/modules/module_registry.ml`,
-   `lib/tir/lower_decls.ml`, `lib/lint/lint.ml`, `lib/search/search.ml`,
-   `lib/refactor/refactor.ml`). `parser.mly` is the **ultimate authority**
+   The three-stage composition is wired in exactly one place,
+   `March_parser.Parse` (`lib/parser/parse.ml`), which every parse call
+   site in the compiler, REPL, LSP and forge goes through; it also owns
+   the conversion of a lexer or parser failure into a diagnostic.
+   `parser.mly` is the **ultimate authority**
    for what parses; this chapter states menhir's *resolved* behavior,
    which of its shift/reduce conflicts resolve which way, given the
    `%left`/`%right`/`%nonassoc` declarations and `%prec` annotations,

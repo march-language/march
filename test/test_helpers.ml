@@ -4,7 +4,7 @@
 
 let parse_module src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  March_parser.Parse.module_of_lexbuf lexbuf
 
 let parse_and_desugar src =
   March_desugar.Desugar.desugar_module (parse_module src)
@@ -69,7 +69,7 @@ let load_stdlib_file_for_test name =
     let lexbuf = Lexing.from_string src in
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-    let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    let m = March_parser.Parse.module_of_lexbuf lexbuf in
     let m = March_desugar.Desugar.desugar_module m in
     (* Wrap as DMod so names are accessible as Module.name *)
     March_ast.Ast.DMod (m.March_ast.Ast.mod_name,
@@ -150,7 +150,7 @@ let repl_type_of expr_src =
   let tc_env = ref (March_typecheck.Typecheck.base_env
     (March_errors.Errors.create ()) type_map) in
   let lexbuf = Lexing.from_string expr_src in
-  match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+  match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in
@@ -176,7 +176,7 @@ let repl_eval_exprs ?(stdlib_src="") exprs_src =
   let tc_env = ref base_tc in
   List.map (fun src ->
     let lexbuf = Lexing.from_string src in
-    match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+    match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
            with _ -> None) with
     | Some (March_ast.Ast.ReplExpr e) ->
       let e' = March_desugar.Desugar.desugar_expr e in
@@ -225,13 +225,8 @@ let repl_eval_exprs ?(stdlib_src="") exprs_src =
 let parse_error_msg src =
   try
     ignore (parse_module src);
-    (* No exception: check errors collected during recovery *)
-    let errs = March_parser.Parse_errors.take_parse_errors () in
-    (match errs with (msg, _, _) :: _ -> Some msg | [] -> None)
-  with March_errors.Errors.ParseError (msg, _, _) ->
-    (* Fatal parse error (e.g. bad module header) *)
-    ignore (March_parser.Parse_errors.take_parse_errors ());
-    Some msg
+    None
+  with March_errors.Errors.ParseError (msg, _, _) -> Some msg
 
 let defun_module src =
   let m = parse_and_desugar src in
@@ -1228,7 +1223,7 @@ let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
 
 let parse_repl src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  March_parser.Parse.repl_input_of_lexbuf lexbuf
 
 (** Test: `let x = 21` on line 1, then `x + 21` on line 2 should give 42. *)
 let make_stdlib_module stdlib_decls (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
@@ -1552,7 +1547,7 @@ let test_app_main_exclusive () =
     end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let ast = March_parser.Parse.module_of_lexbuf lexbuf in
   let errors = March_errors.Errors.create () in
   ignore (March_desugar.Desugar.desugar_module ~errors ast);
   Alcotest.(check bool) "main + app raises" true (March_errors.Errors.has_errors errors)
@@ -1891,7 +1886,7 @@ let interp_eval_expr src =
     Returns Some result_str on success, None if JIT unavailable or fails. *)
 let jit_eval_simple_expr ~runtime_so src =
   let lexbuf   = Lexing.from_string src in
-  match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+  match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in

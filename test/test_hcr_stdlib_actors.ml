@@ -47,7 +47,7 @@ let parse_as ~file src : March_ast.Ast.module_ =
   let lexbuf = Lexing.from_string src in
   Lexing.set_filename lexbuf file;
   March_desugar.Desugar.desugar_module
-    (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+    (March_parser.Parse.module_of_lexbuf lexbuf)
 
 (** Run [f] with [files] recorded as the stdlib's, the way a stdlib loader
     records what it read ([TB.note_stdlib_decls]); restored after. *)
