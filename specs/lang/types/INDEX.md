@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t293 accept, t01–t295 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (175 accept, 241 reject; see the Result line below) -->
+# Typing corpus index (t01–t293 accept, t01–t295 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (179 accept, 237 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -248,7 +248,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 416/416: 175 accept, 241
+Exit 0 iff every program behaves as declared (currently 416/416: 179 accept, 237
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -616,11 +616,16 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 416 / 416 (175 accept, 241 reject).** `reject/t169`–`t170`
-(`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
-2026-08-09 alongside the narrow-element-width work) are not yet written up
-as their own table entries; they mirror the existing `t164`/`t165` pattern
-for `NativeIntArr`/`NativeFloatArr`, which likewise have no table entries.
+**Result: 416 / 416 (179 accept, 237 reject).** `accept/t164`, `t165`,
+`t169` and `t170` (a `NativeIntArr`/`NativeFloatArr`/`NativeF32Arr`/
+`NativeU8Arr` payload in an actor message) were `reject/` fixtures until
+2026-10-06 (Part C, Phase C1 of
+`specs/plans/2026-09-25-send-data-race-freedom-plan.md`): the five
+NativeArray backing types left `check_sendable`'s denylist because every
+in-place write to one is gated on sole ownership and copies otherwise, so a
+native array is a copy-on-write value. They kept their ids across the flip
+(one numbering pool) and mirror each other rather than earning table entries;
+`march-lean` mirrors the verdict flip (two-repo rule).
 `reject/t171`–`t172` (Simd lane-index refinement violations on
 `Simd.extract_f32x4`/`Simd.extract_u8x16`, added 2026-08-10 alongside the
 Simd vector types Task 1 work) and `accept/t173` (the last-legal-lane twin)

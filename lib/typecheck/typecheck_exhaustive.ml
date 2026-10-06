@@ -803,17 +803,20 @@ let offer_unrefined_error env span (r : session_ty ref) op =
   end else false
 
 (** Type constructor names that cannot appear in actor message payloads.
-    These types carry mutable state that must remain owned by a single actor.
-    NativeIntArr/NativeFloatArr/NativeF32Arr/NativeI32Arr/NativeU8Arr are
-    NativeArray's real backing types -- the NativeArray stdlib module
-    (stdlib/native_array.march) is a function namespace over these opaque
-    0-arity constructors, not a type of its own, so "NativeArray" itself
-    would be a silent no-op entry here (see where
-    native_int_arr_make/native_float_arr_make are registered, this
-    file, around the NativeArray builtins section). *)
+    A type belongs here only if its operations write memory another March
+    reference could observe AND it is neither [always_linear] nor
+    copy-on-write gated on sole ownership ([march_rc_is_unique]); see
+    specs/lang/memory-model.md and
+    specs/2026-10-06-linear-ringbuf-and-sendable-arrays-design.md section 1.
+    The five NativeArray backing types (NativeIntArr/NativeFloatArr/
+    NativeF32Arr/NativeI32Arr/NativeU8Arr) left this list on 2026-10-06
+    (Part C, Phase C1): every in-place write the runtime makes to one is
+    gated on sole ownership and copies otherwise, and the interpreter always
+    copies, so a native array is a copy-on-write value that may be sent,
+    captured by a task or shared with parallel code like any other value.
+    [RingBuf] stays until Phase C2 makes it [always_linear]. *)
 let non_sendable_types =
-  ["RingBuf"; "NativeIntArr"; "NativeFloatArr";
-   "NativeF32Arr"; "NativeI32Arr"; "NativeU8Arr"]
+  ["RingBuf"]
 
 (** [check_sendable errors span ty] walks [ty] and emits an error for every
     non-sendable type constructor it finds. Called from the [ECon] arm on
