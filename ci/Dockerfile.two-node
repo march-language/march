@@ -28,7 +28,7 @@ RUN git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3 \
  && rm -rf /tmp/blake3
 
 USER opam
-RUN opam switch create 5.3.0 ocaml-base-compiler.5.3.0 && opam update
+RUN opam switch create 5.5.1 ocaml-base-compiler.5.5.1 && opam update
 
 # Only the package manifests: the dependency layer is cached until they change.
 WORKDIR /deps

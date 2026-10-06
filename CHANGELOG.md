@@ -173,6 +173,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
+  install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
+  source needed no changes. The REPL's `notty` dependency (0.2.3 does not
+  compile on OCaml 5.4+) is now vendored from the community fork under
+  `vendor/notty/` until a fixed release is on opam, and the `js_of_ocaml < 6.4.0`
+  cap is lifted (6.4.1 compiles the browser bundle). Compiler speed is unchanged
+  within noise.
 - **Faster `--compile` once whole-program optimisation is done.** Two lookups
   that scanned every definition in the program (stdlib included) for each name
   reference, one in the CAS dependency hashing and one in the allocation-contract
@@ -232,6 +239,13 @@ git log is authoritative for exact commits.
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary
   builds were not affected.
+- **The language server resolves dependencies the way `forge build` does.**
+  It used to put every cached version of a git dependency on its search path,
+  including each version's `test/` and `priv/` files, and it missed registry
+  and transitive dependencies. Editors then showed errors from files the build
+  never reads. It now uses the version `forge.lock` names, and only that
+  version's `lib/`.
+
 - **Compiled code no longer leaks records whose ownership differs between branches.**
   A record released on one path of a `match` or `if` was leaked on the others. A record
   passed to a function and then updated (`{ st with .. }`) was never released at all. A
