@@ -1716,7 +1716,10 @@ let oracle_check ?(opt = None) ?(tir_opt = true) src =
         Printf.sprintf "%s --compile%s%s %s -o %s"
           (Filename.quote bin) opt_flag tir_flag (Filename.quote src_file) (Filename.quote bin_file)
       in
-      let (rc_compile, _compile_out, compile_err) = run_capture3 ~timeout:30 compile_cmd in
+      (* 120, not 30: a COLD compile (empty stdlib cache, clang on a loaded CI
+         runner) took 30 s on #812's ubuntu property-tests job.  This bounds a
+         hang; it is not a performance assertion. *)
+      let (rc_compile, _compile_out, compile_err) = run_capture3 ~timeout:120 compile_cmd in
       if rc_compile <> 0 then (
         cleanup_temp_march src_file;
         match classify_compile rc_compile compile_err with
@@ -2841,7 +2844,10 @@ let test_record_update_missing_field_on_erased_base_converged () =
       Printf.sprintf "%s --compile %s -o %s"
         (Filename.quote bin) (Filename.quote src_file) (Filename.quote bin_file)
     in
-    let (rc_compile, _compile_out, _compile_err) = run_capture3 ~timeout:30 compile_cmd in
+    (* 120, not 30: a COLD compile (empty stdlib cache, clang on a loaded CI
+       runner) took 30 s on #812's ubuntu property-tests job.  This bounds a
+       hang; it is not a performance assertion. *)
+    let (rc_compile, _compile_out, _compile_err) = run_capture3 ~timeout:120 compile_cmd in
     if rc_compile <> 0 then begin
       cleanup_temp_march src_file;
       Alcotest.failf
