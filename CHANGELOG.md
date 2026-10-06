@@ -235,6 +235,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- A call of another module's function with too few arguments
+  (`List.map([1, 2])`) is now a type error. It used to typecheck, then fail
+  at run time: an `arity mismatch` panic interpreted, a crash compiled, and a
+  crash of the whole REPL session.
 - **Compiled code no longer leaks records whose ownership differs between branches.**
   A record released on one path of a `match` or `if` was leaked on the others. A record
   passed to a function and then updated (`{ st with .. }`) was never released at all. A

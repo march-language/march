@@ -1133,6 +1133,48 @@ let test_tc_arity_fn_returning_fn_ok () =
   end|} in
   Alcotest.(check bool) "full app of fn-returning-fn: no error" false (has_errors ctx)
 
+(* The same rule for a QUALIFIED call of a function another module exports
+   (`M.add(1)`, `List.map([1, 2])`): it used to typecheck through the curried
+   scheme, then panic interpreted, SIGSEGV compiled, and kill the REPL
+   (specs/progress/2026-10-06-qualified-under-application-typechecked.md). *)
+let test_tc_arity_qualified_under_application () =
+  let ctx = typecheck {|mod Test do
+    mod M do
+      fn add(a : Int, b : Int) : Int do a + b end
+    end
+    fn main() : Unit do let _ = M.add(1) end
+  end|} in
+  Alcotest.(check bool) "qualified under-application is an error" true (has_errors ctx);
+  Alcotest.(check bool) "names the arity" true
+    (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+         contains "`M.add` expects 2 arguments, but got 1" d.message) ctx.diagnostics)
+
+let test_tc_arity_qualified_nested () =
+  let ctx = typecheck {|mod Test do
+    mod A do
+      mod B do
+        fn three(a : Int, b : Int, c : Int) : Int do a + b + c end
+      end
+    end
+    fn main() : Unit do let _ = A.B.three(1, 2) end
+  end|} in
+  Alcotest.(check bool) "nested-module qualified under-application is an error" true (has_errors ctx)
+
+let test_tc_arity_qualified_ok () =
+  let ctx = typecheck {|mod Test do
+    mod M do
+      fn add(a : Int, b : Int) : Int do a + b end
+      fn make_adder(n : Int) : (Int) -> Int do fn x -> x + n end
+    end
+    fn main() : Unit do
+      let _ = M.add(1, 2)
+      let f = M.make_adder(5)
+      let _ = f(2)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "correct qualified calls: no error" false (has_errors ctx)
+
 (* ── root_cap: callable-vs-value diagnostic ─────────────────────────────
    root_cap is a bare ambient value of type Cap(IO) (see docs/capabilities.md
    and examples/capabilities.march) — NOT a function.  infer_app's
@@ -17571,6 +17613,9 @@ let compiler_suites =
           Alcotest.test_case "arity: over-application is error"    `Quick test_tc_arity_over_application;
           Alcotest.test_case "arity: correct call is ok"           `Quick test_tc_arity_correct_ok;
           Alcotest.test_case "arity: fn returning fn is ok"        `Quick test_tc_arity_fn_returning_fn_ok;
+          Alcotest.test_case "arity: qualified under-application"  `Quick test_tc_arity_qualified_under_application;
+          Alcotest.test_case "arity: nested qualified"             `Quick test_tc_arity_qualified_nested;
+          Alcotest.test_case "arity: qualified correct calls ok"   `Quick test_tc_arity_qualified_ok;
           Alcotest.test_case "root_cap() is rejected"              `Quick test_tc_root_cap_call_rejected;
           Alcotest.test_case "bare root_cap is rejected (R2)"       `Quick test_tc_root_cap_bare_rejected;
           Alcotest.test_case "legit zero-arg builtins still callable" `Quick test_tc_zero_arg_builtins_still_callable;

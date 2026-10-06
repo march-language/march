@@ -291,6 +291,13 @@ type env = {
       number of arguments panics at runtime (and the compiler miscompiles
       under-application into a body call with a garbage argument).  Used to
       reject wrong-arity calls of these functions at the call site. *)
+  qual_fn_arities : (int * Ast.span) StrMap.t;
+  (** [fn_arities] for the qualified keys a public [DMod] exports
+      (`List.map` -> 2), so a qualified call is held to its arity too.
+      Populated at the [Ast.DMod] export step from the inner module's
+      [fn_arities] and its own [qual_fn_arities] (nested modules).  Never
+      cleared by [bind_var]: a qualified name cannot be shadowed by a local.
+      Registry-loaded [ExFn] exports carry no arity and are not in it. *)
   qual_fn_names : unit StrMap.t;
   (** Qualified ("Mod.name") keys in [vars] that denote a genuine top-level
       function — i.e. a [DFn], an interface method, or a registry [ExFn]
@@ -697,6 +704,7 @@ let make_env errors type_map = {
   deferred_check4 = ref [];
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
+  qual_fn_arities = StrMap.empty;
   qual_fn_names = StrMap.empty;
   plain_let_names = StringSet.empty;
   proof_caps = [];

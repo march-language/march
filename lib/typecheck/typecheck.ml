@@ -2290,6 +2290,22 @@ let rec infer_expr env (e : Ast.expr) : ty =
              let n_args = List.length args in
              if n_args <> arity && count_arrows f_ty >= arity then Some (name, arity, n_args, Some def_span)
              else None
+           | None when String.contains name.txt '.'
+                    && StrMap.mem name.txt env.qual_fn_arities ->
+             (* A qualified call (`List.map([1, 2])`) of a function another
+                module exports: the same rule.  Under-application used to
+                typecheck, then panic interpreted and SIGSEGV compiled (and
+                kill the REPL). *)
+             let (arity, def_span) = StrMap.find name.txt env.qual_fn_arities in
+             let n_args = List.length args in
+             (* Point at the definition only when it is in the caller's file:
+                the renderer reads the related span's lines from the primary
+                span's source, so a stdlib definition printed a blank line of
+                the user's file. *)
+             let related =
+               if def_span.Ast.file = name.span.Ast.file then Some def_span else None in
+             if n_args <> arity && count_arrows f_ty >= arity then Some (name, arity, n_args, related)
+             else None
            | None ->
              (* The same rule for a BUILTIN, under-application only: its scheme
                 is a curried arrow chain, so `monitor(p)` (two parameters)
@@ -2367,7 +2383,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
                      Err.lbl_message = Printf.sprintf "defined here with %d parameter%s"
                        arity (if arity = 1 then "" else "s") }]
                 | None -> []);
-             notes = (if def_span = None then [ Printf.sprintf "`%s` is a builtin taking %d argument%s." name.txt arity (if arity = 1 then "" else "s") ] else []);
+             notes = (if def_span = None then
+                        [ Printf.sprintf "`%s` %s %d argument%s." name.txt
+                            (if StrMap.mem name.txt env.qual_fn_arities then "takes"
+                             else "is a builtin taking")
+                            arity (if arity = 1 then "" else "s") ]
+                      else []);
              code = None; fix = None };
          (* Return the declared return type so downstream inference stays sane. *)
          let rec peel n t =
@@ -6091,6 +6112,19 @@ let rec check_decl env (d : Ast.decl) : env =
         then StrMap.add (name.txt ^ "." ^ k) () acc
         else acc
       ) inner_env.vars StrMap.empty in
+    (* The arities of those functions, for the call-site arity check: this
+       module's own fns from [fn_arities] (bare keys), nested modules' from
+       their [qual_fn_arities]. *)
+    let new_fn_arities = StrMap.fold (fun k _sch acc ->
+        if not (StrMap.mem (name.txt ^ "." ^ k) new_fn_quals) then acc
+        else
+          let found =
+            if StrMap.mem k inner_env.local_fns then StrMap.find_opt k inner_env.fn_arities
+            else StrMap.find_opt k inner_env.qual_fn_arities in
+          match found with
+          | Some a -> StrMap.add (name.txt ^ "." ^ k) a acc
+          | None -> acc
+      ) inner_env.vars StrMap.empty in
     (* Also export type names and constructors from public DMod into outer scope.
        Types defined in a module (e.g. IOList, Option) are referred to by their
        bare name throughout user code, not prefixed.
@@ -6225,6 +6259,7 @@ let rec check_decl env (d : Ast.decl) : env =
                     Some merged) all_new env'.ctors);
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
       qual_fn_names = StrMap.union (fun _k a _ -> Some a) new_fn_quals env'.qual_fn_names;
+      qual_fn_arities = StrMap.union (fun _k a _ -> Some a) new_fn_arities env'.qual_fn_arities;
       module_caps = module_caps';
       proof_caps = inner_env.proof_caps;
       cap_dicts = inner_env.cap_dicts;
