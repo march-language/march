@@ -1,0 +1,4 @@
+update base on one branch, released on the other, no growth: true
+record passed to a function, then updated, no growth: true
+nominal record in a Map, dropped through its holder, no growth: true
+sha256 of a fresh string, no growth: true

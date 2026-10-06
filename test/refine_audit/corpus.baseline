@@ -464,6 +464,8 @@ native_record_field_tail_projection: coverage audit (user + stdlib): 123 enforce
 native_record_field_tail_projection: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_get_let_bound_eq: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_record_get_let_bound_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_record_ownership_drops: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_record_ownership_drops: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_pattern: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_record_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_pattern_partial: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

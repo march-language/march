@@ -609,7 +609,9 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
     let not_taken_in e live =
       List.filter (fun p ->
           not (releases_var p.Tir.v_name e
-               || not (used_only_as_field_source ~releases_ok:true p.Tir.v_name e)))
+               || not (used_only_as_field_source ~releases_ok:true p.Tir.v_name e
+                       (* consumed only through dups: still ours *)
+                       || covered_by_incs p.Tir.v_name e)))
         live
     in
     (* [aliases] holds the heap values on the current path that still point

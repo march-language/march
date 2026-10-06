@@ -197,7 +197,7 @@ march --compile -o hello hello.march         # compile to a native binary
 ## Installing from source
 
 **Prerequisites**
-- OCaml 5.3.0 (via opam)
+- OCaml 5.5.1 (via opam)
 - `clang` (for native compilation)
 
 **1. Install opam** (if needed)
@@ -211,7 +211,7 @@ opam init
 **2. Create the OCaml switch**
 
 ```bash
-opam switch create march 5.3.0
+opam switch create march 5.5.1
 eval $(opam env --switch=march)
 ```
 
