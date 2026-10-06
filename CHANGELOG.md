@@ -254,6 +254,17 @@ git log is authoritative for exact commits.
   (`List.map([1, 2])`) is now a type error. It used to typecheck, then fail
   at run time: an `arity mismatch` panic interpreted, a crash compiled, and a
   crash of the whole REPL session.
+- A `--hot-reload` build no longer leaks a small object each time it calls a
+  lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
+  a list, `Actor.inspect_state` of an actor with a list field). Ordinary
+  builds were not affected.
+- **The language server resolves dependencies the way `forge build` does.**
+  It used to put every cached version of a git dependency on its search path,
+  including each version's `test/` and `priv/` files, and it missed registry
+  and transitive dependencies. Editors then showed errors from files the build
+  never reads. It now uses the version `forge.lock` names, and only that
+  version's `lib/`.
+
 - **Compiled code no longer leaks records whose ownership differs between branches.**
   A record released on one path of a `match` or `if` was leaked on the others. A record
   passed to a function and then updated (`{ st with .. }`) was never released at all. A
