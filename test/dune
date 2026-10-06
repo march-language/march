@@ -7935,6 +7935,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/cluster_node_vaults_unnamed.expected native_cluster_node_vaults_unnamed.out)))
 
+; ── a superseded certificate is not taken back after a restart ────────────
+; Security review, dd step 12b (specs/progress/2026-10-04-dd12-review-cert-
+; downgrade-after-restart.md): a replayed cert-only release whose certificate
+; a later release replaced is refused by the REAL ClusterNode.replace_cert
+; even with the Agent's in-memory floor gone (a fresh Vault models the
+; restart), because the certificate was issued before the one in use; a
+; later, shorter-lived re-issue is still taken. Ephemeral port.
+(rule
+ (targets native_cert_downgrade_after_restart native_cert_downgrade_after_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file native/cert_downgrade_after_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_cert_downgrade_after_restart
+        native/cert_downgrade_after_restart.march)
+   (with-stdout-to native_cert_downgrade_after_restart.out
+        (system "./native_cert_downgrade_after_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/cert_downgrade_after_restart.expected native_cert_downgrade_after_restart.out)))
+
 ; ── NodeSend loopback: a one-way actor message to a GlobalPid over TCP ──
 ; Distributed actors 1/4 (specs/progress/2026-09-14-remote-send-to-a-global-pid.md):
 ; ACTOR_MSG delivered into a remote actor's mailbox and answered by the same

@@ -160,6 +160,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **A call to an unknown function is now a compile error, not a link error.**
+  When native code generation met a direct call to a name that is neither a
+  function in the program, an extern, nor a runtime builtin, it used to emit a
+  forward `declare` and leave the failure to the linker (or link the call to an
+  unrelated C symbol of the same name). It now stops with
+  ``error: `foo` (called from `bar`) is not a function in scope and not a
+  runtime builtin`` and exits 1.
 - **Chained `NativeArray` maps compile to one loop.** With the optimizer on,
   `map_*(map_*(a, f), g)`, a `map2_*` with a mapped input on either side, and a
   `map_*` of a `map2_*` are rewritten into a single call whose callback is the
@@ -240,6 +247,31 @@ git log is authoritative for exact commits.
   nothing to talk to. Roles the build places itself are now pinned, and a re-read leaves
   them alone.
 
+- **Security: a node can no longer be rolled back to an older certificate, and a
+  recorded certificate update cannot be replayed (step-12 security review).**
+  A node now refuses a replacement certificate issued before the one it holds.
+  `forge cluster cert` serials now start with the issue time in unix
+  milliseconds (`<ms>-<random>`); the signed certificate format is unchanged.
+  The control plane's Agent also keeps its certificate-release floor on disk
+  (`$MARCH_CONTROL_DIR/cert-floor-<node>`). Before, a restart lost the floor, and
+  a compromised leader could replay an older, genuinely signed cert release to
+  restore removed roles or flags. A `CERT_UPDATE` (live certificate
+  replacement on a link) is now signed over that link's handshake transcript
+  and a per-link counter. Before, an update recorded off the wire could be
+  replayed on a link made with a leaked old key, and that link then survived
+  the old certificate's revocation. The frame format changed: a peer from
+  before this change refuses the new update (and is refused by it), then
+  redials under the new certificate when the old one expires, as a peer from
+  before live replacement does.
+- **A session no longer fails to form when its access point is replaced mid-invitation.**
+  When a hosting actor re-offered a role (for example after a hot deploy moved it
+  to a new protocol version) and closed the old offer, an initiator that had
+  just invited the old offer waited out the whole setup time (20 s) and then
+  failed with `NoOffer(.., "<node> did not answer")`: the invitation reached a
+  node whose offer had already dropped its route, so no one answered it.
+  `SessionNode.initiate` now notices the offer's name was unregistered, withdraws
+  the invitation, and looks again for the replacement offer, as it already did
+  for an offer that refused with "closing".
 - **Vault writes release what they replace, and session tables are freed.**
   Overwriting or dropping a Vault entry released only the old value's own cell,
   never its fields or list spine, so `Vault.set` of a record in a loop grew

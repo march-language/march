@@ -1,0 +1,59 @@
+-- Two-node harness, scenario "cert_update_replay": node-b, the real node.
+-- Linked to node-a (through node-c), it rotates to the certificate and key
+-- in NEW_PKI when scenario.sh says so (ClusterNode.replace_cert), which
+-- sends node-a a CERT_UPDATE, then stops. See scenario.sh.
+mod CertUpdateReplayB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn me() : String do "node-b" end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn read(path : String) : String do
+    match File.read(path) do
+      Ok(t) -> String.trim(t)
+      Err(e) -> panic("node-b: " ++ path ++ ": " ++ to_string(e))
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println(me() ++ ": up")
+        wait_file(Env.require("ROTATE_FILE"))
+        let np = Env.require("NEW_PKI")
+        match ClusterNode.replace_cert(h, read(np ++ "/" ++ me() ++ ".cert"), read(np ++ "/" ++ me() ++ ".key")) do
+          Ok(_) -> println(me() ++ ": my certificate replaced")
+          Err(e) -> println(me() ++ ": replacing my certificate failed: " ++ e)
+        end
+        wait_file(Env.require("B_STOP_FILE"))
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

@@ -838,11 +838,31 @@ mod TestClusterNode do
     end
   end
 
+  -- [certified_linked], the link's handshake transcript being [binding].
+  pfn certified_bound(me : String, peer : String, pcert : NodeCert.Cert, binding : Bytes) : (String, ClusterNode.CnState) do
+    let creds = { signed: signed_cert(me, 2, 2000000000, "serial-" ++ me), secret_key: node_sk(2),
+                  operator_pubkey: NodeCert.public_key(op_sk()), revoked: fn _ -> false }
+    let pid = ClusterNode.node_id_of(peer)
+    let st0 = ClusterNode.core_new({ cfg(me, Nil) with auth: ClusterAuth.Certified(creds) }, 1)
+    match ClusterNode.core_linked_bound(ClusterNode.core_peer_cert(st0, pid, Some(pcert)), pid, peer, "127.0.0.1:7001", 1, 10, 11, pid, 99, binding) do
+      (st1, _) ->
+        let out = (pid, st1)
+        out
+    end
+  end
+
+  pfn refused_from(st : ClusterNode.CnState, from : String, frame : List(Int)) : String do
+    match ClusterNode.core_peer_cert_update(st, from, frame, 1000) do
+      Ok(_) -> "accepted"
+      Err(e) -> e
+    end
+  end
+
   pfn a_id() : String do ClusterNode.node_id_of("a") end
 
   -- b's CERT_UPDATE to a: [signed], proved by key [v] for receiver [to].
   pfn update_from_b(signed : NodeCert.Signed, v : Int, to : String) : List(Int) do
-    ClusterNode.sign_cert_update(signed, node_sk(v), ClusterNode.node_id_of("b"), to)
+    ClusterNode.sign_cert_update(signed, node_sk(v), ClusterNode.node_id_of("b"), to, Bytes.empty(), 1)
   end
 
   pfn serial_of(st : ClusterNode.CnState, id : String) : String do
@@ -912,7 +932,7 @@ mod TestClusterNode do
           assert (refused(st, b, update_from_b(signed_cert("b", 9, 2000000000, "serial-b9"), 9, a_id())) == "accepted")
           -- the old key cannot vouch for a certificate naming the new one
           assert (refused(st, b, update_from_b(signed_cert("b", 9, 2000000000, "serial-b9"), 3, a_id()))
-                  == "the proof is not by the new certificate's key")
+                  == "the proof is not by the new certificate's key for this link")
       end
     end
 
@@ -921,7 +941,7 @@ mod TestClusterNode do
         (b, st) ->
           -- a proof made for another receiver (replayed from b's link to c)
           assert (refused(st, b, update_from_b(signed_cert("b", 3, 2000000000, "s2"), 3, ClusterNode.node_id_of("c")))
-                  == "the proof is not by the new certificate's key")
+                  == "the proof is not by the new certificate's key for this link")
           -- not the operator's
           let forged = NodeCert.sign({ cert_of("b", 3, 2000000000) with serial: "s3" }, node_sk(5))
           assert (refused(st, b, update_from_b(forged, 3, a_id())) == "certificate not signed by the cluster operator")
@@ -978,6 +998,101 @@ mod TestClusterNode do
             (st2, _) ->
               match ClusterNode.core_linked(st2, c, "c", "127.0.0.1:7002", 1, 20, 21, c, 98) do
                 (_, effs) -> assert (List.length(tag16(effs, c)) == 1)
+              end
+          end
+      end
+    end
+
+    -- security review, dd step 12b (specs/reviews/dd12/cert_update_replay_escapes_revocation.march):
+    -- a CERT_UPDATE is bound to the link it was made for.
+    test "a CERT_UPDATE recorded on one link is refused on another, and the old certificate's revocation still drops it" do
+      let b = ClusterNode.node_id_of("b")
+      let old_b = { cert_of("b", 3, 2000000000) with serial: "serial-b-old" }
+      let new_b = signed_cert("b", 4, 2000000000, "serial-b-new")
+      -- link 1 (the real b) and link 2 (a holder of b's leaked key 3), each
+      -- with its own handshake transcript
+      let link = fn binding -> match certified_bound("a", "b", old_b, binding) do (_, st) -> st end
+      let st1 = link(Bytes.from_string("transcript-1"))
+      let frame = ClusterNode.sign_cert_update(new_b, node_sk(4), b, a_id(), Bytes.from_string("transcript-1"), 1)
+      assert (refused(st1, b, frame) == "accepted")
+      let st2 = link(Bytes.from_string("transcript-2"))
+      assert (refused(st2, b, frame) == "the proof is not by the new certificate's key for this link")
+      assert (serial_of(st2, b) == "serial-b-old")
+      -- so the old certificate's revocation drops link 2
+      match ClusterNode.core_revoke(st2, revocation("serial-b-old", op_sk())) do
+        (st3, _) ->
+          match ClusterNode.core_tick(st3, 2000000) do
+            (_, effs) -> assert (drops(effs) != Nil)
+          end
+      end
+    end
+
+    test "a CERT_UPDATE already taken on a link is refused there again" do
+      let b = ClusterNode.node_id_of("b")
+      let tr = Bytes.from_string("transcript-1")
+      match certified_bound("a", "b", cert_of("b", 3, 2000000000), tr) do
+        (_, st) ->
+          let f1 = ClusterNode.sign_cert_update(signed_cert("b", 3, 2000000000, "s1"), node_sk(3), b, a_id(), tr, 1)
+          let f2 = ClusterNode.sign_cert_update(signed_cert("b", 3, 2000000000, "s2"), node_sk(3), b, a_id(), tr, 2)
+          match ClusterNode.core_peer_cert_update(st, b, f1, 1000) do
+            Err(e) -> assert (e == "accepted")
+            Ok((st2, _)) ->
+              assert (String.contains(refused(st2, b, f1), "already taken on this link"))
+              match ClusterNode.core_peer_cert_update(st2, b, f2, 1000) do
+                Err(e) -> assert (e == "accepted")
+                Ok((st3, c)) ->
+                  assert (c.serial == "s2")
+                  -- the first one again, after the second: still refused
+                  assert (String.contains(refused(st3, b, f1), "already taken on this link"))
+                  assert (serial_of(st3, b) == "s2")
+              end
+          end
+      end
+    end
+
+    test "a CERT_UPDATE carrying a certificate issued before the one held is refused" do
+      let held = { cert_of("b", 3, 2000000000) with serial: NodeCert.ordered_serial(1700000000500, "aa") }
+      match certified_linked("a", "b", held) do
+        (b, st) ->
+          let older = signed_cert("b", 3, 2000000000, NodeCert.ordered_serial(1700000000400, "bb"))
+          assert (String.contains(refused(st, b, update_from_b(older, 3, a_id())), "was issued before"))
+          -- one from before ordered serials cannot replace it either
+          assert (String.contains(refused(st, b, update_from_b(signed_cert("b", 3, 2000000000, "legacy"), 3, a_id())), "carries no issue time"))
+          -- a later one, living SHORTER, is taken
+          let later = signed_cert("b", 3, 1900000000, NodeCert.ordered_serial(1700000000600, "cc"))
+          assert (refused(st, b, update_from_b(later, 3, a_id())) == "accepted")
+      end
+    end
+
+    test "a v1 CERT_UPDATE (not bound to a link) is refused" do
+      match certified_linked("a", "b", cert_of("b", 3, 2000000000)) do
+        (b, st) ->
+          let v1 = Msgpack.encode(Msgpack.array([Msgpack.int(16), Msgpack.bin(NodeCert.to_bytes(signed_cert("b", 3, 2000000000, "s2"))),
+                                                 Msgpack.bin([1, 2, 3])]))
+          assert (String.contains(refused(st, b, v1), "not bound to this link"))
+      end
+    end
+
+    test "each replacement is the next CERT_UPDATE on every link" do
+      let tr = Bytes.from_string("transcript-ab")
+      match certified_bound("a", "b", cert_of("b", 3, 2000000000), tr) do
+        (b, st) ->
+          match ClusterNode.core_replace_cert(st, signed_cert("a", 2, 2000000000, "serial-a2"), node_sk(2)) do
+            (st2, effs1) ->
+              match ClusterNode.core_replace_cert(st2, signed_cert("a", 2, 2000000000, "serial-a3"), node_sk(2)) do
+                (_, effs2) ->
+                  match certified_bound("b", "a", cert_of("a", 2, 2000000000), tr) do
+                    (a, st_b) ->
+                      let take = fn (s, f) -> match ClusterNode.core_peer_cert_update(s, a, f, 1000) do
+                        Ok((s2, _)) -> s2
+                        Err(_) -> s
+                      end
+                      let f1 = match tag16(effs1, b) do Cons(f, _) -> f | Nil -> Nil end
+                      let f2 = match tag16(effs2, b) do Cons(f, _) -> f | Nil -> Nil end
+                      let st_b2 = take(take(st_b, f1), f2)
+                      assert (serial_of(st_b2, a) == "serial-a3")
+                      assert (String.contains(refused_from(st_b2, a, f1), "already taken on this link"))
+                  end
               end
           end
       end
