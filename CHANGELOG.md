@@ -235,6 +235,17 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Every in-place write now synchronises with the reference it reuses.** The
+  sole-ownership test behind FBIP reuse, `NativeArray.set`/`sort` and the SIMD
+  store read the reference count with a relaxed load, so a cell another thread
+  had just released could be mutated in place without ordering against that
+  thread's last reads (a C11 data race, harmless on x86 in practice). The test
+  is an acquire load now, in the C runtime (`march_rc_is_unique`) and in
+  emitted code; free on x86-64, one `ldar` on arm64.
+- **A dead linear value's resource destructor runs.** Freeing a dead linear
+  binding bypassed the reference-count path and so skipped the destructor a
+  resource cell (a `RingBuf`, an FFI resource) carries, leaking its native
+  store and elements. `march_free` runs it now, as `march_decrc` always did.
 - **Compiled code no longer leaks records whose ownership differs between branches.**
   A record released on one path of a `match` or `if` was leaked on the others. A record
   passed to a function and then updated (`{ st with .. }`) was never released at all. A

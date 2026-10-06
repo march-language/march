@@ -646,6 +646,16 @@ void march_free(void *p) {
     if (IS_HEAP_PTR(p) && ((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
     if (gc_trace_on() && IS_HEAP_PTR(p))
         gc_emit("free", p, 0, 0, ((march_hdr *)p)->tag);
+    /* A dead LINEAR binding reaches here through EFree, bypassing march_decrc,
+     * and march_decrc is where a resource cell's destructor ran.  Without this
+     * a dead RingBuf (or any FFI resource cell) would be shallow-freed: its
+     * 40-byte cell gone, its backing store and every element it still held
+     * leaked, silently.  No accepted program reached that path while every
+     * resource cell was unrestricted or must-consume, but the moment one can
+     * be dead (an affine buffer, a later relaxation) the leak is real, so the
+     * same tag check march_decrc makes at zero is made here.  One predictable
+     * branch on an already-cold path. */
+    if (IS_HEAP_PTR(p)) march_run_resource_dtor(p);
     free(p);
 }
 
@@ -12043,11 +12053,12 @@ int64_t native_int_arr_get(void *arr, int64_t i) {
  * therefore owns exactly one reference to [arr] and is responsible for
  * releasing it.
  *
- * When that reference is the ONLY one (rc == 1, the same unique-ownership
- * predicate LLVM-generated FBIP `reuse … as …` uses, which also reads ->rc as
- * a plain non-atomic load — safe precisely because a unique owner has no
- * concurrent observer), we mutate the backing array in place and hand our
- * reference straight to the result: O(1), no allocation, no copy, no free.
+ * When that reference is the ONLY one (march_rc_is_unique: an acquire load of
+ * ->rc reading 1, the same unique-ownership predicate LLVM-generated FBIP
+ * `reuse … as …` uses; acquire so that a reference another thread dropped a
+ * moment ago has its last reads ordered before our write, see the helper's
+ * comment in march_runtime.h), we mutate the backing array in place and hand
+ * our reference straight to the result: O(1), no allocation, no copy, no free.
  * That is what keeps a threaded-forward set_int accumulator flat in RSS
  * instead of leaking (or churning) a fresh 8-element copy on every call.
  *
@@ -12058,7 +12069,7 @@ int64_t native_int_arr_get(void *arr, int64_t i) {
  * arrays (rc >= MARCH_RC_IMMORTAL), which are never mutated in place. */
 void *native_int_arr_set(void *arr, int64_t i, int64_t val) {
     native_arr_check_bounds("native_int_arr_set", i, native_int_arr_length(arr));
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8) = val;
         return arr;
     }
@@ -12597,7 +12608,7 @@ NSORT_DEFINE_CORE(i32, int32_t)
  * original, so we sort a fresh copy and release our own reference. */
 void *native_int_arr_sort(void *arr) {
     int64_t len = native_int_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         nsort_i64((int64_t *)((char *)arr + NATIVE_ARR_HDR), len);
         return arr;
     }
@@ -12847,7 +12858,7 @@ double native_float_arr_get(void *arr, int64_t i) {
  * place, shared array copies-on-write then releases our reference). */
 void *native_float_arr_set(void *arr, int64_t i, double val) {
     native_arr_check_bounds("native_float_arr_set", i, native_float_arr_length(arr));
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         memcpy((char *)arr + NATIVE_ARR_HDR + i * 8, &val, 8);
         return arr;
     }
@@ -12864,7 +12875,7 @@ void *native_float_arr_set(void *arr, int64_t i, double val) {
  * place at rc == 1, a sorted fresh copy (our reference released) at rc > 1. */
 void *native_float_arr_sort(void *arr) {
     int64_t len = native_float_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         nsort_f64((double *)((char *)arr + NATIVE_ARR_HDR), len);
         return arr;
     }
@@ -13071,7 +13082,7 @@ int64_t PREFIX##_get(void *arr, int64_t i) {                                  \
 }                                                                             \
 void *PREFIX##_set(void *arr, int64_t i, int64_t val) {                       \
     native_arr_check_bounds(#PREFIX "_set", i, PREFIX##_length(arr));         \
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {                    \
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {                    \
         *(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)) = (CTYPE)val; \
         return arr;                                                           \
     }                                                                         \
@@ -13175,7 +13186,7 @@ DEF_NARROW_INT_ARR(native_u8_arr,  uint8_t, NATIVE_ELEM_U8)
  * reference released) at rc > 1. */
 void *native_i32_arr_sort(void *arr) {
     int64_t len = native_i32_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         nsort_i32((int32_t *)((char *)arr + NATIVE_ARR_HDR), len);
         return arr;
     }
@@ -13192,7 +13203,7 @@ void *native_i32_arr_sort(void *arr) {
  * array, so it needs no memcpy first. */
 void *native_u8_arr_sort(void *arr) {
     int64_t len = native_u8_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         uint8_t *d = (uint8_t *)((char *)arr + NATIVE_ARR_HDR);
         nsort_u8(d, d, len);
         return arr;
@@ -13226,7 +13237,7 @@ double native_f32_arr_get(void *arr, int64_t i) {
 /* FBIP/COW contract identical to native_float_arr_set above. */
 void *native_f32_arr_set(void *arr, int64_t i, double val) {
     native_arr_check_bounds("native_f32_arr_set", i, native_f32_arr_length(arr));
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         *(float *)((char *)arr + NATIVE_ARR_HDR + i * 4) = (float)val;
         return arr;
     }
@@ -13242,7 +13253,7 @@ void *native_f32_arr_set(void *arr, int64_t i, double val) {
  * FBIP/COW contract identical to native_float_arr_sort. */
 void *native_f32_arr_sort(void *arr) {
     int64_t len = native_f32_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         nsort_f32((float *)((char *)arr + NATIVE_ARR_HDR), len);
         return arr;
     }
