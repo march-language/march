@@ -241,6 +241,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
+  variable alias used to drop every fact about its value (`let b = a + 0`
+  kept them), so `take_pos(b)` was skipped even when `a` was a refined
+  parameter or a positive literal. It is now proved, and a violating value is
+  reported through the alias. Non-`Int` aliases still carry nothing.
 - A `--hot-reload` build no longer leaks a small object each time it calls a
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary

@@ -845,17 +845,21 @@ A `match`-arm binder of the same name (`Cons(_, ys) -> inner(ys)`) retires it
 identically. Both leave the call **skipped**, never falsely proved and never
 falsely reported.
 
-**A caller's fact does not travel through a local `let`, for any type.** This
-is a separate, pre-existing limitation of the pass and is unchanged: it
-propagates no local binding's value into a later goal, so
+**A local `let` carries a fact forward only for an `Int` value of a simple
+shape.** `let n = e` records `n == e` when `e` is an integer literal, a variable
+the typechecker says is `Int`, `+`/`-` over those, `*` with one literal factor,
+or an `if` whose arms are all of those (recorded as a case split on the guard).
+A call's proved return refinement reaches its `let`-bound result as well. So
 
 ```march
 let u = 5
-take_pos(u)      -- skipped, even though `5` satisfies `{Int | _ > 0}`
+let v = u
+take_pos(v)      -- proved
 ```
 
-is skipped, and the `List` analogue (`let u = [1, 2]` then `inner(u)`) behaves
-identically. Pass the value directly, or restate the fact with `assert`.
+Any other type carries nothing: `let u = [1, 2]` then `inner(u)` against
+`{List(Int) | len(_) > 0}` is skipped, and so is `let b = true` against a
+`Bool` refinement. Pass the value directly, or restate the fact with `assert`.
 
 ---
 
@@ -2001,9 +2005,6 @@ its own, so for it the check stays a skip.
   not checked through the callee's sources.
 - **Only a one-parameter lambda receives a domain fact.** `fold_left`'s
   two-parameter callback does not.
-- **An argument using non-linear arithmetic is not translated** in any argument
-  position, so a lambda returning `y * y + 1` does not prove the demand even
-  though the value is always positive.
 - **A local `fn` with a container return** has its tails checked by nothing and
   lends no element fact at its call sites.
 - **An element refinement that names a parameter** (`: List({Int | _ < n})`) is
@@ -3241,11 +3242,11 @@ edges:
   predicate, so the call was silently unchecked. A promise is retired when any
   name it mentions is rebound between the parameter and the call, so a shadowed
   name never lends its fact to a new binding.
-- **A local `let` does not carry a fact forward, for any type.** The pass
-  propagates no local binding's value into a later goal, so `let u = 5` then
-  `take_pos(u)` against `{Int | _ > 0}` is skipped, and the `List` analogue
-  behaves identically. Pre-existing and unchanged; pass the value directly or
-  restate the fact with `assert`.
+- **A local `let` carries a fact forward only for a simple `Int` value.**
+  An integer literal, an `Int` variable, `+`/`-`/literal-`*` over those, or an
+  `if` of them (see "A local `let`" above). `let u = [1, 2]` then `inner(u)`
+  against a non-empty contract is skipped, as is any other non-`Int` binding;
+  pass the value directly or restate the fact with `assert`.
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return
