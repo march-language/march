@@ -46,5 +46,10 @@ mod Main do
     flat("Msgpack.Bin dropped", fn () -> mp_tag(Msgpack.bin(bytes_list(500, Nil))))
     flat("Msgpack.Array dropped", fn () -> mp_tag(Msgpack.array(List.map(bytes_list(50, Nil), fn i -> Msgpack.str(int_to_string(i))))))
     flat("Msgpack.decode of a frame dropped", fn () -> ok1(Msgpack.decode(frame)))
+    -- Not a colliding-type drop: Msgpack's string encoding calls char_to_int
+    -- once per byte, which was classed as consuming its argument while the
+    -- runtime only reads it, so every byte of every encoded string leaked
+    -- (specs/progress/2026-10-05-char-builtins-borrow.md).
+    flat("Msgpack.encode of a string", fn () -> List.length(Msgpack.encode(Msgpack.str("a name of some length"))))
   end
 end
