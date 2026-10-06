@@ -160,13 +160,14 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
      sweeps the same shared dir on start, but a user who only ever runs the
      CLI would otherwise never clear them. *)
   March_repl.Repl.sweep_stale_cache_tmps cache_dir;
-  let load_from_cache () =
-    try
-      if Sys.file_exists cache_path then begin
-        let ic = open_in_bin cache_path in
-        let (cached_env : March_typecheck.Typecheck.env) = Marshal.from_channel ic in
+  (* [next ()] yields the next Marshal-encoded piece, in file order.  The file
+     reader and the cold path's in-memory round trip below both go through
+     this one decoder, so the two cannot drift apart. *)
+  let decode_pieces (rd : < next : 'a. unit -> 'a >) =
+        let next () = rd#next () in
+        let (cached_env : March_typecheck.Typecheck.env) = next () in
         let (cached_tm : (March_ast.Ast.span * March_typecheck.Typecheck.ty) list) =
-          Marshal.from_channel ic in
+          next () in
         (* Restore the two PROCESS-GLOBAL side-tables a from-scratch stdlib
            check would have advanced/populated as a side effect, and that a
            cache hit otherwise skips entirely:
@@ -204,18 +205,25 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
                reproduced in the golden corpus. Restored defensively for
                the same reason the round-1 fix insisted on byte-identical
                diagnostics rather than "close enough". *)
-        let (cached_counter : int) = Marshal.from_channel ic in
+        let (cached_counter : int) = next () in
         let (cached_record_names : (string * string option) list) =
-          Marshal.from_channel ic in
-        close_in ic;
+          next () in
         List.iter (fun (k, v) -> Hashtbl.replace type_map k v) cached_tm;
         if cached_counter > !March_typecheck.Typecheck._counter then
           March_typecheck.Typecheck._counter := cached_counter;
         List.iter (fun (k, v) -> Hashtbl.replace March_typecheck.Typecheck._record_names k v)
           cached_record_names;
-        Some { cached_env with
-               March_typecheck.Typecheck.errors = March_errors.Errors.create ();
-               type_map }
+        { cached_env with
+          March_typecheck.Typecheck.errors = March_errors.Errors.create ();
+          type_map }
+  in
+  let load_from_cache () =
+    try
+      if Sys.file_exists cache_path then begin
+        let ic = open_in_bin cache_path in
+        let env = Fun.protect ~finally:(fun () -> close_in_noerr ic)
+            (fun () -> decode_pieces (object method next : 'a. unit -> 'a = fun () -> Marshal.from_channel ic end)) in
+        Some env
       end else None
     with _ -> None
   in
@@ -232,6 +240,24 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
     let errors = March_errors.Errors.create () in
     let (_errs, _tm, final_env) =
       March_typecheck.Typecheck.check_module_core ~errors synthetic in
+    (* Encode the four pieces ONCE, up front.  The cold path hands the typechecker
+       the DECODED copy of these exact bytes, never [final_env] itself: a live
+       env and its type_map share mutable tvar cells, so the user module's
+       pass 2 could link a stdlib fn's generic [Pid('a)] annotation to one
+       concrete type and lowering would then emit a different TIR (an extra
+       mono clone, shifted lambda uids, a different post-TIR CAS key) than the
+       warm path, whose Marshal round trip severs that sharing.  Cold and warm
+       must see the same state. *)
+    let pieces =
+      let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+        final_env.March_typecheck.Typecheck.type_map [] in
+      let record_names_list =
+        Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+          March_typecheck.Typecheck._record_names [] in
+      [ Marshal.to_string (March_repl.Repl.marshalable_tc_env final_env) [];
+        Marshal.to_string tm_list [];
+        Marshal.to_string !March_typecheck.Typecheck._counter [];
+        Marshal.to_string record_names_list [] ] in
     (try
       mkdir_p cache_dir;
       let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
@@ -246,20 +272,12 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
           (try close_out oc with _ -> ());
           if Sys.file_exists tmp then (try Sys.remove tmp with _ -> ()))
         (fun () ->
-          Marshal.to_channel oc (March_repl.Repl.marshalable_tc_env final_env) [];
-          let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
-            final_env.March_typecheck.Typecheck.type_map [] in
-          Marshal.to_channel oc tm_list [];
+          List.iter (output_string oc) pieces;
           (* Snapshot the two process-global side-tables RIGHT NOW — the
              point where a from-scratch run would hand off from "stdlib
              checked" to "start checking the user's own file" — so a later
              cache hit can restore them to this exact point. See the long
              comment on [load_from_cache] above for why both matter. *)
-          Marshal.to_channel oc !March_typecheck.Typecheck._counter [];
-          let record_names_list =
-            Hashtbl.fold (fun k v acc -> (k, v) :: acc)
-              March_typecheck.Typecheck._record_names [] in
-          Marshal.to_channel oc record_names_list [];
           close_out oc;
           Sys.rename tmp cache_path)
     with e ->
@@ -267,9 +285,13 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
         "[warn] could not save the stdlib typecheck cache (%s); stdlib will be \
          re-typechecked on every invocation\n%!"
         (Printexc.to_string e));
-    { final_env with
-      March_typecheck.Typecheck.errors = March_errors.Errors.create ();
-      type_map = final_env.March_typecheck.Typecheck.type_map }
+    let rest = ref pieces in
+    decode_pieces (object
+      method next : 'a. unit -> 'a = fun () ->
+        match !rest with
+        | p :: tl -> rest := tl; Marshal.from_string p 0
+        | [] -> assert false
+    end)
 
 (* Substring test used by the MARCH_DUMP_TXT stage filter (see snap_tir). *)
 let contains_substring (hay : string) (needle : string) =
@@ -481,6 +503,40 @@ let user_fn_names_of ~stdlib_files (m : March_ast.Ast.module_) :
   in
   walk m.March_ast.Ast.mod_decls;
   user_fn_names
+
+(* A TIR function name's bare stem: module prefix and monomorphization suffix
+   stripped (`M.helper$Int` -> `helper`), the spelling [user_fn_names_of]
+   records. *)
+let tir_fn_stem n =
+  let n =
+    match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+    | None -> n
+  in
+  match String.index_opt n '$' with
+  | Some i -> String.sub n 0 i
+  | None -> n
+
+(* Whether TIR function [n] is one THIS file declares.  The stem comparison
+   strips the module prefix, so on its own it also matched every STDLIB
+   function sharing a user function's bare name: a main-less module declaring
+   `add` rooted `BigInt.add`, `Decimal.add`, `DateTime.add`, `Forge.add`,
+   `PeerRegistry.add` and `CRDT.GCounter.add`, whose 172 reachable functions
+   include console IO — and the ceiling then charged `IO.Console` to a module
+   that never mentions it
+   (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md).  A
+   prefixed name is the user's own only if the prefix is not a stdlib module;
+   the entry module's own functions are bare.  Shared by the --cap-strict
+   ceiling's DCE roots and a main-less executable's codegen roots. *)
+let is_user_tir_fn ~user_fns ~stdlib_mods n =
+  Hashtbl.mem user_fns (tir_fn_stem n)
+  && (let pre_mono =
+        match String.index_opt n '$' with
+        | Some i -> String.sub n 0 i
+        | None -> n in
+      match String.rindex_opt pre_mono '.' with
+      | None -> true
+      | Some i -> not (List.mem (String.sub pre_mono 0 i) stdlib_mods))
 
 (* MIRRORS the local [impl_ty_key] inside Typecheck's [check_module_needs] —
    the producer of the "Iface$Ty.method" closure keys this file must match.
@@ -2881,16 +2937,7 @@ let compile filename =
         user_fn_names_of ~stdlib_files:(stdlib_span_files stdlib_decls)
           desugared
       in
-      let stem n =
-        let n =
-          match String.rindex_opt n '.' with
-          | Some i -> String.sub n (i + 1) (String.length n - i - 1)
-          | None -> n
-        in
-        match String.index_opt n '$' with
-        | Some i -> String.sub n 0 i
-        | None -> n
-      in
+      let stem = tir_fn_stem in
       (* The PRELUDE's functions are the complement of [user_fns] at the top
          level: stdlib-span [DFn]s, unwrapped into the entry module, so their
          TIR names are BARE exactly like the user's own.  They must be
@@ -2922,28 +2969,7 @@ let compile filename =
              (`MyMod.println`) see-through. *)
           not (String.contains n '.') && Hashtbl.mem prelude_fns (stem n))
         (March_tir.Dce.prune_unreachable
-           ~extra_root:(fun n ->
-             (* The stem comparison strips the module prefix, so on its own
-                it also matched every STDLIB function sharing a user
-                function's bare name: a main-less module declaring `add`
-                rooted `BigInt.add`, `Decimal.add`, `DateTime.add`,
-                `Forge.add`, `PeerRegistry.add` and `CRDT.GCounter.add`, whose
-                172 reachable functions include console IO — and the ceiling
-                then charged `IO.Console` to a module that never mentions it.
-                The discriminator was the NAME, not the signature: a scalar
-                helper that collides with nothing compiled clean, and a heap
-                helper renamed to `add` did not
-                (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md).
-                A prefixed name is the user's own only if the prefix is not a
-                stdlib module; the entry module's own functions are bare. *)
-             Hashtbl.mem user_fns (stem n)
-             && (let pre_mono =
-                   match String.index_opt n '$' with
-                   | Some i -> String.sub n 0 i
-                   | None -> n in
-                 match String.rindex_opt pre_mono '.' with
-                 | None -> true
-                 | Some i -> not (List.mem (String.sub pre_mono 0 i) stdlib_mods)))
+           ~extra_root:(is_user_tir_fn ~user_fns ~stdlib_mods)
            ~fail_open:false pre_opt_tir)
     in
     (* --cap-strict: `needs` as a hard ceiling.  Deliberately checked here,
@@ -3100,6 +3126,35 @@ let compile filename =
     cap_state := Some (cap_attrib, cap_decls)
     in
     let contract_decls = March_tir.Alloc_contract.collect desugared in
+    (* A program with no entry point of its own (no `main`, no tests, no
+       exports) gives DCE no roots, and codegen then fails open and keeps
+       EVERY function: the whole prepended stdlib, ~8,000 of them, 45 MB of
+       IR and minutes of llvm-emit + clang for a file whose only declaration
+       is `fn f(x) = x + 1`.  Measured on a topology app compiled without its
+       `--topology` digest (forge generates its `main`): 47 MB of IR and
+       llvm-emit ~20x slower than the same app with the digest
+       (specs/progress/2026-10-04-mainless-compile-emits-whole-stdlib.md).
+       Root the functions this FILE declares instead, as the --cap-strict
+       ceiling already does: they still compile, and what they reach comes
+       along.  Not for a shared object, a hot-reload build or a JS/WASM-island
+       target, whose roots are exports and symbols a loader looks up, nor when
+       the file declares nothing (fail open as before). *)
+    let mainless_roots =
+      if !compile_so || !hot_reload_prefix <> None || is_js_target
+         || parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown
+         || March_tir.Dce.root_names ~fail_open:false tir <> []
+      then []
+      else begin
+        let user_fns =
+          user_fn_names_of ~stdlib_files:(stdlib_span_files stdlib_decls)
+            desugared in
+        let stdlib_mods = stdlib_module_names stdlib_decls in
+        List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
+            let n = fn.March_tir.Tir.fn_name in
+            if is_user_tir_fn ~user_fns ~stdlib_mods n then Some n else None)
+          tir.March_tir.Tir.tm_fns
+      end
+    in
     let pipe =
       try
       March_tir.Contract_pipeline.run
@@ -3118,7 +3173,7 @@ let compile filename =
         ~extra_roots:(if !report_contracts
                       then List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
                           d.March_tir.Alloc_contract.d_name) contract_decls
-                      else [])
+                      else mainless_roots)
         ~opt:!opt_enabled tir
       with March_tir.Mono.Repr_disagreement msg ->
         (* A real defect in the program or the stdlib manifest, not a compiler
@@ -3328,6 +3383,20 @@ let compile filename =
            hashing into the next stamp (llvm-emit, or nothing on a cache hit). *)
         stamp "cas-hash";
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
+        (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" = Some "2" then
+           List.iter (fun sc ->
+             let nm = match sc with
+               | March_cas.Pipeline.HSingle { hs_hdef } ->
+                 (match hs_hdef.March_cas.Cas.hd_def with
+                  | March_cas.Cas.FnDef fd -> fd.March_tir.Tir.fn_name
+                  | March_cas.Cas.TypeDef _ -> "<type>")
+               | March_cas.Pipeline.HGroup { hg_hdefs; _ } ->
+                 "{" ^ String.concat "," (List.map (fun (hd : March_cas.Cas.hashed_def) ->
+                   match hd.March_cas.Cas.hd_def with
+                   | March_cas.Cas.FnDef fd -> fd.March_tir.Tir.fn_name
+                   | March_cas.Cas.TypeDef _ -> "<type>") hg_hdefs) ^ "}" in
+             Printf.eprintf "MARCH_SCC: %s %s\n" (March_cas.Pipeline.scc_impl_hash sc) nm)
+             h_sccs);
         (* Hot Code Reload: per-function impl_hash map (qualified fn name →
            64-char hex Merkle root) so the baseline dispatch-table publish can
            carry real hashes instead of null. Built from the same CAS hashing
@@ -3582,6 +3651,8 @@ let compile filename =
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_observe.c")) (* observe socket *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_observe_snapshot.c")) (* observe verbs *)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_observe_debug.c")) (* signed debug verbs *)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_sig.c")) (* deploy-key signatures, nonces, audit log *)
               ^ (if hcr_identity_flags <> "" then opt_file2 hcr_identity_c2 else "")
               ^ (opt_file2 (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
             in
@@ -4491,6 +4562,12 @@ let compile filename =
         with several `derive Json` in scope), not a compiler bug: render it
         as an ordinary diagnostic and exit 1, distinct from the
         internal-compiler-error path below (exit 3). *)
+     Printf.eprintf "error: %s\n%!" msg;
+     exit 1
+   | March_tir.Llvm_calls.Unknown_callee msg ->
+     (* A direct call to a name that is neither in scope nor a runtime
+        builtin.  Formerly a silent `declare` and a link failure; now a
+        diagnostic (exit 1) naming the callee and its enclosing function. *)
      Printf.eprintf "error: %s\n%!" msg;
      exit 1
    | exn ->

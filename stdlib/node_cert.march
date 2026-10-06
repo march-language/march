@@ -211,6 +211,55 @@ mod NodeCert do
   doc "Has [c] expired at [now] (unix seconds)?"
   fn expired(c : Cert, now : Int) : Bool do now > c.not_after end
 
+  -- ── issue order (security review, dd step 12b) ──────────────────────────
+  -- A certificate carries its issue time in its serial: `forge cluster
+  -- cert` writes "<issued, unix ms>-<32 random hex digits>". The serial is a
+  -- free-form signed string, so the v1 body is unchanged (an older node takes
+  -- such a certificate, and a newer node takes an older one, whose random
+  -- serial has no order). A node refuses a replacement issued BEFORE the
+  -- certificate it holds (`supersedes`): a replayed, superseded certificate
+  -- cannot be put back. The order is the issue time, not `not_after`, so a
+  -- re-issue that lives shorter (or narrows the roles) still replaces.
+
+  doc "A serial carrying issue time [issued_ms] (unix ms): \"<issued_ms>-<rest>\"."
+  fn ordered_serial(issued_ms : Int, rest : String) : String do int_to_string(issued_ms) ++ "-" ++ rest end
+
+  pfn all_digits(s : String) : Bool do
+    let bs = Bytes.to_list(Bytes.from_string(s))
+    bs != Nil && List.length(bs) <= 18 && List.all(bs, fn b -> b >= 48 && b <= 57)
+  end
+
+  doc "When [c] was issued (unix ms), if its serial says (`ordered_serial`); None for a serial with no order."
+  fn issued_ms(c : Cert) : Option(Int) do
+    match String.split(c.serial, "-") do
+      Cons(t, Cons(_, _)) -> if all_digits(t) do string_to_int(t) else None end
+      _ -> None
+    end
+  end
+
+  doc """
+  May [next] replace [held], by issue order? Refused when [held] carries an
+  issue time and [next] was issued before it, or carries none (a certificate
+  from before ordered serials cannot replace one after). When [held] has no
+  issue time there is no order to keep and the answer is yes (the release
+  floor guards that case, `Control`). The same certificate again is yes.
+  """
+  fn supersedes(next : Cert, held : Cert) : Bool do
+    match (issued_ms(next), issued_ms(held)) do
+      (_, None) -> true
+      (Some(n), Some(h)) -> n >= h
+      (None, Some(_)) -> false
+    end
+  end
+
+  doc "Why [next] may not replace [held] (`supersedes`), if it may not."
+  fn order_problem(next : Cert, held : Cert) : Option(String) do
+    if supersedes(next, held) do None
+    else if issued_ms(next) == None do
+      Some("certificate " ++ next.serial ++ " carries no issue time, so it cannot replace " ++ held.serial ++ ", the certificate in use, which does")
+    else Some("certificate " ++ next.serial ++ " was issued before " ++ held.serial ++ ", the certificate in use") end end
+  end
+
   -- ── revocations ─────────────────────────────────────────────────────────
 
   fn encode_revocation(r : Revocation) : List(Int) do

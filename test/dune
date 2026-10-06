@@ -867,6 +867,7 @@
           ../runtime/third_party/blake3/blake3_impl.h
           ../runtime/third_party/blake3/blake3_portable.c
           ../runtime/tweetnacl.c ../runtime/tweetnacl.h
+          ../runtime/march_sig.c ../runtime/march_sig.h
           ../runtime/march_runtime.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_message.c ../runtime/march_message.h
@@ -894,7 +895,7 @@
       ../runtime/third_party/blake3/blake3.c \
       ../runtime/third_party/blake3/blake3_dispatch.c \
       ../runtime/third_party/blake3/blake3_portable.c \
-      ../runtime/tweetnacl.c ../runtime/march_runtime.c \
+      ../runtime/tweetnacl.c ../runtime/march_sig.c ../runtime/march_runtime.c \
       ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_message.c \
       ../runtime/march_heap.c ../runtime/march_gc.c \
       ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c \
@@ -7935,6 +7936,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/cluster_node_vaults_unnamed.expected native_cluster_node_vaults_unnamed.out)))
 
+; ── a superseded certificate is not taken back after a restart ────────────
+; Security review, dd step 12b (specs/progress/2026-10-04-dd12-review-cert-
+; downgrade-after-restart.md): a replayed cert-only release whose certificate
+; a later release replaced is refused by the REAL ClusterNode.replace_cert
+; even with the Agent's in-memory floor gone (a fresh Vault models the
+; restart), because the certificate was issued before the one in use; a
+; later, shorter-lived re-issue is still taken. Ephemeral port.
+(rule
+ (targets native_cert_downgrade_after_restart native_cert_downgrade_after_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file native/cert_downgrade_after_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_cert_downgrade_after_restart
+        native/cert_downgrade_after_restart.march)
+   (with-stdout-to native_cert_downgrade_after_restart.out
+        (system "./native_cert_downgrade_after_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/cert_downgrade_after_restart.expected native_cert_downgrade_after_restart.out)))
+
 ; ── NodeSend loopback: a one-way actor message to a GlobalPid over TCP ──
 ; Distributed actors 1/4 (specs/progress/2026-09-14-remote-send-to-a-global-pid.md):
 ; ACTOR_MSG delivered into a remote actor's mailbox and answered by the same
@@ -12058,6 +12082,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/branch_alias_tail_drop.expected native_branch_alias_tail_drop.out)))
 
+;; A module with no entry point of its own (no `main`, tests or exports) must
+;; root the functions the FILE declares for codegen, not fail open and keep the
+;; whole prepended stdlib: before 2026-10-04 this fixture emitted ~7,900
+;; definitions (45 MB of IR, minutes of llvm-emit + clang), and a topology app
+;; compiled without its --topology digest took ~20x longer in llvm-emit than
+;; with it (specs/progress/2026-10-04-mainless-compile-emits-whole-stdlib.md).
+;; Pins both halves: the user's functions are still emitted (`helper`, and
+;; `shout` dragging in what it reaches), and the count stays small.
+(rule
+ (targets mainless_prunes_stdlib_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/mainless_prunes_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/mainless_prunes_stdlib.march)
+   (with-stdout-to mainless_prunes_stdlib_llvm_check.out
+    (run bash -c
+     "defs=$(grep -c '^define ' native/mainless_prunes_stdlib.ll); \
+      helper=$(grep -c '^define .*@helper(' native/mainless_prunes_stdlib.ll); \
+      shout=$(grep -c '^define .*@shout(' native/mainless_prunes_stdlib.ll); \
+      echo \"$defs $helper $shout\"")))))
+
+(rule
+ (alias runtest)
+ (deps mainless_prunes_stdlib_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r defs helper shout < mainless_prunes_stdlib_llvm_check.out; \
+    test \"$helper\" -eq 1 -a \"$shout\" -eq 1 -a \"$defs\" -lt 300 || { echo \"mainless_prunes_stdlib: expected @helper and @shout defined and <300 definitions (the whole stdlib is ~7,900) -- found defs=$defs helper=$helper shout=$shout\" >&2; exit 1; }")))
+
 ; ── Actor.inspect_state (observe R4a) ────────────────────────────────────
 ; specs/progress/2026-10-04-observe-r4a-inspect-state.md. The state fixture
 ; runs compiled, compiled with --hot-reload (the renderer's code-epoch check
@@ -12127,3 +12183,47 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_inspect_block.expected native_actor_inspect_block.out)))
+
+; ── Signed debug verbs on the observe socket (observe R4b) ─────────────────
+; specs/progress/2026-10-05-observe-r4b-signed-debug-verbs.md.
+; observe_debug_check.exe makes a fresh deploy keypair, the fixture is built
+; --hot-reload --signing-pubkey with it, and the checker runs every acceptance
+; case of the plan (bad signature, policy, valid STATE, replay, expired, too
+; far ahead, bad nonce, bad args, dead pid, CRASHES_FULL, every attempt
+; audited).  The second leg builds the same fixture with no key: every debug
+; verb answers signing_not_configured.  MARCH_AUDIT_LOG keeps the audit lines
+; out of $HOME.
+(executable
+ (name observe_debug_check)
+ (modules observe_debug_check)
+ (libraries unix yojson march_ed25519))
+
+(rule
+ (targets native_observe_debug.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_debug_check.exe)
+       (file native/observe_debug.march))
+ (action
+  (with-stdout-to native_observe_debug.out
+   (system "rm -f obs_dbg.*; ./observe_debug_check.exe keygen obs_dbg.pk obs_dbg.sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat obs_dbg.pk) -o obs_dbg.bin native/observe_debug.march > obs_dbg.build 2>&1 || { cat obs_dbg.build; exit 1; }; : > obs_dbg.policy; MARCH_OBSERVE_SOCKET=obs_dbg.sock MARCH_DEBUG_POLICY=obs_dbg.policy MARCH_AUDIT_LOG=obs_dbg.audit ./obs_dbg.bin > obs_dbg.prog 2>&1 & prog=$!; ./observe_debug_check.exe signed obs_dbg.sock obs_dbg.prog obs_dbg.sk obs_dbg.policy obs_dbg.audit; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_dbg.*; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_debug.expected native_observe_debug.out)))
+
+(rule
+ (targets native_observe_debug_nokey.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_debug_check.exe)
+       (file native/observe_debug.march))
+ (action
+  (with-stdout-to native_observe_debug_nokey.out
+   (system "rm -f obs_dbgn.*; %{exe:../bin/main.exe} --compile -o obs_dbgn.bin native/observe_debug.march > obs_dbgn.build 2>&1 || { cat obs_dbgn.build; exit 1; }; MARCH_OBSERVE_SOCKET=obs_dbgn.sock MARCH_AUDIT_LOG=obs_dbgn.audit ./obs_dbgn.bin > obs_dbgn.prog 2>&1 & prog=$!; ./observe_debug_check.exe nokey obs_dbgn.sock obs_dbgn.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_dbgn.*; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_debug_nokey.expected native_observe_debug_nokey.out)))
