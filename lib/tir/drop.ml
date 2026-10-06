@@ -395,23 +395,35 @@ let droppable_ctors (env : env) (ty : Tir.ty)
         alone, and a dropped [Msgpack.Value] reached the drop's [unreachable]
         default (SIGSEGV, compiled only;
         specs/progress/2026-10-06-local-type-named-like-stdlib-value.md).  When
-        the union is refused the drop stays shallow: a leak, not a crash. *)
-     | Kind.Boxed when not (String.contains name '.')
-                       && Hashtbl.mem env.collision_set name ->
-       colliding_union env name ty_args
+        the union is refused (candidates whose type arities or same-named
+        constructors' fields differ, e.g. a user [type Tree = Leaf | Node(..)]
+        beside [OrderedMap.Tree(k, v)]), the drop falls back to the exact
+        lookup it used before the union existed: going shallow there leaked
+        every such tree (test/native/aggregate_drop_erased_fields). *)
      | Kind.Boxed ->
-       (match (match Kind.find_variant env.k_table name with
-               | Some _ as found -> found
-               | None -> find_variant_by_suffix env name) with
-        | Some ctors ->
-          let params = type_params_of ctors in
-          let subst =
-            if List.length params = List.length ty_args
-            then List.combine params ty_args else []
-          in
-          Some (List.map (fun (cn, ftys) ->
-              (cn, List.map (apply_subst subst) ftys)) ctors)
-        | None -> colliding_union env name ty_args)
+       let union () =
+         if not (String.contains name '.') && Hashtbl.mem env.collision_set name
+         then colliding_union env name ty_args else None in
+       let exact () =
+         match (match Kind.find_variant env.k_table name with
+                | Some _ as found -> found
+                | None -> find_variant_by_suffix env name) with
+         | Some ctors ->
+           let params = type_params_of ctors in
+           let subst =
+             if List.length params = List.length ty_args
+             then List.combine params ty_args else []
+           in
+           Some (List.map (fun (cn, ftys) ->
+               (cn, List.map (apply_subst subst) ftys)) ctors)
+         | None -> None
+       in
+       (match union () with
+        | Some _ as u -> u
+        | None ->
+          (match exact () with
+           | Some _ as e -> e
+           | None -> colliding_union env name ty_args))
      (* Unboxed: an inline struct of scalars.  No cell to free and no heap
         field to recurse into, so there is nothing for a [__drop$T] helper to
         do — the same answer as the erased reprs, for a different reason. *)

@@ -59,3 +59,13 @@ on with the tag `Msgpack.bin` allocates.
 
 Why P1: a user picking a common name (`Value`, `State`, `Event`, `Error`, `Level`, `Mode`
 all collide with stdlib types) gets a segfault, compiled only, far from the cause.
+
+## Follow-up: a refused union falls back to the exact lookup
+
+The first version left the drop shallow whenever the union was refused. A user
+`type Tree = Leaf | Node(Tree, Int, Tree)` collides with `OrderedMap.Tree(k, v)`: the
+arities differ and the shared `Node` has different fields, so the union declines, and every
+such tree leaked (`test/native/aggregate_drop_erased_fields`, "Option field", 24,002 objects
+over 400 iterations; caught by the dune `rest` shard, which `run-tests.sh` does not run). A
+refused union now falls back to the exact (then suffix) lookup the drop used before, so
+only the cases the union resolves behave differently from main.
