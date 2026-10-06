@@ -160,6 +160,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **A call to an unknown function is now a compile error, not a link error.**
+  When native code generation met a direct call to a name that is neither a
+  function in the program, an extern, nor a runtime builtin, it used to emit a
+  forward `declare` and leave the failure to the linker (or link the call to an
+  unrelated C symbol of the same name). It now stops with
+  ``error: `foo` (called from `bar`) is not a function in scope and not a
+  runtime builtin`` and exits 1.
 - **Chained `NativeArray` maps compile to one loop.** With the optimizer on,
   `map_*(map_*(a, f), g)`, a `map2_*` with a mapped input on either side, and a
   `map_*` of a `map2_*` are rewritten into a single call whose callback is the

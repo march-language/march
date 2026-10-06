@@ -4484,6 +4484,12 @@ let compile filename =
         internal-compiler-error path below (exit 3). *)
      Printf.eprintf "error: %s\n%!" msg;
      exit 1
+   | March_tir.Llvm_calls.Unknown_callee msg ->
+     (* A direct call to a name that is neither in scope nor a runtime
+        builtin.  Formerly a silent `declare` and a link failure; now a
+        diagnostic (exit 1) naming the callee and its enclosing function. *)
+     Printf.eprintf "error: %s\n%!" msg;
+     exit 1
    | exn ->
      (* Every diagnosed failure in this pipeline (parse errors, typecheck
         errors, user-file capability-policy violations, clang/link failures)
