@@ -19,6 +19,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
+  probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
+  `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
+  set, so a slow or loaded host can stop taking healthy peers for dead without
+  a rebuild. A record update of the config still wins.
 - **Signed debug requests on the observe socket.** `forge observe --state PID`
   returns a running actor's state (what `Actor.inspect_state` returns inside
   the program), and `forge observe --crashes-full` returns recent crashes with
@@ -229,6 +234,11 @@ git log is authoritative for exact commits.
   and transitive dependencies. Editors then showed errors from files the build
   never reads. It now uses the version `forge.lock` names, and only that
   version's `lib/`.
+
+- **A locally bound generic lambda no longer leaks memory when it returns a
+  Float.** `let keep = fn (p, x) -> p` called directly with Float arguments,
+  as in `keep(1.0, x)`, leaked one boxed Float per call in compiled code. The
+  interpreter was unaffected.
 
 - **`char_to_int`, `char_is_digit`, `char_is_alphanumeric` and `char_is_whitespace` no
   longer leak their argument.** Compiled code leaked the one-character string on every call.

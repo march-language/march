@@ -57,13 +57,12 @@ ctl_start() {
     export MARCH_HOT_RELOAD_SOCKET="$(ctl_sock "$n")" MARCH_CONTROL_DIR="$d/control"
     export MARCH_CONTROL_PORT_OFFSET=1000 MARCH_PLACEMENT_SETTLE_MS=1500 MARCH_PLACEMENT_TICK_MS=200
     export MARCH_CONTROL_POLL_MS=${CTL_POLL_MS:-200}${CTL_SESSION_POLLS:+ MARCH_CONTROL_SESSION_POLLS=$CTL_SESSION_POLLS}
-    export MARCH_SWIM_PROBE_MS=300 MARCH_SWIM_SUSPECT_MS=1500
     export HOME="$d/home"
     # Certificate mode, when the scenario made a PKI (control_cert).
     if [ -n "${PKI:-}" ]; then
       export MARCH_NODE_CERT="$PKI/$n.cert" MARCH_NODE_KEY="$PKI/$n.key" MARCH_CLUSTER_OPERATOR_PUBKEY="$PKI/operator.pub"
     fi
-    exec "$work/node_$n"
+    run_node "$work/node_$n"
   ) >> "$work/$n.out" 2>> "$work/$n.err" &
   eval "pid_$n=$!"
 }
@@ -79,8 +78,9 @@ ctl_up() {
 }
 
 # ctl_until <seconds> <description> <command...>: poll until it succeeds.
+# The limit is stretched by TIME_SCALE under ASan (scripts/two-node.sh).
 ctl_until() {
-  local limit=$1 what=$2; shift 2
+  local limit=$(( $1 * TIME_SCALE )) what=$2; shift 2
   local i=0
   until "$@" > /dev/null 2>&1; do
     i=$((i + 1)); [ "$i" -gt $((limit * 5)) ] && fail "timed out waiting for: $what"
@@ -112,7 +112,7 @@ ctl_all_reporting() { local s; s=$(ctl_status) || return 1; for n in "$@"; do ec
 ctl_release() {
   local eps="" n
   for n in a b; do eps="$eps,$(ctl_api_ep "$n")"; done
-  CANARY=$1 CANARY_MS=$2 FOLLOW_S=${FOLLOW_S:-90} "$HCR" release "$work/keys" "${eps#,}" render main \
+  CANARY=$1 CANARY_MS=$2 FOLLOW_S=${FOLLOW_S:-$(( 90 * TIME_SCALE ))} "$HCR" release "$work/keys" "${eps#,}" render main \
     "$work/p2/v2.so" "$work/p1/v1.so.hcr_manifest" "$work/p1/v1.so.schemas.json"
 }
 
