@@ -196,6 +196,7 @@ val preprocess_fn : k_table:Kind.table -> Tir.fn_def -> Tir.fn_def
 val perceus :
   ?repl:bool ->
   ?repl_vars:string list ->
+  ?heap_lambdas:bool ->
   ?borrow_map:Borrow.borrow_map ->
   ?k_table:Kind.table ->
   Tir.tir_module -> Tir.tir_module
