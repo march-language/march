@@ -14,8 +14,8 @@ Items, each its own PR; tick as they land and add a dated
 - [x] R2 counters, scheduler idle time, crash ring (A/B per commit) ([progress](../progress/2026-10-02-observe-r2-counters-crash-ring.md))
 - [x] R3 `Recon` observe tier, `forge top`, `forge diagnose`, `forge status` ([R3a](../progress/2026-10-04-observe-r3a-recon.md), [R3b-d](../progress/2026-10-04-observe-r3b-diagnose-top-status.md))
 - [x] R4 debug tier: `Actor.Debug`, `inspect_state`, signed `STATE`/`CRASHES_FULL`, nonces, policy, audit ([R4a](../progress/2026-10-05-observe-r4a-inspect-state.md), [R4b](../progress/2026-10-05-observe-r4b-signed-debug-verbs.md); `MESSAGES` split out to [its own todo](2026-10-05-observe-messages-verb.md))
-- [ ] R5 shell groundwork: body hashing, pinned NAME_IDs, per-function attach check, fragment emission, cap-marker check (security review before R6)
-- [ ] R6 `forge rpc` / `forge shell` / `forge eval` over signed `EVAL`
+- [ ] R5 shell groundwork: body hashing, pinned NAME_IDs, per-function attach check, fragment emission (required: a main-less patch takes 82 s), limit-aware rendering, cap-marker check (security review before R6)
+- [ ] R6 `forge rpc` / `forge shell` / `forge eval`: warm compiler session (p50 ≤ 300 ms per input), shell listener, signed `EVAL`, `limit: N`, captured output; a deploy ends a session
 - [ ] R7 `forge observe` TUI, `WATCH`, crash dumps
 - [ ] R8 tracing with mandatory limits + boundary call tracing
 - [ ] R9 `forge release build` + `bin/<app>`
