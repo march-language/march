@@ -718,7 +718,9 @@ and optimise, 2-3 ms to emit IR, ~130 ms in clang, and ~190 ms to `dlopen`
 
 **Target.** On a warm session against a local socket, an expression over
 existing functions answers in **p50 ≤ 300 ms, p95 ≤ 600 ms**, excluding the
-expression's own run time. Over ssh, add one network round trip per input
+expression's own run time. Measured on 2026-10-06 (plan R5.1), a warm input's
+compile and load costs ~37 ms on Linux and ~255 ms on macOS, where the OS
+spends ~150 ms checking each new fragment file on `dlopen`. Over ssh, add one network round trip per input
 and nothing else. Attaching (loading and typechecking the project once) may
 take a few seconds; the prompt says so while it does.
 
