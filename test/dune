@@ -867,6 +867,7 @@
           ../runtime/third_party/blake3/blake3_impl.h
           ../runtime/third_party/blake3/blake3_portable.c
           ../runtime/tweetnacl.c ../runtime/tweetnacl.h
+          ../runtime/march_sig.c ../runtime/march_sig.h
           ../runtime/march_runtime.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_message.c ../runtime/march_message.h
@@ -894,7 +895,7 @@
       ../runtime/third_party/blake3/blake3.c \
       ../runtime/third_party/blake3/blake3_dispatch.c \
       ../runtime/third_party/blake3/blake3_portable.c \
-      ../runtime/tweetnacl.c ../runtime/march_runtime.c \
+      ../runtime/tweetnacl.c ../runtime/march_sig.c ../runtime/march_runtime.c \
       ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_message.c \
       ../runtime/march_heap.c ../runtime/march_gc.c \
       ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c \
@@ -12182,3 +12183,47 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_inspect_block.expected native_actor_inspect_block.out)))
+
+; ── Signed debug verbs on the observe socket (observe R4b) ─────────────────
+; specs/progress/2026-10-05-observe-r4b-signed-debug-verbs.md.
+; observe_debug_check.exe makes a fresh deploy keypair, the fixture is built
+; --hot-reload --signing-pubkey with it, and the checker runs every acceptance
+; case of the plan (bad signature, policy, valid STATE, replay, expired, too
+; far ahead, bad nonce, bad args, dead pid, CRASHES_FULL, every attempt
+; audited).  The second leg builds the same fixture with no key: every debug
+; verb answers signing_not_configured.  MARCH_AUDIT_LOG keeps the audit lines
+; out of $HOME.
+(executable
+ (name observe_debug_check)
+ (modules observe_debug_check)
+ (libraries unix yojson march_ed25519))
+
+(rule
+ (targets native_observe_debug.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_debug_check.exe)
+       (file native/observe_debug.march))
+ (action
+  (with-stdout-to native_observe_debug.out
+   (system "rm -f obs_dbg.*; ./observe_debug_check.exe keygen obs_dbg.pk obs_dbg.sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat obs_dbg.pk) -o obs_dbg.bin native/observe_debug.march > obs_dbg.build 2>&1 || { cat obs_dbg.build; exit 1; }; : > obs_dbg.policy; MARCH_OBSERVE_SOCKET=obs_dbg.sock MARCH_DEBUG_POLICY=obs_dbg.policy MARCH_AUDIT_LOG=obs_dbg.audit ./obs_dbg.bin > obs_dbg.prog 2>&1 & prog=$!; ./observe_debug_check.exe signed obs_dbg.sock obs_dbg.prog obs_dbg.sk obs_dbg.policy obs_dbg.audit; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_dbg.*; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_debug.expected native_observe_debug.out)))
+
+(rule
+ (targets native_observe_debug_nokey.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_debug_check.exe)
+       (file native/observe_debug.march))
+ (action
+  (with-stdout-to native_observe_debug_nokey.out
+   (system "rm -f obs_dbgn.*; %{exe:../bin/main.exe} --compile -o obs_dbgn.bin native/observe_debug.march > obs_dbgn.build 2>&1 || { cat obs_dbgn.build; exit 1; }; MARCH_OBSERVE_SOCKET=obs_dbgn.sock MARCH_AUDIT_LOG=obs_dbgn.audit ./obs_dbgn.bin > obs_dbgn.prog 2>&1 & prog=$!; ./observe_debug_check.exe nokey obs_dbgn.sock obs_dbgn.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_dbgn.*; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_debug_nokey.expected native_observe_debug_nokey.out)))

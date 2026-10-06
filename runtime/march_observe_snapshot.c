@@ -1047,10 +1047,16 @@ static const march_observe_verb snapshot_verbs[] = {
       verb_top },
 };
 
+/* The signed debug verbs (march_observe_debug.c).  This weak no-op stands in
+ * when a C harness links the snapshot verbs without that file (and without
+ * tweetnacl, which it needs); the driver links it, and its definition wins. */
+__attribute__((weak)) void march_observe_debug_install(void) {}
+
 void march_observe_snapshot_install(void) {
     static int done;
     if (done) return;
     done = 1;
     (void)march_observe_add_verbs(snapshot_verbs,
                                   sizeof snapshot_verbs / sizeof snapshot_verbs[0]);
+    march_observe_debug_install();
 }

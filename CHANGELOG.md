@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Signed debug requests on the observe socket.** `forge observe --state PID`
+  returns a running actor's state (what `Actor.inspect_state` returns inside
+  the program), and `forge observe --crashes-full` returns recent crashes with
+  their panic messages. A node answers only if it was built with
+  `--hot-reload --signing-pubkey`, the request is signed by that deploy key,
+  and its `$MARCH_DEBUG_POLICY` file lists the verb (no file: nothing is
+  allowed). Each request carries a nonce and a 30 s expiry, so a captured
+  request cannot be replayed, and every attempt is written to the audit log.
 - **A multi-host lab, and `examples/lab_app`.** `scripts/lab/run.sh` starts four
   Debian containers on a private Docker network, deploys `examples/lab_app` (a
   three-role choreography with a loop, a choice, an actor-hosted role placed
@@ -204,6 +212,8 @@ git log is authoritative for exact commits.
   compile after a cold cache used the live stdlib type environment, whose type variables the program
   could link, so it produced different IR (an extra specialised clone, shifted lambda ids) and a
   different compilation-cache key than every later compile of the same source.
+- `forge top -n` and `forge observe -n` also accept `--count`; `--n` was
+  documented but never parsed.
 - **Compiling a file with no `main` no longer emits the whole standard
   library.** A module with no `main`, tests or exports (a library file, or a
   topology app compiled without its `--topology` digest) kept all ~8,000
