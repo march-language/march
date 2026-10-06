@@ -55,6 +55,17 @@
 #                                 unsorted: only for a node that prints from one
 #                                 actor, whose order is then the protocol's
 #
+#   run_node <binary>             exec a node binary with its in-program
+#                                 deadlines scaled under ASan (see TIME_SCALE
+#                                 below). start_node uses it; a scenario that
+#                                 launches a node itself (the control-plane
+#                                 ones) ends the node's subshell with it
+#   TIME_SCALE                    (read-only) 1, or the ASan factor, for a
+#                                 scenario's own deadlines (ctl_until uses it)
+#   TIME_SCALE_EXEMPT             (set by the scenario) deadline variables NOT
+#                                 to scale, for a scenario whose point is how
+#                                 its own timing compares with that deadline
+#
 # Every wait has a deadline (TWO_NODE_TIMEOUT, default 60 s) and fails loudly
 # with every node's output. Why two processes and not two green threads: see
 # specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
@@ -176,6 +187,63 @@ dir=$root/test/two_node/$scenario
 [ -x "$MARCH" ] || { echo "two-node: compiler not built: $MARCH" >&2; exit 2; }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/two-node-$scenario.XXXXXX")
+
+# ── In-program deadlines under AddressSanitizer ─────────────────────────────
+# The sanitize gate (specs/lang/golden/sanitize.sh) runs every scenario with
+# MARCH_SANITIZE=1, which makes every node several times slower, more on a
+# loaded runner. TWO_NODE_TIMEOUT stretches the harness's own waits; it does
+# not reach the deadlines INSIDE the nodes, and those are what the sweep kept
+# tripping, a different scenario nearly every run: SWIM declaring a slow but
+# healthy peer dead at its 3 s suspect timeout, a placement conflict outliving
+# its 5 s grace. Some were patched one scenario at a time (HCR_SUSPECT_MS);
+# this is the one place instead.
+#
+# Under MARCH_SANITIZE, run_node multiplies each deadline below by TIME_SCALE
+# (TWO_NODE_ASAN_SCALE, default 5): the value the scenario exported, or the
+# stdlib's default when it exported none. Only deadlines that DECLARE A
+# FAILURE are scaled (a peer dead, a setup abandoned, a conflict real), never
+# a poll interval or a "wait at least this long" delay, which would only make
+# a slow run slower. Without MARCH_SANITIZE, TIME_SCALE is 1 and run_node is
+# a bare exec: the normal two-node job runs exactly as before.
+#
+#   MARCH_SWIM_SUSPECT_MS                    ClusterNode.config (SWIM)
+#   MARCH_SESSION_CONNECT_MS / _TIMEOUT_MS   session setup / heartbeat
+#   MARCH_PLACEMENT_CONFLICT_GRACE_MS        Topology: a held endpoint
+#   MARCH_HOOK_TIMEOUT_MS                    Topology: a placement hook
+#   MARCH_CONTROL_AGENT_GRACE_MS             control: an agent's mark
+#
+# Why 5, and why only SWIM's suspect timeout and not its probe period or ack
+# timeout: measured 2026-10-05 on hcr_new_code_session (2 CPUs, 2 busy loops,
+# ASan). A suspect is cleared by its own refutation, gossiped on the next
+# probes, so a longer period slows the very thing the timeout waits for.
+# Scaling all three by 3 (period 3 s, suspect 9 s) or 4 (4 s, 12 s) still
+# declared node-a dead (3 of 3, 1 of 1); the period kept at 1 s with a 15 s
+# suspect passed 3 of 3. 5 x 3 s is that 15 s.
+#
+# Each default here must be the stdlib's (stdlib/cluster_node.march,
+# session_node.march, topology.march, lib/desugar/control_wiring.march).
+# TWO_NODE_TIME_SCALE is exported for a node program's own deadlines.
+if [ -n "${MARCH_SANITIZE:-}" ]; then TIME_SCALE=${TWO_NODE_ASAN_SCALE:-5}; else TIME_SCALE=1; fi
+[[ $TIME_SCALE =~ ^[1-9][0-9]*$ ]] \
+  || { echo "two-node: TWO_NODE_ASAN_SCALE must be a positive integer, got: $TIME_SCALE" >&2; exit 2; }
+export TWO_NODE_TIME_SCALE=$TIME_SCALE
+scaled_deadlines="MARCH_SWIM_SUSPECT_MS=3000
+  MARCH_SESSION_CONNECT_MS=20000 MARCH_SESSION_TIMEOUT_MS=10000
+  MARCH_PLACEMENT_CONFLICT_GRACE_MS=5000 MARCH_HOOK_TIMEOUT_MS=10000
+  MARCH_CONTROL_AGENT_GRACE_MS=20000"
+run_node() {
+  local kv var cur
+  if [ "$TIME_SCALE" != 1 ]; then
+    for kv in $scaled_deadlines; do
+      var=${kv%%=*}
+      case " ${TIME_SCALE_EXEMPT:-} " in *" $var "*) continue ;; esac
+      cur=${!var:-${kv#*=}}
+      [[ $cur =~ ^[0-9]+$ ]] || cur=${kv#*=}
+      export "$var=$(( cur * TIME_SCALE ))"
+    done
+  fi
+  exec "$@"
+}
 
 # node-b's listen port, chosen BELOW the OS's ephemeral range.
 #
@@ -310,7 +378,7 @@ start_node() {
     local tries=1
     while :; do
       MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C \
-      MARCH_NODE_PORT=$PORT MARCH_NODE_CREATION=$creation "$work/node_b" >> "$work/b.out" 2>> "$work/b.err" &
+      MARCH_NODE_PORT=$PORT MARCH_NODE_CREATION=$creation run_node "$work/node_b" >> "$work/b.out" 2>> "$work/b.err" &
       pid_b=$!
       bind_failed || break
       # Something else holds the port.  Before node-b has ever bound and
@@ -323,11 +391,11 @@ start_node() {
       pick_port
     done
   elif [ "$n" = c ]; then
-    MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C "$work/node_c" >> "$work/c.out" 2>> "$work/c.err" &
+    MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C run_node "$work/node_c" >> "$work/c.out" 2>> "$work/c.err" &
     pid_c=$!
   else
     MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C \
-    MARCH_PEER_PORT=$PORT "$work/node_a" >> "$work/a.out" 2>> "$work/a.err" &
+    MARCH_PEER_PORT=$PORT run_node "$work/node_a" >> "$work/a.out" 2>> "$work/a.err" &
     pid_a=$!
   fi
   port_settled=1

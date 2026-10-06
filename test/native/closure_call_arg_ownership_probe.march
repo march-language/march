@@ -24,6 +24,10 @@
 --     another closure releases the reference that closure did not spend
 --     (march_clo_float_arg). Each was a double free or a leak before
 --     2026-09-30.
+--   - the same let-generalized lambdas called DIRECTLY (Known_call turns the
+--     call into a direct apply-fn call): the Float result box is released
+--     only when the call carries its call-site result type; one box leaked
+--     per call before 2026-10-06.
 -- Each leg prints the value it computed, so a use-after-free that changes a
 -- result fails the golden, not just the flat check.
 mod Main do
@@ -89,6 +93,26 @@ mod Main do
     end
   end
 
+  pfn direct_keep(n : Int, acc : Float) : Float do
+    if n <= 0 do acc else
+      let keep = fn (p, x) -> p
+      direct_keep(n - 1, acc +. keep(1.0, int_to_float(n)))
+    end
+  end
+  pfn direct_last(n : Int, acc : Float) : Float do
+    if n <= 0 do acc else
+      let last = fn (p, x) -> x
+      direct_last(n - 1, acc +. last(1.0, int_to_float(n)))
+    end
+  end
+  pfn direct_tail(x : Float) : Float do
+    let last = fn (p, y) -> y
+    last(1.0, x)
+  end
+  pfn direct_in_tail(n : Int, acc : Float) : Float do
+    if n <= 0 do acc else direct_in_tail(n - 1, acc +. direct_tail(int_to_float(n))) end
+  end
+
   pfn flat(label : String, before : Int, r : String) : () do
     let grew = live_allocs() - before
     println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 200))
@@ -145,5 +169,11 @@ mod Main do
     flat("erased lambda returns a Float", o, float_to_string(call_float2(last, n, 0.0)))
     let q = live_allocs()
     flat("erased lambda forwards a Float", q, float_to_string(call_via(fwd, doubler, n, 0.0)))
+    let r = live_allocs()
+    flat("erased lambda called directly ignores a Float", r, float_to_string(direct_keep(n, 0.0)))
+    let t = live_allocs()
+    flat("erased lambda called directly returns a Float", t, float_to_string(direct_last(n, 0.0)))
+    let u = live_allocs()
+    flat("erased lambda called directly in tail position", u, float_to_string(direct_in_tail(n, 0.0)))
   end
 end

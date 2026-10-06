@@ -10,6 +10,9 @@
 export SLOW_A_ADDR=127.0.0.1:$PORT_A
 export MARCH_SESSION_HEARTBEAT_MS=200
 export MARCH_SESSION_TIMEOUT_MS=2000
+# A's 4 s start must outlast the timeout, or this proves nothing: keep it at
+# 2 s under ASan too, where the harness would otherwise stretch it to 6 s.
+TIME_SCALE_EXEMPT=MARCH_SESSION_TIMEOUT_MS
 export MARCH_NUM_SCHEDULERS=1
 
 ORDERED=1

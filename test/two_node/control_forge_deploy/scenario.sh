@@ -98,9 +98,9 @@ fd_start() {
     export MARCH_TOPOLOGY_FILE="$digest" MARCH_TOPOLOGY_STATUS="$d/status"
     export MARCH_HOT_RELOAD_SOCKET="$(ctl_sock "$n")" MARCH_CONTROL_DIR="$d/control"
     export MARCH_CONTROL_PORT_OFFSET=1000 MARCH_PLACEMENT_SETTLE_MS=1500 MARCH_PLACEMENT_TICK_MS=200
-    export MARCH_CONTROL_POLL_MS=200 MARCH_SWIM_PROBE_MS=300 MARCH_SWIM_SUSPECT_MS=1500
+    export MARCH_CONTROL_POLL_MS=200
     export HOME="$d/home"
-    exec "$work/node_$n"
+    run_node "$work/node_$n"
   ) >> "$work/$n.out" 2>> "$work/$n.err" &
   eval "pid_$n=$!"
 }
