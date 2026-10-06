@@ -1,0 +1,5 @@
+record update push = 403, flat: true
+record field size = 3200, flat: true
+buffer holds 8
+make/push/peek/to_list churn = 81000, flat: true
+string elements overwrite/snapshot/drop = 800, flat: true

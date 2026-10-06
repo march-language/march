@@ -1,0 +1,35 @@
+-- A RingBuf as actor state (Part C, Phase C2; design spec section 3.4).
+-- `RingBuf` is always_linear, so `buf` is a linear field: the state owns the
+-- buffer and each handler that reads it stores one back, the LinearMap
+-- idiom. The buffer arrives through spawn(A, rb): check_spawn_args runs
+-- check_expr on each argument, so the spawn is the consuming use of `rb`,
+-- and a send (Take) is a consuming use too: a moved buffer has one owner on
+-- either side of the move.
+mod Main do
+  needs IO.Console
+  actor Recent do
+    state { buf : RingBuf(Int), n : Int }
+    init(buf : RingBuf(Int)) { buf: buf, n: 0 }
+    on Seen(x : Int) do
+      { state with buf: RingBuf.push(state.buf, x), n: state.n + 1 }
+    end
+    on Dump() do
+      let (items, buf) = RingBuf.snapshot(state.buf)
+      println(show(items))
+      { state with buf: buf }
+    end
+    on Take(other : RingBuf(Int)) do
+      RingBuf.drop(other)
+      state
+    end
+  end
+  fn main(_c : Cap(IO.Console)) : Int do
+    let rb = RingBuf.make(8)
+    let s = spawn(Recent, rb)
+    send(s, Seen(1))
+    send(s, Dump())
+    let moved = RingBuf.make(2)
+    send(s, Take(moved))
+    0
+  end
+end

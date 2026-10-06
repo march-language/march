@@ -814,9 +814,16 @@ let offer_unrefined_error env span (r : session_ty ref) op =
     gated on sole ownership and copies otherwise, and the interpreter always
     copies, so a native array is a copy-on-write value that may be sent,
     captured by a task or shared with parallel code like any other value.
-    [RingBuf] stays until Phase C2 makes it [always_linear]. *)
-let non_sendable_types =
-  ["RingBuf"]
+    [RingBuf] left on the same day (Phase C2): it is [always_linear], so a
+    send is its one consuming use and a moved buffer has exactly one owner on
+    either side of the move.  The list is EMPTY and stays as the enforcement
+    point for the rule above: a type that is neither linear nor copy-on-write
+    may only be added here after Parts A and B of the plan (a general Send
+    check through closures and user types) have landed;
+    a unit test (Phase C5 of the plan) fails the build if a name appears
+    before then. *)
+let non_sendable_types : string list =
+  []
 
 (** [check_sendable errors span ty] walks [ty] and emits an error for every
     non-sendable type constructor it finds. Called from the [ECon] arm on

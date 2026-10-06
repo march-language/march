@@ -181,6 +181,18 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **`RingBuf` is linear: every operation consumes the buffer and hands it
+  back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
+  `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer
+  beside it (`let (n, rb) = RingBuf.size(rb)`); new `snapshot` reads the
+  elements out and keeps the buffer; `to_list` and new `drop` end it. A buffer
+  can no longer be aliased, captured by a closure, stored at module level or
+  put in a `Vault` (each is a compile-time error, the existing linear-type
+  errors), and it may now be *sent* in a message or passed to `spawn`, which
+  moves it. In actor state write `{ state with buf: RingBuf.push(state.buf,
+  x) }`. Migration table: design spec section 5. **New rule for every linear
+  type:** a module-level `let` of a `RingBuf`, `Handle` or `LinearMap` is
+  rejected, since a module-level value can never be consumed exactly once.
 - **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
   install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
   source needed no changes. The REPL's `notty` dependency (0.2.3 does not

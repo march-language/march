@@ -5632,6 +5632,29 @@ let rec check_decl env (d : Ast.decl) : env =
       (rhs_ty, bindings) in
     discharge_constraints env sp;
     ignore (leave_level env');
+    (* Part C, Phase C2 (specs/2026-10-06-linear-ringbuf-and-sendable-arrays-
+       design.md section 3.5): an always_linear type, or a type that holds
+       one, cannot be a module-level `let`.  A module-level value is shared by
+       every function and every actor, so it can never be consumed exactly
+       once; before this rule `let rb = RingBuf.make(8)` at module level (hole
+       H6) was a buffer every actor and thread shared, and a module-level
+       Handle or LinearMap was silently accepted too.  Judged on the solved
+       RHS type with [contains_linear], so a buffer inside a tuple, Option or
+       record field is caught as well. *)
+    (match repr rhs_ty with
+     | TError -> ()
+     | t when contains_linear env t ->
+       let what = match b.bind_pat with
+         | Ast.PatVar n -> Printf.sprintf "`%s`" n.Ast.txt
+         | _ -> "This binding" in
+       Err.error env.errors ~span:sp
+         (Printf.sprintf
+            "%s has the linear type `%s`, so it cannot be a module-level `let`: \
+             a module-level value is shared by every function and every actor, \
+             and a linear value must be consumed exactly once.\n\
+             Create it where it is used, or keep it in an actor's state."
+            what (pp_ty t))
+     | _ -> ());
     (* Same Vault value restriction as the block-[let] path above. *)
     if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
     (* Generalise simple variable bindings at module level *)

@@ -312,23 +312,6 @@ let extern_borrow_table : (string * bool list) list = [
   ("record_has_key",   [true; true]);
   ("record_put",       [true; true; true]);
   ("record_from_list", [true]);
-  (* ── RingBuf builtins ───────────────────────────────────────────────────
-     The buffer [rb] is borrowed by every op: RingBuf mutates in place through
-     the pointer and returns Unit/Option/List, never consuming the buffer, so
-     the caller retains ownership and drops it when it goes dead.  push's second
-     param [x] is NOT borrowed — it is transferred (owned) into the ring, which
-     stores it without an incref and releases it on overwrite/pop/clear/drop.
-     get's Int index is not a heap value. *)
-  ("ring_buf_make",        [false]);
-  ("ring_buf_push",        [true; false]);
-  ("ring_buf_pop",         [true]);
-  ("ring_buf_get",         [true; false]);
-  ("ring_buf_peek_oldest", [true]);
-  ("ring_buf_peek_newest", [true]);
-  ("ring_buf_size",        [true]);
-  ("ring_buf_cap",         [true]);
-  ("ring_buf_clear",       [true]);
-  ("ring_buf_to_list",     [true]);
   (* ── NativeArray: reads borrow their array, `set` consumes it (in-place) ── *)
   ("native_u8_arr_get",    [true; false]);
   ("native_u8_arr_length", [true]);
@@ -489,6 +472,18 @@ let is_simd_builtin (fn_name : string) : bool =
     [extern_borrow_table] — see
     specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md. *)
 let extern_owned_builtins : string list = [
+    (* RingBuf is always_linear and every ring_buf_* builtin CONSUMES the
+       buffer and hands it back rc-neutrally (Part C, Phase C2; the full
+       contract table is in the plan). For a Lin variable Perceus emits no RC
+       op either way; the table matters on the unrestricted paths -- a user
+       record's field projection, where Perceus dups a borrowed field before
+       a consuming position -- so the C bodies and this classification must
+       agree: push/clear return the same cell, the readers return it inside a
+       fresh pair, to_list/drop release it. The element of push was already
+       owned (stored without an incref). *)
+    "ring_buf_push"; "ring_buf_pop"; "ring_buf_get"; "ring_buf_peek_oldest";
+    "ring_buf_peek_newest"; "ring_buf_size"; "ring_buf_cap"; "ring_buf_clear";
+    "ring_buf_snapshot"; "ring_buf_to_list"; "ring_buf_drop";
     (* delivery_failed_watch stores its closure in the runtime's hook slot
        (march_delivery_failed_watch), releasing the one it replaces. *)
     "delivery_failed_watch";

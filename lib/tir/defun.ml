@@ -262,7 +262,8 @@ let builtin_names : StringSet.t =
       (* RingBuf builtins — mutable fixed-capacity circular buffer *)
       "ring_buf_make"; "ring_buf_push"; "ring_buf_pop"; "ring_buf_get";
       "ring_buf_peek_oldest"; "ring_buf_peek_newest"; "ring_buf_size";
-      "ring_buf_cap"; "ring_buf_clear"; "ring_buf_to_list";
+      "ring_buf_cap"; "ring_buf_clear"; "ring_buf_snapshot"; "ring_buf_to_list";
+      "ring_buf_drop";
       (* Typed array builtins *)
       "typed_array_create"; "typed_array_get"; "typed_array_set";
       "typed_array_length"; "typed_array_from_list"; "typed_array_to_list";

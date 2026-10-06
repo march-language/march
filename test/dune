@@ -3502,11 +3502,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 ; ── RingBuf compiled backend (runtime/march_runtime.c ring_buf_*) ──
 ; The ring_buf_* builtins existed only in the interpreter; a compiled program
-; using RingBuf failed to link. This fixture exercises every op with both Int
-; (immediate) and String (heap, RC-managed) elements — make, push past capacity
-; (wraparound), pop, get, peek, size, cap, clear, to_list — and diffs stdout
-; against the interpreter's output. Guards the erased-i64 element round-trip
-; (odd value 7) and element RC on overwrite/pop/clear/drop.
+; using RingBuf failed to link. This fixture exercises every op of the
+; always_linear, consume-and-return API (Part C, Phase C2) with both Int
+; (immediate) and String (heap, RC-managed) elements — make, push past
+; capacity (wraparound), pop, get, peek, size, cap, snapshot, clear, to_list,
+; drop — and diffs stdout against the interpreter's output. Guards the
+; erased-i64 element round-trip (odd value 7), the tagged Int in a reader's
+; pair, and element RC on overwrite/pop/clear/drop.
 (rule
  (targets native_ring_buf_ops native_ring_buf_ops.out)
  (deps (file %{exe:../bin/main.exe})
@@ -3584,6 +3586,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/native_arr_task_set_race.expected native_native_arr_task_set_race.out)))
+
+; RingBuf reference-count contract on its one unrestricted path, a user
+; record's field (`{ r with buf: RingBuf.push(r.buf, x) }`): the owned,
+; rc-neutral ring_buf_* builtins must leave live_allocs() flat (Part C,
+; Phase C2). Also in specs/lang/golden/sanitize.sh's curated native list, so
+; CI runs it under AddressSanitizer.
+(rule
+ (targets native_ring_buf_record_leak_probe native_ring_buf_record_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/ring_buf_record_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_ring_buf_record_leak_probe
+        native/ring_buf_record_leak_probe.march)
+   (with-stdout-to native_ring_buf_record_leak_probe.out
+        (system "./native_ring_buf_record_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ring_buf_record_leak_probe.expected native_ring_buf_record_leak_probe.out)))
 
 ; String search edge cases (SIMD march_memmem kernel, runtime/march_runtime.c).
 ; String.index_of/index_of_from/contains go through the compiled runtime's

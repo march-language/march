@@ -1,40 +1,55 @@
 mod TestRingBuf do
 
+  -- RingBuf is always_linear: every operation consumes the buffer and hands
+  -- it back (mutators return it, readers return it beside their answer), and
+  -- every test ends its buffer with to_list or drop. Part C, Phase C2 of
+  -- specs/plans/2026-09-25-send-data-race-freedom-plan.md. The compiled twin
+  -- is test/native/ring_buf_ops.march; the two backends must agree.
+
+  pfn push_all(rb : RingBuf(Int), xs : List(Int)) : RingBuf(Int) do
+    List.fold_left(xs, rb, fn (acc, x) -> RingBuf.push(acc, x))
+  end
+
   describe "make / cap / is_empty" do
 
     test "cap is preserved" do
-      let rb = RingBuf.make(8)
-      assert (RingBuf.cap(rb) == 8)
+      let (c, rb) = RingBuf.cap(RingBuf.make(8))
+      RingBuf.drop(rb)
+      assert (c == 8)
     end
 
     test "starts empty" do
-      let rb = RingBuf.make(4)
-      assert (RingBuf.is_empty(rb))
+      let (e, rb) = RingBuf.is_empty(RingBuf.make(4))
+      RingBuf.drop(rb)
+      assert e
     end
 
     test "size starts at zero" do
-      let rb = RingBuf.make(4)
-      assert (RingBuf.size(rb) == 0)
+      let (n, rb) = RingBuf.size(RingBuf.make(4))
+      RingBuf.drop(rb)
+      assert (n == 0)
     end
 
     test "peek_oldest on empty is None" do
-      let rb = RingBuf.make(4)
-      assert (RingBuf.peek_oldest(rb) == None)
+      let (x, rb) = RingBuf.peek_oldest(RingBuf.make(4))
+      RingBuf.drop(rb)
+      assert (x == None)
     end
 
     test "peek_newest on empty is None" do
-      let rb = RingBuf.make(4)
-      assert (RingBuf.peek_newest(rb) == None)
+      let (x, rb) = RingBuf.peek_newest(RingBuf.make(4))
+      RingBuf.drop(rb)
+      assert (x == None)
     end
 
     test "pop on empty is None" do
-      let rb = RingBuf.make(4)
-      assert (RingBuf.pop(rb) == None)
+      let (x, rb) = RingBuf.pop(RingBuf.make(4))
+      RingBuf.drop(rb)
+      assert (x == None)
     end
 
     test "to_list on empty is Nil" do
-      let rb = RingBuf.make(4)
-      assert (RingBuf.to_list(rb) == Nil)
+      assert (RingBuf.to_list(RingBuf.make(4)) == Nil)
     end
 
   end
@@ -42,31 +57,31 @@ mod TestRingBuf do
   describe "push / size / is_full" do
 
     test "push increments size" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 1)
-      assert (RingBuf.size(rb) == 1)
+      let rb = RingBuf.push(RingBuf.make(4), 1)
+      let (n, rb) = RingBuf.size(rb)
+      RingBuf.drop(rb)
+      assert (n == 1)
     end
 
     test "size stops at cap when full" do
-      let rb = RingBuf.make(3)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.push(rb, 3)
-      RingBuf.push(rb, 4)
-      assert (RingBuf.size(rb) == 3)
+      let rb = push_all(RingBuf.make(3), [1, 2, 3, 4])
+      let (n, rb) = RingBuf.size(rb)
+      RingBuf.drop(rb)
+      assert (n == 3)
     end
 
     test "is_full after cap pushes" do
-      let rb = RingBuf.make(2)
-      RingBuf.push(rb, 10)
-      RingBuf.push(rb, 20)
-      assert (RingBuf.is_full(rb))
+      let rb = push_all(RingBuf.make(2), [10, 20])
+      let (f, rb) = RingBuf.is_full(rb)
+      RingBuf.drop(rb)
+      assert f
     end
 
     test "not full before cap" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 1)
-      assert (not(RingBuf.is_full(rb)))
+      let rb = RingBuf.push(RingBuf.make(4), 1)
+      let (f, rb) = RingBuf.is_full(rb)
+      RingBuf.drop(rb)
+      assert (not(f))
     end
 
   end
@@ -74,24 +89,28 @@ mod TestRingBuf do
   describe "peek_oldest / peek_newest" do
 
     test "peek_oldest returns first pushed" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 10)
-      RingBuf.push(rb, 20)
-      assert (RingBuf.peek_oldest(rb) == Some(10))
+      let rb = push_all(RingBuf.make(4), [10, 20])
+      let (x, rb) = RingBuf.peek_oldest(rb)
+      RingBuf.drop(rb)
+      assert (x == Some(10))
     end
 
     test "peek_newest returns last pushed" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 10)
-      RingBuf.push(rb, 20)
-      assert (RingBuf.peek_newest(rb) == Some(20))
+      let rb = push_all(RingBuf.make(4), [10, 20])
+      let (x, rb) = RingBuf.peek_newest(rb)
+      RingBuf.drop(rb)
+      assert (x == Some(20))
     end
 
-    test "single element: oldest == newest" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 42)
-      assert (RingBuf.peek_oldest(rb) == Some(42))
-      assert (RingBuf.peek_newest(rb) == Some(42))
+    test "single element: oldest == newest, and peeking keeps it" do
+      let rb = RingBuf.push(RingBuf.make(4), 42)
+      let (o, rb) = RingBuf.peek_oldest(rb)
+      let (n, rb) = RingBuf.peek_newest(rb)
+      let (sz, rb) = RingBuf.size(rb)
+      RingBuf.drop(rb)
+      assert (o == Some(42))
+      assert (n == Some(42))
+      assert (sz == 1)
     end
 
   end
@@ -99,26 +118,26 @@ mod TestRingBuf do
   describe "get — indexed access (0 = oldest)" do
 
     test "get(0) returns oldest" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.push(rb, 3)
-      assert (RingBuf.get(rb, 0) == Some(1))
+      let rb = push_all(RingBuf.make(4), [1, 2, 3])
+      let (x, rb) = RingBuf.get(rb, 0)
+      RingBuf.drop(rb)
+      assert (x == Some(1))
     end
 
     test "get(size-1) returns newest" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.push(rb, 3)
-      assert (RingBuf.get(rb, 2) == Some(3))
+      let rb = push_all(RingBuf.make(4), [1, 2, 3])
+      let (x, rb) = RingBuf.get(rb, 2)
+      RingBuf.drop(rb)
+      assert (x == Some(3))
     end
 
     test "get out of range returns None" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 1)
-      assert (RingBuf.get(rb, 1) == None)
-      assert (RingBuf.get(rb, -1) == None)
+      let rb = RingBuf.push(RingBuf.make(4), 1)
+      let (a, rb) = RingBuf.get(rb, 1)
+      let (b, rb) = RingBuf.get(rb, -1)
+      RingBuf.drop(rb)
+      assert (a == None)
+      assert (b == None)
     end
 
   end
@@ -126,22 +145,24 @@ mod TestRingBuf do
   describe "pop — FIFO drain" do
 
     test "pop returns oldest first" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 10)
-      RingBuf.push(rb, 20)
-      RingBuf.push(rb, 30)
-      assert (RingBuf.pop(rb) == Some(10))
-      assert (RingBuf.pop(rb) == Some(20))
-      assert (RingBuf.pop(rb) == Some(30))
-      assert (RingBuf.pop(rb) == None)
+      let rb = push_all(RingBuf.make(4), [10, 20, 30])
+      let (a, rb) = RingBuf.pop(rb)
+      let (b, rb) = RingBuf.pop(rb)
+      let (c, rb) = RingBuf.pop(rb)
+      let (d, rb) = RingBuf.pop(rb)
+      RingBuf.drop(rb)
+      assert (a == Some(10))
+      assert (b == Some(20))
+      assert (c == Some(30))
+      assert (d == None)
     end
 
     test "pop decrements size" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.pop(rb)
-      assert (RingBuf.size(rb) == 1)
+      let rb = push_all(RingBuf.make(4), [1, 2])
+      let (_, rb) = RingBuf.pop(rb)
+      let (n, rb) = RingBuf.size(rb)
+      RingBuf.drop(rb)
+      assert (n == 1)
     end
 
   end
@@ -149,52 +170,46 @@ mod TestRingBuf do
   describe "overwrite — wrap-around behavior" do
 
     test "oldest is overwritten when full" do
-      let rb = RingBuf.make(3)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.push(rb, 3)
-      RingBuf.push(rb, 4)
-      assert (RingBuf.peek_oldest(rb) == Some(2))
-      assert (RingBuf.peek_newest(rb) == Some(4))
+      let rb = push_all(RingBuf.make(3), [1, 2, 3, 4])
+      let (o, rb) = RingBuf.peek_oldest(rb)
+      let (n, rb) = RingBuf.peek_newest(rb)
+      RingBuf.drop(rb)
+      assert (o == Some(2))
+      assert (n == Some(4))
     end
 
     test "to_list after wrap has correct order" do
-      let rb = RingBuf.make(3)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.push(rb, 3)
-      RingBuf.push(rb, 4)
+      let rb = push_all(RingBuf.make(3), [1, 2, 3, 4])
       assert (RingBuf.to_list(rb) == Cons(2, Cons(3, Cons(4, Nil))))
     end
 
     test "multiple overwrites" do
-      let rb = RingBuf.make(2)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.push(rb, 3)
-      RingBuf.push(rb, 4)
+      let rb = push_all(RingBuf.make(2), [1, 2, 3, 4])
       assert (RingBuf.to_list(rb) == Cons(3, Cons(4, Nil)))
     end
 
   end
 
-  describe "to_list — snapshot oldest-to-newest" do
+  describe "snapshot / to_list — oldest-to-newest" do
 
     test "to_list of three pushes" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.push(rb, 3)
+      let rb = push_all(RingBuf.make(4), [1, 2, 3])
       assert (RingBuf.to_list(rb) == Cons(1, Cons(2, Cons(3, Nil))))
     end
 
     test "to_list after pop" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 10)
-      RingBuf.push(rb, 20)
-      RingBuf.push(rb, 30)
-      RingBuf.pop(rb)
+      let rb = push_all(RingBuf.make(4), [10, 20, 30])
+      let (_, rb) = RingBuf.pop(rb)
       assert (RingBuf.to_list(rb) == Cons(20, Cons(30, Nil)))
+    end
+
+    test "snapshot reads out and keeps the buffer" do
+      let rb = push_all(RingBuf.make(4), [1, 2])
+      let (xs, rb) = RingBuf.snapshot(rb)
+      let rb = RingBuf.push(rb, 3)
+      let ys = RingBuf.to_list(rb)
+      assert (xs == Cons(1, Cons(2, Nil)))
+      assert (ys == Cons(1, Cons(2, Cons(3, Nil))))
     end
 
   end
@@ -202,39 +217,42 @@ mod TestRingBuf do
   describe "clear" do
 
     test "clear resets size to 0" do
-      let rb = RingBuf.make(4)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.clear(rb)
-      assert (RingBuf.size(rb) == 0)
+      let rb = RingBuf.clear(push_all(RingBuf.make(4), [1, 2]))
+      let (n, rb) = RingBuf.size(rb)
+      RingBuf.drop(rb)
+      assert (n == 0)
     end
 
     test "cap unchanged after clear" do
-      let rb = RingBuf.make(8)
-      RingBuf.push(rb, 1)
-      RingBuf.clear(rb)
-      assert (RingBuf.cap(rb) == 8)
+      let rb = RingBuf.clear(RingBuf.push(RingBuf.make(8), 1))
+      let (c, rb) = RingBuf.cap(rb)
+      RingBuf.drop(rb)
+      assert (c == 8)
     end
 
     test "can push after clear" do
-      let rb = RingBuf.make(2)
-      RingBuf.push(rb, 1)
-      RingBuf.push(rb, 2)
-      RingBuf.clear(rb)
-      RingBuf.push(rb, 99)
+      let rb = RingBuf.clear(push_all(RingBuf.make(2), [1, 2]))
+      let rb = RingBuf.push(rb, 99)
       assert (RingBuf.to_list(rb) == Cons(99, Nil))
     end
 
   end
 
-  describe "shared reference semantics" do
+  describe "ownership" do
 
-    test "alias sees mutations" do
-      let rb = RingBuf.make(4)
-      let rb2 = rb
-      RingBuf.push(rb, 42)
-      assert (RingBuf.size(rb2) == 1)
-      assert (RingBuf.peek_newest(rb2) == Some(42))
+    test "a buffer threaded through a fold never shares" do
+      let rb = List.fold_left([1, 2, 3, 4, 5], RingBuf.make(3), fn (acc, x) -> RingBuf.push(acc, x))
+      assert (RingBuf.to_list(rb) == Cons(3, Cons(4, Cons(5, Nil))))
+    end
+
+    test "heap elements survive the pair round trips" do
+      let rb = RingBuf.push(RingBuf.push(RingBuf.make(2), "a"), "b" ++ "!")
+      let (x, rb) = RingBuf.peek_newest(rb)
+      let (y, rb) = RingBuf.pop(rb)
+      let zs = RingBuf.to_list(rb)
+      assert (x == Some("b!"))
+      assert (y == Some("a"))
+      assert (zs == Cons("b!", Nil))
     end
 
   end
