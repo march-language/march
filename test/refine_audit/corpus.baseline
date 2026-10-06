@@ -276,6 +276,8 @@ native_js_self_tail_call_rc_drop: coverage audit (user + stdlib): 123 enforced, 
 native_js_self_tail_call_rc_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_js_unmapped_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_known_call_generic_lambda_float: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_known_call_generic_lambda_float: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_lazy_niche: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_lazy_niche: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_let_shadow_rebind: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

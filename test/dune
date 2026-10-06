@@ -10445,6 +10445,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nclones boxcalls ngeneral nchecks < native_arr_map2_inline_llvm_check.out; \
     test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 -a \"$ngeneral\" -eq 1 -a \"$nchecks\" -ge 1 || { echo \"expected 2 unboxed \\$mapfast\\$ clones (zero boxing calls), 1 general non-inlined native_int_arr_map2 call (reused-closure fallback), >=1 length-check call (found clones=$nclones boxcalls=$boxcalls general=$ngeneral checks=$nchecks)\" >&2; exit 1; }")))
 
+;  Direct (Known_call) call to a let-generalized lambda returning a Float
+; (specs/progress/2026-10-02-known-call-generic-lambda-float-leak.md). The
+; .expected file IS the interpreter's output, including every "flat: true".
+(rule
+ (targets known_call_generic_lambda_float known_call_generic_lambda_float.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/known_call_generic_lambda_float.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o known_call_generic_lambda_float
+        native/known_call_generic_lambda_float.march)
+   (with-stdout-to known_call_generic_lambda_float.out
+        (system "./known_call_generic_lambda_float")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/known_call_generic_lambda_float.expected known_call_generic_lambda_float.out)))
+
 ;  Inline refcount fast path (lib/tir/llvm_rc_inline.ml,
 ; specs/plans/2026-09-30-inline-rc-fast-path.md). Correctness and no leak: the
 ; .expected file IS the interpreter's output, including its "flat: true" line.
