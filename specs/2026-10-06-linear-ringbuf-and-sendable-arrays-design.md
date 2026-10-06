@@ -21,7 +21,7 @@ either immutable, copy-on-write under a sole owner, or linear.
 
 ---
 
-## 0. Where things stand (read at `33527ba9`, not yet probed)
+## 0. Where things stand (read at `33527ba9`; probed 2026-10-06, see the todo)
 
 | | Today | After |
 |---|---|---|
@@ -31,9 +31,10 @@ either immutable, copy-on-write under a sole owner, or linear.
 | sole-ownership check | relaxed load | acquire load |
 | a dead linear value's memory | shallow-freed; a resource cell's destructor is skipped | destructor runs |
 
-Nothing in this table has been run against a built compiler. Phase 0 of the
-plan writes the eight hole programs and confirms each type-checks today; this
-document's "rejected" examples (§3.4) are what those programs must become.
+Phase 0 of the plan wrote the eight hole programs
+(`specs/lang/types/staging/h1`–`h8`) and confirmed with a built compiler that
+every one type-checks today; this document's "rejected" examples (§3.5) are
+what those programs must become. The results are recorded in the todo.
 
 ---
 
@@ -235,18 +236,20 @@ linear types.
 | `dup(rb)` where `fn dup(x) do (x, x) end` (H4) | `` `rb` is linear, but `dup` is generic in a parameter of that type, so it may drop or duplicate the value. `` with the `linear x : a` hint |
 | `let _ = rb` | `` This `_` discards the linear value `rb` `` |
 | `Vault.set(t, "k", rb)` (H7) | the generic-parameter error above: `vault_set` is generic in its value and does not opt in |
-| `Task.await(t)` twice where `t : Task(RingBuf(Int))` (H8) | the double-use error on `t`: a `Task` holding a linear value is linear |
+| `Task.async(fn () -> RingBuf.make(4))`, so that `Task.await(t)` could run twice (H8) | the generic-parameter error above, at the `Task.async` call: `task_spawn` is generic in its closure's result and does not opt in, so a `Task(RingBuf)` is never created and the second `await` is unreachable |
 | a module-level `let rb = RingBuf.make(8)` (H6) | **new:** `` `rb` has the linear type `RingBuf(Int)`, so it cannot be a module-level `let`: a module-level value is shared by every function and every actor, and a linear value must be consumed exactly once. Create it where it is used, or keep it in an actor's state. `` |
 
 The module-level rule applies to every `always_linear` type, so `Handle` and
 `LinearMap` get it too; today both are silently accepted at module level.
 
-Two of these rows are assumptions about the existing checker that Phase 0
-must confirm, not statements of its current behaviour: that the
-generic-parameter rule fires for a *builtin* generic such as `vault_set`, and
-that the "container holding a linear value" rule reaches the opaque `Task`
-type. If either does not hold, the fix belongs to this design and the row
-stays.
+Two of these rows were assumptions about the existing checker; Phase 0
+probed both with an existing `always_linear` type. The generic-parameter rule
+does fire for a *builtin* generic (`vault_set`) as well as for the stdlib
+wrapper (`Vault.set`), so the H7 row stands as written. The "container holding
+a linear value" rule does *not* reach the opaque `Task` type
+(`contains_linear` excludes opaque handles deliberately), but it never needs
+to: the H8 row was rewritten above, because `Task.async` of a linear result is
+already rejected at the spawn, one step earlier than the plan assumed.
 
 ### 3.6 Elements
 
