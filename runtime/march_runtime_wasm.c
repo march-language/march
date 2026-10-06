@@ -93,6 +93,8 @@ int64_t march_decrc_freed(void *p) { (void)p; return 0; }
 void  march_incrc_local(void *p) { (void)p; }
 void  march_decrc_local(void *p) { (void)p; }
 void  march_clo_param_own(void *p) { (void)p; }
+void  march_clo_release(void *p) { (void)p; }
+void  march_clo_register_drops(void **pairs, int64_t n) { (void)pairs; (void)n; }
 void *march_clo_float_arg(void *p) { (void)p; return 0; }
 void  march_free(void *p) { (void)p; /* no-op bump alloc */ }
 /* A TCO loop's pending-drop list (see march_runtime.h): every release it could

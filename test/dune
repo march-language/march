@@ -11970,6 +11970,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/colliding_type_drop.expected native_colliding_type_drop.out)))
+
+; ── A closure released without being called releases its captures (2026-10-05)
+; The release of a function-typed value goes through march_clo_release, which
+; runs the capture drop registered for the closure's apply function. RED
+; without it: the first three legs "no growth: false".
+(rule
+ (targets native_dropped_closure_captures native_dropped_closure_captures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/dropped_closure_captures.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_dropped_closure_captures
+        native/dropped_closure_captures.march)
+   (with-stdout-to native_dropped_closure_captures.out
+        (system "./native_dropped_closure_captures")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/dropped_closure_captures.expected native_dropped_closure_captures.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),

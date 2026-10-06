@@ -515,6 +515,95 @@ void march_decrc(void *p) {
     }
 }
 
+/* ── Releasing a closure that dies without being called ───────────────────
+ * An apply function releases its environment's captures when IT frees the
+ * environment.  A closure released anywhere else (dropped from a list, a
+ * record, a Vault, or never applied) is a value of a function type at that
+ * site, which names no layout, so the release used to free the cell and leak
+ * every capture.  The compiler synthesizes a capture-release function per
+ * closure type whose environment owns its captures and registers it here
+ * under the closure's apply function (field 0), once, from main's prologue
+ * (march_clo_register_drops).  march_clo_release runs it when the release
+ * frees the cell.  A closure with no entry -- a runtime trampoline, a type
+ * whose environment borrows, one built by a hot patch or REPL fragment,
+ * which do not register -- is released exactly as before: never a crash,
+ * at worst the old leak.  See specs/progress/2026-10-05-dropped-closure-captures.md.
+ *
+ * Registration happens before the scheduler starts, so lookups need no lock. */
+typedef void (*march_clo_drop_fn)(void *clo);
+typedef struct { void *apply; march_clo_drop_fn drop; } march_clo_drop_entry;
+static march_clo_drop_entry *g_clo_drops = NULL;
+static size_t g_clo_drops_cap = 0;   /* a power of two, or 0 */
+static size_t g_clo_drops_n = 0;
+
+static size_t clo_drop_slot(void *apply, size_t cap) {
+    uintptr_t h = (uintptr_t)apply;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+    return (size_t)h & (cap - 1);
+}
+
+static void clo_drop_insert(march_clo_drop_entry *tab, size_t cap, void *apply, march_clo_drop_fn drop) {
+    size_t i = clo_drop_slot(apply, cap);
+    while (tab[i].apply && tab[i].apply != apply) i = (i + 1) & (cap - 1);
+    tab[i].apply = apply;
+    tab[i].drop = drop;
+}
+
+void march_clo_register_drops(void **pairs, int64_t n) {
+    if (n <= 0) return;
+    size_t want = g_clo_drops_n + (size_t)n;
+    if (want * 2 > g_clo_drops_cap) {
+        size_t cap = g_clo_drops_cap ? g_clo_drops_cap : 64;
+        while (want * 2 > cap) cap *= 2;
+        march_clo_drop_entry *tab = calloc(cap, sizeof *tab);
+        if (!tab) return;   /* out of memory: keep the old (shallow) behaviour */
+        for (size_t i = 0; i < g_clo_drops_cap; i++)
+            if (g_clo_drops[i].apply)
+                clo_drop_insert(tab, cap, g_clo_drops[i].apply, g_clo_drops[i].drop);
+        free(g_clo_drops);
+        g_clo_drops = tab;
+        g_clo_drops_cap = cap;
+    }
+    for (int64_t k = 0; k < n; k++) {
+        void *apply = pairs[2 * k];
+        if (!apply) continue;
+        clo_drop_insert(g_clo_drops, g_clo_drops_cap, apply, (march_clo_drop_fn)pairs[2 * k + 1]);
+    }
+    g_clo_drops_n = want;
+}
+
+static march_clo_drop_fn clo_drop_lookup(void *apply) {
+    if (!g_clo_drops_cap || !apply) return NULL;
+    size_t i = clo_drop_slot(apply, g_clo_drops_cap);
+    while (g_clo_drops[i].apply) {
+        if (g_clo_drops[i].apply == apply) return g_clo_drops[i].drop;
+        i = (i + 1) & (g_clo_drops_cap - 1);
+    }
+    return NULL;
+}
+
+void march_clo_release(void *p) {
+    if (!IS_HEAP_PTR(p)) return;
+    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
+    march_clo_drop_fn drop = clo_drop_lookup(*(void **)((char *)p + 16));
+    if (!drop) { march_decrc(p); return; }
+    int32_t tag  = ((march_hdr *)p)->tag;
+    int64_t prev = atomic_fetch_sub_explicit(
+        (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
+    if (gc_trace_on())
+        gc_emit(prev == 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
+    if (prev == 1) {
+        drop(p);            /* releases the captures; reads the cell, frees nothing of it */
+        march_run_resource_dtor(p);
+        MARCH_FREE_BUMP();
+        free(p);
+    } else if (prev < 1) {
+        fprintf(stderr, "march: RC underflow in march_clo_release (rc was %lld) at %p — aborting\n",
+                (long long)prev, p);
+        abort();
+    }
+}
+
 int64_t march_decrc_freed(void *p) {
     if (!IS_HEAP_PTR(p)) return 1;
     /* Immortal: not freed, so the caller must not release its children. */

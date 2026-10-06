@@ -1383,6 +1383,45 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
            f.Tir.fn_params
        | None -> ());
       { f with Tir.fn_body = rewrite env body }) m.Tir.tm_fns in
+  (* Capture releases for closures dropped without being called.  An apply
+     function releases its environment's captures when IT frees the
+     environment ([rewrite_apply_clo_drop]); a closure released anywhere else
+     -- dropped from a list, a record, a Vault, or never applied -- is a value
+     of a function type, which names no layout, so that release freed the
+     cell alone and leaked every capture
+     (specs/progress/2026-10-05-dropped-closure-captures.md).  For each closure
+     type whose environment OWNS its captures (the same [owning] gate, for the
+     same reason: a borrowing environment's captures are released by its
+     scope), [__clodrop$<clo>($clo)] loads and drops every capture.  The
+     LLVM backend registers it with the runtime under the apply function's
+     address, and a release of a function-typed value calls
+     [march_clo_release], which runs it when that release frees the cell. *)
+  let clo_drops =
+    List.filter_map (function
+        | Tir.TDClosure (clo, _ :: cap_tys) ->
+          (match apply_name_of_clo clo with
+           | Some apply when Hashtbl.mem owning apply ->
+             let clo_var =
+               { Tir.v_name = Tir_names.clo_param_name; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+             let caps = List.filteri (fun _ (v, _) -> Kind.needs_rc_of env.k_table v.Tir.v_ty)
+                 (List.mapi (fun i ty ->
+                      ({ Tir.v_name = Printf.sprintf "$cap%d" (i + 1); v_ty = ty; v_lin = Tir.Unr },
+                       Tir_names.fv_field (i + 1))) cap_tys) in
+             if caps = [] then None
+             else begin
+               let rec chain = function
+                 | [] -> Tir.ETuple []
+                 | op :: rest -> Tir.ESeq (op, chain rest)
+               in
+               let releases = chain (List.map (fun (v, _) -> drop_op env v) caps) in
+               let body = List.fold_right (fun (v, field) acc ->
+                   Tir.ELet (v, Tir.EField (Tir.AVar clo_var, field), acc)) caps releases in
+               Some { Tir.fn_name = Tir_names.clo_drop_fn_name clo; fn_params = [clo_var];
+                      fn_ret_ty = Tir.TUnit; fn_body = body; fn_kind = Tir.FnNormal }
+             end
+           | _ -> None)
+        | _ -> None) m.Tir.tm_types
+  in
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
-  { m with Tir.tm_fns = fns @ List.rev env.fns }
+  { m with Tir.tm_fns = fns @ clo_drops @ List.rev env.fns }

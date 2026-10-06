@@ -103,6 +103,15 @@ let clo_struct_prefix = "$Clo_"
 let is_clo_struct (tcon_name : string) : bool =
   String.length tcon_name >= 5 && String.sub tcon_name 0 5 = clo_struct_prefix
 
+(** Name of the capture-release function [Drop.run] synthesizes for closure
+    struct [clo] ("__clodrop$$Clo_f$7"): it releases every capture of an
+    environment that is being freed.  The runtime calls it, looked up by the
+    closure's apply function, when a closure released WITHOUT being called
+    dies ([march_clo_release]); nothing in TIR calls it, so [Dce] keeps it
+    alive through the closure's allocation sites instead. *)
+let clo_drop_fn_prefix = "__clodrop$"
+let clo_drop_fn_name (clo : string) : string = clo_drop_fn_prefix ^ clo
+
 (* ── Closure apply wrappers: "<fn>$apply$<uid>" ─────────────────────────
    Producer: lib/tir/defun.ml mints the apply-wrapper fn name as
    [Printf.sprintf "%s$apply$%d" fn.fn_name lam.lam_uid].

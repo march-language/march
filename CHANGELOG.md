@@ -198,6 +198,12 @@ git log is authoritative for exact commits.
   `Msgpack` calls `char_to_int` for each byte of every string it encodes, so every cluster
   frame leaked one object per byte of its strings.
 
+- **A closure that is dropped without being called now frees what it captured.** Before,
+  only calling a closure released its captured values; one dropped from a list, record or
+  table, or never applied, leaked all of them. Cluster nodes hit this on every session and
+  every registry update: a single-node session left about 4,400 objects behind, now about
+  1,400.
+
 - **Derived implementations (`derive Eq`, `Ord`, `Json`, ...) are no longer typechecked with
   another program's types.** Their generated code got placeholder source positions from a
   counter that restarted in every compiler process, and the stdlib's cached, already
