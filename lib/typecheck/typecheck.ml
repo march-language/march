@@ -5003,11 +5003,21 @@ let discharge_constraints env span =
         (match ty with
          | TVar _ -> ()   (* Still polymorphic — cannot check yet *)
          | _ ->
-           let satisfied = match StrMap.find_opt iface_name env.impls with
-             | None -> false
-             | Some impl_tys -> List.exists (fun (impl_ty, _, _) ->
-                 impl_matches_ty (repr impl_ty) ty) impl_tys
+           (* A tuple is Eq when every component is: both backends compare
+              tuples structurally, and no impl can be written for every
+              arity. A component that is still a type variable is
+              polymorphic, like the top-level case above. *)
+           let rec satisfies t =
+             match strip_lin t with
+             | TVar _ -> true
+             | TTuple ts when iface_name = "Eq" -> List.for_all satisfies ts
+             | t' ->
+               (match StrMap.find_opt iface_name env.impls with
+                | None -> false
+                | Some impl_tys -> List.exists (fun (impl_ty, _, _) ->
+                    impl_matches_ty (repr impl_ty) t') impl_tys)
            in
+           let satisfied = satisfies ty in
            if not satisfied then begin
              (* Record field auto-satisfy: discharge a single-method
                 accessor-shaped interface against an anonymous TRecord when

@@ -1,0 +1,15 @@
+-- Phase 0 accept fixture: Parallel.pmap over a pure lambda that captures an
+-- immutable Map. Immutable data may be shared with parallel code freely.
+mod Main do
+  needs IO.Spawn
+  fn int_cmp(a : Int, b : Int) : Bool do a < b end
+  fn main(_s : Cap(IO.Spawn)) : Int do
+    let m = Map.insert(Map.insert(Map.empty(), 1, 10, int_cmp), 2, 20, int_cmp)
+    let r = Parallel.pmap(RRB.range(1, 4), fn x ->
+      match Map.get(m, x, int_cmp) do
+        Some(v) -> v
+        None -> x
+      end)
+    RRB.length(r)
+  end
+end

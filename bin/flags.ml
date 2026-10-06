@@ -23,6 +23,11 @@ let emit_llvm      = ref false
 let shell_socket   : string option ref = ref None
 let shell_timeout_ms = ref 10_000
 let shell_inputs   : string option ref = ref None
+(* --dump-impl-hashes: write <basename>.hashes beside the .ll, one line per
+   post-TIR definition `symbol<TAB>impl_hash<TAB>sig_hash`, sorted by symbol.
+   Read-only view of the CAS hashing (Pipeline.hash_module); consumed by
+   scripts/determinism-oracle.sh. *)
+let dump_impl_hashes = ref false
 let do_compile     = ref false
 (* --jit: run a whole program through the in-process ORC JIT (the REPL's
    backend) instead of the tree-walking interpreter.  Experimental; see the
@@ -138,6 +143,10 @@ let debug_mode     = ref false
 let debug_tui_mode = ref false
 let opt_enabled    = ref true
 let fast_math      = ref false
+(* --rc-trace: store a site id before every refcount/alloc/free call and emit
+   the site table (lib/tir/llvm_rc_trace.ml).  MARCH_RC_TRACE=1 is the same
+   switch for build paths that cannot pass a flag (forge, the IR oracle). *)
+let rc_trace       = ref false
 let pmap_threshold = ref 1024    (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
 let no_copy_runtime = ref false    (* --no-copy-runtime: skip auto-copy of march_runtime.mjs *)
 (* --hot-reload=<Prefix>: compile boundary modules (under <Prefix>) with the

@@ -149,6 +149,15 @@ After changing a feature, run the benchmark(s) that exercise it to catch regress
 
 Suspected miscompile: `scripts/triage.sh FILE [--fn NAME] [--deep]` runs interp-vs-compiled, the optional-pass switches, per-stage TIR dumps and an ASAN rebuild, one screen (`--help`).
 
+Leak hunt (who took the unreleased reference): build with `march --rc-trace --compile -o prog FILE`
+(or `MARCH_RC_TRACE=1`; own CAS tag), run `MARCH_TRACE_GC=1 ./prog`, then
+`scripts/gc-trace-report.py trace/gc` prints every object live at exit with its type, allocation
+site and full inc/dec history, each step named `<fn>#<ordinal>:<runtime callee>`
+(`--site PATTERN`, `--addr HEX`, `--top N`; exit 1 while anything is live). `kill -USR2 PID` flushes
+a live process's trace first. Release IR is byte-identical with the switch off (`scripts/ir-oracle.sh`);
+`MARCH_SANITIZE=1` builds additionally abort on `march_free` of a shared object and on a TRMC hole fill
+that finds the slot non-null.
+
 ### TIR golden-snapshot tests
 
 `test/run_snapshots.exe` pins the pretty-printed TIR (`lib/tir/pp.ml`) for a small
@@ -167,7 +176,8 @@ determinism).
 ### Refactor oracles: prove a change moved no behaviour
 
 Three scripts exist to prove a refactor changed no observable behaviour. Each
-records a baseline, then compares. **Prove any oracle goes RED on an intentional
+records a baseline, then compares. A fourth, `determinism-oracle`, needs no
+baseline: it compares one compiler against itself across environments. **Prove any oracle goes RED on an intentional
 perturbation before you trust a GREEN**; two of these three shipped broken
 (a `${1:?usage … {a|b} …}` bash expansion ends at the *first* `}`, so the mode
 argument was mangled and every run crashed before touching a fixture), and one of
@@ -177,6 +187,7 @@ them was certified "verified" by a review while in that state.
 scripts/ir-oracle.sh     baseline|check <dir>   # hashes --emit-llvm over ~240 programs
 scripts/refine-oracle.sh baseline|check <dir>   # refinement diagnostics over ~297 fixtures
 scripts/types-oracle.sh  baseline|check <dir>   # two-tier: core-AST inference results + diagnostic text
+scripts/determinism-oracle.sh [--corpus small|all] [--self-test]  # same source, cold/warm HOME × two cwds: .ll + --dump-impl-hashes identical
 ```
 
 What they do **not** cover, which matters when choosing one:

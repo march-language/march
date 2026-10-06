@@ -3,7 +3,7 @@
     closures into a checked compile-time contract.
 
     Deliberately reuses [Native_map_inline]'s own matching helpers
-    (count_uses, strip_alias_chain, find_target_call*, apply_fn_table,
+    (count_uses, remove_alias_chain, find_target_call*, apply_fn_table,
     is_all_float_signature) rather than re-deriving a second notion of
     "eligible" — the two must never be able to disagree about whether a
     given callback vectorizes. Must run on the TIR *before*
@@ -136,8 +136,8 @@ let rec collect_call_sites
   let combine (f1, n1) (f2, n2) = (f1 @ f2, n1 + n2) in
   match e with
   | Tir.ELet (v, Tir.EAlloc (Tir.TCon (_, []), [ Tir.AVar apply_var ]), rest) ->
-    let (effective_name, _wrappers, inner) =
-      Native_map_inline.strip_alias_chain v.Tir.v_name rest in
+    let (effective_name, inner) =
+      Native_map_inline.remove_alias_chain v.Tir.v_name rest in
     let sub = collect_call_sites apply_fns inner in
     let target =
       match Native_map_inline.find_target_call effective_name inner with
@@ -153,8 +153,8 @@ let rec collect_call_sites
        ((match fail with Some f -> f :: sub_fails | None -> sub_fails),
         sub_found + 1))
   | Tir.ELet (v, Tir.EAlloc (Tir.TCon (_, []), Tir.AVar apply_var :: (_ :: _)), rest) ->
-    let (effective_name, _wrappers, inner) =
-      Native_map_inline.strip_alias_chain v.Tir.v_name rest in
+    let (effective_name, inner) =
+      Native_map_inline.remove_alias_chain v.Tir.v_name rest in
     let sub = collect_call_sites apply_fns rest in
     let target =
       match Native_map_inline.find_target_call_var effective_name rest with
