@@ -167,7 +167,7 @@ git log is authoritative for exact commits.
   `vendor/notty/` until a fixed release is on opam, and the `js_of_ocaml < 6.4.0`
   cap is lifted (6.4.1 compiles the browser bundle). Compiler speed is unchanged
   within noise.
-
+- **A call to an unknown function is now a compile error, not a link error.**
   When native code generation met a direct call to a name that is neither a
   function in the program, an extern, nor a runtime builtin, it used to emit a
   forward `declare` and leave the failure to the linker (or link the call to an
