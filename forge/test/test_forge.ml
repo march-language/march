@@ -736,6 +736,46 @@ let test_project_metadata_absent () =
   | Error e -> Alcotest.failf "load failed: %s" e
   | Ok p -> Alcotest.(check (option string)) "absent license -> None" None p.Project.license
 
+(* [[ffi]] / [[ffi.rust]]: one table per native library, every table used in
+   declaration order. Only the first table of a name used to be read, so a
+   second library's shims and link flags were silently dropped. *)
+let test_project_multi_ffi_tables () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"x\"\n\n\
+     [[ffi]]\nsources = [\"native/zip.c\"]\nlink = [\"-lz\"]\n\n\
+     [[ffi]]\nsources = [\"native/db.c\", \"native/db2.c\"]\nlink = [\"-lsqlite3\"]\n\n\
+     [[ffi.rust]]\ncrate = \"native/a\"\n\n\
+     [[ffi.rust]]\ncrate = \"native/b\"\nlib = \"bee\"\n";
+  match Project.load_from_dir dir with
+  | Error e -> Alcotest.failf "load failed: %s" e
+  | Ok p ->
+    Alcotest.(check (list string)) "every table's sources, in order"
+      ["native/zip.c"; "native/db.c"; "native/db2.c"] p.Project.ffi_sources;
+    Alcotest.(check (list string)) "every table's links, in order"
+      ["-lz"; "-lsqlite3"] p.Project.ffi_link;
+    Alcotest.(check (list (pair string string))) "every rust crate"
+      [("native/a", "a"); ("native/b", "bee")]
+      (List.map (fun (c : Project.ffi_rust_crate) -> (c.Project.frc_path, c.Project.frc_lib))
+         p.Project.ffi_rust);
+    let flags = Cmd_build.ffi_flags_of ~root:"/r" p in
+    Alcotest.(check string) "both libraries reach the compiler"
+      " --ffi-c '/r/native/zip.c' --ffi-c '/r/native/db.c' --ffi-c '/r/native/db2.c' \
+       --ffi-link '-lz' --ffi-link '-lsqlite3'"
+      flags
+
+(* The single-table spelling is unchanged. *)
+let test_project_single_ffi_table () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"x\"\n\n[ffi]\nsources = [\"native/s.c\"]\nlink = [\"-lm\"]\n";
+  match Project.load_from_dir dir with
+  | Error e -> Alcotest.failf "load failed: %s" e
+  | Ok p ->
+    Alcotest.(check (list string)) "sources" ["native/s.c"] p.Project.ffi_sources;
+    Alcotest.(check (list string)) "link" ["-lm"] p.Project.ffi_link;
+    Alcotest.(check int) "no rust crate" 0 (List.length p.Project.ffi_rust)
+
 (* [package] pin_main: baked into the binary via `march --pin-main`. *)
 let test_project_pin_main_true () =
   let dir = fresh_dir () in
@@ -3056,6 +3096,8 @@ let () =
       Alcotest.test_case "gen-c: raises (env-routed errors)"        `Quick test_ffi_gen_c_raises;
       Alcotest.test_case "add-rust: scaffolds a binding crate" `Quick test_ffi_add_rust;
       Alcotest.test_case "gen-c: errors with no extern"      `Quick test_ffi_gen_c_no_extern;
+      Alcotest.test_case "[[ffi]]: every table is used"      `Quick test_project_multi_ffi_tables;
+      Alcotest.test_case "[ffi]: single table unchanged"     `Quick test_project_single_ffi_table;
     ];
     "hcr-cap-gate", [
       Alcotest.test_case "parse_manifest: tolerates legacy ROOT line, no phantom fn" `Quick test_parse_manifest_root_line_no_phantom_fn;

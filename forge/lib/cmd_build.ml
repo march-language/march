@@ -581,46 +581,54 @@ let ffi_flags_of ~root (proj : Project.project) =
   String.concat "" (srcs @ links)
 
 (** Full FFI flags for [proj]: the [[ffi]] C sources/links from [ffi_flags_of]
-    plus, if [[ffi.rust]] is declared, a `cargo build --release` of the crate and
-    a --ffi-link to its staticlib archive.  Shared by [forge build] and
+    plus, for each declared [[ffi.rust]] crate, a `cargo build --release` of the
+    crate and a --ffi-link to its staticlib archive.  Shared by [forge build] and
     [forge test] so both link the same native shims.  Returns [Error] if the
     Rust build fails or its archive is missing. *)
 let ffi_flags_full ?(target_is_cross=false) (proj : Project.project) : (string, string) result =
+  let build_crate (frc : Project.ffi_rust_crate) =
+    let crate_dir =
+      if Filename.is_relative frc.Project.frc_path then
+        Filename.concat proj.Project.root frc.Project.frc_path
+      else frc.Project.frc_path
+    in
+    let archive =
+      Filename.concat crate_dir
+        (Filename.concat "target"
+           (Filename.concat "release"
+              ("lib" ^ frc.Project.frc_lib ^ ".a")))
+    in
+    Printf.printf "  [ffi.rust] cargo build --release in %s\n%!" crate_dir;
+    let rc = Sys.command
+      (Printf.sprintf "cd %s && cargo build --release 2>&1"
+         (Filename.quote crate_dir))
+    in
+    if rc <> 0 then
+      Error (Printf.sprintf "ffi.rust: cargo build failed (exit %d)" rc)
+    else if not (Sys.file_exists archive) then
+      Error (Printf.sprintf "ffi.rust: expected archive not found: %s" archive)
+    else begin
+      Printf.printf "  [ffi.rust] linked %s\n%!" archive;
+      Ok (" --ffi-link " ^ Filename.quote archive)
+    end
+  in
   let rust_link_flags_result =
     match proj.Project.ffi_rust with
-    | None -> Ok ""
-    | Some _ when target_is_cross ->
+    | [] -> Ok ""
+    | _ :: _ when target_is_cross ->
       (* P1: the Rust crate is built for the host via `cargo build` (no --target),
          so it cannot link into a cross Linux binary. Fail loudly rather than
          silently producing a broken artifact. Cross Rust FFI (cargo-zigbuild)
          is a follow-up. *)
       Error "this project uses [ffi.rust]; cross-compilation of Rust bindings is \
              not yet supported. Build on Linux, or use `forge deploy hot --so`."
-    | Some frc ->
-      let crate_dir =
-        if Filename.is_relative frc.Project.frc_path then
-          Filename.concat proj.Project.root frc.Project.frc_path
-        else frc.Project.frc_path
-      in
-      let archive =
-        Filename.concat crate_dir
-          (Filename.concat "target"
-             (Filename.concat "release"
-                ("lib" ^ frc.Project.frc_lib ^ ".a")))
-      in
-      Printf.printf "  [ffi.rust] cargo build --release in %s\n%!" crate_dir;
-      let rc = Sys.command
-        (Printf.sprintf "cd %s && cargo build --release 2>&1"
-           (Filename.quote crate_dir))
-      in
-      if rc <> 0 then
-        Error (Printf.sprintf "ffi.rust: cargo build failed (exit %d)" rc)
-      else if not (Sys.file_exists archive) then
-        Error (Printf.sprintf "ffi.rust: expected archive not found: %s" archive)
-      else begin
-        Printf.printf "  [ffi.rust] linked %s\n%!" archive;
-        Ok (" --ffi-link " ^ Filename.quote archive)
-      end
+    | crates ->
+      (* Each crate in declaration order; the first failure stops the build. *)
+      List.fold_left (fun acc frc ->
+          match acc with
+          | Error _ as e -> e
+          | Ok flags -> Result.map (fun f -> flags ^ f) (build_crate frc))
+        (Ok "") crates
   in
   match rust_link_flags_result with
   | Error _ as e -> e

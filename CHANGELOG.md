@@ -19,6 +19,9 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Several native libraries per project.** forge.toml can declare `[[ffi]]`
+  once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
+  links all of them, in order. A single `[ffi]` table works as before.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
