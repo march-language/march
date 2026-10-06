@@ -1991,6 +1991,33 @@ let emit_protocols () =
         end)
       E.emitted
 
+(* --dump-impl-hashes: one line per hashed post-TIR definition, sorted by
+   symbol, written to [basename ^ ".hashes"].  Reuses the hashed_def fields
+   the CAS already computed (hd_impl_hash is the transitive Merkle root that
+   keys the artifact cache; hd_sig_hash the signature-only hash); it computes
+   no new hash, so the dump is exactly what the cache key is built from.
+   Type definitions are listed too, prefixed `type:`, since their hashes fold
+   into every function that mentions them. *)
+let write_impl_hashes basename (h_sccs : March_cas.Pipeline.hashed_scc list) =
+  let name_of (hd : March_cas.Cas.hashed_def) =
+    match hd.March_cas.Cas.hd_def with
+    | March_cas.Cas.FnDef fd -> fd.March_tir.Tir.fn_name
+    | March_cas.Cas.TypeDef (March_tir.Tir.TDVariant (n, _))
+    | March_cas.Cas.TypeDef (March_tir.Tir.TDRecord (n, _))
+    | March_cas.Cas.TypeDef (March_tir.Tir.TDClosure (n, _)) -> "type:" ^ n
+  in
+  let lines = List.concat_map (function
+      | March_cas.Pipeline.HSingle { hs_hdef } -> [ hs_hdef ]
+      | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> hg_hdefs) h_sccs
+    |> List.map (fun (hd : March_cas.Cas.hashed_def) ->
+        Printf.sprintf "%s\t%s\t%s" (name_of hd)
+          hd.March_cas.Cas.hd_impl_hash hd.March_cas.Cas.hd_sig_hash)
+    |> List.sort compare in
+  let path = basename ^ ".hashes" in
+  let oc = open_out path in
+  List.iter (fun l -> output_string oc l; output_char oc '\n') lines;
+  close_out oc
+
 let compile filename =
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
@@ -3352,6 +3379,7 @@ let compile filename =
            hashing into the next stamp (llvm-emit, or nothing on a cache hit). *)
         stamp "cas-hash";
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
+        if !dump_impl_hashes then write_impl_hashes basename h_sccs;
         (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" = Some "2" then
            List.iter (fun sc ->
              let nm = match sc with
@@ -4471,6 +4499,8 @@ let compile filename =
            when --hot-reload is active). *)
         let hr_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
         let remote_sig_hashes2 : (string, string) Hashtbl.t = Hashtbl.create 16 in
+        let h_sccs = March_cas.Pipeline.hash_module tir in
+        if !dump_impl_hashes then write_impl_hashes basename h_sccs;
         (* Non-transitive reload-identity hash — see the compile path above for
            why HCR slots must NOT use the transitive Merkle root. *)
         (let add_hdef (hd : March_cas.Cas.hashed_def) =
@@ -4486,7 +4516,7 @@ let compile filename =
          List.iter (function
            | March_cas.Pipeline.HSingle { hs_hdef } -> add_hdef hs_hdef
            | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add_hdef hg_hdefs)
-           (March_cas.Pipeline.hash_module tir));
+           h_sccs);
         let () =
           let stub_suffix = "__rpc_stub" in
           let slen = String.length stub_suffix in
@@ -5290,6 +5320,8 @@ let () =
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
+    ("--dump-impl-hashes", Arg.Set dump_impl_hashes,
+     " With --emit-llvm/--compile: write <file>.hashes (symbol, impl_hash, sig_hash per post-TIR def, sorted)");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
     ("--jit",        Arg.Set jit_mode,
      " Run the program through the in-process ORC JIT instead of the interpreter (experimental)");

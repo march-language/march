@@ -19,6 +19,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
+  `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
+  line per post-TIR definition, sorted, straight from the CAS hashing that keys
+  the compilation cache. `scripts/determinism-oracle.sh` compiles the IR-oracle
+  corpus under a cold and a warm private `$HOME` from two cwds and fails on any
+  difference in the IR or these hashes; CI runs it as the `determinism` job.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
