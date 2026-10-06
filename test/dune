@@ -12140,6 +12140,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/branch_alias_tail_drop.expected native_branch_alias_tail_drop.out)))
 
+;; A module with no entry point of its own (no `main`, tests or exports) must
+;; root the functions the FILE declares for codegen, not fail open and keep the
+;; whole prepended stdlib: before 2026-10-04 this fixture emitted ~7,900
+;; definitions (45 MB of IR, minutes of llvm-emit + clang), and a topology app
+;; compiled without its --topology digest took ~20x longer in llvm-emit than
+;; with it (specs/progress/2026-10-04-mainless-compile-emits-whole-stdlib.md).
+;; Pins both halves: the user's functions are still emitted (`helper`, and
+;; `shout` dragging in what it reaches), and the count stays small.
+(rule
+ (targets mainless_prunes_stdlib_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/mainless_prunes_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/mainless_prunes_stdlib.march)
+   (with-stdout-to mainless_prunes_stdlib_llvm_check.out
+    (run bash -c
+     "defs=$(grep -c '^define ' native/mainless_prunes_stdlib.ll); \
+      helper=$(grep -c '^define .*@helper(' native/mainless_prunes_stdlib.ll); \
+      shout=$(grep -c '^define .*@shout(' native/mainless_prunes_stdlib.ll); \
+      echo \"$defs $helper $shout\"")))))
+
+(rule
+ (alias runtest)
+ (deps mainless_prunes_stdlib_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r defs helper shout < mainless_prunes_stdlib_llvm_check.out; \
+    test \"$helper\" -eq 1 -a \"$shout\" -eq 1 -a \"$defs\" -lt 300 || { echo \"mainless_prunes_stdlib: expected @helper and @shout defined and <300 definitions (the whole stdlib is ~7,900) -- found defs=$defs helper=$helper shout=$shout\" >&2; exit 1; }")))
+
 ; ── Actor.inspect_state (observe R4a) ────────────────────────────────────
 ; specs/progress/2026-10-04-observe-r4a-inspect-state.md. The state fixture
 ; runs compiled, compiled with --hot-reload (the renderer's code-epoch check
