@@ -1,6 +1,6 @@
 # March compiler
 
-March is a statically-typed functional language (ML/Elixir hybrid) compiled with OCaml 5.3.0.
+March is a statically-typed functional language (ML/Elixir hybrid) compiled with OCaml 5.5.1.
 
 ## Keeping specs up to date
 

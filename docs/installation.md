@@ -7,7 +7,7 @@ permalink: /docs/installation/
 
 # Installation
 
-The fastest way to get March is a prebuilt binary. You can also build from source with OCaml 5.3.0 + dune (managed with opam).
+The fastest way to get March is a prebuilt binary. You can also build from source with OCaml 5.5.1 + dune (managed with opam).
 
 ---
 
@@ -39,7 +39,7 @@ See the [README](https://github.com/march-language/march#install-a-prebuilt-bina
 
 # Building from source (contributors)
 
-The rest of this page walks through building March's compiler, standard library, and tooling from source with OCaml 5.3.0 + dune. You only need this if you're hacking on March itself.
+The rest of this page walks through building March's compiler, standard library, and tooling from source with OCaml 5.5.1 + dune. You only need this if you're hacking on March itself.
 
 ---
 
@@ -48,7 +48,7 @@ The rest of this page walks through building March's compiler, standard library,
 | Tool | Version | Purpose |
 |------|---------|---------|
 | opam | 2.x | OCaml package manager |
-| OCaml | 5.3.0 | Set up via opam switch |
+| OCaml | 5.5.1 | Set up via opam switch |
 | dune | 3.7+ | Build system (installed by opam) |
 | LLVM / clang | 18+ | Native code compilation |
 | git | any | Clone the repository |
@@ -84,10 +84,10 @@ cd march
 
 ## 2. Create the opam switch
 
-March uses a dedicated opam switch pinned to OCaml 5.3.0. This keeps its dependencies isolated from other OCaml projects.
+March uses a dedicated opam switch pinned to OCaml 5.5.1. This keeps its dependencies isolated from other OCaml projects.
 
 ```sh
-opam switch create march 5.3.0
+opam switch create march 5.5.1
 ```
 
 This downloads and compiles OCaml; it takes a few minutes the first time.

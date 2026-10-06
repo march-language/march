@@ -20,7 +20,7 @@ jobs:
         include:
           - os: macos-15
             platform: darwin-arm64
-            ocaml-compiler: 5.3.0
+            ocaml-compiler: 5.5.1
           # BOTH Linux legs build inside Alpine, and `static: true` now means
           # it: the archives are fully statically linked musl binaries with no
           # NEEDED entries at all (verified by the scratch-container step
@@ -40,7 +40,7 @@ jobs:
           # no QEMU on either.
           - os: ubuntu-24.04
             platform: linux-x86_64
-            ocaml-compiler: 5.3.0
+            ocaml-compiler: 5.5.1
             static: true
             alpine: true
           # Native arm64 host (GitHub-hosted `ubuntu-24.04-arm`, free for
@@ -50,7 +50,7 @@ jobs:
           # minutes on its own (nightly run 33358635235).
           - os: ubuntu-24.04-arm
             platform: linux-aarch64
-            ocaml-compiler: 5.3.0
+            ocaml-compiler: 5.5.1
             static: true
             alpine: true
 
@@ -139,7 +139,7 @@ jobs:
             # — tolerable now that the switch is built natively rather than
             # emulated.
             opam init --disable-sandboxing --bare -y
-            opam switch create 5.3.0 ocaml-base-compiler.5.3.0
+            opam switch create 5.5.1 ocaml-base-compiler.5.5.1
             eval $(opam env)
             opam install --deps-only -y .
             # This pair is the whole of `static: true`. OCAMLPARAM passes
