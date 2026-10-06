@@ -85,7 +85,7 @@ let test_lexer_arrow () =
 
 let test_lexer_comment () =
   let lexbuf = Lexing.from_string "-- this is a comment\n42" in
-  let lex = March_parser.Token_filter.make March_lexer.Lexer.token in
+  let lex = March_parser.Parse.tokens () in
   let tok = lex lexbuf in
   Alcotest.(check int) "skips line comment" 42
     (match tok with March_parser.Parser.INT n -> n | _ -> failwith "expected INT")
@@ -122,8 +122,7 @@ let test_ast_span () =
    top-level DMod's inner declarations — exactly the shape both
    prelude.march and an entry file are reduced to before concatenation. *)
 let unwrap_decls src =
-  let m = March_parser.Parser.module_
-      (March_parser.Token_filter.make March_lexer.Lexer.token)
+  let m = March_parser.Parse.module_of_lexbuf
       (Lexing.from_string src) in
   let desugared = March_desugar.Desugar.desugar_module m in
   match desugared.March_ast.Ast.mod_decls with
@@ -354,7 +353,7 @@ let test_prelude_collision_detects_internally_called_prelude_name () =
    source by span (refactor tooling, in-sample diagnostics) need the extent. *)
 let test_parse_string_literal_span () =
   let lexbuf = Lexing.from_string {|"hello"|} in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELit (LitString "hello", sp) ->
     Alcotest.(check int) "start col at opening quote" 0 sp.start_col;
@@ -365,7 +364,7 @@ let test_parse_string_literal_span () =
    6 source columns but a 3-character string.  The span must track the source. *)
 let test_parse_string_literal_span_escapes () =
   let lexbuf = Lexing.from_string {|"a\nb"|} in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELit (LitString "a\nb", sp) ->
     Alcotest.(check int) "start col" 0 sp.start_col;
@@ -376,7 +375,7 @@ let test_parse_string_literal_span_escapes () =
    the start rather than recording the actual opening-quote position. *)
 let test_parse_string_literal_span_offset () =
   let lexbuf = Lexing.from_string {|f("hi")|} in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   let rec find e =
     match e with
     | March_ast.Ast.ELit (March_ast.Ast.LitString "hi", sp) -> Some sp
@@ -393,7 +392,7 @@ let test_parse_string_literal_span_offset () =
    with the same lexeme-start reset.  Spanning lines exercises pos_bol too. *)
 let test_parse_string_literal_span_triple () =
   let lexbuf = Lexing.from_string "\"\"\"ab\ncd\"\"\"" in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELit (LitString _, sp) ->
     Alcotest.(check int) "start line" 1 sp.start_line;
@@ -404,21 +403,21 @@ let test_parse_string_literal_span_triple () =
 
 let test_parse_expr_int () =
   let lexbuf = Lexing.from_string "42" in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELit (LitInt 42, _) -> ()
   | _ -> Alcotest.fail "expected ELit(LitInt 42)"
 
 let test_parse_expr_atom () =
   let lexbuf = Lexing.from_string ":ok" in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.EAtom ("ok", [], _) -> ()
   | _ -> Alcotest.fail "expected EAtom(ok)"
 
 let test_parse_expr_pipe () =
   let lexbuf = Lexing.from_string "x |> f" in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.EPipe (_, _, _) -> ()
   | _ -> Alcotest.fail "expected EPipe"
@@ -426,7 +425,7 @@ let test_parse_expr_pipe () =
 let test_parse_expr_lambda () =
   (* Lambdas use fn keyword: fn x -> body *)
   let lexbuf = Lexing.from_string "map(fn x -> x)" in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.EApp (_, [March_ast.Ast.ELam (_, _, _)], _) -> ()
   | _ -> Alcotest.fail "expected EApp with ELam argument"
@@ -435,7 +434,7 @@ let test_parse_lambda_keyword_params () =
   (* `state` is a reserved keyword; it must be usable as a lambda param name *)
   let src = "fn (state, event, payload) -> state" in
   let lexbuf = Lexing.from_string src in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELam (ps, _, _) ->
     Alcotest.(check int) "3 params" 3 (List.length ps);
@@ -447,7 +446,7 @@ let test_parse_lambda_block_body () =
   (* Multi-expression lambda body with let bindings *)
   let src = "fn x -> let y = x + 1 let z = y * 2 z" in
   let lexbuf = Lexing.from_string src in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELam ([_], March_ast.Ast.EBlock (stmts, _), _) ->
     Alcotest.(check int) "3 stmts in block" 3 (List.length stmts)
@@ -457,7 +456,7 @@ let test_parse_lambda_single_let () =
   (* Single let-binding lambda: let followed by final expr *)
   let src = "fn x -> let y = x + 1 y" in
   let lexbuf = Lexing.from_string src in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELam ([_], March_ast.Ast.EBlock ([_; _], _), _) -> ()
   | _ -> Alcotest.fail "expected ELam with 2-element EBlock body"
@@ -466,7 +465,7 @@ let test_parse_lambda_no_let_unchanged () =
   (* Single-expression lambda still works as before — no EBlock wrapper *)
   let src = "fn x -> x + 1" in
   let lexbuf = Lexing.from_string src in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELam ([_], body, _) ->
     (match body with
@@ -478,7 +477,7 @@ let test_parse_lambda_zero_arg_block () =
   (* Zero-arg lambda with multi-expression body *)
   let src = "fn () -> let x = 1 x" in
   let lexbuf = Lexing.from_string src in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELam ([], March_ast.Ast.EBlock ([_; _], _), _) -> ()
   | _ -> Alcotest.fail "expected zero-arg ELam with EBlock body"
@@ -487,7 +486,7 @@ let test_parse_lambda_multi_param_block () =
   (* Multi-param lambda with let-binding body *)
   let src = "fn (a, b) -> let c = a + b c" in
   let lexbuf = Lexing.from_string src in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.ELam ([_; _], March_ast.Ast.EBlock ([_; _], _), _) -> ()
   | _ -> Alcotest.fail "expected 2-param ELam with EBlock body"
@@ -500,7 +499,7 @@ let test_parse_lambda_bare_stmt_before_if () =
      ("I got stuck here" at `if`). *)
   let src = "f(fn x -> let a = 1 println(\"hi\") if a > 0 do 1 else 2 end)" in
   let lexbuf = Lexing.from_string src in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.EApp (_, [March_ast.Ast.ELam ([_], March_ast.Ast.EBlock (stmts, _), _)], _) ->
     Alcotest.(check int) "3 stmts in lambda body" 3 (List.length stmts)
@@ -511,14 +510,14 @@ let test_parse_lambda_consecutive_bare_stmts () =
      lambda call-argument body used to fail on the second statement. *)
   let src = "f(fn x -> println(\"hi\") println(\"bye\"))" in
   let lexbuf = Lexing.from_string src in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.EApp (_, [March_ast.Ast.ELam ([_], March_ast.Ast.EBlock ([_; _], _), _)], _) -> ()
   | _ -> Alcotest.fail "expected EApp with ELam argument containing 2-stmt EBlock body"
 
 let test_parse_expr_app () =
   let lexbuf = Lexing.from_string "f(x, y)" in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let expr = March_parser.Parse.expr_of_lexbuf lexbuf in
   match expr with
   | March_ast.Ast.EApp (_, [_; _], _) -> ()
   | _ -> Alcotest.fail "expected EApp with 2 args"
@@ -530,7 +529,7 @@ let test_parse_module_multi_head () =
     fn fib(n) do n end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   (* Three fn fib clauses should be grouped into one DFn with 3 clauses *)
   match m.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
@@ -543,7 +542,7 @@ let test_parse_module_single_fn () =
     fn greet(name) do name end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   match m.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
     Alcotest.(check string) "fn name" "greet" def.fn_name.txt;
@@ -555,7 +554,7 @@ let test_parse_dotted_module_name () =
     fn dispatch(conn) do conn end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   Alcotest.(check string) "module name is dotted" "TestApp.Router" m.mod_name.txt;
   match m.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
@@ -567,7 +566,7 @@ let test_parse_underscore_param () =
     fn greet(_name : String) do "hello" end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   match m.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
     Alcotest.(check string) "fn name" "greet" def.fn_name.txt;
@@ -588,8 +587,7 @@ let test_parse_underscore_param () =
 let single_fn_body_exprs src =
   let lexbuf = Lexing.from_string src in
   let m =
-    March_parser.Parser.module_
-      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+    March_parser.Parse.module_of_lexbuf lexbuf
   in
   match m.March_ast.Ast.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
@@ -686,8 +684,7 @@ let test_parse_multiline_call_args_still_work () =
 let with_else_match_branches src =
   let lexbuf = Lexing.from_string src in
   let m =
-    March_parser.Parser.module_
-      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+    March_parser.Parse.module_of_lexbuf lexbuf
   in
   match m.March_ast.Ast.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
@@ -7273,6 +7270,45 @@ let test_derive_eq_single_ctor_no_unreachable_arm () =
     (List.length (List.filter (fun (d : March_errors.Errors.diagnostic) ->
          contains_substring d.message "never be reached") (warnings ctx)))
 
+(* Derive-generated spans are keyed by the generated decl, not a process-wide
+   counter (specs/progress/2026-10-05-derive-span-cache-collision.md).
+   The stdlib's desugared AST is cached on disk with the spans of the process
+   that wrote it; with a counter, a later compile of another program minted
+   the same spans for its own derived nodes and lowered them with the cached
+   nodes' types.  So: the same decl gets the same spans whatever was respanned
+   before it, and a different decl gets different ones. *)
+let test_derive_spans_keyed_by_decl () =
+  let decls src = (parse_module src).March_ast.Ast.mod_decls in
+  let d1 = List.hd (decls {|mod T do
+    fn f(x : Int) : Int do x + 1 end
+  end|}) in
+  let d2 = List.hd (decls {|mod T do
+    fn g(x : Int) : Int do x * 2 end
+  end|}) in
+  let name_span = function
+    | March_ast.Ast.DFn (fd, _) -> fd.March_ast.Ast.fn_name.March_ast.Ast.span
+    | _ -> Alcotest.fail "expected a DFn" in
+  let module D = March_desugar.Desugar_derive in
+  let in_scope scope f = D.with_salt_scope scope f in
+  (* "This process": d1, then other work in the module. *)
+  D.reset_salt_counts ();
+  let r1 = in_scope "M" (fun () -> D.respan_derived_decl d1) in
+  let r2 = in_scope "M" (fun () -> D.respan_derived_decl d2) in
+  let r1_again = in_scope "M" (fun () -> D.respan_derived_decl d1) in
+  (* "Another process" (a cached stdlib module): the same module from scratch. *)
+  D.reset_salt_counts ();
+  let _ = in_scope "Other" (fun () -> D.respan_derived_decl d2) in
+  let r1' = in_scope "M" (fun () -> D.respan_derived_decl d1) in
+  let r1_other_mod = in_scope "N" (fun () -> D.respan_derived_decl d1) in
+  Alcotest.(check bool) "same module, same decl: same spans in every process" true (r1 = r1');
+  Alcotest.(check bool) "a different decl gets a different key" true (name_span r1 <> name_span r2);
+  Alcotest.(check bool) "a repeat in one module gets a different key" true
+    (name_span r1 <> name_span r1_again);
+  Alcotest.(check bool) "the same decl in another module gets a different key" true
+    (name_span r1 <> name_span r1_other_mod);
+  Alcotest.(check string) "still synthetic" "<none>" (name_span r1).March_ast.Ast.file;
+  Alcotest.(check bool) "positive line" true ((name_span r1).March_ast.Ast.start_line > 0)
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -7357,7 +7393,7 @@ let test_whereis_named () =
   end|} in
   let m =
     let lexbuf = Lexing.from_string src in
-    let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    let ast = March_parser.Parse.module_of_lexbuf lexbuf in
     March_desugar.Desugar.desugar_module ast
   in
   March_eval.Eval.run_module m;
@@ -7689,7 +7725,7 @@ let test_dyn_sup_in_app () =
   end|} in
   let m =
     let lexbuf = Lexing.from_string src in
-    let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    let ast = March_parser.Parse.module_of_lexbuf lexbuf in
     March_desugar.Desugar.desugar_module ast
   in
   March_eval.Eval.run_module m;
@@ -10217,7 +10253,7 @@ let test_cap_no_alloc_lexes () =
 let test_cap_verified_parses () =
   let src = "mod V do\n  cap verified\n  fn f(n : Int) : Int do n end\nend\n" in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   Alcotest.(check bool) "DOpts verified present" true
     (List.exists
        (function March_ast.Ast.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
@@ -13958,17 +13994,11 @@ let test_qualified_error_uses_notes () =
 (* ── Improvement #7: parse errors route through render_diagnostic ────────── *)
 
 let render_parse_err src =
-  let lexbuf = Lexing.from_string src in
-  (try ignore (March_parser.Parser.module_
-    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf); ""
-  with
-  | March_errors.Errors.ParseError (msg, hint, _) ->
-    let lb2 = Lexing.from_string src in
-    March_errors.Errors.render_parse_error ~src ?hint ~msg lb2
-  | March_parser.Parser.Error ->
-    let lb2 = Lexing.from_string src in
-    March_errors.Errors.render_parse_error ~src ~msg:"Parse error:" lb2
-  | _ -> "")
+  match March_parser.Parse.module_ ~stuck:"Parse error:" src with
+  | Ok _ -> ""
+  | Error diags ->
+    String.concat "\n"
+      (List.map (March_errors.Errors.render_diagnostic ~src) diags)
 
 let test_parse_error_has_error_header () =
   let src = "mod Test do\n  fn f(x) do\n    if x then 1 end\n  end\nend" in
@@ -14073,6 +14103,101 @@ let test_toplevel_mod_plus_sibling_fn_error () =
     "top-level mod + sibling fn: message mentions only one top-level mod" true
     (_contains_substr output "only one top-level" ||
      _contains_substr output "one top-level `mod`")
+
+(* ── Parse-error caret positions ─────────────────────────────────────────
+   The grammar's `error` productions each choose the position their message
+   is about (`$startpos($N)`).  The CLI used to drop it and render at menhir's
+   lookahead token instead -- the token AFTER the mistake -- and nothing
+   noticed, because every parse-error test asserted message substrings only.
+   These pin line AND column of the span the diagnostic is rendered at. *)
+
+let parse_error_diag src : March_errors.Errors.diagnostic option =
+  match March_parser.Parse.module_ src with
+  | Ok _ -> None
+  | Error diags -> Some (List.hd diags)
+
+let check_parse_error_caret ~src ~msg_part ~line ~col ~end_col =
+  match parse_error_diag src with
+  | None -> Alcotest.fail "expected a parse error"
+  | Some d ->
+    let sp = d.March_errors.Errors.span in
+    Alcotest.(check bool) ("message mentions " ^ msg_part) true
+      (_contains_substr d.March_errors.Errors.message msg_part);
+    Alcotest.(check (triple int int int)) "caret (line, col, end_col)"
+      (line, col, end_col)
+      (sp.March_ast.Ast.start_line, sp.March_ast.Ast.start_col,
+       sp.March_ast.Ast.end_col);
+    (* ...and the rendered caret line really sits under that column. *)
+    let rendered = March_errors.Errors.render_diagnostic ~src d in
+    let gutter = String.length (Printf.sprintf "%d | " line) in
+    let want = String.make (gutter + col) ' ' ^ String.make (end_col - col) '^' in
+    Alcotest.(check bool) "rendered caret under the chosen token" true
+      (List.mem want (String.split_on_char '\n' rendered))
+
+let test_parse_caret_then () =
+  (* `IF expr THEN expr error` chooses $startpos($3), the `then`.  The
+     lookahead when the production fires is `end` (col 18): the old caret. *)
+  check_parse_error_caret
+    ~src:"mod T do\n  fn f(x) do\n    if x then 1 end\n  end\nend"
+    ~msg_part:"I don't recognize `then` here" ~line:3 ~col:9 ~end_col:13
+
+let test_parse_caret_else_if_missing_end () =
+  (* `IF .. DO .. ELSE .. error`: one `end` closes the inner `if`, the outer
+     one is still open when `)` arrives. *)
+  check_parse_error_caret
+    ~src:"mod T do\n  fn f(a, b) do\n    g(if a do 1 else if b do 2 else 3 end)\n  end\nend"
+    ~msg_part:"I was expecting `end` to close the if expression" ~line:3 ~col:41 ~end_col:42
+
+let test_parse_caret_mod_missing_do () =
+  check_parse_error_caret
+    ~src:"mod T\n  fn f() do 1 end\nend"
+    ~msg_part:"I was expecting `do` to start the module body" ~line:2 ~col:2 ~end_col:4
+
+(* [Parse] turns each of the three failure kinds into one diagnostic with its
+   own code; a lexer error in particular must not escape as an exception (on
+   the command line it used to: `Fatal error: exception Lexer_error`). *)
+let test_parse_diag_codes () =
+  let code src = match parse_error_diag src with
+    | Some d -> d.March_errors.Errors.code
+    | None -> Alcotest.fail "expected a parse error" in
+  Alcotest.(check (option string)) "grammar production" (Some "parse_error")
+    (code "mod T do\n  fn f(x) do\n    if x then 1 end\n  end\nend");
+  Alcotest.(check (option string)) "menhir stuck" (Some "syntax_error")
+    (code "mod T do\n  fn f() do 1 + end\nend");
+  Alcotest.(check (option string)) "lexer" (Some "lex_error")
+    (code "mod T do\n  fn f() do ` end\nend");
+  check_parse_error_caret ~src:"mod T do\n  fn f() do ` end\nend"
+    ~msg_part:"Unexpected character" ~line:2 ~col:12 ~end_col:13;
+  (* the hint travels as a note, the filename into the span *)
+  match March_parser.Parse.module_ ~filename:"x.march"
+          "mod T do\n  fn f(x) do\n    if x then 1 end\n  end\nend" with
+  | Error [d] ->
+    Alcotest.(check string) "span file" "x.march" d.span.March_ast.Ast.file;
+    Alcotest.(check int) "hint is the one note" 1 (List.length d.notes)
+  | _ -> Alcotest.fail "expected exactly one diagnostic"
+
+(* `--check-json` lines carry the secondary spans and the notes; a consumer
+   that wants the old shape (`--emit-core-ast`) asks for [~related:false]. *)
+let test_diagnostic_json_labels_notes () =
+  let sp l c = { March_ast.Ast.file = "f.march"; start_line = l; start_col = c;
+                 end_line = l; end_col = c + 3 } in
+  let d : March_errors.Errors.diagnostic =
+    { severity = March_errors.Errors.Error; span = sp 3 4; message = "boom";
+      labels = [ { lbl_span = sp 1 2; lbl_message = "declared \"here\"" } ];
+      notes = [ "try\nthis" ]; code = Some "x"; fix = None } in
+  let j = March_errors.Errors.render_diagnostic_json d in
+  Alcotest.(check bool) "labels array" true
+    (_contains_substr j
+       {|"labels":[{"file":"f.march","start_line":1,"start_col":2,"end_line":1,"end_col":5,"message":"declared \"here\""}]|});
+  Alcotest.(check bool) "notes array" true
+    (_contains_substr j {|"notes":["try\nthis"]|});
+  Alcotest.(check bool) "fix still precedes them" true
+    (_contains_substr j {|"fix":null,"labels":|});
+  let old = March_errors.Errors.render_diagnostic_json ~related:false d in
+  Alcotest.(check bool) "~related:false is the old shape" true
+    (not (_contains_substr old "labels") && not (_contains_substr old "notes")
+     && String.length old > 0 && old.[String.length old - 1] = '}'
+     && _contains_substr old {|"fix":null}|})
 
 (* A nested multi-line match used directly as a match-arm body (no do/end
    wrapper) must parse.  This locks in the contextual-NL token-filter behavior
@@ -15244,8 +15369,7 @@ let stdlib_decls_like_toolchain dir files =
       let lexbuf = Lexing.from_string src in
       lexbuf.Lexing.lex_curr_p <-
         { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-      let m = March_parser.Parser.module_
-          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+      let m = March_parser.Parse.module_of_lexbuf lexbuf in
       let is_prelude = name = "prelude.march" in
       let m = March_desugar.Desugar.desugar_module ~is_entry:is_prelude m in
       if is_prelude then
@@ -16960,8 +17084,7 @@ let test_restart_still_usable_as_identifier () =
     end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_
-            (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   Alcotest.(check bool) "module with a `restart` parameter parses"
     true (List.length m.mod_decls > 0)
 
@@ -16989,8 +17112,7 @@ let test_parse_supervise_child_restart_types () =
     end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_
-            (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   let sup =
     List.find_map (fun d -> match d with
       | March_ast.Ast.DActor (_, nm, ad, _) when nm.March_ast.Ast.txt = "S" ->
@@ -17752,6 +17874,7 @@ let compiler_suites =
           Alcotest.test_case "container: Option dropped"                  `Quick test_linear_container_option_dropped;
           Alcotest.test_case "container: used once / records ok"          `Quick test_linear_container_ok;
           Alcotest.test_case "derive Eq: no unreachable arm"              `Quick test_derive_eq_single_ctor_no_unreachable_arm;
+          Alcotest.test_case "derive spans keyed by the decl"             `Quick test_derive_spans_keyed_by_decl;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;
@@ -18182,6 +18305,11 @@ let compiler_suites =
           Alcotest.test_case "#6 non-redundant match: no warning"           `Quick test_non_redundant_no_warning;
           Alcotest.test_case "#8 qualified error has notes not inline"      `Quick test_qualified_error_uses_notes;
           Alcotest.test_case "#7 parse error uses -- ERROR header"          `Quick test_parse_error_has_error_header;
+          Alcotest.test_case "parse caret: `then` points at `then`"          `Quick test_parse_caret_then;
+          Alcotest.test_case "parse caret: else-if chain missing `end`"      `Quick test_parse_caret_else_if_missing_end;
+          Alcotest.test_case "parse caret: mod missing `do`"                 `Quick test_parse_caret_mod_missing_do;
+          Alcotest.test_case "Parse: one coded diagnostic per failure kind"  `Quick test_parse_diag_codes;
+          Alcotest.test_case "--check-json: labels and notes"                `Quick test_diagnostic_json_labels_notes;
           Alcotest.test_case "#7 if-then note mentions do/end"              `Quick test_parse_error_then_note_do_end;
           Alcotest.test_case "fix: if-then error names then as problem"     `Quick test_parse_error_then_says_then_not_else;
           Alcotest.test_case "fix: if-then primary message not about else"  `Quick test_parse_error_then_primary_message;

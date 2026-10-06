@@ -109,7 +109,10 @@ What `start` gives you:
   makes a peer *suspect* and triggers a reconnect; a refused reconnect (nothing listening)
   or SWIM's timeout makes it *dead*. A dead peer is reconnected on a backoff and rejoins when
   it proves it is alive. A peer that restarted is a new *creation*: the old one is reported
-  dead and the new one as rejoined.
+  dead and the new one as rejoined. SWIM probes every 1 s, waits 500 ms for an ack and
+  3 s for a suspect to refute; `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and
+  `MARCH_SWIM_SUSPECT_MS` move those defaults of `ClusterNode.config` for a slow host
+  (a record update of the config still wins).
 - **Names.** `register(node, name, pid)`, `unregister`, `lookup`, and `watch(node, name, f)`,
   which reports `Bound`, `Unbound` and `Lost`. A registration is pushed to every peer at
   once and repaired by periodic anti-entropy. `lookup` hides a binding whose holder is dead,
@@ -287,17 +290,27 @@ or a changed `MARCH_NODE_CERT` file, which `config_from_env` nodes re-read every
 `MARCH_NODE_CERT_POLL_MS` (10 s by default). New handshakes present the new
 certificate. A link already up is not reconnected, because that would cancel the
 sessions on it. Instead the node sends the peer a `CERT_UPDATE` control frame
-over the link (tag 16). The frame holds the new certificate and a signature by
-that certificate's key over the sender, the receiver and the certificate. The
-peer checks the certificate as a handshake would, with the same node name
-required, and keeps it for that link from then on.
+over the link (tag 16). The frame holds the new certificate, a counter, and a
+signature by that certificate's key over the sender, the receiver, the link's
+handshake transcript, the counter and the certificate. The peer takes it only
+on the link whose transcript it covers, and only with a counter above the last
+one it took there. A frame recorded off the wire therefore cannot be replayed
+on another link or again on the same one. The peer checks the certificate as a
+handshake would, with the same node name required, and keeps it for that link
+from then on. A running node, and a peer taking an update, also refuse a
+certificate issued before the one held. The issue time is the
+`<unix ms>-<random>` prefix `forge cluster cert` puts on the serial, so the
+signed body format is unchanged.
 
 In a cluster running the control plane (a `[control]` section in its topology),
 a certificate and a revocation can also arrive as items of a release, from
 `forge cluster cert --deliver` and `forge cluster revoke --deliver`. The release
 is signed by the deploy key and the item by the operator key, and the node
 checks both before it calls `replace_cert` (for an item naming itself) or
-`revoke`. The control plane only carries them and issues nothing. See
+`revoke`. It refuses a release older than the newest one it took certificates
+or revocations from. That floor is kept in `$MARCH_CONTROL_DIR/cert-floor-<node>`
+so it survives a restart. The control plane only carries them and issues
+nothing. See
 [Cluster Certificates]({{ site.baseurl }}/docs/cluster-certificates/).
 
 ### Per-frame MAC

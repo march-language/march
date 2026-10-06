@@ -153,9 +153,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 
 /* Responsive */
 @media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}
-</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div><div class="sb-sub"><a class="sl" href="Actor.html#fn-call"><span class="sb-kind" style="color:var(--fn)">F</span>call</a>
+</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div><div class="sb-sub"><a class="sl" href="Actor.html#type-InspectError"><span class="sb-kind" style="color:var(--ty)">T</span>InspectError</a>
+<a class="sl" href="Actor.html#fn-call"><span class="sb-kind" style="color:var(--fn)">F</span>call</a>
 <a class="sl" href="Actor.html#fn-cancel_timer"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_timer</a>
 <a class="sl" href="Actor.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
+<a class="sl" href="Actor.html#fn-debug"><span class="sb-kind" style="color:var(--fn)">F</span>debug</a>
+<a class="sl" href="Actor.html#fn-inspect_state"><span class="sb-kind" style="color:var(--fn)">F</span>inspect_state</a>
 <a class="sl" href="Actor.html#fn-introspect"><span class="sb-kind" style="color:var(--fn)">F</span>introspect</a>
 <a class="sl" href="Actor.html#fn-is_draining"><span class="sb-kind" style="color:var(--fn)">F</span>is_draining</a>
 <a class="sl" href="Actor.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
@@ -441,9 +444,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-core_check_certs"><span class="sb-kind" style="color:var(--fn)">F</span>core_check_certs</a>
 <a class="sl" href="ClusterNode.html#fn-core_dial_failed"><span class="sb-kind" style="color:var(--fn)">F</span>core_dial_failed</a>
 <a class="sl" href="ClusterNode.html#fn-core_dialed"><span class="sb-kind" style="color:var(--fn)">F</span>core_dialed</a>
+<a class="sl" href="ClusterNode.html#fn-core_dialed_bound"><span class="sb-kind" style="color:var(--fn)">F</span>core_dialed_bound</a>
 <a class="sl" href="ClusterNode.html#fn-core_frame"><span class="sb-kind" style="color:var(--fn)">F</span>core_frame</a>
 <a class="sl" href="ClusterNode.html#fn-core_link_closed"><span class="sb-kind" style="color:var(--fn)">F</span>core_link_closed</a>
 <a class="sl" href="ClusterNode.html#fn-core_linked"><span class="sb-kind" style="color:var(--fn)">F</span>core_linked</a>
+<a class="sl" href="ClusterNode.html#fn-core_linked_bound"><span class="sb-kind" style="color:var(--fn)">F</span>core_linked_bound</a>
 <a class="sl" href="ClusterNode.html#fn-core_local_down"><span class="sb-kind" style="color:var(--fn)">F</span>core_local_down</a>
 <a class="sl" href="ClusterNode.html#fn-core_lookup"><span class="sb-kind" style="color:var(--fn)">F</span>core_lookup</a>
 <a class="sl" href="ClusterNode.html#fn-core_member"><span class="sb-kind" style="color:var(--fn)">F</span>core_member</a>
@@ -469,6 +474,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-event_text"><span class="sb-kind" style="color:var(--fn)">F</span>event_text</a>
 <a class="sl" href="ClusterNode.html#fn-frames_rejected"><span class="sb-kind" style="color:var(--fn)">F</span>frames_rejected</a>
 <a class="sl" href="ClusterNode.html#fn-global_pid"><span class="sb-kind" style="color:var(--fn)">F</span>global_pid</a>
+<a class="sl" href="ClusterNode.html#fn-handshake"><span class="sb-kind" style="color:var(--fn)">F</span>handshake</a>
 <a class="sl" href="ClusterNode.html#fn-info_of"><span class="sb-kind" style="color:var(--fn)">F</span>info_of</a>
 <a class="sl" href="ClusterNode.html#fn-is_session_tag"><span class="sb-kind" style="color:var(--fn)">F</span>is_session_tag</a>
 <a class="sl" href="ClusterNode.html#fn-link_count"><span class="sb-kind" style="color:var(--fn)">F</span>link_count</a>
@@ -894,6 +900,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Deque.html#fn-singleton"><span class="sb-kind" style="color:var(--fn)">F</span>singleton</a>
 <a class="sl" href="Deque.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
 <a class="sl" href="Deque.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Diagnose.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Diagnose.html">Diagnose</a></div><div class="sb-sub"><a class="sl" href="Diagnose.html#type-Finding"><span class="sb-kind" style="color:var(--ty)">T</span>Finding</a>
+<a class="sl" href="Diagnose.html#fn-findings"><span class="sb-kind" style="color:var(--fn)">F</span>findings</a>
+<a class="sl" href="Diagnose.html#fn-ids_of"><span class="sb-kind" style="color:var(--fn)">F</span>ids_of</a>
+<a class="sl" href="Diagnose.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Dir.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Dir.html">Dir</a></div><div class="sb-sub"><a class="sl" href="Dir.html#fn-exists"><span class="sb-kind" style="color:var(--fn)">F</span>exists</a>
 <a class="sl" href="Dir.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
 <a class="sl" href="Dir.html#fn-list_full"><span class="sb-kind" style="color:var(--fn)">F</span>list_full</a>
@@ -1790,6 +1800,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NetKernel.html#fn-handshake_addr"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_addr</a>
 <a class="sl" href="NetKernel.html#fn-handshake_auth"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_auth</a>
 <a class="sl" href="NetKernel.html#fn-handshake_role"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_role</a>
+<a class="sl" href="NetKernel.html#fn-link_binding"><span class="sb-kind" style="color:var(--fn)">F</span>link_binding</a>
 <a class="sl" href="NetKernel.html#fn-mac_failure_limit"><span class="sb-kind" style="color:var(--fn)">F</span>mac_failure_limit</a>
 <a class="sl" href="NetKernel.html#fn-note_raw_refused"><span class="sb-kind" style="color:var(--fn)">F</span>note_raw_refused</a>
 <a class="sl" href="NetKernel.html#fn-off_frame_rejected"><span class="sb-kind" style="color:var(--fn)">F</span>off_frame_rejected</a>
@@ -1837,12 +1848,15 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeCert.html#fn-has_flag"><span class="sb-kind" style="color:var(--fn)">F</span>has_flag</a>
 <a class="sl" href="NodeCert.html#fn-has_role"><span class="sb-kind" style="color:var(--fn)">F</span>has_role</a>
 <a class="sl" href="NodeCert.html#fn-is_revoked"><span class="sb-kind" style="color:var(--fn)">F</span>is_revoked</a>
+<a class="sl" href="NodeCert.html#fn-issued_ms"><span class="sb-kind" style="color:var(--fn)">F</span>issued_ms</a>
 <a class="sl" href="NodeCert.html#fn-issuer_uri"><span class="sb-kind" style="color:var(--fn)">F</span>issuer_uri</a>
 <a class="sl" href="NodeCert.html#fn-key_from_hex"><span class="sb-kind" style="color:var(--fn)">F</span>key_from_hex</a>
 <a class="sl" href="NodeCert.html#fn-keypair"><span class="sb-kind" style="color:var(--fn)">F</span>keypair</a>
 <a class="sl" href="NodeCert.html#fn-keypair_from_seed"><span class="sb-kind" style="color:var(--fn)">F</span>keypair_from_seed</a>
 <a class="sl" href="NodeCert.html#fn-node_name"><span class="sb-kind" style="color:var(--fn)">F</span>node_name</a>
 <a class="sl" href="NodeCert.html#fn-node_uri"><span class="sb-kind" style="color:var(--fn)">F</span>node_uri</a>
+<a class="sl" href="NodeCert.html#fn-order_problem"><span class="sb-kind" style="color:var(--fn)">F</span>order_problem</a>
+<a class="sl" href="NodeCert.html#fn-ordered_serial"><span class="sb-kind" style="color:var(--fn)">F</span>ordered_serial</a>
 <a class="sl" href="NodeCert.html#fn-public_key"><span class="sb-kind" style="color:var(--fn)">F</span>public_key</a>
 <a class="sl" href="NodeCert.html#fn-revocation_from_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_from_bytes</a>
 <a class="sl" href="NodeCert.html#fn-revocation_from_text"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_from_text</a>
@@ -1853,6 +1867,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeCert.html#fn-revokes"><span class="sb-kind" style="color:var(--fn)">F</span>revokes</a>
 <a class="sl" href="NodeCert.html#fn-sign"><span class="sb-kind" style="color:var(--fn)">F</span>sign</a>
 <a class="sl" href="NodeCert.html#fn-sign_revocation"><span class="sb-kind" style="color:var(--fn)">F</span>sign_revocation</a>
+<a class="sl" href="NodeCert.html#fn-supersedes"><span class="sb-kind" style="color:var(--fn)">F</span>supersedes</a>
 <a class="sl" href="NodeCert.html#fn-to_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>to_bytes</a>
 <a class="sl" href="NodeCert.html#fn-to_text"><span class="sb-kind" style="color:var(--fn)">F</span>to_text</a>
 <a class="sl" href="NodeCert.html#fn-verify"><span class="sb-kind" style="color:var(--fn)">F</span>verify</a>
@@ -2177,6 +2192,20 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Range.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
 <a class="sl" href="Range.html#fn-sum"><span class="sb-kind" style="color:var(--fn)">F</span>sum</a>
 <a class="sl" href="Range.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Recon.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Recon.html">Recon</a></div><div class="sb-sub"><a class="sl" href="Recon.html#type-ActorInfo"><span class="sb-kind" style="color:var(--ty)">T</span>ActorInfo</a>
+<a class="sl" href="Recon.html#type-SupNode"><span class="sb-kind" style="color:var(--ty)">T</span>SupNode</a>
+<a class="sl" href="Recon.html#type-NodeStats"><span class="sb-kind" style="color:var(--ty)">T</span>NodeStats</a>
+<a class="sl" href="Recon.html#type-CrashReport"><span class="sb-kind" style="color:var(--ty)">T</span>CrashReport</a>
+<a class="sl" href="Recon.html#type-EpochReport"><span class="sb-kind" style="color:var(--ty)">T</span>EpochReport</a>
+<a class="sl" href="Recon.html#fn-actors"><span class="sb-kind" style="color:var(--fn)">F</span>actors</a>
+<a class="sl" href="Recon.html#fn-crashes"><span class="sb-kind" style="color:var(--fn)">F</span>crashes</a>
+<a class="sl" href="Recon.html#fn-epochs"><span class="sb-kind" style="color:var(--fn)">F</span>epochs</a>
+<a class="sl" href="Recon.html#fn-info"><span class="sb-kind" style="color:var(--fn)">F</span>info</a>
+<a class="sl" href="Recon.html#fn-node_stats"><span class="sb-kind" style="color:var(--fn)">F</span>node_stats</a>
+<a class="sl" href="Recon.html#fn-proc_count"><span class="sb-kind" style="color:var(--fn)">F</span>proc_count</a>
+<a class="sl" href="Recon.html#fn-proc_window"><span class="sb-kind" style="color:var(--fn)">F</span>proc_window</a>
+<a class="sl" href="Recon.html#fn-scheduler_usage"><span class="sb-kind" style="color:var(--fn)">F</span>scheduler_usage</a>
+<a class="sl" href="Recon.html#fn-tree"><span class="sb-kind" style="color:var(--fn)">F</span>tree</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Regex.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Regex.html">Regex</a></div><div class="sb-sub"><a class="sl" href="Regex.html#type-RegexAtom"><span class="sb-kind" style="color:var(--ty)">T</span>RegexAtom</a>
 <a class="sl" href="Regex.html#type-RegexQuant"><span class="sb-kind" style="color:var(--ty)">T</span>RegexQuant</a>
 <a class="sl" href="Regex.html#type-RegexItem"><span class="sb-kind" style="color:var(--ty)">T</span>RegexItem</a>
@@ -2306,6 +2335,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#type-RunError"><span class="sb-kind" style="color:var(--ty)">T</span>RunError</a>
 <a class="sl" href="SessionNode.html#type-OfferCount"><span class="sb-kind" style="color:var(--ty)">T</span>OfferCount</a>
 <a class="sl" href="SessionNode.html#type-Offer"><span class="sb-kind" style="color:var(--ty)">T</span>Offer</a>
+<a class="sl" href="SessionNode.html#type-ApWait"><span class="sb-kind" style="color:var(--ty)">T</span>ApWait</a>
 <a class="sl" href="SessionNode.html#type-ApMix"><span class="sb-kind" style="color:var(--ty)">T</span>ApMix</a>
 <a class="sl" href="SessionNode.html#fn-accept_from"><span class="sb-kind" style="color:var(--fn)">F</span>accept_from</a>
 <a class="sl" href="SessionNode.html#fn-accepts"><span class="sb-kind" style="color:var(--fn)">F</span>accepts</a>
@@ -2738,6 +2768,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Topology.html#fn-offered"><span class="sb-kind" style="color:var(--fn)">F</span>offered</a>
 <a class="sl" href="Topology.html#fn-offering"><span class="sb-kind" style="color:var(--fn)">F</span>offering</a>
 <a class="sl" href="Topology.html#fn-on_label"><span class="sb-kind" style="color:var(--fn)">F</span>on_label</a>
+<a class="sl" href="Topology.html#fn-pinned"><span class="sb-kind" style="color:var(--fn)">F</span>pinned</a>
 <a class="sl" href="Topology.html#fn-place"><span class="sb-kind" style="color:var(--fn)">F</span>place</a>
 <a class="sl" href="Topology.html#fn-placement_of_json"><span class="sb-kind" style="color:var(--fn)">F</span>placement_of_json</a>
 <a class="sl" href="Topology.html#fn-placement_text"><span class="sb-kind" style="color:var(--fn)">F</span>placement_text</a>
@@ -2797,6 +2828,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Uri.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Vault.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Vault.html">Vault</a></div><div class="sb-sub"><a class="sl" href="Vault.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
 <a class="sl" href="Vault.html#fn-clear"><span class="sb-kind" style="color:var(--fn)">F</span>clear</a>
+<a class="sl" href="Vault.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
 <a class="sl" href="Vault.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
 <a class="sl" href="Vault.html#fn-drop"><span class="sb-kind" style="color:var(--fn)">F</span>drop</a>
 <a class="sl" href="Vault.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
@@ -2804,6 +2836,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Vault.html#fn-has"><span class="sb-kind" style="color:var(--fn)">F</span>has</a>
 <a class="sl" href="Vault.html#fn-incr"><span class="sb-kind" style="color:var(--fn)">F</span>incr</a>
 <a class="sl" href="Vault.html#fn-keys"><span class="sb-kind" style="color:var(--fn)">F</span>keys</a>
+<a class="sl" href="Vault.html#fn-live_tables"><span class="sb-kind" style="color:var(--fn)">F</span>live_tables</a>
 <a class="sl" href="Vault.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
 <a class="sl" href="Vault.html#fn-ns_drop"><span class="sb-kind" style="color:var(--fn)">F</span>ns_drop</a>
 <a class="sl" href="Vault.html#fn-ns_get"><span class="sb-kind" style="color:var(--fn)">F</span>ns_get</a>
@@ -2885,12 +2918,15 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-has_flag"><div class="ih"><span class="badge bfn">fn</span><span class="name">has_flag</span><span class="sig">has_flag(c : <a href="#type-Cert">Cert</a>, flag : String) : Bool do List.member(c.flags, flag) end</span><a class="anchor-link" href="#fn-has_flag" title="Link">#</a></div><div class="ib"><p>Does [c] carry [flag] (e.g. \</p></div></div>
 <div class="item" id="fn-has_role"><div class="ih"><span class="badge bfn">fn</span><span class="name">has_role</span><span class="sig">has_role(c : <a href="#type-Cert">Cert</a>, role : String) : Bool do List.member(c.roles, role) end</span><a class="anchor-link" href="#fn-has_role" title="Link">#</a></div><div class="ib"><p>Does [c] let its node play role [role] (\</p></div></div>
 <div class="item" id="fn-is_revoked"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_revoked</span><span class="sig">is_revoked(c : <a href="#type-Cert">Cert</a>, rs : List(<a href="#type-Revocation">Revocation</a>)) : Bool</span><a class="anchor-link" href="#fn-is_revoked" title="Link">#</a></div><div class="ib"><p>Is [c] revoked by any of [rs]?</p></div></div>
+<div class="item" id="fn-issued_ms"><div class="ih"><span class="badge bfn">fn</span><span class="name">issued_ms</span><span class="sig">issued_ms(c : <a href="#type-Cert">Cert</a>) : Option(Int)</span><a class="anchor-link" href="#fn-issued_ms" title="Link">#</a></div><div class="ib"><p>When [c] was issued (unix ms), if its serial says (<code>ordered_serial</code>); None for a serial with no order.</p></div></div>
 <div class="item" id="fn-issuer_uri"><div class="ih"><span class="badge bfn">fn</span><span class="name">issuer_uri</span><span class="sig">issuer_uri(trust_domain : String, operator_pub_hex : String) : String</span><a class="anchor-link" href="#fn-issuer_uri" title="Link">#</a></div><div class="ib"><p>The issuer URI for an operator public key (hex): its first 16 hex digits.</p></div></div>
 <div class="item" id="fn-key_from_hex"><div class="ih"><span class="badge bfn">fn</span><span class="name">key_from_hex</span><span class="sig">key_from_hex(s : String, len : Int) : Result(<a href="Bytes.html#type-Bytes">Bytes</a>, String)</span><a class="anchor-link" href="#fn-key_from_hex" title="Link">#</a></div><div class="ib"><p>A key (or signature) from its hex text, checking its length in bytes.</p></div></div>
 <div class="item" id="fn-keypair"><div class="ih"><span class="badge bfn">fn</span><span class="name">keypair</span><span class="sig">keypair() : <a href="Bytes.html#type-Bytes">Bytes</a> do ed25519_seed_keypair(Crypto.random_bytes(32)) end</span><a class="anchor-link" href="#fn-keypair" title="Link">#</a></div><div class="ib"><p>A fresh ed25519 secret key (64 bytes: seed || public key).</p></div></div>
 <div class="item" id="fn-keypair_from_seed"><div class="ih"><span class="badge bfn">fn</span><span class="name">keypair_from_seed</span><span class="sig">keypair_from_seed(seed : <a href="Bytes.html#type-Bytes">Bytes</a>) : <a href="Bytes.html#type-Bytes">Bytes</a> do ed25519_seed_keypair(seed) end</span><a class="anchor-link" href="#fn-keypair_from_seed" title="Link">#</a></div><div class="ib"><p>The secret key a 32-byte [seed] determines (RFC 8032); empty Bytes for a wrong length.</p></div></div>
 <div class="item" id="fn-node_name"><div class="ih"><span class="badge bfn">fn</span><span class="name">node_name</span><span class="sig">node_name(uri : String) : String</span><a class="anchor-link" href="#fn-node_name" title="Link">#</a></div><div class="ib"><p>The node name a certificate's URI ends in (the segment after the last &quot;/node/&quot;), or &quot;&quot; when the URI has no node segment. The handshake requires it to equal the name the peer announces.</p></div></div>
 <div class="item" id="fn-node_uri"><div class="ih"><span class="badge bfn">fn</span><span class="name">node_uri</span><span class="sig">node_uri(trust_domain : String, pool : String, name : String) : String</span><a class="anchor-link" href="#fn-node_uri" title="Link">#</a></div><div class="ib"><p>The SPIFFE-style URI of node [name] in [pool] under [trust_domain].</p></div></div>
+<div class="item" id="fn-order_problem"><div class="ih"><span class="badge bfn">fn</span><span class="name">order_problem</span><span class="sig">order_problem(next : <a href="#type-Cert">Cert</a>, held : <a href="#type-Cert">Cert</a>) : Option(String)</span><a class="anchor-link" href="#fn-order_problem" title="Link">#</a></div><div class="ib"><p>Why [next] may not replace [held] (<code>supersedes</code>), if it may not.</p></div></div>
+<div class="item" id="fn-ordered_serial"><div class="ih"><span class="badge bfn">fn</span><span class="name">ordered_serial</span><span class="sig">ordered_serial(issued_ms : Int, rest : String) : String do int_to_string(issued_ms) ++ &quot;-&quot; ++ rest end</span><a class="anchor-link" href="#fn-ordered_serial" title="Link">#</a></div><div class="ib"><p>A serial carrying issue time [issued_ms] (unix ms): \</p></div></div>
 <div class="item" id="fn-public_key"><div class="ih"><span class="badge bfn">fn</span><span class="name">public_key</span><span class="sig">public_key(sk : <a href="Bytes.html#type-Bytes">Bytes</a>) : <a href="Bytes.html#type-Bytes">Bytes</a> do Bytes.slice(sk, 32, 32) end</span><a class="anchor-link" href="#fn-public_key" title="Link">#</a></div><div class="ib"><p>The 32-byte public key inside a 64-byte secret key.</p></div></div>
 <div class="item" id="fn-revocation_from_bytes"><div class="ih"><span class="badge bfn">fn</span><span class="name">revocation_from_bytes</span><span class="sig">revocation_from_bytes(bytes : List(Int)) : Result(<a href="#type-SignedRevocation">SignedRevocation</a>, String)</span><a class="anchor-link" href="#fn-revocation_from_bytes" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-revocation_from_text"><div class="ih"><span class="badge bfn">fn</span><span class="name">revocation_from_text</span><span class="sig">revocation_from_text(t : String) : Result(<a href="#type-SignedRevocation">SignedRevocation</a>, String)</span><a class="anchor-link" href="#fn-revocation_from_text" title="Link">#</a></div><div class="ib"></div></div>
@@ -2901,6 +2937,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-revokes"><div class="ih"><span class="badge bfn">fn</span><span class="name">revokes</span><span class="sig">revokes(r : <a href="#type-Revocation">Revocation</a>, c : <a href="#type-Cert">Cert</a>) : Bool</span><a class="anchor-link" href="#fn-revokes" title="Link">#</a></div><div class="ib"><p>Does [r] revoke [c]: the same serial, or (serial \</p></div></div>
 <div class="item" id="fn-sign"><div class="ih"><span class="badge bfn">fn</span><span class="name">sign</span><span class="sig">sign(c : <a href="#type-Cert">Cert</a>, operator_sk : <a href="Bytes.html#type-Bytes">Bytes</a>) : <a href="#type-Signed">Signed</a></span><a class="anchor-link" href="#fn-sign" title="Link">#</a></div><div class="ib"><p>Sign [c] with the operator secret key [operator_sk].</p></div></div>
 <div class="item" id="fn-sign_revocation"><div class="ih"><span class="badge bfn">fn</span><span class="name">sign_revocation</span><span class="sig">sign_revocation(r : <a href="#type-Revocation">Revocation</a>, operator_sk : <a href="Bytes.html#type-Bytes">Bytes</a>) : <a href="#type-SignedRevocation">SignedRevocation</a></span><a class="anchor-link" href="#fn-sign_revocation" title="Link">#</a></div><div class="ib"><p>Sign a revocation with the operator secret key.</p></div></div>
+<div class="item" id="fn-supersedes"><div class="ih"><span class="badge bfn">fn</span><span class="name">supersedes</span><span class="sig">supersedes(next : <a href="#type-Cert">Cert</a>, held : <a href="#type-Cert">Cert</a>) : Bool</span><a class="anchor-link" href="#fn-supersedes" title="Link">#</a></div><div class="ib"><p>May [next] replace [held], by issue order? Refused when [held] carries an issue time and [next] was issued before it, or carries none (a certificate from before ordered serials cannot replace one after). When [held] has no issue time there is no order to keep and the answer is yes (the release floor guards that case, <code>Control</code>). The same certificate again is yes.</p></div></div>
 <div class="item" id="fn-to_bytes"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_bytes</span><span class="sig">to_bytes(s : <a href="#type-Signed">Signed</a>) : List(Int)</span><a class="anchor-link" href="#fn-to_bytes" title="Link">#</a></div><div class="ib"><p>The signed certificate's wire bytes: [Bin(body), Bin(signature)].</p></div></div>
 <div class="item" id="fn-to_text"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_text</span><span class="sig">to_text(s : <a href="#type-Signed">Signed</a>) : String do Bytes.encode_base64(Bytes.from_list(to_bytes(s))) end</span><a class="anchor-link" href="#fn-to_text" title="Link">#</a></div><div class="ib"><p>The text form (base64 of <code>to_bytes</code>): MARCH_NODE_CERT and forge's .cert files.</p></div></div>
 <div class="item" id="fn-verify"><div class="ih"><span class="badge bfn">fn</span><span class="name">verify</span><span class="sig">verify(s : <a href="#type-Signed">Signed</a>, operator_pubkey : <a href="Bytes.html#type-Bytes">Bytes</a>, now : Int) : Result(<a href="#type-Cert">Cert</a>, String)</span><a class="anchor-link" href="#fn-verify" title="Link">#</a></div><div class="ib"><p>Verify a signed certificate against [operator_pubkey] (32 bytes) at [now] (unix seconds): the signature must cover the body, and [now] must not be past <code>not_after</code>. Returns the certificate, or why it is refused.</p></div></div>

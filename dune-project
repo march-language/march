@@ -23,8 +23,8 @@
   (alcotest (>= 1.7.0))
   (qcheck-core (>= 0.91))
   (qcheck-alcotest (>= 0.91))
-  (notty (>= 0.2.3))
-  (js_of_ocaml (and (>= 5.0) (< 6.4.0))))
+  (uutf (>= 1.0))   ; for vendor/notty
+  (js_of_ocaml (>= 5.0)))
 )
 
 (package

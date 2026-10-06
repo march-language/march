@@ -341,6 +341,9 @@ let base_env : env =
         | _ -> eval_error "mailbox_size: expected pid"))
   (* The observe socket's reply to one request line, built from the
      interpreter's actor table (lib/eval/eval_observe.ml). Stdlib-only: Recon. *)
+  ; ("observe_count_send", VBuiltin ("observe_count_send", function
+        | [] | [VUnit] -> Eval_runtime.count_send (); VUnit
+        | _ -> eval_error "observe_count_send: expected unit"))
   ; ("observe_query", VBuiltin ("observe_query", function
         | [VString line] -> VString (Eval_observe.query line)
         | _ -> eval_error "observe_query: expected String"))
@@ -477,7 +480,19 @@ let base_env : env =
            | Some pid ->
              (match Hashtbl.find_opt actor_registry pid with
               | Some inst when not (Queue.is_empty inst.ai_mailbox) ->
-                Queue.pop inst.ai_mailbox
+                (* An inspect request reaching a receive INSIDE a handler is
+                   answered "busy" (the compiled march_actor_recv's rule): the
+                   handler is mid-way, and user code never sees the request. *)
+                let rec next () =
+                  if Queue.is_empty inst.ai_mailbox then raise BlockedOnReceive
+                  else match Queue.pop inst.ai_mailbox with
+                    | VCon ("$sys_inspect", [VInt ref_id]) ->
+                      Hashtbl.replace pending_replies ref_id (VCon ("Err", [VString "busy"]));
+                      Hashtbl.replace pending_reply_times ref_id (Unix.gettimeofday () *. 1000.);
+                      next ()
+                    | m -> m
+                in
+                next ()
               | Some _ ->
                 raise BlockedOnReceive
               | None -> eval_error "receive: actor %d not found" pid)
@@ -4173,6 +4188,32 @@ let base_env : env =
         ) keys (VCon ("Nil", []))
       | _ -> eval_error "vault_keys: expected VaultTable"))
 
+  (* vault_reap / vault_close: the compiled runtime hands values a write
+     displaced back to the typed caller to drop (it cannot release them
+     deeply itself). Here the OCaml GC owns every value, so there is never
+     anything to hand back. vault_close still retires the table: its name
+     is unregistered and its data dropped. *)
+  ; ("vault_reap", VBuiltin ("vault_reap", function
+      | [VVaultHandle _; _key] -> VCon ("Nil", [])
+      | _ -> eval_error "vault_reap: expected (VaultTable, key)"))
+
+  ; ("vault_close", VBuiltin ("vault_close", function
+      | [VVaultHandle id] ->
+        (match Hashtbl.find_opt vault_registry id with
+         | Some tbl ->
+           (match Hashtbl.find_opt vault_name_registry tbl.vt_name with
+            | Some id' when id' = id -> Hashtbl.remove vault_name_registry tbl.vt_name
+            | _ -> ());
+           Hashtbl.remove vault_registry id;
+           Hashtbl.replace vault_closed id ()
+         | None -> ());
+        VCon ("Nil", [])
+      | _ -> eval_error "vault_close: expected VaultTable"))
+
+  ; ("vault_live_tables", VBuiltin ("vault_live_tables", function
+      | [] | [VUnit] -> VInt (Hashtbl.length vault_registry)
+      | _ -> eval_error "vault_live_tables: takes no arguments"))
+
   (* String-namespace vault helpers: accept a String namespace name and
      auto-create/find the vault by that name.  Useful for the pattern:
        ptype MyStore = { ns : String }
@@ -4262,6 +4303,28 @@ let base_env : env =
           tag-routing.  With the documented `type GetReq = GetReq` single-ctor
           sentinel this is index 0 = the actor's FIRST handler.
      Returns Ok(result) or Err(reason). *)
+  (* Observe plan R4: Actor.inspect_state. A "$sys_inspect" request queued
+     like any message (but past the mailbox limit), answered by the
+     scheduler when it reaches it (eval.ml), so the order relative to the
+     backlog is the compiled backend's. *)
+  ; ("actor_inspect", VBuiltin ("actor_inspect", function
+        | [VPid pid; VInt _timeout_ms] ->
+          if !current_pid = Some pid then VCon ("Err", [VString "self"])
+          else
+            (match Hashtbl.find_opt actor_registry pid with
+             | Some inst when inst.ai_alive ->
+               let ref_id = !next_call_ref in
+               next_call_ref := ref_id + 1;
+               Queue.push (VCon ("$sys_inspect", [VInt ref_id])) inst.ai_mailbox;
+               !run_scheduler_hook ();
+               (match Hashtbl.find_opt pending_replies ref_id with
+                | Some result ->
+                  Hashtbl.remove pending_replies ref_id;
+                  Hashtbl.remove pending_reply_times ref_id;
+                  result
+                | None -> VCon ("Err", [VString "timeout"]))
+             | _ -> VCon ("Err", [VString "dead"]))
+        | _ -> eval_error "actor_inspect: expected (Pid, Int)"))
   ; ("actor_call", VBuiltin ("actor_call", function
         | [VPid pid; msg; VInt timeout_ms] ->
           let call_started_ms = Unix.gettimeofday () *. 1000. in

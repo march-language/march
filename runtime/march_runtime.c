@@ -515,6 +515,95 @@ void march_decrc(void *p) {
     }
 }
 
+/* ── Releasing a closure that dies without being called ───────────────────
+ * An apply function releases its environment's captures when IT frees the
+ * environment.  A closure released anywhere else (dropped from a list, a
+ * record, a Vault, or never applied) is a value of a function type at that
+ * site, which names no layout, so the release used to free the cell and leak
+ * every capture.  The compiler synthesizes a capture-release function per
+ * closure type whose environment owns its captures and registers it here
+ * under the closure's apply function (field 0), once, from main's prologue
+ * (march_clo_register_drops).  march_clo_release runs it when the release
+ * frees the cell.  A closure with no entry -- a runtime trampoline, a type
+ * whose environment borrows, one built by a hot patch or REPL fragment,
+ * which do not register -- is released exactly as before: never a crash,
+ * at worst the old leak.  See specs/progress/2026-10-05-dropped-closure-captures.md.
+ *
+ * Registration happens before the scheduler starts, so lookups need no lock. */
+typedef void (*march_clo_drop_fn)(void *clo);
+typedef struct { void *apply; march_clo_drop_fn drop; } march_clo_drop_entry;
+static march_clo_drop_entry *g_clo_drops = NULL;
+static size_t g_clo_drops_cap = 0;   /* a power of two, or 0 */
+static size_t g_clo_drops_n = 0;
+
+static size_t clo_drop_slot(void *apply, size_t cap) {
+    uintptr_t h = (uintptr_t)apply;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+    return (size_t)h & (cap - 1);
+}
+
+static void clo_drop_insert(march_clo_drop_entry *tab, size_t cap, void *apply, march_clo_drop_fn drop) {
+    size_t i = clo_drop_slot(apply, cap);
+    while (tab[i].apply && tab[i].apply != apply) i = (i + 1) & (cap - 1);
+    tab[i].apply = apply;
+    tab[i].drop = drop;
+}
+
+void march_clo_register_drops(void **pairs, int64_t n) {
+    if (n <= 0) return;
+    size_t want = g_clo_drops_n + (size_t)n;
+    if (want * 2 > g_clo_drops_cap) {
+        size_t cap = g_clo_drops_cap ? g_clo_drops_cap : 64;
+        while (want * 2 > cap) cap *= 2;
+        march_clo_drop_entry *tab = calloc(cap, sizeof *tab);
+        if (!tab) return;   /* out of memory: keep the old (shallow) behaviour */
+        for (size_t i = 0; i < g_clo_drops_cap; i++)
+            if (g_clo_drops[i].apply)
+                clo_drop_insert(tab, cap, g_clo_drops[i].apply, g_clo_drops[i].drop);
+        free(g_clo_drops);
+        g_clo_drops = tab;
+        g_clo_drops_cap = cap;
+    }
+    for (int64_t k = 0; k < n; k++) {
+        void *apply = pairs[2 * k];
+        if (!apply) continue;
+        clo_drop_insert(g_clo_drops, g_clo_drops_cap, apply, (march_clo_drop_fn)pairs[2 * k + 1]);
+    }
+    g_clo_drops_n = want;
+}
+
+static march_clo_drop_fn clo_drop_lookup(void *apply) {
+    if (!g_clo_drops_cap || !apply) return NULL;
+    size_t i = clo_drop_slot(apply, g_clo_drops_cap);
+    while (g_clo_drops[i].apply) {
+        if (g_clo_drops[i].apply == apply) return g_clo_drops[i].drop;
+        i = (i + 1) & (g_clo_drops_cap - 1);
+    }
+    return NULL;
+}
+
+void march_clo_release(void *p) {
+    if (!IS_HEAP_PTR(p)) return;
+    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
+    march_clo_drop_fn drop = clo_drop_lookup(*(void **)((char *)p + 16));
+    if (!drop) { march_decrc(p); return; }
+    int32_t tag  = ((march_hdr *)p)->tag;
+    int64_t prev = atomic_fetch_sub_explicit(
+        (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
+    if (gc_trace_on())
+        gc_emit(prev == 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
+    if (prev == 1) {
+        drop(p);            /* releases the captures; reads the cell, frees nothing of it */
+        march_run_resource_dtor(p);
+        MARCH_FREE_BUMP();
+        free(p);
+    } else if (prev < 1) {
+        fprintf(stderr, "march: RC underflow in march_clo_release (rc was %lld) at %p — aborting\n",
+                (long long)prev, p);
+        abort();
+    }
+}
+
 int64_t march_decrc_freed(void *p) {
     if (!IS_HEAP_PTR(p)) return 1;
     /* Immortal: not freed, so the caller must not release its children. */
@@ -3195,6 +3284,14 @@ static void spawn_main_impl(void (*fn)(void), int force_pin) {
        it: a program compiled --pin-main needs the main thread to run at all
        (Cocoa/GLFW), so honouring MARCH_PIN_MAIN=0 there would break it in a
        way the user cannot diagnose from the message they would not get. */
+    /* The observe socket reads its environment (getenv) when it starts.
+     * Start it here, before `main` is runnable: march_run_scheduler starts it
+     * too, but when a scheduler is already running in the background
+     * (march_ensure_sched_started) `main` is executing by then, and its
+     * Process.set_env (setenv frees the old environ) racing that getenv on
+     * this thread is a SIGSEGV in getenv.  Both calls are once-only. */
+    march_observe_snapshot_install();
+    march_observe_maybe_start();
     /* `main` is the one unit that follows the current code version instead
      * of pinning an epoch (march_proc.code_epoch): it runs for the process
      * lifetime and never reaches a marker, so a pinned main would keep its
@@ -4547,6 +4644,9 @@ static void actor_run_on_stop(march_proc *self, void *actor, void *clo) {
     self->crash_jmp = saved_crash;
 }
 
+static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
+                                 void *actor, void *request);
+
 static void actor_green_thread(void *arg) {
     march_actor_meta *meta = (march_actor_meta *)arg;
     void *actor = meta->actor;
@@ -4764,6 +4864,15 @@ static void actor_green_thread(void *arg) {
             break;
         }
 
+        /* An inspect request (Actor.inspect_state): answered here, between
+         * handlers, on the actor's own thread; never dispatched.  One header
+         * load and a compare per message (receive side only). */
+        if (IS_HEAP_PTR(msg) && ((march_hdr *)msg)->tag == MARCH_SYS_INSPECT_TAG) {
+            actor_answer_inspect(meta, self, actor, msg);
+            march_sched_tick();
+            continue;
+        }
+
         /* The epoch model's message rules (early advance, deferral,
          * migrate_msg, drop). */
         if (self && hcr_route(meta, a, self, &msg, msg_epoch, 1, msg_conn, msg_seq) == HCR_CONSUMED) {
@@ -4944,8 +5053,20 @@ stopped:
  * shutdown endgame); it must never reach user code, which would match on
  * the static sentinel and drop it.  An actor lands on its loop's death path
  * through stop_jmp; a task or main simply ends this green thread. */
+static void inspect_reply(void *request, void *result);
+static void *mk_err_cstr(const char *msg);
+
 void *march_actor_recv(void) {
     void *msg = march_sched_recv();
+    /* An inspect request popped by a receive INSIDE a handler: the actor's
+     * state fields are moved out mid-handler, so it cannot be rendered now.
+     * Answer "busy" at once (the inspector reports it as a timeout) and keep
+     * receiving: user code never sees the request. */
+    while (msg != MARCH_RECV_NO_MSG && IS_HEAP_PTR(msg)
+            && ((march_hdr *)msg)->tag == MARCH_SYS_INSPECT_TAG) {
+        inspect_reply(msg, mk_err_cstr("busy"));
+        msg = march_sched_recv();
+    }
     /* Epoch markers are invisible here (the scheduler skips them and leaves
      * them queued for the actor loop).  A legacy MARCH_MIGRATE_TAG message
      * belongs to the actor loop too and must not reach user code as a
@@ -7315,9 +7436,11 @@ int64_t march_actor_get_int(void *actor, int64_t index) {
  * shutdown: the background thread drives all actors to completion, then the
  * join returns and the program exits normally. */
 void march_run_scheduler(void) {
-    /* The observe socket (march_observe.h): started here, on the main OS
-     * thread before any green thread exists, when MARCH_OBSERVE_SOCKET (or
-     * MARCH_HOT_RELOAD_SOCKET) is set.  Once only; a no-op otherwise.  The
+    /* The observe socket (march_observe.h): started on the main OS thread
+     * when MARCH_OBSERVE_SOCKET (or MARCH_HOT_RELOAD_SOCKET) is set.  Once
+     * only; a no-op otherwise.  A compiled program already started it in
+     * spawn_main_impl, before `main` could run (see the comment there); this
+     * call covers hosts that run the scheduler without march_spawn_main.  The
      * snapshot verbs register first: registration closes when it starts. */
     march_observe_snapshot_install();
     march_observe_maybe_start();
@@ -7616,6 +7739,88 @@ static void *call_held_restore(call_held *h, void *ret) {
     return ret;
 }
 
+/* The wait half of an Actor.call (and of Actor.inspect_state, which sends
+ * its request differently but waits the same way): receive until the reply
+ * whose correlation is [corr] arrives or [timeout_ms] passes (<= 0: wait
+ * forever), holding every other message and putting them back in order.
+ * Returns Ok(payload) or Err("no reply (timeout or unhandled Call)"). */
+static void *actor_call_wait(int64_t corr, int64_t timeout_ms) {
+    call_held held = {0};
+    uint64_t seq = 0;
+
+    if (timeout_ms <= 0) {
+        /* Preserve wait-forever semantics for callers that opt out. Still
+         * loop on a mismatched correlation: a wait-forever call can also
+         * receive a stale envelope left over from an EARLIER timed-out call
+         * on the same green thread. */
+        for (;;) {
+            void *result = march_sched_recv_user_seq(&seq);
+            if (result == MARCH_RECV_NO_MSG)
+                return call_held_restore(&held,
+                    mk_err_cstr("no reply (timeout or unhandled Call)"));
+            void *payload;
+            int rc = march_actor_call_unwrap(result, corr, &payload);
+            if (rc == 1)
+                return call_held_restore(&held, mk_ok(payload));
+            if (rc < 0)
+                call_held_push(&held, result, seq);
+            /* stale envelope (discarded) or held message: keep waiting */
+        }
+    }
+
+    /* Timed wait: park with a deadline instead of busy yield-polling. The
+     * scheduler wakes us early on reply (march_actor_reply's march_sched_send
+     * → march_sched_wake) or lets the timer service fire at the deadline, so
+     * a pending timed call no longer consumes a dispatch slot every turn.
+     *
+     * march_sched_recv_until (not march_sched_try_recv2 +
+     * march_sched_park_self_until) is deliberate: it holds the mailbox lock
+     * across both the emptiness check and the PROC_PARKED store, closing a
+     * lost-wakeup window where march_sched_send could observe this proc as
+     * still PROC_RUNNING between an unlocked emptiness check and a separate
+     * PROC_PARKED store, and skip the wake — deferring delivery of an
+     * already-arrived reply until the full timeout elapsed. See
+     * march_sched_recv_until's doc comment in march_scheduler.h/.c.
+     *
+     * The Err payloads match the interpreter's no-reply message exactly so
+     * both backends surface the same value.
+     *
+     * On timeout, a late reply CAN still land in the caller's mailbox (we
+     * give up waiting, not the handler up replying) — but it now carries a
+     * correlation id that no longer matches any call this green thread is
+     * waiting on, so a SUBSEQUENT Actor.call on the same thread discards it
+     * via march_actor_call_unwrap above instead of misdelivering it as that
+     * later call's answer. (We don't merge this branch with the wait-forever
+     * one above into a single march_sched_recv_until(INT64_MAX) path: recv_until
+     * registers a timer-heap entry for its deadline, and a deadline of
+     * INT64_MAX would never fire and never get removed — one leaked heap
+     * slot per wait-forever call, unbounded for a call-heavy long-lived
+     * server. Two branches, one shared unwrap helper, is the right split.) */
+    int64_t deadline_ms = march_now_ms() + timeout_ms;
+    for (;;) {
+        void *msg = march_sched_recv_user_until_seq(deadline_ms, &seq);
+        if (msg != MARCH_RECV_NO_MSG) {
+            void *payload;
+            int rc = march_actor_call_unwrap(msg, corr, &payload);
+            if (rc == 1)
+                return call_held_restore(&held, mk_ok(payload));
+            if (rc < 0)
+                call_held_push(&held, msg, seq);
+            /* stale envelope discarded or message held; the deadline may
+             * have passed while we were draining, so re-check before looping. */
+            if (march_now_ms() >= deadline_ms)
+                return call_held_restore(&held,
+                    mk_err_cstr("no reply (timeout or unhandled Call)"));
+            continue;
+        }
+        if (march_now_ms() >= deadline_ms)
+            return call_held_restore(&held,
+                mk_err_cstr("no reply (timeout or unhandled Call)"));
+        /* Woken with an empty mailbox but time remains (spurious, or the
+         * no-preempt-daemon degrade-to-yield path) — loop and try again. */
+    }
+}
+
 /*
  * march_actor_call: synchronous call — builds a wrapped message containing a
  * heap-allocated reply-ref (caller proc + correlation id) as the reply
@@ -7727,80 +7932,7 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
                                : "actor_call: not in scheduler context");
     }
 
-    call_held held = {0};
-    uint64_t seq = 0;
-
-    if (timeout_ms <= 0) {
-        /* Preserve wait-forever semantics for callers that opt out. Still
-         * loop on a mismatched correlation: a wait-forever call can also
-         * receive a stale envelope left over from an EARLIER timed-out call
-         * on the same green thread. */
-        for (;;) {
-            void *result = march_sched_recv_user_seq(&seq);
-            if (result == MARCH_RECV_NO_MSG)
-                return call_held_restore(&held,
-                    mk_err_cstr("no reply (timeout or unhandled Call)"));
-            void *payload;
-            int rc = march_actor_call_unwrap(result, corr, &payload);
-            if (rc == 1)
-                return call_held_restore(&held, mk_ok(payload));
-            if (rc < 0)
-                call_held_push(&held, result, seq);
-            /* stale envelope (discarded) or held message: keep waiting */
-        }
-    }
-
-    /* Timed wait: park with a deadline instead of busy yield-polling. The
-     * scheduler wakes us early on reply (march_actor_reply's march_sched_send
-     * → march_sched_wake) or lets the timer service fire at the deadline, so
-     * a pending timed call no longer consumes a dispatch slot every turn.
-     *
-     * march_sched_recv_until (not march_sched_try_recv2 +
-     * march_sched_park_self_until) is deliberate: it holds the mailbox lock
-     * across both the emptiness check and the PROC_PARKED store, closing a
-     * lost-wakeup window where march_sched_send could observe this proc as
-     * still PROC_RUNNING between an unlocked emptiness check and a separate
-     * PROC_PARKED store, and skip the wake — deferring delivery of an
-     * already-arrived reply until the full timeout elapsed. See
-     * march_sched_recv_until's doc comment in march_scheduler.h/.c.
-     *
-     * The Err payloads match the interpreter's no-reply message exactly so
-     * both backends surface the same value.
-     *
-     * On timeout, a late reply CAN still land in the caller's mailbox (we
-     * give up waiting, not the handler up replying) — but it now carries a
-     * correlation id that no longer matches any call this green thread is
-     * waiting on, so a SUBSEQUENT Actor.call on the same thread discards it
-     * via march_actor_call_unwrap above instead of misdelivering it as that
-     * later call's answer. (We don't merge this branch with the wait-forever
-     * one above into a single march_sched_recv_until(INT64_MAX) path: recv_until
-     * registers a timer-heap entry for its deadline, and a deadline of
-     * INT64_MAX would never fire and never get removed — one leaked heap
-     * slot per wait-forever call, unbounded for a call-heavy long-lived
-     * server. Two branches, one shared unwrap helper, is the right split.) */
-    int64_t deadline_ms = march_now_ms() + timeout_ms;
-    for (;;) {
-        void *msg = march_sched_recv_user_until_seq(deadline_ms, &seq);
-        if (msg != MARCH_RECV_NO_MSG) {
-            void *payload;
-            int rc = march_actor_call_unwrap(msg, corr, &payload);
-            if (rc == 1)
-                return call_held_restore(&held, mk_ok(payload));
-            if (rc < 0)
-                call_held_push(&held, msg, seq);
-            /* stale envelope discarded or message held; the deadline may
-             * have passed while we were draining, so re-check before looping. */
-            if (march_now_ms() >= deadline_ms)
-                return call_held_restore(&held,
-                    mk_err_cstr("no reply (timeout or unhandled Call)"));
-            continue;
-        }
-        if (march_now_ms() >= deadline_ms)
-            return call_held_restore(&held,
-                mk_err_cstr("no reply (timeout or unhandled Call)"));
-        /* Woken with an empty mailbox but time remains (spurious, or the
-         * no-preempt-daemon degrade-to-yield path) — loop and try again. */
-    }
+    return actor_call_wait(corr, timeout_ms);
 }
 
 
@@ -7870,6 +8002,288 @@ void march_actor_reply(void *ref_ptr, void *result) {
     if (caller) march_sched_send(caller, env);
     march_reclaim_exit();
 }
+
+/* ── Actor.inspect_state (R4 of the observe plan; stage B1 of
+ * specs/2026-09-23-per-actor-introspection-design.md) ────────────────────
+ *
+ * Every actor type's compiled Name_inspect(actor) renders its state with
+ * to_string and stores the String through march_actor_inspect_store, then
+ * writes the state fields back exactly as a handler does (the on_stop
+ * lowering).  Its spawn glue registers it here, keyed by the dispatch
+ * closure every record of the type holds in word 2.  The table is
+ * lock-free to read (a spawn re-registers, and pays one probe); inserts take
+ * a mutex. */
+#define INSPECT_SLOTS 1024
+static _Atomic(void *) g_inspect_key[INSPECT_SLOTS];
+static void           *g_inspect_fn[INSPECT_SLOTS];
+static uint32_t        g_inspect_epoch[INSPECT_SLOTS];  /* code epoch when registered */
+static pthread_mutex_t g_inspect_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static size_t inspect_slot(void *key) { return ((uintptr_t)key >> 4) & (INSPECT_SLOTS - 1); }
+
+void march_register_actor_inspect(void *dispatch_clo, void *inspect_clo) {
+    size_t h = inspect_slot(dispatch_clo);
+    for (size_t i = 0; i < INSPECT_SLOTS; i++) {
+        size_t k = (h + i) & (INSPECT_SLOTS - 1);
+        void *cur = atomic_load_explicit(&g_inspect_key[k], memory_order_acquire);
+        if (cur == dispatch_clo) return;          /* the common case: already there */
+        if (cur == NULL) {
+            pthread_mutex_lock(&g_inspect_mu);
+            cur = atomic_load_explicit(&g_inspect_key[k], memory_order_relaxed);
+            if (cur == NULL) {
+                g_inspect_fn[k] = inspect_clo;
+                /* The code version that ran this spawn glue: the spawning
+                 * proc's epoch, or the current one when it is unpinned
+                 * (main, epoch 0, always runs current code). */
+                march_proc *p = march_sched_current();
+                uint32_t e = p ? atomic_load_explicit(&p->code_epoch,
+                                                      memory_order_relaxed) : 0;
+                g_inspect_epoch[k] = e ? e : march_epoch_current();
+                atomic_store_explicit(&g_inspect_key[k], dispatch_clo, memory_order_release);
+                pthread_mutex_unlock(&g_inspect_mu);
+                return;
+            }
+            pthread_mutex_unlock(&g_inspect_mu);
+            if (cur == dispatch_clo) return;
+        }
+    }
+    /* Table full (1024 actor types): this type simply cannot be inspected. */
+}
+
+static void *inspect_lookup(void *dispatch_clo, uint32_t *epoch) {
+    size_t h = inspect_slot(dispatch_clo);
+    for (size_t i = 0; i < INSPECT_SLOTS; i++) {
+        size_t k = (h + i) & (INSPECT_SLOTS - 1);
+        void *cur = atomic_load_explicit(&g_inspect_key[k], memory_order_acquire);
+        if (cur == dispatch_clo) { *epoch = g_inspect_epoch[k]; return g_inspect_fn[k]; }
+        if (cur == NULL) return NULL;
+    }
+    return NULL;
+}
+
+/* Called by Name_inspect on the actor's own green thread: keep the rendered
+ * String (owned) for actor_answer_inspect. */
+void march_actor_inspect_store(void *s) {
+    march_proc *p = march_sched_current();
+    if (!p) { march_decrc(s); return; }
+    if (p->inspect_out) march_decrc(p->inspect_out);
+    p->inspect_out = s;
+}
+
+/* An inspect request from a thread that is not a green thread (the observe
+ * socket's STATE verb): it cannot receive a reply message, so it waits on
+ * this instead.  Two references, the asker's and the request's; whichever
+ * drops the last frees it, so an asker that timed out never leaves the
+ * answering actor a dangling pointer.  A request still queued when its actor
+ * dies is freed with the mailbox (shallowly) and its reference leaks: one
+ * small allocation per such request. */
+typedef struct inspect_waiter {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    int             refs;
+    int             done;
+    int             ok;      /* 1: text is the state; 0: text is the reason */
+    char           *text;    /* malloc'd */
+} inspect_waiter;
+
+static void inspect_waiter_release(inspect_waiter *w) {
+    pthread_mutex_lock(&w->mu);
+    int last = --w->refs == 0;
+    pthread_mutex_unlock(&w->mu);
+    if (!last) return;
+    pthread_mutex_destroy(&w->mu);
+    pthread_cond_destroy(&w->cv);
+    free(w->text);
+    free(w);
+}
+
+static char *dup_march_string(void *s) {
+    march_string *ms = (march_string *)s;
+    size_t n = IS_HEAP_PTR(s) ? (size_t)ms->len : 0;
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    if (n) memcpy(out, ms->data, n);
+    out[n] = '\0';
+    return out;
+}
+
+/* Reply to an inspect request with [result] (an owned Result(String,
+ * String)), consuming the request.  The request is a two-field record:
+ * field 0 the green-thread asker's reply-ref, or 0 for an external asker,
+ * whose inspect_waiter is field 1. */
+static void inspect_reply(void *request, void *result) {
+    void *reply_ref = (void *)(uintptr_t)MARCH_FIELD(request, 0);
+    inspect_waiter *w = (inspect_waiter *)(uintptr_t)MARCH_FIELD(request, 1);
+    /* march_decrc is shallow: freeing the request hands its one reference
+     * to the reply-ref over to march_actor_reply, which retires it. */
+    march_decrc(request);
+    if (reply_ref) {
+        march_actor_reply(reply_ref, result);
+        return;
+    }
+    /* External: copy the text out, release the Result (and its String). */
+    void *str = (void *)(uintptr_t)MARCH_FIELD(result, 0);
+    int ok = ((march_hdr *)result)->tag == 0;
+    char *text = dup_march_string(str);
+    march_decrc(str);
+    march_decrc(result);
+    pthread_mutex_lock(&w->mu);
+    w->ok = ok;
+    w->text = text;
+    w->done = 1;
+    pthread_cond_signal(&w->cv);
+    pthread_mutex_unlock(&w->mu);
+    inspect_waiter_release(w);
+}
+
+/* Answer an inspect request between handlers: run the type's renderer under
+ * a crash trap (a render that panics must not kill the actor) and reply
+ * Ok(rendered) or Err(why). */
+static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
+                                 void *actor, void *request) {
+    /* Not a message the program sent: take it back out of msgs_in. */
+    if (self) atomic_store_explicit(&self->msgs_in,
+        atomic_load_explicit(&self->msgs_in, memory_order_relaxed) - 1,
+        memory_order_relaxed);
+    uint32_t reg_epoch = 0;
+    void *clo = inspect_lookup((void *)(uintptr_t)((int64_t *)actor)[2], &reg_epoch);
+    if (!clo || !self) {
+        inspect_reply(request, mk_err_cstr("no state renderer for this actor"));
+        return;
+    }
+    /* A hot reload may have changed the state layout since this renderer was
+     * registered; an old renderer over a new layout would read the wrong
+     * fields.  Refuse rather than guess. */
+    if (meta->dispatch_name_id
+            && reg_epoch != atomic_load_explicit(&self->code_epoch, memory_order_relaxed)) {
+        inspect_reply(request, mk_err_cstr("the actor's code changed by a hot reload since its renderer was registered"));
+        return;
+    }
+    jmp_buf jb;
+    jmp_buf *saved_crash = self->crash_jmp;
+    self->crash_jmp = &jb;
+    void *result;
+    if (setjmp(jb) == 0) {
+        typedef void (*inspect_fn_t)(void *, void *);
+        inspect_fn_t fn = *(inspect_fn_t *)((char *)clo + 16);
+        march_incrc(clo);
+        fn(clo, actor);
+        void *s = self->inspect_out;
+        self->inspect_out = NULL;
+        result = s ? mk_ok(s) : mk_err_cstr("the renderer produced nothing");
+    } else {
+        /* The render panicked; the actor carries on.  The longjmp skips
+         * every release in Name_inspect, so the actor record still owns its
+         * fields (the loads moved nothing out of it that anything freed);
+         * at worst the temporary state record leaks.  to_string does not
+         * panic on any value it accepts: this is the design's
+         * belt-and-braces. */
+        const char *m = self->crash_message ? self->crash_message : "panic";
+        size_t mlen = self->crash_message ? self->crash_message_len : 5;
+        char buf[256];
+        snprintf(buf, sizeof buf, "render failed: %.*s", (int)(mlen > 200 ? 200 : mlen), m);
+        free(self->crash_message);
+        self->crash_message = NULL;
+        self->crash_message_len = 0;
+        if (self->inspect_out) { march_decrc(self->inspect_out); self->inspect_out = NULL; }
+        result = mk_err_cstr(buf);
+    }
+    self->crash_jmp = saved_crash;
+    inspect_reply(request, result);
+}
+
+/* actor_inspect(pid, timeout_ms) : Result(String, String), stdlib-only
+ * (Actor.inspect_state).  Err is "self", "dead", "timeout", "busy", or the
+ * answerer's own reason. */
+void *march_actor_inspect(void *actor, int64_t timeout_ms) {
+    march_proc *caller = march_sched_current();
+    if (!caller) return mk_err_cstr("not in scheduler context");
+    if (caller->actor == actor) return mk_err_cstr("self");
+    if (!actor_alive_load(actor)) return mk_err_cstr("dead");
+    int64_t corr = atomic_fetch_add_explicit(&g_next_call_corr, 1, memory_order_relaxed);
+    void *reply_ref = march_alloc(16 + 16);
+    MARCH_SET_TAG(reply_ref, MARCH_CALL_REPLY_TAG);
+    MARCH_FIELD(reply_ref, 0) = (caller->pid << 1) | 1;
+    MARCH_FIELD(reply_ref, 1) = corr;
+    void *request = march_alloc(32);
+    MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
+    MARCH_FIELD(request, 0) = (int64_t)(uintptr_t)reply_ref;
+    MARCH_FIELD(request, 1) = 0;
+    march_reclaim_enter();
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? meta_gt(meta) : NULL;
+    int rc = gt ? march_sched_send_unlimited(gt, request) : MARCH_SEND_DEAD;
+    march_reclaim_exit();
+    if (rc == MARCH_SEND_DEAD) {
+        march_decrc(request);          /* not enqueued: ours (a shallow free) */
+        march_decrc(reply_ref);
+        return mk_err_cstr("dead");
+    }
+    if (rc != MARCH_SEND_OK) return mk_err_cstr("dropped");   /* disposed by the send */
+    void *r = actor_call_wait(corr, timeout_ms);
+    /* actor_call_wait: Ok(answer) where answer is the answerer's Result, or
+     * Err(no reply). */
+    /* r's one field is ours either way; march_decrc(r) frees only r. */
+    void *inner = (void *)(uintptr_t)MARCH_FIELD(r, 0);
+    int ok = ((march_hdr *)r)->tag == 0;
+    march_decrc(r);
+    if (ok) return inner;
+    march_decrc(inner);
+    return mk_err_cstr("timeout");
+}
+
+/* Actor.inspect_state for a thread that is not a green thread: the observe
+ * socket's STATE verb (march_observe_debug.c).  See march_observe.h. */
+void *march_pid_of_int(int64_t n);
+
+int march_actor_inspect_external(int64_t pid, int64_t timeout_ms, char **out) {
+    *out = NULL;
+    void *actor = march_pid_of_int(pid);          /* owned, or the dead sentinel */
+    if (!actor_alive_load(actor)) {
+        march_decrc(actor);
+        *out = strdup("dead");
+        return 0;
+    }
+    inspect_waiter *w = (inspect_waiter *)calloc(1, sizeof *w);
+    if (!w) { march_decrc(actor); *out = strdup("out of memory"); return 0; }
+    pthread_mutex_init(&w->mu, NULL);
+    pthread_cond_init(&w->cv, NULL);
+    w->refs = 2;
+    void *request = march_alloc(32);
+    MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
+    MARCH_FIELD(request, 0) = 0;
+    MARCH_FIELD(request, 1) = (int64_t)(uintptr_t)w;
+    march_reclaim_enter();
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? meta_gt(meta) : NULL;
+    int rc = gt ? march_sched_send_unlimited(gt, request) : MARCH_SEND_DEAD;
+    march_reclaim_exit();
+    march_decrc(actor);
+    if (rc != MARCH_SEND_OK) {
+        march_decrc(request);
+        w->refs = 1;                               /* the request never held it */
+        inspect_waiter_release(w);
+        *out = strdup("dead");
+        return 0;
+    }
+    struct timespec dl;
+    clock_gettime(CLOCK_REALTIME, &dl);
+    int64_t ns = (int64_t)dl.tv_nsec + (timeout_ms % 1000) * 1000000;
+    dl.tv_sec += (time_t)(timeout_ms / 1000 + ns / 1000000000);
+    dl.tv_nsec = (long)(ns % 1000000000);
+    pthread_mutex_lock(&w->mu);
+    while (!w->done)
+        if (pthread_cond_timedwait(&w->cv, &w->mu, &dl) == ETIMEDOUT) break;
+    int done = w->done, ok = w->ok;
+    char *text = w->text;
+    w->text = NULL;
+    pthread_mutex_unlock(&w->mu);
+    inspect_waiter_release(w);
+    if (!done) { *out = strdup("timeout"); return 0; }
+    *out = text ? text : strdup("");
+    return ok;
+}
+
 
 /* ── Float builtins ──────────────────────────────────────────────────── */
 

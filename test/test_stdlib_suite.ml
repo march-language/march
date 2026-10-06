@@ -5443,22 +5443,16 @@ let test_parse_match_wildcard_only () =
 
 let test_parse_error_empty_fn_body () =
   (* fn with do but no body before end — must not propagate uncaught exception *)
-  (try
-    ignore (parse_module {|mod T do fn bad() do end end|});
-    ignore (March_parser.Parse_errors.take_parse_errors ())
-   with _ ->
-    ignore (try March_parser.Parse_errors.take_parse_errors () with _ -> []));
+  (try ignore (parse_module {|mod T do fn bad() do end end|})
+   with _ -> ());
   Alcotest.(check bool) "empty fn body: no uncaught exception" true true
 
 let test_parse_error_type_no_variants () =
   let has_error =
     try
       ignore (parse_module {|mod T do type Foo = end|});
-      let errs = March_parser.Parse_errors.take_parse_errors () in
-      errs <> []
-    with _ ->
-      ignore (try March_parser.Parse_errors.take_parse_errors () with _ -> []);
-      true
+      false
+    with _ -> true
   in
   Alcotest.(check bool) "type with no variants: error reported" true has_error
 
@@ -5485,11 +5479,8 @@ let test_parse_error_recovery_two_bad_decls () =
   let has_error =
     (try
        ignore (parse_module src);
-       let errs = March_parser.Parse_errors.take_parse_errors () in
-       errs <> []
-     with _ ->
-       ignore (March_parser.Parse_errors.take_parse_errors ());
-       true)
+       false
+     with _ -> true)
   in
   Alcotest.(check bool) "two bad decls: at least one error collected" true has_error
 
@@ -5503,12 +5494,8 @@ let test_parse_error_valid_decls_survive_recovery () =
   end|} in
   let m_opt =
     (try
-       let m = parse_module src in
-       ignore (March_parser.Parse_errors.take_parse_errors ());
-       Some m
-     with _ ->
-       ignore (March_parser.Parse_errors.take_parse_errors ());
-       None)
+       Some (parse_module src)
+     with _ -> None)
   in
   (* We only assert we don't crash; recovered parse may have partial decls *)
   Alcotest.(check bool) "recovery: valid decls survive without exception" true true;
@@ -11713,7 +11700,8 @@ let test_hcr_manifest_role_closure_lines () =
    (the baseline is the running build's manifest); with --grant-cap it gets
    past the client, and the SERVER refuses it: a real compiled base binary
    running its reload server under a node policy (IO.Console, not
-   IO.FileWrite) answers the signed ACTIVATE6 with ERR role_cap_policy.  A
+   IO.FileWrite) answers the signed ACTIVATE7 (ACTIVATE6's role blocks plus
+   the bytes' digest) with ERR role_cap_policy.  A
    control patch whose closure stays inside the policy is admitted. *)
 let e2e_connect sock =
   let fd = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
@@ -11725,20 +11713,23 @@ let e2e_connect sock =
   in
   go 150
 
-let e2e_activate6 conn ~sk ~(manifest : March_forge.Cmd_deploy_hot.manifest) ~fn_name =
+(* What forge sends today: ACTIVATE7, the role blocks plus the signed digest
+   of the patch's bytes (review 2026-10-04, dd12 P1). *)
+let e2e_activate6 conn ~sk ~(manifest : March_forge.Cmd_deploy_hot.manifest) ~so_path ~fn_name =
   let module H = March_forge.Cmd_deploy_hot in
   let fm = List.find (fun f -> f.H.fn_name = fn_name) manifest.H.functions in
   let (role_caps, roles) = H.role_blocks manifest.H.roles in
   let cap_root = H.fn_cap_root fm.H.fn_caps in
   let callers = String.concat "," (List.sort String.compare fm.H.fn_callers) in
+  let so = H.artifact_digest so_path in
   let (signed, wire_head) =
-    H.build_activate6_lines ~name:fm.H.fn_name ~impl:fm.H.fn_impl_hash ~cas:manifest.H.cas_hash
-      ~migrate:0 ~epoch:0 ~cap_root ~role_caps ~callers_csv:callers in
+    H.build_activate7_lines ~name:fm.H.fn_name ~impl:fm.H.fn_impl_hash ~cas:manifest.H.cas_hash
+      ~so ~migrate:0 ~epoch:0 ~cap_root ~role_caps ~callers_csv:callers () in
   let sig_b64 = March_ed25519.Ed25519.(sig_to_base64 (sign_str signed sk)) in
   H.send_line conn
-    (Printf.sprintf "%s %s 0 epoch:0 cap_root:%s role_caps:%s caps:%s roles:%s callers:%s"
-       wire_head sig_b64 cap_root role_caps
-       (String.concat "," (List.sort String.compare fm.H.fn_caps)) roles callers);
+    (H.activate7_command ~wire_head ~sig_b64 ~so ~migrate:0 ~epoch:0 ~cap_root
+       ~caps_csv:(String.concat "," (List.sort String.compare fm.H.fn_caps))
+       ~roles:(role_caps, roles) ~callers_csv:callers ());
   H.recv_line conn
 
 let with_reload_server ?(stop = Sys.sigterm) ~dir ~bin ~sock ~extra_env f =
@@ -11800,7 +11791,7 @@ let test_hcr_role_widening_refused_end_to_end () =
          | Some fd ->
            let conn = H.conn_of_fd fd in
            H.cas_put conn current.H.cas_hash (wbin);
-           let resp = e2e_activate6 conn ~sk ~manifest:current ~fn_name:"cons" in
+           let resp = e2e_activate6 conn ~sk ~manifest:current ~so_path:wbin ~fn_name:"cons" in
            Alcotest.(check string) "the server refuses the widened role closure"
              "ERR role_cap_policy Stream.Cons IO.FileWrite" resp;
            H.cas_put conn prior.H.cas_hash nbin;
@@ -11814,7 +11805,7 @@ let test_hcr_role_widening_refused_end_to_end () =
            let target =
              if List.mem "cons" known then "cons"
              else match known with n :: _ -> n | [] -> Alcotest.fail "no registered slot in the manifest" in
-           let resp = e2e_activate6 conn ~sk ~manifest:prior ~fn_name:target in
+           let resp = e2e_activate6 conn ~sk ~manifest:prior ~so_path:nbin ~fn_name:target in
            Alcotest.(check bool) ("a closure inside the policy is admitted: " ^ resp) true
              (String.length resp >= 3 && String.sub resp 0 3 = "OK ");
            admitted := target;

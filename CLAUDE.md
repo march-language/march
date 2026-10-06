@@ -1,6 +1,6 @@
 # March compiler
 
-March is a statically-typed functional language (ML/Elixir hybrid) compiled with OCaml 5.3.0.
+March is a statically-typed functional language (ML/Elixir hybrid) compiled with OCaml 5.5.1.
 
 ## Keeping specs up to date
 
@@ -147,6 +147,8 @@ After implementing or completing a feature, `git mv` its file from `specs/todos/
 
 After changing a feature, run the benchmark(s) that exercise it to catch regressions; see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`. **Always run benchmarks compiled** (`march --compile --opt 2 bench/<name>.march -o /tmp/<name> && /tmp/<name>`); interpreted (`dune exec march --`) can take hours on `fib`-shaped benchmarks.
 
+Suspected miscompile: `scripts/triage.sh FILE [--fn NAME] [--deep]` runs interp-vs-compiled, the optional-pass switches, per-stage TIR dumps and an ASAN rebuild, one screen (`--help`).
+
 ### TIR golden-snapshot tests
 
 `test/run_snapshots.exe` pins the pretty-printed TIR (`lib/tir/pp.ml`) for a small
@@ -241,6 +243,7 @@ bin/main.ml                 compiler entry point (parse→desugar→typecheck→
 lib/ast/ast.ml              AST types (span, expr, pattern, decl, …)
 lib/lexer/lexer.mll         ocamllex lexer
 lib/parser/parser.mly       menhir parser
+lib/parser/parse.ml         the ONE parse entry point (owns the token filter + parse-error → diagnostic)
 lib/desugar/desugar.ml      pipe desugar, multi-head fn → single EMatch clause
                              (+desugar_derive: derive/satisfy expansion + span uniquification)
 lib/typecheck/                bidirectional HM type inference: typecheck (inference core),
@@ -264,7 +267,7 @@ lsp/lib/                    LSP analysis: analysis (+.mli) + analysis_{types,uti
                              code_actions_{ast,diag} (the two code-action engines)
 lsp/test/                   test_lsp (Alcotest registration only) + the test bodies in
                              test_lsp_{harness,analysis,actions,perf,features,refactor,html,depot}
-stdlib/                     129 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
+stdlib/                     130 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
 lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)
@@ -339,7 +342,7 @@ fn ->
 
 ## Pipeline
 
-1. Parse (`March_parser.Parser.module_`)
+1. Parse (`March_parser.Parse.module_`: lexer → token filter → menhir, syntax errors returned as diagnostics)
 2. Desugar (`March_desugar.Desugar.desugar_module`)
 3. Typecheck (`March_typecheck.Typecheck.check_module`): prints diagnostics, exits 1 on errors
 4. Eval (`March_eval.Eval.run_module`): calls `main()` if present

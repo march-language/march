@@ -42,7 +42,7 @@ let parse_decls ~(fname : string) (src : string) : Ast.decl list =
   let lexbuf = Lexing.from_string text in
   lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = fname };
   let m =
-    try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+    try March_parser.Parse.module_of_lexbuf lexbuf
     with _ ->
       Printf.eprintf "march: internal error: the generated topology code does not parse:\n%s\n" text;
       exit 2

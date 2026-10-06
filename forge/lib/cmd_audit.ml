@@ -64,8 +64,7 @@ let parse_file path : A.decl list option =
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     let m =
-      March_parser.Parser.module_
-        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+      March_parser.Parse.module_of_lexbuf lexbuf
     in
     Some m.A.mod_decls
   with _ -> None

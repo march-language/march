@@ -38,8 +38,8 @@ RUN git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3 \
 
 USER opam
 
-# ── OCaml 5.3.0 switch ────────────────────────────────────────────────────
-RUN opam switch create 5.3.0 ocaml-base-compiler.5.3.0 \
+# ── OCaml 5.5.1 switch ────────────────────────────────────────────────────
+RUN opam switch create 5.5.1 ocaml-base-compiler.5.5.1 \
  && opam update
 
 # ── project source ────────────────────────────────────────────────────────

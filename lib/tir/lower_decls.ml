@@ -421,8 +421,7 @@ let () = Lower_state._ensure_module_lowered := (fun env mod_name ->
          let lexbuf = Lexing.from_string src in
          lexbuf.Lexing.lex_curr_p <-
            { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-         let ast = March_parser.Parser.module_
-                     (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+         let ast = March_parser.Parse.module_of_lexbuf lexbuf in
          let ast = March_desugar.Desugar.desugar_module ast in
          (* Lazily lowered from inside whatever body referenced it, possibly
             an entry fn's: a stdlib module's bare builtin name is the

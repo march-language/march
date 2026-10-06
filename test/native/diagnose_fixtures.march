@@ -1,0 +1,47 @@
+-- stdlib/diagnose.march against the shared diagnose fixtures
+-- (forge/test/fixtures/diagnose): for every fixture expected.txt names, print
+-- "name: id/severity,..." exactly as expected.txt does. test/dune diffs this
+-- output against expected.txt itself, and forge/test/test_diagnose.ml holds
+-- forge's OCaml findings to the same file, so the two cannot drift.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+
+  fn dir() : String do "../forge/test/fixtures/diagnose/" end
+
+  fn name_of(line : String) : String do
+    match String.split_first(line, ":") do
+      Some((name, _)) -> name
+      None -> line
+    end
+  end
+
+  fn run(name : String) : String do
+    match File.read(dir() ++ name ++ ".json") do
+      Ok(text) ->
+        match Json.parse(text) do
+          Ok(j) ->
+            let before = unwrap_or(Json.get(j, "before"), Json.Null)
+            let after = unwrap_or(Json.get(j, "after"), Json.Null)
+            name ++ ": " ++ String.join(Diagnose.ids_of(Diagnose.findings(before, after)), ",")
+          Err(_) -> name ++ ": (bad json)"
+        end
+      Err(_) -> name ++ ": (unreadable)"
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    match File.read(dir() ++ "expected.txt") do
+      Ok(text) ->
+        List.each(List.filter(String.split(text, "\n"), fn l -> l != ""), fn l ->
+          println(run(name_of(l))))
+      Err(_) -> println("expected.txt unreadable")
+    end
+    -- Diagnose.run on this program itself: it runs (two in-process
+    -- snapshots) on both backends. Not printed: its findings depend on the
+    -- machine, and stdout must equal expected.txt.
+    let _ = Diagnose.run(Actor.introspect(io), 10)
+    ()
+  end
+end

@@ -14,7 +14,7 @@
 #   test          (ubuntu) × 4          `dune runtest`, sharded: codegen, refinecheck,
 #                                       compiler, rest (see the job's comment)
 #                 (macos)               `dune runtest`, unsharded
-#   two-node      (ubuntu) × 2          two-node scenarios, sharded 1/2 + 2/2;
+#   two-node      (ubuntu) × 3          two-node scenarios, sharded 1/3, 2/3, 3/3;
 #                                       shard 1 also runs the node_discovery soak
 #   conformance   (ubuntu, macos)       @types-check, @grammar-check, @vault-scale, docs, fmt
 #   tree-sitter   (ubuntu)              tree-sitter-march/ parses what the compiler accepts
@@ -163,17 +163,20 @@ jobs:
   # (opam is cached) on one more Linux runner; each shard's scenarios take
   # ~24 min on a fast runner, ~31 on a slow one.
   # `scripts/two-node.sh --list K/N` deals the list round-robin, which splits
-  # the heavy control_* / protocol_* / hcr_* families across both shards.
+  # the heavy control_* / protocol_* / hcr_* families across the shards.
+  # Three shards since 2026-10-05: with main red at control_artifact_digest
+  # each shard stopped early, hiding that 2/2 had grown past its 50 min
+  # (main run 37317973656 timed out at 51 min once the whole list ran).
   two-node:
-    name: two-node (${{ matrix.shard }}/2)
+    name: two-node (${{ matrix.shard }}/3)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     runs-on: ubuntu-24.04
-    # Must stay above the scenarios step's 50 plus setup (12), build (10) and
-    # the soak (5).
-    timeout-minutes: 80
+    # Must stay above the scenarios step's 50 plus setup (12), build (10),
+    # the soak (5) and the precompile (25).
+    timeout-minutes: 105
     steps:
       - uses: actions/checkout@v4
 
@@ -221,11 +224,29 @@ jobs:
           done
           echo "node_discovery: 200/200 runs matched the golden"
 
+      # Compiling is most of a scenario's time, and the loop below is serial.
+      # This compiles every node of the shard 4 at a time first (one per
+      # runner vCPU); each scenario then copies its binaries instead
+      # (TWO_NODE_PREBUILT). It is done before any scenario starts, so no
+      # deadline ever races a compile. The control_* scenarios and any node
+      # with COMPILE_FLAGS_<x> (keys generated at run time) are not
+      # prebuilt; they still compile in their scenario. A node that fails
+      # here is not an error: its scenario compiles it again and reports it.
+      - name: Precompile two-node nodes (${{ matrix.shard }}/3)
+        timeout-minutes: 25
+        run: |
+          eval $(opam env)
+          list=$(scripts/two-node.sh --list ${{ matrix.shard }}/3) || exit 1
+          pre="$RUNNER_TEMP/two-node-prebuilt"
+          # shellcheck disable=SC2086 # one word per scenario
+          TWO_NODE_JOBS=4 scripts/two-node.sh --precompile "$pre" $list
+          echo "TWO_NODE_PREBUILT=$pre" >> "$GITHUB_ENV"
+
       # Two real OS processes, a fault applied from outside (SIGKILL + restart
       # with a new creation), per-node goldens. 10-200 s per scenario, almost
-      # all of it compiling the nodes. Each scenario
+      # all of it compiling the nodes (now mostly done by the step above). Each scenario
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
-      - name: Two-node scenarios (${{ matrix.shard }}/2)
+      - name: Two-node scenarios (${{ matrix.shard }}/3)
         # 71 scenarios as of 2026-10-02: ~31 min per shard on a slow runner
         # (~61 unsharded), ~24 on a fast one. 50 leaves room for the list to
         # grow. When a shard's green runs reach ~40 min, add a third shard (N
@@ -235,9 +256,9 @@ jobs:
           eval $(opam env)
           # The list is captured, not looped over inline: `for s in $(...)`
           # ignores a failing --list and would run zero scenarios, green.
-          list=$(scripts/two-node.sh --list ${{ matrix.shard }}/2) || exit 1
-          [ -n "$list" ] || { echo "::error::shard ${{ matrix.shard }}/2 lists no scenarios"; exit 1; }
-          echo "shard ${{ matrix.shard }}/2: $(echo "$list" | wc -l) scenarios"
+          list=$(scripts/two-node.sh --list ${{ matrix.shard }}/3) || exit 1
+          [ -n "$list" ] || { echo "::error::shard ${{ matrix.shard }}/3 lists no scenarios"; exit 1; }
+          echo "shard ${{ matrix.shard }}/3: $(echo "$list" | wc -l) scenarios"
           for s in $list; do scripts/two-node.sh "$s" || exit 1; done
 
   # Static-semantics + grammar corpora, doc notebooks and formatting: all

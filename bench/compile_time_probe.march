@@ -1,0 +1,51 @@
+-- Compile-time probe for scripts/compile-time-bench.sh.
+--
+-- NOT a runtime benchmark: this program exists so the harness has one source
+-- it can edit in controlled ways and still have the compiler accept it.  The
+-- `-- BENCH:*` markers are what the script's sed recipes match on; keep the
+-- marked lines exactly as they are (the script changes them per run so every
+-- run is a fresh cache miss, see the scenario table in that script's header).
+--
+--   BENCH:LEAF        a body-only edit to a leaf function (callers unchanged)
+--   sig_target        a function renamed at its definition AND every call site
+--                     (the "signature edit": each caller's TIR changes)
+--   BENCH:FIELD_TYPE  a record type that gains fields (layout change)
+--   BENCH:FIELD_INIT  the one construction site of that record
+--
+-- The list pipeline is here so the program pulls in stdlib specialisations
+-- (List.map / fold_left / range / sum_int at Int) and the "whole-program TIR"
+-- bucket measures something, not just a dozen user functions.
+--
+-- Usage: march --compile --timings bench/compile_time_probe.march -o /tmp/probe
+
+mod CompileTimeProbe do
+  needs IO.Console
+
+  type Box = { v : Int, w : Int } -- BENCH:FIELD_TYPE
+
+  fn leaf(x : Int) : Int do
+    x + 1 -- BENCH:LEAF
+  end
+
+  -- Recursive on purpose: a non-recursive sig_target is inlined into every
+  -- caller and dropped by opt, so renaming it leaves the post-opt TIR (the
+  -- post-TIR CAS key) unchanged and the "sig" scenario becomes a tir-hit
+  -- instead of the miss it is meant to measure.  Computes 2 * x for x >= 0.
+  fn sig_target(x : Int, acc : Int) : Int do
+    if x <= 0 do acc else sig_target(x - 1, acc + 2) end
+  end
+
+  fn use_a(xs : List(Int)) : Int do
+    List.sum_int(List.map(xs, fn x -> sig_target(leaf(x), 0)))
+  end
+
+  fn use_b(xs : List(Int)) : Int do
+    List.fold_left(xs, 0, fn (acc, x) -> acc + sig_target(x, 0))
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let xs = List.range(1, 100)
+    let b = { v: use_a(xs), w: 7 } -- BENCH:FIELD_INIT
+    println(b.v + use_b(xs))
+  end
+end

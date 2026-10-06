@@ -1,0 +1,40 @@
+#!/bin/sh
+# A stand-in for systemctl in a container without systemd (the lab's hosts).
+# forge/test/test_deploy_e2e.ml's stand-in, plus `enable`/`is-enabled`
+# recorded under /etc/fake-systemd/enabled, which boot.sh starts when the
+# container starts. It runs a unit's ExecStart with its Environment= and
+# EnvironmentFile= as the unit's User (setpriv); stdout and stderr go to
+# /var/log/<unit>.log, appended, so a restart keeps the earlier lines.
+cmd=$1; shift
+[ "$cmd" = "--quiet" ] && { cmd=$1; shift; }
+unit=$1; [ "$unit" = "--quiet" ] && unit=$2
+case "$cmd" in --signal=*) sig=${cmd#--signal=}; cmd=kill; unit=$1 ;; esac
+[ "$cmd" = "kill" ] && case "$1" in --signal=*) sig=${1#--signal=}; unit=$2 ;; esac
+pidf=/run/fake-systemd-$unit.pid
+enabled=/etc/fake-systemd/enabled
+alive() { [ -f "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null; }
+case "$cmd" in
+  daemon-reload) exit 0 ;;
+  enable) mkdir -p "$enabled" && touch "$enabled/$unit" ;;
+  is-enabled) [ -f "$enabled/$unit" ] ;;
+  is-active) if alive; then echo active; else echo inactive; exit 3; fi ;;
+  kill) alive && kill -"${sig:-TERM}" "$(cat "$pidf")" ;;
+  stop) if alive; then kill "$(cat "$pidf")"; while alive; do sleep 0.2; done; fi ;;
+  restart|start)
+    f=/etc/systemd/system/$unit
+    [ -f "$f" ] || { echo "fake systemctl: no unit $unit" >&2; exit 5; }
+    if [ "$cmd" = start ] && alive; then exit 0; fi
+    if alive; then kill "$(cat "$pidf")"; n=0; while alive && [ $n -lt 100 ]; do sleep 0.1; n=$((n+1)); done; fi
+    exe=$(sed -n 's/^ExecStart=//p' "$f"); user=$(sed -n 's/^User=//p' "$f")
+    envfile=$(sed -n 's/^EnvironmentFile=-\{0,1\}//p' "$f")
+    echo "=== $(date -u +%FT%TZ) fake systemctl: $cmd $unit" >> "/var/log/$unit.log"
+    (
+      set -a
+      [ -f "$envfile" ] && . "$envfile"
+      for e in $(sed -n 's/^Environment=//p' "$f"); do export "$e"; done
+      cd /
+      exec setpriv --reuid="$user" --regid="$user" --init-groups "$exe"
+    ) >> "/var/log/$unit.log" 2>&1 &
+    echo $! > "$pidf" ;;
+  *) echo "fake systemctl: $cmd not supported" >&2; exit 1 ;;
+esac

@@ -39,6 +39,7 @@ val vault_next_id : int ref
 val vault_row_live : vault_row -> bool
 val vault_decode_key : string -> value
 val vault_key_of_value : value -> string
+val vault_closed : (int, unit) Hashtbl.t
 val vault_lookup : int -> vault_table
 val vault_shard_for : string -> vault_shard array -> vault_shard
 
@@ -138,6 +139,9 @@ val finish_self_stop : int -> unit
 val drain_hook : (unit -> unit) ref
 val mailbox_accepts : actor_inst -> bool
 val mailbox_enqueue : actor_inst -> value -> unit
+
+(** Count one message sent by the current actor (observe msgs_out). *)
+val count_send : unit -> unit
 val dropped_messages_count : int ref
 val monitor_actor : watcher_pid:int -> target_pid:int -> int
 val demonitor_actor : int -> unit

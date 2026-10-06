@@ -27,7 +27,7 @@ module Typecheck = March_typecheck.Typecheck
     Raises [March_parser.Parser.Error] on syntax error. *)
 let parse_src src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  March_parser.Parse.module_of_lexbuf lexbuf
 
 (* ── Stdlib-loaded typecheck env (Task 6.4) ────────────────────────────────
 
@@ -91,8 +91,7 @@ let load_stdlib_file path =
     let lexbuf = Lexing.from_string src in
     lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     (try
-       let m = March_parser.Parser.module_
-                 (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+       let m = March_parser.Parse.module_of_lexbuf lexbuf in
        let basename = Filename.basename path in
        let m = March_desugar.Desugar.desugar_module
                  ~is_entry:(basename = "prelude.march") m in

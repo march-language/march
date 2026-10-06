@@ -1,13 +1,13 @@
 -- Leak guard: a DIRECT call to a let-generalized lambda that returns a Float
--- (specs/todos/2026-10-02-known-call-generic-lambda-float-leak.md).
+-- (specs/progress/2026-10-02-known-call-generic-lambda-float-leak.md).
 --
 -- `let keep = fn (p, x) -> p` is generalized, so its apply fn's parameters and
 -- return stay erased (TVar) after Mono and a Float crosses it boxed. When the
 -- closure is allocated in the same function, Known_call turns the call into a
 -- direct call, but typed the callee as an opaque code address, losing the call
 -- site's Float result type; the emitter then unboxed the returned box without
--- releasing it, one leaked box per call. Known_call now records the binder's
--- type on the callee, so the emitter's erased-Float-return release fires.
+-- releasing it, one leaked box per call. Known_call now records the call
+-- site's result type on the callee (#811), so the emitter releases the box.
 --
 -- Every leg prints its value (a use-after-free that changes a result fails the
 -- golden) and checks live_allocs stays flat. The Int and String legs must not

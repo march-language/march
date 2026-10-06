@@ -109,7 +109,11 @@ mod Node do
     let seq = next_seq()
     let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
     match NodeQueue.cast(q, seq, to, type_tag, payload, policy) do
-      Ok(_) -> Ok(seq)
+      Ok(_) ->
+        -- Admitted to the queue: counted as sent, on the sender's msgs_out
+        -- (the queue's writer goes straight to the socket, not via NodeSend).
+        observe_count_send(())
+        Ok(seq)
       Err(e) -> Err(e)
     end
   end
@@ -119,7 +123,11 @@ mod Node do
     let seq = next_seq()
     let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
     match NodeQueue.cast_schema(q, seq, to, type_tag, schema, payload, policy) do
-      Ok(_) -> Ok(seq)
+      Ok(_) ->
+        -- Admitted to the queue: counted as sent, on the sender's msgs_out
+        -- (the queue's writer goes straight to the socket, not via NodeSend).
+        observe_count_send(())
+        Ok(seq)
       Err(e) -> Err(e)
     end
   end

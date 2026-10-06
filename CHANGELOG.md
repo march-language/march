@@ -19,6 +19,48 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
+  probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
+  `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
+  set, so a slow or loaded host can stop taking healthy peers for dead without
+  a rebuild. A record update of the config still wins.
+- **Signed debug requests on the observe socket.** `forge observe --state PID`
+  returns a running actor's state (what `Actor.inspect_state` returns inside
+  the program), and `forge observe --crashes-full` returns recent crashes with
+  their panic messages. A node answers only if it was built with
+  `--hot-reload --signing-pubkey`, the request is signed by that deploy key,
+  and its `$MARCH_DEBUG_POLICY` file lists the verb (no file: nothing is
+  allowed). Each request carries a nonce and a 30 s expiry, so a captured
+  request cannot be replayed, and every attempt is written to the audit log.
+- **A multi-host lab, and `examples/lab_app`.** `scripts/lab/run.sh` starts four
+  Debian containers on a private Docker network, deploys `examples/lab_app` (a
+  three-role choreography with a loop, a choice, an actor-hosted role placed
+  `count = 1`, role grants and a `[control]` section) to them with the real `forge`
+  over ssh, and checks hot deploys, restarts on persisted patches and failover, with
+  sessions flowing throughout. It runs on demand, not in CI; see the Multi-host Lab
+  docs page. Its first runs filed nine bugs under `specs/todos/2026-10-0[45]-lab-*`,
+  among them a pushed topology closing the control plane's leader role on every node.
+- **`Actor.inspect_state`: read a running actor's state.** The `sys:get_state`
+  equivalent. `Actor.inspect_state(Actor.debug(io), pid, timeout_ms)` returns
+  the actor's state fields as `{ count: 3, tags: [a, b], best: Some(3) }`,
+  each field printed by its own `Show` (a field holding functions prints
+  `<opaque>`), in declaration order, the same on the compiled and
+  interpreted backends. The request skips the actor's mailbox
+  limit, so a full mailbox still answers. It fails cleanly
+  (`InspectTimeout`, `InspectDead`, `InspectSelf`, `InspectFailed(why)`) when
+  the actor is busy inside a nested `receive`, gone, the caller itself, or a
+  field's `Show` panics; the actor keeps running in every case. It needs the
+  new `Cap(Actor.Debug)`, minted from `Cap(IO)` by `Actor.debug`.
+- **`forge top`, `forge diagnose` and `forge status`.** `forge top` watches a
+  node's busiest actors (by mailbox depth, crashes, or message and dispatch
+  rate) refreshed in place. `forge diagnose` checks a node over a window for
+  growing mailboxes, actors dropping at their limit, saturated or imbalanced
+  schedulers, crash loops, a heap climbing with no new actors and stuck
+  hot-reload epochs, and exits 0, 1, 2 or 3 (nothing, warnings, critical,
+  unreachable). `forge status` adds each node's actors, queued messages,
+  memory, load, recent crashes and deepest mailbox to the topology report.
+  The same findings are in the stdlib as `Diagnose`, so a program can check
+  itself, and remote sends now count in an actor's sent messages.
 - **`Recon`: a program's view of itself.** The new stdlib module answers, from
   March code, the questions `forge observe` asks a node: `Recon.info` (one
   actor's mailbox, counters, supervisor and names), `actors`, `proc_count`
@@ -131,6 +173,45 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
+  install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
+  source needed no changes. The REPL's `notty` dependency (0.2.3 does not
+  compile on OCaml 5.4+) is now vendored from the community fork under
+  `vendor/notty/` until a fixed release is on opam, and the `js_of_ocaml < 6.4.0`
+  cap is lifted (6.4.1 compiles the browser bundle). Compiler speed is unchanged
+  within noise.
+- **Faster `--compile` once whole-program optimisation is done.** Two lookups
+  that scanned every definition in the program (stdlib included) for each name
+  reference, one in the CAS dependency hashing and one in the allocation-contract
+  checks, now use a hash table or compute the name once. On
+  `examples/topology_app` at `--opt 2` that took ~7 s of CPU off every compile
+  that gets past optimisation: a comment-only edit (a cached-binary hit) went
+  from 11.2 s to 4.3 s and a one-function edit from 26.0 s to 18.4 s. Cache
+  keys are unchanged, so existing caches stay valid. `--timings` now reports
+  the two phases as `alloc-contract` and `cas-hash`.
+- **Parse errors are now emitted by `--check-json`.** A file that does not
+  parse used to produce an empty NDJSON stream (the error went to stderr
+  only); it now produces one line per syntax error, with `code` set to
+  `parse_error`, `syntax_error` or `lex_error`. Every `--check-json` line also
+  gains `labels` (the secondary source spans, each with its message) and
+  `notes`. Existing fields are unchanged and `forge fix` ignores the new ones.
+- **A call to an unknown function is now a compile error, not a link error.**
+  When native code generation met a direct call to a name that is neither a
+  function in the program, an extern, nor a runtime builtin, it used to emit a
+  forward `declare` and leave the failure to the linker (or link the call to an
+  unrelated C symbol of the same name). It now stops with
+  ``error: `foo` (called from `bar`) is not a function in scope and not a
+  runtime builtin`` and exits 1.
+- **Chained `NativeArray` maps compile to one loop.** With the optimizer on,
+  `map_*(map_*(a, f), g)`, a `map2_*` with a mapped input on either side, and a
+  `map_*` of a `map2_*` are rewritten into a single call whose callback is the
+  two lambda bodies composed, so no intermediate array is allocated or walked
+  (4M elements: Int 3-deep map chain 5.2 → 1.0 ms, Float 4.8 → 0.6 ms, map
+  feeding map2 3.0 → 0.8 ms). It applies when every callback is a lambda
+  written at the call, its body has no effects (and no division, which can
+  trap), the intermediate is used only once, and nothing observable runs
+  between the two calls; int, float, i32 and u8 arrays, not f32. Results are
+  unchanged. `MARCH_NO_NATIVEARR_FUSION=1` turns it off.
 - **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
   operation.** `+ - *`, negation and `int_shl` leave their result in the full
   64-bit register and the reduction modulo 2^63 happens where the value is
@@ -154,11 +235,156 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
-- **Calling a let-bound generic lambda that returns a Float no longer leaks.** A
-  lambda such as `let keep = fn (p, x) -> p`, called in the function that defines
-  it with Float arguments, leaked one Float box per call in compiled code. The
-  compiler now keeps the call site's result type on the direct call, so the box
-  is released after it is read.
+- **Compiled code no longer leaks records whose ownership differs between branches.**
+  A record released on one path of a `match` or `if` was leaked on the others. A record
+  passed to a function and then updated (`{ st with .. }`) was never released at all. A
+  record type named without its module inside another type was freed without its fields.
+  Cluster nodes hit all three on every session (registry entries, the node's whole old
+  state).
+- **`Crypto.sha256`, `sha512`, `md5`, the HMAC, signing and base64 builtins no longer leak
+  their argument.** Compiled code leaked every string or `Bytes` it hashed or encoded. The
+  cluster registry rehashes its Merkle tree on every update, so a node leaked one string
+  per registry entry per update. With these fixes a cluster session leaves about 160
+  objects behind instead of about 730.
+- **A locally bound generic lambda no longer leaks memory when it returns a
+  Float.** `let keep = fn (p, x) -> p` called directly with Float arguments,
+  as in `keep(1.0, x)`, leaked one boxed Float per call in compiled code. The
+  interpreter was unaffected.
+
+- **`char_to_int`, `char_is_digit`, `char_is_alphanumeric` and `char_is_whitespace` no
+  longer leak their argument.** Compiled code leaked the one-character string on every call.
+  `Msgpack` calls `char_to_int` for each byte of every string it encodes, so every cluster
+  frame leaked one object per byte of its strings.
+
+- **A closure that is dropped without being called now frees what it captured.** Before,
+  only calling a closure released its captured values; one dropped from a list, record or
+  table, or never applied, leaked all of them. Cluster nodes hit this on every session and
+  every registry update: a single-node session left about 4,400 objects behind, now about
+  1,400.
+
+- **Derived implementations (`derive Eq`, `Ord`, `Json`, ...) are no longer typechecked with
+  another program's types.** Their generated code got placeholder source positions from a
+  counter that restarted in every compiler process, and the stdlib's cached, already
+  desugared code carried the positions of the process that wrote the cache. A later build
+  of a different program could reuse the same positions and lower a derived function with
+  unrelated types. It surfaced as `forge deploy` reporting every derived `Eq` changed
+  after an unrelated protocol edit.
+
+- **A restarted cluster node's offers are visible again.** After a rolling restart, a node
+  that registered its access points anew could have them erased on every node: its peers
+  still held the bindings from its previous run under a newer clock, and retiring those
+  stale bindings removed the live ones too. Initiators were then refused with "no access
+  point is registered" until every node was restarted at once.
+
+- **Dropping a value of a stdlib type that shares its short name with another (`Value`,
+  `State`, `Level`, `Event`, `Error`, `Mode`) now frees what it holds.** Such a value was freed
+  shallowly, so its contents leaked: a decoded `Msgpack.Bin` lost its whole byte list. Every
+  cluster message is decoded that way, so a node leaked roughly one object per byte of
+  every message it received. In the multi-host lab, nodes grew by hundreds of thousands
+  of objects per session and were killed for running out of memory within minutes.
+
+- **A protocol branch named `none`, `some`, `ok`, `err`, `nil` or `cons` no longer breaks the
+  build.** Such a label gives the protocol's message type a constructor of the same name,
+  and the code `@[endpoints]`, `derive` and the control plane's `[control]` wiring generate
+  used the prelude's `Some`, `None`, `Ok`, `Err`, `Nil` and `Cons` unqualified, so they
+  became ambiguous: up to 49 errors, each blaming the compiler. Generated code now names
+  them `Option.None`, `Result.Ok`, `List.Cons` and so on.
+
+- **A pushed topology no longer takes away the control plane's leader.** Re-reading a
+  topology (a signed push from `forge deploy` or `forge topology apply`, SIGHUP, or a restart)
+  closed the control plane's own `Ctl.Control` role on every node, because the topology file
+  cannot name it, so a cluster with `[control]` had no leader after its first deploy and
+  every later cluster deploy, `forge cluster cert --deliver` and `revoke --deliver` had
+  nothing to talk to. Roles the build places itself are now pinned, and a re-read leaves
+  them alone.
+
+- **Parse errors on the command line now point at the token the message is
+  about, not the token after it.** `if x then 1 end` used to put the caret
+  under `end` (or under the next line) while the message talked about `then`;
+  `march`, `march fmt`, `march test` and the REPL now underline `then`, the
+  position the editor integration already showed.
+- **A stray character or an unterminated string is now an ordinary error.**
+  `march`, `march test` and `march fmt` used to die with `Fatal error:
+  exception Lexer_error(...)` and an OCaml backtrace on a character the
+  lexer rejects or a string that never closes; they now print the error with
+  its source line and exit 1, like any other syntax error. A file on
+  `MARCH_LIB_PATH` with such an error no longer aborts the whole compile.
+- **A cold `$HOME` stdlib cache no longer compiles differently from a warm one.** The first
+  compile after a cold cache used the live stdlib type environment, whose type variables the program
+  could link, so it produced different IR (an extra specialised clone, shifted lambda ids) and a
+  different compilation-cache key than every later compile of the same source.
+- `forge top -n` and `forge observe -n` also accept `--count`; `--n` was
+  documented but never parsed.
+- **Compiling a file with no `main` no longer emits the whole standard
+  library.** A module with no `main`, tests or exports (a library file, or a
+  topology app compiled without its `--topology` digest) kept all ~8,000
+  stdlib functions, so a one-line file took minutes in `llvm-emit` and `clang`
+  and wrote 45 MB of IR. It now compiles the functions the file declares and
+  what they reach: a topology app's IR went from 47 MB to 8 MB. Shared-object,
+  hot-reload, JS and WASM-island builds are unchanged.
+- **A record field read on a value the compiler typed as a scalar now stops
+  with an internal error naming it,** instead of writing LLVM IR that clang
+  rejects (`'%w63…' defined with type 'i64' but expected 'ptr'`).
+- **Security: a node can no longer be rolled back to an older certificate, and a
+  recorded certificate update cannot be replayed (step-12 security review).**
+  A node now refuses a replacement certificate issued before the one it holds.
+  `forge cluster cert` serials now start with the issue time in unix
+  milliseconds (`<ms>-<random>`); the signed certificate format is unchanged.
+  The control plane's Agent also keeps its certificate-release floor on disk
+  (`$MARCH_CONTROL_DIR/cert-floor-<node>`). Before, a restart lost the floor, and
+  a compromised leader could replay an older, genuinely signed cert release to
+  restore removed roles or flags. A `CERT_UPDATE` (live certificate
+  replacement on a link) is now signed over that link's handshake transcript
+  and a per-link counter. Before, an update recorded off the wire could be
+  replayed on a link made with a leaked old key, and that link then survived
+  the old certificate's revocation. The frame format changed: a peer from
+  before this change refuses the new update (and is refused by it), then
+  redials under the new certificate when the old one expires, as a peer from
+  before live replacement does.
+- **A session no longer fails to form when its access point is replaced mid-invitation.**
+  When a hosting actor re-offered a role (for example after a hot deploy moved it
+  to a new protocol version) and closed the old offer, an initiator that had
+  just invited the old offer waited out the whole setup time (20 s) and then
+  failed with `NoOffer(.., "<node> did not answer")`: the invitation reached a
+  node whose offer had already dropped its route, so no one answered it.
+  `SessionNode.initiate` now notices the offer's name was unregistered, withdraws
+  the invitation, and looks again for the replacement offer, as it already did
+  for an offer that refused with "closing".
+- **Vault writes release what they replace, and session tables are freed.**
+  Overwriting or dropping a Vault entry released only the old value's own cell,
+  never its fields or list spine, so `Vault.set` of a record in a loop grew
+  without bound (100,000 overwrites of a 50-string record: 576 MB). Writes now
+  hand the displaced value back to the typed wrapper, which drops it at its
+  type; a Vault(Float) write no longer leaks a box either. New `Vault.close(t)`
+  unregisters, empties and frees a table (a handle used afterwards sees an empty
+  table), and `Vault.live_tables()` counts the tables a process holds. Every
+  `SessionNode` session closes its 13 tables when it ends, by any path, and
+  `Session.in_process()` gained `close`; before, each session kept about 300 KB
+  of tables for the life of the process.
+- **A compiled program that calls `Process.set_env` at the top of `main` no
+  longer crashes, now and then, at startup.** On Linux the runtime read
+  the environment from the main thread while `main` was already running on a
+  worker, and `setenv` freed the array it was reading, so the program died with
+  `fatal SIGSEGV ... sched=-1` in `getenv`. The runtime now reads those settings
+  before `main` can start.
+- **Security: a signed hot deploy now runs only the bytes the operator signed.**
+  A signed `ACTIVATE` named its artifact by the compiler's compilation hash, and
+  nothing checked the bytes stored under it, so anyone who could write a node's
+  artifact store (`CAS_PUT` over the reload socket or the unauthenticated control
+  API) could make an operator's genuine deploy, or a restart's replay, load their
+  own code. forge now sends `ACTIVATE7`, which signs the BLAKE3 of the patch's bytes.
+  The node checks it on a private copy before loading anything; other bytes get
+  `ERR artifact_digest` and none of their code runs. `CAS_CHECK` and `CAS_PUT` take
+  the digest too, so forge uploads a substituted artifact again and the node refuses
+  a corrupt upload. Once a node holds a release (or under
+  `MARCH_HCR_REQUIRE_RELEASE=1`) it refuses the older verbs, which sign no digest
+  (`ERR artifact_digest_required`), and does not replay them after a restart: such
+  a function comes back on the base build until the next deploy. Deploying to a
+  server that predates `ACTIVATE7` now fails with "upgrade the server binary".
+- **Security: the hot-reload socket is owner-only whatever the umask.** It was
+  created with the inherited umask's mode, so a node started under `umask 000`
+  let any local user connect. It is now `0600`, and a peer running as another
+  user (other than root) is disconnected.
 - **Topology now reports two roles that share one endpoint on a node.** Two roles
   placed on one node that serve the same protocol role through the same offer
   function want the same endpoint name, so the second could never be offered;
@@ -2118,6 +2344,14 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Observing a running node** (`docs/observe.md`), an operator's guide to the
+  observe socket and `forge observe`/`top`/`status`/`diagnose`: turning the
+  socket on and what it costs, the protocol and error codes, every verb with a
+  real reply and what each actor-row field means, the forge commands' flags and
+  exit codes, each `forge diagnose` finding with its exact threshold and what to
+  do next, `Recon` and `Diagnose` from March code, a worked "a node is slow"
+  incident, and the interpreter's differences. The section in `docs/tooling.md`
+  is now a short summary linking to it.
 - **Choreography** reference (`docs/choreography.md`): the test-script example used a
   constructor (`Expect_Msg_Prod_Cons_1`) that does not exist for the labelled `Stream`
   protocol (now `Expect_Item`), and the offer example passed a `RunError` to `panic`. The

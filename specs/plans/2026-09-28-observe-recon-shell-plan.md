@@ -1,7 +1,9 @@
 # Observe, Recon, Shell: implementation plan
 
 **Date:** 2026-09-28
-**Status:** Specced; nothing built.
+**Status:** R0–R3 and R4a merged; R4b in review (#804), with `MESSAGES` split
+out. **Revised 2026-10-05** for shell interaction: R5.1, R5.5, R5.7 and R6
+now target a sub-second warm shell (C18–C20).
 **Parent:** [`2026-09-24-observe-recon-shell-design.md`](../2026-09-24-observe-recon-shell-design.md)
 (the design) and its todo [`todos/2026-09-24-observe-recon-shell.md`](../todos/2026-09-24-observe-recon-shell.md).
 **Siblings:** [`2026-09-23-per-actor-introspection-design.md`](../2026-09-23-per-actor-introspection-design.md)
@@ -30,8 +32,8 @@ from the shell.
 | R2 | Counters (slices, msgs in/out, last active), scheduler idle time, crash ring | 1 week | R1 | R3, R6 |
 | R3 | `Recon` observe tier, `forge top`, `forge diagnose`, `forge status` | 1 week | R2 | — |
 | R4 | Debug tier: `Actor.Debug`, `inspect_state` (introspection B1), `STATE`, `MESSAGES` | 2 weeks | R1 | R5, R8, R10 |
-| R5 | Remote shell groundwork: nonces, body hashing, name-table pinning, fragment build | 2 weeks | R4 | R6-shell |
-| R6 | `forge rpc` / `forge shell` over signed `EVAL` | 1.5 weeks | R5 | R11 |
+| R5 | Remote shell groundwork: body hashing, name-table pinning, fragment build (required), limit-aware rendering | 2.5 weeks | R4 | R6-shell |
+| R6 | `forge rpc` / `forge shell`: warm compiler session, shell listener, signed `EVAL`, `limit`, captured output | 3 weeks | R5 | R11 |
 | R7 | `forge observe` TUI, `WATCH`, crash dump | 1.5 weeks | R2 | — |
 | R8 | Tracing with mandatory limits (introspection C1/C2) + boundary call tracing | 2 weeks | R4 | — |
 | R9 | `forge release build` + `bin/<app>` launcher | 4 days | R3 | — |
@@ -43,8 +45,8 @@ merge while R4+ is still being argued. R5 is the security-sensitive one and
 gets a dedicated review before R6 starts. R7, R8, R9, R10 are independent of
 each other once their prerequisite lands.
 
-Critical path to a working remote shell: R0 → R1 → R4 → R5 → R6, about seven
-weeks of focused work. Critical path to "an on-call engineer can see what a
+Critical path to a working remote shell: R0 → R1 → R4 → R5 → R6, about eight
+and a half weeks of focused work (R0–R4 are done or in review). Critical path to "an on-call engineer can see what a
 node is doing": R0 → R1 → R2 → R3, about three weeks.
 
 ---
@@ -53,7 +55,8 @@ node is doing": R0 → R1 → R2 → R3, about three weeks.
 
 Each row is a claim the design makes that current code contradicts, and what
 this plan does instead. The review of 2026-09-25 found C1–C9; the
-re-read of 2026-09-28 found C10–C14.
+re-read of 2026-09-28 found C10–C14; the shell-interaction review of
+2026-10-05 found C18–C20.
 
 | # | Design said | Actually | This plan |
 |---|---|---|---|
@@ -61,7 +64,7 @@ re-read of 2026-09-28 found C10–C14.
 | C2 | Attach refuses unless the client reproduces the node's `cas_hash`. | `cas_hash` mixes in the compiler executable's bytes, target, flags and signing key (`bin/main.ml:876`, `:1000-1014`), and a fragment build adds a `compile-so` tag. It can never match. | R5.4: attach compares **per-function `impl_hash`** for every boundary function the fragment reaches, plus a collision-set tag digest. Unison's idea at the right granularity. |
 | C3 | A fragment is "a few hundred KB, only `__eval`". | A `--compile-so` patch is the whole program's IR, app plus stdlib, runtime symbols undefined (`bin/main.ml:3752-3779`). | R5.5: a `--fragment` emission mode; R5.1 measures today's patch size first so the win is known. |
 | C4 | The node checks the fragment's cap markers, "not the client's word". | `cap_root` is recomputed over the client-sent `caps:` list (`runtime/march_reload.c:1295`, `compute_cap_root`). | R5.6: the compiler emits a `__march_cap_manifest` string in every patch; after `dlopen` the node recomputes `cap_root` from it and requires equality with the signed root. |
-| C5 | A fragment over budget "is killed at its next preemption check, the same way any actor is". | Reductions only preempt. Deadline cancellation exists for **tasks** (`cancel_requested` + `march_sched_cancel_point`, `runtime/march_scheduler.c:3180-3208`), not actor procs. | R6.2: `__eval` runs as a task; timeout sets `cancel_requested` on that proc and raises `march_preempt_request`. |
+| C5 | A fragment over budget "is killed at its next preemption check, the same way any actor is". | Reductions only preempt. Deadline cancellation exists for **tasks** (`cancel_requested` + `march_sched_cancel_point`, `runtime/march_scheduler.c:3180-3208`), not actor procs. | R6.4: `__eval` runs as a task; timeout sets `cancel_requested` on that proc and raises `march_preempt_request`. |
 | C6 | Moving `DRAIN` to the signed tier closes its todo. | Already fixed and signed on 2026-09-24 (`specs/progress/2026-09-24-dd-review-drain-current-epoch-kills-every-actor.md`). | Dropped from scope. |
 | C7 | The observe tier shows crash reasons. | Crash messages are user `panic` strings and can hold payloads. | Observe shows the crash **kind** (`Crash`/`Killed`/`Normal`/`draining`) and type; message text is debug tier. |
 | C8 | Counters are plain stores read with relaxed loads. | That is a C11 data race. | `_Atomic uint64_t` with `memory_order_relaxed` store and load: same instruction on x86-64 and arm64. |
@@ -74,6 +77,9 @@ re-read of 2026-09-28 found C10–C14.
 | C15 | Design §1.5 reuses `lib/repl/tui.ml`. | 164 lines, REPL-specific, and `march_repl` drags typecheck, eval and JIT into forge. | R7: add `notty` to `march_forge` directly. |
 | C16 | Open question 1 (can the socket thread enter a reclamation critical section?). | Yes. Slots are per OS thread, registered lazily (`runtime/march_reclaim.h:30-35`); the preempt daemon already reads procs this way (`march_scheduler.c:3615-3690`). | Resolved, and **confirmed by QW4** (20 000 actors under 1 M churn: 200/200 walks, p99 4.6 ms; Linux ASAN clean). The rule that binds: never park or sleep inside a section. |
 | C17 | The design cites a private memory note. | Not a repo artifact. | Removed from the design. |
+| C18 | A shell input is a `--compile-so` patch; R5.5 is optional. | A fragment has no `main`, and a main-less build prunes nothing: the same one-function patch took **82 s** (`llvm-emit` 52 s, `clang` 27 s) against 3.2 s with a `main` (2026-10-05, load 5). Even 3 s per input is not an interactive shell. | R5.5 is **required**. R6.1 adds a warm compiler session (the REPL's incremental pipeline, ~150 ms compile per input measured) with a latency gate. |
+| C19 | `EVAL` runs on the reload socket. | That socket serves one client at a time (C10); a session holding a connection for its lifetime would block every deploy. | R6.2: a separate **shell listener** (`<reload>.shell`), one thread per session, sharing `dlopen` and the registry under a mutex held only while loading. |
+| C20 | (This plan's first draft of R6.) Bindings live in node-wide slot ranges (`SLOT_ALLOC` / `SLOT_FREE`). | A session that dies leaks its range until restart, and a deploy changes the types the slots hold. | A deploy **ends** the session (`ERR epoch_changed`); slots belong to the connection and are freed when it closes. No `SLOT_*` verbs. |
 
 ---
 
@@ -466,11 +472,16 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
 
 **What.**
 
-1. **Measured** (QW3, 2026-09-29): a whole-program `--compile-so` patch for a
-   small app is 53–89 KB; deploy (upload + activate) takes 0.07–0.34 s and the
-   run under 0.11 s; **compile takes ~2.6 s** and dominates a 2.95 s median round
-   trip. So R5.5 is worth doing for compile time, not size. Re-measure on a
-   mid-size app (the conduit test app) before deciding R5.5's priority.
+1. **Measured.** QW3 (2026-09-29): a whole-program `--compile-so` patch for a
+   small app *with a `main`* is 53–89 KB; deploy (upload + activate) takes
+   0.07–0.34 s and the run under 0.11 s; compile takes ~2.6 s of a 2.95 s
+   median round trip. 2026-10-05: the same patch **without** a `main`, which
+   is what a fragment is, takes 82 s (C18). The local REPL's warm
+   incremental pipeline, per input: ~10 ms typecheck through opt, 2–3 ms IR
+   emit, ~130 ms clang, ~190 ms `dlopen` (`MARCH_JIT_PROFILE=1`). First task
+   of R5: re-measure the REPL numbers on the conduit test app (a mid-size
+   project) and the node-side `dlopen` of a ~10-function fragment, since
+   those set R6's latency budget.
 2. **Body hashing** (C14): `CAS_PUT` computes BLAKE3 of the received bytes and
    stores the digest beside the artifact. New signed verbs (EVAL) sign
    `so_blake3:<hex>`, and the server compares it with the stored digest before
@@ -498,15 +509,27 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
    `HCR_INFO` as `tags:<hex>`; a mismatch is a hard stop even with `--force`. Actor message tags are hashed
    (`llvm_toplevel.ml:583-620`) and record shapes are interned in the host
    runtime (`march_extras.c:2387-2413`), so neither needs a check.
-5. **`--fragment` emission** (C3): with `--fragment NAME`, lowering keeps only
-   the fragment module's functions, their non-boundary transitive callees from
-   the app, and stdlib functions they reach; boundary callees become
-   dispatch-only references (no body). Hidden visibility as today. Built on
-   the existing `--compile-so` path (`bin/main.ml:3752-3779`); `--fragment`
-   implies `--hot-reload <Prefix>` so the identity markers the loader checks
-   (`march_hcr_patch_identity_ok`) are present. If R5.1 shows a
-   whole-program patch is small enough (under 2 MB and under 20 ms to
-   `dlopen`), defer this step and file it; correctness does not depend on it.
+5. **Fragment emission** (C3, C18), **required**: the shell cannot work
+   without it. A fragment's object holds the fragment module's functions and
+   lambdas and any instantiation the node lacks; nothing else.
+   - Boundary callees become dispatch references through the node's pinned
+     NAME_IDs (R5.3), no body.
+   - Every other callee, app or stdlib, is an **undefined symbol resolved
+     against the node** at `dlopen` (a `--hot-reload` binary is linked
+     `--export-dynamic`). The client knows which symbols the node has because
+     it built the same program: the warm session (R6.1) holds it, and the
+     per-function identity check (R5.4) has proved the reached code equal.
+     A symbol the node turns out to lack is an `ERR undefined_symbol <name>`
+     from `dlopen(RTLD_NOW)`, never a crash. When the node is a different
+     build than the client expects, the fallback is to emit bodies for the
+     non-boundary callees (hidden visibility), slower but self-contained.
+   - Built as an API the warm session calls per input (one module in, one
+     `.ll` out), with `march --fragment NAME` as the command-line form for
+     tests. Implies `--hot-reload <Prefix>` so the identity markers the
+     loader checks (`march_hcr_patch_identity_ok`) are present.
+   - Acceptance: a one-expression fragment's `.so` is under 64 KB and builds
+     in under 300 ms cold from the command line (no warm session) on the
+     conduit test app.
 6. **Marker check** (C4): today's cap markers are one symbol per cap
    (`@__march_cap_<path> = constant i8 1`, `llvm_toplevel.ml:1652`) and forge
    reads them with `nm` (`forge/lib/cap_binary.ml:22`); there is no
@@ -523,18 +546,37 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
    same trust `ACTIVATE` already places in it. `forge cap inspect` gains a
    check that the manifest and the per-cap markers agree. Test: a `.so`
    whose manifest is patched to drop one cap is refused with `ERR cap_tamper`.
-7. **Type-directed rendering**: the fragment's `__eval` returns
-   `show(result)`. For types without a `Show` impl, the fragment build runs
-   `derive Show` (`lib/desugar/desugar_derive.ml:297`) on demand for the
-   result type and every type it reaches, **inside the fragment only**, so
-   the node's types are not changed. Opaque runtime types (Pid, closures,
-   Vault handles) use the existing `march_value_to_string`. The renderer must
-   **quote strings** (plain `to_string` leaves them bare inside containers on both
-   backends) and render `()` (compiled `to_string(())` prints `0`,
-   [`todos/2026-09-29-compiled-unit-to-string-prints-zero.md`](../todos/2026-09-29-compiled-unit-to-string-prints-zero.md)). Spike first: if
-   on-demand derive for a type declared in another module is not possible
-   without re-typechecking that module, fall back to the REPL's approach and
-   return a heap walk description, and record which.
+7. **Type-directed rendering with a limit** (design §6.9): the fragment's
+   `__eval` returns `__render(result, limit)`, a renderer the client
+   generates from the result's static type, **inside the fragment only**, so
+   the node's types are not changed.
+   - Collections (`List`, `Array`, `Map`, `Set`) render at most `limit`
+     elements and then `… n more`; strings at most `limit` characters
+     (quoted, escaped). The limit applies at every depth. `limit = 0` means
+     no element limit.
+   - Records, tuples and ADTs are rendered field by field with constructor
+     names, passing the limit down. This uses a limit-aware variant of
+     `derive Show` (`lib/desugar/desugar_derive.ml:297`) generated on demand
+     for the result type and every type it reaches, **including types that
+     derive `Show` in the app** (a derived impl is mechanical, so the
+     shell's version prints the same text within the limit).
+   - A type with a **hand-written** `Show` impl is rendered by calling it;
+     its string is cut at 16 KiB with `… (n more bytes)`, since it cannot
+     take a limit.
+   - Opaque runtime types (Pid, closures, Vault handles) use
+     `march_value_to_string`; `()` renders as `()` (compiled `to_string(())`
+     prints `0`,
+     [`todos/2026-09-29-compiled-unit-to-string-prints-zero.md`](../todos/2026-09-29-compiled-unit-to-string-prints-zero.md)).
+   - The combinators live in a small stdlib module (`ShellRender`: `list(xs,
+     limit, f)`, `map(m, limit, fk, fv)`, `string(s, limit)`, …) so the
+     generated code is short and the rules are unit-tested in March.
+   - Spike first: if on-demand derive for a type declared in another module
+     is not possible without re-typechecking that module, record the
+     workaround used.
+   - Tests: a 10 000-element list at the default limit renders 50 elements
+     and `… 9 950 more`; nested limits (a list of records holding lists); a
+     hand-written `Show` producing 1 MB is cut at 16 KiB; strings are quoted
+     inside containers.
 
 **Acceptance.**
 - Each of 2–6 has a test that goes RED with the change reverted.
@@ -546,66 +588,152 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
 
 ---
 
-## R6. `forge rpc` and `forge shell` (1.5 weeks)
+## R6. `forge rpc` and `forge shell` (3 weeks)
+
+**Why.** The shell is only used if it answers about as fast as a local
+REPL. Design §6.9 is the user-facing spec; this item builds it.
+
+**Target (the gate).** On a warm session against a local socket, an
+expression over existing functions answers in **p50 ≤ 300 ms, p95 ≤ 600 ms**,
+excluding the expression's own run time, on the conduit test app at load
+< 10. Over ssh: one network round trip more, nothing else. Attaching may take
+a few seconds and says so.
 
 **What.**
 
-1. **`EVAL` verb on the reload socket** (not the observe socket: it loads
-   code, and the reload server already owns `dlopen`, CAS and activation
-   bookkeeping). Signed line:
-   `EVAL <name> so_blake3:<h> cas_hash:<c> epoch:<E> cap_root:<r> nonce:<n> not_after_ms:<t> timeout_ms:<t> caps:<csv> src_b64:<s>`.
-   **The fragment's `__eval` takes only the narrowed caps allowed by
-   `$MARCH_SHELL_POLICY` as parameters, never `Cap(IO)`.** QW3 showed why: a hook
-   taking root `Cap(IO)` records `caps=IO` in its manifest, which already covers
-   every leaf, so any widening is invisible to the capability check.
-   Flow: verify signature, nonce, expiry (R4.4); check body digest (R5.2);
-   check policy against `$MARCH_SHELL_POLICY` (a flat cap list like the
-   deploy policy; absent means **deny all**); `dlopen`; marker check (R5.6);
-   spawn `__eval` as a **task** from the server thread
-   (`sched_spawn_common` accepts a foreign thread, `march_scheduler.c:1705-1735`)
-   at the current epoch; wait on a condition the task signals, **outside**
-   any reclamation section; reply `OK <b64 result>`, `TIMEOUT`,
-   `PANIC <b64 msg>` or `ERR …`. Audit line with the full source.
-   While a fragment runs, the reload server is blocked (it serves one client).
-   That is acceptable for v1 and stated in `forge shell --help`; the
-   `timeout_ms` cap is 30 s.
-2. **Timeout** (C5): on expiry, set `cancel_requested` on the task's proc and
-   `march_preempt_request = 1`, as `march_sched_stop_epoch` does
+1. **Warm compiler session** (C18): `march shell-session --project DIR`, a
+   long-lived process driven by forge over stdin/stdout (one JSON request and
+   one JSON reply per line).
+   - At start it loads the stdlib and the project, typechecks once, lowers
+     and monomorphises the program, and keeps all of it (the REPL's state:
+     `lib/jit/repl_jit.ml`'s `partition_fns` / `mark_compiled_fns` and its
+     type map).
+   - Per input it typechecks the input against that environment, lowers
+     only the input, monomorphises what is new, and emits a fragment (R5.5)
+     with clang at `-O1`. It answers `{ok, so_path, caps, result_type}` or
+     `{error, diagnostics}`; a type error never reaches the node.
+   - It also answers `:t`, `:doc`, `:search` and completion requests, so
+     forge does not link the typechecker (C15).
+   - `let x = e` records `x`'s type and slot in the session; later inputs
+     reference it as a typed slot read.
+2. **Shell listener** (C19): `<reload socket>.shell`, an accept thread
+   started with the reload server, one thread per connection, at most 4
+   sessions (a fifth gets `ERR busy`). It shares the reload server's
+   `dlopen`, handle registry and audit writer under a mutex held only while
+   loading a fragment, never while one runs. The reload socket is unchanged
+   and never held by a shell.
+3. **`EVAL`** on the shell listener, signed, with a nonce and an expiry
+   (R4b's `march_sig.c`), the fragment **inline**:
+   `EVAL <sig> name:<__Shell_N> so_blake3:<h> epoch:<E> cap_root:<r> nonce:<n> not_after_ms:<t> timeout_ms:<t> limit:<n> caps:<csv> src_b64:<s> so_b64:<bytes>`
+   (refused over 4 MiB). Flow, in order:
+   1. signature, nonce, expiry;
+   2. `epoch` equals the current code epoch, else `ERR epoch_changed <old> <new>`;
+   3. BLAKE3 of the bytes equals `so_blake3` (R5.2);
+   4. `caps` against `$MARCH_SHELL_POLICY` (a flat cap list; no file means
+      deny all), else `ERR policy <cap>`;
+   5. an audit line with the full source;
+   6. `dlopen` with `RTLD_NOW`, and the cap-manifest check (R5.6);
+   7. spawn `__eval` as a **task** from the listener thread
+      (`sched_spawn_common` accepts a foreign thread,
+      `march_scheduler.c:1705-1735`), with the pre-bound caps (item 6) and
+      output capture (item 5);
+   8. wait on a condition the task signals, **outside** any reclamation
+      section;
+   9. reply `OK <b64 result> out:<b64> pinned:<bool>`, `TIMEOUT`,
+      `TIMEOUT uncancellable`, `PANIC <b64 msg> out:<b64>`, or `ERR …`.
+
+   The whole reply is capped at 1 MiB (`… truncated`), whatever the limit.
+   `__eval`'s parameters are only the narrowed caps the policy allows, never
+   `Cap(IO)`: QW3 showed a hook taking root `Cap(IO)` records `caps=IO`,
+   which covers every leaf, so any widening is invisible to the cap check.
+4. **Timeout** (C5): on expiry, set `cancel_requested` on the task's proc
+   and `march_preempt_request = 1`, as `march_sched_stop_epoch` does
    (`march_scheduler.c:3187-3208`); the task longjmps at its next
    `march_sched_cancel_point`. A fragment stuck in a foreign call cannot be
-   cancelled; the reply says `TIMEOUT uncancellable` and the proc is left and
-   reported by `ACTORS`.
-3. **Unloading**: `dlclose` when the fragment's dispatch refs drop to zero. A
-   fragment that spawned an actor or stored a closure keeps its handle; the
-   reply says `pinned:true`, and `EPOCHS` lists pinned fragments by name.
-4. **Bindings across inputs**: `let x = e` compiles to a fragment that stores
-   into a slot with `march_repl_set` (`runtime/march_extras.c:2291-2299`,
-   4096 slots, `core` role, so present in every binary) and returns
-   `show(x)`. Forge keeps
-   the slot→type map for the session. Slots are per node, not per session:
-   add a `SLOT_ALLOC <n>` verb that reserves a range (fails past 4096) so two
-   concurrent shells do not collide, and a `SLOT_FREE` the client sends on
-   exit; a session that dies without freeing leaks its range until restart,
-   which `EPOCHS` reports.
-5. **Commands**: `forge rpc --host H 'expr'` (one fragment, print, exit 0/1),
-   `forge shell --host H [--select]` (line editing via plain stdin in v1,
-   history in `.forge/shell_history`), `forge eval 'expr'` (runs locally on the
-   release bundle, R9; before R9 it is `march` with the project's entry and
-   `MARCH_POOLS` unset).
-6. **Refusals with a reason** for inputs that declare a `type`, `actor`,
-   `mod` or `impl` (design §6.5): "definitions need a deploy: `forge deploy
-   hot`".
+   cancelled; the reply says `TIMEOUT uncancellable` and the proc is left
+   and reported by `ACTORS`. `timeout_ms` is at most 30 s; forge's own read
+   timeout is `timeout_ms + 5 s`.
+5. **Captured output**: a per-proc capture buffer (one pointer on
+   `march_proc`, NULL normally). `march_println` / `march_print` and the
+   Console write path append to it when set (capped at 256 KiB, then
+   `… truncated`) instead of writing to stdout. The listener sets it on the
+   `__eval` task only; tasks and actors the fragment spawns write where they
+   always do. The check is one load on the print path, not on any hot path;
+   no A/B needed beyond the print microbench.
+6. **Pre-bound caps**: `__eval` takes the policy's caps under fixed names
+   (`console`, `clock`, `intro` = `Actor.Introspect`, `dbg` = `Actor.Debug`,
+   and one name per further leaf, listed in `forge shell --help`). The warm
+   session declares them in the input's scope, so `Actor.list(intro)` simply
+   typechecks. An input that uses a name the policy did not grant is refused
+   by the session before compiling, naming the cap.
+7. **Sessions end on deploy** (C20): a session opens with `HELLO`, and the
+   listener answers with the code epoch and a range of 256 slot indices
+   reserved for this connection from `march_repl_set`'s 4096 (`ERR
+   slots_full` when none is free). The warm session compiles `let`s to
+   absolute indices in that range. The listener releases the range, and the
+   values in it (`decrc`), when the connection closes. When the code epoch
+   changes, the listener sends `BYE epoch_changed <old> <new>` to idle
+   sessions and closes them; a session mid-`EVAL` gets its reply and then
+   `BYE`. `forge shell` prints that the node was redeployed and its bindings
+   are gone, and exits, or re-attaches with no bindings under `--reconnect`.
+   A node restart drops the connection, with the same result.
+8. **Commands.**
+   - `forge rpc --host H [--limit N] [--yes] 'expr'`: one input, prints the
+     captured output then the result, exit 0 (OK) / 1 (anything else). Uses
+     the warm-session binary for one input.
+   - `forge shell --host H [--select …] [--yes] [--reconnect] [--limit N]`:
+     the session. Line editing with `notty` (the R7 dependency, C15),
+     history in `.forge/shell_history`, completion from the session process.
+   - `forge eval 'expr'`: runs locally on the release bundle (R9); before R9
+     it is `march` with the project's entry and `MARCH_POOLS` unset.
+9. **Meta commands**, compiling nothing: `:state PID` (R4b `STATE`), `:actors
+   [n]`, `:top ATTR [n]`, `:crashes [n]` (`CRASHES_FULL` when the debug
+   policy allows, else `CRASHES`), `:mem`; and locally `:t EXPR`, `:doc NAME`,
+   `:search Q`, `:caps`, `:limit N`, `:quit`.
+10. **`limit: N`**: a trailing `limit: N` (or `limit: all`) on an input sets
+    that input's render limit; forge strips it before compiling and sends it
+    as `limit:`. Default 50; `:limit N` changes the session default. The
+    rendering is R5.7's.
+11. **Confirmation**: an input asks `y/N` if its caps go beyond the read set
+    (`console`, `clock`, `intro`, `dbg`) or it calls `send`, `kill`,
+    `Actor.stop`, `Recon.replace_state` / `suspend` / `resume` directly or in
+    a lambda it defines (the session reports these from the input's own
+    TIR). App functions are not looked inside; the policy is the boundary,
+    the question only catches slips. `--yes` skips it; `forge rpc` refuses
+    such an input without `--yes`.
+12. **Several nodes**: `--select` / `--env` runs each input on every selected
+    node in turn, one result per node prefixed with its name; identity is
+    checked per node and a failing node is skipped with the reason;
+    bindings are per node.
+13. **Refusals with a reason** for inputs that declare a `type`, `actor`,
+    `mod` or `impl` (design §6.5): "definitions need a deploy: `forge deploy
+    hot`".
 
 **Acceptance.**
+- **Latency gate**: `bench/shell_latency.sh` drives `forge shell` against a
+  local `--hot-reload` build of the conduit test app with 30 inputs (calls,
+  `let`s, a record result, a 10 000-element list) and reports p50/p95 per
+  phase (session compile, round trip, node `dlopen`, run). Fails above the
+  target. First run is recorded in the progress file, with the load average.
 - `test/test_shell_e2e.ml`, real binaries (pattern: `test_upgrade_from.ml`):
-  start a `--hot-reload` node with a counter actor; `forge rpc` reads it via
-  `Recon.get_state`; a `let` in one input is visible in the next; a fragment
-  that loops forever returns `TIMEOUT` inside `timeout_ms + 1 s` and the node
-  keeps serving; a fragment needing `IO.NetConnect` is refused under a policy
-  without it; the audit log has every input.
-- **Skew test:** change one boundary function's body in the client checkout;
+  - start a `--hot-reload` node with a counter actor;
+  - `forge rpc` reads its state via `Recon.get_state`;
+  - a `let` in one input is visible in the next;
+  - `println` inside an input comes back in the reply, not on the node's
+    stdout;
+  - `Actor.list(intro)` on 200 actors shows 50 and `… 150 more`, and with
+    `limit: 500` shows all 200;
+  - a fragment that loops forever returns `TIMEOUT` inside `timeout_ms + 1 s`
+    and the node keeps serving;
+  - a fragment needing `IO.NetConnect` is refused under a policy without it;
+  - while a session is open, `forge deploy hot` succeeds, and the session's
+    next input gets `epoch_changed` and the shell exits;
+  - the session's slots are released when it ends (live-object count back
+    to its baseline);
+  - the audit log has every input.
+- **Skew test**: change one boundary function's body in the client checkout;
   `forge shell` refuses and names it; `--force` then allows a read-only
-  fragment and refuses `replace_state`.
+  fragment and refuses `Recon.replace_state`.
 - CHANGELOG `### Added`: `forge rpc`, `forge shell`, `forge eval`.
 
 ---

@@ -18,7 +18,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
-    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host"; "observe" ]
+    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host"; "observe"; "diagnose"; "top"; "status" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -1421,7 +1421,7 @@ let observe_cmd =
   let sections =
     Arg.(value & opt_all string [] & info ["section"] ~docv:"S"
            ~doc:"Ask for $(b,SNAPSHOT) of just this section (repeatable): actors, tree, names, \
-                 sched, mem, epochs.")
+                 sched, mem, epochs, crashes.")
   in
   let json =
     Arg.(value & flag & info ["json"]
@@ -1436,13 +1436,117 @@ let observe_cmd =
     Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
            ~doc:"Only the [[hot-reload.env]] entries named NAME (default: every host in forge.toml).")
   in
-  let run words sections json socket env =
-    handle (Cmd_observe.run ~socket ~env ~json ~words ~sections ())
+  let state =
+    Arg.(value & opt (some int) None & info ["state"] ~docv:"PID"
+           ~doc:"Ask for actor PID's state, as $(b,Actor.inspect_state) renders it: the signed \
+                 debug verb $(b,STATE), signed with ~/.march/ed25519_secret.key. The node must be \
+                 a $(b,--hot-reload --signing-pubkey) build that lists STATE in its \
+                 MARCH_DEBUG_POLICY file.")
+  in
+  let crashes_full =
+    Arg.(value & flag & info ["crashes-full"]
+           ~doc:"Ask for the recent crashes with their messages: the signed debug verb \
+                 $(b,CRASHES_FULL) (see $(b,--state)).")
+  in
+  let n =
+    Arg.(value & opt (some int) None & info ["n"; "count"] ~docv:"N"
+           ~doc:"With $(b,--crashes-full): how many crashes (default 20, max 256).")
+  in
+  let timeout_ms =
+    Arg.(value & opt int 1000 & info ["timeout-ms"] ~docv:"MS"
+           ~doc:"With $(b,--state): how long the actor has to answer (default 1000, max 8000; \
+                 forge waits at most 10 s for the reply).")
+  in
+  let run words sections json socket env state crashes_full n timeout_ms =
+    let debug = match state, crashes_full with
+      | Some _, true -> None
+      | Some pid, false -> Some (Cmd_observe.State { pid; timeout_ms })
+      | None, true -> Some (Cmd_observe.Crashes_full n)
+      | None, false -> Some Cmd_observe.No_debug in
+    match debug with
+    | None -> handle (Error "observe: give --state or --crashes-full, not both")
+    | Some debug -> handle (Cmd_observe.run ~debug ~socket ~env ~json ~words ~sections ())
   in
   Cmd.v (Cmd.info "observe"
            ~doc:"Ask a running node what it is doing: its actors, supervision tree, names, \
-                 schedulers, memory and code epochs, from the node's read-only observe socket")
-    Term.(const run $ words $ sections $ json $ socket $ env_name)
+                 schedulers, memory and code epochs, from the node's read-only observe socket; \
+                 with $(b,--state) or $(b,--crashes-full), a signed debug request")
+    Term.(const run $ words $ sections $ json $ socket $ env_name $ state $ crashes_full $ n $ timeout_ms)
+
+let top_cmd =
+  let sort =
+    Arg.(value & opt string "mbox" & info ["sort"] ~docv:"ATTR"
+           ~doc:"Rank by mbox (default), crashes, slices, msgs_in or msgs_out; the last three \
+                 rank the change over $(b,--window).")
+  in
+  let n = Arg.(value & opt int 20 & info ["n"; "count"] ~docv:"N" ~doc:"Rows to show (default 20).") in
+  let window =
+    Arg.(value & opt int 1000 & info ["window"] ~docv:"MS"
+           ~doc:"Window for the rate sorts, and their refresh (default 1000).")
+  in
+  let once = Arg.(value & flag & info ["once"] ~doc:"Print one frame and exit (for scripts).") in
+  let socket =
+    Arg.(value & opt (some string) None & info ["socket"] ~docv:"PATH"
+           ~doc:"A local observe socket instead of the first forge.toml host.")
+  in
+  let env_name =
+    Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
+           ~doc:"The [[hot-reload.env]] entry to watch (the first one named NAME).")
+  in
+  let run sort n window once socket env_name =
+    handle (Cmd_observe.run_top ~socket ~env:env_name ~sort ~n ~window_ms:window ~once ())
+  in
+  Cmd.v (Cmd.info "top"
+           ~doc:"Watch a running node's busiest actors: mailbox depth, crashes, or message and \
+                 dispatch rates, refreshed in place")
+    Term.(const run $ sort $ n $ window $ once $ socket $ env_name)
+
+let status_cmd =
+  let json = Arg.(value & flag & info ["json"] ~doc:"One JSON document instead of text.") in
+  let socket =
+    Arg.(value & opt (some string) None & info ["socket"] ~docv:"PATH"
+           ~doc:"A local observe socket instead of the project's nodes.")
+  in
+  let env_name =
+    Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
+           ~doc:"The environment: the topology.NAME.toml overlay, or the [[hot-reload.env]] entries named NAME.")
+  in
+  let run json socket env_name =
+    handle (Cmd_observe.run_status ~socket ~env:env_name ~json ())
+  in
+  Cmd.v (Cmd.info "status"
+           ~doc:"Each node at a glance: with a topology, its report (alive, versions, drift) and \
+                 then actors, queued messages, memory, scheduler load, crashes in the last hour \
+                 and the deepest mailbox, from each node's observe socket")
+    Term.(const run $ json $ socket $ env_name)
+
+let diagnose_cmd =
+  let window =
+    Arg.(value & opt int 1000 & info ["window"] ~docv:"MS"
+           ~doc:"Take the two snapshots this many milliseconds apart (default 1000).")
+  in
+  let dump =
+    Arg.(value & opt (some string) None & info ["dump"] ~docv:"FILE"
+           ~doc:"Also write the two raw snapshots to FILE (the diagnose fixture format).")
+  in
+  let json = Arg.(value & flag & info ["json"] ~doc:"Print each envelope on one line.") in
+  let socket =
+    Arg.(value & opt (some string) None & info ["socket"] ~docv:"PATH"
+           ~doc:"A local observe socket instead of the forge.toml hosts.")
+  in
+  let env_name =
+    Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
+           ~doc:"Only the [[hot-reload.env]] entries named NAME.")
+  in
+  let run window dump json socket env_name =
+    exit (Cmd_observe.run_diagnose ~socket ~env:env_name ~json ~window_ms:window ~dump ())
+  in
+  Cmd.v (Cmd.info "diagnose"
+           ~doc:"Check a running node for known trouble (growing mailboxes, saturated schedulers, \
+                 crash loops, heap climbing, stuck epochs) over a window; exit 0 nothing found, \
+                 1 warnings, 2 critical, 3 unreachable"
+           ~exits:Cmd.Exit.defaults)
+    Term.(const run $ window $ dump $ json $ socket $ env_name)
 
 (* -------------------------------------------------------- forge hot-reload *)
 
@@ -1877,7 +1981,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; observe_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
+      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; observe_cmd; diagnose_cmd; top_cmd; status_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

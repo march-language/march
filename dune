@@ -1,5 +1,8 @@
 (dirs (:standard \ .claude))
 
+; Third-party code we carry a local patch for (see vendor/notty/VENDORED.md).
+(vendored_dirs vendor)
+
 (env
  (dev
   (c_flags (:standard -g))))

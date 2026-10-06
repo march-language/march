@@ -103,6 +103,21 @@ let clo_struct_prefix = "$Clo_"
 let is_clo_struct (tcon_name : string) : bool =
   String.length tcon_name >= 5 && String.sub tcon_name 0 5 = clo_struct_prefix
 
+(** Name of the capture-release function [Drop.run] synthesizes for closure
+    struct [clo] ("$clodrop$$Clo_f$7"): it releases every capture of an
+    environment that is being freed.  The runtime calls it, looked up by the
+    closure's apply function, when a closure released WITHOUT being called
+    dies ([march_clo_release]); nothing in TIR calls it, so [Dce] keeps it
+    alive through the closure's allocation sites instead.
+    The name embeds [clo], and so the global lambda counter, and must start
+    with '$' like every other counter-derived name ([$lam<n>], [$jp<n>]):
+    tooling that diffs hot-reload manifests (forge's deploy plan,
+    forge/test/test_hcr_manifest_diff.ml) treats a leading '$' as "generated,
+    may be renumbered by any edit"; as "__clodrop$" a one-line edit showed up
+    as user functions removed. *)
+let clo_drop_fn_prefix = "$clodrop$"
+let clo_drop_fn_name (clo : string) : string = clo_drop_fn_prefix ^ clo
+
 (* ── Closure apply wrappers: "<fn>$apply$<uid>" ─────────────────────────
    Producer: lib/tir/defun.ml mints the apply-wrapper fn name as
    [Printf.sprintf "%s$apply$%d" fn.fn_name lam.lam_uid].
@@ -526,6 +541,17 @@ let is_actor_dispatch_fn (fn_name : string) : bool =
     reference to the actor record, so that trampoline must release nothing —
     see [Llvm_emit.clo_wrap_borrowed]. *)
 let actor_on_stop_suffix = "_on_stop"
+
+(** Suffix for an actor's generated state renderer ("Name" -> "Name_inspect",
+    observe plan R4): lowered like `on_stop`, called by the runtime's actor
+    loop through the same kind of trampoline, so it too must release nothing
+    in [Llvm_emit.clo_wrap_borrowed]. *)
+let actor_inspect_suffix = "_inspect"
+
+let is_actor_inspect_fn (fn_name : string) : bool =
+  let sfx = actor_inspect_suffix in
+  let nl = String.length fn_name and sl = String.length sfx in
+  nl > sl && String.sub fn_name (nl - sl) sl = sfx
 
 (** Is [fn_name] an actor's `on_stop` callback fn? Suffix check, with the same
     looseness as [is_actor_dispatch_fn]: a user fn that happens to end in the

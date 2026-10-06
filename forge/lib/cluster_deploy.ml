@@ -272,15 +272,18 @@ let stage c ~(release : string) : (unit, string) result =
   if String.length resp >= 2 && String.sub resp 0 2 = "OK" then Ok ()
   else Error (Printf.sprintf "STAGE: %s" resp)
 
-(** Upload [path] as artifact [hash] to every endpoint that lacks it, on a
-    connection that stages [release] (which names [hash]) first. *)
+(** Upload [path] as artifact [hash] to every endpoint that lacks it, or
+    holds other bytes under it, on a connection that stages [release] (which
+    names [hash]) first: both verbs carry the bytes' digest, the one the
+    release's ACTIVATE7 lines sign. *)
 let upload (eps : endpoint list) ~(release : string) ~(hash : string) ~(path : string) : (unit, string) result =
+  let digest = Cmd_deploy_hot.artifact_digest path in
   List.fold_left (fun acc e ->
       let* () = acc in
       match with_conn e (fun c ->
           let* () = stage c ~release in
-          if Cmd_deploy_hot.cas_check c hash then Ok ()
-          else (Cmd_deploy_hot.cas_put c hash path; Ok ())) with
+          if Cmd_deploy_hot.cas_check ~digest c hash then Ok ()
+          else (Cmd_deploy_hot.cas_put ~digest c hash path; Ok ())) with
       | Ok () -> Ok ()
       | Error m ->
         (* A candidate that is down is skipped: the artifact reaches the

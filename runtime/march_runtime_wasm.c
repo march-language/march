@@ -93,6 +93,8 @@ int64_t march_decrc_freed(void *p) { (void)p; return 0; }
 void  march_incrc_local(void *p) { (void)p; }
 void  march_decrc_local(void *p) { (void)p; }
 void  march_clo_param_own(void *p) { (void)p; }
+void  march_clo_release(void *p) { (void)p; }
+void  march_clo_register_drops(void **pairs, int64_t n) { (void)pairs; (void)n; }
 void *march_clo_float_arg(void *p) { (void)p; return 0; }
 void  march_free(void *p) { (void)p; /* no-op bump alloc */ }
 /* A TCO loop's pending-drop list (see march_runtime.h): every release it could
@@ -605,6 +607,9 @@ void *march_vault_drop(void *t, void *k) { (void)t; (void)k; __builtin_trap(); }
 void *march_vault_update(void *t, void *k, void *f) { (void)t;(void)k;(void)f; __builtin_trap(); }
 int64_t march_vault_size(void *t) { (void)t; __builtin_trap(); }
 void *march_vault_keys(void *t) { (void)t; __builtin_trap(); }
+void *march_vault_reap(void *t, void *k) { (void)t; (void)k; __builtin_trap(); }
+void *march_vault_close(void *t) { (void)t; __builtin_trap(); }
+int64_t march_vault_live_tables(void) { __builtin_trap(); }
 
 /* ── LLVM intrinsic ─────────────────────────────────────────────────── */
 

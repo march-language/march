@@ -2,7 +2,27 @@
  (modules parser)
  (flags --explain))
 
+; The lexer is compiled INTO this library, from its source at
+; lib/lexer/lexer.mll, so that [Parse] (the one parse entry point) can own
+; the whole lexer -> token filter -> parser pipeline.  It cannot simply depend
+; on march_lexer: the lexer needs the parser's token type, so that dependency
+; runs the other way.  lib/lexer's `March_lexer.Lexer` is now a re-export of
+; this module (same exception, same functions), so existing callers and the
+; source path lib/lexer/lexer.mll are both unchanged.
+; The one edit made on the way in: inside this library the parser is
+; `Parser`, not `March_parser.Parser` (dune rejects a library module that
+; names its own library's main module).  Line numbers are preserved.
+(rule
+ (targets lexer.mll)
+ (deps ../lexer/lexer.mll)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run sed "s/^open March_parser\\.Parser$/open Parser/" %{deps}))))
+
+(ocamllex lexer)
+
 (library
  (name march_parser)
- (modules parse_errors parser token_filter)
+ (modules parser token_filter lexer parse)
  (libraries march_ast march_errors))

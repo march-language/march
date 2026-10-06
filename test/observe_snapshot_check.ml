@@ -200,7 +200,7 @@ let tree sock =
           |> List.map (fun v -> member "name" v |> to_string) in
   check "HELP lists every verb"
     (h = ["HELP"; "PING"; "SNAPSHOT"; "ACTORS"; "ACTOR"; "TREE"; "NAMES";
-          "SCHED"; "MEM"; "EPOCHS"; "CRASHES"; "TOP"])
+          "SCHED"; "MEM"; "EPOCHS"; "CRASHES"; "TOP"; "STATE"; "CRASHES_FULL"])
     (String.concat "," h)
 
 let types sock =
@@ -287,15 +287,42 @@ let sched sock ready_file =
   (* last_run_ms comes from a clock the preemption daemon ticks every 1 ms:
      an actor that is running right now must not look idle.  (It once came
      from a per-scheduler clock refreshed every 1024 dispatches, which left
-     the busiest actors reading seconds idle.) *)
-  (* Five samples: the stale clock read anywhere from 0 to ~700 ms. *)
-  let samples = List.init 5 (fun _ ->
+     the busiest actors reading seconds idle, nearly every reading of every
+     actor over 50 ms.)  A correct reading can still go over once in a while
+     for a real reason: four spinners on a 3-core macOS runner time-share the
+     CPU, and a scheduler thread descheduled mid-slice takes its actor's next
+     dispatch with it (one CI run read 101 ms in one of 20 readings).  So: ten
+     samples, and fail only on a CONSISTENT stale value, an actor over 50 ms
+     in half or more of its samples, or more than a quarter of all readings
+     over.  Measured 2026-10-04, 30 runs each, macOS under 14 `yes` on 14
+     cores and linux/arm64 on 4 CPUs under 4 `yes`: correct runs peaked at 6
+     of 40 readings over, while the stale clock reintroduced (dispatch
+     stamping the 1024-dispatch scheduler clock, or a coarse clock ticked
+     every 100 ms) never read fewer than 21 of 40 over.  Rows are keyed by
+     pid: ACTORS ranks by status, so row order can change between samples. *)
+  let nsamples = 10 in
+  let samples = List.init nsamples (fun _ ->
       Unix.sleepf 0.1;
       data (get sock "ACTORS status 4") |> member "actors" |> to_list
-      |> List.map (fun r -> match member "idle_ms" r with `Int n -> n | _ -> max_int)) in
-  check "running actors read under 50 ms idle (5 samples)"
-    (List.for_all (fun xs -> List.length xs = 4 && List.for_all (fun n -> n < 50) xs) samples)
-    (String.concat " " (List.map (fun xs -> String.concat "," (List.map string_of_int xs)) samples));
+      |> List.map (fun r ->
+          (member "pid" r |> to_int,
+           match member "idle_ms" r with `Int n -> n | _ -> max_int))) in
+  let readings = List.concat samples in
+  let over (_, n) = n >= 50 in
+  let pids = List.sort_uniq compare (List.map fst readings) in
+  let stale_pid p =
+    List.length (List.filter (fun r -> fst r = p && over r) readings) * 2
+    >= List.length (List.filter (fun r -> fst r = p) readings) in
+  let shown = String.concat " " (List.map (fun xs ->
+      String.concat "," (List.map (fun (_, n) -> string_of_int n) xs)) samples) in
+  (* stderr, so a passing run's readings still reach the CI log. *)
+  prerr_endline ("observe_sched idle_ms samples: " ^ shown);
+  check "running actors read under 50 ms idle (10 samples)"
+    (List.for_all (fun xs -> List.length xs = 4) samples
+     && List.length pids = 4
+     && not (List.exists stale_pid pids)
+     && List.length (List.filter over readings) * 4 <= List.length readings)
+    shown;
   let s = data (get sock "SNAPSHOT sched") |> member "sched" in
   check "SNAPSHOT's sched section is lifetime-only (no window)"
     (member "window_ms" s = `Null && member "utilisation" s = `Null

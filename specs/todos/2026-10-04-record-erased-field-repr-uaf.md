@@ -2,8 +2,10 @@
 
 Found 2026-10-04 in an ASAN sweep (Linux container, `MARCH_SANITIZE=1
 MARCH_DEBUG_RUNTIME=1`, `detect_leaks=0`) while fixing
-`specs/todos/2026-10-02-known-call-generic-lambda-float-leak.md`. It reproduces with
-main's unmodified compiler (main at 2026-10-04), so it predates that fix. The
+the Known_call generic-lambda Float leak
+(`specs/progress/2026-10-02-known-call-generic-lambda-float-leak.md`). It reproduced
+with main's unmodified compiler at 2026-10-04, and again on 2026-10-06 on main
+`11833975a` (after #811 and the record-ownership leak fixes), so neither caused it. The
 fixture's normal golden test passes: the freed memory is not reused in time to
 change any printed value, so only ASAN sees it.
 

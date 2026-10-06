@@ -4,8 +4,7 @@
 
 let parse src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.module_
-    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  March_parser.Parse.module_of_lexbuf lexbuf
 
 let z3_available () =
   match March_refine.Solver.create () with
@@ -75,8 +74,7 @@ let typed_ledger src =
 let parse_as ~file src =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = file };
-  March_parser.Parser.module_
-    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  March_parser.Parse.module_of_lexbuf lexbuf
 
 let has_refine_error_from ?(stdlib_files = []) ~file src =
   let ctx = March_errors.Errors.create () in
@@ -10119,8 +10117,7 @@ let load_stdlib_march (name : string) : March_ast.Ast.module_ * string =
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     let m =
-      March_parser.Parser.module_
-        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+      March_parser.Parse.module_of_lexbuf lexbuf
     in
     (March_desugar.Desugar.desugar_module m, path)
 

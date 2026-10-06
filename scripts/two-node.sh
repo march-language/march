@@ -8,6 +8,11 @@
 #   scripts/two-node.sh --list K/N           # shard K of N (1-based): every
 #                                            # scenario whose index in the
 #                                            # sorted list is K-1 mod N
+#   scripts/two-node.sh --precompile <dir> <scenario>...
+#                                            # compile those scenarios' nodes
+#                                            # into <dir>, TWO_NODE_JOBS
+#                                            # (default 4) at a time; see
+#                                            # TWO_NODE_PREBUILT below
 #
 # A scenario directory holds node_a.march / node_b.march (and node_c.march for
 # a three-node scenario), node_<x>.expected (each node's stdout, sorted; a
@@ -50,19 +55,119 @@
 #                                 unsorted: only for a node that prints from one
 #                                 actor, whose order is then the protocol's
 #
+#   run_node <binary>             exec a node binary with its in-program
+#                                 deadlines scaled under ASan (see TIME_SCALE
+#                                 below). start_node uses it; a scenario that
+#                                 launches a node itself (the control-plane
+#                                 ones) ends the node's subshell with it
+#   TIME_SCALE                    (read-only) 1, or the ASan factor, for a
+#                                 scenario's own deadlines (ctl_until uses it)
+#   TIME_SCALE_EXEMPT             (set by the scenario) deadline variables NOT
+#                                 to scale, for a scenario whose point is how
+#                                 its own timing compares with that deadline
+#
 # Every wait has a deadline (TWO_NODE_TIMEOUT, default 60 s) and fails loudly
 # with every node's output. Why two processes and not two green threads: see
 # specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
+#
+# TWO_NODE_PREBUILT=<dir> (set by the caller, after `--precompile <dir> ...`):
+# `compile` copies a node's binary from <dir>/<scenario>/ instead of compiling
+# it, when the scenario sets no COMPILE_FLAGS_<x> for it, the prebuilt source
+# is byte-identical to node_<x>.march, and <dir>/stamp matches this
+# toolchain (toolchain_stamp). Anything else compiles as before, so a stale,
+# partial or missing <dir> costs time, never correctness. The point is to
+# take compiling off the serial path: CI compiles a shard's ~90 nodes in
+# parallel before any scenario, whose deadlines then never race a compile.
+# --precompile skips every node with a COMPILE_FLAGS_<x> in its scenario.sh
+# (keys and baselines generated at run time) and every scenario with no
+# node_<x>.march (control_*, hcr_role_policy: they build their own).
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 MARCH=${MARCH_BIN:-$root/_build/default/bin/main.exe}
+case $MARCH in /*) ;; *) MARCH=$PWD/$MARCH ;; esac   # --precompile-one cds
 TIMEOUT=${TWO_NODE_TIMEOUT:-60}
+
+sha256() { if command -v sha256sum > /dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
+
+# What a node binary is a function of, besides its source and flags: the
+# compiler, the runtime and stdlib it compiles against (exe-relative, unless
+# overridden, as bin/toolchain.ml resolves them), the C compiler, and the
+# environment the compiler reads that changes its output (MARCH_SANITIZE: the
+# ASan gate). A miss is only a recompile, so this can afford to be broad.
+toolchain_stamp() {
+  local d exe_dir; exe_dir=$(dirname "$MARCH")
+  {
+    sha256 < "$MARCH"
+    for d in "${MARCH_RUNTIME_DIR:-$exe_dir/../runtime}" "${MARCH_STDLIB:-$exe_dir/../stdlib}"; do
+      [ -d "$d" ] || { echo "missing $d"; continue; }
+      (cd "$d" && find . -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.march' \) \
+                   | LC_ALL=C sort | while read -r f; do printf '%s ' "$f"; sha256 < "$f"; done)
+    done
+    "${CC:-cc}" --version 2>&1 | head -1
+    echo "MARCH_SANITIZE=${MARCH_SANITIZE:-}"
+    uname -sm
+  } | sha256 | cut -d' ' -f1
+}
+
+# --precompile-one <dir> <scenario> <x>: one node, run by --precompile's
+# xargs. In its own directory, which is the compiler's cwd and therefore its
+# own CAS (.march/cas/ under the cwd; its object writes are not atomic, so
+# concurrent compiles must not share one). A failure leaves no binary: the
+# scenario then compiles the node itself and reports the error in context.
+if [ "${1:-}" = "--precompile-one" ]; then
+  out=$2/$3; n=$4
+  mkdir -p "$out"
+  cp "$root/test/two_node/$3/node_$n.march" "$out/node_$n.march"
+  if (cd "$out" && "$MARCH" --compile -o "$out/node_$n.tmp" "$out/node_$n.march") > "$out/compile_$n.log" 2>&1; then
+    mv "$out/node_$n.tmp" "$out/node_$n"
+  else
+    rm -f "$out/node_$n" "$out/node_$n.tmp"
+    echo "two-node --precompile: $3/node_$n did not compile (the scenario will retry and report it)" >&2
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "--precompile" ]; then
+  pre=${2:?usage: scripts/two-node.sh --precompile <dir> <scenario>...}
+  shift 2
+  [ -x "$MARCH" ] || { echo "two-node: compiler not built: $MARCH" >&2; exit 2; }
+  mkdir -p "$pre"
+  pre=$(cd "$pre" && pwd)
+  stamp=$(toolchain_stamp)
+  # Another toolchain's binaries are worthless here; start over. Only in a
+  # directory this mode made (it has a stamp): never empty someone's typo.
+  if [ -f "$pre/stamp" ]; then
+    [ "$(cat "$pre/stamp")" = "$stamp" ] || find "$pre" -mindepth 1 -delete
+  elif [ -n "$(ls -A "$pre")" ]; then
+    echo "two-node: --precompile: $pre is not empty and has no stamp; refusing to use it" >&2; exit 2
+  fi
+  echo "$stamp" > "$pre/stamp"
+  for s in "$@"; do
+    sdir=$root/test/two_node/$s
+    [ -f "$sdir/scenario.sh" ] || { echo "two-node: no such scenario: $s" >&2; exit 2; }
+    for n in a b c; do
+      [ -f "$sdir/node_$n.march" ] || continue
+      grep -q "COMPILE_FLAGS_$n" "$sdir/scenario.sh" && continue
+      # Already built from this exact source by this toolchain.
+      [ -x "$pre/$s/node_$n" ] && cmp -s "$sdir/node_$n.march" "$pre/$s/node_$n.march" && continue
+      echo "$s $n"
+    done
+  done > "$pre/todo"
+  start=$(date +%s)
+  xargs -P "${TWO_NODE_JOBS:-4}" -n 2 "$root/scripts/two-node.sh" --precompile-one "$pre" < "$pre/todo"
+  built=0; tried=0
+  while read -r s n; do
+    tried=$((tried + 1)); [ -x "$pre/$s/node_$n" ] && built=$((built + 1))
+  done < "$pre/todo"
+  echo "two-node --precompile: $built of $tried nodes compiled in $(( $(date +%s) - start )) s"
+  exit 0
+fi
 
 # --list K/N deals the sorted list round-robin rather than cutting it into
 # contiguous runs: scenarios that share a prefix also share a cost (the four
 # control_* are 135-200 s each, the drain_* ~25-50 s), so a contiguous cut
-# would put every heavy family in one shard. CI's two-node job runs two shards.
+# would put every heavy family in one shard. CI's two-node job runs three shards.
 if [ "${1:-}" = "--list" ]; then
   shard=${2:-1/1}
   if [[ $shard =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] \
@@ -82,6 +187,63 @@ dir=$root/test/two_node/$scenario
 [ -x "$MARCH" ] || { echo "two-node: compiler not built: $MARCH" >&2; exit 2; }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/two-node-$scenario.XXXXXX")
+
+# ── In-program deadlines under AddressSanitizer ─────────────────────────────
+# The sanitize gate (specs/lang/golden/sanitize.sh) runs every scenario with
+# MARCH_SANITIZE=1, which makes every node several times slower, more on a
+# loaded runner. TWO_NODE_TIMEOUT stretches the harness's own waits; it does
+# not reach the deadlines INSIDE the nodes, and those are what the sweep kept
+# tripping, a different scenario nearly every run: SWIM declaring a slow but
+# healthy peer dead at its 3 s suspect timeout, a placement conflict outliving
+# its 5 s grace. Some were patched one scenario at a time (HCR_SUSPECT_MS);
+# this is the one place instead.
+#
+# Under MARCH_SANITIZE, run_node multiplies each deadline below by TIME_SCALE
+# (TWO_NODE_ASAN_SCALE, default 5): the value the scenario exported, or the
+# stdlib's default when it exported none. Only deadlines that DECLARE A
+# FAILURE are scaled (a peer dead, a setup abandoned, a conflict real), never
+# a poll interval or a "wait at least this long" delay, which would only make
+# a slow run slower. Without MARCH_SANITIZE, TIME_SCALE is 1 and run_node is
+# a bare exec: the normal two-node job runs exactly as before.
+#
+#   MARCH_SWIM_SUSPECT_MS                    ClusterNode.config (SWIM)
+#   MARCH_SESSION_CONNECT_MS / _TIMEOUT_MS   session setup / heartbeat
+#   MARCH_PLACEMENT_CONFLICT_GRACE_MS        Topology: a held endpoint
+#   MARCH_HOOK_TIMEOUT_MS                    Topology: a placement hook
+#   MARCH_CONTROL_AGENT_GRACE_MS             control: an agent's mark
+#
+# Why 5, and why only SWIM's suspect timeout and not its probe period or ack
+# timeout: measured 2026-10-05 on hcr_new_code_session (2 CPUs, 2 busy loops,
+# ASan). A suspect is cleared by its own refutation, gossiped on the next
+# probes, so a longer period slows the very thing the timeout waits for.
+# Scaling all three by 3 (period 3 s, suspect 9 s) or 4 (4 s, 12 s) still
+# declared node-a dead (3 of 3, 1 of 1); the period kept at 1 s with a 15 s
+# suspect passed 3 of 3. 5 x 3 s is that 15 s.
+#
+# Each default here must be the stdlib's (stdlib/cluster_node.march,
+# session_node.march, topology.march, lib/desugar/control_wiring.march).
+# TWO_NODE_TIME_SCALE is exported for a node program's own deadlines.
+if [ -n "${MARCH_SANITIZE:-}" ]; then TIME_SCALE=${TWO_NODE_ASAN_SCALE:-5}; else TIME_SCALE=1; fi
+[[ $TIME_SCALE =~ ^[1-9][0-9]*$ ]] \
+  || { echo "two-node: TWO_NODE_ASAN_SCALE must be a positive integer, got: $TIME_SCALE" >&2; exit 2; }
+export TWO_NODE_TIME_SCALE=$TIME_SCALE
+scaled_deadlines="MARCH_SWIM_SUSPECT_MS=3000
+  MARCH_SESSION_CONNECT_MS=20000 MARCH_SESSION_TIMEOUT_MS=10000
+  MARCH_PLACEMENT_CONFLICT_GRACE_MS=5000 MARCH_HOOK_TIMEOUT_MS=10000
+  MARCH_CONTROL_AGENT_GRACE_MS=20000"
+run_node() {
+  local kv var cur
+  if [ "$TIME_SCALE" != 1 ]; then
+    for kv in $scaled_deadlines; do
+      var=${kv%%=*}
+      case " ${TIME_SCALE_EXEMPT:-} " in *" $var "*) continue ;; esac
+      cur=${!var:-${kv#*=}}
+      [[ $cur =~ ^[0-9]+$ ]] || cur=${kv#*=}
+      export "$var=$(( cur * TIME_SCALE ))"
+    done
+  fi
+  exec "$@"
+}
 
 # node-b's listen port, chosen BELOW the OS's ephemeral range.
 #
@@ -145,6 +307,19 @@ need_built() {
     || { cat "$work/need_built.log" >&2; fail "could not build $rel"; }
 }
 
+# Does TWO_NODE_PREBUILT's stamp name this toolchain? Computed once per run.
+prebuilt_ok=""
+prebuilt_current() {
+  if [ -z "$prebuilt_ok" ]; then
+    if [ "$(cat "$TWO_NODE_PREBUILT/stamp" 2>/dev/null)" = "$(toolchain_stamp)" ]; then prebuilt_ok=1
+    else
+      prebuilt_ok=0
+      echo "two-node[$scenario]: $TWO_NODE_PREBUILT was built by another toolchain; compiling" >&2
+    fi
+  fi
+  [ "$prebuilt_ok" = 1 ]
+}
+
 compile() {
   local n=$1
   [ -x "$work/node_$n" ] && return
@@ -154,6 +329,13 @@ compile() {
   # COMPILE_FLAGS_<n> (set by the scenario): extra compiler flags for that
   # node, e.g. `--protocol-baseline $work/base/P.json` (build step 9).
   local flags_var="COMPILE_FLAGS_$n"
+  local pre=${TWO_NODE_PREBUILT:+$TWO_NODE_PREBUILT/$scenario}
+  if [ -n "$pre" ] && [ -z "${!flags_var:-}" ] && [ -x "$pre/node_$n" ] \
+     && cmp -s "$dir/node_$n.march" "$pre/node_$n.march" && prebuilt_current; then
+    cp "$pre/node_$n" "$work/node_$n"
+    echo "prebuilt: $pre/node_$n" > "$work/compile_$n.log"
+    return
+  fi
   # shellcheck disable=SC2086 # the flags are words, split on purpose
   "$MARCH" --compile ${!flags_var:-} -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
     || { cat "$work/compile_$n.log" >&2; fail "node_$n.march did not compile"; }
@@ -196,7 +378,7 @@ start_node() {
     local tries=1
     while :; do
       MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C \
-      MARCH_NODE_PORT=$PORT MARCH_NODE_CREATION=$creation "$work/node_b" >> "$work/b.out" 2>> "$work/b.err" &
+      MARCH_NODE_PORT=$PORT MARCH_NODE_CREATION=$creation run_node "$work/node_b" >> "$work/b.out" 2>> "$work/b.err" &
       pid_b=$!
       bind_failed || break
       # Something else holds the port.  Before node-b has ever bound and
@@ -209,11 +391,11 @@ start_node() {
       pick_port
     done
   elif [ "$n" = c ]; then
-    MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C "$work/node_c" >> "$work/c.out" 2>> "$work/c.err" &
+    MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C run_node "$work/node_c" >> "$work/c.out" 2>> "$work/c.err" &
     pid_c=$!
   else
     MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C \
-    MARCH_PEER_PORT=$PORT "$work/node_a" >> "$work/a.out" 2>> "$work/a.err" &
+    MARCH_PEER_PORT=$PORT run_node "$work/node_a" >> "$work/a.out" 2>> "$work/a.err" &
     pid_a=$!
   fi
   port_settled=1

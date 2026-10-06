@@ -38,8 +38,8 @@ docker run --rm --cap-add NET_ADMIN \
   -v "$root":/work -v "$volume":/lbuild -w /work \
   -e TWO_NODE_TIMEOUT="${TWO_NODE_TIMEOUT:-60}" \
   "$image" bash -c '
-    export PATH=/home/opam/.opam/5.3.0/bin:$PATH
-    eval "$(opam env --root /home/opam/.opam --switch 5.3.0 2> /dev/null)"
+    export PATH=/home/opam/.opam/5.5.1/bin:$PATH
+    eval "$(opam env --root /home/opam/.opam --switch 5.5.1 2> /dev/null)"
     dune build --root . --build-dir /lbuild bin/main.exe @bin/warm-cache > /tmp/build.log 2>&1 \
       || { tail -40 /tmp/build.log; exit 2; }
     status=0

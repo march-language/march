@@ -66,6 +66,10 @@ void  march_decrc(void *p);
 /* Decrement RC and return 1 if the object was freed (RC hit 0), 0 if still alive.
    Used when pattern-matching to conditionally IncRC extracted child pointers. */
 int64_t march_decrc_freed(void *p);
+/* Release a closure value; when this frees it, first release its captures
+   through the drop registered for its apply function (march_runtime.c). */
+void march_clo_release(void *p);
+void march_clo_register_drops(void **pairs, int64_t n);
 /* Decrement RC with march_decrc_local's atomicity policy and return 1 if the
    object was freed, 0 otherwise (0 also for a non-heap pointer). */
 int64_t march_decrc_local_freed(void *p);
@@ -286,12 +290,17 @@ void    march_timer_cancel(void *tok);
 #define MARCH_DOWN_NORMAL_TAG         0x7F000001
 #define MARCH_DOWN_KILLED_TAG         0x7F000002
 #define MARCH_DOWN_CRASH_TAG          0x7F000003
-#define MARCH_RESERVED_CTOR_TAG_LIMIT 0x7F000004
+/* An inspect request (Actor.inspect_state; R4 of the observe plan, stage B1
+ * of the per-actor introspection design): field 0 is a reply-ref built as
+ * march_actor_call builds one.  Intercepted by the actor loop between
+ * handlers; never reaches a dispatch. */
+#define MARCH_SYS_INSPECT_TAG         0x7F000004
+#define MARCH_RESERVED_CTOR_TAG_LIMIT 0x7F000005
 
 #if MARCH_ORDINARY_CTOR_TAG_LIMIT > MARCH_ACTOR_MSG_TAG_BASE || \
     MARCH_ACTOR_MSG_TAG_LIMIT > MARCH_COLLISION_TAG_BASE || \
     MARCH_COLLISION_TAG_LIMIT > MARCH_DOWN_TAG || \
-    MARCH_DOWN_CRASH_TAG >= MARCH_RESERVED_CTOR_TAG_LIMIT
+    MARCH_SYS_INSPECT_TAG >= MARCH_RESERVED_CTOR_TAG_LIMIT
 #error "March constructor tag ranges overlap the reserved monitor ABI"
 #endif
 
@@ -1006,6 +1015,13 @@ void   *march_vault_drop(void *table, void *key);
 void   *march_vault_update(void *table, void *key, void *f);
 int64_t march_vault_size(void *table);
 void   *march_vault_keys(void *table);
+/* Collect the values [key]'s shard has stopped holding, as a List(v) the
+ * caller owns; Vault's typed wrappers drop it (march_extras.c). */
+void   *march_vault_reap(void *table, void *key);
+/* Unregister and empty a table, returning every value it held (march_extras.c). */
+void   *march_vault_close(void *table);
+/* Vault tables created and not yet freed (a leak gauge for tests). */
+int64_t march_vault_live_tables(void);
 /* String-namespace helpers: accept a String name, auto-create/find vault. */
 void   *march_vault_ns_set(void *ns, void *key, void *value);
 void   *march_vault_ns_get(void *ns, void *key);

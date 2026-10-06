@@ -20,7 +20,7 @@ open Flags
 
 let parse_pred (src : string) : March_ast.Ast.expr option =
   let lb = Lexing.from_string src in
-  match March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lb with
+  match March_parser.Parse.expr_of_lexbuf lb with
   | e -> Some e
   | exception _ -> None
 

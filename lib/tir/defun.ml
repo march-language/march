@@ -94,7 +94,7 @@ let builtin_names : StringSet.t =
       "cap_narrow"; "root_cap"; "mint_cap"; "cap_impl"; "cap_dict";
       "set_actor_caps"; "actor_caps";
       (* Monitor/supervision builtins *)
-      "demonitor"; "monitor"; "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node"; "mailbox_size"; "sched_stat"; "observe_query"; "actor_set_mailbox_limit";
+      "demonitor"; "monitor"; "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node"; "mailbox_size"; "sched_stat"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_inspect_store"; "register_actor_inspect"; "actor_set_mailbox_limit";
       "run_until_idle"; "register_resource"; "get_cap";
       (* Named registry (Task 4) *)
       "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";
@@ -312,7 +312,8 @@ let builtin_names : StringSet.t =
       "vault_new"; "vault_whereis"; "vault_set"; "vault_set_ttl"; "vault_get";
       "vault_drop"; "vault_update"; "vault_put_new"; "vault_incr";
       "vault_push_capped"; "vault_size"; "vault_keys"; "vault_ns_set";
-      "vault_ns_get"; "vault_ns_drop" ]
+      "vault_ns_get"; "vault_ns_drop"; "vault_reap"; "vault_close";
+      "vault_live_tables" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

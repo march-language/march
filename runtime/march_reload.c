@@ -5,9 +5,17 @@
  *   ABI_QUERY                                     → SLOT <id> <name> <impl_hash> <sig_hash> …, END
  *   VERSIONS                                      → VERSION <name> baseline <h> [hot <h>] …, END
  *   VERSIONS_DETAIL                               → SLOT <id> <name> <impl_hash> <activated_at_ms> <signer_hex> …, END
- *   CAS_CHECK <compilation_hash>                  → PRESENT | MISSING
- *   CAS_PUT <compilation_hash> <size_bytes>\n     → READY\n
+ *   CAS_CHECK <compilation_hash> [so_blake3:<hex>] → PRESENT | MISSING
+ *     With so_blake3: PRESENT only when the stored bytes hash to <hex>, so a
+ *     client re-uploads an artifact that is stale or was substituted.
+ *   CAS_PUT <compilation_hash> <size_bytes> [so_blake3:<hex>]\n → READY\n
  *     <binary data, exactly size_bytes>           → OK <hash> | ERR <reason>
+ *     With so_blake3: the received bytes must hash to <hex> (ERR
+ *     digest_mismatch, nothing stored).  Without it the bytes are stored as
+ *     before.  Either way the CAS is NOT a trust boundary: anyone who can
+ *     reach this socket or the control API can write it, and the key is a
+ *     compilation hash, not a digest of the bytes.  What makes an activation
+ *     safe is ACTIVATE7's signed so_blake3, checked at load (below).
  *   ACTIVATE  <name> <impl_hash> <cas_hash> <sig64>  → OK <impl_hash> | ERR <reason>  (v1, legacy)
  *   ACTIVATE2 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> callers:<sorted-csv>
  *                                                   → OK <impl_hash> | ERR <reason>  (v2, signed epoch+callers)
@@ -64,6 +72,29 @@
  *     signature would fail with a misleading ERR bad_signature) and its
  *     `callers:` parse runs to end of line.  A client whose manifest has
  *     no ROLE lines keeps sending ACTIVATE4/ACTIVATE5 unchanged.
+ *   ACTIVATE7 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N>
+ *             so_blake3:<hex> cap_root:<hex> [role_caps:<...>] caps:<sorted-csv>
+ *             [roles:<...>] callers:<sorted-csv>
+ *                                                   → OK | WAIT … | ERR <reason>  (v7)
+ *     As ACTIVATE5 (or, with role_caps:/roles:, ACTIVATE6), plus the BLAKE3
+ *     of the patch .so's bytes, INSIDE the signed message (between epoch
+ *     and cap_root):
+ *       "ACTIVATE7 <name> <impl> <cas> <migrate> epoch:<N> so_blake3:<hex>
+ *        cap_root:<hex>[ role_caps:<...>] callers:<csv>"
+ *     <cas_hash> is the compiler's compilation hash, the CAS key; nothing
+ *     before v7 signed a digest of the bytes, so whoever could write the CAS
+ *     (CAS_PUT is unauthenticated) chose the code a signed line loaded
+ *     (review 2026-10-04-dd12-review-cas-artifact-unverified).  v7's bytes
+ *     are checked at load: load_verified copies the artifact into the
+ *     service's private load directory, hashing exactly the bytes it copies,
+ *     and dlopens the copy only when they hash to so_blake3 (ERR
+ *     artifact_digest otherwise; no byte of a refused artifact is ever
+ *     mapped, so its constructors never run).  A new verb, not a field on
+ *     ACTIVATE5/6: an older server answers ERR unknown_command instead of
+ *     loading unverified bytes.  A line before v7 carries no digest: once
+ *     the node holds a release, or with MARCH_HCR_REQUIRE_RELEASE=1, it is
+ *     refused (ERR artifact_digest_required), wrapped or not, and a
+ *     persisted one is not replayed (see "Host-local persisted state").
  *   TOPOLOGY <blake3> <sig64> <size>\n                → READY | ERR <reason>
  *     <topology file, exactly size bytes>            → OK <blake3> | ERR <reason>
  *     A signed reconciler action (plan section 5): the signature is over
@@ -113,6 +144,12 @@
  * Artifact CAS layout (server side):
  *   ~/.march/cas/artifacts/<2>/<62>
  *   where <2> = first 2 chars of compilation_hash, <62> = remaining 62 chars.
+ * A v7 activation loads a verified private copy instead:
+ *   <state_dir>/loaded/<so_blake3>.so   (directory mode 0700; no verb writes it)
+ *
+ * The socket is created owner-only (0600, set between bind and listen, so no
+ * connection is ever accepted under the inherited umask's mode), and a peer
+ * whose uid is neither this process's nor root's is dropped at accept.
  *
  * Audit log: every ACTIVATE appends a JSON line to $MARCH_AUDIT_LOG
  *   (default: ${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl).
@@ -122,12 +159,16 @@
  */
 #if defined(__linux__) || defined(__APPLE__)
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE   /* struct ucred (SO_PEERCRED, peer_uid_ok) */
+#endif
 #include "march_reload.h"
 #include "march_dispatch.h"
 #include "march_runtime.h"
 #include "march_cap_lattice.h"
 #include "march_blake3.h"
 #include "tweetnacl.h"
+#include "march_sig.h"
 #include <stdatomic.h>
 #include <pthread.h>
 #include <sys/socket.h>
@@ -139,6 +180,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/time.h>
 
@@ -156,34 +198,15 @@
 #define MARCH_HCR_ABI_ID "march-hcr-v3;triple=" MARCH_HCR_STRINGIFY(MARCH_HCR_TRIPLE) ";ptr=8"
 
 /* ── Signing public key (embedded at build time) ──────────────────────── */
-/* Generated by the compiler when --signing-pubkey is passed.
+/* Generated by the compiler when --signing-pubkey is passed, and parsed by
+ * march_sig.c (shared with the observe socket's debug verbs).
  * All-zeros → signing not configured → ACTIVATE always rejects. */
+#define g_pubkey        (march_sig_pubkey())
+#define g_pubkey_loaded (march_sig_key_loaded())
+static void load_pubkey_from_hex(void) { march_sig_load_key(); }
 #ifdef MARCH_SIGNING_PUBKEY_HEX
-static unsigned char g_pubkey[32];
-static int           g_pubkey_loaded = 0;
-
-static int hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-static void load_pubkey_from_hex(void) {
-    const char *hex = MARCH_SIGNING_PUBKEY_HEX;
-    int ok = (strlen(hex) == 64);
-    for (int i = 0; i < 32 && ok; i++) {
-        int hi = hex_nibble(hex[2*i]);
-        int lo = hex_nibble(hex[2*i+1]);
-        if (hi < 0 || lo < 0) { ok = 0; break; }
-        g_pubkey[i] = (unsigned char)((hi << 4) | lo);
-    }
-    g_pubkey_loaded = ok;
-}
 #define HAVE_SIGNING_KEY 1
 #else
-static const unsigned char g_pubkey[32] = {0};
-static const int           g_pubkey_loaded = 0;
 #define HAVE_SIGNING_KEY 0
 #endif
 
@@ -306,7 +329,14 @@ static uint32_t load_next_epoch(void) {
  * signed line, skips (with an audit line) any entry that fails, whose
  * artifact is gone from the CAS or whose function the binary does not
  * have, and republishes each function's newest entry, deploy by deploy in
- * sequence (hence epoch) order.  The rewritten file then holds only those:
+ * sequence (hence epoch) order.  An ACTIVATE7 entry's artifact must still
+ * hash to its signed so_blake3 (err_restore_digest otherwise), and is loaded
+ * through the same verified copy as a live activation.  An entry from before
+ * v7 has no signed digest to check the bytes against, so it cannot be
+ * re-verified: it is replayed only where a live unbound line would still be
+ * accepted (no release held, MARCH_HCR_REQUIRE_RELEASE unset), and skipped
+ * otherwise (err_restore_no_digest) -- the function comes back on the base
+ * build until a fresh (v7) deploy.  The rewritten file then holds only those:
  * superseded and broken entries do not outlive a restart.
  * $MARCH_HCR_NO_REPLAY=1 starts from the base binary and sets the stack
  * aside (state.no-replay), for a patch that breaks the boot. */
@@ -487,6 +517,122 @@ static void mkdir_p(const char *path) {
     mkdir(tmp, 0755);
 }
 
+/* ── Artifact digests (ACTIVATE7, review 2026-10-04 dd12 P1) ────────────── */
+
+/* Copy the 64-hex value after [key] (e.g. " so_blake3:") in [line] into
+ * [out], lowercased, when [key] occurs before [before] (or anywhere, when
+ * [before] is NULL or absent).  1 on success, 0 when the field is absent,
+ * -1 when it is present but not 64 hex characters. */
+static int hex_field(const char *line, const char *key, const char *before, char out[65]) {
+    const char *k = strstr(line, key);
+    if (!k) return 0;
+    const char *b = before ? strstr(line, before) : NULL;
+    if (b && k > b) return -1;
+    const char *v = k + strlen(key);
+    for (int i = 0; i < CAS_HASH_LEN; i++) {
+        char c = v[i];
+        if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return -1;
+        out[i] = c;
+    }
+    if (v[CAS_HASH_LEN] != '\0' && v[CAS_HASH_LEN] != ' ') return -1;
+    out[CAS_HASH_LEN] = '\0';
+    return 1;
+}
+
+/* The whole of [path] (at most CAS_MAX_ARTIFACT bytes), malloc'ed; NULL on
+ * any error.  Reads through one fd, so the bytes returned are one file's. */
+static unsigned char *read_artifact(const char *path, size_t *len) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)
+        || st.st_size < 0 || st.st_size > CAS_MAX_ARTIFACT) {
+        close(fd);
+        return NULL;
+    }
+    size_t cap = (size_t)st.st_size, n = 0;
+    unsigned char *buf = (unsigned char *)malloc(cap ? cap : 1);
+    if (!buf) { close(fd); return NULL; }
+    while (n < cap) {
+        ssize_t r = read(fd, buf + n, cap - n);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        n += (size_t)r;
+    }
+    /* A file that grew while being read is not one snapshot: refuse it. */
+    char extra;
+    ssize_t more = read(fd, &extra, 1);
+    close(fd);
+    if (n != cap || more != 0) { free(buf); return NULL; }
+    *len = n;
+    return buf;
+}
+
+/* 1 iff [path] exists and its bytes hash to [want_hex]. */
+static int artifact_digest_ok(const char *path, const char *want_hex) {
+    size_t n = 0;
+    unsigned char *buf = read_artifact(path, &n);
+    if (!buf) return 0;
+    char hex[65];
+    state_hex(buf, n, hex);
+    free(buf);
+    return strcmp(hex, want_hex) == 0;
+}
+
+/* dlopen the artifact at [cas_path] iff its bytes hash to [want_hex].
+ *
+ * The CAS is writable by anyone who reaches CAS_PUT (this socket, or the
+ * control API of any March node of this user sharing ~/.march/cas), so a
+ * check of the CAS file followed by dlopen of the same path would race a
+ * rename() replacing it.  Instead the bytes are read ONCE into memory,
+ * hashed, and (when they match) written to <state_dir>/loaded/<hex>.so, a
+ * directory of mode 0700 that no verb writes, and that copy is dlopened.  A
+ * copy already there is reused when it still hashes to <hex>, so two
+ * functions of one artifact, or a replay at the next start, dlopen one path
+ * (one image).  Returns the handle, or NULL with [why] set to
+ * "artifact_digest" (the bytes are not the signed ones), "missing_artifact",
+ * "load_copy" (the private copy could not be written) or "dlopen". */
+static void *load_verified(const char *cas_path, const char *want_hex, const char **why) {
+    size_t n = 0;
+    if (access(cas_path, F_OK) != 0) { *why = "missing_artifact"; return NULL; }
+    unsigned char *buf = read_artifact(cas_path, &n);
+    if (!buf) { *why = "missing_artifact"; return NULL; }
+    char hex[65];
+    state_hex(buf, n, hex);
+    if (strcmp(hex, want_hex) != 0) { free(buf); *why = "artifact_digest"; return NULL; }
+
+    char dir[800], dest[880], tmp[900];
+    if (g_state_dir[0]) snprintf(dir, sizeof(dir), "%s/loaded", g_state_dir);
+    else snprintf(dir, sizeof(dir), "%s/hcr_loaded", g_cas_root);
+    mkdir_p(dir);
+    chmod(dir, 0700);
+    snprintf(dest, sizeof(dest), "%s/%s.so", dir, want_hex);
+    if (!artifact_digest_ok(dest, want_hex)) {
+        snprintf(tmp, sizeof(tmp), "%s/.%s.%d.tmp", dir, want_hex, (int)getpid());
+        unlink(tmp);
+        int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0700);
+        int ok = fd >= 0;
+        size_t off = 0;
+        while (ok && off < n) {
+            ssize_t w = write(fd, buf + off, n - off);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) ok = 0; else off += (size_t)w;
+        }
+        if (fd >= 0 && close(fd) != 0) ok = 0;
+        if (!ok || rename(tmp, dest) != 0) {
+            unlink(tmp);
+            free(buf);
+            *why = "load_copy";
+            return NULL;
+        }
+    }
+    free(buf);
+    void *handle = dlopen(dest, RTLD_NOW | RTLD_GLOBAL);
+    if (!handle) *why = "dlopen";
+    return handle;
+}
+
 /* The I/O channel of one request dispatch (DD step 12a).  The socket loop
  * reads and writes a real fd; `reload_request` (the stdlib-only builtin the
  * control plane's Agent uses) runs the SAME dispatch over a request held in
@@ -573,18 +719,7 @@ static void write_safe(int fd, const char *buf, int snprintf_ret, size_t bufsz) 
 
 /* ── Audit log ───────────────────────────────────────────────────────────── */
 
-static void pubkey_to_hex(char out[65]) {
-    out[0] = '\0';
-#if HAVE_SIGNING_KEY
-    if (!g_pubkey_loaded) return;
-    static const char hc[] = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        out[2*i]   = hc[(g_pubkey[i] >> 4) & 0xf];
-        out[2*i+1] = hc[g_pubkey[i] & 0xf];
-    }
-    out[64] = '\0';
-#endif
-}
+static void pubkey_to_hex(char out[65]) { march_sig_pubkey_hex(out); }
 
 /* Capability data for one audit line.  Only ACTIVATE4 carries any; every
  * older protocol passes NULL, which the log records as "caps":null,
@@ -623,33 +758,13 @@ static void json_write_str(FILE *f, const char *s, size_t n) {
 static void write_audit_log(const char *fn, const char *impl_hash,
                              const char *cas_hash, const audit_caps_t *ac,
                              const char *result) {
-    const char *log_path = getenv("MARCH_AUDIT_LOG");
-    char default_path[512];
-    if (!log_path || !log_path[0]) {
-        const char *xdg = getenv("XDG_DATA_HOME");
-        if (xdg && xdg[0])
-            snprintf(default_path, sizeof(default_path), "%s/march/audit.jsonl", xdg);
-        else {
-            const char *home = getenv("HOME");
-            if (!home || !home[0]) return;
-            snprintf(default_path, sizeof(default_path),
-                     "%s/.local/share/march/audit.jsonl", home);
-        }
-        log_path = default_path;
-    }
-    /* Ensure parent directory exists */
-    char dir[512];
-    snprintf(dir, sizeof(dir), "%s", log_path);
-    char *slash = strrchr(dir, '/');
-    if (slash) { *slash = '\0'; mkdir_p(dir); }
-
     struct timeval tv;
     gettimeofday(&tv, NULL);
     long long ts_ms = (long long)tv.tv_sec * 1000LL + (long long)tv.tv_usec / 1000;
 
     char signer[65]; pubkey_to_hex(signer);
 
-    FILE *f = fopen(log_path, "a");
+    FILE *f = march_audit_open();
     if (!f) return;
     fprintf(f,
         "{\"ts\":%lld,\"type\":\"%s\",\"fn\":\"%s\","
@@ -686,7 +801,7 @@ static void write_audit_log(const char *fn, const char *impl_hash,
         fputs("\"caps\":null,\"cap_root\":null,", f);
     }
     fprintf(f, "\"result\":\"%s\"}\n", result);
-    fclose(f);
+    march_audit_close(f);
 }
 
 /* A patch is loaded WITHOUT RTLD_DEEPBIND (dropped 2026-09-25).  DEEPBIND made
@@ -778,6 +893,9 @@ typedef struct {
      * host-local patch stack so a restart can re-verify and replay it.
      * NULL on replay itself (the entry is already on the stack). */
     const char         *signed_msg, *sig_b64;
+    /* ACTIVATE7: the signed BLAKE3 of the artifact's bytes (load_verified);
+     * NULL for a line from before v7, which loads the CAS file as is. */
+    const char         *so_digest;
 } act_item;
 
 /* Activate [n] functions as one deploy.  Returns 0 (OK), 1 (WAIT: nothing
@@ -801,7 +919,23 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
             snprintf(resp, rsz, "ERR missing_artifact\n");
             goto fail;
         }
-        void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+        void *handle;
+        if (it[i].so_digest) {
+            /* v7: only the bytes the operator signed are ever mapped. */
+            const char *why = NULL;
+            handle = load_verified(path, it[i].so_digest, &why);
+            if (!handle && strcmp(why, "dlopen") != 0) {
+                int digest = strcmp(why, "artifact_digest") == 0;
+                write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac,
+                                digest ? "err_artifact_digest"
+                                : strcmp(why, "missing_artifact") == 0 ? "err_cas_miss"
+                                : "err_load_copy");
+                snprintf(resp, rsz, "ERR %s\n", why);
+                goto fail;
+            }
+        } else {
+            handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+        }
         if (!handle) {
             write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "err_dlopen");
             snprintf(resp, rsz, "ERR dlopen_failed %.300s\n", dlerror());
@@ -898,9 +1032,9 @@ fail:
 static void do_activate(int fd, const char *name, const char *impl_hash,
                         const char *cas_hash, int migrate,
                         uint32_t activate_epoch, const char *callers_csv,
-                        const audit_caps_t *ac) {
+                        const audit_caps_t *ac, const char *so_digest) {
     act_item it = { name, impl_hash, cas_hash, callers_csv, activate_epoch,
-                    migrate, ac, g_last_signed, g_last_sig };
+                    migrate, ac, g_last_signed, g_last_sig, so_digest };
     char resp[512];
     int r = activate_items(&it, 1, resp, sizeof(resp));
     if (r == 0) {
@@ -915,29 +1049,7 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
 
 /* 1 iff [sig_b64] is a valid signature over [msg] by the deploy key. */
 static int verify_signed_line(const char *msg, const char *sig_b64) {
-#if HAVE_SIGNING_KEY
-    if (!g_pubkey_loaded) return 0;
-    int all_zero = 1;
-    for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
-    if (all_zero) return 0;
-    unsigned char sigbytes[64];
-    size_t sl = strlen(sig_b64);
-    if (sl > 128) return 0;
-    if (b64_decode(sig_b64, sl, sigbytes) != 64) return 0;
-    size_t mlen = strlen(msg);
-    unsigned char *sm = (unsigned char *)malloc(mlen + 64);
-    unsigned char *mo = (unsigned char *)malloc(mlen + 64);
-    if (!sm || !mo) { free(sm); free(mo); return 0; }
-    memcpy(sm, sigbytes, 64);
-    memcpy(sm + 64, msg, mlen);
-    unsigned long long olen = 0;
-    int rc = crypto_sign_open(mo, &olen, sm, (unsigned long long)(mlen + 64), g_pubkey);
-    free(sm); free(mo);
-    return rc == 0;
-#else
-    (void)msg; (void)sig_b64;
-    return 0;
-#endif
+    return march_sig_verify(msg, sig_b64);
 }
 
 /* Set the current state file aside as <state>.<suffix>. */
@@ -1063,6 +1175,13 @@ static int is_signed_verb(const char *line) {
     if (strncmp(line, "ACTIVATE", 8) == 0 && line[8] >= '2' && line[8] <= '9' && line[9] == ' ')
         return 1;
     return strncmp(line, "TOPOLOGY ", 9) == 0 || strncmp(line, "DRAIN ", 6) == 0;
+}
+
+/* An ACTIVATE verb that carries no signed digest of the artifact's bytes:
+ * every version before ACTIVATE7. */
+static int is_unbound_activate(const char *line) {
+    if (strncmp(line, "ACTIVATE", 8) != 0 || !is_signed_verb(line)) return 0;
+    return !(line[8] == '7' && line[9] == ' ');
 }
 
 /* Unwrap "SEQ <seq> <id> <sig64> <line>" in place (line starts with "SEQ ").
@@ -1348,12 +1467,17 @@ static void replay_state(const char *socket_path) {
             const char *why = NULL;
             uint32_t slot;
             char cpath[640];
-            if (!e->name) why = "err_restore_malformed";
+            char so[65];
+            int has_so = e->msg ? hex_field(e->msg, " so_blake3:", " cap_root:", so) : 0;
+            if (!e->name || has_so < 0) why = "err_restore_malformed";
             else if (!verify_signed_line(e->msg, e->sig_b64)) why = "err_restore_sig";
+            else if (!has_so && (g_require_release || g_release_seq > 0))
+                why = "err_restore_no_digest";   /* nothing signed to check the bytes against */
             else if (!march_dispatch_name_to_id(e->name, &slot)) why = "err_restore_unknown_name";
             else {
                 cas_artifact_path(cpath, sizeof(cpath), e->cas_hash);
                 if (access(cpath, F_OK) != 0) why = "err_restore_cas_miss";
+                else if (has_so && !artifact_digest_ok(cpath, so)) why = "err_restore_digest";
             }
             if (why) {
                 write_audit_log(e->name ? e->name : "(malformed)", e->impl_hash, e->cas_hash, NULL, why);
@@ -1370,9 +1494,15 @@ static void replay_state(const char *socket_path) {
             for (size_t j = i + 1; j < n; j++)
                 if (ok[j] && strcmp(ents[j].name, ents[i].name) == 0) { ok[i] = 0; break; }
         }
-        /* One activation per deploy (seq), in order. */
+        /* One activation per deploy (seq), in order.  A v7 entry's signed
+         * digest goes with it: activate_items loads it through
+         * load_verified, as a live activation does. */
+        char (*sos)[65] = (char (*)[65])calloc(n ? n : 1, 65);
+        for (size_t x = 0; sos && x < n; x++)
+            if (!ents[x].msg || hex_field(ents[x].msg, " so_blake3:", " cap_root:", sos[x]) != 1)
+                sos[x][0] = '\0';
         size_t i = 0;
-        while (ok && i < n) {
+        while (ok && sos && i < n) {
             size_t j = i;
             while (j < n && ents[j].seq == ents[i].seq) j++;
             act_item *items = (act_item *)calloc(j - i, sizeof(*items));
@@ -1385,7 +1515,7 @@ static void replay_state(const char *socket_path) {
                 const char *cp = strstr(ents[x].msg, " callers:");
                 items[k] = (act_item){ ents[x].name, ents[x].impl_hash, ents[x].cas_hash,
                                        cp && cp[9] ? cp + 9 : NULL, ents[x].epoch, 0,
-                                       NULL, NULL, NULL };
+                                       NULL, NULL, NULL, sos[x][0] ? sos[x] : NULL };
                 if (ents[x].epoch > ep) ep = ents[x].epoch;
                 idx[k++] = x;
             }
@@ -1415,6 +1545,7 @@ static void replay_state(const char *socket_path) {
             i = j;
         }
         free(ok);
+        free(sos);
         if (g_restored_entries || g_restored_skipped)
             fprintf(stderr, "[hcr] restore: republished %d patch(es), skipped %d\n",
                     g_restored_entries, g_restored_skipped);
@@ -1794,6 +1925,7 @@ struct march_staged {
     char    *roles;      /* ACTIVATE6 only (heap); NULL otherwise */
     char    *signed_msg; /* the verified signed line (heap), persisted */
     char    *sig_b64;    /* its signature (heap) */
+    char     so_digest[65]; /* ACTIVATE7: signed blake3 of the bytes; "" before v7 */
 };
 struct rl_session {
     struct march_staged staged[MARCH_MAX_BATCH];
@@ -1821,6 +1953,16 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
         if (unwrap_release(fd, line) != 0) return;
     } else if (is_signed_verb(line) && (g_require_release || g_release_seq > 0)) {
         wresp(fd, "ERR release_required\n");
+        return;
+    }
+    /* An activation from before ACTIVATE7 signs no digest of the bytes it
+     * loads.  Sticky like the release rule above: refused (wrapped or not)
+     * once the node holds a release or must. */
+    if (is_unbound_activate(line) && (g_require_release || g_release_seq > 0)) {
+        char nm[256] = "", im[128] = "", cs[128] = "";
+        sscanf(line, "%*s %255s %127s %127s", nm, im, cs);
+        write_audit_log(nm, im, cs, NULL, "err_artifact_digest_required");
+        wresp(fd, "ERR artifact_digest_required\n");
         return;
     }
 
@@ -1968,18 +2110,27 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
 
     /* ── CAS_CHECK ────────────────────────────────────────────────── */
     } else if (strncmp(line, "CAS_CHECK ", 10) == 0) {
-        const char *hash = line + 10;
-        if (!is_hex64(hash)) {
+        /* CAS_CHECK <hash> [so_blake3:<hex>]: with a digest, PRESENT only
+         * when the stored bytes are those bytes (else the client uploads). */
+        char hash[80] = "", so[65] = "";
+        int k = sscanf(line + 10, "%79s", hash);
+        int has_so = hex_field(line, " so_blake3:", NULL, so);
+        if (has_so > 0 && !HAVE_SIGNING_KEY) has_so = 0;   /* no blake3 linked (state_hex) */
+        if (k != 1 || !is_hex64(hash) || has_so < 0) {
             wresp(fd, "ERR bad_hash\n"); return;
         }
         char path[640]; cas_artifact_path(path, sizeof(path), hash);
-        wresp(fd, (access(path, F_OK) == 0) ? "PRESENT\n" : "MISSING\n");
+        int present = has_so ? artifact_digest_ok(path, so) : access(path, F_OK) == 0;
+        wresp(fd, present ? "PRESENT\n" : "MISSING\n");
 
     /* ── CAS_PUT ──────────────────────────────────────────────────── */
     } else if (strncmp(line, "CAS_PUT ", 8) == 0) {
         char hash[65]; long long size_ll;
+        char so[65] = "";
+        int has_so = hex_field(line, " so_blake3:", NULL, so);
+        if (has_so > 0 && !HAVE_SIGNING_KEY) has_so = 0;   /* nothing activates here anyway */
         if (sscanf(line + 8, "%64s %lld", hash, &size_ll) != 2
-            || !is_hex64(hash)
+            || !is_hex64(hash) || has_so < 0
             || size_ll <= 0 || size_ll > CAS_MAX_ARTIFACT) {
             wresp(fd, "ERR bad_format\n"); return;
         }
@@ -1990,6 +2141,18 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
         if (read_exact(fd, buf, sz) != 0) {
             /* Stream is desynced — close rather than trying to recover. */
             free(buf); close(fd); return;
+        }
+        /* With so_blake3: the uploader says which bytes it meant; bytes that
+         * are not those are refused, not stored (a corrupt or substituted
+         * upload never reaches the CAS). */
+        if (has_so) {
+            char got[65];
+            state_hex(buf, sz, got);
+            if (strcmp(got, so) != 0) {
+                free(buf);
+                wresp(fd, "ERR digest_mismatch\n");
+                return;
+            }
         }
         /* Write to CAS */
         char path[640]; cas_artifact_path(path, sizeof(path), hash);
@@ -2069,7 +2232,7 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
             if (ep_ptr) activate_epoch = (uint32_t)atoi(ep_ptr + 7);
             const char *callers_ptr = strstr(line, " callers:");
             do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                        activate_epoch, callers_ptr ? callers_ptr + 9 : NULL, NULL);
+                        activate_epoch, callers_ptr ? callers_ptr + 9 : NULL, NULL, NULL);
         }
 
     /* ── ACTIVATE2 ─────────────────────────────────────────────────── */
@@ -2172,7 +2335,7 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
         wresp(fd, "ERR signing_not_configured\n"); return;
 #endif
         do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                    activate_epoch, callers_sorted, NULL);
+                    activate_epoch, callers_sorted, NULL, NULL);
 
     /* ── ACTIVATE3 ─────────────────────────────────────────────────── */
     /* Protocol v3: migrate_required is now included in the signed payload,
@@ -2292,6 +2455,7 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
             staged[S->n_staged].impl_hash[127] = '\0';
             staged[S->n_staged].cas_hash[127]  = '\0';
             staged[S->n_staged].callers[1023]  = '\0';
+            staged[S->n_staged].so_digest[0] = '\0';
             staged[S->n_staged].caps     = NULL;   /* no cap data pre-ACTIVATE4 */
             staged[S->n_staged].cap_root = NULL;
             staged[S->n_staged].roles    = NULL;
@@ -2303,7 +2467,7 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
             write_safe(fd, resp, n, sizeof(resp));
         } else {
             do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                        activate_epoch, callers_sorted, NULL);
+                        activate_epoch, callers_sorted, NULL, NULL);
         }
 
     /* ── ACTIVATE4 ─────────────────────────────────────────────────── */
@@ -2315,14 +2479,21 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
      *                  epoch:<N> cap_root:<hex> callers:<sorted-csv>" */
     } else if (strncmp(line, "ACTIVATE4 ", 10) == 0
                || strncmp(line, "ACTIVATE5 ", 10) == 0
-               || strncmp(line, "ACTIVATE6 ", 10) == 0) {
+               || strncmp(line, "ACTIVATE6 ", 10) == 0
+               || strncmp(line, "ACTIVATE7 ", 10) == 0) {
         /* ACTIVATE5 differs only in <migrate> being a bitmask (see the
          * file header) and in the verb inside the signed message;
          * ACTIVATE6 adds the signed role_caps: and the unsigned roles:
-         * blocks (DD build step 10). */
-        const int v6 = line[8] == '6';
-        const int v5 = line[8] == '5' || v6;
-        const char *verb = v6 ? "ACTIVATE6" : v5 ? "ACTIVATE5" : "ACTIVATE4";
+         * blocks (DD build step 10).  ACTIVATE7 is ACTIVATE5, or with
+         * role_caps: ACTIVATE6, plus the signed so_blake3: (the bytes). */
+        const int v7 = line[8] == '7';
+        const int v6 = line[8] == '6' || (v7 && strstr(line, " role_caps:") != NULL);
+        const int v5 = line[8] == '5' || v6 || v7;
+        const char *verb = v7 ? "ACTIVATE7" : v6 ? "ACTIVATE6" : v5 ? "ACTIVATE5" : "ACTIVATE4";
+        char so_digest[65] = "";
+        if (v7 && hex_field(line, " so_blake3:", " cap_root:", so_digest) != 1) {
+            wresp(fd, "ERR bad_format missing_so_blake3\n"); return;
+        }
         char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
         char migrate_str[8] = {0};
         if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
@@ -2468,15 +2639,17 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
         /* Reconstruct the canonical signed message — cap_root is signed,
          * caps is NOT (see file-header note above). */
         char signed_msg[RELOAD_LINE_MAX];
+        char so_field[80] = "";
+        if (v7) snprintf(so_field, sizeof(so_field), " so_blake3:%s", so_digest);
         int smlen = v6
             ? snprintf(signed_msg, sizeof(signed_msg),
-                       "%s %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
+                       "%s %s %s %s %d epoch:%u%s cap_root:%s role_caps:%s callers:%s",
                        verb, name, impl_hash, cas_hash, migrate_required,
-                       activate_epoch, cap_root, role_roots, callers_sorted)
+                       activate_epoch, so_field, cap_root, role_roots, callers_sorted)
             : snprintf(signed_msg, sizeof(signed_msg),
-                       "%s %s %s %s %d epoch:%u cap_root:%s callers:%s",
+                       "%s %s %s %s %d epoch:%u%s cap_root:%s callers:%s",
                        verb, name, impl_hash, cas_hash, migrate_required,
-                       activate_epoch, cap_root, callers_sorted);
+                       activate_epoch, so_field, cap_root, callers_sorted);
         if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
             wresp(fd, "ERR signed_msg_truncated\n"); return;
         }
@@ -2599,6 +2772,8 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
             staged[S->n_staged].caps     = strdup(caps_buf);
             staged[S->n_staged].cap_root = strdup(cap_root);
             staged[S->n_staged].roles    = roles_buf ? strdup(roles_buf) : NULL;
+            snprintf(staged[S->n_staged].so_digest, sizeof(staged[S->n_staged].so_digest),
+                     "%s", so_digest);
             staged[S->n_staged].signed_msg = strdup(g_last_signed);
             staged[S->n_staged].sig_b64    = strdup(g_last_sig);
             S->n_staged++;
@@ -2607,7 +2782,8 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
             write_safe(fd, resp, n, sizeof(resp));
         } else {
             do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                        activate_epoch, callers_sorted, &ac4);
+                        activate_epoch, callers_sorted, &ac4,
+                        so_digest[0] ? so_digest : NULL);
         }
 
     /* ── COMPACT (patch-stack size, DD step 10) ───────────────────── */
@@ -2656,6 +2832,7 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
             items[i].ac        = staged[i].caps ? &acs[i] : NULL;
             items[i].signed_msg = staged[i].signed_msg;
             items[i].sig_b64    = staged[i].sig_b64;
+            items[i].so_digest  = staged[i].so_digest[0] ? staged[i].so_digest : NULL;
         }
         char resp[512];
         int r = S->n_staged ? activate_items(items, S->n_staged, resp, sizeof(resp)) : 0;
@@ -2868,6 +3045,24 @@ void *march_reload_request_string(void *s) {
     return r;
 }
 
+/* Belt and braces over the socket's mode: a peer must run as this
+ * process's uid (or root).  1 when the platform cannot say. */
+static int peer_uid_ok(int fd) {
+#if defined(__APPLE__)
+    uid_t uid; gid_t gid;
+    if (getpeereid(fd, &uid, &gid) != 0) return 1;
+    return uid == geteuid() || uid == 0;
+#elif defined(SO_PEERCRED)
+    struct ucred cr;
+    socklen_t len = sizeof(cr);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0) return 1;
+    return cr.uid == geteuid() || cr.uid == 0;
+#else
+    (void)fd;
+    return 1;
+#endif
+}
+
 static void *reload_server_thread(void *arg) {
     (void)arg;
 
@@ -2889,6 +3084,13 @@ static void *reload_server_thread(void *arg) {
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("march_reload: bind"); close(srv); return NULL;
     }
+    /* Owner-only, whatever the inherited umask (review 2026-10-04-dd12-
+     * review-reload-socket-permissions): connecting needs write permission
+     * on the socket inode, and nothing can connect before listen(), so
+     * setting the mode here leaves no window. */
+    if (chmod(g_socket_path, 0600) != 0) {
+        perror("march_reload: chmod"); close(srv); unlink(g_socket_path); return NULL;
+    }
     listen(srv, RELOAD_BACKLOG);
     fprintf(stderr, "[hcr] reload server listening on %s\n", g_socket_path);
 
@@ -2899,6 +3101,7 @@ static void *reload_server_thread(void *arg) {
             perror("march_reload: accept");
             break;
         }
+        if (!peer_uid_ok(cli)) { close(cli); continue; }
         handle_client(cli);
     }
     unlink(g_socket_path);

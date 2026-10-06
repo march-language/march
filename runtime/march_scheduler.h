@@ -504,6 +504,10 @@ typedef struct march_proc {
     _Atomic uint64_t            msgs_in;
     _Atomic uint64_t            msgs_out;
     _Atomic int64_t             held;
+    /* The String the actor's generated Name_inspect renderer stored through
+     * march_actor_inspect_store, taken by actor_answer_inspect (R4).  Only
+     * the actor's own green thread touches it. */
+    void                       *inspect_out;
 } march_proc;
 
 /* Bump a single-writer counter: relaxed load + store, the same instructions
@@ -516,6 +520,9 @@ typedef struct march_proc {
 /* Record how many messages the calling green thread's Actor.call is holding
  * off its mailbox (0 when it puts them back). */
 void march_sched_set_held(int64_t n);
+
+/* Count one remote send (Node.send) on the calling green thread's proc. */
+void march_observe_count_send(void);
 
 /* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
 typedef struct march_scheduler {
@@ -716,6 +723,9 @@ int          march_sched_send(march_proc *target, void *msg);
  * mailbox capacity/overflow policy and is stored outside the user FIFO, so a
  * later DROP_OLD send cannot evict it. Ownership matches march_sched_send. */
 int          march_sched_send_control(march_proc *target, void *msg);
+/* Like march_sched_send onto the user queue, ignoring the mailbox limit and
+ * policy (the inspect request; see its definition). */
+int          march_sched_send_unlimited(march_proc *target, void *msg);
 
 /* Set a mailbox capacity + overflow policy on a process. limit <= 0 means
  * unbounded (MARCH_MBOX_UNBOUNDED is the default set at spawn). Safe to call

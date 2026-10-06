@@ -645,13 +645,16 @@
 ; todo it serves (specs/todos/2026-08-12-vault-toward-ets-semantics.md) says
 ; not to partition the per-table write mutex without a workload that
 ; measurably serialises on it, so this exists to produce that number: T
-; threads each rewriting their OWN key, ratio against a solo run. Its
-; assertion is loose on purpose (it fails only if the result is worse than
-; plain serialisation) -- the printed ratio is the deliverable, and a
-; scaling assertion belongs here only once the lock is actually partitioned.
+; threads each rewriting their OWN key, ratio against a solo run. The ratio
+; is printed, not asserted: what fails the run is a lock count, not a time.
+; vault_lock_probe.h is force-included (-include) into every source below so
+; each pthread_mutex_lock call is tallied per mutex, and the run fails if one
+; mutex covers at least half of every thread's distinct-key writes (the
+; header of test_vault_write_scale.c has the why: wall time could not tell a
+; global lock from the shards on a loaded 4-vCPU runner).
 (rule
  (targets test_vault_write_scale_runner)
- (deps    test_vault_write_scale.c
+ (deps    test_vault_write_scale.c vault_lock_probe.h
           ../runtime/march_runtime.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
@@ -665,6 +668,7 @@
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -include vault_lock_probe.h
                -o %{targets}
                test_vault_write_scale.c ../runtime/march_runtime.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
@@ -863,6 +867,7 @@
           ../runtime/third_party/blake3/blake3_impl.h
           ../runtime/third_party/blake3/blake3_portable.c
           ../runtime/tweetnacl.c ../runtime/tweetnacl.h
+          ../runtime/march_sig.c ../runtime/march_sig.h
           ../runtime/march_runtime.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_message.c ../runtime/march_message.h
@@ -890,7 +895,7 @@
       ../runtime/third_party/blake3/blake3.c \
       ../runtime/third_party/blake3/blake3_dispatch.c \
       ../runtime/third_party/blake3/blake3_portable.c \
-      ../runtime/tweetnacl.c ../runtime/march_runtime.c \
+      ../runtime/tweetnacl.c ../runtime/march_sig.c ../runtime/march_runtime.c \
       ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_message.c \
       ../runtime/march_heap.c ../runtime/march_gc.c \
       ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c \
@@ -900,7 +905,7 @@
 
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (run ./test_reload_activate4_runner reload_keys.txt)))
 
 ; The stub patch the reload test's epoch-model case uploads and activates.
@@ -913,9 +918,20 @@
              -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
              -o hcr_stub.so hcr_stub_so.c ../runtime/march_hcr_identity.c")))
 
+; The attacker's bytes of the dd12 review's CAS-substitution repro: the same
+; exports and identity markers as hcr_stub.so, other code (hcr_stub_so.c).
+(rule
+ (targets hcr_evil.so)
+ (deps    hcr_stub_so.c ../runtime/march_hcr_identity.c ../runtime/march_hcr_identity.h)
+ (action  (run bash -c
+            "%{cc} -shared -fPIC -DHCR_STUB_EVIL \
+             -DMARCH_HCR_TRIPLE=arm64-apple-macosx26.0.0 \
+             -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
+             -o hcr_evil.so hcr_stub_so.c ../runtime/march_hcr_identity.c")))
+
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 
@@ -923,7 +939,7 @@
 ; role closure, including roles the node does not serve.
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy_all.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy_all.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy_all.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy-all))))
 
@@ -933,7 +949,7 @@
 ; different base build do not replay.  Each server lifetime is a forked child.
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (run ./test_reload_activate4_runner reload_keys.txt restore)))
 
 ; ── HCR capability-lattice anti-drift check ───────────────────────────────
@@ -2607,6 +2623,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/builtin_borrow_leak_probe.expected native_builtin_borrow_leak_probe.out)))
 
+; ── A Vault write released only the displaced value's own cell, never its
+; children; a closed table must be freed. live_allocs() deltas per operation,
+; booleans in the golden. Red on main: every displaced-value leg.
+; specs/progress/2026-10-01-session-node-vault-tables-leak.md
+(rule
+ (targets native_vault_churn_leak_probe native_vault_churn_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/vault_churn_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_vault_churn_leak_probe
+        native/vault_churn_leak_probe.march)
+   (with-stdout-to native_vault_churn_leak_probe.out
+        (system "./native_vault_churn_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/vault_churn_leak_probe.expected native_vault_churn_leak_probe.out)))
+
 ; ── Compiled `to_string(())` printed `0` (the interpreter prints `()`): the
 ; unit value is typed as the empty tuple, so Mono keyed the Show lookup
 ; "$Tuple0" and fell through to the generic runtime formatter. Both backends
@@ -2674,6 +2711,57 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/recon_basic.expected interp_recon_basic.out)))
+
+; stdlib/diagnose.march against the shared fixtures, compiled and
+; interpreted: the output must equal forge/test/fixtures/diagnose/expected.txt,
+; the file forge's OCaml findings (forge/test/test_diagnose.ml) are held to.
+(rule
+ (targets native_diagnose_fixtures native_diagnose_fixtures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (source_tree ../forge/test/fixtures/diagnose)
+       (file native/diagnose_fixtures.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_diagnose_fixtures native/diagnose_fixtures.march)
+   (with-stdout-to native_diagnose_fixtures.out (system "./native_diagnose_fixtures")))))
+
+(rule
+ (alias runtest)
+ (action (diff ../forge/test/fixtures/diagnose/expected.txt native_diagnose_fixtures.out)))
+
+(rule
+ (targets interp_diagnose_fixtures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (source_tree ../forge/test/fixtures/diagnose)
+       (file native/diagnose_fixtures.march))
+ (action
+  (with-stdout-to interp_diagnose_fixtures.out
+    (run %{exe:../bin/main.exe} native/diagnose_fixtures.march))))
+
+(rule
+ (alias runtest)
+ (action (diff ../forge/test/fixtures/diagnose/expected.txt interp_diagnose_fixtures.out)))
+
+; `forge diagnose` against a real compiled node with a runaway mailbox: exit
+; 2 and a critical mailbox.growth; and exit 3 when the socket is not there.
+(rule
+ (targets native_diagnose_runaway native_diagnose_runaway.out)
+ (deps (file %{exe:../bin/main.exe}) (file %{exe:../forge/bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/diagnose_runaway.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_diagnose_runaway native/diagnose_runaway.march)
+   (with-stdout-to native_diagnose_runaway.out
+    (system "rm -f diag_ra.sock diag_ra.prog; MARCH_OBSERVE_SOCKET=diag_ra.sock ./native_diagnose_runaway > diag_ra.prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready diag_ra.prog 2>/dev/null && break; sleep 0.1; done; sleep 0.3; %{exe:../forge/bin/main.exe} diagnose --socket diag_ra.sock --window 500 --json > diag_ra.json; echo \"exit=$?\"; grep -o '\"id\":\"[^\"]*\",\"severity\":\"[^\"]*\"' diag_ra.json; %{exe:../forge/bin/main.exe} top --socket diag_ra.sock --once | grep -c ' sink ' | sed 's/^/top rows naming sink: /'; %{exe:../forge/bin/main.exe} status --socket diag_ra.sock --json | grep -o '\"deepest\":{\"pid\":0,\"name\":\"sink\"'; kill $prog 2>/dev/null; wait $prog 2>/dev/null; %{exe:../forge/bin/main.exe} diagnose --socket diag_ra.sock --window 10 > /dev/null 2>&1; echo \"unreachable exit=$?\"; rm -f diag_ra.sock diag_ra.prog diag_ra.json; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/diagnose_runaway.expected native_diagnose_runaway.out)))
 ; ── Leak guard: compiled actors leaked every received message, every state
 ; record a handler returned and the Some(()) of a statement `send`; a nominal
 ; record read only through its fields leaked with every heap field. Red before
@@ -7848,6 +7936,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/cluster_node_vaults_unnamed.expected native_cluster_node_vaults_unnamed.out)))
 
+; ── a superseded certificate is not taken back after a restart ────────────
+; Security review, dd step 12b (specs/progress/2026-10-04-dd12-review-cert-
+; downgrade-after-restart.md): a replayed cert-only release whose certificate
+; a later release replaced is refused by the REAL ClusterNode.replace_cert
+; even with the Agent's in-memory floor gone (a fresh Vault models the
+; restart), because the certificate was issued before the one in use; a
+; later, shorter-lived re-issue is still taken. Ephemeral port.
+(rule
+ (targets native_cert_downgrade_after_restart native_cert_downgrade_after_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file native/cert_downgrade_after_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_cert_downgrade_after_restart
+        native/cert_downgrade_after_restart.march)
+   (with-stdout-to native_cert_downgrade_after_restart.out
+        (system "./native_cert_downgrade_after_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/cert_downgrade_after_restart.expected native_cert_downgrade_after_restart.out)))
+
 ; ── NodeSend loopback: a one-way actor message to a GlobalPid over TCP ──
 ; Distributed actors 1/4 (specs/progress/2026-09-14-remote-send-to-a-global-pid.md):
 ; ACTOR_MSG delivered into a remote actor's mailbox and answered by the same
@@ -10313,7 +10424,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
     test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 -a \"$ngeneral\" -eq 1 -a \"$nchecks\" -ge 1 || { echo \"expected 2 unboxed \\$mapfast\\$ clones (zero boxing calls), 1 general non-inlined native_int_arr_map2 call (reused-closure fallback), >=1 length-check call (found clones=$nclones boxcalls=$boxcalls general=$ngeneral checks=$nchecks)\" >&2; exit 1; }")))
 
 ;  Direct (Known_call) call to a let-generalized lambda returning a Float
-; (specs/todos/2026-10-02-known-call-generic-lambda-float-leak.md). The
+; (specs/progress/2026-10-02-known-call-generic-lambda-float-leak.md). The
 ; .expected file IS the interpreter's output, including every "flat: true".
 (rule
  (targets known_call_generic_lambda_float known_call_generic_lambda_float.out)
@@ -10460,6 +10571,51 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "read -r nloops nruntime boxcalls < native_arr_fold_inline_llvm_check.out; \
     test \"$nloops\" -eq 11 -a \"$nruntime\" -eq 3 -a \"$boxcalls\" -eq 0 || { echo \"expected 11 inline fold loops, 3 runtime folds, 0 boxing calls in unboxed clones (found loops=$nloops runtime=$nruntime boxcalls=$boxcalls)\" >&2; exit 1; }")))
+
+;  NativeArray map / map2 chain fusion (phase B of
+; specs/plans/2026-09-28-nativearray-fusion-plan.md, Fusion.run_nativearr).
+; Correctness: every line matches the interpreter (the .expected file IS the
+; interpreter's output), including the negative cases that must not fuse.
+; Shape: main (with the two negative helper fns inlined into it) has exactly
+; 21 inline map loops, 8 inline map2 loops and 1 runtime map call after
+; fusion; with MARCH_NO_NATIVEARR_FUSION=1 the same program has 47 / 8 / 2.
+(rule
+ (targets nativearr_map_fusion nativearr_map_fusion.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_map_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nativearr_map_fusion
+        native/nativearr_map_fusion.march)
+   (with-stdout-to nativearr_map_fusion.out
+        (system "./nativearr_map_fusion")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nativearr_map_fusion.expected nativearr_map_fusion.out)))
+
+(rule
+ (targets nativearr_map_fusion_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_map_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/nativearr_map_fusion.march)
+   (with-stdout-to nativearr_map_fusion_llvm_check.out
+    (run bash -c
+     "awk '/^define/ && /@march_main\\(/ {p=1} p {print} p && /^}/ {exit}' native/nativearr_map_fusion.ll > main_nafuse.ll; echo \"$(grep -c '^nmap_pre[0-9]*:' main_nafuse.ll) $(grep -c '^nmap2_pre[0-9]*:' main_nafuse.ll) $(grep -c 'call ptr @native_[a-z0-9]*_arr_map2*(' main_nafuse.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps nativearr_map_fusion_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nmap nmap2 nruntime < nativearr_map_fusion_llvm_check.out; \
+    test \"$nmap\" -eq 21 -a \"$nmap2\" -eq 8 -a \"$nruntime\" -eq 1 || { echo \"expected 21 inline map loops, 8 inline map2 loops, 1 runtime map call in main (found map=$nmap map2=$nmap2 runtime=$nruntime)\" >&2; exit 1; }")))
 
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
@@ -11799,6 +11955,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/topology_conflict.expected topology_conflict.out)))
 
+; ── A pushed topology leaves pinned roles alone (lab finding, 2026-10-05) ──
+; Ctl.Control is placed by the generated main and a digest cannot name it;
+; apply_desired used to place it nowhere on every re-read (no leader).
+(rule
+ (targets topology_pinned_bin topology_pinned.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file session/topology_pinned.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o topology_pinned_bin session/topology_pinned.march)
+   (with-stdout-to topology_pinned.out (system "./topology_pinned_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/topology_pinned.expected topology_pinned.out)))
+
 ; ── Aggregate drop: boxed Float / niche Option / erased fields (2026-10-02) ──
 ; A dying tuple, List(Float) cell, Option-holding tuple, and a frame tuple
 ; destructured in a polymorphic local fn must give back everything they own.
@@ -11820,6 +11992,69 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/aggregate_drop_erased_fields.expected native_aggregate_drop_erased_fields.out)))
+
+; ── Colliding short type names: a deep drop for each (2026-10-05) ───────────
+; Msgpack.Value, Config.Value and DataFrame.Value share the short name `Value`,
+; which every use site carries; the drop pass found no constructors and freed
+; each dying cell shallowly (~1 object per byte of every decoded cluster
+; message). RED without the fix: all three legs "no growth: false".
+(rule
+ (targets native_colliding_type_drop native_colliding_type_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/colliding_type_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_colliding_type_drop
+        native/colliding_type_drop.march)
+   (with-stdout-to native_colliding_type_drop.out
+        (system "./native_colliding_type_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/colliding_type_drop.expected native_colliding_type_drop.out)))
+
+; ── A closure released without being called releases its captures (2026-10-05)
+; The release of a function-typed value goes through march_clo_release, which
+; runs the capture drop registered for the closure's apply function. RED
+; without it: the first three legs "no growth: false".
+(rule
+ (targets native_dropped_closure_captures native_dropped_closure_captures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/dropped_closure_captures.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_dropped_closure_captures
+        native/dropped_closure_captures.march)
+   (with-stdout-to native_dropped_closure_captures.out
+        (system "./native_dropped_closure_captures")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/dropped_closure_captures.expected native_dropped_closure_captures.out)))
+
+; ── Records released on every path; nominal records and hashed strings deep
+; (2026-10-06). Four per-session leaks of the cluster node in their minimal
+; shapes; RED before the fixes on legs 1, 2, 3 and 4 respectively.
+(rule
+ (targets native_record_ownership_drops native_record_ownership_drops.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_ownership_drops.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_record_ownership_drops
+        native/record_ownership_drops.march)
+   (with-stdout-to native_record_ownership_drops.out
+        (system "./native_record_ownership_drops")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_ownership_drops.expected native_record_ownership_drops.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),
@@ -11945,3 +12180,149 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/branch_alias_tail_drop.expected native_branch_alias_tail_drop.out)))
+
+;; A module with no entry point of its own (no `main`, tests or exports) must
+;; root the functions the FILE declares for codegen, not fail open and keep the
+;; whole prepended stdlib: before 2026-10-04 this fixture emitted ~7,900
+;; definitions (45 MB of IR, minutes of llvm-emit + clang), and a topology app
+;; compiled without its --topology digest took ~20x longer in llvm-emit than
+;; with it (specs/progress/2026-10-04-mainless-compile-emits-whole-stdlib.md).
+;; Pins both halves: the user's functions are still emitted (`helper`, and
+;; `shout` dragging in what it reaches), and the count stays small.
+(rule
+ (targets mainless_prunes_stdlib_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/mainless_prunes_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/mainless_prunes_stdlib.march)
+   (with-stdout-to mainless_prunes_stdlib_llvm_check.out
+    (run bash -c
+     "defs=$(grep -c '^define ' native/mainless_prunes_stdlib.ll); \
+      helper=$(grep -c '^define .*@helper(' native/mainless_prunes_stdlib.ll); \
+      shout=$(grep -c '^define .*@shout(' native/mainless_prunes_stdlib.ll); \
+      echo \"$defs $helper $shout\"")))))
+
+(rule
+ (alias runtest)
+ (deps mainless_prunes_stdlib_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r defs helper shout < mainless_prunes_stdlib_llvm_check.out; \
+    test \"$helper\" -eq 1 -a \"$shout\" -eq 1 -a \"$defs\" -lt 300 || { echo \"mainless_prunes_stdlib: expected @helper and @shout defined and <300 definitions (the whole stdlib is ~7,900) -- found defs=$defs helper=$helper shout=$shout\" >&2; exit 1; }")))
+
+; ── Actor.inspect_state (observe R4a) ────────────────────────────────────
+; specs/progress/2026-10-04-observe-r4a-inspect-state.md. The state fixture
+; runs compiled, compiled with --hot-reload (the renderer's code-epoch check
+; must pass when nothing reloaded), and interpreted, against one .expected.
+; The BLOCK-limit case is compiled-only: the interpreter has no blocking send.
+
+(rule
+ (targets native_actor_inspect_state native_actor_inspect_state.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_inspect_state.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_inspect_state
+        native/actor_inspect_state.march)
+   (with-stdout-to native_actor_inspect_state.out
+        (system "./native_actor_inspect_state")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_state.expected native_actor_inspect_state.out)))
+
+(rule
+ (targets native_actor_inspect_state_hcr native_actor_inspect_state_hcr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_inspect_state.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --hot-reload Main -o native_actor_inspect_state_hcr
+        native/actor_inspect_state.march)
+   (with-stdout-to native_actor_inspect_state_hcr.out
+        (system "./native_actor_inspect_state_hcr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_state.expected native_actor_inspect_state_hcr.out)))
+
+(rule
+ (targets interp_actor_inspect_state.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_inspect_state.march))
+ (action
+  (with-stdout-to interp_actor_inspect_state.out
+    (run %{exe:../bin/main.exe} native/actor_inspect_state.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_state.expected interp_actor_inspect_state.out)))
+
+(rule
+ (targets native_actor_inspect_block native_actor_inspect_block.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_inspect_block.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_inspect_block
+        native/actor_inspect_block.march)
+   (with-stdout-to native_actor_inspect_block.out
+        (system "./native_actor_inspect_block")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_block.expected native_actor_inspect_block.out)))
+
+; ── Signed debug verbs on the observe socket (observe R4b) ─────────────────
+; specs/progress/2026-10-05-observe-r4b-signed-debug-verbs.md.
+; observe_debug_check.exe makes a fresh deploy keypair, the fixture is built
+; --hot-reload --signing-pubkey with it, and the checker runs every acceptance
+; case of the plan (bad signature, policy, valid STATE, replay, expired, too
+; far ahead, bad nonce, bad args, dead pid, CRASHES_FULL, every attempt
+; audited).  The second leg builds the same fixture with no key: every debug
+; verb answers signing_not_configured.  MARCH_AUDIT_LOG keeps the audit lines
+; out of $HOME.
+(executable
+ (name observe_debug_check)
+ (modules observe_debug_check)
+ (libraries unix yojson march_ed25519))
+
+(rule
+ (targets native_observe_debug.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_debug_check.exe)
+       (file native/observe_debug.march))
+ (action
+  (with-stdout-to native_observe_debug.out
+   (system "rm -f obs_dbg.*; ./observe_debug_check.exe keygen obs_dbg.pk obs_dbg.sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat obs_dbg.pk) -o obs_dbg.bin native/observe_debug.march > obs_dbg.build 2>&1 || { cat obs_dbg.build; exit 1; }; : > obs_dbg.policy; MARCH_OBSERVE_SOCKET=obs_dbg.sock MARCH_DEBUG_POLICY=obs_dbg.policy MARCH_AUDIT_LOG=obs_dbg.audit ./obs_dbg.bin > obs_dbg.prog 2>&1 & prog=$!; ./observe_debug_check.exe signed obs_dbg.sock obs_dbg.prog obs_dbg.sk obs_dbg.policy obs_dbg.audit; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_dbg.*; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_debug.expected native_observe_debug.out)))
+
+(rule
+ (targets native_observe_debug_nokey.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_debug_check.exe)
+       (file native/observe_debug.march))
+ (action
+  (with-stdout-to native_observe_debug_nokey.out
+   (system "rm -f obs_dbgn.*; %{exe:../bin/main.exe} --compile -o obs_dbgn.bin native/observe_debug.march > obs_dbgn.build 2>&1 || { cat obs_dbgn.build; exit 1; }; MARCH_OBSERVE_SOCKET=obs_dbgn.sock MARCH_AUDIT_LOG=obs_dbgn.audit ./obs_dbgn.bin > obs_dbgn.prog 2>&1 & prog=$!; ./observe_debug_check.exe nokey obs_dbgn.sock obs_dbgn.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_dbgn.*; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_debug_nokey.expected native_observe_debug_nokey.out)))

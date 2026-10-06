@@ -39,7 +39,7 @@ leader's audit log, [../progress/2026-10-01-dd-step12a-forge-cluster-backend.md]
   or it is now a compile error. Keeping the merge in `Control.leader_report` is also fine.
   Shape 2 (`Control.serialize`'s `if` over `r.signature`) compiles correctly now.
 - The session-runtime leaks the wiring routes around:
-  [2026-10-01-session-node-vault-tables-leak.md](2026-10-01-session-node-vault-tables-leak.md).
+  [2026-10-01-session-node-vault-tables-leak.md](../progress/2026-10-01-session-node-vault-tables-leak.md).
 
 ## Moving `Ctl` and `CtlFetch` into `stdlib/control.march` (unblocked 2026-10-03)
 

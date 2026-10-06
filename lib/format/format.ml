@@ -1326,13 +1326,21 @@ let format_module ?(src = "") m =
     result
 
 (** Parse [src] (from [filename]) and format it.
-    Raises [March_parser.Parser.Error] on parse failure. *)
+    Raises the parser's exception on parse failure; see
+    [format_source_result] for the reporting form. *)
 let format_source ~filename src =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_parser.Parse.module_of_lexbuf lexbuf in
   format_module ~src m
+
+(** [format_source] for callers that report the failure: a source that does
+    not parse yields its diagnostics instead of an exception.  [stuck] is
+    passed to {!March_parser.Parse.module_}. *)
+let format_source_result ~filename ?stuck src =
+  Result.map (format_module ~src)
+    (March_parser.Parse.module_ ~filename ?stuck src)
 
 (* Wire the refinement-predicate formatter now that [expr_inline] is in scope. *)
 let () = fmt_pred_ref := expr_inline

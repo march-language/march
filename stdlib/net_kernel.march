@@ -310,8 +310,24 @@ mod NetKernel do
   doc "Raw frames refused on connections this process handshaked, in either direction."
   fn raw_refused() : Int do Vault.get_or(mac_counts(), "raw_refused_total", 0) end
 
+  -- ── the connection's handshake transcript (security review, dd step 12b) ──
+  -- Kept per connection so a ClusterNode link can bind what it signs to the
+  -- handshake that made it (a CERT_UPDATE's proof): the transcript covers
+  -- both hellos, nonces and ephemeral keys, so no two connections share one,
+  -- and both ends compute the same bytes (`ClusterAuth.transcript`).
+  pfn binding_table() : Vault(Bytes) do Vault.open("net_kernel_binding") end
+
+  doc "The handshake transcript of [fd]'s sealed connection (empty when it has none: unsealed, or never handshaked here)."
+  fn link_binding(fd : Int) : Bytes do
+    match Vault.get(binding_table(), fk(fd)) do
+      Some(b) -> b
+      None -> Bytes.empty()
+    end
+  end
+
   doc "Drop [fd]'s MAC state: its frames are plain again (see the rule above)."
   fn forget(fd : Int) : () do
+    Vault.drop(binding_table(), fk(fd))
     Vault.drop(raw_table(), fk(fd))
     Vault.drop(mac_table(), fk(fd))
     let c = mac_counts()
@@ -443,8 +459,9 @@ mod NetKernel do
                                 -- Sealed when the peer offered it too (a pre-11a peer does not).
                                 let mac = ClusterAuth.offers_mac(peer.nonce)
                                 let _ = if mac do
-                                  install(fd, ClusterAuth.frame_keys(Bytes.from_string(secret),
-                                                ClusterAuth.transcript(hello, nonce, hbytes, peer.nonce), nonce, peer.nonce))
+                                  let th = ClusterAuth.transcript(hello, nonce, hbytes, peer.nonce)
+                                  install(fd, ClusterAuth.frame_keys(Bytes.from_string(secret), th, nonce, peer.nonce))
+                                  Vault.set(binding_table(), fk(fd), th)
                                 else () end
                                 Ok({ identity: id, role: peer.role, addr: peer.addr, cert: None, mac: mac })
                             end
@@ -500,6 +517,7 @@ mod NetKernel do
                                     if Bytes.is_empty(shared) do Err("Handshake: the peer's ephemeral key is not usable")
                                     else
                                       install(fd, ClusterAuth.frame_keys(shared, th, nonce, peer.nonce))
+                                      Vault.set(binding_table(), fk(fd), th)
                                       let raw = NodeCert.has_flag(creds.signed.cert, "raw_send") && NodeCert.has_flag(cert, "raw_send")
                                       Vault.set(raw_table(), fk(fd), if raw do 1 else 0 end)
                                       Ok({ identity: peer.identity, role: peer.role, addr: peer.addr,

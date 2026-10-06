@@ -642,6 +642,67 @@ let rec releases_var (name : string) (e : Tir.expr) : bool =
     || releases_var name body
   | _ -> false
 
+(** True when, on EVERY path through [e], each consuming use of [name] (a call
+    or constructor argument, a returned atom, ...) is matched by an [inc_rc]
+    of it on the same path.  Perceus dups a variable before each consuming use
+    that is not its last, so then every consumer took a dup and the original
+    reference is still owned when the path ends: a record that is passed to a
+    function and then used as an update base ([let p = f(st) in { st with ..
+    }]) still has to be released, and the "consumed, so not ours to drop"
+    verdict leaked it (ClusterNode.core_register_ok's [identity_of(st, ..)]
+    beside [{ st with reg: .. }]: the old state, every registration).  A
+    last-use transfer has no inc, so it still counts as taken.  [None]-like
+    answers (an alias of [name], a match on it, a capture, too many paths)
+    are [false]: the conservative verdict, a leak, never a double release. *)
+let path_counts (name : string) (e : Tir.expr) : (int * int) list option =
+  let exception Unknown in
+  let hits = function Tir.AVar w -> String.equal w.Tir.v_name name | _ -> false in
+  let count atoms = List.length (List.filter hits atoms) in
+  let cap = 256 in
+  let product xs ys =
+    let r = List.concat_map (fun (c1, i1) -> List.map (fun (c2, i2) -> (c1 + c2, i1 + i2)) ys) xs in
+    let r = List.sort_uniq compare r in
+    if List.length r > cap then raise Unknown else r in
+  let rec go (e : Tir.expr) : (int * int) list =
+    match e with
+    | Tir.EIncRC a | Tir.EAtomicIncRC a -> [ (0, if hits a then 1 else 0) ]
+    | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ -> [ (0, 0) ]
+    | Tir.EField _ -> [ (0, 0) ]
+    | Tir.EUpdate (_, fields) -> [ (count (List.map snd fields), 0) ]
+    | Tir.EAtom a -> [ (count [ a ], 0) ]
+    | Tir.EApp (_, args) -> [ (count args, 0) ]
+    | Tir.ECallPtr (a, args) -> [ (count (a :: args), 0) ]
+    | Tir.ETuple atoms | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) -> [ (count atoms, 0) ]
+    | Tir.ERecord fields -> [ (count (List.map snd fields), 0) ]
+    | Tir.EReuse (a, _, args) -> [ (count (a :: args), 0) ]
+    | Tir.EAllocHole (tok, _, args, _) ->
+      [ (count (match tok with Some a -> a :: args | None -> args), 0) ]
+    | Tir.ESetField (a, _, b) -> [ (count [ a; b ], 0) ]
+    | Tir.ELet (_, Tir.EAtom a, _) when hits a -> raise Unknown
+    | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> product (go e1) (go e2)
+    | Tir.ECase (a, brs, d) ->
+      if hits a then raise Unknown;
+      let r = List.concat_map (fun (b : Tir.branch) -> go b.Tir.br_body) brs
+              @ (match d with Some d -> go d | None -> []) in
+      List.sort_uniq compare r
+    | Tir.ELetRec (fns, body) ->
+      if List.exists (fun (f : Tir.fn_def) -> Perceus_liveness.name_free_in name f.Tir.fn_body) fns
+      then raise Unknown;
+      go body
+  in
+  match go e with
+  | paths -> Some paths
+  | exception Unknown -> None
+
+(** [path_counts]: for each path through [e], the number of consuming uses of
+    [name] and of [inc_rc]s of it, or [None] when [e] aliases, matches on or
+    captures [name] (or has too many paths to list). *)
+let covered_by_incs (name : string) (e : Tir.expr) : bool =
+  match path_counts name e with
+  | Some paths -> List.exists (fun (c, _) -> c > 0) paths
+                  && List.for_all (fun (c, i) -> c <= i) paths
+  | None -> false
+
 (** True when [name] is the value the expression evaluates to, i.e. it sits in
     tail position as a bare atom.  Used to suppress the aggregate scope-end
     drop for [let b = {..} in b], where ownership has already been transferred
@@ -755,6 +816,14 @@ let rec dup_tail_projections (env : env) (name : string) (e : Tir.expr) : Tir.ex
     parameter position of a known callee has no such dup and is read for the
     whole call, so that case stays a post-call release.  Any other tail is
     bound first ([let tmp = tail in dec_rc v; tmp]), which needs its type. *)
+(* Whether [e] can hold more than one path to a tail, so a release inside it
+   says nothing about every path: a case, or a let/seq leading to one. *)
+let rec is_branching (e : Tir.expr) : bool =
+  match e with
+  | Tir.ECase _ -> true
+  | Tir.ELet (_, _, body) | Tir.ESeq (_, body) -> is_branching body
+  | _ -> false
+
 let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option =
   let name = v.Tir.v_name in
   (* [v] and its pure aliases, then the variables projected out of them. *)
@@ -818,15 +887,49 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
     | _ -> false
   in
   let ok = ref true in
-  let rec go (x : Tir.expr) : Tir.expr =
+  (* A path that already releases [v] (a dead-at-entry [dec_rc v] Perceus put
+     at the head of a branch that does not use it, or any release on the way
+     to the tail) is left as it is; only the paths that reach a tail still
+     owning [v] get the drop.  Before, a release on ONE branch suppressed the
+     drop on all of them: in
+       match o do Some(e) -> if e.present do Some({ e with .. }) else None end
+     the [else] branch released [e] and the [then] branch leaked it, with the
+     field the update replaced (GlobalRegistry.unregister_own, every session). *)
+  (* [bal]: the [inc_rc]s of [v] minus its consuming uses so far on this path.
+     Perceus dups [v] before every consuming use that is not its last, so
+     [bal >= 0] at a tail means every consumer took a dup and [v]'s own
+     reference is still here to release; [bal < 0] means the path handed it
+     over (returned it, stored it, passed it on last).  A non-tail piece whose
+     paths disagree, or that aliases or captures [v], leaves the rest of the
+     path alone: a leak at worst. *)
+  let delta (x : Tir.expr) : int option =
+    match path_counts name x with
+    | Some ((c, i) :: rest) when List.for_all (fun (c', i') -> i' - c' = i - c) rest -> Some (i - c)
+    | Some [] -> Some 0
+    | _ -> None
+  in
+  let rec go bal (x : Tir.expr) : Tir.expr =
     match x with
-    | Tir.ELet (w, e1, body) -> Tir.ELet (w, e1, go body)
-    | Tir.ESeq (a, body) -> Tir.ESeq (a, go body)
+    | _ when releases_var name x && not (is_branching x) -> x
+    | Tir.ELet (_, e1, _) when releases_var name e1 -> x
+    | Tir.ESeq (a, _) when releases_var name a -> x
+    | Tir.ELet (w, e1, body) ->
+      (match delta e1 with
+       | Some d -> Tir.ELet (w, e1, go (bal + d) body)
+       | None -> x)
+    | Tir.ESeq (a, body) ->
+      (match delta a with
+       | Some d -> Tir.ESeq (a, go (bal + d) body)
+       | None -> x)
+    | Tir.ECase (Tir.AVar w, _, _) when String.equal w.Tir.v_name name -> x
     | Tir.ECase (a, brs, d) ->
       Tir.ECase (a,
         List.map (fun (br : Tir.branch) ->
-            { br with Tir.br_body = go br.Tir.br_body }) brs,
-        Option.map go d)
+            { br with Tir.br_body = go bal br.Tir.br_body }) brs,
+        Option.map (go bal) d)
+    | Tir.ELetRec (fns, _)
+      when List.exists (fun (f : Tir.fn_def) -> Perceus_liveness.name_free_in name f.Tir.fn_body) fns -> x
+    | tail when (match delta tail with Some d -> bal + d < 0 | None -> true) -> tail
     (* A literal reads nothing, so the release goes in front of it (the
        actor handler's trailing `:unit`; a literal has no type to bind). *)
     | Tir.EAtom (Tir.ALit _) as tail -> Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
@@ -840,7 +943,7 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
                    Tir.ESeq (decrc_for env v (Tir.AVar v), Tir.EAtom (Tir.AVar tmp)))
        | None -> ok := false; tail)
   in
-  let r = go e in
+  let r = go 0 e in
   if !ok then Some r else None
 
 (** True for the source of an actor handler's state load: the handler's
@@ -1387,8 +1490,10 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
               && not (StringSet.mem v.Tir.v_name env.moved_vars)
               && not is_borrowed_field
               && not (tail_value_is_var v.Tir.v_name e2')
-              && not (releases_var v.Tir.v_name e2')
-              && used_only_as_field_source v.Tir.v_name e2'
+              (* A release on some paths no longer blocks the drop: it goes
+                 on the paths that do not release ([drop_agg_at_tails]). *)
+              (* Whether [v] is still owned is decided per path by
+                 [drop_agg_at_tails]; the paths that hand it over keep it. *)
               && drop_agg_at_tails env v e2' <> None then
         (* Scope-end drop for an owned aggregate (Wave: aggregate RC).
            Records and tuples are read exclusively through [EField]; unlike a
