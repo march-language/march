@@ -208,6 +208,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A cold `$HOME` stdlib cache no longer compiles differently from a warm one.** The first
+  compile after a cold cache used the live stdlib type environment, whose type variables the program
+  could link, so it produced different IR (an extra specialised clone, shifted lambda ids) and a
+  different compilation-cache key than every later compile of the same source.
 - `forge top -n` and `forge observe -n` also accept `--count`; `--n` was
   documented but never parsed.
 - **Compiling a file with no `main` no longer emits the whole standard
