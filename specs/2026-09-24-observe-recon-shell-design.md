@@ -3,9 +3,14 @@
 **Date:** 2026-09-24
 **Status:** design, nothing built. **Superseded in part** by the implementation plan
 [`plans/2026-09-28-observe-recon-shell-plan.md`](plans/2026-09-28-observe-recon-shell-plan.md),
-whose §C lists seventeen claims here that current code contradicts (the shell's
+whose §C lists the claims here that current code contradicts (the shell's
 dispatch ids and attach hash, fragment size, cap-marker checking, timeouts, the
 single-client socket, counters, crash dumps). Where the two disagree, the plan wins.
+**Revised 2026-10-05** (shell interaction): §6.2–6.5 now agree with the plan,
+and §6.9 adds the interactive session: a warm compiler so an input answers in
+well under a second, a `limit: N` on rendered results, captured `println`,
+pre-bound caps, and a session that a deploy ends. The plan's R5–R6 carry the
+work.
 **Working names:** `forge observe` (Observer), `Recon` (the stdlib diagnostics
 module), `forge shell` (remote shell), `forge release` (the app bundle).
 **Method:** the ground truth in §1 was read from this worktree on 2026-09-24
@@ -34,10 +39,12 @@ it, and the operator-facing packaging around both.
    binary and needs its own auth story. It can be added later *on top of* the
    snapshot API as a stdlib module (§5.6), never as the primary channel.
 2. **How a remote shell executes code.** *Recommendation:* compile on the
-   operator's machine against the **exact build the node runs** (matched by
-   `cas_hash`, refused on mismatch), ship the fragment as a signed `EVAL`
-   patch over `CAS_PUT`, run it on a fresh bounded green thread, and have the
-   fragment render its own result (§6). *Why:* compiled March binaries cannot
+   operator's machine against **the code the node runs** (every boundary
+   function the fragment reaches must have the node's `impl_hash`, refused
+   on mismatch), in a **warm compiler session** that compiles only what each
+   input adds; ship the fragment as a signed `EVAL` over the session's one
+   connection; run it as a bounded task; and have the fragment render its
+   own result, within a `limit` (§6). *Why:* compiled March binaries cannot
    describe their own values (`march_value_to_string` prints `#<tag:N>` for
    any ADT, `runtime/march_runtime.c:9640`), and they do not carry the
    compiler. The client does carry it, and it knows the fragment's type, so
@@ -198,7 +205,7 @@ dependency.
 | **`sys`** | `get_state`, `replace_state`, `suspend`/`resume`, `statistics` (`reductions, messages_in, messages_out`), `log` ring, all as system messages the actor loop handles between user messages. | `Recon.statistics` fields (§4.2); `replace_state` through the same in-band tag as `inspect_state` (§4.6); the epoch marker is already our `suspend`. | Behaviours that ignore their mailbox blocking system messages: our in-band requests carry a timeout and the socket reports `InspectTimeout`. |
 | **`mix release`** | One `bin/<app>` with `start / daemon / stop / pid / version / eval / rpc / remote`; `eval` on a fresh VM vs `rpc` against the running one vs `remote` as a shell. | The launcher verb set (§7.2) and the three-way split `forge eval` / `forge rpc` / `forge shell` (§6.1). | Cookie as root; hot upgrades bolted on and abandoned. |
 | **OTP release_handler** | `code_change/3` driven by the supervision tree, two live versions, `soft_purge`. | Nothing new: the deploys plan already has `migrate_state`, three versions per slot, soft/hard drains. | Hand-written appups. The plan's `--plan` output is the automated appup. |
-| **Unison** | Definitions are hashes; names are pointers; a deploy is `run deploy` returning a `ServiceHash`; `ServiceName.assign` is blue/green; transcripts are executable docs and tests. | `forge shell` **refuses to attach unless the client's `cas_hash` matches the node's** (§6.2); `Recon.source(fn)` and `Recon.which(fn)` answer "what is actually running" from CAS (§4.7); `forge shell --transcript` (§6.6). | Codebase-as-database. |
+| **Unison** | Definitions are hashes; names are pointers; a deploy is `run deploy` returning a `ServiceHash`; `ServiceName.assign` is blue/green; transcripts are executable docs and tests. | `forge shell` **refuses to run a fragment unless every function it reaches has the node's `impl_hash`** (§6.2); `Recon.source(fn)` and `Recon.which(fn)` answer "what is actually running" from CAS (§4.7); `forge shell --transcript` (§6.6). | Codebase-as-database. |
 | **Livebook attached node** | Cells evaluate on the target; a notebook becomes a runbook with charts. | `forge notebook --attach <host>` routes cells through `EVAL` (§6.8, later). | |
 | **JVM `jcmd`** | One verb; the *target* enumerates its subcommands (`jcmd <pid> help`); JFR's "dump the last N minutes on incident". | `HELP` verb so old forges work against new nodes (§3.3); the crash ring and trace ring are the "last N" (§4.3, §4.5). | JMX/RMI. |
 | **tokio-console** | Instrumentation as a subscriber speaking a versioned protocol; automatic lints over the stream (`never yielded`, `lost waker`). | `forge diagnose` findings are lints over a snapshot (§5.3). | Overhead when on; we keep the armed-flag rule from the introspection design. |
@@ -218,9 +225,9 @@ dependency.
  ┌──────────────────────┐    ssh -L      ┌──────────────────────────────┐
  │ forge observe (TUI)  │──────────────▶ │ node control socket (pthread)│
  │ forge diagnose (json)│                │   observe │ debug │ exec     │
- │ forge shell / rpc    │  CAS_PUT .so   │      ▼        ▼       ▼      │
+ │ forge shell / rpc    │  EVAL + .so    │      ▼        ▼       ▼      │
  │ forge deploy/status  │──────────────▶ │  C snapshot layer   dlopen   │
- │ march (compiler, CAS)│                │  march_observe_*    EVAL run │
+ │ march shell-session  │                │  march_observe_*    EVAL run │
  └──────────────────────┘                │      ▲                       │
           ▲                              │  Recon / Actor / Trace stdlib│
           │  same verbs, later           │  (in-node March code)        │
@@ -246,11 +253,13 @@ Three rules hold the pieces together:
 | Tier | Verbs | Auth | Reveals |
 |---|---|---|---|
 | **observe** | `HELP`, `PING`, `SNAPSHOT`, `ACTOR`, `TOP`, `TREE`, `NAMES`, `SCHED`, `MEM`, `EPOCHS`, `CLUSTER`, `CRASHES`, `TABLES`, `WATCH` | connect to the socket (filesystem permissions; the ssh tunnel is the remote auth) | existence, counts, names, types, tree shape, epochs, crash *reasons* (not payloads) |
-| **debug** | `STATE`, `MESSAGES`, `TRACE_START` / `TRACE_DRAIN` / `TRACE_STOP`, `TABLE_ROWS`, `SOURCE` | signed request (same ed25519 key and envelope as `ACTIVATE4`), `debug` allowed in `$MARCH_DEPLOY_POLICY` | state renderings, message payloads, table rows |
-| **exec** | `EVAL`, `REPLACE_STATE`, `KILL`, `SUSPEND` / `RESUME`, plus today's `ACTIVATE*`, `DRAIN`, `*_BATCH` | signed, `cap_root` checked against policy, audit line carries the fragment source | changes the system |
+| **debug** | `STATE`, `CRASHES_FULL`, `MESSAGES`, `TRACE_START` / `TRACE_DRAIN` / `TRACE_STOP`, `TABLE_ROWS`, `SOURCE` | signed request (the deploy key, a nonce and an expiry), the verb listed in `$MARCH_DEBUG_POLICY` (as built in R4b) | state renderings, message payloads, table rows |
+| **exec** | `EVAL`, plus today's `ACTIVATE*`, `DRAIN`, `*_BATCH`; `REPLACE_STATE`, `KILL`, `SUSPEND` / `RESUME` are `EVAL`s of `Recon` calls (§6.4) | signed, `cap_root` checked against `$MARCH_SHELL_POLICY` (for `EVAL`) or the deploy policy, audit line carries the fragment source | changes the system |
 
-`DRAIN` moves from unsigned to exec, which closes the open todo. The policy
-file gains two sections, `debug:` and `shell_caps:` (§6.4). A binary built
+`DRAIN` moves from unsigned to exec, which closes the open todo. The debug
+and shell policies are separate files (`$MARCH_DEBUG_POLICY`,
+`$MARCH_SHELL_POLICY`), so the deploy policy's parser, which `ACTIVATE6`
+depends on, is not touched. A binary built
 without `--hot-reload` still gets the **observe** tier when
 `MARCH_CONTROL_SOCKET` is set (the env var is a new alias of
 `MARCH_HOT_RELOAD_SOCKET`; both work); debug and exec need the signing key
@@ -563,83 +572,114 @@ without forge. It is deliberately after everything else and gated by
 
 ### 6.2 Attach: identity by hash (Decision 2)
 
-On connect, forge sends `HCR_INFO` and `VERSIONS` and gets the node's
-`cas_hash`, target, abi and `module_prefix`. It then builds (or finds in the
-local CAS) the same module hash from the project at the current checkout. If
-the hashes differ, `forge shell` refuses with the diff: which functions'
-`impl_hash` differ, and the commit the node's manifest names. `--force`
-attaches anyway, marks every prompt `[skew]`, and forbids `REPLACE_STATE`.
-This is Unison's rule: the client never guesses whether its idea of a type
-matches the node's, it knows. It also removes the "your shell's Erlang
-must match the node's" class of failures, because there is no runtime on
+On connect, forge asks the node for `HCR_INFO` (target, abi, module prefix,
+code epoch, the collision-set tag digest) and `ABI_QUERY` (every boundary
+slot with its `impl_hash`). The whole-binary `cas_hash` can never match a
+fragment build (it mixes in the compiler executable, flags and the signing
+key), so identity is checked **per function**: for every boundary function a
+fragment reaches through dispatch, the client's `impl_hash` must equal the
+node's. A mismatch is a hard stop that names the functions and both hashes.
+`--force` runs read-only fragments anyway (no `Actor.Debug`, no caps beyond
+the read set), marks the prompt `[skew]`, and refuses anything that writes.
+A differing tag digest is a hard stop even with `--force`. This is Unison's
+rule at the granularity March can check: the client never guesses whether
+its idea of a function matches the node's, it knows. There is no runtime on
 the client side that has to match anything; only the compiler's output does,
-and that is what the hash covers.
+and that is what the hashes cover.
 
 ### 6.3 A fragment
 
-Each input is compiled by the local `march` into a **fragment patch**: a
-`--compile-so` build of
+Each input becomes a module
 
 ```march
 mod __Shell_N do
-  fn __eval() : String do
-    let __r = <expr>            -- with earlier bindings resolved to slots
-    show(__r)                   -- generated for the inferred type
+  fn __eval(console : Cap(IO.Console), intro : Cap(Actor.Introspect), …) : String do
+    let __r = <expr>            -- earlier bindings read from the session's slots
+    __render(__r, <limit>)      -- generated for the inferred type (§6.9)
   end
 end
 ```
 
-against the project's modules (so `Orders.place(…)` resolves through the
-dispatch table at the node's current epoch) and the stdlib, with `--hot-reload
-<Prefix>` so `__eval` carries the identity markers. A `let x = …` input
-compiles to a fragment that stores into `march_repl_slots[k]` and returns
-`show(x)`; later fragments read the slot with the type forge remembered.
+`__eval`'s parameters are exactly the narrowed caps `$MARCH_SHELL_POLICY`
+grants (never `Cap(IO)`: a hook that takes the root cap records `caps=IO`,
+which covers every leaf and hides any widening). They are the pre-bound
+names the user types (§6.9).
+
+The fragment is compiled **against the node's program**: app and stdlib
+calls resolve to the node's own symbols, and calls to boundary functions go
+through the node's dispatch table at its current epoch, using the node's
+NAME_IDs (plan R5.3). It carries only `__eval`, its lambdas, and any
+generic instantiation the node does not already have. Building it as a
+whole-program `--compile-so` is not an option: a module with no `main` gets
+no stdlib pruning, and that build took **82 s** (`llvm-emit` 52 s, `clang`
+27 s) on 2026-10-05, against 3.2 s for the same patch with a `main`. The
+plan's R5.5 (`--fragment` emission) is therefore required, not an
+optimisation.
+
+A `let x = …` input stores into a session slot (`march_repl_set`) and
+renders `x`; later fragments read the slot with the type forge remembered.
 This is exactly what `lib/jit/repl_jit.ml` does for the local REPL, moved to
 a different process: the client owns the type environment, the node owns the
-values. The fragment's `.so` goes up with `CAS_PUT` (a few hundred KB, since
-only `__eval` and its closures are in it; the stdlib and app symbols resolve
-from the process).
+values.
 
 ### 6.4 `EVAL`: the verb
 
 ```
-EVAL <cas_hash> <sig> epoch:<E> cap_root:<H> timeout_ms:<T> src_b64:<S>
+EVAL <sig> name:<__Shell_N> so_blake3:<h> epoch:<E> cap_root:<r> nonce:<n> not_after_ms:<t> timeout_ms:<t> limit:<n> caps:<csv> src_b64:<s> so_b64:<bytes>
 ```
 
-Signed like `ACTIVATE4`. The node: verifies the signature; recomputes
-`cap_root` from the fragment's `__march_cap_*` markers and checks it against
-`shell_caps:` in the policy (a shell allowed `IO.Console` and
-`Actor.Introspect` cannot open a socket, whatever the operator types; the
-compiler's own cap ceiling is what makes this checkable); appends an audit
-line with the source; `dlopen`s the fragment; spawns a **green thread** with
-its own stack, the node's current epoch, a reduction budget derived from
-`timeout_ms`, and a mailbox; runs `__eval` on it; replies with the string or
-with `TIMEOUT` / `PANIC <msg>` / `CAP <path>`. A fragment that exceeds the
-budget is killed at its next preemption check, the same way any actor is.
+Signed, with a nonce and an expiry (the R4b machinery). The fragment's bytes
+ride **inline** (`so_b64`, refused over 4 MiB), so one input is one round
+trip, not a `CAS_PUT` and then an `EVAL`. The node:
 
-The fragment's `.so` is `dlclose`d when its `refs` drop to zero, using the
-existing per-handle `refs`. A fragment that spawned an actor or registered a
-closure keeps a reference and stays loaded; the reply says so
-(`pinned: true`), and the Epochs panel lists shell fragments as units so they
-are never invisible.
+1. checks the signature, nonce and expiry, and that `epoch` is its current
+   code epoch (if not, the session is over, §6.9);
+2. checks the bytes against `so_blake3`;
+3. checks `caps` against `$MARCH_SHELL_POLICY` (a flat cap list; no file
+   means deny all);
+4. writes an audit line with the source;
+5. `dlopen`s the fragment and requires its `__march_cap_manifest` to hash to
+   the signed `cap_root`;
+6. spawns `__eval` as a **task** at the current epoch, with its `println`
+   output captured (§6.9);
+7. waits on a condition the task signals, outside any reclamation section,
+   and replies `OK <b64 result> out:<b64 captured>`, `TIMEOUT`,
+   `TIMEOUT uncancellable`, `PANIC <b64 msg>`, or `ERR <code>`.
+
+On timeout it sets `cancel_requested` on the task and raises the preempt
+flag; the task unwinds at its next cancel point. A fragment stuck in a
+foreign call cannot be cancelled and is left running, reported by `ACTORS`.
+
+`EVAL` is served by a **shell listener** beside the reload socket
+(`<reload socket>.shell`): one thread per session connection, a few
+sessions at most. It shares the reload server's `dlopen` and registry under
+a mutex held only while loading, never while a fragment runs. The reload
+socket itself stays one-client and is never held by a shell, so an open
+session never blocks a deploy.
+
+The fragment's `.so` is `dlclose`d when its `refs` drop to zero. A fragment
+that spawned an actor or stored a closure keeps a reference and stays
+loaded; the reply says `pinned:true`, and `EPOCHS` lists pinned fragments by
+name.
 
 `REPLACE_STATE`, `KILL`, `SUSPEND`, `RESUME` are not separate wire verbs:
-they are `EVAL` of `Recon.replace_state(…)` and friends, and the policy's
-`shell_caps:` decides whether `Actor.Debug` is on the table. One verb, one
-audit path, one cap check.
+they are `EVAL` of `Recon.replace_state(…)` and friends, and the shell
+policy decides whether `Actor.Debug` is on the table. One verb, one audit
+path, one cap check.
 
 ### 6.5 What the shell can and cannot do
 
 - Can: call any app or stdlib function at the node's epoch, read state
   (`Recon.get_state`), bind values across inputs, spawn actors (they are
-  charged to the shell's cap, and outlive the fragment as pinned units), send
-  messages to any pid it can name (holding a pid is authority, as everywhere
-  in March).
-- Cannot: define a new type or actor (the fragment would not agree with the
-  node's shape ids; `forge deploy` is the path), redefine an existing
-  function (that is `ACTIVATE`), exceed `shell_caps:`, run longer than
-  `timeout_ms`, or attach to a node whose `cas_hash` it cannot reproduce.
-- Prints values through the fragment's generated `show`, so records and
+  charged to the shell's caps, and outlive the fragment as pinned units),
+  send messages to any pid it can name (holding a pid is authority, as
+  everywhere in March).
+- Cannot: define a new type, actor, module or impl (the fragment would not
+  agree with the node's shape ids; `forge deploy` is the path, and the shell
+  says so), redefine an existing function (that is `ACTIVATE`), exceed the
+  shell policy's caps, run longer than `timeout_ms` (30 s at most), or call
+  a function whose `impl_hash` differs from the node's.
+- Prints values through the fragment's generated renderer, so records and
   ADTs render with constructor names, which the node alone cannot do.
 
 ### 6.6 Transcripts
@@ -665,6 +705,105 @@ libLLVM.
 `forge notebook --attach H` routes each cell through `EVAL` instead of a
 fresh subprocess, which is Livebook's attached-node runtime. Cells that
 declare types or actors are refused with the §6.5 message. Not v1.
+
+### 6.9 The interactive session
+
+The shell is only useful if an input answers about as fast as a local
+REPL. Today's path is far from that: the quick-win prototype took a 2.9 s
+median round trip, 2.6 s of it compiling (and 82 s for a fragment without a
+`main`, §6.3). The local REPL already shows what is possible: with its
+compiler warm, an input costs about 10 ms to typecheck, lower, monomorphise
+and optimise, 2-3 ms to emit IR, ~130 ms in clang, and ~190 ms to `dlopen`
+(measured 2026-10-05 with `MARCH_JIT_PROFILE=1`).
+
+**Target.** On a warm session against a local socket, an expression over
+existing functions answers in **p50 ≤ 300 ms, p95 ≤ 600 ms**, excluding the
+expression's own run time. Over ssh, add one network round trip per input
+and nothing else. Attaching (loading and typechecking the project once) may
+take a few seconds; the prompt says so while it does.
+
+**How.**
+
+- **A warm compiler.** `forge shell` starts one `march shell-session`
+  process per session. It loads the stdlib and the project once, keeps the
+  typecheck environment and the lowered program in memory, and per input
+  compiles only the input and what it newly needs (the REPL's
+  `partition_fns` / `mark_compiled_fns`). It emits LLVM IR for a handful of
+  functions and runs clang at `-O1` on that alone.
+- **One connection, one round trip.** The session keeps one connection
+  (one ssh tunnel) to the shell listener for its lifetime. Each input is a
+  single `EVAL` with the fragment inline.
+- **Instant meta commands.** The common questions compile nothing: `:state
+  PID`, `:actors [n]`, `:top ATTR [n]`, `:crashes [n]`, `:mem` go straight to
+  the observe and debug verbs. `:t EXPR` (type), `:doc NAME` and `:search Q`
+  run in the local compiler only. `:caps` lists the pre-bound caps,
+  `:limit N` sets the session's render limit, `:quit` ends the session.
+- **Line editing** in forge with `notty`, as R7's TUI uses (forge does not
+  link the REPL's `lib/repl/tui.ml`, which drags the typechecker and JIT into
+  forge): history in `.forge/shell_history`, and completion asked of the
+  `march shell-session` process, which has the typecheck environment.
+
+**Rendering, and `limit: N`.** Every result is rendered by a renderer the
+client generates from the result's static type (plan R5.7). The renderer
+takes a limit: every list, array, map, set and string shows at most `N`
+elements (characters, for a string), and says how many it left out:
+
+```
+march@prod-1> Actor.list(intro)
+[Pid(0), Pid(1), Pid(2), …, Pid(49), … 4 950 more]     -- the default limit, 50
+march@prod-1> Actor.list(intro) limit: 3
+[Pid(0), Pid(1), Pid(2), … 4 997 more]
+march@prod-1> Actor.list(intro) limit: all
+[Pid(0), Pid(1), Pid(2), Pid(3), …                     -- every one of the 5 000
+```
+
+`limit: N` at the end of an input sets the limit for that input only;
+`limit: all` lifts it. `:limit N` changes the session default, and `forge rpc
+--limit N` sets it for one call. The limit applies at every depth, so a list
+of 1 000 records each holding a 1 000-element list renders 50 × 50. A type with
+a hand-written `Show` cannot take a limit; its output is cut at 16 KiB with
+`… (n more bytes)`. A whole reply is cut at 1 MiB on the node regardless,
+so no input can make the node build an unbounded string. `limit: N` is
+shell syntax, recognised only at the very end of an input; it never reaches
+the compiler.
+
+**Captured output.** `println` and friends inside a fragment write into a
+buffer on the task (the runtime checks for a per-proc capture before writing
+to stdout), and the reply carries it, so the operator sees it above the
+result instead of it landing in the node's log. Output from actors or tasks
+the fragment spawns is not captured; it goes where their output always goes.
+
+**Pre-bound caps.** The user never types a cap's construction. `__eval`
+takes the caps the shell policy grants, under fixed names: `console`,
+`clock`, `intro` (`Actor.Introspect`), `dbg` (`Actor.Debug`), and so on.
+`:caps` lists them. An input that needs a cap the policy does not grant is
+refused before it is compiled, naming the cap.
+
+**Confirmation.** An input asks `y/N` before it runs, naming what it would
+do, if it uses a cap outside the read set (`console`, `clock`, `intro`,
+`dbg`), or if the input itself calls `send`, `kill`, `Actor.stop`, or a
+`Recon` write (`replace_state`, `suspend`, `resume`), directly or in a lambda
+it defines. Calls into app functions are not looked inside: the question
+guards against slips, while the shell policy is the security boundary.
+`--yes` skips it for scripts; `forge rpc` never asks, and refuses such an
+input without `--yes`.
+
+**A deploy ends the session.** Every `EVAL` names the code epoch the session
+attached at. When a deploy moves the node to a new epoch, the next `EVAL`
+gets `ERR epoch_changed <old> <new>`, and the shell listener also closes idle
+sessions with that line. The shell prints that the node was redeployed, that
+the session and its bindings are gone, and exits (`forge shell` started with
+`--reconnect` re-attaches instead, with no bindings). A node restart drops the
+connection, with the same result. The session's slots belong to its
+connection (a range handed out when the session says hello) and are freed
+when it closes, so neither case leaks them, and no `SLOT_FREE` message is
+needed.
+
+**Several nodes.** `--select` (or `--env`) runs each input on every selected
+node in turn and prints one result per node, prefixed with its name. The
+identity check runs per node; a node that fails it is skipped with the
+reason. Bindings are per node: `let x = …` binds `x` on each node to that
+node's value.
 
 ---
 
@@ -697,7 +836,9 @@ lib/<app>.hcr_manifest    from the build
 lib/<app>.schemas.json    from the build
 lib/patches/              empty; the host-persisted patch stack (plan §6.5) lives here
 etc/topology.json         exported topology for this env
-etc/policy                MARCH_DEPLOY_POLICY (debug:, shell_caps:, caps)
+etc/policy                MARCH_DEPLOY_POLICY (caps)
+etc/debug_policy          MARCH_DEBUG_POLICY (debug verbs allowed)
+etc/shell_policy          MARCH_SHELL_POLICY (caps a shell fragment may hold)
 etc/pubkey                the signing public key, for `forge cap inspect`
 etc/env                   sourced by the launcher; MARCH_* defaults, overridable
 RELEASE                   name, version, target, cas_hash, compiler version, built_at
@@ -755,10 +896,13 @@ manifest recorded at `.prev`, and the audit log entry says `rollback_of:<E>`.
   This is the first thing to verify in stage 1; if it is not possible, the
   snapshot is taken by a system green thread the socket thread asks and
   waits on, which costs one hand-off and nothing else.
-- **Fragment cost.** One `dlopen` and one green thread per `EVAL`; a session
-  keeps its fragments' `.so`s until `refs` hit zero. A shell that runs 1,000
-  inputs has loaded 1,000 small objects; `dlclose` returns them. This is
-  the REPL's existing model and its existing leak surface.
+- **Fragment cost.** One `dlopen` and one task per `EVAL`; a fragment's
+  `.so` is kept until its `refs` hit zero. A shell that runs 1,000 inputs
+  has loaded 1,000 small objects; `dlclose` returns them. This is the
+  REPL's existing model and its existing leak surface. A warm
+  `march shell-session` holds the project's typechecked and lowered program
+  in memory on the operator's machine (hundreds of MB for a large app),
+  which is the price of a sub-second input.
 
 ---
 
@@ -770,7 +914,7 @@ manifest recorded at `.prev`, and the audit log entry says `rollback_of:<E>`.
 - Debug and exec are signed with the deploy key. The audit line for `EVAL`
   carries the source, the signer and the `cap_root`. "Who ran what on prod"
   is answered by `grep EVAL run/audit.jsonl`.
-- `shell_caps:` in the policy is enforced by the compiler's cap ceiling plus
+- `$MARCH_SHELL_POLICY` is enforced by the compiler's cap ceiling plus
   the node's `cap_root` recomputation; a fragment's authority is
   what its markers say, and the node checks the markers, not the client's
   word.
@@ -803,8 +947,9 @@ Each stage lands alone and is useful alone. Sizes are rough.
 4. **Introspection design stages A and B1** (push alarm, `inspect_state`) as
    specced there, plus `STATE` and `MESSAGES` on the debug tier, the policy's
    `debug:` section, and `DRAIN` moved to exec. ~2 weeks (their estimate).
-5. **`forge shell` / `forge rpc`** (§6.2–6.5): fragment build, `EVAL`,
-   hash-matched attach, slots, audit with source. ~2 weeks. `forge eval` is
+5. **`forge shell` / `forge rpc`** (§6.2–6.5, §6.9): fragment build, warm
+   compiler session, `EVAL` on the shell listener, per-function identity,
+   slots, `limit`, captured output, audit with source. ~3.5 weeks. `forge eval` is
    a day on top of stage 7's bundle, or a flag on `forge run` before it.
 6. **`forge observe` TUI** over `lib/repl/tui.ml`, all panels, `WATCH`,
    `--dump` and `MARCH_CRASH_DUMP`. ~1.5 weeks.
@@ -832,11 +977,9 @@ PRs. Stage 5 is the one with a security review.
    `Node.send` wrapper on the sender's proc.
 3. The fragment needs the project's modules to compile against. For a node
    deployed from a CI build, the operator's checkout must produce the same
-   `cas_hash`; that is what CAS reproducibility promises, but it has not been
-   tested across machines (`specs/features/content-addressed-system.md` says
-   the key excludes type definitions). Stage 5 should include a cross-machine
-   reproducibility test, and `forge shell` should say which of the two
-   compilers differs when they do.
+   per-function `impl_hash`es (§6.2). That has not been tested across
+   machines. Stage 5 should include a cross-machine test, and `forge shell`
+   should say which functions differ when they do.
 4. `TREE` from `sup_children[]` covers supervisor-spawned actors; actors
    spawned bare have `sup_pe = NULL` and appear as roots. Is a `spawned_by`
    pid worth one word on the meta so the forest has a real root? Proposed:
