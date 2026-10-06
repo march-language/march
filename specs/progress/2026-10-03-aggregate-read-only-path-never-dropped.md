@@ -38,3 +38,29 @@ tail if its last mention there is a read (an un-dup'd consuming use is always it
 mention, since Perceus dups a use that is live after). Both scope-end drops would then
 drop it at that path's tail. Check the ELet one and the parameter one together, and
 re-run the ASAN corpus sweep: this widens where drops appear.
+
+## Fixed 2026-10-06 (closed by a pinning test)
+
+Fixed on main by
+[2026-10-06-record-ownership-drops.md](2026-10-06-record-ownership-drops.md)
+(`12da34b98`, "perceus: release an owned record on every path that still owns
+it"). It judges each path on its own, and a path whose consuming uses are all
+matched by `inc_rc`s (`covered_by_incs`) still owns the record at its tail.
+That is this todo's proposed fix. That commit left this file open.
+
+Closed with `test/native/aggregate_dupd_consume_drop.march`, which pins the
+three shapes the fix covers, each with a flat `live_allocs()` check and its
+computed value:
+
+- a record handed to a call twice (both dup'd), then read: this todo's
+  shape 2;
+- a record captured by a closure (dup'd), then only a `with` base on one
+  path while the other paths move it on: this todo's shape 1;
+- a record stored into another record (dup'd), then read.
+
+All three print `flat: false` on a compiler without the fix (measured on
+`3926df302`, before `12da34b98`) and `flat: true` on main, matching the
+interpreter.
+
+An equivalent fix written independently for this todo (a per-path net count,
+`net_takes`) was dropped in favour of the one already on main.
