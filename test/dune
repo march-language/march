@@ -1279,6 +1279,14 @@
  (modules test_ast_calls)
  (libraries march_lexer march_parser march_ast march_desugar alcotest))
 
+; The guard for specs/lang/memory-model.md's "Mutable builtins: the rule":
+; non_sendable_types must stay empty until the general Send check lands, and
+; is_send must follow a root through user types (Part C, Phase C5).
+(test
+ (name test_typecheck_send)
+ (modules test_typecheck_send)
+ (libraries march_test_helpers march_typecheck march_errors alcotest))
+
 (test
  (name test_caps)
  (modules test_caps)

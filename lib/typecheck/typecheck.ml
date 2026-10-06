@@ -2502,7 +2502,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
               send_checked, Actor.cast, Actor.call, or just storing it in a
               variable first), not just the builtin used at THIS callsite. *)
            if ci.ci_is_actor_msg then
-             List.iter (check_sendable env.errors sp) arg_tys;
+             List.iter (check_sendable env sp) arg_tys;
            result_ty
          end)
 

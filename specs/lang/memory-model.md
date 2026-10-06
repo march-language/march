@@ -408,6 +408,37 @@ directly; FBIP reuse of any value has the same shape. The same idea scales to ac
 
 ---
 
+## Mutable builtins: the rule
+
+Everything above assumes that a value with two live references is never
+written through one of them. Three facts keep that true: ordinary data is
+immutable, actors share nothing, and in-place updates happen only when a value
+has one owner (RC == 1, read with an acquire load). A builtin type whose
+operations write memory has to fit one of two shapes, or it breaks all three:
+
+> A builtin type whose operations write memory another March reference could
+> observe must be either **`always_linear`** (every operation consumes the
+> value and hands it back; `RingBuf`), or **copy-on-write gated on sole
+> ownership** (`march_rc_is_unique`; the `NativeArray` backing types). A type
+> that is neither must be listed in `non_sendable_types`
+> (`lib/typecheck/typecheck_exhaustive.ml`), and adding the first such type
+> requires Parts A and B of
+> `specs/plans/2026-09-25-send-data-race-freedom-plan.md` first: a general
+> `Send` check that follows the type through user types, record fields and
+> closure captures.
+
+The list is empty, and a unit test (`test/test_typecheck_send.ml`) fails the
+build if a name is added while that check is absent, so the rule is enforced
+by the build, not by memory. The structural judgement the check would need,
+`is_send`, already exists beside the list with no roots to find: the first
+entry ever added is followed through ADTs, records and type arguments from
+day one. Until 2026-10-06 the list held `RingBuf` (then shared mutable state;
+now linear) and the five native array types (always copy-on-write; listed by
+analogy); eight ways around the list are the typing corpus's
+`reject/t300`–`t307`.
+
+---
+
 ## Where this sits in the bigger picture
 
 FBIP is one layer of a stratified memory model. The others reinforce it:
