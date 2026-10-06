@@ -1,0 +1,71 @@
+-- Scenario "cert_order": node-b offers Stock; see scenario.sh.
+mod CertOrderB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  -- The multi-host lab's protocol (examples/lab_app), less the role grants.
+  @[endpoints]
+  protocol Order do
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : String
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : String
+        out  -> Stock -> Shop : String
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  -- Certificate mode, from the files scenario.sh made with `forge cluster`.
+  pfn config(me : String, port_var : String, seeds : String) : ClusterNode.CnConfig do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me)
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int(port_var)))
+    Process.set_env("MARCH_CLUSTER_NODES", seeds)
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+  end
+
+  pfn stock(s : Cap(Session.Live), st : Order_Stock.Entry) : Order_Stock.Yield do
+    Order_Stock.recv_Want(s, st, fn (n, st1) ->
+      if n == 1 do println("stock: a session on node-b") else () end
+      if n < 3 do
+        let st2 = Order_Stock.choose_have(s, st1, "have " ++ int_to_string(n))
+        stock(s, Order_Stock.send_Book(s, st2, n))
+      else
+        let st2 = Order_Stock.choose_out(s, st1, "out")
+        Order_Stock.close(s, Order_Stock.send_Skip(s, st2, n))
+      end)
+  end
+
+  fn main(c : Cap(IO)) do
+    match ClusterNode.start(c, config("node-b", "MARCH_PORT_B", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")))) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        match Order_Run.offer_Stock(c, h, 8, fn (s, st) -> stock(s, st)) do
+          Err(e) -> panic(Order_Run.error_message(e))
+          Ok(_) ->
+            println("node-b: offering")
+            sleep_ms(600000)
+        end
+    end
+  end
+end

@@ -112,6 +112,8 @@ native_cluster_accept_silent_peer: coverage audit (user + stdlib): 123 enforced,
 native_cluster_accept_silent_peer: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_cluster_node_vaults_unnamed: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_cluster_node_vaults_unnamed: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_colliding_type_drop: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_colliding_type_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_compare_nan: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -144,6 +146,8 @@ native_dist_monitor_loopback: coverage audit (user + stdlib): 123 enforced, 0 in
 native_dist_monitor_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_dns_resolve_parity: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_dns_resolve_parity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_dropped_closure_captures: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_dropped_closure_captures: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_render_show: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -460,6 +464,8 @@ native_record_field_tail_projection: coverage audit (user + stdlib): 123 enforce
 native_record_field_tail_projection: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_get_let_bound_eq: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_record_get_let_bound_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_record_ownership_drops: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_record_ownership_drops: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_pattern: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_record_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_pattern_partial: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

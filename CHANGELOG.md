@@ -19,6 +19,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
+  probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
+  `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
+  set, so a slow or loaded host can stop taking healthy peers for dead without
+  a rebuild. A record update of the config still wins.
 - **Signed debug requests on the observe socket.** `forge observe --state PID`
   returns a running actor's state (what `Actor.inspect_state` returns inside
   the program), and `forge observe --crashes-full` returns recent crashes with
@@ -168,6 +173,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
+  install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
+  source needed no changes. The REPL's `notty` dependency (0.2.3 does not
+  compile on OCaml 5.4+) is now vendored from the community fork under
+  `vendor/notty/` until a fixed release is on opam, and the `js_of_ocaml < 6.4.0`
+  cap is lifted (6.4.1 compiles the browser bundle). Compiler speed is unchanged
+  within noise.
 - **Faster `--compile` once whole-program optimisation is done.** Two lookups
   that scanned every definition in the program (stdlib included) for each name
   reference, one in the CAS dependency hashing and one in the allocation-contract
@@ -223,6 +235,69 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled code no longer leaks records whose ownership differs between branches.**
+  A record released on one path of a `match` or `if` was leaked on the others. A record
+  passed to a function and then updated (`{ st with .. }`) was never released at all. A
+  record type named without its module inside another type was freed without its fields.
+  Cluster nodes hit all three on every session (registry entries, the node's whole old
+  state).
+- **`Crypto.sha256`, `sha512`, `md5`, the HMAC, signing and base64 builtins no longer leak
+  their argument.** Compiled code leaked every string or `Bytes` it hashed or encoded. The
+  cluster registry rehashes its Merkle tree on every update, so a node leaked one string
+  per registry entry per update. With these fixes a cluster session leaves about 160
+  objects behind instead of about 730.
+- **A locally bound generic lambda no longer leaks memory when it returns a
+  Float.** `let keep = fn (p, x) -> p` called directly with Float arguments,
+  as in `keep(1.0, x)`, leaked one boxed Float per call in compiled code. The
+  interpreter was unaffected.
+
+- **`char_to_int`, `char_is_digit`, `char_is_alphanumeric` and `char_is_whitespace` no
+  longer leak their argument.** Compiled code leaked the one-character string on every call.
+  `Msgpack` calls `char_to_int` for each byte of every string it encodes, so every cluster
+  frame leaked one object per byte of its strings.
+
+- **A closure that is dropped without being called now frees what it captured.** Before,
+  only calling a closure released its captured values; one dropped from a list, record or
+  table, or never applied, leaked all of them. Cluster nodes hit this on every session and
+  every registry update: a single-node session left about 4,400 objects behind, now about
+  1,400.
+
+- **Derived implementations (`derive Eq`, `Ord`, `Json`, ...) are no longer typechecked with
+  another program's types.** Their generated code got placeholder source positions from a
+  counter that restarted in every compiler process, and the stdlib's cached, already
+  desugared code carried the positions of the process that wrote the cache. A later build
+  of a different program could reuse the same positions and lower a derived function with
+  unrelated types. It surfaced as `forge deploy` reporting every derived `Eq` changed
+  after an unrelated protocol edit.
+
+- **A restarted cluster node's offers are visible again.** After a rolling restart, a node
+  that registered its access points anew could have them erased on every node: its peers
+  still held the bindings from its previous run under a newer clock, and retiring those
+  stale bindings removed the live ones too. Initiators were then refused with "no access
+  point is registered" until every node was restarted at once.
+
+- **Dropping a value of a stdlib type that shares its short name with another (`Value`,
+  `State`, `Level`, `Event`, `Error`, `Mode`) now frees what it holds.** Such a value was freed
+  shallowly, so its contents leaked: a decoded `Msgpack.Bin` lost its whole byte list. Every
+  cluster message is decoded that way, so a node leaked roughly one object per byte of
+  every message it received. In the multi-host lab, nodes grew by hundreds of thousands
+  of objects per session and were killed for running out of memory within minutes.
+
+- **A protocol branch named `none`, `some`, `ok`, `err`, `nil` or `cons` no longer breaks the
+  build.** Such a label gives the protocol's message type a constructor of the same name,
+  and the code `@[endpoints]`, `derive` and the control plane's `[control]` wiring generate
+  used the prelude's `Some`, `None`, `Ok`, `Err`, `Nil` and `Cons` unqualified, so they
+  became ambiguous: up to 49 errors, each blaming the compiler. Generated code now names
+  them `Option.None`, `Result.Ok`, `List.Cons` and so on.
+
+- **A pushed topology no longer takes away the control plane's leader.** Re-reading a
+  topology (a signed push from `forge deploy` or `forge topology apply`, SIGHUP, or a restart)
+  closed the control plane's own `Ctl.Control` role on every node, because the topology file
+  cannot name it, so a cluster with `[control]` had no leader after its first deploy and
+  every later cluster deploy, `forge cluster cert --deliver` and `revoke --deliver` had
+  nothing to talk to. Roles the build places itself are now pinned, and a re-read leaves
+  them alone.
+
 - **Parse errors on the command line now point at the token the message is
   about, not the token after it.** `if x then 1 end` used to put the caret
   under `end` (or under the next line) while the message talked about `then`;

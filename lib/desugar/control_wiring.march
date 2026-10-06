@@ -147,8 +147,8 @@ pfn ctl_cfg(key : String, default : String) : String do Vault.get_or(ctl_memory(
 
 pfn ctl_cfg_int(key : String, default : Int) : Int do
   match string_to_int(ctl_cfg(key, "")) do
-    Some(n) -> n
-    None -> default
+    Option.Some(n) -> n
+    Option.None -> default
   end
 end
 
@@ -172,58 +172,58 @@ end
 
 pfn ctl_field(line : String, key : String) : String do
   match List.find(ctl_words(line), fn w -> String.starts_with(w, key ++ ":")) do
-    Some(w) -> String.slice(w, String.byte_size(key) + 1, String.byte_size(w) - String.byte_size(key) - 1)
-    None -> ""
+    Option.Some(w) -> String.slice(w, String.byte_size(key) + 1, String.byte_size(w) - String.byte_size(key) - 1)
+    Option.None -> ""
   end
 end
 
 pfn ctl_first(xs : List(String), f : String -> Option(String)) : Option(String) do
   match xs do
-    Nil -> None
-    Cons(x, rest) ->
+    List.Nil -> Option.None
+    List.Cons(x, rest) ->
       match f(x) do
-        Some(v) -> Some(v)
-        None -> ctl_first(rest, f)
+        Option.Some(v) -> Option.Some(v)
+        Option.None -> ctl_first(rest, f)
       end
   end
 end
 
 pfn ctl_first_ep(xs : List((String, Int)), f : String -> Int -> Option(String)) : Option(String) do
   match xs do
-    Nil -> None
-    Cons((h, p), rest) ->
+    List.Nil -> Option.None
+    List.Cons((h, p), rest) ->
       match f(h, p) do
-        Some(v) -> Some(v)
-        None -> ctl_first_ep(rest, f)
+        Option.Some(v) -> Option.Some(v)
+        Option.None -> ctl_first_ep(rest, f)
       end
   end
 end
 
 pfn ctl_int(s : String) : Int do
   match string_to_int(s) do
-    Some(n) -> n
-    None -> 0
+    Option.Some(n) -> n
+    Option.None -> 0
   end
 end
 
 pfn ctl_leaders() : Vault(Control.CtlLeader) do
   match Vault.whereis("ctl_leader") do
-    Some(v) -> v
-    None -> Vault.new("ctl_leader")
+    Option.Some(v) -> v
+    Option.None -> Vault.new("ctl_leader")
   end
 end
 
 pfn ctl_locks() : Vault(Int) do
   match Vault.whereis("ctl_locks") do
-    Some(v) -> v
-    None -> Vault.new("ctl_locks")
+    Option.Some(v) -> v
+    Option.None -> Vault.new("ctl_locks")
   end
 end
 
 pfn ctl_memory() : Vault(String) do
   match Vault.whereis("ctl_agent_memory") do
-    Some(v) -> v
-    None -> Vault.new("ctl_agent_memory")
+    Option.Some(v) -> v
+    Option.None -> Vault.new("ctl_agent_memory")
   end
 end
 
@@ -263,8 +263,8 @@ end
 pfn ctl_pubkey() : Bytes do
   let info = Control.relay_line("HCR_INFO")
   match Bytes.from_hex(ctl_field(String.trim(info), "key")) do
-    Ok(b) -> b
-    Err(_) -> Bytes.empty()
+    Result.Ok(b) -> b
+    Result.Err(_) -> Bytes.empty()
   end
 end
 
@@ -274,11 +274,11 @@ pfn ctl_topology_applied(status : String) : Bool do
   let path = ctl_cfg("verified_file", "")
   if path == "" do false
   else match File.read(path) do
-    Err(_) -> false
-    Ok(text) ->
+    Result.Err(_) -> false
+    Result.Ok(text) ->
       match List.find(String.split(status, "\n"), fn l -> String.starts_with(l, "topology ")) do
-        Some(l) -> String.trim(String.slice(l, 9, String.byte_size(l) - 9)) == Crypto.sha256(text)
-        None -> false
+        Option.Some(l) -> String.trim(String.slice(l, 9, String.byte_size(l) - 9)) == Crypto.sha256(text)
+        Option.None -> false
       end
   end end
 end
@@ -295,13 +295,13 @@ end
 -- server side until the epochs older than it have drained.
 pfn ctl_relay(line : String, tries : Int) : String do
   let text = if String.contains(line, " TOPOLOGY ") do
-    match ctl_first(ctl_words(line), fn w -> if String.byte_size(w) == 64 do Some(w) else None end) do
-      Some(digest) ->
+    match ctl_first(ctl_words(line), fn w -> if String.byte_size(w) == 64 do Option.Some(w) else Option.None end) do
+      Option.Some(digest) ->
         match File.read(ctl_artifact_path(digest)) do
-          Ok(body) -> line ++ "\n" ++ body
-          Err(_) -> line
+          Result.Ok(body) -> line ++ "\n" ++ body
+          Result.Err(_) -> line
         end
-      None -> line
+      Option.None -> line
     end
   else line end
   let resp = String.trim(String.replace_all(Control.relay_line(text), "READY\n", ""))
@@ -332,8 +332,8 @@ end
 
 pfn ctl_own_serial(node : Cap(ClusterNode.Live)) : String do
   match ClusterNode.own_cert(node) do
-    Some(c) -> c.serial
-    None -> ""
+    Option.Some(c) -> c.serial
+    Option.None -> ""
   end
 end
 
@@ -341,10 +341,10 @@ pfn ctl_cert_ops(node : Cap(ClusterNode.Live)) : Control.CertOps do
   { name: Topology.node_name(node), deploy_key: ctl_pubkey(), serial: fn -> ctl_own_serial(node),
     replace: fn text ->
       match ClusterNode.replace_cert(node, text, "") do
-        Ok(c) ->
+        Result.Ok(c) ->
           Vault.set(ctl_memory(), "cert_persist", text)
-          Ok(c.serial)
-        Err(e) -> Err(e)
+          Result.Ok(c.serial)
+        Result.Err(e) -> Result.Err(e)
       end,
     revoke: fn t -> ClusterNode.revoke(node, t),
     floor: fn ->
@@ -407,19 +407,19 @@ end
 -- reads the same certificate back, which `replace_cert` takes as a no-op.
 pfn ctl_persist_cert(io : Cap(IO)) : () do
   match Vault.get(ctl_memory(), "cert_persist") do
-    None -> ()
-    Some(text) ->
+    Option.None -> ()
+    Option.Some(text) ->
       Vault.drop(ctl_memory(), "cert_persist")
       let path = ctl_cfg("cert_file", "")
       if path == "" do ()
       else
         let tmp = path ++ ".delivered.tmp"
         match File.write(tmp, text ++ "\n") do
-          Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e))
-          Ok(_) ->
+          Result.Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e))
+          Result.Ok(_) ->
             match File.rename(tmp, path) do
-              Ok(_) -> ()
-              Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e))
+              Result.Ok(_) -> ()
+              Result.Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e))
             end
         end
       end
@@ -433,8 +433,8 @@ end
 -- server (`CAS_PUT`).
 pfn ctl_wants() : Vault(Int) do
   match Vault.whereis("ctl_wants") do
-    Some(v) -> v
-    None -> Vault.new("ctl_wants")
+    Option.Some(v) -> v
+    Option.None -> Vault.new("ctl_wants")
   end
 end
 
@@ -445,22 +445,22 @@ end
 -- past 2 GB (specs/progress/2026-09-30-dd-step12a-control-wiring.md).
 pfn ctl_fetch_from(host : String, port : Int, hash : String) : Result(String, String) do
   match tcp_connect_timeout(host, port, 2000) do
-    Err(e) -> Err(host ++ ":" ++ int_to_string(port) ++ ": " ++ e)
-    Ok(fd) ->
+    Result.Err(e) -> Result.Err(host ++ ":" ++ int_to_string(port) ++ ": " ++ e)
+    Result.Ok(fd) ->
       let _ = tcp_set_recv_timeout(fd, 30000)
       let out = match tcp_send_all(fd, "CAS_GET " ++ hash ++ "\n") do
-        Err(e) -> Err(e)
-        Ok(_) ->
+        Result.Err(e) -> Result.Err(e)
+        Result.Ok(_) ->
           match ctl_read_line(fd, "", 0) do
-            None -> Err("no answer")
-            Some(l) ->
+            Option.None -> Result.Err("no answer")
+            Option.Some(l) ->
               if String.starts_with(l, "DATA ") do
                 let size = ctl_int(String.slice(l, 5, String.byte_size(l) - 5))
                 match tcp_recv_exact(fd, size) do
-                  Ok(b) -> Ok(Bytes.to_string(b))
-                  Err(e) -> Err(e)
+                  Result.Ok(b) -> Result.Ok(Bytes.to_string(b))
+                  Result.Err(e) -> Result.Err(e)
                 end
-              else Err(l) end
+              else Result.Err(l) end
           end
       end
       tcp_close(fd)
@@ -470,21 +470,21 @@ end
 
 pfn ctl_fetch_any(eps : List((String, Int)), hash : String, why : String) : Result(String, String) do
   match eps do
-    Nil -> Err(if why == "" do "no candidate to fetch from" else why end)
-    Cons((h, p), rest) ->
+    List.Nil -> Result.Err(if why == "" do "no candidate to fetch from" else why end)
+    List.Cons((h, p), rest) ->
       match ctl_fetch_from(h, p, hash) do
-        Ok(body) -> Ok(body)
-        Err(e) -> ctl_fetch_any(rest, hash, if why == "" do e else why ++ "; " ++ e end)
+        Result.Ok(body) -> Result.Ok(body)
+        Result.Err(e) -> ctl_fetch_any(rest, hash, if why == "" do e else why ++ "; " ++ e end)
       end
   end
 end
 
 pfn ctl_fetch_one(node : Cap(ClusterNode.Live), hash : String) : Result((), String) do
   match ctl_fetch_any(ctl_others(node, ctl_cfg_int("port", 7947)), hash, "") do
-    Err(e) -> Err(e)
-    Ok(body) ->
+    Result.Err(e) -> Result.Err(e)
+    Result.Ok(body) ->
       let resp = Control.relay_line("CAS_PUT " ++ hash ++ " " ++ int_to_string(String.byte_size(body)) ++ "\n" ++ body)
-      if String.contains(resp, "OK ") do Ok(()) else Err("CAS_PUT: " ++ String.trim(resp)) end
+      if String.contains(resp, "OK ") do Result.Ok(()) else Result.Err("CAS_PUT: " ++ String.trim(resp)) end
   end
 end
 
@@ -500,10 +500,10 @@ pfn ctl_prefetch_one(io : Cap(IO), node : Cap(ClusterNode.Live), h : String) : (
     Vault.drop(ctl_locks(), "fetch_backoff:" ++ h)
   else
     match ctl_fetch_one(node, h) do
-      Ok(_) ->
+      Result.Ok(_) ->
         Vault.drop(w, h)
         Vault.drop(ctl_locks(), "fetch_backoff:" ++ h)
-      Err(why) ->
+      Result.Err(why) ->
         let back = Vault.get_or(ctl_locks(), "fetch_backoff:" ++ h, 1000)
         Vault.set(ctl_locks(), "fetch_backoff:" ++ h, if back * 2 > 30000 do 30000 else back * 2 end)
         Vault.set(w, h, now + back)
@@ -521,7 +521,7 @@ pfn ctl_prefetch_loop(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
 end
 
 pfn ctl_wait_for(ops : Control.AgentOps, o : Control.StepOrder, left_ms : Int) : Bool do
-  if Control.missing(ops, o) == Nil do true
+  if Control.missing(ops, o) == List.Nil do true
   else if left_ms <= 0 do false
   else
     sleep_ms(100)
@@ -540,8 +540,8 @@ end
 
 pfn ctl_apply_relayed(ops : Control.AgentOps, o : Control.StepOrder) : Control.StepResult do
   let need = Control.missing(ops, o)
-  if need != Nil do
-    List.each(need, fn h -> if Vault.get(ctl_wants(), h) == None do Vault.set(ctl_wants(), h, 0) else () end)
+  if need != List.Nil do
+    List.each(need, fn h -> if Vault.get(ctl_wants(), h) == Option.None do Vault.set(ctl_wants(), h, 0) else () end)
     let _ = ctl_wait_for(ops, o, 60000)
     ()
   else () end
@@ -567,21 +567,21 @@ end
 -- new code.
 pfn ctl_agent_loop(io : Cap(IO), node : Cap(ClusterNode.Live), backoff : Int) : Int do
   match Ctl_Run.initiate_Agent(io, node, fn (s, nc, fr, mu, ck, st) -> ctl_agent_body(node, s, nc, fr, mu, ck, st)) do
-    Ok(Session.Drained(_)) ->
+    Result.Ok(Session.Drained(_)) ->
       sleep_ms(200)
       match Vault.get(ctl_respawners(), "r") do
-        Some(r) ->
+        Option.Some(r) ->
           let _ = send(r, CtlRespawn(io, node))
           0
-        None -> ctl_agent_loop(io, node, 250)
+        Option.None -> ctl_agent_loop(io, node, 250)
       end
-    Ok(_) ->
+    Result.Ok(_) ->
       sleep_ms(100)
       ctl_agent_loop(io, node, 250)
-    Err(e) ->
+    Result.Err(e) ->
       -- Said once per distinct reason: the leader may simply not be up yet.
       let why = SessionNode.run_error_message(e)
-      if Vault.get(ctl_memory(), "last_error") != Some(why) do
+      if Vault.get(ctl_memory(), "last_error") != Option.Some(why) do
         Vault.set(ctl_memory(), "last_error", why)
         println("control: no session with a leader: " ++ why)
       else () end
@@ -603,8 +603,8 @@ end
 
 pfn ctl_respawners() : Vault(Pid(CtlRespawnerState)) do
   match Vault.whereis("ctl_respawner") do
-    Some(v) -> v
-    None -> Vault.new("ctl_respawner")
+    Option.Some(v) -> v
+    Option.None -> Vault.new("ctl_respawner")
   end
 end
 
@@ -621,11 +621,11 @@ pfn ctl_store_release(seq : Int, text : String) : Bool do
   let path = ctl_release_file(seq)
   let tmp = path ++ ".tmp"
   match File.write(tmp, text) do
-    Err(_) -> false
-    Ok(_) ->
+    Result.Err(_) -> false
+    Result.Ok(_) ->
       match File.rename(tmp, path) do
-        Ok(_) -> true
-        Err(_) -> false
+        Result.Ok(_) -> true
+        Result.Err(_) -> false
       end
   end
 end
@@ -638,18 +638,18 @@ end
 -- The newest release this candidate holds on disk.
 pfn ctl_load_newest() : Option(Control.CtlRelease) do
   match Dir.list(ctl_dir() ++ "/releases") do
-    Err(_) -> None
-    Ok(names) ->
+    Result.Err(_) -> Option.None
+    Result.Ok(names) ->
       let files = List.sort_by(List.filter(names, fn n -> String.ends_with(n, ".release")), fn (a, b) -> a > b)
       match List.head_opt(files) do
-        None -> None
-        Some(f) ->
+        Option.None -> Option.None
+        Option.Some(f) ->
           match File.read(ctl_dir() ++ "/releases/" ++ f) do
-            Err(_) -> None
-            Ok(text) ->
+            Result.Err(_) -> Option.None
+            Result.Ok(text) ->
               match Control.parse(text) do
-                Ok(r) -> Some(r)
-                Err(_) -> None
+                Result.Ok(r) -> Option.Some(r)
+                Result.Err(_) -> Option.None
               end
           end
       end
@@ -658,8 +658,8 @@ end
 
 pfn ctl_head_seq(l : Control.CtlLeader) : Int do
   match l.release do
-    Some(r) -> r.seq
-    None -> 0
+    Option.Some(r) -> r.seq
+    Option.None -> 0
   end
 end
 
@@ -667,15 +667,15 @@ end
 -- every reachable candidate got a copy before forge was told "accepted".
 pfn ctl_ensure_loaded() : () do
   let lv = ctl_leaders()
-  let held = Vault.get(lv, "leader") != None
+  let held = Vault.get(lv, "leader") != Option.None
   let cur = ctl_leader_state()
   match ctl_load_newest() do
-    None -> if held do () else ctl_put_leader(cur) end
-    Some(r) ->
+    Option.None -> if held do () else ctl_put_leader(cur) end
+    Option.Some(r) ->
       if r.seq > ctl_head_seq(cur) do
         match Control.leader_release(Control.leader_new(), r) do
-          Ok(l) -> ctl_put_leader(l)
-          Err(_) -> ctl_put_leader(cur)
+          Result.Ok(l) -> ctl_put_leader(l)
+          Result.Err(_) -> ctl_put_leader(cur)
         end
       else if held do () else ctl_put_leader(cur) end end
   end
@@ -706,11 +706,11 @@ pfn ctl_audit_file() : String do ctl_dir() ++ "/audit.jsonl" end
 -- counted. [ctl_audit_append] holds the "audit_file" lock around it.
 pfn ctl_audit_size() : Int do
   match Vault.get(ctl_locks(), "audit_bytes") do
-    Some(n) -> n
-    None ->
+    Option.Some(n) -> n
+    Option.None ->
       let n = match File.read(ctl_audit_file()) do
-        Ok(t) -> String.byte_size(t)
-        Err(_) -> 0
+        Result.Ok(t) -> String.byte_size(t)
+        Result.Err(_) -> 0
       end
       Vault.set(ctl_locks(), "audit_bytes", n)
       n
@@ -763,8 +763,8 @@ end
 -- the control API answers `AUDIT`: the rotated file's, then the current one's.
 pfn ctl_audit_answer(n : Int) : String do
   let read = fn path -> match File.read(path) do
-    Ok(t) -> List.filter(String.split(t, "\n"), fn x -> x != "")
-    Err(_) -> Nil
+    Result.Ok(t) -> List.filter(String.split(t, "\n"), fn x -> x != "")
+    Result.Err(_) -> List.Nil
   end
   let lines = List.append(read(ctl_audit_file() ++ ".1"), read(ctl_audit_file()))
   let total = List.length(lines)
@@ -798,8 +798,8 @@ pfn ctl_ready(node : Cap(ClusterNode.Live), l : Control.CtlLeader) : Bool do
     else
       let key = "first_seen:" ++ m.name
       let first = match string_to_int(Vault.get_or(ctl_memory(), key, "")) do
-        Some(t) -> t
-        None ->
+        Option.Some(t) -> t
+        Option.None ->
           Vault.set(ctl_memory(), key, int_to_string(now))
           now
       end
@@ -811,7 +811,7 @@ end
 -- bound to an actor that lives as long as the node.
 pfn ctl_mark_agent(node : Cap(ClusterNode.Live), pid : Pid(CtlRespawnerState)) : () do
   let name = Topology.marker("Ctl.Agent", ClusterNode.node_id(node))
-  if ClusterNode.lookup(node, name) == None do
+  if ClusterNode.lookup(node, name) == Option.None do
     let _ = ClusterNode.register(node, name, pid)
     ()
   else () end
@@ -828,18 +828,18 @@ pfn ctl_next_for(node : Cap(ClusterNode.Live), name : String) : Control.CtlNext 
   else
     let got = ctl_lock("leader", 500)
     let l = ctl_leader_state()
-    let verdict = if not(ctl_ready(node, l)) do (l, None) else Control.leader_pass(l, ctl_members_of(l), unix_time_ms()) end
+    let verdict = if not(ctl_ready(node, l)) do (l, Option.None) else Control.leader_pass(l, ctl_members_of(l), unix_time_ms()) end
     let (l2, d) = verdict
     let _ = if got do ctl_put_leader(l2) else () end
     if got do ctl_unlock("leader") else () end
     if got do ctl_audit_end(node, l2, d) else () end
     match d do
-      Some(Control.RolloutApply(_, os)) ->
+      Option.Some(Control.RolloutApply(_, os)) ->
         match List.find(os, fn o -> o.node == name) do
-          Some(o) ->
+          Option.Some(o) ->
             ctl_audit(Control.audit_order(unix_time_ms(), Topology.node_name(node), o))
             Control.NextOrder(o)
-          None ->
+          Option.None ->
             sleep_ms(ctl_poll_ms())
             Control.NextPoll
         end
@@ -854,15 +854,15 @@ end
 -- re-derived on every pass).
 pfn ctl_audit_end(node : Cap(ClusterNode.Live), l : Control.CtlLeader, d : Option(Control.CtlDecision)) : () do
   match (l.release, d) do
-    (Some(r), Some(dd)) ->
+    (Option.Some(r), Option.Some(dd)) ->
       match Control.audit_decision(unix_time_ms(), Topology.node_name(node), r.seq, dd) do
-        Some(line) ->
+        Option.Some(line) ->
           let key = "audited_end:" ++ int_to_string(r.seq)
-          if Vault.get(ctl_memory(), key) == None do
+          if Vault.get(ctl_memory(), key) == Option.None do
             Vault.set(ctl_memory(), key, "1")
             ctl_audit(line)
           else () end
-        None -> ()
+        Option.None -> ()
       end
     _ -> ()
   end
@@ -925,12 +925,12 @@ end
 -- silence.
 
 pfn ctl_read_line(fd : Int, acc : String, n : Int) : Option(String) do
-  if n > 65536 do None
+  if n > 65536 do Option.None
   else match tcp_recv_exact(fd, 1) do
-    Err(_) -> if acc == "" do None else Some(acc) end
-    Ok(b) ->
+    Result.Err(_) -> if acc == "" do Option.None else Option.Some(acc) end
+    Result.Ok(b) ->
       let c = Bytes.to_string(b)
-      if c == "\n" do Some(acc)
+      if c == "\n" do Option.Some(acc)
       else if c == "\r" do ctl_read_line(fd, acc, n)
       else ctl_read_line(fd, acc ++ c, n + 1) end end
   end end
@@ -950,12 +950,12 @@ end
 -- answer line.
 pfn ctl_call(host : String, port : Int, text : String) : Option(String) do
   match tcp_connect_timeout(host, port, 2000) do
-    Err(_) -> None
-    Ok(fd) ->
+    Result.Err(_) -> Option.None
+    Result.Ok(fd) ->
       let _ = tcp_set_recv_timeout(fd, 15000)
       let out = match tcp_send_all(fd, text) do
-        Err(_) -> None
-        Ok(_) -> ctl_read_line(fd, "", 0)
+        Result.Err(_) -> Option.None
+        Result.Ok(_) -> ctl_read_line(fd, "", 0)
       end
       tcp_close(fd)
       out
@@ -971,14 +971,14 @@ pfn ctl_others(node : Cap(ClusterNode.Live), port : Int) : List((String, Int)) d
   let me = ClusterNode.node_id(node)
   let offset = ctl_cfg_int("port_offset", 0)
   List.filter_map(Topology.role_candidates(node, "Ctl.Control"), fn m ->
-    if m.node_id == me || m.addr == "" do None
+    if m.node_id == me || m.addr == "" do Option.None
     else
       let parts = String.split(m.addr, ":")
       let host = ctl_host_of(m.addr)
-      if offset == 0 do Some((host, port))
+      if offset == 0 do Option.Some((host, port))
       else match List.head_opt(List.reverse(parts)) do
-        Some(p) -> Some((host, ctl_int(p) + offset))
-        None -> None
+        Option.Some(p) -> Option.Some((host, ctl_int(p) + offset))
+        Option.None -> Option.None
       end end
     end)
 end
@@ -998,8 +998,8 @@ pfn ctl_replicate(node : Cap(ClusterNode.Live), port : Int, body : String, hashe
     let (host, cport) = hp
     ctl_push_artifacts(host, cport, body, hashes)
     match ctl_call_auth(node, host, cport, "RELEASE_COPY " ++ int_to_string(String.byte_size(body)), body) do
-      Some(resp) -> if String.starts_with(resp, "OK") do None else Some(host ++ ":" ++ int_to_string(cport) ++ " answered " ++ resp) end
-      None -> None
+      Option.Some(resp) -> if String.starts_with(resp, "OK") do Option.None else Option.Some(host ++ ":" ++ int_to_string(cport) ++ " answered " ++ resp) end
+      Option.None -> Option.None
     end)
   String.join(failures, "; ")
 end
@@ -1007,18 +1007,18 @@ end
 -- A connection to a candidate's control API.
 pfn ctl_open(host : String, port : Int) : Option(Int) do
   match tcp_connect_timeout(host, port, 2000) do
-    Err(_) -> None
-    Ok(fd) ->
+    Result.Err(_) -> Option.None
+    Result.Ok(fd) ->
       let _ = tcp_set_recv_timeout(fd, 15000)
-      Some(fd)
+      Option.Some(fd)
   end
 end
 
 -- Send [text] on an open connection and read the answer's first line.
 pfn ctl_ask(fd : Int, text : String) : Option(String) do
   match tcp_send_all(fd, text) do
-    Err(_) -> None
-    Ok(_) -> ctl_read_line(fd, "", 0)
+    Result.Err(_) -> Option.None
+    Result.Ok(_) -> ctl_read_line(fd, "", 0)
   end
 end
 
@@ -1026,11 +1026,11 @@ end
 -- release, then `CAS_PUT` each missing one on the same connection.
 pfn ctl_push_artifacts(host : String, port : Int, body : String, hashes : List(String)) : () do
   match ctl_open(host, port) do
-    None -> ()
-    Some(fd) ->
+    Option.None -> ()
+    Option.Some(fd) ->
       match ctl_ask(fd, "STAGE " ++ int_to_string(String.byte_size(body)) ++ "\n" ++ body) do
-        Some(l) -> if String.starts_with(l, "OK") do List.each(hashes, fn h -> ctl_push_one(fd, h)) else () end
-        None -> ()
+        Option.Some(l) -> if String.starts_with(l, "OK") do List.each(hashes, fn h -> ctl_push_one(fd, h)) else () end
+        Option.None -> ()
       end
       tcp_close(fd)
   end
@@ -1038,22 +1038,22 @@ end
 
 pfn ctl_push_one(fd : Int, h : String) : () do
   match ctl_ask(fd, "CAS_CHECK " ++ h ++ "\n") do
-    Some(resp) ->
+    Option.Some(resp) ->
       if String.starts_with(resp, "MISSING") do
         match File.read(ctl_artifact_path(h)) do
-          Ok(data) ->
+          Result.Ok(data) ->
             match ctl_ask(fd, "CAS_PUT " ++ h ++ " " ++ int_to_string(String.byte_size(data)) ++ "\n") do
-              Some(r) ->
+              Option.Some(r) ->
                 if r == "READY" do
                   let _ = ctl_ask(fd, data)
                   ()
                 else () end
-              None -> ()
+              Option.None -> ()
             end
-          Err(_) -> ()
+          Result.Err(_) -> ()
         end
       else () end
-    None -> ()
+    Option.None -> ()
   end
 end
 
@@ -1064,10 +1064,10 @@ end
 pfn ctl_release(node : Cap(ClusterNode.Live), port : Int, text : String) : String do
   let me = Topology.node_name(node)
   match Control.parse(text) do
-    Err(e) ->
+    Result.Err(e) ->
       ctl_audit(Control.audit_release(unix_time_ms(), me, 0, "-", "err_parse", e))
       "ERR bad_release " ++ e
-    Ok(r) ->
+    Result.Ok(r) ->
       if not(ctl_signed(r)) do
         ctl_audit(Control.audit_release(unix_time_ms(), me, r.seq, Control.digest(r), "err_sig", "bad signature"))
         "ERR bad_signature"
@@ -1082,10 +1082,10 @@ pfn ctl_release(node : Cap(ClusterNode.Live), port : Int, text : String) : Strin
         ctl_ensure_loaded()
         let l = ctl_leader_state()
         let out = match Control.leader_release(l, r) do
-          Err(e) ->
+          Result.Err(e) ->
             ctl_audit(Control.audit_release(unix_time_ms(), me, seq, digest, Control.audit_refusal(e), e))
             "ERR " ++ e
-          Ok(l2) ->
+          Result.Ok(l2) ->
             if not(ctl_store_release(seq, body)) do
               ctl_audit(Control.audit_release(unix_time_ms(), me, seq, digest, "err_store", "could not store the release"))
               "ERR could_not_store"
@@ -1113,8 +1113,8 @@ end
 -- has already accepted it).
 pfn ctl_release_copy(text : String) : String do
   match Control.parse(text) do
-    Err(e) -> "ERR bad_release " ++ e
-    Ok(r) ->
+    Result.Err(e) -> "ERR bad_release " ++ e
+    Result.Ok(r) ->
       if not(ctl_signed(r)) do "ERR bad_signature"
       else if ctl_store_release(r.seq, Control.serialize(r)) do
         ctl_adopt(ctl_release_hashes(r))
@@ -1125,11 +1125,11 @@ end
 
 pfn ctl_state_word(d : Option(Control.CtlDecision)) : String do
   match d do
-    None -> "none"
-    Some(Control.RolloutComplete) -> "complete"
-    Some(Control.RolloutHalted(_, _, _)) -> "halted"
-    Some(Control.RolloutBehind(_)) -> "behind"
-    Some(_) -> "running"
+    Option.None -> "none"
+    Option.Some(Control.RolloutComplete) -> "complete"
+    Option.Some(Control.RolloutHalted(_, _, _)) -> "halted"
+    Option.Some(Control.RolloutBehind(_)) -> "behind"
+    Option.Some(_) -> "running"
   end
 end
 
@@ -1150,8 +1150,8 @@ end
 -- no-op), but the canary window was not watched here, and STATUS says so.
 pfn ctl_decision_step(d : Option(Control.CtlDecision)) : Int do
   match d do
-    Some(Control.RolloutApply(s, _)) -> s
-    Some(Control.RolloutWait(s, _)) -> s
+    Option.Some(Control.RolloutApply(s, _)) -> s
+    Option.Some(Control.RolloutWait(s, _)) -> s
     _ -> 0
   end
 end
@@ -1159,29 +1159,29 @@ end
 pfn ctl_done_nodes(stp : Control.CtlStep, r : Control.CtlRelease, l : Control.CtlLeader, sel : List(String)) : List(String) do
   List.filter(sel, fn n ->
     match List.find(l.obs, fn o -> o.report.node == n) do
-      Some(o) -> Control.reports_state(o.report, Control.show_action(stp.action), Control.want_for(r, stp, n))
-      None -> false
+      Option.Some(o) -> Control.reports_state(o.report, Control.show_action(stp.action), Control.want_for(r, stp, n))
+      Option.None -> false
     end)
 end
 
 pfn ctl_skip_notes_from(steps : List(Control.CtlStep), r : Control.CtlRelease, l : Control.CtlLeader, members : List(Control.CtlMember), prior : List((Control.CtlStep, List(String))), open_step : Int) : List(String) do
   match steps do
-    Nil -> Nil
-    Cons(stp, rest) ->
+    List.Nil -> List.Nil
+    List.Cons(stp, rest) ->
       let sel = Control.select(stp, members, prior)
       let own = if stp.id > open_step do
         List.map(ctl_done_nodes(stp, r, l, sel), fn n -> "NOTE step " ++ int_to_string(stp.id) ++ " already applied on " ++ n ++ " while step " ++ int_to_string(open_step) ++ " is still open here: its gate was not observed by this leader\n")
-      else Nil end
+      else List.Nil end
       List.append(own, ctl_skip_notes_from(rest, r, l, members, List.append(prior, [(stp, sel)]), open_step))
   end
 end
 
 pfn ctl_gate_notes(l : Control.CtlLeader, d : Option(Control.CtlDecision)) : String do
   match l.release do
-    None -> ""
-    Some(r) ->
+    Option.None -> ""
+    Option.Some(r) ->
       let open_step = ctl_decision_step(d)
-      if open_step == 0 do "" else String.join(ctl_skip_notes_from(r.steps, r, l, ctl_members_of(l), Nil, open_step), "") end
+      if open_step == 0 do "" else String.join(ctl_skip_notes_from(r.steps, r, l, ctl_members_of(l), List.Nil, open_step), "") end
   end
 end
 
@@ -1189,15 +1189,15 @@ end
 pfn ctl_status(node : Cap(ClusterNode.Live)) : String do
   ctl_ensure_loaded()
   let l = ctl_leader_state()
-  let d = if ctl_ready(node, l) do Tuple.second(Control.leader_pass(l, ctl_members_of(l), unix_time_ms())) else None end
+  let d = if ctl_ready(node, l) do Tuple.second(Control.leader_pass(l, ctl_members_of(l), unix_time_ms())) else Option.None end
   let head = match l.release do
-    Some(r) -> int_to_string(r.seq) ++ " " ++ Control.digest(r)
-    None -> "0 -"
+    Option.Some(r) -> int_to_string(r.seq) ++ " " ++ Control.digest(r)
+    Option.None -> "0 -"
   end
   "STATUS head:" ++ head ++ " state:" ++ ctl_state_word(d) ++ " leader:" ++ Topology.node_name(node) ++ "\n"
     ++ "DECISION " ++ (match d do
-      Some(x) -> Control.show_decision(x)
-      None -> if ctl_ready(node, l) do "no release" else "waiting for every node to report" end
+      Option.Some(x) -> Control.show_decision(x)
+      Option.None -> if ctl_ready(node, l) do "no release" else "waiting for every node to report" end
     end) ++ "\n"
     ++ String.join(List.map(List.sort_by(l.obs, fn (a, b) -> a.report.node < b.report.node), fn o -> ctl_node_line(o)), "")
     ++ ctl_gate_notes(l, d)
@@ -1208,12 +1208,12 @@ end
 pfn ctl_forward(node : Cap(ClusterNode.Live), port : Int, text : String) : String do
   let rec_first = ctl_first_ep(ctl_others(node, port), fn (host, cport) ->
     match ctl_call(host, cport, "FORWARDED " ++ text) do
-      Some(resp) -> if String.starts_with(resp, "ERR not_leader") do None else Some(resp) end
-      None -> None
+      Option.Some(resp) -> if String.starts_with(resp, "ERR not_leader") do Option.None else Option.Some(resp) end
+      Option.None -> Option.None
     end)
   match rec_first do
-    Some(r) -> r
-    None -> "ERR no_leader"
+    Option.Some(r) -> r
+    Option.None -> "ERR no_leader"
   end
 end
 
@@ -1221,23 +1221,23 @@ end
 pfn ctl_forward_status(node : Cap(ClusterNode.Live), port : Int) : String do
   let rec_first = ctl_first_ep(ctl_others(node, port), fn (host, cport) ->
     match ctl_call_lines(host, cport, "FORWARDED STATUS\n") do
-      Some(text) -> if String.starts_with(text, "ERR") do None else Some(text) end
-      None -> None
+      Option.Some(text) -> if String.starts_with(text, "ERR") do Option.None else Option.Some(text) end
+      Option.None -> Option.None
     end)
   match rec_first do
-    Some(t) -> t
-    None -> "ERR no_leader\n"
+    Option.Some(t) -> t
+    Option.None -> "ERR no_leader\n"
   end
 end
 
 pfn ctl_call_lines(host : String, port : Int, text : String) : Option(String) do
   match tcp_connect_timeout(host, port, 2000) do
-    Err(_) -> None
-    Ok(fd) ->
+    Result.Err(_) -> Option.None
+    Result.Ok(fd) ->
       let _ = tcp_set_recv_timeout(fd, 15000)
       let out = match tcp_send_all(fd, text) do
-        Err(_) -> None
-        Ok(_) -> Some(ctl_read_until_end(fd, ""))
+        Result.Err(_) -> Option.None
+        Result.Ok(_) -> Option.Some(ctl_read_until_end(fd, ""))
       end
       tcp_close(fd)
       out
@@ -1246,8 +1246,8 @@ end
 
 pfn ctl_read_until_end(fd : Int, acc : String) : String do
   match ctl_read_line(fd, "", 0) do
-    None -> acc
-    Some(l) -> if l == "END" do acc ++ "END\n" else ctl_read_until_end(fd, acc ++ l ++ "\n") end
+    Option.None -> acc
+    Option.Some(l) -> if l == "END" do acc ++ "END\n" else ctl_read_until_end(fd, acc ++ l ++ "\n") end
   end
 end
 
@@ -1267,14 +1267,14 @@ pfn ctl_artifact_max() : Int do 67108864 end
 
 pfn ctl_is_hex64(h : String) : Bool do
   String.byte_size(h) == 64 && (match Bytes.from_hex(h) do
-    Ok(b) -> Bytes.to_hex(b) == h
-    Err(_) -> false
+    Result.Ok(b) -> Bytes.to_hex(b) == h
+    Result.Err(_) -> false
   end)
 end
 
 -- The artifacts a release names: its topology and each build's patch.
 pfn ctl_release_hashes(r : Control.CtlRelease) : List(String) do
-  Cons(r.topology, List.map(r.builds, fn b -> b.manifest))
+  List.Cons(r.topology, List.map(r.builds, fn b -> b.manifest))
 end
 
 -- The server's half of a candidate-only verb: the cluster handshake on [fd],
@@ -1284,12 +1284,12 @@ end
 -- must be sealed, so the digest frame that binds the body is authentic.
 pfn ctl_api_auth(node : Cap(ClusterNode.Live), fd : Int) : Result((), String) do
   match ClusterNode.handshake(node, fd, "ctl-api", 5000) do
-    Err(e) -> Err(e)
-    Ok(a) ->
-      if not(a.mac) do Err("the connection is not sealed")
+    Result.Err(e) -> Result.Err(e)
+    Result.Ok(a) ->
+      if not(a.mac) do Result.Err("the connection is not sealed")
       else match a.cert do
-        Some(c) -> SessionAP.authorize(Some(c), "Ctl", "Control", "offer")
-        None -> if ClusterNode.certified(node) do Err("presented no certificate") else Ok(()) end
+        Option.Some(c) -> SessionAP.authorize(Option.Some(c), "Ctl", "Control", "offer")
+        Option.None -> if ClusterNode.certified(node) do Result.Err("presented no certificate") else Result.Ok(()) end
       end end
   end
 end
@@ -1298,13 +1298,13 @@ end
 -- [size] bytes of the body, which must hash to it.
 pfn ctl_recv_bound(fd : Int, size : Int) : Result(String, String) do
   match NetKernel.recv_frame_exact(fd) do
-    Err(e) -> Err(e)
-    Ok(d) ->
+    Result.Err(e) -> Result.Err(e)
+    Result.Ok(d) ->
       match tcp_recv_exact(fd, size) do
-        Err(e) -> Err(e)
-        Ok(b) ->
+        Result.Err(e) -> Result.Err(e)
+        Result.Ok(b) ->
           let body = Bytes.to_string(b)
-          if Crypto.sha256(body) == NetKernel.bytes_to_str(d) do Ok(body) else Err("the body does not match its digest") end
+          if Crypto.sha256(body) == NetKernel.bytes_to_str(d) do Result.Ok(body) else Result.Err("the body does not match its digest") end
       end
   end
 end
@@ -1314,22 +1314,22 @@ end
 pfn ctl_api_authed(node : Cap(ClusterNode.Live), fd : Int, size : Int, f : String -> String) : Option(()) do
   if size <= 0 || size > ctl_body_max() do
     ctl_reply(fd, "ERR bad_size\n")
-    Some(())
+    Option.Some(())
   else
     ctl_reply(fd, "AUTH\n")
     let out = match ctl_api_auth(node, fd) do
-      Err(e) ->
+      Result.Err(e) ->
         println("control: refused an unauthenticated write: " ++ e)
         ctl_reply(fd, "ERR unauthenticated\n")
-        None
-      Ok(_) ->
+        Option.None
+      Result.Ok(_) ->
         match ctl_recv_bound(fd, size) do
-          Err(e) ->
+          Result.Err(e) ->
             ctl_reply(fd, "ERR bad_body " ++ e ++ "\n")
-            None
-          Ok(body) ->
+            Option.None
+          Result.Ok(body) ->
             ctl_reply(fd, f(body) ++ "\n")
-            Some(())
+            Option.Some(())
         end
     end
     NetKernel.forget(fd)
@@ -1342,18 +1342,18 @@ end
 -- cannot be reached.
 pfn ctl_call_auth(node : Cap(ClusterNode.Live), host : String, port : Int, line : String, body : String) : Option(String) do
   match ctl_open(host, port) do
-    None -> None
-    Some(fd) ->
+    Option.None -> Option.None
+    Option.Some(fd) ->
       let out = match ctl_ask(fd, line ++ "\n") do
-        None -> None
-        Some(first) ->
-          if first != "AUTH" do Some(first)
+        Option.None -> Option.None
+        Option.Some(first) ->
+          if first != "AUTH" do Option.Some(first)
           else match ClusterNode.handshake(node, fd, "ctl-api", 5000) do
-            Err(e) -> Some("ERR unauthenticated " ++ e)
-            Ok(_) ->
+            Result.Err(e) -> Option.Some("ERR unauthenticated " ++ e)
+            Result.Ok(_) ->
               match NetKernel.send_frame(fd, NetKernel.str_to_bytes(Crypto.sha256(body))) do
-                Err(e) -> Some("ERR " ++ e)
-                Ok(_) -> ctl_ask(fd, body)
+                Result.Err(e) -> Option.Some("ERR " ++ e)
+                Result.Ok(_) -> ctl_ask(fd, body)
               end
           end end
       end
@@ -1368,17 +1368,17 @@ end
 -- on this connection.
 pfn ctl_stage(text : String) : Result(List(String), String) do
   match Control.parse(text) do
-    Err(e) -> Err("bad_release " ++ e)
-    Ok(r) ->
-      if not(ctl_signed(r)) do Err("bad_signature")
+    Result.Err(e) -> Result.Err("bad_release " ++ e)
+    Result.Ok(r) ->
+      if not(ctl_signed(r)) do Result.Err("bad_signature")
       else
         let disk = match ctl_load_newest() do
-          Some(n) -> n.seq
-          None -> 0
+          Option.Some(n) -> n.seq
+          Option.None -> 0
         end
         let head = if disk > ctl_head_seq(ctl_leader_state()) do disk else ctl_head_seq(ctl_leader_state()) end
-        if r.seq < head do Err("stale_release head:" ++ int_to_string(head))
-        else Ok(ctl_release_hashes(r)) end
+        if r.seq < head do Result.Err("stale_release head:" ++ int_to_string(head))
+        else Result.Ok(ctl_release_hashes(r)) end
       end
   end
 end
@@ -1396,17 +1396,17 @@ end
 
 pfn ctl_pending() : Vault(String) do
   match Vault.whereis("ctl_cas_pending") do
-    Some(v) -> v
-    None ->
+    Option.Some(v) -> v
+    Option.None ->
       let v = Vault.new("ctl_cas_pending")
       match File.read(ctl_dir() ++ "/cas_pending") do
-        Ok(t) ->
+        Result.Ok(t) ->
           List.each(String.split(t, "\n"), fn l ->
             match ctl_words(l) do
-              Cons(h, Cons(size, Cons(ts, Nil))) -> if ctl_is_hex64(h) do Vault.set(v, h, size ++ " " ++ ts) else () end
+              List.Cons(h, List.Cons(size, List.Cons(ts, List.Nil))) -> if ctl_is_hex64(h) do Vault.set(v, h, size ++ " " ++ ts) else () end
               _ -> ()
             end)
-        Err(_) -> ()
+        Result.Err(_) -> ()
       end
       v
   end
@@ -1417,17 +1417,17 @@ pfn ctl_pending_save() : () do
   let text = String.join(List.map(Vault.all(ctl_pending()), fn kv -> match kv do (h, v) -> h ++ " " ++ v ++ "\n" end), "")
   let path = ctl_dir() ++ "/cas_pending"
   match File.write(path ++ ".tmp", text) do
-    Ok(_) ->
+    Result.Ok(_) ->
       let _ = File.rename(path ++ ".tmp", path)
       ()
-    Err(_) -> ()
+    Result.Err(_) -> ()
   end
 end
 
 pfn ctl_pending_size(v : String) : Int do
   match ctl_words(v) do
-    Cons(n, _) -> ctl_int(n)
-    Nil -> 0
+    List.Cons(n, _) -> ctl_int(n)
+    List.Nil -> 0
   end
 end
 
@@ -1460,7 +1460,7 @@ end
 -- A stored release names [hashes]: they are no longer pending.
 pfn ctl_adopt(hashes : List(String)) : () do
   let p = ctl_pending()
-  if List.any(hashes, fn h -> Vault.get(p, h) != None) do
+  if List.any(hashes, fn h -> Vault.get(p, h) != Option.None) do
     let locked = ctl_lock("pending", 1000)
     List.each(hashes, fn h -> Vault.drop(p, h))
     ctl_pending_save()
@@ -1472,15 +1472,15 @@ end
 pfn ctl_stored_hashes() : List(String) do
   let dir = ctl_dir() ++ "/releases"
   match Dir.list(dir) do
-    Err(_) -> Nil
-    Ok(names) ->
+    Result.Err(_) -> List.Nil
+    Result.Ok(names) ->
       List.flat_map(List.filter(names, fn n -> String.ends_with(n, ".release")), fn f ->
         match File.read(dir ++ "/" ++ f) do
-          Err(_) -> Nil
-          Ok(text) ->
+          Result.Err(_) -> List.Nil
+          Result.Ok(text) ->
             match Control.parse(text) do
-              Ok(r) -> ctl_release_hashes(r)
-              Err(_) -> Nil
+              Result.Ok(r) -> ctl_release_hashes(r)
+              Result.Err(_) -> List.Nil
             end
         end)
   end
@@ -1490,12 +1490,12 @@ end
 pfn ctl_stack_text() : String do
   let dir = ctl_cas_root() ++ "/hcr_state"
   match Dir.list(dir) do
-    Err(_) -> ""
-    Ok(names) ->
+    Result.Err(_) -> ""
+    Result.Ok(names) ->
       String.join(List.map(names, fn n ->
         match File.read(dir ++ "/" ++ n ++ "/state") do
-          Ok(t) -> t
-          Err(_) -> ""
+          Result.Ok(t) -> t
+          Result.Err(_) -> ""
         end), "\n")
   end
 end
@@ -1503,7 +1503,7 @@ end
 pfn ctl_cas_gc() : Int do
   sleep_ms(ctl_cfg_int("gc_ms", 60000))
   let p = ctl_pending()
-  if Vault.all(p) != Nil do
+  if Vault.all(p) != List.Nil do
     let refs = ctl_stored_hashes()
     ctl_adopt(refs)
     let stack = ctl_stack_text()
@@ -1513,12 +1513,12 @@ pfn ctl_cas_gc() : Int do
       match kv do
         (h, v) ->
           let ts = match ctl_words(v) do
-            Cons(_, Cons(t, _)) -> ctl_int(t)
+            List.Cons(_, List.Cons(t, _)) -> ctl_int(t)
             _ -> 0
           end
           now - ts > grace && not(String.contains(stack, h))
       end)
-    if old != Nil do
+    if old != List.Nil do
       let locked = ctl_lock("pending", 1000)
       List.each(old, fn kv ->
         match kv do
@@ -1538,29 +1538,29 @@ end
 pfn ctl_api_cas_put(fd : Int, line : String, h : String, size : Int, staged : List(String)) : Option(List(String)) do
   if size <= 0 || size > ctl_artifact_max() do
     ctl_reply(fd, "ERR bad_size\n")
-    Some(staged)
+    Option.Some(staged)
   else if not(ctl_is_hex64(h)) do
     ctl_reply(fd, "ERR bad_hash\n")
-    Some(staged)
+    Option.Some(staged)
   else if not(List.member(staged, h)) do
     ctl_reply(fd, "ERR not_staged\n")
-    Some(staged)
+    Option.Some(staged)
   else
     let fresh = not(String.starts_with(Control.relay_line("CAS_CHECK " ++ h), "PRESENT"))
     if fresh && not(ctl_pending_claim(size)) do
       ctl_reply(fd, "ERR cas_quota\n")
-      Some(staged)
+      Option.Some(staged)
     else
       ctl_reply(fd, "READY\n")
       match tcp_recv_exact(fd, size) do
-        Err(_) ->
+        Result.Err(_) ->
           if fresh do ctl_pending_settle(h, size, false) else () end
-          None
-        Ok(b) ->
+          Option.None
+        Result.Ok(b) ->
           let resp = Control.relay_line(line ++ "\n" ++ Bytes.to_string(b))
           if fresh do ctl_pending_settle(h, size, String.contains(resp, "OK")) else () end
           ctl_reply(fd, String.replace_all(resp, "READY\n", ""))
-          Some(staged)
+          Option.Some(staged)
       end
     end
   end end end
@@ -1570,21 +1570,21 @@ end
 -- put. None when the connection is done.
 pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged : List(String)) : Option(List(String)) do
   match ctl_read_line(fd, "", 0) do
-    None -> None
-    Some(line0) ->
+    Option.None -> Option.None
+    Option.Some(line0) ->
       let fwd = String.starts_with(line0, "FORWARDED ")
       let line = if fwd do String.slice(line0, 10, String.byte_size(line0) - 10) else line0 end
       let ws = ctl_words(line)
       let verb = match List.head_opt(ws) do
-        Some(v) -> v
-        None -> ""
+        Option.Some(v) -> v
+        Option.None -> ""
       end
       let word = fn i -> match List.head_opt(List.drop(ws, i)) do
-        Some(x) -> x
-        None -> ""
+        Option.Some(x) -> x
+        Option.None -> ""
       end
       let arg = fn i -> ctl_int(word(i))
-      let keep = fn ok -> if ok do Some(staged) else None end
+      let keep = fn ok -> if ok do Option.Some(staged) else Option.None end
       match verb do
         "RELEASE" -> keep(ctl_api_release(node, port, fd, fwd, arg(1)))
         "RELEASE_COPY" -> Option.map(ctl_api_authed(node, fd, arg(1), fn body -> ctl_release_copy(body)), fn _ -> staged)
@@ -1597,17 +1597,17 @@ pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged :
           let size = arg(1)
           if size <= 0 || size > ctl_body_max() do
             ctl_reply(fd, "ERR bad_size\n")
-            Some(staged)
+            Option.Some(staged)
           else match tcp_recv_exact(fd, size) do
-            Err(_) -> None
-            Ok(b) ->
+            Result.Err(_) -> Option.None
+            Result.Ok(b) ->
               match ctl_stage(Bytes.to_string(b)) do
-                Err(e) ->
+                Result.Err(e) ->
                   ctl_reply(fd, "ERR " ++ e ++ "\n")
-                  Some(staged)
-                Ok(hs) ->
+                  Option.Some(staged)
+                Result.Ok(hs) ->
                   ctl_reply(fd, "OK staged " ++ int_to_string(List.length(hs)) ++ "\n")
-                  Some(List.take(List.append(hs, staged), 256))
+                  Option.Some(List.take(List.append(hs, staged), 256))
               end
           end end
         "CAS_PUT" -> ctl_api_cas_put(fd, line, word(1), arg(2), staged)
@@ -1615,26 +1615,26 @@ pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged :
           if ctl_is_leader(node) do ctl_reply(fd, ctl_status(node))
           else if fwd do ctl_reply(fd, "ERR not_leader\n")
           else ctl_reply(fd, ctl_forward_status(node, port)) end end
-          Some(staged)
+          Option.Some(staged)
         "CAS_GET" ->
           -- An artifact's bytes from this node's CAS: `DATA <size>` then the bytes.
           let h = word(1)
           if not(ctl_is_hex64(h)) do ctl_reply(fd, "ERR bad_hash\n")
           else match File.read(ctl_artifact_path(h)) do
-            Ok(data) -> ctl_reply(fd, "DATA " ++ int_to_string(String.byte_size(data)) ++ "\n" ++ data)
-            Err(_) -> ctl_reply(fd, "ERR missing\n")
+            Result.Ok(data) -> ctl_reply(fd, "DATA " ++ int_to_string(String.byte_size(data)) ++ "\n" ++ data)
+            Result.Err(_) -> ctl_reply(fd, "ERR missing\n")
           end end
-          Some(staged)
+          Option.Some(staged)
         "AUDIT" ->
           ctl_reply(fd, ctl_audit_answer(arg(1)))
-          Some(staged)
+          Option.Some(staged)
         "LEADER" ->
           ctl_reply(fd, (if ctl_is_leader(node) do "LEADER yes " else "LEADER no " end) ++ Topology.node_name(node) ++ "\n")
-          Some(staged)
+          Option.Some(staged)
         _ ->
           if ctl_passthrough(verb) || verb == "CAS_CHECK" do ctl_reply(fd, Control.relay_line(line))
           else ctl_reply(fd, "ERR unknown_command\n") end
-          Some(staged)
+          Option.Some(staged)
       end
   end
 end
@@ -1645,8 +1645,8 @@ pfn ctl_api_release(node : Cap(ClusterNode.Live), port : Int, fd : Int, fwd : Bo
     ctl_reply(fd, "ERR bad_size\n")
     true
   else match tcp_recv_exact(fd, size) do
-    Err(_) -> false
-    Ok(b) ->
+    Result.Err(_) -> false
+    Result.Ok(b) ->
       let body = Bytes.to_string(b)
       if ctl_is_leader(node) do ctl_reply(fd, ctl_release(node, port, body) ++ "\n")
       else if fwd do ctl_reply(fd, "ERR not_leader\n")
@@ -1657,8 +1657,8 @@ end
 
 pfn ctl_api_conn(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged : List(String)) : () do
   match ctl_api_request(node, port, fd, staged) do
-    Some(st) -> ctl_api_conn(node, port, fd, st)
-    None ->
+    Option.Some(st) -> ctl_api_conn(node, port, fd, st)
+    Option.None ->
       tcp_close(fd)
       let _ = Vault.incr(ctl_locks(), "api_conns", -1)
       ()
@@ -1670,15 +1670,15 @@ end
 -- without a byte.
 pfn ctl_api_accept(node : Cap(ClusterNode.Live), port : Int, lfd : Int) : Int do
   match tcp_accept(lfd) do
-    Err(_) -> sleep_ms(200)
-    Ok(fd) ->
+    Result.Err(_) -> sleep_ms(200)
+    Result.Ok(fd) ->
       if Vault.incr(ctl_locks(), "api_conns", 1) > ctl_cfg_int("max_conns", 64) do
         let _ = Vault.incr(ctl_locks(), "api_conns", -1)
         ctl_reply(fd, "ERR busy\n")
         tcp_close(fd)
       else
         let _ = tcp_set_recv_timeout(fd, ctl_cfg_int("idle_ms", 30000))
-        let _ = task_spawn(fn _ -> ctl_api_conn(node, port, fd, Nil))
+        let _ = task_spawn(fn _ -> ctl_api_conn(node, port, fd, List.Nil))
         ()
       end
   end
@@ -1724,12 +1724,12 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   let listen_port = if offset == 0 do port else ctl_int(Env.get("MARCH_NODE_PORT", "0")) + offset end
   if List.member(Topology.node_labels(), label) do
     match tcp_listen(listen_port) do
-      Ok(lfd) ->
+      Result.Ok(lfd) ->
         let _ = task_spawn(fn _ -> ctl_api_accept(node, port, lfd))
         let _ = task_spawn(fn _ -> ctl_audit_copier(node, port))
         let _ = task_spawn(fn _ -> ctl_cas_gc())
         println("control: API listening on port " ++ int_to_string(listen_port))
-      Err(e) -> println("control: cannot listen on port " ++ int_to_string(listen_port) ++ ": " ++ e)
+      Result.Err(e) -> println("control: cannot listen on port " ++ int_to_string(listen_port) ++ ": " ++ e)
     end
   else () end
 end

@@ -1,0 +1,8 @@
+before:
+Shop.Front: everywhere, capacity 16
+Shop.Ledger: count 1, capacity 8
+Ctl.Control: count 1 on control, capacity 256
+after a pushed topology:
+Shop.Front: on edge, capacity 32
+Shop.Ledger: not served here, capacity 8
+Ctl.Control: count 1 on control, capacity 256
