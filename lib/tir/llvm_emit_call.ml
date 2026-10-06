@@ -24,7 +24,7 @@ open Llvm_ctx
 let llvm_ty = Llvm_ctx.llvm_ty
 let llvm_ret_ty = Llvm_ctx.llvm_ret_ty
 let is_apply_fn = Tir_names.is_apply_fn
-let builtin_ret_ty = Llvm_builtins.builtin_ret_ty
+let builtin_ret_ty = Builtin_table.ret_ty
 let mangle_extern = Llvm_builtins.mangle_extern
 let emit_raises_wrapper = Llvm_calls.emit_raises_wrapper
 let fail_if_unresolved_iface_method = Llvm_calls.fail_if_unresolved_iface_method
@@ -362,36 +362,25 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
        direct path must read the result as ptr too. *)
     let ret_ty =
       if is_apply_fn resolved_name then "ptr" else llvm_ret_ty ctx ret_tir in
-    (* If the function is not known (not in top_fns, not a builtin, not an extern),
-       emit a forward declaration into the preamble so LLVM does not reject the IR
-       with "use of undefined value".  This covers interface dispatch calls that were
-       not resolved at compile time due to type erasure (e.g. Conduit.Storage.X when
-       the storage value has type TVar "_").
-       NOTE: skip if fname starts with "march_" — those are always pre-declared
-       in the hardcoded preamble string (emit_preamble). *)
-    let is_runtime_builtin = Tir_names.has_runtime_prefix fname in
+    (* A callee that is not a module function, an extern, a runtime symbol or
+       a [Builtin_table] builtin is a compile error ([Llvm_calls.Unknown_callee]),
+       after the unresolved-interface-method guard has had its chance to give
+       the more specific diagnostic.  This used to [declare] the name and leave
+       the failure to the linker.  One exception keeps the declare: a JIT
+       fragment calling a function an earlier fragment compiled. *)
     let is_known_fn =
-      is_runtime_builtin
-      || Hashtbl.mem ctx.top_fns resolved_name
-      || Hashtbl.mem ctx.extern_map resolved_name
-      || builtin_ret_ty f.Tir.v_name <> None
-      || (match f.Tir.v_name with
-          | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
-          | "print" | "print_stderr" | "io_read_line" | "read_line"
-          | "io_read_byte" | "read_byte" -> true
-          | _ -> false)
+      Llvm_calls.is_known_callee ctx ~v_name:f.Tir.v_name ~resolved_name ~fname
     in
     (* Unresolved bare interface-method guard — see
        [fail_if_unresolved_iface_method]; the ECallPtr no-var-slot catch-all
        applies the identical guard. *)
-    if not is_known_fn then
-      fail_if_unresolved_iface_method ~args ctx f.Tir.v_name;
-    if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
-      Hashtbl.replace ctx.unknown_decls fname ();
-      let param_strs = List.mapi (fun i (ty, _) ->
-          Printf.sprintf "%s %%arg%d" ty i) arg_pairs in
-      Buffer.add_string ctx.preamble
-        (Printf.sprintf "declare %s @%s(%s)\n" ret_ty fname (String.concat ", " param_strs))
+    if not is_known_fn then begin
+      if Llvm_ctx.is_repl_prior_fn resolved_name then
+        Llvm_calls.declare_prior_fragment_fn ctx ~fname ~ret_ty ~arg_pairs
+      else begin
+        fail_if_unresolved_iface_method ~args ctx f.Tir.v_name;
+        Llvm_calls.unknown_callee ctx f.Tir.v_name
+      end
     end;
     if Hashtbl.mem ctx.raises_externs resolved_name then
       emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs
@@ -640,36 +629,25 @@ let emit_callptr_global ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
          | Some t -> t)
     in
     let ret_ty = llvm_ret_ty ctx ret_tir in
-    (* Emit a forward declare if the function is not known (not in top_fns,
-       not a builtin, not an extern).  This covers interface-dispatch calls
-       where the storage value has a type-erased type (TVar "_") and march
-       did not monomorphize the call — e.g. @Conduit.Storage.checkpoint_load_all
-       appears as a call but has no define/declare in the generated IR.
-       NOTE: skip if fname starts with "march_" — those are always pre-declared
-       in the hardcoded preamble string (emit_preamble). *)
-    let is_runtime_builtin = Tir_names.has_runtime_prefix fname in
+    (* A callee that is not a module function, an extern, a runtime symbol or
+       a [Builtin_table] builtin is a compile error ([Llvm_calls.Unknown_callee]),
+       after the unresolved-interface-method guard has had its chance to give
+       the more specific diagnostic.  This used to [declare] the name and leave
+       the failure to the linker.  One exception keeps the declare: a JIT
+       fragment calling a function an earlier fragment compiled. *)
     let is_known_fn =
-      is_runtime_builtin
-      || Hashtbl.mem ctx.top_fns resolved_name
-      || Hashtbl.mem ctx.extern_map resolved_name
-      || builtin_ret_ty f.Tir.v_name <> None
-      || (match f.Tir.v_name with
-          | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
-          | "print" | "print_stderr" | "io_read_line" | "read_line"
-          | "io_read_byte" | "read_byte" -> true
-          | _ -> false)
+      Llvm_calls.is_known_callee ctx ~v_name:f.Tir.v_name ~resolved_name ~fname
     in
     (* Unresolved bare interface-method guard — see
        [fail_if_unresolved_iface_method]; the EApp general-call path applies
        the identical guard. *)
-    if not is_known_fn then
-      fail_if_unresolved_iface_method ~args ctx f.Tir.v_name;
-    if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
-      Hashtbl.replace ctx.unknown_decls fname ();
-      let param_strs = List.mapi (fun i (ty, _) ->
-          Printf.sprintf "%s %%arg%d" ty i) arg_pairs in
-      Buffer.add_string ctx.preamble
-        (Printf.sprintf "declare %s @%s(%s)\n" ret_ty fname (String.concat ", " param_strs))
+    if not is_known_fn then begin
+      if Llvm_ctx.is_repl_prior_fn resolved_name then
+        Llvm_calls.declare_prior_fragment_fn ctx ~fname ~ret_ty ~arg_pairs
+      else begin
+        fail_if_unresolved_iface_method ~args ctx f.Tir.v_name;
+        Llvm_calls.unknown_callee ctx f.Tir.v_name
+      end
     end;
     if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);

@@ -122,9 +122,8 @@ let simd_widen ctx (sty : simd_ty) (e_v : string) : string =
   | other -> failwith ("simd_widen: unexpected elem ty " ^ other)
 
 (** Declare an LLVM intrinsic into the module preamble on first use. Reuses
-    [ctx.unknown_decls] (the same dedup table the general [EApp] arm's
-    auto-declare path uses) so a given intrinsic is declared at most once per
-    module regardless of how many call sites in the SIMD intercept arm need
+    [ctx.unknown_decls] as a per-module dedup table so a given intrinsic is
+    declared at most once per module regardless of how many call sites in the SIMD intercept arm need
     it. Intrinsic declares are per-module (not part of the fixed hand-written
     preamble string), so they never affect the golden-preamble byte test. *)
 let ensure_intrinsic_declared ctx ~(name : string) ~(sig_ : string) : unit =
