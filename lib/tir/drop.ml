@@ -578,6 +578,10 @@ let erased_payload (env : env) (ty : Tir.ty)
 (** The synthesized drop function for [ty], or [None] if a bare [EDecRC] on
     [ty] is already correct (no heap children to release). *)
 let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
+  match ty with
+  (* Erased, niche-encoded: see [drop_op]'s [Option('a)] arm. *)
+  | Tir.TCon ("Option", [ Tir.TVar _ ]) -> None
+  | _ ->
   let key = mangle ty in
   match Hashtbl.find_opt env.names key with
   | Some "" -> None            (* memoized negative *)
@@ -809,6 +813,18 @@ and drop_op (env : env) (v : Tir.var) : Tir.expr =
   let unit_expr = Tir.ETuple [] in
   match v.Tir.v_ty with
   | Tir.TVar _ -> Tir.EDecRC (Tir.AVar v)
+  (* An Option whose payload type was never pinned ([record_get(r, "y")] with
+     nothing constraining it) comes from an erased runtime read, which encodes
+     it as a niche: [Some(x)] is [x] itself, [None] is null
+     (march_record_get's 'g' kind).  The synthesized drop for [Option('a)]
+     assumes a boxed [Some] cell, so it freed [x] as the cell and then released
+     [x] again as its payload: a use-after-free in
+     test/native/record_erased_field_repr under ASAN
+     (specs/progress/2026-10-06-record-get-erased-option-drop.md).  A plain
+     release is right for the niche ([x] released, null ignored), and for a
+     boxed cell it frees the cell and leaks the payload: never a double
+     release. *)
+  | Tir.TCon ("Option", [ Tir.TVar _ ]) -> Tir.EDecRC (Tir.AVar v)
   | ty when may_be_non_heap env ty ->
     (match erased_payload env ty with
      | Some (`Niche (cname, pty)) ->

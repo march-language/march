@@ -235,6 +235,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Reading a record field whose type is never pinned down (`record_get(r, "y")` printed
+  or shown) no longer double-frees or leaks in compiled code.** The result was released
+  once too often, a use-after-free that only showed under ASAN. Showing it leaked one
+  string per call.
+
 - **Compiled code no longer leaks records whose ownership differs between branches.**
   A record released on one path of a `match` or `if` was leaked on the others. A record
   passed to a function and then updated (`{ st with .. }`) was never released at all. A

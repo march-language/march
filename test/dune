@@ -12035,6 +12035,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/record_ownership_drops.expected native_record_ownership_drops.out)))
+
+; ── An erased Option read (record_get) dropped and shown without a double
+; release or a leak (2026-10-06). RED before: 200 objects left.
+(rule
+ (targets native_erased_option_read native_erased_option_read.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/erased_option_read.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_option_read
+        native/erased_option_read.march)
+   (with-stdout-to native_erased_option_read.out
+        (system "./native_erased_option_read")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_option_read.expected native_erased_option_read.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),
