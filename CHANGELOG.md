@@ -228,6 +228,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- A `--hot-reload` build no longer leaks a small object each time it calls a
+  lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
+  a list, `Actor.inspect_state` of an actor with a list field). Ordinary
+  builds were not affected.
 - **`char_to_int`, `char_is_digit`, `char_is_alphanumeric` and `char_is_whitespace` no
   longer leak their argument.** Compiled code leaked the one-character string on every call.
   `Msgpack` calls `char_to_int` for each byte of every string it encodes, so every cluster
