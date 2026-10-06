@@ -223,6 +223,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Tuples can be compared with `==` and `!=`.** `(1, ["x"]) == (1, ["x"])`
+  used to be rejected with "does not implement interface `Eq`". A tuple is now
+  `Eq` when every component is. Compiled code also compared a tuple's Float
+  component by address instead of by value, so `(1, 2.5) == (1, 2.5)` was
+  false in compiled code (for example inside `List.member`). Tuples are still
+  not ordered with `<`.
+
 - **`char_to_int`, `char_is_digit`, `char_is_alphanumeric` and `char_is_whitespace` no
   longer leak their argument.** Compiled code leaked the one-character string on every call.
   `Msgpack` calls `char_to_int` for each byte of every string it encodes, so every cluster

@@ -1704,6 +1704,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; uniquely-held set panicked "non-exhaustive pattern match" compiled while the
 ; interpreter printed the size.  Needs the stdlib (SortedSet), hence
 ; (source_tree ../stdlib).
+; Tuple `==`: Eq when every component is; compiled compares a tuple's boxed
+; Float slot by value (it compared box pointers before).
+(rule
+ (targets native_tuple_eq native_tuple_eq.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/tuple_eq.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tuple_eq native/tuple_eq.march)
+   (with-stdout-to native_tuple_eq.out (system "./native_tuple_eq")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_eq.expected native_tuple_eq.out)))
+
 (rule
  (targets native_aggregate_param_field_alias native_aggregate_param_field_alias.out)
  (deps (file %{exe:../bin/main.exe})

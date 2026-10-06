@@ -793,10 +793,14 @@ equality-comparable but not ordered: there is no built-in `Bool < Bool`, no
 fewer** than `Num` overlaps with (`Ord` ⊃ `{Int,Float}` ∩ `Num`, plus
 `String`, which `Num` never includes; `String` is Ord but never Num, the
 imbalance the live `1+"x"`-shaped probes above exploit). None of the four
-built-in interfaces cover function types (`TArrow`), tuples, records, or
+built-in interfaces cover function types (`TArrow`), records, or
 user-defined ADTs out of the box; those all require an explicit `impl …
 do … end` (or, for a single-method interface over an anonymous record only,
-the field-auto-satisfy path in (T-Discharge) above).
+the field-auto-satisfy path in (T-Discharge) above). **Tuples** are the one
+structural case: `Eq (τ₁, …, τₙ)` is discharged when every `Eq τᵢ` is (a
+component that is still a type variable is skipped, like a top-level one),
+because both backends compare tuples component-wise and no `impl` can cover
+every arity (2026-10-06). `Ord` has no tuple case.
 
 `builtin_interfaces` (`typecheck.ml:1127–1145`) is the companion table
 declaring `Eq`/`Ord`/`Show`/`Hash`'s single-method SHAPE (`eq : a → a → Bool`,
