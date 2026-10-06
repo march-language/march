@@ -246,14 +246,14 @@ let build_scope ~release proj =
   if release then proj.Project.deps
   else proj.Project.deps @ proj.Project.dev_deps @ proj.Project.dev_only_deps
 
-(** Assemble the MARCH_LIB_PATH environment prefix used for every invocation
+(** The MARCH_LIB_PATH directories used for every invocation
     of the [march] compiler.  Contains the project's own lib/, any dep lib
     roots (scoped by environment) — walked transitively — and config/ when
     present.
 
     [release=true]  → only prod [deps] are on the path (ships to users).
     [release=false] → [deps] + [dev-deps] + [dev-only-deps] are included. *)
-let lib_path_env ?(release=false) proj =
+let lib_paths ?(release=false) proj =
   let lib_dir    = Filename.concat proj.Project.root "lib" in
   let config_dir = Filename.concat proj.Project.root "config" in
   (* Collect deps for the current build scope. *)
@@ -275,11 +275,14 @@ let lib_path_env ?(release=false) proj =
     (fun (root, dep_name, dep) -> dep_to_lib_paths ~coords ~root (dep_name, dep))
     transitive_deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
-  let all_lib_paths =
-    dep_lib_paths @ collect_lib_dirs lib_dir
-    @ (if Sys.file_exists gen_dir then [gen_dir] else [])
-    @ (if Sys.file_exists config_dir then [config_dir] else [])
-  in
+  dep_lib_paths @ collect_lib_dirs lib_dir
+  @ (if Sys.file_exists gen_dir then [gen_dir] else [])
+  @ (if Sys.file_exists config_dir then [config_dir] else [])
+
+(** [lib_paths] as the shell prefix every [march] invocation runs under:
+    [MARCH_LIB_PATH=...], behind the resolved toolchain's PATH entry. *)
+let lib_path_env ?(release=false) proj =
+  let all_lib_paths = lib_paths ~release proj in
   (* Put the resolved toolchain (project .march-version pin, else global) first
      on PATH so the bare `march` in the commands below uses the pinned version.
      Quote each path so a metachar in a project/dep path can't inject shell. *)
