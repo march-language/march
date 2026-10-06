@@ -160,6 +160,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **A call to an unknown function is now a compile error, not a link error.**
+  When native code generation met a direct call to a name that is neither a
+  function in the program, an extern, nor a runtime builtin, it used to emit a
+  forward `declare` and leave the failure to the linker (or link the call to an
+  unrelated C symbol of the same name). It now stops with
+  ``error: `foo` (called from `bar`) is not a function in scope and not a
+  runtime builtin`` and exits 1.
 - **Chained `NativeArray` maps compile to one loop.** With the optimizer on,
   `map_*(map_*(a, f), g)`, a `map2_*` with a mapped input on either side, and a
   `map_*` of a `map2_*` are rewritten into a single call whose callback is the
@@ -193,6 +200,32 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiling a file with no `main` no longer emits the whole standard
+  library.** A module with no `main`, tests or exports (a library file, or a
+  topology app compiled without its `--topology` digest) kept all ~8,000
+  stdlib functions, so a one-line file took minutes in `llvm-emit` and `clang`
+  and wrote 45 MB of IR. It now compiles the functions the file declares and
+  what they reach: a topology app's IR went from 47 MB to 8 MB. Shared-object,
+  hot-reload, JS and WASM-island builds are unchanged.
+- **A record field read on a value the compiler typed as a scalar now stops
+  with an internal error naming it,** instead of writing LLVM IR that clang
+  rejects (`'%w63…' defined with type 'i64' but expected 'ptr'`).
+- **Security: a node can no longer be rolled back to an older certificate, and a
+  recorded certificate update cannot be replayed (step-12 security review).**
+  A node now refuses a replacement certificate issued before the one it holds.
+  `forge cluster cert` serials now start with the issue time in unix
+  milliseconds (`<ms>-<random>`); the signed certificate format is unchanged.
+  The control plane's Agent also keeps its certificate-release floor on disk
+  (`$MARCH_CONTROL_DIR/cert-floor-<node>`). Before, a restart lost the floor, and
+  a compromised leader could replay an older, genuinely signed cert release to
+  restore removed roles or flags. A `CERT_UPDATE` (live certificate
+  replacement on a link) is now signed over that link's handshake transcript
+  and a per-link counter. Before, an update recorded off the wire could be
+  replayed on a link made with a leaked old key, and that link then survived
+  the old certificate's revocation. The frame format changed: a peer from
+  before this change refuses the new update (and is refused by it), then
+  redials under the new certificate when the old one expires, as a peer from
+  before live replacement does.
 - **A session no longer fails to form when its access point is replaced mid-invitation.**
   When a hosting actor re-offered a role (for example after a hot deploy moved it
   to a new protocol version) and closed the old offer, an initiator that had

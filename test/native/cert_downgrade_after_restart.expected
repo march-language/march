@@ -1,0 +1,12 @@
+starting node b
+started
+release 1: ok=true certificate 1700000000100-xbroad in use
+release 2 (operator narrows b): ok=true certificate 1700000000200-ynarrow in use
+after release 2: serial=1700000000200-ynarrow roles=Ctl.Agent:initiate flags=
+replay of release 1, same process: ok=false stale: release 1700000000001 is older than release 1700000000002, which this node has taken
+floor after restart: 1600000000000
+replay of release 1 after restart: ok=false cluster_node: the new certificate: certificate 1700000000100-xbroad was issued before 1700000000200-ynarrow, the certificate in use
+after replay: serial=1700000000200-ynarrow roles=Ctl.Agent:initiate flags=
+release 3 (a shorter re-issue): ok=true certificate 1700000000300-zshort in use
+release 4 (a certificate from before ordered serials): ok=false cluster_node: the new certificate: certificate 0123456789abcdef carries no issue time, so it cannot replace 1700000000300-zshort, the certificate in use, which does
+at the end: serial=1700000000300-zshort roles=Ctl.Agent:initiate flags=
