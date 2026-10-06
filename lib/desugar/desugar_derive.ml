@@ -67,12 +67,67 @@ let mk_fn_def name params body : fn_def =
    never map "<none>" spans onto a document) keep treating derived code as
    synthetic. *)
 
+(* The key is (salt, ordinal): [ordinal] counts the nodes of ONE generated
+   decl from 1, and [salt] is a hash of that decl ([respan_derived_decl] sets
+   both).  It used to be a process-wide counter, which was unique only within
+   one process: the stdlib's desugared AST is cached on disk
+   (the stdlib_ast blobs in ~/.cache/march), carrying the counter values of the process
+   that wrote it, so a later compile of a DIFFERENT program minted the same
+   spans for its own derived nodes and the type map handed one the other's
+   type.  The multi-host lab saw it as `Eq$Action.eq(a : Result((Int,
+   List(Event)), DecodeError), ...)` after a protocol edit: every derived Eq
+   "changed signature", and a hot patch became a restart
+   (specs/progress/2026-10-05-derive-span-cache-collision.md).
+   The key is now a hash of the decl AND the module it is generated in (the
+   salt scope, set by [Desugar.desugar_module] and its nested-module walks),
+   plus a count of the same (scope, decl) already respanned in this process.
+   The module matters: identical generated ASTs in two modules (an endpoint
+   helper, a derive over two same-named types) denote different types, and a
+   first version that hashed the decl alone gave them one key, so
+   test/session/drain_peers lost a message compiled.  The count matters for
+   exact repeats within one module.  Both are the same in every process that
+   desugars that module, so a cached stdlib AST and a fresh compile agree.
+   The salt goes in the columns, so [start_line] stays a positive ordinal and
+   the file stays "<none>". *)
 let _synthetic_span_counter = ref 0
+let _synthetic_span_salt = ref 0
+let _salt_scope = ref ""
+let _salt_seen : (int, int) Hashtbl.t = Hashtbl.create 256
+
+(** Run [f] with [scope] as the module generated decls are salted with. *)
+let with_salt_scope (scope : string) (f : unit -> 'a) : 'a =
+  let saved = !_salt_scope in
+  _salt_scope := scope;
+  Fun.protect ~finally:(fun () -> _salt_scope := saved) f
+
+let current_salt_scope () = !_salt_scope
+
+(** Forget the repeat counts: [Desugar.desugar_module] calls it first, so a
+    module's keys depend on that module alone, whatever this process desugared
+    before (a cached stdlib module and a fresh one agree). *)
+let reset_salt_counts () = Hashtbl.reset _salt_seen
 
 let fresh_synthetic_span () : span =
   incr _synthetic_span_counter;
-  { file = "<none>"; start_line = !_synthetic_span_counter; start_col = 0;
-    end_line = !_synthetic_span_counter; end_col = 0 }
+  { file = "<none>"; start_line = !_synthetic_span_counter;
+    start_col = !_synthetic_span_salt land 0x3FFFFFFF;
+    end_line = !_synthetic_span_counter;
+    end_col = (!_synthetic_span_salt lsr 30) land 0x3FFFFFFF }
+
+(* A 60-bit key for the generated decl [d] in the current salt scope, from two
+   independent structural hashes (its derive-site span included). *)
+let decl_salt (d : decl) : int =
+  let key = (!_salt_scope, d) in
+  let h1 = Hashtbl.hash_param 4096 4096 key in
+  let h2 = Hashtbl.seeded_hash_param 4096 4096 0x5eed key in
+  let base = (h1 land 0x3FFFFFFF) lor ((h2 land 0x3FFFFFFF) lsl 30) in
+  let k = Option.value ~default:0 (Hashtbl.find_opt _salt_seen base) in
+  Hashtbl.replace _salt_seen base (k + 1);
+  if k = 0 then base
+  else
+    let h3 = Hashtbl.seeded_hash 0x5eed (base, k) in
+    let h4 = Hashtbl.seeded_hash 0x0ddba11 (base, k) in
+    (h3 land 0x3FFFFFFF) lor ((h4 land 0x3FFFFFFF) lsl 30)
 
 let respan_name (n : name) : name = { n with span = fresh_synthetic_span () }
 
@@ -179,6 +234,8 @@ let respan_fn_def (fd : fn_def) : fn_def =
     (Json); any other decl kind passes through unchanged, which merely keeps
     today's shared-dummy-span behavior for it. *)
 let respan_derived_decl (d : decl) : decl =
+  _synthetic_span_salt := decl_salt d;
+  _synthetic_span_counter := 0;
   match d with
   | DImpl (idef, sp) ->
     DImpl ({ impl_iface       = respan_name idef.impl_iface;
@@ -575,8 +632,8 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
           ) fields
         in
         let pairs_list = List.fold_right (fun e acc ->
-            ECon (mk_name "Cons", [e; acc], sp)
-          ) pair_exprs (ECon (mk_name "Nil", [], sp))
+            ECon (mk_name "List.Cons", [e; acc], sp)
+          ) pair_exprs (ECon (mk_name "List.Nil", [], sp))
         in
         EApp (EVar (mk_name "Json.encode_object"), [pairs_list], sp)
       | TDVariant variants ->
@@ -602,8 +659,8 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
             in
             let all_pairs = tag_pair :: arg_pairs in
             let pairs_list = List.fold_right (fun e acc ->
-                ECon (mk_name "Cons", [e; acc], sp)
-              ) all_pairs (ECon (mk_name "Nil", [], sp))
+                ECon (mk_name "List.Cons", [e; acc], sp)
+              ) all_pairs (ECon (mk_name "List.Nil", [], sp))
             in
             { branch_pat = PatCon (v.var_name, pats);
               branch_guard = None;
@@ -622,16 +679,16 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     let jpath_field_step (key : string) : expr =
       ECon (mk_name "Json.JPathField", [ELit (LitString key, sp)], sp)
     in
-    let nil_path : expr = ECon (mk_name "Nil", [], sp) in
+    let nil_path : expr = ECon (mk_name "List.Nil", [], sp) in
     let single_step_path (key : string) : expr =
-      ECon (mk_name "Cons", [jpath_field_step key; nil_path], sp)
+      ECon (mk_name "List.Cons", [jpath_field_step key; nil_path], sp)
     in
     let mk_decode_err (msg : string) (path : expr) : expr =
       ECon (mk_name "Json.DecodeError",
             [ELit (LitString msg, sp); path; ELit (LitInt (-1), sp)], sp)
     in
     let err_at_field (msg : string) (key : string) : expr =
-      ECon (mk_name "Err", [mk_decode_err msg (single_step_path key)], sp)
+      ECon (mk_name "Result.Err", [mk_decode_err msg (single_step_path key)], sp)
     in
     (* Variant-decoding counterparts of the above: a positional argument's
        path step is JPathIndex(i) rather than JPathField(key), so an argument
@@ -640,10 +697,10 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
       ECon (mk_name "Json.JPathIndex", [ELit (LitInt i, sp)], sp)
     in
     let single_index_path (i : int) : expr =
-      ECon (mk_name "Cons", [jpath_index_step i; nil_path], sp)
+      ECon (mk_name "List.Cons", [jpath_index_step i; nil_path], sp)
     in
     let err_at_path (msg : string) (path : expr) : expr =
-      ECon (mk_name "Err", [mk_decode_err msg path], sp)
+      ECon (mk_name "Result.Err", [mk_decode_err msg path], sp)
     in
     let mk_decode_err_expr (msg_expr : expr) (path : expr) : expr =
       ECon (mk_name "Json.DecodeError", [msg_expr; path; ELit (LitInt (-1), sp)], sp)
@@ -691,12 +748,12 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         let inner_ok = mk_name (fv.txt ^ "_ok") in
         let inner_err = mk_name (fv.txt ^ "_err") in
         EMatch (EApp (EVar (mk_name "from_json"), [EVar fv], sp), [
-            { branch_pat = PatCon (mk_name "Ok", [PatVar inner_ok]);
+            { branch_pat = PatCon (mk_name "Result.Ok", [PatVar inner_ok]);
               branch_guard = None;
               branch_body = k (EVar inner_ok) };
-            { branch_pat = PatCon (mk_name "Err", [PatVar inner_err]);
+            { branch_pat = PatCon (mk_name "Result.Err", [PatVar inner_err]);
               branch_guard = None;
-              branch_body = ECon (mk_name "Err",
+              branch_body = ECon (mk_name "Result.Err",
                 [EApp (EVar (mk_name "Json.decode_error_under"),
                        [step; EVar inner_err], sp)], sp) };
           ], sp)
@@ -723,7 +780,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     let rec build_field_chain (fields : field list)
         (decoded : (name * expr) list) : expr =
       match fields with
-      | [] -> ECon (mk_name "Ok", [ERecord (List.rev decoded, sp)], sp)
+      | [] -> ECon (mk_name "Result.Ok", [ERecord (List.rev decoded, sp)], sp)
       | f :: rest ->
         let key = f.fld_name.txt in
         let fv = mk_name (Printf.sprintf "_jf_%s" key) in
@@ -734,10 +791,10 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
             build_field_chain rest ((f.fld_name, value_expr) :: decoded))
         in
         EMatch (get_expr, [
-            { branch_pat = PatCon (mk_name "None", []);
+            { branch_pat = PatCon (mk_name "Option.None", []);
               branch_guard = None;
               branch_body = err_at_field "missing field" key };
-            { branch_pat = PatCon (mk_name "Some", [PatVar fv]);
+            { branch_pat = PatCon (mk_name "Option.Some", [PatVar fv]);
               branch_guard = None;
               branch_body = some_body };
           ], sp)
@@ -753,7 +810,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         let not_object_branch = {
           branch_pat = PatWild sp;
           branch_guard = None;
-          branch_body = ECon (mk_name "Err",
+          branch_body = ECon (mk_name "Result.Err",
             [mk_decode_err "expected an object" nil_path], sp);
         } in
         EMatch (EVar (mk_name "v"), [object_branch; not_object_branch], sp)
@@ -782,7 +839,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         let rec build_arg_chain (ctor_name : name) (arg_tys : ty list)
             (idx : int) (decoded : expr list) : expr =
           match arg_tys with
-          | [] -> ECon (mk_name "Ok", [ECon (ctor_name, List.rev decoded, sp)], sp)
+          | [] -> ECon (mk_name "Result.Ok", [ECon (ctor_name, List.rev decoded, sp)], sp)
           | ty :: rest ->
             let key = string_of_int idx in
             let fv = mk_name (Printf.sprintf "_ja_%d" idx) in
@@ -793,10 +850,10 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
                 build_arg_chain ctor_name rest (idx + 1) (value_expr :: decoded))
             in
             EMatch (get_expr, [
-                { branch_pat = PatCon (mk_name "None", []);
+                { branch_pat = PatCon (mk_name "Option.None", []);
                   branch_guard = None;
                   branch_body = err_at_path "missing field" (single_index_path idx) };
-                { branch_pat = PatCon (mk_name "Some", [PatVar fv]);
+                { branch_pat = PatCon (mk_name "Option.Some", [PatVar fv]);
                   branch_guard = None;
                   branch_body = some_body };
               ], sp)
@@ -811,7 +868,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         let unknown_variant_branch = {
           branch_pat = PatCon (mk_name "Str", [PatVar tagstr]);
           branch_guard = None;
-          branch_body = ECon (mk_name "Err",
+          branch_body = ECon (mk_name "Result.Err",
             [mk_decode_err_expr
                (cat2 (cat2 (ELit (LitString "unknown variant `", sp)) (EVar tagstr))
                      (ELit (LitString "`", sp)))
@@ -831,17 +888,17 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
           branch_body = EMatch (
             EApp (EVar (mk_name "Json.get_field"),
                   [EVar kvs; ELit (LitString "tag", sp)], sp),
-            [ { branch_pat = PatCon (mk_name "None", []);
+            [ { branch_pat = PatCon (mk_name "Option.None", []);
                 branch_guard = None;
                 branch_body = err_at_field "missing field" "tag" };
-              { branch_pat = PatCon (mk_name "Some", [PatVar tagv]);
+              { branch_pat = PatCon (mk_name "Option.Some", [PatVar tagv]);
                 branch_guard = None;
                 branch_body = tagv_match } ], sp);
         } in
         let not_object_branch = {
           branch_pat = PatWild sp;
           branch_guard = None;
-          branch_body = ECon (mk_name "Err",
+          branch_body = ECon (mk_name "Result.Err",
             [mk_decode_err "expected an object" nil_path], sp);
         } in
         EMatch (EVar (mk_name "v"), [object_branch; not_object_branch], sp)
@@ -934,33 +991,33 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         let sk_recurse events_e depth_e2 =
           EApp (EVar skip_name, [events_e; depth_e2], sp)
         in
-        let sk_ok_rest = ECon (mk_name "Ok", [EVar sk_rest], sp) in
+        let sk_ok_rest = ECon (mk_name "Result.Ok", [EVar sk_rest], sp) in
         let sk_close_branch =
           EIf (depth_eq 1, sk_ok_rest, sk_recurse (EVar sk_rest) depth_minus1, sp)
         in
         let skip_body =
           EMatch (EVar sk_events, [
-              { branch_pat = PatCon (mk_name "Nil", []);
+              { branch_pat = PatCon (mk_name "List.Nil", []);
                 branch_guard = None;
-                branch_body = ECon (mk_name "Err",
+                branch_body = ECon (mk_name "Result.Err",
                   [mk_decode_err "truncated while skipping an unknown field's value" nil_path], sp) };
-              { branch_pat = PatCon (mk_name "Cons",
+              { branch_pat = PatCon (mk_name "List.Cons",
                   [PatCon (mk_name "EvObjStart", []); PatVar sk_rest]);
                 branch_guard = None;
                 branch_body = sk_recurse (EVar sk_rest) depth_plus1 };
-              { branch_pat = PatCon (mk_name "Cons",
+              { branch_pat = PatCon (mk_name "List.Cons",
                   [PatCon (mk_name "EvArrStart", []); PatVar sk_rest]);
                 branch_guard = None;
                 branch_body = sk_recurse (EVar sk_rest) depth_plus1 };
-              { branch_pat = PatCon (mk_name "Cons",
+              { branch_pat = PatCon (mk_name "List.Cons",
                   [PatCon (mk_name "EvObjEnd", []); PatVar sk_rest]);
                 branch_guard = None;
                 branch_body = sk_close_branch };
-              { branch_pat = PatCon (mk_name "Cons",
+              { branch_pat = PatCon (mk_name "List.Cons",
                   [PatCon (mk_name "EvArrEnd", []); PatVar sk_rest]);
                 branch_guard = None;
                 branch_body = sk_close_branch };
-              { branch_pat = PatCon (mk_name "Cons", [PatWild sp; PatVar sk_rest]);
+              { branch_pat = PatCon (mk_name "List.Cons", [PatWild sp; PatVar sk_rest]);
                 branch_guard = None;
                 branch_body = EIf (depth_eq 0, sk_ok_rest, sk_recurse (EVar sk_rest) depth_e, sp) };
             ], sp)
@@ -983,14 +1040,14 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
             let bound = mk_name "_evsv" in
             let rest3 = mk_name "_evsrest" in
             EMatch (events_e, [
-                { branch_pat = PatCon (mk_name "Cons",
+                { branch_pat = PatCon (mk_name "List.Cons",
                     [PatCon (mk_name ctor, [PatVar bound]); PatVar rest3]);
                   branch_guard = None;
-                  branch_body = ECon (mk_name "Ok",
+                  branch_body = ECon (mk_name "Result.Ok",
                     [ETuple ([conv (EVar bound); EVar rest3], sp)], sp) };
                 { branch_pat = PatWild sp;
                   branch_guard = None;
-                  branch_body = ECon (mk_name "Err", [mk_decode_err msg single_path], sp) };
+                  branch_body = ECon (mk_name "Result.Err", [mk_decode_err msg single_path], sp) };
               ], sp)
           in
           match fty with
@@ -1012,14 +1069,14 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
             let inner_rest = mk_name "_evokrest" in
             let inner_err = mk_name "_everr" in
             EMatch (EApp (EVar (mk_name "from_json_events"), [events_e], sp), [
-                { branch_pat = PatCon (mk_name "Ok",
+                { branch_pat = PatCon (mk_name "Result.Ok",
                     [PatTuple ([PatVar inner_ok; PatVar inner_rest], sp)]);
                   branch_guard = None;
-                  branch_body = ECon (mk_name "Ok",
+                  branch_body = ECon (mk_name "Result.Ok",
                     [ETuple ([EVar inner_ok; EVar inner_rest], sp)], sp) };
-                { branch_pat = PatCon (mk_name "Err", [PatVar inner_err]);
+                { branch_pat = PatCon (mk_name "Result.Err", [PatVar inner_err]);
                   branch_guard = None;
-                  branch_body = ECon (mk_name "Err",
+                  branch_body = ECon (mk_name "Result.Err",
                     [EApp (EVar (mk_name "Json.decode_error_under"),
                            [step; EVar inner_err], sp)], sp) };
               ], sp)
@@ -1036,17 +1093,17 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
           let sk2_ok = mk_name "_evskrest" in
           let sk2_err = mk_name "_evskerr" in
           EMatch (EApp (EVar skip_name, [events_after_e; ELit (LitInt 0, sp)], sp), [
-              { branch_pat = PatCon (mk_name "Ok", [PatVar sk2_ok]);
+              { branch_pat = PatCon (mk_name "Result.Ok", [PatVar sk2_ok]);
                 branch_guard = None;
                 branch_body = EApp (EVar loop_name, EVar sk2_ok :: slot_args, sp) };
-              { branch_pat = PatCon (mk_name "Err", [PatVar sk2_err]);
+              { branch_pat = PatCon (mk_name "Result.Err", [PatVar sk2_err]);
                 branch_guard = None;
-                branch_body = ECon (mk_name "Err", [EVar sk2_err], sp) };
+                branch_body = ECon (mk_name "Result.Err", [EVar sk2_err], sp) };
             ], sp)
         in
         let is_some_expr (e : expr) : expr =
           EMatch (e, [
-              { branch_pat = PatCon (mk_name "Some", [PatWild sp]);
+              { branch_pat = PatCon (mk_name "Option.Some", [PatWild sp]);
                 branch_guard = None; branch_body = ELit (LitBool true, sp) };
               { branch_pat = PatWild sp;
                 branch_guard = None; branch_body = ELit (LitBool false, sp) };
@@ -1067,17 +1124,17 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
               let drest = mk_name "_evdrest" in
               let derr = mk_name "_evderr" in
               EMatch (decoded, [
-                  { branch_pat = PatCon (mk_name "Ok",
+                  { branch_pat = PatCon (mk_name "Result.Ok",
                       [PatTuple ([PatVar dv; PatVar drest], sp)]);
                     branch_guard = None;
                     branch_body =
                       let new_args = List.mapi (fun j s ->
-                          if j = i then ECon (mk_name "Some", [EVar dv], sp)
+                          if j = i then ECon (mk_name "Option.Some", [EVar dv], sp)
                           else EVar s) all_slots in
                       EApp (EVar loop_name, EVar drest :: new_args, sp) };
-                  { branch_pat = PatCon (mk_name "Err", [PatVar derr]);
+                  { branch_pat = PatCon (mk_name "Result.Err", [PatVar derr]);
                     branch_guard = None;
-                    branch_body = ECon (mk_name "Err", [EVar derr], sp) };
+                    branch_body = ECon (mk_name "Result.Err", [EVar derr], sp) };
                 ], sp)
             in
             EIf (key_eq,
@@ -1091,37 +1148,37 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         let rec build_finish_chain (remaining : (int * field * name) list)
             (decoded : (name * expr) list) (tail_e : expr) : expr =
           match remaining with
-          | [] -> ECon (mk_name "Ok",
+          | [] -> ECon (mk_name "Result.Ok",
               [ETuple ([ERecord (List.rev decoded, sp); tail_e], sp)], sp)
           | (_, f, slot) :: rest ->
             let bv = mk_name (Printf.sprintf "_evfv_%s" f.fld_name.txt) in
             EMatch (EVar slot, [
-                { branch_pat = PatCon (mk_name "Some", [PatVar bv]);
+                { branch_pat = PatCon (mk_name "Option.Some", [PatVar bv]);
                   branch_guard = None;
                   branch_body = build_finish_chain rest
                     ((f.fld_name, EVar bv) :: decoded) tail_e };
-                { branch_pat = PatCon (mk_name "None", []);
+                { branch_pat = PatCon (mk_name "Option.None", []);
                   branch_guard = None;
                   branch_body = err_at_field "missing field" f.fld_name.txt };
               ], sp)
         in
         let loop_body =
           EMatch (EVar cursor, [
-              { branch_pat = PatCon (mk_name "Cons",
+              { branch_pat = PatCon (mk_name "List.Cons",
                   [PatCon (mk_name "EvObjEnd", []); PatVar tail_v]);
                 branch_guard = None;
                 branch_body = build_finish_chain ev_field_slots [] (EVar tail_v) };
-              { branch_pat = PatCon (mk_name "Cons",
+              { branch_pat = PatCon (mk_name "List.Cons",
                   [PatCon (mk_name "EvKey", [PatVar key_v]); PatVar after_key_v]);
                 branch_guard = None;
                 branch_body = build_key_chain ev_field_slots };
-              { branch_pat = PatCon (mk_name "Nil", []);
+              { branch_pat = PatCon (mk_name "List.Nil", []);
                 branch_guard = None;
-                branch_body = ECon (mk_name "Err",
+                branch_body = ECon (mk_name "Result.Err",
                   [mk_decode_err "truncated while decoding an object" nil_path], sp) };
               { branch_pat = PatWild sp;
                 branch_guard = None;
-                branch_body = ECon (mk_name "Err",
+                branch_body = ECon (mk_name "Result.Err",
                   [mk_decode_err "expected a field name or end of object" nil_path], sp) };
             ], sp)
         in
@@ -1131,16 +1188,16 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         in
         let loop_fn_letfn = ELetFn (loop_name, loop_params, None, loop_body, sp) in
         let rest0 = mk_name "_ev_rest0" in
-        let all_none_args = List.map (fun _ -> ECon (mk_name "None", [], sp)) all_slots in
+        let all_none_args = List.map (fun _ -> ECon (mk_name "Option.None", [], sp)) all_slots in
         let top_body =
           EMatch (EVar (mk_name "events"), [
-              { branch_pat = PatCon (mk_name "Cons",
+              { branch_pat = PatCon (mk_name "List.Cons",
                   [PatCon (mk_name "EvObjStart", []); PatVar rest0]);
                 branch_guard = None;
                 branch_body = EApp (EVar loop_name, EVar rest0 :: all_none_args, sp) };
               { branch_pat = PatWild sp;
                 branch_guard = None;
-                branch_body = ECon (mk_name "Err",
+                branch_body = ECon (mk_name "Result.Err",
                   [mk_decode_err "expected an object" nil_path], sp) };
             ], sp)
         in

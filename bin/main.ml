@@ -4349,6 +4349,13 @@ let compile filename =
               | Error _ ->
                 Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
              Hashtbl.iter (fun name impl_h ->
+               (* A capture-release function ([Drop.run]'s [$clodrop$<clo>]) is
+                  reached only through the registry main fills at start-up; a
+                  patch never registers one, so no deploy can deliver or need
+                  it.  Its name carries the lambda counter, so a one-line edit
+                  renames and "changes" them wholesale, and the planner would
+                  count each as an undeliverable change (restart).  Not listed. *)
+               if String.starts_with ~prefix:March_tir.Tir_names.clo_drop_fn_prefix name then () else
                let sig_h = Option.value ~default:""
                    (Hashtbl.find_opt remote_sig_hashes name) in
                let callers_field =

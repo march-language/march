@@ -520,7 +520,7 @@ let main_source ?pools (f : facts) (t : t) : string =
     | None -> ""
     | Some c ->
       Printf.sprintf
-        ", [\n      Topology.offer_role(\"Ctl.Control\", Topology.count_on(%S, 1), 256, fn topology_cap -> Ctl_Run.offer_Control(topology_io, topology_node, topology_cap,\n        fn (topology_s, topology_x1, topology_x2, topology_x3, topology_x4, topology_x5, topology_st) -> ctl_control_session(topology_node, topology_s, topology_x1, topology_x2, topology_x3, topology_x4, topology_x5, topology_st)))\n    ]"
+        ", [\n      Topology.pinned(Topology.offer_role(\"Ctl.Control\", Topology.count_on(%S, 1), 256, fn topology_cap -> Ctl_Run.offer_Control(topology_io, topology_node, topology_cap,\n        fn (topology_s, topology_x1, topology_x2, topology_x3, topology_x4, topology_x5, topology_st) -> ctl_control_session(topology_node, topology_s, topology_x1, topology_x2, topology_x3, topology_x4, topology_x5, topology_st))))\n    ]"
         c.c_candidates
   in
   add "  Topology.place(topology_node, List.concat([%s%s]))\n"

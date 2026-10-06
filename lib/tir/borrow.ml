@@ -244,6 +244,15 @@ let extern_borrow_table : (string * bool list) list = [
   ("char_is_lowercase",    [true]);
   ("char_to_uppercase",    [true]);
   ("char_to_lowercase",    [true]);
+  (* The rest of the family, audited 2026-10-05: each reads data[0] and neither
+     stores nor releases the String.  Left owned, every call leaked its
+     argument -- Msgpack's str_to_bytes calls char_to_int once per byte of
+     every string it encodes, so a cluster node leaked one object per byte of
+     every name and hash in every registry frame it built. *)
+  ("char_to_int",          [true]);
+  ("char_is_digit",        [true]);
+  ("char_is_alphanumeric", [true]);
+  ("char_is_whitespace",   [true]);
   ("string_to_lowercase",  [true]);
   ("reload_request",       [true]);
   ("string_to_uppercase",  [true]);
@@ -465,8 +474,7 @@ let extern_owned_builtins : string list = [
     (* actor_inspect_store keeps its String in the proc's inspect_out slot
        until the actor loop sends it as the reply (observe plan R4). *)
     "actor_inspect_store";
-    "panic_"; "unreachable_"; "todo_"; "print_stderr"; "char_to_int";
-    "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
+    "panic_"; "unreachable_"; "todo_"; "print_stderr";
     "list_append"; "list_concat";
     "iolist_hash_fnv1a"; "md5"; "sha256";
     "stdlib_sha256"; "sha512"; "stdlib_sha512"; "hmac_sha256";

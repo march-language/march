@@ -630,6 +630,64 @@ let emit_atom_show_table ctx =
          [{ i32, ptr, ptr } { i32 65535, ptr @march_atom_namer_unregister, ptr null }]\n"
   end
 
+(** [define internal void @march_clo_drops_register()]: hands the runtime
+    every (apply function, capture-release function) pair of this program, so
+    a closure released without being called releases its captures
+    ([march_clo_release], specs/progress/2026-10-05-dropped-closure-captures.md).
+    The pairs come from the FINAL module's closure allocations -- field 0 of a
+    [$Clo_*] allocation is the apply function the cell will carry -- so a
+    pair exists only for a closure type [Drop.run] gave a release function
+    (its environment owns its captures) and that is still allocated.  An
+    apply function seen with two closure types (none should be) is left out:
+    a wrong layout is worse than a leak.  main's prologue calls it once,
+    before the scheduler starts. *)
+let clo_drop_registration (m : Tir.tir_module) : string =
+  let defined = Hashtbl.create 1024 in
+  List.iter (fun (fn : Tir.fn_def) -> Hashtbl.replace defined fn.Tir.fn_name ()) m.Tir.tm_fns;
+  let pairs : (string, string option) Hashtbl.t = Hashtbl.create 64 in
+  let note clo atoms =
+    match atoms with
+    | Tir.AVar f :: _ when Tir_names.is_clo_struct clo ->
+      let drop = Tir_names.clo_drop_fn_name clo in
+      if Hashtbl.mem defined f.Tir.v_name && Hashtbl.mem defined drop then
+        (match Hashtbl.find_opt pairs f.Tir.v_name with
+         | None -> Hashtbl.replace pairs f.Tir.v_name (Some drop)
+         | Some (Some d) when d = drop -> ()
+         | Some _ -> Hashtbl.replace pairs f.Tir.v_name None)
+    | _ -> ()
+  in
+  let rec walk (e : Tir.expr) =
+    match e with
+    | Tir.EAlloc (Tir.TCon (clo, _), atoms) -> note clo atoms
+    | Tir.EReuse (_, Tir.TCon (clo, _), atoms) -> note clo atoms
+    | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> walk a; walk b
+    | Tir.ELetRec (fns, body) ->
+      List.iter (fun (fd : Tir.fn_def) -> walk fd.Tir.fn_body) fns; walk body
+    | Tir.ECase (_, branches, default) ->
+      List.iter (fun (b : Tir.branch) -> walk b.Tir.br_body) branches;
+      Option.iter walk default
+    | _ -> ()
+  in
+  List.iter (fun (fn : Tir.fn_def) -> walk fn.Tir.fn_body) m.Tir.tm_fns;
+  let entries =
+    Hashtbl.fold (fun apply d acc ->
+        match d with Some drop -> (apply, drop) :: acc | None -> acc) pairs []
+    |> List.sort compare
+  in
+  let n = List.length entries in
+  if n = 0 then
+    "\ndefine internal void @march_clo_drops_register() {\nentry:\n  ret void\n}\n"
+  else
+    let elems = String.concat ", " (List.concat_map (fun (apply, drop) ->
+        [ "ptr @" ^ Llvm_builtins.mangle_extern apply;
+          "ptr @" ^ Llvm_builtins.mangle_extern drop ]) entries) in
+    Printf.sprintf
+      "\n@march_clo_drop_pairs = private constant [%d x ptr] [%s]\n\
+       declare void @march_clo_register_drops(ptr, i64)\n\
+       define internal void @march_clo_drops_register() {\nentry:\n\
+      \  call void @march_clo_register_drops(ptr @march_clo_drop_pairs, i64 %d)\n\
+      \  ret void\n}\n" (2 * n) elems n
+
 (* emit_mutual_tco_group moved to [Llvm_tco] (Wave 3 Task 6, chunk 2).
    Its single call site (emit_module, below) passes emit_expr as a labeled
    callback and qualifies the reference: see Llvm_tco.emit_mutual_tco_group. *)
@@ -1603,6 +1661,7 @@ let emit_module ~emit_expr
          "define i32 @main(i32 %argc, ptr %argv_ptr) {\nentry:\n";
        Buffer.add_string buf2
          "  call void @march_process_argv_init(i32 %argc, ptr %argv_ptr)\n";
+       Buffer.add_string buf2 "  call void @march_clo_drops_register()\n";
        Buffer.add_string buf2
          "  call void @march_test_init(i32 %argc, ptr %argv_ptr)\n";
        if has_setup_all then
@@ -1620,6 +1679,7 @@ let emit_module ~emit_expr
        ) m.Tir.tm_tests;
        Buffer.add_string buf2 "  %rc = call i32 @march_test_report()\n";
        Buffer.add_string buf2 "  ret i32 %rc\n}\n";
+       Buffer.add_string buf2 (clo_drop_registration m);
        Buffer.add_buffer out buf2
      end else begin
        (match main_fn_name with
@@ -1671,13 +1731,15 @@ let emit_module ~emit_expr
              %s\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+               call void @march_clo_drops_register()\n\
                call void @march_remote_init()\n\
              %s%s\
                call void @march_spawn_main%s(ptr %s)\n\
                call void @march_run_scheduler()\n\
                ret i32 0\n}\n" (if !pin_main then "_pinned" else "")
                 thunk_def hr_setup stub_setup
-                (if !pin_main then "_pinned" else "") spawn_target)
+                (if !pin_main then "_pinned" else "") spawn_target);
+          Buffer.add_string out (clo_drop_registration m)
         | None ->
           (* Library module with no user-defined main: emit a stub @main so
              clang can link a valid binary (forge build type-checks libraries). *)

@@ -227,6 +227,54 @@ git log is authoritative for exact commits.
   Float.** `let keep = fn (p, x) -> p` called directly with Float arguments,
   as in `keep(1.0, x)`, leaked one boxed Float per call in compiled code. The
   interpreter was unaffected.
+
+- **`char_to_int`, `char_is_digit`, `char_is_alphanumeric` and `char_is_whitespace` no
+  longer leak their argument.** Compiled code leaked the one-character string on every call.
+  `Msgpack` calls `char_to_int` for each byte of every string it encodes, so every cluster
+  frame leaked one object per byte of its strings.
+
+- **A closure that is dropped without being called now frees what it captured.** Before,
+  only calling a closure released its captured values; one dropped from a list, record or
+  table, or never applied, leaked all of them. Cluster nodes hit this on every session and
+  every registry update: a single-node session left about 4,400 objects behind, now about
+  1,400.
+
+- **Derived implementations (`derive Eq`, `Ord`, `Json`, ...) are no longer typechecked with
+  another program's types.** Their generated code got placeholder source positions from a
+  counter that restarted in every compiler process, and the stdlib's cached, already
+  desugared code carried the positions of the process that wrote the cache. A later build
+  of a different program could reuse the same positions and lower a derived function with
+  unrelated types. It surfaced as `forge deploy` reporting every derived `Eq` changed
+  after an unrelated protocol edit.
+
+- **A restarted cluster node's offers are visible again.** After a rolling restart, a node
+  that registered its access points anew could have them erased on every node: its peers
+  still held the bindings from its previous run under a newer clock, and retiring those
+  stale bindings removed the live ones too. Initiators were then refused with "no access
+  point is registered" until every node was restarted at once.
+
+- **Dropping a value of a stdlib type that shares its short name with another (`Value`,
+  `State`, `Level`, `Event`, `Error`, `Mode`) now frees what it holds.** Such a value was freed
+  shallowly, so its contents leaked: a decoded `Msgpack.Bin` lost its whole byte list. Every
+  cluster message is decoded that way, so a node leaked roughly one object per byte of
+  every message it received. In the multi-host lab, nodes grew by hundreds of thousands
+  of objects per session and were killed for running out of memory within minutes.
+
+- **A protocol branch named `none`, `some`, `ok`, `err`, `nil` or `cons` no longer breaks the
+  build.** Such a label gives the protocol's message type a constructor of the same name,
+  and the code `@[endpoints]`, `derive` and the control plane's `[control]` wiring generate
+  used the prelude's `Some`, `None`, `Ok`, `Err`, `Nil` and `Cons` unqualified, so they
+  became ambiguous: up to 49 errors, each blaming the compiler. Generated code now names
+  them `Option.None`, `Result.Ok`, `List.Cons` and so on.
+
+- **A pushed topology no longer takes away the control plane's leader.** Re-reading a
+  topology (a signed push from `forge deploy` or `forge topology apply`, SIGHUP, or a restart)
+  closed the control plane's own `Ctl.Control` role on every node, because the topology file
+  cannot name it, so a cluster with `[control]` had no leader after its first deploy and
+  every later cluster deploy, `forge cluster cert --deliver` and `revoke --deliver` had
+  nothing to talk to. Roles the build places itself are now pinned, and a re-read leaves
+  them alone.
+
 - **Parse errors on the command line now point at the token the message is
   about, not the token after it.** `if x then 1 end` used to put the caret
   under `end` (or under the next line) while the message talked about `then`;

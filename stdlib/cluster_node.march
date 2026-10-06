@@ -1407,7 +1407,12 @@ mod ClusterNode do
   end
 
   -- Tombstone our own bindings from an earlier creation (a restart reuses
-  -- local pids, so they name whatever process has that pid now).
+  -- local pids, so they name whatever process has that pid now). A name this
+  -- life registered again is re-registered instead, with a clock past the
+  -- merged one: our registration came from an empty replica, so its clock is
+  -- older than our previous life's binding the peers still hold, and the merge
+  -- kept that one. Tombstoning it erased the live registration on every node
+  -- (the lab's "no access point is registered" after a rolling restart).
   pfn retire_stale(st : CnState) : (CnState, List(String)) do
     let stale = List.filter(GlobalRegistry.all_entries(st.reg), fn kv ->
       match kv do (_n, e) -> e.present && e.node_id == st.me && e.creation != st.cfg.creation end)
@@ -1417,11 +1422,19 @@ mod ClusterNode do
           match kv do
             (name, e) ->
               let clock = GlobalRegistry.next_clock(s.reg, name, s.me)
-              match GlobalRegistry.unregister_own(s.reg, name, s.me, e.creation, e.pid, clock) do
-                Some(r) ->
+              match Map.get(s.regs, name, Map.str_cmp) do
+                Some((pid, _)) ->
+                  let r = GlobalRegistry.register_as(s.reg, name, s.me, s.cfg.creation, pid, clock,
+                                                     identity_of(s, s.me))
                   let out = ({ s with reg: r }, Cons(name, names))
                   out
-                None -> (s, names)
+                None ->
+                  match GlobalRegistry.unregister_own(s.reg, name, s.me, e.creation, e.pid, clock) do
+                    Some(r) ->
+                      let out = ({ s with reg: r }, Cons(name, names))
+                      out
+                    None -> (s, names)
+                  end
               end
           end
       end)

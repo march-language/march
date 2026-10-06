@@ -1,5 +1,36 @@
 # `[P1]` After nodes are restarted one by one, no initiator sees any offer ("no access point is registered")
 
+**FIXED 2026-10-05** (`stdlib/cluster_node.march`, `retire_stale`).
+
+## Cause
+
+The first suspect was right, with one more step. A restarted node registers its offer
+names again from an EMPTY replica, so the registration's clock (`next_clock` on an empty
+replica: our slot at 1) is causally OLDER than the clock its peers hold for the same
+name from its previous life, which a long-running node had bumped many times. The first
+registry exchange merges, and the merge keeps the old binding (older creation, hidden by
+`visible`). `retire_stale` then sees "our own binding from an earlier creation" and
+tombstones it with a clock past the merged one -- erasing the name the node had just
+registered again, on every node it pushes to. The node's `regs` still says it holds the
+offer, so it never registers again; anti-entropy only spreads the tombstone. Hence
+"no access point is registered" for good. A simultaneous restart of every node escaped
+it: no peer kept the old binding.
+
+## Fix
+
+`retire_stale` re-registers a stale name this life holds again (it is in `regs`) at the
+current creation, with the bumped clock, and pushes it, instead of tombstoning it. A
+stale name nobody holds now is tombstoned as before.
+
+## Test
+
+`test/stdlib/test_cluster_node.march`, "a restart re-registers a name it holds again
+rather than retiring it": the restarted node (creation 2) registers `ap`, then merges a
+peer's sync carrying its creation-1 binding at a newer clock. `ap` stays visible at pid
+42, creation 2, the change is pushed, and a peer holding the old binding sees the new
+one after merging the push. Red before the fix (the name was gone).
+
+
 Found 2026-10-05 by the multi-host lab (docs/lab.md), main at 53d66f068, four containers,
 shared-secret mode, no control-plane leader
 ([2026-10-05-lab-topology-reread-closes-ctl-control.md](2026-10-05-lab-topology-reread-closes-ctl-control.md)).

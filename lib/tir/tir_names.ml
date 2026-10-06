@@ -103,6 +103,21 @@ let clo_struct_prefix = "$Clo_"
 let is_clo_struct (tcon_name : string) : bool =
   String.length tcon_name >= 5 && String.sub tcon_name 0 5 = clo_struct_prefix
 
+(** Name of the capture-release function [Drop.run] synthesizes for closure
+    struct [clo] ("$clodrop$$Clo_f$7"): it releases every capture of an
+    environment that is being freed.  The runtime calls it, looked up by the
+    closure's apply function, when a closure released WITHOUT being called
+    dies ([march_clo_release]); nothing in TIR calls it, so [Dce] keeps it
+    alive through the closure's allocation sites instead.
+    The name embeds [clo], and so the global lambda counter, and must start
+    with '$' like every other counter-derived name ([$lam<n>], [$jp<n>]):
+    tooling that diffs hot-reload manifests (forge's deploy plan,
+    forge/test/test_hcr_manifest_diff.ml) treats a leading '$' as "generated,
+    may be renumbered by any edit"; as "__clodrop$" a one-line edit showed up
+    as user functions removed. *)
+let clo_drop_fn_prefix = "$clodrop$"
+let clo_drop_fn_name (clo : string) : string = clo_drop_fn_prefix ^ clo
+
 (* ── Closure apply wrappers: "<fn>$apply$<uid>" ─────────────────────────
    Producer: lib/tir/defun.ml mints the apply-wrapper fn name as
    [Printf.sprintf "%s$apply$%d" fn.fn_name lam.lam_uid].
