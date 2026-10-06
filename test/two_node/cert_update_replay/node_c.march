@@ -1,0 +1,181 @@
+-- Two-node harness, scenario "cert_update_replay": node-c, the attacker. It
+-- is a TCP proxy between node-a and node-b that records node-b's
+-- CERT_UPDATE frame off the wire: a sealed frame is a sequence number, the
+-- payload in the clear, and a MAC tag, so the payload is readable. It also
+-- holds node-b's OLD (leaked) certificate and key (OLD_PKI). Once node-b has
+-- stopped it handshakes with node-a as node-b under that certificate, which
+-- node-a still admits, and sends the recorded payload as a frame of its own
+-- link (sealed with that link's own MAC key, so the MAC checks out). See
+-- scenario.sh.
+mod CertUpdateReplayC do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  pfn recorded() : Vault(List(Int)) do
+    match Vault.whereis("replay_recorded") do
+      Some(v) -> v
+      None -> Vault.new("replay_recorded")
+    end
+  end
+
+  -- A CERT_UPDATE payload: a MessagePack array whose first element is 16.
+  pfn is_cert_update(payload : List(Int)) : Bool do
+    match Msgpack.decode(payload) do
+      Ok(Msgpack.Array(Cons(Msgpack.Int(16), _))) -> true
+      _ -> false
+    end
+  end
+
+  -- Record [body] (a sealed frame's body, from node-b) when it carries a CERT_UPDATE.
+  pfn look(body : Bytes) : () do
+    let n = Bytes.length(body)
+    if n <= 40 do () else
+      let payload = Bytes.to_list(Bytes.slice(body, 8, n - 40))
+      if is_cert_update(payload) && Vault.get(recorded(), "f") == None do
+        Vault.set(recorded(), "f", payload)
+        println("node-c: recorded node-b's certificate update")
+      else () end
+    end
+  end
+
+  pfn pump(src : Int, dst : Int, from_b : Bool) : Int do
+    match tcp_recv_exact(src, 4) do
+      Err(_) ->
+        tcp_shutdown(dst)
+        0
+      Ok(hdr) ->
+        match tcp_recv_exact(src, NetFrame.body_length(Bytes.to_list(hdr))) do
+          Err(_) ->
+            tcp_shutdown(dst)
+            0
+          Ok(body) ->
+            if from_b do look(body) else () end
+            match Socket.write(dst, Bytes.to_string(Bytes.concat(hdr, body))) do
+              Ok(_) -> pump(src, dst, from_b)
+              Err(_) -> 0
+            end
+        end
+    end
+  end
+
+  pfn serve(listen_fd : Int, go : String) : () do
+    if File.exists(go) do () else
+      match tcp_accept_timeout(listen_fd, 200) do
+        Err(_) -> serve(listen_fd, go)
+        Ok(fd) ->
+          match Socket.connect("127.0.0.1", Env.require_int("MARCH_PORT_B")) do
+            Err(_) ->
+              -- node-b has stopped: node-a's redials go nowhere.
+              tcp_close(fd)
+              serve(listen_fd, go)
+            Ok(up) ->
+              let _ = task_spawn(fn _ -> pump(fd, up, false))
+              let _ = task_spawn(fn _ -> pump(up, fd, true))
+              serve(listen_fd, go)
+          end
+      end
+    end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn read(path : String) : String do
+    match File.read(path) do
+      Ok(t) -> String.trim(t)
+      Err(e) -> panic("node-c: " ++ path ++ ": " ++ to_string(e))
+    end
+  end
+
+  -- Read and drop whatever node-a sends on [fd] (its member view, pings).
+  pfn drain(fd : Int) : Int do
+    match tcp_recv_exact(fd, 4) do
+      Err(_) -> 0
+      Ok(hdr) ->
+        match tcp_recv_exact(fd, NetFrame.body_length(Bytes.to_list(hdr))) do
+          Err(_) -> 0
+          Ok(_) -> drain(fd)
+        end
+    end
+  end
+
+  -- One connection to node-a, handshaked as node-b with the old credentials.
+  pfn connect_as_b(auth : ClusterAuth.Auth, role : String) : Int do
+    let me = NodeIdentity.make("node-b", "pk-node-b", 2)
+    match Socket.connect("127.0.0.1", Env.require_int("MARCH_PORT_A")) do
+      Err(e) -> panic("node-c: connect: " ++ Socket.error_message(e))
+      Ok(fd) ->
+        match NetKernel.handshake_auth(fd, me, auth, NetKernel.fresh_nonce(), role, "", 5000) do
+          Err(e) -> panic("node-c: handshake as node-b refused: " ++ e)
+          Ok(_) ->
+            let _ = task_spawn(fn _ -> drain(fd))
+            fd
+        end
+    end
+  end
+
+  pfn replay_loop(cfd : Int, frame : List(Int), stop : String) : Int do
+    if File.exists(stop) do 0 else
+      match NetKernel.send_frame(cfd, frame) do
+        Ok(_) ->
+          if Vault.incr(recorded_n(), "sent", 1) == 1 do println("node-c: replayed it on its own link as node-b") else () end
+        Err(_) -> ()
+      end
+      sleep_ms(200)
+      replay_loop(cfd, frame, stop)
+    end
+  end
+
+  pfn recorded_n() : Vault(Int) do
+    match Vault.whereis("replay_sent") do
+      Some(v) -> v
+      None -> Vault.new("replay_sent")
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let old = Env.require("OLD_PKI")
+    let signed = match NodeCert.from_text(read(old ++ "/node-b.cert")) do
+      Ok(s) -> s
+      Err(e) -> panic("node-c: " ++ e)
+    end
+    let sk = match NodeCert.key_from_hex(read(old ++ "/node-b.key"), 64) do
+      Ok(k) -> k
+      Err(e) -> panic("node-c: " ++ e)
+    end
+    let op = match NodeCert.key_from_hex(read(Env.require("PKI") ++ "/operator.pub"), 32) do
+      Ok(k) -> k
+      Err(e) -> panic("node-c: " ++ e)
+    end
+    let auth = ClusterAuth.Certified({ signed: signed, secret_key: sk, operator_pubkey: op, revoked: fn _ -> false })
+    match tcp_listen(Env.require_int("MARCH_PORT_C")) do
+      Err(e) -> panic("node-c: listen: " ++ e)
+      Ok(lfd) ->
+        println("node-c: up")
+        let go = Env.require("GO_FILE")
+        serve(lfd, go)
+        let frame = match Vault.get(recorded(), "f") do
+          Some(f) -> f
+          None -> panic("node-c: recorded nothing")
+        end
+        let cfd = connect_as_b(auth, Handshake.role_control())
+        let _dfd = connect_as_b(auth, Handshake.role_data())
+        -- Replay the frame every 200 ms until the end: node-a may not have
+        -- paired the two connections into a link yet when the first one
+        -- lands (under ASan it is slow), and each replay is the same attack.
+        let _ = task_spawn(fn _ -> replay_loop(cfd, frame, Env.require("CLUSTER_STOP_FILE")))
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        println("node-c: done")
+    end
+  end
+end

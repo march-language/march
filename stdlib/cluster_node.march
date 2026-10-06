@@ -397,7 +397,12 @@ mod ClusterNode do
   -- One peer's connection pair. `dialer` is the node_id that opened it; `cw`
   -- is its control writer's pid (as an Int: opaque to the core); `creation`
   -- the peer's creation, from its hello.
-  type CnLink = { node_id : String, gen : Int, cfd : Int, dfd : Int, dialer : String, cw : Int, creation : Int }
+  -- `binding` is the link's control-connection handshake transcript
+  -- (`NetKernel.link_binding`; empty in pure tests), which a CERT_UPDATE's
+  -- proof covers; `cu_sent`/`cu_seen` count the CERT_UPDATEs sent and the
+  -- newest taken on this link, so one is good on this link once only.
+  type CnLink = { node_id : String, gen : Int, cfd : Int, dfd : Int, dialer : String, cw : Int, creation : Int,
+                  binding : Bytes, cu_sent : Int, cu_seen : Int }
 
   -- A half-assembled inbound pair: the control and data connections of one
   -- peer arrive as two accepts, in either order (each is handshaked in its
@@ -574,12 +579,15 @@ mod ClusterNode do
   -- it -- but re-authenticated in place: the node sends each linked peer a
   -- CERT_UPDATE control frame (tag 16) with the new certificate and a proof,
   -- an ed25519 signature by the NEW certificate's key over (sender, receiver,
-  -- certificate). The frame rides the link's MAC, so only the peer that did
-  -- the link's handshake can send it; the proof shows that peer holds the
+  -- the link's handshake transcript, a per-link counter, certificate). The
+  -- frame rides the link's MAC, so only the peer that did the link's
+  -- handshake can send it, and the binding keeps it good on that link
+  -- only, once (see below); the proof shows that peer holds the
   -- new key, so a certificate for a new key (a rotation after a key leak)
   -- is as safe to take in place as a renewal of the same key. The receiver
   -- checks it as a handshake would -- operator's signature, not expired, not
-  -- revoked, and naming the same node -- and then holds it for that link:
+  -- revoked, and naming the same node -- and that it is not issued before
+  -- the certificate it replaces, and then holds it for that link:
   -- the per-tick expiry recheck, `peer_cert` and the raw-send and role
   -- checks all read the new one, so the link outlives the old certificate.
   -- A refused update changes nothing (the old certificate expires as it
@@ -590,35 +598,67 @@ mod ClusterNode do
 
   fn tag_cert_update() : Int do 16 end
 
-  doc "What a CERT_UPDATE's proof signs: the sender, the receiver and the certificate's wire bytes."
-  fn cert_update_message(signed : NodeCert.Signed, from_id : String, to_id : String) : Bytes do
-    Bytes.concat(Bytes.from_string("march-cert-update-v1 " ++ from_id ++ " " ++ to_id ++ " "),
+  -- The proof is bound to the LINK (security review, dd step 12b): it also
+  -- covers the link's control-connection handshake transcript (both
+  -- hellos, so both nonces and both ephemeral keys: no two links share one)
+  -- and a counter the sender raises on every update it sends on that link.
+  -- The receiver takes an update only on the link it was made for, and only
+  -- with a counter above the last it took there, so a frame recorded on one
+  -- link (frames are MAC'd, not encrypted) is refused on any other, and one
+  -- recorded earlier on the same link is refused there too. Without the
+  -- binding, a holder of a leaked OLD key could handshake under the old
+  -- certificate and replay the node's recorded update to the new one, and
+  -- the old certificate's revocation would no longer drop that link.
+  -- The v1 frame ([16, cert, proof], no binding) is refused: a peer that
+  -- predates the binding falls back to the redial at the old certificate's
+  -- expiry, as one that predates CERT_UPDATE does.
+
+  doc """
+  What a CERT_UPDATE's proof signs: the sender, the receiver, the link's
+  handshake transcript [binding], the update's [counter] on that link, and
+  the certificate's wire bytes.
+  """
+  fn cert_update_message(signed : NodeCert.Signed, from_id : String, to_id : String, binding : Bytes, counter : Int) : Bytes do
+    Bytes.concat(Bytes.concat(Bytes.from_string("march-cert-update-v2 " ++ from_id ++ " " ++ to_id ++ " " ++ int_to_string(counter) ++ " "),
+                              Bytes.from_string(Bytes.to_hex(binding) ++ " ")),
                  Bytes.from_list(NodeCert.to_bytes(signed)))
   end
 
-  fn encode_cert_update(signed : NodeCert.Signed, proof : Bytes) : List(Int) do
-    Msgpack.encode(Msgpack.array([Msgpack.int(tag_cert_update()), Msgpack.bin(NodeCert.to_bytes(signed)),
-                                  Msgpack.bin(Bytes.to_list(proof))]))
+  fn encode_cert_update(signed : NodeCert.Signed, counter : Int, proof : Bytes) : List(Int) do
+    Msgpack.encode(Msgpack.array([Msgpack.int(tag_cert_update()), Msgpack.str("v2"), Msgpack.int(counter),
+                                  Msgpack.bin(NodeCert.to_bytes(signed)), Msgpack.bin(Bytes.to_list(proof))]))
   end
 
-  fn decode_cert_update(frame : List(Int)) : Result((NodeCert.Signed, Bytes), String) do
+  doc "A CERT_UPDATE frame's certificate, counter and proof."
+  fn decode_cert_update(frame : List(Int)) : Result((NodeCert.Signed, Int, Bytes), String) do
     match Msgpack.decode(frame) do
-      Ok(Msgpack.Array([Msgpack.Int(16), Msgpack.Bin(cb), Msgpack.Bin(pb)])) ->
-        match NodeCert.from_bytes(cb) do
-          Err(e) -> Err(e)
-          Ok(signed) -> Ok((signed, Bytes.from_list(pb)))
+      Ok(Msgpack.Array([Msgpack.Int(16), Msgpack.Str(v), Msgpack.Int(n), Msgpack.Bin(cb), Msgpack.Bin(pb)])) ->
+        if v != "v2" do Err("malformed CERT_UPDATE frame")
+        else
+          match NodeCert.from_bytes(cb) do
+            Err(e) -> Err(e)
+            Ok(signed) -> Ok((signed, n, Bytes.from_list(pb)))
+          end
         end
+      Ok(Msgpack.Array(items)) ->
+        if List.length(items) == 3 do Err("a CERT_UPDATE not bound to this link (v1): refused")
+        else Err("malformed CERT_UPDATE frame") end
       _ -> Err("malformed CERT_UPDATE frame")
     end
   end
 
-  doc "The CERT_UPDATE frame node [from_id] sends [to_id]: [signed], with a proof by its key [sk]."
-  fn sign_cert_update(signed : NodeCert.Signed, sk : Bytes, from_id : String, to_id : String) : List(Int) do
-    encode_cert_update(signed, ed25519_sign(sk, cert_update_message(signed, from_id, to_id)))
+  doc """
+  The CERT_UPDATE frame node [from_id] sends [to_id] on the link whose
+  handshake transcript is [binding], as its [counter]th update there:
+  [signed], with a proof by its key [sk].
+  """
+  fn sign_cert_update(signed : NodeCert.Signed, sk : Bytes, from_id : String, to_id : String,
+                      binding : Bytes, counter : Int) : List(Int) do
+    encode_cert_update(signed, counter, ed25519_sign(sk, cert_update_message(signed, from_id, to_id, binding, counter)))
   end
 
-  pfn cert_update_for(st : CnState, creds : NodeCert.Credentials, to_id : String) : List(Int) do
-    sign_cert_update(creds.signed, creds.secret_key, st.me, to_id)
+  pfn cert_update_on(l : CnLink, creds : NodeCert.Credentials, me : String, counter : Int) : List(Int) do
+    sign_cert_update(creds.signed, creds.secret_key, me, l.node_id, l.binding, counter)
   end
 
   doc """
@@ -632,28 +672,45 @@ mod ClusterNode do
       ClusterAuth.Certified(cr) ->
         let creds = { cr with signed: signed, secret_key: sk }
         let st1 = { st with cfg: { st.cfg with auth: ClusterAuth.Certified(creds) }, rotated: true }
-        let out = (st1, List.map(linked_ids(st1), fn id -> Send(id, cert_update_for(st1, creds, id))))
-        out
+        send_cert_updates(st1, creds)
     end
+  end
+
+  pfn put_link(st : CnState, l : CnLink) : CnState do
+    { st with links: Map.insert(st.links, l.node_id, l, Map.str_cmp) }
+  end
+
+  -- Send every linked peer the next CERT_UPDATE on its link.
+  pfn send_cert_updates(st : CnState, creds : NodeCert.Credentials) : (CnState, List(CnEffect)) do
+    List.fold_left(Map.entries(st.links), (st, Nil), fn (acc, kv) ->
+      match (acc, kv) do
+        ((s, effs), (id, l)) ->
+          let n = l.cu_sent + 1
+          let frame = cert_update_on(l, creds, s.me, n)
+          (put_link(s, { l with cu_sent: n }), Cons(Send(id, frame), effs))
+      end)
   end
 
   doc """
   A CERT_UPDATE from linked peer [from], at [now_s] (unix seconds): the
   certificate must verify under the operator key, be unexpired and not
-  revoked, name the same node as the one [from] presented before, and come
-  with a proof by its own key for this sender and receiver. Ok with the new
-  state (holding it as [from]'s certificate) and the certificate, or Err with
-  why it was refused.
+  revoked, name the same node as the one [from] presented before, not be
+  issued before it (`NodeCert.supersedes`), and come with a proof by its own
+  key for this sender and receiver, THIS link's handshake transcript and a
+  counter above the last update taken on this link. Ok with the new state
+  (holding it as [from]'s certificate) and the certificate, or Err with why
+  it was refused.
   """
   fn core_peer_cert_update(st : CnState, from : String, frame : List(Int), now_s : Int)
       : Result((CnState, NodeCert.Cert), String) do
-    match (operator_key(st.cfg), Map.get(st.certs, from, Map.str_cmp)) do
-      (None, _) -> Err("this node runs in shared-secret mode")
-      (_, None) -> Err("no certificate on record for this peer")
-      (Some(op), Some(old)) ->
+    match (operator_key(st.cfg), Map.get(st.certs, from, Map.str_cmp), Map.get(st.links, from, Map.str_cmp)) do
+      (None, _, _) -> Err("this node runs in shared-secret mode")
+      (_, None, _) -> Err("no certificate on record for this peer")
+      (_, _, None) -> Err("no link to this peer")
+      (Some(op), Some(old), Some(l)) ->
         match decode_cert_update(frame) do
           Err(e) -> Err(e)
-          Ok((signed, proof)) ->
+          Ok((signed, counter, proof)) ->
             match NodeCert.verify(signed, op, now_s) do
               Err(e) -> Err(e)
               Ok(c) ->
@@ -661,13 +718,19 @@ mod ClusterNode do
                 else if NodeCert.node_name(c.node) != NodeCert.node_name(old.node) do
                   Err("the new certificate names " ++ c.node ++ ", not " ++ old.node)
                 else
-                  match NodeCert.key_from_hex(c.pubkey, 32) do
-                    Err(e) -> Err(e)
-                    Ok(pk) ->
-                      if ed25519_verify(pk, cert_update_message(signed, from, st.me), proof) do
-                        let out = Ok(({ st with certs: Map.insert(st.certs, from, c, Map.str_cmp) }, c))
+                  match (NodeCert.order_problem(c, old), NodeCert.key_from_hex(c.pubkey, 32)) do
+                    (Some(why), _) -> Err(why)
+                    (_, Err(e)) -> Err(e)
+                    (None, Ok(pk)) ->
+                      if not(ed25519_verify(pk, cert_update_message(signed, from, st.me, l.binding, counter), proof)) do
+                        Err("the proof is not by the new certificate's key for this link")
+                      else if counter <= l.cu_seen do
+                        Err("a CERT_UPDATE already taken on this link (counter " ++ int_to_string(counter) ++ "): refused")
+                      else
+                        let st1 = put_link({ st with certs: Map.insert(st.certs, from, c, Map.str_cmp) }, { l with cu_seen: counter })
+                        let out = Ok((st1, c))
                         out
-                      else Err("the proof is not by the new certificate's key") end
+                      end end
                   end
                 end end
             end
@@ -924,8 +987,15 @@ mod ClusterNode do
   """
   fn core_linked(st : CnState, id : String, name : String, addr : String, creation : Int,
                  cfd : Int, dfd : Int, dialer : String, cw : Int) : (CnState, List(CnEffect)) do
+    core_linked_bound(st, id, name, addr, creation, cfd, dfd, dialer, cw, Bytes.empty())
+  end
+
+  doc "`core_linked`, for a link whose control-connection handshake transcript is [binding] (`NetKernel.link_binding`)."
+  fn core_linked_bound(st : CnState, id : String, name : String, addr : String, creation : Int,
+                       cfd : Int, dfd : Int, dialer : String, cw : Int, binding : Bytes) : (CnState, List(CnEffect)) do
     let gen = st.gen + 1
-    let l = { node_id: id, gen: gen, cfd: cfd, dfd: dfd, dialer: dialer, cw: cw, creation: creation }
+    let l = { node_id: id, gen: gen, cfd: cfd, dfd: dfd, dialer: dialer, cw: cw, creation: creation,
+              binding: binding, cu_sent: 0, cu_seen: 0 }
     let st1 = { st with gen: gen }
     let (st2, drops) = match Map.get(st1.links, id, Map.str_cmp) do
       None -> (st1, Nil)
@@ -952,7 +1022,15 @@ mod ClusterNode do
         None -> 0
       end
       let obs = Membership.member(id, name, addr, creation, Alive, known_incarnation)
-      let st3 = queue({ st2 with links: Map.insert(st2.links, id, l, Map.str_cmp),
+      -- After a replacement the handshake may have begun under the old
+      -- certificate: tell the peer the current one (the link's first
+      -- CERT_UPDATE).
+      let (l2, certsync) = match st2.cfg.auth do
+        ClusterAuth.Certified(cr) ->
+          if st2.rotated do ({ l with cu_sent: 1 }, Cons(Send(id, cert_update_on(l, cr, st2.me, 1)), Nil)) else (l, Nil) end
+        ClusterAuth.Secret(_) -> (l, Nil)
+      end
+      let st3 = queue({ st2 with links: Map.insert(st2.links, id, l2, Map.str_cmp),
                                  cert_dead: Map.remove(st2.cert_dead, id, Map.str_cmp),
                                  backoff: Map.remove(st2.backoff, addr, Map.str_cmp),
                                  dialing: Map.remove(st2.dialing, addr, Map.str_cmp) },
@@ -960,13 +1038,7 @@ mod ClusterNode do
       let sync = SwimDriver.encode_members_sync(List.append(core_members(st3), Cons(obs, Nil)))
       let regsync = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st3.reg), GlobalRegistry.all_entries(st3.reg))
       let revsync = if List.is_empty(st3.revs) do Nil else Cons(Send(id, encode_revocations(st3.revs)), Nil) end
-      -- After a replacement the handshake may have begun under the old
-      -- certificate: tell the peer the current one.
-      let certsync = match st3.cfg.auth do
-        ClusterAuth.Certified(cr) -> if st3.rotated do Cons(Send(id, cert_update_for(st3, cr, id)), Nil) else Nil end
-        ClusterAuth.Secret(_) -> Nil
-      end
-      let out = (st3, List.append(drops, Cons(Install(l), Cons(Send(id, sync), Cons(Send(id, regsync), List.append(revsync, certsync))))))
+      let out = (st3, List.append(drops, Cons(Install(l2), Cons(Send(id, sync), Cons(Send(id, regsync), List.append(revsync, certsync))))))
       out
     else
       (st2, drops)
@@ -980,11 +1052,17 @@ mod ClusterNode do
   """
   fn core_dialed(st : CnState, dialed : String, id : String, name : String, peer_addr : String,
                  creation : Int, cfd : Int, dfd : Int, cw : Int) : (CnState, List(CnEffect)) do
+    core_dialed_bound(st, dialed, id, name, peer_addr, creation, cfd, dfd, cw, Bytes.empty())
+  end
+
+  doc "`core_dialed`, for a link whose control-connection handshake transcript is [binding] (`NetKernel.link_binding`)."
+  fn core_dialed_bound(st : CnState, dialed : String, id : String, name : String, peer_addr : String,
+                       creation : Int, cfd : Int, dfd : Int, cw : Int, binding : Bytes) : (CnState, List(CnEffect)) do
     let a = if String.is_empty(peer_addr) do dialed else peer_addr end
     let st1 = { st with seed_ids: Map.insert(st.seed_ids, dialed, id, Map.str_cmp),
                         dialing: Map.remove(st.dialing, dialed, Map.str_cmp),
                         backoff: Map.remove(st.backoff, dialed, Map.str_cmp) }
-    core_linked(st1, id, name, a, creation, cfd, dfd, st1.me, cw)
+    core_linked_bound(st1, id, name, a, creation, cfd, dfd, st1.me, cw, binding)
   end
 
   doc "A dial of [addr] reached this node itself (a seed list naming us): never dial it again."
@@ -1568,7 +1646,7 @@ mod ClusterNode do
       if state.started do
         let cw = start_writers(state.h, cfd, dfd)
         let st1 = core_peer_cert(state.st, id, cert)
-        step_io(st1, state.h, core_dialed(st1, addr, id, name, peer_addr, creation, cfd, dfd, cw), state.started)
+        step_io(st1, state.h, core_dialed_bound(st1, addr, id, name, peer_addr, creation, cfd, dfd, cw, NetKernel.link_binding(cfd)), state.started)
       else
         tcp_close(cfd)
         tcp_close(dfd)
@@ -1779,7 +1857,7 @@ mod ClusterNode do
     if hf.cfd >= 0 && hf.dfd >= 0 do
       let st1 = { st with halves: Map.remove(st.halves, id, Map.str_cmp) }
       let cw = start_writers(h, hf.cfd, hf.dfd)
-      step_io(st1, h, core_linked(st1, id, hf.name, hf.addr, hf.creation, hf.cfd, hf.dfd, id, cw), true)
+      step_io(st1, h, core_linked_bound(st1, id, hf.name, hf.addr, hf.creation, hf.cfd, hf.dfd, id, cw, NetKernel.link_binding(hf.cfd)), true)
     else
       { st: { st with halves: Map.insert(st.halves, id, hf, Map.str_cmp) }, h: h, started: true }
     end
@@ -2884,7 +2962,10 @@ mod ClusterNode do
 
   -- The current credentials, and the new certificate and key once they
   -- admit this node: the operator's signature, unexpired, naming this node
-  -- and the key, not revoked. [key_hex] "" keeps the current key.
+  -- and the key, not revoked, and not issued before the certificate in use
+  -- (`NodeCert.supersedes`: a replayed, superseded certificate is refused,
+  -- across restarts too, since the node starts on the certificate it last
+  -- took). [key_hex] "" keeps the current key.
   pfn replace_checked(h : CnHandle, cert_text : String, key_hex : String)
       : Result((NodeCert.Credentials, NodeCert.Signed, Bytes), String) do
     let cur = match h_auth(h, ClusterAuth.Secret("")) do
@@ -2913,8 +2994,12 @@ mod ClusterNode do
                   else if cr.revoked(c) do
                     Err("cluster_node: the new certificate is revoked")
                   else
-                    let out = Ok((cr, signed, sk))
-                    out
+                    match NodeCert.order_problem(c, cr.signed.cert) do
+                      Some(why) -> Err("cluster_node: the new certificate: " ++ why)
+                      None ->
+                        let out = Ok((cr, signed, sk))
+                        out
+                    end
                   end end end
               end
           end
