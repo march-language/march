@@ -1985,6 +1985,15 @@ let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op sch
   PDeclare "march_simd_lane_panic";
 ]
 
+(** Sanitizer builds (MARCH_SANITIZE) run the runtime with -DMARCH_RC_CHECKS,
+    and the emitter then adds the checks that need compiled-code cooperation:
+    the TRMC hole fill verifies the slot it fills is still null
+    ([march_hole_fill_check], runtime/march_runtime.c).  Set by bin/main.ml
+    from the same predicate as the sanitize CAS tag, so the IR and the
+    runtime it links always agree; re-exported as [Llvm_toplevel.rc_checks].
+    Lives here because the preamble below declares the check. *)
+let rc_checks = ref false
+
 (** Emit the LLVM preamble (`declare`d externs for every builtin/runtime
     C symbol) to [buf].  Mirrors llvm_emit.ml's former hand-written
     structure exactly: [core_items] on every target; [native_actor_items]
@@ -1999,6 +2008,8 @@ let emit_preamble ~(is_wasm : bool) ~(triple : string) ?(repl = false) (buf : Bu
   Buffer.add_string buf
     (Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" triple);
   render_items buf core_items;
+  if !rc_checks && not is_wasm then
+    Buffer.add_string buf "declare void @march_hole_fill_check(ptr %cell, i64 %field, ptr %prev)\n";
   if not is_wasm then begin
     render_items buf native_actor_items;
     (* In REPL mode the reduction check is skipped, so march_tls_reductions and

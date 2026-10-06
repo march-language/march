@@ -19,6 +19,19 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`--rc-trace`: leak reports that name the function.** A program built with
+  `march --rc-trace` (or `MARCH_RC_TRACE=1`) tags every runtime call it makes
+  with a site id, so the `MARCH_TRACE_GC=1` trace now records *who* allocated,
+  retained and released each object; the new `scripts/gc-trace-report.py`
+  folds the trace into per-object histories and prints every object still live
+  at exit with its type, allocation site and each inc/dec as
+  `<fn>#<ordinal>:<runtime callee>`, plus any count that went negative or was
+  freed twice and a per-site summary. String allocations are traced too (they
+  were not before), string-literal cells are reported as immortal rather than
+  leaked, and `kill -USR2` flushes a live process's trace. Release builds are
+  byte-identical with the switch off. `MARCH_SANITIZE=1` builds additionally
+  abort on a `march_free` of a shared object and on a TRMC hole fill that finds
+  its slot already written.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
