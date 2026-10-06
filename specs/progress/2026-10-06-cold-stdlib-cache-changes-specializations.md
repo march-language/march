@@ -44,3 +44,18 @@ mono sees a different type at `Topology.offer_actor_role`'s call site.
 Acceptance: two compiles of the same input, one cold and one warm, produce
 byte-identical `.hcr_manifest` function lists and `--emit-llvm` IR; drop the
 warm-up compile in forge/test/test_hcr_manifest_diff.ml.
+
+## Resolution (2026-10-06)
+
+Fixed by 5864ef0d1 (specs/progress/2026-10-05-cold-vs-warm-home-cache-tir-divergence.md):
+on a cache miss `get_stdlib_tc_env` returned the live stdlib env, whose
+`type_map` shares tvar cells with it, so the entry module's call linked
+`Topology.offer_actor_role`'s `Pid(a)` to the app's actor type and lowering
+kept an extra specialisation. A miss now decodes the same bytes a hit reads.
+That change left this todo open and the warm-up compile in
+forge/test/test_hcr_manifest_diff.ml in place; the warm-up is now dropped,
+and the test passes without it (all three cases).
+
+Why `a` was free to be linked at all (it flows into a `Vault`, so it is not
+generalised) is filed separately as
+specs/todos/2026-10-05-vault-pid-param-not-generalised.md.
