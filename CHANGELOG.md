@@ -173,6 +173,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
+  install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
+  source needed no changes. The REPL's `notty` dependency (0.2.3 does not
+  compile on OCaml 5.4+) is now vendored from the community fork under
+  `vendor/notty/` until a fixed release is on opam, and the `js_of_ocaml < 6.4.0`
+  cap is lifted (6.4.1 compiles the browser bundle). Compiler speed is unchanged
+  within noise.
 - **Faster `--compile` once whole-program optimisation is done.** Two lookups
   that scanned every definition in the program (stdlib included) for each name
   reference, one in the CAS dependency hashing and one in the allocation-contract
