@@ -52,6 +52,27 @@
     CAS hash. *)
 let is_clo_name = Tir_names.is_clo_struct
 
+let rec has_tvar (t : Tir.ty) : bool =
+  match t with
+  | Tir.TVar _ -> true
+  | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TString | Tir.TUnit -> false
+  | Tir.TTuple ts | Tir.TCon (_, ts) -> List.exists has_tvar ts
+  | Tir.TRecord fs -> List.exists (fun (_, t) -> has_tvar t) fs
+  | Tir.TFn (ps, r) -> List.exists has_tvar ps || has_tvar r
+  | Tir.TPtr t -> has_tvar t
+
+(** True when an apply function's signature is concrete: no [TVar] in its
+    return type or any parameter after the opaque [$clo] pointer. A
+    let-generalized lambda (`let keep = fn (p, x) -> p`) keeps [TVar]
+    parameters after Mono, and its Float arguments and result cross erased
+    (boxed). *)
+let concrete_apply_sig (fd : Tir.fn_def) : bool =
+  match fd.Tir.fn_params with
+  | _clo :: rest ->
+    not (has_tvar fd.Tir.fn_ret_ty)
+    && not (List.exists (fun (p : Tir.var) -> has_tvar p.Tir.v_ty) rest)
+  | [] -> false
+
 (** Environment: maps local variable name → apply function name. *)
 type clo_env = (string * string) list
 
@@ -88,7 +109,39 @@ let shadowing (self : self_clo) (names : string list) : self_clo =
   | Some (clo_param, _) when List.exists (String.equal clo_param) names -> None
   | s -> s
 
-let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = function
+(** The direct call replacing [ECallPtr(AVar v, args)].  The apply function
+    takes ($clo, original_params...); we pass [AVar v] as the first argument
+    (the closure pointer itself).
+
+    The callee var is typed [TPtr TUnit] (codegen reads an apply fn's
+    signature from its definition), EXCEPT for an apply fn in [erased]: there
+    it carries [TFn ($clo :: arg types, ret)], [ret] being the type the
+    enclosing expression gives the call's result (the [let] binder it flows
+    into, or the function's return type in tail position).  An erased apply fn returns its result in
+    the generic ptr slot, and a Float result comes back as a box only this
+    call site holds; codegen releases it ([erased_float_return] in
+    [Llvm_emit_call.emit_generic_app]) only when the call-site type says
+    Float, and the var's type is the only call-site type an [EApp] has.
+    Before, `let keep = fn (p, x) -> p` called directly with Float arguments
+    leaked one box per call
+    (specs/progress/2026-10-02-known-call-generic-lambda-float-leak.md). *)
+let known_app ~(erased : (string, unit) Hashtbl.t) ~(ret : Tir.ty)
+    (v : Tir.var) (apply_name : string) (args : Tir.atom list) : Tir.expr =
+  let v_ty =
+    if Hashtbl.mem erased apply_name then
+      Tir.TFn (Tir.TPtr Tir.TUnit :: List.map Mono.atom_ty args, ret)
+    else Tir.TPtr Tir.TUnit
+  in
+  let apply_var = { Tir.v_name = apply_name; v_ty; v_lin = Tir.Unr } in
+  Tir.EApp (apply_var, Tir.AVar v :: args)
+
+(** [erased] holds the apply functions whose signature is not concrete
+    ([concrete_apply_sig]); [ret] is the type of the expression being
+    traversed (see [known_app]). *)
+let rec go ~changed ~(erased : (string, unit) Hashtbl.t) ~(ret : Tir.ty)
+    ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr =
+  let go = go ~erased in
+  function
 
   (* ── Track closure allocations ──────────────────────────────────────── *)
   (* ELet(v, EAlloc("$Clo_...", AVar(apply_fn) :: fv_atoms), body) *)
@@ -97,7 +150,7 @@ let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = 
       body)
     when is_clo_name clo_name ->
     let env' = (v.Tir.v_name, fn_ptr.Tir.v_name) :: env in
-    Tir.ELet (v, rhs, go ~changed ~self:(shadowing self [v.Tir.v_name]) env' body)
+    Tir.ELet (v, rhs, go ~changed ~ret ~self:(shadowing self [v.Tir.v_name]) env' body)
 
   (* Same but for stack-promoted closures (after Escape analysis). *)
   | Tir.ELet (v,
@@ -105,7 +158,7 @@ let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = 
       body)
     when is_clo_name clo_name ->
     let env' = (v.Tir.v_name, fn_ptr.Tir.v_name) :: env in
-    Tir.ELet (v, rhs, go ~changed ~self:(shadowing self [v.Tir.v_name]) env' body)
+    Tir.ELet (v, rhs, go ~changed ~ret ~self:(shadowing self [v.Tir.v_name]) env' body)
 
   (* ── Track the SELF-binding of a local recursive fn ─────────────────── *)
   (* Defun lifts `fn go(...) ... go(...) ... end` to an apply function whose
@@ -132,45 +185,46 @@ let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = 
           | None -> false) ->
     let apply_name = match self with Some (_, n) -> n | None -> assert false in
     let env' = (v.Tir.v_name, apply_name) :: env in
-    Tir.ELet (v, rhs, go ~changed ~self:(shadowing self [v.Tir.v_name]) env' body)
+    Tir.ELet (v, rhs, go ~changed ~ret ~self:(shadowing self [v.Tir.v_name]) env' body)
 
   (* ── Convert known ECallPtr to direct EApp ──────────────────────────── *)
   | Tir.ECallPtr (Tir.AVar v, args) ->
     (match List.assoc_opt v.Tir.v_name env with
      | Some apply_name ->
        changed := true;
-       (* The apply function takes ($clo, original_params...).
-          We pass AVar v as the first argument (the closure pointer itself). *)
-       let apply_var = { Tir.v_name = apply_name;
-                         v_ty = Tir.TPtr Tir.TUnit;
-                         v_lin = Tir.Unr } in
-       Tir.EApp (apply_var, Tir.AVar v :: args)
+       known_app ~erased ~ret v apply_name args
      | None -> Tir.ECallPtr (Tir.AVar v, args))
 
   (* ── Recursive traversal ────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
     (* The binder scopes over the BODY only, so [rhs] keeps the outer pair. *)
-    Tir.ELet (v, go ~changed ~self env rhs,
-              go ~changed ~self:(shadowing self [v.Tir.v_name]) env body)
+    Tir.ELet (v, go ~changed ~ret:v.Tir.v_ty ~self env rhs,
+              go ~changed ~ret ~self:(shadowing self [v.Tir.v_name]) env body)
   | Tir.ELetRec (fns, body) ->
     Tir.ELetRec (
       List.map (fun fd ->
         let self = shadowing self
           (List.map (fun p -> p.Tir.v_name) fd.Tir.fn_params) in
-        { fd with Tir.fn_body = go ~changed ~self env fd.Tir.fn_body }) fns,
-      go ~changed ~self env body)
+        { fd with Tir.fn_body =
+                     go ~changed ~ret:fd.Tir.fn_ret_ty ~self env fd.Tir.fn_body })
+        fns,
+      go ~changed ~ret ~self env body)
   | Tir.ECase (a, branches, default) ->
     Tir.ECase (a,
       List.map (fun b ->
         let self = shadowing self
           (List.map (fun v -> v.Tir.v_name) b.Tir.br_vars) in
-        { b with Tir.br_body = go ~changed ~self env b.Tir.br_body }) branches,
-      Option.map (go ~changed ~self env) default)
+        { b with Tir.br_body = go ~changed ~ret ~self env b.Tir.br_body }) branches,
+      Option.map (go ~changed ~ret ~self env) default)
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (go ~changed ~self env e1, go ~changed ~self env e2)
+    Tir.ESeq (go ~changed ~ret:Tir.TUnit ~self env e1, go ~changed ~ret ~self env e2)
   | other -> other
 
 let run ~changed (m : Tir.tir_module) : Tir.tir_module =
+  let erased = Hashtbl.create 16 in
+  List.iter (fun fd ->
+    if Tir_names.is_apply_fn fd.Tir.fn_name && not (concrete_apply_sig fd) then
+      Hashtbl.replace erased fd.Tir.fn_name ()) m.Tir.tm_fns;
   { m with Tir.tm_fns = List.map (fun fd ->
     let self =
       if Tir_names.is_apply_fn fd.Tir.fn_name then
@@ -179,5 +233,5 @@ let run ~changed (m : Tir.tir_module) : Tir.tir_module =
         | [] -> None
       else None
     in
-    { fd with Tir.fn_body = go ~changed ~self [] fd.Tir.fn_body }
+    { fd with Tir.fn_body = go ~changed ~erased ~ret:fd.Tir.fn_ret_ty ~self [] fd.Tir.fn_body }
   ) m.Tir.tm_fns }

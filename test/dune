@@ -12037,6 +12037,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/dropped_closure_captures.expected native_dropped_closure_captures.out)))
+
+; ── Records released on every path; nominal records and hashed strings deep
+; (2026-10-06). Four per-session leaks of the cluster node in their minimal
+; shapes; RED before the fixes on legs 1, 2, 3 and 4 respectively.
+(rule
+ (targets native_record_ownership_drops native_record_ownership_drops.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_ownership_drops.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_record_ownership_drops
+        native/record_ownership_drops.march)
+   (with-stdout-to native_record_ownership_drops.out
+        (system "./native_record_ownership_drops")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_ownership_drops.expected native_record_ownership_drops.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),
