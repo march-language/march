@@ -702,6 +702,22 @@ let parametric_return ~(entry_of : A.expr -> (string * elem option list) option)
      predicates mention nothing but their own binder.
 
    Anything else carries nothing. *)
+(* Does an element entry's predicate apply any of [names]?  An entry naming a
+   callee's abstract refinement (`{a | p(_)}`) is not a fact at a call site:
+   `p` means something different at every call and is instantiated there, by
+   [abstract_flow], never read from the declaration.  It matters most when the
+   CALLER declares an abstract refinement of the same name: [abstract_tyvar_slot]
+   then admits the callee's slot, and the caller would read the callee's `p`
+   as its own. *)
+let entry_mentions (names : string list) ((_, slots) : string * elem option list) : bool =
+  let rec slot = function
+    | None -> false
+    | Some (Refined (_, p, _)) ->
+      List.exists (fun (n, _, _) -> List.mem n names) (Refine_abstract.applications p)
+    | Some (Container (_, inner)) -> List.exists slot inner
+  in
+  names <> [] && List.exists slot slots
+
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
   : (string * elem option list) option =
   match e with
@@ -746,7 +762,10 @@ and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
       (match Hashtbl.find_opt fn_defs_tbl key with
        | Some (_, fd) ->
          (match elem_refinement fd.A.fn_ret_ty with
-          | Some entry when entry_is_closed entry -> Some entry
+          | Some entry
+            when entry_is_closed entry
+                 && not (entry_mentions (callee_abstracts ctx fname) entry) ->
+            Some entry
           | _ -> None)
        | None -> None)
     | _ -> None

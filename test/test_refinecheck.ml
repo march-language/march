@@ -17617,7 +17617,41 @@ end|}
         Alcotest.(check (option string)) "base" (Some "a")
           (March_refinecheck.Refine_abstract.positive_base ~is_known fd "p");
         Alcotest.(check (option int)) "not abstract" None
-          (March_refinecheck.Refine_abstract.definer_index ~is_known fd "q")) ]
+          (March_refinecheck.Refine_abstract.definer_index ~is_known fd "q"));
+
+    (* A caller that declares its OWN abstract refinement `p` must not read a
+       callee's `{a | p(_)}` as its own `p`: they are different predicates
+       that share a name.  `g` returns every element of `ys` (the lambda
+       keeps all), which says nothing about g's `p`, so g's element return
+       must NOT prove. *)
+    gated "a callee's p(_) is not the caller's p" (fun () ->
+        let src =
+          "mod SN do\n" ^ ar2_filt
+          ^ {|  fn g(ys : List(a), k : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do
+    filt(ys, fn y -> true)
+  end
+end|}
+        in
+        (* g's tail shares the label `filt(…)` with filt's own (legitimately
+           proved) recursive tails, so pick g's out by its source line. *)
+        let line_of needle =
+          let rec find i = if String.sub src i (String.length needle) = needle then i else find (i + 1) in
+          let k = find 0 in
+          1 + List.length (List.filter (fun c -> c = '\n') (List.init k (String.get src)))
+        in
+        let gl = line_of "filt(ys, fn y -> true)" in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_typed src);
+        let at_g =
+          List.filter_map
+            (fun (o : March_refinecheck.Obligation.t) ->
+              if o.March_refinecheck.Obligation.span.March_ast.Ast.start_line = gl then
+                Some (March_refinecheck.Obligation.verdict_name o.March_refinecheck.Obligation.verdict)
+              else None)
+            (March_refinecheck.Obligation.all ())
+        in
+        Alcotest.(check bool) "g's tail has an obligation" true (at_g <> []);
+        Alcotest.(check bool) "and it is not proved" false (List.mem "proved" at_g)) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
