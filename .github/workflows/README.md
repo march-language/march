@@ -6,8 +6,8 @@ which incident a check exists for); this page is the map.
 
 **Runner budget.** The `march-language` org is on GitHub's free plan: at most
 **20 concurrent Linux jobs and 5 concurrent macOS jobs across the whole org**.
-One `CI` run asks for 29 jobs (23 Linux, 6 macOS), about 224 Linux and 57
-macOS job-minutes, so runs from different PRs queue behind each other. What
+One `CI` run asks for 26 jobs (20 Linux, 6 macOS), about 370 Linux and 88
+macOS job-minutes (measured 2026-10-07, before the in-job parallelism of PR #859), so runs from different PRs queue behind each other. What
 costs queue time is job-minutes on each pool, not job count: splitting a job
 only pays if the pieces add up to about the same minutes. On macOS they did not
 (one 32 min `dune runtest` became 67 min across four shards), so macOS runs the
@@ -65,7 +65,7 @@ ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir
                              │                                                    └─ property-coverage
              ubuntu leg only ├─ cross-linux-oracle
                              ├─ determinism
-                             └─ property-oracle × 8
+                             └─ property-oracle × 2
 ```
 
 | Job | What it checks | If it's red |
@@ -84,7 +84,7 @@ ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir
 | `ocaml-build (<os>)` | Builds the compiler and oracle binaries once and uploads them for the jobs below. | A build break; everything downstream is skipped. |
 | `property-tests (<os>, <shard>)` | QCheck property groups from `test/test_properties.ml`, split into three shards, on both OSes (macOS matters: signal/segfault classification differs). | Shrunk counterexample is in the log. |
 | `property-coverage` | Asserts the three shards together cover every property group, so a new group can't silently run nowhere. | Add the group to a shard's filter in `ci.yml`. |
-| `property-oracle` × 8 | The differential oracle: ~1090 generated programs, interpreted vs compiled, outputs must match. | An interpreter/compiler divergence; the log has the program. |
+| `property-oracle` × 2 | The differential oracle: ~1090 generated programs, interpreted vs compiled, outputs must match. Eight case lists, four running side by side on each runner (one list is one sequential process; one per runner left three cores idle). | An interpreter/compiler divergence; the log has the program. |
 | `cross-linux-oracle` | Cross-compiles the golden corpus to linux/amd64 with `zig cc` and checks output is byte-identical to the native build. | A cross-compilation or target-flag regression. |
 | `determinism` | `scripts/determinism-oracle.sh --corpus all`: every program in the IR-oracle corpus compiled with `--emit-llvm --dump-impl-hashes` under a cold and a warm private `$HOME`, from two cwds; the `.ll` and `.hashes` must be byte-identical across all four. Runs `--self-test` first (a perturbed stdlib copy must make it red). | Compiler output depends on cache state or cwd (a fresh-name counter, Hashtbl order, or a cached-vs-fresh stdlib difference, cf. PRs #805/#807). The log names the program, the condition pair and the first differing line; rerun locally with `scripts/determinism-oracle.sh -w <dir>` and diff `out/<tag>/{1,2,3,4}.ll`. A red self-test means the oracle itself is broken. |
 
