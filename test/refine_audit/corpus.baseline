@@ -436,6 +436,8 @@ native_option_niche: coverage audit (user + stdlib): 126 enforced, 0 inert (warn
 native_option_niche: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_or_pattern: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_or_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_owned_call_drop_fusion: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
+native_owned_call_drop_fusion: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_peak_rss: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_peak_rss: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_peer_reader_loopback: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced

@@ -10892,6 +10892,52 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r allocs tip < static_nullary_ctor_llvm_check.out; \
     test \"$allocs\" -eq 1 -a \"$tip\" -eq 1 || { echo \"expected make to call march_alloc once (the Fork) and one static Tip cell (found allocs=$allocs tip=$tip)\" >&2; exit 1; }")))
 
+;  Owned-call drop fusion: a call whose argument dies at a borrowed position
+; goes to an owned clone of the callee instead of being followed by a deep
+; drop (specs/progress/2026-10-07-owned-call-drop-fusion.md). Correctness:
+; every line matches the interpreter (shared subtrees, an argument read
+; again after the call, a static nullary passed owned, mutual recursion, a
+; 300000-element owned list walk), and the churn loop stays flat.
+(rule
+ (targets owned_call_drop_fusion owned_call_drop_fusion.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_drop_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o owned_call_drop_fusion
+        native/owned_call_drop_fusion.march)
+   (with-stdout-to owned_call_drop_fusion.out
+        (system "./owned_call_drop_fusion")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/owned_call_drop_fusion.expected owned_call_drop_fusion.out)))
+
+; Shape: the binary-trees-shaped `churn` calls the owned clone `check$own0`
+; and no deep drop at all, and the clone releases cells with decrc_freed.
+(rule
+ (targets owned_call_drop_fusion_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_drop_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/owned_call_drop_fusion.march)
+   (with-stdout-to owned_call_drop_fusion_llvm_check.out
+    (run bash -c
+     "f=native/owned_call_drop_fusion.ll; awk '/^define .*@churn\\(/,/^}/' $f > churn_ocdf.ll; echo \"$(grep -c 'call i64 @check\\$own0(' churn_ocdf.ll) $(grep -c 'call void @__drop\\$' churn_ocdf.ll) $(awk '/^define .*@check\\$own0\\(/,/^}/' $f | grep -c 'decrc_freed(')\"")))))
+
+(rule
+ (alias runtest)
+ (deps owned_call_drop_fusion_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r owned drops freed < owned_call_drop_fusion_llvm_check.out; \
+    test \"$owned\" -ge 1 -a \"$drops\" -eq 0 -a \"$freed\" -ge 1 || { echo \"expected churn to call check\\$own0 and no __drop\\$ helper, and check\\$own0 to release with decrc_freed (found owned=$owned drops=$drops freed=$freed)\" >&2; exit 1; }")))
+
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
 ; native_int_arr_map2/native_float_arr_map2 functions' check, since the

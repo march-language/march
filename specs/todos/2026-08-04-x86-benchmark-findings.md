@@ -181,6 +181,13 @@ sentence.
    workload, and the honest framing is the tree-transform pairing, not a promise
    to catch OCaml at binary-trees.
 
+**2026-10-07: the separate drop pass is gone.** `check` borrows its tree, so
+`check(make(d))` was followed by a full `__drop$Tree` walk (~22% of a profile).
+Perceus now redirects such a call to an owned clone (`check$own0`) that frees
+each node during the read: binary_trees −7% median on an M3 Max (75 → 70 ms).
+See `specs/progress/2026-10-07-owned-call-drop-fusion.md`. The allocator and
+free costs above are untouched by it.
+
 ## 3. simd-map: vectorizes fine; the ISA baseline costs ~13%, and the 2× gap to OCaml is still unexplained
 
 **A first pass at this was wrong twice, and the corrections are the useful part.**
