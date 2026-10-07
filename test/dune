@@ -10848,6 +10848,50 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nmap nmap2 nruntime < nativearr_map_fusion_llvm_check.out; \
     test \"$nmap\" -eq 22 -a \"$nmap2\" -eq 8 -a \"$nruntime\" -eq 0 || { echo \"expected 22 inline map loops, 8 inline map2 loops, 0 runtime map calls in main (found map=$nmap map2=$nmap2 runtime=$nruntime)\" >&2; exit 1; }")))
 
+;  A nullary constructor of a boxed ADT is one shared immortal static cell
+; (Llvm_ctx.intern_static_nullary), not a heap allocation
+; (specs/progress/2026-10-07-binary-trees-static-nullary-and-idle-ticks.md).
+; Correctness: every line matches the interpreter, the churn loop stays flat.
+; Shape: `make` calls march_alloc exactly once (the Fork; the Tip is the
+; static cell), and the Tip cell is emitted.
+(rule
+ (targets static_nullary_ctor static_nullary_ctor.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/static_nullary_ctor.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o static_nullary_ctor
+        native/static_nullary_ctor.march)
+   (with-stdout-to static_nullary_ctor.out
+        (system "./static_nullary_ctor")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/static_nullary_ctor.expected static_nullary_ctor.out)))
+
+(rule
+ (targets static_nullary_ctor_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/static_nullary_ctor.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/static_nullary_ctor.march)
+   (with-stdout-to static_nullary_ctor_llvm_check.out
+    (run bash -c
+     "f=native/static_nullary_ctor.ll; echo \"$(awk '/^define .*@make\\(/,/^}/' $f | grep -c 'call ptr @march_alloc') $(grep -c '^@BinTree.Tip\\$static_nullary = internal global' $f)\"")))))
+
+(rule
+ (alias runtest)
+ (deps static_nullary_ctor_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r allocs tip < static_nullary_ctor_llvm_check.out; \
+    test \"$allocs\" -eq 1 -a \"$tip\" -eq 1 || { echo \"expected make to call march_alloc once (the Fork) and one static Tip cell (found allocs=$allocs tip=$tip)\" >&2; exit 1; }")))
+
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
 ; native_int_arr_map2/native_float_arr_map2 functions' check, since the

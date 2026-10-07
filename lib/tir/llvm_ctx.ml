@@ -1017,6 +1017,31 @@ let intern_static_closure ctx fn_name wrap_name =
     Hashtbl.replace ctx.static_clos fn_name g;
     g
 
+(* One immortal, statically-initialised cell per NULLARY constructor of a
+   boxed ADT (2026-10-07), for the same reason as [intern_static_closure]: the
+   cell march_alloc would build for [Leaf] or [Nil] is a constant 16-byte
+   header -- rc, the ctor tag at +8, the type id at +12 -- with no fields, so
+   every materialization can share one.  Before, `make(0) = Leaf` paid a
+   malloc and a free per leaf: half of binary_trees' allocations.
+
+   Same immortality argument as the closure: rc = MARCH_RC_IMMORTAL keeps
+   every decrement path from freeing it and makes the FBIP `rc == 1` test
+   false, so it is never reused or written in place.  `internal global`, not
+   `constant`, because increments are still emitted against it.  Shares the
+   [static_clos] table under a "nullary:" key so the two never collide. *)
+let intern_static_nullary ctx (llvm_ctor : string) (tag : int) (type_id : int) =
+  let key = "nullary:" ^ llvm_ctor in
+  match Hashtbl.find_opt ctx.static_clos key with
+  | Some g -> g
+  | None ->
+    let g = Printf.sprintf "@%s$static_nullary" llvm_ctor in
+    Buffer.add_string ctx.preamble
+      (Printf.sprintf
+         "%s = internal global { i64, i32, i32 } { i64 1099511627776, i32 %d, i32 %d }, align 8\n"
+         g tag type_id);
+    Hashtbl.replace ctx.static_clos key g;
+    g
+
 (** Decide how this fragment should provide [wrap_name] (a `$clo_wrap`
     trampoline), and record the decision.  Replaces the bare
     check-then-add-[emitted_wraps] guard that every `$clo_wrap` call site used
