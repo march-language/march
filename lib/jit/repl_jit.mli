@@ -126,14 +126,6 @@ val create_shell : ?clang:string -> unit -> t
 (** The first slot of the range the node gave this session. *)
 val shell_set_slot_base : t -> int -> unit
 
-(** Once per session: adopt the program's type definitions (actor message
-    types, constructor numbering) for every later fragment. *)
-val shell_prepare :
-  t ->
-  program:March_ast.Ast.module_ ->
-  type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
-  unit
-
 (** Bind [name] to the next slot, of TIR type [ty], for later inputs. *)
 val shell_bind_slot : t -> name:string -> ty:March_tir.Tir.ty -> int
 
@@ -153,6 +145,7 @@ val shell_compile :
   ?triple:string ->
   t ->
   tc_env:March_typecheck.Typecheck.env ->
+  program_name:string ->
   program_decls:March_ast.Ast.decl list ->
   program_type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
   ?store_as:int ->

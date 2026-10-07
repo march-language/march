@@ -39,6 +39,10 @@ git log is authoritative for exact commits.
   (`console`, `clock`, `intro`, `debug`), and the node allows only those in
   its `$MARCH_SHELL_POLICY` file. A panic or a timeout ends only that input,
   and a deploy ends the session. Every input is audited with its source.
+  Inputs can call the program's own functions and its `MARCH_LIB_PATH`
+  libraries, a Depot query for example. The policy does not yet see the
+  capabilities an input reaches through that code, only the pre-bound ones
+  it names.
 - **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
   `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
   line per post-TIR definition, sorted, straight from the CAS hashing that keys

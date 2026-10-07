@@ -170,3 +170,43 @@ tunnel (`FORGE_SSH_CONFIG`, `[hot-reload] ssh_host`):
 
 Cross-architecture (an arm64 Mac to an x86-64 node) is untested: the
 fragment IR is emitted for the host and only re-targeted by clang.
+
+## Library code, and a Depot query over the shell
+
+Fragments used to be lowered through the REPL's lazy per-module path, which
+re-reads stdlib files from disk and ignores `import`. A library on
+`MARCH_LIB_PATH` therefore did not lower: Depot's `Connection.connect` was
+unknown, and so was the bare `encode(..)` its `import Encode` brings in.
+`Repl_jit.shell_compile` now lowers each input together with the program's
+declarations through the full `Lower.lower_module` path that the native
+build uses, which covers imports, aliases, actors and externs. Mono then
+runs, and `Dce.prune_unreachable` keeps only what the fragment's `main`
+reaches before the RC passes run. This replaced `shell_prepare`. The cost is
+about 470 ms of lowering and optimisation per input for a Depot-sized
+program.
+
+The combined module is named after the program's entry module, and an
+input's self-qualified `DepotNode.pg()` is stripped to `pg` the way the
+entry's own desugar does it (`Desugar.strip_entry_self_qual
+~members_of:program_decls`). Typechecking accepted both spellings, but the
+lowered fragment called a `DepotNode.pg` that did not exist.
+`test/shell/session.txt` covers this with `Main.evens(9)` and `evens(4)`,
+where `evens` is a program fn whose body uses an imported bare `filter`.
+
+Verified 2026-10-06 on macOS against Postgres 17 in Docker. The node was a
+`--hot-reload` build of an app that depends on Depot. The session ran:
+- `let conn = Connection.connect(DepotNode.pg())`, then `let c =
+  Result.unwrap(conn)`;
+- `simple_query` SELECTs, which returned rows: `[["Alice","30"],
+  ["Bob","25"], ["Carol","41"]]`, and a count of `2`;
+- an INSERT (`INSERT 0 1`), after which a SELECT returned the new row;
+- a bad column, which came back as `Err(column "nope" does not exist)`.
+
+The connection stayed open in a session slot across inputs. On a second
+session, the duplicate INSERT came back as Postgres's unique-constraint
+`Err`.
+
+Gap: every input was audited with `caps:"-"`. The fragments reach
+`IO.NetConnect` through Depot, but the client only declares the caps the
+input names itself, so the node's `$MARCH_SHELL_POLICY` never saw the
+network access. See `specs/todos/2026-10-06-shell-cap-manifest-library-caps.md`.
