@@ -17477,7 +17477,35 @@ end|}
             "is_nonneg"
         in
         Alcotest.(check bool) "pass site not proved" true
-          (List.exists (fun v -> v <> "proved") vs)) ]
+          (List.exists (fun v -> v <> "proved") vs));
+
+    (* The value route: `let b = keep(h)` binds `b == (h > 0)` through the
+       same relational return, so a later `if b` carries the fact.  CB8 is the
+       bracket: without the `if b`, `h` is unconstrained. *)
+    gated "a let-bound callback result carries the codomain fact" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             {|mod CB7 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, h : Int) : Int do
+    let b = keep(h)
+    if b do pos(h) else 0 end
+  end
+end|}
+             "pos"));
+
+    gated "without the guard the callback result proves nothing" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem "proved"
+             (verdicts_of
+                {|mod CB8 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, h : Int) : Int do
+    let b = keep(h)
+    pos(h)
+  end
+end|}
+                "pos"))) ]
 
 (* A definer (`keep : ({x : a | true}) -> {Bool | _ == p(x)}`) is satisfied by
    ANY callable: `p` is, by definition, whatever the callable returns.  Before
