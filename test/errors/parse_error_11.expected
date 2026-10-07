@@ -1,0 +1,16 @@
+exit: 1
+-- ERROR -------------------- errors/parse_error_11.march
+
+This `if` (line 4) needs its own `end`: the `end` on line 5 belongs to an outer block. [parse_error]
+
+4 |     if a do 1 else if b do 2 else 3 end
+        ^^
+
+    I only noticed at the end of the file.
+    `else if` is a nested `if` in the else position, so each `if` needs its own `end`: a two-branch chain ends `end end`, a three-branch chain `end end end`.
+    run `march --explain parse_error`
+
+fix [parse_error]:
+@@ after line 4 @@
+     if a do 1 else if b do 2 else 3 end
++    end

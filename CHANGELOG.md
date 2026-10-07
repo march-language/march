@@ -322,6 +322,16 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A missing `end` is reported at the construct that is missing it.** Instead of
+  "Parse error in declaration" at the end of the file or the next `fn`, the error
+  points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the
+  parser noticed, and it carries a fix that inserts the `end`, which `forge fix`
+  can apply. An `else if` chain one `end` short gets a note explaining that each
+  `if` closes separately.
+- **A program no longer hangs on exit after `ClusterNode.stop` while one of its sessions
+  is finishing.** Stopping the node ended its connection to itself without telling the
+  sessions using it, so a session whose last messages were still in flight could wait
+  for them forever and keep the process alive.
 - **A record or tuple returned on one branch is now freed on the branches that only read
   it.** In `let st = .. ; if cond do { ..st.x.. } else st end`, compiled code leaked `st`
   (and everything it held) whenever the first branch ran, and the same in a `let` whose

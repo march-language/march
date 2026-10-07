@@ -654,3 +654,154 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     tok
   in
   emit
+
+(* ── Open-construct tracking (diagnostics plan §5, D1) ─────────────────────
+
+   [make_with_state] wraps [make] and watches the FILTERED token stream (what
+   the parser actually sees) to keep a stack of the constructs currently open,
+   each with the position of the keyword that opened it. [Parse] reads it only
+   after a parse has failed, to point a structural error ("missing `end`") at
+   the construct that is missing it instead of at the token where the grammar
+   gave up, which by construction is after the mistake.
+
+   - An opening keyword (IF, FN, MATCH, MOD, WITH, ...) is held in a PENDING
+     register keyed by paren depth, the way [pending_match_depths] is above;
+     the next [DO] at that depth consumes it and pushes an opener named after
+     it. [ARROW] at that depth clears it: an arrow-form lambda `fn x -> body`
+     (parser.mly, [lambda]) and a match arm never get a [DO]. A [DO] with
+     nothing pending pushes a bare "do" opener.
+   - `choose by R: ... end` (parser.mly:1072) is the one construct that closes
+     with [END] without a [DO]; it is pushed at its [BY].
+   - [END] pops the innermost opener and records the pair; an [END] with
+     nothing open is remembered as stray.
+   - [ELSE] marks the innermost opener when it is an `if` ([saw_else]); an
+     [IF] directly after that [ELSE] marks it as heading an `else if` chain.
+   The state is advisory: [Parse] applies it to a diagnostic's span, notes and
+   fix only, never to whether a program parses. *)
+
+type opener = {
+  op_kw : string;                 (* the opening keyword, e.g. "if" *)
+  op_pos : Lexing.position;       (* where that keyword starts *)
+  mutable op_saw_else : bool;     (* an `if` that reached its `else` *)
+  mutable op_else_if : bool;      (* ... whose else branch is another `if` *)
+}
+
+type open_state = {
+  openers : opener list;          (* innermost first *)
+  decls : (Lexing.position * opener list) list;
+      (* every declaration keyword (fn, pfn, type, mod, ...) seen while a
+         construct was open, with the openers open at that moment
+         (innermost first); oldest first *)
+  closed : (opener * Lexing.position) list;
+      (* every opener an END closed, with that END's position, oldest first *)
+  stray_end : Lexing.position option;  (* the first END that closed nothing *)
+  last_tok : Parser.token option;      (* the most recent token emitted *)
+  last_pos : Lexing.position;          (* ... and where it starts *)
+}
+
+let opener_keyword = function
+  | Parser.IF -> Some "if" | Parser.FN -> Some "fn" | Parser.PFN -> Some "pfn"
+  | Parser.MATCH -> Some "match" | Parser.MOD -> Some "mod"
+  | Parser.ACTOR -> Some "actor" | Parser.APP -> Some "app"
+  | Parser.WITH -> Some "with" | Parser.TEST -> Some "test"
+  | Parser.DESCRIBE -> Some "describe" | Parser.SETUP -> Some "setup"
+  | Parser.SETUP_ALL -> Some "setup_all" | Parser.SUPERVISE -> Some "supervise"
+  | Parser.EXTERN -> Some "extern" | Parser.PROTOCOL -> Some "protocol"
+  | Parser.LOOP -> Some "loop" | Parser.ON_START -> Some "on_start"
+  | Parser.ON_STOP -> Some "on_stop" | Parser.SIG -> Some "sig"
+  | Parser.TRANSITIONS -> Some "transitions" | Parser.INTERFACE -> Some "interface"
+  | Parser.IMPL -> Some "impl"
+  | _ -> None
+
+let is_declaration_keyword = function
+  | Parser.FN | Parser.PFN | Parser.MOD | Parser.TYPE | Parser.PTYPE
+  | Parser.ACTOR | Parser.APP | Parser.IMPL | Parser.INTERFACE
+  | Parser.PROTOCOL | Parser.EXTERN | Parser.SIG | Parser.TEST
+  | Parser.DESCRIBE | Parser.NEEDS | Parser.DERIVE | Parser.SATISFY -> true
+  | _ -> false
+
+let make_with_state (base_lexer : Lexing.lexbuf -> Parser.token)
+    : (Lexing.lexbuf -> Parser.token) * (unit -> open_state) =
+  (* [make] peeks one raw token after MATCH and CHOOSE and re-queues it, so
+     when it RETURNS those two the lexbuf already points at the token after
+     them. Their own positions are captured here, below the filter, in lexing
+     order (the filter never drops or reorders either). *)
+  let peeked_kw : Lexing.position Queue.t = Queue.create () in
+  let base lexbuf =
+    let t = base_lexer lexbuf in
+    (match t with
+     | Parser.MATCH | Parser.CHOOSE -> Queue.add lexbuf.Lexing.lex_start_p peeked_kw
+     | _ -> ());
+    t
+  in
+  let filtered = make base in
+  let decls = ref [] in
+  let depth = ref 0 in
+  let pending : (int, string * Lexing.position) Hashtbl.t = Hashtbl.create 8 in
+  let openers : opener list ref = ref [] in
+  let closed : (opener * Lexing.position) list ref = ref [] in
+  let stray_end = ref None in
+  let last_tok = ref None in
+  let last_pos = ref Lexing.dummy_pos in
+  let observe tok (pos : Lexing.position) =
+    let pos =
+      match tok with
+      | Parser.MATCH | Parser.CHOOSE when not (Queue.is_empty peeked_kw) ->
+        Queue.pop peeked_kw
+      | _ -> pos
+    in
+    let prev = !last_tok in
+    if is_declaration_keyword tok && !openers <> [] then
+      decls := (pos, !openers) :: !decls;
+    (match tok with
+     | Parser.LPAREN | Parser.LPAREN_STMT | Parser.INIT_PAREN
+     | Parser.LBRACKET | Parser.LBRACE -> incr depth
+     | Parser.RPAREN | Parser.RBRACKET | Parser.RBRACE ->
+       Hashtbl.remove pending !depth;
+       decr depth
+     | Parser.ARROW -> Hashtbl.remove pending !depth
+     | Parser.DO ->
+       let (kw, p) =
+         match Hashtbl.find_opt pending !depth with
+         | Some kp -> Hashtbl.remove pending !depth; kp
+         | None -> ("do", pos)
+       in
+       openers := { op_kw = kw; op_pos = p; op_saw_else = false;
+                    op_else_if = false } :: !openers
+     | Parser.BY when prev = Some Parser.CHOOSE ->
+       Hashtbl.remove pending !depth;
+       openers := { op_kw = "choose"; op_pos = !last_pos; op_saw_else = false;
+                    op_else_if = false } :: !openers
+     | Parser.END ->
+       (match !openers with
+        | o :: rest -> openers := rest; closed := (o, pos) :: !closed
+        | [] -> if !stray_end = None then stray_end := Some pos)
+     | Parser.ELSE ->
+       (match !openers with
+        | o :: _ when o.op_kw = "if" -> o.op_saw_else <- true
+        | _ -> ())
+     | _ -> ());
+    (match tok with
+     | Parser.IF when prev = Some Parser.ELSE ->
+       (match !openers with
+        | o :: _ when o.op_kw = "if" && o.op_saw_else -> o.op_else_if <- true
+        | _ -> ())
+     | _ -> ());
+    (match opener_keyword tok with
+     | Some kw -> Hashtbl.replace pending !depth (kw, pos)
+     | None -> ());
+    (match tok with
+     | Parser.NL -> ()
+     | _ -> last_tok := Some tok; last_pos := pos)
+  in
+  let lexer lexbuf =
+    let tok = filtered lexbuf in
+    observe tok lexbuf.Lexing.lex_start_p;
+    tok
+  in
+  let state () =
+    { openers = !openers; decls = List.rev !decls;
+      closed = List.rev !closed; stray_end = !stray_end;
+      last_tok = !last_tok; last_pos = !last_pos }
+  in
+  (lexer, state)
