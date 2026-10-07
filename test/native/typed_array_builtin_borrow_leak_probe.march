@@ -1,0 +1,124 @@
+-- Leak guard: TypedArray builtins read their array (or list, or mask) and
+-- return a fresh value
+-- (specs/progress/2026-10-06-typed-array-builtins-leak-their-argument.md).
+--
+-- They were classified owned (unaudited) in lib/tir/borrow.ml, so the last
+-- reference to the argument was handed to a C function that never released
+-- it: every list given to `from_list` and every array given to `length`,
+-- `get`, `map`, ... leaked. Now the source is borrowed, and whatever a
+-- builtin copies into a fresh array takes its own reference, so the
+-- caller's release of the source cannot free an element the new array
+-- still holds.
+--
+-- Part 1 (flat): Int/Bool elements, which carry no reference count, so
+-- live_allocs measures only the arrays and lists the builtins were handed.
+-- (A dead TypedArray still never releases its heap ELEMENTS: that is
+-- specs/todos/2026-10-07-typed-array-free-does-not-release-elements.md.)
+-- Part 2 (values): fresh String elements per iteration, read back through
+-- the new array after the source list or array is gone, so a use-after-free
+-- that changes a value fails the golden.
+mod Main do
+  needs IO.Console
+
+  pfn flat(label : String, before : Int, r : String) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 30))
+  end
+
+  pfn ints(n : Int) : List(Int) do Cons(n, Cons(n + 1, Cons(2, Nil))) end
+
+  pfn from_list_len(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      from_list_len(n - 1, acc + typed_array_length(typed_array_from_list(Cons(true, Cons(false, Cons(true, Nil))))))
+    end
+  end
+
+  pfn get_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else get_leg(n - 1, acc + typed_array_get(typed_array_from_list(ints(n)), 1)) end
+  end
+
+  pfn to_list_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      to_list_leg(n - 1, acc + List.fold_left(typed_array_to_list(typed_array_from_list(ints(n))), 0, fn (s, x) -> s + x))
+    end
+  end
+
+  pfn set_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let b = typed_array_set(typed_array_from_list(ints(n)), 0, 7)
+      set_leg(n - 1, acc + typed_array_get(b, 0) + typed_array_get(b, 1))
+    end
+  end
+
+  pfn create_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else create_leg(n - 1, acc + typed_array_get(typed_array_create(3, n), 2)) end
+  end
+
+  pfn map_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      map_leg(n - 1, acc + typed_array_get(typed_array_map(typed_array_from_list(ints(n)), fn x -> x * 2), 0))
+    end
+  end
+
+  pfn filter_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let mask = typed_array_from_list(Cons(false, Cons(true, Cons(true, Nil))))
+      let a = typed_array_filter(typed_array_from_list(ints(n)), mask)
+      filter_leg(n - 1, acc + typed_array_length(a) + typed_array_get(a, 0))
+    end
+  end
+
+  pfn fold_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      fold_leg(n - 1, acc + typed_array_fold(typed_array_from_list(ints(n)), 0, fn (s, x) -> s + x))
+    end
+  end
+
+  pfn slice_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      slice_leg(n - 1, acc + typed_array_get(typed_array_slice(typed_array_from_list(ints(n)), 1, 2), 0))
+    end
+  end
+
+  pfn strs(n : Int) : List(String) do
+    Cons(int_to_string(n), Cons("x" ++ int_to_string(n), Cons("yz" ++ "", Nil)))
+  end
+
+  pfn str_values(n : Int, acc : String) : String do
+    if n <= 0 do acc else
+      let a = typed_array_from_list(strs(n))
+      let b = typed_array_set(a, 2, "s" ++ int_to_string(n))
+      let c = typed_array_filter(b, typed_array_from_list(Cons(false, Cons(true, Cons(true, Nil)))))
+      let d = typed_array_map(c, fn s -> s ++ "!")
+      let e = typed_array_slice(d, 0, 2)
+      let f = typed_array_create(2, "c" ++ int_to_string(n))
+      let xs = typed_array_to_list(e)
+      let row = typed_array_get(a, 0) ++ "," ++ typed_array_get(b, 2) ++ ","
+                ++ List.fold_left(xs, "", fn (s, x) -> s ++ x) ++ "," ++ typed_array_get(f, 1)
+      str_values(n - 1, if n == 1 do row else acc end)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let n = 300
+    let a = live_allocs()
+    flat("from_list + length", a, int_to_string(from_list_len(n, 0)))
+    let b = live_allocs()
+    flat("get", b, int_to_string(get_leg(n, 0)))
+    let c = live_allocs()
+    flat("to_list", c, int_to_string(to_list_leg(n, 0)))
+    let d = live_allocs()
+    flat("set", d, int_to_string(set_leg(n, 0)))
+    let e = live_allocs()
+    flat("create", e, int_to_string(create_leg(n, 0)))
+    let g = live_allocs()
+    flat("map", g, int_to_string(map_leg(n, 0)))
+    let h = live_allocs()
+    flat("filter", h, int_to_string(filter_leg(n, 0)))
+    let i = live_allocs()
+    flat("fold", i, int_to_string(fold_leg(n, 0)))
+    let j = live_allocs()
+    flat("slice", j, int_to_string(slice_leg(n, 0)))
+    println("string values: " ++ str_values(n, ""))
+  end
+end

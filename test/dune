@@ -10761,6 +10761,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; (specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md).
 ; Every leg's live_allocs stays flat; the .expected file IS the interpreter's
 ; output, including every "flat: true".
+; TypedArray builtins borrow the array / list / mask they read, and every
+; element they copy into a fresh array takes its own reference; each leg
+; leaked its argument before (2026-10-07).
+(rule
+ (targets typed_array_builtin_borrow_leak_probe typed_array_builtin_borrow_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/typed_array_builtin_borrow_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o typed_array_builtin_borrow_leak_probe
+        native/typed_array_builtin_borrow_leak_probe.march)
+   (with-stdout-to typed_array_builtin_borrow_leak_probe.out
+        (system "./typed_array_builtin_borrow_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/typed_array_builtin_borrow_leak_probe.expected typed_array_builtin_borrow_leak_probe.out)))
+
 (rule
  (targets nativearray_builtin_borrow_leak_probe nativearray_builtin_borrow_leak_probe.out)
  (deps (file %{exe:../bin/main.exe})
