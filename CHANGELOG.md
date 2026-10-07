@@ -322,6 +322,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`Map.fold` with a closure that captures a value no longer leaks the closure.** Every
+  such fold leaked one closure, and so did a closure that tail-called another closure it
+  had captured after dropping an argument of its own. Cluster nodes did both on every
+  session.
+
 - **A missing `end` is reported at the construct that is missing it.** Instead of
   "Parse error in declaration" at the end of the file or the next `fn`, the error
   points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the
