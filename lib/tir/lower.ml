@@ -189,8 +189,13 @@ let note_migrate_msg ~prefix (def : Ast.fn_def) (fn : Tir.fn_def) =
         ~written:written.txt ~actor_msg
     | _ -> ()
 
+(** Set by [lower_module ~resumable:true]: lowers more top-level [fn]s as if
+    they had been declared at the end of that module.  See [lower_more]. *)
+let _resume : (Ast.decl list -> Tir.fn_def list * Tir.type_def list) option ref = ref None
+
 (** Lower a module. *)
-let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) (m : Ast.module_) : Tir.tir_module =
+let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) ?(resumable=false) (m : Ast.module_) : Tir.tir_module =
+  _resume := None;
   reset_counter ();
   Provenance.reset ();
   (* Collision-conditional qualification (Task 3 of specs/plans/2026-07-20-
@@ -1203,9 +1208,81 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      bindings, not refs — they are simply dropped when [lower_module]
      returns, with no explicit reset needed (was [_type_map_ref := None];
      [_current_module_aliases := Hashtbl.create 0]). *)
+  if resumable then begin
+    (* Keep what Pass 2 resolves names against; the tables below are about to
+       be replaced, so these are the module's own and nothing else mutates
+       them until a resume puts them back. *)
+    let iface = !_iface_methods and use_aliases = !_use_aliases
+    and module_aliases = !_module_aliases and dispatch = !_default_dispatch
+    and lowered = !_lowered_modules and module_fns = !_current_module_fns
+    and counter = ref !Lower_state._lower_counter
+    and lets = List.rev !top_lets in
+    _resume := Some (fun decls ->
+        _iface_methods := iface;
+        _use_aliases := use_aliases;
+        _module_aliases := module_aliases;
+        _default_dispatch := dispatch;
+        _lowered_modules := lowered;
+        (* Fresh names continue after every earlier one ($lamN, ...), so the
+           new fns never collide with the module's. *)
+        Lower_state._lower_counter := max !Lower_state._lower_counter !counter;
+        let fns = ref [] and types = ref [] in
+        _fns_ref := fns;
+        _types_ref := types;
+        let scope = Hashtbl.copy module_fns in
+        List.iter (function
+            | Ast.DFn (def, _) -> Hashtbl.replace scope def.fn_name.txt ()
+            | _ -> ()) decls;
+        _current_module_fns := scope;
+        (* A failed call keeps none of the fns it lowered, so it must not
+           leave the modules it lowered lazily marked as done either: a later
+           call reaching them would find them neither lowered nor lowerable. *)
+        let lowered_before = Hashtbl.copy lowered in
+        try Fun.protect ~finally:(fun () ->
+            counter := !Lower_state._lower_counter;
+            _saved_iface_methods := Hashtbl.copy !_iface_methods;
+            _iface_methods := Hashtbl.create 0;
+            _use_aliases := Hashtbl.create 0;
+            _module_aliases := Hashtbl.create 0)
+          (fun () ->
+             List.iter (fun d ->
+                 Lower_state.with_decl_builtin_shadows (Lower_decls.decl_span d) (fun () ->
+                     match d with
+                     | Ast.DFn (def, _) when not (Hashtbl.mem dispatch def.fn_name.txt) ->
+                       let fn = Lower_decls.lower_fn_def env def in
+                       fns := fn :: !fns
+                     | _ -> ()))
+               decls;
+             let new_fns = List.rev !fns in
+             let new_fns = match lets with
+               | [] -> new_fns
+               | _ ->
+                 List.map (fun (fn : Tir.fn_def) ->
+                     let needed = List.filter (fun (v, _) ->
+                         fn.fn_name = "main" || fn_body_uses v.Tir.v_name fn.fn_body) lets in
+                     { fn with fn_body = List.fold_right (fun (v, rhs) body ->
+                           Tir.ELet (v, rhs, body)) needed fn.fn_body }) new_fns in
+             (List.map uniquify_fn new_fns, List.rev !types))
+        with e ->
+          Hashtbl.filter_map_inplace (fun k v ->
+              if Hashtbl.mem lowered_before k then Some v else None) lowered;
+          raise e)
+  end;
   (* Save a snapshot before clearing so the mono pass can use it. *)
   _saved_iface_methods := Hashtbl.copy !_iface_methods;
   _iface_methods := Hashtbl.create 0;
   _use_aliases := Hashtbl.create 0;
   _module_aliases := Hashtbl.create 0;
   result
+
+(** Lower more top-level [fn] declarations against the module the last
+    [lower_module ~resumable:true] lowered: the same names, imports, aliases,
+    interface impls and top-level lets, as if they were declared at its end.
+    Returns their TIR fns plus whatever stdlib/library fns lowering them first
+    reached (lazily lowered modules), and any types those brought.  The
+    [type_map] given to [lower_module] must hold the new decls' spans.  The
+    remote shell lowers its program once and each input with this. *)
+let lower_more (decls : Ast.decl list) : Tir.fn_def list * Tir.type_def list =
+  match !_resume with
+  | Some f -> f decls
+  | None -> failwith "Lower.lower_more: no resumable lower_module"

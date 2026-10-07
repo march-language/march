@@ -7895,13 +7895,19 @@ let test_large_multi_file_check_is_not_quadratic () =
   Unix.putenv "MARCH_LIB_PATH" dir;
   Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
     let m = parse_and_desugar entry_src in
-    let start = Unix.gettimeofday () in
+    (* CPU time, not wall time: under a parallel `dune runtest` on a loaded
+       macOS runner the wall clock of the fixed code reached 32s (CI run
+       37640401039) while it takes ~9s locally.  The regression this guards
+       is a CPU-bound O(var-refs * imports) scan, which CPU time still sees in
+       full; waiting for a core does not count. *)
+    let cpu () = let t = Unix.times () in t.Unix.tms_utime +. t.Unix.tms_stime in
+    let start = cpu () in
     let (resolve_errors, extra_decls, _user_files) =
       March_resolver.Resolver.resolve_imports ~source_file:"entry.march" m in
     Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
     let m = { m with March_ast.Ast.mod_decls = extra_decls @ m.March_ast.Ast.mod_decls } in
     let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
-    let elapsed = Unix.gettimeofday () -. start in
+    let elapsed = cpu () -. start in
     Alcotest.(check bool) "no typecheck errors" false (has_errors errors);
     (* 30s bound: the fixed (indexed) code finishes this N in ~3-5s even on a
        loaded CI box; the pre-fix O(var-refs * imports) scan measured ~31s+
@@ -7909,7 +7915,7 @@ let test_large_multi_file_check_is_not_quadratic () =
        side of this bound, so a regression back to the linear-scan version
        would fail this test rather than merely being "a bit slower". *)
     Alcotest.(check bool)
-      (Printf.sprintf "multi-file check completes well under 30s (took %.2fs)" elapsed)
+      (Printf.sprintf "multi-file check completes well under 30s of CPU (took %.2fs)" elapsed)
       true (elapsed < 30.0)))
 
 (* ── opaque-type constructor visibility across compilation units ────────── *)
@@ -17381,6 +17387,7 @@ let compiler_suites =
       ("cap_markers", Test_cap_markers.tests);
       ("prog_argv", Test_prog_argv.tests);
       ("compile_ll_race", Test_compile_ll_race.tests);
+      ("post_tir_cache", Test_post_tir_cache.tests);
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);

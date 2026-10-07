@@ -145,6 +145,13 @@ native_curated=(
   # the Msgpack/actor/socket program whose guard-page crash is why the
   # closure deep-drop gate exists at all
   node_discovery
+  # an erased `record_get` read is niche-encoded, but the Option('a) drop
+  # assumed a boxed Some cell and released the payload twice. Only ASAN saw
+  # it: the golden kept passing because the freed cell was not reused in time
+  # (specs/progress/2026-10-06-record-get-erased-option-drop.md,
+  # …/2026-10-04-record-erased-field-repr-uaf.md)
+  record_erased_field_repr
+  erased_option_read
   # NativeArray: narrow widths, fold, map/map2, and the inline-loop lowerings
   native_arr_fold
   # the two length-independent Float boxes at a fold_float call boundary,
