@@ -71,7 +71,7 @@ let reuse_diag ~span ~severity ~fn_name ~target : March_errors.Errors.diagnostic
          inline it \xe2\x80\x94 falling back would silently produce a scalar\n\
          loop, not the fast path you asked for."
         fn_name d d;
-    labels = []; code = None; fix = None;
+    labels = []; code = March_errors.Code.vectorize_failed; fix = None;
     notes = [ Printf.sprintf
         "Hint: pass a fresh, single-use lambda directly to the call:\n    %s"
         (reuse_example target) ] }
@@ -85,7 +85,7 @@ let generic_diag ~span ~severity ~fn_name ~target : March_errors.Errors.diagnost
          per-element box/unbox and hand the loop to LLVM's vectorizer\n\
          as-is."
         fn_name;
-    labels = []; code = None; fix = None;
+    labels = []; code = March_errors.Errors.Code.vectorize_failed; fix = None;
     notes = [ Printf.sprintf
         "Hint: give the callback passed to `%s` a concrete Float\n\
          signature, e.g. `fn (x: Float) -> x *. 2.0`, instead of leaving\n\
@@ -98,7 +98,7 @@ let misuse_diag ~span ~fn_name : March_errors.Errors.diagnostic =
         "`%s` is marked @[vectorize] but calls no NativeArray.map/map2 \
          function"
         fn_name;
-    labels = []; code = None; fix = None;
+    labels = []; code = March_errors.Errors.Code.vectorize_failed; fix = None;
     notes = [ "Hint: remove the attribute, or check the NativeArray call \
                you meant to guard is actually present in this function's \
                body." ] }

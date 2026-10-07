@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: is private to module `Array`
+mod Main do
+  -- `Array.lst_rev` is a real PRIVATE function (`pfn lst_rev` at
+  -- stdlib/array.march:39). A private `pfn` is module-internal: it is NOT
+  -- callable from another module by qualification. Before the visibility fix
+  -- (2026-07-06, `load_module_into_env`'s `ex_public` gate for `ExFn`/`ExValue`)
+  -- this typechecked AND ran, returning `[3, 2, 1]` from unrelated code — the
+  -- headline bug of the modules-widening slice. Now it is rejected with the
+  -- same "is private to module `X`." message shape the `ExCtor` gate already
+  -- produced for private CONSTRUCTORS.
+  --
+  -- Contrast: a PUBLIC cross-module call (e.g. `Array.length`) still resolves,
+  -- and a private `ptype`'s bare NAME stays referenceable across modules (the
+  -- opaque-type pattern) — only its CONSTRUCTOR and its private FUNCTIONS are
+  -- hidden. See accept/t31 for the ACCEPT side.
+  fn main() : Int do
+    let r = Array.lst_rev(Cons(1, Cons(2, Cons(3, Nil))))
+    match r do
+      Nil -> 0
+      Cons(h, _) -> h
+    end
+  end
+end

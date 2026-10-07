@@ -1,0 +1,36 @@
+-- EXPECT-ERROR: reached from `main`: main → slurp
+mod Witness do
+  -- Task 8 of specs/2026-08-13-capability-ux-plan.md — the grant violation
+  -- must name the USER'S OWN call chain, not just the stdlib leaf that
+  -- directly holds the reached capability. t166 (this file's sibling)
+  -- already pins the through-a-HELPER shape, but its helper calls the
+  -- builtin `file_write` directly — every unit test in test_compiler.ml's
+  -- `cap_grant` suite does the same, because the bare `parse_and_desugar`
+  -- harness those tests use loads no stdlib source at all, so a REAL stdlib
+  -- call (`File.read`, not `file_read`) typechecks as a no-op there and
+  -- exercises nothing (see specs/progress/2026-08-13-grant-violation-
+  -- attributed-to-stdlib-leaf.md for the measurement). This corpus witness
+  -- runs the real compiled binary with its real bundled stdlib, so it is
+  -- the only place in the test suite that proves the fix on the scenario
+  -- the task exists for: a violation reached THROUGH a stdlib module
+  -- function.
+  --
+  -- Before the fix this reported only `(reached in \`File.read\`)` — the
+  -- least useful frame, since `File.read` is not a function the user wrote
+  -- or can act on. After the fix it reports the full chain, `main`
+  -- included, down through the user's own `slurp` to the stdlib leaf:
+  -- `(reached from \`main\`: main → slurp → File.read)`.
+  needs IO.Console
+  needs IO.FileRead
+
+  fn slurp(path : String) : String do
+    match File.read(path) do
+      Ok(s) -> s
+      Err(_) -> ""
+    end
+  end
+
+  fn main(cap : Cap(IO.Console)) : () do
+    println(slurp("/etc/passwd"))
+  end
+end

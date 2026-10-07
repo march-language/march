@@ -1,0 +1,21 @@
+exit: 1
+-- ERROR ------------------ errors/realtime_mixed_1.march
+
+function `step` takes `Tagged(_, Realtime)` but also takes `Cap(IO)`. [realtime_mixed]
+Realtime functions cannot hold `Cap(IO)` — allocation, IO, and panic are excluded from realtime contexts.
+hint: remove `Cap(IO)`
+
+20 |   fn step(_deadline : Tagged(Int, Realtime), _cap : Cap(IO)) : Int do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+-- HINT ------------------ errors/realtime_mixed_1.march
+
+this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
+
+20 |   fn step(_deadline : Tagged(Int, Realtime), _cap : Cap(IO)) : Int do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+

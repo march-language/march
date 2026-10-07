@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: `Pid` cannot be serialized
+-- `derive Json` refuses a type with a local `Pid` anywhere in it
+-- (2026-09-15): a pid is an index into THIS node's actor table, so a codec
+-- over it is a wrong-delivery route on any other node, not a serialization.
+-- Refused at the declaration, with a real span, the way a `Cap` field is —
+-- and that is what makes `Node.send` of such a message a compile-time
+-- refusal (rule 3 of specs/progress/2026-09-15-typed-node-send.md). The
+-- cross-node identity is `GlobalPid.Pid`, a plain record.
+mod PidField do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Tick() do { n: state.n + 1 } end
+  end
+
+  type Hello = { from : Pid(Counter), n : Int }
+  derive Json for Hello
+
+  fn main(_c : Cap(IO.Console)) do
+    println("unreachable")
+  end
+end

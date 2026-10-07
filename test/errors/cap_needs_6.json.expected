@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/cap_needs_6.march","start_line":7,"start_col":2,"end_line":10,"end_col":5,"message":"`Cap(IO.Network)` used in module `Server` but `IO.Network` is not declared in `needs`.\nhelp: add `needs IO.Network` to the module body.","code":"cap_needs:IO.Network","fix":{"kind":"insert","after_line":6,"text":"  needs IO.Network"},"labels":[],"notes":[]}

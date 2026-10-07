@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR -------------- errors/cap_grant_exceeded_2.march
+
+`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileRead` (reached from `main`: main → slurp → File.read). The grant is a ceiling on the WHOLE program — declaring `needs IO.FileRead` does not raise it. [cap_grant_exceeded]
+help: add a `Cap(IO.FileRead)` parameter to `main` (e.g. `fn main(…, _cap_fileread : Cap(IO.FileRead))`), or widen the whole grant to `Cap(IO)`, or remove the use.
+
+33 |   fn main(cap : Cap(IO.Console)) : () do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+

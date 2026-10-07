@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: performs IO but declares no grant
+mod Main do
+  -- R1 stage D reject witness (2026-08-10) — the end of ambient IO.
+  --
+  -- Stages A–C made a DECLARED grant enforceable, and left the default
+  -- ambient: a `main` with no capability parameter performed IO freely. That
+  -- adoption contract is what let the grant check ship without breaking a
+  -- single program, and it is also what kept the honest claim down to "a
+  -- program that STATES its grant cannot exceed it".
+  --
+  -- Here every `needs` line is truthful and every earlier check passes. The
+  -- program is rejected because it never says what authority it runs under.
+  -- Accept companion t176 adds exactly that, and nothing else.
+  needs IO.Console
+  needs IO.FileWrite
+
+  fn main() : () do
+    match file_write("/tmp/t176_out", "d") do
+      Ok(_)  -> println("ok")
+      Err(_) -> println("e")
+    end
+  end
+end

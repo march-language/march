@@ -1,0 +1,50 @@
+exit: 1
+-- ERROR --------------- errors/linear_used_twice_6.march
+
+The linear value `st` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+20 |     let b = Stream_Prod.send_Msg_Prod_Cons_1(s, st, 2)
+                                                     ^^
+
+
+    `st` was already consumed here:
+
+19 |     let a = Stream_Prod.send_Msg_Prod_Cons_1(s, st, 1)
+                                                     ^^
+    run `march --explain linear_used_twice`
+
+
+-- ERROR --------------- errors/linear_used_twice_6.march
+
+expected `S_end` but got `S_send_Msg_Prod_Cons_1`. [type_mismatch]
+
+21 |     let _ = Stream_Prod.offer_more_done(s, a, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
+                                                                                        ^^^
+
+    This is argument #2 of a function call.
+    Both are states of a generated protocol role: `S_send_Msg_Prod_Cons_1` is the state the role is in before that step, and this call is a different step. Either the protocol takes the steps in another order, or this body is written for a different role than the one it is run as (`run_<Role>` and `<Role>.register` decide which).
+
+    the expected type comes from here:
+
+21 |     let _ = Stream_Prod.offer_more_done(s, a, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
+                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+
+-- ERROR --------------- errors/linear_used_twice_6.march
+
+expected `S_end` but got `S_send_Msg_Prod_Cons_1`. [type_mismatch]
+
+22 |     Stream_Prod.offer_more_done(s, b, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
+                                                                                ^^^
+
+    This is argument #2 of a function call.
+    Both are states of a generated protocol role: `S_send_Msg_Prod_Cons_1` is the state the role is in before that step, and this call is a different step. Either the protocol takes the steps in another order, or this body is written for a different role than the one it is run as (`run_<Role>` and `<Role>.register` decide which).
+
+    the expected type comes from here:
+
+22 |     Stream_Prod.offer_more_done(s, b, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
+                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+

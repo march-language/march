@@ -1,0 +1,5 @@
+; Build-time generator for lib/errors/explain_pages.ml: embeds every
+; specs/lang/errors/<slug>.md page into the compiler so `march --explain`
+; works from an installed binary with no repo checkout beside it.
+(executable
+ (name gen_explain_pages))

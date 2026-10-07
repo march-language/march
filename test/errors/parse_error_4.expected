@@ -1,0 +1,14 @@
+exit: 1
+-- ERROR --------------------- errors/parse_error_4.march
+
+March `if` expressions always need an `else` branch: [parse_error]
+
+6 |     end
+        ^^^
+
+    if cond do
+        expr1
+    else
+        expr2
+    end
+    run `march --explain parse_error`

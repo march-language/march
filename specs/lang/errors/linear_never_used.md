@@ -1,0 +1,58 @@
+---
+layout: docs
+title: "linear_never_used"
+permalink: /docs/errors/linear_never_used/
+---
+
+# `linear_never_used`: a linear value was never used
+
+A value of a linear type was bound but never consumed. Linear values must
+be used exactly once; letting one go out of scope silently drops it.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+  always_linear type Token = Token(Int)
+
+  fn consume(t : Token) : Int do
+    match t do Token(n) -> n end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let t = Token(1)
+    println("forgot the token")
+  end
+end
+```
+
+## The fix
+
+Pass the value to something that consumes it. If dropping it really is
+intended, the type should provide a consuming function that does so
+explicitly (a `close`, `release`, or similar).
+
+```march
+mod Main do
+  needs IO.Console
+  always_linear type Token = Token(Int)
+
+  fn consume(t : Token) : Int do
+    match t do Token(n) -> n end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let t = Token(1)
+    println(int_to_string(consume(t)))
+  end
+end
+```
+
+## Why the rule exists
+
+Linear types model resources whose release must happen: a file handle, a
+session channel, a buffer that must be returned. If a linear value could be
+dropped on the floor, the type could not promise that its release runs.
+
+See also: [the language reference](../linear-types.md).

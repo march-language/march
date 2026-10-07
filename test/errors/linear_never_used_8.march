@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: The linear value `b` was never used
+mod Main do
+  needs IO.Console
+  -- A two-parameter lambda in check mode binds one parameter per arrow; the
+  -- must-use check must cover every one of them, not only the innermost.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn run2(k : S1 -> S1 -> Int) : Int do k(S1(1), S1(2)) end
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(run2(fn (a, b) -> sink(a))))
+  end
+end

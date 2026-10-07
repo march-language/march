@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_11.march
+
+The linear value `st` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+8 |     let f = fn st -> sink(st) + sink(st)
+                                         ^^
+
+
+    `st` was already consumed here:
+
+8 |     let f = fn st -> sink(st) + sink(st)
+                              ^^
+    run `march --explain linear_used_twice`
+
+

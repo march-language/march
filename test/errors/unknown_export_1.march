@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: Module `Array` does not export `lst_rev`.
+mod Main do
+  -- Widening slice 2, Task 4 -- selective `use X.{name}` of a PRIVATE name.
+  -- `Array.lst_rev` is a real `pfn` (stdlib/array.march:39, the same
+  -- function `reject/t26_cross_module_private_fn` exercises through plain
+  -- qualified access). Because `Array` is spliced in as a real `DMod` before
+  -- typecheck runs (`bin/main.ml`'s `load_stdlib`), `lst_rev` was already
+  -- excluded from `pub_set` at the `DMod` export step (`typecheck.ml`
+  -- ~6884-6927, per `core-march-types.md` §2.5) -- so "Array.lst_rev" was
+  -- NEVER written into `env.vars` in the first place. `DUse`'s `UseNames`
+  -- arm (~typecheck.ml:7320-7337) looks it up, misses, and raises "Module
+  -- `%s` does not export `%s`." -- textually distinct from, but rooted in
+  -- the EXACT SAME `pub_set` gate as, `reject/t26`'s "is private to module"
+  -- message (the qualified-var-resolution path's `qualified_error_msg`
+  -- phrasing for the same underlying absence). Confirms selective `use` is
+  -- consistent with Task 1's cross-module visibility fix: a private name is
+  -- unreachable through EITHER path, `use`-selector or bare qualification.
+  use Array.{lst_rev}
+
+  fn main() : Int do 0 end
+end

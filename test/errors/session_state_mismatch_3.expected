@@ -1,0 +1,19 @@
+exit: 1
+-- ERROR ---------- errors/session_state_mismatch_3.march
+
+Chan.close: channel is at `Send(String, End)` but I expected `End`. [session_state_mismatch]
+
+33 |         Chan.close(cc4)
+             ^^^^^^^^^^^^^^^
+
+
+
+-- ERROR ---------- errors/session_state_mismatch_3.march
+
+Chan.close: channel is at `Send(String, End)` but I expected `End`. [session_state_mismatch]
+
+36 |         Chan.close(cc4)
+             ^^^^^^^^^^^^^^^
+
+
+

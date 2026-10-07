@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: `S1` is linear, but `drop_it` is generic in a parameter of that type
+mod Main do
+  needs IO.Console
+  -- The drop half of t229: `drop_it` ignores its argument, and the S1 leaks.
+  always_linear type S1 = S1(Int)
+  fn drop_it(x) : Int do 0 end
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(drop_it(S1(1))))
+  end
+end

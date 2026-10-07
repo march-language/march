@@ -1,0 +1,16 @@
+exit: 1
+-- ERROR --------------------- errors/cap_ceiling_2.march
+
+module `Dep` uses `IO.FileRead` but does not declare `needs IO.FileRead`. [cap_ceiling]
+help: add `needs IO.FileRead` to the module body.
+
+14 |     needs IO.Console
+         ^^^^^^^^^^^^^^^^
+
+
+
+
+fix [cap_ceiling:IO.FileRead]:
+@@ after line 14 @@
+     needs IO.Console
++    needs IO.FileRead

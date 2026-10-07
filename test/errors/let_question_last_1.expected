@@ -1,0 +1,14 @@
+exit: 1
+-- ERROR --------------- errors/let_question_last_1.march
+
+`let?` cannot be the last expression in a block. [let_question_last]
+Add a Result-producing expression after it — for example:
+
+    let? x = might_fail()
+    Ok(x + 1)
+
+9 |     let? x = f()
+        ^^^^^^^^^^^^
+
+
+

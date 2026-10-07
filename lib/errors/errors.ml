@@ -7,6 +7,8 @@ exception ParseError of string * string option * Lexing.position
     to produce clear, non-cascading diagnostics with
     expected-vs-found framing. *)
 
+module Code = Code
+
 type severity = Error | Warning | Hint
 
 type fix_kind =
@@ -24,7 +26,8 @@ type diagnostic = {
   message : string;
   labels : label list;     (** Additional labeled source spans *)
   notes : string list;      (** Extra context / suggestions *)
-  code : string option;    (** Machine-readable error/warning code, e.g. "unused_binding" *)
+  code : string;           (** Machine-readable code from {!Code}, e.g. [Code.unused_binding].
+                               Required: every diagnostic has one. *)
   fix : fix_kind option;   (** Mechanically-determined fix, if one exists *)
 }
 
@@ -54,38 +57,31 @@ let report ctx diag =
   if not (List.exists is_dup ctx.diagnostics) then
     ctx.diagnostics <- diag :: ctx.diagnostics
 
-let error ctx ~span message =
+let error ctx ~code ~span message =
   report ctx
-    { severity = Error; span; message; labels = []; notes = []; code = None; fix = None }
+    { severity = Error; span; message; labels = []; notes = []; code; fix = None }
 
-let warning ctx ~span message =
+let warning ctx ~code ~span message =
   report ctx
-    { severity = Warning; span; message; labels = []; notes = []; code = None; fix = None }
+    { severity = Warning; span; message; labels = []; notes = []; code; fix = None }
 
-let hint ctx ~span ?code message =
+let hint ctx ~code ~span message =
   report ctx
     { severity = Hint; span; message; labels = []; notes = []; code; fix = None }
 
-let warning_with_code ctx ~span ~code message =
-  report ctx
-    { severity = Warning; span; message; labels = []; notes = []; code = Some code; fix = None }
+(* Kept as an alias of [warning] now that every helper takes [~code]. *)
+let warning_with_code = warning
 
-let error_with_fix ctx ~span ?code ~fix message =
+let error_with_fix ctx ~code ~span ~fix message =
   report ctx
     { severity = Error; span; message; labels = []; notes = []; code; fix = Some fix }
 
-let warning_with_fix ctx ~span ~fix message =
+let warning_with_fix ctx ~code ~span ~fix message =
   report ctx
-    { severity = Warning; span; message; labels = []; notes = []; code = None; fix = Some fix }
+    { severity = Warning; span; message; labels = []; notes = []; code; fix = Some fix }
 
-let warning_with_code_and_fix ctx ~span ~code ~fix message =
-  report ctx
-    { severity = Warning; span; message; labels = []; notes = []; code = Some code; fix = Some fix }
+let warning_with_code_and_fix = warning_with_fix
 
-(* ── ANSI colour ──────────────────────────────────────────────────────── *)
-
-(** Set to [true] at startup when stderr is a TTY (and NO_COLOR is absent).
-    Callers (bin/main.ml) are responsible for setting this before any output. *)
 let use_color : bool ref = ref false
 
 let ansi_reset        = "\027[0m"
@@ -182,6 +178,35 @@ let sorted ctx =
         | ^^^^^^^^^^^^
       [notes]
 *)
+(* ── Codes in rendered output ────────────────────────────────────────
+
+   Every rendered diagnostic ends its headline (the message's first line)
+   with ` [slug]`. It is APPENDED to the line, never inserted, so a test or a
+   corpus `EXPECT-ERROR` that greps for a fragment of the headline still
+   matches. The first time a run renders a code that has a
+   `march --explain` page, the diagnostic also says so; later diagnostics
+   with the same code don't repeat it. *)
+
+let explain_hints_shown : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+
+let headline_with_code (d : diagnostic) =
+  let suffix = " [" ^ Code.slug_of d.code ^ "]" in
+  match String.index_opt d.message '\n' with
+  | None -> d.message ^ suffix
+  | Some i ->
+    String.sub d.message 0 i ^ suffix
+    ^ String.sub d.message i (String.length d.message - i)
+
+let explain_hint (d : diagnostic) =
+  let slug = Code.slug_of d.code in
+  if not (Explain.has_page slug)
+     || Hashtbl.mem explain_hints_shown slug then ""
+  else begin
+    Hashtbl.replace explain_hints_shown slug ();
+    "\n" ^ fmt_note (Printf.sprintf "    run `march --explain %s`" slug)
+  end
+
 let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
   let sev_str = match d.severity with
     | Error   -> "ERROR"
@@ -216,7 +241,8 @@ let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
   in
   (* When no span info, just show the header and message. *)
   if line <= 0 || src = "" then
-    String.concat "\n" [ header; ""; fmt_message d.message; notes_block ]
+    String.concat "\n" [ header; ""; fmt_message (headline_with_code d); notes_block ]
+    ^ explain_hint d
   else begin
     (* Extract the source line(s) *)
     let src_lines = String.split_on_char '\n' src in
@@ -267,14 +293,15 @@ let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
       ) d.labels
     in
     String.concat "\n"
-      ([ header; ""; fmt_message d.message; "";
+      ([ header; ""; fmt_message (headline_with_code d); "";
          paint ansi_dim (gutter line) ^ src_line;
          pad ^ paint (sev_plain_code d.severity) underline;
          notes_block ]
        @ label_blocks)
+    ^ explain_hint d
   end
 
-let parse_error_diagnostic ?(filename = "") ?hint ~msg lexbuf =
+let parse_error_diagnostic ?(filename = "") ?hint ?(code = Code.syntax_error) ~msg lexbuf =
   let pos     = Lexing.lexeme_start_p lexbuf in
   let line    = pos.Lexing.pos_lnum in
   let col     = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in
@@ -284,7 +311,7 @@ let parse_error_diagnostic ?(filename = "") ?hint ~msg lexbuf =
                   start_line = line; start_col = col;
                   end_line = line; end_col = col + tok_len } in
   let notes   = match hint with None -> [] | Some h -> [h] in
-  { severity = Error; span; message = msg; labels = []; notes; code = None; fix = None }
+  { severity = Error; span; message = msg; labels = []; notes; code; fix = None }
 
 let render_parse_error ~src ?(filename = "") ?hint ~msg lexbuf =
   render_diagnostic ~src ~filename (parse_error_diagnostic ~filename ?hint ~msg lexbuf)
@@ -323,7 +350,8 @@ let token_len_at ~src ~line ~col =
     only knows menhir's lookahead token, which is the token AFTER the one the
     message is about.  [src], when given, sizes the caret to the token at
     [pos]; [len] overrides it. *)
-let parse_error_diagnostic_at ?(filename = "") ?hint ?src ?len ~msg
+let parse_error_diagnostic_at ?(filename = "") ?hint ?src ?len
+    ?(code = Code.parse_error) ~msg
     (pos : Lexing.position) =
   let line = pos.Lexing.pos_lnum in
   let col  = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in
@@ -336,7 +364,7 @@ let parse_error_diagnostic_at ?(filename = "") ?hint ?src ?len ~msg
                start_line = line; start_col = col;
                end_line = line; end_col = col + len } in
   let notes = match hint with None -> [] | Some h -> [h] in
-  { severity = Error; span; message = msg; labels = []; notes; code = None; fix = None }
+  { severity = Error; span; message = msg; labels = []; notes; code; fix = None }
 
 let render_parse_error_at ~src ?(filename = "") ?hint ~msg pos =
   render_diagnostic ~src ~filename
@@ -367,7 +395,7 @@ let render_diagnostic_json ?(related = true) (d : diagnostic) : string =
   let sp  = d.span in
   let file    = json_string sp.March_ast.Ast.file in
   let msg     = json_string d.message in
-  let code    = match d.code with None -> "null" | Some c -> json_string c in
+  let code    = json_string d.code in
   let fix_json = match d.fix with
     | None -> "null"
     | Some (FInsert { after_line; text }) ->

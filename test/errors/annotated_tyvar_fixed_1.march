@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: expected `String` but got `Int`
+-- Slice 6 (nested-module soundness), the DISTINCT-TVAR ANNOTATION witness --
+-- a nested `fn launder(x : a) : b do x end` declares two DISTINCT type
+-- variables in its signature (`a` for the param, `b` for the return), so its
+-- prebound scheme built from annotation SYNTAX alone (`a -> b`) is never
+-- unified against the body constraint `a ~ b`. Pre-fix (round-2 of the P0
+-- fix, before the rebind became unconditional), this un-body-validated
+-- annotation scheme was left intact and let a caller coerce `Int -> String`
+-- through `launder`. The P0 fix binds every qualified fn key to `check_fn`'s
+-- REAL body-checked scheme (which forces `a = b`), regardless of whether the
+-- prebind was a placeholder or an un-body-validated annotation -- so
+-- `launder`'s true type is `a -> a` and `need_str(launder(42))` is caught.
+-- IMPOSSIBLE to reject pre-fix. See core-march-types.md §2.8.13.
+mod Outer do
+  mod App do
+    fn launder(x : a) : b do x end
+
+    fn need_str(s : String) : Int do string_length(s) end
+
+    fn attack() : Int do need_str(launder(42)) end
+  end
+end

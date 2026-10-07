@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ---------------- errors/linear_discarded_1.march
+
+This `_` discards a linear value of type `Token`. [linear_discarded]
+Linear values must be consumed exactly once. Bind it to a name and pass it to something that consumes it.
+
+6 |     let _ = Token(1)
+            ^
+
+    run `march --explain linear_discarded`
+
+

@@ -1,0 +1,27 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_20.march
+
+expected `Result(Int, String)` but got `Int`. [type_mismatch]
+
+8 |     let? x = f()
+        ^^^^^^^^^^^^
+
+    This is the declared return type of `bad`.
+
+    the expected type comes from here:
+
+ 7 |   fn bad() : Result(Int, String) do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+
+-- ERROR ------------------ errors/type_mismatch_20.march
+
+expected `Result(a, String)` but got `Int`. [type_mismatch]
+
+8 |     let? x = f()
+        ^^^^^^^^^^^^
+
+    The code after `let?` must produce a Result with the same error type.
+
+

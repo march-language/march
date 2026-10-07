@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------- errors/refinement_violated_3.march
+
+refinement violation: argument `k` of `g` does not satisfy precondition `_ >= 0` [refinement_violated]
+note: guard the call (e.g. `if _ >= 0 do …`) or pass a value known to satisfy it
+
+14 |     g(-3)
+         ^^^^^
+
+
+    this argument must satisfy `_ >= 0`:
+
+14 |     g(-3)
+           ^^
+    run `march --explain refinement_violated`
+
+

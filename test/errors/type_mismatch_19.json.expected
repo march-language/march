@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/type_mismatch_19.march","start_line":6,"start_col":4,"end_line":6,"end_col":15,"message":"expected `Result(a, b)` but got `Int`.","code":"type_mismatch","fix":null,"labels":[],"notes":["The right-hand side of `let?` must be a Result value."]}

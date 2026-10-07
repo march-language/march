@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/role_needs_invalid_4.march","start_line":10,"start_col":14,"end_line":10,"end_col":15,"message":"Protocol `Logging`: `may crash D` names a role that is not in the protocol.","code":"role_needs_invalid","fix":null,"labels":[],"notes":[]}

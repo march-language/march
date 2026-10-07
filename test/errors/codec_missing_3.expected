@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------------- errors/codec_missing_3.march
+
+`@[remote] dispatch` needs a JSON codec for `Hit`, and none is derived. [codec_missing]
+hint: add `derive Json for Hit` next to its declaration; the compiler then mints the wire type tag from it, and a receiver decodes with `from_json`.
+
+    in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` declaration; the excerpt cannot be shown
+
+
+-- ERROR ------------------- errors/codec_missing_3.march
+
+`@[remote] dispatch` needs a JSON codec for `Hit`, and none is derived. [codec_missing]
+hint: add `derive Json for Hit` next to its declaration; the compiler then mints the wire type tag from it, and a receiver decodes with `from_json`.
+
+    in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` declaration; the excerpt cannot be shown
+
+

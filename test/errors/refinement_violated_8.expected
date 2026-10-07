@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------- errors/refinement_violated_8.march
+
+refinement violation: argument `xs` of `inner` does not satisfy precondition `len(_) > 0` (e.g. ys = []) [refinement_violated]
+note: guard the call (e.g. `if len(_) > 0 do …`) or pass a value known to satisfy it
+
+34 |       inner(ys)
+           ^^^^^^^^^
+
+
+    this argument must satisfy `len(_) > 0`:
+
+34 |       inner(ys)
+                 ^^
+    run `march --explain refinement_violated`
+
+

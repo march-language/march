@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: could collide
+-- A label whose capitalised form starts with `Msg_` spells the shape of the
+-- names `@[endpoints]` makes up for unlabelled steps (`Msg_<From>_<To>_<k>`),
+-- so it could collide with one; refused (2026-09-20).
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol P do
+    msg_A_B_1: A -> B : Int
+    B -> A : Bool
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

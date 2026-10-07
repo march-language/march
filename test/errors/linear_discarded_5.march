@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: This `_` discards a linear value of type `S1`
+mod Main do
+  needs IO.Console
+  -- The scrutinee counts as the use of `st`, and the `_` arm then discards
+  -- it: the value is consumed by nothing.
+  always_linear type S1 = S1(Int)
+  fn g(st : S1) : Int do
+    match st do
+      _ -> 0
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(g(S1(1))))
+  end
+end

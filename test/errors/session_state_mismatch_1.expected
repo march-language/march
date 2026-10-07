@@ -1,0 +1,28 @@
+exit: 1
+-- ERROR ---------- errors/session_state_mismatch_1.march
+
+Chan.send: channel is at `Recv(Int, End)` but I expected `Send(T, ...)`. [session_state_mismatch]
+
+20 |     let cc3 = Chan.send(cc2, 43)
+                   ^^^^^^^^^^^^^^^^^^
+
+
+
+-- ERROR ---------- errors/session_state_mismatch_1.march
+
+Chan.close: expected a channel endpoint but got `a`. [session_state_mismatch]
+
+21 |     Chan.close(cc3)
+         ^^^^^^^^^^^^^^^
+
+
+
+-- ERROR ---------- errors/session_state_mismatch_1.march
+
+Chan.close: channel is at `Recv(Int, Send(Int, End))` but I expected `End`. [session_state_mismatch]
+
+22 |     Chan.close(sc)
+         ^^^^^^^^^^^^^^
+
+
+

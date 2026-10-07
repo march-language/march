@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: `@[remote] dispatch` needs a JSON codec for `Hit`
+-- `@[remote]` on an actor (2026-09-15, lib/desugar/desugar_remote.ml)
+-- generates a dispatch that routes a typed remote delivery to each handler
+-- taking one annotated parameter. The wire tag comes from that parameter's
+-- type, through the same deferred sweep as `Node.send`, so a handler whose
+-- type has no `derive Json` is refused, naming the type -- a receiver could
+-- never decode it, and a sender could never send it.
+mod RemoteNoCodec do
+  needs IO.Console
+
+  type Hit = { n : Int }
+
+  @[remote]
+  actor Counter do
+    state { total : Int }
+    init  { total: 0 }
+    on Bump(h : Hit) do
+      { total: state.total + h.n }
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let _ = spawn(Counter)
+    ()
+  end
+end

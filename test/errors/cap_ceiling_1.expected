@@ -1,0 +1,42 @@
+exit: 1
+-- ERROR --------------------- errors/cap_ceiling_1.march
+
+module `Report` uses `IO.Console` but does not declare `needs IO.Console`. [cap_ceiling]
+help: add `needs IO.Console` to the module body.
+
+3 |   mod Report do
+      ^^^^^^^^^^^^^
+
+
+
+-- ERROR --------------------- errors/cap_ceiling_1.march
+
+function bodies in `Report` call builtins that require `Cap(IO.Console)`, but `Report` declares no matching `needs`. [cap_needs]
+hint: add these to the module body —
+        needs IO.Console
+
+5 |       println(int_to_string(n))
+          ^^^^^^^
+
+    run `march --explain cap_needs`
+
+
+-- HINT --------------------- errors/cap_ceiling_1.march
+
+reached from `main`: main → show [cap_needs]
+
+5 |       println(int_to_string(n))
+          ^^^^^^^
+
+
+
+
+fix [cap_ceiling:IO.Console]:
+@@ after line 3 @@
+   mod Report do
++  needs IO.Console
+
+fix [cap_needs:IO.Console]:
+@@ after line 3 @@
+   mod Report do
++  needs IO.Console

@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------ errors/refinement_violated_12.march
+
+refinement violation: argument `n` of `List.nth` does not satisfy precondition `_ >= 0 && _ < len(xs)` [refinement_violated]
+note: guard the call (e.g. `if _ >= 0 && _ < len(xs) do …`) or pass a value known to satisfy it
+
+21 |     List.nth([1, 2, 3], 7)
+         ^^^^^^^^^^^^^^^^^^^^^^
+
+
+    this argument must satisfy `_ >= 0 && _ < len(xs)`:
+
+21 |     List.nth([1, 2, 3], 7)
+                             ^
+    run `march --explain refinement_violated`
+
+

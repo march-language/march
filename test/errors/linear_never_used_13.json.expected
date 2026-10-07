@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/linear_never_used_13.march","start_line":15,"start_col":7,"end_line":15,"end_col":13,"message":"The linear value `state.slot` was never used.\nLinear values must be consumed exactly once — did you mean to pass it somewhere?","code":"linear_never_used","fix":null,"labels":[],"notes":[]}

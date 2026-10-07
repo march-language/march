@@ -1,0 +1,9 @@
+exit: 1
+-- ERROR --------------------- errors/parse_error_7.march
+
+Parse error in declaration [parse_error]
+
+3 |   cap no_such_thing
+      ^^^
+
+    run `march --explain parse_error`

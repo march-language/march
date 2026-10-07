@@ -1,0 +1,22 @@
+exit: 1
+-- ERROR ---------- errors/proof_cap_mint_private_1.march
+
+private function `run_migrations` in `Db` cannot mint `Cap(Db.Migrated)`. [proof_cap_mint_private]
+Only public functions of `Db` can construct `Cap(Db.Migrated)`.
+hint: make this function public, or accept `Cap(Db.Migrated)` as a parameter and pass it through.
+
+17 |   pfn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+-- ERROR ---------- errors/proof_cap_mint_private_1.march
+
+mint_cap `Cap(Db.Migrated)` is only allowed inside a public function of its declaring module `Db`. [mint_cap_invalid]
+hint: to obtain `Cap(Db.Migrated)` elsewhere, receive it as a parameter and pass it through, or call a public factory in `Db`.
+
+18 |     mint_cap(cap)
+         ^^^^^^^^^^^^^
+
+
+

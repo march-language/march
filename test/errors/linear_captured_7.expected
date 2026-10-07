@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ----------------- errors/linear_captured_7.march
+
+The linear value `r` cannot be captured by a closure. [linear_captured]
+A closure may be called multiple times, which would violate the exactly-once guarantee.
+Pass `r` as a parameter to the closure instead.
+
+14 |     let f = fn -> take(r)
+                 ^^^^^^^^^^^^^
+
+
+

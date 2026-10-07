@@ -1,0 +1,10 @@
+exit: 1
+-- ERROR ------------------ errors/unknown_export_1.march
+
+Module `Array` does not export `lst_rev`. [unknown_export]
+
+18 |   use Array.{lst_rev}
+                  ^^^^^^^
+
+
+

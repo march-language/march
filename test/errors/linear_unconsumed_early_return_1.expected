@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR -- errors/linear_unconsumed_early_return_1.march
+
+The linear value `st` is still unconsumed when `let?` returns early on `Err`. [linear_unconsumed_early_return]
+On that path the value is dropped. Consume it before the `let?`, or match on the result and consume it on the `Err` branch too.
+
+10 |     let? v = mk(i)
+         ^^^^^^^^^^^^^^
+
+
+

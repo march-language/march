@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: `make_pair` is in `cap no_alloc` module `NoAllocPair` but allocates
+-- Capabilities widening, Task 4 -- `cap no_alloc`, the REJECT side: a
+-- non-empty tuple inside a `cap no_alloc` module's function body. Since
+-- 2026-09-15 the cap is a module-wide hard `@[no_alloc]` contract, judged by
+-- `lib/tir/alloc_contract.ml` on the final TIR (after Perceus and escape
+-- analysis); `--check` lowers the program on demand to judge it (the
+-- syntactic AST walk that used to answer here was deleted). `make_pair`'s
+-- `(a, b)` return is a heap-allocated 2-tuple that escapes the call, so
+-- `--check` exits 1 naming the cap: `` `make_pair` is in `cap no_alloc`
+-- module `NoAllocPair` but allocates. ``. See core-march-types.md §2.8.11.
+mod NoAllocPair do
+  cap no_alloc
+
+  fn make_pair(a : Int, b : Int) : (Int, Int) do
+    (a, b)
+  end
+end
