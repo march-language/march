@@ -74,7 +74,7 @@ The conformance pair `accept/t310` (all PROVED under `cap verified`, plus a
 - `take_while`, compiled `--opt 2`, 60 × a 150k prefix of 200k, interleaved, warm runs: base 0.21–0.23 s, branch 0.17–0.20 s, same output.
 - `bench/list_ops.march`: identical output; 0.04–0.07 s both.
 - Cold `--check --stdlib-source stdlib/list.march`: base median 3.32 s, branch 3.52 s (+6%). The load average was 48 throughout, so this is noisy; it's within the 110% budget.
-- Full suite: see the PR.
+- Full suite (`scripts/run-tests.sh`): all passing. Compiler 1372, eval 288, codegen 681, stdlib 894, stdlib_march 77, jit 33, lsp 379 + 5 + 37 + 10 + 7, refinecheck 1020, errors 269.
 
 ## Environment note
 
