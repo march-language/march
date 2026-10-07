@@ -1918,6 +1918,7 @@ type shell_fragment = {
   sf_so    : string;               (** path of the compiled .so *)
   sf_entry : string;               (** its one exported symbol *)
   sf_ret   : March_tir.Tir.ty;     (** the entry's return type *)
+  sf_caps  : string list;          (** the capabilities its code uses, sorted *)
 }
 
 (** The shell fragment's function.  It is `main` because monomorphisation
@@ -1963,7 +1964,7 @@ let shell_lower_program ctx ~program_name ~program_decls ~program_type_map =
     and makes the entry return nothing useful (an init fragment); otherwise
     the entry returns the value of [main] (a String: the caller wraps the
     input in its renderer).  Raises [Typecheck_failed] / [Failure]. *)
-let shell_compile ?triple ctx ~tc_env ~(program_name : string)
+let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
     ~(program_decls : March_ast.Ast.decl list)
     ~(program_type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t)
     ?store_as (m : March_ast.Ast.module_) : shell_fragment =
@@ -2039,6 +2040,24 @@ let shell_compile ?triple ctx ~tc_env ~(program_name : string)
   let n = next_id ctx in
   let entry = Printf.sprintf "repl_%d" n in
   let sw = fresh_wrap_state ctx in
+  (* R5.4: refuse an input whose code differs from the node's build (see
+     shell_ident.ml), before paying for clang. *)
+  (match ident with
+   | Some c ->
+     (match Shell_ident.fragment_skew c ~types:tir.March_tir.Tir.tm_types (main_fn :: fns) with
+      | [] -> ()
+      | diffs ->
+        let shown = List.filteri (fun i _ -> i < 8) diffs in
+        let more = List.length diffs - List.length shown in
+        failwith (String.concat "\n  "
+          ("this input reaches code that differs from the node's build:" :: shown
+           @ (if more > 0 then [ Printf.sprintf "... and %d more" more ] else []))))
+   | None -> ());
+  (* The capabilities are those of the C symbols the emitted code calls, as
+     for a binary's cap markers (llvm_toplevel.ml): a fragment carries every
+     body it runs, so this covers what it reaches through program and library
+     code, not only the caps the input names. *)
+  March_tir.Llvm_builtins.reset_called_syms ();
   let ir = time_phase "emit_ir" (fun () ->
       March_tir.Llvm_emit.emit_repl_expr
         ~n ~ret_ty:main_fn.fn_ret_ty
@@ -2051,6 +2070,20 @@ let shell_compile ?triple ctx ~tc_env ~(program_name : string)
            type names take tags from a counter over this list). *)
         ~types:tir.March_tir.Tir.tm_types
         main_fn.fn_body) in
+  let caps =
+    March_tir.Llvm_builtins.called_c_symbols ()
+    |> List.filter_map March_caps.Cap_symbols.cap_of_symbol
+    |> List.sort_uniq String.compare in
+  (* The node checks this against the signed `caps:` after loading the
+     fragment (runtime/march_shell.c), so a fragment cannot run under a
+     narrower declaration than its own code. *)
+  let manifest = String.concat "\n" caps in
+  let ir = ir ^ Printf.sprintf
+      "\n@__march_cap_manifest = constant [%d x i8] c\"%s\\00\"\n"
+      (String.length manifest + 1)
+      (String.concat "" (List.map (fun c ->
+           if c = '\n' then "\\0A" else String.make 1 c)
+           (List.of_seq (String.to_seq manifest)))) in
   let base = Filename.concat ctx.tmp_dir (Printf.sprintf "shell_%d" n) in
   let ll = base ^ ".ll" and so = base ^ ".so" in
   let oc = open_out ll in
@@ -2075,11 +2108,12 @@ let shell_compile ?triple ctx ~tc_env ~(program_name : string)
      the fragment bind to the fragment's own copies. *)
   let export_flags =
     if target_is_mac then
-      Printf.sprintf " -undefined dynamic_lookup -Wl,-exported_symbol,_%s" entry
+      Printf.sprintf " -undefined dynamic_lookup -Wl,-exported_symbol,_%s \
+                      -Wl,-exported_symbol,___march_cap_manifest" entry
     else begin
       let vs = base ^ ".map" in
       let oc = open_out vs in
-      Printf.fprintf oc "{ global: %s; local: *; };\n" entry;
+      Printf.fprintf oc "{ global: %s; __march_cap_manifest; local: *; };\n" entry;
       close_out oc;
       Printf.sprintf " -Wl,--version-script=%s -Wl,-Bsymbolic" (Filename.quote vs)
     end in
@@ -2091,4 +2125,4 @@ let shell_compile ?triple ctx ~tc_env ~(program_name : string)
     let msg = try In_channel.with_open_text log In_channel.input_all with _ -> "" in
     failwith ("shell: clang failed:\n" ^ msg)
   end;
-  { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty }
+  { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty; sf_caps = caps }

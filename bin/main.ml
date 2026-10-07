@@ -1348,6 +1348,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
         (* --protocol-baseline: the previous protocol versions decide the
            generated `<P>_Msg.compat()` table, so they are part of the binary. *)
         @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+        @ (match !shell_ident_tag with Some t -> ["sident:" ^ t] | None -> [])
         @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
             (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
@@ -2410,6 +2411,13 @@ let compile filename =
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
   in
   stamp "stdlib-load";
+  (* The shell's identity table, over the same declarations `march --shell`
+     hashes on the client (both see this [desugared]). *)
+  if !do_compile && !hot_reload_prefix <> None && not !compile_so then begin
+    let decls, _ = March_jit.Shell_ident.of_decls desugared.March_ast.Ast.mod_decls in
+    shell_ident_decls := Some decls;
+    shell_ident_tag := Some (March_jit.Shell_ident.digest decls)
+  end;
   (* source_cas_state = early_cas — the CAS lookup already ran before parse.
      On a cache hit we already exited; if we reach this point it's a miss.
      We still pass the (store, ch) pair forward so the post-clang store fires. *)
@@ -3526,6 +3534,12 @@ let compile filename =
           let () = March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None in
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
+          let ir = match !shell_ident_decls with
+            | Some decls ->
+              ir ^ March_jit.Shell_ident.ir_global
+                { March_jit.Shell_ident.decls;
+                  tags = March_jit.Shell_ident.tags_of_types tir.March_tir.Tir.tm_types }
+            | None -> ir in
           let ir = finish_ir target ir in
           stamp "llvm-emit";
           (* clang reads the per-process temp, never the shared [ll_file]

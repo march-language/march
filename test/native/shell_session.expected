@@ -7,6 +7,7 @@ xs : List(Int)
 [0, 2]
 2.5
 4.
+** refused: policy IO.Clock
 [1, 4, 9, … 6 more]
 hi from the shell
 ()

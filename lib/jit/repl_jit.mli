@@ -136,6 +136,7 @@ type shell_fragment = {
   sf_so    : string;
   sf_entry : string;
   sf_ret   : March_tir.Tir.ty;
+  sf_caps  : string list;  (** the capabilities its code uses, sorted *)
 }
 
 (** Lower the program for [shell_compile], once per session; call it at
@@ -151,6 +152,7 @@ val shell_lower_program :
     that stores its value in that slot. *)
 val shell_compile :
   ?triple:string ->
+  ?ident:Shell_ident.check ->
   t ->
   tc_env:March_typecheck.Typecheck.env ->
   program_name:string ->
