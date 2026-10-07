@@ -43,6 +43,10 @@ git log is authoritative for exact commits.
   libraries, a Depot query for example. The policy does not yet see the
   capabilities an input reaches through that code, only the pre-bound ones
   it names.
+- **Several native libraries per project.** forge.toml can declare `[[ffi]]`
+  once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
+  links all of them, in order. A single `[ffi]` table works as before.
+
 - **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
   `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
   line per post-TIR definition, sorted, straight from the CAS hashing that keys
