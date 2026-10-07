@@ -520,7 +520,11 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
                     (check_fn_post_verdict ~root errctx
                        (local_fn_def { A.txt = lam_name; A.span = lsp } ps (Some cod) body lsp))
                 in
-                let captures = List.exists (fun v -> List.mem v ctx.locals) (Witness.free_vars a) in
+                (* Binder-aware and head-inclusive: a local called as `h(y)`
+                   is a capture, a lambda parameter spelled like a local is
+                   not.  ([Witness.free_vars] answers [] for any `ELam`, so it
+                   made every lambda look closed.) *)
+                let captures = List.exists (fun v -> Refine_scope.expr_mentions_free v a) ctx.locals in
                 if captures then run () else Witness.with_lambda lam_name a run
               | A.EVar { A.txt = g; _ } ->
                 (match callee_sig ctx defs cb g with
