@@ -322,6 +322,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Matching a nested `Option(Float)` returns the right value when compiled.** A match
+  like `Some(Some(f)) -> f` next to `Some(x) -> 0.5` on an `Option(Option(Float))` (or
+  `Ok(Some(f))` next to `Ok(x)` on a `Result(Option(Float), _)`) returned a tiny garbage
+  number such as `2.9e-311` from both `Some` arms, even the constant one. The inner value
+  was read with the wrong memory layout; the interpreter was never affected.
 - **A missing `end` is reported at the construct that is missing it.** Instead of
   "Parse error in declaration" at the end of the file or the next `fn`, the error
   points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the

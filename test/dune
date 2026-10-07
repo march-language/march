@@ -12325,6 +12325,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/local_colliding_type.expected native_local_colliding_type.out)))
 
+; ── A nested Some(..) pattern beside a row binding the same field by name
+; (2026-10-07): the erased sub-scrutinee decoded an Option(Float) as a niche,
+; and the function returned denormal garbage (Option(Option(Float)),
+; Result(Option(Float), _)). The .expected file IS the interpreter's output.
+(rule
+ (targets native_nested_option_float_match native_nested_option_float_match.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/nested_option_float_match.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_option_float_match
+        native/nested_option_float_match.march)
+   (with-stdout-to native_nested_option_float_match.out
+        (system "./native_nested_option_float_match")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_option_float_match.expected native_nested_option_float_match.out)))
+
 ; ── A cluster session's party is released when it ends (2026-10-06): live
 ; objects left per session under 120 (RED before: ~156, the party's Ops
 ; closures, the Party and its table handles).

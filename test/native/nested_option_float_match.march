@@ -1,0 +1,99 @@
+-- A nested constructor pattern whose field another row binds by name: the
+-- sub-scrutinee is lowered erased (TVar "_"), and codegen's erased-scrutinee
+-- recovery read its Some/None branches as a NICHE Option. An Option(Float) is
+-- niche-unsafe, so it is a boxed cell: the inner match took the cell for the
+-- payload box and returned denormal garbage (even for a constant arm),
+-- compiled only. Each shape below mixes a nested Some(..) row with a row that
+-- binds the same field by name.
+-- specs/progress/2026-10-07-nested-option-float-match.md
+mod Main do
+  needs IO.Console
+
+  pfn oof(o : Option(Option(Float))) : Float do
+    match o do
+      Some(Some(f)) -> f
+      Some(x) -> 0.5
+      None -> 0.0
+    end
+  end
+
+  -- The Float leaves through a let and through a nested case arm.
+  pfn oof_let(o : Option(Option(Float))) : Float do
+    let r = match o do
+      Some(Some(f)) -> f * 2.0
+      Some(_x) -> 1.5
+      None -> 0.25
+    end
+    r + 1.0
+  end
+
+  pfn oof_arm(o : Option(Option(Float)), pick : Bool) : Float do
+    match o do
+      Some(Some(f)) ->
+        if pick do f else 0.0 - f end
+      Some(x) ->
+        match x do
+          Some(g) -> g
+          None -> 7.5
+        end
+      None -> 0.0
+    end
+  end
+
+  pfn ooi(o : Option(Option(Int))) : Int do
+    match o do
+      Some(Some(n)) -> n
+      Some(x) -> 5
+      None -> 0
+    end
+  end
+
+  pfn oos(o : Option(Option(String))) : String do
+    match o do
+      Some(Some(s)) -> s
+      Some(x) -> "inner none"
+      None -> "none"
+    end
+  end
+
+  pfn rof(r : Result(Option(Float), String)) : Float do
+    match r do
+      Ok(Some(f)) -> f
+      Ok(x) -> 0.5
+      Err(_) -> 0.0 - 1.0
+    end
+  end
+
+  pfn generic_inner(o : Option(Option(a)), d : a) : a do
+    match o do
+      Some(Some(v)) -> v
+      Some(x) -> d
+      None -> d
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println(float_to_string(oof(Some(Some(2.5)))))
+    println(float_to_string(oof(Some(None))))
+    println(float_to_string(oof(None)))
+    println(float_to_string(oof_let(Some(Some(2.5)))))
+    println(float_to_string(oof_let(Some(None))))
+    println(float_to_string(oof_let(None)))
+    println(float_to_string(oof_arm(Some(Some(3.25)), true)))
+    println(float_to_string(oof_arm(Some(Some(3.25)), false)))
+    println(float_to_string(oof_arm(Some(None), true)))
+    println(float_to_string(oof_arm(None, true)))
+    println(int_to_string(ooi(Some(Some(42)))))
+    println(int_to_string(ooi(Some(None))))
+    println(int_to_string(ooi(None)))
+    println(oos(Some(Some("hello"))))
+    println(oos(Some(None)))
+    println(oos(None))
+    println(float_to_string(rof(Ok(Some(9.75)))))
+    println(float_to_string(rof(Ok(None))))
+    println(float_to_string(rof(Err("e"))))
+    println(float_to_string(generic_inner(Some(Some(1.125)), 0.0)))
+    println(float_to_string(generic_inner(Some(None), 6.5)))
+    println(int_to_string(generic_inner(Some(Some(11)), 0)))
+  end
+end

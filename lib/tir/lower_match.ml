@@ -577,6 +577,42 @@ let rec compile_matrix
     let body    = compile_matrix_impl env scruts rows (Some jp_call) in
     bind_jp clo_var lambda_expr body
 
+(** The scrutinee atom an [ECase] on a constructor column switches on, typed
+    for codegen.  A NESTED column's scrutinee is a sub-pattern variable that
+    [compile_matrix_impl] mints at [unknown_ty] whenever another row binds that
+    field to a plain name (see [field_ty_at]), and [Llvm_case.emit_case] then
+    has only the branch tags to choose a decode by: for Some/None it picks the
+    NICHE decode (every Option-shaped owner is niche-shaped).  That is wrong for
+    an Option over a niche-UNSAFE payload: [Some(Some(f)) -> f | Some(x) -> ..]
+    on an Option(Option(Float)) read the boxed inner Option(Float) cell as the
+    payload's float box and returned a denormal, compiled only.  The
+    typechecker recorded the constructor pattern's own type at its span; give
+    the [ECase]'s atom that type, the same variable re-annotated in place (no
+    new binding, no RC change, as [expand_record_column] does for a nested
+    record).  The sub-variable itself, and so every [let n = <sub_var>]
+    rebinding of a name-bound row, stays erased, which keeps the uniform ->
+    natural untag at those bindings. *)
+and case_scrut_ty
+    (env  : Lower_state.env)
+    (scrut : Tir.atom)
+    (ctor_rows : (Ast.pattern list * Tir.expr) list)
+  : Tir.atom =
+  match scrut with
+  | Tir.AVar ({ Tir.v_ty = Tir.TVar _; _ } as v) ->
+    let pattern_ty =
+      List.find_map (fun (pats, _) ->
+          match pats with
+          | (Ast.PatCon _ as p) :: _ ->
+            (match Lower_state.ty_of_span env (span_of_pat p) with
+             | Tir.TCon _ as t -> Some t
+             | _ -> None)
+          | _ -> None) ctor_rows
+    in
+    (match pattern_ty with
+     | Some t -> Tir.AVar { v with Tir.v_ty = t }
+     | None -> scrut)
+  | _ -> scrut
+
 and compile_matrix_impl
     (env      : Lower_state.env)
     (scruts   : Tir.atom list)
@@ -802,7 +838,7 @@ and compile_matrix_impl
           | Some _ -> default
           | None -> Some (Lower_state.nonexhaustive_panic ())
         in
-        Tir.ECase (scrut, tir_branches, default))
+        Tir.ECase (case_scrut_ty env scrut ctor_rows, tir_branches, default))
 
 (** Replace a first-column record pattern with one column per field.
 
