@@ -26,8 +26,14 @@ mod GlobalRegistry do
   -- a relayed binding whose holder this replica has not verified). It is
   -- local bookkeeping: never on the wire, not in the Merkle hash, and no part
   -- of the merge order, so replicas that recorded it differently still agree.
+  -- `retired_at` is when a tombstone was first stamped (Unix ms), 0 for a
+  -- present binding or a tombstone not yet stamped. `collect_tombstones`
+  -- stamps and later drops it. It travels with the entry (see
+  -- NetKernel.encode_registry_sync_resp) so every replica expires a tombstone
+  -- at about the same moment, but it is not in the Merkle hash and no part of
+  -- the merge order.
   type Entry = { node_id : String, pid : Int, clock : VectorClock, present : Bool, creation : Int,
-                 registrant : String }
+                 registrant : String, retired_at : Int }
 
   -- name -> Entry.
   type Names = Names(Map(String, Entry))
@@ -58,15 +64,31 @@ mod GlobalRegistry do
   end
 
   -- Fold one binding into the registry, keeping the winner for that name.
+  -- Two copies of the same tombstone (Equal clocks) keep the earlier stamp,
+  -- so a replica re-sent an unstamped or later-stamped copy does not restart
+  -- its expiry.
   fn observe(reg : Names, name : String, entry : Entry) : Names do
     match reg do
       Names(m) ->
         let winner = match Map.get(m, name, Map.str_cmp) do
           None -> entry
-          Some(existing) -> if wins(entry, existing) do entry else existing end
+          Some(existing) ->
+            let w = if wins(entry, existing) do entry else existing end
+            if w.present || existing.present || entry.present do w
+            else
+              match VectorClock.compare(entry.clock, existing.clock) do
+                Equal -> { w with retired_at: earliest_stamp(entry.retired_at, existing.retired_at) }
+                _ -> w
+              end
+            end
         end
         Names(Map.insert(m, name, winner, Map.str_cmp))
     end
+  end
+
+  -- The earlier of two tombstone stamps, where 0 means "not stamped yet".
+  pfn earliest_stamp(a : Int, b : Int) : Int do
+    if a == 0 do b else if b == 0 do a else if a < b do a else b end end end
   end
 
   -- Register [name] -> (node_id, pid) at [clock] (the registrant's VectorClock
@@ -84,7 +106,7 @@ mod GlobalRegistry do
   fn register_as(reg : Names, name : String, node_id : String, creation : Int, pid : Int, clock : VectorClock,
                  registrant : String) : Names do
     observe(reg, name, { node_id: node_id, pid: pid, clock: clock, present: true, creation: creation,
-                         registrant: registrant })
+                         registrant: registrant, retired_at: 0 })
   end
 
   -- The entry for [name], tombstone or not.
@@ -115,7 +137,7 @@ mod GlobalRegistry do
       None -> None
       Some(e) ->
         if e.present && e.node_id == node_id && e.creation == creation && e.pid == pid do
-          Some(observe(reg, name, { e with clock: clock, present: false }))
+          Some(observe(reg, name, { e with clock: clock, present: false, retired_at: 0 }))
         else
           None
         end
@@ -130,7 +152,7 @@ mod GlobalRegistry do
       Names(m) ->
         match Map.get(m, name, Map.str_cmp) do
           None -> reg
-          Some(existing) -> observe(reg, name, { existing with clock: clock, present: false })
+          Some(existing) -> observe(reg, name, { existing with clock: clock, present: false, retired_at: 0 })
         end
     end
   end
@@ -170,6 +192,38 @@ mod GlobalRegistry do
 
   -- Count of present bindings (tombstones excluded).
   fn size(reg : Names) : Int do List.length(names(reg)) end
+
+  -- Count of tombstones held.
+  fn tombstone_count(reg : Names) : Int do
+    match reg do
+      Names(m) -> List.length(List.filter(Map.entries(m), fn (kv) ->
+        match kv do (_n, e) -> !e.present end))
+    end
+  end
+
+  doc """
+  Expire tombstones: stamp every unstamped tombstone with [now] (Unix ms),
+  and drop every tombstone stamped at least [grace_ms] ago. Present bindings
+  are untouched.
+
+  A tombstone exists so that a delayed, causally older binding cannot bring
+  an unregistered name back. Once every replica has seen it, which takes far
+  less than [grace_ms] on a healthy cluster, it guards nothing. Dropping it
+  bounds the registry (and each anti-entropy round) by the live names rather
+  than by every name ever unregistered. The cost: a partition longer than
+  [grace_ms] can bring back a binding whose holder is gone, which the node
+  service then hides and its owner tombstones again.
+  """
+  fn collect_tombstones(reg : Names, now : Int, grace_ms : Int) : Names do
+    match reg do
+      Names(m) ->
+        Names(Map.fold(m, m, fn (acc, name, e) ->
+          if e.present do acc
+          else if e.retired_at == 0 do Map.insert(acc, name, { e with retired_at: now }, Map.str_cmp)
+          else if now - e.retired_at >= grace_ms do Map.remove(acc, name, Map.str_cmp)
+          else acc end end end))
+    end
+  end
 
   -- CRDT join: observe every binding of [b] into [a].
   fn merge(a : Names, b : Names) : Names do
