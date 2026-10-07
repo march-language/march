@@ -1,0 +1,16 @@
+-- Abstract refinements, phase 2 (specs/2026-09-20-abstract-refinements-design.md
+-- rows n, n1 and the let-bound result): `List.filter` instantiates its abstract
+-- refinement `p` from an inline lambda at each call, so its result's elements
+-- satisfy the lambda.  Under `cap verified` every obligation must be PROVED,
+-- so exit 0 here means each demand proved, not skipped.  Reject companion:
+-- reject/t297 (a weaker lambda).
+mod AbsFilter do
+  cap verified
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn direct(ys : List(Int)) : Int do sum_pos(List.filter(ys, fn y -> y > 0)) end
+  fn conj(ys : List({Int | _ > 0})) : Int do sum_pos(List.filter(ys, fn y -> y < 100)) end
+  fn bound(ys : List(Int)) : Int do
+    let zs = List.filter(ys, fn y -> y > 0)
+    sum_pos(zs)
+  end
+end
