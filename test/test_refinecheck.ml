@@ -17841,9 +17841,11 @@ end|}
           typed_ledger
             ("mod NCL do\n" ^ ar2_filt
            ^ {|  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
-  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> is_pos(y))) end
+  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> is_pos(y) && y < 100)) end
 end|})
         in
+        (* Phase 3 reads a bare `fn y -> is_pos(y)` as `is_pos` (eta), so the
+           call here is deliberately not the whole body. *)
         Alcotest.(check int) "not violated" 0 v;
         Alcotest.(check bool) "uninstantiated" true (List.mem "abstract-refinement-uninstantiated" rs);
         Alcotest.(check bool) "not too weak" false (List.mem "abstract-refinement-too-weak" rs));
@@ -17854,6 +17856,78 @@ end|})
           (has_refine_error_typed (m "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"));
         Alcotest.(check bool) "too-weak errors" true
           (has_refine_error_typed (m "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y >= 0)) end\n"))) ]
+
+(* Phase 3 (plan specs/plans/2026-10-07-abstract-refinements-phase3-plan.md):
+   the instantiating actual may be a named predicate with a PROVED
+   `{Bool | _ == e}` return, a callback parameter, a let-bound lambda, or
+   `fn y -> g(y)`.  Each row's "today" is the 2026-10-07 pressure test. *)
+let abstract_phase3_suite =
+  let sumpos src =
+    List.filter_map (fun (c, v, r) -> if c = "sum_pos" then Some (v, r) else None)
+      (typed_obligations ("mod Q do\n" ^ ar2_filt ^ src ^ "end\n"))
+  in
+  let proved = [ ("proved", "") ] in
+  let uninst = [ ("skipped", "abstract-refinement-uninstantiated") ] in
+  let ps = Alcotest.(list (pair string string)) in
+  [ gated "q01: a named predicate with a proved return instantiates p" (fun () ->
+        Alcotest.check ps "proved" proved
+          (sumpos "  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, is_pos)) end\n"));
+    gated "q03: either orientation of the equality" (fun () ->
+        Alcotest.check ps "proved" proved
+          (sumpos "  fn is_pos(n : Int) : {Bool | (n > 0) == _} do n > 0 end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, is_pos)) end\n"));
+    gated "a weaker named predicate is too weak, not violated" (fun () ->
+        Alcotest.check ps "too weak" [ ("skipped", "abstract-refinement-too-weak") ]
+          (sumpos "  fn nonneg(n : Int) : {Bool | _ == (n >= 0)} do n >= 0 end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, nonneg)) end\n"));
+    gated "q02: a named predicate with no contract instantiates nothing" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (sumpos "  fn is_pos(n : Int) : Bool do n > 0 end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, is_pos)) end\n"));
+    (* r5: a return the definition does NOT prove never reaches a caller, so
+       it must not instantiate either. *)
+    gated "r5: an unproved return instantiates nothing" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (sumpos "  fn helper(n : Int) : Bool do n > 0 end\n  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do helper(n) end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, is_pos)) end\n"));
+    gated "q04: a callback parameter passes its contract through" (fun () ->
+        Alcotest.check ps "proved" proved
+          (sumpos "  fn go(ys : List(Int), k : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : Int do sum_pos(filt(ys, k)) end\n"));
+    gated "a callback parameter with no codomain contract instantiates nothing" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (sumpos "  fn go(ys : List(Int), k : ({x : Int | true}) -> Bool) : Int do sum_pos(filt(ys, k)) end\n"));
+    gated "q07: fn y -> g(y) is g" (fun () ->
+        Alcotest.check ps "proved" proved
+          (sumpos "  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> is_pos(y))) end\n"));
+    gated "q06: a two-parameter call stays uninstantiated" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (sumpos "  fn gt(n : Int, m : Int) : {Bool | _ == (n > m)} do n > m end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> gt(y, 0))) end\n"));
+    (* §3.5 through a named predicate: the parameter path uses the same
+       instantiation. *)
+    gated "a named predicate at a parameter slot" (fun () ->
+        let p, v, s, _ =
+          typed_ledger
+            {|mod QN do
+  fn need(xs : List({a | p(_)}), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : Int do 0 end
+  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
+  fn go(pos : List({Int | _ > 0})) : Int do need(pos, is_pos) end
+end|}
+        in
+        (* is_pos's own postcondition (1) + the element obligation (1). *)
+        Alcotest.(check (triple int int int)) "proved" (2, 0, 0) (p, v, s));
+    gated "q05: a let-bound lambda instantiates p" (fun () ->
+        Alcotest.check ps "proved" proved
+          (sumpos "  fn go(ys : List(Int)) : Int do\n    let f = fn y -> y > 0\n    sum_pos(filt(ys, f))\n  end\n"));
+    gated "an alias of a let-bound lambda instantiates p" (fun () ->
+        Alcotest.check ps "proved" proved
+          (sumpos "  fn go(ys : List(Int)) : Int do\n    let f = fn y -> y > 0\n    let g = f\n    sum_pos(filt(ys, g))\n  end\n"));
+    gated "rebinding the lambda's name retires it" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem ("proved", "")
+             (sumpos "  fn go(ys : List(Int), h : ({x : Int | true}) -> Bool) : Int do\n    let f = fn y -> y > 0\n    let f = h\n    sum_pos(filt(ys, f))\n  end\n")));
+    gated "a let-bound lambda that captures is uninstantiated" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (sumpos "  fn go(ys : List(Int), m : Int) : Int do\n    let f = fn y -> y > m\n    sum_pos(filt(ys, f))\n  end\n"));
+    (* A local lambda shadows a top-level predicate of the same name. *)
+    gated "a let-bound lambda shadows a named predicate" (fun () ->
+        Alcotest.check ps "too weak" [ ("skipped", "abstract-refinement-too-weak") ]
+          (sumpos "  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end\n  fn go(ys : List(Int)) : Int do\n    let is_pos = fn y -> y >= 0\n    sum_pos(filt(ys, is_pos))\n  end\n")) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
@@ -18647,4 +18721,5 @@ let () =
       ("callback-binder", callback_binder_suite);
       ("abstract-pass-sites", abstract_pass_sites_suite);
       ("abstract-phase2", abstract_phase2_suite);
+      ("abstract-phase3", abstract_phase3_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

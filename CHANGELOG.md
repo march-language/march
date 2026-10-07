@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **More predicates and combinators keep what they say.** An abstract
+  refinement is now also instantiated from a named predicate with a proved
+  `{Bool | _ == …}` return (`List.filter(ys, is_pos)`, or `fn y -> is_pos(y)`),
+  from a callback parameter with such a contract, and from a `let`-bound
+  lambda. `List.find`, `Option.filter` and `List.take_while` now carry their
+  predicate like `List.filter` does, so `one_pos(List.find(ys, fn y -> y > 0))`
+  proves an `Option({Int | _ > 0})` demand. `List.take_while` is now a
+  single-pass loop.
 - **Every diagnostic has a code, and `march --explain <code>`.** Each error,
   warning and hint ends its first line with its code in brackets
   (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always
