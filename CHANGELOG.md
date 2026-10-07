@@ -302,6 +302,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- A comment-only edit is a compile-cache hit again. Since the `--rc-trace` change, a
+  `--compile` whose typed IR was unchanged printed `compiled out (cached)` and then
+  emitted LLVM IR, ran clang and printed `compiled out` anyway, so the hit saved
+  nothing; it now stops at the cache lookup.
 - A green thread started from a runtime thread that is not a scheduler (the
   hot-reload server's drain, the new shell listener) no longer inherits that
   thread's blocked signals. With SIGSEGV blocked, the first time its stack
