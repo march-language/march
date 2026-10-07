@@ -374,6 +374,11 @@ git log is authoritative for exact commits.
   is finishing.** Stopping the node ended its connection to itself without telling the
   sessions using it, so a session whose last messages were still in flight could wait
   for them forever and keep the process alive.
+- **A record or tuple returned on one branch is now freed on the branches that only read
+  it.** In `let st = .. ; if cond do { ..st.x.. } else st end`, compiled code leaked `st`
+  (and everything it held) whenever the first branch ran, and the same in a `let` whose
+  value came from such an `if`. Actor handlers often have this shape: a cluster session
+  left about 70 objects behind per session, now about 6 once its tombstones expire.
 
 - Compiled programs no longer risk a use-after-free when two scheduler threads
   touch records of a not-yet-seen shape at the same time. Registering a new
