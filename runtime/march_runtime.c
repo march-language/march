@@ -4807,7 +4807,11 @@ static void *on_stop_lookup(void *dispatch_clo) {
  * through the actor loop's stop_jmp (march_actor_recv), which lands at
  * actor_green_thread's `stopped:` — still live below this frame — and that
  * path restores crash_jmp. */
-static void actor_run_on_stop(march_proc *self, void *actor, void *clo) {
+/* Returns 1 when the callback panicked: it had moved the state fields out of
+ * the record and never wrote them back, so they are no longer the record's
+ * to release (actor_green_thread's state drop is skipped). */
+static int actor_run_on_stop(march_proc *self, void *actor, void *clo) {
+    volatile int panicked = 0;
     jmp_buf on_stop_jmp;
     jmp_buf *saved_crash = self->crash_jmp;
     self->crash_jmp = &on_stop_jmp;
@@ -4819,6 +4823,7 @@ static void actor_run_on_stop(march_proc *self, void *actor, void *clo) {
         march_incrc(clo);
         fn(clo, actor);
     } else {
+        panicked = 1;
         const char *m = self->crash_message ? self->crash_message : "panic";
         size_t mlen = self->crash_message ? self->crash_message_len
                                           : sizeof("panic") - 1;
@@ -4829,6 +4834,7 @@ static void actor_run_on_stop(march_proc *self, void *actor, void *clo) {
         self->crash_message_len = 0;
     }
     self->crash_jmp = saved_crash;
+    return panicked;
 }
 
 static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
@@ -4878,8 +4884,14 @@ static void actor_green_thread(void *arg) {
      * frame finds its own buffer; both restore their saved pointer on exit. */
     jmp_buf stop_jmp;
     jmp_buf *saved_stop = self ? self->stop_jmp : NULL;
+    /* Set when the stop trap fires (the longjmp left a handler or on_stop
+     * mid-flight) or when on_stop panicked: either way the state fields were
+     * moved into that frame's locals, so they are not the record's to
+     * release at `stopped`.  volatile: see the pin. */
+    volatile int stopped_in_handler = 0;
     if (self) self->stop_jmp = &stop_jmp;
     if (self && setjmp(stop_jmp) != 0) {
+        stopped_in_handler = 1;
         if (dispatch_pinned) {
             march_dispatch_leave(meta->dispatch_name_id, pinned_version);
             dispatch_pinned = 0;
@@ -5210,8 +5222,9 @@ static void actor_green_thread(void *arg) {
                  * callback's next receive, never lost. */
                 atomic_store_explicit(&self->stop_requested, 0,
                                       memory_order_seq_cst);
-                if (actor_alive_load(actor))
-                    actor_run_on_stop(self, actor, cb);
+                if (actor_alive_load(actor)
+                        && actor_run_on_stop(self, actor, cb))
+                    stopped_in_handler = 1;
             }
         }
     }
@@ -5229,6 +5242,19 @@ stopped:
     atomic_store_explicit(&meta->green_thread, MARCH_GT_EXITED,
                           memory_order_release);
     hcr_actor_exit(meta);
+    /* Release the state: the record's last reference frees it shallowly, so
+     * its heap state fields are released here, by the compiled per-actor
+     * function registered alongside the closure drops under the code
+     * pointer of field 0 (the dispatch function's closure value).  Only on
+     * a clean loop exit, where the record owns every field; a crash, a stop
+     * taken inside a handler, or a panicking on_stop leaks them as before.
+     * See specs/progress/2026-10-06-killed-actor-state-leak.md. */
+    if (!stopped_in_handler) {
+        void *dispatch = (void *)(uintptr_t)a[2];
+        march_clo_drop_fn drop = IS_HEAP_PTR(dispatch)
+            ? clo_drop_lookup(*(void **)((char *)dispatch + 16)) : NULL;
+        if (drop) drop(actor);
+    }
     /* The live actor's own reference (taken in march_spawn_common). */
     march_decrc(actor);
     meta_put(meta);

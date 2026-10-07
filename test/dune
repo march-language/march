@@ -12246,6 +12246,103 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/record_ownership_drops.expected native_record_ownership_drops.out)))
+
+; ── An erased Option read (record_get) dropped and shown without a double
+; release or a leak (2026-10-06). RED before: 200 objects left.
+(rule
+ (targets native_erased_option_read native_erased_option_read.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/erased_option_read.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_option_read
+        native/erased_option_read.march)
+   (with-stdout-to native_erased_option_read.out
+        (system "./native_erased_option_read")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_option_read.expected native_erased_option_read.out)))
+
+; ── A local type with a stdlib type's short name (2026-10-06): both kinds of
+; value dropped deep. RED before: SIGSEGV dropping the Msgpack.Value.
+(rule
+ (targets native_local_colliding_type native_local_colliding_type.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/local_colliding_type.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_local_colliding_type
+        native/local_colliding_type.march)
+   (with-stdout-to native_local_colliding_type.out
+        (system "./native_local_colliding_type")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/local_colliding_type.expected native_local_colliding_type.out)))
+
+; ── A cluster session's party is released when it ends (2026-10-06): live
+; objects left per session under 120 (RED before: ~156, the party's Ops
+; closures, the Party and its table handles).
+(rule
+ (targets native_session_party_released native_session_party_released.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/session_party_released.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_session_party_released
+        native/session_party_released.march)
+   (with-stdout-to native_session_party_released.out
+        (system "./native_session_party_released")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/session_party_released.expected native_session_party_released.out)))
+
+; ── A dead actor's record and state are released (2026-10-06): under 5
+; objects left over 50 actors (RED before: the killed actor's List state, and
+; the record itself once Actor.call had been used on it).
+(rule
+ (targets native_actor_state_released native_actor_state_released.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_state_released.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_state_released
+        native/actor_state_released.march)
+   (with-stdout-to native_actor_state_released.out
+        (system "./native_actor_state_released")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_state_released.expected native_actor_state_released.out)))
+
+; ── A wildcard-bound value is dropped deep (2026-10-06): the `_` of
+; `(None, _)` is typed erased, so its Deque was freed shallow. RED before: 200.
+(rule
+ (targets native_wildcard_binder_drop native_wildcard_binder_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/wildcard_binder_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_wildcard_binder_drop
+        native/wildcard_binder_drop.march)
+   (with-stdout-to native_wildcard_binder_drop.out
+        (system "./native_wildcard_binder_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/wildcard_binder_drop.expected native_wildcard_binder_drop.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),

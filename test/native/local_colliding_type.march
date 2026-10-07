@@ -1,0 +1,42 @@
+-- A program declaring its own type with a stdlib type's short name (Value:
+-- Msgpack's, Config's, DataFrame's). The entry module's types register under
+-- the bare name, so the drop of `Value` resolved to the local type alone and a
+-- dropped Msgpack.Value reached the drop's unreachable default: SIGSEGV,
+-- compiled only (specs/progress/2026-10-06-local-type-named-like-stdlib-value.md).
+-- Both kinds of Value are dropped here, deep: no crash, no growth.
+mod Main do
+  needs IO.Console
+
+  type Value = Leaf(String) | Node(List(Value))
+
+  pfn tag(v : Msgpack.Value) : Int do
+    match v do
+      Msgpack.Bin(_) -> 1
+      _ -> 0
+    end
+  end
+
+  pfn size(v : Value) : Int do
+    match v do
+      Leaf(_) -> 1
+      Node(xs) -> List.length(xs)
+    end
+  end
+
+  pfn times(n : Int, f : () -> Int) : Int do
+    if n <= 0 do 0 else f() + times(n - 1, f) end
+  end
+
+  pfn flat(name : String, f : () -> Int) : () do
+    let _ = times(3, f)
+    let a0 = live_allocs()
+    let _ = times(200, f)
+    println(name ++ ", no growth: " ++ bool_to_string(live_allocs() - a0 <= 0))
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println(int_to_string(tag(Msgpack.bin([1, 2, 3]))))
+    flat("a Msgpack.Value dropped", fn () -> tag(Msgpack.bin([1, 2, 3])))
+    flat("the local Value dropped", fn () -> size(Node(Cons(Leaf("a" ++ "b"), Cons(Leaf("c"), Nil)))))
+  end
+end

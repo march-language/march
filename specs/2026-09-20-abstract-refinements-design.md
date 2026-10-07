@@ -55,6 +55,30 @@ Facts the design rests on, each verified on this commit rather than assumed:
   sort) | Container of …` (`refine_scope.ml:1112-1114`); demands are matched by
   `demand_flow` (`refine_check.ml:880-1035`) over `sources_of`
   (`refine_param.ml:540-551`), gated by P1/P2 (`refine_param.ml:425-472`).
+**Re-probed 2026-10-06** (`24c7eb543`, before phase 2). Four things this
+section did not anticipate, all fixed by the callback-binder PR that precedes
+phase 2 (`specs/progress/2026-10-06-callback-binder-pass-sites.md`;
+plan `specs/plans/2026-10-06-abstract-refinements-phase2-plan.md`):
+
+1. `callback_sig_of_ty` renamed the callback's parameter to `$cb_arg` but kept
+   the domain binder `x` in the codomain, so `postcond_of` found it Unusable
+   and a guard `if keep(h)` yielded NO fact, even for a concrete codomain
+   `{Bool | _ == (x > 0)}`. §4.1's "no new proof rule" depended on this.
+2. The pass-site check verified a passed lambda against the codomain without
+   renaming `x` to the lambda's own parameter (`solver-undecided`).
+3. It read a named callable's proved return under that callable's own
+   parameter name, independent of `x`: a correct `is_pos(n)` was REJECTED
+   (witness `n = 0, x = 1`).
+4. Nothing exempted a definer: every pass of a callable for
+   `{Bool | _ == p(x)}` (including the body's recursive forward) was an
+   `unreflectable-predicate` skip, and a hard error under `cap verified`.
+   Changing `List.filter`'s signature without that would have broken every
+   `cap verified` caller.
+
+Also: `List.filter` already returns `{List(a) | subset(elts(_), elts(xs))}`
+(2026-09-14); phase 2 keeps that half (`{List({a | p(_)}) | subset(…)}` parses
+and proves). It was rewritten in natural style on 2026-09-28 (TRMC), which is
+exactly §4.1's body shape. The CI skip ceiling is now 42, not 46.
 
 ---
 
@@ -241,7 +265,9 @@ direction.
 
 `filter`'s body must prove that every element of its result satisfies `p`. With
 §2a's uninterpreted `$abs_p`, the existing Tier 2 element-return machinery does
-this with no new proof rule:
+this with no new proof rule — *once* `callback_sig_of_ty` renames the domain
+binder (2026-10-06; before that, a guard calling a callback yielded no fact,
+see §0):
 
 ```march
 fn filter(xs, keep) do
@@ -332,9 +358,12 @@ PATH, and CI's z3 4.8.12 noted since the local build is 4.16.
 **Phase 1 — surface and well-formedness, inert.** `Refine_abstract.collect`,
 the §1 rules, the hard errors, the vacuity warning, the §3.6 warning exemption.
 No verdict changes anywhere: the refine oracle must be **identical**, and the
-audit baselines and `stdlib/list.march` skip count (CI ceiling 46) must not
+audit baselines and `stdlib/list.march` skip count (CI ceiling 46 then; 42 since 2026-09-16) must not
 move. Tests: each malformed signature its own error, a well-formed one still
 producing exactly today's skips.
+
+**Before phase 2 (added 2026-10-06): callback binders and the definer
+exemption** — §0's re-probe items 1-4, its own PR.
 
 **Phase 2 — the filter rule.** §2a's SMT arm and declaration, §3.1 instantiation
 from inline lambdas, §3.2 substitution, §3.3 discharge, §3.4 conjunction, §4's

@@ -310,6 +310,22 @@ git log is authoritative for exact commits.
   (`List.map([1, 2])`) is now a type error. It used to typecheck, then fail
   at run time: an `arity mismatch` panic interpreted, a crash compiled, and a
   crash of the whole REPL session.
+- **A callback contract that names its argument now works.** With
+  `keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}`, a guard `if keep(h)`
+  establishes `h > 0`, and `let b = keep(h)` binds `b == (h > 0)`; both used
+  to establish nothing. Passing a named function whose proved return matches
+  (`is_pos(n) : {Bool | _ == (n > 0)}`) was wrongly REJECTED with a bogus
+  witness (`n = 0, x = 1`) and now compiles; a matching lambda (`fn y -> y > 0`)
+  is now proved rather than skipped. A callback that defines an abstract
+  refinement (`_ == p(x)`) is no longer a skip, or a `cap verified` error, at
+  every call.
+- **A hot deploy over the reload socket no longer drops its connection while
+  the control plane's Agent polls the node.** The socket server read a
+  request line from the Agent's in-process request instead of the socket
+  whenever the two overlapped, then closed the deploy's connection mid-batch
+  (`hcr_deploy: connection closed` / `Connection reset by peer`, the node
+  itself unharmed). It hit roughly one deploy session in ten on a node that
+  runs the control plane.
 - **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
   variable alias used to drop every fact about its value (`let b = a + 0`
   kept them), so `take_pos(b)` was skipped even when `a` was a refined
@@ -340,6 +356,30 @@ git log is authoritative for exact commits.
   and transitive dependencies. Editors then showed errors from files the build
   never reads. It now uses the version `forge.lock` names, and only that
   version's `lib/`.
+
+- **A value matched by `_` inside a tuple or constructor pattern is now fully freed.** In
+  `match pop(q) do (None, _) -> ...`, the value the `_` stood for was freed without its
+  contents, so a dropped `Deque` leaked both of its lists. This also cost a cluster node a
+  few objects for each frame it queued.
+
+- **A dead actor's memory is released.** An actor that was killed or stopped kept its
+  state (lists, maps, strings, closures) allocated for the rest of the program, and an
+  actor that had ever been the target of `Actor.call` was never freed at all, because
+  each call leaked a reference to it.
+
+- **A cluster session no longer leaves its party behind.** Each finished session leaked the
+  party record, the session capability's closures and the handles of thirteen session
+  tables. Every session operation (send, receive, register, close) also leaked a
+  reference. A session now leaves about 90 objects behind instead of about 160.
+
+- **A program that declares a type with a stdlib type's name (`Value`, `State`, `Event`,
+  `Error`, ...) no longer crashes when compiled.** Dropping a value of the stdlib type
+  (a `Msgpack.Value`, say) segfaulted, because the drop only knew the program's own type.
+
+- **Reading a record field whose type is never pinned down (`record_get(r, "y")` printed
+  or shown) no longer double-frees or leaks in compiled code.** The result was released
+  once too often, a use-after-free that only showed under ASAN. Showing it leaked one
+  string per call.
 
 - **Every in-place write now synchronises with the reference it reuses.** The
   sole-ownership test behind FBIP reuse, `NativeArray.set`/`sort` and the SIMD

@@ -1994,6 +1994,20 @@ map_pos(ys, fn y -> y - 1)    -- error: the lambda returns 0 for y = 1
 A lambda that names a local variable of its enclosing function cannot be run on
 its own, so for it the check stays a skip.
 
+A callback type's codomain may name the domain's argument:
+`keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}`. Inside the higher-order
+function, a guard `if keep(h)` then establishes `h > 0` (and its `else` branch
+`h <= 0`), and `let b = keep(h)` binds `b == (h > 0)`. Where a callable is
+passed, it is checked under its own parameter name: `fn y -> y > 0` and a
+named `is_pos(n : Int) : {Bool | _ == (n > 0)}` both satisfy that codomain,
+and `fn y -> y >= 0` or `is_nonneg(n) : {Bool | _ == (n >= 0)}` do not.
+
+A codomain that applies one of the function's *abstract refinements*
+(`keep : ({x : a | true}) -> {Bool | _ == p(x)}`, with `p` also in the
+signature) does not constrain what may be passed for it: `p` stands for
+whatever that callable returns, so any callable satisfies it and the pass site
+records no obligation.
+
 ### What element refinements do not do
 
 - **`filter` does not produce a refinement it was not given.**
