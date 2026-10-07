@@ -495,7 +495,7 @@ let emit_simd_call
           store, return the same array; rc>1 -> alloc a fresh array,
           memcpy the whole payload, vector-store into the copy, decrc the
           original, return the copy. The rc==1 test mirrors EReuse's
-          "load atomic i64 ... monotonic" + `icmp eq i64 %rc, 1` pattern
+          "load atomic i64 ... acquire" + `icmp eq i64 %rc, 1` pattern
           (see the EAlloc/EReuse FBIP arm above, ~L4496-4499). *)
        let (arr_ty0, arr_v0) = List.nth arg_pairs 0 in
        let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
@@ -544,7 +544,7 @@ let emit_simd_call
        let is_heap = fresh ctx "vheap" in
        emit ctx (Printf.sprintf "%s = and i1 %s, %s" is_heap heap1 positive);
        let rc = fresh ctx "vrc" in
-       emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc arr_v);
+       emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s acquire, align 8" rc arr_v);
        let rc_uniq = fresh ctx "vrcu" in
        emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" rc_uniq rc);
        let uniq = fresh ctx "vuniq" in
