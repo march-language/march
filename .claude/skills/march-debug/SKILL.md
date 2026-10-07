@@ -79,6 +79,12 @@ MARCH_SANITIZE=1 ./_build/default/bin/main.exe --compile FILE -o /tmp/x_asan && 
 `MARCH_SANITIZE=1` builds also abort on `march_free` of a shared object and on a
 TRMC hole fill that finds the slot non-null.
 
+On macOS the driver first checks that the C compiler's sanitizer runtime starts
+at all: Apple clang 17 (Xcode 26) and LLVM 21 deadlock in ASAN init on macOS 26
+(every binary, even C hello-world, hangs silently before `main`). It falls back
+to Homebrew LLVM (`brew install llvm`, 22+ works) with a note, or exits with an
+explanation; `MARCH_SANITIZE_CC=/path/to/clang` picks the compiler.
+
 `--debug-info` emits per-function DWARF (a `DISubprogram` per March fn plus
 `!march.provenance`) and links with `-g`, so `lldb`, ASan reports and `perf`
 name March functions. `--dump-provenance` prints the fn-name → origin table

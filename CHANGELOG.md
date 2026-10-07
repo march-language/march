@@ -342,6 +342,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`MARCH_SANITIZE` builds no longer hang silently on macOS 26.** Apple clang 17
+  (Xcode 26) and LLVM 21 ship an ASAN runtime that deadlocks before `main` on
+  macOS 26, so every sanitized binary, even hello-world, printed nothing and never
+  exited. On macOS the driver now checks that the C compiler's sanitizer runtime
+  starts, falls back to a working Homebrew LLVM (`brew install llvm`, 22+) with a
+  note, or stops with an explanation. `MARCH_SANITIZE_CC` picks the compiler.
 - **A missing `end` is reported at the construct that is missing it.** Instead of
   "Parse error in declaration" at the end of the file or the next `fn`, the error
   points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the

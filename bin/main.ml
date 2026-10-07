@@ -1143,6 +1143,194 @@ let sanitize_clang_flag () =
   | Some _ -> " -fsanitize=address,undefined -DMARCH_RC_CHECKS"
   | None -> ""
 
+(* ---- Sanitizer toolchain probe (macOS) ---------------------------------
+   Apple clang 17 (Xcode 26.x) and Homebrew LLVM 21 ship an ASAN runtime that
+   DEADLOCKS before main() on macOS 26: AsanInitInternal ->
+   InitializeShadowMemory -> get_dyld_hdr -> dyld_shared_cache_iterate_text_swift
+   -> _Block_copy -> malloc -> the ASAN malloc zone -> AsanInitFromRtl, which
+   spins forever on the init lock its own caller holds.  A plain C hello world
+   built with `clang -fsanitize=address` hangs the same way, so it is not
+   March's runtime; the same toolchain's TSAN runtime segfaults at startup.
+   Homebrew LLVM 22's compiler-rt starts fine.  Measured 2026-10-07, M3 Max,
+   macOS 26.6.1 (see specs/progress/2026-10-07-macos-asan-hang.md).
+
+   So on a macOS host a sanitizer build first proves its C compiler's
+   sanitizer runtime can start: it compiles and runs a trivial C program with
+   the same -fsanitize flags, bounded by a deadline.  If the default `clang`
+   fails, a Homebrew LLVM clang that passes is used instead (with a note);
+   if none passes, the driver stops with an explanation instead of emitting a
+   binary that hangs silently.  MARCH_SANITIZE_CC names the compiler to use
+   (still probed).  Verdicts are cached on disk, keyed on the compiler's
+   `--version`, the flags and the kernel release, so the probe costs one
+   C compile per toolchain/OS combination.  Linux hosts are not probed (their
+   sanitizer runtimes work; CI's sanitize-gate covers them). *)
+
+let host_is_darwin =
+  let v = lazy (
+    try
+      let ic = Unix.open_process_in "uname -s 2>/dev/null" in
+      let l = try input_line ic with End_of_file -> "" in
+      ignore (Unix.close_process_in ic);
+      String.trim l = "Darwin"
+    with _ -> false) in
+  fun () -> Lazy.force v
+
+let host_kernel_release =
+  let v = lazy (
+    try
+      let ic = Unix.open_process_in "uname -r 2>/dev/null" in
+      let l = try input_line ic with End_of_file -> "" in
+      ignore (Unix.close_process_in ic);
+      String.trim l
+    with _ -> "") in
+  fun () -> Lazy.force v
+
+(* Run [prog] with stdout/stderr discarded; [true] iff it exits 0 within
+   [deadline] seconds.  A hung probe gets SIGTERM, then SIGKILL. *)
+let run_bounded ~(deadline : float) (prog : string) : bool =
+  let devnull = Unix.openfile "/dev/null" [Unix.O_RDWR] 0 in
+  let pid =
+    try Some (Unix.create_process prog [| prog |] devnull devnull devnull)
+    with Unix.Unix_error _ -> None in
+  Unix.close devnull;
+  match pid with
+  | None -> false
+  | Some pid ->
+    let t0 = Unix.gettimeofday () in
+    let rec wait () =
+      match Unix.waitpid [Unix.WNOHANG] pid with
+      | 0, _ ->
+        if Unix.gettimeofday () -. t0 > deadline then begin
+          (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ());
+          Unix.sleepf 0.5;
+          (match Unix.waitpid [Unix.WNOHANG] pid with
+           | 0, _ ->
+             (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+             ignore (Unix.waitpid [] pid)
+           | _ -> ());
+          false
+        end else (Unix.sleepf 0.02; wait ())
+      | _, Unix.WEXITED 0 -> true
+      | _, _ -> false
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait ()
+    in
+    wait ()
+
+let sanitizer_probe_cache_dir () =
+  match Sys.getenv_opt "HOME" with
+  | Some h when h <> "" ->
+    Some (Filename.concat (Filename.concat (Filename.concat h ".march") "cache")
+            "sanitizer-probe")
+  | _ -> None
+
+(* Does [cc]'s sanitizer runtime (for [flag]) start on this host? *)
+let sanitizer_runtime_works (cc : string) (flag : string) : bool =
+  match March_cas.Runtime_archive.cc_identity cc with
+  | None -> false   (* `cc --version` failed: not a usable compiler *)
+  | Some ident ->
+    let key = March_cas.Blake3.hash_string
+        (String.concat "\x00" ["v1"; ident; flag; host_kernel_release ()]) in
+    let cache_file =
+      Option.map (fun d -> Filename.concat d key) (sanitizer_probe_cache_dir ()) in
+    let cached =
+      match cache_file with
+      | Some f when Sys.file_exists f ->
+        (try
+           let ic = open_in f in
+           let l = try input_line ic with End_of_file -> "" in
+           close_in ic; Some (String.trim l = "ok")
+         with Sys_error _ -> None)
+      | _ -> None in
+    match cached with
+    | Some v -> v
+    | None ->
+      let dir = Filename.temp_dir "march_sanprobe" "" in
+      let src = Filename.concat dir "probe.c" in
+      let exe = Filename.concat dir "probe" in
+      let ok =
+        try
+          let oc = open_out src in
+          output_string oc
+            "#include <stdio.h>\n#include <stdlib.h>\n\
+             int main(void){char *p=malloc(16);p[0]='o';\
+             printf(\"%c\\n\",p[0]);free(p);return 0;}\n";
+          close_out oc;
+          let rc = Sys.command (Printf.sprintf "%s%s -o %s %s > /dev/null 2>&1"
+                                  cc flag (Filename.quote exe) (Filename.quote src)) in
+          rc = 0 && run_bounded ~deadline:10.0 exe
+        with Sys_error _ -> false in
+      List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [src; exe];
+      (try Sys.rmdir dir with Sys_error _ -> ());
+      (match cache_file, sanitizer_probe_cache_dir () with
+       | Some f, Some d ->
+         (try
+            ignore (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote d)));
+            let tmp = f ^ Printf.sprintf ".%d.tmp" (Unix.getpid ()) in
+            let oc = open_out tmp in
+            output_string oc (if ok then "ok\n" else "fail\n");
+            close_out oc;
+            Sys.rename tmp f
+          with Sys_error _ -> ())
+       | _ -> ());
+      ok
+
+(* The C compiler for a NATIVE build: plain "clang", except for a sanitizer
+   build on a macOS host, where it is the first candidate whose sanitizer
+   runtime passes [sanitizer_runtime_works].  Memoized: both the CAS key
+   ([build_cas_key]) and the clang invocation read it. *)
+let native_cc =
+  let v = lazy (
+    match sanitize_mode () with
+    | None -> "clang"
+    | Some _ when not (host_is_darwin ()) -> "clang"
+    | Some mode ->
+      let flag = sanitize_clang_flag () in
+      let explicit = match Sys.getenv_opt "MARCH_SANITIZE_CC" with
+        | Some s when String.trim s <> "" -> Some (String.trim s)
+        | _ -> None in
+      let candidates = match explicit with
+        | Some cc -> [cc]
+        | None ->
+          "clang"
+          :: List.filter Sys.file_exists
+               ["/opt/homebrew/opt/llvm/bin/clang"; "/usr/local/opt/llvm/bin/clang"] in
+      match List.find_opt (fun cc -> sanitizer_runtime_works cc flag) candidates with
+      | Some cc ->
+        if explicit = None && cc <> "clang" then
+          Printf.eprintf
+            "march: MARCH_SANITIZE: the default clang's %s runtime does not start \
+             on this macOS; using %s instead (set MARCH_SANITIZE_CC to choose)\n%!"
+            mode cc;
+        cc
+      | None ->
+        let tried = String.concat ", " candidates in
+        Printf.eprintf
+          "march: MARCH_SANITIZE=%s: no C compiler on this host builds a \
+           program with the %s sanitizer that starts (tried: %s).\n\
+          \  A trivial C program built with `<cc>%s` hangs or crashes before \
+           main().\n\
+          \  Known cause: Apple clang 17 / LLVM 21 compiler-rt on macOS 26 \
+           deadlock in ASAN init (and their TSAN segfaults).\n\
+          \  Fix: `brew install llvm` (LLVM 22+ works) or point \
+           MARCH_SANITIZE_CC at a clang whose sanitizer runtime works.\n%!"
+          (Option.value (Sys.getenv_opt "MARCH_SANITIZE") ~default:"")
+          mode tried flag;
+        exit 1) in
+  fun () -> Lazy.force v
+
+(* CAS tag for the sanitizer build's C compiler: switching compilers (e.g.
+   from a hanging Apple clang build to Homebrew LLVM) must not serve the old
+   binary from the cache.  Only for native sanitizer builds on macOS, where
+   [native_cc] can differ from "clang". *)
+let sanitize_cc_tag (target : March_tir.Llvm_emit.target_config) : string list =
+  let native = match target with March_tir.Llvm_emit.Native -> true | _ -> false in
+  if sanitize_mode () = None || not native || not (host_is_darwin ()) then []
+  else
+    let cc = native_cc () in
+    match March_cas.Runtime_archive.cc_identity cc with
+    | Some id -> ["sancc:" ^ id]
+    | None -> ["sancc:" ^ cc]
+
 (* CAS cache-key fragments for the remaining toggles that alter the emitted
    binary: MARCH_SANITIZE adds -fsanitize to the clang link (the tag carries
    the mode; see [sanitize_mode]), MARCH_HTTP_EVLOOP adds
@@ -1325,6 +1513,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
     (if !opt_enabled then Printf.sprintf "O%d" (effective_opt ()) else "no-opt")
     :: Printf.sprintf "pmt%d" !pmap_threshold
     :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
+        @ sanitize_cc_tag target
         @ (if !compile_so then ["compile-so"] else [])
         (* capstrip: the dead-strip link mode (strip_flag/section_cflags
            below) changes the emitted binary's contents; a pre-strip
@@ -4059,7 +4248,7 @@ let compile filename =
             let cc_driver =
               match March_tir.Llvm_emit.zig_target xtarget with
               | Some zt -> Printf.sprintf "zig cc -target %s" zt
-              | None    -> "clang"
+              | None    -> native_cc ()
             in
             let arch_cflags =
               (* --target-cpu replaces the baseline ISA flag.  The spelling is
