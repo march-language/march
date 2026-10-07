@@ -278,6 +278,59 @@ let perceus_cases =
       (check_stage "perceus" dump_post_perceus entry)
   ) corpus
 
+(* ── A6: per-pass metrics, pinned ───────────────────────────────────────
+   The Tir_metrics counts (functions, allocation sites, RC ops, reuse tokens,
+   join points) after each stage of this harness's pipeline, for three
+   programs chosen to exercise reuse (FBIP), TRMC and closures.  A change
+   that moves a count shows up as a one-line diff at a named stage; regenerate
+   with UPDATE_SNAPSHOTS=1 like the TIR snapshots. *)
+let metrics_corpus = [
+  "fbip_dead_binding_reuse", "fbip_dead_binding_reuse.march";
+  "trmc_modulo_cons",        "trmc_modulo_cons.march";
+  "closure_hof",             "closure_hof.march";
+]
+
+let dump_metrics src =
+  March_tir.Defun.set_lambda_counter 0;
+  let buf = Buffer.create 256 in
+  let line stage tir =
+    Buffer.add_string buf
+      (Printf.sprintf "%-12s %s\n" stage
+         (March_tir.Tir_metrics.to_string (March_tir.Tir_metrics.of_module tir)));
+    tir
+  in
+  let tir = line "tir-lower" (Test_helpers.lower_module_typed src) in
+  let tir = line "tir-trmc" (March_tir.Trmc.transform_module tir) in
+  let tir = line "tir-mono" (March_tir.Mono.monomorphize tir) in
+  let tir = line "tir-defun" (March_tir.Defun.defunctionalize tir) in
+  ignore (line "tir-perceus" (March_tir.Perceus.perceus tir));
+  Buffer.contents buf
+
+let metrics_cases =
+  List.map (fun entry ->
+    let (name, _) = entry in
+    Alcotest.test_case (name ^ " (metrics)") `Quick
+      (check_stage "metrics" dump_metrics entry)
+  ) metrics_corpus
+
+(* ── A6: Opt reaches its fixed point ────────────────────────────────────
+   Opt.run iterates its passes until one iteration changes nothing, capped at
+   5 iterations.  Assert CONVERGENCE (the last iteration changed nothing), not
+   idempotence: a second Opt.run is not expected to be a no-op, and Perceus is
+   not idempotent at all.  Runs the whole Contract_pipeline with ~opt:true
+   over the snapshot corpus, the same entry point the compiler uses. *)
+let test_opt_converges () =
+  List.iter (fun (name, src_file) ->
+    let src = read_file (src_path src_file) in
+    March_tir.Defun.set_lambda_counter 0;
+    let tir = Test_helpers.lower_module_typed src in
+    ignore (March_tir.Contract_pipeline.run ~opt:true tir);
+    Alcotest.(check bool)
+      (Printf.sprintf "%s: Opt converged (iterations: %d of 5)" name
+         !March_tir.Opt.last_iterations)
+      true !March_tir.Opt.last_converged
+  ) corpus
+
 (* ── Determinism canary ─────────────────────────────────────────────────
    Runs each stage TWICE in the same process (independent of alcotest's own
    ordering/repetition) and asserts byte-identical output — a fast in-
@@ -296,6 +349,11 @@ let test_double_run_determinism () =
 let suites = [
   ("tir_snapshots_lower", lower_cases);
   ("tir_snapshots_perceus", perceus_cases);
+  ("tir_metrics", metrics_cases);
+  ("opt_convergence", [
+     Alcotest.test_case "Opt.run reaches its fixed point on the snapshot corpus" `Quick
+       test_opt_converges;
+   ]);
   ("tir_snapshots_determinism", [
      Alcotest.test_case "dumps are stable across repeated in-process runs" `Quick
        test_double_run_determinism;

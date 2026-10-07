@@ -75,6 +75,22 @@ pipelines in `test_codegen.ml`. Design: observability plan §6 (A1).
 
 **Don't:** suppress a finding by name without classifying it; the checks' false
 positives are fixed in `lib/tir/tir_verify.ml` with a comment saying why.
+## Which commit broke it?
+
+```bash
+scripts/bisect-ir.sh GOOD BAD FILE          # first PR merge whose emitted IR for FILE differs
+scripts/bisect-output.sh GOOD BAD FILE [--expect OUT]   # ... whose compiled program behaves differently
+```
+Both run in a throwaway worktree with a private `HOME`, bisect `--first-parent`
+along `main`'s PR merges, skip commits that do not build, and print the blamed
+merge with its `specs/progress/` entry. `bisect-ir` renumbers fresh names
+(`$lamN`, numbered `%` locals) before hashing, because a lambda added anywhere
+in the stdlib renumbers every program's IR; `--exact` hashes the raw IR.
+`bisect-output` compiles each step against that commit's own `runtime/` and
+`stdlib/` (`MARCH_RUNTIME_DIR`, `MARCH_STDLIB`), so runtime changes are seen.
+
+**Don't:** `git bisect` by hand in your own checkout: a targeted build there
+does not restage `runtime/`, and the stale `_build` stdlib copy leaks in.
 
 ## Which optional pass?
 
@@ -142,7 +158,8 @@ something that does (`dune build --root .`) or the edit is not in the build.
 
 ## Compile is slow
 
-**First command:** `--timings` prints per-stage stamps to stderr, including
+**First command:** `--timings` prints per-stage stamps to stderr (each TIR
+pass's line also carries its counts: `fns allocs stack inc dec reuse jp`), including
 `alloc-contract` (the `@[no_alloc]` analyses) and `cas-hash` (SCC build + Merkle
 hashing before the post-TIR lookup).
 ```bash

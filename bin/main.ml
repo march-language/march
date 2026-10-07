@@ -2820,7 +2820,11 @@ let compile filename =
     in
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
     snap_tir "tir-lower" tir;
-    stamp "lower";
+    (* A6: the same per-pass counts Contract_pipeline puts on its stamps. *)
+    stamp (if !do_timings
+           then "lower  " ^ March_tir.Tir_metrics.to_string
+                  (March_tir.Tir_metrics.of_module tir)
+           else "lower");
     (* Phase 5: collect actor state schemas for .schemas.json emission.
        Picks up TDRecord entries named *_State — the state record emitted
        by lower_actor for every actor definition. Only collected when both
@@ -3205,7 +3209,7 @@ let compile filename =
         ~after_fusion:policy_audit ~before_opt
         ~wasm_island:(parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown)
         ~is_js:is_js_target ~hot_reload:(hr_config ()) ~iface_methods
-        ~decls:contract_decls
+        ~decls:contract_decls ~stamp_metrics:!do_timings
         (* --report-contracts judges functions nothing calls, so they must
            survive DCE and inlining to be judged at all.  Their BODIES are
            optimised exactly as always; only reachability changes, and the
