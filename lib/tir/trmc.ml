@@ -528,6 +528,8 @@ let transform_fn ?(on_decline = fun (_ : string) -> ())
   match verdict_of r, r.r_modcons with
   | Eligible, [ (_ctor, hole) ] ->
     let dps_name = fn.Tir.fn_name ^ "$dps" in
+    Provenance.record dps_name ~from:fn.Tir.fn_name
+      ~derived:(Provenance.Clone_of (fn.Tir.fn_name, "dps")) ~pass:"trmc" ();
     let dst = { Tir.v_name = "$dst"; v_ty = fn.Tir.fn_ret_ty; v_lin = Tir.Unr } in
     let dps_ty =
       Tir.TFn (List.map (fun (p : Tir.var) -> p.Tir.v_ty)

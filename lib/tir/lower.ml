@@ -192,6 +192,7 @@ let note_migrate_msg ~prefix (def : Ast.fn_def) (fn : Tir.fn_def) =
 (** Lower a module. *)
 let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
+  Provenance.reset ();
   (* Collision-conditional qualification (Task 3 of specs/plans/2026-07-20-
      fqn-impl-dispatch-identity.md, impl symbols; extended by Task 3 of
      docs/superpowers/plans/2026-07-21-ctor-module-identity.md to ECon
@@ -663,6 +664,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                     Lower_decls.rename_tir_vars (idef.impl_iface.txt ^ ".")
                       iface_self_call_names fn
                   else fn in
+                  Provenance.rename ~old:fn.fn_name ~new_:mangled;
                   fns := { fn with fn_name = mangled } :: !fns
                 end;
                 (* Provenance for mono's return-position fallback
@@ -793,7 +795,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           (* An entry fn named like a C-symbol builtin is defined under its
              distinct name, the one its references were resolved to. *)
           let fn = match Hashtbl.find_opt !Lower_state._builtin_shadows fn.fn_name with
-            | Some renamed -> { fn with fn_name = renamed }
+            | Some renamed ->
+              Provenance.rename ~old:fn.fn_name ~new_:renamed;
+              { fn with fn_name = renamed }
             | None -> fn
           in
           note_migrate_msg ~prefix:"" def fn;
@@ -880,6 +884,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
               | Ast.DFn (def, _) ->
                 let fn = Lower_decls.lower_fn_def mod_env def in
                 let fn = Lower_decls.rename_scoped_vars scopes fn in
+                Provenance.rename ~old:fn.fn_name ~new_:(prefix ^ fn.fn_name);
                 let fn = { fn with fn_name = prefix ^ fn.fn_name } in
                 note_migrate_msg ~prefix def fn;
                 fns := fn :: !fns
@@ -1187,6 +1192,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     tm_exports = [];
     tm_tests = List.rev !test_pairs;
     tm_io_fns = [] } in
+  (* Provenance (specs/plans/incremental-codegen-cas-plan.md §7): seeded
+     here, after every lowering-time rename, from the spans noted at each
+     fn's creation. *)
+  Provenance.seed_from_lowering ~file:m.mod_name.span.Ast.file result;
   (* Every type declaration is known now: bind each `*_migrate_msg`'s old
      message type to its declaration (see [Migrate_msg_pins]). *)
   Migrate_msg_pins.resolve result.Tir.tm_types;

@@ -529,7 +529,7 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
     (typed TPtr TUnit).  The apply fn takes (ptr $clo, original_params) and
     loads its own free variables from $clo at entry.  This lets ECallPtr call
     uniformly through field 0 without knowing the specific lambda statically. *)
-let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
+let lift_lambda ?host (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   let fn = lam.lam_fn in
   let fvs = lam.lam_fvs in
   let clo_name = Tir_names.clo_struct_name ~fn_name:fn.Tir.fn_name ~lam_uid:lam.lam_uid in
@@ -571,6 +571,8 @@ let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
        perceus.ml + llvm_emit.ml name-sniffing copies were detecting. *)
     fn_kind   = Tir.FnApply;
   } in
+  Provenance.record apply_name ?host ~from:fn.Tir.fn_name
+    ~derived:(Provenance.Defun_of fn.Tir.fn_name) ~pass:"defun" ();
   (td, apply_fn)
 
 (* ── Phase 3: expression rewriting ───────────────────────────────── *)
@@ -669,7 +671,11 @@ let defunctionalize (m : Tir.tir_module) : Tir.tir_module =
   let known_lambdas = List.map (fun lam -> (lam.lam_fn.Tir.fn_name, lam)) lambdas in
 
   (* Phase 2: generate closure structs and lifted fns *)
-  let (new_types, new_fns) = List.split (List.map lift_lambda lambdas) in
+  let hosts = Provenance.nested_fn_hosts m in
+  let (new_types, new_fns) =
+    List.split (List.map (fun lam ->
+        lift_lambda ?host:(Hashtbl.find_opt hosts lam.lam_fn.Tir.fn_name) lam)
+        lambdas) in
 
   (* Phase 3: rewrite all top-level fn bodies.  The initial bound set is the
      function's own parameters, so a call to a function-typed parameter whose

@@ -19,6 +19,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
+  March function gets a `DISubprogram` at its defining line (lifted lambdas at
+  the lambda's line, specialisations at the generic's), and the link gets `-g`,
+  so `lldb`/`gdb` backtraces, ASan reports and `perf` profiles name March
+  functions and files instead of `march_main + 1400`. The IR also carries a
+  `!march.provenance` node per function recording where the compiler derived it
+  from (monomorphisation, lambda lifting, fusion, specialisation). Off by
+  default; the emitted code is unchanged when off. `--dump-provenance` prints
+  the same table as text. Distinct from `--debug`, the interpreter's debugger.
 - **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
   `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
   line per post-TIR definition, sorted, straight from the CAS hashing that keys

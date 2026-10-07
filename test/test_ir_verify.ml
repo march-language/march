@@ -252,9 +252,9 @@ type fixture_result =
   | EmitFailed of string * int * string   (* name, rc, compiler output *)
   | VerifyFailed of string * string       (* name, verifier output *)
 
-let run_fixture main_exe name =
+let run_fixture ?(extra_flags = "") main_exe name =
   let src = Filename.concat (native_dir ()) name in
-  match emit_llvm_ir_to_file ~main_exe ~src () with
+  match emit_llvm_ir_to_file ~extra_flags ~main_exe ~src () with
   | `Failed (rc, output) -> EmitFailed (name, rc, output)
     (* emit_llvm_ir_to_file cleans up its own temp dir on failure. *)
   | `Ok ll_path ->
@@ -277,7 +277,7 @@ let run_fixture main_exe name =
     fixtures verify cleanly (see specs/todos.md — no findings filed for
     this task; if a future emitter change breaks one, this test will name
     it precisely instead of surfacing as an opaque clang/runtime failure). *)
-let test_native_corpus_ir_is_verifier_clean () =
+let rec test_native_corpus_ir_is_verifier_clean ?(extra_flags = "") () =
   match find_llvm_verifier_tool () with
   | `None ->
     record_jit_skip "no LLVM verifier tool (opt/llvm-as) on PATH or in brew --prefix llvm — IR validity gate SKIPPED for the whole native/*.march corpus";
@@ -291,7 +291,7 @@ let test_native_corpus_ir_is_verifier_clean () =
     assert_excluded_are_js_target_only excluded;
     Alcotest.(check bool) "at least one native fixture found to gate" true
       (List.length fixtures > 0);
-    let results = List.map (run_fixture main_exe) fixtures in
+    let results = List.map (run_fixture ~extra_flags main_exe) fixtures in
     let emit_failures =
       List.filter_map (function
         | EmitFailed (name, rc, output) -> Some (name, rc, output)
@@ -321,6 +321,14 @@ let test_native_corpus_ir_is_verifier_clean () =
       Alcotest.fail (Buffer.contents buf)
     end
 
+(* A2 (specs/progress/2026-10-06-provenance-table-debug-info.md): the same
+   corpus under --debug-info.  The verifier is the gate that matters here —
+   a DISubprogram-bearing function whose calls lack a location is rejected
+   AND has its debug info silently dropped, so a green plain-corpus run says
+   nothing about this mode. *)
+and test_native_corpus_ir_is_verifier_clean_with_debug_info () =
+  test_native_corpus_ir_is_verifier_clean ~extra_flags:"--debug-info" ()
+
 let suites =
   [
     ( "llvm_ir_validity_gate", [
@@ -331,6 +339,8 @@ let suites =
         Alcotest.test_case "rm_rf_temp_dir refuses unconfined paths" `Quick
           test_rm_rf_temp_dir_refuses_unconfined_paths;
         Alcotest.test_case "native/*.march corpus emits verifier-clean LLVM IR (W2.1)" `Quick
-          test_native_corpus_ir_is_verifier_clean;
+          (fun () -> test_native_corpus_ir_is_verifier_clean ());
+        Alcotest.test_case "native/*.march corpus emits verifier-clean LLVM IR under --debug-info (A2)" `Quick
+          test_native_corpus_ir_is_verifier_clean_with_debug_info;
       ] );
   ]
