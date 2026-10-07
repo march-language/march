@@ -3,6 +3,14 @@ open Test_helpers
 
 (* ── js_pipeline: shared TIR->JS compile pipeline (lib/driver) ────────── *)
 
+(* TIR verifier (A1, lib/tir/tir_verify.ml), always on in the hand-rolled
+   pipelines below, which bypass Contract_pipeline: a finding fails the test. *)
+let verified stage tir =
+  (match March_tir.Tir_verify.check ~stage tir with
+   | [] -> ()
+   | findings -> Alcotest.fail (March_tir.Tir_verify.render ~stage findings));
+  tir
+
 let compile_to_js src =
   let m = parse_and_desugar src in
   March_driver.Js_pipeline.compile_module_to_js ~source_file:"<test>"
@@ -339,15 +347,15 @@ let test_unboxed_aggregate_built_without_alloc () =
 let test_unboxed_aggregate_boxed_control () =
   let m = parse_and_desugar unboxed_vec3_src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
-  let tir = March_tir.Lower.lower_module ~type_map m in
-  let tir = March_tir.Mono.monomorphize tir in
-  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = verified "tir-lower" (March_tir.Lower.lower_module ~type_map m) in
+  let tir = verified "tir-mono" (March_tir.Mono.monomorphize tir) in
+  let tir = verified "tir-defun" (March_tir.Defun.defunctionalize tir) in
   (* One table with unboxing OFF, handed to every pass and to the emitter:
      the same shape MARCH_NO_UNBOX produces through the pipeline. *)
   let k_table = March_tir.Kind.of_module ~unboxing:false tir in
-  let tir = March_tir.Perceus.perceus ~k_table tir in
-  let tir = March_tir.Drop.run ~k_table tir in
-  let tir = March_tir.Escape.escape_analysis ~k_table tir in
+  let tir = verified "tir-perceus" (March_tir.Perceus.perceus ~k_table tir) in
+  let tir = verified "tir-drop" (March_tir.Drop.run ~k_table tir) in
+  let tir = verified "tir-escape" (March_tir.Escape.escape_analysis ~k_table tir) in
   let ir  = March_tir.Llvm_emit.emit_module ~k_table tir in
   Alcotest.(check bool) "control: no struct type declared" false
     (ir_contains ir "%ub.Vec3 = type");
@@ -367,13 +375,13 @@ let test_unboxed_after_repl_ctx_in_same_process () =
   ignore (March_tir.Llvm_ctx.make_ctx ~repl:true ());
   let m = parse_and_desugar unboxed_vec3_src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
-  let tir = March_tir.Lower.lower_module ~type_map m in
-  let tir = March_tir.Mono.monomorphize tir in
-  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = verified "tir-lower" (March_tir.Lower.lower_module ~type_map m) in
+  let tir = verified "tir-mono" (March_tir.Mono.monomorphize tir) in
+  let tir = verified "tir-defun" (March_tir.Defun.defunctionalize tir) in
   let k_table = March_tir.Kind.of_module tir in
-  let tir = March_tir.Perceus.perceus ~k_table tir in
-  let tir = March_tir.Drop.run ~k_table tir in
-  let tir = March_tir.Escape.escape_analysis ~k_table tir in
+  let tir = verified "tir-perceus" (March_tir.Perceus.perceus ~k_table tir) in
+  let tir = verified "tir-drop" (March_tir.Drop.run ~k_table tir) in
+  let tir = verified "tir-escape" (March_tir.Escape.escape_analysis ~k_table tir) in
   let ir  = March_tir.Llvm_emit.emit_module ~k_table tir in
   Alcotest.(check bool) "a REPL ctx earlier in the process does not latch unboxing off" true
     (ir_contains ir "%ub.Vec3 = type")
@@ -1731,10 +1739,10 @@ let test_llvm_no_call_to_double_underscore () =
   end|} in
   let m = parse_and_desugar src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
-  let tir = March_tir.Lower.lower_module ~type_map m in
-  let tir = March_tir.Mono.monomorphize tir in
-  let tir = March_tir.Defun.defunctionalize tir in
-  let tir = March_tir.Perceus.perceus tir in
+  let tir = verified "tir-lower" (March_tir.Lower.lower_module ~type_map m) in
+  let tir = verified "tir-mono" (March_tir.Mono.monomorphize tir) in
+  let tir = verified "tir-defun" (March_tir.Defun.defunctionalize tir) in
+  let tir = verified "tir-perceus" (March_tir.Perceus.perceus tir) in
   let ir  = March_tir.Llvm_emit.emit_module tir in
   (* The bug was that @__ was emitted as a called symbol. *)
   let has_call_to_dunder =
@@ -1811,10 +1819,10 @@ let test_entry_bulk_import_resolves_partial_qualified () =
   end|} in
   let m = parse_and_desugar src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
-  let tir = March_tir.Lower.lower_module ~type_map m in
-  let tir = March_tir.Mono.monomorphize tir in
-  let tir = March_tir.Defun.defunctionalize tir in
-  let tir = March_tir.Perceus.perceus tir in
+  let tir = verified "tir-lower" (March_tir.Lower.lower_module ~type_map m) in
+  let tir = verified "tir-mono" (March_tir.Mono.monomorphize tir) in
+  let tir = verified "tir-defun" (March_tir.Defun.defunctionalize tir) in
+  let tir = verified "tir-perceus" (March_tir.Perceus.perceus tir) in
   let ir  = March_tir.Llvm_emit.emit_module tir in
   (* The qualified target must be CALLED; the bare `@Sub.greet(` (undefined /
      unresolved) must NOT appear. Note `@Foo.Sub.greet` does not contain the
@@ -16289,8 +16297,97 @@ end|} in
   Alcotest.(check bool) "a non-colliding user fn keeps its name" true
     (ir_contains ir "@helper(")
 
+(* ── TIR verifier, check 1 (A1): prove it red on hand-broken TIR ─────── *)
+
+module TV = struct
+  open March_tir.Tir
+  let v name ty = { v_name = name; v_ty = ty; v_lin = Unr }
+  let fn ?(params = []) name body =
+    { fn_name = name; fn_params = params; fn_ret_ty = TInt; fn_body = body;
+      fn_kind = FnNormal }
+  let modl fns =
+    { tm_name = "T"; tm_fns = fns; tm_types = []; tm_externs = [];
+      tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  let int n = ALit (March_ast.Ast.LitInt n)
+end
+
+let tv_findings ?(stage = "tir-perceus") m =
+  List.map snd (March_tir.Tir_verify.check ~stage m)
+
+let tv_has needle m =
+  List.exists (fun s -> Test_helpers.contains needle s) (tv_findings m)
+
+let test_tir_verify_clean_module () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TInt in
+  let m = TV.modl [
+      TV.fn "callee" ~params:[x] (EAtom (AVar x));
+      TV.fn "main" (ELet (TV.v "y" TInt, EApp (TV.v "callee" (TFn ([TInt], TInt)), [TV.int 1]),
+                          EApp (TV.v "+" (TFn ([TInt; TInt], TInt)),
+                                [AVar (TV.v "y" TInt); TV.int 2])));
+    ] in
+  Alcotest.(check (list string)) "well-formed module: no findings" [] (tv_findings m)
+
+let test_tir_verify_unbound_var () =
+  let open March_tir.Tir in
+  let m = TV.modl [ TV.fn "f" (EAtom (AVar (TV.v "ghost" TInt))) ] in
+  Alcotest.(check bool) "unbound AVar is reported" true
+    (tv_has "variable `ghost` is not bound" m);
+  (* scope ends with its let: a binder is not visible in a sibling branch *)
+  let y = TV.v "y" TInt in
+  let m2 = TV.modl [ TV.fn "g" ~params:[TV.v "b" TBool]
+      (ECase (AVar (TV.v "b" TBool),
+              [ { br_tag = "True"; br_vars = [];
+                  br_body = ELet (y, EAtom (TV.int 1), EAtom (AVar y)) };
+                { br_tag = "False"; br_vars = []; br_body = EAtom (AVar y) } ],
+              None)) ] in
+  Alcotest.(check bool) "a let binder does not leak into a sibling branch" true
+    (tv_has "variable `y` is not bound" m2)
+
+let test_tir_verify_unknown_callee () =
+  let open March_tir.Tir in
+  let m = TV.modl [ TV.fn "f" (EApp (TV.v "no_such_fn" (TFn ([], TInt)), [])) ] in
+  Alcotest.(check bool) "EApp to an unknown callee is reported" true
+    (tv_has "call to `no_such_fn`" m)
+
+let test_tir_verify_callptr_non_function () =
+  let open March_tir.Tir in
+  let n = TV.v "n" TInt in
+  let m = TV.modl [ TV.fn "f" ~params:[n] (ECallPtr (AVar n, [])) ] in
+  Alcotest.(check bool) "ECallPtr through an Int is reported" true
+    (tv_has "indirect call through `n`" m)
+
+let test_tir_verify_duplicate_and_defref () =
+  let open March_tir.Tir in
+  let m = TV.modl [ TV.fn "f" (EAtom (TV.int 1)); TV.fn "f" (EAtom (TV.int 2)) ] in
+  Alcotest.(check bool) "duplicate fn_def names are reported after mono" true
+    (tv_has "two top-level fn_defs are named `f`" m);
+  Alcotest.(check (list string)) "... but not before mono (prelude shadowing)" []
+    (tv_findings ~stage:"tir-lower" m);
+  let d = ADefRef { did_name = "gone"; did_hash = String.make 64 'a' } in
+  let m2 = TV.modl [ TV.fn "f" (EAtom d) ] in
+  Alcotest.(check bool) "a dangling ADefRef is reported" true
+    (tv_has "ADefRef `gone`" m2)
+
+let test_tir_verify_enforce_raises () =
+  let open March_tir.Tir in
+  let m = TV.modl [ TV.fn "f" (EAtom (AVar (TV.v "ghost" TInt))) ] in
+  match March_tir.Tir_verify.enforce ~stage:"tir-x" m with
+  | () -> Alcotest.fail "enforce must raise on a finding"
+  | exception March_tir.Tir_verify.Failed (stage, fs) ->
+    Alcotest.(check string) "stage carried" "tir-x" stage;
+    Alcotest.(check int) "one finding" 1 (List.length fs)
+
 let codegen_suites =
   [
+      ( "tir_verify", [
+          Alcotest.test_case "clean module has no findings" `Quick test_tir_verify_clean_module;
+          Alcotest.test_case "unbound variable (RED)" `Quick test_tir_verify_unbound_var;
+          Alcotest.test_case "unknown callee (RED)" `Quick test_tir_verify_unknown_callee;
+          Alcotest.test_case "ECallPtr through a non-function (RED)" `Quick test_tir_verify_callptr_non_function;
+          Alcotest.test_case "duplicate names, dangling ADefRef (RED)" `Quick test_tir_verify_duplicate_and_defref;
+          Alcotest.test_case "enforce raises Failed" `Quick test_tir_verify_enforce_raises;
+        ]);
       ( "vectorize_check", [
           Alcotest.test_case "module loads, misuse case reports one diagnostic" `Quick
             test_vectorize_check_module_loads;

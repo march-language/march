@@ -60,6 +60,22 @@ the CWD**, with function names but no bodies. Use it for the viewer and for
 **Don't:** blame codegen before reading `tir-lower`. A "codegen mis-lowering" has
 been a parser bug before.
 
+## Is the TIR itself malformed?
+
+**First command:** `--verify-tir` (or `MARCH_VERIFY_TIR=1`, which also reaches
+the REPL/JIT and every compile `test_oracle` runs).
+```bash
+./_build/default/bin/main.exe --verify-tir --compile FILE -o /tmp/x
+```
+Checks scoping and references after every pass (each variable bound, each callee
+resolvable, indirect calls through something callable, no duplicate fn names).
+A finding exits 3 and names the stage and function: the first stage listed is
+the pass that broke it. Always on in `run_snapshots` and the hand-rolled
+pipelines in `test_codegen.ml`. Design: observability plan §6 (A1).
+
+**Don't:** suppress a finding by name without classifying it; the checks' false
+positives are fixed in `lib/tir/tir_verify.ml` with a comment saying why.
+
 ## Which optional pass?
 
 `MARCH_NO_UNBOX=1`, `MARCH_NO_HOF_SPEC=1`, `MARCH_NO_INLINE_RC=1`, `--no-opt`.

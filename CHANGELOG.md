@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`march --verify-tir`** (or `MARCH_VERIFY_TIR=1`) checks the compiler's typed IR
+  after every pass. Every variable must be bound, every called function must
+  exist, indirect calls must go through something callable, and no function
+  name may be defined twice. A violation stops the compile as an internal
+  compiler error, naming the pass and the function, instead of surfacing later
+  as an LLVM, link or runtime failure. It is always on in the compiler's own
+  IR test harnesses and its differential oracle.
 - **`List.filter` keeps what its predicate says.** `sum_pos(List.filter(ys, fn y -> y > 0))`
   now proves a `List({Int | _ > 0})` demand, directly or through a `let`, and
   combines with the input's own element refinement. A predicate too weak for

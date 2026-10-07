@@ -60,7 +60,16 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   (* Provenance completeness: after every pass, any top-level fn still
      without an origin gets one naming that pass (see lib/tir/provenance.ml).
      Hooked on [snap] because every pass already reports to it. *)
-  let snap name tir = Provenance.sweep ~pass:name tir; snap name tir in
+  (* TIR verifier (A1; lib/tir/tir_verify.ml): under --verify-tir /
+     MARCH_VERIFY_TIR=1 every pass's output is checked as it is reported,
+     and the input is checked first as "tir-lower" (the driver's own
+     tir-lower snap is a dump hook, not part of this pipeline). *)
+  let verify = Tir_verify.enabled () in
+  let verify_stage name tir =
+    if verify then Tir_verify.enforce ~stage:name ?iface_methods tir in
+  verify_stage "tir-lower" tir;
+  let snap name tir =
+    Provenance.sweep ~pass:name tir; verify_stage name tir; snap name tir in
   let decls = Alloc_contract.resolve_names decls tir in
   (* TRMC eligibility analysis (gated on MARCH_TRMC_REPORT).  Must run here:
      by tir-perceus the stdlib's nested `go` helpers are closures invoked via
@@ -237,7 +246,9 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   (* The driver records Opt's per-pass snapshots through a different observer
      than the top-level stages (phases only, never MARCH_DUMP_TXT); default to
      [snap] for callers that don't care. *)
-  let opt_snap = match opt_snap with Some f -> f | None -> snap in
+  let opt_snap = match opt_snap with
+    | Some f -> (fun name m -> verify_stage name m; f name m)
+    | None -> snap in
   let tir = if opt then Opt.run ~snap:opt_snap ~hot_reload tir else tir in
   (* Prune functions unreachable from the entry points BEFORE LLVM emit, even
      when the optimizer is disabled: a linkability requirement, not an

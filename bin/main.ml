@@ -1343,6 +1343,10 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            must never satisfy the plain spelling (measured: it did, and the
            gate's own driver test went silent on a warm CAS). *)
         @ (if !stdlib_source then ["stdlib-source"] else [])
+        (* --verify-tir / MARCH_VERIFY_TIR changes no output, but a cache hit
+           skips the TIR pipeline and so the check; keying on it means a
+           verified compile is never satisfied by an unverified cached one. *)
+        @ (if March_tir.Tir_verify.enabled () then ["verify-tir"] else [])
         @ cross_sysroot_tag
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
         (* --protocol-baseline: the previous protocol versions decide the
@@ -3209,7 +3213,12 @@ let compile filename =
                           d.March_tir.Alloc_contract.d_name) contract_decls
                       else mainless_roots)
         ~opt:!opt_enabled tir
-      with March_tir.Mono.Repr_disagreement msg ->
+      with
+      | March_tir.Tir_verify.Failed (stage, findings) ->
+        (* A malformed TIR module is a compiler bug, not a program error. *)
+        prerr_endline (March_tir.Tir_verify.render ~stage findings);
+        exit 3
+      | March_tir.Mono.Repr_disagreement msg ->
         (* A real defect in the program or the stdlib manifest, not a compiler
            bug: render it as one clean error rather than letting it reach the
            `| exn ->` internal-compiler-error handler with a backtrace. *)
@@ -5423,6 +5432,8 @@ let () =
     ("--stdlib-source", Arg.Set stdlib_source, " The entry file(s) are standard-library sources checked under a path outside the resolved stdlib root (e.g. `march --check --stdlib-source stdlib/actor.march` from the repo root): exempt them from the stdlib-only builtin gate. Never inferred from the file name");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
+    ("--verify-tir", Arg.Set March_tir.Tir_verify.enabled_flag,
+     " Check TIR well-formedness after every pass (scoping and references); a finding is an internal compiler error. Same as MARCH_VERIFY_TIR=1");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--report-contracts", Arg.Set report_contracts,

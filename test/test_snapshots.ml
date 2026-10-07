@@ -183,9 +183,18 @@ let render_module (m : March_tir.Tir.tir_module) =
    snapshot pins core lowering/RC/FBIP behavior independent of optimizer
    on/off state. *)
 
+(* TIR verifier (A1, lib/tir/tir_verify.ml), always on here: this harness
+   hand-rolls the pipeline instead of going through Contract_pipeline, so it
+   would otherwise never see the check.  A finding fails the case. *)
+let verified stage tir =
+  (match March_tir.Tir_verify.check ~stage tir with
+   | [] -> ()
+   | findings -> failwith (March_tir.Tir_verify.render ~stage findings));
+  tir
+
 let dump_post_lower src =
   March_tir.Defun.set_lambda_counter 0;
-  render_module (Test_helpers.lower_module_typed src)
+  render_module (verified "tir-lower" (Test_helpers.lower_module_typed src))
 
 (* TRMC runs post-lower / pre-mono, exactly as [Contract_pipeline] runs it,
    and it always runs — so these snapshots pin TRMC's emitted shape.  Before
@@ -195,11 +204,11 @@ let dump_post_lower src =
    meant "nothing was looking". *)
 let dump_post_perceus src =
   March_tir.Defun.set_lambda_counter 0;
-  let tir = Test_helpers.lower_module_typed src in
-  let tir = March_tir.Trmc.transform_module tir in
-  let tir = March_tir.Mono.monomorphize tir in
-  let tir = March_tir.Defun.defunctionalize tir in
-  let tir = March_tir.Perceus.perceus tir in
+  let tir = verified "tir-lower" (Test_helpers.lower_module_typed src) in
+  let tir = verified "tir-trmc" (March_tir.Trmc.transform_module tir) in
+  let tir = verified "tir-mono" (March_tir.Mono.monomorphize tir) in
+  let tir = verified "tir-defun" (March_tir.Defun.defunctionalize tir) in
+  let tir = verified "tir-perceus" (March_tir.Perceus.perceus tir) in
   render_module tir
 
 (* ── Diffing ────────────────────────────────────────────────────────────
