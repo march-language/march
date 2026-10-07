@@ -57,6 +57,11 @@ type preamble_item =
   | POther of string
   | PBlank
 val native_net_io_items : preamble_item list
+
+(** Sanitizer builds: emit the TRMC hole-fill check (and declare it in the
+    preamble). Set by bin/main.ml from the sanitize predicate. *)
+val rc_checks : bool ref
+
 val emit_preamble :
   is_wasm:bool -> triple:string -> ?repl:bool -> Buffer.t -> unit
 val is_builtin_fn : string -> bool

@@ -1269,7 +1269,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
               single box-level dec on its rc>1 path. *)
            let rc = Llvm_ctx.fresh ctx "scrut_rc" in
            Llvm_ctx.emit ctx (Printf.sprintf
-             "%s = load atomic i64, ptr %s monotonic, align 8" rc scrut_val);
+             "%s = load atomic i64, ptr %s acquire, align 8" rc scrut_val);
            let shared = Llvm_ctx.fresh ctx "scrut_shared" in
            Llvm_ctx.emit ctx (Printf.sprintf "%s = icmp sgt i64 %s, 1" shared rc);
            let unique_lbl = Llvm_ctx.fresh_block ctx "rb_unique" in

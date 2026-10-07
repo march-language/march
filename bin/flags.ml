@@ -138,6 +138,10 @@ let debug_mode     = ref false
 let debug_tui_mode = ref false
 let opt_enabled    = ref true
 let fast_math      = ref false
+(* --rc-trace: store a site id before every refcount/alloc/free call and emit
+   the site table (lib/tir/llvm_rc_trace.ml).  MARCH_RC_TRACE=1 is the same
+   switch for build paths that cannot pass a flag (forge, the IR oracle). *)
+let rc_trace       = ref false
 let pmap_threshold = ref 1024    (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
 let no_copy_runtime = ref false    (* --no-copy-runtime: skip auto-copy of march_runtime.mjs *)
 (* --hot-reload=<Prefix>: compile boundary modules (under <Prefix>) with the

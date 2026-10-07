@@ -25,6 +25,19 @@ git log is authoritative for exact commits.
   the compilation cache. `scripts/determinism-oracle.sh` compiles the IR-oracle
   corpus under a cold and a warm private `$HOME` from two cwds and fails on any
   difference in the IR or these hashes; CI runs it as the `determinism` job.
+- **`--rc-trace`: leak reports that name the function.** A program built with
+  `march --rc-trace` (or `MARCH_RC_TRACE=1`) tags every runtime call it makes
+  with a site id, so the `MARCH_TRACE_GC=1` trace now records *who* allocated,
+  retained and released each object; the new `scripts/gc-trace-report.py`
+  folds the trace into per-object histories and prints every object still live
+  at exit with its type, allocation site and each inc/dec as
+  `<fn>#<ordinal>:<runtime callee>`, plus any count that went negative or was
+  freed twice and a per-site summary. String allocations are traced too (they
+  were not before), string-literal cells are reported as immortal rather than
+  leaked, and `kill -USR2` flushes a live process's trace. Release builds are
+  byte-identical with the switch off. `MARCH_SANITIZE=1` builds additionally
+  abort on a `march_free` of a shared object and on a TRMC hole fill that finds
+  its slot already written.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
@@ -257,6 +270,14 @@ git log is authoritative for exact commits.
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary
   builds were not affected.
+- **NativeArray operations no longer leak the array they read.** In compiled
+  code, `map`, `map2`, `fold`, `from_list`, the width conversions and the
+  DataFrame column reductions kept a reference to their input that nothing
+  released, so a chain like `map(map(a, f), g)` leaked its whole intermediate
+  array on every call, and `from_list` leaked its list. A `map` or `map2` over
+  Float or f32 arrays whose callback could not be inlined also leaked two
+  Float boxes per element, and `DataFrame.filter` leaked each column it
+  filtered.
 - **The language server resolves dependencies the way `forge build` does.**
   It used to put every cached version of a git dependency on its search path,
   including each version's `test/` and `priv/` files, and it missed registry
@@ -264,6 +285,17 @@ git log is authoritative for exact commits.
   never reads. It now uses the version `forge.lock` names, and only that
   version's `lib/`.
 
+- **Every in-place write now synchronises with the reference it reuses.** The
+  sole-ownership test behind FBIP reuse, `NativeArray.set`/`sort` and the SIMD
+  store read the reference count with a relaxed load, so a cell another thread
+  had just released could be mutated in place without ordering against that
+  thread's last reads (a C11 data race, harmless on x86 in practice). The test
+  is an acquire load now, in the C runtime (`march_rc_is_unique`) and in
+  emitted code; free on x86-64, one `ldar` on arm64.
+- **A dead linear value's resource destructor runs.** Freeing a dead linear
+  binding bypassed the reference-count path and so skipped the destructor a
+  resource cell (a `RingBuf`, an FFI resource) carries, leaking its native
+  store and elements. `march_free` runs it now, as `march_decrc` always did.
 - **Compiled code no longer leaks records whose ownership differs between branches.**
   A record released on one path of a `match` or `if` was leaked on the others. A record
   passed to a function and then updated (`{ st with .. }`) was never released at all. A

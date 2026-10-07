@@ -1,0 +1,13 @@
+map of a map = 90900, flat: true
+map_float = 1200., flat: true
+map2 = 46050, flat: true
+fold = 91200, flat: true
+fold_float = 45900., flat: true
+from_list = 600, flat: true
+min and max = 46049, flat: true
+float min and max = 45301., flat: true
+sumsq_dev = 26955825., flat: true
+width conversions = 125280., flat: true
+filter_mask = 1200, flat: true
+runtime Float map and map2 = 2250., flat: true
+runtime f32 map and map2 = 1800., flat: true
