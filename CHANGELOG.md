@@ -26,6 +26,13 @@ git log is authoritative for exact commits.
   `cap verified`). This is the first *abstract refinement* (a refinement
   parameterised by a predicate), and user functions can declare one the same
   way; see "Abstract refinements" in the refinement types reference.
+- **Cluster name registry tombstones expire.** An unregistered name used to leave a
+  tombstone in every node's registry forever, so a long-running cluster's registry, and
+  every anti-entropy round over it, grew with every name ever unregistered (two per
+  finished session). A tombstone is now dropped 3 hours after it was first seen;
+  `MARCH_REGISTRY_TOMBSTONE_GRACE_MS` or `tombstone_grace_ms` in `ClusterNode.config`
+  changes that. Keep it well above the longest partition the cluster should heal from.
+  Collection starts once every node in a cluster runs this version.
 - **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
   March function gets a `DISubprogram` at its defining line (lifted lambdas at
   the lambda's line, specialisations at the generic's), and the link gets `-g`,
