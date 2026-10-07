@@ -210,6 +210,12 @@ type env = {
      bound name, with the heap captures the allocation moved into them.
      Reset per function; see [dead_clo_release]. *)
   clo_caps      : (string, Tir.var list) Hashtbl.t;
+  (* Case binders that lowering left erased (a [TVar]) although the
+     scrutinee's type names theirs: a wildcard [_] in a tuple or constructor
+     pattern ([(None, _) -> st]).  A release of such a binder knows no layout
+     and stayed shallow, so a [Deque] dropped that way freed its cell and
+     leaked both lists.  Reset per function; see [refine_binders]. *)
+  binder_tys    : (string, Tir.ty) Hashtbl.t;
 }
 
 let fresh env pfx = env.ctr <- env.ctr + 1; Printf.sprintf "$%s%d" pfx env.ctr
@@ -382,19 +388,42 @@ let droppable_ctors (env : env) (ty : Tir.ty)
     in
     if concrete_niche then None else
     (match Kind.repr_of env.k_table ty with
+     (* A short name several modules declare names ALL of their values, so its
+        drop must take every candidate's constructors, even when one candidate
+        answers the exact lookup: the entry module's own types are registered
+        under the bare name, so a user [type Value] made [Value] resolve to it
+        alone, and a dropped [Msgpack.Value] reached the drop's [unreachable]
+        default (SIGSEGV, compiled only;
+        specs/progress/2026-10-06-local-type-named-like-stdlib-value.md).  When
+        the union is refused (candidates whose type arities or same-named
+        constructors' fields differ, e.g. a user [type Tree = Leaf | Node(..)]
+        beside [OrderedMap.Tree(k, v)]), the drop falls back to the exact
+        lookup it used before the union existed: going shallow there leaked
+        every such tree (test/native/aggregate_drop_erased_fields). *)
      | Kind.Boxed ->
-       (match (match Kind.find_variant env.k_table name with
-               | Some _ as found -> found
-               | None -> find_variant_by_suffix env name) with
-        | Some ctors ->
-          let params = type_params_of ctors in
-          let subst =
-            if List.length params = List.length ty_args
-            then List.combine params ty_args else []
-          in
-          Some (List.map (fun (cn, ftys) ->
-              (cn, List.map (apply_subst subst) ftys)) ctors)
-        | None -> colliding_union env name ty_args)
+       let union () =
+         if not (String.contains name '.') && Hashtbl.mem env.collision_set name
+         then colliding_union env name ty_args else None in
+       let exact () =
+         match (match Kind.find_variant env.k_table name with
+                | Some _ as found -> found
+                | None -> find_variant_by_suffix env name) with
+         | Some ctors ->
+           let params = type_params_of ctors in
+           let subst =
+             if List.length params = List.length ty_args
+             then List.combine params ty_args else []
+           in
+           Some (List.map (fun (cn, ftys) ->
+               (cn, List.map (apply_subst subst) ftys)) ctors)
+         | None -> None
+       in
+       (match union () with
+        | Some _ as u -> u
+        | None ->
+          (match exact () with
+           | Some _ as e -> e
+           | None -> colliding_union env name ty_args))
      (* Unboxed: an inline struct of scalars.  No cell to free and no heap
         field to recurse into, so there is nothing for a [__drop$T] helper to
         do — the same answer as the erased reprs, for a different reason. *)
@@ -414,58 +443,8 @@ let variant_ctors (env : env) (name : string)
   | Some _ as found -> found
   | None -> find_variant_by_suffix env name
 
-(** A nominal record named by its SHORT name where the type definition
-    carries the qualified one: [GlobalRegistry.Names]' constructor field is
-    [Map(String, Entry)] while the record is declared as
-    [GlobalRegistry.Entry].  The exact lookup missed, so every map leaf's
-    entry was freed shallowly and its [VectorClock] leaked, three objects per
-    registry update (specs/progress/2026-10-06-nominal-record-short-name-drop.md).
-    Resolved only when exactly one record has that last segment; two or more
-    stay unresolved (shallow), as [find_variant_by_suffix] does for variants. *)
-let record_fields_by_suffix (k_table : Kind.table) (n : string)
-  : (string * Tir.ty) list option =
-  if String.contains n '.' then None
-  else
-    let sfx = "." ^ n in
-    let sl = String.length sfx in
-    let ends q =
-      let ql = String.length q in
-      String.equal q n || (ql > sl && String.equal (String.sub q (ql - sl) sl) sfx) in
-    let defs = Kind.type_defs k_table in
-    (* A variant with the same short name makes the name ambiguous: the use
-       site may be that variant, and a record's layout would be wrong. *)
-    let variant_shares = List.exists (function
-        | Tir.TDVariant (q, _) -> ends q
-        | _ -> false) defs in
-    (* The declared field types name other modules' types QUALIFIED
-       ([reg : GlobalRegistry.Names]), but every value of those types is built
-       and matched under the BARE name, and the representation follows that
-       spelling: [Names] is Boxed where [GlobalRegistry.Names] classifies as a
-       newtype.  Dropping the field under the qualified name dropped the box's
-       pointer as its own payload, a use-after-free in the session probe
-       (ASAN: __drop$CnState then __drop$HEntry_String_Entry on one cell).
-       The structural record a use site carries spells them bare, so do the
-       same here. *)
-    let rec bare (t : Tir.ty) : Tir.ty =
-      match t with
-      | Tir.TCon (q, args) ->
-        let short = match String.rindex_opt q '.' with
-          | Some i -> String.sub q (i + 1) (String.length q - i - 1)
-          | None -> q in
-        Tir.TCon (short, List.map bare args)
-      | Tir.TFn (ps, r) -> Tir.TFn (List.map bare ps, bare r)
-      | Tir.TTuple ts -> Tir.TTuple (List.map bare ts)
-      | Tir.TRecord fs -> Tir.TRecord (List.map (fun (k, v) -> (k, bare v)) fs)
-      | Tir.TPtr t -> Tir.TPtr (bare t)
-      | t -> t
-    in
-    let hits = if variant_shares then [] else List.filter_map (function
-        | Tir.TDRecord (q, _) when ends q ->
-          Option.map (List.map (fun (k, t) -> (k, bare t))) (Kind.record_fields k_table q)
-        | _ -> None) defs in
-    match hits with
-    | [ fields ] -> Some fields
-    | _ -> None
+(** See [Kind.record_fields_short]. *)
+let record_fields_by_suffix = Kind.record_fields_short
 
 (** The (accessor, type) pairs of a record or tuple, in layout order, or
     [None] for any other type.  Records are keyed by field name and sorted, as
@@ -578,6 +557,10 @@ let erased_payload (env : env) (ty : Tir.ty)
 (** The synthesized drop function for [ty], or [None] if a bare [EDecRC] on
     [ty] is already correct (no heap children to release). *)
 let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
+  match ty with
+  (* Erased, niche-encoded: see [drop_op]'s [Option('a)] arm. *)
+  | Tir.TCon ("Option", [ Tir.TVar _ ]) -> None
+  | _ ->
   let key = mangle ty in
   match Hashtbl.find_opt env.names key with
   | Some "" -> None            (* memoized negative *)
@@ -809,6 +792,18 @@ and drop_op (env : env) (v : Tir.var) : Tir.expr =
   let unit_expr = Tir.ETuple [] in
   match v.Tir.v_ty with
   | Tir.TVar _ -> Tir.EDecRC (Tir.AVar v)
+  (* An Option whose payload type was never pinned ([record_get(r, "y")] with
+     nothing constraining it) comes from an erased runtime read, which encodes
+     it as a niche: [Some(x)] is [x] itself, [None] is null
+     (march_record_get's 'g' kind).  The synthesized drop for [Option('a)]
+     assumes a boxed [Some] cell, so it freed [x] as the cell and then released
+     [x] again as its payload: a use-after-free in
+     test/native/record_erased_field_repr under ASAN
+     (specs/progress/2026-10-06-record-get-erased-option-drop.md).  A plain
+     release is right for the niche ([x] released, null ignored), and for a
+     boxed cell it frees the cell and leaks the payload: never a double
+     release. *)
+  | Tir.TCon ("Option", [ Tir.TVar _ ]) -> Tir.EDecRC (Tir.AVar v)
   | ty when may_be_non_heap env ty ->
     (match erased_payload env ty with
      | Some (`Niche (cname, pty)) ->
@@ -1186,6 +1181,9 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
 let rewrite_dec env (atom : Tir.atom) (orig : Tir.expr) : Tir.expr =
   match atom with
   | Tir.AVar v ->
+    let v = match v.Tir.v_ty, Hashtbl.find_opt env.binder_tys v.Tir.v_name with
+      | Tir.TVar _, Some ty -> { v with Tir.v_ty = ty }
+      | _ -> v in
     (match drop_fn_for env v.Tir.v_ty with
      | Some fname ->
        let f = { Tir.v_name = fname;
@@ -1390,10 +1388,49 @@ let rec rewrite env (e : Tir.expr) : Tir.expr =
       List.fold_right (fun op acc -> Tir.ESeq (op, acc))
         (scrut_ops @ List.map (rewrite env) others) rest'
     in
+    refine_binders env scrut brs;
     Tir.ECase (scrut,
       List.map (fun br -> { br with Tir.br_body = rewrite_body br.Tir.br_body }) brs,
       Option.map (rewrite env) def)
   | _ -> e
+
+(** Record, for each erased binder of [brs], the type its position has in the
+    scrutinee's type: a tuple's element, or a constructor's field with the
+    type's arguments substituted ([droppable_ctors], which declines whenever
+    the layout is in doubt).  Only a binder typed [TVar] is refined, and only
+    to a type with no variable at its head. *)
+and refine_binders env (scrut : Tir.atom) (brs : Tir.branch list) : unit =
+  let note (b : Tir.var) ty =
+    match b.Tir.v_ty, ty with
+    | Tir.TVar _, Tir.TVar _ -> ()
+    | Tir.TVar _, _ -> Hashtbl.replace env.binder_tys b.Tir.v_name ty
+    | _ -> ()
+  in
+  let note_all vars tys =
+    if List.length vars = List.length tys then List.iter2 note vars tys in
+  match scrut with
+  | Tir.AVar s ->
+    let sty = match s.Tir.v_ty, Hashtbl.find_opt env.binder_tys s.Tir.v_name with
+      | Tir.TVar _, Some ty -> ty
+      | ty, _ -> ty in
+    (match sty with
+     | Tir.TTuple ts ->
+       List.iter (fun (br : Tir.branch) ->
+           if Tir_names.is_tuple_tag br.Tir.br_tag then note_all br.Tir.br_vars ts) brs
+     | Tir.TCon _ ->
+       (match droppable_ctors env sty with
+        | None -> ()
+        | Some ctors ->
+          let short q = match String.rindex_opt q '.' with
+            | Some i -> String.sub q (i + 1) (String.length q - i - 1)
+            | None -> q in
+          List.iter (fun (br : Tir.branch) ->
+              match List.filter (fun (cn, _) ->
+                  String.equal (short cn) (short br.Tir.br_tag)) ctors with
+              | [ (_, ftys) ] -> note_all br.Tir.br_vars ftys
+              | _ -> ()) brs)
+     | _ -> ())
+  | _ -> ()
 
 (** Synthesize deep-drop functions and route bare aggregate drops through them.
 
@@ -1407,7 +1444,8 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
   let env = { type_defs = m.Tir.tm_types; collision_set; k_table;
               names = Hashtbl.create 32; fns = []; ctr = 0;
               owned_locals = Hashtbl.create 64;
-              clo_caps = Hashtbl.create 16 } in
+              clo_caps = Hashtbl.create 16;
+              binder_tys = Hashtbl.create 16 } in
   (* Apply functions whose environment owns what it captured — see
      [owning_apply_fns] for why this gate is load-bearing rather than an
      optimisation. *)
@@ -1427,6 +1465,7 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
       in
       Hashtbl.reset env.owned_locals;
       Hashtbl.reset env.clo_caps;
+      Hashtbl.reset env.binder_tys;
       (* A parameter the borrow analysis did not mark borrowed is owned by the
          function: it is released in the function, not by the caller. *)
       (match borrow_map with
@@ -1477,6 +1516,40 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
            | _ -> None)
         | _ -> None) m.Tir.tm_types
   in
+  (* State releases for actors that die.  The live actor's record is freed
+     shallowly by the runtime (it is a record, released by its last pid
+     reference), so every heap state field of an actor that was killed or
+     stopped leaked (specs/progress/2026-10-06-killed-actor-state-leak.md).
+     [$actordrop$<A>_Actor($a)] loads each state field that needs RC, stores
+     an immediate over its slot (so nothing reading the dead record afterwards
+     finds a freed pointer) and drops it.  The runtime runs it from the
+     actor's green thread on a NORMAL exit only, after the loop and before the
+     thread releases its own reference: on a crash or a stop taken inside a
+     handler, the fields have been moved into that handler's locals and are
+     not the record's to release.  A hot-reload actor keeps its state in a
+     separately typed record a migration may replace, so it gets none: a
+     wrong layout is worse than a leak. *)
+  let actor_drops =
+    List.filter_map (function
+        | Tir.TDRecord (name, fields)
+          when Tir_names.is_actor_struct_name name
+            && not (List.mem_assoc Tir_names.actor_state_field fields) ->
+          let a = { Tir.v_name = "$a"; v_ty = Tir.TCon (name, []); v_lin = Tir.Unr } in
+          let owned = List.filter_map Fun.id (List.mapi (fun i (f, ty) ->
+              if i >= 2 && Kind.needs_rc_of env.k_table ty then
+                Some ({ Tir.v_name = "$s_" ^ f; v_ty = ty; v_lin = Tir.Unr }, f, i)
+              else None) fields) in
+          if owned = [] then None
+          else begin
+            let body = List.fold_right (fun (v, f, i) acc ->
+                Tir.ELet (v, Tir.EField (Tir.AVar a, f),
+                  Tir.ESeq (Tir.ESetField (Tir.AVar a, i, Tir.ALit (March_ast.Ast.LitInt 0)),
+                    Tir.ESeq (drop_op env v, acc)))) owned (Tir.ETuple []) in
+            Some { Tir.fn_name = Tir_names.actor_drop_fn_name name; fn_params = [a];
+                   fn_ret_ty = Tir.TUnit; fn_body = body; fn_kind = Tir.FnNormal }
+          end
+        | _ -> None) m.Tir.tm_types
+  in
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
-  { m with Tir.tm_fns = fns @ clo_drops @ List.rev env.fns }
+  { m with Tir.tm_fns = fns @ clo_drops @ actor_drops @ List.rev env.fns }

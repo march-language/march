@@ -547,6 +547,18 @@ let ring_get r i =
     let idx = ((r.rb_head - 1 - i) + r.rb_cap * 2) mod r.rb_cap in
     r.rb_arr.(idx)
 
+(* Snapshot oldest-to-newest as a March List. ring_get uses 0 = newest, so
+   iterating 0..n-1 with a prepend yields oldest first. *)
+let ring_to_list r =
+  let n = r.rb_size in
+  let rec go i acc =
+    if i >= n then acc
+    else
+      let v = match ring_get r i with Some x -> x | None -> assert false in
+      go (i + 1) (VCon ("Cons", [v; acc]))
+  in
+  go 0 (VCon ("Nil", []))
+
 (** [ring_pop_oldest r] removes and returns the oldest element (FIFO head).
     Clears the slot for GC. Returns None if empty. *)
 let ring_pop_oldest r =

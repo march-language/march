@@ -1,0 +1,17 @@
+mod Main do
+  -- Companion to accept/t164 for NativeFloatArr (the other 64-bit NativeArray
+  -- backing type): a copy-on-write value, sendable since Part C, Phase C1.
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on MsgArr(arr : NativeFloatArr) do
+      { n: 1 }
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    let arr = NativeArray.make_float(4, 0.0)
+    send(w, MsgArr(arr))
+  end
+end

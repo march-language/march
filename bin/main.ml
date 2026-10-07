@@ -1187,6 +1187,10 @@ let codegen_cas_tags () =
      silently does not own the main thread. *)
   @ (if !March_tir.Llvm_toplevel.pin_main then ["pin-main"] else [])
   @ (if !debug_mode || !debug_tui_mode then ["dbg"] else [])
+  (* --debug-info changes the emitted IR (DISubprogram/!dbg per function)
+     and the clang link (-g); a non-debug cached artifact must never satisfy
+     a --debug-info build. *)
+  @ (if !debug_info then ["dbginfo"] else [])
   (* --test changes the emitted program: [lower_module ~test_mode] builds a
      test-runner entry point instead of the ordinary one, and the
      capability-passing elaboration runs only in a test build.  Without this
@@ -3287,6 +3291,7 @@ let compile filename =
     (* Write all collected phases to march-phases/phases.json *)
     (if !dump_phases then
        March_dump.Dump.write_phases ~source_file:filename (List.rev !phases));
+    if !dump_provenance then March_tir.Provenance.dump stdout;
     if !dump_tir then begin
       List.iter (fun td ->
           Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
@@ -3568,7 +3573,7 @@ let compile filename =
                 in
                 (wasm_clang, " -nostdlib -Wl,--no-entry -Wl,--export-dynamic")
             in
-            let wasm_dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
+            let wasm_dbg_flag = if !debug_mode || !debug_tui_mode || !debug_info then " -g" else "" in
             let cmd = Printf.sprintf
               "%s --target=%s%s%s%s -DMARCH_WASM -Wno-unused-command-line-argument %s %s -o %s"
               clang triple sysroot_flag opt_flag wasm_dbg_flag wasm_runtime ll_tmp out_bin in
@@ -3753,7 +3758,7 @@ let compile filename =
             (* musl needs an explicit -lucontext for the scheduler's green
                threads; glibc has them in libc. See ucontext_link_flags. *)
             let ucontext_flag = ucontext_link_flags () in
-            let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
+            let dbg_flag = if !debug_mode || !debug_tui_mode || !debug_info then " -g" else "" in
             let san_flag = sanitize_clang_flag () in
             (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
             let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
@@ -5361,6 +5366,10 @@ let () =
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
+    ("--debug-info", Arg.Set debug_info,
+     " Emit function-level DWARF (DISubprogram per March fn, !march.provenance) and link with -g");
+    ("--dump-provenance", Arg.Set dump_provenance,
+     " Print the fn-name -> origin provenance table after the TIR pipeline (with --emit-llvm/--compile/--dump-tir)");
     ("--shell",      Arg.String (fun p -> shell_socket := Some p),
      "<socket> A remote shell on the node serving <socket> (its `<reload socket>.shell`): typecheck the program once, then compile each input into a signed fragment the node runs");
     ("--shell-timeout-ms", Arg.Int (fun n -> shell_timeout_ms := n),
@@ -5468,6 +5477,7 @@ let () =
      specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md.
      A leftover MARCH_TRMC=1 in the environment is simply ignored. *)
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
+  March_tir.Llvm_toplevel.debug_info := !debug_info;
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;
   (* --dump-role-authority is a report the typechecker prints; nothing runs. *)

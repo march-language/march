@@ -708,7 +708,15 @@ let make_env errors type_map = {
   qual_fn_names = StrMap.empty;
   plain_let_names = StringSet.empty;
   proof_caps = [];
-  always_linear_types = [];
+  (* "RingBuf" is seeded here so the builtin type is tracked as linear with
+     no declaring module (Part C, Phase C2 of
+     specs/plans/2026-09-25-send-data-race-freedom-plan.md; design spec
+     section 3.2): is_linear_ty / field_linearity consult
+     resolves_always_linear on any bare TCon, so a RingBuf binding, record
+     field or actor-state field is Linear with no `linear` keyword at any use
+     site, and the shadow rule only fires when the current module declares
+     its own RingBuf. *)
+  always_linear_types = ["RingBuf"];
   current_module = "";
   gated_shadowed = StringSet.empty;
   root_cap_allowed = false;

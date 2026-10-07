@@ -105,6 +105,11 @@ val is_record_type : table -> string -> bool
 
 (** Declared fields of a nominal record type, [None] for anything else. *)
 val record_fields : table -> string -> (string * Tir.ty) list option
+
+(** [record_fields] for a record named by its SHORT name ([Ops] for
+    [Session.Ops]): the one record with that last segment, field types spelled
+    bare; [None] when none or several match, or a variant shares the name. *)
+val record_fields_short : table -> string -> (string * Tir.ty) list option
 val is_niche_shaped : table -> string -> bool
 val niche_repr_of_concrete : table -> string -> repr option
 

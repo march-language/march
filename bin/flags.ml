@@ -141,6 +141,14 @@ let cap_mocking () =
 let output_file    = ref ""
 let debug_mode     = ref false
 let debug_tui_mode = ref false
+(* --debug-info: function-granularity DWARF (DISubprogram per March fn) in
+   the emitted IR plus `-g` on the clang link, so lldb/gdb, ASan and perf
+   name March functions.  Distinct from --debug (the interpreter's
+   time-travel debugger).  Own CAS tag: see [codegen_cas_tags]. *)
+let debug_info     = ref false
+(* --dump-provenance: print the fn-name -> origin side table after the TIR
+   pipeline (specs/plans/incremental-codegen-cas-plan.md §7). *)
+let dump_provenance = ref false
 let opt_enabled    = ref true
 let fast_math      = ref false
 (* --rc-trace: store a site id before every refcount/alloc/free call and emit

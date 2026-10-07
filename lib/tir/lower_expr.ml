@@ -384,6 +384,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   (* --- ELetFn as block statement → bind function name in rest of block --- *)
   | Ast.EBlock (Ast.ELetFn (name, params, ret_ty_ann, fn_body, _) :: rest, sp) ->
     let fn_name = name.Ast.txt in
+    Provenance.note_span fn_name name.Ast.span;
     let params' = List.map (fun (p : Ast.param) ->
         { Tir.v_name = p.param_name.txt;
           v_ty = (match p.param_ty with Some t -> lower_ty t | None -> ty_of_span env p.param_name.span);
@@ -898,6 +899,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   (* --- Lambda → ELetRec with a single fn_def --- *)
   | Ast.ELam (params, body, lam_span) ->
     let fn_name = fresh_name "lam" in
+    Provenance.note_span fn_name lam_span;
     (* Extract param types from the lambda's inferred type when no annotation. *)
     let lam_ty = ty_of_span env lam_span in
     let inferred_param_tys = match lam_ty with
@@ -1080,6 +1082,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
      enabling recursion.  Defun lifts it and computes free-variable captures. *)
   | Ast.ELetFn (name, params, ret_ty_ann, body, _) ->
     let fn_name = name.Ast.txt in
+    Provenance.note_span fn_name name.Ast.span;
     let params' = List.map (fun (p : Ast.param) ->
         { Tir.v_name = p.param_name.txt;
           v_ty = (match p.param_ty with Some t -> lower_ty t

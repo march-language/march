@@ -2404,10 +2404,15 @@ sp)`, `typecheck.ml:4177`). It does exactly three things, in order:
    exactly like any other constructor application: a wrong-typed argument is a
    plain unification mismatch, no actor-specific infrastructure involved.
 3. **Runs `check_sendable`**: `check_sendable env.errors sp msg_ty` (`:4180`,
-   def `:3335`). This walks the structure of `msg_ty` and errors ONLY on a
-   `RingBuf`-family constructor (`let non_sendable_types = ["RingBuf"]`, `:3331`),
-   a hardcoded denylist of types that must stay owned by one actor. It is *not*
-   a message-acceptance check.
+   def `:3335`). This walks the structure of `msg_ty` and errors on any
+   constructor named in `non_sendable_types` (`typecheck_exhaustive.ml`), a
+   denylist of builtin types that write memory another reference could observe
+   without being linear or copy-on-write. Since 2026-10-06 that list is
+   **empty**: `RingBuf` is `always_linear` (a send is its consuming use) and
+   the `NativeArray` backing types are copy-on-write values, so nothing fails
+   the check, and the list stays only as the enforcement point for the rule in
+   `memory-model.md` (a new entry needs the general `Send` check first). It
+   was never a message-acceptance check.
 
 `send` then returns `fresh_var env.level` (`:4183`): an unconstrained result, so
 a caller may `match` on it (drop/`Option` semantics) or read state fields.
@@ -2416,7 +2421,7 @@ a caller may `match` on it (drop/`Option` semantics) or read state fields.
 ```
 Γ ⊢ cap ⇒ τ_cap        (τ_cap inferred, then discarded)
 Γ ⊢ msg ⇒ τ_msg        (ordinary ECon; the message ctor's payload type is checked)
-check_sendable(τ_msg)  (errors iff τ_msg mentions RingBuf)
+check_sendable(τ_msg)  (errors iff τ_msg mentions a non_sendable_types entry; none today)
 ─────────────────────────────────────────────────────────  (T-Send)
 Γ ⊢ send(cap, msg) ⇒ β        (β fresh)
 ```
@@ -2429,7 +2434,7 @@ mismatch `` expected `Int` but got `String`. `` (witness
 
 **The actor-affinity non-guarantee: a `send` is NOT checked against the target
 actor's message set (finding 19).** Because step 1 discards `τ_cap` and step 3
-only denylists `RingBuf`, **no check confirms that the target actor actually handles
+only consults a (now empty) denylist, **no check confirms that the target actor actually handles
 the message you send it.** Sending a message that a *different* actor declares (
 `send(counter, Log("stray"))` where `Log` is a `Logger` handler, not a `Counter`
 one) `--check`s clean (exit 0). The `Pid`'s parameter cannot gate this even in
@@ -2439,8 +2444,8 @@ accepted-MESSAGE set. This is distinct from finding 18: finding 18 was "the Pid
 is unparameterized after spawn / a `Pid(T)` annotation is impossible" (the
 former part now fixed); **this** finding is "`send`
 does not gate the message by the target actor", rooted at `:4178` (target type
-discarded) and `:3331`/`:3335` (`check_sendable` is a `RingBuf` denylist, not an
-acceptance check), and it would remain true even if the Pid *did* carry a state
+discarded) and `:3331`/`:3335` (`check_sendable` is a denylist, empty since
+2026-10-06, not an acceptance check), and it would remain true even if the Pid *did* carry a state
 type, because `send` never reads `τ_cap`.
 
 The **runtime consequence diverges by backend** (both verified live; see
@@ -5284,8 +5289,10 @@ typechecker that this document exists to pin down, not bugs:
     target. The `ESend` arm (`typecheck.ml:4177`) infers the target Pid's type
     and immediately discards it (`ignore (infer_expr env cap)`, `:4178`), so
     `send` never consults which actor `cap` is; the only send-side check is
-    `check_sendable` (`:3335`), a hardcoded `RingBuf` denylist (`non_sendable_types
-    = ["RingBuf"]`, `:3331`), NOT a message-acceptance check. The message payload
+    `check_sendable` (`:3335`), a denylist (`non_sendable_types`, `:3331`;
+    empty since 2026-10-06, when `RingBuf` became `always_linear` and native
+    arrays were recognised as copy-on-write values), NOT a message-acceptance
+    check. The message payload
     *shape* IS checked (ordinary `ECon` typing on `infer_expr env msg`, `:4179`;
     that is finding-19's *complement*, witnessed by `reject/t29`), but *which
     handler the target actually has* is not. Note this would remain true even if

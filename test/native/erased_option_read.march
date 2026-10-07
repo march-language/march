@@ -1,0 +1,29 @@
+-- A record field read back through record_get with nothing pinning its type:
+-- Option('a), niche-encoded by the runtime (Some(x) is x itself), shown
+-- through Show$Option.show$Option_String (Mono's default for the dangling
+-- variable). Two compiled-only RC bugs on this path
+-- (specs/progress/2026-10-06-record-get-erased-option-drop.md):
+--   * the Option('a) drop assumed a boxed Some cell: it freed x as the cell and
+--     then released it again as the payload (a use-after-free, ASAN only);
+--   * show's "Some(" ++ show(x) ++ ")" never released show(x), which
+--     march_value_to_string returns with its own reference.
+-- SIGNAL: the live-object count is unchanged over 200 reads (RED before: 200).
+mod Main do
+  needs IO.Console
+
+  pfn shown(i : Int) : Int do
+    let r = record_put(record_from_list([]), "y", 0.5)
+    string_byte_length(to_string(record_get(r, "y"))) + i * 0
+  end
+
+  pfn times(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, acc + shown(n)) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let _ = times(3, 0)
+    let a0 = live_allocs()
+    let _ = times(200, 0)
+    println("erased Option read and shown, balanced: " ++ bool_to_string(live_allocs() - a0 == 0))
+  end
+end

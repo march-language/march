@@ -118,6 +118,17 @@ let is_clo_struct (tcon_name : string) : bool =
 let clo_drop_fn_prefix = "$clodrop$"
 let clo_drop_fn_name (clo : string) : string = clo_drop_fn_prefix ^ clo
 
+(** Name of the state-release function [Drop.run] synthesizes for actor
+    struct [actor] ("$actordrop$Counter_Actor"): it releases every heap state
+    field of an actor whose green thread is exiting normally.  The runtime
+    record free is shallow, so a dead actor's state used to leak
+    (specs/progress/2026-10-06-killed-actor-state-leak.md).  Like
+    [clo_drop_fn_name], the runtime calls it, looked up by field 0 (the
+    dispatch function), and [Dce] keeps it alive through the actor's
+    allocation sites. *)
+let actor_drop_fn_prefix = "$actordrop$"
+let actor_drop_fn_name (actor : string) : string = actor_drop_fn_prefix ^ actor
+
 (* ── Closure apply wrappers: "<fn>$apply$<uid>" ─────────────────────────
    Producer: lib/tir/defun.ml mints the apply-wrapper fn name as
    [Printf.sprintf "%s$apply$%d" fn.fn_name lam.lam_uid].

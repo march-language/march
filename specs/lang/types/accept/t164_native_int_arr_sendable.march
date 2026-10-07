@@ -1,0 +1,25 @@
+mod Main do
+  -- Native arrays are sendable values (Part C, Phase C1, 2026-10-06).
+  -- NativeIntArr is one of NativeArray's five opaque backing types (the
+  -- NativeArray stdlib module is the function namespace over them, not a
+  -- type of its own). Until C1 it sat in `non_sendable_types` by analogy
+  -- with RingBuf; but every in-place write the runtime makes to a native
+  -- array is gated on sole ownership (`march_rc_is_unique`) and copies
+  -- otherwise, and the interpreter always copies, so a native array is a
+  -- copy-on-write VALUE: the actor and the sender each see only their own
+  -- writes. This fixture flipped from reject/ to accept/ keeping its id; the
+  -- behaviour each side sees is pinned by test/native/native_arr_send_cow.march.
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on MsgArr(arr : NativeIntArr) do
+      { n: 1 }
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    let arr = NativeArray.make_int(4, 0)
+    send(w, MsgArr(arr))
+  end
+end

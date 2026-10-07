@@ -1,0 +1,39 @@
+-- Native arrays are copy-on-write values, so they may be sent (Part C,
+-- Phase C1, specs/plans/2026-09-25-send-data-race-freedom-plan.md). An
+-- actor receives a NativeIntArr, writes slot 0 and reports what it sees,
+-- while the sender writes slot 0 of its own reference. Each side must see
+-- only its own write: the mailbox holds a second reference while the
+-- sender's set_int runs, so that set copies (rc > 1); once the actor is the
+-- sole holder its set is in place. Same program as the interpreted
+-- test/stdlib/test_native_array_send.march; the two backends must agree.
+mod Main do
+  needs IO.Console
+  -- The call handler is declared first so it sits at tag 0, where the
+  -- zero-arg sentinel `SeenReq` routes (see "Actor.call" in actors.md).
+  type SeenReq = SeenReq
+  actor Summer do
+    state { seen : Int }
+    init  { seen: 0 }
+    on GetSeen(reply_to) do
+      Actor.reply(reply_to, state.seen)
+      state
+    end
+    on AddArr(xs : NativeIntArr) do
+      let ys = NativeArray.set_int(xs, 0, 100)
+      { seen: NativeArray.sum_int(ys) }
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let xs = NativeArray.from_list_int([1, 2, 3])
+    let s = spawn(Summer)
+    send(s, AddArr(xs))
+    let zs = NativeArray.set_int(xs, 0, 7)
+    println("sender sees " ++ int_to_string(NativeArray.sum_int(zs)))
+    run_until_idle()
+    match Actor.call(s, SeenReq, 5000) do
+      Ok(n)  -> println("actor saw " ++ int_to_string(n))
+      Err(e) -> println("error: " ++ e)
+    end
+    println("original still sums to " ++ int_to_string(NativeArray.sum_int(xs)))
+  end
+end

@@ -1,0 +1,40 @@
+-- A value bound by a wildcard in a tuple pattern is dropped deep
+-- (specs/progress/2026-10-06-wildcard-binder-shallow-drop.md). Lowering types
+-- the `_` of `(None, _)` as a type variable, so its release named no layout and
+-- freed the Deque's cell alone: both of its lists leaked, two cells per call
+-- (NodeQueue.admit_waiting, on every frame admitted to an idle queue).
+-- SIGNAL: the live-object count is unchanged over 100 calls (RED before: 200).
+mod Main do
+  needs IO.Console
+
+  type St = { n : Int, waiting : Deque.Deque((Int, Int, Bytes)) }
+
+  pfn admit(st : St) : St do
+    match Deque.pop_front(st.waiting) do
+      (None, _) -> st
+      (Some((_key, seq, frame)), waiting2) ->
+        if Bytes.length(frame) > 100 do
+          { n: st.n + seq, waiting: waiting2 }
+        else
+          st
+        end
+    end
+  end
+
+  pfn round(i : Int) : Int do
+    let st = { n: i, waiting: Deque.empty() }
+    let st2 = admit(st)
+    st2.n * 0
+  end
+
+  pfn times(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, acc + round(n)) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let _ = times(3, 0)
+    let a0 = live_allocs()
+    let _ = times(100, 0)
+    println("wildcard-bound Deque dropped, balanced: " ++ bool_to_string(live_allocs() - a0 == 0))
+  end
+end

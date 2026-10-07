@@ -123,6 +123,11 @@ native_curated=(
   # …/2026-09-15-closure-captures-released-by-the-hof-loop.md). They are
   # 5,000-iteration probes, not the multi-million ones excluded above.
   closure_capture_release_probe
+  # RingBuf's reference-count contract on its one unrestricted path, a user
+  # record's field: the owned, rc-neutral ring_buf_* builtins must leave
+  # live_allocs() flat and free every pair shell exactly once (Part C, Phase
+  # C2, specs/progress/2026-10-06-ring-buf-always-linear.md).
+  ring_buf_record_leak_probe
   closure_capture_hof_loop_probe
   closure_call_arg_ownership_probe
   # an `if` whose two sides disagree about a heap value: the release on the dead

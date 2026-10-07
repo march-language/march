@@ -57,6 +57,10 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
     ?(wasm_island = false) ?(is_js = false) ?(hot_reload = None)
     ?iface_methods ?(decls = []) ~opt (tir : Tir.tir_module) : result =
+  (* Provenance completeness: after every pass, any top-level fn still
+     without an origin gets one naming that pass (see lib/tir/provenance.ml).
+     Hooked on [snap] because every pass already reports to it. *)
+  let snap name tir = Provenance.sweep ~pass:name tir; snap name tir in
   let decls = Alloc_contract.resolve_names decls tir in
   (* TRMC eligibility analysis (gated on MARCH_TRMC_REPORT).  Must run here:
      by tir-perceus the stdlib's nested `go` helpers are closures invoked via
@@ -266,6 +270,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      will consume. *)
   (* Hand the emitter exactly this decision: the same unboxed set the passes
      reasoned against, re-keyed to the final type list ([Kind.rebind]). *)
+  Provenance.sweep ~pass:"pipeline-end" tir;
   let k_table = Kind.rebind k0 tir.Tir.tm_types in
   let allocating = Alloc_contract.allocating_fns ~k_table ~decls tir in
   let retaining = Alloc_contract.retaining_fns ~k_table ~decls tir in
