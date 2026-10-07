@@ -883,9 +883,17 @@ let named_predicate (sig_of : string -> fn_sig option) (g : string) : (string * 
    - an inline one-parameter lambda that mentions nothing but its parameter
      and calls nothing unreflected;
    - `fn y -> g(y)`, which is [g] (eta);
+   - a `let`-bound lambda ([local_lambda], from the [lets] channel), read as
+     the lambda itself;
    - a name that [named] resolves: a named function or a callback parameter
      with a proved `{Bool | _ == e}` return over one parameter (phase 3). *)
-let instantiate_abstract ~(named : string -> (string * A.expr) option) (fd : A.fn_def) (p : string)
+(* The lambda a `let` bound [f] to, from the [lets] channel (shadow-
+   disciplined, so a rebinding of [f] has retired it). *)
+let local_lambda_of (lets : launder) (f : string) : A.expr option =
+  match List.assoc_opt f lets with Some (A.ELam _ as l) -> Some l | _ -> None
+
+let instantiate_abstract ~(named : string -> (string * A.expr) option)
+    ~(local_lambda : string -> A.expr option) (fd : A.fn_def) (p : string)
     (args : A.expr list) : (string * A.expr, string) result =
   let by_name g =
     match named g with
@@ -936,7 +944,9 @@ let instantiate_abstract ~(named : string -> (string * A.expr) option) (fd : A.f
     Option.bind (Refine_abstract.definer_index ~is_known:known_predicate_fn fd p) (List.nth_opt args)
   with
   | Some (A.ELam _ as lam) -> of_lambda lam
-  | Some (A.EVar { A.txt = g; _ }) -> by_name g
+  (* A let-bound lambda first: it shadows a top-level function of the name. *)
+  | Some (A.EVar { A.txt = g; _ }) ->
+    (match local_lambda g with Some lam -> of_lambda lam | None -> by_name g)
   | Some _ ->
     Error
       (Printf.sprintf
@@ -970,7 +980,7 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
              | Some a when not (parametric_ok ctx g [ a ]) ->
                uninst (Printf.sprintf "`%s` is not known to be parametric in `%s`" g a)
              | _ ->
-               (match instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) fd p args with
+               (match instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) ~local_lambda:(local_lambda_of lets) fd p args with
                 | Error w -> uninst w
                 | Ok (y, body) ->
                   begin
@@ -1384,7 +1394,7 @@ let elem_marker_of_arg (a : A.expr) : string option option =
    entry)]: the demand, ready for [check_elements] (ordinary element
    subtyping, as for a declared `List({Int | …})`); [Some (Error why)]: [p]
    could not be instantiated here; [None]: not such a slot. *)
-let abstract_param_entry (ctx : rctx) defs (cb : cbenv) (g : string) (t : A.ty) (args : A.expr list) (a : A.expr)
+let abstract_param_entry (ctx : rctx) defs (cb : cbenv) (lets : launder) (g : string) (t : A.ty) (args : A.expr list) (a : A.expr)
   : (string * elem option list, string) result option =
   match abstract_slot_of_ty t with
   | Some (c, p) when List.mem p (callee_abstracts ctx g) ->
@@ -1392,7 +1402,7 @@ let abstract_param_entry (ctx : rctx) defs (cb : cbenv) (g : string) (t : A.ty) 
      | None -> None
      | Some (_, fd) ->
        Some
-         (Result.bind (instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) fd p args) (fun (y, body) ->
+         (Result.bind (instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) ~local_lambda:(local_lambda_of lets) fd p args) (fun (y, body) ->
               (* The demand's element sort is the ARGUMENT's: unlike a result
                  demand, nothing declared states it.  Defaulting to Int made a
                  correct `List(String)` call a false violation (probe q09b,
@@ -1415,7 +1425,7 @@ let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
     (fun i a ->
       match List.nth_opt sg.param_tys i with
       | Some t ->
-        (match Option.bind t (fun t -> abstract_param_entry ctx defs cb callee t args a) with
+        (match Option.bind t (fun t -> abstract_param_entry ctx defs cb lets callee t args a) with
          | Some (Ok er) ->
            ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
          | Some (Error why) ->
@@ -1771,6 +1781,10 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                let lets = launder_shadow lets names in
                (match b.A.bind_pat, b.A.bind_expr with
                 | A.PatVar n, (A.EApp _ as rhs) -> (n.A.txt, rhs) :: lets
+                (* A lambda, for an abstract refinement instantiated from the
+                   name (`let f = fn y -> y > 0` then `filter(ys, f)`); the
+                   alias arm below copies it forward like an application. *)
+                | A.PatVar n, (A.ELam _ as rhs) -> (n.A.txt, rhs) :: lets
                 (* A `let n = a` where `a` is ITSELF a laundered name copies the
                    underlying application forward under the new name, so the chain
                    extends to any depth without extra lookup machinery at use time.

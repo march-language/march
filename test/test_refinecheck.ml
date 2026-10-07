@@ -17910,7 +17910,24 @@ let abstract_phase3_suite =
 end|}
         in
         (* is_pos's own postcondition (1) + the element obligation (1). *)
-        Alcotest.(check (triple int int int)) "proved" (2, 0, 0) (p, v, s)) ]
+        Alcotest.(check (triple int int int)) "proved" (2, 0, 0) (p, v, s));
+    gated "q05: a let-bound lambda instantiates p" (fun () ->
+        Alcotest.check ps "proved" proved
+          (sumpos "  fn go(ys : List(Int)) : Int do\n    let f = fn y -> y > 0\n    sum_pos(filt(ys, f))\n  end\n"));
+    gated "an alias of a let-bound lambda instantiates p" (fun () ->
+        Alcotest.check ps "proved" proved
+          (sumpos "  fn go(ys : List(Int)) : Int do\n    let f = fn y -> y > 0\n    let g = f\n    sum_pos(filt(ys, g))\n  end\n"));
+    gated "rebinding the lambda's name retires it" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem ("proved", "")
+             (sumpos "  fn go(ys : List(Int), h : ({x : Int | true}) -> Bool) : Int do\n    let f = fn y -> y > 0\n    let f = h\n    sum_pos(filt(ys, f))\n  end\n")));
+    gated "a let-bound lambda that captures is uninstantiated" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (sumpos "  fn go(ys : List(Int), m : Int) : Int do\n    let f = fn y -> y > m\n    sum_pos(filt(ys, f))\n  end\n"));
+    (* A local lambda shadows a top-level predicate of the same name. *)
+    gated "a let-bound lambda shadows a named predicate" (fun () ->
+        Alcotest.check ps "too weak" [ ("skipped", "abstract-refinement-too-weak") ]
+          (sumpos "  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end\n  fn go(ys : List(Int)) : Int do\n    let is_pos = fn y -> y >= 0\n    sum_pos(filt(ys, is_pos))\n  end\n")) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
