@@ -56,13 +56,18 @@ git log is authoritative for exact commits.
   exits 1 if it did not run. It prints the result
   and anything the input printed. `let` bindings persist across inputs; a
   trailing `limit: N` shortens long lists. Capabilities are pre-bound
-  (`console`, `clock`, `intro`, `debug`), and the node allows only those in
-  its `$MARCH_SHELL_POLICY` file. A panic or a timeout ends only that input,
-  and a deploy ends the session. Every input is audited with its source.
-  Inputs can call the program's own functions and its `MARCH_LIB_PATH`
-  libraries, a Depot query for example. The policy does not yet see the
-  capabilities an input reaches through that code, only the pre-bound ones
-  it names.
+  (`console`, `clock`, `intro`, `debug`). A panic or a timeout ends only that
+  input, and a deploy ends the session. Every input is audited with its
+  source. Inputs can call the program's own functions and its
+  `MARCH_LIB_PATH` libraries, a Depot query for example.
+  - The node runs an input only if its `$MARCH_SHELL_POLICY` file lists every
+    capability the input's compiled code uses, including those reached
+    through program and library code. The fragment carries that list, and
+    the node checks it against the signed request after loading it.
+  - An input that reaches a declaration your checkout has but the node's
+    build does not (changed, added, or a type numbered differently) is
+    refused, with the declarations named. Inputs that reach only unchanged
+    code still run.
 - **Several native libraries per project.** forge.toml can declare `[[ffi]]`
   once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
   links all of them, in order. A single `[ffi]` table works as before.

@@ -7,6 +7,7 @@ Main.evens(9)
 evens(4)
 Math.abs(-2.5)
 Math.sqrt(Math.abs(-16.0))
+nap()
 List.map(xs, fn x -> x * x) limit: 3
 println("hi from the shell")
 Actor.list(intro)

@@ -973,9 +973,28 @@ Inputs:
 | `:limit N`, `:caps`, `:help`, `:quit` | |
 
 Capabilities are pre-bound names: `console` (`Cap(IO.Console)`), `clock`,
-`intro` (`Cap(Actor.Introspect)`), `debug` (`Cap(Actor.Debug)`). The node
-refuses an input that uses one its policy does not list
-(`** refused: policy IO.Console`).
+`intro` (`Cap(Actor.Introspect)`), `debug` (`Cap(Actor.Debug)`).
+
+The node refuses an input whose compiled code uses a capability its policy
+does not list (`** refused: policy IO.Clock`). This counts capabilities the
+input reaches through program and library code, not only the names it
+uses: calling a program function that reads the clock needs `IO.Clock`.
+The fragment carries its capability list, and the node checks it against the
+signed request after loading the fragment, before running it.
+
+**Your checkout must match the node's build** for the code an input reaches.
+When a session starts, the shell compares a hash of every declaration in
+your source with the node's and names the ones that differ. An input that
+reaches one of them is refused, with the list:
+
+```
+error: this input reaches code that differs from the node's build:
+  evens differs
+```
+
+Inputs that reach only unchanged code still run. A type whose constructors
+are numbered differently on the node (reordered, added) is always refused,
+since values built here would be read back wrongly there.
 
 What happens when:
 
@@ -1027,10 +1046,8 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
   them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
 - **The rest of the remote shell.** It works (see above), but:
   - strings print unquoted, and only a top-level list is cut by `limit:`;
-  - a node whose code differs from your checkout is not detected yet;
-  - capabilities are declared from the names an input uses, not from what
-    the compiled fragment can reach;
-  - a program-defined actor cannot be spawned from the shell.
+  - a program-defined actor cannot be spawned from the shell;
+  - it has not had its security review yet (plan R5).
 - **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;
   today `forge top` is the live view.
 - **Tracing (R8).** Message and call tracing with mandatory limits.

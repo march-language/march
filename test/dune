@@ -12745,7 +12745,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/shell_node.march))
  (action
   (with-stdout-to native_shell_node.out
-   (system "rm -rf sh_t; mkdir -p sh_t/frags; ./shell_check.exe keygen sh_t/pk sh_t/sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_t/pk) -o sh_t/node native/shell_node.march > sh_t/build 2>&1 || { cat sh_t/build; exit 1; }; for f in ok panic loop; do if [ \"$(uname)\" = Darwin ]; then %{cc} -shared -fPIC -undefined dynamic_lookup -o sh_t/frags/frag_$f.so shell/frag_$f.c; else %{cc} -shared -fPIC -o sh_t/frags/frag_$f.so shell/frag_$f.c; fi; done; : > sh_t/policy; S=/tmp/march-shell-test-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_t/policy MARCH_AUDIT_LOG=sh_t/audit ./sh_t/node > sh_t/prog 2>&1 & prog=$!; ./shell_check.exe run $S.shell sh_t/prog sh_t/sk sh_t/policy sh_t/audit sh_t/frags; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_t $S $S.shell $S.observe; true"))))
+   (system "rm -rf sh_t; mkdir -p sh_t/frags; ./shell_check.exe keygen sh_t/pk sh_t/sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_t/pk) -o sh_t/node native/shell_node.march > sh_t/build 2>&1 || { cat sh_t/build; exit 1; }; for f in ok panic loop caps nomanifest; do if [ \"$(uname)\" = Darwin ]; then %{cc} -shared -fPIC -undefined dynamic_lookup -o sh_t/frags/frag_$f.so shell/frag_$f.c; else %{cc} -shared -fPIC -o sh_t/frags/frag_$f.so shell/frag_$f.c; fi; done; : > sh_t/policy; S=/tmp/march-shell-test-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_t/policy MARCH_AUDIT_LOG=sh_t/audit ./sh_t/node > sh_t/prog 2>&1 & prog=$!; ./shell_check.exe run $S.shell sh_t/prog sh_t/sk sh_t/policy sh_t/audit sh_t/frags; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_t $S $S.shell $S.observe; true"))))
 
 (rule
  (alias runtest)
@@ -12773,6 +12773,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/shell_session.expected native_shell_session.out)))
+
+; R5.4: a client whose source differs from the node's build.  The node is
+; test/native/shell_node.march; the client compiles inputs against
+; test/native/shell_node_skew.march, whose `evens` and `Shade` differ.  An
+; input reaching either is refused, naming it; the others run.
+(rule
+ (targets native_shell_skew.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/skew.txt)
+       (file native/shell_node.march)
+       (file native/shell_node_skew.march))
+ (action
+  (with-stdout-to native_shell_skew.out
+   (system "rm -rf sh_k; mkdir -p sh_k; ./shell_check.exe keygen-home sh_k/pk $PWD/sh_k/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_k/pk) -o sh_k/node native/shell_node.march > sh_k/build 2>&1 || { cat sh_k/build; exit 1; }; printf 'IO.Console\\n' > sh_k/policy; S=/tmp/march-shell-skew-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_k/policy ./sh_k/node > sh_k/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_k/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_k/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/skew.txt native/shell_node_skew.march 2>&1; echo \"exit=$?\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_k $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_skew.expected native_shell_skew.out)))
 
 ; Golden rendered-diagnostic corpus (diagnostics plan §11, D7): every
 ; test/errors/*.march checked with the real compiler; full rendered output

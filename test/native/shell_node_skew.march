@@ -1,3 +1,7 @@
+-- A copy of test/native/shell_node.march as the operator's checkout might
+-- have it, one change behind or ahead of the node's build: `evens` and
+-- `Shade` differ.  The client side of test/dune's native_shell_skew.out.
+--
 -- The node for test/shell_check.ml: a --hot-reload --signing-pubkey build
 -- whose shell listener (runtime/march_shell.c) runs signed fragments.
 -- Prints "ready" and sleeps; the checker kills it.
@@ -9,7 +13,7 @@ mod Main do
   -- Reached from the shell as `Main.evens(..)` and `evens(..)`: a
   -- self-qualified name, and a body whose bare `filter` is an import.
   fn evens(n : Int) : List(Int) do
-    filter(range(0, n), fn x -> x % 2 == 0)
+    filter(range(0, n + 1), fn x -> x % 2 == 0)
   end
 
   -- Uses IO.Clock, which the session's shell policy does not list: an input
@@ -20,7 +24,7 @@ mod Main do
 
   -- test/native/shell_node_skew.march declares these constructors in the
   -- other order: the shell must refuse an input that builds one.
-  type Shade = Light | Dark
+  type Shade = Dark | Light
 
   actor Counter do
     state { n : Int }
