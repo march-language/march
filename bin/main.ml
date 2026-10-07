@@ -56,6 +56,17 @@ let user_diag ~filename ~user_files (d : March_errors.Errors.diagnostic) =
     user_diag_file ~filename ~user_files f
     && not (f = synthetic_file && d.severity = March_errors.Errors.Hint)
 
+(* Diagnostics replay (observability plan B7.1): every diagnostic text a
+   compile prints to stderr goes through [emit_diag_text], which also keeps
+   it in [replay_log].  A successful compile stores the log beside its
+   source-level cache entry (Cas.store_diagnostics); a hit on that entry
+   prints it again, so a warm build shows the same warnings as a cold one. *)
+let replay_log = Buffer.create 1024
+
+let emit_diag_text (s : string) : unit =
+  prerr_string s;
+  Buffer.add_string replay_log s
+
 (** Render a diagnostic against the file its span points into — an
     imported-module error must not be shown with the entry file's lines.  A
     synthetic span has no source at all (its line number is a counter), so it
@@ -2133,14 +2144,14 @@ let compile filename =
       let cache_input = Buffer.contents buf in
       let src_hash = "src:" ^ Digest.to_hex (Digest.string cache_input) in
       let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
-      (* Same rule as --refine-report above, for a diagnostic that lives even
-         further down the pipeline: an @[no_alloc(warn)] contract (or a hard
-         one downgraded by --no-opt) produces a WARNING and a successful
-         binary, so a warm artifact would satisfy the next build and the
-         warning would silently disappear.  A textual mention anywhere in the
-         hashed sources is enough to suppress the early exit — the check
-         itself decides whether anything is reported. *)
-      if contains_substring cache_input "no_alloc" then raise Exit;
+      (* A warnings-only build (an @[no_alloc(warn)] contract, an unused
+         binding, ...) used to lose its warnings on a warm cache, and the
+         `no_alloc` case was patched by refusing the early exit whenever the
+         sources mentioned it.  The compile path now replays the stored
+         diagnostics on a hit (Cas.lookup_diagnostics, below), so the bailout
+         is gone; --check caches only runs that printed nothing (see the check
+         path), so it needs neither.  Runs whose OUTPUT is a report stay
+         bypassed entirely, above. *)
       if !do_check then begin
         (* Every flag that changes the verdict is part of the key, or a
            clean run under one setting satisfies the next run under another
@@ -2182,18 +2193,24 @@ let compile filename =
           else if target_parsed = March_tir.Llvm_emit.Js then basename ^ ".mjs"
           else basename
         in
-        (match March_cas.Cas.lookup_artifact store ch with
-         | Some cached_bin
+        (match March_cas.Cas.lookup_artifact store ch,
+               March_cas.Cas.lookup_diagnostics store ch with
+         | Some cached_bin, Some diag_text
            when (not !compile_so || March_cas.Cas.restore_sidecars store ch out_bin)
                 && March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin ->
+           (* B7.1: print what the compile that produced this artifact
+              printed.  No [.diag] record (an entry cached before replay
+              existed) falls through as a miss. *)
+           prerr_string diag_text;
            (* A --compile-so build's output includes its sidecars
               (.hcr_manifest, .schemas.json): restored with the .so, or the
               hit is a miss. This early exit skips the code that writes
               them. *)
            Printf.eprintf "compiled %s (cached)\n" out_bin;
            exit 0
-         (* Stale/missing artifact or failed copy → recompile *)
-         | Some _ | None -> ());
+         (* Stale/missing artifact, no diagnostics record, or failed copy
+            → recompile *)
+         | _ -> ());
         Some (store, ch)
       end
     with Exit -> None
@@ -2264,10 +2281,10 @@ let compile filename =
   let desugar_errors = March_errors.Errors.create () in
   let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      Printf.eprintf "%s:%d:%d: %s: %s\n"
+      emit_diag_text (Printf.sprintf "%s:%d:%d: %s: %s\n"
         d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
         d.span.March_ast.Ast.start_col (severity_word d.severity)
-        (March_errors.Errors.headline_with_code d)
+        (March_errors.Errors.headline_with_code d))
     ) (March_errors.Errors.sorted desugar_errors);
   let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
   stamp "desugar";
@@ -2617,7 +2634,7 @@ let compile filename =
   end;
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
-        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
+        emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
     ) diags;
   (* --shell: the program typechecked as the node's build did; hand it to the
      remote shell instead of running or compiling it (bin/shell_cmd.ml). *)
@@ -3229,7 +3246,7 @@ let compile filename =
       pipe.March_tir.Contract_pipeline.vectorize_diags
       @ pipe.March_tir.Contract_pipeline.contract_diags in
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
-        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
+        emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
       ) vectorize_diags;
     if List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error) vectorize_diags
@@ -3590,7 +3607,10 @@ let compile filename =
               stamp "clang";
               March_cas.Cas.store_artifact store ch out_bin;
               (match source_cas_state with
-               | Some (src_store, src_ch) -> March_cas.Cas.store_artifact src_store src_ch out_bin
+               | Some (src_store, src_ch) ->
+                 March_cas.Cas.store_artifact src_store src_ch out_bin;
+                 March_cas.Cas.store_diagnostics src_store src_ch
+                   (Buffer.contents replay_log)
                | None -> ());
               Printf.eprintf "compiled %s (%s)\n" out_bin target_label
             end
@@ -4235,7 +4255,10 @@ let compile filename =
               stamp "clang";
               March_cas.Cas.store_artifact store ch out_bin;
               (match source_cas_state with
-               | Some (src_store, src_ch) -> March_cas.Cas.store_artifact src_store src_ch out_bin
+               | Some (src_store, src_ch) ->
+                 March_cas.Cas.store_artifact src_store src_ch out_bin;
+                 March_cas.Cas.store_diagnostics src_store src_ch
+                   (Buffer.contents replay_log)
                | None -> ());
               Printf.eprintf "compiled %s\n" out_bin
             end

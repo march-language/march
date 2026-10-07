@@ -362,6 +362,28 @@ let restore_sidecars (t : t) (ch : string) (out : string) : bool =
         sidecar_suffixes;
     ok
 
+(* ── Diagnostics replay (observability plan B7.1) ─────────────────────────
+   A successful compile can still print warnings and hints.  A source-level
+   cache hit exits before the front end runs, so without this the next
+   identical build printed nothing: the warnings silently disappeared on a
+   warm cache.  The rendered text the compile printed is stored beside its
+   artifact as [<blob>.diag] (empty when it printed nothing) and replayed on
+   a hit.  An entry with no [.diag] (cached before this existed) is a miss,
+   like a missing [.sidecars] record. *)
+let diag_path t ch = artifact_path t.local_root ch ^ ".diag"
+
+let store_diagnostics (t : t) (ch : string) (text : string) : unit =
+  let path = diag_path t ch in
+  try
+    mkdir_p (Filename.dirname path);
+    let tmp = path ^ ".tmp." ^ string_of_int (Unix.getpid ()) in
+    write_file tmp text;
+    Sys.rename tmp path
+  with Sys_error _ | Unix.Unix_error _ -> ()
+
+let lookup_diagnostics (t : t) (ch : string) : string option =
+  read_file (diag_path t ch)
+
 let lookup_artifact (t : t) (ch : string) : string option =
   let blob = artifact_path t.local_root ch in
   if Sys.file_exists blob then begin

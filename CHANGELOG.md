@@ -322,6 +322,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A cached build prints the same warnings as the build that produced it.**
+  A `--compile` that succeeded with warnings or hints used to print only
+  `compiled out (cached)` on the next identical build. The warnings are now
+  stored with the cached binary and printed again. Programs that mention
+  `no_alloc` are no longer excluded from the cache to work around this.
 - **A missing `end` is reported at the construct that is missing it.** Instead of
   "Parse error in declaration" at the end of the file or the next `fn`, the error
   points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the
