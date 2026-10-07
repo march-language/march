@@ -52,6 +52,15 @@ let nativearr_fusion_env_disabled : bool Lazy.t =
       | Some ("1" | "true" | "yes") -> true
       | _ -> false)
 
+(** Escape hatch: [MARCH_NO_OWNED_CALLS=1] turns off owned-call drop fusion
+    (Perceus redirecting a borrowed call whose argument dies there to an owned
+    clone of the callee) for A/B runs and bisection.  Read once per process;
+    part of the CAS key (bin/main.ml). *)
+let owned_calls_env_disabled : bool Lazy.t =
+  lazy (match Sys.getenv_opt "MARCH_NO_OWNED_CALLS" with
+      | Some ("1" | "true" | "yes") -> true
+      | _ -> false)
+
 let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(after_fusion = fun _ -> ()) ?(before_perceus = fun ~k_table:_ _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
@@ -193,7 +202,19 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      be taken against the SAME one — re-deriving it after RC insertion could
      disagree.  See [Escape]'s module doc. *)
   let borrow_map = Borrow.infer_module ~k_table:k0 tir in
-  let tir = Perceus.perceus ~k_table:k0 ~borrow_map
+  (* Owned-call drop fusion: a call whose dying argument sits at a borrowed
+     position goes to an owned clone of the callee instead of being followed
+     by a deep drop (see [Perceus_core.owned_calls]).  The map handed on is
+     extended with each clone's modes, so Drop and Escape — and Escape's
+     promotion-through-a-borrowed-callee verdict in particular — judge a
+     clone's owned positions as owned.  Off for JS (GC'd runtime), under hot
+     reload (a clone is a second copy of a body the HCR identity machinery
+     does not track, as for Hof_spec), unoptimised, and with
+     MARCH_NO_OWNED_CALLS=1. *)
+  let owned_calls =
+    opt && (not is_js) && hot_reload = None
+    && not (Lazy.force owned_calls_env_disabled) in
+  let tir, borrow_map = Perceus.perceus_owned ~owned_calls ~k_table:k0 ~borrow_map
       ~heap_lambdas:(hot_reload <> None) tir in
   snap "tir-perceus" tir;
   stamp "perceus";

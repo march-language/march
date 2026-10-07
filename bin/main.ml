@@ -1219,6 +1219,8 @@ let codegen_cas_tags () =
   (* MARCH_NO_NATIVEARR_FUSION=1 turns off NativeArray map/map2 chain fusion;
      same reason as nohofspec. *)
   @ (if Lazy.force March_tir.Contract_pipeline.nativearr_fusion_env_disabled then ["nonafuse"] else [])
+  (* MARCH_NO_OWNED_CALLS=1 turns off owned-call drop fusion; same reason. *)
+  @ (if Lazy.force March_tir.Contract_pipeline.owned_calls_env_disabled then ["noowncall"] else [])
   (* MARCH_NO_UNBOX=1 classifies every type Boxed, which changes the emitted
      code without changing the compiler binary: without this tag an A/B run
      reuses whichever variant was cached first. *)

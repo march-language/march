@@ -254,6 +254,12 @@ git log is authoritative for exact commits.
   heap allocation each, and the preemption tick only interrupts scheduler
   threads that are running something. binary_trees went from 120 ms to 74 ms,
   list_ops from 39 ms to 34 ms (Apple M3 Max).
+- **A value read for the last time by a function that only reads it is freed
+  during that read, not in a second pass.** In optimised compiled code,
+  `check(make(d))` used to walk the tree twice, once in `check` and once to
+  free it; the call now goes to a consuming copy of `check` that frees each
+  node as it passes. binary_trees is about 7% faster (75 to 70 ms median,
+  Apple M3 Max). `MARCH_NO_OWNED_CALLS=1` turns it off.
 - **`RingBuf` is linear: every operation consumes the buffer and hands it
   back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
   `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer
