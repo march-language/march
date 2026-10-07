@@ -309,6 +309,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- Compiled programs no longer risk a use-after-free when two scheduler threads
+  touch records of a not-yet-seen shape at the same time. Registering a new
+  record shape could free the shape table while another thread was reading a
+  field through it (seen as an ASAN heap-use-after-free in a cluster node's
+  state drop).
 - A green thread started from a runtime thread that is not a scheduler (the
   hot-reload server's drain, the new shell listener) no longer inherits that
   thread's blocked signals. With SIGSEGV blocked, the first time its stack
