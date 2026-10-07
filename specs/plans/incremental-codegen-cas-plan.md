@@ -1,8 +1,8 @@
 # Compiler Observability and Incremental Compilation — Plan
 
 **Date:** 2026-10-04
-**Status:** Proposed. Part A and B1 recommended regardless; B3–B5 **undecided pending B0's
-numbers** (§3). Every section has been source-checked once by an independent read; see §19.
+**Status:** Proposed. Part A and B1 recommended regardless. B3–B5: B0 **passes** go criterion 1
+(2026-10-07, `incremental-codegen-cas-baseline-2.md`); they now wait on criteria 2 and 3 (§3). Every section has been source-checked once by an independent read; see §19.
 
 ---
 
@@ -87,7 +87,7 @@ from reading alone.
 |---|---|---|---|
 | Part A | low: additive, test-time or opt-in, no codegen change | no: pays on bugs already happening | **do** |
 | B1 structural names, B7 quick wins | moderate; every change is a rename checked by `ir-oracle` | no: fixes the open HCR P2 and a live cache-key gap | **do** |
-| B3–B5 unit split, object cache, ThinLTO | **high** | **entirely** | **undecided**: B0 answers in a day |
+| B3–B5 unit split, object cache, ThinLTO | **high** | **entirely** | criterion 1 **met** (B0, 2026-10-07); waits on criteria 2 and 3; start with **B3-lite** |
 | Memo layer / B6 | high, speculative | yes, and only if the front end dominates | **defer** until B0 and a quarter of Part A in use |
 
 **Go criteria for B3–B5, all three required:**
@@ -96,6 +96,14 @@ from reading alone.
 2. Someone actually sits in an edit-compile loop (`forge watch` exists; is its latency the
    complaint?). If compiles mostly happen in CI, job parallelism already hides latency.
 3. A1 and A5 are green in CI first.
+
+**Criterion 1: met** (`specs/plans/incremental-codegen-cas-baseline-2.md`, 2026-10-07, after
+#807 removed two quadratic post-opt name scans). The topology leaf edit at `--opt 2` is 14.5 s
+wall, and `llvm-emit` + `clang` is 11.1 s of it, 76%. clang at `-O2` over the whole program
+(~8.2 s) is the largest single cost. B3–B5 now wait on criteria 2 and 3 only. When they are
+met, the baseline recommends **B3-lite** (the two-object seam below and in §16) before the full
+N-unit split. Small programs show a ~2.4 s whole-program floor per edit, mostly TIR work over the
+stdlib with only ~0.4 s of back end, and per-function units would not remove it.
 
 **If B0 is borderline: the two-object seam (B3-lite).** Split at exactly one stable boundary,
 stdlib specialisations vs user code, into two objects. The stdlib object is keyed on the set of
