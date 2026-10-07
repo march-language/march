@@ -220,6 +220,7 @@ let uniquify_fn (fn : Tir.fn_def) : Tir.fn_def =
         List.fold_left (fun (env, acc) (f : Tir.fn_def) ->
             if SMap.mem f.Tir.fn_name env then
               let nn = fresh f.Tir.fn_name in
+              Provenance.rename ~old:f.Tir.fn_name ~new_:nn;
               (SMap.add f.Tir.fn_name nn env, { f with Tir.fn_name = nn } :: acc)
             else
               (SMap.add f.Tir.fn_name f.Tir.fn_name env, f :: acc)) (env, []) fns in
@@ -309,6 +310,7 @@ let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
   let body = Lower_match.lower_expr env clause.fc_body in
   Hashtbl.clear Lower_state._fn_param_types;
   Hashtbl.iter (fun k v -> Hashtbl.replace Lower_state._fn_param_types k v) saved_scope;
+  Provenance.note_span def.fn_name.txt def.fn_name.span;
   { fn_name = def.fn_name.txt; fn_params = params; fn_ret_ty = ret_ty; fn_body = body;
     fn_kind = Tir.FnNormal }  (* parsed user/stdlib/impl-method fn *)
 
@@ -377,6 +379,7 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
       | Ast.DFn (def, _) ->
         let fn = lower_fn_def env def in
         let fn = rename_scoped_vars scopes fn in
+        Provenance.rename ~old:fn.fn_name ~new_:(prefix ^ fn.fn_name);
         !Lower_state._fns_ref := { fn with fn_name = prefix ^ fn.fn_name } :: !(!Lower_state._fns_ref)
       | Ast.DType (_, tname, params, td, _)
       | Ast.DAlwaysLinearType (_, tname, params, td, _) ->

@@ -1,0 +1,21 @@
+-- A RingBuf in a user record (Part C, Phase C2). `buf` is a linear field
+-- of an ordinary record, so a record update that reads it must replace it
+-- (`{ r with buf: RingBuf.push(r.buf, x), ... }`), and the record's buffer
+-- must be ended before the record goes out of scope. This is the one path
+-- where the ring_buf_* builtins' owned classification is load-bearing
+-- (Perceus dups a borrowed field before a consuming position); the compiled
+-- test/native/ring_buf_record_leak_probe.march pins that it leaks nothing.
+mod Main do
+  type Recent = { buf : RingBuf(Int), count : Int }
+  fn bump(r : Recent, x : Int) : Recent do
+    { r with buf: RingBuf.push(r.buf, x), count: r.count + 1 }
+  end
+  fn main() : Int do
+    let r0 = { buf: RingBuf.make(4), count: 0 }
+    let r1 = bump(r0, 1)
+    let r2 = bump(r1, 2)
+    let (n, buf) = RingBuf.size(r2.buf)
+    RingBuf.drop(buf)
+    r2.count + n
+  end
+end

@@ -36,6 +36,7 @@ march_http_evloop.c          http            -
 march_tls.c                  http            -
 march_dispatch.c             hcr             jit
 march_reload.c               hcr             jit
+march_shell.c                hcr             -
 march_blake3.c               hcr             -
 march_hcr_identity.c         hcr             -
 march_cap_lattice.c          hcr             -

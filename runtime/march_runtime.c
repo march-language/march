@@ -1649,8 +1649,22 @@ void *march_string_join(void *list, void *sep) {
 
 /* ── I/O ─────────────────────────────────────────────────────────────── */
 
+/* A shell fragment's output goes to its capture buffer, not stdout
+ * (march_shell.c sets the running proc's out_capture).  1 when captured. */
+static int capture_output(const char *data, size_t n) {
+    march_proc *p = march_sched_current();
+    march_out_capture *c = p ? p->out_capture : NULL;
+    if (!c) return 0;
+    size_t room = c->len < c->cap ? c->cap - c->len : 0;
+    size_t take = n < room ? n : room;
+    if (take && c->buf) { memcpy(c->buf + c->len, data, take); c->len += take; }
+    c->dropped += n - take;
+    return 1;
+}
+
 void march_print(void *s) {
     march_string *ms = (march_string *)s;
+    if (capture_output(ms->data, (size_t)ms->len)) return;
     write(1, ms->data, (size_t)ms->len);
 }
 
@@ -1661,13 +1675,13 @@ void march_print(void *s) {
 void march_print_int(int64_t n) {
     char buf[32];
     int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
-    if (len > 0) write(1, buf, (size_t)len);
+    if (len > 0 && !capture_output(buf, (size_t)len)) write(1, buf, (size_t)len);
 }
 
 void march_print_float(double f) {
     char buf[64];
     int len = march_format_float_ocaml(buf, f);
-    if (len > 0) write(1, buf, (size_t)len);
+    if (len > 0 && !capture_output(buf, (size_t)len)) write(1, buf, (size_t)len);
 }
 
 /* Serialises march_println against itself across OS threads.  See the comment
@@ -1703,6 +1717,7 @@ void march_println(void *s) {
      * guarantee; the writev stays because halving the syscall count is worth
      * keeping and because it keeps the critical section to one syscall.
      * (specs/progress/2026-08-21-println-writev-not-atomic-across-threads.md) */
+    if (capture_output(ms->data, (size_t)ms->len)) { capture_output("\n", 1); return; }
     struct iovec iov[2];
     iov[0].iov_base = ms->data;
     iov[0].iov_len  = (size_t)ms->len;
@@ -4792,7 +4807,11 @@ static void *on_stop_lookup(void *dispatch_clo) {
  * through the actor loop's stop_jmp (march_actor_recv), which lands at
  * actor_green_thread's `stopped:` — still live below this frame — and that
  * path restores crash_jmp. */
-static void actor_run_on_stop(march_proc *self, void *actor, void *clo) {
+/* Returns 1 when the callback panicked: it had moved the state fields out of
+ * the record and never wrote them back, so they are no longer the record's
+ * to release (actor_green_thread's state drop is skipped). */
+static int actor_run_on_stop(march_proc *self, void *actor, void *clo) {
+    volatile int panicked = 0;
     jmp_buf on_stop_jmp;
     jmp_buf *saved_crash = self->crash_jmp;
     self->crash_jmp = &on_stop_jmp;
@@ -4804,6 +4823,7 @@ static void actor_run_on_stop(march_proc *self, void *actor, void *clo) {
         march_incrc(clo);
         fn(clo, actor);
     } else {
+        panicked = 1;
         const char *m = self->crash_message ? self->crash_message : "panic";
         size_t mlen = self->crash_message ? self->crash_message_len
                                           : sizeof("panic") - 1;
@@ -4814,6 +4834,7 @@ static void actor_run_on_stop(march_proc *self, void *actor, void *clo) {
         self->crash_message_len = 0;
     }
     self->crash_jmp = saved_crash;
+    return panicked;
 }
 
 static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
@@ -4863,8 +4884,14 @@ static void actor_green_thread(void *arg) {
      * frame finds its own buffer; both restore their saved pointer on exit. */
     jmp_buf stop_jmp;
     jmp_buf *saved_stop = self ? self->stop_jmp : NULL;
+    /* Set when the stop trap fires (the longjmp left a handler or on_stop
+     * mid-flight) or when on_stop panicked: either way the state fields were
+     * moved into that frame's locals, so they are not the record's to
+     * release at `stopped`.  volatile: see the pin. */
+    volatile int stopped_in_handler = 0;
     if (self) self->stop_jmp = &stop_jmp;
     if (self && setjmp(stop_jmp) != 0) {
+        stopped_in_handler = 1;
         if (dispatch_pinned) {
             march_dispatch_leave(meta->dispatch_name_id, pinned_version);
             dispatch_pinned = 0;
@@ -5195,8 +5222,9 @@ static void actor_green_thread(void *arg) {
                  * callback's next receive, never lost. */
                 atomic_store_explicit(&self->stop_requested, 0,
                                       memory_order_seq_cst);
-                if (actor_alive_load(actor))
-                    actor_run_on_stop(self, actor, cb);
+                if (actor_alive_load(actor)
+                        && actor_run_on_stop(self, actor, cb))
+                    stopped_in_handler = 1;
             }
         }
     }
@@ -5214,6 +5242,19 @@ stopped:
     atomic_store_explicit(&meta->green_thread, MARCH_GT_EXITED,
                           memory_order_release);
     hcr_actor_exit(meta);
+    /* Release the state: the record's last reference frees it shallowly, so
+     * its heap state fields are released here, by the compiled per-actor
+     * function registered alongside the closure drops under the code
+     * pointer of field 0 (the dispatch function's closure value).  Only on
+     * a clean loop exit, where the record owns every field; a crash, a stop
+     * taken inside a handler, or a panicking on_stop leaks them as before.
+     * See specs/progress/2026-10-06-killed-actor-state-leak.md. */
+    if (!stopped_in_handler) {
+        void *dispatch = (void *)(uintptr_t)a[2];
+        march_clo_drop_fn drop = IS_HEAP_PTR(dispatch)
+            ? clo_drop_lookup(*(void **)((char *)dispatch + 16)) : NULL;
+        if (drop) drop(actor);
+    }
     /* The live actor's own reference (taken in march_spawn_common). */
     march_decrc(actor);
     meta_put(meta);
@@ -13664,28 +13705,48 @@ void *native_float_arr_filter_mask(void *arr, void *mask) {
     return out;
 }
 
-/* ── RingBuf: mutable fixed-capacity circular buffer ──────────────────────
+/* ── RingBuf: fixed-capacity circular buffer, always_linear ───────────────
  * Compiled backend for stdlib/ring_buf.march.  Mirrors the interpreter
- * (lib/eval/eval.ml ring_create/ring_push/ring_get/ring_pop_oldest).  RingBuf
- * is a single-owner primitive (the typechecker rejects it in send() payloads),
- * so there is no cross-heap-copy or concurrent-alias concern.
+ * (lib/eval/eval_runtime.ml ring_create/ring_push/ring_get/ring_pop_oldest).
+ *
+ * RingBuf is always_linear (lib/typecheck/typecheck_env.ml seeds the name),
+ * so the typechecker guarantees every buffer has exactly one owner and every
+ * operation is a consuming use.  The reference-count CONTRACT that lets the
+ * in-place write stay unconditional (Part C, Phase C2 of
+ * specs/plans/2026-09-25-send-data-race-freedom-plan.md):
+ *
+ *   A live cell has rc == 1 from make to its terminator, and no
+ *   compiler-emitted RC operation ever touches it.  Every builtin here
+ *   CONSUMES the buffer (owned, lib/tir/borrow.ml) and either returns the
+ *   same cell with rc untouched (push, clear), returns it inside a fresh
+ *   2-tuple (every reader: pop, get, peek_*, size, cap, snapshot), or
+ *   releases it with march_decrc so the destructor runs (to_list, drop).
+ *
+ * Three facts of the compiled pipeline make that enough: Perceus emits no
+ * inc or dec for a Lin variable; `let (v, rb2) = …` moves the pair's fields
+ * out and frees only the shell; and a linear send hands the single reference
+ * to the mailbox.  A cell can therefore cross an actor boundary (a move), but
+ * never has two live references, so there is still no concurrent-alias
+ * concern.  Tuple slots use the uniform convention (scalars low-bit tagged,
+ * heap values raw): size/cap store (n << 1) | 1.
  *
  * A RingBuf(a) value is a resource cell (MARCH_RESOURCE_TAG, 40-byte layout
  *   [rc@0][tag@8][pad@12][native_ptr@16][dtor@24][type_id@32])
  * whose native_ptr points at a separately-calloc'd backing store and whose
- * dtor (march_ring_dtor) decrefs any live elements and frees the store when the
- * cell's refcount hits 0 — so dropping the buffer releases its contents.  The
- * backing store is deliberately NOT march_alloc'd: it is freed manually by the
- * dtor, so keeping it off the RC / live-alloc ledger stays symmetric.
+ * dtor (march_ring_dtor) decrefs any live elements and frees the store when
+ * the cell is released -- by march_decrc at zero (to_list, drop) or by
+ * march_free (a dead linear binding; since C0 it runs the destructor too).
+ * The backing store is deliberately NOT march_alloc'd: it is freed manually
+ * by the dtor, so keeping it off the RC / live-alloc ledger stays symmetric.
  *
  * Elements are stored as uniform march_value words (heap ptr as-is, Int as
  * (n<<1)|1).  march_incrc/march_decrc are IS_HEAP_PTR-guarded, so immediates
- * are refcount-free.  Ownership discipline (mirrors NativeArray's element RC):
+ * are refcount-free.  Element ownership (mirrors NativeArray's element RC):
  *   - push transfers one reference into a slot (owned arg, no incref);
  *     overwriting a full slot decrefs the displaced oldest element.
  *   - pop moves a reference out (slot cleared, no decref).
- *   - get / peek / to_list alias a COPY out (march_incrc first — the buffer
- *     keeps its own reference).
+ *   - get / peek / snapshot / to_list alias a COPY out (march_incrc first;
+ *     the buffer keeps its own reference until it is released).
  *   - the dtor decrefs every still-occupied slot.
  * clear only resets the cursors (matches the interpreter: the backing array is
  * not zeroed), so its stale references are released later by overwrite or drop.
@@ -13733,38 +13794,53 @@ void *ring_buf_make(int64_t cap) {
     return cell;
 }
 
+/* Build the (answer, buffer) pair every reader returns.  The pair is a fresh
+ * 16+16-byte tuple cell; [cell] goes in raw (rc untouched: the pair now holds
+ * the one reference the caller handed us), [answer] is already a uniform
+ * word (a niche Option pointer, a List pointer, or a tagged Int). */
+static inline void *ring_pair(void *answer, void *cell) {
+    void *tup = march_alloc(16 + 16);
+    void **fp = (void **)((char *)tup + 16);
+    fp[0] = answer;
+    fp[1] = cell;
+    return tup;
+}
+
 /* push(rb, x): x arrives as a uniform march_value word. Owned — stored without
- * an incref. Overwriting a full slot decrefs the displaced oldest element. */
-void ring_buf_push(void *cell, void *x) {
+ * an incref. Overwriting a full slot decrefs the displaced oldest element.
+ * Returns the same cell. */
+void *ring_buf_push(void *cell, void *x) {
     march_ring *r = ring_of(cell);
     int64_t old = r->slots[r->head];
     if (old) march_decrc((void *)(uintptr_t)old);
     r->slots[r->head] = (int64_t)(uintptr_t)x;
     r->head = (r->head + 1) % r->cap;
     if (r->size < r->cap) r->size++;
+    return cell;
 }
 
-/* pop(rb): remove and return the oldest element as Option(a) (niche: None=0,
- * Some(v)=v). Ownership moves to the caller; the slot is cleared without a
- * decref. */
+/* pop(rb): (Option(a), RingBuf(a)). The oldest element is removed and
+ * returned as Option(a) (niche: None=0, Some(v)=v); ownership of the element
+ * moves to the caller, the slot is cleared without a decref. */
 void *ring_buf_pop(void *cell) {
     march_ring *r = ring_of(cell);
-    if (r->size == 0) return (void *)0;
+    if (r->size == 0) return ring_pair((void *)0, cell);
     int64_t idx = ring_slot_idx(r, 0);
     void *v = (void *)(uintptr_t)r->slots[idx];
     r->slots[idx] = 0;
     r->size--;
-    return v;
+    return ring_pair(v, cell);
 }
 
-/* get(rb, i): element at logical index i (0 = oldest) as Option(a). The buffer
- * keeps its reference, so the aliased-out copy is incref'd. */
+/* get(rb, i): (Option(a), RingBuf(a)); element at logical index i (0 =
+ * oldest). The buffer keeps its reference, so the aliased-out copy is
+ * incref'd. */
 void *ring_buf_get(void *cell, int64_t i) {
     march_ring *r = ring_of(cell);
-    if (i < 0 || i >= r->size) return (void *)0;
+    if (i < 0 || i >= r->size) return ring_pair((void *)0, cell);
     void *v = (void *)(uintptr_t)r->slots[ring_slot_idx(r, i)];
     march_incrc(v);
-    return v;
+    return ring_pair(v, cell);
 }
 
 void *ring_buf_peek_oldest(void *cell) {
@@ -13776,22 +13852,29 @@ void *ring_buf_peek_newest(void *cell) {
     return ring_buf_get(cell, r->size - 1);
 }
 
-int64_t ring_buf_size(void *cell) { return ring_of(cell)->size; }
-int64_t ring_buf_cap(void *cell)  { return ring_of(cell)->cap; }
+/* size(rb), cap(rb): (Int, RingBuf(a)); the Int is low-bit tagged, the
+ * tuple-slot convention for scalars. */
+void *ring_buf_size(void *cell) {
+    return ring_pair((void *)(uintptr_t)((ring_of(cell)->size << 1) | 1), cell);
+}
+void *ring_buf_cap(void *cell) {
+    return ring_pair((void *)(uintptr_t)((ring_of(cell)->cap << 1) | 1), cell);
+}
 
-/* clear(rb): reset cursors only. Matches the interpreter — the backing array is
- * not zeroed, so any stale references remain owned by the buffer and are
- * released on a later overwrite or when the buffer is dropped. */
-void ring_buf_clear(void *cell) {
+/* clear(rb): reset cursors only, return the same cell. Matches the
+ * interpreter — the backing array is not zeroed, so any stale references
+ * remain owned by the buffer and are released on a later overwrite or when
+ * the buffer is released. */
+void *ring_buf_clear(void *cell) {
     march_ring *r = ring_of(cell);
     r->head = 0;
     r->size = 0;
+    return cell;
 }
 
-/* to_list(rb): snapshot oldest-to-newest as List(a). Each aliased element is
- * incref'd (the list gets its own references; the buffer keeps its copies). */
-void *ring_buf_to_list(void *cell) {
-    march_ring *r = ring_of(cell);
+/* Oldest-to-newest as List(a). Each aliased element is incref'd (the list
+ * gets its own references; the buffer keeps its copies). */
+static void *ring_elements_as_list(march_ring *r) {
     void *lst = make_nil();
     for (int64_t i = r->size - 1; i >= 0; i--) {
         void *v = (void *)(uintptr_t)r->slots[ring_slot_idx(r, i)];
@@ -13799,6 +13882,27 @@ void *ring_buf_to_list(void *cell) {
         lst = make_cons(v, lst);
     }
     return lst;
+}
+
+/* snapshot(rb): (List(a), RingBuf(a)); read the elements out and keep the
+ * buffer. */
+void *ring_buf_snapshot(void *cell) {
+    return ring_pair(ring_elements_as_list(ring_of(cell)), cell);
+}
+
+/* to_list(rb): List(a), and the buffer ENDS: our (only) reference is released
+ * and the destructor frees the store and decrefs the elements the list did
+ * not already take its own references to. */
+void *ring_buf_to_list(void *cell) {
+    void *lst = ring_elements_as_list(ring_of(cell));
+    march_decrc(cell);
+    return lst;
+}
+
+/* drop(rb): Unit; the buffer ENDS. Returns NULL, the compiled Unit value. */
+void *ring_buf_drop(void *cell) {
+    march_decrc(cell);
+    return (void *)0;
 }
 
 /* ── UUID v7 ──────────────────────────────────────────────────────────── */

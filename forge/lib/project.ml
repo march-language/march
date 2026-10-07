@@ -90,9 +90,15 @@ type project = {
   archive_tasks : archive_task list;
   archive_deps  : (string * dep) list;
   preprocessors : (string * string) list;
-  ffi_sources   : string list;  (** [ffi] sources = [...]: C shim files to compile+link (relative to root) *)
-  ffi_link      : string list;  (** [ffi] link = [...]: extra linker flags, e.g. "-lz" *)
-  ffi_rust      : ffi_rust_crate option;  (** [ffi.rust]: Rust staticlib crate auto-built by forge build *)
+  ffi_sources   : string list;
+  (** [ffi] sources = [...]: C shim files to compile+link (relative to root),
+      concatenated over every [[ffi]] table in declaration order *)
+  ffi_link      : string list;
+  (** [ffi] link = [...]: extra linker flags, e.g. "-lz", concatenated over
+      every [[ffi]] table *)
+  ffi_rust      : ffi_rust_crate list;
+  (** [ffi.rust] / [[ffi.rust]]: Rust staticlib crates auto-built by forge
+      build, in declaration order *)
   js_deps       : (string * string) list;  (** [js_deps] name = "version": npm packages for JS target builds *)
   hot_reload    : hot_reload_config option;  (** [hot-reload] section (Phase 4) *)
   contracts_no_alloc : string list;
@@ -362,21 +368,28 @@ let load_from root =
       | _ -> None
     ) (Toml.get_section doc "preprocessors")
   in
-  (* [ffi] section: C shim sources + extra linker flags for FFI bindings *)
-  let ffi_section = Toml.get_section doc "ffi" in
-  let ffi_sources = Toml.get_string_list ffi_section "sources" in
-  let ffi_link    = Toml.get_string_list ffi_section "link" in
-  (* [ffi.rust] section: Rust staticlib crate auto-built by forge build.
-     The archive is at <crate>/target/release/lib<lib>.a.
+  (* [ffi] / [[ffi]]: C shim sources + extra linker flags for FFI bindings.
+     A project binding several native libraries declares one [[ffi]] table
+     per library; every table's sources and links are used, in order.
+     ([Toml.get_section] returns only the FIRST table of a name, so a
+     second [[ffi]] used to be dropped without a word.) *)
+  let ffi_tables = Toml.get_all_sections doc "ffi" in
+  let ffi_sources =
+    List.concat_map (fun t -> Toml.get_string_list t "sources") ffi_tables in
+  let ffi_link =
+    List.concat_map (fun t -> Toml.get_string_list t "link") ffi_tables in
+  (* [ffi.rust] / [[ffi.rust]]: Rust staticlib crates auto-built by forge
+     build. Each archive is at <crate>/target/release/lib<lib>.a.
      `lib` defaults to the basename of the crate path if omitted. *)
   let ffi_rust =
-    let rust_sec = Toml.get_section doc "ffi.rust" in
-    (match Toml.get_string rust_sec "crate" with
-     | None -> None
-     | Some crate_path ->
-       let lib_name = Option.value ~default:(Filename.basename crate_path)
-           (Toml.get_string rust_sec "lib") in
-       Some { frc_path = crate_path; frc_lib = lib_name })
+    List.filter_map (fun rust_sec ->
+        match Toml.get_string rust_sec "crate" with
+        | None -> None
+        | Some crate_path ->
+          let lib_name = Option.value ~default:(Filename.basename crate_path)
+              (Toml.get_string rust_sec "lib") in
+          Some { frc_path = crate_path; frc_lib = lib_name })
+      (Toml.get_all_sections doc "ffi.rust")
   in
   (* [js_deps] section: npm package dependencies for --target js builds *)
   let js_deps =

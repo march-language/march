@@ -1,0 +1,28 @@
+-- The node of scenario "hcr_reload_socket_vs_agent": a hot-reloadable
+-- program whose only job is to keep its own reload server busy through the
+-- in-process `reload_request` builtin, as the control plane's Agent does
+-- (Control.relay_line, one NODE_STATE after another), until the stop file
+-- the scenario names exists. Meanwhile the scenario drives the reload SOCKET
+-- of the same process with a stream of CAS_CHECK lines on one connection.
+mod Hammer do
+  needs IO
+  needs IO.Console
+
+  fn hammer(n : Int, stop : String) : Int do
+    if File.exists(stop) do n
+    else
+      let _ = Control.relay_line("NODE_STATE")
+      hammer(n + 1, stop)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    match Process.env("HAMMER_STOP") do
+      None -> println("hammer: HAMMER_STOP is not set")
+      Some(stop) ->
+        println("hammer: started")
+        let n = hammer(0, stop)
+        println(if n > 0 do "hammer: done" else "hammer: never ran" end)
+    end
+  end
+end

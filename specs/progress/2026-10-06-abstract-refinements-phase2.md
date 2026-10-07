@@ -82,13 +82,13 @@ phase-2 function has a negative occurrence. It is still open.
 | let-bound, rebind name, rebind input | B7 |
 
 Also: the phase-1 inert case is renamed (it is now the n4+n6 shape), and the
-conformance pair `accept/t296`, `reject/t297` runs over the real `List.filter`.
+conformance pair `accept/t308`, `reject/t309` runs over the real `List.filter`.
 
 ## Verification
 
 - `scripts/run-tests.sh` (full): all passing. compiler 1367, eval 288, codegen 673, stdlib 894, stdlib_march 76, test_jit 33, lsp 379 + 5 + 37 + 10 + 7, refinecheck 1000.
 - `scripts/run-tests.sh stdlib stdlib_march`: 894 + 76 tests, all passing.
-- `specs/lang/types/check_types.sh`: 418/418.
+- `specs/lang/types/check_types.sh`: 430/430.
 - `scripts/refine-oracle.sh check` against the PR-A baseline: 1880 lines,
   **every** count line `+3 proved` / `+3 precondition` (filter's three tails),
   and 2 lines that are `list.march` warning snippets shifted 5 lines by the new
@@ -101,5 +101,5 @@ conformance pair `accept/t296`, `reject/t297` runs over the real `List.filter`.
 - Cold `--check --stdlib-source stdlib/list.march`, interleaved A/B, 5 runs
   each at load 8.5-9: PR A 1.13-1.16 s, this branch 1.10-1.12 s. No
   regression; the budget was 110%.
-- VC cache: t296, t296 (warm), t297 → 0, 0, 1. The cache key is the full
+- VC cache: t308, t308 (warm), t309 → 0, 0, 1. The cache key is the full
   query text, so the second lambda does not inherit the first's verdict.

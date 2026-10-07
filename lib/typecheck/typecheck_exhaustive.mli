@@ -43,4 +43,22 @@ val unfold_srec : session_ty -> session_ty
 val offer_unrefined_error : env -> Ast.span -> session_ty ref -> string -> bool
 
 (** Reject values that cannot cross an actor or channel boundary. *)
-val check_sendable : Err.ctx -> Ast.span -> ty -> unit
+val check_sendable : env -> Ast.span -> ty -> unit
+
+(** The primitive roots of [is_send]: builtin types that write memory another
+    reference could observe and are neither [always_linear] nor copy-on-write.
+    Empty; test/test_typecheck_send.ml fails the build if a name is added before
+    the general Send check (plan Parts A and B) lands. *)
+val non_sendable_types : string list
+
+(** Test hook: extra primitive roots for [is_send] (test/test_typecheck_send.ml only). *)
+val send_roots_for_tests : string list ref
+
+(** The structural sendability judgement; see the implementation's comment. *)
+type send_result =
+  | Send
+  | Not_send of string list * ty
+  | Send_if of ty list
+  | Send_mod_closures of string list
+
+val is_send : env -> ty -> send_result

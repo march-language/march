@@ -172,6 +172,8 @@ let clone_for (st : spec_state) (g : Tir.fn_def) (i : int) (apply : string) : st
       let p = (List.nth g.Tir.fn_params i).Tir.v_name in
       let apply_var = { Tir.v_name = apply; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
       let body = rewrite_clone ~orig:g.Tir.fn_name ~clone_name:name ~p ~apply_var g.Tir.fn_body in
+      Provenance.record name ~from:g.Tir.fn_name
+        ~derived:(Provenance.Hof_spec_of (g.Tir.fn_name, apply)) ~pass:"hof_spec" ();
       st.new_fns <- { g with Tir.fn_name = name; fn_body = body } :: st.new_fns;
       st.pending <- (name, p, apply) :: st.pending;
       Some name
@@ -294,7 +296,11 @@ let rec redirect (tbl : (string, Tir.fn_def) Hashtbl.t) (made : (string, Tir.fn_
   | Tir.EApp (f, (_ :: _ as args)) when Hashtbl.mem tbl f.Tir.v_name ->
     let fd = Hashtbl.find tbl f.Tir.v_name in
     let name = ufast_name fd.Tir.fn_name in
-    if not (Hashtbl.mem made name) then Hashtbl.replace made name { fd with Tir.fn_name = name };
+    if not (Hashtbl.mem made name) then begin
+      Provenance.record name ~from:fd.Tir.fn_name
+        ~derived:(Provenance.Clone_of (fd.Tir.fn_name, "unboxed")) ~pass:"hof_spec" ();
+      Hashtbl.replace made name { fd with Tir.fn_name = name }
+    end;
     Tir.EApp ({ f with Tir.v_name = name }, args)
   | Tir.ELet (v, e1, e2) -> Tir.ELet (v, go e1, go e2)
   | Tir.ESeq (e1, e2) -> Tir.ESeq (go e1, go e2)

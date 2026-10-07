@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: cannot be captured by a closure
+-- H1 of specs/plans/2026-09-25-send-data-race-freedom-plan.md: Task.async
+-- never checked what its closure captured, so two tasks could mutate one
+-- RingBuf at once. Under Part C `RingBuf` is always_linear, and a linear
+-- value cannot be captured by a closure (the closure may run any number of
+-- times), so both lambdas are rejected. Type-checked today before C2
+-- (Phase 0); the compiled twin of the safe alternative is a native array
+-- (accept/t164).
+mod Main do
+  needs IO.Spawn
+  fn main(_s : Cap(IO.Spawn)) : Int do
+    let rb = RingBuf.make(4)
+    let t1 = Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 1)))
+    let t2 = Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 2)))
+    let _ = Task.await(t1)
+    let _ = Task.await(t2)
+    0
+  end
+end

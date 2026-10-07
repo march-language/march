@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: cannot be a module-level `let`
+-- H6: a module-level `let` of a RingBuf was a global every actor and thread
+-- shared; the DLet arm had no linearity handling. Part C adds the rule (new
+-- in C2, typecheck.ml's DLet arm): an always_linear type, or a type holding
+-- one, cannot be a module-level `let`, because a module-level value is
+-- shared by every function and actor and can never be consumed exactly
+-- once. The same rule covers Handle and LinearMap. Type-checked before C2
+-- (Phase 0).
+mod Main do
+  let shared = RingBuf.make(8)
+  fn record(x : Int) : RingBuf(Int) do RingBuf.push(shared, x) end
+  fn count() : (Int, RingBuf(Int)) do RingBuf.size(shared) end
+  fn main() : Int do
+    RingBuf.drop(record(1))
+    let (n, rb) = count()
+    RingBuf.drop(rb)
+    n
+  end
+end

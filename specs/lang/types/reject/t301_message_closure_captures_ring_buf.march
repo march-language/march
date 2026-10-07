@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: cannot be captured by a closure
+-- H2: check_sendable walked TArrow's argument and result types, not the
+-- closure's environment, so a message carrying a closure over a RingBuf
+-- passed. Under Part C the capture itself is the error, whatever the
+-- closure is later used for. Type-checked before C2 (Phase 0).
+mod Main do
+  actor Runner do
+    state { n : Int }
+    init { n: 0 }
+    on Run(f : Int -> RingBuf(Int)) do
+      RingBuf.drop(f(state.n))
+      { n: state.n + 1 }
+    end
+  end
+  fn main() : Int do
+    let rb = RingBuf.make(4)
+    let s = spawn(Runner)
+    send(s, Run(fn x -> RingBuf.push(rb, x)))
+    0
+  end
+end

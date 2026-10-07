@@ -5695,61 +5695,66 @@ let base_env : env =
   ; ("remote_invoke", VBuiltin ("remote_invoke", function
         | [VString _impl; _args] -> VCon ("None", [])
         | _ -> eval_error "remote_invoke: expected (String, List(Int))"))
-  (* ── RingBuf builtins — mutable fixed-capacity circular buffer ── *)
-  (* Index convention: 0 = oldest (FIFO drain order). Single-owner — do not share
-     across actor boundaries; the typechecker rejects RingBuf in send() payloads. *)
+  (* ── RingBuf builtins — fixed-capacity circular buffer, always_linear ──
+     Every operation consumes the buffer and hands it back: the OCaml record
+     is mutated in place and returned (push, clear) or returned beside the
+     answer in a pair (the readers); to_list ends it; drop is a no-op here,
+     since the interpreter has no destructor to run. The compiled backend
+     keeps the same contract with one resource cell (runtime/march_runtime.c).
+     Part C, Phase C2 of specs/plans/2026-09-25-send-data-race-freedom-plan.md. *)
   ; ("ring_buf_make", VBuiltin ("ring_buf_make", function
         | [VInt cap] ->
           if cap <= 0 then eval_error "ring_buf_make: capacity must be > 0, got %d" cap;
           VRingBuf (ring_create cap)
         | _ -> eval_error "ring_buf_make: expected Int capacity"))
   ; ("ring_buf_push", VBuiltin ("ring_buf_push", function
-        | [VRingBuf r; v] -> ring_push r v; VUnit
+        | [VRingBuf r; v] -> ring_push r v; VRingBuf r
         | _ -> eval_error "ring_buf_push: expected (RingBuf, value)"))
   ; ("ring_buf_pop", VBuiltin ("ring_buf_pop", function
         | [VRingBuf r] ->
-          (match ring_pop_oldest r with
-           | None   -> VCon ("None", [])
-           | Some v -> VCon ("Some", [v]))
+          let v = match ring_pop_oldest r with
+            | None   -> VCon ("None", [])
+            | Some v -> VCon ("Some", [v]) in
+          VTuple [v; VRingBuf r]
         | _ -> eval_error "ring_buf_pop: expected RingBuf"))
   ; ("ring_buf_get", VBuiltin ("ring_buf_get", function
         (* get(rb, i): 0 = oldest. Translate to internal index (0 = newest). *)
         | [VRingBuf r; VInt i] ->
-          (match ring_get r (r.rb_size - 1 - i) with
-           | None   -> VCon ("None", [])
-           | Some v -> VCon ("Some", [v]))
+          let v = match ring_get r (r.rb_size - 1 - i) with
+            | None   -> VCon ("None", [])
+            | Some v -> VCon ("Some", [v]) in
+          VTuple [v; VRingBuf r]
         | _ -> eval_error "ring_buf_get: expected (RingBuf, Int)"))
   ; ("ring_buf_peek_oldest", VBuiltin ("ring_buf_peek_oldest", function
         | [VRingBuf r] ->
-          (match ring_get r (r.rb_size - 1) with
-           | None   -> VCon ("None", [])
-           | Some v -> VCon ("Some", [v]))
+          let v = match ring_get r (r.rb_size - 1) with
+            | None   -> VCon ("None", [])
+            | Some v -> VCon ("Some", [v]) in
+          VTuple [v; VRingBuf r]
         | _ -> eval_error "ring_buf_peek_oldest: expected RingBuf"))
   ; ("ring_buf_peek_newest", VBuiltin ("ring_buf_peek_newest", function
         | [VRingBuf r] ->
-          (match ring_get r 0 with
-           | None   -> VCon ("None", [])
-           | Some v -> VCon ("Some", [v]))
+          let v = match ring_get r 0 with
+            | None   -> VCon ("None", [])
+            | Some v -> VCon ("Some", [v]) in
+          VTuple [v; VRingBuf r]
         | _ -> eval_error "ring_buf_peek_newest: expected RingBuf"))
   ; ("ring_buf_size", VBuiltin ("ring_buf_size", function
-        | [VRingBuf r] -> VInt r.rb_size
+        | [VRingBuf r] -> VTuple [VInt r.rb_size; VRingBuf r]
         | _ -> eval_error "ring_buf_size: expected RingBuf"))
   ; ("ring_buf_cap", VBuiltin ("ring_buf_cap", function
-        | [VRingBuf r] -> VInt r.rb_cap
+        | [VRingBuf r] -> VTuple [VInt r.rb_cap; VRingBuf r]
         | _ -> eval_error "ring_buf_cap: expected RingBuf"))
   ; ("ring_buf_clear", VBuiltin ("ring_buf_clear", function
-        | [VRingBuf r] -> r.rb_head <- 0; r.rb_size <- 0; VUnit
+        | [VRingBuf r] -> r.rb_head <- 0; r.rb_size <- 0; VRingBuf r
         | _ -> eval_error "ring_buf_clear: expected RingBuf"))
+  ; ("ring_buf_snapshot", VBuiltin ("ring_buf_snapshot", function
+        | [VRingBuf r] -> VTuple [ring_to_list r; VRingBuf r]
+        | _ -> eval_error "ring_buf_snapshot: expected RingBuf"))
   ; ("ring_buf_to_list", VBuiltin ("ring_buf_to_list", function
-        | [VRingBuf r] ->
-          let n = r.rb_size in
-          (* ring_get uses 0=newest. Iterate 0..n-1 with prepend → result is oldest-to-newest. *)
-          let rec go i acc =
-            if i >= n then acc
-            else
-              let v = match ring_get r i with Some x -> x | None -> assert false in
-              go (i + 1) (VCon ("Cons", [v; acc]))
-          in
-          go 0 (VCon ("Nil", []))
+        | [VRingBuf r] -> ring_to_list r
         | _ -> eval_error "ring_buf_to_list: expected RingBuf"))
+  ; ("ring_buf_drop", VBuiltin ("ring_buf_drop", function
+        | [VRingBuf _] -> VUnit
+        | _ -> eval_error "ring_buf_drop: expected RingBuf"))
   ]

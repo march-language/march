@@ -1,0 +1,120 @@
+-- A dead actor's record and state are released
+-- (specs/progress/2026-10-06-killed-actor-state-leak.md). Two compiled-only
+-- leaks, each one object (or more) per actor:
+--   * the runtime frees an actor record shallowly, so the heap state of an
+--     actor that was killed or stopped (here a List) was never released;
+--   * Actor.call treated the callee's pid as consumed, but march_actor_call
+--     only reads it, so every call leaked a reference to the actor record and
+--     the record outlived the actor.
+-- SIGNAL: under 5 objects left over 50 actors each (RED before: false on
+-- the first two lines). Death is asynchronous, so the count is polled. The
+-- last line pins that a panicking on_stop (whose state the exit must NOT
+-- release) neither crashes nor double-frees; run it under ASAN to see the
+-- latter.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  type GetReq = GetReq
+
+  actor Box do
+    state { n : Int, xs : List(Int) }
+    init  { n: 0, xs: Nil }
+    on Get(reply_to) do
+      Actor.reply(reply_to, state.n)
+      state
+    end
+    on Push(x) do
+      { n: state.n + 1, xs: Cons(x, state.xs) }
+    end
+  end
+
+  -- Stopped gracefully: on_stop reads the state and writes it back.
+  actor Tidy do
+    state { n : Int, xs : List(String) }
+    init  { n: 0, xs: Nil }
+    on Add(s : String) do
+      { n: state.n + 1, xs: Cons(s, state.xs) }
+    end
+    on_stop do
+      let _ = List.length(state.xs)
+      ()
+    end
+  end
+
+  -- on_stop consumes a state field (List.reverse may reuse its cells) and
+  -- then panics: the fields are that frame's, not the record's, so the exit
+  -- must not release them (a use-after-free under ASAN if it did). Leaking
+  -- them is the accepted cost.
+  actor Messy do
+    state { n : Int, xs : List(String) }
+    init  { n: 0, xs: Nil }
+    on Put(s : String) do
+      { n: state.n + 1, xs: Cons(s, state.xs) }
+    end
+    on_stop do
+      let ys = List.reverse(state.xs)
+      if List.length(ys) >= 0 do panic("on_stop blew up") else () end
+    end
+  end
+
+  pfn pushed(i : Int) : Int do
+    let b = spawn(Box)
+    let _ = send(b, Push(i))
+    let _ = send(b, Push(i))
+    let _ = send(b, Push(i))
+    let n = match Actor.call(b, GetReq, 5000) do
+      Ok(v) -> v
+      Err(_) -> 0
+    end
+    kill(b)
+    n * 0
+  end
+
+  pfn called(i : Int) : Int do
+    let b = spawn(Box)
+    let _ = Actor.call(b, GetReq, 5000)
+    let _ = Actor.call(b, GetReq, 5000)
+    kill(b)
+    i * 0
+  end
+
+  pfn stopped(i : Int) : Int do
+    let b = spawn(Tidy)
+    let _ = send(b, Add(int_to_string(i)))
+    let _ = send(b, Add("y" ++ int_to_string(i)))
+    if Actor.stop(b, 5000) do 0 else 1 end
+  end
+
+  pfn messy(i : Int) : Int do
+    let b = spawn(Messy)
+    let _ = send(b, Put(int_to_string(i)))
+    if Actor.stop(b, 5000) do 0 else 1 end
+  end
+
+  pfn times(n : Int, f : (Int) -> Int, acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, f, acc + f(n)) end
+  end
+
+  pfn settle(a0 : Int, tries : Int) : Int do
+    sleep_ms(20)
+    let d = live_allocs() - a0
+    if d < 5 || tries <= 0 do d else settle(a0, tries - 1) end
+  end
+
+  pfn probe(name : String, f : (Int) -> Int) : () do
+    let _ = times(3, f, 0)
+    sleep_ms(50)
+    let a0 = live_allocs()
+    let _ = times(50, f, 0)
+    println(name ++ " released: " ++ bool_to_string(settle(a0, 100) < 5))
+  end
+
+  fn main(_io : Cap(IO)) : () do
+    probe("pushed to, called and killed", fn i -> pushed(i))
+    probe("called twice and killed", fn i -> called(i))
+    probe("stopped, on_stop ran", fn i -> stopped(i))
+    let _ = times(20, fn i -> messy(i), 0)
+    println("stopped with a panicking on_stop, still running: true")
+  end
+end
