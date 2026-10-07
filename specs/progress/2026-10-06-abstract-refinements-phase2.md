@@ -77,6 +77,18 @@ skip / opaque uninstantiated; red without the path) and definition side
 (`pass` returning `xs` proves `List({a | p(_)})`). `abstract_slot_of_ty` and
 `instantiate_abstract` are now shared with `abstract_flow`.
 
+**Pressure test before phase 3 (2026-10-07) found two more, fixed here:**
+(a) the §3.5 demand defaulted to the Int sort, so a CORRECT
+`need(ss, fn s -> String.byte_size(s) > 0)` with `ss : List({String | len(_) > 0})`
+was a false *violation* (witness `len($elem) = 0`). The sort now comes from
+the argument's typechecked element type (`elem_marker_of_arg`), and an
+unknown sort declines (`uninstantiated`). String literals now prove, and
+`["a", ""]` is a genuine violation. (b) A lambda whose body calls a function
+(`fn y -> is_pos(y)`) was reported `too-weak`, because the call is not
+reflected where the predicate is assumed, so the assumption silently dropped.
+It is now `uninstantiated`, naming the call. Both have tests that were red
+first.
+
 ## Tests (`test_refinecheck`, group `abstract-phase2`)
 
 | Case | Covers |

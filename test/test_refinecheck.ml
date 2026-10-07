@@ -17818,6 +17818,36 @@ end|}
         in
         Alcotest.(check (triple int int int)) "proved" (1, 0, 0) (p, v, sk));
 
+    (* §3.5 at a NON-Int element: the demand built at the parameter must
+       carry the elements' sort.  RED before (2026-10-07 pressure test, probe
+       q09b): the demand defaulted to Int and a CORRECT call was reported as
+       a violation, witness `len($elem) = 0`. *)
+    gated "§3.5: a String element demand has the String sort" (fun () ->
+        let p, v, _, _ =
+          typed_ledger
+            {|mod NGS do
+  fn need(xs : List({a | p(_)}), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : Int do 0 end
+  fn ok(ss : List({String | len(_) > 0})) : Int do need(ss, fn s -> String.byte_size(s) > 0) end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved, never violated" (1, 0) (p, v));
+
+    (* A lambda whose body CALLS a function is not reflected (the scope
+       predicate translator does not inline a callee's contract), so the
+       body-implies-demand query lost its assumption and refuted: reported as
+       too-weak, a false reason (probes q06/q07).  It is uninstantiated. *)
+    gated "a lambda that calls a function is uninstantiated, not too weak" (fun () ->
+        let _, v, _, rs =
+          typed_ledger
+            ("mod NCL do\n" ^ ar2_filt
+           ^ {|  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
+  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> is_pos(y))) end
+end|})
+        in
+        Alcotest.(check int) "not violated" 0 v;
+        Alcotest.(check bool) "uninstantiated" true (List.mem "abstract-refinement-uninstantiated" rs);
+        Alcotest.(check bool) "not too weak" false (List.mem "abstract-refinement-too-weak" rs));
+
     gated "cap verified: a proved demand compiles, a too-weak one is an error" (fun () ->
         let m body = "mod CV do\n  cap verified\n" ^ ar2_filt ^ body ^ "end\n" in
         Alcotest.(check bool) "proved compiles" false

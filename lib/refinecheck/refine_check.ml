@@ -863,9 +863,28 @@ let instantiate_abstract (fd : A.fn_def) (p : string) (args : A.expr list)
   with
   | Some (A.ELam ([ prm ], body, _)) ->
     let y = prm.A.param_name.A.txt in
+    (* A call to anything but an operator, a measure, a tester or a constant
+       function is not reflected where [q] is assumed (a scope predicate does
+       not inline a callee's contract), so the assumption would silently drop
+       and the discharge refute: a false "too weak". *)
+    let rec opaque_call (e : A.expr) : string option =
+      match e with
+      | A.EApp (A.EVar { A.txt = f; _ }, args, _) ->
+        if known_predicate_fn f then List.find_map opaque_call args else Some f
+      | A.EApp (f, args, _) -> List.find_map opaque_call (f :: args)
+      | A.ETuple (es, _) | A.ECon (_, es, _) -> List.find_map opaque_call es
+      | A.EAnnot (e, _, _) | A.EField (e, _, _) -> opaque_call e
+      | _ -> None
+    in
     if classify_pred y [] body <> Closed then
       Error (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
-    else Ok (y, body)
+    else
+      (match opaque_call body with
+       | Some f ->
+         Error
+           (Printf.sprintf
+              "the lambda passed for `%s` calls `%s`, whose result is not reflected there (yet)" p f)
+       | None -> Ok (y, body))
   | Some (A.ELam _) ->
     Error (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
   | Some _ ->
@@ -1291,20 +1310,51 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
      | _ -> `Na)
   | _ -> `Na
 
+(* The sort marker of a container argument's ELEMENTS, from the typechecker's
+   span table ([None] marker = Int): [Some m] when known, [None] when the
+   table is absent or the element type has no SMT sort here (a type variable,
+   a record, a tuple). *)
+let elem_marker_of_arg (a : A.expr) : string option option =
+  match !call_type_map with
+  | None -> None
+  | Some tm ->
+    let module T = March_typecheck.Typecheck in
+    let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
+    (match Option.map strip (Hashtbl.find_opt tm (T.span_of_expr a)) with
+     | Some (T.TCon (_, [ e ])) ->
+       (match sort_of_tc_ty e with
+        | Some Smt.SInt -> Some None
+        | Some Smt.SBool -> Some (Some bool_sort)
+        | Some Smt.SFloat -> Some (Some float_sort)
+        | Some (Smt.SData (n, _)) -> Some (Some n)
+        | _ -> None)
+     | _ -> None)
+
 (* §3.5: a parameter whose element slot applies one of the callee's abstract
    refinements (`xs : List({a | p(_)})`) obliges the caller's container to
    satisfy the predicate [p] is instantiated to at this call.  [Some (Ok
    entry)]: the demand, ready for [check_elements] (ordinary element
    subtyping, as for a declared `List({Int | …})`); [Some (Error why)]: [p]
    could not be instantiated here; [None]: not such a slot. *)
-let abstract_param_entry (ctx : rctx) (g : string) (t : A.ty) (args : A.expr list)
+let abstract_param_entry (ctx : rctx) (g : string) (t : A.ty) (args : A.expr list) (a : A.expr)
   : (string * elem option list, string) result option =
   match abstract_slot_of_ty t with
   | Some (c, p) when List.mem p (callee_abstracts ctx g) ->
     (match Option.bind (resolve_key ctx g) (Hashtbl.find_opt fn_defs_tbl) with
      | None -> None
      | Some (_, fd) ->
-       Some (Result.map (fun (y, body) -> (c, [ Some (Refined (y, body, None)) ])) (instantiate_abstract fd p args)))
+       Some
+         (Result.bind (instantiate_abstract fd p args) (fun (y, body) ->
+              (* The demand's element sort is the ARGUMENT's: unlike a result
+                 demand, nothing declared states it.  Defaulting to Int made a
+                 correct `List(String)` call a false violation (probe q09b,
+                 2026-10-07), so an unknown sort declines instead. *)
+              match elem_marker_of_arg a with
+              | Some m -> Ok (c, [ Some (Refined (y, body, m)) ])
+              | None ->
+                Error
+                  (Printf.sprintf
+                     "the element type of the argument passed for `%s`'s parameter is not known here" p))))
   | _ -> None
 
 (* The element obligations a call's arguments owe the callee's declared
@@ -1317,7 +1367,7 @@ let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
     (fun i a ->
       match List.nth_opt sg.param_tys i with
       | Some t ->
-        (match Option.bind t (fun t -> abstract_param_entry ctx callee t args) with
+        (match Option.bind t (fun t -> abstract_param_entry ctx callee t args a) with
          | Some (Ok er) ->
            ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
          | Some (Error why) ->
