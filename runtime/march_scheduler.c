@@ -2139,7 +2139,9 @@ static void sched_loop(march_scheduler *sched) {
         }
         MARCH_ASAN_SWITCH_TO_PROC(sched, p);
         MARCH_TSAN_SWITCH_TO_PROC(p);
+        atomic_store_explicit(&sched->busy, 1, memory_order_relaxed);
         swapcontext(&sched->sched_ctx, p->ctx);
+        atomic_store_explicit(&sched->busy, 0, memory_order_relaxed);
         MARCH_ASAN_SWITCH_DONE(sched);
         dbg_mark_undispatched(p);
 
@@ -4236,7 +4238,9 @@ static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
                  * malloc the tick interrupted.  The skip path touches no
                  * TLS and calls nothing. */
                 if (atomic_load_explicit(&g_scheds[i].tls_live,
-                                         memory_order_acquire)) {
+                                         memory_order_acquire)
+                    && atomic_load_explicit(&g_scheds[i].busy,
+                                            memory_order_relaxed)) {
                     /* Both writes are async-signal-safe here (volatile scalar
                      * stores, TLS already materialised).
                      * march_preempt_request is what compiled code actually
@@ -4634,9 +4638,13 @@ static void *preempt_daemon(void *arg) {
         if (!atomic_load_explicit(&g_preempt_active, memory_order_acquire))
             break;
 
-        /* Signal every active scheduler thread. */
+        /* Signal every active scheduler thread that is running a green
+         * thread.  An idle one has no quantum to end, and since
+         * march_preempt_request is shared, its tick would preempt the busy
+         * schedulers instead (see march_scheduler.busy). */
         for (int i = 0; i < g_num_scheds; i++) {
             if (atomic_load_explicit(&g_scheds[i].running, memory_order_acquire)
+                    && atomic_load_explicit(&g_scheds[i].busy, memory_order_relaxed)
                     && g_scheds[i].thread) {
                 /* Signal only on the 0 -> 1 transition.  Still 1 means the
                  * previous tick has not been handled yet, and a second kill

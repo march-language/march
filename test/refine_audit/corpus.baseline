@@ -578,6 +578,8 @@ native_static_closure_semantics: coverage audit (user + stdlib): 126 enforced, 0
 native_static_closure_semantics: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_static_lambda_no_leak: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_static_lambda_no_leak: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_static_nullary_ctor: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_static_nullary_ctor: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_concat_n: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_string_concat_n: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_pattern_literal_leak_probe: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
