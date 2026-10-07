@@ -1,0 +1,10 @@
+-- D1 (negative: `with … else` arms open no construct of their own; both missing `end`s are inserted)
+mod M do
+  fn f(a, b) do
+    with x <- a, y <- b do
+      Ok(x + y)
+    else
+      Err(e) -> Err(e)
+
+  fn g() do 0 end
+end

@@ -1,0 +1,7 @@
+-- D1 (stray `end`: the production's message is kept; the fix deletes the line)
+mod M do
+  fn f() do
+    1
+  end
+  end
+end

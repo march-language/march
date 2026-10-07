@@ -1,0 +1,14 @@
+-- D1 (negative: a protocol `choose by` block (END without DO) closes cleanly; the `fn` below is blamed)
+mod M do
+  protocol Pay do
+    choose by S:
+      ok  -> S -> C : Int
+      err -> S -> C : String
+    end
+  end
+
+  fn f() do
+    1
+
+  fn g() do 0 end
+end
