@@ -1,0 +1,60 @@
+---
+layout: docs
+title: "linear_used_twice"
+permalink: /docs/errors/linear_used_twice/
+---
+
+# `linear_used_twice`: a linear value is used more than once
+
+A value of a linear type is consumed twice. The second use is underlined,
+and a label points at the first.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+  always_linear type Token = Token(Int)
+
+  fn consume(t : Token) : Int do
+    match t do Token(n) -> n end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let t = Token(1)
+    println(int_to_string(consume(t) + consume(t)))
+  end
+end
+```
+
+## The fix
+
+Consume the value once and reuse the result, as below. If you need the
+value itself twice, the type must not be linear (or must offer an explicit
+`clone`).
+
+```march
+mod Main do
+  needs IO.Console
+  always_linear type Token = Token(Int)
+
+  fn consume(t : Token) : Int do
+    match t do Token(n) -> n end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let t = Token(1)
+    let n = consume(t)
+    println(int_to_string(n + n))
+  end
+end
+```
+
+## Why the rule exists
+
+A linear value stands for something that exists once: a channel endpoint,
+a uniquely owned buffer. Using it twice would let two parts of the program
+each believe they hold it, which is exactly the aliasing linearity exists to
+rule out.
+
+See also: [the language reference](../linear-types.md).

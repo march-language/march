@@ -19,6 +19,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Every diagnostic has a code, and `march --explain <code>`.** Each error,
+  warning and hint ends its first line with its code in brackets
+  (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always
+  carries it, and the LSP links codes to their page. `march --explain <code>`
+  prints an explanation with a failing and a fixed program; the ten most common
+  codes have pages so far (also on the site under `docs/errors/`).
 - **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
   March function gets a `DISubprogram` at its defining line (lifted lambdas at
   the lambda's line, specialisations at the generic's), and the link gets `-g`,

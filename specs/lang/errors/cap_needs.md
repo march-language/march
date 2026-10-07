@@ -1,0 +1,61 @@
+---
+layout: docs
+title: "cap_needs"
+permalink: /docs/errors/cap_needs/
+---
+
+# `cap_needs`: a module uses a capability it does not declare with `needs`
+
+A function in a module calls something that requires a capability (here
+`println`, which needs `IO.Console`), but the module has no matching
+`needs` line. The code carries the missing capabilities after a colon
+(`cap_needs:IO.Console`). A `HINT` with the same code names the call chain
+from `main` that reaches it. The related `cap_ceiling` error reports the same
+gap from the module's side.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+  mod Report do
+    fn show(n : Int) do
+      println(int_to_string(n))
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    Report.show(42)
+  end
+end
+```
+
+## The fix
+
+Add the `needs` line the `hint:` shows to the module that makes the call.
+`forge fix` can insert it.
+
+```march
+mod Main do
+  needs IO.Console
+  mod Report do
+    needs IO.Console
+    fn show(n : Int) do
+      println(int_to_string(n))
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    Report.show(42)
+  end
+end
+```
+
+## Why the rule exists
+
+`needs` is the module's declaration of authority: reading a module's header
+tells you every capability its code can exercise, and a reviewer or
+`forge audit` can rely on that without reading the bodies. A call that
+exceeds it would make the header a lie.
+
+See also: [the language reference](../capabilities.md).
