@@ -60,4 +60,11 @@ path). Two things kept it from ever running on the reading path:
 - TIR snapshot suite unchanged (no corpus program has the shape).
 - `bench/tree_transform`, `list_ops` and `binary_trees` emit identical IR before and
   after (register names aside).
-- IR oracle and ASAN corpus sweep: see the PR.
+- IR, 432 programs (`test/native`, `test/snapshots/src`, `bench`), baseline compiler
+  from the parent commit: the raw hashes differ for 429, because the new temporaries
+  renumber every later generated name in the stdlib. With register and temporary names
+  normalised, 8 differ: the new fixture, five cluster/session programs (the Endpoint
+  handlers), and `node_discovery` and `record_ownership_drops`. Each of the last two
+  gains exactly one release of a record that leaked before (the SWIM state, a registry
+  entry), and nothing else moves.
+- ASAN corpus sweep: pending (Docker unavailable when this was written).
