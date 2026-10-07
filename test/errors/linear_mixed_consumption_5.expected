@@ -1,0 +1,47 @@
+exit: 1
+-- ERROR -------- errors/linear_mixed_consumption_5.march
+
+The linear value `m` is consumed on some branches but not others. [linear_mixed_consumption]
+On a branch that doesn't consume it, the value is dropped. Consume it on every branch, or end that branch with `panic(…)` if it never returns.
+
+13 |       match got do
+                 ^^^^^^
+
+
+    `m` is consumed on this branch:
+
+14 |         None -> { state with sessions: m }
+                                            ^
+
+    but not on this one, where it is dropped:
+
+15 |         Some(s) -> { state with done: state.done + sink(s) }
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+-- ERROR -------- errors/linear_mixed_consumption_5.march
+
+The linear value `state.sessions` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+15 |         Some(s) -> { state with done: state.done + sink(s) }
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `{ state with … }` keeps every field it doesn't replace, so the old `state.sessions` would survive into the new record. Replace it too: `{ state with sessions: … }`.
+
+    `state.sessions` was already consumed here:
+
+12 |       let (got, m) = LinearMap.take(state.sessions, sid)
+                                         ^^^^^^^^^^^^^^
+    run `march --explain linear_used_twice`
+
+
+-- HINT -------- errors/linear_mixed_consumption_5.march
+
+Constructor `Close` is defined by multiple types (Host_Msg, WsFrame). Use a qualified form to disambiguate, e.g. `Host_Msg.Close`. [ambiguous_constructor]
+
+21 |     send(h, Close(1))
+                 ^^^^^^^^
+
+
+

@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: is used more than once here
+-- H3: check_sendable visited a TCon's type ARGUMENTS, not its constructors'
+-- fields, so a user ADT wrapping a RingBuf hid it from the denylist. Under
+-- Part C a value holding a linear value is linear itself: `Wrap(rb)` moves
+-- `rb` into the message, and the push after the send is a second use.
+-- Type-checked before C2 (Phase 0).
+mod Main do
+  type Wrap = Wrap(RingBuf(Int))
+  actor Holder do
+    state { n : Int }
+    init { n: 0 }
+    on PutWrap(w : Wrap) do
+      match w do
+        Wrap(rb) -> RingBuf.drop(RingBuf.push(rb, 1))
+      end
+      { n: state.n + 1 }
+    end
+  end
+  fn main() : Int do
+    let rb = RingBuf.make(4)
+    let s = spawn(Holder)
+    send(s, PutWrap(Wrap(rb)))
+    RingBuf.drop(RingBuf.push(rb, 2))
+    0
+  end
+end

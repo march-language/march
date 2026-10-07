@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ------------ errors/linear_generic_param_7.march
+
+`RingBuf(Int)` is linear, but `dup` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
+Consume the value here instead, or, if `dup` uses that parameter exactly once, mark it `linear` where `dup` is defined (`linear x : a`).
+
+11 |     let (a, b) = dup(rb)
+                      ^^^
+
+    run `march --explain linear_generic_param`
+
+

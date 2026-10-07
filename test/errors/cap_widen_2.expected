@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ----------------------- errors/cap_widen_2.march
+
+`Cap(IO.FileRead)` cannot be widened to `Cap(IO.FileWrite)` — `cap_narrow` only attenuates, so the source capability must subsume the target. [cap_widen]
+help: `Cap(IO.FileWrite)` is not below `Cap(IO.FileRead)` in the capability lattice. Receive it from a caller that holds an ancestor of it.
+
+18 |     cap_narrow(r)
+         ^^^^^^^^^^^^^
+
+
+

@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: This `_` discards a linear value of type `Option(S1)`
+mod Main do
+  needs IO.Console
+  -- A `_` over a value that HOLDS a linear value drops it just as surely as a
+  -- `_` over the linear value itself. Accepted before 2026-09-18: the
+  -- wildcard check tested the wildcard's own type with `is_linear_ty`, and it
+  -- predates the containment rule, so `Option(S1)` passed.
+  always_linear type S1 = S1(Int)
+  fn main(c : Cap(IO.Console)) do
+    let (_, n) = (Some(S1(1)), 2)
+    println(int_to_string(n))
+  end
+end

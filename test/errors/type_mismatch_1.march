@@ -1,0 +1,10 @@
+mod Main do
+  needs IO.Console
+  fn label(n : Int) : String do
+    "item " ++ n
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(label(3))
+  end
+end

@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/session_offer_nonexhaustive_1.march","start_line":29,"start_col":10,"end_line":33,"end_col":7,"message":"This `match` doesn't handle every branch the peer can choose — missing: :err.\nThe protocol's `offer` branches are: :ok, :err.","code":"session_offer_nonexhaustive","fix":null,"labels":[],"notes":[]}

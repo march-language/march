@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_19.march
+
+expected `Result(a, b)` but got `Int`. [type_mismatch]
+
+6 |     let? x = 42
+        ^^^^^^^^^^^
+
+    The right-hand side of `let?` must be a Result value.
+    run `march --explain type_mismatch`
+
+

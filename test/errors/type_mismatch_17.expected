@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_17.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+24 |     fn attack() : Int do unbox_int(id(Box("hi"))) end
+                                        ^^^^^^^^^^^^^
+
+    This is argument #1 of a function call.
+
+    the expected type comes from here:
+
+24 |     fn attack() : Int do unbox_int(id(Box("hi"))) end
+                              ^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

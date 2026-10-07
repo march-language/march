@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: `Cap(IO.FileWrite)` used in module `Store` but `IO.FileWrite` is not declared in `needs`
+-- Capabilities widening, Task 1 -- one more Check-1 violation: SIBLING caps
+-- do not cover each other. `IO.FileRead` and `IO.FileWrite` share a parent
+-- (`IO.FileSystem`, `cap_lattice.ml:18-20`) but neither is an ancestor of the
+-- other, so `cap_subsumes "IO.FileRead" "IO.FileWrite"` is false. The module
+-- declares only `needs IO.FileRead` (satisfying nothing else), while `save`'s
+-- signature uses `Cap(IO.FileWrite)` — uncovered. Companion to accept/t47,
+-- which declares BOTH siblings' `needs` and accepts. See core-march-types.md
+-- §2.8.
+mod Store do
+  needs IO.FileRead
+
+  fn save(cap : Cap(IO.FileWrite), path : String, data : String) : String do
+    let _ = cap
+    let _ = data
+    path
+  end
+end

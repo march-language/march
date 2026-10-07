@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: `Cap(IO)` cannot be deserialized
+-- Capability unforgeability (R3), derive over a variant argument (2026-08-05).
+--
+-- `derive Json for T` generates a decoder for every constructor argument.
+-- `encoder_for_ty` / `decode_value_at` in lib/desugar/desugar.ml:1585+ fall
+-- back to "assume the nested type also derives Json" for any type they do not
+-- recognise, and `Cap(IO)` is not recognised — so before this check the codec
+-- was generated over the capability position without objection, and the
+-- decoder ran far enough to return a Json.DecodeError rather than refusing to
+-- exist at all.
+--
+-- `needs IO` keeps the needs-coverage checks silent so this file isolates
+-- Check A. Companion: reject/t145 is the record-field spelling of the same
+-- hole; accept/t143 is a cap-free derive in a cap-using module.
+mod DeriveVariantForge do
+  needs IO
+
+  type Loot = Loot(Cap(IO))
+  derive Json for Loot
+
+  fn main() do
+    println("codec generated over a capability position")
+  end
+end

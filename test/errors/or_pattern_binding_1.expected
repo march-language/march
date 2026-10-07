@@ -1,0 +1,22 @@
+exit: 1
+-- ERROR -------------- errors/or_pattern_binding_1.march
+
+Or-pattern alternatives must bind the same variables. [or_pattern_binding]
+
+10 |       A(x) | B(y) -> x + y
+           ^^^^^^^^^^^
+
+    bound by an earlier alternative only: `x`; bound by a later alternative only: `y`
+    Every alternative of `p1 | p2` shares one arm body, so a name bound by only some alternatives would be undefined when the others match.
+    Bind the same names in every alternative, split this into separate arms, or match the common shape and test the difference in a `when` guard.
+
+
+-- ERROR -------------- errors/or_pattern_binding_1.march
+
+I cannot find `y`. Did you mean `%`? [unbound_variable]
+
+10 |       A(x) | B(y) -> x + y
+                              ^
+
+
+

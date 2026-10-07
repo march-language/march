@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: is used more than once here
+mod Main do
+  -- Linearity slice 7 -- (T-LinUse) send-consumes, reject twin of
+  -- accept/t68: `send(pid, StoreRes(r))` consumes `r` (the payload EVar is
+  -- an ordinary use), so touching `r` afterwards is a double use. See §2.9.2.
+  type Res = R(Int)
+  fn take(r : Res) : Int do
+    match r do
+      R(n) -> n
+    end
+  end
+  actor Sink do
+    state { n : Int }
+    init  { n: 0 }
+    on StoreRes(r : Res) do
+      { n: 1 }
+    end
+  end
+  fn main() do
+    let pid = spawn(Sink)
+    linear let r : Res = R(7)
+    send(pid, StoreRes(r))
+    let _ = take(r)
+    run_until_idle()
+  end
+end

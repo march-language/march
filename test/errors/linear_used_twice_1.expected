@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR --------------- errors/linear_used_twice_1.march
+
+The linear value `t` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+11 |     println(int_to_string(consume(t) + consume(t)))
+                                                    ^
+
+
+    `t` was already consumed here:
+
+11 |     println(int_to_string(consume(t) + consume(t)))
+                                       ^
+    run `march --explain linear_used_twice`
+
+

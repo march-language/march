@@ -1,0 +1,29 @@
+-- EXPECT-ERROR: I don't know a constructor called `Stream_Prod.Secret`
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- Linearity does NOT reach a lambda's parameters (filed:
+  -- specs/todos/2026-09-10-linear-lambda-parameter-not-must-use.md), so a
+  -- callback could otherwise drop its state silently.  Every callback must
+  -- return a Yield, and only the generated wrappers that CONSUME a state make
+  -- one: the sole way to abandon the state is to forge the token, and its
+  -- constructor's argument is a private type of the generated module.
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1) : Stream_Prod.Yield do
+    let a = Stream_Prod.send_Msg_Prod_Cons_1(s, st, 1)
+    Stream_Prod.offer_more_done(s, a,
+      fn (_x, st2) -> Stream_Prod.Yield(Stream_Prod.Secret),
+      fn (_x, st2) -> Stream_Prod.close(s, st2))
+  end
+  fn main(c : Cap(IO)) do () end
+end

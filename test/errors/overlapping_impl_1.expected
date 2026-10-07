@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ---------------- errors/overlapping_impl_1.march
+
+Overlapping implementation: `impl JsonTo(Stream_Message)` conflicts with the implementation at <none>:29:945777875 — their heads overlap. [overlapping_impl]
+A type may implement an interface at most once (coherence). If you meant a different behavior, wrap the type in a newtype and implement the interface on that.
+
+    in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` declaration; the excerpt cannot be shown
+
+
+-- ERROR ---------------- errors/overlapping_impl_1.march
+
+Overlapping implementation: `impl JsonFrom(Stream_Message)` conflicts with the implementation at <none>:126:763007762 — their heads overlap. [overlapping_impl]
+A type may implement an interface at most once (coherence). If you meant a different behavior, wrap the type in a newtype and implement the interface on that.
+
+    in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` declaration; the excerpt cannot be shown
+
+

@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_22.march
+
+The linear value `q` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+15 |     let b = close_it(q)
+                          ^
+
+
+    `q` was already consumed here:
+
+14 |     let a = close_it(q)
+                          ^
+    run `march --explain linear_used_twice`
+
+

@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/cap_ceiling_3.march","start_line":9,"start_col":2,"end_line":9,"end_col":18,"message":"module `CeilApp` uses `IO.FileRead` but does not declare `needs IO.FileRead`.\nhelp: add `needs IO.FileRead` to the module body.","code":"cap_ceiling:IO.FileRead","fix":{"kind":"insert","after_line":9,"text":"  needs IO.FileRead"},"labels":[],"notes":[]}

@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: The linear value `st` is used more than once here
+mod Main do
+  needs IO.Console
+  -- t212 for an inferred lambda.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn main(c : Cap(IO.Console)) do
+    let f = fn st -> sink(st) + sink(st)
+    println(int_to_string(f(S1(1))))
+  end
+end

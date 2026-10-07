@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/no_panic_violation_1.march","start_line":16,"start_col":4,"end_line":16,"end_col":9,"message":"`fail` in `mod Guarded` (declared `cap no_panic`) calls `panic`, which can panic.\n\nReturn an error value (`Result`, `Option`) instead of calling `panic`.","code":"no_panic_violation","fix":null,"labels":[],"notes":[]}

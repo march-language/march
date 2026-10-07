@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/linear_discarded_1.march","start_line":6,"start_col":8,"end_line":6,"end_col":9,"message":"This `_` discards a linear value of type `Token`.\nLinear values must be consumed exactly once. Bind it to a name and pass it to something that consumes it.","code":"linear_discarded","fix":null,"labels":[],"notes":[]}

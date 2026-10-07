@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: refinement violation
+-- Refinement types: a call made THROUGH a refined function-typed parameter
+-- (§2.14 higher-order shapes). `resolve_call` only resolves NAMED callees by
+-- default; refinecheck must separately track that `f`'s declared parameter
+-- type carries `{Int | _ >= 0}` and check the call `f(-3)` against it even
+-- though `f` is not a statically-known function name at this call site.
+-- `-3` is a literal, definite counterexample. Accept companion: accept/t98
+-- (`f(1)`).
+mod M do
+  fn ap(f : ({Int | _ >= 0}) -> Int) : Int do f(-3) end
+end

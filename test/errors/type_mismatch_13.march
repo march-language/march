@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: every other branch must begin with a message to the same role
+-- Crash branches, rule 5 (2026-09-20): in a `choose by C` with a `crash`
+-- branch, the role that receives the branch heads is the one that detects
+-- the crash, so every other branch must head to the same role. Here `read`
+-- goes to I and `done` to L: no single detector.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    choose by C:
+      read -> C -> I : String
+              I -> L : String
+      done -> C -> L : Bool
+      crash -> I -> L : String
+    end
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

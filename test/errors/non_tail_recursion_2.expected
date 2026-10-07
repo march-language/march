@@ -1,0 +1,20 @@
+exit: 1
+-- WARNING -------------- errors/non_tail_recursion_2.march
+
+Warning: function `sink_all` is structurally recursive but not tail-recursive. If the recursive call is the direct argument of a constructor in tail position, tail-recursion-modulo-cons compiles it to a loop with no extra stack (it always runs). Otherwise it uses O(depth) stack space and deep input can overflow the stack — consider an accumulator parameter. [non_tail_recursion]
+
+12 |       Cons(S1(n), rest) -> n + sink_all(rest)
+                                    ^^^^^^^^^^^^^^
+
+
+
+-- ERROR -------------- errors/non_tail_recursion_2.march
+
+`ys` has type `List(b)`, which holds a type variable that a `linear` parameter of `f` opts in to linear values, so a caller may pass a linear value here too.  Mark it `linear ys` (or `affine ys`) so the body is checked to use it once. [linear_generic_param]
+
+15 |   fn f(linear x : a, ys : List(b)) : List(a) do Cons(x, ys) end
+                          ^^
+
+    run `march --explain linear_generic_param`
+
+

@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: The linear value `st` was never used
+mod Main do
+  needs IO.Console
+  -- A local `fn ... end` inside a block binds its parameters through the
+  -- lambda path and, like a lambda, never checked them for must-use.
+  always_linear type S1 = S1(Int)
+  fn main(c : Cap(IO.Console)) do
+    fn g(st : S1) : Int do 0 end
+    println(int_to_string(g(S1(1))))
+  end
+end

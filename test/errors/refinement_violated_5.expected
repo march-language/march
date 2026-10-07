@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------- errors/refinement_violated_5.march
+
+refinement violation: argument `xs` of `last` does not satisfy precondition `len(v) > 0` [refinement_violated]
+note: guard the call (e.g. `if len(v) > 0 do …`) or pass a value known to satisfy it
+
+20 |     last([])
+         ^^^^^^^^
+
+
+    this argument must satisfy `len(v) > 0`:
+
+20 |     last([])
+              ^^
+    run `march --explain refinement_violated`
+
+

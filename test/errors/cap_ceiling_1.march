@@ -1,0 +1,12 @@
+mod Main do
+  needs IO.Console
+  mod Report do
+    fn show(n : Int) do
+      println(int_to_string(n))
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    Report.show(42)
+  end
+end

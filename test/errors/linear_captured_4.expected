@@ -1,0 +1,28 @@
+exit: 1
+-- ERROR ----------------- errors/linear_captured_4.march
+
+The linear value `rb` cannot be captured by a closure. [linear_captured]
+A closure may be called multiple times, which would violate the exactly-once guarantee.
+Pass `rb` as a parameter to the closure instead.
+
+13 |     let t1 = Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 1)))
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+-- ERROR ----------------- errors/linear_captured_4.march
+
+The linear value `rb` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+14 |     let t2 = Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 2)))
+                                                                ^^
+
+
+    `rb` was already consumed here:
+
+13 |     let t1 = Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 1)))
+                                                                ^^
+    run `march --explain linear_used_twice`
+
+

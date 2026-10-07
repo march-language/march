@@ -1,0 +1,23 @@
+exit: 1
+-- ERROR ----------------- errors/linear_captured_6.march
+
+The linear value `rb` cannot be captured by a closure. [linear_captured]
+A closure may be called multiple times, which would violate the exactly-once guarantee.
+Pass `rb` as a parameter to the closure instead.
+
+ 9 |     let handler = fn conn ->
+                       ^^^^^^^^^^
+
+
+
+-- ERROR ----------------- errors/linear_captured_6.march
+
+This `_` discards a linear value of type `RingBuf(Int)`. [linear_discarded]
+Linear values must be consumed exactly once. Bind it to a name and pass it to something that consumes it.
+
+10 |       let _ = RingBuf.push(rb, 1)
+               ^
+
+    run `march --explain linear_discarded`
+
+

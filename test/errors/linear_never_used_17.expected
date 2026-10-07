@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR -------------- errors/linear_never_used_17.march
+
+The linear value `s` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+9 |     assert ap2(fn s -> 0, S1(1)) == 0
+                   ^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+

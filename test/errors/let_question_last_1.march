@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: cannot be the last expression in a block
+-- `let?` slice 8, §2.10 (E-LetQ-Last): a `let?` may not be the final expression
+-- in a block -- there is nothing to return on the Ok branch. The parser folds
+-- the block right-associatively and a trailing ELetQ has an empty EBlock body,
+-- caught natively in infer_expr.
+mod Main do
+  fn f() : Result(Int, String) do Ok(1) end
+  fn bad() : Result(Int, String) do
+    let? x = f()
+  end
+end

@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------ errors/refinement_violated_10.march
+
+refinement violation: argument `n` of `inner` does not satisfy precondition `_ > 0` [refinement_violated]
+note: guard the call (e.g. `if _ > 0 do …`) or pass a value known to satisfy it
+
+30 |     inner(0 - 5)
+         ^^^^^^^^^^^^
+
+
+    this argument must satisfy `_ > 0`:
+
+30 |     inner(0 - 5)
+               ^^^^^
+    run `march --explain refinement_violated`
+
+

@@ -1,0 +1,43 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+mod Main do
+  -- Session-types F5 fix (2026-07-15), reject side of accept/t79: driving an
+  -- `offer` arm with the WRONG branch's payload type is REJECTED. Because the
+  -- per-arm refinement now types `sc2` at `branches[:err] = Recv(String, End)`
+  -- inside the `:err` arm, `Chan.recv(sc2)` binds `s : String`; feeding it to
+  -- `int_to_string` (which wants `Int`) is a type error.
+  --
+  -- This witness ALSO documents the soundness the fix restores: PRE-fix the
+  -- `:err` arm's channel was typed at `:ok`'s `Recv(Int, End)` (the first-branch
+  -- approximation), so `s` was `Int` and `int_to_string(s)` typechecked CLEAN --
+  -- the program was wrongly ACCEPTED. The `:ok` arm is written correctly so the
+  -- ONLY error is the wrong-branch drive in `:err`.
+  needs IO.Console
+  type Client = Client
+  type Server = Server
+
+  protocol Decision do
+    choose by Client:
+      ok  -> Client -> Server : Int
+      err -> Client -> Server : String
+    end
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Decision)
+    let cc2 = Chan.choose(cc, :ok)
+    let cc3 = Chan.send(cc2, 42)
+    Chan.close(cc3)
+    let (lbl, sc2) = Chan.offer(sc)
+    match lbl do
+      :ok ->
+        let (n, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(int_to_string(n))
+      :err ->
+        let (s, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(int_to_string(s))
+      _ -> println("other")
+    end
+  end
+end

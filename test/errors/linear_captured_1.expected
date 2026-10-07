@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ----------------- errors/linear_captured_1.march
+
+The linear value `s` cannot be captured by a closure. [linear_captured]
+A closure may be called multiple times, which would violate the exactly-once guarantee.
+Pass `s` as a parameter to the closure instead.
+
+13 |     println(int_to_string(run2(fn () -> sink(s))))
+                                    ^^^^^^^^^^^^^^^^
+
+
+

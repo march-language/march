@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------- errors/refinement_violated_1.march
+
+refinement violation: argument `b` of `safe_div` does not satisfy precondition `_ != 0` [refinement_violated]
+note: guard the call (e.g. `if _ != 0 do …`) or pass a value known to satisfy it
+
+6 |     println(int_to_string(safe_div(10, 0)))
+                              ^^^^^^^^^^^^^^^
+
+
+    this argument must satisfy `_ != 0`:
+
+6 |     println(int_to_string(safe_div(10, 0)))
+                                           ^
+    run `march --explain refinement_violated`
+
+

@@ -1,0 +1,36 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_26.march
+
+The affine value `ch` is used more than once here. [linear_used_twice]
+Affine values may be used at most once.
+
+26 |     let ch3 = Chan.send(ch, 2)
+                             ^^
+
+
+    `ch` was already consumed here:
+
+25 |     let ch2 = Chan.send(ch, 1)
+                             ^^
+    run `march --explain linear_used_twice`
+
+
+-- ERROR -------------- errors/linear_used_twice_26.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+31 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+
+fix [cap_grant]:
+@@ lines 31-31 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do

@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR -------------- errors/linear_never_used_11.march
+
+The linear value `o` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+7 |     let o = Some(S1(1))
+        ^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+

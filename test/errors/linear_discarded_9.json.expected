@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/linear_discarded_9.march","start_line":16,"start_col":10,"end_line":16,"end_col":11,"message":"This `_` discards a linear value of type `LinearMap(Int, S1)`.\nLinear values must be consumed exactly once. Bind it to a name and pass it to something that consumes it.","code":"linear_discarded","fix":null,"labels":[],"notes":[]}

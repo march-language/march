@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ------------ errors/let_star_no_flat_map_1.march
+
+`let*` needs `Widget.flat_map`, but it doesn't exist. [let_star_no_flat_map]
+Define `flat_map(x : Widget(a), f : a -> Widget(b)) : Widget(b)` in a module named `Widget` to make `let*` work with `Widget`.
+
+8 |     let* x = w
+        ^^^^^^^^^^
+
+
+

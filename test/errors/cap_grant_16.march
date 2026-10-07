@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: `root_cap` cannot be referenced
+-- R2 — THE ROOT CAPABILITY IS GRANTED, NOT TAKEN (2026-08-05).
+--
+-- `root_cap` was an ordinary global of type `Cap(IO)`, in scope in every
+-- module. Measured before this change: a module declaring NO `needs` at all
+-- could write `let x = root_cap` and hold the root capability, with no
+-- diagnostic naming it. Narrowing from there to any descendant was then free
+-- AND LEGITIMATE, because `cap_narrow` demands exactly the parent the module
+-- now held.
+--
+-- That is no-authority-from-nothing violated at the source rather than at the
+-- construction site, and it is why the claim earned by R3 had to be stated as
+-- "a capability cannot be fabricated FROM DATA" rather than the shorter "a
+-- capability can only be received" — nothing was received here.
+--
+-- The runtime already grants the root to `main` (see accept/t147); it is the
+-- ambient global that had to go. Note this module declares `needs IO`, so it
+-- is not the `needs` check firing: a fully-declared module still may not help
+-- itself to the root.
+mod TakesTheRoot do
+  needs IO
+
+  fn main() do
+    let stolen = root_cap
+    println("took the root capability without being given it")
+  end
+end

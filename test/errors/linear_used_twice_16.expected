@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_16.march
+
+The linear value `r.st` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+11 |     println(int_to_string(sink(r.st) + sink(r.st)))
+                                                 ^^^^
+
+
+    `r.st` was already consumed here:
+
+11 |     println(int_to_string(sink(r.st) + sink(r.st)))
+                                    ^^^^
+    run `march --explain linear_used_twice`
+
+

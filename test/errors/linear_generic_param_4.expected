@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ------------ errors/linear_generic_param_4.march
+
+This passes `g` a value that may be linear: the enclosing function opted in to linear values of its type (`linear x : ...`), but `g` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
+Consume the value here instead, or, if `g` uses that parameter exactly once, mark it `linear` where `g` is defined.
+
+13 |   fn w(linear val : v) : (v, v) do g(val) end
+                                        ^
+
+    run `march --explain linear_generic_param`
+
+
