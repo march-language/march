@@ -1496,7 +1496,10 @@ plan's incremental-compilation phases are worth building. Drives `march --compil
 over `bench/compile_time_probe.march`, `bench/tree_transform.march` and `examples/topology_app`
 under six scenarios (cold caches; warm no-change; comment-only edit; leaf body edit; signature
 edit; record layout edit) and folds the `[timings]` stamps into three buckets: front end (through
-`typecheck`), whole-program TIR (`lower`…`opt`), back end (`llvm-emit` + `clang`).
+`typecheck`), whole-program TIR (`lower`…`opt`, then `alloc-contract` and `cas-hash`, up to the
+post-TIR cache lookup), back end (`llvm-emit` + `clang`). Until 2026-10-07 the back end began at
+`opt` and so also held `alloc-contract` and `cas-hash`; the TSV's `post_opt_ms` column keeps that
+slice, and the summary prints a second table in the old buckets so the two baselines compare.
 
 ```
 scripts/compile-time-bench.sh                      # all corpora, --opt 2, 3 runs each
@@ -1512,6 +1515,8 @@ and compiled the way `forge run` compiles it (`--topology .forge/topology.json`,
 `forge topology check` writes), so `forge/bin/main.exe` must be built too.
 
 Reading it: the plan's §3 gate asks whether, for the edit scenarios at `--opt 2`, the back-end
-bucket is more than ~60% of wall time and the `topology` total is over ~10 s. Below that, the
-unit-split/object-cache work is not where the time goes. Commit the first full table once as
-`specs/plans/incremental-codegen-cas-baseline.md`; do not hand-maintain numbers here.
+bucket is more than ~60% of the compile and the `topology` total is over ~10 s. `back%` is the
+back end's share of the stamped buckets and `back%w` its share of wall time. Below that, the
+unit-split/object-cache work is not where the time goes. Each baseline is a dated, frozen file
+(`specs/plans/incremental-codegen-cas-baseline.md`, then `-baseline-2.md`, …); do not
+hand-maintain numbers here.
