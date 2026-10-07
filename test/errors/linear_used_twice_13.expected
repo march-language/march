@@ -1,0 +1,18 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_13.march
+
+The linear value `state.st` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+15 |       { state with n: state.n + k }
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `{ state with … }` keeps every field it doesn't replace, so the old `state.st` would survive into the new record. Replace it too: `{ state with st: … }`.
+
+    `state.st` was already consumed here:
+
+14 |       let k = sink(state.st)
+                        ^^^^^^^^
+    run `march --explain linear_used_twice`
+
+

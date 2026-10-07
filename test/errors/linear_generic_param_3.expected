@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ------------ errors/linear_generic_param_3.march
+
+`S1` is linear, but `List.length` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
+Consume the value here instead, or, if `List.length` uses that parameter exactly once, mark it `linear` where `List.length` is defined (`linear x : a`).
+
+9 |     println(int_to_string(List.length(xs)))
+                              ^^^^^^^^^^^
+
+    run `march --explain linear_generic_param`
+
+

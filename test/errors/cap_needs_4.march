@@ -1,0 +1,29 @@
+-- EXPECT-ERROR: `Cap(IO.FileWrite)` used in module `IfaceSig` but `IO.FileWrite` is not declared in `needs`
+-- R8 AUDIT — an INTERFACE method signature is a capability position (2026-08-06).
+--
+-- Found auditing the R8 runtime-escape-hatch table, and it is a gap left by
+-- the R3 work rather than a pre-existing one. When Check 1's decl walk was
+-- made exhaustive on 2026-08-05, `DInterface` and `DImpl` were enumerated
+-- under "names no capability position". That was an explicit decision and it
+-- was wrong: a method signature is a signature, and Check 1 treats every other
+-- signature — plain `fn`, actor handler, `extern` — as a use.
+--
+-- The enumeration is why this is a visible mistake rather than a silent hole:
+-- the arm names the constructors it skips, so the wrong call is reviewable in
+-- the source instead of hiding behind `| _ -> []`. That is the whole argument
+-- for banning the wildcard, and this file is the argument being cashed.
+--
+-- Nothing else in this module mentions a capability — no type declaration, no
+-- `fn` signature, no body annotation — so only the interface can be what
+-- fires. Accept companion: accept/t149.
+mod IfaceSig do
+  needs IO.Console
+
+  interface Grantor(a) do
+    fn grant : a -> Cap(IO.FileWrite)
+  end
+
+  fn main() do
+    println("the only capability here is in an interface method signature")
+  end
+end

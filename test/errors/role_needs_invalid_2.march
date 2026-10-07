@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: is not declared `may crash`
+-- Crash branches, rule 2 (2026-09-20): a crash branch is only for a sender
+-- the protocol declared `may crash`. `L` is reliable, so `L -> I : Int or
+-- crash` is refused: a reliable role that fails anyway is a cancellation.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+      or crash do
+        I -> C : Bool
+      end
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

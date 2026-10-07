@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_21.march
+
+The linear value `rb` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+23 |     RingBuf.drop(RingBuf.push(rb, 2))
+                                   ^^
+
+
+    `rb` was already consumed here:
+
+22 |     send(s, PutWrap(Wrap(rb)))
+                              ^^
+    run `march --explain linear_used_twice`
+
+

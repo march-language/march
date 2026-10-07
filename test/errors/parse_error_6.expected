@@ -1,0 +1,13 @@
+exit: 1
+-- ERROR --------------------- errors/parse_error_6.march
+
+A file may have only one top-level `mod`; everything else must live inside it. [parse_error]
+
+8 | mod R10SecondTopLevelModSecond do
+    ^^^
+
+    mod Name do
+        fn helper() do ... end
+        fn main() do ... end
+    end
+    run `march --explain parse_error`

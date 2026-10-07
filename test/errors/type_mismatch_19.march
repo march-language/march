@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: The right-hand side of `let?` must be a Result value.
+-- `let?` slice 8, §2.10 (E-LetQ-RHS): the RHS must unify with Result(_, _);
+-- a bare Int is rejected with the RHS-must-be-Result reason.
+mod Main do
+  fn bad() : Result(Int, String) do
+    let? x = 42
+    Ok(x)
+  end
+end

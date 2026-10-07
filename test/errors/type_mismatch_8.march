@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: expected `Pid(
+-- Vault typed handles: a table handle is `Vault(v)`, phantom in the type of
+-- the values it holds, and a handle bound by an unannotated `let` does NOT
+-- let-generalize (see `demote_vault_handle_vars` in lib/typecheck/typecheck.ml
+-- -- a Vault is a process-global mutable cell, i.e. ML's `ref []` case). So
+-- the write below pins `v := Int` and the read cannot re-instantiate `v` as a
+-- Pid. Before typed handles, `vault_get` returned a fully free `Option(v)`
+-- per call site, this program typechecked, and the resulting fake Pid was
+-- dereferenced as an actor record by the runtime.
+-- Accept companion: accept/t177 (same table, read back at the type stored).
+mod M do
+  needs IO.Mut
+
+  fn main(_m : Cap(IO.Mut)) : Bool do
+    let t = Vault.new("confusion")
+    Vault.set(t, "k", 42)
+    match Vault.get(t, "k") do
+      Some(p) -> is_alive(p)
+      None    -> false
+    end
+  end
+end

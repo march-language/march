@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/stdlib_internal_1.march","start_line":18,"start_col":36,"end_line":18,"end_col":46,"message":"`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)","code":"stdlib_internal","fix":null,"labels":[],"notes":[]}

@@ -12666,3 +12666,15 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/shell_session.expected native_shell_session.out)))
+
+; Golden rendered-diagnostic corpus (diagnostics plan §11, D7): every
+; test/errors/*.march checked with the real compiler; full rendered output
+; and --check-json pinned in .expected / .json.expected. Regenerate with
+; UPDATE_ERRORS=1 ./_build/default/test/run_errors.exe -e (see the header of
+; test/run_errors.ml).
+(test
+ (name run_errors)
+ (modules run_errors)
+ (libraries march_test_helpers alcotest yojson unix)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
+ (action (run %{test} -e)))

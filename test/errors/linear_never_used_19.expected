@@ -1,0 +1,28 @@
+exit: 1
+-- ERROR -------------- errors/linear_never_used_19.march
+
+The linear value `_st2` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+24 |     let _st2 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+
+-- ERROR -------------- errors/linear_never_used_19.march
+
+The linear value `st` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+24 |     let _st2 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+                                                        ^^
+
+
+    `st` was already consumed here:
+
+23 |     let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+                                                       ^^
+    run `march --explain linear_used_twice`
+
+

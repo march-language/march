@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: cannot be captured by a closure
+mod Main do
+  -- Linearity slice 7 -- (T-LinClosure): a closure may be called any number
+  -- of times, so capturing a linear value would break exactly-once; the ELam
+  -- arm snapshots outer le_used flags and rejects the capture. See §2.9.3.
+  type Res = R(Int)
+  fn take(r : Res) : Int do
+    match r do
+      R(n) -> n
+    end
+  end
+  fn main() : () do
+    linear let r : Res = R(1)
+    let f = fn -> take(r)
+    let _ = f()
+    ()
+  end
+end

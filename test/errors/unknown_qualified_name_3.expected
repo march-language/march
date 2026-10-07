@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ---------- errors/unknown_qualified_name_3.march
+
+Function `secret` is private to module `A`. [unknown_qualified_name]
+
+7 |   fn main() : Int do A.secret() end
+                         ^^^^^^^^
+
+    run `march --explain unknown_qualified_name`
+
+

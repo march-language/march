@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: Unknown type `NoSuchType` in `derive`
+-- Finding 17: `derive X for UnknownType` must ERROR, not silently no-op.
+-- `expand_derive` (`desugar.ml`) previously returned a bare `[]` when the
+-- derive TARGET TYPE was not found in the module's `type_defs`, emitting no
+-- diagnostic — so `derive Show for NoSuchType` typechecked clean (exit 0),
+-- making a misspelled type name indistinguishable from a no-op. The `None`
+-- branch now mirrors its sibling (unknown derive INTERFACE) and emits an
+-- `Err.error` before returning `[]`. See core-march-types.md §2.4.
+mod Main do
+  derive Show for NoSuchType
+
+  fn main() : Int do 0 end
+end

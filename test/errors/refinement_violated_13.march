@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: parameter refinement `_ >= 0`
+-- Refinement types (§2.14): contravariant subtyping at the PASS site.
+--
+-- Until 2026-09-13 this program was accept/t77_refine_hof_bypass_limitation:
+-- `apply(take_n, -3)` called `take_n` INDIRECTLY through `f : Int -> Int`,
+-- nothing at the call `f(x)` stated `take_n`'s `{Int | _ >= 0}`, and `--check`
+-- accepted what reject/t71 rejects at a direct call. Decision (a) of
+-- specs/plans/2026-09-13-refinement-enforcement-holes-plan.md moved the
+-- obligation to where it belongs: passing a refined callable where a function
+-- type is expected is allowed only if that type's DOMAIN implies the callable's
+-- own parameter refinement for every value. `Int -> Int` promises nothing, so
+-- `true => _ >= 0` is refuted (witness `-1`) and the PASS is the violation --
+-- not the later call, which is exactly what made the old shape unverifiable.
+-- To pass `take_n` here, refine `apply`'s own parameter:
+-- `f : ({Int | _ >= 0}) -> Int` (then `x` must be refined to match).
+mod M do
+  needs IO.Console
+  fn take_n(n : {Int | _ >= 0}) : Int do n end
+  fn apply(f : Int -> Int, x : Int) : Int do f(x) end
+  fn main(_cap_console : Cap(IO.Console)) do
+    println(int_to_string(apply(take_n, -3)))
+  end
+end

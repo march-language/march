@@ -1,0 +1,2 @@
+exit: 1
+errors/unknown_derive_1.march:10:18: error: Unknown type `NoSuchType` in `derive` — is it declared in this module? [unknown_derive]

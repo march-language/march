@@ -1,0 +1,25 @@
+-- EXPECT-ERROR: Only public functions of
+-- Slice 6 (proof caps), the mint_cap UNFORGEABILITY witness (external module)
+-- -- `mint_cap` is the ONLY sanctioned way to construct a proof cap, and it is
+-- gated to a PUBLIC fn of the cap's DECLARING module. Here `App` (a non-
+-- declaring module) tries to `mint_cap` a `Cap(Db.P)`; because the mint sits
+-- in the fn's declared RETURN position, Check 6 (the declared-return-type
+-- pass-through discipline) fires FIRST -- `App` did not receive `Cap(Db.P)`
+-- as a parameter and is not `Db`, so it may only pass the cap through, never
+-- construct it. Together the mint gate + Check 6 mean a foreign module can
+-- never mint a proof cap. IMPOSSIBLE to reject pre-fix (pre-slice `mint_cap`
+-- did not exist; the equivalent `cap_narrow` forge accepted). See
+-- core-march-types.md §2.8.13. Accept companion: `accept/t62` (the same mint
+-- INSIDE `Db`'s public fn accepts).
+mod Sys do
+  mod Db do
+    proof cap P
+  end
+
+  mod App do
+    needs IO
+    needs Db.P
+
+    fn make(cap : Cap(IO)) : Cap(Db.P) do mint_cap(cap) end
+  end
+end

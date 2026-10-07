@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: This passes `g` a value that may be linear
+mod Main do
+  needs IO.Console
+  -- `w` opts in to linear values (`linear val : v`) and uses `val` once, but
+  -- hands it to `g`, which never opted in and duplicates it: one S1 becomes
+  -- two. Inside an opted-in body the opted-in type variable counts as linear
+  -- for the generic rule. Accepted before 2026-09-18 whenever unification
+  -- happened to leave `v` as the representative (and ALWAYS once the opt-in
+  -- mark followed the link, accept/t258), hence this witness.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn g(x) do (x, x) end
+  fn w(linear val : v) : (v, v) do g(val) end
+  fn main(c : Cap(IO.Console)) do
+    let (a, b) = w(S1(1))
+    println(int_to_string(sink(a) + sink(b)))
+  end
+end

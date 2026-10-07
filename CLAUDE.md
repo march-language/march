@@ -173,6 +173,16 @@ artifact. See the workflow/design comment at the top of `test/test_snapshots.ml`
 for the full detail (printer choice, prelude-noise filtering, fresh-name-counter
 determinism).
 
+### Golden rendered-diagnostic corpus
+
+`test/run_errors.exe` (suite `errors`) runs `march --check` and `--check-json` on every
+`test/errors/<slug>_<n>.march` and pins the full output in `.expected` (exit code, rendered
+diagnostics with carets, labels, notes, `[slug]`, explain pointer, and each machine fix as a
+diff) and `.json.expected`. A program carrying `-- EXPECT-ERROR:` must also still contain that
+fragment. After an intentional message change: `UPDATE_ERRORS=1 ./_build/default/test/run_errors.exe -e`,
+then review `git diff test/errors/`. New reject programs and `--explain` pages are added by
+`scripts/seed-error-corpus.sh` (idempotent; never renames an existing case).
+
 ### Refactor oracles: prove a change moved no behaviour
 
 Three scripts exist to prove a refactor changed no observable behaviour. Each

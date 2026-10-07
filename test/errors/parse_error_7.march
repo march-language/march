@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: Parse error in declaration
+mod R12CapUnknownDirective do
+  cap no_such_thing
+
+  fn main() do
+    println(1)
+  end
+end

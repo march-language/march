@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ---------------- errors/linear_discarded_8.march
+
+This `_` discards a linear value of type `Option(S1)`. [linear_discarded]
+Linear values must be consumed exactly once. Bind it to a name and pass it to something that consumes it.
+
+12 |     let (_, m2) = LinearMap.put(m1, 1, S1(2))
+              ^
+
+    run `march --explain linear_discarded`
+
+

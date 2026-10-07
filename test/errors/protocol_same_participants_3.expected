@@ -1,0 +1,39 @@
+exit: 1
+-- HINT ------ errors/protocol_same_participants_3.march
+
+Protocol `E` involves the same participants as `D2`. If these are dual protocols (one for each direction), this is expected. Otherwise, consider merging them. [protocol_same_participants]
+
+30 |   protocol E do
+       ^^^^^^^^^^^^^
+
+
+
+-- ERROR ------ errors/protocol_same_participants_3.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+34 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+-- ERROR ------ errors/protocol_same_participants_3.march
+
+This channel came from `Chan.offer`, and the protocol's branches continue differently, so I don't know which one the peer chose. [session_offer_unrefined]
+Match on the label first — `match lbl do :ok -> ... :err -> ... end` — and use the channel inside each arm.
+
+42 |     let (v, cx) = f(cc2)
+                         ^^^
+
+
+
+
+fix [cap_grant]:
+@@ lines 34-34 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do

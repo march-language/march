@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ----------------------- errors/cap_widen_1.march
+
+`Cap(IO.Console)` cannot be widened to `Cap(IO.FileWrite)` — `cap_narrow` only attenuates, so the source capability must subsume the target. [cap_widen]
+help: `Cap(IO.FileWrite)` is not below `Cap(IO.Console)` in the capability lattice. Receive it from a caller that holds an ancestor of it.
+
+24 |     cap_narrow(c)
+         ^^^^^^^^^^^^^
+
+
+

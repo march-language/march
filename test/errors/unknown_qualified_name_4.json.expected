@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/unknown_qualified_name_4.march","start_line":17,"start_col":12,"end_line":17,"end_col":25,"message":"Function `lst_rev` is private to module `Array`.","code":"unknown_qualified_name","fix":null,"labels":[],"notes":[]}

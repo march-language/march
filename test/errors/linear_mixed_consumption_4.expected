@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR -------- errors/linear_mixed_consumption_4.march
+
+The linear value `st` is consumed on some branches but not others. [linear_mixed_consumption]
+On a branch that doesn't consume it, the value is dropped. Consume it on every branch, or end that branch with `panic(…)` if it never returns.
+
+9 |     if b do sink(st) else 0 end
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+

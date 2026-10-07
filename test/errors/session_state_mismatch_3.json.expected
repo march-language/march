@@ -1,0 +1,2 @@
+{"severity":"error","file":"errors/session_state_mismatch_3.march","start_line":33,"start_col":8,"end_line":33,"end_col":23,"message":"Chan.close: channel is at `Send(String, End)` but I expected `End`.","code":"session_state_mismatch","fix":null,"labels":[],"notes":[]}
+{"severity":"error","file":"errors/session_state_mismatch_3.march","start_line":36,"start_col":8,"end_line":36,"end_col":23,"message":"Chan.close: channel is at `Send(String, End)` but I expected `End`.","code":"session_state_mismatch","fix":null,"labels":[],"notes":[]}

@@ -1,0 +1,10 @@
+exit: 1
+-- ERROR -------------- errors/role_needs_invalid_4.march
+
+Protocol `Logging`: `may crash D` names a role that is not in the protocol. [role_needs_invalid]
+
+10 |     may crash D
+                   ^
+
+
+

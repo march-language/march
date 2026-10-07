@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: granted `Cap(IO.Console)`
+mod Main do
+  -- R1 stages A+B reject witness (2026-08-09) — the decisive property, and
+  -- the one no earlier check could state: EVERY `needs` line here is
+  -- truthful, Check 1b passes, the ceiling passes, R3 has nothing to forge —
+  -- the manifest is perfect, and the program is STILL rejected, because
+  -- declaring a capability does not grant it. `main` was granted
+  -- `Cap(IO.Console)` and the closure reaches IO.FileWrite one frame down.
+  --
+  -- The violation deliberately lives in the HELPER, not in `main`: a grant
+  -- an attacker could evade by moving the call one function away would bound
+  -- nothing. Accept companion t167 is this file minus the `file_write`.
+  needs IO.Console
+  needs IO.FileWrite
+
+  fn greet(name : String) : () do
+    match file_write("/tmp/t166_out", name) do
+      Ok(_)  -> println("hello " ++ name)
+      Err(_) -> println("hello anyway")
+    end
+  end
+
+  fn main(cap : Cap(IO.Console)) : () do
+    greet("march")
+  end
+end

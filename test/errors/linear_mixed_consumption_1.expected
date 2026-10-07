@@ -1,0 +1,47 @@
+exit: 1
+-- ERROR -------- errors/linear_mixed_consumption_1.march
+
+The linear value `rb` is consumed on some branches but not others. [linear_mixed_consumption]
+On a branch that doesn't consume it, the value is dropped. Consume it on every branch, or end that branch with `panic(…)` if it never returns.
+
+23 |     match get_cap(w) do
+               ^^^^^^^^^^^^^
+
+
+    `rb` is consumed on this branch:
+
+26 |         match send_checked(cap, RBJob(rb)) do
+                                           ^^
+
+    but not on this one, where it is dropped:
+
+24 |       None -> ()
+                   ^^
+
+
+-- WARNING -------- errors/linear_mixed_consumption_1.march
+
+Non-exhaustive pattern match — missing case: _ [non_exhaustive_match]
+
+26 |         match send_checked(cap, RBJob(rb)) do
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Add a branch for this case, or use `_ -> ...` as a catch-all.
+
+
+-- ERROR -------- errors/linear_mixed_consumption_1.march
+
+The linear value `rb` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+31 |     RingBuf.drop(rb)
+                      ^^
+
+
+    `rb` was already consumed here:
+
+26 |         match send_checked(cap, RBJob(rb)) do
+                                           ^^
+    run `march --explain linear_used_twice`
+
+

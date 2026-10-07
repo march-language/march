@@ -1,0 +1,18 @@
+exit: 1
+-- ERROR ------------------- errors/type_mismatch_9.march
+
+expected `S_end` but got `S_send_Msg_Prod_Cons_1`. [type_mismatch]
+
+20 |     Stream_Prod.close(s, st)
+                              ^^
+
+    This is argument #2 of a function call.
+    Both are states of a generated protocol role: `S_send_Msg_Prod_Cons_1` is the state the role is in before that step, and this call is a different step. Either the protocol takes the steps in another order, or this body is written for a different role than the one it is run as (`run_<Role>` and `<Role>.register` decide which).
+
+    the expected type comes from here:
+
+20 |     Stream_Prod.close(s, st)
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

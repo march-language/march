@@ -1,0 +1,43 @@
+exit: 1
+-- ERROR -------------- errors/linear_never_used_16.march
+
+The linear value `a` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+11 |     let m : LinearMap(S1, Int) = LinearMap.empty(fn a -> fn b -> false)
+                                                      ^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+
+-- ERROR -------------- errors/linear_never_used_16.march
+
+The linear value `b` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+11 |     let m : LinearMap(S1, Int) = LinearMap.empty(fn a -> fn b -> false)
+                                                              ^^^^^^^^^^^^^
+
+
+
+-- ERROR -------------- errors/linear_never_used_16.march
+
+`S1` is linear, but `LinearMap.put` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
+Consume the value here instead, or, if `LinearMap.put` uses that parameter exactly once, mark it `linear` where `LinearMap.put` is defined (`linear x : a`).
+
+12 |     let (d, m2) = LinearMap.put(m, S1(1), 5)
+                       ^^^^^^^^^^^^^
+
+    run `march --explain linear_generic_param`
+
+
+-- ERROR -------------- errors/linear_never_used_16.march
+
+`S1` is linear, but `LinearMap.drain` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
+Consume the value here instead, or, if `LinearMap.drain` uses that parameter exactly once, mark it `linear` where `LinearMap.drain` is defined (`linear x : a`).
+
+17 |     println(int_to_string(n + LinearMap.drain(m2, 0, fn (acc, k, x) -> acc + x + sink(k))))
+                                   ^^^^^^^^^^^^^^^
+
+
+

@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: March `if` expressions always need an `else` branch:
+mod R06IfMissingElse do
+  fn f(x) do
+    if x > 0 do
+      1
+    end
+  end
+
+  fn main() do
+    println(f(5))
+  end
+end

@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_19.march
+
+The linear value `r.slot` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+16 |     println(int_to_string(sink(r.slot) + sink(r.slot)))
+                                                   ^^^^^^
+
+
+    `r.slot` was already consumed here:
+
+16 |     println(int_to_string(sink(r.slot) + sink(r.slot)))
+                                    ^^^^^^
+    run `march --explain linear_used_twice`
+
+

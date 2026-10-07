@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: refinement violation
+-- The stdlib contract itself, exercised across a module boundary: `List.head`
+-- declares `{List(a) | len(_) > 0}`, and this call passes the empty literal.
+--
+-- Distinct from t114, which declares its own contract in the same module. This
+-- file additionally pins that a refinement written in a STDLIB signature is
+-- visible to a user program's call site — the stdlib declarations are merged
+-- into the module the checker sees, and a contract nobody can see is a contract
+-- that does nothing. It also pins that the panic inside `List.head` is now
+-- backed by a compile-time check, not only a runtime abort.
+mod T116 do
+
+  fn main() : Int do
+    List.head([])
+  end
+
+end

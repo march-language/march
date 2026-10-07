@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: A `let*` binding can't have a type annotation
+-- Mirrors r15 (let?'s equivalent parser-level rejection).
+mod Main do
+  fn f(a : Option(Int)) : Option(Int) do
+    let* x : Int = a
+    Some(x)
+  end
+end

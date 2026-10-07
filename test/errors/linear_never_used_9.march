@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: The linear value `r.st` was never used
+mod Main do
+  needs IO.Console
+  -- A record holding a linear field goes out of scope with the field never
+  -- consumed: the value leaks.
+  always_linear type S1 = S1(Int)
+  type R = { st : S1, n : Int }
+  fn main(c : Cap(IO.Console)) do
+    let r : R = { st: S1(0), n: 5 }
+    println(int_to_string(r.n))
+  end
+end

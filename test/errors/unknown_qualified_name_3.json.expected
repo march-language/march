@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/unknown_qualified_name_3.march","start_line":7,"start_col":21,"end_line":7,"end_col":29,"message":"Function `secret` is private to module `A`.","code":"unknown_qualified_name","fix":null,"labels":[],"notes":[]}

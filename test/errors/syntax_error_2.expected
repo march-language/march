@@ -1,0 +1,8 @@
+exit: 1
+-- ERROR -------------------- errors/syntax_error_2.march
+
+I got stuck here: [syntax_error]
+
+4 |     println([x * 2 for x])
+                            ^
+

@@ -1,0 +1,22 @@
+exit: 1
+-- ERROR --------- errors/trusted_linear_reserved_1.march
+
+`@[trusted_linear]` is reserved for the standard library. [trusted_linear_reserved]
+Its function bodies are trusted, not checked, to use each value once. To let a generic function accept a linear value, mark the parameter instead: `linear x : a`.
+
+12 |   fn dup(x : v) : (v, v) do (x, x) end
+          ^^^
+
+
+
+-- ERROR --------- errors/trusted_linear_reserved_1.march
+
+`S1` is linear, but `dup` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
+Consume the value here instead, or, if `dup` uses that parameter exactly once, mark it `linear` where `dup` is defined (`linear x : a`).
+
+14 |     let (a, b) = dup(S1(1))
+                      ^^^
+
+    run `march --explain linear_generic_param`
+
+

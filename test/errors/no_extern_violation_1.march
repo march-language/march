@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: contains an `extern` block
+-- Capabilities widening, Task 4 -- `cap no_extern` (`check_no_extern_module`,
+-- `typecheck.ml:6231-6255`), the REJECT side: a `DExtern` block declared
+-- inside a `cap no_extern` module. `check_no_extern_module`'s `DExtern` arm
+-- (`:6235-6239`) raises unconditionally on any extern block regardless of
+-- whether its own `Cap(X)`/`needs IO.Foreign` obligations (Checks 5/1c) are
+-- otherwise satisfied -- `needs IO.FileSystem` here covers Check 5's own
+-- `Cap(IO.FileSystem)` obligation cleanly (no unrelated diagnostic), so the
+-- ONE error surfacing is `no_extern`'s own: `` `mod NoFFI` (declared `cap
+-- no_extern`) contains an `extern` block (`libc`). ``. (A second, WARNING-
+-- level Check 1c diagnostic -- "extern block ... requires `Cap(IO.Foreign)`
+-- but `NoFFI` does not declare `needs IO.Foreign`" -- also fires alongside,
+-- since this program does not separately declare `needs IO.Foreign`; it
+-- does not change the exit code and is not the substring pinned here.) See
+-- core-march-types.md §2.8.11.
+mod NoFFI do
+  cap no_extern
+  needs IO.FileSystem
+
+  extern "libc" : Cap(IO.FileSystem) do
+    fn c_read(fd : Int, buf : String, n : Int) : Int
+  end
+end
