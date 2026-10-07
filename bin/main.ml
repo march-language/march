@@ -3654,10 +3654,26 @@ let compile filename =
                for why this is a -D and not a force-included header.
                MI_DEBUG=0: mimalloc defaults to its debug build unless NDEBUG,
                and the runtime's own asserts need NDEBUG unset. *)
+            (* MI_TLS_SLOT=89 (macOS only): mimalloc finds the calling thread's
+               heap through a TLS variable, and on Darwin every _Thread_local
+               access is a call to _tlv_get_addr -- one per mi_malloc, ~10% of
+               bench/binary_trees.  With MI_TLS_SLOT it reads the heap pointer
+               straight from a reserved pthread TSD slot instead, which is what
+               upstream mimalloc does in every macOS build that overrides malloc
+               (prim.h, MI_MALLOC_OVERRIDE; slot 89 is libpthread's
+               __PTK_FRAMEWORK_OLDGC_KEY9, unused since the Objective-C GC was
+               removed).  Linux keeps the TLS variable, which is a
+               thread-pointer-relative load there.  See
+               specs/progress/2026-10-07-alloc-free-fast-path.md. *)
+            let mimalloc_tls_flag =
+              if Sys.file_exists "/System/Library/CoreServices"
+                 && not (Sys.file_exists "/proc/version")
+              then " -DMI_TLS_SLOT=89" else "" in
             let alloc_flags =
               if use_mimalloc then
                 Printf.sprintf
-                  " -DMARCH_USE_MIMALLOC -DMI_DEBUG=0 -Dfree=march_free_any -Drealloc=march_realloc_any -I%s -I%s"
+                  " -DMARCH_USE_MIMALLOC -DMI_DEBUG=0%s -Dfree=march_free_any -Drealloc=march_realloc_any -I%s -I%s"
+                  mimalloc_tls_flag
                   (Filename.quote runtime_dir)
                   (Filename.quote (Filename.concat mimalloc_dir "include"))
               else "" in
@@ -4051,7 +4067,14 @@ let compile filename =
                  arm64 and vice versa, and Native means "this host". *)
               let cpu = !target_cpu in
               let x86 = if cpu <> "" then " -march=" ^ cpu else " -msse4.2" in
-              let arm = if cpu <> "" then " -mcpu=" ^ cpu else "" in
+              (* -mno-outline: clang's AArch64 machine outliner (on by default
+                 for Apple arm64 even at -O2) turned common instruction runs in
+                 the runtime's hottest paths -- mimalloc's mi_free above all --
+                 into bl/ret round trips through OUTLINED_FUNCTION_n stubs.
+                 Turning it off saved ~9% of bench/binary_trees' CPU time on
+                 an M3 (specs/progress/2026-10-07-alloc-free-fast-path.md); the
+                 price is a few KB of text. *)
+              let arm = (if cpu <> "" then " -mcpu=" ^ cpu else "") ^ " -mno-outline" in
               match xtarget with
               | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ }) -> arm   (* NEON by default; SSE flags are x86-only *)
               | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) -> x86
