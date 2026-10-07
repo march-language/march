@@ -322,6 +322,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Nested constructor patterns pick the right arm in compiled code when a
+  constructor name is also used by a stdlib type.** With a user
+  `type Tree = Leaf | Node(Tree, Int, Tree)` (stdlib `OrderedMap` also declares
+  `Leaf` and `Node`), an arm like `Node(Leaf, _, Leaf) -> ...` never matched
+  in a compiled binary when another arm bound the same fields by name, so the
+  program silently fell through to a later arm. The interpreter was already
+  correct.
 - **A missing `end` is reported at the construct that is missing it.** Instead of
   "Parse error in declaration" at the end of the file or the next `fn`, the error
   points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the

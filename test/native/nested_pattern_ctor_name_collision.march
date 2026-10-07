@@ -1,0 +1,114 @@
+-- Regression: a user type whose constructors share their short names with a
+-- stdlib type's (`Leaf` / `Node`: stdlib OrderedMap.Tree declares both) took
+-- the WRONG arm for a NESTED constructor pattern in compiled code.  The
+-- nested case's scrutinee is a sub-pattern variable whose TIR type is erased
+-- whenever another row binds that field to a plain name, so codegen resolved
+-- the bare tag `Leaf` by suffix to OrderedMap.Tree.Leaf's tag.  The
+-- interpreter was always right; this file's .expected is its output.
+mod Main do
+  needs IO.Console
+
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  type Holder = { tree : Tree, label : Int }
+
+  pfn make(d : Int) : Tree do
+    if d == 0 do Leaf else Node(make(d - 1), d, make(d - 1)) end
+  end
+
+  pfn leaves(t : Tree) : Int do
+    match t do
+      Leaf -> 1
+      Node(l, _, r) -> leaves(l) + leaves(r)
+    end
+  end
+
+  -- The original report: one level of nesting on a nullary colliding ctor,
+  -- with another row naming the same fields.
+  pfn shrink(t : Tree) : Tree do
+    match t do
+      Leaf -> Leaf
+      Node(Leaf, _, Leaf) -> Leaf
+      Node(l, v, r) -> Node(shrink(l), v, shrink(r))
+    end
+  end
+
+  -- Top-level match on the colliding ctor.
+  pfn is_leaf(t : Tree) : Bool do
+    match t do
+      Leaf -> true
+      _ -> false
+    end
+  end
+
+  -- Two levels deep.
+  pfn left_spine(t : Tree) : Int do
+    match t do
+      Node(Node(Leaf, a, _), b, _) -> a * 100 + b
+      Node(Node(l, _, _), b, _) -> left_spine(l) + b
+      Node(Leaf, b, _) -> b
+      Leaf -> 0
+    end
+  end
+
+  -- A colliding ctor WITH fields as the nested pattern.
+  pfn inner_node(t : Tree) : Int do
+    match t do
+      Node(Node(_, v, _), _, _) -> v
+      Node(l, v, _) -> v + leaves(l) * 1000
+      Leaf -> -1
+    end
+  end
+
+  -- Nested inside a let-bound tuple.
+  pfn tuple_case(t : Tree, n : Int) : Int do
+    let p = (t, n)
+    match p do
+      (Node(Leaf, v, Leaf), k) -> v + k
+      (Node(l, _, _), k) -> leaves(l) + k * 10
+      (Leaf, k) -> k
+    end
+  end
+
+  -- Nested inside a record field.
+  pfn record_case(h : Holder) : Int do
+    match h do
+      { tree: Node(Leaf, v, _), label: lb } -> v * 10 + lb
+      { tree: Node(l, _, _), label: lb } -> leaves(l) + lb
+      { tree: Leaf, label: lb } -> 0 - lb
+    end
+  end
+
+  -- Nested under a generic wrapper (Option's payload slot is erased).
+  pfn opt_case(o : Option(Tree)) : Int do
+    match o do
+      Some(Leaf) -> 1
+      Some(Node(Leaf, v, _)) -> v
+      Some(t) -> leaves(t)
+      None -> 0
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println(int_to_string(leaves(shrink(make(2)))))
+    println(int_to_string(leaves(shrink(make(3)))))
+    println(if is_leaf(Leaf) do "leaf" else "node" end)
+    println(if is_leaf(make(1)) do "leaf" else "node" end)
+    println(int_to_string(left_spine(make(2))))
+    println(int_to_string(left_spine(make(3))))
+    println(int_to_string(left_spine(make(1))))
+    println(int_to_string(inner_node(make(3))))
+    println(int_to_string(inner_node(make(1))))
+    println(int_to_string(inner_node(Leaf)))
+    println(int_to_string(tuple_case(make(1), 5)))
+    println(int_to_string(tuple_case(make(2), 5)))
+    println(int_to_string(tuple_case(Leaf, 5)))
+    println(int_to_string(record_case({ tree: make(1), label: 7 })))
+    println(int_to_string(record_case({ tree: make(3), label: 7 })))
+    println(int_to_string(record_case({ tree: Leaf, label: 7 })))
+    println(int_to_string(opt_case(Some(Leaf))))
+    println(int_to_string(opt_case(Some(make(1)))))
+    println(int_to_string(opt_case(Some(make(2)))))
+    println(int_to_string(opt_case(None)))
+  end
+end
