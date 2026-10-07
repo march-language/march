@@ -138,7 +138,7 @@ let report_double_use ?(notes = []) env ~lin le ~span =
          be copied or ignored." name
   in
   Err.report env.errors
-    { Err.severity = Err.Error; span; message; labels; notes; code = None; fix = None }
+    { Err.severity = Err.Error; span; message; labels; notes; code = Err.Code.linear_used_twice; fix = None }
 
 let record_use_noted ?(notes = []) name span env =
   (* Mark any import entry that matches this name as used.
@@ -386,7 +386,7 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
     ) env bindings
 
 let report_linear_never_used env ~scope_span le =
-  Err.error env.errors ~span:scope_span
+  Err.error ~code:Err.Code.linear_never_used env.errors ~span:scope_span
     (Printf.sprintf
        "The linear value `%s` was never used.\n\
         Linear values must be consumed exactly once — did you \
@@ -447,7 +447,7 @@ let mixed_message name =
      every branch, or end that branch with `panic(…)` if it never returns." name
 
 let report_wildcard_discard env ~span t =
-  Err.error env.errors ~span
+  Err.error ~code:Err.Code.linear_discarded env.errors ~span
     (Printf.sprintf
        "This `_` discards a linear value of type `%s`.\n\
         Linear values must be consumed exactly once. Bind it to a name \
@@ -513,7 +513,7 @@ let rebound_binding_lin env (e : Ast.expr) =
   go e
 
 let report_linear_wildcard_discard env ~span ~name t =
-  Err.error env.errors ~span
+  Err.error ~code:Err.Code.linear_discarded env.errors ~span
     (Printf.sprintf
        "This `_` discards the linear value `%s` of type `%s`.\n\
         Linear values must be consumed exactly once, and binding to `_` is \
@@ -564,7 +564,7 @@ let rec judge_pending ?(defer = true) env ~scope_span entries =
             | None -> ());
            (match !(le.le_mixed) with
             | Some span when lin = Ast.Linear ->
-              Err.error env.errors ~span (mixed_message (lin_display_name le.le_name))
+              Err.error ~code:Err.Code.linear_mixed_consumption env.errors ~span (mixed_message (lin_display_name le.le_name))
             | _ -> ());
            if lin = Ast.Linear && not !(le.le_used) then
              if le.le_name = "_" then report_wildcard_discard env ~span:scope_span t
@@ -733,7 +733,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
              ) candidates in
            "Did you mean one of:\n" ^ String.concat "\n" lines
        in
-       Err.error env.errors ~span:name.span
+       Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
          (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
             name.txt hint);
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
@@ -777,7 +777,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
            let lines = List.map (fun (t, m) ->
                Printf.sprintf "  • `%s.%s` — from type `%s` in module `%s`"
                  m name.txt t m) candidates in
-           Err.error env.errors ~span:name.span
+           Err.error ~code:Err.Code.ambiguous_constructor env.errors ~span:name.span
              (Printf.sprintf
                 "Constructor `%s` is ambiguous between multiple modules:\n%s\n\
                  Use a qualified form to disambiguate."
@@ -785,7 +785,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
          end else begin
            let all_types = all_ctors_named name.txt env in
            if List.length all_types > 1 then
-             Err.hint env.errors ~span:name.span
+             Err.hint ~code:Err.Code.ambiguous_constructor env.errors ~span:name.span
                (Printf.sprintf
                   "Constructor `%s` is defined by multiple types (%s). \
                    Use a qualified form to disambiguate, e.g. `%s.%s`."
@@ -825,7 +825,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        let n_expected = List.length arg_tys in
        let n_got      = List.length ps in
        if n_expected <> n_got then begin
-         Err.error env.errors ~span:name.span
+         Err.error ~code:Err.Code.constructor_arity env.errors ~span:name.span
            (Printf.sprintf
               "Constructor `%s` expects %d argument(s) in a pattern but I got %d."
               name.txt n_expected n_got);
@@ -886,7 +886,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
                notes  =
                  [Printf.sprintf "Available fields: %s"
                     (String.concat ", " (List.map fst expected_flds))];
-               code = Some "unknown_record_field";
+               code = Err.Code.unknown_record_field;
                fix  = None }
        ) flds;
        (* Record the PATTERN's own type under its span.  lower_match's
@@ -961,7 +961,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
                 "Bind the same names in every alternative, split this into \
                  separate arms, or match the common shape and test the \
                  difference in a `when` guard."];
-             code = Some "or_pattern_binding";
+             code = Err.Code.or_pattern_binding;
              fix  = None }
        in
        List.iter (fun (bs, _) ->
@@ -1035,7 +1035,7 @@ let check_captures env ~span snapshot =
   List.iter (fun (le, was_used) ->
       if not was_used && !(le.le_used) && effective_lin env le <> Ast.Unrestricted then
         let name = lin_display_name le.le_name in
-        Err.error env.errors ~span
+        Err.error ~code:Err.Code.linear_captured env.errors ~span
           (Printf.sprintf
              "The linear value `%s` cannot be captured by a closure.\n\
               A closure may be called multiple times, which would violate \
@@ -1083,7 +1083,7 @@ let report_mixed_consumption env ~span le ~consumed_at ~skipped =
   in
   Err.report env.errors
     { Err.severity = Err.Error; span; message = mixed_message name; labels;
-      notes = []; code = None; fix = None }
+      notes = []; code = Err.Code.linear_mixed_consumption; fix = None }
 
 (** Join the linear-use state of a branch construct's mutually exclusive
     paths.  [snapshot] is each entry's (used, first use) on entry; [results]
@@ -1187,7 +1187,7 @@ let holds_linear_ok_var env t =
 let check_opt_in_params env ~fn_name (params : (Ast.param * ty) list) =
   List.iter (fun ((p : Ast.param), t) ->
       if p.param_lin = Ast.Unrestricted && holds_linear_ok_var env t then
-        Err.error env.errors ~span:p.param_name.span
+        Err.error ~code:Err.Code.linear_generic_param env.errors ~span:p.param_name.span
           (Printf.sprintf
              "`%s` has type `%s`, which holds a type variable that a \
               `linear` parameter of `%s` opts in to linear values, so a \
@@ -1264,7 +1264,7 @@ let check_linear_instantiations env =
              && not (Hashtbl.mem env.linear_ok_ids id) then begin
             if contains_linear env t then begin
               reported := true;
-              Err.error env.errors ~span:sp
+              Err.error ~code:Err.Code.linear_generic_param env.errors ~span:sp
                 (Printf.sprintf
                    "`%s` is linear, but `%s` is generic in a parameter of that type, \
                     so it may drop or duplicate the value.\n\
@@ -1274,7 +1274,7 @@ let check_linear_instantiations env =
                    (pp_ty (repr t)) name name name)
             end else if not trusted && mentions_linear_ok t then begin
               reported := true;
-              Err.error env.errors ~span:sp
+              Err.error ~code:Err.Code.linear_generic_param env.errors ~span:sp
                 (Printf.sprintf
                    "This passes `%s` a value that may be linear: the enclosing \
                     function opted in to linear values of its type \
@@ -1342,7 +1342,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          [Cap(IO)] and no cascade of unification failures follows a single
          mistake) — only naming it is refused. *)
       if name.txt = "root_cap" && not env.root_cap_allowed then
-        Err.error env.errors ~span:name.span
+        Err.error ~code:Err.Code.root_cap_reference env.errors ~span:name.span
           (render_parts [
             MPCode "root_cap";
             MPText " cannot be referenced — the root capability is granted to ";
@@ -1365,7 +1365,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
        | Some hint
          when not (StringSet.mem name.txt env.gated_shadowed)
            && not (span_is_stdlib name.span) ->
-         Err.error env.errors ~span:name.span
+         Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
            (Printf.sprintf "`%s` is internal to the standard library; %s" name.txt hint)
        | _ -> ());
       (match lookup_var name.txt env with
@@ -1426,7 +1426,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
               let it silently resolve to an unrelated global of the same bare
               name (e.g. `Auth.hash` matching the builtin `hash` from the
               `Hash` interface), bypassing the visibility check entirely. *)
-           Err.error env.errors ~span:name.span (qualified_error_msg name.txt env);
+           Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span (qualified_error_msg name.txt env);
            TError
          | _ when (match split_qualified name.txt with
                    | Some (mod_name, _) -> March_modules.Module_registry.ensure_loaded mod_name <> None
@@ -1446,7 +1446,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
               [Module_registry] (only the REPL calls [register]; compiled
               builds only lazily populate the registry with real stdlib
               modules) — so this guard cannot misfire on that case. *)
-           Err.error env.errors ~span:name.span (qualified_error_msg name.txt env);
+           Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span (qualified_error_msg name.txt env);
            TError
          | _ ->
            (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
@@ -1475,7 +1475,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   | None   -> base
                 end
               in
-              Err.error env.errors ~span:name.span msg;
+              Err.error ~code:Err.Code.unbound_variable env.errors ~span:name.span msg;
               TError))
 
     (* ── Type annotations ─────────────────────────────────────────── *)
@@ -1494,7 +1494,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
           message = Printf.sprintf "Typed hole %s has type `%s`" label (pp_ty t);
           labels  = [];
           notes   = [ "Fill this hole with an expression of the type shown above." ];
-          code    = None; fix = None };
+          code    = Err.Code.typed_hole; fix = None };
       t
 
     (* ── Function application ─────────────────────────────────────── *)
@@ -1521,13 +1521,13 @@ let rec infer_expr env (e : Ast.expr) : ty =
       in
       (match proto_name with
        | None ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_protocol_arg env.errors ~span:sp
            "Chan.new: argument must be a protocol name (string, atom, or bare name).";
          TError
        | Some pname ->
          (match StrMap.find_opt pname env.protocols with
           | None ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.unknown_protocol env.errors ~span:sp
               (Printf.sprintf "Chan.new: protocol `%s` is not declared." pname);
             TError
           | Some pi ->
@@ -1538,15 +1538,15 @@ let rec infer_expr env (e : Ast.expr) : ty =
                let ty_b = TLin (Ast.Linear, TChan (ref sty_b)) in
                TTuple [ty_a; ty_b]
              | [_] ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.session_role_count env.errors ~span:sp
                  (Printf.sprintf "Chan.new: protocol `%s` has only one role." pname);
                TError
              | [] ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.session_role_count env.errors ~span:sp
                  (Printf.sprintf "Chan.new: protocol `%s` has no roles." pname);
                TError
              | projs ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.session_role_count env.errors ~span:sp
                  (Printf.sprintf
                     "Chan.new: protocol `%s` has %d roles but Chan.new needs \
                      exactly 2. Use MPST.new for multi-party protocols."
@@ -1571,14 +1571,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
             TLin (Ast.Linear, TChan (ref cont))
           | SError -> TError
           | other ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
               (Printf.sprintf
                  "Chan.send: channel is at `%s` but I expected `Send(T, ...)`."
                  (pp_session_ty other));
             TError)
        | TError -> TError
        | _ ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
            (Printf.sprintf
               "Chan.send: expected a channel endpoint but got `%s`."
               (pp_ty ch_ty));
@@ -1600,14 +1600,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
             TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))]
           | SError -> TError
           | other ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
               (Printf.sprintf
                  "Chan.recv: channel is at `%s` but I expected `Recv(T, ...)`."
                  (pp_session_ty other));
             TError)
        | TError -> TError
        | _ ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
            (Printf.sprintf
               "Chan.recv: expected a channel endpoint but got `%s`."
               (pp_ty ch_ty));
@@ -1628,14 +1628,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
           | SEnd -> t_unit
           | SError -> TError
           | other ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
               (Printf.sprintf
                  "Chan.close: channel is at `%s` but I expected `End`."
                  (pp_session_ty other));
             TError)
        | TError -> TError
        | _ ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
            (Printf.sprintf
               "Chan.close: expected a channel endpoint but got `%s`."
               (pp_ty ch_ty));
@@ -1661,27 +1661,27 @@ let rec infer_expr env (e : Ast.expr) : ty =
           | SChoose branches ->
             (match label_str with
              | None ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.session_choice_label env.errors ~span:sp
                  "Chan.choose: label must be an atom literal (e.g. :ok).";
                TError
              | Some lbl ->
                (match List.assoc_opt lbl branches with
                 | Some cont -> TLin (Ast.Linear, TChan (ref cont))
                 | None ->
-                  Err.error env.errors ~span:sp
+                  Err.error ~code:Err.Code.session_choice_label env.errors ~span:sp
                     (Printf.sprintf
                        "Chan.choose: label `:%s` is not a valid branch of this protocol." lbl);
                   TError))
           | SError -> TError
           | other ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
               (Printf.sprintf
                  "Chan.choose: channel is at `%s` but I expected `Choose{...}`."
                  (pp_session_ty other));
             TError)
        | TError -> TError
        | _ ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
            (Printf.sprintf
               "Chan.choose: expected a channel endpoint but got `%s`."
               (pp_ty ch_ty));
@@ -1730,14 +1730,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
                TTuple [t_atom; TError])
           | SError -> TError
           | other ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
               (Printf.sprintf
                  "Chan.offer: channel is at `%s` but I expected `Offer{...}`."
                  (pp_session_ty other));
             TError)
        | TError -> TError
        | _ ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
            (Printf.sprintf
               "Chan.offer: expected a channel endpoint but got `%s`."
               (pp_ty ch_ty));
@@ -1762,19 +1762,19 @@ let rec infer_expr env (e : Ast.expr) : ty =
       in
       (match proto_name with
        | None ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_protocol_arg env.errors ~span:sp
            "MPST.new: argument must be a protocol name.";
          TError
        | Some pname ->
          (match StrMap.find_opt pname env.protocols with
           | None ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.unknown_protocol env.errors ~span:sp
               (Printf.sprintf "MPST.new: protocol `%s` is not declared." pname);
             TError
           | Some pi ->
             let n = List.length pi.pi_projections in
             if n < 3 then begin
-              Err.error env.errors ~span:sp
+              Err.error ~code:Err.Code.session_role_count env.errors ~span:sp
                 (Printf.sprintf
                    "MPST.new: protocol `%s` has %d role(s) but MPST.new \
                     requires at least 3. Use Chan.new for binary protocols."
@@ -1808,11 +1808,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
             in
             (match actual_role with
              | None ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.session_role_mismatch env.errors ~span:sp
                  "MPST.send: second argument must be a role name (e.g. Server).";
                TError
              | Some ar when ar <> target_role ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.session_role_mismatch env.errors ~span:sp
                  (Printf.sprintf
                     "MPST.send: channel expects to send to `%s` but you said `%s`."
                     target_role ar);
@@ -1823,14 +1823,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
                TLin (Ast.Linear, TChan (ref cont)))
           | SError -> TError
           | other ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
               (Printf.sprintf
                  "MPST.send: channel is at `%s` but I expected `MSend(Role, T, ...)`."
                  (pp_session_ty other));
             TError)
        | TError -> TError
        | _ ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
            (Printf.sprintf
               "MPST.send: expected a multi-party channel endpoint but got `%s`."
               (pp_ty ch_ty));
@@ -1858,11 +1858,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
             in
             (match actual_role with
              | None ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.session_role_mismatch env.errors ~span:sp
                  "MPST.recv: second argument must be a role name (e.g. Client).";
                TError
              | Some ar when ar <> source_role ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.session_role_mismatch env.errors ~span:sp
                  (Printf.sprintf
                     "MPST.recv: channel expects to receive from `%s` but you said `%s`."
                     source_role ar);
@@ -1871,14 +1871,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
                TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))])
           | SError -> TError
           | other ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
               (Printf.sprintf
                  "MPST.recv: channel is at `%s` but I expected `MRecv(Role, T, ...)`."
                  (pp_session_ty other));
             TError)
        | TError -> TError
        | _ ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
            (Printf.sprintf
               "MPST.recv: expected a multi-party channel endpoint but got `%s`."
               (pp_ty ch_ty));
@@ -1897,7 +1897,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
           | SEnd -> t_unit
           | SError -> TError
           | other ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
               (Printf.sprintf
                  "MPST.close: channel is at `%s` but the session must be complete \
                   (End) before closing."
@@ -1905,7 +1905,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
             TError)
        | TError -> TError
        | _ ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.session_state_mismatch env.errors ~span:sp
            (Printf.sprintf
               "MPST.close: expected a multi-party channel endpoint but got `%s`."
               (pp_ty ch_ty));
@@ -1955,7 +1955,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
               (match List.assoc_opt op builtin_bindings with
                | Some placeholder_sch -> sch == placeholder_sch
                | None -> false)) ->
-      Err.error env.errors ~span:sp
+      Err.error ~code:Err.Code.unknown_session_op env.errors ~span:sp
         (Printf.sprintf
            "`%s` is not a session-channel operation I know, or it was called \
             with the wrong number of arguments.\n\
@@ -2066,28 +2066,28 @@ let rec infer_expr env (e : Ast.expr) : ty =
             (match Cap_dict_resolve.dict_ty_of_cap env p with
              | Some dict -> dict
              | None ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.cap_dict_misuse env.errors ~span:sp
                  (render_parts [
                    MPCode ("Cap(" ^ p ^ ")");
                    MPText " has no dictionary, so there is no base for ";
                    MPCode "cap_ops_empty"; MPText " to produce." ]);
                TError)
           | _ ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.cap_dict_misuse env.errors ~span:sp
               (render_parts [
                 MPCode "cap_ops_empty";
                 MPText " needs to know which capability it is building a base \
                         for, but the argument's type is undetermined here." ]);
             TError)
        | _ ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.cap_dict_misuse env.errors ~span:sp
            (render_parts [ MPCode "cap_ops_empty"; MPText " expects a capability." ]);
          TError)
 
     | Ast.EApp (Ast.EVar { txt = "cap_dict"; _ }, [cap_arg], sp) ->
       env.cap_dict_sites := sp :: !(env.cap_dict_sites);
       let arg_ty = infer_expr env cap_arg in
-      let reject parts = Err.error env.errors ~span:sp (render_parts parts); TError in
+      let reject parts = Err.error ~code:Err.Code.cap_dict_misuse env.errors ~span:sp (render_parts parts); TError in
       (match repr arg_ty with
        | TError -> TError
        | TCon ("Cap", [inner]) ->
@@ -2223,7 +2223,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       in
       Hashtbl.replace env.type_map bn.Ast.span ret_ty;
       if List.length args < min_arity then begin
-        Err.error env.errors ~span:sp
+        Err.error ~code:Err.Code.builtin_arity env.errors ~span:sp
           (Printf.sprintf
              "`%s` needs at least %d arguments, but I see %d here."
              bname min_arity (List.length args));
@@ -2389,14 +2389,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
                              else "is a builtin taking")
                             arity (if arity = 1 then "" else "s") ]
                       else []);
-             code = None; fix = None };
+             code = Err.Code.arity_mismatch; fix = None };
          (* Return the declared return type so downstream inference stays sane. *)
          let rec peel n t =
            if n <= 0 then t
            else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
          peel arity f_ty
        | None, Some name ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.not_a_function env.errors ~span:sp
            (Printf.sprintf
               "`%s` is not a function — it has type `%s`.\n\
                Remove the `()` and use `%s` directly."
@@ -2451,7 +2451,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                ) candidates in
              "Did you mean one of:\n" ^ String.concat "\n" lines
          in
-         Err.error env.errors ~span:name.span
+         Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
            (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
               name.txt hint);
          List.iter (fun a -> ignore (infer_expr env a)) args;
@@ -2476,7 +2476,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
              let lines = List.map (fun (t, m) ->
                  Printf.sprintf "  • `%s.%s` — from type `%s` in module `%s`"
                    m name.txt t m) candidates in
-             Err.error env.errors ~span:name.span
+             Err.error ~code:Err.Code.ambiguous_constructor env.errors ~span:name.span
                (Printf.sprintf
                   "Constructor `%s` is ambiguous between multiple modules:\n%s\n\
                    Use a qualified form to disambiguate."
@@ -2484,7 +2484,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
            end else begin
              let all_types = all_ctors_named name.txt env in
              if List.length all_types > 1 then
-               Err.hint env.errors ~span:name.span
+               Err.hint ~code:Err.Code.ambiguous_constructor env.errors ~span:name.span
                  (Printf.sprintf
                     "Constructor `%s` is defined by multiple types (%s). \
                      Use a qualified form to disambiguate, e.g. `%s.%s`."
@@ -2498,7 +2498,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          let n_expected = List.length arg_tys in
          let n_got      = List.length args in
          if n_expected <> n_got then begin
-           Err.error env.errors ~span:sp
+           Err.error ~code:Err.Code.constructor_arity env.errors ~span:sp
              (Printf.sprintf
                 "Constructor `%s` expects %d argument(s) but I got %d."
                 name.txt n_expected n_got);
@@ -2612,7 +2612,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                    (Printf.sprintf "field `%s` must keep its original type" fname)))
                  fty uty
              | None ->
-               Err.error env.errors ~span:sp
+               Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp
                  (Printf.sprintf
                     "This record does not have a field called `%s`.\n\
                      The fields I know about are: %s"
@@ -2630,7 +2630,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          unify env ~span:sp base_ty partial;
          base_ty
        | other ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.record_update_non_record env.errors ~span:sp
            (Printf.sprintf
               "I can only use `{ … with … }` on a record, but this \
                expression has type `%s`." (pp_ty other));
@@ -2701,7 +2701,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   else begin
                     (* Sentinel not present — warn that we can't track this field. *)
                     ignore lin;
-                    Err.warning env.errors ~span:sp
+                    Err.warning ~code:Err.Code.linear_field_untracked env.errors ~span:sp
                       (Printf.sprintf
                          "Field `%s` has a linear type but linearity tracking \
                           is not available for `%s` at this binding site.\n\
@@ -2709,7 +2709,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                          name.txt vname.txt vname.txt)
                   end
                 | _ ->
-                  Err.error env.errors ~span:sp
+                  Err.error ~code:Err.Code.linear_field_untracked env.errors ~span:sp
                     (Printf.sprintf
                        "Field `%s` has a linear type; accessing it through \
                         a complex expression loses linearity tracking.\n\
@@ -2718,7 +2718,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
              | _ -> ());
             t
           | None   ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp
               (Printf.sprintf
                  "This record does not have a field called `%s`.\n\
                   The fields I see are: %s"
@@ -2792,7 +2792,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   Printf.sprintf
                     "I cannot access field `%s` because %s has type `%s`, \
                      which is not a record." name.txt subj_desc shown_ty;
-                labels = []; notes = unwrap_note; code = None; fix = None };
+                labels = []; notes = unwrap_note; code = Err.Code.field_access_non_record; fix = None };
             TError))
       (* close the None branch of mod_access match *)
       )
@@ -2826,7 +2826,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.ECond (arms, sp) ->
       (match arms with
        | [] ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.empty_match env.errors ~span:sp
            "A `match do` expression needs at least one arm.";
          TError
        | (first_cond, first_body) :: rest ->
@@ -2940,7 +2940,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (match actor with
        | Ast.ECon (_, [], _) | Ast.EVar _ -> ()
        | _ ->
-         Err.error env.errors ~span:(span_of_expr actor)
+         Err.error ~code:Err.Code.spawn_computed_actor env.errors ~span:(span_of_expr actor)
            "`spawn` needs a plain actor name written directly, like \
             `spawn(Counter)`.\n\
             A computed actor expression (from an `if`, `match`, or function \
@@ -3019,7 +3019,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          Returns Result(t_r, t_err), propagating Err upward automatically. *)
       (match body with
        | Ast.EBlock ([], _) ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.let_question_last env.errors ~span:sp
            "`let?` cannot be the last expression in a block.\n\
             Add a Result-producing expression after it — for example:\n\
             \n\
@@ -3056,7 +3056,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                | Some _ -> if !(le.le_mixed) = None then le.le_mixed := Some sp
                | None when le.le_lin = Ast.Linear ->
                  let name = lin_display_name le.le_name in
-                 Err.error env.errors ~span:sp
+                 Err.error ~code:Err.Code.linear_unconsumed_early_return env.errors ~span:sp
                    (Printf.sprintf
                       "The linear value `%s` is still unconsumed when `let?` returns early on `Err`.\n\
                        On that path the value is dropped. Consume it before the `let?`, \
@@ -3087,7 +3087,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          this case only needs to CHECK that shape is consistent. *)
       (match body with
        | Ast.EBlock ([], _) ->
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.let_star_last env.errors ~span:sp
            "`let*` cannot be the last expression in a block.\n\
             Add an expression of the same type as the right-hand side \
             after it — for example, if the right-hand side is an \
@@ -3121,7 +3121,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
             in
             (match scheme_opt with
              | None ->
-               Err.error env'.errors ~span:sp
+               Err.error ~code:Err.Code.let_star_no_flat_map env'.errors ~span:sp
                  (Printf.sprintf
                     "`let*` needs `%s`, but it doesn't exist.\n\
                      Define `flat_map(x : %s(a), f : a -> %s(b)) : %s(b)` \
@@ -3154,14 +3154,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
                     body_ty m_b2;
                   body_ty
                 | _ ->
-                  Err.error env'.errors ~span:sp
+                  Err.error ~code:Err.Code.let_star_bad_flat_map env'.errors ~span:sp
                     (Printf.sprintf
                        "`%s` doesn't have the shape `let*` needs: \
                         `%s(a) -> (a -> %s(b)) -> %s(b)`."
                        flat_map_name head_name head_name head_name);
                   TError))
           | _ ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.let_star_unknown_type env.errors ~span:sp
               "`let*`'s right-hand side must have a concrete type (e.g. \
                `Option(a)`, `Result(a, e)`) so `let*` can find its \
                `flat_map` — its type could not be determined here.";
@@ -3241,7 +3241,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
            (List.map (fun (p : Ast.param) -> p.param_name.Ast.txt) params) in
        Err.report env.errors
          { Err.severity = Err.Error; span = lsp; labels = []; notes = [];
-           code = Some "curried_lambda_over_tuple"; fix = None;
+           code = Err.Code.curried_lambda_over_tuple; fix = None;
            message = Printf.sprintf
              "This lambda takes %d arguments, but it is passed where a \
               function of ONE argument, a %d-tuple `%s`, is expected.\n\
@@ -3308,7 +3308,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
        let n_expected = List.length arg_tys in
        let n_got      = List.length args in
        if n_expected <> n_got then begin
-         Err.error env.errors ~span:sp
+         Err.error ~code:Err.Code.constructor_arity env.errors ~span:sp
            (Printf.sprintf
               "Constructor `%s` expects %d argument(s) but I got %d."
               name.txt n_expected n_got);
@@ -3380,7 +3380,7 @@ and infer_app env span f_ty args idx =
     List.iter (fun a -> ignore (infer_expr env a)) args;
     TError
   | _, other ->
-    Err.error env.errors ~span
+    Err.error ~code:Err.Code.not_a_function env.errors ~span
       (Printf.sprintf
          "This is not a function — it has type `%s`.\n\
           I cannot apply it to arguments." (pp_ty other));
@@ -3423,7 +3423,7 @@ and check_offer_label_exhaustiveness env span scrut (branches : Ast.branch list)
        List.iter (fun (br : Ast.branch) ->
            match offer_arm_label br with
            | Some lbl when not (List.mem_assoc lbl proto_branches) ->
-             Err.warning env.errors ~span
+             Err.warning ~code:Err.Code.session_unreachable_branch env.errors ~span
                (Printf.sprintf
                   "This `match` has an arm for `:%s`, which is not one of the \
                    protocol's `offer` branches — it can never be taken.\n\
@@ -3432,7 +3432,7 @@ and check_offer_label_exhaustiveness env span scrut (branches : Ast.branch list)
                   (String.concat ", " (List.map (fun (l, _) -> ":" ^ l) proto_branches)))
            | _ -> ()) branches;
        (if not has_catch_all && missing <> [] then
-          Err.error env.errors ~span
+          Err.error ~code:Err.Code.session_offer_nonexhaustive env.errors ~span
             (Printf.sprintf
                "This `match` doesn't handle every branch the peer can choose — \
                 missing: %s.\n\
@@ -3599,8 +3599,8 @@ and infer_let_annotated env sp bind_ty bind_expr =
     if March_errors.Errors.has_errors scratch then begin
       if not (annotation_errors_are_phantom_tags_only env scratch) then
         List.iter (fun (d : March_errors.Errors.diagnostic) ->
-          March_errors.Errors.error env.errors ~span:d.March_errors.Errors.span
-            d.March_errors.Errors.message
+          March_errors.Errors.error env.errors ~code:d.March_errors.Errors.code
+            ~span:d.March_errors.Errors.span d.March_errors.Errors.message
         ) scratch.March_errors.Errors.diagnostics;
       (* Annotation not (fully) expressible as a resolvable type — infer from
          the RHS alone; any genuine error was already surfaced above. *)
@@ -3818,7 +3818,7 @@ and infer_block env exprs =
         if at_end then
           match List.find_opt (fun le -> le.le_name = n) env'.lin with
           | Some le when not !(le.le_used) ->
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.session_not_closed env.errors ~span:sp
               (Printf.sprintf
                  "Session channel `%s` reached `End` but was never closed.\n\
                   A channel at `End` must be passed to `Chan.close` — dropping \
@@ -3923,7 +3923,7 @@ and check_spawn_args env ~site_span ~spelling (actor_name : string)
                (List.map (fun (p, t) -> Printf.sprintf "%s : %s" p (pp_ty (repr t))) sig_))
       in
       let plural n = if n = 1 then "" else "s" in
-      Err.error env.errors ~span:site_span
+      Err.error ~code:Err.Code.actor_init_arity env.errors ~span:site_span
         (if sig_ = [] then
            Printf.sprintf
              "actor `%s` declares no `init` parameters, but %s supplies %d argument%s.\n\
@@ -4045,7 +4045,7 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
   let check_name name span =
     if name <> "_" && not (String.length name > 0 && name.[0] = '_')
        && not (List.mem name used) then
-      Err.warning_with_code_and_fix env.errors ~span ~code:"unused_binding"
+      Err.warning_with_code_and_fix ~code:Err.Code.unused_binding env.errors ~span
         ~fix:(Err.FReplace { span; text = "_" ^ name })
         (Printf.sprintf "Unused variable `%s`.\n\
                          Use `_` to mark intentionally unused params." name)
@@ -4071,7 +4071,7 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
     permissive rather than risk a false error inside the stdlib itself. *)
 let mark_trusted_linear_vars env (def : Ast.fn_def) ~fn_span ~fn_tvars vars =
   if vars <> [] && !stdlib_source_files <> [] && not (span_is_stdlib fn_span) then
-    Err.error env.errors ~span:def.fn_name.span
+    Err.error ~code:Err.Code.trusted_linear_reserved env.errors ~span:def.fn_name.span
       "`@[trusted_linear]` is reserved for the standard library.\n\
        Its function bodies are trusted, not checked, to use each value once. \
        To let a generic function accept a linear value, mark the parameter \
@@ -4080,7 +4080,7 @@ let mark_trusted_linear_vars env (def : Ast.fn_def) ~fn_span ~fn_tvars vars =
     List.iter (fun v ->
         match List.assoc_opt v fn_tvars with
         | None ->
-          Err.error env.errors ~span:def.fn_name.span
+          Err.error ~code:Err.Code.trusted_linear_invalid env.errors ~span:def.fn_name.span
             (Printf.sprintf
                "`@[trusted_linear(%s)]` names no type variable of `%s`'s signature."
                v def.fn_name.txt)
@@ -4089,7 +4089,7 @@ let mark_trusted_linear_vars env (def : Ast.fn_def) ~fn_span ~fn_tvars vars =
            | TVar { contents = Unbound (id, _) } ->
              Hashtbl.replace env.linear_ok_ids id ()
            | t' ->
-             Err.error env.errors ~span:def.fn_name.span
+             Err.error ~code:Err.Code.trusted_linear_invalid env.errors ~span:def.fn_name.span
                (Printf.sprintf
                   "`@[trusted_linear(%s)]`: `%s` is not generic in `%s`; the body \
                    fixed it to `%s`."
@@ -4199,7 +4199,7 @@ let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
       in
       Err.report env.errors
         { Err.severity = Err.Warning; span; message; labels = [];
-          notes = [ note ]; code = Some "annotated_tyvar_fixed"; fix = None })
+          notes = [ note ]; code = Err.Code.annotated_tyvar_fixed; fix = None })
     (annotated_tyvar_fixings def fn_tvars)
 
 (** Check a function definition.
@@ -4279,7 +4279,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
 
   let sch = match def.fn_clauses with
     | [] ->
-      Err.error env.errors ~span:fn_span
+      Err.error ~code:Err.Code.internal_error env.errors ~span:fn_span
         (Printf.sprintf "Function `%s` has no clauses." def.fn_name.txt);
       Mono TError
 
@@ -4315,7 +4315,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 (* Validate that the ADT exists in scope *)
                 match lookup_type n.txt env with
                 | None ->
-                  Err.error env.errors ~span:n.span
+                  Err.error ~code:Err.Code.invalid_type_bound env.errors ~span:n.span
                     (Printf.sprintf
                        "Bound `%s` is not a known ADT or interface name."
                        n.txt);
@@ -4323,7 +4323,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 | Some _ -> Some (CADTBound (n.txt, tv))
               end
             | _ ->
-              Err.error env.errors ~span:var_name.span
+              Err.error ~code:Err.Code.invalid_type_bound env.errors ~span:var_name.span
                 (Printf.sprintf
                    "Bound `%s` on type variable `%s` must be an ADT name, \
                     interface name, or `Nat`."
@@ -4638,7 +4638,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
 
     | _ ->
       (* Multi-clause fn — desugar pass should have eliminated these *)
-      Err.error env.errors ~span:fn_span
+      Err.error ~code:Err.Code.internal_error env.errors ~span:fn_span
         (Printf.sprintf
            "Internal error: fn `%s` has multiple clauses after desugaring."
            def.fn_name.txt);
@@ -4859,7 +4859,7 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
              && not (modules_distinct m_old head_type_module))
           lst with
   | Some (_, prev_sp, _) ->
-    Err.error env.errors ~span:sp
+    Err.error ~code:Err.Code.overlapping_impl env.errors ~span:sp
       (Printf.sprintf
          "Overlapping implementation: `impl %s(%s)` conflicts with the \
           implementation at %s:%d:%d — their heads overlap.\n\
@@ -4989,14 +4989,14 @@ let discharge_constraints env span =
            (match c with
             | COrd _ -> ()   (* String is Ord *)
             | _ ->
-              Err.error env.errors ~span
+              Err.error ~code:Err.Code.missing_impl env.errors ~span
                 "String does not implement Num (only Int and Float do).")
          | TVar r ->
            (match c with
             | CNum _ -> r := Link (TCon ("Int", []))  (* numeric defaulting: unresolved Num → Int *)
             | _ -> ())  (* COrd unresolved — leave polymorphic *)
          | _ ->
-           Err.error env.errors ~span
+           Err.error ~code:Err.Code.missing_impl env.errors ~span
              (Printf.sprintf "`%s` does not implement %s." (pp_ty ty) kind))
       | CInterface (iface_name, t) ->
         let ty = strip_lin t in
@@ -5043,7 +5043,7 @@ let discharge_constraints env span =
                | _ -> false
              in
              if not auto_satisfied then
-               Err.error env.errors ~span
+               Err.error ~code:Err.Code.missing_impl env.errors ~span
                  (Printf.sprintf
                     "`%s` does not implement interface `%s`.\n\
                      Add `impl %s(%s) do ... end` to provide an implementation."
@@ -5069,11 +5069,11 @@ let discharge_constraints env span =
              | Some cis -> List.exists (fun ci -> matches_adt ci.ci_type) cis
            in
            if not found then
-             Err.error env.errors ~span
+             Err.error ~code:Err.Code.not_a_variant env.errors ~span
                (Printf.sprintf "`%s` is not a variant of `%s`."
                   ctor_name adt_name)
          | _ ->
-           Err.error env.errors ~span
+           Err.error ~code:Err.Code.not_a_variant env.errors ~span
              (Printf.sprintf "Expected a variant of `%s`, got `%s`."
                 adt_name (pp_ty ty)))
       | CTNatBound t ->
@@ -5083,7 +5083,7 @@ let discharge_constraints env span =
          | TNat _            -> ()  (* exact TNat — OK *)
          | TNatOp _          -> ()  (* type-level nat arithmetic — OK *)
          | _ ->
-           Err.error env.errors ~span
+           Err.error ~code:Err.Code.not_a_nat env.errors ~span
              (Printf.sprintf "Expected a type-level natural number (Nat), got `%s`."
                 (pp_ty ty)))
     ) !(env.pending_constraints);
@@ -5159,21 +5159,21 @@ let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl
        false positives on modules that coincidentally have State/Msg types. *)
     if has_update || has_render || has_create then begin
       if not has_update then
-        Err.error env.errors ~span:mod_name.span
+        Err.error ~code:Err.Code.island_missing_fn env.errors ~span:mod_name.span
           (Printf.sprintf
              "Island module `%s` is missing required function `update`.\n  \
               Island modules with State and Msg types must define:\n  \
               \  fn update(state : State, msg : Msg) : State"
              mod_name.txt);
       if not has_render then
-        Err.error env.errors ~span:mod_name.span
+        Err.error ~code:Err.Code.island_missing_fn env.errors ~span:mod_name.span
           (Printf.sprintf
              "Island module `%s` is missing required function `render`.\n  \
               Island modules with State and Msg types must define:\n  \
               \  fn render(state : State) : IOList"
              mod_name.txt);
       if not has_create then
-        Err.warning env.errors ~span:mod_name.span
+        Err.warning ~code:Err.Code.island_missing_fn env.errors ~span:mod_name.span
           (Printf.sprintf
              "Island module `%s` does not define `create`.\n  \
               Consider adding: fn create(props : Props) : State"
@@ -5259,7 +5259,7 @@ include Typecheck_modcaps
      here would otherwise surface as a body "reaching" a capability that its
      grant spells almost right. *)
 let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
-  let err ~span msg = Err.error env.errors ~span (Printf.sprintf "Protocol `%s`: %s" proto msg) in
+  let err ~span msg = Err.error ~code:Err.Code.role_needs_invalid env.errors ~span (Printf.sprintf "Protocol `%s`: %s" proto msg) in
   let rec roles_in (steps : Ast.protocol_step list) : string list =
     List.concat_map
       (function
@@ -5330,7 +5330,7 @@ let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
              end
            | Some known ->
              ok := false;
-             Err.error_with_fix env.errors ~span:c.span
+             Err.error_with_fix ~code:Err.Code.unknown_capability env.errors ~span:c.span
                ~fix:(Err.FReplace { span = c.span; text = known })
                (Printf.sprintf "`%s` is not a known capability.\nhelp: did you mean `%s`?" c.txt known))
         caps;
@@ -5347,7 +5347,7 @@ let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
   top ~after_message:false pdef.Ast.proto_steps
 
 let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
-  let err ~span msg = Err.error env.errors ~span (Printf.sprintf "Protocol `%s`: %s" proto msg) in
+  let err ~span msg = Err.error ~code:Err.Code.role_needs_invalid env.errors ~span (Printf.sprintf "Protocol `%s`: %s" proto msg) in
   let rec roles_in (steps : Ast.protocol_step list) : string list =
     List.concat_map
       (function
@@ -5678,7 +5678,7 @@ let rec check_decl env (d : Ast.decl) : env =
        let what = match b.bind_pat with
          | Ast.PatVar n -> Printf.sprintf "`%s`" n.Ast.txt
          | _ -> "This binding" in
-       Err.error env.errors ~span:sp
+       Err.error ~code:Err.Code.linear_module_let env.errors ~span:sp
          (Printf.sprintf
             "%s has the linear type `%s`, so it cannot be a module-level `let`: \
              a module-level value is shared by every function and every actor, \
@@ -5725,7 +5725,7 @@ let rec check_decl env (d : Ast.decl) : env =
     if env.current_module = env.enclosing_package
        && (name.txt = "Down" || name.txt = "DownReason")
        && not is_canonical_dist_link_down_reason then begin
-      Err.error env.errors ~span:name.span
+      Err.error ~code:Err.Code.reserved_type_name env.errors ~span:name.span
         (Printf.sprintf
            "type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared"
            name.txt);
@@ -5740,7 +5740,7 @@ let rec check_decl env (d : Ast.decl) : env =
        let _ = List.fold_left (fun seen (v : Ast.variant) ->
            match List.assoc_opt v.var_name.txt seen with
            | Some first_sp ->
-             Err.error env.errors ~span:v.var_name.span
+             Err.error ~code:Err.Code.duplicate_constructor env.errors ~span:v.var_name.span
                (Printf.sprintf
                   "type `%s` defines constructor `%s` more than once\n\
                    Constructors are the named cases of a variant type — \
@@ -5770,7 +5770,7 @@ let rec check_decl env (d : Ast.decl) : env =
        let _ = List.fold_left (fun seen (f : Ast.field) ->
            match List.assoc_opt f.fld_name.txt seen with
            | Some first_sp ->
-             Err.error env.errors ~span:f.fld_name.span
+             Err.error ~code:Err.Code.duplicate_field env.errors ~span:f.fld_name.span
                (Printf.sprintf
                   "record `%s` defines field `%s` more than once\n\
                    First defined at %s:%d:%d"
@@ -5822,7 +5822,7 @@ let rec check_decl env (d : Ast.decl) : env =
        same message name is always a programmer error. *)
     let _ = List.fold_left (fun seen (h : Ast.actor_handler) ->
         if List.mem h.ah_msg.txt seen then
-          Err.error env.errors ~span:h.ah_msg.span
+          Err.error ~code:Err.Code.duplicate_handler env.errors ~span:h.ah_msg.span
             (Printf.sprintf
                "actor '%s' defines handler '%s' more than once;\
                 \nremove the duplicate or rename one of them"
@@ -5958,7 +5958,7 @@ let rec check_decl env (d : Ast.decl) : env =
                 (pp_ty (repr state_ty)) (pp_ty (repr inferred));
               labels = [];
               notes = actor_handler_hints (repr state_ty) (repr inferred);
-              code = None; fix = None }
+              code = Err.Code.actor_handler_state_type; fix = None }
       ) actor.actor_handlers;
     (* The `on_stop` terminate callback: `state` (the final state) and `self`
        in scope, exactly as in a handler, but no message params and no
@@ -6059,7 +6059,7 @@ let rec check_decl env (d : Ast.decl) : env =
         List.iter (fun ((fname : Ast.name), sig_ty) ->
             match StrMap.find_opt fname.txt inner_env.vars with
             | None ->
-              Err.error env.errors ~span:name.span
+              Err.error ~code:Err.Code.sig_mismatch env.errors ~span:name.span
                 (Printf.sprintf
                    "Module `%s` does not implement `%s` required by `sig %s`."
                    name.txt fname.txt name.txt)
@@ -6073,7 +6073,7 @@ let rec check_decl env (d : Ast.decl) : env =
               let tmp_env = { inner_env with errors = tmp_errors } in
               unify tmp_env ~span:fname.span expected actual;
               if Err.has_errors tmp_errors then
-                Err.error env.errors ~span:fname.span
+                Err.error ~code:Err.Code.sig_mismatch env.errors ~span:fname.span
                   (Printf.sprintf
                      "Module `%s` implements `%s` with wrong type.\n  \
                       Expected: %s  (from sig %s)\n  \
@@ -6085,7 +6085,7 @@ let rec check_decl env (d : Ast.decl) : env =
         (* Verify all sig_types are declared in the module *)
         List.iter (fun ((tname : Ast.name), _params) ->
             if not (StrMap.mem tname.txt inner_env.types) then
-              Err.error env.errors ~span:name.span
+              Err.error ~code:Err.Code.sig_mismatch env.errors ~span:name.span
                 (Printf.sprintf
                    "Module `%s` does not declare type `%s` required by `sig %s`."
                    name.txt tname.txt name.txt)
@@ -6305,10 +6305,10 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DProtocol (name, pdef, sp) ->
     (* Register the protocol and validate structural well-formedness. *)
     if StrMap.mem name.txt env.protocols then
-      Err.error env.errors ~span:sp
+      Err.error ~code:Err.Code.duplicate_protocol env.errors ~span:sp
         (Printf.sprintf "Duplicate protocol definition `%s`." name.txt);
     if pdef.proto_steps = [] then
-      Err.warning env.errors ~span:sp
+      Err.warning ~code:Err.Code.protocol_empty env.errors ~span:sp
         (Printf.sprintf "Protocol `%s` has no steps — it describes no communication."
            name.txt);
     (* Validate each step for structural correctness. [in_loop] tracks
@@ -6317,7 +6317,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let rec validate_step ~in_loop = function
       | Ast.ProtoMsg (sender, receiver, msg_ty, _) ->
         if sender.txt = receiver.txt then
-          Err.error env.errors ~span:sender.span
+          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:sender.span
             (Printf.sprintf
                "Protocol `%s`: participant `%s` cannot send a message to itself."
                name.txt sender.txt);
@@ -6325,20 +6325,20 @@ let rec check_decl env (d : Ast.decl) : env =
         ignore (surface_ty env ~tvars msg_ty)
       | Ast.ProtoLoop (steps, _) ->
         if steps = [] then
-          Err.error env.errors ~span:sp
+          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:sp
             (Printf.sprintf "Protocol `%s`: a `loop` block must contain at least one step."
                name.txt);
         List.iter (validate_step ~in_loop:true) steps
       | Ast.ProtoChoice (participant, branches) ->
         if List.length branches < 2 then
-          Err.error env.errors ~span:participant.span
+          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:participant.span
             (Printf.sprintf
                "Protocol `%s`: `choice` by `%s` must have at least 2 branches."
                name.txt participant.txt);
         List.iter (fun (_, steps) -> List.iter (validate_step ~in_loop) steps) branches
       | Ast.ProtoStop stop_sp ->
         if not in_loop then
-          Err.error env.errors ~span:stop_sp
+          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:stop_sp
             (Printf.sprintf
                "Protocol `%s`: `stop` outside of a `loop` has no effect — the \
                 protocol already ends here if you just write nothing."
@@ -6364,13 +6364,13 @@ let rec check_decl env (d : Ast.decl) : env =
       | Ast.ProtoLoop (inner, _) :: rest ->
         check_unreachable_after_loop ~tail:[] inner;
         if rest <> [] then
-          Err.error env.errors ~span:sp
+          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:sp
             (Printf.sprintf
                "Protocol `%s`: the steps after this `loop` can never run — \
                 a `loop` block repeats forever, so it must be the last step."
                name.txt)
         else if tail <> [] then
-          Err.error env.errors ~span:sp
+          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:sp
             (Printf.sprintf
                "Protocol `%s`: this `choose` branch ends in a `loop`, but the \
                 protocol continues after the `choose` — those following steps \
@@ -6383,13 +6383,13 @@ let rec check_decl env (d : Ast.decl) : env =
            unreachability shape as `loop`, just via early exit instead of
            looping forever. *)
         if rest <> [] then
-          Err.error env.errors ~span:stop_sp
+          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:stop_sp
             (Printf.sprintf
                "Protocol `%s`: the steps after `stop` can never run — `stop` \
                 exits the loop immediately, so it must be the last step."
                name.txt)
         else if tail <> [] then
-          Err.error env.errors ~span:stop_sp
+          Err.error ~code:Err.Code.protocol_invalid env.errors ~span:stop_sp
             (Printf.sprintf
                "Protocol `%s`: this `choose` branch ends in `stop`, but the \
                 protocol continues after the `choose` — those following steps \
@@ -6413,7 +6413,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let projections = project_protocol env ~span:sp ~proto_name:name.txt pdef in
     let participants = List.map fst projections in
     if participants <> [] && List.length participants < 2 then
-      Err.warning env.errors ~span:sp
+      Err.warning ~code:Err.Code.protocol_single_participant env.errors ~span:sp
         (Printf.sprintf
            "Protocol `%s` only names one participant (`%s`). \
             A protocol usually involves at least two parties."
@@ -6431,7 +6431,7 @@ let rec check_decl env (d : Ast.decl) : env =
              let other_parts = List.map fst other_pi.pi_projections in
              if List.length participants >= 2 && List.length other_parts >= 2
              && List.sort compare participants = List.sort compare other_parts then
-               Err.hint env.errors ~span:sp
+               Err.hint ~code:Err.Code.protocol_same_participants env.errors ~span:sp
                  (Printf.sprintf
                     "Protocol `%s` involves the same participants as `%s`. \
                      If these are dual protocols (one for each direction), \
@@ -6508,7 +6508,7 @@ let rec check_decl env (d : Ast.decl) : env =
                  | None -> false
                  | Some tys -> List.exists (fun (impl_ty, _, _) ->
                      impl_matches_ty (repr impl_ty) cty) tys) then
-               Err.error env.errors ~span:cname.span
+               Err.error ~code:Err.Code.unsatisfied_constraint env.errors ~span:cname.span
                  (Printf.sprintf
                     "Constraint `%s(%s)` in `when` clause is not satisfied.\n\
                      No `impl %s(%s)` is in scope."
@@ -6526,7 +6526,7 @@ let rec check_decl env (d : Ast.decl) : env =
          && String.sub idef.impl_iface.txt 0 4 = "Json"
        in
        if not is_json_derive then
-         Err.error env.errors ~span:idef.impl_iface.span
+         Err.error ~code:Err.Code.unknown_interface env.errors ~span:idef.impl_iface.span
            (Printf.sprintf "Unknown interface `%s` — is it declared above this impl?"
               idef.impl_iface.txt)
      | Some interface ->
@@ -6544,7 +6544,7 @@ let rec check_decl env (d : Ast.decl) : env =
                      | None -> false
                      | Some tys -> List.exists (fun (impl_ty, _, _) ->
                          impl_matches_ty (repr impl_ty) sc_inst_ty) tys) then
-                   Err.error env.errors ~span:idef.impl_iface.span
+                   Err.error ~code:Err.Code.missing_superclass_impl env.errors ~span:idef.impl_iface.span
                      (Printf.sprintf
                         "Cannot implement `%s(%s)`: required superclass `%s(%s)` is not \
                          satisfied.\n\
@@ -6562,7 +6562,7 @@ let rec check_decl env (d : Ast.decl) : env =
              idef.impl_methods
            in
            if not provided && iface_m.md_default = None then
-             Err.error env.errors ~span:idef.impl_iface.span
+             Err.error ~code:Err.Code.missing_method env.errors ~span:idef.impl_iface.span
                (Printf.sprintf
                   "Missing method `%s` in `impl %s(%s)`.\n\
                    Interface `%s` requires this method to be implemented."
@@ -6574,7 +6574,7 @@ let rec check_decl env (d : Ast.decl) : env =
                    (fun (m : Ast.method_decl) -> m.md_name.txt = mname.txt)
                    interface.iface_methods with
            | None ->
-             Err.error env.errors ~span:mname.span
+             Err.error ~code:Err.Code.unknown_method env.errors ~span:mname.span
                (Printf.sprintf "Interface `%s` does not declare a method `%s`."
                   idef.impl_iface.txt mname.txt)
            | Some iface_method ->
@@ -6775,7 +6775,7 @@ let rec check_decl env (d : Ast.decl) : env =
              import_index_add_exact env.import_idx n.Ast.txt entry;
              bind_var n.Ast.txt sch env
            | None ->
-             Err.error env.errors ~span:n.Ast.span
+             Err.error ~code:Err.Code.unknown_export env.errors ~span:n.Ast.span
                (Printf.sprintf "Module `%s` does not export `%s`."
                   mod_str n.Ast.txt);
              env) env names
@@ -6872,7 +6872,7 @@ let rec check_decl env (d : Ast.decl) : env =
             | [] -> sp
           in
           if not (March_caps.Cap_scope.is_scopable cap) then
-            Err.error env.errors ~span
+            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
               (Printf.sprintf
                  "`%s` does not take a path scope; only filesystem \
                   capabilities do (`IO.FileRead`, `IO.FileWrite`, \
@@ -6881,7 +6881,7 @@ let rec check_decl env (d : Ast.decl) : env =
                   you mean, e.g. `needs IO.FileSystem(\"%s\")`."
                  cap path path)
           else if not (March_caps.Cap_scope.is_absolute path) then
-            Err.error env.errors ~span
+            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
               (Printf.sprintf
                  "The scope `%s` on `%s` is a relative path, so it would \
                   name a different directory depending on the working \
@@ -7006,7 +7006,7 @@ let rec check_decl env (d : Ast.decl) : env =
         in
         match sch_opt with
         | None ->
-          Err.error env.errors ~span:a.tr_via.span
+          Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_via.span
             (Printf.sprintf
                "Via function `%s` is not defined in this module. \
                 Expected: fn %s(h : %s(%s)) : %s(%s) do ... end"
@@ -7019,7 +7019,7 @@ let rec check_decl env (d : Ast.decl) : env =
            | TArrow (TCon (hn, param_args), ret_t) when hn = handle_name ->
              (match last_arg param_args with
               | Some (TCon (s, []) as from_t) when s <> a.tr_from.txt ->
-                Err.error env.errors ~span:a.tr_span
+                Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_span
                   (Printf.sprintf
                      "Via function `%s` takes state `%s` but transition declares from-state `%s`."
                      via_name (pp_ty from_t) a.tr_from.txt)
@@ -7028,23 +7028,23 @@ let rec check_decl env (d : Ast.decl) : env =
               | TCon (hn2, ret_args) when hn2 = handle_name ->
                 (match last_arg ret_args with
                  | Some (TCon (s, []) as to_t) when s <> a.tr_to.txt ->
-                   Err.error env.errors ~span:a.tr_span
+                   Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_span
                      (Printf.sprintf
                         "Via function `%s` returns state `%s` but transition declares to-state `%s`."
                         via_name (pp_ty to_t) a.tr_to.txt)
                  | _ -> ())
               | _ ->
-                Err.error env.errors ~span:a.tr_span
+                Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_span
                   (Printf.sprintf
                      "Via function `%s` has return type `%s`, expected `%s(_, %s)`."
                      via_name (pp_ty ret_t) handle_name a.tr_to.txt))
            | TArrow (param_t, _) ->
-             Err.error env.errors ~span:a.tr_via.span
+             Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_via.span
                (Printf.sprintf
                   "Via function `%s` takes `%s`, expected `%s(..., %s)`."
                   via_name (pp_ty param_t) handle_name a.tr_from.txt)
            | _ ->
-             Err.error env.errors ~span:a.tr_via.span
+             Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_via.span
                (Printf.sprintf
                   "Via function `%s` has type `%s`, expected `%s(..., %s) -> %s(..., %s)`."
                   via_name (pp_ty ty) handle_name a.tr_from.txt handle_name a.tr_to.txt));
@@ -7065,7 +7065,7 @@ let rec check_decl env (d : Ast.decl) : env =
                let from_s = pp_ty from_t in
                let to_s   = pp_ty to_t in
                if from_s <> to_s then
-                 Err.warning env.errors ~span:sp
+                 Err.warning ~code:Err.Code.undeclared_transition env.errors ~span:sp
                    (Printf.sprintf
                       "`%s` looks like a transition function (`%s` -> `%s`) \
                        but is not declared in `transitions %s`. \
@@ -7093,7 +7093,7 @@ let rec check_decl env (d : Ast.decl) : env =
 let warn_unused_imports env =
   List.iter (fun ie ->
     if not !(ie.ie_used) then
-      Err.warning_with_code env.errors ~span:ie.ie_span ~code:"unused_import" ie.ie_desc
+      Err.warning_with_code ~code:Err.Code.unused_import env.errors ~span:ie.ie_span ie.ie_desc
   ) !(env.import_tracker)
 
 (* =================================================================
@@ -7421,7 +7421,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
             The span has to be [fc_params_span] specifically — `main`'s NAME
             span would yield `fn main(…)() : ()`, and the clause span covers
             the body. That is why `fn_clause` grew the field. *)
-         Err.error_with_fix env.errors ~span ~code:"cap_grant"
+         Err.error_with_fix ~code:Err.Code.cap_grant env.errors ~span
            ~fix:(Err.FReplace
                    { span = params_span; text = Printf.sprintf "(%s)" suggested })
            (Printf.sprintf
@@ -7460,7 +7460,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
             not cover it — where it would otherwise be an ordinary violation,
             and this is the more informative message to give. *)
          else if cap_subsumes "IO.Foreign" c then
-           Err.error env.errors ~span
+           Err.error ~code:Err.Code.cap_grant_exceeded env.errors ~span
              (Printf.sprintf
                 "`main` is granted %s, but the program reaches `%s` — \
                  linked C code, whose behavior the capability lattice cannot \
@@ -7486,7 +7486,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
            let param_hint =
              Printf.sprintf "_cap_%s : Cap(%s)" (String.lowercase_ascii leaf) c
            in
-           Err.error env.errors ~span
+           Err.error ~code:Err.Code.cap_grant_exceeded env.errors ~span
              (Printf.sprintf
                 "`main` is granted %s, but the program reaches `%s`%s. \
                  The grant is a ceiling on the WHOLE program — declaring \
@@ -8132,7 +8132,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                      | Some i -> String.sub c (i + 1) (String.length c - i - 1)
                      | None -> c
                    in
-                   Err.error env.errors ~span:sp
+                   Err.error ~code:Err.Code.role_grant_too_wide env.errors ~span:sp
                      (Printf.sprintf
                         "Protocol `%s`: `role %s needs %s` is wider than `main`'s grant, which is %s. \
                          A role's grant must fit within the program's: the runner narrows the role's \
@@ -8181,7 +8181,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                         (render_cap_chain (r.rr_what :: List.map show_key chain))
                     | _ -> ""
                   in
-                  Err.error env.errors ~span:r.rr_span
+                  Err.error ~code:Err.Code.role_grant_exceeded env.errors ~span:r.rr_span
                     (Printf.sprintf
                        "Role `%s.%s` is granted %s (`role %s needs %s`), but %s reaches `%s`%s. \
                         A role's grant bounds everything its code reaches, as `main`'s grant bounds \
@@ -8202,7 +8202,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                 else [])
            in
            if whys <> [] then
-             Err.warning env.errors ~span:r.rr_span
+             Err.warning ~code:Err.Code.role_grant_unverified env.errors ~span:r.rr_span
                (Printf.sprintf
                   "cannot verify role grant for %s at %s:%d: value not statically known (%s). \
                    A closure received as a value is its creator's authority, so `role %s needs %s` \
@@ -8626,7 +8626,7 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
                  in specs/todos/2026-08-14-cap-ceiling-under-check-needs-body-only-closure.md.
                  Under-deliver the fix there rather than mis-place it. *)
               if sp == Ast.dummy_span || sp.Ast.start_line <= 0 then
-                Err.error errors ~span:sp msg
+                Err.error ~code:Err.Code.cap_ceiling errors ~span:sp msg
               else
                 (* Indent the inserted line to the owner's own declaration
                    column (the span points at its first `needs`/header), so a
@@ -8634,7 +8634,7 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
                    hardcoded two spaces. *)
                 let indent = String.make (max 0 (sp.Ast.start_col)) ' ' in
                 Err.error_with_fix errors ~span:sp
-                  ~code:("cap_ceiling:" ^ c)
+                  ~code:(Err.Code.with_arg Err.Code.cap_ceiling c)
                   ~fix:(Err.FInsert { after_line = sp.Ast.start_line;
                                       text = indent ^ "needs " ^ c })
                   msg
@@ -9375,7 +9375,7 @@ let check_letstar_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
       in
       (match scheme_opt with
        | None ->
-         Err.error env''.errors ~span:sp
+         Err.error ~code:Err.Code.let_star_no_flat_map env''.errors ~span:sp
            (Printf.sprintf
               "`let*` needs `%s`, but it doesn't exist.\n\
                Define `flat_map(x : %s(a), f : a -> %s(b)) : %s(b)` in a \
@@ -9395,14 +9395,14 @@ let check_letstar_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
             unify env'' ~span:sp ~reason:(Some (RLetBind sp)) a_ty pat_ty;
             Some bindings
           | _ ->
-            Err.error env''.errors ~span:sp
+            Err.error ~code:Err.Code.let_star_bad_flat_map env''.errors ~span:sp
               (Printf.sprintf
                  "`%s` doesn't have the shape `let*` needs: \
                   `%s(a) -> (a -> %s(b)) -> %s(b)`."
                  flat_map_name head_name head_name head_name);
             None))
     | _ ->
-      Err.error env'.errors ~span:sp
+      Err.error ~code:Err.Code.let_star_unknown_type env'.errors ~span:sp
         "`let*`'s right-hand side must have a concrete type (e.g. `Option(a)`, \
          `Result(a, e)`) so `let*` can find its `flat_map` — its type could \
          not be determined here.";

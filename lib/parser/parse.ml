@@ -2,9 +2,9 @@ module Errors = March_errors.Errors
 
 type 'a result_ = ('a, Errors.diagnostic list) result
 
-let code_parse_error  = "parse_error"
-let code_syntax_error = "syntax_error"
-let code_lex_error    = "lex_error"
+let code_parse_error  = March_errors.Code.parse_error
+let code_syntax_error = March_errors.Code.syntax_error
+let code_lex_error    = March_errors.Code.lex_error
 
 (* The one place a token filter is instantiated.  Its state lives in the
    closure, so every parse gets a fresh one. *)
@@ -29,16 +29,16 @@ let run ?(filename = "") ?(stuck = "I got stuck here:") entry src =
   | v -> Ok v
   | exception Errors.ParseError (msg, hint, pos) ->
     Error [ { (Errors.parse_error_diagnostic_at ~filename ?hint ~src ~msg pos)
-              with code = Some code_parse_error } ]
+              with code = code_parse_error } ]
   | exception Parser.Error ->
     Error [ { (Errors.parse_error_diagnostic ~filename ~msg:stuck lexbuf)
-              with code = Some code_syntax_error } ]
+              with code = code_syntax_error } ]
   | exception Lexer.Lexer_error msg ->
     (* The lexer's sub-rules leave no usable lexeme; one caret where it
        stopped. *)
     Error [ { (Errors.parse_error_diagnostic_at ~filename ~len:1 ~msg
                  (Lexing.lexeme_start_p lexbuf))
-              with code = Some code_lex_error } ]
+              with code = code_lex_error } ]
 
 let module_ ?filename ?stuck src    = run ?filename ?stuck module_of_lexbuf src
 let repl_input ?filename ?stuck src = run ?filename ?stuck repl_input_of_lexbuf src

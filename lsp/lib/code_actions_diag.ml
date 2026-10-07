@@ -499,7 +499,7 @@ let code_actions_at (a : t) ~line ~character
   let unused_binding_actions =
     List.concat_map (fun (diag : Lsp.Types.Diagnostic.t) ->
         let has_code = match diag.code with
-          | Some (`String "unused_binding") -> true
+          | Some (`String c) -> c = March_errors.Code.unused_binding
           | _ -> false
         in
         if not has_code || not (diag_cursor_overlap diag) then []
@@ -643,7 +643,7 @@ let code_actions_at (a : t) ~line ~character
   let unused_import_actions =
     List.concat_map (fun (diag : Lsp.Types.Diagnostic.t) ->
         let has_code = match diag.code with
-          | Some (`String "unused_import") -> true
+          | Some (`String c) -> c = March_errors.Code.unused_import
           | _ -> false
         in
         if not has_code || not (diag_cursor_overlap diag) then []
@@ -943,7 +943,7 @@ let code_actions_at (a : t) ~line ~character
     let prefix_edits =
       List.filter_map (fun (diag : Lsp.Types.Diagnostic.t) ->
           match diag.code with
-          | Some (`String "unused_binding") ->
+          | Some (`String c) when c = March_errors.Code.unused_binding ->
             let pos = diag.range.Lsp.Types.Range.start in
             Some (TextEdit.create
                     ~range:(Range.create ~start:pos ~end_:pos) ~newText:"_")

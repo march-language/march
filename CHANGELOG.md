@@ -19,6 +19,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Every diagnostic has a code, and `march --explain <code>`.** Each error,
+  warning and hint ends its first line with its code in brackets
+  (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always
+  carries it, and the LSP links codes to their page. `march --explain <code>`
+  prints an explanation with a failing and a fixed program; the ten most common
+  codes have pages so far (also on the site under `docs/errors/`).
 - **`List.filter` keeps what its predicate says.** `sum_pos(List.filter(ys, fn y -> y > 0))`
   now proves a `List({Int | _ > 0})` demand, directly or through a `let`, and
   combines with the input's own element refinement. A predicate too weak for

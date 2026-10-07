@@ -318,7 +318,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         | None -> ()
         | Some known ->
           unknown_needs := cap_path :: !unknown_needs;
-          Err.error_with_fix env.errors ~span:sp
+          Err.error_with_fix ~code:Err.Code.unknown_capability env.errors ~span:sp
             ~fix:(Err.FReplace { span = sp; text = "needs " ^ known })
             (Printf.sprintf
                "`%s` is not a known capability.\n\
@@ -1058,7 +1058,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                       List.filter_map (fun (_, sc) -> sc) relevant
                       |> List.sort_uniq String.compare
                     in
-                    Err.error env.errors ~span:sp
+                    Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
                       (Printf.sprintf
                          "`%s` is scoped to %s, but this reads `%s`, which is \
                           outside it.\n\
@@ -1199,7 +1199,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       check1_demanded_caps := cap_path :: !check1_demanded_caps;
       match List.assoc_opt cap_path env.proof_caps with
       | Some declaring_mod ->
-        Err.error env.errors ~span:sp
+        Err.error ~code:Err.Code.proof_cap_foreign env.errors ~span:sp
           (render_parts [
             cap cap_path; MPText " is a proof capability declared in module ";
             MPCode declaring_mod; MPText ".";
@@ -1208,7 +1208,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             MPBreak; MPText "Only public functions of "; MPCode declaring_mod;
             MPText " can mint "; cap cap_path; MPText " — callers must receive it as a parameter." ])
       | None ->
-        Err.error_with_fix env.errors ~span:sp ~code:("cap_needs:" ^ cap_path)
+        Err.error_with_fix env.errors ~span:sp ~code:(Err.Code.with_arg Err.Code.cap_needs cap_path)
           ~fix:(Err.FInsert {
             after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
             text = "  needs " ^ cap_path })
@@ -1308,7 +1308,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         specs/progress/2026-08-10-capability-diagnostic-duplication.md and
         specs/progress/2026-08-13-aggregate-missing-needs-diagnostics.md. *)
      Err.error_with_fix env.errors ~span:first_span
-       ~code:("cap_needs:" ^ String.concat "," caps)
+       ~code:(Err.Code.with_arg Err.Code.cap_needs (String.concat "," caps))
        ~fix:(Err.FInsert {
          after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
          text = fix_lines })
@@ -1323,7 +1323,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     if not covered then
-      Err.warning_with_fix env.errors ~span:sp
+      Err.warning_with_fix ~code:Err.Code.extern_needs_foreign env.errors ~span:sp
         ~fix:(Err.FInsert {
           after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
           text = "  needs " ^ cap_path })
@@ -1385,7 +1385,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               || List.exists (fun cap_path -> cap_subsumes need cap_path)
                    (Lazy.force own_transitive_caps) in
     if not used then
-      Err.warning_with_fix env.errors ~span:need_sp
+      Err.warning_with_fix ~code:Err.Code.unused_needs env.errors ~span:need_sp
         ~fix:(Err.FDelete {
           start_line = need_sp.March_ast.Ast.start_line;
           end_line   = need_sp.March_ast.Ast.end_line })
@@ -1421,7 +1421,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   List.iter (fun (cap_path, fn_name, sp) ->
     if cap_path = "IO" && fn_name <> "main"
        && not (List.mem fn_name proof_cap_factories) then
-      Err.hint env.errors ~span:sp
+      Err.hint ~code:Err.Code.cap_root_broad env.errors ~span:sp
         (render_parts [
           MPText "this function takes "; cap "IO";
           MPText " (the root capability); consider narrowing to e.g. ";
@@ -1453,7 +1453,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
              List.exists (fun need -> cap_subsumes need req_cap) declared_needs
            in
            if not covered then
-             Err.error env.errors ~span:sp
+             Err.error ~code:Err.Code.import_cap_missing env.errors ~span:sp
                (render_parts [
                  MPText "module "; MPCode mod_name.txt; MPText " imports ";
                  MPCode imported; MPText " which requires "; cap req_cap;
@@ -1473,7 +1473,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           List.exists (fun need -> cap_subsumes need cap_path) declared_needs
         in
         if not covered then
-          Err.error env.errors ~span:sp
+          Err.error ~code:Err.Code.extern_cap_missing env.errors ~span:sp
             (render_parts [
               MPText "extern block "; MPCode ("\"" ^ edef.ext_lib_name ^ "\"");
               MPText " uses "; cap cap_path;
@@ -1509,7 +1509,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                   || def.fn_vis = Ast.Private)
               && not (List.mem cap_path param_caps) ->
             if declaring_mod = mod_name.txt then
-              Err.error env.errors ~span:sp
+              Err.error ~code:Err.Code.proof_cap_mint_private env.errors ~span:sp
                 (render_parts [
                   MPText "private function "; MPCode def.fn_name.txt;
                   MPText " in "; MPCode declaring_mod;
@@ -1519,7 +1519,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                   MPBreak; MPText "hint: make this function public, or accept ";
                   cap cap_path; MPText " as a parameter and pass it through." ])
             else
-              Err.error env.errors ~span:sp
+              Err.error ~code:Err.Code.proof_cap_return env.errors ~span:sp
                 (render_parts [
                   MPText "function "; MPCode def.fn_name.txt;
                   MPText " returns "; cap cap_path;
@@ -1563,7 +1563,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             let cap_name = match t with
               | Ast.TyCon (_, [Ast.TyCon ({txt;_}, [])]) -> txt
               | _ -> "?" in
-            Err.error env.errors ~span:sp
+            Err.error ~code:Err.Code.realtime_mixed env.errors ~span:sp
               (render_parts [
                 MPText "function "; MPCode def.fn_name.txt;
                 MPText " takes "; MPCode "Tagged(_, Realtime)";
@@ -1598,7 +1598,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       has "_migrate_msg" || has "_migrate_msg__hcr" in
     let what = if is_msg then "migrate_msg" else "migrate_state" in
     if own_caps <> [] then
-      Err.error env.errors ~span:sp
+      Err.error ~code:Err.Code.io_not_allowed env.errors ~span:sp
         (render_parts [
           MPText (what ^ " must be IO-free"); MPBreak;
           MPCode qname; MPText " calls capabilities that need ";
@@ -1622,7 +1622,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         | Some (Ast.TyCon ({ Ast.txt = "Option"; _ }, [ _ ])) -> true
         | _ -> false in
       if not (ok_params && ok_ret) then
-        Err.error env.errors ~span:sp
+        Err.error ~code:Err.Code.migrate_msg_shape env.errors ~span:sp
           (render_parts [
             MPCode name; MPText " is a hot-reload message migration, and must be written as";
             MPBreak; MPCode (name ^ "(m : <old message type>) : Option(<Actor>.Msg)");
@@ -1723,7 +1723,7 @@ let check_cap_narrow_sites (env : env) : unit =
          | Some src, Some dst
            when not (is_proof src) && not (is_proof dst)
              && not (March_caps.Cap_lattice.cap_subsumes src dst) ->
-           Err.error env.errors ~span:sp
+           Err.error ~code:Err.Code.cap_widen env.errors ~span:sp
              (render_parts [
                MPCode ("Cap(" ^ src ^ ")");
                MPText " cannot be widened to "; MPCode ("Cap(" ^ dst ^ ")");
@@ -1854,7 +1854,7 @@ let check_json_cap_sites (env : env) : unit =
            | None -> ())
       | Some cap_rendered ->
         let verb = if encoding then "serialized" else "deserialized" in
-        Err.error env.errors ~span:sp
+        Err.error ~code:Err.Code.cap_deserialize env.errors ~span:sp
           (render_parts [
             (* Already rendered as `Cap(X)` or `ActorCap(X)` by
                [cap_in_solved_ty] — do not wrap it again. *)
@@ -2021,7 +2021,7 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
       | Some msg_ty ->
         (match json_dispatch_head env msg_ty with
          | None ->
-           Err.error env.errors ~span:sp
+           Err.error ~code:Err.Code.codec_missing env.errors ~span:sp
              (render_parts [
                MPCode callee; MPText " cannot choose a codec for a message of type ";
                MPCode (pp_ty (repr msg_ty)); MPText ".";
@@ -2035,7 +2035,7 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
              March_ast.Json_dispatch.record_schema sp (schema_hash env name)
            end
            else
-             Err.error env.errors ~span:sp
+             Err.error ~code:Err.Code.codec_missing env.errors ~span:sp
                (render_parts [
                  MPCode callee; MPText " needs a JSON codec for ";
                  MPCode s; MPText ", and none is derived.";
@@ -2067,7 +2067,7 @@ let check_cap_dict_decls (env : env) : unit =
           StrMap.mem dict_name env.types || StrMap.mem qual env.types
         in
         if known_type then
-          Err.error env.errors ~span:sp
+          Err.error ~code:Err.Code.cap_dict_type env.errors ~span:sp
             (render_parts [
               MPText "A capability's dictionary type must be a RECORD type, but ";
               MPCode dict_name; MPText " is not one.";
@@ -2076,7 +2076,7 @@ let check_cap_dict_decls (env : env) : unit =
                       authorizes, one function per field — e.g. ";
               MPCode "type Ops = { send : (Int) -> Int }"; MPText "." ])
         else
-          Err.error env.errors ~span:sp
+          Err.error ~code:Err.Code.cap_dict_type env.errors ~span:sp
             (render_parts [
               MPText "I don't know a type named "; MPCode dict_name;
               MPText " for the dictionary of "; MPCode ("Cap(" ^ cap_path ^ ")");
@@ -2107,7 +2107,7 @@ let check_cap_dict_decls (env : env) : unit =
     [check_mint_cap_sites]'s third arm. *)
 let check_cap_impl_sites (env : env) : unit =
   List.iter (fun (sp, rty, dict_ty, cur_fn_public, current_module) ->
-      let err parts = Err.error env.errors ~span:sp (render_parts parts) in
+      let err parts = Err.error ~code:Err.Code.cap_impl_invalid env.errors ~span:sp (render_parts parts) in
       match repr rty with
       | TCon ("Cap", [inner]) ->
         (match repr inner with
@@ -2231,7 +2231,7 @@ let check_mint_cap_sites (env : env) : unit =
            (match List.assoc_opt p env.proof_caps with
             | Some declaring_mod ->
               if not (declaring_mod = current_module && cur_fn_public) then
-                Err.error env.errors ~span:sp
+                Err.error ~code:Err.Code.mint_cap_invalid env.errors ~span:sp
                   (render_parts [
                     MPText "mint_cap "; MPCode ("Cap(" ^ p ^ ")");
                     MPText " is only allowed inside a public function of its declaring module ";
@@ -2243,7 +2243,7 @@ let check_mint_cap_sites (env : env) : unit =
             | None ->
               (* mint_cap used to produce a non-proof (IO) cap — disallow; that's
                  cap_narrow's job. *)
-              Err.error env.errors ~span:sp
+              Err.error ~code:Err.Code.mint_cap_invalid env.errors ~span:sp
                 (render_parts [
                   MPText "mint_cap is only for proof capabilities; use ";
                   MPCode "cap_narrow"; MPText " to attenuate IO capabilities." ]))
@@ -2257,7 +2257,7 @@ let check_mint_cap_sites (env : env) : unit =
               target proof cap is fixed at the call site (direct mint, or an
               immediately-applied / type-annotated lambda) pins the result and
               is checked against the declaring-module + public gate above. *)
-           Err.error env.errors ~span:sp
+           Err.error ~code:Err.Code.mint_cap_invalid env.errors ~span:sp
              (render_parts [
                MPText "mint_cap here does not have a determinable proof-capability result type.";
                MPBreak;
@@ -2342,7 +2342,7 @@ let check_deferred_imports (env : env) : unit =
       List.iter (fun req_cap ->
         if not (List.exists (fun need -> cap_subsumes need req_cap) declared_needs)
         then
-          Err.error env.errors ~span:sp
+          Err.error ~code:Err.Code.import_cap_missing env.errors ~span:sp
             (render_parts [
               MPText "module "; MPCode importer; MPText " imports ";
               MPCode imported; MPText " which requires "; cap req_cap;
