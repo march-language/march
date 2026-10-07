@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`List.filter` keeps what its predicate says.** `sum_pos(List.filter(ys, fn y -> y > 0))`
+  now proves a `List({Int | _ > 0})` demand, directly or through a `let`, and
+  combines with the input's own element refinement. A predicate too weak for
+  the demand is reported as `abstract-refinement-too-weak` (an error only under
+  `cap verified`). This is the first *abstract refinement* (a refinement
+  parameterised by a predicate), and user functions can declare one the same
+  way; see "Abstract refinements" in the refinement types reference.
 - **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
   `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
   line per post-TIR definition, sorted, straight from the CAS hashing that keys
