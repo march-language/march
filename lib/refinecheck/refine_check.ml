@@ -384,7 +384,7 @@ let check_impl_dispatch ~root errctx defs (ctx : rctx) path lets sc re ~(span : 
              { Obligation.span; callee = fname; predicate; verdict = Obligation.Skipped reason
              ; kind = Obligation.Precondition };
            if !strict_verified then
-             Err.error errctx ~span
+             Err.error ~code:Err.Code.refinement_unverified errctx ~span
                (Printf.sprintf
                   "`cap verified` module: cannot verify precondition `%s` on `%s` (%s: %s)\n\
                    note: annotate the receiver so its type selects one `impl`, or remove \
@@ -439,7 +439,7 @@ let record_skip_obligation errctx ~(span : A.span) ~(callee : string) ~(predicat
     { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
     ; kind = Obligation.Precondition };
   if !strict_verified then
-    Err.error errctx ~span
+    Err.error ~code:Err.Code.refinement_unverified errctx ~span
       (Printf.sprintf "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\nnote: %s"
          noun predicate callee (Obligation.reason_name reason) (Obligation.reason_detail reason)
          remedy)
@@ -584,7 +584,7 @@ let record_elem_skip errctx ~(span : A.span) ~(callee : string) ~(predicate : st
     { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
     ; kind = Obligation.Precondition };
   if !strict_verified then
-    Err.error errctx ~span
+    Err.error ~code:Err.Code.refinement_unverified errctx ~span
       (Printf.sprintf
          "`cap verified` module: cannot verify element refinement `%s` on `%s` (%s: %s)\n\
           note: build the container from elements the checker can see, or bind it to a \
@@ -790,7 +790,7 @@ let record_param_skip errctx ~(span : A.span) ~(callee : string) ~(predicate : s
     { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
     ; kind = Obligation.Precondition };
   if !strict_verified then
-    Err.error errctx ~span
+    Err.error ~code:Err.Code.refinement_unverified errctx ~span
       (Printf.sprintf
          "`cap verified` module: cannot verify element refinement `%s` on `%s` (%s: %s)\n\
           note: make every argument the call builds its elements from meet the refinement, \
@@ -2033,7 +2033,7 @@ let warn_qualified_call (errctx : Err.ctx) ~(span : A.span) (qname : string) : u
       " A predicate can only call the bare measure vocabulary — `len`, or an \
        `@[measure]` function by its bare name."
   in
-  Err.warning errctx ~span
+  Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
     (Printf.sprintf
        "`%s` is a qualified call inside a refinement predicate. This spelling is \
         never reflected here, so the refinement enforces nothing.%s"
@@ -2056,7 +2056,7 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
       if not (division_reflects ~vocab:true ~top d) then
         Option.iter
           (fun why ->
-            Err.warning errctx ~span
+            Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
               (Printf.sprintf "This refinement is not checked: %s." why))
           (division_outside_fragment_hint e);
       List.iter go args
@@ -2065,7 +2065,7 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
       (* A set-vocabulary name applied in some other shape: most likely the
          program's own function of that name.  It is not a set operation, so
          it translates to nothing (see [set_app_well_formed]). *)
-      Err.warning errctx ~span
+      Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
         (Printf.sprintf
            "`%s` is set vocabulary in a refinement predicate, but this is not a well-formed \
             set operation (`member(x, s)`, `union(a, b)`, `inter(a, b)`, `diff(a, b)`, \
@@ -2093,7 +2093,7 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
             (* A zero-argument function that did not qualify as a constant.
                `@[measure]` is the WRONG remedy here — the shape gate rejects
                it — so say what would actually make the call reflect. *)
-            Err.warning errctx ~span
+            Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
               (Printf.sprintf
                  "`%s()` is a zero-argument function, but it cannot be used as a constant in \
                   this refinement predicate, so the refinement is not checked: its body %s. \
@@ -2101,7 +2101,7 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
                   an Int or Bool literal."
                  f why)
           | _ ->
-            Err.warning errctx ~span
+            Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
               (Printf.sprintf
                  "`%s` is not a measure or known predicate, so this refinement is not checked. \
                   Annotate the function `@[measure]`, or use a supported predicate."
@@ -2248,7 +2248,7 @@ let set_element_type_errors ~(env : (string * A.ty) list) ~(set_fns : (string * 
 let check_set_element_types (errctx : Err.ctx) ~(set_fns : (string * A.ty) list) (fd : A.fn_def) : unit =
   (* [Err.error] drops an identical re-report, so a refinement shared by
      several clauses is reported once. *)
-  let report (span, msg) = Err.error errctx ~span msg in
+  let report (span, msg) = Err.error ~code:Err.Code.set_refinement_type errctx ~span msg in
   List.iter
     (fun (c : A.fn_clause) ->
       let params =
@@ -2321,8 +2321,8 @@ let warn_iface_method_refinement (errctx : Err.ctx) ~(strict : bool) (m : A.meth
        (exactly one `impl` defines it and no top-level `fn` shares the name)."
       m.A.md_name.A.txt
   in
-  if strict then Err.error errctx ~span:m.A.md_name.A.span msg
-  else Err.warning errctx ~span:m.A.md_name.A.span msg
+  if strict then Err.error ~code:Err.Code.refinement_ignored errctx ~span:m.A.md_name.A.span msg
+  else Err.warning ~code:Err.Code.refinement_ignored errctx ~span:m.A.md_name.A.span msg
 
 (* ── `sig` signature refinement warning ────────────────────────────────────
    A refinement in a `sig` module signature (`A.sig_def`'s [sig_fns]) is inert
@@ -2338,7 +2338,7 @@ let warn_iface_method_refinement (errctx : Err.ctx) ~(strict : bool) (m : A.meth
    Emits unconditionally: the caller has already established
    [ty_has_refinement]. *)
 let warn_sig_fn_refinement (errctx : Err.ctx) (sig_name : A.name) (fn_name : A.name) : unit =
-  Err.warning errctx ~span:fn_name.A.span
+  Err.warning ~code:Err.Code.refinement_ignored errctx ~span:fn_name.A.span
     (Printf.sprintf
        "the `sig %s` signature of `%s` carries a refinement, which enforces \
         nothing: a `sig` signature is never read by the refinement checker, so \
@@ -2365,7 +2365,7 @@ let warn_sig_fn_refinement (errctx : Err.ctx) (sig_name : A.name) (fn_name : A.n
    Emits unconditionally: the caller has already established
    [ty_has_refinement]. *)
 let warn_extern_fn_refinement (errctx : Err.ctx) (ef : A.extern_fn) : unit =
-  Err.warning errctx ~span:ef.A.ef_name.A.span
+  Err.warning ~code:Err.Code.refinement_ignored errctx ~span:ef.A.ef_name.A.span
     (Printf.sprintf
        "the `extern` signature of `%s` carries a refinement, which enforces \
         nothing: the callee is not March code, so the refinement checker \
@@ -2555,7 +2555,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
      branch.  An attribute that silently does nothing is exactly the failure
      mode this subsystem keeps producing, so say so. *)
   if is_trusted && not !strict_verified then
-    Err.warning errctx ~span:fd.A.fn_name.A.span
+    Err.warning ~code:Err.Code.attribute_no_effect errctx ~span:fd.A.fn_name.A.span
       (Printf.sprintf
          "`@[trusted]` on `%s` has no effect here: this function is not inside \
           a `cap verified` module, so there is no escalation for it to \
@@ -2568,7 +2568,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
   (* `@[assume]` on a function with no refined return assumes nothing — say
      so, exactly as the `@[trusted]` no-effect case above does. *)
   if is_assumed fd && assumed_return fd = None then
-    Err.warning errctx ~span:fd.A.fn_name.A.span
+    Err.warning ~code:Err.Code.attribute_no_effect errctx ~span:fd.A.fn_name.A.span
       (Printf.sprintf
          "`@[assume]` on `%s` has no effect: it declares no refined return \
           type, so there is no postcondition to assume."
@@ -3776,7 +3776,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         match measure_shape_error fd with
         | None -> true
         | Some msg ->
-          Err.error errctx ~span:fd.A.fn_name.A.span
+          Err.error ~code:Err.Code.invalid_measure errctx ~span:fd.A.fn_name.A.span
             (Printf.sprintf "@[measure] `%s` %s" name msg);
           false)
       all_mfns
@@ -3815,7 +3815,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         (fun e ->
           match e with
           | A.EApp (A.EVar { A.txt; A.span }, _, _) when is_set_measure txt ->
-            Err.error errctx ~span
+            Err.error ~code:Err.Code.set_measure_call errctx ~span
               (Printf.sprintf
                  "`%s` is a set-valued @[measure]: it is meaningful only inside a \
                   refinement predicate and cannot be called here."
@@ -3890,7 +3890,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       (fun (_name, fd) ->
         List.iter
           (fun msg ->
-            Err.error errctx ~span:fd.A.fn_name.A.span
+            Err.error ~code:Err.Code.invalid_measure errctx ~span:fd.A.fn_name.A.span
               (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
           (measure_gate_errors fd))
       mfns;
@@ -3917,7 +3917,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     List.iter
       (fun (name, fd) ->
         if Hashtbl.mem measure_scalar_field_dep name then
-          Err.warning errctx ~span:fd.A.fn_name.A.span
+          Err.warning ~code:Err.Code.measure_scalar_field errctx ~span:fd.A.fn_name.A.span
             (Printf.sprintf
                "@[measure] `%s` reads a constructor field that is not itself a \
                 data type: its value is known at a call site only when the \

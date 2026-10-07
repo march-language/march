@@ -374,7 +374,7 @@ let rec check_decls ?(graph : (string, string list) Hashtbl.t option)
            own contract (full text, unconditional) is untouched; see the
            module header and
            specs/progress/2026-08-10-capability-diagnostic-duplication.md. *)
-        Err.hint errctx ~span:call_span ~code:("cap_needs:" ^ cap)
+        Err.hint errctx ~span:call_span ~code:(Err.Code.with_arg Err.Code.cap_needs cap)
           (Printf.sprintf
              "call to `%s` requires `needs %s` — add `needs %s` to module `%s`%s"
              call_name cap cap mod_name (chain_note enclosing))

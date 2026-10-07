@@ -12115,7 +12115,7 @@ let test_ordinary_unused_param_still_warned () =
 let tyvar_fixed_warnings ctx =
   List.filter (fun (d : March_errors.Errors.diagnostic) ->
       d.severity = March_errors.Errors.Warning
-      && d.code = Some "annotated_tyvar_fixed")
+      && d.code = "annotated_tyvar_fixed")
     ctx.March_errors.Errors.diagnostics
 
 let test_tyvar_fixed_concrete_warns () =
@@ -13858,7 +13858,7 @@ let test_label_rendered_in_output () =
     message  = "type mismatch";
     labels   = [{ lbl_span; lbl_message = "the expected type comes from here" }];
     notes    = [];
-    code     = None;
+    code     = March_errors.Code.type_mismatch;
     fix      = None;
   } in
   let rendered = render_diagnostic ~src diag in
@@ -14227,11 +14227,11 @@ let test_parse_diag_codes () =
   let code src = match parse_error_diag src with
     | Some d -> d.March_errors.Errors.code
     | None -> Alcotest.fail "expected a parse error" in
-  Alcotest.(check (option string)) "grammar production" (Some "parse_error")
+  Alcotest.(check string) "grammar production" "parse_error"
     (code "mod T do\n  fn f(x) do\n    if x then 1 end\n  end\nend");
-  Alcotest.(check (option string)) "menhir stuck" (Some "syntax_error")
+  Alcotest.(check string) "menhir stuck" "syntax_error"
     (code "mod T do\n  fn f() do 1 + end\nend");
-  Alcotest.(check (option string)) "lexer" (Some "lex_error")
+  Alcotest.(check string) "lexer" "lex_error"
     (code "mod T do\n  fn f() do ` end\nend");
   check_parse_error_caret ~src:"mod T do\n  fn f() do ` end\nend"
     ~msg_part:"Unexpected character" ~line:2 ~col:12 ~end_col:13;
@@ -14243,6 +14243,45 @@ let test_parse_diag_codes () =
     Alcotest.(check int) "hint is the one note" 1 (List.length d.notes)
   | _ -> Alcotest.fail "expected exactly one diagnostic"
 
+(* D3: every rendered diagnostic ends its headline with ` [slug]` (appended to
+   the FIRST line only, so a fragment grep of the headline still matches), and
+   the explain pointer appears once per run per code that has a page. *)
+let test_diag_code_suffix_and_explain () =
+  let module E = March_errors.Errors in
+  let sp = { March_ast.Ast.file = "f.march"; start_line = 1; start_col = 0;
+             end_line = 1; end_col = 3 } in
+  let mk code message =
+    { E.severity = E.Error; span = sp; message; labels = []; notes = [];
+      code; fix = None } in
+  let src = "abc\n" in
+  let r1 = E.render_diagnostic ~src (mk E.Code.type_mismatch "first line\nsecond line") in
+  Alcotest.(check bool) "suffix on the headline" true
+    (contains_substring r1 "first line [type_mismatch]\nsecond line");
+  Alcotest.(check bool) "argument dropped from the shown slug" true
+    (contains_substring (E.render_diagnostic ~src
+                 (mk (E.Code.with_arg E.Code.cap_needs "IO.Console") "m"))
+       "m [cap_needs]");
+  (* type_mismatch has a page: the pointer appears on the first rendering of
+     the code in a run and not on the second. *)
+  Hashtbl.reset E.explain_hints_shown;
+  let a = E.render_diagnostic ~src (mk E.Code.type_mismatch "x") in
+  let b = E.render_diagnostic ~src (mk E.Code.type_mismatch "y") in
+  Alcotest.(check bool) "explain pointer once" true
+    (contains_substring a "march --explain type_mismatch"
+     && not (contains_substring b "march --explain"));
+  Alcotest.(check bool) "no pointer for a code without a page" false
+    (contains_substring (E.render_diagnostic ~src (mk E.Code.typed_hole "z")) "--explain");
+  Alcotest.(check bool) "explain prints the page" true
+    (contains_substring (March_errors.Explain.explain "type_mismatch") "## Why the rule exists");
+  Alcotest.(check string) "explain on a code with no page"
+    "no page yet for typed_hole\n" (March_errors.Explain.explain "typed_hole");
+  Alcotest.(check (option string)) "page url"
+    (Some "https://march-lang.org/docs/errors/cap_needs/")
+    (March_errors.Explain.url_of_code "cap_needs:IO");
+  let sorted = List.sort_uniq compare E.Code.all in
+  Alcotest.(check int) "Code.all has no duplicates" (List.length E.Code.all)
+    (List.length sorted)
+
 (* `--check-json` lines carry the secondary spans and the notes; a consumer
    that wants the old shape (`--emit-core-ast`) asks for [~related:false]. *)
 let test_diagnostic_json_labels_notes () =
@@ -14251,7 +14290,7 @@ let test_diagnostic_json_labels_notes () =
   let d : March_errors.Errors.diagnostic =
     { severity = March_errors.Errors.Error; span = sp 3 4; message = "boom";
       labels = [ { lbl_span = sp 1 2; lbl_message = "declared \"here\"" } ];
-      notes = [ "try\nthis" ]; code = Some "x"; fix = None } in
+      notes = [ "try\nthis" ]; code = "x"; fix = None } in
   let j = March_errors.Errors.render_diagnostic_json d in
   Alcotest.(check bool) "labels array" true
     (_contains_substr j
@@ -16389,7 +16428,7 @@ let test_redundant_arm_in_checking_position () =
   end|} in
   let has_redundant =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
-        d.code = Some "redundant_arm")
+        d.code = "redundant_arm")
       ctx.March_errors.Errors.diagnostics
   in
   Alcotest.(check bool) "redundant arm reported in checking position" true
@@ -16409,7 +16448,7 @@ let test_redundant_arm_in_inference_position () =
   end|} in
   let has_redundant =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
-        d.code = Some "redundant_arm")
+        d.code = "redundant_arm")
       ctx.March_errors.Errors.diagnostics
   in
   Alcotest.(check bool) "redundant arm reported in inference position" true
@@ -16433,7 +16472,7 @@ let test_record_pattern_arm_not_flagged_redundant () =
   end|} in
   let has_redundant =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
-        d.code = Some "redundant_arm")
+        d.code = "redundant_arm")
       ctx.March_errors.Errors.diagnostics
   in
   Alcotest.(check bool) "record-pattern arm not falsely flagged" false
@@ -16619,7 +16658,7 @@ let test_nested_or_pattern_arm_not_flagged_redundant () =
   end|} in
   let has_redundant =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
-        d.code = Some "redundant_arm")
+        d.code = "redundant_arm")
       ctx.March_errors.Errors.diagnostics
   in
   Alcotest.(check bool) "arm after a nested or-pattern is reachable" false
@@ -16637,7 +16676,7 @@ let test_as_over_or_pattern_arm_not_flagged_redundant () =
   end|} in
   let has_redundant =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
-        d.code = Some "redundant_arm")
+        d.code = "redundant_arm")
       ctx.March_errors.Errors.diagnostics
   in
   Alcotest.(check bool) "arm after `(1 | 2) as k` is reachable" false
@@ -16704,7 +16743,7 @@ let test_record_pattern_genuinely_redundant_is_reported () =
   end|} in
   let has_redundant =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
-        d.code = Some "redundant_arm")
+        d.code = "redundant_arm")
       ctx.March_errors.Errors.diagnostics
   in
   Alcotest.(check bool) "record arm after a catch-all record arm is flagged"
@@ -16890,7 +16929,7 @@ let test_let_record_destructure_unknown_field_rejected () =
   end|} in
   let names_field =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
-        d.code = Some "unknown_record_field")
+        d.code = "unknown_record_field")
       ctx.March_errors.Errors.diagnostics
   in
   Alcotest.(check bool) "let with unknown field: dedicated diagnostic" true
@@ -18379,6 +18418,7 @@ let compiler_suites =
           Alcotest.test_case "parse caret: else-if chain missing `end`"      `Quick test_parse_caret_else_if_missing_end;
           Alcotest.test_case "parse caret: mod missing `do`"                 `Quick test_parse_caret_mod_missing_do;
           Alcotest.test_case "Parse: one coded diagnostic per failure kind"  `Quick test_parse_diag_codes;
+          Alcotest.test_case "D3: [slug] suffix, explain pointer, --explain pages" `Quick test_diag_code_suffix_and_explain;
           Alcotest.test_case "--check-json: labels and notes"                `Quick test_diagnostic_json_labels_notes;
           Alcotest.test_case "#7 if-then note mentions do/end"              `Quick test_parse_error_then_note_do_end;
           Alcotest.test_case "fix: if-then error names then as problem"     `Quick test_parse_error_then_says_then_not_else;

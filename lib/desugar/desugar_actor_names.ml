@@ -93,7 +93,7 @@ let is_stdlib_file : (string -> bool) ref = ref (fun _ -> false)
 let build ?qualify errors (actors : (string list * name) list) : table =
   let declared = List.fold_left (fun m (p, (n : name)) ->
       if KMap.mem (p, n.txt) m then begin
-        Err.error errors ~span:n.span
+        Err.error ~code:Err.Code.duplicate_actor errors ~span:n.span
           (Printf.sprintf
              "actor `%s` is declared more than once in %s; \
               rename one of them"

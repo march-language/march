@@ -222,7 +222,7 @@ let rec expand (errors : Err.ctx) (decls : decl list) : decl list =
         | DActor (_, name, adef, span) as d when adef.actor_remote ->
           (match routable adef with
            | [] ->
-             Err.error errors ~span
+             Err.error ~code:Err.Code.remote_actor_unroutable errors ~span
                (Printf.sprintf
                   "`@[remote]` actor `%s` has no handler a remote message can reach. A routable handler takes exactly one parameter annotated with a declared type that derives Json, e.g. `on Bump(h : Hit)`."
                   name.txt);
