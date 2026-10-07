@@ -248,6 +248,11 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Compiled artifacts are shared across projects on the same machine.** Every
+  build also stores its cache entry in `~/.march/cas`, and a project that has
+  not built a program yet reuses an identical build from another project or
+  clone. To force a rebuild, clear both `.march/cas/artifacts-v2` and
+  `~/.march/cas/artifacts-v2`.
 - **Editing a file the build does not use no longer invalidates the compile
   cache.** The cache used to key on every `.march` file in the entry's
   directory and in `MARCH_LIB_PATH`. It now keys on the files the previous

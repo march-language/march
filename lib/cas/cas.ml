@@ -299,10 +299,44 @@ let copy_file_exec ~(src : string) ~(dest : string) : bool =
 (* Store the compiled binary IN the cache (by content), not a pointer to it.
    See [artifact_path] for why a pointer is unsound. A failed copy simply
    leaves no entry — a future compile misses and rebuilds, which is correct. *)
+(* ── Write-through to the global store (observability plan B7.3) ─────────
+   [global_root] (~/.march/cas) was created but never written: every project
+   and every fresh clone rebuilt what another had already built with the same
+   compiler, runtime, flags and sources.  Every artifact-store write now also
+   goes to the global store with the same temp+rename discipline
+   ([copy_file_exec]), and a local miss consults the global store and warms
+   the local one from it.  The key already includes the compiler and runtime
+   identities, the target, every codegen flag and the source digest, so a
+   global entry is valid in any project that computes the same key.  Clearing
+   a stale cache now means clearing BOTH artifacts-v2 trees. *)
+let global_artifact_path t ch =
+  Option.map (fun gr -> artifact_path gr ch) t.global_root
+
+(* Every file that belongs to an artifact entry: the blob, its diagnostics
+   and sidecar records ([.diag], [.sidecars]) and its sidecar outputs. *)
+let entry_suffixes () = [ ""; ".diag"; ".sidecars" ] @ [ ".hcr_manifest"; ".schemas.json" ]
+
+(* Copy the [suffixes] of [ch]'s entry that exist under [from_blob] to
+   [to_blob]. *)
+let copy_entry ?(suffixes = entry_suffixes ()) ~from_blob ~to_blob () =
+  List.iter (fun sfx ->
+      let src = from_blob ^ sfx in
+      if Sys.file_exists src then ignore (copy_file_exec ~src ~dest:(to_blob ^ sfx)))
+    suffixes
+
+(* Mirror just-written local entry files ([suffixes]) into the global store. *)
+let write_through ~suffixes t ch =
+  match global_artifact_path t ch with
+  | Some gblob ->
+    copy_entry ~suffixes ~from_blob:(artifact_path t.local_root ch) ~to_blob:gblob ()
+  | None -> ()
+
 let store_artifact (t : t) (ch : string) (path : string) : unit =
   let blob = artifact_path t.local_root ch in
-  if copy_file_exec ~src:path ~dest:blob then
-    Hashtbl.replace t.artifacts ch blob
+  if copy_file_exec ~src:path ~dest:blob then begin
+    Hashtbl.replace t.artifacts ch blob;
+    write_through ~suffixes:[ "" ] t ch
+  end
 
 (* Copy a cached artifact to [dest], returning false if the artifact file is
    gone or the copy fails — callers must treat that as a cache miss and
@@ -340,8 +374,9 @@ let store_sidecars (t : t) (ch : string) (out : string) : unit =
   let stored = List.filter (fun sfx ->
       Sys.file_exists (out ^ sfx) && copy_file_exec ~src:(out ^ sfx) ~dest:(blob ^ sfx))
       sidecar_suffixes in
-  try write_file (sidecar_list_path t ch) (String.concat "\n" stored ^ "\n")
-  with Sys_error _ -> ()
+  (try write_file (sidecar_list_path t ch) (String.concat "\n" stored ^ "\n")
+   with Sys_error _ -> ());
+  write_through ~suffixes:(".sidecars" :: sidecar_suffixes) t ch
 
 (* Restore [ch]'s sidecars next to [out], removing any [out] sidecar the
    cached build did not produce (a stale manifest from another build is
@@ -378,14 +413,24 @@ let store_diagnostics (t : t) (ch : string) (text : string) : unit =
     mkdir_p (Filename.dirname path);
     let tmp = path ^ ".tmp." ^ string_of_int (Unix.getpid ()) in
     write_file tmp text;
-    Sys.rename tmp path
+    Sys.rename tmp path;
+    write_through ~suffixes:[ ".diag" ] t ch
   with Sys_error _ | Unix.Unix_error _ -> ()
 
 let lookup_diagnostics (t : t) (ch : string) : string option =
-  read_file (diag_path t ch)
+  match read_file (diag_path t ch) with
+  | Some d -> Some d
+  | None ->
+    (* B7.3: an entry another project wrote through to the global store. *)
+    Option.bind t.global_root (fun gr -> read_file (artifact_path gr ch ^ ".diag"))
 
 let lookup_artifact (t : t) (ch : string) : string option =
   let blob = artifact_path t.local_root ch in
+  (* Local miss, global hit: warm the local store from the global one. *)
+  (if not (Sys.file_exists blob) then
+     match global_artifact_path t ch with
+     | Some gblob when Sys.file_exists gblob -> copy_entry ~from_blob:gblob ~to_blob:blob ()
+     | _ -> ());
   if Sys.file_exists blob then begin
     (* Keep the memo in step with the on-disk truth. *)
     Hashtbl.replace t.artifacts ch blob;

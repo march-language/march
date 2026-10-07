@@ -2160,7 +2160,8 @@ refinement obligations (user + stdlib): 17 proved, 0 violated, 0 trusted, 33 ski
   by kind: 50 precondition, 0 postcondition, 0 division
 ```
 
-> **Clear `.march/cas/artifacts-v2` first.** A `--check` run with sources that hash to
+> **Clear `.march/cas/artifacts-v2` and `~/.march/cas/artifacts-v2` first** (builds
+> write through to the global store, so a project-only clear can still hit). A `--check` run with sources that hash to
 > an artifact already in the CAS exits immediately, before parsing, so the
 > report never runs and the command prints **no output** while still exiting 0.
 > That looks identical to "no obligations found", which is exactly the

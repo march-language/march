@@ -185,8 +185,39 @@ let test_depend_mode_new_sibling_imported () =
     "mod Helpers do\n  fn twice(n : Int) : Int do n * 3 end\nend\n";
   Alcotest.(check string) "a new sibling that is imported is picked up" "63" (build "new_sibling")
 
+(* ── B7.3: write-through to the global store ───────────────────────────── *)
+
+let test_global_store_write_through () =
+  require_compiler ();
+  with_scratch @@ fun dir ->
+  let home = Filename.concat dir "home" in
+  let mk name =
+    let p = Filename.concat dir name in
+    Unix.mkdir p 0o755;
+    write_file (Filename.concat p "m.march") warn_src;
+    p in
+  let a = mk "project_a" and b = mk "project_b" in
+  let cold = compile ~home ~extra:"--timings" ~dir:a ~log:(Filename.concat dir "a.log") "m.march" in
+  Alcotest.(check string) ("project A builds from scratch\n" ^ cold) "full compile" (show (outcome cold));
+  let gstore = Filename.concat home ".march/cas/artifacts-v2" in
+  Alcotest.(check bool) "the build wrote through to ~/.march/cas/artifacts-v2" true
+    (Sys.file_exists gstore && Array.length (Sys.readdir gstore) > 0);
+  (* Project B has never built anything: no .march/cas of its own. *)
+  let warm = compile ~home ~extra:"--timings" ~dir:b ~log:(Filename.concat dir "b.log") "m.march" in
+  Alcotest.(check string) ("project B is a source-level hit from the global store\n" ^ warm)
+    "source-level hit" (show (outcome warm));
+  Alcotest.(check string) "and replays the same diagnostics"
+    (diagnostics_of cold |> String.split_on_char '\n'
+     |> List.filter (fun l -> not (contains l "[timings]")) |> String.concat "\n")
+    (diagnostics_of warm);
+  Alcotest.(check string) "project B's binary runs" "2" (run_out b);
+  Alcotest.(check bool) "the hit warmed project B's local store" true
+    (Sys.file_exists (Filename.concat b ".march/cas/artifacts-v2"))
+
 let tests =
-  [ Alcotest.test_case "B7.1: a cache hit replays the build's warnings" `Slow
+  [ Alcotest.test_case "B7.3: a build writes through to ~/.march/cas; another project hits it" `Slow
+      test_global_store_write_through;
+    Alcotest.test_case "B7.1: a cache hit replays the build's warnings" `Slow
       test_replay_diagnostics_on_hit;
     Alcotest.test_case "B7.2: editing an unloaded sibling is still a source-level hit" `Slow
       test_depend_mode_unrelated_sibling;

@@ -117,7 +117,7 @@ elsewhere: run the sanitizer after it. Release IR is byte-identical with
 ```bash
 MARCH_DEBUG_CASFLAGS=1 ./_build/default/bin/main.exe --compile FILE -o /tmp/x   # key: target, flags, src=, ch=
 MARCH_DEBUG_CASFLAGS=2 ...                                                      # + per-SCC hash lines
-rm -rf .march/cas/artifacts-v2                                                  # NOT artifacts/ (inert v1)
+rm -rf .march/cas/artifacts-v2 ~/.march/cas/artifacts-v2                       # BOTH: builds write through to ~/.march; NOT artifacts/ (inert v1)
 ```
 `src=` digests only the source/TIR input and is comparable across compiler
 builds; `ch=` folds in the compiler executable. After editing `runtime/*.c`, a
