@@ -288,7 +288,7 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found
     { Err.severity = Error; span; message = headline;
       labels;
       notes = occurs_note @ why_note @ mismatch_note @ session_hint @ common_hint @ same_name_note;
-      code = None; fix = None }
+      code = Err.Code.type_mismatch; fix = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).
     Intentionally ignores payload types — only checks session structure shape. *)
@@ -410,7 +410,7 @@ let rec unify env ~span ?(reason = None) t1 t2 =
          (match Hashtbl.find_opt env.cap_producer_ivars id with
           | Some cn_sp ->
             let forge_error p =
-              Err.error env.errors ~span:cn_sp
+              Err.error ~code:Err.Code.cap_narrow_invalid env.errors ~span:cn_sp
                 (render_parts [
                   MPText "cap_narrow cannot produce "; MPCode ("Cap(" ^ p ^ ")");
                   MPText " — "; MPCode ("Cap(" ^ p ^ ")");
@@ -534,9 +534,9 @@ let rec unify env ~span ?(reason = None) t1 t2 =
        that meets it is told to match on the label, not that two session
        types mismatch.  (F5 residual, 2026-07-27; state form 2026-09-17.) *)
     if (not (r1 == r2)) && (session_pending !r1 || session_pending !r2) then
-      Err.error env.errors ~span (offer_unrefined_message "This channel")
+      Err.error ~code:Err.Code.session_offer_unrefined env.errors ~span (offer_unrefined_message "This channel")
     else if not (session_ty_equal !r1 !r2) then
-      Err.error env.errors ~span
+      Err.error ~code:Err.Code.session_type_mismatch env.errors ~span
         (Printf.sprintf
            "Session type mismatch: expected channel at `%s` but found `%s`."
            (pp_session_ty !r1) (pp_session_ty !r2))
@@ -699,11 +699,11 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
      | "Chan", [Ast.TyCon (role, []); Ast.TyCon (proto, [])] ->
        (match StrMap.find_opt proto.txt env.protocols with
         | None ->
-          Err.error env.errors ~span:proto.span
+          Err.error ~code:Err.Code.unknown_protocol env.errors ~span:proto.span
             (Printf.sprintf "I don't know a protocol called `%s`." proto.txt);
           TChan (ref SError)
         | Some pi when has_crash_branches pi.pi_def.Ast.proto_steps ->
-          Err.error env.errors ~span:proto.span
+          Err.error ~code:Err.Code.protocol_crash_branches env.errors ~span:proto.span
             (Printf.sprintf
                "Protocol `%s` has crash branches, and those are only supported \
                 with `@[endpoints]`: `Chan(%s, %s)` cannot run them."
@@ -712,7 +712,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
         | Some pi ->
           (match List.assoc_opt role.txt pi.pi_projections with
            | None ->
-             Err.error env.errors ~span:role.span
+             Err.error ~code:Err.Code.unknown_role env.errors ~span:role.span
                (Printf.sprintf
                   "Protocol `%s` has no role called `%s`.\n\
                    Known roles: %s"
@@ -737,13 +737,13 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
            | n :: rest -> upto (n :: acc) rest
          in
          let cycle = upto [] !expanding_aliases @ [name.Ast.txt] in
-         Err.error env.errors ~span:name.Ast.span
+         Err.error ~code:Err.Code.recursive_type_alias env.errors ~span:name.Ast.span
            (Printf.sprintf "`%s` is defined in terms of itself (%s)."
               name.Ast.txt
               (String.concat " -> " (List.map (Printf.sprintf "`%s`") cycle)));
          TError
        end else if List.length params <> List.length args' then begin
-         Err.error env.errors ~span:name.Ast.span
+         Err.error ~code:Err.Code.type_arity env.errors ~span:name.Ast.span
            (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
               name.Ast.txt (List.length params) (List.length args'));
          TError
@@ -768,7 +768,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
         | Some t -> TCon (t, [])
         | None -> TError)
      | "Chan", _ when name.txt = "Chan" ->
-       Err.error env.errors ~span:name.span
+       Err.error ~code:Err.Code.type_arity env.errors ~span:name.span
          "Chan expects exactly two type arguments: Chan(RoleName, ProtocolName)";
        TChan (ref SError)
      | _ ->
@@ -779,7 +779,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
         match resolve_qualified_type name.txt env with
         | env', Some a -> env', a
         | _ ->
-          Err.error env.errors ~span:name.span
+          Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span
             (qualified_error_msg name.txt env);
           env, 0
     in
@@ -822,7 +822,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
        a dummy span and such diagnostics were filtered out. *)
     let actor_pid = name.txt = "Pid" && List.length args' = 1 in
     if List.length args' <> arity && not actor_pid then
-      Err.error env.errors ~span:name.span
+      Err.error ~code:Err.Code.type_arity env.errors ~span:name.span
         (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
            name.txt arity (List.length args'));
     (* If this is a named record type, expand it structurally so that
@@ -935,11 +935,11 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
     (* Look up the protocol and project onto the given role. *)
     (match StrMap.find_opt proto.txt env.protocols with
      | None ->
-       Err.error env.errors ~span:proto.span
+       Err.error ~code:Err.Code.unknown_protocol env.errors ~span:proto.span
          (Printf.sprintf "I don't know a protocol called `%s`." proto.txt);
        TChan (ref SError)
      | Some pi when has_crash_branches pi.pi_def.Ast.proto_steps ->
-       Err.error env.errors ~span:proto.span
+       Err.error ~code:Err.Code.protocol_crash_branches env.errors ~span:proto.span
          (Printf.sprintf
             "Protocol `%s` has crash branches, and those are only supported \
              with `@[endpoints]`: the channel API cannot run them."
@@ -948,7 +948,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
      | Some pi ->
        (match List.assoc_opt role.txt pi.pi_projections with
         | None ->
-          Err.error env.errors ~span:role.span
+          Err.error ~code:Err.Code.unknown_role env.errors ~span:role.span
             (Printf.sprintf
                "Protocol `%s` has no role called `%s`.\n\
                 Known roles: %s"

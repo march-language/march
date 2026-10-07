@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/syntax_error_5.march","start_line":8,"start_col":12,"end_line":8,"end_col":16,"message":"I got stuck here:","code":"syntax_error","fix":null,"labels":[],"notes":[]}

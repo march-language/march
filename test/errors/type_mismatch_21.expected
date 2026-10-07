@@ -1,0 +1,13 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_21.march
+
+expected `{ x : Int }` but got `{ s : String }`. [type_mismatch]
+
+24 |     let _bad = Cons(pa, Cons(pb, Nil))
+                             ^^^^^^^^^^^^^
+
+    Argument to constructor `Cons`.
+    Field `s` is present in the value provided, but the expected type has no such field.
+    run `march --explain type_mismatch`
+
+

@@ -1,0 +1,38 @@
+-- EXPECT-ERROR: is used more than once here
+mod Main do
+  -- Session-types F7 linearity hole (b), FIXED 2026-07-15: reusing a linear
+  -- session-channel PARAMETER endpoint is REJECTED. `use_twice`'s parameter
+  -- `ch : Chan(Client, Echo)` resolves to a linear `TLin(Linear, TChan ...)`
+  -- endpoint; sending on `ch` a second time re-reads the already-consumed
+  -- endpoint -- a double-use of a linear value.
+  --
+  -- Pre-fix this typechecked CLEAN: the parameter-binding paths (`check_fn`'s
+  -- `FPNamed` loop and `bind_lam_param`) only recognized `always_linear` `TCon`
+  -- parameters, so a `TLin`-wrapped channel parameter was bound UNRESTRICTED and
+  -- escaped the linear-use tracker entirely -- while the same value bound by a
+  -- `let` was tracked (via `bind_pattern_bindings`). The fix threads the `TLin`
+  -- wrapper's linearity into both parameter-binding paths, so `record_use` now
+  -- catches the second read exactly as it would for a linear let-binding (t35).
+  needs IO.Console
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+  end
+
+  fn use_twice(ch : Chan(Client, Echo)) do
+    let ch2 = Chan.send(ch, 1)
+    let ch3 = Chan.send(ch, 2)
+    Chan.close(ch2)
+    Chan.close(ch3)
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Echo)
+    use_twice(cc)
+    let (n, sc2) = Chan.recv(sc)
+    Chan.close(sc2)
+    println(int_to_string(n))
+  end
+end

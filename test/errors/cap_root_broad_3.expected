@@ -1,0 +1,20 @@
+exit: 1
+-- HINT ------------------ errors/cap_root_broad_3.march
+
+this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
+
+26 |     fn attack(cap : Cap(IO)) : Int do consume(cap_narrow(cap)) end
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+-- ERROR ------------------ errors/cap_root_broad_3.march
+
+cap_narrow cannot produce `Cap(Db.P)` — `Cap(Db.P)` is a proof capability, not an IO capability. [cap_narrow_invalid]
+hint: a proof capability may only be minted by a public function of its declaring module via `mint_cap`; cap_narrow only attenuates IO capabilities.
+
+26 |     fn attack(cap : Cap(IO)) : Int do consume(cap_narrow(cap)) end
+                                                   ^^^^^^^^^^^^^^^
+
+
+

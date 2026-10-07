@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR --------------- errors/linear_discarded_11.march
+
+This `_` discards the linear value `val` of type `a`. [linear_discarded]
+Linear values must be consumed exactly once, and binding to `_` is not a use — it drops the value. Pass it to something that consumes it, or match on it. For a session endpoint, the generated `take_closed` / `take_idle` are its consumers.
+
+13 |     let _ = val
+             ^
+
+    run `march --explain linear_discarded`
+
+

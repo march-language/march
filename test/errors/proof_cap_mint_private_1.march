@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: Only public functions of
+-- Slice 6 (proof caps), the mint_cap PRIVATE-FN witness -- the minting surface
+-- is exactly the PUBLIC (`fn`) functions of the declaring module; a `pfn`
+-- (private function) of the declaring module is NOT a mint surface (it may
+-- pass a proof cap through, like any external code, but may not construct
+-- one). Here `Db`'s own `pfn run_migrations` tries to `mint_cap` its own
+-- `Cap(Db.Migrated)`; Check 6's private-in-declaring-module branch rejects it
+-- with `` private function `run_migrations` in `Db` cannot mint
+-- `Cap(Db.Migrated)`. Only public functions of `Db` can construct
+-- `Cap(Db.Migrated)`. ``. Making the fn public (`fn`) is exactly the accept
+-- case (`accept/t62`). IMPOSSIBLE to reject pre-fix (`mint_cap` is new to this
+-- slice). See core-march-types.md §2.8.13.
+mod Db do
+  proof cap Migrated
+  needs IO
+
+  pfn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+    mint_cap(cap)
+  end
+end

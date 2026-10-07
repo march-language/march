@@ -1,0 +1,10 @@
+exit: 1
+-- ERROR -------------------- errors/parse_error_10.march
+
+A `let*` binding can't have a type annotation — its type is inferred from the right-hand side. [parse_error]
+
+5 |     let* x : Int = a
+               ^
+
+    let* name = expr
+    run `march --explain parse_error`

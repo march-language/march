@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_25.march
+
+The linear value `r` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+23 |     let _ = take(r)
+                      ^
+
+
+    `r` was already consumed here:
+
+22 |     send(pid, StoreRes(r))
+                            ^
+    run `march --explain linear_used_twice`
+
+

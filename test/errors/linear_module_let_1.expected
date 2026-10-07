@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR --------------- errors/linear_module_let_1.march
+
+`shared` has the linear type `RingBuf(a)`, so it cannot be a module-level `let`: a module-level value is shared by every function and every actor, and a linear value must be consumed exactly once. [linear_module_let]
+Create it where it is used, or keep it in an actor's state.
+
+10 |   let shared = RingBuf.make(8)
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+

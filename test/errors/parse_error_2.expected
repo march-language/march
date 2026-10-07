@@ -1,0 +1,10 @@
+exit: 1
+-- ERROR --------------------- errors/parse_error_2.march
+
+A `let?` binding can't have a type annotation — its type is inferred from the `Ok` payload of the `Result` on the right. [parse_error]
+
+10 |     let? x : Int = f()
+                ^
+
+    let? name = result_expr
+    run `march --explain parse_error`

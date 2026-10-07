@@ -1,0 +1,2 @@
+exit: 1
+errors/codec_missing_4.march:15:2: error: Protocol `P`: the message `A -> B : Thing` carries `Thing`, which has no JSON codec. Every payload crosses the network as JSON: add `derive Json for Thing`. [codec_missing]

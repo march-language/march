@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: is generic in a parameter of that type
+mod Main do
+  needs IO.Console
+  -- A container holding a linear value handed to a generic stdlib function
+  -- that drops its elements. `List.length` has not opted in, and should not.
+  always_linear type S1 = S1(Int)
+  fn main(c : Cap(IO.Console)) do
+    let xs = [S1(1)]
+    println(int_to_string(List.length(xs)))
+  end
+end

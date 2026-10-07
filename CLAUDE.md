@@ -147,6 +147,12 @@ After implementing or completing a feature, `git mv` its file from `specs/todos/
 
 After changing a feature, run the benchmark(s) that exercise it to catch regressions; see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`. **Always run benchmarks compiled** (`march --compile --opt 2 bench/<name>.march -o /tmp/<name> && /tmp/<name>`); interpreted (`dune exec march --`) can take hours on `fib`-shaped benchmarks.
 
+**A new `bench/*.march` must be registered in `test/test_bench_gate.ml`** (gated with its expected output, or skip-listed with a reason), or the `bench-gate` CI job goes red for everyone.
+
+### When something breaks
+
+Run `scripts/triage.sh FILE` first. For everything else (stage dumps, pass switches, sanitizer, leak tracing, cache keys, slow compiles, the oracles, CI flakes), load the `march-debug` skill; for driving a PR to green, the `steward` skill. Never skip, disable or quarantine a test to get green.
+
 Suspected miscompile: `scripts/triage.sh FILE [--fn NAME] [--deep]` runs interp-vs-compiled, the optional-pass switches, per-stage TIR dumps and an ASAN rebuild, one screen (`--help`).
 
 Leak hunt (who took the unreleased reference): build with `march --rc-trace --compile -o prog FILE`
@@ -172,6 +178,16 @@ Regenerate on purpose after an intentional TIR-shape change with
 artifact. See the workflow/design comment at the top of `test/test_snapshots.ml`
 for the full detail (printer choice, prelude-noise filtering, fresh-name-counter
 determinism).
+
+### Golden rendered-diagnostic corpus
+
+`test/run_errors.exe` (suite `errors`) runs `march --check` and `--check-json` on every
+`test/errors/<slug>_<n>.march` and pins the full output in `.expected` (exit code, rendered
+diagnostics with carets, labels, notes, `[slug]`, explain pointer, and each machine fix as a
+diff) and `.json.expected`. A program carrying `-- EXPECT-ERROR:` must also still contain that
+fragment. After an intentional message change: `UPDATE_ERRORS=1 ./_build/default/test/run_errors.exe -e`,
+then review `git diff test/errors/`. New reject programs and `--explain` pages are added by
+`scripts/seed-error-corpus.sh` (idempotent; never renames an existing case).
 
 ### Refactor oracles: prove a change moved no behaviour
 

@@ -154,7 +154,13 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
         String.concat " "
           (flatten d.message :: List.map (fun n -> "note: " ^ flatten n) d.notes)
     in
-    let code = Option.map (fun s -> `String s) d.code in
+    let code = Some (`String d.code) in
+    (* Link the code to its `march --explain` page on the site, for the codes
+       that have one (specs/lang/errors/<slug>.md, rendered to docs/errors/). *)
+    let codeDescription =
+      Option.map (fun href -> Lsp.Types.CodeDescription.create ~href:(Lsp.Uri.of_string href))
+        (March_errors.Explain.url_of_code d.code)
+    in
     let relatedInformation =
       let infos = List.filter_map (fun (lbl : Err.label) ->
         if lbl.lbl_span.Ast.start_line <= 0 then None
@@ -180,6 +186,7 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
       ~message:(`String message)
       ~source:"march"
       ?code
+      ?codeDescription
       ?relatedInformation
       ())
 

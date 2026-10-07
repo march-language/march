@@ -1,0 +1,2 @@
+exit: 1
+errors/remote_actor_unroutable_1.march:9:2: error: `@[remote]` actor `Counter` has no handler a remote message can reach. A routable handler takes exactly one parameter annotated with a declared type that derives Json, e.g. `on Bump(h : Hit)`. [remote_actor_unroutable]

@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR --------------- errors/linear_never_used_8.march
+
+The linear value `b` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+10 |     println(int_to_string(run2(fn (a, b) -> sink(a))))
+                                    ^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+

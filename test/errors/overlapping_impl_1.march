@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: Overlapping implementation
+mod Main do
+  -- `@[endpoints] protocol P` reserves the type name `P_Message` (the message
+  -- type inside the generated `P_Msg` module, named after its protocol since
+  -- 2026-09-22 so that two protocols in one module do not share the short
+  -- name `Msg` that impl dispatch keys on -- see accept/t285).
+  --
+  -- The cost of that reservation, pinned here: a user type called
+  -- `Stream_Message` that derives an interface the generated codec also
+  -- derives is a coherence conflict. It is a LOUD typecheck error on both
+  -- backends, which is the point -- the collision it replaces was silent
+  -- interpreted (a match failure inside generated code) and a codegen refusal
+  -- compiled.
+  needs IO.Console
+
+  @[endpoints]
+  protocol Stream do
+    Prod -> Cons : Int
+  end
+
+  type Stream_Message = SM(Int)
+  derive Json for Stream_Message
+
+  fn main(_c : Cap(IO.Console)) do
+    println(Json.to_string(to_json(SM(1))))
+  end
+end

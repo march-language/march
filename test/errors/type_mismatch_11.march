@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+mod Main do
+  -- A module-level `let` with a type annotation: the annotation is checked
+  -- against the right-hand side exactly as a block `let`'s is. Before the fix
+  -- the module-level path inferred the RHS and never looked at `: Int`, so
+  -- this whole file was accepted.
+  let x : Int = "hello"
+
+  fn main() : Int do
+    0
+  end
+end

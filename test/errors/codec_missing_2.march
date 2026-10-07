@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: `Node.enqueue` needs a JSON codec for `Ping`
+-- The typed send through a NodeQueue (2026-09-15, stdlib/node.march) carries
+-- the same codec contract as `Node.send`: `Node.enqueue(q, to, msg, policy)`
+-- records its site in the same deferred sweep, so a message type without
+-- `derive Json` is refused at the call site, naming the callee and the type.
+mod EnqueueNoCodec do
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.Mut
+
+  type Ping = { n : Int }
+
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+    let q = NodeQueue.start(3, 4096)
+    let p : Ping = { n: 1 }
+    let _ = Node.enqueue(q, GlobalPid.make("b", 1, 1), p, NodeQueue.DropNew)
+    ()
+  end
+end

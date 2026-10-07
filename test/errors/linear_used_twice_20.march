@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: The linear value `m0` is used more than once
+mod Main do
+  needs IO.Console
+  -- `put` consumed m0 and returned m1; taking from m0 afterwards would read a
+  -- map version whose values now live in m1.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn main(c : Cap(IO.Console)) do
+    let m0 = LinearMap.empty_int()
+    let (d, m1) = LinearMap.put(m0, 1, S1(1))
+    let (got, m2) = LinearMap.take(m0, 1)
+    let n = match d do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+    let k = match got do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+    let a = LinearMap.drain(m1, 0, fn (acc, key, s) -> acc + sink(s))
+    let b = LinearMap.drain(m2, 0, fn (acc, key, s) -> acc + sink(s))
+    println(int_to_string(n + k + a + b))
+  end
+end

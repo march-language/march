@@ -1,0 +1,18 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_16.march
+
+expected `String` but got `Int`. [type_mismatch]
+
+24 |     fn attack() : Int do takes_str(id(42)) end
+                                        ^^^^^^
+
+    This is argument #1 of a function call.
+    Use `int_to_string(x)` to convert an Int to a String.
+
+    the expected type comes from here:
+
+24 |     fn attack() : Int do takes_str(id(42)) end
+                              ^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

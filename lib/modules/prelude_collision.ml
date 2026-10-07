@@ -177,7 +177,7 @@ let internally_referenced_names (prelude_decls : decl list) : StrSet.t =
     (top_level_fn_sites prelude_decls) StrSet.empty
 
 let report_collision errors ~name ~span ~reason =
-  March_errors.Errors.error errors ~span
+  March_errors.Errors.error ~code:March_errors.Errors.Code.prelude_collision errors ~span
     (Printf.sprintf
        "`%s` redefines %s.\n\
         March's Prelude (println, show, print, and others) calls its own \

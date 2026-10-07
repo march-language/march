@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR --------------- errors/linear_used_twice_8.march
+
+The linear value `a` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+11 |     let y = G.step(a)
+                        ^
+
+
+    `a` was already consumed here:
+
+10 |     let x = G.step(a)
+                        ^
+    run `march --explain linear_used_twice`
+
+

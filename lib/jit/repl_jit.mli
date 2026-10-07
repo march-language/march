@@ -138,6 +138,14 @@ type shell_fragment = {
   sf_ret   : March_tir.Tir.ty;
 }
 
+(** Lower the program for [shell_compile], once per session; call it at
+    session start so no input pays for it.  Later calls return at once. *)
+val shell_lower_program :
+  t -> program_name:string ->
+  program_decls:March_ast.Ast.decl list ->
+  program_type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
+  unit
+
 (** Typecheck and compile one input (a module whose [main] is the input)
     against the program the node runs.  [store_as] makes it an init fragment
     that stores its value in that slot. *)

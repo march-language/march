@@ -908,7 +908,7 @@ let retaining_fns ?(k_table : Kind.table option) ~decls (m : Tir.tir_module) : (
 
 let diag ~severity ~span ~code ?(notes = []) message : March_errors.Errors.diagnostic =
   { March_errors.Errors.severity; span; message; labels = []; notes;
-    code = Some code; fix = None }
+    code; fix = None }
 
 (* Message body shared by the explicit-attribute and policy diagnostics:
    [head] is "`f` is marked @[no_alloc]" or "`f` is specialized to a NoAlloc
@@ -1035,7 +1035,7 @@ let check ~decls ~(allocating : (string, reason) Hashtbl.t)
               | None -> March_ast.Ast.dummy_span in
             let head =
               Printf.sprintf "`%s` is specialized to a NoAlloc policy" name in
-            Some (diag ~severity:March_errors.Errors.Error ~span ~code:"no_alloc_policy"
+            Some (diag ~severity:March_errors.Errors.Error ~span ~code:March_errors.Code.no_alloc_policy
                     (failure_message ~head ~name ~suffix:"" reason)))
       m.Tir.tm_fns
   in
@@ -1060,7 +1060,7 @@ let check ~decls ~(allocating : (string, reason) Hashtbl.t)
         let head = match d.d_cap with
           | Some m -> Printf.sprintf "`%s` is in `cap no_alloc` module `%s`" name m
           | None -> Printf.sprintf "`%s` is marked @[no_alloc]" name in
-        Some (diag ~severity ~span:d.d_name_span ~code:"no_alloc"
+        Some (diag ~severity ~span:d.d_name_span ~code:March_errors.Code.no_alloc
                 (failure_message ~head ~name ~suffix reason))
       | _ -> None) m.Tir.tm_fns
   @
@@ -1086,12 +1086,12 @@ let check ~decls ~(allocating : (string, reason) Hashtbl.t)
                  d.d_name ]
            | _ -> [] in
          Some (diag ~severity:March_errors.Errors.Error ~span:d.d_name_span
-                 ~code:"no_alloc_transient" ~notes msg)
+                 ~code:March_errors.Code.no_alloc_transient ~notes msg)
        | _ -> None) m.Tir.tm_fns)
 
 (* ── Where the contract is not judged ──────────────────────────────────── *)
 
-let unchecked_code = "no_alloc_unchecked"
+let unchecked_code = March_errors.Code.no_alloc_unchecked
 
 (** One warning per obligation when the check paths could not lower the
     program (an interpreter-only construct, say): the guarantee is unknown,

@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/unknown_constructor_1.march","start_line":8,"start_col":34,"end_line":8,"end_col":75,"message":"I don't know a constructor called `LinearMapRep`.\nDid you mean one of:\n  • `LiveProcess` — from type `LiveProcess`","code":"unknown_constructor","fix":null,"labels":[],"notes":[]}

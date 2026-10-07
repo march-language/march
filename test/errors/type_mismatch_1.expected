@@ -1,0 +1,18 @@
+exit: 1
+-- ERROR ------------------- errors/type_mismatch_1.march
+
+expected `String` but got `Int`. [type_mismatch]
+
+4 |     "item " ++ n
+                   ^
+
+    This is argument #2 of a function call.
+    Use `int_to_string(x)` to convert an Int to a String.
+
+    the expected type comes from here:
+
+4 |     "item " ++ n
+        ^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

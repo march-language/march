@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: is used more than once here
+mod Main do
+  -- Every send path is a consuming use of a linear payload: the bare actor_cast builtin.
+  -- Until Part C this fixture proved that this path ran check_sendable's
+  -- RingBuf denylist; that list is empty now (`RingBuf` is always_linear and
+  -- native arrays are copy-on-write values), so the per-path coverage is
+  -- kept by moving a RingBuf through the path and then using it: the second
+  -- use must be the linearity error, proving the path consumed the buffer.
+  -- (2026-10-06, specs/plans/2026-09-25-send-data-race-freedom-plan.md C4.)
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on RBJob(rb : RingBuf(Int)) do
+      RingBuf.drop(rb)
+      { n: 1 }
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    let rb = RingBuf.make(4)
+    let rb = RingBuf.push(rb, 1)
+    actor_cast(w, RBJob(rb))
+    RingBuf.drop(rb)
+  end
+end

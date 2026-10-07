@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/parse_error_8.march","start_line":8,"start_col":20,"end_line":8,"end_col":21,"message":"`f(...)(...)` is not a chained call — March functions are not curried.","code":"parse_error","fix":null,"labels":[],"notes":["Write `f(a, b)` for a multi-argument call, or put the second call on its own line if you meant two separate statements."]}

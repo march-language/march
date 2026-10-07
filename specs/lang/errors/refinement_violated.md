@@ -1,0 +1,51 @@
+---
+layout: docs
+title: "refinement_violated"
+permalink: /docs/errors/refinement_violated/
+---
+
+# `refinement_violated`: a value does not satisfy a refinement it is required to
+
+A function's parameter (or a `let` annotation, or a return type) carries a
+refinement such as `{Int | _ != 0}`, and the value supplied provably does
+not satisfy it. The refinement checker found a definite counterexample, not
+merely a value it could not decide.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+  fn safe_div(a : Int, b : {Int | _ != 0}) : Int do a / b end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(safe_div(10, 0)))
+  end
+end
+```
+
+## The fix
+
+Pass a value that satisfies the predicate, or guard the call so the value
+is known to satisfy it on that path (`if b != 0 do safe_div(a, b) else … end`).
+
+```march
+mod Main do
+  needs IO.Console
+  fn safe_div(a : Int, b : {Int | _ != 0}) : Int do a / b end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(safe_div(10, 2)))
+  end
+end
+```
+
+## Why the rule exists
+
+Refinements move a precondition from a runtime check (or a comment) into
+the signature, where every caller is checked against it. A definite
+violation is always a bug, so it is an error in every module; a call the
+checker merely cannot decide is accepted unless the module is
+`cap verified`.
+
+See also: [the language reference](../refinement-types.md).

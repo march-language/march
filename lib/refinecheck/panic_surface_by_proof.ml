@@ -134,7 +134,7 @@ let rec check_decls (errctx : Err.ctx) (mod_name : string) (decls : A.decl list)
         List.iter
           (fun (name, name_span, app_span) ->
             if is_covered name && not (is_proved app_span name) then
-              Err.error errctx ~span:name_span
+              Err.error ~code:Err.Code.no_panic_violation errctx ~span:name_span
                 (Printf.sprintf
                    "`%s` in `mod %s` (declared `cap no_panic`) calls `%s`, which can panic.%s"
                    def.A.fn_name.A.txt mod_name name

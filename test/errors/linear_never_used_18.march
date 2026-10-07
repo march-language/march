@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: The linear value `s` was never used
+mod Main do
+  needs IO.Console
+  -- The lambda is checked before the argument that fixes `a` to `S1`, so when
+  -- its scope closes `s` still has an unbound type and reads as polymorphic.
+  -- It is judged again at `main`'s close, once the call is solved. Accepted
+  -- before 2026-09-19; the same call with the arguments swapped was rejected.
+  always_linear type S1 = S1(Int)
+  fn ap2(f : a -> Int, linear x : a) : Int do f(x) end
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(ap2(fn s -> 0, S1(1))))
+  end
+end

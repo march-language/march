@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: I got stuck here
+mod R11SuperviseMissingStrategy do
+  actor Worker do
+    state { count : Int }
+    init { count: 0 }
+    on Inc() do { count: state.count + 1 } end
+  end
+
+  actor Supervisor do
+    state { worker : Int }
+    init { worker: 0 }
+    supervise do
+      max_restarts 3 within 5
+      Worker worker
+    end
+  end
+end

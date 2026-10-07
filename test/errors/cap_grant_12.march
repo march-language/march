@@ -1,0 +1,51 @@
+-- EXPECT-ERROR: cannot be deserialized
+-- Capability unforgeability (R3), THE DECISIVE CASE (2026-08-05).
+--
+-- `from_json` is typed `poly2 (fun a b -> TArrow (a, b))` — fully
+-- unconstrained — so nothing in its type stops it from producing a `Cap`.
+-- Before this check existed the program below typechecked with exit 0,
+-- fabricating root authority from a string literal. (Passing `--cap-strict`
+-- changed nothing, but not for the reassuring reason: the ceiling check runs
+-- on the COMPILE path only, so the flag is inert under `--check`. Measured
+-- 2026-08-05.)
+--
+-- What makes THIS file the one that matters: `from_json`'s result type is a
+-- bare `TVar` at the application site on line 1 of `main`. It is pinned to
+-- a capability only by the LATER `cap_narrow(x)` on the next line.
+--
+-- The reported capability is `Cap(_)`, not `Cap(IO)`, and that changed with
+-- R4a (2026-08-06). `cap_narrow` used to be typed `Cap(IO) -> Cap(a)`, so it
+-- pinned its argument to the ROOT and this file could name the capability.
+-- R4a loosened it to `Cap(a) -> Cap(b)` so attenuation can chain, which means
+-- nothing here determines WHICH capability is being forged — only that one is.
+--
+-- The rejection still fires, and that is not luck: `cap_in_solved_ty` reports
+-- an unpinned capability argument as `_` rather than skipping it, precisely
+-- because an un-pinned capability position is not a safe position. Had it
+-- skipped, R4a would have silently reopened R3's hole for exactly this
+-- program, and the corpus would have gone green while doing it.
+--
+-- An eager check at the `from_json` call site therefore sees an unsolved
+-- variable and passes — it would report nothing here while still passing
+-- every reject case that writes the annotation inline. That is the same trap
+-- documented for `cap_narrow` at lib/typecheck/typecheck.ml:5490-5496 ("`a`
+-- is pinned by LATER unification"). This file is what forces the check to be
+-- a DEFERRED end-of-module pass that zonks recorded application vars, rather
+-- than an inline test that only appears to work.
+--
+-- `needs IO` is deliberate: it makes the module's declaration broad enough
+-- that the needs-coverage checks stay silent, so a failure here can only be
+-- Check A and never Check B.
+--
+-- Accept companion: accept/t142, `from_json` producing an ordinary type in a
+-- module that also handles capabilities — proving the check reads the solved
+-- result type rather than blanket-rejecting `from_json` in cap-using code.
+mod ZonkForge do
+  needs IO
+
+  fn main() do
+    let x = from_json("{}")
+    let w = cap_narrow(x)
+    println("forged root authority from a string literal")
+  end
+end

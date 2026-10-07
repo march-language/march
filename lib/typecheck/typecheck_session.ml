@@ -168,7 +168,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
      let proj_b = List.assoc b projections in
      let dual_a = dual_session_ty proj_a in
      if not (session_ty_equal dual_a proj_b) then
-       Err.error env.errors ~span
+       Err.error ~code:Err.Code.protocol_projection env.errors ~span
          (Printf.sprintf
             "Protocol `%s`: the projection onto `%s` and the projection onto \
              `%s` are not duals of each other.\n\
@@ -226,7 +226,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
          in
          (match List.assoc_opt sender projections with
           | Some proj when not (has_msend proj) ->
-            Err.error env.errors ~span
+            Err.error ~code:Err.Code.protocol_projection env.errors ~span
               (Printf.sprintf
                  "Protocol `%s`: role `%s` should send to `%s` but \
                   its projected type does not include MSend(%s, ...)."
@@ -234,7 +234,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
           | _ -> ());
          (match List.assoc_opt receiver projections with
           | Some proj when not (has_mrecv proj) ->
-            Err.error env.errors ~span
+            Err.error ~code:Err.Code.protocol_projection env.errors ~span
               (Printf.sprintf
                  "Protocol `%s`: role `%s` should receive from `%s` but \
                   its projected type does not include MRecv(%s, ...)."

@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR --------------- errors/linear_never_used_7.march
+
+The linear value `st` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+8 |     fn g(st : S1) : Int do 0 end
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+

@@ -1,0 +1,25 @@
+-- EXPECT-ERROR: uses `IO.FileRead` but does not declare `needs IO.FileRead`
+-- The `--check`-side capability ceiling
+-- (specs/todos/2026-08-14-cap-ceiling-under-check-needs-body-only-closure.md,
+-- landed): a nested module reaches a capability through a STDLIB wrapper
+-- (`File.read`, not the builtin `file_read`) that its own `needs` does not
+-- cover. `main`'s grant is broad enough to satisfy the whole-program check, so
+-- before this landed `--check` exited 0 here while `--compile` rejected it via
+-- the TIR ceiling; now `--check` catches it too — attributing `IO.FileRead` to
+-- `Dep`, the module whose code reaches it.
+mod CeilApp do
+  needs IO.Console
+  needs IO.FileRead
+  mod Dep do
+    needs IO.Console
+    fn slurp(p : String) : String do
+      match File.read(p) do
+        Ok(s) -> s
+        Err(_) -> ""
+      end
+    end
+  end
+  fn main(cap_console : Cap(IO.Console), cap_fileread : Cap(IO.FileRead)) : () do
+    println(Dep.slurp("/etc/passwd"))
+  end
+end

@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_20.march
+
+The linear value `m0` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+11 |     let (got, m2) = LinearMap.take(m0, 1)
+                                        ^^
+
+
+    `m0` was already consumed here:
+
+10 |     let (d, m1) = LinearMap.put(m0, 1, S1(1))
+                                     ^^
+    run `march --explain linear_used_twice`
+
+

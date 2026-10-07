@@ -436,6 +436,10 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
             program_decls = program.Ast.mod_decls;
             program_type_map = type_map; limit = default_limit; timeout_ms; n = 0; bound = [];
             failed = false; triple = field hello "triple" } in
+  (* Lower the program now, before the first prompt, rather than on the
+     first input. *)
+  March_jit.Repl_jit.shell_lower_program jit ~program_name:s.program_name
+    ~program_decls:s.program_decls ~program_type_map:s.program_type_map;
   let interactive = inputs = None && Unix.isatty Unix.stdin in
   let lines = match inputs with
     | Some text -> ref (String.split_on_char '\n' text)

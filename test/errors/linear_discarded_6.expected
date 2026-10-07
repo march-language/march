@@ -1,0 +1,29 @@
+exit: 1
+-- ERROR ---------------- errors/linear_discarded_6.march
+
+This `_` discards a linear value of type `Parked_Cons`. [linear_discarded]
+Linear values must be consumed exactly once. Bind it to a name and pass it to something that consumes it.
+
+29 |           let _ = Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true))
+                   ^
+
+    run `march --explain linear_discarded`
+
+
+-- ERROR ---------------- errors/linear_discarded_6.march
+
+The linear value `state.parked` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+30 |           { state with budget: state.budget - n }
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `{ state with … }` keeps every field it doesn't replace, so the old `state.parked` would survive into the new record. Replace it too: `{ state with parked: … }`.
+
+    `state.parked` was already consumed here:
+
+27 |       match Stream_Cons.resume(state.parked, from, msg, ep) do
+                                    ^^^^^^^^^^^^
+    run `march --explain linear_used_twice`
+
+

@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/parse_error_10.march","start_line":5,"start_col":11,"end_line":5,"end_col":12,"message":"A `let*` binding can't have a type annotation — its type is inferred from the right-hand side.","code":"parse_error","fix":null,"labels":[],"notes":["let* name = expr"]}

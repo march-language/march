@@ -1,0 +1,2 @@
+exit: 1
+errors/endpoints_label_invalid_2.march:11:4: error: Protocol `P`: the label `msg_A_B_1` would name the message `Msg_A_B_1`, which is the shape of the names `@[endpoints]` makes up for unlabelled steps (`Msg_<From>_<To>_<k>`), so it could collide with one. Pick a label that does not start with `msg_`. [endpoints_label_invalid]

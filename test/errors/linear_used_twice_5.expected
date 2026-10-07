@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR --------------- errors/linear_used_twice_5.march
+
+The linear value `rb` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+27 |     RingBuf.drop(rb)
+                      ^^
+
+
+    `rb` was already consumed here:
+
+23 |     match actor_call(w, RBJob(rb), 1000) do
+                                   ^^
+    run `march --explain linear_used_twice`
+
+

@@ -1,0 +1,8 @@
+exit: 1
+-- ERROR -------------------- errors/syntax_error_5.march
+
+I got stuck here: [syntax_error]
+
+8 |     Prod -> item: Cons : Int
+                ^^^^
+

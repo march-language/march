@@ -1,0 +1,38 @@
+exit: 1
+-- ERROR -------------- errors/linear_never_used_23.march
+
+The linear value `x` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+16 |     let x = p.data
+         ^^^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+
+-- ERROR -------------- errors/linear_never_used_23.march
+
+The linear value `y` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+17 |     let y = p.data
+         ^^^^^^^^^^^^^^
+
+
+
+-- ERROR -------------- errors/linear_never_used_23.march
+
+The linear value `p.data` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+17 |     let y = p.data
+                 ^^^^^^
+
+
+    `p.data` was already consumed here:
+
+16 |     let x = p.data
+                 ^^^^^^
+    run `march --explain linear_used_twice`
+
+

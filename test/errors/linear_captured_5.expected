@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ----------------- errors/linear_captured_5.march
+
+The linear value `rb` cannot be captured by a closure. [linear_captured]
+A closure may be called multiple times, which would violate the exactly-once guarantee.
+Pass `rb` as a parameter to the closure instead.
+
+18 |     send(s, Run(fn x -> RingBuf.push(rb, x)))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+

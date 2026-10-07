@@ -1,0 +1,32 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_10.march
+
+expected `String` but got `Int`. [type_mismatch]
+
+11 |     fn speak(self) do
+            ^^^^^
+
+    `speak` in `impl Speak` must match the interface signature
+    Use `int_to_string(x)` to convert an Int to a String.
+    run `march --explain type_mismatch`
+
+
+-- ERROR ------------------ errors/type_mismatch_10.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+18 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+
+fix [cap_grant]:
+@@ lines 18-18 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do

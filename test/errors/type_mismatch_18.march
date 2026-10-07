@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: expected `String` but got `Int`
+-- Slice 6 (nested-module soundness), the ENTRY-MODULE variant -- the same
+-- `id`-launder soundness break, but through the ENTRY module's own top-level
+-- fn referenced by its SELF-QUALIFIED name `Main.id`. `check_module_core`
+-- seeds the entry module's own unannotated top-level fns under a self-qualified
+-- key (`Main.id`) while the nested-prefix accumulator (`cap_qual_prefix`) is
+-- still empty, so the round-2 nested reconcile (gated `cap_qual_prefix <> ""`)
+-- structurally excluded it; an explicit `Main.id(42)` reference kept a
+-- decoupled scheme and erased `Int -> String` (exit 0 pre-fix). A BARE `id`
+-- was always safe (desugar never auto-qualifies bare refs), but the written
+-- `Main.id` form is memory-unsafe. The P0 fix (round 3) reconciles BOTH the
+-- `cap_qual_prefix` key AND the `current_module` key, so `Main.id` is now the
+-- real polymorphic `a -> a`. IMPOSSIBLE to reject pre-fix. See
+-- core-march-types.md §2.8.13.
+mod Main do
+  fn id(x) do x end
+
+  fn need_str(s : String) : Int do string_length(s) end
+
+  fn attack() : Int do need_str(Main.id(42)) end
+end

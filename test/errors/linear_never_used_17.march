@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: The linear value `s` was never used
+mod Main do
+  -- reject/t269 in a `test` body, which has no enclosing named function: the
+  -- deferred judgement is installed there too (and in `setup`, `setup_all` and
+  -- top-level `let`). Found in review of the 2026-09-19 fix.
+  always_linear type S1 = S1(Int)
+  fn ap2(f : a -> Int, linear x : a) : Int do f(x) end
+  test "drops the value" do
+    assert ap2(fn s -> 0, S1(1)) == 0
+  end
+end
