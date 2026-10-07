@@ -317,23 +317,6 @@ let extern_borrow_table : (string * bool list) list = [
   ("record_has_key",   [true; true]);
   ("record_put",       [true; true; true]);
   ("record_from_list", [true]);
-  (* ── RingBuf builtins ───────────────────────────────────────────────────
-     The buffer [rb] is borrowed by every op: RingBuf mutates in place through
-     the pointer and returns Unit/Option/List, never consuming the buffer, so
-     the caller retains ownership and drops it when it goes dead.  push's second
-     param [x] is NOT borrowed — it is transferred (owned) into the ring, which
-     stores it without an incref and releases it on overwrite/pop/clear/drop.
-     get's Int index is not a heap value. *)
-  ("ring_buf_make",        [false]);
-  ("ring_buf_push",        [true; false]);
-  ("ring_buf_pop",         [true]);
-  ("ring_buf_get",         [true; false]);
-  ("ring_buf_peek_oldest", [true]);
-  ("ring_buf_peek_newest", [true]);
-  ("ring_buf_size",        [true]);
-  ("ring_buf_cap",         [true]);
-  ("ring_buf_clear",       [true]);
-  ("ring_buf_to_list",     [true]);
   (* ── NativeArray: reads borrow their array, `set` consumes it (in-place) ── *)
   ("native_u8_arr_get",    [true; false]);
   ("native_u8_arr_length", [true]);
@@ -355,6 +338,55 @@ let extern_borrow_table : (string * bool list) list = [
   ("native_float_arr_length", [true]);
   ("native_float_arr_sum",    [true]);
   ("native_float_arr_to_list",[true]);
+  (* ── NativeArray readers that build a NEW result: each C function reads
+     its array (or list) argument and returns a fresh allocation; none frees
+     or stores it (audited 2026-10-06 against runtime/march_runtime.c and the
+     DEF_NARROW_INT_ARR macro). They were classified owned (unaudited), so
+     the argument's last reference was handed over and never released: an
+     intermediate array in `map(map(a, f), g)` leaked on every call, and so
+     did every list passed to `from_list`
+     (specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md).
+     The closure argument of map/map2/fold stays owned (the runtime releases
+     it once after the loop), and so does fold's accumulator (it is handed
+     to the callback). `set` and `sort` really consume their array and stay
+     in [extern_owned_builtins]. ── *)
+  ("native_int_arr_map",          [true; false]);
+  ("native_float_arr_map",        [true; false]);
+  ("native_f32_arr_map",          [true; false]);
+  ("native_i32_arr_map",          [true; false]);
+  ("native_u8_arr_map",           [true; false]);
+  ("native_int_arr_map2",         [true; true; false]);
+  ("native_float_arr_map2",       [true; true; false]);
+  ("native_f32_arr_map2",         [true; true; false]);
+  ("native_i32_arr_map2",         [true; true; false]);
+  ("native_u8_arr_map2",          [true; true; false]);
+  ("native_int_arr_fold",         [false; true; false]);
+  ("native_float_arr_fold",       [false; true; false]);
+  ("native_f32_arr_fold",         [false; true; false]);
+  ("native_i32_arr_fold",         [false; true; false]);
+  ("native_u8_arr_fold",          [false; true; false]);
+  ("native_int_arr_from_list",    [true]);
+  ("native_float_arr_from_list",  [true]);
+  ("native_f32_arr_from_list",    [true]);
+  ("native_i32_arr_from_list",    [true]);
+  ("native_u8_arr_from_list",     [true]);
+  ("native_int_arr_min",          [true]);
+  ("native_int_arr_max",          [true]);
+  ("native_float_arr_min",        [true]);
+  ("native_float_arr_max",        [true]);
+  ("native_int_arr_sumsq_dev",    [true; false]);
+  ("native_float_arr_sumsq_dev",  [true; false]);
+  ("native_int_arr_to_float_arr", [true]);
+  ("native_int_arr_filter_mask",  [true; true]);
+  ("native_float_arr_filter_mask",[true; true]);
+  ("native_float_to_f32_arr",     [true]);
+  ("native_f32_to_float_arr",     [true]);
+  ("native_int_to_i32_arr",       [true]);
+  ("native_i32_to_int_arr",       [true]);
+  ("native_int_to_u8_arr",        [true]);
+  ("native_u8_to_int_arr",        [true]);
+  ("native_i32_to_f32_arr",       [true]);
+  ("native_u8_to_f32_arr",        [true]);
   (* ── TypedArray: slice COPIES its range into a fresh array, taking its own
      reference on each element, and never stores or frees the source array
      (march_typed_array_slice), so the source is borrowed. Every producer of
@@ -494,6 +526,18 @@ let is_simd_builtin (fn_name : string) : bool =
     [extern_borrow_table] — see
     specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md. *)
 let extern_owned_builtins : string list = [
+    (* RingBuf is always_linear and every ring_buf_* builtin CONSUMES the
+       buffer and hands it back rc-neutrally (Part C, Phase C2; the full
+       contract table is in the plan). For a Lin variable Perceus emits no RC
+       op either way; the table matters on the unrestricted paths -- a user
+       record's field projection, where Perceus dups a borrowed field before
+       a consuming position -- so the C bodies and this classification must
+       agree: push/clear return the same cell, the readers return it inside a
+       fresh pair, to_list/drop release it. The element of push was already
+       owned (stored without an incref). *)
+    "ring_buf_push"; "ring_buf_pop"; "ring_buf_get"; "ring_buf_peek_oldest";
+    "ring_buf_peek_newest"; "ring_buf_size"; "ring_buf_cap"; "ring_buf_clear";
+    "ring_buf_snapshot"; "ring_buf_to_list"; "ring_buf_drop";
     (* delivery_failed_watch stores its closure in the runtime's hook slot
        (march_delivery_failed_watch), releasing the one it replaces. *)
     "delivery_failed_watch";
@@ -520,26 +564,10 @@ let extern_owned_builtins : string list = [
     "typed_array_length"; "typed_array_get"; "typed_array_set";
     "typed_array_map"; "typed_array_filter"; "typed_array_fold";
     "native_int_arr_set"; "native_int_arr_sort";
-    "native_int_arr_min"; "native_int_arr_max";
-    "native_int_arr_sumsq_dev"; "native_int_arr_map"; "native_int_arr_map2";
-    "native_int_arr_to_float_arr"; "native_int_arr_fold";
-    "native_int_arr_from_list"; "native_int_arr_filter_mask";
     "native_float_arr_set"; "native_float_arr_sort";
-    "native_float_arr_min"; "native_float_arr_max";
-    "native_float_arr_sumsq_dev"; "native_float_arr_map";
-    "native_float_arr_map2"; "native_float_arr_fold";
-    "native_float_arr_from_list"; "native_float_arr_filter_mask";
-    "native_f32_arr_set"; "native_f32_arr_sort"; "native_f32_arr_map";
-    "native_f32_arr_map2";
-    "native_f32_arr_fold"; "native_f32_arr_from_list"; "native_i32_arr_set";
-    "native_i32_arr_sort";
-    "native_i32_arr_map"; "native_i32_arr_map2"; "native_i32_arr_fold";
-    "native_i32_arr_from_list"; "native_u8_arr_set"; "native_u8_arr_sort";
-    "native_u8_arr_map";
-    "native_u8_arr_map2"; "native_u8_arr_fold"; "native_u8_arr_from_list";
-    "native_float_to_f32_arr"; "native_f32_to_float_arr";
-    "native_int_to_i32_arr"; "native_i32_to_int_arr"; "native_int_to_u8_arr";
-    "native_u8_to_int_arr"; "native_i32_to_f32_arr"; "native_u8_to_f32_arr";
+    "native_f32_arr_set"; "native_f32_arr_sort";
+    "native_i32_arr_set"; "native_i32_arr_sort";
+    "native_u8_arr_set"; "native_u8_arr_sort";
     "tcp_connect"; "tcp_connect_timeout"; "http_serialize_request"; "http_parse_response";
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps"; "monitor";

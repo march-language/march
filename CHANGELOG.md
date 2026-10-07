@@ -19,6 +19,61 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
+  March function gets a `DISubprogram` at its defining line (lifted lambdas at
+  the lambda's line, specialisations at the generic's), and the link gets `-g`,
+  so `lldb`/`gdb` backtraces, ASan reports and `perf` profiles name March
+  functions and files instead of `march_main + 1400`. The IR also carries a
+  `!march.provenance` node per function recording where the compiler derived it
+  from (monomorphisation, lambda lifting, fusion, specialisation). Off by
+  default; the emitted code is unchanged when off. `--dump-provenance` prints
+  the same table as text. Distinct from `--debug`, the interpreter's debugger.
+- **A remote shell on a running node: `forge shell` and `forge rpc`.**
+  Against a node built with `--hot-reload --signing-pubkey`, `forge shell`
+  (or `march --shell <reload socket>.shell app.march`) typechecks the
+  project once. It then compiles each input into a small signed library that
+  the node loads and runs as a task. `forge rpc 'expr'` runs one input and
+  exits 1 if it did not run. It prints the result
+  and anything the input printed. `let` bindings persist across inputs; a
+  trailing `limit: N` shortens long lists. Capabilities are pre-bound
+  (`console`, `clock`, `intro`, `debug`), and the node allows only those in
+  its `$MARCH_SHELL_POLICY` file. A panic or a timeout ends only that input,
+  and a deploy ends the session. Every input is audited with its source.
+  Inputs can call the program's own functions and its `MARCH_LIB_PATH`
+  libraries, a Depot query for example. The policy does not yet see the
+  capabilities an input reaches through that code, only the pre-bound ones
+  it names.
+- **Several native libraries per project.** forge.toml can declare `[[ffi]]`
+  once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
+  links all of them, in order. A single `[ffi]` table works as before.
+
+- **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
+  `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
+  line per post-TIR definition, sorted, straight from the CAS hashing that keys
+  the compilation cache. `scripts/determinism-oracle.sh` compiles the IR-oracle
+  corpus under a cold and a warm private `$HOME` from two cwds and fails on any
+  difference in the IR or these hashes; CI runs it as the `determinism` job.
+- **`--rc-trace`: leak reports that name the function.** A program built with
+  `march --rc-trace` (or `MARCH_RC_TRACE=1`) tags every runtime call it makes
+  with a site id, so the `MARCH_TRACE_GC=1` trace now records *who* allocated,
+  retained and released each object; the new `scripts/gc-trace-report.py`
+  folds the trace into per-object histories and prints every object still live
+  at exit with its type, allocation site and each inc/dec as
+  `<fn>#<ordinal>:<runtime callee>`, plus any count that went negative or was
+  freed twice and a per-site summary. String allocations are traced too (they
+  were not before), string-literal cells are reported as immortal rather than
+  leaked, and `kill -USR2` flushes a live process's trace. Release builds are
+  byte-identical with the switch off. `MARCH_SANITIZE=1` builds additionally
+  abort on a `march_free` of a shared object and on a TRMC hole fill that finds
+  its slot already written.
+- **Native arrays may be sent in messages, captured by tasks and shared with
+  parallel code.** `NativeIntArr`, `NativeFloatArr`, `NativeF32Arr`,
+  `NativeI32Arr` and `NativeU8Arr` are copy-on-write values: a write to an
+  array nobody else holds is in place, the first write to a shared array copies
+  it (O(n), once), and each holder sees only its own writes. They were rejected
+  in actor messages by analogy with `RingBuf`; the runtime never shared their
+  mutations, so the rejection is gone. The typing corpus fixtures `t164`,
+  `t165`, `t169`, `t170` flipped from reject to accept.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
@@ -173,6 +228,18 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **`RingBuf` is linear: every operation consumes the buffer and hands it
+  back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
+  `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer
+  beside it (`let (n, rb) = RingBuf.size(rb)`); new `snapshot` reads the
+  elements out and keeps the buffer; `to_list` and new `drop` end it. A buffer
+  can no longer be aliased, captured by a closure, stored at module level or
+  put in a `Vault` (each is a compile-time error, the existing linear-type
+  errors), and it may now be *sent* in a message or passed to `spawn`, which
+  moves it. In actor state write `{ state with buf: RingBuf.push(state.buf,
+  x) }`. Migration table: design spec section 5. **New rule for every linear
+  type:** a module-level `let` of a `RingBuf`, `Handle` or `LinearMap` is
+  rejected, since a module-level value can never be consumed exactly once.
 - **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
   install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
   source needed no changes. The REPL's `notty` dependency (0.2.3 does not
@@ -235,6 +302,41 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- A green thread started from a runtime thread that is not a scheduler (the
+  hot-reload server's drain, the new shell listener) no longer inherits that
+  thread's blocked signals. With SIGSEGV blocked, the first time its stack
+  had to grow killed the whole process silently on Linux.
+- A call of another module's function with too few arguments
+  (`List.map([1, 2])`) is now a type error. It used to typecheck, then fail
+  at run time: an `arity mismatch` panic interpreted, a crash compiled, and a
+  crash of the whole REPL session.
+- **A callback contract that names its argument now works.** With
+  `keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}`, a guard `if keep(h)`
+  establishes `h > 0`, and `let b = keep(h)` binds `b == (h > 0)`; both used
+  to establish nothing. Passing a named function whose proved return matches
+  (`is_pos(n) : {Bool | _ == (n > 0)}`) was wrongly REJECTED with a bogus
+  witness (`n = 0, x = 1`) and now compiles; a matching lambda (`fn y -> y > 0`)
+  is now proved rather than skipped. A callback that defines an abstract
+  refinement (`_ == p(x)`) is no longer a skip, or a `cap verified` error, at
+  every call.
+- **A hot deploy over the reload socket no longer drops its connection while
+  the control plane's Agent polls the node.** The socket server read a
+  request line from the Agent's in-process request instead of the socket
+  whenever the two overlapped, then closed the deploy's connection mid-batch
+  (`hcr_deploy: connection closed` / `Connection reset by peer`, the node
+  itself unharmed). It hit roughly one deploy session in ten on a node that
+  runs the control plane.
+- **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
+  variable alias used to drop every fact about its value (`let b = a + 0`
+  kept them), so `take_pos(b)` was skipped even when `a` was a refined
+  parameter or a positive literal. It is now proved, and a violating value is
+  reported through the alias. Non-`Int` aliases still carry nothing.
+- **Tuples can be compared with `==` and `!=`.** `(1, ["x"]) == (1, ["x"])`
+  used to be rejected with "does not implement interface `Eq`". A tuple is now
+  `Eq` when every component is. Compiled code also compared a tuple's Float
+  component by address instead of by value, so `(1, 2.5) == (1, 2.5)` was
+  false in compiled code (for example inside `List.member`). Tuples are still
+  not ordered with `<`.
 - **A nested type named like a runtime type no longer crashes when it is matched.** A
   module-local `type Down = Down(Int)` (or another name the runtime reserves) was built
   one way and read another in compiled code, a segfault on the first `match`.
@@ -243,6 +345,14 @@ git log is authoritative for exact commits.
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary
   builds were not affected.
+- **NativeArray operations no longer leak the array they read.** In compiled
+  code, `map`, `map2`, `fold`, `from_list`, the width conversions and the
+  DataFrame column reductions kept a reference to their input that nothing
+  released, so a chain like `map(map(a, f), g)` leaked its whole intermediate
+  array on every call, and `from_list` leaked its list. A `map` or `map2` over
+  Float or f32 arrays whose callback could not be inlined also leaked two
+  Float boxes per element, and `DataFrame.filter` leaked each column it
+  filtered.
 - **The language server resolves dependencies the way `forge build` does.**
   It used to put every cached version of a git dependency on its search path,
   including each version's `test/` and `priv/` files, and it missed registry
@@ -274,6 +384,17 @@ git log is authoritative for exact commits.
   once too often, a use-after-free that only showed under ASAN. Showing it leaked one
   string per call.
 
+- **Every in-place write now synchronises with the reference it reuses.** The
+  sole-ownership test behind FBIP reuse, `NativeArray.set`/`sort` and the SIMD
+  store read the reference count with a relaxed load, so a cell another thread
+  had just released could be mutated in place without ordering against that
+  thread's last reads (a C11 data race, harmless on x86 in practice). The test
+  is an acquire load now, in the C runtime (`march_rc_is_unique`) and in
+  emitted code; free on x86-64, one `ldar` on arm64.
+- **A dead linear value's resource destructor runs.** Freeing a dead linear
+  binding bypassed the reference-count path and so skipped the destructor a
+  resource cell (a `RingBuf`, an FFI resource) carries, leaking its native
+  store and elements. `march_free` runs it now, as `march_decrc` always did.
 - **Compiled code no longer leaks records whose ownership differs between branches.**
   A record released on one path of a `match` or `if` was leaked on the others. A record
   passed to a function and then updated (`{ st with .. }`) was never released at all. A
@@ -2383,6 +2504,11 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Data-race freedom, written down.** `actors.md` says what a message may
+  carry (a linear value moves, everything else is immutable or copy-on-write),
+  `linear-types.md` has a `RingBuf` section and the module-level `let` rule,
+  `memory-model.md` states the acquire-ordering guarantee behind every in-place
+  write, and `parallelism.md` says which captured values parallel code may touch.
 - **Observing a running node** (`docs/observe.md`), an operator's guide to the
   observe socket and `forge observe`/`top`/`status`/`diagnose`: turning the
   socket on and what it costs, the protocol and error codes, every verb with a

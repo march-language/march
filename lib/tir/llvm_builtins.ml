@@ -953,26 +953,33 @@ let builtins : builtin list = [
      Elements are erased (TVar "_"); the buffer stores/returns the uniform
      march_value word, so push/pop/get/peek/to_list all use "ptr" element slots
      and pop/get/peek return niche-encoded Option(a) (None=0, Some(v)=v). *)
+  (* RingBuf: always_linear; every builtin consumes the buffer and returns it
+     (push, clear), returns it beside its answer in a pair (the readers), or
+     ends it (to_list, drop). Part C, Phase C2. *)
   { march_name = "ring_buf_make"; c_name = None; ret_ty = Some (Tir.TCon ("RingBuf", [Tir.TVar "_"]));
     in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_make(i64 %cap)" };
-  { march_name = "ring_buf_push"; c_name = None; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void   @ring_buf_push(ptr %rb, ptr %x)" };
-  { march_name = "ring_buf_pop"; c_name = None; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "_"]));
+  { march_name = "ring_buf_push"; c_name = None; ret_ty = Some (Tir.TCon ("RingBuf", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_push(ptr %rb, ptr %x)" };
+  { march_name = "ring_buf_pop"; c_name = None; ret_ty = Some (Tir.TTuple [Tir.TCon ("Option", [Tir.TVar "_"]); Tir.TCon ("RingBuf", [Tir.TVar "_"])]);
     in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_pop(ptr %rb)" };
-  { march_name = "ring_buf_get"; c_name = None; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "_"]));
+  { march_name = "ring_buf_get"; c_name = None; ret_ty = Some (Tir.TTuple [Tir.TCon ("Option", [Tir.TVar "_"]); Tir.TCon ("RingBuf", [Tir.TVar "_"])]);
     in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_get(ptr %rb, i64 %i)" };
-  { march_name = "ring_buf_peek_oldest"; c_name = None; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "_"]));
+  { march_name = "ring_buf_peek_oldest"; c_name = None; ret_ty = Some (Tir.TTuple [Tir.TCon ("Option", [Tir.TVar "_"]); Tir.TCon ("RingBuf", [Tir.TVar "_"])]);
     in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_peek_oldest(ptr %rb)" };
-  { march_name = "ring_buf_peek_newest"; c_name = None; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "_"]));
+  { march_name = "ring_buf_peek_newest"; c_name = None; ret_ty = Some (Tir.TTuple [Tir.TCon ("Option", [Tir.TVar "_"]); Tir.TCon ("RingBuf", [Tir.TVar "_"])]);
     in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_peek_newest(ptr %rb)" };
-  { march_name = "ring_buf_size"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @ring_buf_size(ptr %rb)" };
-  { march_name = "ring_buf_cap"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @ring_buf_cap(ptr %rb)" };
-  { march_name = "ring_buf_clear"; c_name = None; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void   @ring_buf_clear(ptr %rb)" };
+  { march_name = "ring_buf_size"; c_name = None; ret_ty = Some (Tir.TTuple [Tir.TInt; Tir.TCon ("RingBuf", [Tir.TVar "_"])]);
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_size(ptr %rb)" };
+  { march_name = "ring_buf_cap"; c_name = None; ret_ty = Some (Tir.TTuple [Tir.TInt; Tir.TCon ("RingBuf", [Tir.TVar "_"])]);
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_cap(ptr %rb)" };
+  { march_name = "ring_buf_clear"; c_name = None; ret_ty = Some (Tir.TCon ("RingBuf", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_clear(ptr %rb)" };
+  { march_name = "ring_buf_snapshot"; c_name = None; ret_ty = Some (Tir.TTuple [Tir.TCon ("List", [Tir.TVar "_"]); Tir.TCon ("RingBuf", [Tir.TVar "_"])]);
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_snapshot(ptr %rb)" };
   { march_name = "ring_buf_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "_"]));
     in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_to_list(ptr %rb)" };
+  { march_name = "ring_buf_drop"; c_name = None; ret_ty = Some (Tir.TUnit);
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_drop(ptr %rb)" };
   { march_name = "unix_time"; c_name = Some "march_unix_time"; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @march_unix_time()" };
   { march_name = "unix_time_ms"; c_name = Some "march_unix_time_ms"; ret_ty = Some Tir.TInt;
@@ -1862,7 +1869,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_f32_arr_alloc_raw";
   PDeclare "native_i32_arr_alloc_raw";
   PDeclare "native_u8_arr_alloc_raw";
-  PComment "; RingBuf builtins — mutable fixed-capacity circular buffer";
+  PComment "; RingBuf builtins — always_linear fixed-capacity circular buffer";
   PDeclare "ring_buf_make";
   PDeclare "ring_buf_push";
   PDeclare "ring_buf_pop";
@@ -1872,7 +1879,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "ring_buf_size";
   PDeclare "ring_buf_cap";
   PDeclare "ring_buf_clear";
+  PDeclare "ring_buf_snapshot";
   PDeclare "ring_buf_to_list";
+  PDeclare "ring_buf_drop";
   PComment "; Time builtins";
   PDeclare "march_unix_time";
   PDeclare "march_unix_time_ms";
@@ -1985,6 +1994,15 @@ let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op sch
   PDeclare "march_simd_lane_panic";
 ]
 
+(** Sanitizer builds (MARCH_SANITIZE) run the runtime with -DMARCH_RC_CHECKS,
+    and the emitter then adds the checks that need compiled-code cooperation:
+    the TRMC hole fill verifies the slot it fills is still null
+    ([march_hole_fill_check], runtime/march_runtime.c).  Set by bin/main.ml
+    from the same predicate as the sanitize CAS tag, so the IR and the
+    runtime it links always agree; re-exported as [Llvm_toplevel.rc_checks].
+    Lives here because the preamble below declares the check. *)
+let rc_checks = ref false
+
 (** Emit the LLVM preamble (`declare`d externs for every builtin/runtime
     C symbol) to [buf].  Mirrors llvm_emit.ml's former hand-written
     structure exactly: [core_items] on every target; [native_actor_items]
@@ -1999,6 +2017,8 @@ let emit_preamble ~(is_wasm : bool) ~(triple : string) ?(repl = false) (buf : Bu
   Buffer.add_string buf
     (Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" triple);
   render_items buf core_items;
+  if !rc_checks && not is_wasm then
+    Buffer.add_string buf "declare void @march_hole_fill_check(ptr %cell, i64 %field, ptr %prev)\n";
   if not is_wasm then begin
     render_items buf native_actor_items;
     (* In REPL mode the reduction check is skipped, so march_tls_reductions and

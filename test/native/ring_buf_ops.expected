@@ -1,7 +1,7 @@
 cap=3
 empty=true
 full=true
-to_list=[20,30,7]
+snapshot=[20,30,7]
 oldest=Some(20)
 newest=Some(7)
 get0=Some(20)
@@ -10,6 +10,9 @@ get9=None
 pop=Some(20)
 size=2
 cleared=0
-str to_list=b,c!
+to_list=[99]
+str snapshot=b,c!
 str pop=Some(b)
 str newest=Some(c!)
+str to_list=c!
+dropped

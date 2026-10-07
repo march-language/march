@@ -928,6 +928,71 @@ limit on `sink` so the node sheds load instead of growing.
 
 ---
 
+## A remote shell: forge shell and forge rpc
+
+`forge shell` evaluates March on a running node. Each input is compiled on
+your machine against the project, as `forge build` would compile it, into a
+small library. That library is signed with the deploy key and sent to the
+node, which loads it and runs it as a task. The node answers with the
+result and anything the input printed.
+
+```
+$ forge shell --env prod
+attached at epoch 3 (:help for commands, :quit to leave)
+march> Actor.list(intro)
+[Pid(0), Pid(1), Pid(2)]
+march> let c = Actor.whereis(intro, "counter")
+c : Option(Pid(a))
+march> List.range(1, 1000) limit: 3
+[1, 2, 3, … 996 more]
+march> println("hello")
+hello
+()
+```
+
+```bash
+forge rpc --env prod 'Scheduler.live_procs()'   # one input; exit 1 if it did not run
+```
+
+What a node needs:
+
+- **A deploy key.** A `--hot-reload` build with `--signing-pubkey`, the same
+  key `forge deploy hot` signs with (`~/.march/ed25519_secret.key` on your
+  machine).
+- **A shell policy.** `$MARCH_SHELL_POLICY` names a file listing, one per
+  line, the capabilities an input may use. With no file, nothing is allowed.
+
+Inputs:
+
+| You type | It does |
+|---|---|
+| `<expr>` | runs it and prints the value (lists cut at 50 elements) |
+| `<expr> limit: N` / `limit: all` | the same, cutting lists at `N` / not at all |
+| `let x = <expr>` | runs it and keeps the value on the node for later inputs |
+| `:t <expr>` | the expression's type; nothing runs |
+| `:limit N`, `:caps`, `:help`, `:quit` | |
+
+Capabilities are pre-bound names: `console` (`Cap(IO.Console)`), `clock`,
+`intro` (`Cap(Actor.Introspect)`), `debug` (`Cap(Actor.Debug)`). The node
+refuses an input that uses one its policy does not list
+(`** refused: policy IO.Console`).
+
+What happens when:
+
+- **An input panics.** You see `** panic: <message>`; the node and the
+  session carry on.
+- **An input runs too long.** It is cancelled after `--timeout-ms` (default
+  10 s, at most 30 s) and you see `** timeout`. A loop that never reaches a
+  cancellation point is reported as still running on the node.
+- **A deploy happens.** The session ends with "the node was redeployed".
+  Bindings belong to the session, so they go with it.
+- **Anything is sent.** Every input, accepted or not, is appended to the
+  node's audit log with `"type":"shell"`, the signer and the source.
+
+Under the hood `forge shell` runs `march --shell <reload socket>.shell
+<entry>` with the project's `MARCH_LIB_PATH`, through an ssh tunnel for a
+remote host. Running that directly works too.
+
 ## Interpreter vs compiled, and what is not there yet
 
 ### Interpreter differences
@@ -960,8 +1025,12 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
 - **Mailbox contents (`MESSAGES`).** The rest of the debug tier: the queued
   messages of an actor, most useful exactly when it is stuck and cannot render
   them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
-- **A remote shell (R5-R6).** `forge rpc` / `forge shell`, evaluating code on a
-  node over signed requests.
+- **The rest of the remote shell.** It works (see above), but:
+  - strings print unquoted, and only a top-level list is cut by `limit:`;
+  - a node whose code differs from your checkout is not detected yet;
+  - capabilities are declared from the names an input uses, not from what
+    the compiled fragment can reach;
+  - a program-defined actor cannot be spawned from the shell.
 - **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;
   today `forge top` is the live view.
 - **Tracing (R8).** Message and call tracing with mandatory limits.

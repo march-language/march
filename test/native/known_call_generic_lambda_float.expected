@@ -1,0 +1,6 @@
+generic lambda returns its first Float = 20000., flat: true
+generic lambda returns its second Float = 200010000., flat: true
+generic lambda forwards a Float = 400020000., flat: true
+generic lambda returns an Int = 200010000, flat: true
+generic lambda returns a String = 88894, flat: true
+call in a nested tail position = 100020000., flat: true

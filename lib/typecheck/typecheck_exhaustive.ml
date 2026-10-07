@@ -803,38 +803,141 @@ let offer_unrefined_error env span (r : session_ty ref) op =
   end else false
 
 (** Type constructor names that cannot appear in actor message payloads.
-    These types carry mutable state that must remain owned by a single actor.
-    NativeIntArr/NativeFloatArr/NativeF32Arr/NativeI32Arr/NativeU8Arr are
-    NativeArray's real backing types -- the NativeArray stdlib module
-    (stdlib/native_array.march) is a function namespace over these opaque
-    0-arity constructors, not a type of its own, so "NativeArray" itself
-    would be a silent no-op entry here (see where
-    native_int_arr_make/native_float_arr_make are registered, this
-    file, around the NativeArray builtins section). *)
-let non_sendable_types =
-  ["RingBuf"; "NativeIntArr"; "NativeFloatArr";
-   "NativeF32Arr"; "NativeI32Arr"; "NativeU8Arr"]
+    A type belongs here only if its operations write memory another March
+    reference could observe AND it is neither [always_linear] nor
+    copy-on-write gated on sole ownership ([march_rc_is_unique]); see
+    specs/lang/memory-model.md and
+    specs/2026-10-06-linear-ringbuf-and-sendable-arrays-design.md section 1.
+    The five NativeArray backing types (NativeIntArr/NativeFloatArr/
+    NativeF32Arr/NativeI32Arr/NativeU8Arr) left this list on 2026-10-06
+    (Part C, Phase C1): every in-place write the runtime makes to one is
+    gated on sole ownership and copies otherwise, and the interpreter always
+    copies, so a native array is a copy-on-write value that may be sent,
+    captured by a task or shared with parallel code like any other value.
+    [RingBuf] left on the same day (Phase C2): it is [always_linear], so a
+    send is its one consuming use and a moved buffer has exactly one owner on
+    either side of the move.  The list is EMPTY and stays as the enforcement
+    point for the rule above: a type that is neither linear nor copy-on-write
+    may only be added here after Parts A and B of the plan (a general Send
+    check through closures and user types) have landed;
+    a unit test (Phase C5 of the plan) fails the build if a name appears
+    before then. *)
+let non_sendable_types : string list =
+  []
 
-(** [check_sendable errors span ty] walks [ty] and emits an error for every
-    non-sendable type constructor it finds. Called from the [ECon] arm on
-    an actor message constructor's instantiated argument types (guarded by
-    [ci_is_actor_msg]) -- at message-CONSTRUCTION time, not at each place a
-    message value is later sent. *)
-let rec check_sendable errors span ty =
-  match repr ty with
-  | TCon (name, args) ->
-    if List.mem name non_sendable_types then
-      Err.error errors ~span
-        (Printf.sprintf
-           "Values of type `%s` cannot be sent in actor messages.\n\
-            `%s` is a mutable buffer that must be owned by a single actor.\n\
-            Pass it as initial actor state at spawn time instead of sending it."
-           name name)
-    else List.iter (check_sendable errors span) args
-  | TArrow (a, b)     -> check_sendable errors span a; check_sendable errors span b
-  | TTuple ts         -> List.iter (check_sendable errors span) ts
-  | TRecord flds      -> List.iter (fun (_, t) -> check_sendable errors span t) flds
-  | TLin (_, t)       -> check_sendable errors span t
-  | TNatOp (_, a, b)  -> check_sendable errors span a; check_sendable errors span b
-  | TRefine (base, _, _) -> check_sendable errors span base
-  | TVar _ | TChan _ | TNat _ | TError -> ()
+(** Test hook: extra primitive roots for [is_send], so the structural walk
+    can be exercised while [non_sendable_types] is empty.  Only
+    test/test_typecheck_send.ml sets it; production code never does. *)
+let send_roots_for_tests : string list ref = ref []
+
+(** The structural sendability judgement (Part C, Phase C5 of
+    specs/plans/2026-09-25-send-data-race-freedom-plan.md; Part A's Phase 1,
+    landed early as the guard for the rule in specs/lang/memory-model.md).
+    Derived from [non_sendable_types], the primitive roots, so that the first
+    entry ever added there is checked through user ADTs, record fields, type
+    arguments and tuples from day one, not only when it appears at the top of
+    a message payload. *)
+type send_result =
+  | Send
+  | Not_send of string list * ty      (** path to the offender, the offender *)
+  | Send_if of ty list                 (** unresolved type variables *)
+  | Send_mod_closures of string list   (** paths to arrow-typed components *)
+
+(** [is_send env ty]:
+    - a [TCon] named in the roots is [Not_send];
+    - any other [TCon] is judged by what it holds: a record's fields
+      ([Typecheck_unify.expand_record]) or each constructor's argument types
+      with the type arguments substituted for the parameters
+      ([Typecheck_unify.surface_ty] with a fixed [tvars] map, so no fresh
+      variable and no unification), with the path naming the record field or
+      the constructor and field index.  A revisit of the same
+      [(name, args)] key is [Send] (coinductive, so [List(a)] terminates);
+    - an opaque builtin with no constructors and no record definition
+      ([Task], [Pid], [Cap], [Vault], [WorkPool], sockets) is [Send] unless
+      it is a root: it refers to values rather than holding one, the same
+      judgement [contains_linear] makes;
+    - [TTuple], [TRecord], [TLin], [TRefine], [TNatOp] recurse into their
+      components ([TLin] does not make a type [Send]: a linear buffer is
+      still a buffer);
+    - [TChan] is [Send] (session endpoints are linear and meant to be handed
+      off); [TArrow] is [Send_mod_closures] (the type cannot say what a
+      closure captures; Part B's value-level check would decide); [TVar] is
+      [Send_if] (Part A's Phase 2 would turn it into a bound).
+    Results combine as [Not_send] > [Send_if] > [Send_mod_closures] > [Send],
+    keeping the first offender's path. *)
+let is_send (env : env) (ty : ty) : send_result =
+  let roots = non_sendable_types @ !send_roots_for_tests in
+  let combine a b = match a, b with
+    | Not_send _, _ -> a | _, Not_send _ -> b
+    | Send_if xs, Send_if ys -> Send_if (xs @ ys)
+    | Send_if _, _ -> a | _, Send_if _ -> b
+    | Send_mod_closures _, _ -> a | _, Send_mod_closures _ -> b
+    | Send, Send -> Send in
+  let fold_tys seen path tys go =
+    List.fold_left (fun acc (p, t) -> combine acc (go seen (p :: path) t)) Send tys in
+  let key_of name args = name ^ "(" ^ String.concat ", " (List.map pp_ty args) ^ ")" in
+  let rec go seen path t =
+    match repr t with
+    | TCon (name, _) as t0 when List.mem name roots -> Not_send (List.rev path, t0)
+    | TCon (name, args) as t0 ->
+      let key = key_of name args in
+      if List.mem key seen then Send
+      else begin
+        let seen = key :: seen in
+        match Typecheck_unify.expand_record env t0 with
+        | Some (TRecord flds) ->
+          fold_tys seen path (List.map (fun (f, ft) -> (name ^ "." ^ f, ft)) flds) go
+        | _ ->
+          let ctors = ctors_for_type env name in
+          if ctors = [] then Send
+          else
+            let per_ctor acc (ctor_name, _arity) =
+              match lookup_ctor_in_type ctor_name name env with
+              | None -> acc
+              | Some ci ->
+                let tvars =
+                  if List.length ci.ci_params = List.length args
+                  then ref (List.combine ci.ci_params args)
+                  else ref (List.map (fun p -> (p, fresh_var env.level)) ci.ci_params) in
+                let arg_tys = List.map (Typecheck_unify.surface_ty env ~tvars) ci.ci_arg_tys in
+                combine acc
+                  (fold_tys seen path
+                     (List.mapi (fun i at -> (Printf.sprintf "%s field %d" ctor_name (i + 1), at)) arg_tys)
+                     go)
+            in
+            List.fold_left per_ctor Send ctors
+      end
+    | TArrow _ -> Send_mod_closures (List.rev path)
+    | TTuple ts -> fold_tys seen path (List.mapi (fun i t -> (Printf.sprintf "component %d" (i + 1), t)) ts) go
+    | TRecord flds -> fold_tys seen path (List.map (fun (f, ft) -> ("." ^ f, ft)) flds) go
+    | TLin (_, t) -> go seen path t
+    | TRefine (base, _, _) -> go seen path base
+    | TNatOp (_, a, b) -> combine (go seen path a) (go seen path b)
+    | TVar _ as tv -> Send_if [tv]
+    | TChan _ | TNat _ | TError -> Send
+  in
+  go [] [] ty
+
+(** [check_sendable env span ty] is [is_send] at a message boundary: emits an
+    error for a [Not_send] payload, naming the path to the offender.  Called
+    from the [ECon] arm on an actor message constructor's instantiated
+    argument types (guarded by [ci_is_actor_msg]) -- at message-CONSTRUCTION
+    time, not at each place a message value is later sent.  [Send_if] and
+    [Send_mod_closures] are accepted here: the type variable case becomes a
+    bound only with Part A's Phase 2, and closures are Part B's business.
+    With the roots empty nothing is ever rejected; the walk is the guard
+    for the rule in specs/lang/memory-model.md. *)
+let check_sendable (env : env) span ty =
+  match is_send env ty with
+  | Not_send (path, offender) ->
+    let name = match repr offender with TCon (n, _) -> n | t -> pp_ty t in
+    let where = match path with
+      | [] -> ""
+      | p -> Printf.sprintf "\nIt is reached through %s." (String.concat ", then " p) in
+    Err.error env.errors ~span
+      (Printf.sprintf
+         "Values of type `%s` cannot be sent in actor messages.\n\
+          `%s` is a mutable buffer that must be owned by a single actor.%s\n\
+          Pass it as initial actor state at spawn time instead of sending it."
+         name name where)
+  | Send | Send_if _ | Send_mod_closures _ -> ()

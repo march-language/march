@@ -1,0 +1,192 @@
+-- Leak guard: NativeArray builtins that READ their array (or list) argument
+-- and return a fresh value
+-- (specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md).
+--
+-- They were classified owned (unaudited) in lib/tir/borrow.ml, so the last
+-- reference to the argument was handed to a C function that never released
+-- it: the intermediate array of `map(map(a, f), g)` leaked on every call, and
+-- so did every list given to `from_list`. Each leg below builds a FRESH array
+-- (or list) per iteration whose last use is the builtin under test, runs 300
+-- iterations, prints its result (so a use-after-free that changes a value
+-- fails the golden) and checks live_allocs stays flat.
+--
+-- The `_rt` legs pass the callback as a parameter, so the call stays on the
+-- runtime's C loop instead of an inline loop. The runtime's Float/f32
+-- map and map2 boxed each element for the closure call and never released
+-- the argument box or the returned box: two leaked boxes per element. The
+-- identity and ignore-the-argument callbacks are there because a box
+-- released twice is the opposite mistake.
+mod Main do
+  needs IO.Console
+
+  pfn flat(label : String, before : Int, r : String) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 30))
+  end
+
+  pfn fresh_int(n : Int) : NativeIntArr do
+    NativeArray.from_list_int(Cons(n, Cons(n + 1, Cons(2, Nil))))
+  end
+
+  pfn fresh_float(n : Int) : NativeFloatArr do
+    NativeArray.from_list_float(Cons(int_to_float(n), Cons(0.5, Cons(2.0, Nil))))
+  end
+
+  pfn map_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let t = NativeArray.map_int(fresh_int(n), fn x -> x + 1)
+      let u = NativeArray.map_int(t, fn y -> y * 2)
+      map_leg(n - 1, acc + NativeArray.get_int(u, 0))
+    end
+  end
+
+  pfn map_float_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let u = NativeArray.map_float(fresh_float(n), fn y -> y *. 2.0)
+      map_float_leg(n - 1, acc +. NativeArray.get_float(u, 2))
+    end
+  end
+
+  pfn map2_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let u = NativeArray.map2_int(fresh_int(n), fresh_int(1), fn (x, y) -> x + y)
+      map2_leg(n - 1, acc + NativeArray.get_int(u, 1))
+    end
+  end
+
+  pfn fold_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else fold_leg(n - 1, acc + NativeArray.fold_int(fresh_int(n), 0, fn (s, x) -> s + x))
+    end
+  end
+
+  pfn fold_float_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else fold_float_leg(n - 1, acc +. NativeArray.fold_float(fresh_float(n), 0.0, fn (s, x) -> s +. x))
+    end
+  end
+
+  pfn from_list_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let xs = Cons(n, Cons(1, Nil))
+      let a = NativeArray.from_list_int(xs)
+      from_list_leg(n - 1, acc + NativeArray.length_int(a))
+    end
+  end
+
+  pfn minmax_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else minmax_leg(n - 1, acc + native_int_arr_min(fresh_int(n)) + native_int_arr_max(fresh_int(n)))
+    end
+  end
+
+  pfn float_minmax_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else float_minmax_leg(n - 1,
+      acc +. native_float_arr_min(fresh_float(n)) +. native_float_arr_max(fresh_float(n)))
+    end
+  end
+
+  pfn sumsq_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else sumsq_leg(n - 1, acc +. native_int_arr_sumsq_dev(fresh_int(n), 1.0)
+                          +. native_float_arr_sumsq_dev(fresh_float(n), 1.0))
+    end
+  end
+
+  pfn convert_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let f = NativeArray.to_float_arr(fresh_int(n))
+      let g = NativeArray.f32_to_float_arr(NativeArray.float_to_f32_arr(fresh_float(n)))
+      let h = NativeArray.i32_to_int_arr(NativeArray.int_to_i32_arr(fresh_int(n)))
+      let k = NativeArray.u8_to_int_arr(NativeArray.int_to_u8_arr(fresh_int(n)))
+      let l = NativeArray.i32_to_f32_arr(NativeArray.int_to_i32_arr(fresh_int(n)))
+      let m = NativeArray.u8_to_f32_arr(NativeArray.int_to_u8_arr(fresh_int(n)))
+      convert_leg(n - 1, acc +. NativeArray.get_float(f, 0) +. NativeArray.get_float(g, 1)
+        +. int_to_float(NativeArray.get_int(h, 0) + NativeArray.get_int(k, 0))
+        +. NativeArray.get_f32(l, 2) +. NativeArray.get_f32(m, 2))
+    end
+  end
+
+  -- The mask is built once: typed_array_from_list leaks its list on its own
+  -- (specs/todos/2026-10-06-typed-array-builtins-leak-their-argument.md).
+  -- filter_mask was also missing from Defun's builtin names, so it was called
+  -- through call_ptr, where no borrow entry applies.
+  pfn mask_leg(n : Int, mask : TypedArray(Bool), acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let a = native_int_arr_filter_mask(fresh_int(n), mask)
+      let b = native_float_arr_filter_mask(fresh_float(n), mask)
+      mask_leg(n - 1, mask, acc + NativeArray.length_int(a) + NativeArray.length_float(b))
+    end
+  end
+
+  -- The callback is chosen at run time, so no lambda literal reaches the
+  -- map call and it stays on the runtime path.
+  pfn pick1(n : Int, f : Float -> Float, g : Float -> Float) : Float -> Float do
+    if n % 2 == 0 do f else g end
+  end
+
+  pfn pick2(n : Int, f : Float -> Float -> Float, g : Float -> Float -> Float)
+      : Float -> Float -> Float do
+    if n % 2 == 0 do f else g end
+  end
+
+  pfn float_rt_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let a = fresh_float(n)
+      let u = NativeArray.map_float(a, pick1(n, fn x -> x *. 2.0, fn x -> x +. 1.0))
+      let v = NativeArray.map_float(a, pick1(n, fn x -> x, fn _x -> 1.5))
+      let z = NativeArray.map2_float(a, a, pick2(n, fn (x, y) -> x +. y, fn (x, _y) -> x))
+      float_rt_leg(n - 1, acc +. NativeArray.get_float(u, 2) +. NativeArray.get_float(v, 1)
+        +. NativeArray.get_float(z, 2))
+    end
+  end
+
+  pfn f32_rt_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let a = NativeArray.float_to_f32_arr(fresh_float(n))
+      let u = NativeArray.map_f32(a, pick1(n, fn x -> x *. 2.0, fn x -> x))
+      let z = NativeArray.map2_f32(a, a, pick2(n, fn (x, y) -> x +. y, fn (_x, y) -> y))
+      f32_rt_leg(n - 1, acc +. NativeArray.get_f32(u, 2) +. NativeArray.get_f32(z, 2))
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let n = 300
+    let a0 = live_allocs()
+    flat("map of a map", a0, int_to_string(map_leg(n, 0)))
+    let a1 = live_allocs()
+    flat("map_float", a1, float_to_string(map_float_leg(n, 0.0)))
+    let a2 = live_allocs()
+    flat("map2", a2, int_to_string(map2_leg(n, 0)))
+    let a3 = live_allocs()
+    flat("fold", a3, int_to_string(fold_leg(n, 0)))
+    let a4 = live_allocs()
+    flat("fold_float", a4, float_to_string(fold_float_leg(n, 0.0)))
+    let a5 = live_allocs()
+    flat("from_list", a5, int_to_string(from_list_leg(n, 0)))
+    let a6 = live_allocs()
+    flat("min and max", a6, int_to_string(minmax_leg(n, 0)))
+    let a7 = live_allocs()
+    flat("float min and max", a7, float_to_string(float_minmax_leg(n, 0.0)))
+    let a8 = live_allocs()
+    flat("sumsq_dev", a8, float_to_string(sumsq_leg(n, 0.0)))
+    let a9 = live_allocs()
+    flat("width conversions", a9, float_to_string(convert_leg(n, 0.0)))
+    let mask = typed_array_from_list(Cons(true, Cons(false, Cons(true, Nil))))
+    let a10 = live_allocs()
+    flat("filter_mask", a10, int_to_string(mask_leg(n, mask, 0)))
+    let a11 = live_allocs()
+    flat("runtime Float map and map2", a11, float_to_string(float_rt_leg(n, 0.0)))
+    let a12 = live_allocs()
+    flat("runtime f32 map and map2", a12, float_to_string(f32_rt_leg(n, 0.0)))
+  end
+end

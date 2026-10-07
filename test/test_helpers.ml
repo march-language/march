@@ -960,6 +960,30 @@ let compile_march_or_skip ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~
   | `Ok bin -> Some bin
   | `Skipped -> None
 
+(** The RC trace report for [src], for a leak test's failure message:
+    rebuilds the program with [--rc-trace] (site ids on every runtime call,
+    lib/tir/llvm_rc_trace.ml), runs it under [MARCH_TRACE_GC=1] with [tmp] as
+    its cwd (the trace lands in [tmp]/trace/gc), and folds the trace with
+    scripts/gc-trace-report.py, whose live-object section names the function
+    that took each unreleased reference.  Every step's failure is reported in
+    the returned text rather than raised: this runs INSIDE a failure path and
+    must never mask the original assertion. *)
+let rc_trace_report ~project_root ~main_exe ~src ~tmp : string =
+  let bin = Filename.concat tmp "rc_trace_bin" in
+  let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --rc-trace --compile -o %s %s"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+  if crc <> 0 then Printf.sprintf "(--rc-trace rebuild failed, rc=%d)\n%s" crc cout
+  else begin
+    let (rrc, rout) = run_capture (Printf.sprintf "cd %s && MARCH_TRACE_GC=1 %s"
+        (Filename.quote tmp) (Filename.quote bin)) in
+    let report = Filename.concat project_root "scripts/gc-trace-report.py" in
+    let (prc, pout) = run_capture (Printf.sprintf "cd %s && python3 %s trace/gc --top 20"
+        (Filename.quote tmp) (Filename.quote report)) in
+    Printf.sprintf "traced run (rc=%d): %s\nreport (rc=%d; 1 = objects live at exit):\n%s"
+      rrc (String.trim rout) prc pout
+  end
+
 (** Runs [argv] (argv.(0) is looked up on PATH like execvp) with stdout
     redirected to [stdout_file] and stderr discarded, waiting up to
     [timeout_secs] for it to exit. Returns [`Exited rc] on a normal exit, or
@@ -1178,7 +1202,7 @@ let rm_rf_temp_dir path =
     `main_exe` itself is the same never-legitimately-absent binary
     `find_main_exe` already asserts on, so any failure here is a real
     compiler bug and must fail loudly with the captured output. *)
-let emit_llvm_ir_to_file ~main_exe ~src () : [ `Ok of string | `Failed of int * string ] =
+let emit_llvm_ir_to_file ?(extra_flags = "") ~main_exe ~src () : [ `Ok of string | `Failed of int * string ] =
   let tmp_dir = Filename.temp_file "march_ir_verify" "" in
   Sys.remove tmp_dir;
   Unix.mkdir tmp_dir 0o755;
@@ -1194,8 +1218,10 @@ let emit_llvm_ir_to_file ~main_exe ~src () : [ `Ok of string | `Failed of int * 
   output_string oc contents;
   close_out oc;
   let ll_path = Filename.concat tmp_dir (base ^ ".ll") in
-  let cmd = Printf.sprintf "cd %s && %s --emit-llvm %s </dev/null"
-    (Filename.quote tmp_dir) (Filename.quote main_exe) (Filename.quote (Filename.basename march_copy)) in
+  let cmd = Printf.sprintf "cd %s && %s --emit-llvm%s %s </dev/null"
+    (Filename.quote tmp_dir) (Filename.quote main_exe)
+    (if extra_flags = "" then "" else " " ^ extra_flags)
+    (Filename.quote (Filename.basename march_copy)) in
   let (rc, output) = run_capture cmd in
   if rc = 0 && Sys.file_exists ll_path then `Ok ll_path
   else begin

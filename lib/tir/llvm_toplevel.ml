@@ -57,6 +57,165 @@ type target_config =
     so a non-pinned cached artifact must never satisfy a --pin-main build. *)
 let pin_main = ref false
 
+(* ── --debug-info: function-granularity DWARF + !march.provenance ─────────
+   (specs/plans/incremental-codegen-cas-plan.md §7, A2).  Off by default and
+   driver-set, so the emitted text is byte-identical to before when off; the
+   REPL never sets it.  Per-module state below is reset by [emit_module].
+
+   Metadata id layout (no other metadata is emitted anywhere in lib/tir):
+     !0 DICompileUnit  !1/!2 module flags  !3 DIFile (module)  !4/!5 fn type
+     !6.. interned DIFiles, then per function a pair: !N = DISubprogram,
+     !N+1 = DILocation(scope: !N).  [attach_call_dbg] relies on the pair. *)
+let debug_info = ref false
+let dbg_next_id = ref 6
+let dbg_files : (string, int) Hashtbl.t = Hashtbl.create 16
+let dbg_nodes = Buffer.create 4096
+let dbg_subprograms : int list ref = ref []       (* DISubprogram ids, reversed *)
+let dbg_prov_nodes : int list ref = ref []        (* !march.provenance entries *)
+
+let dbg_reset () =
+  dbg_next_id := 6;
+  Hashtbl.reset dbg_files;
+  Buffer.clear dbg_nodes;
+  dbg_subprograms := [];
+  dbg_prov_nodes := []
+
+let dbg_fresh () = let n = !dbg_next_id in incr dbg_next_id; n
+
+(* LLVM metadata-string escaping: double quote, backslash and
+   non-printables become two-hex-digit escapes. *)
+let md_escape s =
+  let b = Buffer.create (String.length s) in
+  String.iter (fun c ->
+      let code = Char.code c in
+      if c = '"' || c = '\\' || code < 0x20 || code > 0x7e
+      then Buffer.add_string b (Printf.sprintf "\\%02X" code)
+      else Buffer.add_char b c) s;
+  Buffer.contents b
+
+let dbg_module_file () =
+  match !Provenance.module_file with Some f -> f | None -> "<unknown>.march"
+
+let dbg_file_node (path : string) : int =
+  match Hashtbl.find_opt dbg_files path with
+  | Some id -> id
+  | None ->
+    let id = if path = dbg_module_file () then 3 else dbg_fresh () in
+    Hashtbl.replace dbg_files path id;
+    let dir = Filename.dirname path in
+    let dir = if Filename.is_relative dir then Filename.concat (Sys.getcwd ()) dir else dir in
+    Printf.bprintf dbg_nodes "!%d = !DIFile(filename: \"%s\", directory: \"%s\")\n"
+      id (md_escape (Filename.basename path)) (md_escape dir);
+    id
+
+(** The ` !dbg !N` suffix for [fn]'s define line (and the matching
+    DISubprogram/DILocation pair, plus its !march.provenance entry). *)
+let dbg_define_suffix (fn : Tir.fn_def) (fn_llvm_name : string) : string =
+  let name = fn.Tir.fn_name in
+  let (file, line) = match Provenance.effective_span name with
+    | Some sp -> (sp.March_ast.Ast.file, max 1 sp.March_ast.Ast.start_line)
+    | None -> (dbg_module_file (), 1) in
+  let file_id = dbg_file_node file in
+  let sp_id = dbg_fresh () in
+  let loc_id = dbg_fresh () in
+  assert (loc_id = sp_id + 1);
+  Printf.bprintf dbg_nodes
+    "!%d = distinct !DISubprogram(name: \"%s\", linkageName: \"%s\", scope: !%d, \
+     file: !%d, line: %d, type: !4, scopeLine: %d, spFlags: DISPFlagDefinition, \
+     unit: !0)\n"
+    sp_id (md_escape name) (md_escape fn_llvm_name) file_id file_id line line;
+  Printf.bprintf dbg_nodes "!%d = !DILocation(line: %d, scope: !%d)\n" loc_id line sp_id;
+  dbg_subprograms := sp_id :: !dbg_subprograms;
+  (match Provenance.find name with
+   | Some o ->
+     let pid = dbg_fresh () in
+     Printf.bprintf dbg_nodes "!%d = !{!\"%s\", !\"%s\"}\n"
+       pid (md_escape name) (md_escape (Provenance.render_meta o));
+     dbg_prov_nodes := pid :: !dbg_prov_nodes
+   | None -> ());
+  Printf.sprintf " !dbg !%d" sp_id
+
+(** The module-level block: compile unit, flags, files, and every node
+    collected by [dbg_define_suffix]. *)
+let dbg_module_block () : string =
+  let b = Buffer.create (Buffer.length dbg_nodes + 1024) in
+  ignore (dbg_file_node (dbg_module_file ()));   (* ensure !3 exists *)
+  Buffer.add_string b "\n!llvm.dbg.cu = !{!0}\n!llvm.module.flags = !{!1, !2}\n";
+  (match List.rev !dbg_prov_nodes with
+   | [] -> ()
+   | ids ->
+     Printf.bprintf b "!march.provenance = !{%s}\n"
+       (String.concat ", " (List.map (Printf.sprintf "!%d") ids)));
+  Buffer.add_string b
+    "!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !3, producer: \"march\", \
+     isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)\n\
+     !1 = !{i32 2, !\"Debug Info Version\", i32 3}\n\
+     !2 = !{i32 2, !\"Dwarf Version\", i32 4}\n\
+     !4 = !DISubroutineType(types: !5)\n\
+     !5 = !{}\n";
+  Buffer.add_buffer b dbg_nodes;
+  Buffer.contents b
+
+(** LLVM's verifier rejects a call without a location inside a function that
+    has a DISubprogram when the callee has one too ("inlinable function call
+    in a function with debug info must have a !dbg location"), and then DROPS
+    the module's debug info entirely.  So every call in a `define … !dbg !N`
+    body gets the function's own location, `!dbg !N+1` — still function
+    granularity, just stated on each call.  Text pass over the finished
+    module, like [Llvm_rc_inline]: calls are printed by a dozen emitter files
+    and the attachment must be total. *)
+let attach_call_dbg (ir : string) : string =
+  let starts_with pre s =
+    String.length s >= String.length pre && String.sub s 0 (String.length pre) = pre in
+  let contains_dbg s =
+    let n = String.length s in
+    let rec go i = i + 6 <= n && (String.sub s i 6 = ", !dbg" || go (i + 1)) in
+    go 0 in
+  let is_call_line t =
+    (* `%r = call`, `call`, `tail call`, `musttail call`, `notail call`, `invoke` *)
+    let t = match String.index_opt t '=' with
+      | Some i when starts_with "%" t -> String.trim (String.sub t (i + 1) (String.length t - i - 1))
+      | _ -> t in
+    starts_with "call " t || starts_with "tail call " t || starts_with "musttail call " t
+    || starts_with "notail call " t || starts_with "invoke " t in
+  (* "define … !dbg !N {" -> Some (N+1), the DILocation paired with !N. *)
+  let loc_of_define line =
+    let marker = " !dbg !" in
+    let ml = String.length marker and n = String.length line in
+    let rec find i = if i + ml > n then None
+      else if String.sub line i ml = marker then Some (i + ml) else find (i + 1) in
+    match find 0 with
+    | None -> None
+    | Some j ->
+      let k = ref j in
+      while !k < n && line.[!k] >= '0' && line.[!k] <= '9' do incr k done;
+      Option.map (fun d -> d + 1) (int_of_string_opt (String.sub line j (!k - j))) in
+  let out = Buffer.create (String.length ir + 4096) in
+  let cur = ref None in
+  List.iter (fun line ->
+      if starts_with "define " line then begin
+        cur := loc_of_define line;
+        Buffer.add_string out line
+      end else if line = "}" then begin
+        cur := None; Buffer.add_string out line
+      end else begin
+        (match !cur with
+         | Some loc when is_call_line (String.trim line) && not (contains_dbg line) ->
+           Buffer.add_string out line;
+           Buffer.add_string out (Printf.sprintf ", !dbg !%d" loc)
+         | _ -> Buffer.add_string out line)
+      end;
+      Buffer.add_char out '\n')
+    (String.split_on_char '\n' ir);
+  (* split_on_char yields a trailing "" for a '\n'-terminated input; drop the
+     extra newline we just added for it. *)
+  let s = Buffer.contents out in
+  if String.length ir > 0 && ir.[String.length ir - 1] = '\n'
+  then String.sub s 0 (String.length s - 1) else s
+
+(** See [Llvm_builtins.rc_checks] (the preamble declares the check). *)
+let rc_checks = Llvm_builtins.rc_checks
+
 let is_wasm_target = function
   | Native | LinuxGnu _ | Js -> false
   | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown -> true
@@ -264,8 +423,10 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
     then "hidden "
     else ""
   in
+  let dbg_suffix =
+    if !debug_info && not ctx.Llvm_ctx.repl then dbg_define_suffix fn fn_llvm_name else "" in
   Buffer.add_string ctx.Llvm_ctx.buf
-    (Printf.sprintf "\ndefine %s%s @%s(%s) {\nentry:\n" vis_prefix ret_ty fn_llvm_name params_str);
+    (Printf.sprintf "\ndefine %s%s @%s(%s)%s {\nentry:\n" vis_prefix ret_ty fn_llvm_name params_str dbg_suffix);
 
   (* Alloca + store for each parameter; collect slot info for TCO. *)
   let native_vec_idxs = native_vec_param_idxs fn in
@@ -1057,6 +1218,7 @@ let emit_module ~emit_expr
   (* type defs are threaded via ctx.type_defs (set below); reset the
      repr-consistency audit per module emission. *)
   Hashtbl.reset Llvm_ctx._repr_audit;
+  dbg_reset ();
   (* Capability markers: start each module emission with a clean slate so
      symbols recorded by a previous emission in the same process (tests,
      forge multi-entry checks) cannot leak into this module's markers. *)
@@ -1881,4 +2043,8 @@ let emit_module ~emit_expr
    end);
 
   Llvm_ctx.repr_audit_report ();
-  Buffer.contents out
+  if !debug_info then begin
+    Buffer.add_string out (dbg_module_block ());
+    attach_call_dbg (Buffer.contents out)
+  end else
+    Buffer.contents out

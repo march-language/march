@@ -65,6 +65,23 @@ let typed_ledger src =
       | _ -> (p, v, s, rs))
     (0, 0, 0, []) (March_refinecheck.Obligation.all ())
 
+(* Every obligation of a TYPED check as (callee, verdict slug, reason slug or
+   ""), in record order.  For asserting on ONE callee's verdicts when the
+   whole-module triple would hide which obligation moved. *)
+let typed_obligations (src : string) : (string * string * string) list =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_typed src);
+  List.map
+    (fun (o : March_refinecheck.Obligation.t) ->
+      let open March_refinecheck.Obligation in
+      ( o.callee
+      , verdict_name o.verdict
+      , match o.verdict with Skipped r -> reason_name r | _ -> "" ))
+    (March_refinecheck.Obligation.all ())
+
+let verdicts_of (src : string) (callee : string) : string list =
+  List.filter_map (fun (c, v, _) -> if c = callee then Some v else None) (typed_obligations src)
+
 (* Same as [has_refine_error_d], but parsed AS IF it came from [file] and
    checked with [stdlib_files] declared as the standard library's own sources.
    Both are needed to exercise the ENABLING branch of the `List.length` measure
@@ -12259,7 +12276,99 @@ end|}
         Alcotest.(check (triple int int int)) "baseline ledger" (1, 0, 1)
           (proved, violated, skipped);
         Alcotest.(check bool) "no sort-conflict skip" false
-          (List.mem "sort-conflict" (skip_reasons src))) ]
+          (List.mem "sort-conflict" (skip_reasons src)));
+
+    (* The exclusion above was wider than its cause: an `Int` alias mixes no
+       sorts, yet `let b = a` dropped `a`'s facts while `let b = a + 0` kept
+       them.  A bare variable is now admitted when the typechecker's span
+       table says it is `Int` (the rule `let c = if … else x end` already
+       used), so these use [typed_ledger]. *)
+    gated "an Int alias of a refined parameter carries its fact" (fun () ->
+        (* RED before: 0 proved / 1 skipped (unconstrained-subject on `b`). *)
+        let proved, violated, skipped, _rs =
+          typed_ledger
+            {|mod IA1 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn f(a : {Int | _ > 0}) : Int do
+    let b = a
+    pos(b)
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "proved" (1, 0, 0)
+          (proved, violated, skipped));
+
+    gated "an Int alias chain carries a literal's fact" (fun () ->
+        let proved, violated, skipped, _rs =
+          typed_ledger
+            {|mod IA2 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn f() : Int do
+    let a = 5
+    let b = a
+    pos(b)
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "proved" (1, 0, 0)
+          (proved, violated, skipped));
+
+    (* The negative bracket: the alias must carry a BAD value through too,
+       or IA2 could pass by an equality that constrains nothing. *)
+    gated "an Int alias chain carries a violating value" (fun () ->
+        let proved, violated, skipped, _rs =
+          typed_ledger
+            {|mod IA3 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn f() : Int do
+    let a = 0 - 5
+    let b = a
+    pos(b)
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "violated" (0, 1, 0)
+          (proved, violated, skipped));
+
+    (* Rebinding the aliased name retires `b == a` (it mentions `a`), so the
+       call goes back to undecided; it must never read the NEW `a` and
+       falsely violate. *)
+    gated "rebinding the aliased name retires the alias" (fun () ->
+        let _p, violated, _s, _rs =
+          typed_ledger
+            {|mod IA4 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn f() : Int do
+    let a = 5
+    let b = a
+    let a = 0 - 1
+    pos(b)
+  end
+end|}
+        in
+        Alcotest.(check int) "no false violation" 0 violated);
+
+    (* OA1 again WITH the type table: the `Option` alias must still be
+       turned away now that the table can admit an `Int` one. *)
+    gated "a typed Option alias is still not admitted" (fun () ->
+        let proved, violated, skipped, rs =
+          typed_ledger
+            {|mod IA5 do
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn f(x : Option(Int)) : Int do
+    let u = x
+    match x do
+      Some(v) -> unwrap(x)
+      None -> 0
+    end
+  end
+  fn g(x : Option(Int)) : Int do unwrap(x) end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "baseline ledger" (1, 0, 1)
+          (proved, violated, skipped);
+        Alcotest.(check bool) "no sort-conflict skip" false
+          (List.mem "sort-conflict" rs)) ]
 
 (* ── Task 1: arithmetic actuals reflect through the subject's own scope ──
    `pos(i + 1)` is spelled `EApp (EVar "+", [i; 1])`.  [reflect_scalar]'s
@@ -17273,6 +17382,178 @@ let caller_sorts_suite =
    (specs/plans/set-refinements-strengthening-plan.md step 1.0).  The first
    case proves the counter is live on a known-malformed shape, and undoes its
    own contribution so the second case measures only the rest of the run. *)
+(* A callback's codomain may name its domain's binder:
+   `keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}`.  [callback_sig_of_ty]
+   names the parameter `$cb_arg` but kept `x` in the return predicate, so
+   [postcond_of] classified it Unusable and a guard `if keep(h)` taught
+   nothing.  CB1 is the flagship (RED before: every "return of keep_pos" is
+   skipped); CB2 is its negative bracket — on the other branch the guard's
+   NEGATION holds, so a positive-only tail there is a definite violation. *)
+let callback_binder_suite =
+  [ gated "a guard calling a callback learns its codomain fact" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod CB1 do
+  fn keep_pos(xs : List(Int), keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : List({Int | _ > 0}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do Cons(h, keep_pos(t, keep)) else keep_pos(t, keep) end
+    end
+  end
+end|}
+            "return of keep_pos"
+        in
+        Alcotest.(check bool) "some return obligation" true (vs <> []);
+        Alcotest.(check (list string)) "all proved" (List.map (fun _ -> "proved") vs) vs);
+
+    gated "the fact holds only on the guarded branch" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod CB2 do
+  fn keep_pos(xs : List(Int), keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : List({Int | _ > 0}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do keep_pos(t, keep) else Cons(h, keep_pos(t, keep)) end
+    end
+  end
+end|}
+            "return of keep_pos"
+        in
+        (* The else branch knows `not keep(h)`, i.e. `h <= 0` through the
+           contract, so `Cons(h, …)` there DEFINITELY breaks `_ > 0`: a
+           violation, not merely an unproved tail.  The guard's fact is
+           confined to its branch, and its negation reaches the other. *)
+        Alcotest.(check bool) "not all proved" true (List.exists (fun v -> v <> "proved") vs);
+        Alcotest.(check bool) "the else-branch Cons is a violation" true (List.mem "violated" vs));
+
+    (* The expected codomain names the argument `x`; the lambda calls it `y`.
+       RED before: `solver-undecided` on `<lambda>` — `x` was a free constant. *)
+    gated "a lambda meets a codomain over its own parameter name" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             {|mod CB3 do
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn go() : Bool do ap(fn y -> y > 0, 3) end
+end|}
+             "<lambda>"));
+
+    gated "a lambda that disagrees with the codomain is not proved" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod CB4 do
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn go() : Bool do ap(fn y -> y >= 0, 3) end
+end|}
+            "<lambda>"
+        in
+        Alcotest.(check bool) "some verdict" true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem "proved" vs));
+
+    (* `is_pos`'s proved return names ITS parameter `n`; the expected codomain
+       names `$cb_arg` (after CB1's fix).  The pass-site obligation is the
+       LAST one recorded under callee `is_pos` (its own postcondition is
+       checked first, when `is_pos` itself is visited).  RED before: skipped. *)
+    gated "a named callable's proved return meets the codomain" (fun () ->
+        let obs =
+          typed_obligations
+            {|mod CB5 do
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
+  fn go() : Bool do ap(is_pos, 3) end
+end|}
+        in
+        Alcotest.(check (list (pair string string))) "own post + pass site, both proved"
+          [ ("proved", ""); ("proved", "") ]
+          (List.filter_map (fun (c, v, r) -> if c = "is_pos" then Some (v, r) else None) obs));
+
+    gated "a named callable with a different predicate is not proved" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod CB6 do
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn is_nonneg(n : Int) : {Bool | _ == (n >= 0)} do n >= 0 end
+  fn go() : Bool do ap(is_nonneg, 3) end
+end|}
+            "is_nonneg"
+        in
+        Alcotest.(check bool) "pass site not proved" true
+          (List.exists (fun v -> v <> "proved") vs));
+
+    (* The value route: `let b = keep(h)` binds `b == (h > 0)` through the
+       same relational return, so a later `if b` carries the fact.  CB8 is the
+       bracket: without the `if b`, `h` is unconstrained. *)
+    gated "a let-bound callback result carries the codomain fact" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             {|mod CB7 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, h : Int) : Int do
+    let b = keep(h)
+    if b do pos(h) else 0 end
+  end
+end|}
+             "pos"));
+
+    gated "without the guard the callback result proves nothing" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem "proved"
+             (verdicts_of
+                {|mod CB8 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, h : Int) : Int do
+    let b = keep(h)
+    pos(h)
+  end
+end|}
+                "pos"))) ]
+
+(* A definer (`keep : ({x : a | true}) -> {Bool | _ == p(x)}`) is satisfied by
+   ANY callable: `p` is, by definition, whatever the callable returns.  Before
+   this, every pass — the body's own recursive forward, a lambda, a named fn —
+   was an `unreflectable-predicate` skip, and a hard error under
+   `cap verified` (probes b1/b2, 2026-10-06).  AP3 pins that the exemption is
+   for DEFINERS only: a concrete codomain still obliges a plain named fn. *)
+let ap_filt =
+  {|  fn filt(xs : List(a), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do Cons(h, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+|}
+
+let abstract_pass_sites_suite =
+  [ gated "passing a lambda or a named fn for a definer records nothing" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod AP1 do\n" ^ ap_filt
+           ^ {|  fn is_even(n : Int) : Bool do n % 2 == 0 end
+  fn go(ys : List(Int)) : Int do List.length(filt(ys, fn y -> y > 0)) + List.length(filt(ys, is_even)) end
+end|})
+        in
+        Alcotest.(check (list string)) "no definer skips" []
+          (List.filter_map
+             (fun (c, v, _) -> if v = "skipped" && List.mem c [ "keep"; "<lambda>"; "is_even" ] then Some c else None)
+             obs));
+
+    gated "a cap verified caller of a definer compiles" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_typed
+             ("mod AP2 do\n  cap verified\n" ^ ap_filt
+            ^ {|  fn is_even(n : Int) : Bool do n % 2 == 0 end
+  fn go(ys : List(Int)) : Int do List.length(filt(ys, fn y -> y > 0)) + List.length(filt(ys, is_even)) end
+end|})));
+
+    gated "a concrete codomain still obliges a plain named fn" (fun () ->
+        Alcotest.(check bool) "still an error" true
+          (has_refine_error_typed
+             {|mod AP3 do
+  cap verified
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn is_even(n : Int) : Bool do n % 2 == 0 end
+  fn go() : Bool do ap(is_even, 3) end
+end|})) ]
+
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
         let before = !March_refine.Solver.malformed_count in
@@ -18062,4 +18343,6 @@ let () =
       ("array-contract-followups", array_followups_suite);
       ("wrapper-contracts", wrapper_contracts_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
+      ("callback-binder", callback_binder_suite);
+      ("abstract-pass-sites", abstract_pass_sites_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

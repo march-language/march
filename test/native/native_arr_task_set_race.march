@@ -1,0 +1,35 @@
+-- Two tasks each set slot 0 of the SAME captured native array, in a loop
+-- (Part C, Phase C1). The array is shared three ways while the tasks run
+-- (main, two closures), so both sets must copy; each task keeps its own
+-- result and main's array is untouched. This is the copy-on-write race the
+-- acquire-ordered sole-ownership test (C0, march_rc_is_unique) protects: the
+-- task that drops its reference last may find rc == 1 and write in place,
+-- which is only correct if that write is ordered after the other task's
+-- reads. 300 rounds, three checks per round; prints the pass count.
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+  pfn unwrap(r : Result(Int, String)) : Int do
+    match r do
+      Ok(v) -> v
+      Err(_) -> -1
+    end
+  end
+  pfn round(arr : NativeIntArr, k : Int) : Int do
+    let t1 = Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, k), 0))
+    let t2 = Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, k + 1000), 0))
+    let a = unwrap(Task.await(t1))
+    let b = unwrap(Task.await(t2))
+    let c = NativeArray.get_int(arr, 0)
+    (if a == k do 1 else 0 end) + (if b == k + 1000 do 1 else 0 end) + (if c == 0 do 1 else 0 end)
+  end
+  pfn rounds(arr : NativeIntArr, i : Int, n : Int, ok : Int) : Int do
+    if i == n do ok else rounds(arr, i + 1, n, ok + round(arr, i)) end
+  end
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let arr = NativeArray.make_int(4, 0)
+    let n = 300
+    println("passed " ++ int_to_string(rounds(arr, 0, n, 0)) ++ " of " ++ int_to_string(3 * n))
+    println("main still sees " ++ int_to_string(NativeArray.get_int(arr, 0)))
+  end
+end

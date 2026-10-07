@@ -386,6 +386,8 @@ let try_fuse_2step
       else begin
         let fd = gen_map_fold ~nil_ctor ~cons_ctor
             ~list_ty:prod_ty ~elem_ty ~mapped_ty ~acc_ty in
+        Provenance.record fd.Tir.fn_name
+          ~derived:(Provenance.Fusion_of (prod_fn, cons_fn)) ~pass:"fusion" ();
         let call_var = mk_var fd.Tir.fn_name
             (Tir.TFn ([prod_ty; ty_of_atom transform;
                        acc_ty; ty_of_atom combine], acc_ty)) in
@@ -408,6 +410,8 @@ let try_fuse_2step
       else begin
         let fd = gen_filter_fold ~nil_ctor ~cons_ctor
             ~list_ty:prod_ty ~elem_ty ~acc_ty in
+        Provenance.record fd.Tir.fn_name
+          ~derived:(Provenance.Fusion_of (prod_fn, cons_fn)) ~pass:"fusion" ();
         let call_var = mk_var fd.Tir.fn_name
             (Tir.TFn ([prod_ty; ty_of_atom pred;
                        acc_ty; ty_of_atom combine], acc_ty)) in
@@ -473,6 +477,8 @@ let try_fuse_3step
     else begin
       let fd = gen_map_filter_fold ~nil_ctor ~cons_ctor
           ~list_ty:map_ty ~elem_ty ~mapped_ty ~acc_ty in
+      Provenance.record fd.Tir.fn_name
+        ~derived:(Provenance.Fusion_of (map_fn, fold_fn)) ~pass:"fusion" ();
       let call_var = mk_var fd.Tir.fn_name
           (Tir.TFn ([map_ty; ty_of_atom transform; ty_of_atom pred;
                      acc_ty; ty_of_atom combine], acc_ty)) in
@@ -678,8 +684,9 @@ and try_fuse_2step_let
 let run ~(changed : bool ref) (m : Tir.tir_module) : Tir.tir_module =
   let new_fns_acc = ref [] in
   let fns' = List.map (fun fd ->
+    Provenance.with_host fd.Tir.fn_name (fun () ->
     { fd with Tir.fn_body =
-        fuse_expr m.Tir.tm_types new_fns_acc ~changed fd.Tir.fn_body }
+        fuse_expr m.Tir.tm_types new_fns_acc ~changed fd.Tir.fn_body })
   ) m.Tir.tm_fns in
   { m with Tir.tm_fns = List.rev !new_fns_acc @ fns' }
 
@@ -1002,6 +1009,9 @@ let na_try_one (ctx : na_ctx) (items : na_item array) (term : Tir.expr)
     let lam_name = na_fresh "lam" in
     let cfd = { Tir.fn_name = lam_name; fn_params = params;
                 fn_ret_ty = ret_ty; fn_body = body; fn_kind = Tir.FnLambda } in
+    Provenance.record lam_name
+      ~derived:(Provenance.Fusion_of (fdf.Tir.fn_name, fdg.Tir.fn_name))
+      ~pass:"fusion_nativearr" ();
     Hashtbl.replace ctx.depth lam_name (na_depth ctx fdf + na_depth ctx fdg);
     let h = mk_var (na_fresh "cb") cb_ty in
     let cb_item =
@@ -1164,6 +1174,7 @@ let run_nativearr (m : Tir.tir_module) : Tir.tir_module =
     { m with Tir.tm_fns = List.map (fun (fd : Tir.fn_def) ->
           if Hashtbl.mem wrappers fd.Tir.fn_name
           || na_wrapper_calls wrappers fd.Tir.fn_body < 2 then fd
-          else { fd with Tir.fn_body = na_rw ctx fd.Tir.fn_body })
+          else Provenance.with_host fd.Tir.fn_name (fun () ->
+              { fd with Tir.fn_body = na_rw ctx fd.Tir.fn_body }))
           m.Tir.tm_fns }
   end

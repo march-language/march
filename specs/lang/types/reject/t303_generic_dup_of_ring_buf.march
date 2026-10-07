@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: is generic in a parameter of that type
+-- H4: type variables were skipped, so a generic helper could duplicate a
+-- RingBuf and both halves aliased one buffer. Under Part C `dup` is generic
+-- in a parameter whose type is linear here and did not opt in
+-- (`linear x : a`), so the call is rejected. Type-checked before C2
+-- (Phase 0).
+mod Main do
+  fn dup(x) do (x, x) end
+  fn main() : Int do
+    let rb = RingBuf.make(4)
+    let (a, b) = dup(rb)
+    RingBuf.drop(RingBuf.push(a, 1))
+    RingBuf.drop(b)
+    0
+  end
+end

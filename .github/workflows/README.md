@@ -64,6 +64,7 @@ sanitize-gate (ubuntu)
 ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir | rest ─┐
                              │                                                    └─ property-coverage
              ubuntu leg only ├─ cross-linux-oracle
+                             ├─ determinism
                              └─ property-oracle × 8
 ```
 
@@ -85,6 +86,7 @@ ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir
 | `property-coverage` | Asserts the three shards together cover every property group, so a new group can't silently run nowhere. | Add the group to a shard's filter in `ci.yml`. |
 | `property-oracle` × 8 | The differential oracle: ~1090 generated programs, interpreted vs compiled, outputs must match. | An interpreter/compiler divergence; the log has the program. |
 | `cross-linux-oracle` | Cross-compiles the golden corpus to linux/amd64 with `zig cc` and checks output is byte-identical to the native build. | A cross-compilation or target-flag regression. |
+| `determinism` | `scripts/determinism-oracle.sh --corpus all`: every program in the IR-oracle corpus compiled with `--emit-llvm --dump-impl-hashes` under a cold and a warm private `$HOME`, from two cwds; the `.ll` and `.hashes` must be byte-identical across all four. Runs `--self-test` first (a perturbed stdlib copy must make it red). | Compiler output depends on cache state or cwd (a fresh-name counter, Hashtbl order, or a cached-vs-fresh stdlib difference, cf. PRs #805/#807). The log names the program, the condition pair and the first differing line; rerun locally with `scripts/determinism-oracle.sh -w <dir>` and diff `out/<tag>/{1,2,3,4}.ll`. A red self-test means the oracle itself is broken. |
 
 **What CI does not cover:** Linux arm64 (only built, by `build.yml`), Windows,
 the tests quarantined out of `runtest` (run informationally by the nightly), and

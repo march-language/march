@@ -232,6 +232,20 @@ crate = "native/demo_binding"  # path to the Cargo project
 lib   = "demo_binding"         # [lib] name (default: basename of crate)
 ```
 
+A project that binds several native libraries declares one table per library
+with `[[ffi]]` (and `[[ffi.rust]]` for several crates). forge uses every
+table, in the order they appear:
+
+```toml
+[[ffi]]
+sources = ["native/zip_shim.c"]
+link    = ["-lz"]
+
+[[ffi]]
+sources = ["native/db_shim.c"]
+link    = ["-lsqlite3"]
+```
+
 Editing a shim or any Rust source invalidates the content-addressed binary cache,
 so a rebuild relinks automatically. (Under the bare compiler the flags are
 `--ffi-c` / `--ffi-link`.)

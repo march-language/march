@@ -192,7 +192,10 @@ end
 ```
 
 See `surface-syntax.md`'s always_linear/`tag` section for the full typestate
-pattern, and `core-march-types.md` §2.9.1 for the promotion rule.
+pattern, and `core-march-types.md` §2.9.1 for the promotion rule. Three
+standard-library types are `always_linear`: `Handle`, `LinearMap` (below) and
+the builtin `RingBuf` (below), the last registered by the typechecker itself
+since it has no declaring module.
 
 > **Same-named types don't inherit linearity.** Whether a type is
 > `always_linear` is resolved against the type the name actually refers to,
@@ -522,6 +525,46 @@ in with `linear x : a`, whose body is checked.
 
 ---
 
+## A Single-Owner Buffer: `RingBuf`
+
+`RingBuf(a)` is a fixed-capacity circular buffer that writes in place, which
+is what makes it O(1) and allocation-free after `make`. Since 2026-10-06 it is
+`always_linear` (before that, every alias saw every `push`, and only a
+message-payload denylist kept a buffer on one thread; closures, user types,
+generic helpers, `Vault.set` and module-level `let`s all got around it). Every
+operation consumes the buffer: a mutator hands it back (`push`, `clear`), a
+reader returns its answer beside it (`pop`, `get`, `peek_oldest`,
+`peek_newest`, `size`, `cap`, `is_empty`, `is_full`, `snapshot`), and a
+terminator ends it (`to_list`, `drop`). Rebind on every call. In actor state the
+buffer is a linear field, the `LinearMap` idiom:
+
+```march
+actor Recent do
+  state { buf : RingBuf(Int) }
+  init  { buf: RingBuf.make(64) }
+
+  on Seen(x : Int) do
+    { state with buf: RingBuf.push(state.buf, x) }
+  end
+
+  on Dump() do
+    let (items, buf) = RingBuf.snapshot(state.buf)
+    println(show(items))
+    { state with buf: buf }
+  end
+end
+```
+
+A send or a `spawn` argument is a consuming use, so a buffer can *move* to
+another actor (`send(worker, Take(rb))`); it can never be aliased. Elements
+are ordinary values: a buffer silently overwrites its oldest element, so it
+cannot hold a value that must itself be consumed, and `RingBuf.make` of a
+linear element type is rejected by the generic-parameter rule. The eight
+programs that used to get around the denylist are `reject/t300`–`t307`; the
+idioms that must work are `accept/t296`–`t297`.
+
+---
+
 ## Practical Rules
 
 1. **Use `linear` for resources with mandatory cleanup**: file handles, database connections, exclusive locks, capabilities you must return.
@@ -536,7 +579,9 @@ in with `linear x : a`, whose body is checked.
 
 6. **Closures, wildcards and generic code don't get a pass**: a closure can't capture a linear value, `_` can't discard one, a tuple/list/ADT holding one is linear too, and a generic function receives one only through a parameter marked `linear`.
 
-7. **Keep many linear values in a `LinearMap`**, not a `Map`: take a value out, use it, put the next one back.
+7. **Keep many linear values in a `LinearMap`**, not a `Map`: take a value out, use it, put the next one back. A `RingBuf` is linear too: thread it through every call and end it with `to_list` or `drop`.
+
+8. **A linear value cannot be a module-level `let`.** A module-level value is shared by every function and every actor, so it can never be consumed exactly once; `let rb = RingBuf.make(8)` at module level (or a `Handle`, or a `LinearMap`) is rejected with `` `rb` has the linear type `RingBuf(Int)`, so it cannot be a module-level `let` ``. Create it where it is used, or keep it in an actor's state (`reject/t305`).
 
 ---
 

@@ -8,7 +8,8 @@ mod Main do
   -- registered `Inc` with payload type `Int` (`on Inc(x : Int)`, message ctor
   -- `Counter_Msg`, §2.6.1 step 3), and `3 : Int` matches, so the send typechecks.
   -- `check_sendable` (`:3335`, invoked at `:4180`) then walks the message type
-  -- and finds no `RingBuf`-family constructor, so it raises nothing.
+  -- and finds no `non_sendable_types` entry (the list is empty since
+  -- 2026-10-06; see memory-model.md), so it raises nothing.
   --
   -- The target Pid (`cap`) is INFERRED THEN DISCARDED (`ignore (infer_expr env
   -- cap)`, `:4178`): the message is NOT checked against what `counter` accepts —

@@ -1854,3 +1854,184 @@ let cleanup ctx =
      with _ -> ());
     (try Unix.rmdir ctx.tmp_dir with _ -> ())
   end
+
+(* ── Shell fragments (R6 of specs/plans/2026-09-28-observe-recon-shell-plan.md)
+   ──────────────────────────────────────────────────────────────────────────
+
+   The remote shell compiles each input on the operator's machine into a
+   self-contained fragment .so that a running node dlopens and runs
+   (runtime/march_shell.c).  It reuses the REPL's fragment pipeline with three
+   differences:
+
+   - No prelude.  Nothing is "already compiled": every March function the
+     input reaches (stdlib or app) is emitted into the fragment, lowered with
+     the PROGRAM's type map (the one the node was built from), so each body is
+     typed exactly as the node's.  The REPL's old miscompile came from
+     lowering stdlib without a type map; this never does.
+   - Nothing is loaded here.  The fragment is compiled to a .so for the node;
+     runtime symbols stay undefined and bind to the node's runtime at dlopen.
+     Every March symbol except the entry is made local, so the fragment's
+     copies can never be interposed by (or interpose) the node's.
+   - Slots live on the node.  A session's `let`s and its pre-bound caps are
+     slots in the range the node handed it (march_repl_set/get there). *)
+
+let create_shell ?(clang = "clang") () =
+  let tmp_dir = Filename.concat (Filename.get_temp_dir_name ())
+      ("march_shell." ^ string_of_int (Unix.getpid ())) in
+  (try Unix.mkdir tmp_dir 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  { runtime_so = ""; clang; tmp_dir; undef_flag = ""; rt_link = "";
+    counter = 0; var_slots = []; next_slot = 0; handles = [];
+    compiled_fns = Hashtbl.create 1; wrap_defined = Hashtbl.create 1;
+    fn_fingerprints = Hashtbl.create 1; global_tir_tys = Hashtbl.create 16;
+    global_type_defs = Hashtbl.create 16; stdlib_decls = [];
+    loaded_tir_types = []; orc = None }
+
+let shell_set_slot_base ctx base = ctx.next_slot <- base
+
+(** Bind [name] to a fresh slot of TIR type [ty] for later inputs. *)
+let shell_bind_slot ctx ~name ~(ty : March_tir.Tir.ty) : int =
+  let k = alloc_slot ctx in
+  ctx.var_slots <- (name, k, ty) :: List.filter (fun (b, _, _) -> b <> name) ctx.var_slots;
+  Hashtbl.replace ctx.global_tir_tys name ty;
+  k
+
+(** Bind [name] to the existing [slot] (a `let` whose value an init fragment
+    already stored there), dropping any other binding of that slot. *)
+let shell_name_slot ctx ~name ~slot ~(ty : March_tir.Tir.ty) =
+  ctx.var_slots <- (name, slot, ty)
+                   :: List.filter (fun (b, k, _) -> b <> name && k <> slot) ctx.var_slots;
+  Hashtbl.replace ctx.global_tir_tys name ty
+
+type shell_fragment = {
+  sf_so    : string;               (** path of the compiled .so *)
+  sf_entry : string;               (** its one exported symbol *)
+  sf_ret   : March_tir.Tir.ty;     (** the entry's return type *)
+}
+
+(** The shell fragment's function.  It is `main` because monomorphisation
+    keeps `main` as a root even when its type is polymorphic (a `let` of
+    `Actor.pid_from_int(..)` : `Pid(a)`), as the REPL relies on.  The
+    program's own top-level `main` is therefore left out of the declarations
+    a fragment is lowered against ([shell_program_decls]); no input can call
+    it anyway. *)
+let shell_entry_fn = "main"
+
+let shell_program_decls (decls : March_ast.Ast.decl list) =
+  List.filter (function
+      | March_ast.Ast.DFn (d, _) -> d.March_ast.Ast.fn_name.March_ast.Ast.txt <> "main"
+      | _ -> true) decls
+
+(** Compile one shell input (already wrapped as a module whose
+    [shell_entry_fn] is the input) against the program.  [store_as] stores the result in that slot
+    and makes the entry return nothing useful (an init fragment); otherwise
+    the entry returns the value of [main] (a String: the caller wraps the
+    input in its renderer).  Raises [Typecheck_failed] / [Failure]. *)
+let shell_compile ?triple ctx ~tc_env ~(program_name : string)
+    ~(program_decls : March_ast.Ast.decl list)
+    ~(program_type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t)
+    ?store_as (m : March_ast.Ast.module_) : shell_fragment =
+  let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
+  let errors = March_errors.Errors.create () in
+  let env = { tc_env with March_typecheck.Typecheck.errors;
+              refs = ref []; current_decl = ref "" } in
+  let input_map =
+    checked_type_map (time_phase "typecheck"
+      (fun () -> March_typecheck.Typecheck.check_module_with_env env m)) in
+  (* The program's map plus the input's: the input's own spans, and every
+     stdlib/app body it reaches, typed. *)
+  let type_map = Hashtbl.copy program_type_map in
+  Hashtbl.iter (fun k v -> Hashtbl.replace type_map k v) input_map;
+  (* Lower the fragment TOGETHER with the program, through the full path the
+     native build uses (imports, aliases, actors and externs of every module,
+     a library on MARCH_LIB_PATH included), then keep only what the
+     fragment's `main` reaches.  The REPL's lazy per-module lowering cannot
+     do this: it re-reads stdlib files from disk and ignores `import`, so a
+     library like Depot (`import Encode`, then a bare `encode(..)`) did not
+     lower.  The prune runs after monomorphisation, where interface impls are
+     tied to their uses, and before the RC passes, so those run on the
+     fragment alone. *)
+  (* Named as the program's entry module, whose members the node's build
+     emits bare; an input's self-qualified `DepotNode.pg` is stripped to
+     `pg` as the entry's own desugar does (typechecking accepted both). *)
+  let combined = { March_ast.Ast.mod_name =
+                     { m.March_ast.Ast.mod_name with March_ast.Ast.txt = program_name };
+                   mod_decls = shell_program_decls program_decls
+                               @ March_desugar.Desugar.strip_entry_self_qual
+                                   ~members_of:program_decls program_name
+                                   m.March_ast.Ast.mod_decls } in
+  let tir = time_phase "lower+mono+opt" (fun () ->
+      let tir = March_tir.Lower.lower_module ~type_map ~shadow_builtins:false combined in
+      let tir = March_tir.Trmc.transform_module tir in
+      let iface_methods = March_tir.Lower.get_iface_methods () in
+      let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+      let tir = March_tir.Defun.defunctionalize tir in
+      let tir = March_tir.Dce.prune_unreachable tir in
+      let k_table = March_tir.Kind.of_module ~unboxing:false tir in
+      let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir in
+      March_tir.Escape.escape_analysis ~k_table tir) in
+  register_type_defs ctx tir.March_tir.Tir.tm_types;
+  let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
+      f.fn_name = shell_entry_fn) tir.March_tir.Tir.tm_fns with
+    | Some f -> f
+    | None -> failwith ("shell: the TIR pipeline produced no '" ^ shell_entry_fn ^ "' function") in
+  let fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
+      f.fn_name <> shell_entry_fn && not (is_c_runtime_fn f.fn_name)) tir.March_tir.Tir.tm_fns in
+  if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None then
+    List.iter (fun (f : March_tir.Tir.fn_def) ->
+        Printf.eprintf "[shell] fn %s\n%!" f.fn_name) tir.March_tir.Tir.tm_fns;
+  let n = next_id ctx in
+  let entry = Printf.sprintf "repl_%d" n in
+  let sw = fresh_wrap_state ctx in
+  let ir = time_phase "emit_ir" (fun () ->
+      March_tir.Llvm_emit.emit_repl_expr
+        ~n ~ret_ty:main_fn.fn_ret_ty
+        ~prev_slots:(prev_slots_of ctx)
+        ~fns ~extern_fns:[]
+        ~store_as_slot:store_as
+        ~session_wraps:sw
+        (* The program's types, in the node build's order: [combined] is
+           lowered from the same declarations in the same order (colliding
+           type names take tags from a counter over this list). *)
+        ~types:tir.March_tir.Tir.tm_types
+        main_fn.fn_body) in
+  let base = Filename.concat ctx.tmp_dir (Printf.sprintf "shell_%d" n) in
+  let ll = base ^ ".ll" and so = base ^ ".so" in
+  let oc = open_out ll in
+  output_string oc ir;
+  close_out oc;
+  (* Compile for the NODE's platform ([triple], from its HELLO), which is
+     often not this machine's: a Linux node cannot load a Mach-O.  From macOS
+     to Linux, the system clang cross-compiles with lld; a fragment links
+     against nothing (every runtime symbol binds at the node's dlopen), so no
+     target libc or sysroot is needed. *)
+  let target_is_mac = match triple with
+    | Some t -> contains_sub t "apple" || contains_sub t "darwin"
+    | None -> is_macos () in
+  if target_is_mac && not (is_macos ()) then
+    failwith "shell: this node runs macOS; its fragments must be compiled on macOS";
+  let target_flags = match triple with
+    | Some t when t <> "" && t <> "unknown" ->
+      Printf.sprintf " --target=%s%s" t
+        (if (not target_is_mac) && is_macos () then " -fuse-ld=lld -nostdlib" else "")
+    | _ -> "" in
+  (* Export the entry only: every other symbol is local, so references inside
+     the fragment bind to the fragment's own copies. *)
+  let export_flags =
+    if target_is_mac then
+      Printf.sprintf " -undefined dynamic_lookup -Wl,-exported_symbol,_%s" entry
+    else begin
+      let vs = base ^ ".map" in
+      let oc = open_out vs in
+      Printf.fprintf oc "{ global: %s; local: *; };\n" entry;
+      close_out oc;
+      Printf.sprintf " -Wl,--version-script=%s -Wl,-Bsymbolic" (Filename.quote vs)
+    end in
+  let log = base ^ ".clang.log" in
+  let cmd = Printf.sprintf "%s%s -shared -fPIC -O1 -Wno-override-module -x ir %s -o %s%s > %s 2>&1"
+      ctx.clang target_flags (Filename.quote ll) (Filename.quote so) export_flags (Filename.quote log) in
+  let rc = time_phase "clang" (fun () -> Sys.command cmd) in
+  if rc <> 0 then begin
+    let msg = try In_channel.with_open_text log In_channel.input_all with _ -> "" in
+    failwith ("shell: clang failed:\n" ^ msg)
+  end;
+  { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty }

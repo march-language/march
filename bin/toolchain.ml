@@ -873,6 +873,7 @@ let ensure_runtime_so () =
       ^ (opt_file (Filename.concat runtime_dir "march_hcr_identity.c")) (* HCR target identity *)
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
       ^ (opt_file (Filename.concat runtime_dir "march_reload.c"))    (* HCR reload server *)
+      ^ (opt_file (Filename.concat runtime_dir "march_shell.c"))     (* shell listener: signed EVAL of fragments *)
       ^ (opt_file (Filename.concat runtime_dir "march_blake3.c"))    (* BLAKE3 for server-side cap_root recompute *)
       ^ (opt_file (Filename.concat runtime_dir "march_cap_lattice.c")) (* cap subsumption/normalize for ACTIVATE4 admission *)
       ^ (opt_file (Filename.concat runtime_dir "tweetnacl.c"))        (* ed25519 for ACTIVATE verification; was missing from the cross-compile list (check-runtime-sources.sh caught it) *)

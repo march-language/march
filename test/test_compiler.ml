@@ -1133,6 +1133,48 @@ let test_tc_arity_fn_returning_fn_ok () =
   end|} in
   Alcotest.(check bool) "full app of fn-returning-fn: no error" false (has_errors ctx)
 
+(* The same rule for a QUALIFIED call of a function another module exports
+   (`M.add(1)`, `List.map([1, 2])`): it used to typecheck through the curried
+   scheme, then panic interpreted, SIGSEGV compiled, and kill the REPL
+   (specs/progress/2026-10-06-qualified-under-application-typechecked.md). *)
+let test_tc_arity_qualified_under_application () =
+  let ctx = typecheck {|mod Test do
+    mod M do
+      fn add(a : Int, b : Int) : Int do a + b end
+    end
+    fn main() : Unit do let _ = M.add(1) end
+  end|} in
+  Alcotest.(check bool) "qualified under-application is an error" true (has_errors ctx);
+  Alcotest.(check bool) "names the arity" true
+    (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+         contains "`M.add` expects 2 arguments, but got 1" d.message) ctx.diagnostics)
+
+let test_tc_arity_qualified_nested () =
+  let ctx = typecheck {|mod Test do
+    mod A do
+      mod B do
+        fn three(a : Int, b : Int, c : Int) : Int do a + b + c end
+      end
+    end
+    fn main() : Unit do let _ = A.B.three(1, 2) end
+  end|} in
+  Alcotest.(check bool) "nested-module qualified under-application is an error" true (has_errors ctx)
+
+let test_tc_arity_qualified_ok () =
+  let ctx = typecheck {|mod Test do
+    mod M do
+      fn add(a : Int, b : Int) : Int do a + b end
+      fn make_adder(n : Int) : (Int) -> Int do fn x -> x + n end
+    end
+    fn main() : Unit do
+      let _ = M.add(1, 2)
+      let f = M.make_adder(5)
+      let _ = f(2)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "correct qualified calls: no error" false (has_errors ctx)
+
 (* ── root_cap: callable-vs-value diagnostic ─────────────────────────────
    root_cap is a bare ambient value of type Cap(IO) (see docs/capabilities.md
    and examples/capabilities.march) — NOT a function.  infer_app's
@@ -4916,6 +4958,31 @@ let test_letfn_two_distinct_errors_both_report () =
     1 (count_errors_matching ctx "expected `Int` but got `String`.");
   Alcotest.(check int) "distinct Bool/Int error still reported"
     1 (count_errors_matching ctx "expected `Bool` but got `Int`.")
+
+(* A tuple is Eq when every component is (2026-10-06): no impl can be written
+   for every arity, and both backends compare tuples component-wise. *)
+let test_tuple_eq_structural_accepts () =
+  let ctx = typecheck {|mod M do
+  needs IO.Console
+    fn main(_cap_console : Cap(IO.Console)) do
+      let a = (1, "x") == (1, "x")
+      let b = ((1, "s"), 2.5, true) != ((1, "s"), 2.0, false)
+      if a && b do println("y") else println("n") end
+    end
+  end|} in
+  Alcotest.(check bool) "tuple of Eq components accepted" false (has_errors ctx)
+
+(* ...and only then: a component without Eq still rejects the tuple. *)
+let test_tuple_eq_component_without_eq_rejects () =
+  let ctx = typecheck {|mod M do
+  needs IO.Console
+    type Hue = Rood | Bloo
+    fn main(_cap_console : Cap(IO.Console)) do
+      if (1, Rood) == (1, Bloo) do println("y") else println("n") end
+    end
+  end|} in
+  Alcotest.(check bool) "tuple with a non-Eq component rejected" true
+    (count_errors_matching ctx "`(Int, Hue)` does not implement interface `Eq`." >= 1)
 
 (* ── Finding 15: generic when-constraint re-checked at call sites ───────── *)
 
@@ -17571,6 +17638,9 @@ let compiler_suites =
           Alcotest.test_case "arity: over-application is error"    `Quick test_tc_arity_over_application;
           Alcotest.test_case "arity: correct call is ok"           `Quick test_tc_arity_correct_ok;
           Alcotest.test_case "arity: fn returning fn is ok"        `Quick test_tc_arity_fn_returning_fn_ok;
+          Alcotest.test_case "arity: qualified under-application"  `Quick test_tc_arity_qualified_under_application;
+          Alcotest.test_case "arity: nested qualified"             `Quick test_tc_arity_qualified_nested;
+          Alcotest.test_case "arity: qualified correct calls ok"   `Quick test_tc_arity_qualified_ok;
           Alcotest.test_case "root_cap() is rejected"              `Quick test_tc_root_cap_call_rejected;
           Alcotest.test_case "bare root_cap is rejected (R2)"       `Quick test_tc_root_cap_bare_rejected;
           Alcotest.test_case "legit zero-arg builtins still callable" `Quick test_tc_zero_arg_builtins_still_callable;
@@ -18343,6 +18413,8 @@ let compiler_suites =
       ( "generic_when_constraints", [
           Alcotest.test_case "finding 15: unsatisfied generic bound rejects"  `Quick test_generic_when_constraint_unsatisfied_rejects;
           Alcotest.test_case "finding 15: satisfied generic bound accepts"    `Quick test_generic_when_constraint_satisfied_accepts;
+          Alcotest.test_case "tuple of Eq components is Eq"                   `Quick test_tuple_eq_structural_accepts;
+          Alcotest.test_case "tuple with a non-Eq component is not Eq"        `Quick test_tuple_eq_component_without_eq_rejects;
           Alcotest.test_case "finding 15: unconstrained generic accepts"      `Quick test_generic_no_constraint_accepts;
         ] );
       ( "test_body_constraints", [

@@ -220,6 +220,27 @@ let callable_sig_of_actual (ctx : rctx) defs (cb : cbenv) (a : A.expr) : (string
 
 let fresh_cb_arg = "$cb_x"
 
+(* The abstract refinements a call's callee declares (design 2026-09-20 §1),
+   memoised per definition key for the module.  [] for anything that is not
+   a resolvable top-level definition: a callback parameter, a local, an
+   unknown name. *)
+let abstracts_tbl : (string, string list) Hashtbl.t = Hashtbl.create 64
+
+let callee_abstracts (ctx : rctx) (fname : string) : string list =
+  match resolve_key ctx fname with
+  | None -> []
+  | Some key ->
+    (match Hashtbl.find_opt abstracts_tbl key with
+     | Some ns -> ns
+     | None ->
+       let ns =
+         match Hashtbl.find_opt fn_defs_tbl key with
+         | Some (_, fd) -> Refine_abstract.names ~is_known:known_predicate_fn fd
+         | None -> []
+       in
+       Hashtbl.replace abstracts_tbl key ns;
+       ns)
+
 (* The module's enforced actor-handler contracts, message name -> signature
    ([Refine_scope.collect_handler_sigs]).  Per module like [strict_verified]:
    set by [check_module] before the walk, consulted by [visit]'s [ECon] arm
@@ -424,6 +445,7 @@ let record_skip_obligation errctx ~(span : A.span) ~(callee : string) ~(predicat
          remedy)
 
 let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : A.span)
+    ~(callee_name : string)
     (callee_sg : fn_sig) (args : A.expr list) : unit =
   List.iteri
     (fun i a ->
@@ -450,48 +472,91 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
       | Some (Some (A.TyArrow (dom, (A.TyRefine _ as cod)))) ->
         (match callback_sig_of_ty (A.TyArrow (dom, cod)) with
          | Some { ret = Some (b, p); ret_sort = srt; _ } ->
-           let cod_sig = elem_sig ~name:"$r" (b, p, srt) in
-           let rp = List.hd cod_sig.refined in
-           (match a with
-            | A.ELam (ps, body, lsp) ->
-              (* An unannotated single parameter ranges over the expected
-                 DOMAIN — the values the higher-order function may pass it,
-                 the pass-site contravariance stance — so it is declared at
-                 that type: the model decodes against it, and the witness
-                 runs the lambda on it.  A closed lambda is made runnable for
-                 the witness ([Witness.with_lambda]); one that names a local
-                 of the enclosing function is not, and keeps the old skip. *)
-              let ps =
-                match ps with
-                | [ p ] when p.A.param_ty = None -> [ { p with A.param_ty = Some dom } ]
-                | ps -> ps
-              in
-              let lam_name = "<lambda>" in
-              let run () =
-                ignore
-                  (check_fn_post_verdict ~root errctx
-                     (local_fn_def { A.txt = lam_name; A.span = lsp } ps (Some cod) body lsp))
-              in
-              let captures = List.exists (fun v -> List.mem v ctx.locals) (Witness.free_vars a) in
-              if captures then run () else Witness.with_lambda lam_name a run
-            | A.EVar { A.txt = g; _ } ->
-              (match callee_sig ctx defs cb g with
-               | Some { ret = Some (rb, rq); ret_sort = rsrt; _ } ->
-                 let sc = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
-                 let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
-                 check_call cx ~span:asp ~callee:g ~subject:Callback_codomain cod_sig
-                   [ A.EVar { A.txt = "$r"; A.span = asp } ] rp
-               | _ ->
-                 record_skip_obligation errctx ~span:asp ~callee:g ~predicate:(pred_str p)
-                   ~noun:"the expected codomain refinement"
-                   ~what:(Printf.sprintf "`%s` declares no proved return refinement to imply it from" g)
-                   ~remedy:"declare (and prove) a return refinement on the passed function that \
-                            implies the expected codomain, or weaken the expected codomain")
-            | _ ->
-              record_skip_obligation errctx ~span:asp ~callee:"<callable>" ~predicate:(pred_str p)
-                ~noun:"the expected codomain refinement"
-                ~what:"the passed callable is neither a named function, a local, nor an inline lambda"
-                ~remedy:"bind the callable to a name whose return refinement the checker can see")
+           let abs = callee_abstracts ctx callee_name in
+           if abs <> []
+              && List.exists (fun (n, _, _) -> List.mem n abs) (Refine_abstract.applications p)
+           then
+             (* A DEFINER: the callable passed here fixes what the abstract
+                refinement means at this call (design 2026-09-20 §2b), so it
+                satisfies the codomain by construction.  Nothing to oblige;
+                the facts it yields are drawn at the call itself. *)
+             ()
+           else begin
+             let cod_sig = elem_sig ~name:"$r" (b, p, srt) in
+             let rp = List.hd cod_sig.refined in
+             (match a with
+              | A.ELam (ps, body, lsp) ->
+                (* An unannotated single parameter ranges over the expected
+                   DOMAIN — the values the higher-order function may pass it,
+                   the pass-site contravariance stance — so it is declared at
+                   that type: the model decodes against it, and the witness
+                   runs the lambda on it.  A closed lambda is made runnable for
+                   the witness ([Witness.with_lambda]); one that names a local
+                   of the enclosing function is not, and keeps the old skip. *)
+                let ps =
+                  match ps with
+                  | [ p ] when p.A.param_ty = None -> [ { p with A.param_ty = Some dom } ]
+                  | ps -> ps
+                in
+                (* The expected codomain names the argument by the DOMAIN's
+                   binder; this lambda calls it [y].  Rename so the body is
+                   checked against a goal about its own parameter — otherwise
+                   the binder is a fresh unconstrained constant and a correct
+                   lambda is undecided. *)
+                let cod =
+                  match ps, cod with
+                  | [ p ], A.TyRefine (base, cbind, pred) ->
+                    let y = p.A.param_name.A.txt in
+                    (match dom_binder dom with
+                     | Some x
+                       when x <> y && (match cbind with Some n -> n.A.txt <> x | None -> true) ->
+                       A.TyRefine (base, cbind, subst_params [ (x, A.EVar p.A.param_name) ] pred)
+                     | _ -> cod)
+                  | _ -> cod
+                in
+                let lam_name = "<lambda>" in
+                let run () =
+                  ignore
+                    (check_fn_post_verdict ~root errctx
+                       (local_fn_def { A.txt = lam_name; A.span = lsp } ps (Some cod) body lsp))
+                in
+                let captures = List.exists (fun v -> List.mem v ctx.locals) (Witness.free_vars a) in
+                if captures then run () else Witness.with_lambda lam_name a run
+              | A.EVar { A.txt = g; _ } ->
+                (match callee_sig ctx defs cb g with
+                 | Some ({ ret = Some (rb, rq); ret_sort = rsrt; _ } as gsg) ->
+                   (* The callable's return names ITS parameter; the expected
+                      codomain names [callback_param_name] (see
+                      [callback_sig_of_ty]).  Rename the former so both speak of
+                      one argument: the implication is then checked for an
+                      arbitrary argument value, as covariance requires.  Without
+                      it the two names were independent, and a correct
+                      `is_pos(n) : {Bool | _ == (n > 0)}` was REJECTED against
+                      `_ == (x > 0)` with the witness `n = 0, x = 1`.  A
+                      forwarded callback's sig already names
+                      [callback_param_name] (the rename is the identity). *)
+                   let rq =
+                     match gsg.param_names with
+                     | [ gp ] when gp <> callback_param_name ->
+                       subst_params [ (gp, A.EVar { A.txt = callback_param_name; A.span = asp }) ] rq
+                     | _ -> rq
+                   in
+                   let sc = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
+                   let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+                   check_call cx ~span:asp ~callee:g ~subject:Callback_codomain cod_sig
+                     [ A.EVar { A.txt = "$r"; A.span = asp } ] rp
+                 | _ ->
+                   record_skip_obligation errctx ~span:asp ~callee:g ~predicate:(pred_str p)
+                     ~noun:"the expected codomain refinement"
+                     ~what:(Printf.sprintf "`%s` declares no proved return refinement to imply it from" g)
+                     ~remedy:"declare (and prove) a return refinement on the passed function that \
+                              implies the expected codomain, or weaken the expected codomain")
+              | _ ->
+                record_skip_obligation errctx ~span:asp ~callee:"<callable>" ~predicate:(pred_str p)
+                  ~noun:"the expected codomain refinement"
+                  ~what:"the passed callable is neither a named function, a local, nor an inline lambda"
+                  ~remedy:"bind the callable to a name whose return refinement the checker can see")
+           end
          | _ -> ())
       | _ -> ())
     args
@@ -1117,22 +1182,23 @@ let check_pass_site_elements ~root errctx defs (ctx : rctx) path lets sc re (cb 
       | _ -> ())
     args
 
-(* Is this `if` ARM an admitted right-hand side for the disjunctive let fact?
+(* Is this an admitted right-hand side for a `let` path fact — a flat
+   `let n = e`, or either arm of `let n = if g do a else b end`?
 
    [let_equality_rhs] excludes a BARE VARIABLE for a documented reason: the
    path translator reflects a variable at the INTEGER sort, so aliasing an
    ADT-typed name (`let u = o` with `o : Option(Int)`) mixes sorts in one VC
    and the sort-conflict gate drops the WHOLE VC — unrelated obligations
-   included.  An `if` arm is where a bare variable actually earns its keep
-   (`if c < 1 do 1 else c end` is the shape the stdlib writes), so admit one
-   only when the typechecker's span table says the binder really is `Int`.
+   included.  An `Int` alias mixes nothing, though (`let b = a`, or the arm
+   in `if c < 1 do 1 else c end`), so admit one only when the typechecker's
+   span table says the binder really is `Int`.
 
    No table (most unit fixtures) and no recorded binding span both answer
    "not admitted": conservative in the direction that costs a proof rather
    than soundness.  [Refine_check.check_module]'s production path always
    passes the table, so this is a test-harness distinction, not a user-facing
    one — assert on it with [has_refine_error_typed]. *)
-let if_arm_admitted (ctx : rctx) (e : A.expr) : bool =
+let let_rhs_admitted (ctx : rctx) (e : A.expr) : bool =
   match e with
   | A.EVar { A.txt = v; _ } ->
     (match List.assoc_opt v ctx.binds with
@@ -1181,7 +1247,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      | Some sg ->
        let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
-       check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp sg args;
+       check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp ~callee_name:fname sg args;
        check_arg_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:fname sg args;
        check_pass_site_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp sg args
      (* TRULY unresolved — not a named function (refined or not: [Some None]
@@ -1327,7 +1393,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                    [names] is exactly the set [path_shadow] just retired
                    facts about, so require the RHS to mention none of them. *)
                 | A.PatVar n, rhs
-                  when let_equality_rhs rhs && not (expr_mentions names rhs) ->
+                  when let_rhs_admitted ctx rhs && not (expr_mentions names rhs) ->
                   let sp = n.A.span in
                   let eq =
                     A.EApp
@@ -1355,7 +1421,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                    all three sub-expressions for the same reason it applies to
                    a flat RHS. *)
                 | A.PatVar n, A.EIf (g, a, b, _)
-                  when if_arm_admitted ctx a && if_arm_admitted ctx b
+                  when let_rhs_admitted ctx a && let_rhs_admitted ctx b
                        && not (expr_mentions names g)
                        && not (expr_mentions names a)
                        && not (expr_mentions names b) ->
@@ -3633,6 +3699,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* Same hygiene: a prior module's enclosing function must never leak into
      this module's promotion checks. *)
   enclosing_fn := None;
+  Hashtbl.reset abstracts_tbl;
   stdlib_source_files := stdlib_files;
   let mod_name = m.A.mod_name.A.txt in
   (* Each gate answers "is the alias still safe?"; a `false` is a WITHDRAWAL,
