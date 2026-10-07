@@ -853,46 +853,94 @@ let abstract_slot_of_ty (t : A.ty) : (string * string) option =
 let abstract_return_slot (fd : A.fn_def) : (string * string) option =
   Option.bind fd.A.fn_ret_ty abstract_slot_of_ty
 
-(* What the actual at [p]'s definer position instantiates it to (§3.1): the
-   body of an inline one-parameter lambda that mentions nothing but its
-   parameter, as [(param, body)]; otherwise why not. *)
-let instantiate_abstract (fd : A.fn_def) (p : string) (args : A.expr list)
-  : (string * A.expr, string) result =
+(* A named callable as an abstract refinement's instantiation (phase 3): its
+   proved return `{Bool | _ == e}` (either orientation) over its ONE parameter,
+   as [(param, e)].  [sig_of] must return only PROVED returns — [callee_sig]
+   does (an unproved postcondition never reaches a caller; probe r5,
+   2026-10-07) — so an assumed-but-unproved contract can never instantiate
+   [p].  A callback parameter's signature names its parameter
+   [callback_param_name] and its return was rewritten over it
+   ([callback_sig_of_ty]), so it needs no special case. *)
+let named_predicate (sig_of : string -> fn_sig option) (g : string) : (string * A.expr) option =
+  match sig_of g with
+  | Some
+      { param_names = [ n ]
+      ; ret = Some (b, A.EApp (A.EVar { A.txt = "=="; _ }, [ l; r ], _))
+      ; ret_sort
+      ; _
+      }
+    when ret_sort = Some bool_sort ->
+    let is_b = function A.EVar { A.txt; _ } -> txt = b || txt = "_" | _ -> false in
+    let e = if is_b l then Some r else if is_b r then Some l else None in
+    Option.bind e (fun e ->
+        match classify_pred b [ n ] e with
+        | Closed | Relational [ _ ] -> Some (n, e)
+        | _ -> None)
+  | _ -> None
+
+(* What the actual at [p]'s definer position instantiates it to (§3.1), as
+   [(param, predicate)], or why not:
+   - an inline one-parameter lambda that mentions nothing but its parameter
+     and calls nothing unreflected;
+   - `fn y -> g(y)`, which is [g] (eta);
+   - a name that [named] resolves: a named function or a callback parameter
+     with a proved `{Bool | _ == e}` return over one parameter (phase 3). *)
+let instantiate_abstract ~(named : string -> (string * A.expr) option) (fd : A.fn_def) (p : string)
+    (args : A.expr list) : (string * A.expr, string) result =
+  let by_name g =
+    match named g with
+    | Some (n, e) -> Ok (n, e)
+    | None ->
+      Error
+        (Printf.sprintf
+           "`%s`, passed for `%s`, has no proved `{Bool | _ == …}` return over one parameter" g p)
+  in
+  let of_lambda (lam : A.expr) =
+    match lam with
+    | A.ELam ([ prm ], body, _) ->
+      let y = prm.A.param_name.A.txt in
+      (* A call to anything but an operator, a measure, a tester or a
+         constant function is not reflected where [q] is assumed (a scope
+         predicate does not inline a callee's contract), so the assumption
+         would silently drop and the discharge refute: a false "too weak". *)
+      let rec opaque_call (e : A.expr) : string option =
+        match e with
+        | A.EApp (A.EVar { A.txt = f; _ }, args, _) ->
+          if known_predicate_fn f then List.find_map opaque_call args else Some f
+        | A.EApp (f, args, _) -> List.find_map opaque_call (f :: args)
+        | A.ETuple (es, _) | A.ECon (_, es, _) -> List.find_map opaque_call es
+        | A.EAnnot (e, _, _) | A.EField (e, _, _) -> opaque_call e
+        | _ -> None
+      in
+      (match body with
+       (* `fn y -> g(y)` is `g` (eta). *)
+       | A.EApp (A.EVar { A.txt = g; _ }, [ A.EVar { A.txt = y'; _ } ], _)
+         when y' = y && not (known_predicate_fn g) ->
+         by_name g
+       | _ ->
+         if classify_pred y [] body <> Closed then
+           Error
+             (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
+         else
+           (match opaque_call body with
+            | Some f ->
+              Error
+                (Printf.sprintf
+                   "the lambda passed for `%s` calls `%s`, whose result is not reflected there (yet)" p f)
+            | None -> Ok (y, body)))
+    | A.ELam _ ->
+      Error (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
+    | _ -> Error (Printf.sprintf "the argument passed for `%s` is not a lambda" p)
+  in
   match
     Option.bind (Refine_abstract.definer_index ~is_known:known_predicate_fn fd p) (List.nth_opt args)
   with
-  | Some (A.ELam ([ prm ], body, _)) ->
-    let y = prm.A.param_name.A.txt in
-    (* A call to anything but an operator, a measure, a tester or a constant
-       function is not reflected where [q] is assumed (a scope predicate does
-       not inline a callee's contract), so the assumption would silently drop
-       and the discharge refute: a false "too weak". *)
-    let rec opaque_call (e : A.expr) : string option =
-      match e with
-      | A.EApp (A.EVar { A.txt = f; _ }, args, _) ->
-        if known_predicate_fn f then List.find_map opaque_call args else Some f
-      | A.EApp (f, args, _) -> List.find_map opaque_call (f :: args)
-      | A.ETuple (es, _) | A.ECon (_, es, _) -> List.find_map opaque_call es
-      | A.EAnnot (e, _, _) | A.EField (e, _, _) -> opaque_call e
-      | _ -> None
-    in
-    if classify_pred y [] body <> Closed then
-      Error (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
-    else
-      (match opaque_call body with
-       | Some f ->
-         Error
-           (Printf.sprintf
-              "the lambda passed for `%s` calls `%s`, whose result is not reflected there (yet)" p f)
-       | None -> Ok (y, body))
-  | Some (A.ELam _) ->
-    Error (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
+  | Some (A.ELam _ as lam) -> of_lambda lam
+  | Some (A.EVar { A.txt = g; _ }) -> by_name g
   | Some _ ->
     Error
       (Printf.sprintf
-         "the argument passed for `%s` is not an inline one-parameter lambda (a named function or a \
-          callback parameter instantiates nothing yet)"
-         p)
+         "the argument passed for `%s` is neither a lambda nor a name with a proved predicate contract" p)
   | None -> Error (Printf.sprintf "no argument at the position that defines `%s`" p)
 
 (* A call [g(args)] to a combinator whose return is `List({a | p(_)})`, with a
@@ -922,7 +970,7 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
              | Some a when not (parametric_ok ctx g [ a ]) ->
                uninst (Printf.sprintf "`%s` is not known to be parametric in `%s`" g a)
              | _ ->
-               (match instantiate_abstract fd p args with
+               (match instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) fd p args with
                 | Error w -> uninst w
                 | Ok (y, body) ->
                   begin
@@ -1336,7 +1384,7 @@ let elem_marker_of_arg (a : A.expr) : string option option =
    entry)]: the demand, ready for [check_elements] (ordinary element
    subtyping, as for a declared `List({Int | …})`); [Some (Error why)]: [p]
    could not be instantiated here; [None]: not such a slot. *)
-let abstract_param_entry (ctx : rctx) (g : string) (t : A.ty) (args : A.expr list) (a : A.expr)
+let abstract_param_entry (ctx : rctx) defs (cb : cbenv) (g : string) (t : A.ty) (args : A.expr list) (a : A.expr)
   : (string * elem option list, string) result option =
   match abstract_slot_of_ty t with
   | Some (c, p) when List.mem p (callee_abstracts ctx g) ->
@@ -1344,7 +1392,7 @@ let abstract_param_entry (ctx : rctx) (g : string) (t : A.ty) (args : A.expr lis
      | None -> None
      | Some (_, fd) ->
        Some
-         (Result.bind (instantiate_abstract fd p args) (fun (y, body) ->
+         (Result.bind (instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) fd p args) (fun (y, body) ->
               (* The demand's element sort is the ARGUMENT's: unlike a result
                  demand, nothing declared states it.  Defaulting to Int made a
                  correct `List(String)` call a false violation (probe q09b,
@@ -1367,7 +1415,7 @@ let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
     (fun i a ->
       match List.nth_opt sg.param_tys i with
       | Some t ->
-        (match Option.bind t (fun t -> abstract_param_entry ctx callee t args a) with
+        (match Option.bind t (fun t -> abstract_param_entry ctx defs cb callee t args a) with
          | Some (Ok er) ->
            ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
          | Some (Error why) ->
