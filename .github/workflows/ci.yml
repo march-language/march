@@ -21,7 +21,7 @@
 #   sanitize-gate (ubuntu)              ASAN gate: golden corpus + curated native + two-node
 #   ocaml-build   (ubuntu, macos) ─┬─ property-tests × 3 (per OS)
 #                  ubuntu leg only ─┼─ cross-linux-oracle
-#                                   └─ property-oracle × 8
+#                                   └─ property-oracle × 2 (4 case lists each)
 #
 # Two other changes cut the per-job floor and the per-compile cost:
 #   - .github/actions/opam-deps caches ~/.opam, so `opam install --deps-only`
@@ -736,7 +736,7 @@ jobs:
             ./specs/lang/golden/sanitize.sh
 
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
-  # cross-linux-oracle and all 8 property-oracle shards below each used to
+  # cross-linux-oracle and the property-oracle shards below each used to
   # independently pay ~2.3min opam-install + a fresh `dune build` — 9 job
   # instances redoing identical work. Neither of them needs a coherent local
   # `_build`/incremental dune state the way the `dune runtest`-based test job
@@ -750,7 +750,7 @@ jobs:
   # carefully the key is chosen.
   # Matrixed over both runners because `property-tests` below consumes this,
   # and its groups must run on macOS too (see that job's comment). The Linux
-  # leg additionally feeds cross-linux-oracle and the 8 property-oracle shards.
+  # leg additionally feeds cross-linux-oracle and the property-oracle shards.
   ocaml-build:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -918,10 +918,10 @@ jobs:
   # directly isn't viable either: each unique generated program is a real
   # `--compile` that the whole-binary CAS can never hit (distinct sources), so
   # all 1090 would add well over an hour to the Test job on every push.
-  # Instead this runs as its own job, sharded 8-way via alcotest's own
-  # case-number filtering (`test <suite> <cases>`), hand-balanced by measured
-  # per-case cost (not a naive index range) so no single shard is dominated by
-  # the two heavier cases (case 0 = println_arith at QCheck count 100; case 20
+  # Instead this runs as its own job: eight case lists selected by alcotest's
+  # own case-number filtering (`test <suite> <cases>`), run four at a time on
+  # each of two runners, hand-balanced by measured per-case cost (not a naive
+  # index range) so no single list is dominated by the two heavier cases (case 0 = println_arith at QCheck count 100; case 20
   # = opt_matrix at count 20 * 2 opt levels).
   # test_properties.exe's QCheck property groups — everything in that binary
   # EXCEPT the interp-vs-compiled oracle group (which property-oracle below
@@ -1066,37 +1066,29 @@ jobs:
           fi
 
   property-oracle:
+    name: property-oracle (${{ matrix.shard }}/2)
     runs-on: ubuntu-24.04
-    needs: [ocaml-build]
     timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        # 8-way (not 4-way): the first version of this job was sized against
-        # local timing (~4s/compile on a 14-core Apple Silicon dev machine)
-        # and failed on real GH Actions hardware, which measured ~6.5s/compile
-        # (case 0 alone: 100 iterations in 10m48s) — shard 1 (250 cases) needed
-        # ~27min against a 25min timeout. Re-balanced by measured cost. The
-        # runtime-object cache has since cut the per-compile cost roughly in
-        # half again; the shard split is left as-is rather than re-tuned
-        # optimistically, per the same lesson.
+        # Two runners, each running FOUR case lists side by side. Each list is
+        # one test_properties.exe process, and each process is one compile at
+        # a time: run one per runner (8 jobs, the layout until 2026-10-07),
+        # three of a 4-vCPU runner's cores sat idle and the group cost ~95
+        # Linux job-minutes plus 8 setups for ~15 min of wall time.
+        #
+        # The lists are the old eight shards, hand-balanced by measured cost
+        # (case 0 = println_arith at QCheck count 100 and case 20 = opt_matrix
+        # at count 20 * 2 opt levels are the heavy ones; on CI the old shards
+        # took 9-16 min each). Each runner gets two of the slow lists and two
+        # of the fast ones. The guard step below pins the case count, so a new
+        # oracle case cannot land in no list.
         include:
           - shard: 1
-            cases: "0,20"
+            cases: "0,20 4,5,6 10,11,12 16,17"
           - shard: 2
-            cases: "1,2,3"
-          - shard: 3
-            cases: "4,5,6"
-          - shard: 4
-            cases: "7,8,9"
-          - shard: 5
-            cases: "10,11,12"
-          - shard: 6
-            cases: "13,14,15"
-          - shard: 7
-            cases: "16,17"
-          - shard: 8
-            cases: "18,19"
+            cases: "1,2,3 7,8,9 13,14,15 18,19"
     steps:
       - uses: actions/checkout@v4
 
@@ -1147,7 +1139,7 @@ jobs:
       # stay green; deleting one would shift every later index and silently
       # re-cover the wrong cases. The property-tests coverage guard cannot
       # catch either — it checks group NAMES, and this group is named there.
-      # Pin the count instead: the 8 shards' index lists union to exactly
+      # Pin the count instead: the two shards' index lists union to exactly
       # 0..20, so any change to the case count must come with a re-shard here.
       - name: Guard — oracle case count still matches the shard split
         run: |
@@ -1158,15 +1150,35 @@ jobs:
             | grep -c '^oracle: interp = compiled' || true)
           echo "oracle cases: expected $expected, found $actual"
           if [ "$actual" -ne "$expected" ]; then
-            echo "::error::the 'oracle: interp = compiled' group has $actual cases but the 8 property-oracle shards cover exactly $expected (indices 0..$((expected-1))). Re-balance the shard 'cases' lists in this workflow and update this guard, or the new/removed cases will silently run in no shard at all."
+            echo "::error::the 'oracle: interp = compiled' group has $actual cases but the property-oracle case lists cover exactly $expected (indices 0..$((expected-1))). Re-balance the shard 'cases' lists in this workflow and update this guard, or the new/removed cases will silently run in no shard at all."
             exit 1
           fi
 
-      - name: Differential oracle (shard ${{ matrix.shard }}/8, cases ${{ matrix.cases }})
+      - name: Differential oracle (shard ${{ matrix.shard }}/2, cases ${{ matrix.cases }})
         timeout-minutes: 25
         run: |
-          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
-            ./_build/default/test/test_properties.exe test 'oracle: interp = compiled' "${{ matrix.cases }}" -e
+          # One process per case list, all at once, each with its own alcotest
+          # log dir. Every process is waited for and every log printed, so one
+          # failing list never hides another's result.
+          pids=""; n=0
+          for cases in ${{ matrix.cases }}; do
+            n=$((n + 1))
+            mkdir -p "$RUNNER_TEMP/oracle-$n"   # alcotest's -o refuses a missing dir
+            MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+              ./_build/default/test/test_properties.exe test 'oracle: interp = compiled' "$cases" \
+                -e -o "$RUNNER_TEMP/oracle-$n" > "$RUNNER_TEMP/oracle-$n.log" 2>&1 &
+            pids="$pids $!:$cases:$n"
+          done
+          rc=0
+          for p in $pids; do
+            pid=${p%%:*}; rest=${p#*:}; cases=${rest%%:*}; n=${rest##*:}
+            if wait "$pid"; then status=ok; else status=FAILED; rc=1; fi
+            echo "::group::cases $cases: $status"
+            cat "$RUNNER_TEMP/oracle-$n.log"
+            echo "::endgroup::"
+            [ "$status" = ok ] || echo "::error::oracle cases $cases failed (log in the group above)"
+          done
+          exit $rc
 
   # Asserts that every property group in test_properties.exe is actually run by
   # SOME property-tests shard (or is the oracle group, which property-oracle
