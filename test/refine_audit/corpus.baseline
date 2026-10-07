@@ -320,6 +320,8 @@ native_monitor_after_death_loopback: coverage audit (user + stdlib): 126 enforce
 native_monitor_after_death_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_monitor_expiry_loopback: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_monitor_expiry_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_monitor_releases_actors: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
+native_monitor_releases_actors: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_multihead_literal_arg: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_multihead_literal_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mutual_tco_deferred_drop: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
