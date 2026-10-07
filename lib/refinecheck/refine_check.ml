@@ -832,20 +832,45 @@ let rec first_slot_pred (slots : elem option list) : string =
    refinement of the container itself.  Read from the declared type directly:
    [elem_refinement] admits such a slot only inside [fd]'s own walk
    ([abstract_tyvar_slot]), and this is asked at its call sites. *)
-let abstract_return_slot (fd : A.fn_def) : (string * string) option =
+let abstract_slot_of_ty (t : A.ty) : (string * string) option =
   let rec strip (t : A.ty) =
     match unlinear t with
     | A.TyRefine ((A.TyCon _ as base), _, _) -> strip base
     | t -> t
   in
-  match Option.map strip fd.A.fn_ret_ty with
-  | Some
-      (A.TyCon
-         ( { A.txt = c; _ }
-         , [ A.TyRefine (A.TyVar _, b, A.EApp (A.EVar { A.txt = p; _ }, [ A.EVar { A.txt = v; _ } ], _)) ] ))
+  match strip t with
+  | A.TyCon
+      ( { A.txt = c; _ }
+      , [ A.TyRefine (A.TyVar _, b, A.EApp (A.EVar { A.txt = p; _ }, [ A.EVar { A.txt = v; _ } ], _)) ] )
     when is_container_type c && (v = binder_name b || v = "_") ->
     Some (c, p)
   | _ -> None
+
+let abstract_return_slot (fd : A.fn_def) : (string * string) option =
+  Option.bind fd.A.fn_ret_ty abstract_slot_of_ty
+
+(* What the actual at [p]'s definer position instantiates it to (§3.1): the
+   body of an inline one-parameter lambda that mentions nothing but its
+   parameter, as [(param, body)]; otherwise why not. *)
+let instantiate_abstract (fd : A.fn_def) (p : string) (args : A.expr list)
+  : (string * A.expr, string) result =
+  match
+    Option.bind (Refine_abstract.definer_index ~is_known:known_predicate_fn fd p) (List.nth_opt args)
+  with
+  | Some (A.ELam ([ prm ], body, _)) ->
+    let y = prm.A.param_name.A.txt in
+    if classify_pred y [] body <> Closed then
+      Error (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
+    else Ok (y, body)
+  | Some (A.ELam _) ->
+    Error (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
+  | Some _ ->
+    Error
+      (Printf.sprintf
+         "the argument passed for `%s` is not an inline one-parameter lambda (a named function or a \
+          callback parameter instantiates nothing yet)"
+         p)
+  | None -> Error (Printf.sprintf "no argument at the position that defines `%s`" p)
 
 (* A call [g(args)] to a combinator whose return is `List({a | p(_)})`, with a
    demand [slots] on its result.  Instantiate `p` from the actual at its
@@ -874,15 +899,10 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
              | Some a when not (parametric_ok ctx g [ a ]) ->
                uninst (Printf.sprintf "`%s` is not known to be parametric in `%s`" g a)
              | _ ->
-               (match
-                  Option.bind (Refine_abstract.definer_index ~is_known fd p) (List.nth_opt args)
-                with
-                | Some (A.ELam ([ prm ], body, _)) ->
-                  let y = prm.A.param_name.A.txt in
-                  if classify_pred y [] body <> Closed then
-                    uninst
-                      (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
-                  else begin
+               (match instantiate_abstract fd p args with
+                | Error w -> uninst w
+                | Ok (y, body) ->
+                  begin
                     (* §3.4: an element of the result is an element of the
                        input it came from, so the input's own element fact
                        holds of it as well.  Only through the single source
@@ -932,16 +952,7 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
                           (Printf.sprintf "`fn %s -> %s` does not imply `%s`" y (pred_str body)
                              (pred_str dpred)))
                     | _ -> Some `Undecided
-                  end
-                | Some (A.ELam _) ->
-                  uninst (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
-                | Some _ ->
-                  uninst
-                    (Printf.sprintf
-                       "the argument passed for `%s` is not an inline one-parameter lambda (a named \
-                        function or a callback parameter instantiates nothing yet)"
-                       p)
-                | None -> uninst (Printf.sprintf "no argument at the position that defines `%s`" p)))
+                  end))
         | _ -> None))
   | _ -> None
 
@@ -1276,18 +1287,44 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
      | _ -> `Na)
   | _ -> `Na
 
+(* §3.5: a parameter whose element slot applies one of the callee's abstract
+   refinements (`xs : List({a | p(_)})`) obliges the caller's container to
+   satisfy the predicate [p] is instantiated to at this call.  [Some (Ok
+   entry)]: the demand, ready for [check_elements] (ordinary element
+   subtyping, as for a declared `List({Int | …})`); [Some (Error why)]: [p]
+   could not be instantiated here; [None]: not such a slot. *)
+let abstract_param_entry (ctx : rctx) (g : string) (t : A.ty) (args : A.expr list)
+  : (string * elem option list, string) result option =
+  match abstract_slot_of_ty t with
+  | Some (c, p) when List.mem p (callee_abstracts ctx g) ->
+    (match Option.bind (resolve_key ctx g) (Hashtbl.find_opt fn_defs_tbl) with
+     | None -> None
+     | Some (_, fd) ->
+       Some (Result.map (fun (y, body) -> (c, [ Some (Refined (y, body, None)) ])) (instantiate_abstract fd p args)))
+  | _ -> None
+
 (* The element obligations a call's arguments owe the callee's declared
-   parameter types. *)
+   parameter types.  An abstract slot is tried FIRST: read through
+   [elem_refinement] by a caller that declares an abstract refinement of the
+   same name, it would mean the caller's predicate, not the callee's. *)
 let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) (sg : fn_sig) (args : A.expr list) : unit =
   List.iteri
     (fun i a ->
       match List.nth_opt sg.param_tys i with
       | Some t ->
-        (match elem_refinement t with
-         | Some er ->
+        (match Option.bind t (fun t -> abstract_param_entry ctx callee t args) with
+         | Some (Ok er) ->
            ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
-         | None -> ())
+         | Some (Error why) ->
+           ignore
+             (record_abstract_verdict errctx ~span:(arg_span span a) ~callee
+                ~predicate:"p(_)" (`Uninstantiated why))
+         | None ->
+           (match elem_refinement t with
+            | Some er ->
+              ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
+            | None -> ()))
       | None -> ())
     args
 

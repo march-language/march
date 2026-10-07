@@ -65,9 +65,17 @@ work all four were errors there, and now only the last one is.
    its comment says so. It is conservative: rebinding the *input* also
    retires the record (test NLI).
 
-§3.5 (a negative occurrence of `p` in a parameter's element slot) is not
-exercised: `abstract_flow` runs only for a demand on a *result*, and no
-phase-2 function has a negative occurrence. It is still open.
+§3.5, a negative occurrence (`p` in a parameter's element slot), was found
+silently UNCHECKED when probed after the first round (2026-10-07: zero
+obligations, even for `need([0, 1], fn y -> y > 0)`), because a call site sees
+no slot for a callee's `{a | p(_)}`. Fixed in this PR: `abstract_param_entry`
+instantiates `p` at the call and `check_arg_elements` runs ordinary element
+subtyping against it (tried before `elem_refinement`, which would read a
+same-named caller `p`); an opaque callback is an `uninstantiated` skip. Tests
+§3.5 call side (refined input / literals / literal 0 violated / unrefined
+skip / opaque uninstantiated; red without the path) and definition side
+(`pass` returning `xs` proves `List({a | p(_)})`). `abstract_slot_of_ty` and
+`instantiate_abstract` are now shared with `abstract_flow`.
 
 ## Tests (`test_refinecheck`, group `abstract-phase2`)
 

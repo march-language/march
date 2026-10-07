@@ -17752,6 +17752,49 @@ end|}
                ^ "  fn go(ys : List(Int), ws : List(Int)) : Int do\n    let zs = filt(ys, fn y -> y > 0)\n    let ys = ws\n    sum_pos(zs)\n  end\nend\n")
                 "sum_pos")));
 
+    (* §3.5: `p` in a PARAMETER's element slot is an obligation on the caller,
+       discharged against the instantiated predicate by ordinary element
+       subtyping.  RED before: no obligation at all — `need([0, 1], fn y ->
+       y > 0)` was silently unchecked (probed 2026-10-07). *)
+    gated "§3.5: a negative occurrence obliges the caller's container" (fun () ->
+        let pre =
+          "mod NG do\n"
+          ^ "  fn need(xs : List({a | p(_)}), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : Int do 0 end\n"
+        in
+        (* The module has no other obligation, so its whole ledger is the
+           call's: (proved, violated, skipped, skip reasons).  Element
+           obligations are labelled by the ARGUMENT (`pos`, or `need` for a
+           literal), so a callee filter would miss them. *)
+        let at body = typed_ledger (pre ^ body ^ "end\n") in
+        let triple (p, v, s, _) = (p, v, s) in
+        Alcotest.(check (triple int int int)) "refined input proves" (1, 0, 0)
+          (triple (at "  fn go(pos : List({Int | _ > 0})) : Int do need(pos, fn y -> y > 0) end\n"));
+        Alcotest.(check (triple int int int)) "each literal element proves" (2, 0, 0)
+          (triple (at "  fn go() : Int do need([1, 2], fn y -> y > 0) end\n"));
+        Alcotest.(check (triple int int int)) "a literal 0 is a violation" (1, 1, 0)
+          (triple (at "  fn go() : Int do need([0, 1], fn y -> y > 0) end\n"));
+        Alcotest.(check (triple int int int)) "an unrefined input is a skip, not silence" (0, 0, 1)
+          (triple (at "  fn go(ys : List(Int)) : Int do need(ys, fn y -> y > 0) end\n"));
+        let _, _, _, rs =
+          at "  fn go(pos : List({Int | _ > 0}), k : ({x : Int | true}) -> Bool) : Int do need(pos, k) end\n"
+        in
+        Alcotest.(check (list string)) "an opaque callback is uninstantiated"
+          [ "abstract-refinement-uninstantiated" ] rs);
+
+    (* The definition side of a negative occurrence: inside `pass`, `xs`'s
+       elements carry `$abs_p`, so returning `xs` proves a positive
+       `List({a | p(_)})` (contrast n6, whose parameter promised nothing). *)
+    gated "§3.5: a negative occurrence is a fact inside the definition" (fun () ->
+        (* The tail `xs` is recorded under its own name, so assert the whole
+           (single-function) module's ledger. *)
+        let p, v, sk, _ =
+          typed_ledger
+            {|mod NGD do
+  fn pass(xs : List({a | p(_)}), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do xs end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "proved" (1, 0, 0) (p, v, sk));
+
     gated "cap verified: a proved demand compiles, a too-weak one is an error" (fun () ->
         let m body = "mod CV do\n  cap verified\n" ^ ar2_filt ^ body ^ "end\n" in
         Alcotest.(check bool) "proved compiles" false

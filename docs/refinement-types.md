@@ -2048,6 +2048,13 @@ its input unfiltered, say) lends nothing at its calls. Passing any callable
 for the defining parameter is always allowed — `p` is, by definition, what it
 returns — so it owes no codomain obligation where it is passed.
 
+`p` may also sit in a *parameter's* element slot, where it is an obligation
+on the caller: with `need(xs : List({a | p(_)}), keep : ({x : a | true}) ->
+{Bool | _ == p(x)})`, the call `need(pos, fn y -> y > 0)` is checked like a
+call to a function taking `List({Int | _ > 0})` — proved for
+`pos : List({Int | _ > 0})` or `[1, 2]`, a violation for `[0, 1]`, a skip for
+an unrefined list — and inside `need`, `xs`'s elements carry `p`.
+
 What it does not do (reason `abstract-refinement-uninstantiated` where a
 demand meets one of these):
 
