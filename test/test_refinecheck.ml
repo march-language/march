@@ -17045,10 +17045,12 @@ let abstract_refinements_suite =
         Alcotest.(check bool) "not called vacuous" false (says "never used in the signature" msgs);
         Alcotest.(check bool) "no error" false (says "abstract refinement `p` is applied" msgs));
 
-    gated "phase 1 is inert: row n still skips, nothing proves" (fun () ->
-        (* The motivating case (design row n).  Phase 2 turns this into a
-           proof; until then the ledger must be unchanged, and this case is
-           what will show that happening. *)
+    gated "an unproved filt with an opaque callback proves nothing (rows n4, n6)" (fun () ->
+        (* Phase 1's inert-row-n witness.  After phase 2 it still proves
+           nothing, for two independent reasons: `filt`'s body (`xs`) does
+           not prove its abstract return, and `k` is an opaque callback that
+           instantiates nothing.  The proving row n is in the
+           `abstract-phase2` suite. *)
         let src =
           m (String.concat "\n"
                [ Printf.sprintf "  fn filt(xs : List(a), keep : %s) : List({a | p(_)}) do xs end" definer;
@@ -17553,6 +17555,252 @@ end|})));
   fn is_even(n : Int) : Bool do n % 2 == 0 end
   fn go() : Bool do ap(is_even, 3) end
 end|})) ]
+
+(* Abstract refinements, phase 2 (specs/2026-09-20-abstract-refinements-design.md
+   §2-§4; plan specs/plans/2026-10-06-abstract-refinements-phase2-plan.md, PR B).
+   [ar2_filt] is the canonical definer: `p` is defined by `keep`'s codomain and
+   produced in the element slot of the return. *)
+let ar2_filt =
+  {|  fn filt(xs : List(a), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do Cons(h, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+|}
+
+let abstract_phase2_suite =
+  [ Alcotest.test_case "the two new reasons have stable slugs" `Quick (fun () ->
+        let open March_refinecheck.Obligation in
+        Alcotest.(check (pair string string)) "slugs"
+          ("abstract-refinement-too-weak", "abstract-refinement-uninstantiated")
+          (reason_name (Abstract_too_weak "w"), reason_name (Abstract_uninstantiated "u")));
+
+    (* n5: the definition side.  `keep(h)` reflects (PR A) to
+       `keep$ret == $abs_p(h)`; the Cons tail's goal is `$abs_p(h)`; the
+       recursive tails take the structural hypothesis. *)
+    gated "n5: filter's own body proves its abstract element return" (fun () ->
+        let vs =
+          List.filter_map
+            (fun (c, v, r) -> if c = "return of filt" then Some (v, r) else None)
+            (typed_obligations ("mod N5 do\n" ^ ar2_filt ^ "end\n"))
+        in
+        Alcotest.(check bool) "some" true (vs <> []);
+        Alcotest.(check (list (pair string string))) "all proved"
+          (List.map (fun _ -> ("proved", "")) vs) vs);
+
+    (* n6: returning the input proves nothing about `p`. *)
+    gated "n6: a body that ignores the callback does not prove" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod N6 do
+  fn bad(xs : List(a), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do xs end
+end|}
+            "return of bad"
+        in
+        Alcotest.(check bool) "an obligation exists" true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem "proved" vs);
+        Alcotest.(check bool) "not violated" false (List.mem "violated" vs));
+
+    Alcotest.test_case "definer_index and positive_base find filt's parts" `Quick (fun () ->
+        let m = parse ("mod DI do\n" ^ ar2_filt ^ "end\n") in
+        let fd =
+          List.find_map
+            (function
+              | March_ast.Ast.DFn (fd, _) when fd.March_ast.Ast.fn_name.March_ast.Ast.txt = "filt" -> Some fd
+              | _ -> None)
+            m.March_ast.Ast.mod_decls
+          |> Option.get
+        in
+        let is_known _ = false in
+        Alcotest.(check (option int)) "index" (Some 1)
+          (March_refinecheck.Refine_abstract.definer_index ~is_known fd "p");
+        Alcotest.(check (option string)) "base" (Some "a")
+          (March_refinecheck.Refine_abstract.positive_base ~is_known fd "p");
+        Alcotest.(check (option int)) "not abstract" None
+          (March_refinecheck.Refine_abstract.definer_index ~is_known fd "q"));
+
+    (* A caller that declares its OWN abstract refinement `p` must not read a
+       callee's `{a | p(_)}` as its own `p`: they are different predicates
+       that share a name.  `g` returns every element of `ys` (the lambda
+       keeps all), which says nothing about g's `p`, so g's element return
+       must NOT prove. *)
+    gated "a callee's p(_) is not the caller's p" (fun () ->
+        let src =
+          "mod SN do\n" ^ ar2_filt
+          ^ {|  fn g(ys : List(a), k : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do
+    filt(ys, fn y -> true)
+  end
+end|}
+        in
+        (* g's tail shares the label `filt(…)` with filt's own (legitimately
+           proved) recursive tails, so pick g's out by its source line. *)
+        let line_of needle =
+          let rec find i = if String.sub src i (String.length needle) = needle then i else find (i + 1) in
+          let k = find 0 in
+          1 + List.length (List.filter (fun c -> c = '\n') (List.init k (String.get src)))
+        in
+        let gl = line_of "filt(ys, fn y -> true)" in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_typed src);
+        let at_g =
+          List.filter_map
+            (fun (o : March_refinecheck.Obligation.t) ->
+              if o.March_refinecheck.Obligation.span.March_ast.Ast.start_line = gl then
+                Some (March_refinecheck.Obligation.verdict_name o.March_refinecheck.Obligation.verdict)
+              else None)
+            (March_refinecheck.Obligation.all ())
+        in
+        Alcotest.(check bool) "g's tail has an obligation" true (at_g <> []);
+        Alcotest.(check bool) "and it is not proved" false (List.mem "proved" at_g));
+
+    (* n: the flagship.  RED before: `parametric-source-unproved`. *)
+    gated "n: an inline lambda instantiates p and proves the demand" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             ("mod N do\n" ^ ar2_filt
+            ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\nend\n")
+             "sum_pos"));
+
+    (* n2: weaker lambda — a skip with the new reason, never a violation. *)
+    gated "n2: a weaker lambda is too-weak, not violated" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod N2 do\n" ^ ar2_filt
+           ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y >= 0)) end\nend\n")
+        in
+        Alcotest.(check (list (pair string string))) "too weak"
+          [ ("skipped", "abstract-refinement-too-weak") ]
+          (List.filter_map (fun (c, v, r) -> if c = "sum_pos" then Some (v, r) else None) obs));
+
+    (* n4: an opaque callable instantiates nothing. *)
+    gated "n4: an opaque callback is uninstantiated" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod N4 do\n" ^ ar2_filt
+           ^ "  fn go(ys : List(Int), k : ({x : Int | true}) -> Bool) : Int do sum_pos(filt(ys, k)) end\nend\n")
+        in
+        Alcotest.(check (list string)) "reason" [ "abstract-refinement-uninstantiated" ]
+          (List.filter_map (fun (c, _, r) -> if c = "sum_pos" then Some r else None) obs));
+
+    (* A lambda mentioning an outer name is declined, not mis-instantiated. *)
+    gated "a capturing lambda is uninstantiated" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod NC do\n" ^ ar2_filt
+           ^ "  fn go(ys : List(Int), m : Int) : Int do sum_pos(filt(ys, fn y -> y > m)) end\nend\n")
+        in
+        Alcotest.(check (list string)) "reason" [ "abstract-refinement-uninstantiated" ]
+          (List.filter_map (fun (c, _, r) -> if c = "sum_pos" then Some r else None) obs));
+
+    (* n6 at the call site: a callee whose body does not prove lends nothing. *)
+    gated "an unproved definition lends nothing at its call" (fun () ->
+        let obs =
+          typed_obligations
+            {|mod NB do
+  fn bad(xs : List(a), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do xs end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn go(ys : List(Int)) : Int do sum_pos(bad(ys, fn y -> y > 0)) end
+end|}
+        in
+        Alcotest.(check (list (pair string string))) "uninstantiated"
+          [ ("skipped", "abstract-refinement-uninstantiated") ]
+          (List.filter_map (fun (c, v, r) -> if c = "sum_pos" then Some (v, r) else None) obs));
+
+    (* n1: the lambda alone (`y < 100`) does not give `> 0`; the input's own
+       element fact does (§3.4).  RED before: too-weak. *)
+    gated "n1: the input's element fact conjoins with the lambda" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             ("mod N1 do\n" ^ ar2_filt
+            ^ "  fn go(ys : List({Int | _ > 0})) : Int do sum_pos(filt(ys, fn y -> y < 100)) end\nend\n")
+             "sum_pos"));
+
+    gated "n1 control: an unrefined input lends nothing" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod N1C do\n" ^ ar2_filt
+           ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y < 100)) end\nend\n")
+        in
+        Alcotest.(check (list string)) "too weak" [ "abstract-refinement-too-weak" ]
+          (List.filter_map (fun (c, _, r) -> if c = "sum_pos" then Some r else None) obs));
+
+    gated "a let-bound filter result carries the instantiated fact" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             ("mod NL do\n" ^ ar2_filt
+            ^ "  fn go(ys : List(Int)) : Int do\n    let zs = filt(ys, fn y -> y > 0)\n    sum_pos(zs)\n  end\nend\n")
+             "sum_pos"));
+
+    gated "rebinding the name retires it" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem "proved"
+             (verdicts_of
+                ("mod NLR do\n" ^ ar2_filt
+               ^ "  fn go(ys : List(Int)) : Int do\n    let zs = filt(ys, fn y -> y > 0)\n    let zs = ys\n    sum_pos(zs)\n  end\nend\n")
+                "sum_pos")));
+
+    (* Conservative, not required for soundness: rebinding the INPUT does not
+       change `zs`'s elements, but the [lets] channel retires the record when
+       any name its call mentions is rebound.  A known precision loss. *)
+    gated "rebinding the input retires it (conservatively)" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem "proved"
+             (verdicts_of
+                ("mod NLI do\n" ^ ar2_filt
+               ^ "  fn go(ys : List(Int), ws : List(Int)) : Int do\n    let zs = filt(ys, fn y -> y > 0)\n    let ys = ws\n    sum_pos(zs)\n  end\nend\n")
+                "sum_pos")));
+
+    (* §3.5: `p` in a PARAMETER's element slot is an obligation on the caller,
+       discharged against the instantiated predicate by ordinary element
+       subtyping.  RED before: no obligation at all — `need([0, 1], fn y ->
+       y > 0)` was silently unchecked (probed 2026-10-07). *)
+    gated "§3.5: a negative occurrence obliges the caller's container" (fun () ->
+        let pre =
+          "mod NG do\n"
+          ^ "  fn need(xs : List({a | p(_)}), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : Int do 0 end\n"
+        in
+        (* The module has no other obligation, so its whole ledger is the
+           call's: (proved, violated, skipped, skip reasons).  Element
+           obligations are labelled by the ARGUMENT (`pos`, or `need` for a
+           literal), so a callee filter would miss them. *)
+        let at body = typed_ledger (pre ^ body ^ "end\n") in
+        let triple (p, v, s, _) = (p, v, s) in
+        Alcotest.(check (triple int int int)) "refined input proves" (1, 0, 0)
+          (triple (at "  fn go(pos : List({Int | _ > 0})) : Int do need(pos, fn y -> y > 0) end\n"));
+        Alcotest.(check (triple int int int)) "each literal element proves" (2, 0, 0)
+          (triple (at "  fn go() : Int do need([1, 2], fn y -> y > 0) end\n"));
+        Alcotest.(check (triple int int int)) "a literal 0 is a violation" (1, 1, 0)
+          (triple (at "  fn go() : Int do need([0, 1], fn y -> y > 0) end\n"));
+        Alcotest.(check (triple int int int)) "an unrefined input is a skip, not silence" (0, 0, 1)
+          (triple (at "  fn go(ys : List(Int)) : Int do need(ys, fn y -> y > 0) end\n"));
+        let _, _, _, rs =
+          at "  fn go(pos : List({Int | _ > 0}), k : ({x : Int | true}) -> Bool) : Int do need(pos, k) end\n"
+        in
+        Alcotest.(check (list string)) "an opaque callback is uninstantiated"
+          [ "abstract-refinement-uninstantiated" ] rs);
+
+    (* The definition side of a negative occurrence: inside `pass`, `xs`'s
+       elements carry `$abs_p`, so returning `xs` proves a positive
+       `List({a | p(_)})` (contrast n6, whose parameter promised nothing). *)
+    gated "§3.5: a negative occurrence is a fact inside the definition" (fun () ->
+        (* The tail `xs` is recorded under its own name, so assert the whole
+           (single-function) module's ledger. *)
+        let p, v, sk, _ =
+          typed_ledger
+            {|mod NGD do
+  fn pass(xs : List({a | p(_)}), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do xs end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "proved" (1, 0, 0) (p, v, sk));
+
+    gated "cap verified: a proved demand compiles, a too-weak one is an error" (fun () ->
+        let m body = "mod CV do\n  cap verified\n" ^ ar2_filt ^ body ^ "end\n" in
+        Alcotest.(check bool) "proved compiles" false
+          (has_refine_error_typed (m "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"));
+        Alcotest.(check bool) "too-weak errors" true
+          (has_refine_error_typed (m "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y >= 0)) end\n"))) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
@@ -18345,4 +18593,5 @@ let () =
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("callback-binder", callback_binder_suite);
       ("abstract-pass-sites", abstract_pass_sites_suite);
+      ("abstract-phase2", abstract_phase2_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

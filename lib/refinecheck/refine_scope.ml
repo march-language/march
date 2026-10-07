@@ -304,6 +304,11 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
   (* A measure application m(e): m(var) reflects to a consistent measure symbol;
      m(expr) is evaluated via resolve_measure_app (e.g. concrete_len for a list);
      len(list-literal) is computed concretely without needing resolve_measure_app. *)
+  (* An abstract refinement of the function being checked: uninterpreted
+     (design 2026-09-20 §2a).  Only inside its declaring definition —
+     [current_abstracts] is empty everywhere else. *)
+  | A.EApp (A.EVar { A.txt = p; _ }, [ a ], _) when List.mem p !current_abstracts ->
+    Result.map (fun t -> Smt.App (abs_sym p, [ t ])) (r a)
   | A.EApp (A.EVar { A.txt = m0; _ }, [ a ], _)
     when is_measure_app m0 && (vocab || not (is_builtin_set_measure (measure_name m0))) ->
     (* One normalization point for BOTH sides: a path condition and a predicate
@@ -1275,12 +1280,16 @@ let let_equality_rhs (e : A.expr) : bool =
    about this value" stops being syntactically evident, and the fallback is
    the honest general message, not a guess.
 
-   The channel carries NO solver-visible fact — it is consulted only when
-   choosing the WORDING of a skip — but it obeys the same shadow discipline as
-   [scope]/[path], and for the same reason: an entry surviving a rebinding
-   attributes an outer value's guard to an inner binding, which in this
-   channel is a wrong SENTENCE rather than a wrong verdict, and a wrong
-   attribution is worse than a vague one.  Hence BOTH tests below: the KEY
+   The channel carries NO solver-visible fact of its own — it is consulted
+   when choosing the WORDING of a skip, and (since 2026-10-06) by
+   [Refine_check.check_elements] to RE-EXAMINE a let-bound call to a
+   combinator with an abstract refinement (`let zs = List.filter(…)`), whose
+   instantiated element fact has no [contenv] entry.  It obeys the same
+   shadow discipline as [scope]/[path], and for the same reason: an entry
+   surviving a rebinding attributes an outer value's guard to an inner
+   binding.  For the wording that is a wrong SENTENCE; for the abstract
+   re-examination it would be a wrong VERDICT, which is why the retirement
+   below must stay exactly as strict as it is.  Hence BOTH tests below: the KEY
    retires when the laundering name rebinds (`let n = 5` after the laundering
    `let` makes the guard's `n` a literal), and the entry retires when any name
    its RHS mentions rebinds (`let ys = zs` in between leaves `n` measuring the
@@ -1392,6 +1401,22 @@ let is_container_type (name : string) : bool =
   | Some ctors -> ctors <> [] && List.for_all (Hashtbl.mem ctor_param_fields) ctors
   | None -> false
 
+(* An element refinement over a TYPE VARIABLE (`{a | p(_)}`) has a meaning only
+   where the predicate applies one of the abstract refinements of the function
+   being checked: there `p` is uninterpreted ([current_abstracts]) and the
+   element an erased value, sort Int.  Anywhere else — a call site, where `p`
+   is instantiated by [Refine_check.abstract_flow] instead, or a type-variable
+   refinement with no abstract refinement in it — the slot stays empty, as it
+   always was. *)
+let abstract_tyvar_slot (arg : A.ty) : (string * A.expr * string option) option =
+  match unlinear arg with
+  | A.TyRefine (A.TyVar _, binder, pred)
+    when !current_abstracts <> []
+         && List.exists (fun (n, _, _) -> List.mem n !current_abstracts)
+              (Refine_abstract.applications pred) ->
+    Some (binder_name binder, pred, None)
+  | _ -> None
+
 let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
   match Option.map unlinear t with
   (* A refinement on the CONTAINER itself (`{List({Int | p}) | len(_) > 0}`)
@@ -1405,6 +1430,9 @@ let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
           match refined_param_ty (Some arg) with
           | Some r -> Some (Refined r)
           | None ->
+            match abstract_tyvar_slot arg with
+            | Some r -> Some (Refined r)
+            | None ->
             (match elem_refinement (Some arg) with
              | Some (c', slots') -> Some (Container (c', slots'))
              | None -> None))

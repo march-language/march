@@ -702,6 +702,22 @@ let parametric_return ~(entry_of : A.expr -> (string * elem option list) option)
      predicates mention nothing but their own binder.
 
    Anything else carries nothing. *)
+(* Does an element entry's predicate apply any of [names]?  An entry naming a
+   callee's abstract refinement (`{a | p(_)}`) is not a fact at a call site:
+   `p` means something different at every call and is instantiated there, by
+   [abstract_flow], never read from the declaration.  It matters most when the
+   CALLER declares an abstract refinement of the same name: [abstract_tyvar_slot]
+   then admits the callee's slot, and the caller would read the callee's `p`
+   as its own. *)
+let entry_mentions (names : string list) ((_, slots) : string * elem option list) : bool =
+  let rec slot = function
+    | None -> false
+    | Some (Refined (_, p, _)) ->
+      List.exists (fun (n, _, _) -> List.mem n names) (Refine_abstract.applications p)
+    | Some (Container (_, inner)) -> List.exists slot inner
+  in
+  names <> [] && List.exists slot slots
+
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
   : (string * elem option list) option =
   match e with
@@ -746,7 +762,10 @@ and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
       (match Hashtbl.find_opt fn_defs_tbl key with
        | Some (_, fd) ->
          (match elem_refinement fd.A.fn_ret_ty with
-          | Some entry when entry_is_closed entry -> Some entry
+          | Some entry
+            when entry_is_closed entry
+                 && not (entry_mentions (callee_abstracts ctx fname) entry) ->
+            Some entry
           | _ -> None)
        | None -> None)
     | _ -> None
@@ -806,6 +825,158 @@ let rec first_slot_pred (slots : elem option list) : string =
   | Some (Container (_, inner)) :: rest ->
     (match first_slot_pred inner with "<element refinement>" -> first_slot_pred rest | s -> s)
   | None :: rest -> first_slot_pred rest
+
+(* ── Abstract refinements at a call (design 2026-09-20 §3) ─────────────────
+   [abstract_return_slot fd] is [fd]'s return element slot when it is exactly
+   an abstract-refinement application: `List({a | p(_)})`, possibly under a
+   refinement of the container itself.  Read from the declared type directly:
+   [elem_refinement] admits such a slot only inside [fd]'s own walk
+   ([abstract_tyvar_slot]), and this is asked at its call sites. *)
+let abstract_slot_of_ty (t : A.ty) : (string * string) option =
+  let rec strip (t : A.ty) =
+    match unlinear t with
+    | A.TyRefine ((A.TyCon _ as base), _, _) -> strip base
+    | t -> t
+  in
+  match strip t with
+  | A.TyCon
+      ( { A.txt = c; _ }
+      , [ A.TyRefine (A.TyVar _, b, A.EApp (A.EVar { A.txt = p; _ }, [ A.EVar { A.txt = v; _ } ], _)) ] )
+    when is_container_type c && (v = binder_name b || v = "_") ->
+    Some (c, p)
+  | _ -> None
+
+let abstract_return_slot (fd : A.fn_def) : (string * string) option =
+  Option.bind fd.A.fn_ret_ty abstract_slot_of_ty
+
+(* What the actual at [p]'s definer position instantiates it to (§3.1): the
+   body of an inline one-parameter lambda that mentions nothing but its
+   parameter, as [(param, body)]; otherwise why not. *)
+let instantiate_abstract (fd : A.fn_def) (p : string) (args : A.expr list)
+  : (string * A.expr, string) result =
+  match
+    Option.bind (Refine_abstract.definer_index ~is_known:known_predicate_fn fd p) (List.nth_opt args)
+  with
+  | Some (A.ELam ([ prm ], body, _)) ->
+    let y = prm.A.param_name.A.txt in
+    if classify_pred y [] body <> Closed then
+      Error (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
+    else Ok (y, body)
+  | Some (A.ELam _) ->
+    Error (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
+  | Some _ ->
+    Error
+      (Printf.sprintf
+         "the argument passed for `%s` is not an inline one-parameter lambda (a named function or a \
+          callback parameter instantiates nothing yet)"
+         p)
+  | None -> Error (Printf.sprintf "no argument at the position that defines `%s`" p)
+
+(* A call [g(args)] to a combinator whose return is `List({a | p(_)})`, with a
+   demand [slots] on its result.  Instantiate `p` from the actual at its
+   definer position, then decide `q(v) ⇒ D(v)` for a fresh element `v` — one
+   query, in a scratch ledger, so a refutation is reported as too-weak rather
+   than as a definite violation (§3.3, decision 9.2).  [None]: [g] declares no
+   abstract element return; the caller falls through to [demand_flow]. *)
+let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv) ~(span : A.span)
+    ~(callee : string) ((_, slots) : string * elem option list) (g : string) (args : A.expr list)
+  : [ `Proved | `Too_weak of string | `Uninstantiated of string | `Undecided ] option =
+  let abs = callee_abstracts ctx g in
+  match resolve_key ctx g, slots with
+  | Some key, [ Some (Refined demand) ] when abs <> [] ->
+    (match Hashtbl.find_opt fn_defs_tbl key with
+     | None -> None
+     | Some (_, fd) ->
+       (match abstract_return_slot fd with
+        | Some (_, p) when List.mem p abs ->
+          let is_known = known_predicate_fn in
+          let uninst w = Some (`Uninstantiated w) in
+          if not (Hashtbl.mem elem_ret_proved key) then
+            uninst
+              (Printf.sprintf "`%s`'s own body is not proved to return elements satisfying `%s`" g p)
+          else
+            (match Refine_abstract.positive_base ~is_known fd p with
+             | Some a when not (parametric_ok ctx g [ a ]) ->
+               uninst (Printf.sprintf "`%s` is not known to be parametric in `%s`" g a)
+             | _ ->
+               (match instantiate_abstract fd p args with
+                | Error w -> uninst w
+                | Ok (y, body) ->
+                  begin
+                    (* §3.4: an element of the result is an element of the
+                       input it came from, so the input's own element fact
+                       holds of it as well.  Only through the single source
+                       the parametric rule traces (gated above), and only a
+                       single refined slot. *)
+                    let body' =
+                      match
+                        Option.bind (callee_sig ctx defs cb g) (fun sg ->
+                            Option.bind (Refine_abstract.positive_base ~is_known fd p) (sources_of sg))
+                      with
+                      | Some [ Src_elem (j, [ _ ]) ] ->
+                        (match
+                           Option.bind (List.nth_opt args j) (container_entry_of_expr ctx defs cb ce)
+                         with
+                         | Some (_, [ Some (Refined (b0, q0, _)) ]) ->
+                           A.EApp
+                             ( A.EVar { A.txt = "&&"; A.span = span }
+                             , [ subst_params [ (b0, A.EVar { A.txt = y; A.span = span }) ] q0; body ]
+                             , span )
+                         | _ -> body)
+                      | _ -> body
+                    in
+                    let ((_, dpred, dsort) as d) = demand in
+                    let sg = elem_sig ~name:"$elem" d in
+                    let rp = List.hd sg.refined in
+                    let sc' = ("$elem", (y, body', dsort)) :: scope_shadow sc [ "$elem" ] in
+                    let cx =
+                      { root; errctx = Err.create (); postcond = postcond_of ~cb ctx defs; path; lets
+                      ; sc = sc'; re; binds = ctx.binds }
+                    in
+                    let out = ref None in
+                    let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
+                    Fun.protect
+                      ~finally:(fun () ->
+                        strict_verified := saved_strict;
+                        unverified_hinted := saved_hinted)
+                      (fun () ->
+                        Obligation.with_scratch (fun () ->
+                            strict_verified := false;
+                            check_call cx ~span ~callee ~subject:Element_domain ~verdict_out:out sg
+                              [ A.EVar { A.txt = "$elem"; A.span = span } ] rp));
+                    match !out with
+                    | Some Obligation.Proved -> Some `Proved
+                    | Some Obligation.Violated ->
+                      Some
+                        (`Too_weak
+                          (Printf.sprintf "`fn %s -> %s` does not imply `%s`" y (pred_str body)
+                             (pred_str dpred)))
+                    | _ -> Some `Undecided
+                  end))
+        | _ -> None))
+  | _ -> None
+
+(* Record an [abstract_flow] verdict at the demanding call; escalate a skip
+   under `cap verified` the way [record_param_skip] does.  Returns whether the
+   demand was proved, as [check_elements]' arms do. *)
+let record_abstract_verdict errctx ~(span : A.span) ~(callee : string) ~(predicate : string) v : bool =
+  let verdict =
+    match v with
+    | `Proved -> Obligation.Proved
+    | `Too_weak w -> Obligation.Skipped (Obligation.Abstract_too_weak w)
+    | `Uninstantiated w -> Obligation.Skipped (Obligation.Abstract_uninstantiated w)
+    | `Undecided -> Obligation.Skipped Obligation.Solver_undecided
+  in
+  Obligation.record { Obligation.span; callee; predicate; verdict; kind = Obligation.Precondition };
+  (match verdict with
+   | Obligation.Skipped r when !strict_verified ->
+     Err.error errctx ~span
+       (Printf.sprintf
+          "`cap verified` module: cannot verify element refinement `%s` on `%s` (%s: %s)\n\
+           note: pass a predicate that implies the refinement, or remove `cap verified` from this module"
+          predicate callee (Obligation.reason_name r) (Obligation.reason_detail r))
+   | _ -> ());
+  verdict = Obligation.Proved
 
 let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
@@ -898,12 +1069,31 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
          true (List.init n Fun.id)
      | _ ->
        (match a with
-        | A.EVar _ ->
-          record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots)
-            ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
-          false
+        | A.EVar { A.txt = xv; _ } ->
+          (* A name let-bound to a call with an abstract element return
+             (`let zs = List.filter(ys, fn y -> y > 0)`): re-examine that call
+             here.  [lets] retires the record when [xv] or any name the call
+             mentions is rebound, so the call still denotes [xv]'s value. *)
+          let via_let =
+            match List.assoc_opt xv lets with
+            | Some (A.EApp (A.EVar { A.txt = g; _ }, args, _)) ->
+              abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
+            | _ -> None
+          in
+          (match via_let with
+           | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
+           | None ->
+             record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots)
+               ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
+             false)
         | A.EApp (A.EVar { A.txt = g; _ }, args, _) ->
           (match
+             abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
+           with
+           | Some v ->
+             record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
+           | None ->
+          match
              demand_flow ~root errctx defs ctx path lets sc re cb ce ~span ~callee (container, slots) g args
            with
            | `Proved ->
@@ -1097,18 +1287,44 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
      | _ -> `Na)
   | _ -> `Na
 
+(* §3.5: a parameter whose element slot applies one of the callee's abstract
+   refinements (`xs : List({a | p(_)})`) obliges the caller's container to
+   satisfy the predicate [p] is instantiated to at this call.  [Some (Ok
+   entry)]: the demand, ready for [check_elements] (ordinary element
+   subtyping, as for a declared `List({Int | …})`); [Some (Error why)]: [p]
+   could not be instantiated here; [None]: not such a slot. *)
+let abstract_param_entry (ctx : rctx) (g : string) (t : A.ty) (args : A.expr list)
+  : (string * elem option list, string) result option =
+  match abstract_slot_of_ty t with
+  | Some (c, p) when List.mem p (callee_abstracts ctx g) ->
+    (match Option.bind (resolve_key ctx g) (Hashtbl.find_opt fn_defs_tbl) with
+     | None -> None
+     | Some (_, fd) ->
+       Some (Result.map (fun (y, body) -> (c, [ Some (Refined (y, body, None)) ])) (instantiate_abstract fd p args)))
+  | _ -> None
+
 (* The element obligations a call's arguments owe the callee's declared
-   parameter types. *)
+   parameter types.  An abstract slot is tried FIRST: read through
+   [elem_refinement] by a caller that declares an abstract refinement of the
+   same name, it would mean the caller's predicate, not the callee's. *)
 let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) (sg : fn_sig) (args : A.expr list) : unit =
   List.iteri
     (fun i a ->
       match List.nth_opt sg.param_tys i with
       | Some t ->
-        (match elem_refinement t with
-         | Some er ->
+        (match Option.bind t (fun t -> abstract_param_entry ctx callee t args) with
+         | Some (Ok er) ->
            ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
-         | None -> ())
+         | Some (Error why) ->
+           ignore
+             (record_abstract_verdict errctx ~span:(arg_span span a) ~callee
+                ~predicate:"p(_)" (`Uninstantiated why))
+         | None ->
+           (match elem_refinement t with
+            | Some er ->
+              ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
+            | None -> ()))
       | None -> ())
     args
 
@@ -2575,8 +2791,11 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
          fd.A.fn_name.A.txt);
   let saved_trusted = !trusted_fn in
   let saved_enclosing = !enclosing_fn in
+  let saved_abstracts = !current_abstracts in
   trusted_fn := is_trusted;
   enclosing_fn := Some fd;
+  (* `p` is uninterpreted for exactly this walk (design 2026-09-20 §2a). *)
+  current_abstracts := Refine_abstract.names ~is_known:known_predicate_fn fd;
   (* Constant-function folding is suspended for any name this function
      binds locally — see [const_shadowed].  Saved and restored like the two
      cells above rather than reset, for the same reason. *)
@@ -2591,7 +2810,8 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
       Hashtbl.reset const_shadowed;
       Hashtbl.iter (fun n () -> Hashtbl.replace const_shadowed n ()) saved_shadowed;
       trusted_fn := saved_trusted;
-      enclosing_fn := saved_enclosing)
+      enclosing_fn := saved_enclosing;
+      current_abstracts := saved_abstracts)
     (fun () ->
     with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd);
     let walked = if assume_params then fd else strip_param_refinements fd in
@@ -3606,6 +3826,15 @@ let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list
    round proves something new: a function whose tail calls another
    candidate proves once that candidate has.  A cycle proves nothing (no
    candidate may assume its own contract here). *)
+(* Does [fd] declare an element return?  Read under [fd]'s own abstract
+   refinements, so a `List({a | p(_)})` return counts — it is a slot only
+   inside its declaring definition ([abstract_tyvar_slot]). *)
+let has_elem_return (fd : A.fn_def) : bool =
+  let saved = !current_abstracts in
+  current_abstracts := Refine_abstract.names ~is_known:known_predicate_fn fd;
+  Fun.protect ~finally:(fun () -> current_abstracts := saved)
+    (fun () -> elem_refinement fd.A.fn_ret_ty <> None)
+
 let gate_elem_returns ~root defs (decls : A.decl list) : unit =
   let candidates = ref [] in
   let rec collect (ctx : rctx) decls =
@@ -3620,7 +3849,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
     in
     List.iter
       (function
-        | A.DFn (fd, _) when elem_refinement fd.A.fn_ret_ty <> None ->
+        | A.DFn (fd, _) when has_elem_return fd ->
           let key = if ctx.modpath = "" then fd.A.fn_name.A.txt else ctx.modpath ^ "." ^ fd.A.fn_name.A.txt in
           candidates := (key, ctx, fd) :: !candidates
         | A.DMod (name, _, ds, _) ->

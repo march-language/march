@@ -118,6 +118,17 @@ type reason =
      ([Refine_post.check_post_induction]), whose refutations carry no
      diagnostic of their own. *)
   | Refuted_unconfirmed
+  (* A call to a combinator with an abstract refinement (design 2026-09-20
+     §3.3): the predicate instantiated from the passed lambda does not imply
+     the demand.  Never a violation — whether a weaker predicate ever admits a
+     bad element depends on the caller's data (`filter([], …)` is fine).
+     Payload names the lambda and the demand, rendered in the detail. *)
+  | Abstract_too_weak of string
+  (* The abstract refinement could not be instantiated at this call: an
+     opaque or named callable (named functions are phase 3), a lambda
+     mentioning another name, or a callee whose own body is not proved to
+     return elements satisfying it (§3.1).  Payload says which. *)
+  | Abstract_uninstantiated of string
 
 (* [Trusted]: the obligation was [Skipped] for some ordinary reason, but the
    enclosing function carries `@[trusted]`, so under `cap verified` it is
@@ -289,6 +300,8 @@ let reason_name = function
   | Partial_conjunct _ -> "partial-conjunct"
   | Parametric_source_unproved _ -> "parametric-source-unproved"
   | Refuted_unconfirmed -> "refuted-unconfirmed"
+  | Abstract_too_weak _ -> "abstract-refinement-too-weak"
+  | Abstract_uninstantiated _ -> "abstract-refinement-uninstantiated"
 
 (* One clause of plain English per reason, for the `cap verified` error text.
    [reason_name] alone is a debug-report slug; once a reason reaches a USER it
@@ -330,6 +343,8 @@ let reason_detail = function
   | Refuted_unconfirmed ->
     "the solver refuted the predicate on some path, but no concrete input was \
      found on which the function returns a value violating it"
+  | Abstract_too_weak what -> what
+  | Abstract_uninstantiated what -> what
 
 (* Deliberately still a 3-tuple: (proved, violated, skips-by-reason).  Every
    existing caller destructures it that way, and [Trusted] does not belong in
