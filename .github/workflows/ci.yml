@@ -1067,6 +1067,7 @@ jobs:
 
   property-oracle:
     name: property-oracle (${{ matrix.shard }}/2)
+    needs: ocaml-build
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
