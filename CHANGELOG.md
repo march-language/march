@@ -286,6 +286,15 @@ git log is authoritative for exact commits.
   x) }`. Migration table: design spec section 5. **New rule for every linear
   type:** a module-level `let` of a `RingBuf`, `Handle` or `LinearMap` is
   rejected, since a module-level value can never be consumed exactly once.
+- **`fold` and `sum` over a NativeArray `map` compile to one loop.**
+  `NativeArray.fold_*(map_*(a, f), z, g)` now runs as a single fold, and
+  `sum_*(map_*(a, f))` or `sum_*(map2_*(a, b, f))` (a dot product, say) as a
+  single summing loop, with no intermediate array, when the callbacks are
+  lambdas written at the call. A fold keeps its strict left-to-right order; a
+  Float sum reassociates exactly as `sum_float` already does. Measured on a
+  4M-element array (`bench/native_array_chains.march`): Int `fold(map(..))`
+  2.9 ms to 0.48 ms, `sum(map(..))` 1.1 ms to 0.49 ms (Int) and 0.46 ms
+  (Float). `MARCH_NO_NATIVEARR_FUSION=1` turns it off.
 - **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
   install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
   source needed no changes. The REPL's `notty` dependency (0.2.3 does not

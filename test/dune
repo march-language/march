@@ -10403,7 +10403,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_capture.march)
+   ; Fusion off: this checks the MAP loop, and each map here feeds a sum,
+   ; which the sum-map peephole would otherwise fuse into one sum loop
+   ; (that loop is checked by nativearr_fold_sum_fusion).
+   (setenv MARCH_NO_NATIVEARR_FUSION 1
+    (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_capture.march))
    (with-stdout-to native_arr_map_inline_capture_llvm_check.out
     (run bash -c
      "echo \"$(grep -c nmap_pre native/native_arr_map_inline_capture.ll) $(grep -c '= call ptr @native_int_arr_map(ptr\\|= call ptr @native_float_arr_map(ptr' native/native_arr_map_inline_capture.ll)\"")))))
@@ -10546,7 +10550,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_narrow_inline.march)
+   ; Fusion off: this checks the MAP loop, and each map here feeds a sum,
+   ; which the sum-map peephole would otherwise fuse into one sum loop
+   ; (that loop is checked by nativearr_fold_sum_fusion).
+   (setenv MARCH_NO_NATIVEARR_FUSION 1
+    (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_narrow_inline.march))
    (with-stdout-to native_arr_narrow_inline_llvm_check.out
     (run bash -c
      "echo \"$(grep -c nmap_pre native/native_arr_narrow_inline.ll) $(grep -c '= call ptr @native_f32_arr_map(ptr\\|= call ptr @native_u8_arr_map(ptr\\|= call ptr @native_i32_arr_map2(ptr' native/native_arr_narrow_inline.ll) $(grep -c '^define double @.*\\$mapfast\\$' native/native_arr_narrow_inline.ll) $(grep -c 'load float' native/native_arr_narrow_inline.ll)\"")))))
@@ -10891,6 +10899,52 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "read -r allocs tip < static_nullary_ctor_llvm_check.out; \
     test \"$allocs\" -eq 1 -a \"$tip\" -eq 1 || { echo \"expected make to call march_alloc once (the Fork) and one static Tip cell (found allocs=$allocs tip=$tip)\" >&2; exit 1; }")))
+;  NativeArray fold(map) and sum(map) fusion (phase C of
+; specs/plans/2026-09-28-nativearray-fusion-plan.md): Fusion.run_nativearr
+; composes fold(map(..)) into one fold, Native_map_inline's sum-map peephole
+; fuses sum(map(..)) / sum(map2(..)) into one loop. Correctness: every line
+; matches the interpreter, negatives included. Shape (whole module): 15 sum-map
+; loops, 12 inline fold loops, 5 inline map loops and 1 inline map2 loop (the
+; negative cases), 2 runtime sums (the two intermediates read twice), and the
+; Float sum-map loops reassociate. With MARCH_NO_NATIVEARR_FUSION=1 the same
+; program has 0 / 12 / 28 / 4 and 17 runtime sums.
+(rule
+ (targets nativearr_fold_sum_fusion nativearr_fold_sum_fusion.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_fold_sum_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nativearr_fold_sum_fusion
+        native/nativearr_fold_sum_fusion.march)
+   (with-stdout-to nativearr_fold_sum_fusion.out
+        (system "./nativearr_fold_sum_fusion")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nativearr_fold_sum_fusion.expected nativearr_fold_sum_fusion.out)))
+
+(rule
+ (targets nativearr_fold_sum_fusion_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_fold_sum_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/nativearr_fold_sum_fusion.march)
+   (with-stdout-to nativearr_fold_sum_fusion_llvm_check.out
+    (run bash -c
+     "f=native/nativearr_fold_sum_fusion.ll; echo \"$(grep -c '^nsum_pre[0-9]*:' $f) $(grep -c '^nfold_pre[0-9]*:' $f) $(grep -c '^nmap_pre[0-9]*:' $f) $(grep -c '^nmap2_pre[0-9]*:' $f) $(grep -cE 'call [a-z0-9]+ @native_[a-z0-9]*_arr_sum\\(' $f) $(grep -c 'fadd reassoc' $f)\"")))))
+
+(rule
+ (alias runtest)
+ (deps nativearr_fold_sum_fusion_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nsum nfold nmap nmap2 rtsum reassoc < nativearr_fold_sum_fusion_llvm_check.out; \
+    test \"$nsum\" -eq 15 -a \"$nfold\" -eq 12 -a \"$nmap\" -eq 5 -a \"$nmap2\" -eq 1 -a \"$rtsum\" -eq 2 -a \"$reassoc\" -ge 1 || { echo \"expected 15 sum-map loops, 12 fold loops, 5 map loops, 1 map2 loop, 2 runtime sums, reassociating Float sums (found nsum=$nsum nfold=$nfold nmap=$nmap nmap2=$nmap2 rtsum=$rtsum reassoc=$reassoc)\" >&2; exit 1; }")))
 
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
