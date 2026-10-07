@@ -256,6 +256,39 @@ let module_ctor_type (module_prefix : string) (ctor_name : string)
 let type_declares_ctor (type_name : string) (ctor_name : string) : bool =
   Hashtbl.mem type_ctor_tbl (type_name, ctor_name)
 
+(** The module-qualified ctor key ("OrderedMap.Tree.Node") for [ctor_name] of
+    type [type_name] when it is constructed or matched BARE inside module
+    [env.mod_prefix], that module declares the type itself, AND a BARE-named
+    type of the same short name also exists (the entry module's own types, and
+    the builtin Option/Result/List, are registered unqualified).  [None]
+    otherwise: the bare "Type.Ctor" key is kept.
+
+    The static [Tir.ty] stays the bare [TCon "Tree"] for both declarations
+    ([Collision_set]'s "TCon stays bare" invariant), so the bare key
+    "Tree.Node" a stdlib module builds for its OWN type is an EXACT
+    [ctor_info] hit on the entry module's same-named type: a user
+    `type Tree = Leaf | Node(Tree, Int, Tree)` hijacked every construction and
+    match of stdlib OrderedMap.Tree (wrong tag, wrong field count: an ICE
+    "constructor Tree.Node has 3 field(s) but field index 3 was requested").
+    Without a bare-named twin the bare key has no exact hit and
+    [Llvm_data.ctor_entry]'s suffix resolver finds the module's own
+    qualified entry; that path (and the cross-module [ptype] hand-offs that
+    rely on it, see [shared_ctor_collision_tbl]) is left alone. *)
+let own_module_ctor_key ?prefix (env : env) (type_name : string)
+    (ctor_name : string) : string option =
+  (* [prefix]: a written module qualifier ("OrderedMap." of
+     `OrderedMap.Node(..)`), in place of the lexical [env.mod_prefix]. *)
+  let prefix = Option.value prefix ~default:env.mod_prefix in
+  if prefix = "" || String.contains type_name '.' then None
+  else
+    let own = prefix ^ type_name in
+    match Hashtbl.find_opt env.collision_set type_name with
+    | Some names
+      when List.mem type_name names && List.mem own names
+           && module_ctor_type prefix ctor_name = Some type_name ->
+      Some (own ^ "." ^ ctor_name)
+    | _ -> None
+
 (** Resolve constructor identity for the runtime-reserved local-monitor type
     short names without letting a module-qualified user declaration collapse
     onto canonical [Down.*]/[DownReason.*] metadata.

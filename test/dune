@@ -12459,6 +12459,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/local_colliding_type.expected native_local_colliding_type.out)))
 
+; ── A user `type Tree` beside stdlib OrderedMap.Tree(k, v) (2026-10-07):
+; OrderedMap's own bare "Tree.Node" keys hit the user's type (ICE at LLVM emit),
+; and the drop of a Tree(k, v) resolved to the user's type alone (SIGSEGV).
+; The .expected file IS the interpreter's output, including both "no growth".
+(rule
+ (targets native_user_type_named_like_stdlib_tree native_user_type_named_like_stdlib_tree.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/user_type_named_like_stdlib_tree.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_user_type_named_like_stdlib_tree
+        native/user_type_named_like_stdlib_tree.march)
+   (with-stdout-to native_user_type_named_like_stdlib_tree.out
+        (system "./native_user_type_named_like_stdlib_tree")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_type_named_like_stdlib_tree.expected native_user_type_named_like_stdlib_tree.out)))
+
 ; ── A cluster session's party is released when it ends (2026-10-06): live
 ; objects left per session under 120 (RED before: ~156, the party's Ops
 ; closures, the Party and its table handles).

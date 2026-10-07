@@ -348,6 +348,12 @@ git log is authoritative for exact commits.
   exited. On macOS the driver now checks that the C compiler's sanitizer runtime
   starts, falls back to a working Homebrew LLVM (`brew install llvm`, 22+) with a
   note, or stops with an explanation. `MARCH_SANITIZE_CC` picks the compiler.
+- **A type named like a stdlib type no longer breaks that stdlib module when compiled.**
+  Declaring your own `type Tree = Leaf | Node(Tree, Int, Tree)` in a program that also
+  uses `OrderedMap` crashed the compiler ("constructor Tree.Node has 3 field(s) but
+  field index 3 was requested"): `OrderedMap`'s own constructors, matches and memory
+  release for its internal `Tree` resolved to your type. Each type now keeps its own;
+  the interpreter was never affected.
 - **A missing `end` is reported at the construct that is missing it.** Instead of
   "Parse error in declaration" at the end of the file or the next `fn`, the error
   points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the
