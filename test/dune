@@ -12345,6 +12345,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/session_party_released.expected native_session_party_released.out)))
 
+; ── An aggregate returned on one path is released on the paths that only read
+; it (2026-10-07). RED before: 201 objects left over 100 calls of each shape.
+(rule
+ (targets native_mixed_tail_aggregate_drop native_mixed_tail_aggregate_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/mixed_tail_aggregate_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_mixed_tail_aggregate_drop
+        native/mixed_tail_aggregate_drop.march)
+   (with-stdout-to native_mixed_tail_aggregate_drop.out
+        (system "./native_mixed_tail_aggregate_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mixed_tail_aggregate_drop.expected native_mixed_tail_aggregate_drop.out)))
+
 ; ── A dead actor's record and state are released (2026-10-06): under 5
 ; objects left over 50 actors (RED before: the killed actor's List state, and
 ; the record itself once Actor.call had been used on it).
