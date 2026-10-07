@@ -17599,7 +17599,25 @@ end|}
         in
         Alcotest.(check bool) "an obligation exists" true (vs <> []);
         Alcotest.(check bool) "not proved" false (List.mem "proved" vs);
-        Alcotest.(check bool) "not violated" false (List.mem "violated" vs)) ]
+        Alcotest.(check bool) "not violated" false (List.mem "violated" vs));
+
+    Alcotest.test_case "definer_index and positive_base find filt's parts" `Quick (fun () ->
+        let m = parse ("mod DI do\n" ^ ar2_filt ^ "end\n") in
+        let fd =
+          List.find_map
+            (function
+              | March_ast.Ast.DFn (fd, _) when fd.March_ast.Ast.fn_name.March_ast.Ast.txt = "filt" -> Some fd
+              | _ -> None)
+            m.March_ast.Ast.mod_decls
+          |> Option.get
+        in
+        let is_known _ = false in
+        Alcotest.(check (option int)) "index" (Some 1)
+          (March_refinecheck.Refine_abstract.definer_index ~is_known fd "p");
+        Alcotest.(check (option string)) "base" (Some "a")
+          (March_refinecheck.Refine_abstract.positive_base ~is_known fd "p");
+        Alcotest.(check (option int)) "not abstract" None
+          (March_refinecheck.Refine_abstract.definer_index ~is_known fd "q")) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
