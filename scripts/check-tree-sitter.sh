@@ -16,7 +16,10 @@
 #   3. queries    every .scm under tree-sitter-march/queries/ and
 #                 zed-march/languages/march/ must compile against the grammar;
 #   4. ratchet    every .march under stdlib/ test/ examples/ bench/ specs/lang/
-#                 (except specs/lang/grammar/reject/) must parse with no ERROR or
+#                 (except specs/lang/grammar/reject/ and test/errors/, whose
+#                 programs are broken on purpose; every test/errors twin of a
+#                 valid-syntax program is scanned at its specs/lang source)
+#                 must parse with no ERROR or
 #                 MISSING node, unless listed in tree-sitter-march/known-failures.txt;
 #                 a listed file that now parses, or no longer exists, is also red,
 #                 so the list only shrinks;
@@ -59,7 +62,7 @@ build() {
 
 corpus_files() {
   (cd "$ROOT" && find stdlib test examples bench specs/lang -name '*.march' \
-      -not -path 'specs/lang/grammar/reject/*' | LC_ALL=C sort)
+      -not -path 'specs/lang/grammar/reject/*' -not -path 'test/errors/*' | LC_ALL=C sort)
 }
 
 # failing <lib>: accepted-by-tree-sitter test — prints files with ERROR/MISSING.
