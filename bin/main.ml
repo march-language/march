@@ -1115,10 +1115,32 @@ let maybe_inline_rc target ir =
   then ir
   else March_tir.Llvm_rc_inline.rewrite ir
 
+(** --rc-trace (or MARCH_RC_TRACE=1): site ids before every refcount /
+    alloc / free call plus the site table (lib/tir/llvm_rc_trace.ml). Native
+    targets only: the wasm/js runtimes have no trace. THE one reading of the
+    switch; the CAS tag ([codegen_cas_tags]) derives from it too. *)
+let rc_trace_enabled () =
+  !rc_trace || Sys.getenv_opt "MARCH_RC_TRACE" = Some "1"
+
+(** Every post-emission text rewrite, in order: site ids first (they tag the
+    runtime calls by name), then the inline refcount twins (which rename
+    those calls). *)
+let finish_ir target ir =
+  let ir =
+    if rc_trace_enabled ()
+    && not (March_tir.Llvm_emit.is_wasm_target target)
+    && target <> March_tir.Llvm_emit.Js
+    then March_tir.Llvm_rc_trace.rewrite ir else ir in
+  maybe_inline_rc target ir
+
+(* -DMARCH_RC_CHECKS turns on the runtime's checked extras (a march_free of a
+   shared object aborts; the TRMC hole fill is verified, see
+   Llvm_toplevel.rc_checks); it rides on the sanitize flag so the runtime
+   objects and the IR that calls into them are built from one predicate. *)
 let sanitize_clang_flag () =
   match sanitize_mode () with
-  | Some "thread" -> " -fsanitize=thread -g"
-  | Some _ -> " -fsanitize=address,undefined"
+  | Some "thread" -> " -fsanitize=thread -g -DMARCH_RC_CHECKS"
+  | Some _ -> " -fsanitize=address,undefined -DMARCH_RC_CHECKS"
   | None -> ""
 
 (* CAS cache-key fragments for the remaining toggles that alter the emitted
@@ -1165,6 +1187,10 @@ let codegen_cas_tags () =
      silently does not own the main thread. *)
   @ (if !March_tir.Llvm_toplevel.pin_main then ["pin-main"] else [])
   @ (if !debug_mode || !debug_tui_mode then ["dbg"] else [])
+  (* --debug-info changes the emitted IR (DISubprogram/!dbg per function)
+     and the clang link (-g); a non-debug cached artifact must never satisfy
+     a --debug-info build. *)
+  @ (if !debug_info then ["dbginfo"] else [])
   (* --test changes the emitted program: [lower_module ~test_mode] builds a
      test-runner entry point instead of the ordinary one, and the
      capability-passing elaboration runs only in a test build.  Without this
@@ -1182,6 +1208,10 @@ let codegen_cas_tags () =
   (* MARCH_NO_INLINE_RC=1 turns off the inline refcount fast path, which changes
      the emitted code without changing the compiler binary. *)
   @ (if Lazy.force March_tir.Llvm_rc_inline.env_disabled then ["noinlinerc"] else [])
+  (* --rc-trace / MARCH_RC_TRACE=1 adds a site-id store before every refcount
+     call and a site table; a release artifact must never satisfy it (the
+     report would then show every event at site -1) nor the reverse. *)
+  @ (if rc_trace_enabled () then ["rctrace"] else [])
   (* MARCH_NO_HOF_SPEC=1 turns off Hof_spec, which changes the emitted code
      without changing the compiler binary: without this tag an A/B run reuses
      whichever variant was cached first. *)
@@ -2587,6 +2617,14 @@ let compile filename =
       if is_user_file d then
         Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
     ) diags;
+  (* --shell: the program typechecked as the node's build did; hand it to the
+     remote shell instead of running or compiling it (bin/shell_cmd.ml). *)
+  (match !shell_socket with
+   | Some socket ->
+     if frontend_rejected then exit 1;
+     Shell_cmd.run ~socket ~program:desugared ~type_map ~tc_env:typecheck_env
+       ~timeout_ms:!shell_timeout_ms ~inputs:!shell_inputs
+   | None -> ());
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
   (* --jit: replace the tree-walking interpreter with the in-process ORC JIT
      for this run.  Every diagnostic above has already been produced and
@@ -3253,6 +3291,7 @@ let compile filename =
     (* Write all collected phases to march-phases/phases.json *)
     (if !dump_phases then
        March_dump.Dump.write_phases ~source_file:filename (List.rev !phases));
+    if !dump_provenance then March_tir.Provenance.dump stdout;
     if !dump_tir then begin
       List.iter (fun td ->
           Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
@@ -3479,9 +3518,10 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
+          March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None;
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
-          let ir = maybe_inline_rc target ir in
+          let ir = finish_ir target ir in
           stamp "llvm-emit";
           (* clang reads the per-process temp, never the shared [ll_file]
              another concurrent compile of this source may be rewriting; see
@@ -3533,7 +3573,7 @@ let compile filename =
                 in
                 (wasm_clang, " -nostdlib -Wl,--no-entry -Wl,--export-dynamic")
             in
-            let wasm_dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
+            let wasm_dbg_flag = if !debug_mode || !debug_tui_mode || !debug_info then " -g" else "" in
             let cmd = Printf.sprintf
               "%s --target=%s%s%s%s -DMARCH_WASM -Wno-unused-command-line-argument %s %s -o %s"
               clang triple sysroot_flag opt_flag wasm_dbg_flag wasm_runtime ll_tmp out_bin in
@@ -3636,6 +3676,7 @@ let compile filename =
               ^ (opt_file2 ffi_c2)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_shell.c")     else "")  (* shell listener: signed EVAL of fragments *)
               ^ (if not !compile_so then
                    opt_file2 blake3_c2 ^ opt_file2 blake3_impl_c2
                    ^ opt_file2 blake3_dispatch_c2 ^ opt_file2 blake3_portable_c2
@@ -3717,7 +3758,7 @@ let compile filename =
             (* musl needs an explicit -lucontext for the scheduler's green
                threads; glibc has them in libc. See ucontext_link_flags. *)
             let ucontext_flag = ucontext_link_flags () in
-            let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
+            let dbg_flag = if !debug_mode || !debug_tui_mode || !debug_info then " -g" else "" in
             let san_flag = sanitize_clang_flag () in
             (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
             let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
@@ -4549,9 +4590,10 @@ let compile filename =
         (match hr_config () with
          | None -> ()
          | Some cfg -> hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes);
+        March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None;
         let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
-          let ir = maybe_inline_rc target ir in
+          let ir = finish_ir target ir in
         (* Same temp-then-rename as --compile, so a concurrent reader never
            sees a half-written file. *)
         write_ll_tmp ir;
@@ -5072,6 +5114,10 @@ let analyze_gc_trace path =
         incr n_free;
         if Hashtbl.mem freed addr then incr n_double
         else begin Hashtbl.remove live addr; Hashtbl.replace freed addr true end
+      | "immortal" ->
+        (* A string literal's shared cell (march_string_lit_static): lives for
+           the program by design, never a leak. *)
+        Hashtbl.remove live addr
       | "inc_ref" ->
         incr n_inc;
         (match Hashtbl.find_opt live addr with
@@ -5320,6 +5366,16 @@ let () =
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
+    ("--debug-info", Arg.Set debug_info,
+     " Emit function-level DWARF (DISubprogram per March fn, !march.provenance) and link with -g");
+    ("--dump-provenance", Arg.Set dump_provenance,
+     " Print the fn-name -> origin provenance table after the TIR pipeline (with --emit-llvm/--compile/--dump-tir)");
+    ("--shell",      Arg.String (fun p -> shell_socket := Some p),
+     "<socket> A remote shell on the node serving <socket> (its `<reload socket>.shell`): typecheck the program once, then compile each input into a signed fragment the node runs");
+    ("--shell-timeout-ms", Arg.Int (fun n -> shell_timeout_ms := n),
+     "<ms> With --shell: how long each input may run on the node (default 10000, max 30000)");
+    ("--shell-inputs", Arg.String (fun f -> shell_inputs := Some (In_channel.with_open_bin f In_channel.input_all)),
+     "<file> With --shell: read the inputs from <file>, one per line, instead of the terminal");
     ("--dump-impl-hashes", Arg.Set dump_impl_hashes,
      " With --emit-llvm/--compile: write <file>.hashes (symbol, impl_hash, sig_hash per post-TIR def, sorted)");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
@@ -5394,6 +5450,7 @@ let () =
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
     ("--no-opt",    Arg.Clear opt_enabled,  " Skip TIR optimization passes");
     ("--fast-math",  Arg.Set fast_math,  " Emit 'fast' on all FP LLVM instructions");
+    ("--rc-trace",   Arg.Set rc_trace,   " Name the call site of every refcount/alloc/free in MARCH_TRACE_GC=1 traces (scripts/gc-trace-report.py); same as MARCH_RC_TRACE=1");
     ("--pin-main",
      Arg.Unit (fun () -> March_tir.Llvm_toplevel.pin_main := true),
      " pin `main` to the process main thread (Cocoa/GLFW need it); bakes in\n\
@@ -5420,6 +5477,7 @@ let () =
      specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md.
      A leftover MARCH_TRMC=1 in the environment is simply ignored. *)
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
+  March_tir.Llvm_toplevel.debug_info := !debug_info;
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;
   (* --dump-role-authority is a report the typechecker prints; nothing runs. *)

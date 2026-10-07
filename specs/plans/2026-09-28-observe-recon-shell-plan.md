@@ -666,7 +666,7 @@ a few seconds and says so.
    always do. The check is one load on the print path, not on any hot path;
    no A/B needed beyond the print microbench.
 6. **Pre-bound caps**: `__eval` takes the policy's caps under fixed names
-   (`console`, `clock`, `intro` = `Actor.Introspect`, `dbg` = `Actor.Debug`,
+   (`console`, `clock`, `intro` = `Actor.Introspect`, `debug` = `Actor.Debug`,
    and one name per further leaf, listed in `forge shell --help`). The warm
    session declares them in the input's scope, so `Actor.list(intro)` simply
    typechecks. An input that uses a name the policy did not grant is refused
@@ -700,7 +700,7 @@ a few seconds and says so.
     as `limit:`. Default 50; `:limit N` changes the session default. The
     rendering is R5.7's.
 11. **Confirmation**: an input asks `y/N` if its caps go beyond the read set
-    (`console`, `clock`, `intro`, `dbg`) or it calls `send`, `kill`,
+    (`console`, `clock`, `intro`, `debug`) or it calls `send`, `kill`,
     `Actor.stop`, `Recon.replace_state` / `suspend` / `resume` directly or in
     a lambda it defines (the session reports these from the input's own
     TIR). App functions are not looked inside; the policy is the boundary,

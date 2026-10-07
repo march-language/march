@@ -1,0 +1,4 @@
+pushed to, called and killed released: true
+called twice and killed released: true
+stopped, on_stop ran released: true
+stopped with a panicking on_stop, still running: true

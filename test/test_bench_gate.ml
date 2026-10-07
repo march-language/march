@@ -163,6 +163,7 @@ let gated : (string * string * compare_mode) list = [
   "hash_map_bench",      "", IgnoreTiming;
   "rrb_bench",           "", IgnoreTiming;
   "json_stream",         "", IgnoreTiming;
+  "ring_buf",            "", IgnoreTiming;
   "json_stream_strings", "", IgnoreTiming;
   "scratch_string_memmem", "", IgnoreTiming;
   "simd_f32",            "", IgnoreTiming;
@@ -231,6 +232,7 @@ let timing_value_anchors : (string * string list) list = [
   "array_numeric",   ["result: 49500."; "checksum: 99000."; "result: 4999950000"];
   "dataframe_bench", ["Result rows: 490"; "Groups: 5"; "cat_4 | 200 | 51.5"];
   "json_stream",     ["checksum=280000"];
+  "ring_buf",        ["checksum 50015349651157"];
   "json_stream_strings", ["stream_events=8000"; "parse_len=2000000"];
   "scratch_string_memmem", ["ABSENT_RESULT 0"; "LATE_RESULT 633600000"];
   "simd_f32",        ["SUM_RESULT 5000000."; "MAP_RESULT 15000000.";

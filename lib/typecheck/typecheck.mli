@@ -260,6 +260,7 @@ type env = {
   deferred_check4 : (string * string list * string * Ast.span) list ref;
   local_fns : unit StrMap.t;
   fn_arities : (int * Ast.span) StrMap.t;
+  qual_fn_arities : (int * Ast.span) StrMap.t;
   qual_fn_names : unit StrMap.t;
   plain_let_names : StringSet.t;
   proof_caps : (string * string) list;

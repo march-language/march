@@ -1,0 +1,25 @@
+-- EXPECT-ERROR: is generic in a parameter of that type
+-- H8: a task could create and return a RingBuf, and Task.await twice on
+-- one Task aliased the buffer. Under Part C the program is rejected one step
+-- earlier than the plan assumed: `task_spawn` is generic in its closure's
+-- result and does not opt in, so `Task.async(fn () -> RingBuf.make(4))` is
+-- the error and a Task(RingBuf) is never created (the opaque Task type is
+-- deliberately outside the "container holding a linear value" rule, and
+-- does not need to be inside it). Type-checked before C2 (Phase 0).
+mod Main do
+  needs IO.Spawn
+  fn main(_s : Cap(IO.Spawn)) : Int do
+    let t = Task.async(fn () -> RingBuf.make(4))
+    let a = match Task.await(t) do
+      Ok(rb) -> rb
+      Err(_) -> RingBuf.make(1)
+    end
+    let b = match Task.await(t) do
+      Ok(rb) -> rb
+      Err(_) -> RingBuf.make(1)
+    end
+    RingBuf.drop(RingBuf.push(a, 1))
+    RingBuf.drop(b)
+    0
+  end
+end

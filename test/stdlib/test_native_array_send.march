@@ -1,0 +1,58 @@
+mod TestNativeArraySend do
+
+  -- Native arrays are copy-on-write values, so they may be sent, captured
+  -- by a task and shared with parallel code (Part C, Phase C1,
+  -- specs/plans/2026-09-25-send-data-race-freedom-plan.md). The compiled
+  -- twins are test/native/native_arr_send_cow.march,
+  -- native_arr_pmap_capture.march and native_arr_task_set_race.march.
+
+  -- The call handler is declared first so it sits at tag 0, where the
+  -- zero-arg sentinel `TotalReq` routes (see "Actor.call" in actors.md).
+  type TotalReq = TotalReq
+  actor Summer do
+    state { total : Int }
+    init  { total: 0 }
+    on GetTotal(reply_to) do
+      Actor.reply(reply_to, state.total)
+      state
+    end
+    on AddArr(xs : NativeIntArr) do
+      let ys = NativeArray.set_int(xs, 0, 100)
+      { total: state.total + NativeArray.sum_int(ys) }
+    end
+  end
+
+  describe "a native array in a message is a value" do
+
+    test "sender and actor each see only their own write" do
+      let xs = NativeArray.from_list_int([1, 2, 3])
+      let s = spawn(Summer)
+      send(s, AddArr(xs))
+      let zs = NativeArray.set_int(xs, 0, 7)
+      run_until_idle()
+      assert (NativeArray.sum_int(zs) == 12)
+      assert (NativeArray.sum_int(xs) == 6)
+      match Actor.call(s, TotalReq, 1000) do
+        Ok(t) -> assert (t == 105)
+        Err(_) -> assert false
+      end
+    end
+
+    test "a task captures a native array and keeps its own result" do
+      let arr = NativeArray.make_int(4, 0)
+      let t1 = Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, 5), 0))
+      let t2 = Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, 9), 0))
+      assert (Task.await(t1) == Ok(5))
+      assert (Task.await(t2) == Ok(9))
+      assert (NativeArray.get_int(arr, 0) == 0)
+    end
+
+    test "parallel code may read a captured native array" do
+      let arr = NativeArray.from_list_int([10, 20, 30, 40])
+      let r = Parallel.pmap(RRB.range(0, 4), fn i -> NativeArray.get_int(arr, i) * 2)
+      assert (RRB.to_list(r) == [20, 40, 60, 80])
+    end
+
+  end
+
+end

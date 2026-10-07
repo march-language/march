@@ -170,8 +170,11 @@ let try_unboxed_variant (apply_fns : (string, Tir.fn_def) Hashtbl.t)
     match Hashtbl.find_opt apply_fns apply_var.Tir.v_name with
     | Some fn when is_all_float_signature fn ->
       let unboxed_name = unboxed_name_of fn.Tir.fn_name in
-      if not (List.exists (fun f -> f.Tir.fn_name = unboxed_name) !extra_fns) then
-        extra_fns := { fn with Tir.fn_name = unboxed_name } :: !extra_fns;
+      if not (List.exists (fun f -> f.Tir.fn_name = unboxed_name) !extra_fns) then begin
+        Provenance.record unboxed_name ~from:fn.Tir.fn_name
+          ~derived:(Provenance.Clone_of (fn.Tir.fn_name, "unboxed")) ~pass:"native_map_inline" ();
+        extra_fns := { fn with Tir.fn_name = unboxed_name } :: !extra_fns
+      end;
       Some { Tir.v_name = unboxed_name; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr }
     | _ -> None
 
@@ -478,18 +481,41 @@ let apply_fn_table (m : Tir.tir_module) : (string, Tir.fn_def) Hashtbl.t =
    not itself mention [name]: an RC op on the closure var being tracked
    (rather than some other var) would mean our "used exactly once" analysis
    can't just skip over it, so bail out of peeling in that case instead of
-   risking a miscount. Every wrapper we peel is returned (in original
-   order) so the caller can re-wrap the rewritten body in the same
-   `ESeq`s — dropping or reordering one would be an RC correctness bug
-   (UAF / premature free), not just a missed optimization. *)
-let rec strip_alias_chain (name : string) (e : Tir.expr) : string * Tir.expr list * Tir.expr =
+   risking a miscount. Every wrapper seen past stays exactly where it was
+   — dropping or reordering one would be an RC correctness bug (UAF /
+   premature free), not just a missed optimization.
+
+   [remove_alias_chain] returns the final alias name and [e] with every
+   alias let of the chain removed in place, everything else kept as is.
+   The chain can also sit INSIDE a let's right-hand side, which is what
+   Perceus emits since the map builtins BORROW their array (2026-10-06,
+   specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md):
+   the array's drop follows the call, so the call lands in the RHS of a let
+   whose body holds that drop,
+
+     let $clo = alloc .. in
+     let r = (let f = $clo in native_*_arr_map(arr, f)) in
+     dec_rc arr;
+     r
+
+   A let is entered on the side that mentions [name], and only when the
+   other side does not mention it. *)
+let rec remove_alias_chain (name : string) (e : Tir.expr) : string * Tir.expr =
   match e with
   | Tir.ELet (v2, Tir.EAtom (Tir.AVar v3), cont) when v3.Tir.v_name = name ->
-    strip_alias_chain v2.Tir.v_name cont
+    remove_alias_chain v2.Tir.v_name cont
   | Tir.ESeq (other, cont) when count_uses name other = 0 ->
-    let (final_name, wrappers, final_e) = strip_alias_chain name cont in
-    (final_name, other :: wrappers, final_e)
-  | _ -> (name, [], e)
+    let (final_name, cont') = remove_alias_chain name cont in
+    (final_name, Tir.ESeq (other, cont'))
+  | Tir.ELet (r, rhs, body)
+    when r.Tir.v_name <> name && count_uses name body = 0 && count_uses name rhs > 0 ->
+    let (final_name, rhs') = remove_alias_chain name rhs in
+    (final_name, Tir.ELet (r, rhs', body))
+  | Tir.ELet (r, rhs, body)
+    when r.Tir.v_name <> name && count_uses name rhs = 0 && count_uses name body > 0 ->
+    let (final_name, body') = remove_alias_chain name body in
+    (final_name, Tir.ELet (r, rhs, body'))
+  | _ -> (name, e)
 
 let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
     (extra_fns : Tir.fn_def list ref) (e : Tir.expr) : Tir.expr =
@@ -506,7 +532,7 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
        compile, where nothing prunes it, take minutes instead of seconds
        (PR #635's CI compiler shard timed out at 45 min). *)
     let rest' = rewrite_expr rest in
-    let (effective_name, wrappers, inner') = strip_alias_chain v.Tir.v_name rest' in
+    let (effective_name, inner') = remove_alias_chain v.Tir.v_name rest' in
     let eligible =
       Hashtbl.mem apply_fns apply_var.Tir.v_name
       && count_uses effective_name inner' = 1
@@ -528,23 +554,20 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
       (match find_target_call effective_name inner' with
        | Some target_name ->
          let (unboxed, call_var) = unboxed_pair target_name in
-         let substituted = subst_call ~unboxed target_name effective_name call_var inner' in
-         (* [wrappers] came off the already-rewritten [rest']: re-wrap as is. *)
-         List.fold_right (fun w acc -> Tir.ESeq (w, acc)) wrappers substituted
+         (* [inner'] still holds every non-alias item of [rest'] in place. *)
+         subst_call ~unboxed target_name effective_name call_var inner'
        | None ->
          match find_target_call2 effective_name inner' with
          | Some target_name ->
            let (unboxed, call_var) = unboxed_pair target_name in
-           let substituted = subst_call2 ~unboxed target_name effective_name call_var inner' in
-           List.fold_right (fun w acc -> Tir.ESeq (w, acc)) wrappers substituted
+           subst_call2 ~unboxed target_name effective_name call_var inner'
          | None ->
            match find_target_call_fold effective_name inner' with
            | Some target_name ->
              (match fold_callback_kind apply_fns extra_fns target_name apply_var with
               | Some (unboxed, call_var) ->
                 (* Same arg shape as map2: [acc; arr; clo] -> [acc; arr; apply]. *)
-                let substituted = subst_call2 ~unboxed target_name effective_name call_var inner' in
-                List.fold_right (fun w acc -> Tir.ESeq (w, acc)) wrappers substituted
+                subst_call2 ~unboxed target_name effective_name call_var inner'
               | None -> Tir.ELet (v, alloc_e, rest'))
            | None -> Tir.ELet (v, alloc_e, rest'))
   (* P10 Phase 2c — a CAPTURING closure (one or more free vars, so the
@@ -560,7 +583,7 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
      same fallback as ever. *)
   | Tir.ELet (v, (Tir.EAlloc (Tir.TCon (_clo_name, []), Tir.AVar apply_var :: (_ :: _)) as alloc_e), rest) ->
     let rest' = rewrite_expr rest in
-    let (effective_name, _wrappers, inner) = strip_alias_chain v.Tir.v_name rest' in
+    let (effective_name, inner) = remove_alias_chain v.Tir.v_name rest' in
     (* Count on [inner] (the tree with the alias-copy let(s) already peeled
        off), NOT on [rest'] directly: count_uses's ELet case treats a
        rebinding of the tracked name as "stop counting — this is a distinct
@@ -568,7 +591,7 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
        in question is [effective_name]'s OWN alias-let sitting at the head
        of [rest'] — that would zero out the real use further down before
        ever reaching it. [inner] has already had that alias-let stripped
-       (by the same [strip_alias_chain] call above), so no such node
+       (by the same [remove_alias_chain] call above), so no such node
        remains to trip the guard. *)
     let eligible =
       Hashtbl.mem apply_fns apply_var.Tir.v_name

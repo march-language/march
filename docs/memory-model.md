@@ -387,10 +387,55 @@ the disjointness proof.
 
 This is exactly the property the `parallel` benchmark relies on: sibling subtrees
 have independent RC chains, so in-place reuse stays correct on both sides with no
-locking. The same idea scales to actor message passing; see the
+locking.
+
+One ordering detail makes the "RC == 1, so write in place" step sound when the
+other reference *was* held by another thread a moment ago. Dropping a reference
+is an acquire-release decrement (`march_decrc`), which releases that thread's
+last reads of the object. The sole-ownership test on the writer's side is an
+**acquire** load (`march_rc_is_unique` in the C runtime, `load atomic …
+acquire` in emitted code), so the in-place write that follows is ordered after
+those reads. With a relaxed load the pair would be a data race under the C11
+model, invisible on x86 and covered by a control dependency on arm64 in
+practice, but a race all the same; it is the same reason Rust's `Arc::get_mut`
+uses `Acquire`. The cost is nothing on x86-64 (an acquire load is a plain
+`mov`) and one `ldar` instead of `ldr` on arm64. Native arrays, which are
+copy-on-write values that may be sent and captured by tasks, lean on this
+directly; FBIP reuse of any value has the same shape. The same idea scales to actor message passing; see the
 [parallelism](/docs/parallel-collections/) guide, and
 [linear types]({{ site.baseurl }}/docs/linear-types/) for the ownership-transfer
 ("zero-copy send") case where a `linear` value is *guaranteed* RC == 1.
+
+---
+
+## Mutable builtins: the rule
+
+Everything above assumes that a value with two live references is never
+written through one of them. Three facts keep that true: ordinary data is
+immutable, actors share nothing, and in-place updates happen only when a value
+has one owner (RC == 1, read with an acquire load). A builtin type whose
+operations write memory has to fit one of two shapes, or it breaks all three:
+
+> A builtin type whose operations write memory another March reference could
+> observe must be either **`always_linear`** (every operation consumes the
+> value and hands it back; `RingBuf`), or **copy-on-write gated on sole
+> ownership** (`march_rc_is_unique`; the `NativeArray` backing types). A type
+> that is neither must be listed in `non_sendable_types`
+> (`lib/typecheck/typecheck_exhaustive.ml`), and adding the first such type
+> requires Parts A and B of
+> `specs/plans/2026-09-25-send-data-race-freedom-plan.md` first: a general
+> `Send` check that follows the type through user types, record fields and
+> closure captures.
+
+The list is empty, and a unit test (`test/test_typecheck_send.ml`) fails the
+build if a name is added while that check is absent, so the rule is enforced
+by the build, not by memory. The structural judgement the check would need,
+`is_send`, already exists beside the list with no roots to find: the first
+entry ever added is followed through ADTs, records and type arguments from
+day one. Until 2026-10-06 the list held `RingBuf` (then shared mutable state;
+now linear) and the five native array types (always copy-on-write; listed by
+analogy); eight ways around the list are the typing corpus's
+`reject/t300`–`t307`.
 
 ---
 

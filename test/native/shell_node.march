@@ -1,0 +1,29 @@
+-- The node for test/shell_check.ml: a --hot-reload --signing-pubkey build
+-- whose shell listener (runtime/march_shell.c) runs signed fragments.
+-- Prints "ready" and sleeps; the checker kills it.
+mod Main do
+  needs IO.Console
+  needs IO.Clock
+  import List
+
+  -- Reached from the shell as `Main.evens(..)` and `evens(..)`: a
+  -- self-qualified name, and a body whose bare `filter` is an import.
+  fn evens(n : Int) : List(Int) do
+    filter(range(0, n), fn x -> x % 2 == 0)
+  end
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+    let c = spawn(Counter)
+    send(c, Bump(1))
+    println("ready")
+    sleep_ms(120000)
+  end
+end

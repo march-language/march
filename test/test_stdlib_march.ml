@@ -192,6 +192,11 @@ let all_stdlib_decls =
     "cluster.march";
     "rrb_vec.march";
     "parallel.march";
+    (* NativeArray: a function namespace over the opaque Native*Arr builtins,
+       no constructors, so it cannot steal a bare-name lookup. Loaded for
+       test_native_array_send.march (Part C, Phase C1). *)
+    "native_array.march";
+    "task.march";
     (* Loaded last: datetime.march's Date/Time/Tz constructors must not steal
        bare-name lookups from modules loaded before it. *)
     "datetime.march";
@@ -570,6 +575,10 @@ let () =
     ("ring_buf", [
       Alcotest.test_case "RingBuf module"
         `Quick (run_stdlib_test "test_ring_buf.march" "TestRingBuf");
+    ]);
+    ("native_array_send", [
+      Alcotest.test_case "native arrays are sendable copy-on-write values"
+        `Quick (run_stdlib_test "test_native_array_send.march" "TestNativeArraySend");
     ]);
     ("net_frame", [
       Alcotest.test_case "NetFrame module"

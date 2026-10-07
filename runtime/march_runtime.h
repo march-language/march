@@ -11,6 +11,23 @@
  * TInt fields stored as int64_t, TFloat as double, all others as pointer. */
 typedef struct { int64_t rc; int32_t tag; int32_t pad; } march_hdr;
 
+/* The sole-ownership test every in-place write is gated on: FBIP reuse,
+ * native-array set/sort, the SIMD store, and anything else that mutates a
+ * cell only its caller can see.  An ACQUIRE load, not a plain one: another
+ * thread that dropped its reference a moment ago did so with march_decrc's
+ * acq_rel RMW, which RELEASES that thread's last reads of the object.  Only an
+ * acquire on this side gives the write that follows a happens-before edge with
+ * those reads; with a relaxed load the pair is a data race under the C11
+ * model (the same reason Rust's Arc::get_mut uses Acquire).  Free on x86-64
+ * (a plain mov), one ldar on arm64.  Callers guard with IS_HEAP_PTR first; an
+ * immortal cell (rc >= MARCH_RC_IMMORTAL) is never unique.  The LLVM emitter
+ * mirrors this as `load atomic i64 ... acquire` (lib/tir/llvm_emit_alloc.ml,
+ * llvm_emit_simd.ml, llvm_case.ml); keep the two in step.
+ * specs/2026-10-06-linear-ringbuf-and-sendable-arrays-design.md section 2.3. */
+static inline int march_rc_is_unique(const void *p) {
+    return __atomic_load_n(&((const march_hdr *)p)->rc, __ATOMIC_ACQUIRE) == 1;
+}
+
 /* ── What the header pad word means ───────────────────────────────────
  *
  * `pad` is multiplexed, decided by SIGN and by tag:
@@ -73,6 +90,13 @@ void march_clo_register_drops(void **pairs, int64_t n);
 /* Decrement RC with march_decrc_local's atomicity policy and return 1 if the
    object was freed, 0 otherwise (0 also for a non-heap pointer). */
 int64_t march_decrc_local_freed(void *p);
+
+/* RC trace site ids (--rc-trace; see march_rc_site in march_runtime.c):
+   compiled code stores the id of the call site it is about to execute, the
+   trace writer reads and resets it; the constructor of a --rc-trace module
+   registers the id -> "<fn>#<ordinal>" table. */
+void march_rc_site_set(int32_t site);
+void march_rc_sites_register(const char **names, int32_t n);
 
 /* Non-atomic reference counting — only safe for values provably owned by a
    single thread (no actor send in their lifetime).  Faster than atomic ops
@@ -225,6 +249,15 @@ double  march_unbox_float(void *p);
 #define MARCH_SIMD_TAG ((int32_t)-4)
 /* Allocate a 32-byte SIMD vector box (rc=1, tag=MARCH_SIMD_TAG, kind in pad). */
 void   *march_simd_alloc(int64_t kind);
+/* Output captured from one shell fragment (march_shell.c): the print
+ * primitives append here instead of writing to stdout while the running
+ * proc's [out_capture] points at one.  Capped at [cap] bytes; [dropped]
+ * counts what did not fit. */
+typedef struct march_out_capture {
+    char   *buf;
+    size_t  len, cap;
+    size_t  dropped;
+} march_out_capture;
 /* Report an out-of-bounds SIMD load/store index and terminate. Noreturn. */
 void    march_simd_bounds_panic(int64_t i, int64_t lanes, int64_t len);
 void    march_simd_lane_panic(int64_t i, int64_t lanes);

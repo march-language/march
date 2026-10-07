@@ -11404,11 +11404,13 @@ let test_unboxed_aggregate_zero_live_allocs_compiled () =
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
-    Alcotest.(check string)
-      "a Vec3-heavy loop never reaches the allocator: an unboxed aggregate is \
-       built with insertvalue, not march_alloc, so the runtime's live-object \
-       count must not move at all"
-      "ZERO" run_out
+    if run_out <> "ZERO" then
+      Alcotest.failf
+        "a Vec3-heavy loop never reaches the allocator: an unboxed aggregate is \
+         built with insertvalue, not march_alloc, so the runtime's live-object \
+         count must not move at all; expected ZERO, got %S\n\n\
+         --- RC trace report (--rc-trace + MARCH_TRACE_GC=1) ---\n%s"
+        run_out (rc_trace_report ~project_root ~main_exe ~src ~tmp)
 
 (* The runtime-gauge half of the branch-join story (the IR assertion lives in
    test_unboxed_aggregate_branch_join_box_released, "unboxed_aggregates"
@@ -11462,11 +11464,13 @@ let test_unboxed_aggregate_branch_join_no_leak_compiled () =
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
-    Alcotest.(check string)
-      "an aggregate built inside a branch is boxed to cross the join and freed \
-       again at the merge: the runtime's live-object count must not grow with \
-       the iteration count"
-      "ZERO" run_out
+    if run_out <> "ZERO" then
+      Alcotest.failf
+        "an aggregate built inside a branch is boxed to cross the join and freed \
+         again at the merge: the runtime's live-object count must not grow with \
+         the iteration count; expected ZERO, got %S\n\n\
+         --- RC trace report (--rc-trace + MARCH_TRACE_GC=1) ---\n%s"
+        run_out (rc_trace_report ~project_root ~main_exe ~src ~tmp)
 
 (* Static capture-free closures (Task 1, lib/tir/llvm_emit.ml): a top-level
    named fn used as a first-class value now references ONE immortal
@@ -14766,17 +14770,19 @@ declare ptr    @native_u8_to_f32_arr(ptr %arr)
 declare ptr    @native_f32_arr_alloc_raw(i64 %len)
 declare ptr    @native_i32_arr_alloc_raw(i64 %len)
 declare ptr    @native_u8_arr_alloc_raw(i64 %len)
-; RingBuf builtins — mutable fixed-capacity circular buffer
+; RingBuf builtins — always_linear fixed-capacity circular buffer
 declare ptr    @ring_buf_make(i64 %cap)
-declare void   @ring_buf_push(ptr %rb, ptr %x)
+declare ptr    @ring_buf_push(ptr %rb, ptr %x)
 declare ptr    @ring_buf_pop(ptr %rb)
 declare ptr    @ring_buf_get(ptr %rb, i64 %i)
 declare ptr    @ring_buf_peek_oldest(ptr %rb)
 declare ptr    @ring_buf_peek_newest(ptr %rb)
-declare i64    @ring_buf_size(ptr %rb)
-declare i64    @ring_buf_cap(ptr %rb)
-declare void   @ring_buf_clear(ptr %rb)
+declare ptr    @ring_buf_size(ptr %rb)
+declare ptr    @ring_buf_cap(ptr %rb)
+declare ptr    @ring_buf_clear(ptr %rb)
+declare ptr    @ring_buf_snapshot(ptr %rb)
 declare ptr    @ring_buf_to_list(ptr %rb)
+declare ptr    @ring_buf_drop(ptr %rb)
 ; Time builtins
 declare double @march_unix_time()
 declare i64    @march_unix_time_ms()
@@ -17335,4 +17341,6 @@ let codegen_suites =
   @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
   @ Test_trmc.suites (* TRMC Phase 1: tail-recursion-modulo-cons eligibility *)
+  @ Test_provenance.suites (* A2: provenance side table + --debug-info *)
   @ Test_kind.suites (* type kinds: the per-type table (specs/2026-09-10-type-kinds-design.md) *)
+  @ Test_rc_trace.suites (* --rc-trace site ids + scripts/gc-trace-report.py (plan §8 A3) *)

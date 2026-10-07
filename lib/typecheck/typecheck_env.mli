@@ -165,6 +165,7 @@ type env = {
   deferred_check4 : (string * string list * string * Typecheck_types.Ast.span) list ref;
   local_fns : unit StrMap.t;
   fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
+  qual_fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
   qual_fn_names : unit StrMap.t;
   plain_let_names : Typecheck_types.StringSet.t;
   proof_caps : (string * string) list;

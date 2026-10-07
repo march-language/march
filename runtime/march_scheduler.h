@@ -508,6 +508,10 @@ typedef struct march_proc {
      * march_actor_inspect_store, taken by actor_answer_inspect (R4).  Only
      * the actor's own green thread touches it. */
     void                       *inspect_out;
+    /* A shell fragment's captured output (march_shell.c): when set, the print
+     * primitives append to this buffer instead of writing to stdout.  Only
+     * the proc's own green thread sets, clears and writes it. */
+    struct march_out_capture   *out_capture;
 } march_proc;
 
 /* Bump a single-writer counter: relaxed load + store, the same instructions

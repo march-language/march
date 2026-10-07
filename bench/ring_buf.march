@@ -1,0 +1,47 @@
+-- RingBuf push/pop loop: the cost of the always_linear API (Part C, Phase
+-- C2 of specs/plans/2026-09-25-send-data-race-freedom-plan.md).
+--
+-- Every mutator returns the same cell and every reader returns it inside a
+-- fresh 2-tuple, so the loop below pays one 32-byte pair per pop and per
+-- size; the in-place write itself is unconditional and allocation-free. If
+-- the pair shows up, the follow-up named in the design spec (section 8,
+-- question 2) is an unboxed (Int, RingBuf) return.
+--
+-- Known answer (checked by test/test_bench_gate.ml): the loop pushes
+-- 0..N-1 into a 1024-slot buffer and pops one element every 4 pushes, so
+-- what remains is the newest 1024 of the un-popped stream; the printed
+-- checksum is deterministic.
+--
+-- Run compiled: march --compile --opt 2 bench/ring_buf.march -o /tmp/ring_buf && /tmp/ring_buf
+mod Main do
+  needs IO.Console
+
+  pfn drive(rb : RingBuf(Int), i : Int, n : Int, popped : Int) : (Int, RingBuf(Int)) do
+    if i == n do (popped, rb)
+    else
+      let rb = RingBuf.push(rb, i)
+      if i % 4 == 3 do
+        let (x, rb) = RingBuf.pop(rb)
+        let v = match x do
+          Some(v) -> v
+          None -> 0
+        end
+        drive(rb, i + 1, n, popped + v)
+      else
+        drive(rb, i + 1, n, popped)
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 20000000
+    let t0 = System.monotonic_time()
+    let (popped, rb) = drive(RingBuf.make(1024), 0, n, 0)
+    let (sz, rb) = RingBuf.size(rb)
+    let rest = RingBuf.to_list(rb)
+    let remaining = List.fold_left(rest, 0, fn (acc, x) -> acc + x)
+    let t1 = System.monotonic_time()
+    println("checksum " ++ int_to_string(popped + remaining + sz))
+    println("elapsed " ++ int_to_string(t1 - t0) ++ " ms")
+  end
+end

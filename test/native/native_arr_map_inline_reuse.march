@@ -1,4 +1,4 @@
--- Regression: P10 Phase 2b — Native_map_inline.strip_alias_chain must see
+-- Regression: P10 Phase 2b — Native_map_inline.remove_alias_chain (was strip_alias_chain) must see
 -- through an `ESeq` wrapper (an unrelated Perceus RC op, e.g. `inc_rc arr;`)
 -- sitting between the closure alloc and the alias-let, without dropping or
 -- reordering that RC op. This shape shows up whenever the mapped array is

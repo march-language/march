@@ -1662,28 +1662,37 @@ let builtin_bindings : (string * scheme) list =
         TArrow (t_list a, TCon ("TypedArray", [a]))));
     ("typed_array_to_list",  poly1 (fun a ->
         TArrow (TCon ("TypedArray", [a]), t_list a)));
-    (* RingBuf builtins — mutable fixed-capacity circular buffer.
-       RingBuf(a) is a non-sendable type: the typechecker rejects it in send() payloads. *)
+    (* RingBuf builtins — fixed-capacity circular buffer, always_linear
+       (typecheck_env.ml seeds the name). Every operation CONSUMES the buffer:
+       a mutator returns it, a reader returns its answer beside it, a
+       terminator (to_list, drop) ends it. Elements stay unrestricted; a
+       buffer silently overwrites its oldest element, so it cannot hold a
+       value that must be consumed, and these generics deliberately do not
+       opt in to linear elements. Part C, Phase C2. *)
     ("ring_buf_make",        poly1 (fun a ->
         TArrow (t_int, TCon ("RingBuf", [a]))));
     ("ring_buf_push",        poly1 (fun a ->
-        TArrow (TCon ("RingBuf", [a]), TArrow (a, t_unit))));
+        TArrow (TCon ("RingBuf", [a]), TArrow (a, TCon ("RingBuf", [a])))));
     ("ring_buf_pop",         poly1 (fun a ->
-        TArrow (TCon ("RingBuf", [a]), t_option a)));
+        TArrow (TCon ("RingBuf", [a]), TTuple [t_option a; TCon ("RingBuf", [a])])));
     ("ring_buf_get",         poly1 (fun a ->
-        TArrow (TCon ("RingBuf", [a]), TArrow (t_int, t_option a))));
+        TArrow (TCon ("RingBuf", [a]), TArrow (t_int, TTuple [t_option a; TCon ("RingBuf", [a])]))));
     ("ring_buf_peek_oldest", poly1 (fun a ->
-        TArrow (TCon ("RingBuf", [a]), t_option a)));
+        TArrow (TCon ("RingBuf", [a]), TTuple [t_option a; TCon ("RingBuf", [a])])));
     ("ring_buf_peek_newest", poly1 (fun a ->
-        TArrow (TCon ("RingBuf", [a]), t_option a)));
+        TArrow (TCon ("RingBuf", [a]), TTuple [t_option a; TCon ("RingBuf", [a])])));
     ("ring_buf_size",        poly1 (fun a ->
-        TArrow (TCon ("RingBuf", [a]), t_int)));
+        TArrow (TCon ("RingBuf", [a]), TTuple [t_int; TCon ("RingBuf", [a])])));
     ("ring_buf_cap",         poly1 (fun a ->
-        TArrow (TCon ("RingBuf", [a]), t_int)));
+        TArrow (TCon ("RingBuf", [a]), TTuple [t_int; TCon ("RingBuf", [a])])));
     ("ring_buf_clear",       poly1 (fun a ->
-        TArrow (TCon ("RingBuf", [a]), t_unit)));
+        TArrow (TCon ("RingBuf", [a]), TCon ("RingBuf", [a]))));
+    ("ring_buf_snapshot",    poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), TTuple [t_list a; TCon ("RingBuf", [a])])));
     ("ring_buf_to_list",     poly1 (fun a ->
         TArrow (TCon ("RingBuf", [a]), t_list a)));
+    ("ring_buf_drop",        poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), t_unit)));
     (* TLS builtins — tls_client_ctx, tls_server_ctx, etc.  All fail with a
        String reason (see runtime/march_tls.c's make_err) — Mono, not a
        polymorphic `e`. *)

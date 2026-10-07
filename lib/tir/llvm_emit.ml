@@ -2479,6 +2479,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let op = coerce ctx o_ty o_val "ptr" in
     let (v_ty, v_val) = emit_atom ctx value in
     let vp = coerce ctx v_ty v_val "ptr" in
+    (* Sanitizer builds: assert the hole is still the null the allocation
+       stored (Llvm_toplevel.rc_checks; march_hole_fill_check aborts
+       otherwise).  Not in a release build: the extra load and call change
+       the IR, which only the sanitize CAS tag separates.  An actor's state
+       release ([Drop]'s [$actordrop$]) also uses ESetField, to overwrite a
+       LIVE field with an immediate before dropping it; that slot is never
+       null, so it is not a hole fill and gets no check. *)
+    if !Llvm_toplevel.rc_checks
+       && not (String.starts_with ~prefix:Tir_names.actor_drop_fn_prefix
+                 ctx.Llvm_ctx.cur_emit_fn) then begin
+      let prev = Llvm_data.emit_load_field ctx op i "ptr" in
+      emit ctx (Printf.sprintf "call void @march_hole_fill_check(ptr %s, i64 %d, ptr %s)" op i prev)
+    end;
     emit_store_field ctx op i "ptr" vp;
     ("ptr", "null")
 

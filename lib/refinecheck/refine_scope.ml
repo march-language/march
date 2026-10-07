@@ -828,6 +828,15 @@ let callback_param_name = "$cb_arg"
    CURRIED arrow `(Int) -> (Int) -> Int` has an unrefined `Int` domain at this
    level for the same reason).  Per plan fact 2, multi-argument callbacks are
    out of scope and calling one fails typecheck anyway. *)
+(* The name a callback's DOMAIN gives its argument (`x` in `({x : Int | …})
+   -> …`), when it gives one.  The codomain may mention it; the synthesized
+   signature names its one parameter [callback_param_name], so the codomain
+   is rewritten to match (see [callback_sig_of_ty]). *)
+let dom_binder (dom : A.ty) : string option =
+  match unlinear dom with
+  | A.TyRefine (_, Some n, _) when n.A.txt <> "_" -> Some n.A.txt
+  | _ -> None
+
 let callback_sig_of_ty (t : A.ty) : fn_sig option =
   match t with
   | A.TyArrow (dom, cod) ->
@@ -847,6 +856,17 @@ let callback_sig_of_ty (t : A.ty) : fn_sig option =
          | Some (b, p, srt) -> (Some (b, p), srt)
          | None -> (None, None))
       | _ -> (None, None)
+    in
+    (* The codomain names the argument by the DOMAIN's binder; the signature
+       names it [callback_param_name].  Rename, so [postcond_of] sees a
+       relational return over the one parameter and substitutes the actual
+       (`keep(h)` then reflects to `keep$ret == (h > 0)`).  A codomain binder
+       spelled like the domain's shadows it: leave that predicate alone. *)
+    let ret =
+      match ret, dom_binder dom with
+      | Some (b, p), Some x when x <> b ->
+        Some (b, subst_params [ (x, A.EVar { A.txt = callback_param_name; A.span = A.dummy_span }) ] p)
+      | r, _ -> r
     in
     (match refined_param_ty (Some dom) with
      | Some (binder, pred, sort) ->

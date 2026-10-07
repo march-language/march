@@ -209,6 +209,7 @@ val capture_ewriteln : string -> unit
 val ring_create : int -> 'a ring
 val ring_push : 'a ring -> 'a -> unit
 val ring_get : 'a ring -> int -> 'a option
+val ring_to_list : value ring -> value
 val ring_pop_oldest : 'a ring -> 'a option
 
 (** {1 Interpreter control-flow exceptions} *)

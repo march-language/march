@@ -1463,6 +1463,10 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
         (* Apply substitution to get the specialized version *)
         let fn' = subst_fn_def subst orig_fn in
         let fn' = { fn' with Tir.fn_name = target_name } in
+        if target_name <> orig_name then
+          Provenance.record target_name ~from:orig_name
+            ~derived:(Provenance.Mono_of (orig_name, List.map snd subst))
+            ~pass:"mono" ();
         let fn' =
           { fn' with
             Tir.fn_body = retype_known_vars fn'.Tir.fn_params fn'.Tir.fn_body }

@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: cannot be captured by a closure
+-- H5: the HTTP server runs one handler closure from N connection threads
+-- (http_server_listen) and nothing checked its captures. Under Part C the
+-- handler cannot capture a RingBuf at all. Type-checked before C2 (Phase 0).
+mod Main do
+  needs IO.NetListen
+  fn main(_c : Cap(IO.NetListen)) do
+    let rb = RingBuf.make(16)
+    let handler = fn conn ->
+      let _ = RingBuf.push(rb, 1)
+      HttpServer.text(conn, 200, "ok")
+    HttpServer.new(8080) |> HttpServer.plug(handler) |> HttpServer.listen()
+  end
+end

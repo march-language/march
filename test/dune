@@ -23,7 +23,7 @@
 (library
  (name march_test_codegen)
  (wrapped false)
- (modules test_codegen test_ir_verify test_collision_set test_ctor_tags test_trmc test_kind)
+ (modules test_codegen test_ir_verify test_collision_set test_ctor_tags test_trmc test_kind test_provenance test_rc_trace)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_driver alcotest str unix threads.posix))
 
 (library
@@ -488,6 +488,39 @@
  (alias   runtest)
  (deps    (file test_signal_watch_runner))
  (action  (run ./test_signal_watch_runner)))
+
+;  march_free must run a resource cell's destructor (Part C, Phase C0), and
+; march_rc_is_unique is the acquire-load ownership test.  Same full-runtime
+; link set as test_float_box_runner below (march_runtime.c is the god-object).
+(rule
+ (targets test_free_dtor_runner)
+ (deps    test_free_dtor.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c
+          ../runtime/march_remote_registry.c)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_free_dtor.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_free_dtor_runner))
+ (action  (run ./test_free_dtor_runner)))
 
 ; ── Boxed-Float runtime API unit test (float-boxing design, stage 1) ──────
 ; march_alloc_float / march_unbox_float / march_poly_eq / march_poly_compare
@@ -1245,6 +1278,14 @@
  (name test_ast_calls)
  (modules test_ast_calls)
  (libraries march_lexer march_parser march_ast march_desugar alcotest))
+
+; The guard for specs/lang/memory-model.md's "Mutable builtins: the rule":
+; non_sendable_types must stay empty until the general Send check lands, and
+; is_send must follow a root through user types (Part C, Phase C5).
+(test
+ (name test_typecheck_send)
+ (modules test_typecheck_send)
+ (libraries march_test_helpers march_typecheck march_errors alcotest))
 
 (test
  (name test_caps)
@@ -3528,11 +3569,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 ; ── RingBuf compiled backend (runtime/march_runtime.c ring_buf_*) ──
 ; The ring_buf_* builtins existed only in the interpreter; a compiled program
-; using RingBuf failed to link. This fixture exercises every op with both Int
-; (immediate) and String (heap, RC-managed) elements — make, push past capacity
-; (wraparound), pop, get, peek, size, cap, clear, to_list — and diffs stdout
-; against the interpreter's output. Guards the erased-i64 element round-trip
-; (odd value 7) and element RC on overwrite/pop/clear/drop.
+; using RingBuf failed to link. This fixture exercises every op of the
+; always_linear, consume-and-return API (Part C, Phase C2) with both Int
+; (immediate) and String (heap, RC-managed) elements — make, push past
+; capacity (wraparound), pop, get, peek, size, cap, snapshot, clear, to_list,
+; drop — and diffs stdout against the interpreter's output. Guards the
+; erased-i64 element round-trip (odd value 7), the tagged Int in a reader's
+; pair, and element RC on overwrite/pop/clear/drop.
 (rule
  (targets native_ring_buf_ops native_ring_buf_ops.out)
  (deps (file %{exe:../bin/main.exe})
@@ -3549,6 +3592,89 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/ring_buf_ops.expected native_ring_buf_ops.out)))
+
+; ── Native arrays are sendable copy-on-write values (Part C, Phase C1) ──
+; specs/plans/2026-09-25-send-data-race-freedom-plan.md. An actor receives a
+; NativeIntArr and writes it while the sender writes its own reference; each
+; side must see only its own write (the mailbox's reference forces the
+; sender's set to copy). Interpreted twin: test/stdlib/test_native_array_send.march.
+(rule
+ (targets native_native_arr_send_cow native_native_arr_send_cow.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_send_cow.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_native_arr_send_cow
+        native/native_arr_send_cow.march)
+   (with-stdout-to native_native_arr_send_cow.out
+        (system "./native_native_arr_send_cow")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_send_cow.expected native_native_arr_send_cow.out)))
+
+; Parallel.pmap reading a captured native array from several worker threads
+; at once: reads only, deterministic result.
+(rule
+ (targets native_native_arr_pmap_capture native_native_arr_pmap_capture.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_pmap_capture.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_native_arr_pmap_capture
+        native/native_arr_pmap_capture.march)
+   (with-stdout-to native_native_arr_pmap_capture.out
+        (system "./native_native_arr_pmap_capture")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_pmap_capture.expected native_native_arr_pmap_capture.out)))
+
+; Two tasks set the same captured native array in a 300-round loop: the
+; copy-on-write race that C0's acquire-ordered sole-ownership test protects.
+; Compiled at --opt 2 so the FBIP/reuse paths are the ones exercised.
+(rule
+ (targets native_native_arr_task_set_race native_native_arr_task_set_race.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_task_set_race.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_native_arr_task_set_race
+        native/native_arr_task_set_race.march)
+   (with-stdout-to native_native_arr_task_set_race.out
+        (system "./native_native_arr_task_set_race")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_task_set_race.expected native_native_arr_task_set_race.out)))
+
+; RingBuf reference-count contract on its one unrestricted path, a user
+; record's field (`{ r with buf: RingBuf.push(r.buf, x) }`): the owned,
+; rc-neutral ring_buf_* builtins must leave live_allocs() flat (Part C,
+; Phase C2). Also in specs/lang/golden/sanitize.sh's curated native list, so
+; CI runs it under AddressSanitizer.
+(rule
+ (targets native_ring_buf_record_leak_probe native_ring_buf_record_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/ring_buf_record_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_ring_buf_record_leak_probe
+        native/ring_buf_record_leak_probe.march)
+   (with-stdout-to native_ring_buf_record_leak_probe.out
+        (system "./native_ring_buf_record_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ring_buf_record_leak_probe.expected native_ring_buf_record_leak_probe.out)))
 
 ; String search edge cases (SIMD march_memmem kernel, runtime/march_runtime.c).
 ; String.index_of/index_of_from/contains go through the compiled runtime's
@@ -10631,13 +10757,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nloops nruntime boxcalls < native_arr_fold_inline_llvm_check.out; \
     test \"$nloops\" -eq 11 -a \"$nruntime\" -eq 3 -a \"$boxcalls\" -eq 0 || { echo \"expected 11 inline fold loops, 3 runtime folds, 0 boxing calls in unboxed clones (found loops=$nloops runtime=$nruntime boxcalls=$boxcalls)\" >&2; exit 1; }")))
 
+;  NativeArray builtins that only READ their array/list argument borrow it
+; (specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md).
+; Every leg's live_allocs stays flat; the .expected file IS the interpreter's
+; output, including every "flat: true".
+(rule
+ (targets nativearray_builtin_borrow_leak_probe nativearray_builtin_borrow_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearray_builtin_borrow_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nativearray_builtin_borrow_leak_probe
+        native/nativearray_builtin_borrow_leak_probe.march)
+   (with-stdout-to nativearray_builtin_borrow_leak_probe.out
+        (system "./nativearray_builtin_borrow_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nativearray_builtin_borrow_leak_probe.expected
+               nativearray_builtin_borrow_leak_probe.out)))
+
 ;  NativeArray map / map2 chain fusion (phase B of
 ; specs/plans/2026-09-28-nativearray-fusion-plan.md, Fusion.run_nativearr).
 ; Correctness: every line matches the interpreter (the .expected file IS the
 ; interpreter's output), including the negative cases that must not fuse.
 ; Shape: main (with the two negative helper fns inlined into it) has exactly
-; 21 inline map loops, 8 inline map2 loops and 1 runtime map call after
-; fusion; with MARCH_NO_NATIVEARR_FUSION=1 the same program has 47 / 8 / 2.
+; 22 inline map loops, 8 inline map2 loops and no runtime map call after
+; fusion. The parameter-callback case is not FUSED (Fusion runs before Opt
+; inlines the helper), but since the map builtins borrow their array
+; (specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md)
+; Native_map_inline sees its closure through the deeper alias chain and
+; inlines that map too; before, it stayed one runtime call (21 / 8 / 1).
 (rule
  (targets nativearr_map_fusion nativearr_map_fusion.out)
  (deps (file %{exe:../bin/main.exe})
@@ -10674,7 +10826,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action
   (run bash -c
    "read -r nmap nmap2 nruntime < nativearr_map_fusion_llvm_check.out; \
-    test \"$nmap\" -eq 21 -a \"$nmap2\" -eq 8 -a \"$nruntime\" -eq 1 || { echo \"expected 21 inline map loops, 8 inline map2 loops, 1 runtime map call in main (found map=$nmap map2=$nmap2 runtime=$nruntime)\" >&2; exit 1; }")))
+    test \"$nmap\" -eq 22 -a \"$nmap2\" -eq 8 -a \"$nruntime\" -eq 0 || { echo \"expected 22 inline map loops, 8 inline map2 loops, 0 runtime map calls in main (found map=$nmap map2=$nmap2 runtime=$nruntime)\" >&2; exit 1; }")))
 
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
@@ -12114,6 +12266,103 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/record_ownership_drops.expected native_record_ownership_drops.out)))
+
+; ── An erased Option read (record_get) dropped and shown without a double
+; release or a leak (2026-10-06). RED before: 200 objects left.
+(rule
+ (targets native_erased_option_read native_erased_option_read.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/erased_option_read.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_option_read
+        native/erased_option_read.march)
+   (with-stdout-to native_erased_option_read.out
+        (system "./native_erased_option_read")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_option_read.expected native_erased_option_read.out)))
+
+; ── A local type with a stdlib type's short name (2026-10-06): both kinds of
+; value dropped deep. RED before: SIGSEGV dropping the Msgpack.Value.
+(rule
+ (targets native_local_colliding_type native_local_colliding_type.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/local_colliding_type.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_local_colliding_type
+        native/local_colliding_type.march)
+   (with-stdout-to native_local_colliding_type.out
+        (system "./native_local_colliding_type")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/local_colliding_type.expected native_local_colliding_type.out)))
+
+; ── A cluster session's party is released when it ends (2026-10-06): live
+; objects left per session under 120 (RED before: ~156, the party's Ops
+; closures, the Party and its table handles).
+(rule
+ (targets native_session_party_released native_session_party_released.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/session_party_released.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_session_party_released
+        native/session_party_released.march)
+   (with-stdout-to native_session_party_released.out
+        (system "./native_session_party_released")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/session_party_released.expected native_session_party_released.out)))
+
+; ── A dead actor's record and state are released (2026-10-06): under 5
+; objects left over 50 actors (RED before: the killed actor's List state, and
+; the record itself once Actor.call had been used on it).
+(rule
+ (targets native_actor_state_released native_actor_state_released.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_state_released.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_state_released
+        native/actor_state_released.march)
+   (with-stdout-to native_actor_state_released.out
+        (system "./native_actor_state_released")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_state_released.expected native_actor_state_released.out)))
+
+; ── A wildcard-bound value is dropped deep (2026-10-06): the `_` of
+; `(None, _)` is typed erased, so its Deque was freed shallow. RED before: 200.
+(rule
+ (targets native_wildcard_binder_drop native_wildcard_binder_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/wildcard_binder_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_wildcard_binder_drop
+        native/wildcard_binder_drop.march)
+   (with-stdout-to native_wildcard_binder_drop.out
+        (system "./native_wildcard_binder_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/wildcard_binder_drop.expected native_wildcard_binder_drop.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),
@@ -12385,3 +12634,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/observe_debug_nokey.expected native_observe_debug_nokey.out)))
+
+; ── The shell listener (runtime/march_shell.c), R6 of the observe plan ────
+; specs/progress/2026-10-06-shell-node-listener.md. shell_check.exe signs
+; EVALs of hand-written C fragments (test/shell/frag_*.c) against a
+; --hot-reload --signing-pubkey node: a result and its captured println, a
+; replay, another key, the shell policy, a panic, a cancelled endless loop,
+; a missing entry, a stale epoch, four sessions with their own slot ranges
+; and a refused fifth, and the audit lines. Node side only: no March input
+; is compiled here.
+(executable
+ (name shell_check)
+ (modules shell_check)
+ (libraries unix march_ed25519))
+
+(rule
+ (targets native_shell_node.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (glob_files shell/*.c)
+       (file native/shell_node.march))
+ (action
+  (with-stdout-to native_shell_node.out
+   (system "rm -rf sh_t; mkdir -p sh_t/frags; ./shell_check.exe keygen sh_t/pk sh_t/sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_t/pk) -o sh_t/node native/shell_node.march > sh_t/build 2>&1 || { cat sh_t/build; exit 1; }; for f in ok panic loop; do if [ \"$(uname)\" = Darwin ]; then %{cc} -shared -fPIC -undefined dynamic_lookup -o sh_t/frags/frag_$f.so shell/frag_$f.c; else %{cc} -shared -fPIC -o sh_t/frags/frag_$f.so shell/frag_$f.c; fi; done; : > sh_t/policy; S=/tmp/march-shell-test-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_t/policy MARCH_AUDIT_LOG=sh_t/audit ./sh_t/node > sh_t/prog 2>&1 & prog=$!; ./shell_check.exe run $S.shell sh_t/prog sh_t/sk sh_t/policy sh_t/audit sh_t/frags; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_t $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_node.expected native_shell_node.out)))
+
+; `march --shell` end to end (bin/shell_cmd.ml + Repl_jit.shell_compile):
+; each input of test/shell/session.txt is compiled into a fragment, signed,
+; and run by the node (test/native/shell_node.march). Values, `let`
+; bindings, the list limit, captured println (and the node's own stdout
+; never sees it), the program's actor reached through Actor.list /
+; pid_from_int / send / inspect_state, a panic, a type error, and the
+; session carrying on after each.
+(rule
+ (targets native_shell_session.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/session.txt)
+       (file native/shell_node.march))
+ (action
+  (with-stdout-to native_shell_session.out
+   (system "rm -rf sh_s; mkdir -p sh_s; ./shell_check.exe keygen-home sh_s/pk $PWD/sh_s/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_s/pk) -o sh_s/node native/shell_node.march > sh_s/build 2>&1 || { cat sh_s/build; exit 1; }; printf 'IO.Console\\nActor.Introspect\\nActor.Debug\\n' > sh_s/policy; S=/tmp/march-shell-sess-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_s/policy MARCH_AUDIT_LOG=sh_s/audit ./sh_s/node > sh_s/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_s/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_s/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/session.txt native/shell_node.march 2>&1; echo \"exit=$?\"; echo \"node stdout lines from the shell: $(grep -c 'hi from the shell' sh_s/prog)\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_s $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_session.expected native_shell_session.out)))
