@@ -2060,6 +2060,132 @@ let write_impl_hashes basename (h_sccs : March_cas.Pipeline.hashed_scc list) =
   List.iter (fun l -> output_string oc l; output_char oc '\n') lines;
   close_out oc
 
+(* ── Depend-mode source key (observability plan B7.2) ─────────────────────
+
+   The source-level cache key used to hash every `.march` file in the entry's
+   directory and every MARCH_LIB_PATH directory, because the resolver may
+   auto-discover any of them.  So editing an UNRELATED sibling (one the build
+   never loads) was a miss.  ccache's depend mode, adapted: after a
+   successful run, record the load set the resolver actually produced
+   ([resolve_imports]'s [user_files]); on the next run, if that record is
+   still valid, key on the entry + stdlib + exactly those files.
+
+   "Still valid" must mean "the resolver would load the same set", or a hit
+   is stale.  The resolver keeps a discovered module iff it is reachable by
+   name from kept sources or carries a global-effect declaration
+   (Resolver.keep), so the record is valid only when
+   - the walked directories are the same, and no `.march` file appeared in
+     any of them (a new sibling can become reachable);
+   - every recorded load-set file still exists;
+   - every recorded NON-loaded sibling whose bytes changed still parses, has
+     no global-effect declaration, and none of its anchors (its module name,
+     type and constructor names: Resolver.provided_anchor_names) is a token
+     of the entry or a loaded file (Resolver.referenced_name_tokens): i.e.
+     the resolver would prune it again.
+   Anything else falls back to today's full-directory key. *)
+
+let loadset_version = "march-loadset v1"
+
+let realpath_or p = try Unix.realpath p with Unix.Unix_error _ -> p
+
+let read_opt path =
+  try
+    let ic = open_in_bin path in
+    let s = really_input_string ic (in_channel_length ic) in
+    close_in ic; Some s
+  with Sys_error _ -> None
+
+let loadset_path ~store_root ~entry_real ~walked =
+  Printf.sprintf "%s/loadsets/%s" store_root
+    (Digest.to_hex (Digest.string (String.concat "\x00" (entry_real :: walked))))
+
+(* The depend-mode digest: entry bytes + stdlib digest + each loaded file's
+   path and bytes, in sorted order.  [None] if a listed file cannot be read. *)
+let depend_digest ~src ~stdlib_hash ~(listed : string list) : string option =
+  let buf = Buffer.create (64 * 1024) in
+  Buffer.add_string buf src;
+  Buffer.add_string buf stdlib_hash;
+  let ok = List.for_all (fun f ->
+      match read_opt f with
+      | Some b -> Buffer.add_string buf ("\x00" ^ f ^ "\x00"); Buffer.add_string buf b; true
+      | None -> false) listed in
+  if ok then Some ("dep:" ^ Digest.to_hex (Digest.string (Buffer.contents buf))) else None
+
+(* The loaded files of a run, canonical, without the entry, sorted. *)
+let canonical_listed ~entry_real (user_files : string list) =
+  List.sort_uniq String.compare
+    (List.filter (fun f -> f <> entry_real) (List.map realpath_or user_files))
+
+let write_loadset ~path ~walked ~listed ~unlisted =
+  let lines =
+    loadset_version
+    :: List.map (fun d -> "dir\t" ^ d) walked
+    @ List.map (fun f -> "listed\t" ^ f) listed
+    @ List.map (fun (f, h) -> "unlisted\t" ^ f ^ "\t" ^ h) unlisted in
+  try
+    let dir = Filename.dirname path in
+    (try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+    let tmp = path ^ ".tmp." ^ string_of_int (Unix.getpid ()) in
+    Out_channel.with_open_bin tmp (fun oc -> output_string oc (String.concat "\n" lines ^ "\n"));
+    Sys.rename tmp path
+  with Sys_error _ | Unix.Unix_error _ -> ()
+
+(* [files_in walked]: every `.march` file the resolver would discover. *)
+let files_in walked =
+  List.concat_map (fun d ->
+      List.map realpath_or (March_resolver.Resolver.collect_lib_files d)) walked
+  |> List.sort_uniq String.compare
+
+(* The listed files if the record at [path] is still valid (see above). *)
+let valid_loadset ~path ~entry_real ~src ~walked : string list option =
+  match read_opt path with
+  | None -> None
+  | Some text ->
+    let lines = List.filter (fun l -> l <> "") (String.split_on_char '\n' text) in
+    (match lines with
+     | v :: rest when v = loadset_version ->
+       let fields l = String.split_on_char '\t' l in
+       let dirs = List.filter_map (fun l -> match fields l with ["dir"; d] -> Some d | _ -> None) rest in
+       let listed = List.filter_map (fun l -> match fields l with ["listed"; f] -> Some f | _ -> None) rest in
+       let unlisted = List.filter_map (fun l -> match fields l with ["unlisted"; f; h] -> Some (f, h) | _ -> None) rest in
+       let known = entry_real :: listed @ List.map fst unlisted in
+       if dirs <> walked then None
+       else if List.exists (fun f -> not (List.mem f known)) (files_in walked) then None
+       else if List.exists (fun f -> not (Sys.file_exists f)) listed then None
+       else begin
+         let changed = List.filter_map (fun (f, h) ->
+             match read_opt f with
+             | None -> None   (* deleted: it was not loaded, so nothing changes *)
+             | Some b -> if Digest.to_hex (Digest.string b) = h then None else Some (f, b))
+             unlisted in
+         if changed = [] then Some listed
+         else begin
+           let tokens = Hashtbl.create 256 in
+           List.iter (fun t ->
+               Hashtbl.iter (fun k () -> Hashtbl.replace tokens k ())
+                 (March_resolver.Resolver.referenced_name_tokens t))
+             (src :: List.filter_map read_opt listed);
+           let still_pruned (f, b) =
+             match March_parser.Parse.module_ ~filename:f b with
+             | Error _ -> false
+             | Ok m ->
+               let decls = m.March_ast.Ast.mod_decls in
+               not (March_resolver.Resolver.has_global_effect_decl decls)
+               && not (List.exists (fun a -> Hashtbl.mem tokens a)
+                         (m.March_ast.Ast.mod_name.March_ast.Ast.txt
+                          :: March_resolver.Resolver.provided_anchor_names decls))
+           in
+           if List.for_all still_pruned changed then Some listed else None
+         end
+       end
+     | _ -> None)
+
+(* Set by the early cache lookup in [compile]: given a successful run's
+   [user_files], also store [artifact] (and its diagnostics) under the
+   depend-mode key and record the load set for the next run. *)
+let depend_store : (user_files:string list -> artifact:string -> diag:string -> unit) option ref =
+  ref None
+
 let compile filename =
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
@@ -2104,11 +2230,12 @@ let compile filename =
     then None
     else if not !do_compile && not !do_check then None
     else try
+      let stdlib_hash = match stdlib_source_hash ~for_js:is_js_target () with
+        | Some (_, h, _) -> h
+        | None -> "" in
       let buf = Buffer.create (256 * 1024) in
       Buffer.add_string buf src;
-      (match stdlib_source_hash ~for_js:is_js_target () with
-       | Some (_, h, _) -> Buffer.add_string buf h
-       | None -> ());
+      Buffer.add_string buf stdlib_hash;
       (* Hash every .march file the resolver will load as user code: the
          entry's OWN source directory (siblings are auto-discovered by
          resolve_imports — search_path = source_dir :: lib paths) plus all
@@ -2123,6 +2250,8 @@ let compile filename =
         List.filter (fun d -> d <> "") (String.split_on_char ':' lib_path) in
       let entry_real =
         (try Unix.realpath filename with Unix.Unix_error _ -> filename) in
+      let walked = Filename.dirname filename :: lib_dirs in
+      let walk_hash () =
       List.iter (fun dir ->
         let files = List.sort String.compare (collect_lib_files dir) in
         List.iter (fun fp ->
@@ -2140,9 +2269,39 @@ let compile filename =
             with Sys_error _ -> ())
           end
         ) files
-      ) (Filename.dirname filename :: lib_dirs);
-      let cache_input = Buffer.contents buf in
-      let src_hash = "src:" ^ Digest.to_hex (Digest.string cache_input) in
+      ) walked;
+      "src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)) in
+      (* B7.2: key on the previous run's load set when it is still valid
+         (see [valid_loadset]); the full walk otherwise. *)
+      let ls_path = loadset_path ~store_root:(Sys.getcwd () ^ "/.march/cas")
+          ~entry_real ~walked in
+      let src_hash =
+        match valid_loadset ~path:ls_path ~entry_real ~src ~walked with
+        | Some listed ->
+          (match depend_digest ~src ~stdlib_hash ~listed with
+           | Some h -> h
+           | None -> walk_hash ())
+        | None -> walk_hash ()
+      in
+      (* After a successful run: store the result under the depend-mode key
+         its real load set gives, and record that load set. *)
+      let register_depend_store (key_of : string -> string) store =
+        depend_store := Some (fun ~user_files ~artifact ~diag ->
+            let listed = canonical_listed ~entry_real user_files in
+            match depend_digest ~src ~stdlib_hash ~listed with
+            | None -> ()
+            | Some dep_hash ->
+              let dep_ch = key_of dep_hash in
+              March_cas.Cas.store_artifact store dep_ch artifact;
+              March_cas.Cas.store_diagnostics store dep_ch diag;
+              let unlisted =
+                List.filter_map (fun f ->
+                    if f = entry_real || List.mem f listed then None
+                    else Option.map (fun b -> (f, Digest.to_hex (Digest.string b)))
+                        (read_opt f))
+                  (files_in walked) in
+              write_loadset ~path:ls_path ~walked ~listed ~unlisted)
+      in
       let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
       (* A warnings-only build (an @[no_alloc(warn)] contract, an unused
          binding, ...) used to lose its warnings on a warm cache, and the
@@ -2176,6 +2335,8 @@ let compile filename =
         (match March_cas.Cas.lookup_artifact store ch with
          | Some _ -> exit 0
          | None -> ());
+        register_depend_store
+          (fun h -> March_cas.Cas.compilation_hash h ~target:"check" ~flags) store;
         Some (store, ch)
       end else begin (* !do_compile *)
         let target_parsed = parse_target !target_str in
@@ -2185,6 +2346,9 @@ let compile filename =
            module's impl hashes. *)
         let (_, ch) =
           build_cas_key ~target:target_parsed ~target_label ~src_hash in
+        register_depend_store
+          (fun h -> snd (build_cas_key ~target:target_parsed ~target_label ~src_hash:h))
+          store;
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
         let out_bin  =
@@ -2733,7 +2897,8 @@ let compile filename =
     in
     (match source_cas_state with
      | Some (src_store, src_ch) when not printed_user_diag ->
-       March_cas.Cas.store_artifact src_store src_ch filename
+       March_cas.Cas.store_artifact src_store src_ch filename;
+       Option.iter (fun f -> f ~user_files ~artifact:filename ~diag:"") !depend_store
      | Some _ | None -> ());
     exit 0
   end
@@ -3532,9 +3697,21 @@ let compile filename =
             March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin
           | None -> false
         in
-        (if cached_ok then
+        (if cached_ok then begin
+          (* A post-TIR hit ran the whole front end, so it knows this
+             source's diagnostics and load set: record the source-level
+             entry too (artifact, diagnostics, depend-mode key), or every
+             later identical build would stop at this same, slower hit. *)
+          (match source_cas_state with
+           | Some (src_store, src_ch) ->
+             March_cas.Cas.store_artifact src_store src_ch out_bin;
+             March_cas.Cas.store_diagnostics src_store src_ch
+               (Buffer.contents replay_log);
+             Option.iter (fun f -> f ~user_files ~artifact:out_bin
+                             ~diag:(Buffer.contents replay_log)) !depend_store
+           | None -> ());
           Printf.eprintf "compiled %s (cached)\n" out_bin
-        else
+        end else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary.  [let () = … in], not a
              bare [;]: [;] binds looser than if/else, which would leave
@@ -3610,7 +3787,9 @@ let compile filename =
                | Some (src_store, src_ch) ->
                  March_cas.Cas.store_artifact src_store src_ch out_bin;
                  March_cas.Cas.store_diagnostics src_store src_ch
-                   (Buffer.contents replay_log)
+                   (Buffer.contents replay_log);
+                 Option.iter (fun f -> f ~user_files ~artifact:out_bin
+                                 ~diag:(Buffer.contents replay_log)) !depend_store
                | None -> ());
               Printf.eprintf "compiled %s (%s)\n" out_bin target_label
             end
@@ -4258,7 +4437,9 @@ let compile filename =
                | Some (src_store, src_ch) ->
                  March_cas.Cas.store_artifact src_store src_ch out_bin;
                  March_cas.Cas.store_diagnostics src_store src_ch
-                   (Buffer.contents replay_log)
+                   (Buffer.contents replay_log);
+                 Option.iter (fun f -> f ~user_files ~artifact:out_bin
+                                 ~diag:(Buffer.contents replay_log)) !depend_store
                | None -> ());
               Printf.eprintf "compiled %s\n" out_bin
             end

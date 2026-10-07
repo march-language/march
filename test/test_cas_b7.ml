@@ -99,7 +99,97 @@ let test_replay_diagnostics_on_hit () =
   Alcotest.(check string) (what "the warm build prints the same diagnostics")
     (diagnostics_of cold) (diagnostics_of warm)
 
+(* ── B7.2: depend-mode source key ──────────────────────────────────────── *)
+
+(* How a compile was satisfied, read off its --timings stamps: a
+   source-level hit exits before parsing and prints none; a post-TIR hit
+   prints stamps up to cas-hash and "(cached)". *)
+type outcome = Source_hit | Post_tir_hit | Full
+
+let outcome log =
+  if not (contains log "[timings]") then Source_hit
+  else if contains log "(cached)" then Post_tir_hit
+  else Full
+
+let show = function
+  | Source_hit -> "source-level hit" | Post_tir_hit -> "post-TIR hit"
+  | Full -> "full compile"
+
+let run_out dir =
+  let log = Filename.concat dir "run.log" in
+  ignore (Sys.command (Printf.sprintf "%s > %s 2>&1"
+      (Filename.quote (Filename.concat dir "out")) (Filename.quote log)));
+  String.trim (read_file log)
+
+let main_src = {|mod Main do
+  needs IO.Console
+  import Helpers
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(Helpers.twice(21)))
+  end
+end
+|}
+
+let test_depend_mode_unrelated_sibling () =
+  require_compiler ();
+  with_scratch @@ fun dir ->
+  let w f s = write_file (Filename.concat dir f) s in
+  w "main.march" main_src;
+  w "helpers.march" "mod Helpers do\n  fn twice(n : Int) : Int do n * 2 end\nend\n";
+  w "unrelated.march" "mod Unrelated do\n  fn noise() : Int do 1 end\nend\n";
+  let step name =
+    let log = compile ~extra:"--timings" ~dir ~log:(Filename.concat dir (name ^ ".log")) "main.march" in
+    (outcome log, run_out dir, log) in
+  let check name (o, out, log) want_o want_out =
+    Alcotest.(check string) (name ^ ": how the build was satisfied\n" ^ log) (show want_o) (show o);
+    Alcotest.(check string) (name ^ ": program output") want_out out in
+  check "cold" (step "cold") Full "42";
+  check "warm" (step "warm") Source_hit "42";
+  (* The build never loads Unrelated (pruned: nothing names it).  Before
+     depend mode its bytes were in the key, so this edit was a miss. *)
+  w "unrelated.march" "mod Unrelated do\n  fn noise() : Int do 2 end\nend\n";
+  check "unrelated sibling edited" (step "edit_unrelated") Source_hit "42";
+  (* An `interface` is a global-effect declaration: the resolver now keeps
+     the module, so the old load set is wrong and the key must fall back. *)
+  w "unrelated.march"
+    "mod Unrelated do\n  interface Noisy(a) do\n    fn noisy(x : a) : Int\n  end\nend\n";
+  let (o, _, log) = step "global_effect" in
+  Alcotest.(check bool) ("a sibling that gains a global-effect decl is not a source-level hit\n" ^ log)
+    true (o <> Source_hit);
+  (* A loaded file's bytes are in the key. *)
+  w "helpers.march" "mod Helpers do\n  fn twice(n : Int) : Int do n * 2 + 1 end\nend\n";
+  check "loaded sibling edited" (step "edit_helpers") Full "43"
+
+let test_depend_mode_new_sibling_imported () =
+  require_compiler ();
+  with_scratch @@ fun dir ->
+  let lib = Filename.concat dir "lib" and app = Filename.concat dir "app" in
+  Unix.mkdir lib 0o755; Unix.mkdir app 0o755;
+  write_file (Filename.concat lib "helpers.march")
+    "mod Helpers do\n  fn twice(n : Int) : Int do n * 2 end\nend\n";
+  write_file (Filename.concat app "main.march") main_src;
+  let build name =
+    let log = Filename.concat dir (name ^ ".log") in
+    let cmd = Printf.sprintf
+        "cd %s && env HOME=%s MARCH_LIB_PATH=%s %s --compile -o out main.march > %s 2>&1"
+        (Filename.quote app) (Filename.quote (Filename.concat dir "home"))
+        (Filename.quote lib) (Filename.quote compiler_exe) (Filename.quote log) in
+    if Sys.command cmd <> 0 then Alcotest.failf "%s: compile failed:\n%s" name (read_file log);
+    run_out app in
+  Alcotest.(check string) "cold: Helpers comes from MARCH_LIB_PATH" "42" (build "cold");
+  Alcotest.(check string) "warm" "42" (build "warm");
+  (* A new sibling in the entry's own directory is found first and replaces
+     the library's Helpers.  It is a NEW file in a walked directory, so the
+     recorded load set is no longer trusted; a stale hit would print 42. *)
+  write_file (Filename.concat app "helpers.march")
+    "mod Helpers do\n  fn twice(n : Int) : Int do n * 3 end\nend\n";
+  Alcotest.(check string) "a new sibling that is imported is picked up" "63" (build "new_sibling")
+
 let tests =
   [ Alcotest.test_case "B7.1: a cache hit replays the build's warnings" `Slow
       test_replay_diagnostics_on_hit;
+    Alcotest.test_case "B7.2: editing an unloaded sibling is still a source-level hit" `Slow
+      test_depend_mode_unrelated_sibling;
+    Alcotest.test_case "B7.2: a new sibling that becomes imported is not a stale hit" `Slow
+      test_depend_mode_new_sibling_imported;
   ]

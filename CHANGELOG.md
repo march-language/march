@@ -248,6 +248,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Editing a file the build does not use no longer invalidates the compile
+  cache.** The cache used to key on every `.march` file in the entry's
+  directory and in `MARCH_LIB_PATH`. It now keys on the files the previous
+  build actually loaded, and falls back to the full set whenever an edit could
+  change which files are loaded. That covers a new file in one of those
+  directories, and an unloaded file that gains an `impl`, an `interface` or a
+  name another file mentions.
 - **`RingBuf` is linear: every operation consumes the buffer and hands it
   back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
   `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer
