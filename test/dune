@@ -12860,3 +12860,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (libraries march_test_helpers alcotest yojson unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
  (action (run %{test} -e)))
+
+;  Nested constructor pattern on a ctor name a stdlib type also declares
+; (specs/progress/2026-10-07-nested-pattern-ctor-name-collision-miscompile.md).
+; A user `type Tree = Leaf | Node(..)` collides with stdlib OrderedMap.Tree's
+; `Leaf`/`Node`; a nested `Node(Leaf, _, Leaf)` used to take the wrong arm when
+; compiled. The .expected file IS the interpreter's output.
+(rule
+ (targets nested_pattern_ctor_name_collision nested_pattern_ctor_name_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nested_pattern_ctor_name_collision.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nested_pattern_ctor_name_collision
+        native/nested_pattern_ctor_name_collision.march)
+   (with-stdout-to nested_pattern_ctor_name_collision.out
+        (system "./nested_pattern_ctor_name_collision")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_pattern_ctor_name_collision.expected nested_pattern_ctor_name_collision.out)))
