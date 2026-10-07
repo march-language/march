@@ -1030,8 +1030,19 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
                     | Some Obligation.Violated ->
                       Some
                         (`Too_weak
-                          (Printf.sprintf "`fn %s -> %s` does not imply `%s`" y (pred_str body)
-                             (pred_str dpred)))
+                          (let source =
+                             (* Name what the user wrote: a named predicate
+                                or callback by its name, a lambda as itself. *)
+                             match
+                               Option.bind
+                                 (Refine_abstract.definer_index ~is_known:known_predicate_fn fd p)
+                                 (List.nth_opt args)
+                             with
+                             | Some (A.EVar { A.txt = g; _ }) ->
+                               Printf.sprintf "`%s` (`%s`)" g (pred_str body)
+                             | _ -> Printf.sprintf "`fn %s -> %s`" y (pred_str body)
+                           in
+                           Printf.sprintf "%s does not imply `%s`" source (pred_str dpred)))
                     | _ -> Some `Undecided
                   end))
         | _ -> None))
