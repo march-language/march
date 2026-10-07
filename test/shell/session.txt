@@ -1,0 +1,15 @@
+1 + 2
+List.range(1, 100) limit: 5
+List.range(1, 100)
+let xs = List.range(1, 10)
+List.length(xs)
+List.map(xs, fn x -> x * x) limit: 3
+println("hi from the shell")
+Actor.list(intro)
+let c = Actor.pid_from_int(intro, 0)
+send(c, Bump(41))
+Actor.inspect_state(debug, c, 500)
+panic("deliberate")
+List.head(List.filter(xs, fn x -> x > 100))
+nosuchfn(1)
+2 + 2

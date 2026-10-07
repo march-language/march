@@ -18,6 +18,11 @@ let dump_role_authority = ref false
 let dump_phases    = ref false
 let do_timings     = ref false
 let emit_llvm      = ref false
+(* `march --shell <socket> app.march`: a remote shell on the node serving
+   that `<reload socket>.shell` (bin/shell_cmd.ml). *)
+let shell_socket   : string option ref = ref None
+let shell_timeout_ms = ref 10_000
+let shell_inputs   : string option ref = ref None
 (* --dump-impl-hashes: write <basename>.hashes beside the .ll, one line per
    post-TIR definition `symbol<TAB>impl_hash<TAB>sig_hash`, sorted by symbol.
    Read-only view of the CAS hashing (Pipeline.hash_module); consumed by

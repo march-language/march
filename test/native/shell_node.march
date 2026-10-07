@@ -1,0 +1,22 @@
+-- The node for test/shell_check.ml: a --hot-reload --signing-pubkey build
+-- whose shell listener (runtime/march_shell.c) runs signed fragments.
+-- Prints "ready" and sleeps; the checker kills it.
+mod Main do
+  needs IO.Console
+  needs IO.Clock
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+    let c = spawn(Counter)
+    send(c, Bump(1))
+    println("ready")
+    sleep_ms(120000)
+  end
+end

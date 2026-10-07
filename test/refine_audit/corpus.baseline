@@ -514,6 +514,8 @@ native_shadow_selfref_let: coverage audit (user + stdlib): 123 enforced, 0 inert
 native_shadow_selfref_let: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shadowed_builtin_name: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_shadowed_builtin_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_shell_node: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_shell_node: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_show_list_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_show_list_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_signal_term_suppress: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

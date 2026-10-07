@@ -28,6 +28,17 @@ git log is authoritative for exact commits.
   from (monomorphisation, lambda lifting, fusion, specialisation). Off by
   default; the emitted code is unchanged when off. `--dump-provenance` prints
   the same table as text. Distinct from `--debug`, the interpreter's debugger.
+- **A remote shell on a running node: `forge shell` and `forge rpc`.**
+  Against a node built with `--hot-reload --signing-pubkey`, `forge shell`
+  (or `march --shell <reload socket>.shell app.march`) typechecks the
+  project once. It then compiles each input into a small signed library that
+  the node loads and runs as a task. `forge rpc 'expr'` runs one input and
+  exits 1 if it did not run. It prints the result
+  and anything the input printed. `let` bindings persist across inputs; a
+  trailing `limit: N` shortens long lists. Capabilities are pre-bound
+  (`console`, `clock`, `intro`, `debug`), and the node allows only those in
+  its `$MARCH_SHELL_POLICY` file. A panic or a timeout ends only that input,
+  and a deploy ends the session. Every input is audited with its source.
 - **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
   `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
   line per post-TIR definition, sorted, straight from the CAS hashing that keys
@@ -263,6 +274,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- A green thread started from a runtime thread that is not a scheduler (the
+  hot-reload server's drain, the new shell listener) no longer inherits that
+  thread's blocked signals. With SIGSEGV blocked, the first time its stack
+  had to grow killed the whole process silently on Linux.
+- A call of another module's function with too few arguments
+  (`List.map([1, 2])`) is now a type error. It used to typecheck, then fail
+  at run time: an `arity mismatch` panic interpreted, a crash compiled, and a
+  crash of the whole REPL session.
 - **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
   variable alias used to drop every fact about its value (`let b = a + 0`
   kept them), so `take_pos(b)` was skipped even when `a` was a refined

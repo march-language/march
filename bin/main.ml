@@ -2617,6 +2617,14 @@ let compile filename =
       if is_user_file d then
         Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
     ) diags;
+  (* --shell: the program typechecked as the node's build did; hand it to the
+     remote shell instead of running or compiling it (bin/shell_cmd.ml). *)
+  (match !shell_socket with
+   | Some socket ->
+     if frontend_rejected then exit 1;
+     Shell_cmd.run ~socket ~program:desugared ~type_map ~tc_env:typecheck_env
+       ~timeout_ms:!shell_timeout_ms ~inputs:!shell_inputs
+   | None -> ());
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
   (* --jit: replace the tree-walking interpreter with the in-process ORC JIT
      for this run.  Every diagnostic above has already been produced and
@@ -3668,6 +3676,7 @@ let compile filename =
               ^ (opt_file2 ffi_c2)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_shell.c")     else "")  (* shell listener: signed EVAL of fragments *)
               ^ (if not !compile_so then
                    opt_file2 blake3_c2 ^ opt_file2 blake3_impl_c2
                    ^ opt_file2 blake3_dispatch_c2 ^ opt_file2 blake3_portable_c2
@@ -5361,6 +5370,12 @@ let () =
      " Emit function-level DWARF (DISubprogram per March fn, !march.provenance) and link with -g");
     ("--dump-provenance", Arg.Set dump_provenance,
      " Print the fn-name -> origin provenance table after the TIR pipeline (with --emit-llvm/--compile/--dump-tir)");
+    ("--shell",      Arg.String (fun p -> shell_socket := Some p),
+     "<socket> A remote shell on the node serving <socket> (its `<reload socket>.shell`): typecheck the program once, then compile each input into a signed fragment the node runs");
+    ("--shell-timeout-ms", Arg.Int (fun n -> shell_timeout_ms := n),
+     "<ms> With --shell: how long each input may run on the node (default 10000, max 30000)");
+    ("--shell-inputs", Arg.String (fun f -> shell_inputs := Some (In_channel.with_open_bin f In_channel.input_all)),
+     "<file> With --shell: read the inputs from <file>, one per line, instead of the terminal");
     ("--dump-impl-hashes", Arg.Set dump_impl_hashes,
      " With --emit-llvm/--compile: write <file>.hashes (symbol, impl_hash, sig_hash per post-TIR def, sorted)");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");

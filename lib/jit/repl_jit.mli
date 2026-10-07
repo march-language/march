@@ -111,3 +111,50 @@ val run_program :
 
 (** Clean up: close all open dl handles, remove temp files. *)
 val cleanup : t -> unit
+
+(** {2 Shell fragments}  (R6 of specs/plans/2026-09-28-observe-recon-shell-plan.md)
+
+    Compile shell input into self-contained fragment .so files for a running
+    node (runtime/march_shell.c) instead of running them here. *)
+
+(** The name of the function a shell fragment module defines for its input. *)
+val shell_entry_fn : string
+
+(** A context for shell fragments: no runtime is loaded in this process. *)
+val create_shell : ?clang:string -> unit -> t
+
+(** The first slot of the range the node gave this session. *)
+val shell_set_slot_base : t -> int -> unit
+
+(** Once per session: adopt the program's type definitions (actor message
+    types, constructor numbering) for every later fragment. *)
+val shell_prepare :
+  t ->
+  program:March_ast.Ast.module_ ->
+  type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
+  unit
+
+(** Bind [name] to the next slot, of TIR type [ty], for later inputs. *)
+val shell_bind_slot : t -> name:string -> ty:March_tir.Tir.ty -> int
+
+(** Bind [name] to an existing [slot] (replacing that slot's other binding). *)
+val shell_name_slot : t -> name:string -> slot:int -> ty:March_tir.Tir.ty -> unit
+
+type shell_fragment = {
+  sf_so    : string;
+  sf_entry : string;
+  sf_ret   : March_tir.Tir.ty;
+}
+
+(** Typecheck and compile one input (a module whose [main] is the input)
+    against the program the node runs.  [store_as] makes it an init fragment
+    that stores its value in that slot. *)
+val shell_compile :
+  ?triple:string ->
+  t ->
+  tc_env:March_typecheck.Typecheck.env ->
+  program_decls:March_ast.Ast.decl list ->
+  program_type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
+  ?store_as:int ->
+  March_ast.Ast.module_ ->
+  shell_fragment
