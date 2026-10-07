@@ -65,6 +65,23 @@ let typed_ledger src =
       | _ -> (p, v, s, rs))
     (0, 0, 0, []) (March_refinecheck.Obligation.all ())
 
+(* Every obligation of a TYPED check as (callee, verdict slug, reason slug or
+   ""), in record order.  For asserting on ONE callee's verdicts when the
+   whole-module triple would hide which obligation moved. *)
+let typed_obligations (src : string) : (string * string * string) list =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_typed src);
+  List.map
+    (fun (o : March_refinecheck.Obligation.t) ->
+      let open March_refinecheck.Obligation in
+      ( o.callee
+      , verdict_name o.verdict
+      , match o.verdict with Skipped r -> reason_name r | _ -> "" ))
+    (March_refinecheck.Obligation.all ())
+
+let verdicts_of (src : string) (callee : string) : string list =
+  List.filter_map (fun (c, v, _) -> if c = callee then Some v else None) (typed_obligations src)
+
 (* Same as [has_refine_error_d], but parsed AS IF it came from [file] and
    checked with [stdlib_files] declared as the standard library's own sources.
    Both are needed to exercise the ENABLING branch of the `List.length` measure
@@ -17365,6 +17382,50 @@ let caller_sorts_suite =
    (specs/plans/set-refinements-strengthening-plan.md step 1.0).  The first
    case proves the counter is live on a known-malformed shape, and undoes its
    own contribution so the second case measures only the rest of the run. *)
+(* A callback's codomain may name its domain's binder:
+   `keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}`.  [callback_sig_of_ty]
+   names the parameter `$cb_arg` but kept `x` in the return predicate, so
+   [postcond_of] classified it Unusable and a guard `if keep(h)` taught
+   nothing.  CB1 is the flagship (RED before: every "return of keep_pos" is
+   skipped); CB2 is its negative bracket — on the other branch the guard's
+   NEGATION holds, so a positive-only tail there is a definite violation. *)
+let callback_binder_suite =
+  [ gated "a guard calling a callback learns its codomain fact" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod CB1 do
+  fn keep_pos(xs : List(Int), keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : List({Int | _ > 0}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do Cons(h, keep_pos(t, keep)) else keep_pos(t, keep) end
+    end
+  end
+end|}
+            "return of keep_pos"
+        in
+        Alcotest.(check bool) "some return obligation" true (vs <> []);
+        Alcotest.(check (list string)) "all proved" (List.map (fun _ -> "proved") vs) vs);
+
+    gated "the fact holds only on the guarded branch" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod CB2 do
+  fn keep_pos(xs : List(Int), keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : List({Int | _ > 0}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do keep_pos(t, keep) else Cons(h, keep_pos(t, keep)) end
+    end
+  end
+end|}
+            "return of keep_pos"
+        in
+        (* The else branch knows `not keep(h)`, i.e. `h <= 0` through the
+           contract, so `Cons(h, …)` there DEFINITELY breaks `_ > 0`: a
+           violation, not merely an unproved tail.  The guard's fact is
+           confined to its branch, and its negation reaches the other. *)
+        Alcotest.(check bool) "not all proved" true (List.exists (fun v -> v <> "proved") vs);
+        Alcotest.(check bool) "the else-branch Cons is a violation" true (List.mem "violated" vs)) ]
+
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
         let before = !March_refine.Solver.malformed_count in
@@ -18154,4 +18215,5 @@ let () =
       ("array-contract-followups", array_followups_suite);
       ("wrapper-contracts", wrapper_contracts_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
+      ("callback-binder", callback_binder_suite);
       ("z3-well-formed", z3_wellformed_suite) ]
