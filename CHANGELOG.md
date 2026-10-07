@@ -25,6 +25,13 @@ git log is authoritative for exact commits.
   carries it, and the LSP links codes to their page. `march --explain <code>`
   prints an explanation with a failing and a fixed program; the ten most common
   codes have pages so far (also on the site under `docs/errors/`).
+- **`List.filter` keeps what its predicate says.** `sum_pos(List.filter(ys, fn y -> y > 0))`
+  now proves a `List({Int | _ > 0})` demand, directly or through a `let`, and
+  combines with the input's own element refinement. A predicate too weak for
+  the demand is reported as `abstract-refinement-too-weak` (an error only under
+  `cap verified`). This is the first *abstract refinement* (a refinement
+  parameterised by a predicate), and user functions can declare one the same
+  way; see "Abstract refinements" in the refinement types reference.
 - **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
   March function gets a `DISubprogram` at its defining line (lifted lambdas at
   the lambda's line, specialisations at the generic's), and the link gets `-g`,
@@ -308,6 +315,15 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- Compiled programs no longer risk a use-after-free when two scheduler threads
+  touch records of a not-yet-seen shape at the same time. Registering a new
+  record shape could free the shape table while another thread was reading a
+  field through it (seen as an ASAN heap-use-after-free in a cluster node's
+  state drop).
+- A comment-only edit is a compile-cache hit again. Since the `--rc-trace` change, a
+  `--compile` whose typed IR was unchanged printed `compiled out (cached)` and then
+  emitted LLVM IR, ran clang and printed `compiled out` anyway, so the hit saved
+  nothing; it now stops at the cache lookup.
 - A green thread started from a runtime thread that is not a scheduler (the
   hot-reload server's drain, the new shell listener) no longer inherits that
   thread's blocked signals. With SIGSEGV blocked, the first time its stack
@@ -343,7 +359,16 @@ git log is authoritative for exact commits.
   component by address instead of by value, so `(1, 2.5) == (1, 2.5)` was
   false in compiled code (for example inside `List.member`). Tuples are still
   not ordered with `<`.
+- **A nested type named like a runtime type no longer crashes when it is matched.** A
+  module-local `type Down = Down(Int)` (or another name the runtime reserves) was built
+  one way and read another in compiled code, a segfault on the first `match`.
 
+- **No false refinement error for a lambda that uses a local.** A lambda passed
+  where a refined return is expected (`ap(fn y -> h(y), 1)` with
+  `f : (Int) -> {Int | _ > 0}`) that called or read a parameter or `let` of the
+  enclosing function could be reported as a definite violation, with a
+  counterexample computed from a module-level function of the same name. Such a
+  lambda is now left unchecked (a recorded skip), as intended.
 - A `--hot-reload` build no longer leaks a small object each time it calls a
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary
@@ -2507,6 +2532,15 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Agent debugging guidance.** A `march-debug` skill maps each symptom
+  (compiled/interpreted divergence, crash, leak, slow compile, stale cache, red
+  CI, "prove this refactor moved nothing") to the first command and how to read
+  it; a `steward` skill records the known CI flakes and the one-re-run policy,
+  how to find the real failure in the macOS `all` log, and what CI enforces
+  (including registering a new `bench/*.march` in `test/test_bench_gate.ml`).
+  `CLAUDE.md` gains a short "When something breaks" pointer, and a hook prints a
+  one-line hint after a failed compile, test or build. doc-lint now also checks
+  `scripts/*.sh`/`*.py` pointers in the current docs and the skills.
 - **Data-race freedom, written down.** `actors.md` says what a message may
   carry (a linear value moves, everything else is immutable or copy-on-write),
   `linear-types.md` has a `RingBuf` section and the module-level `let` rule,

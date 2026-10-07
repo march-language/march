@@ -300,3 +300,34 @@ let check (errctx : Err.ctx) ~(is_known : string -> bool) (fd : A.fn_def) : unit
               refinement applies directly to the binder in scope."
              inner))
     nested
+
+(* Which parameter's type DEFINES abstract refinement [p] (holds its Definer
+   occurrence)?  Counted over the first clause's parameters, patterns
+   included, so the index lines up with a call's argument list. *)
+let definer_index ~(is_known : string -> bool) (fd : A.fn_def) (p : string) : int option =
+  if not (List.mem p (names ~is_known fd)) then None
+  else
+    match fd.A.fn_clauses with
+    | [] -> None
+    | c :: _ ->
+      let defines (fp : A.fn_param) =
+        match fp with
+        | A.FPNamed prm | A.FPDefault (prm, _) ->
+          let acc = ref [] in
+          Option.iter (fun t -> walk_ty ~role:Negative t acc) prm.A.param_ty;
+          List.exists (fun o -> o.occ_name = p && o.occ_role = Definer) !acc
+        | A.FPPat _ -> false
+      in
+      let rec find i = function
+        | [] -> None
+        | fp :: rest -> if defines fp then Some i else find (i + 1) rest
+      in
+      find 0 c.A.fc_params
+
+(* The element type [p] is applied at in the RETURN (its first Positive
+   occurrence's base), e.g. "a" for `List({a | p(_)})`. *)
+let positive_base ~(is_known : string -> bool) (fd : A.fn_def) (p : string) : string option =
+  match List.assoc_opt p (collect ~is_known fd) with
+  | None -> None
+  | Some occs ->
+    List.find_map (fun o -> if o.occ_role = Positive then Some o.occ_base else None) occs

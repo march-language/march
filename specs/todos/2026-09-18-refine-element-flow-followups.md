@@ -21,8 +21,9 @@ not do"; remove the bullet there when closing one.
    2026-09-21**: it was a live soundness bug (a false relational postcondition
    proved), fixed at the source in `structural_subvars` for all three
    consumers; see `specs/progress/2026-09-21-structural-components-trusted-by-name.md`.
-6. **Abstract refinements**, so `filter` can produce `List({Int | p})` from a
-   predicate. A new mechanism in the logic, not plumbing; its own design —
-   written 2026-09-20: `specs/2026-09-20-abstract-refinements-design.md`
-   (four phases, one PR each; phase 2 is the one that closes this item and the
-   "`filter` does not produce a refinement it was not given" bullet).
+6. ~~**Abstract refinements**, so `filter` can produce `List({Int | p})` from a
+   predicate.~~ **Closed 2026-10-06** by phase 2 of
+   `specs/2026-09-20-abstract-refinements-design.md`; see
+   `specs/progress/2026-10-06-abstract-refinements-phase2.md`. Phases 3
+   (named predicates, more stdlib) and 4 (sugar) remain, tracked by that
+   design; arity > 1 by `2026-09-20-abstract-refinements-multi-arg-callbacks.md`.

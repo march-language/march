@@ -3519,8 +3519,11 @@ let compile filename =
           Printf.eprintf "compiled %s (cached)\n" out_bin
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
-             call clang, then cache the binary *)
-          March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None;
+             call clang, then cache the binary.  [let () = … in], not a
+             bare [;]: [;] binds looser than if/else, which would leave
+             only this assignment in the else branch and run emission +
+             clang on every cache hit too. *)
+          let () = March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None in
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           let ir = finish_ir target ir in
