@@ -10938,6 +10938,50 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r owned drops freed < owned_call_drop_fusion_llvm_check.out; \
     test \"$owned\" -ge 1 -a \"$drops\" -eq 0 -a \"$freed\" -ge 1 || { echo \"expected churn to call check\\$own0 and no __drop\\$ helper, and check\\$own0 to release with decrc_freed (found owned=$owned drops=$drops freed=$freed)\" >&2; exit 1; }")))
 
+; Owned-call drop fusion, a dying variable at two borrowed positions of one
+; call inside an owned clone (specs/progress/2026-10-07-owned-call-dup-arg.md):
+; the clones' loops must stay loops (1 000 000 rows) and the churn loop flat.
+(rule
+ (targets owned_call_dup_arg owned_call_dup_arg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_dup_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o owned_call_dup_arg
+        native/owned_call_dup_arg.march)
+   (with-stdout-to owned_call_dup_arg.out
+        (system "./owned_call_dup_arg")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/owned_call_dup_arg.expected owned_call_dup_arg.out)))
+
+; Shape: the mutual loop's clone mg$own0 and the self loop's clone
+; dd$own0_1_2 exist and neither calls itself (both loop through a TCO back
+; edge).  Before the fix mg$own0 called itself followed by a drop of the row.
+(rule
+ (targets owned_call_dup_arg_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_dup_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/owned_call_dup_arg.march)
+   (with-stdout-to owned_call_dup_arg_llvm_check.out
+    (run bash -c
+     "f=native/owned_call_dup_arg.ll; awk '/^define .*@mg\\$own0\\(/,/^}/' $f > mg_ocda.ll; awk '/^define .*@dd\\$own0_1_2\\(/,/^}/' $f > dd_ocda.ll; echo \"$(grep -c '^define' mg_ocda.ll) $(grep -c 'call i64 @mg\\$own0(' mg_ocda.ll) $(grep -c '^define' dd_ocda.ll) $(grep -c 'call i64 @dd\\$own0_1_2(' dd_ocda.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps owned_call_dup_arg_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r mg mgself dd ddself < owned_call_dup_arg_llvm_check.out; \
+    test \"$mg\" -eq 1 -a \"$mgself\" -eq 0 -a \"$dd\" -eq 1 -a \"$ddself\" -eq 0 || { echo \"expected mg\\$own0 and dd\\$own0_1_2 to exist and loop without calling themselves (found mg=$mg mgself=$mgself dd=$dd ddself=$ddself)\" >&2; exit 1; }")))
+
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
 ; native_int_arr_map2/native_float_arr_map2 functions' check, since the

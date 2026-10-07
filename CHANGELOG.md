@@ -259,7 +259,8 @@ git log is authoritative for exact commits.
   `check(make(d))` used to walk the tree twice, once in `check` and once to
   free it; the call now goes to a consuming copy of `check` that frees each
   node as it passes. binary_trees is about 7% faster (75 to 70 ms median,
-  Apple M3 Max). `MARCH_NO_OWNED_CALLS=1` turns it off.
+  Apple M3 Max). A loop that passes the same value to two such parameters
+  stays a loop. `MARCH_NO_OWNED_CALLS=1` turns it off.
 - **`RingBuf` is linear: every operation consumes the buffer and hands it
   back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
   `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer
