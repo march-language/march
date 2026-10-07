@@ -270,6 +270,43 @@ let run_fixture ?(extra_flags = "") main_exe name =
     rm_rf_temp_dir (Filename.dirname ll_path);
     result
 
+(** Worker count for the corpus walk: [MARCH_IR_VERIFY_JOBS] if set, else
+    [Domain.recommended_domain_count ()] capped at 8. *)
+let verify_jobs () =
+  match Option.bind (Sys.getenv_opt "MARCH_IR_VERIFY_JOBS") int_of_string_opt with
+  | Some n when n >= 1 -> n
+  | _ -> max 1 (min 8 (Domain.recommended_domain_count ()))
+
+(** [List.map f xs] over [verify_jobs ()] domains, results in input order.
+    The corpus walk was the codegen suite's long pole: two serial passes
+    over ~350 fixtures took ~80% of run_codegen's wall time (CI audit,
+    2026-10-07) while each worker only waits on a subprocess. Safe because
+    each fixture gets its own temp dir and subprocesses, the verifier tool is
+    resolved before any domain spawns, and [Filename.temp_file]'s PRNG is
+    domain-local. An exception from [f] (e.g. [Alcotest.failf] from
+    [rm_rf_temp_dir]) is re-raised for the first failing input, after every
+    domain has been joined. *)
+let parallel_map f xs =
+  let input = Array.of_list xs in
+  let n = Array.length input in
+  let output = Array.make n None in
+  let next = Atomic.make 0 in
+  let rec worker () =
+    let i = Atomic.fetch_and_add next 1 in
+    if i < n then begin
+      output.(i) <- Some (try Ok (f input.(i)) with e -> Error e);
+      worker ()
+    end
+  in
+  let domains = List.init (max 0 (min n (verify_jobs ()) - 1)) (fun _ -> Domain.spawn worker) in
+  worker ();
+  List.iter Domain.join domains;
+  Array.to_list output
+  |> List.map (function
+    | Some (Ok r) -> r
+    | Some (Error e) -> raise e
+    | None -> assert false)
+
 (** GREEN on the real corpus: every test/native/*.march fixture (excluding
     JS-target-only ones — see [is_js_only_fixture]) emits verifier-clean
     LLVM IR. Aggregated: collects every failing fixture before reporting,
@@ -291,7 +328,7 @@ let rec test_native_corpus_ir_is_verifier_clean ?(extra_flags = "") () =
     assert_excluded_are_js_target_only excluded;
     Alcotest.(check bool) "at least one native fixture found to gate" true
       (List.length fixtures > 0);
-    let results = List.map (run_fixture ~extra_flags main_exe) fixtures in
+    let results = parallel_map (run_fixture ~extra_flags main_exe) fixtures in
     let emit_failures =
       List.filter_map (function
         | EmitFailed (name, rc, output) -> Some (name, rc, output)
