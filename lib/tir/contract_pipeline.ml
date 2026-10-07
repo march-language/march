@@ -57,7 +57,15 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(after_fusion = fun _ -> ()) ?(before_perceus = fun ~k_table:_ _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
     ?(wasm_island = false) ?(is_js = false) ?(hot_reload = None)
-    ?iface_methods ?(decls = []) ~opt (tir : Tir.tir_module) : result =
+    ?iface_methods ?(decls = []) ?(stamp_metrics = false)
+    ~opt (tir : Tir.tir_module) : result =
+  (* A6: with [stamp_metrics] (the driver passes it under --timings) each
+     stamp also carries the module's Tir_metrics counts at that point. *)
+  let stamp_tir name (m : Tir.tir_module) =
+    if stamp_metrics then
+      stamp (name ^ "  " ^ Tir_metrics.to_string (Tir_metrics.of_module m))
+    else stamp name
+  in
   (* Provenance completeness: after every pass, any top-level fn still
      without an origin gets one naming that pass (see lib/tir/provenance.ml).
      Hooked on [snap] because every pass already reports to it. *)
@@ -108,7 +116,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   in
   let tir = Mono.monomorphize ?iface_methods tir in
   snap "tir-mono" tir;
-  stamp "mono";
+  stamp_tir "mono" tir;
   (* After mono, update tm_exports to use monomorphized names *)
   let tir =
     if tir.Tir.tm_exports <> [] then begin
@@ -152,11 +160,11 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     if opt && (not is_js) && not (Lazy.force nativearr_fusion_env_disabled)
     then Fusion.run_nativearr tir else tir in
   snap "tir-fusion" tir;
-  stamp "fusion";
+  stamp_tir "fusion" tir;
   after_fusion tir;
   let tir = Defun.defunctionalize tir in
   snap "tir-defun" tir;
-  stamp "defun";
+  stamp_tir "defun" tir;
   (* The per-type table is decided here — after Mono (which instantiates
      generic variants) and Defun (which adds the closure structs), so the
      decision is made on the type list the remaining passes see, and BEFORE
@@ -206,15 +214,15 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = Perceus.perceus ~k_table:k0 ~borrow_map
       ~heap_lambdas:(hot_reload <> None) tir in
   snap "tir-perceus" tir;
-  stamp "perceus";
+  stamp_tir "perceus" tir;
   (* Deep-drop synthesis (lib/tir/drop.ml).  Skipped for the JS target, whose
      runtime is GC'd and ignores RC ops entirely. *)
   let tir = if is_js then tir else Drop.run ~k_table:k0 ~borrow_map tir in
   snap "tir-drop" tir;
-  stamp "drop";
+  stamp_tir "drop" tir;
   let tir = Escape.escape_analysis ~k_table:k0 ~borrow_map tir in
   snap "tir-escape" tir;
-  stamp "escape";
+  stamp_tir "escape" tir;
   let pre_opt = tir in
   before_opt pre_opt;
   (* Extra DCE roots, given by pre-Mono name: expand to every clone whose
@@ -279,7 +287,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   snap "tir-hof-unboxed" tir;
   (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
   if not opt then snap "tir-opt" tir;
-  stamp "opt";
+  stamp_tir "opt" tir;
   (* @[no_alloc]: the last pass before emission, on the exact TIR Llvm_emit
      will consume. *)
   (* Hand the emitter exactly this decision: the same unboxed set the passes
@@ -290,7 +298,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let retaining = Alloc_contract.retaining_fns ~k_table ~decls tir in
   let contract_diags =
     Alloc_contract.check ~decls ~allocating ~retaining ~opt tir in
-  stamp "alloc-contract";
+  stamp_tir "alloc-contract" tir;
   { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table }
 
 (** The allocation contracts, judged without emitting anything: what `march

@@ -34,6 +34,15 @@ git log is authoritative for exact commits.
   compiler error, naming the pass and the function, instead of surfacing later
   as an LLVM, link or runtime failure. It is always on in the compiler's own
   IR test harnesses and its differential oracle.
+- **`scripts/bisect-ir.sh` and `scripts/bisect-output.sh`** find the merge on
+  `main` that changed a program's emitted LLVM IR or its compiled output. Each
+  step runs in a throwaway worktree against that commit's own stdlib and
+  runtime. The result prints the blamed merge and its `specs/progress/` entry.
+  `bisect-ir` ignores the renumbering of compiler-generated names that any
+  stdlib lambda causes.
+- **`--timings` shows per-pass IR counts.** Each compiler pass's line carries
+  the number of functions, allocation sites, RC increments and decrements,
+  reuse tokens and join points at that point.
 - **Every diagnostic has a code, and `march --explain <code>`.** Each error,
   warning and hint ends its first line with its code in brackets
   (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always
