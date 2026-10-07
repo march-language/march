@@ -3,7 +3,7 @@
 -- refinement `p` from an inline lambda at each call, so its result's elements
 -- satisfy the lambda.  Under `cap verified` every obligation must be PROVED,
 -- so exit 0 here means each demand proved, not skipped.  Reject companion:
--- reject/t297 (a weaker lambda).
+-- reject/t309 (a weaker lambda).
 mod AbsFilter do
   cap verified
   fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end

@@ -2,7 +2,7 @@
 -- Abstract refinements, phase 2 (design row n2): `fn y -> y >= 0` admits 0,
 -- which `{Int | _ > 0}` does not.  Not a violation (an empty input is fine);
 -- a too-weak skip, which `cap verified` turns into this error.  Accept
--- companion: accept/t296.
+-- companion: accept/t308.
 mod AbsFilterWeak do
   cap verified
   fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
