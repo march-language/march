@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ----- errors/session_offer_nonexhaustive_1.march
+
+This `match` doesn't handle every branch the peer can choose — missing: :err. [session_offer_nonexhaustive]
+The protocol's `offer` branches are: :ok, :err.
+
+29 |     match lbl do
+               ^^^^^^
+
+
+

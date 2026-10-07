@@ -1,0 +1,2 @@
+exit: 1
+errors/endpoints_label_invalid_1.march:12:12: error: Protocol `P`: the branch label `go` already names this message (`Go`), so the step cannot carry a label of its own. Remove `item:`. [endpoints_label_invalid]

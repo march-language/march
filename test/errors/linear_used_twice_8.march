@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: is used more than once
+mod Main do
+  needs IO.Console
+  -- Same hole through a NESTED module, the shape `@[endpoints]` generates.
+  -- lib/desugar/desugar_endpoints.ml inserts its modules ahead of the user's
+  -- first ordinary declaration to dodge this; with pass 1 seeding the
+  -- registry the placement is no longer load-bearing.
+  fn main(c : Cap(IO.Console)) do
+    let a = G.S(1)
+    let x = G.step(a)
+    let y = G.step(a)
+    print_line(int_to_string(x + y))
+  end
+  mod G do
+    always_linear type S = S(Int)
+    fn step(s : S) : Int do match s do S(e) -> e end end
+  end
+end

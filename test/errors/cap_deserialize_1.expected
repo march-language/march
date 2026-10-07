@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ----------------- errors/cap_deserialize_1.march
+
+`Cap(IO)` cannot be serialized — a capability may only be received, never constructed. [cap_deserialize]
+hint: `to_json` places no constraint on the type it produces, so it would fabricate authority from data. Receive the capability as a parameter and pass it through instead.
+
+20 |     println(to_json(cap))
+                 ^^^^^^^^^^^^
+
+
+

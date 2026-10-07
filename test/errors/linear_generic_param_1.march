@@ -1,0 +1,15 @@
+mod Main do
+  needs IO.Console
+  always_linear type Token = Token(Int)
+
+  fn consume(t : Token) : Int do
+    match t do Token(n) -> n end
+  end
+
+  fn pass(x) do x end
+
+  fn main(_console : Cap(IO.Console)) do
+    let t = pass(Token(1))
+    println(int_to_string(consume(t)))
+  end
+end

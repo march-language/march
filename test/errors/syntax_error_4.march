@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: I got stuck here
+mod R13ProtocolStepMissingPayloadType do
+  protocol Broken do
+    Client -> Server
+  end
+end

@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_14.march
+
+expected `Pid(a)` but got `Int`. [type_mismatch]
+
+20 |       Some(p) -> println(bool_to_string(is_alive(p)))
+                                                      ^
+
+    This is argument #1 of a function call.
+
+    the expected type comes from here:
+
+20 |       Some(p) -> println(bool_to_string(is_alive(p)))
+                                             ^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

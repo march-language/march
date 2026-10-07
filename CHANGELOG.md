@@ -26,6 +26,12 @@ git log is authoritative for exact commits.
   compiler error, naming the pass and the function, instead of surfacing later
   as an LLVM, link or runtime failure. It is always on in the compiler's own
   IR test harnesses and its differential oracle.
+- **Every diagnostic has a code, and `march --explain <code>`.** Each error,
+  warning and hint ends its first line with its code in brackets
+  (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always
+  carries it, and the LSP links codes to their page. `march --explain <code>`
+  prints an explanation with a failing and a fixed program; the ten most common
+  codes have pages so far (also on the site under `docs/errors/`).
 - **`List.filter` keeps what its predicate says.** `sum_pos(List.filter(ys, fn y -> y > 0))`
   now proves a `List({Int | _ > 0})` demand, directly or through a `let`, and
   combines with the input's own element refinement. A predicate too weak for
@@ -33,6 +39,13 @@ git log is authoritative for exact commits.
   `cap verified`). This is the first *abstract refinement* (a refinement
   parameterised by a predicate), and user functions can declare one the same
   way; see "Abstract refinements" in the refinement types reference.
+- **Cluster name registry tombstones expire.** An unregistered name used to leave a
+  tombstone in every node's registry forever, so a long-running cluster's registry, and
+  every anti-entropy round over it, grew with every name ever unregistered (two per
+  finished session). A tombstone is now dropped 3 hours after it was first seen;
+  `MARCH_REGISTRY_TOMBSTONE_GRACE_MS` or `tombstone_grace_ms` in `ClusterNode.config`
+  changes that. Keep it well above the longest partition the cluster should heal from.
+  Collection starts once every node in a cluster runs this version.
 - **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
   March function gets a `DISubprogram` at its defining line (lifted lambdas at
   the lambda's line, specialisations at the generic's), and the link gets `-g`,
@@ -316,6 +329,17 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A missing `end` is reported at the construct that is missing it.** Instead of
+  "Parse error in declaration" at the end of the file or the next `fn`, the error
+  points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the
+  parser noticed, and it carries a fix that inserts the `end`, which `forge fix`
+  can apply. An `else if` chain one `end` short gets a note explaining that each
+  `if` closes separately.
+- **A program no longer hangs on exit after `ClusterNode.stop` while one of its sessions
+  is finishing.** Stopping the node ended its connection to itself without telling the
+  sessions using it, so a session whose last messages were still in flight could wait
+  for them forever and keep the process alive.
+
 - Compiled programs no longer risk a use-after-free when two scheduler threads
   touch records of a not-yet-seen shape at the same time. Registering a new
   record shape could free the shape table while another thread was reading a
@@ -325,6 +349,11 @@ git log is authoritative for exact commits.
   `--compile` whose typed IR was unchanged printed `compiled out (cached)` and then
   emitted LLVM IR, ran clang and printed `compiled out` anyway, so the hit saved
   nothing; it now stops at the cache lookup.
+- **`typed_array_*` functions no longer leak their argument.** In compiled
+  code, each call to `typed_array_from_list`, `typed_array_length`,
+  `typed_array_get`, `typed_array_map` and the rest of the family leaked the
+  array or list it was given. `DataFrame` columns are built on these.
+
 - A green thread started from a runtime thread that is not a scheduler (the
   hot-reload server's drain, the new shell listener) no longer inherits that
   thread's blocked signals. With SIGSEGV blocked, the first time its stack

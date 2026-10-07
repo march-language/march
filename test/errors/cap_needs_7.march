@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: `Cap(IO)` used in module `Server` but `IO` is not declared in `needs`
+-- Capabilities widening, Task 1 -- subsumption is DIRECTIONAL, not symmetric.
+-- The module declares the NARROW `needs IO.Network`, but the signature uses
+-- the ROOT `Cap(IO)`. `cap_subsumes "IO.Network" "IO"` is false — a child
+-- does not cover its own parent, only the reverse (`cap_ancestors "IO" =
+-- ["IO"]`, `cap_lattice.ml:39-46`, so `"IO.Network"` is never in that list).
+-- Also emits a Check 3 narrowing HINT (`:5652`, "this function takes
+-- `Cap(IO)` ... consider narrowing") ahead of the Check 1 ERROR, but the
+-- pinned substring below is the ERROR text, not the HINT. See
+-- core-march-types.md §2.8.
+mod Server do
+  needs IO.Network
+
+  fn listen(cap : Cap(IO), port : Int) : Int do
+    let _ = cap
+    port
+  end
+end

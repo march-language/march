@@ -1,0 +1,22 @@
+exit: 1
+-- ERROR -------------- errors/no_panic_violation_2.march
+
+`get` in `mod Guarded` (declared `cap no_panic`) contains a non-exhaustive `match`, which panics at runtime when no clause matches. [no_panic_violation]
+
+A `cap no_panic` module must handle every case, or add a `_ -> ...` catch-all arm.
+
+20 |     match opt do
+               ^^^^^^
+
+
+
+-- WARNING -------------- errors/no_panic_violation_2.march
+
+Non-exhaustive pattern match — missing case: None [non_exhaustive_match]
+
+20 |     match opt do
+               ^^^^^^
+
+    Add a branch for this case, or use `_ -> ...` as a catch-all.
+
+

@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: is used more than once
+mod Main do
+  needs IO.Console
+  -- `always_linear` tracking must not depend on declaration order. Before
+  -- 2026-09-11 `env.always_linear_types` was written only by `check_decl`,
+  -- mid-fold, so `main` — checked before the type declaration below — saw an
+  -- ordinary type and this reuse was SILENTLY ACCEPTED. Pass 1 now seeds the
+  -- registry (`always_linear_names`). Sibling witnesses: t192 (drop), t193
+  -- (nested module), accept/t194 (the bare name must not over-fire).
+  fn main(c : Cap(IO.Console)) do
+    let a = S(1)
+    let x = step(a)
+    let y = step(a)
+    print_line(int_to_string(x + y))
+  end
+  fn step(s : S) : Int do match s do S(e) -> e end end
+  always_linear type S = S(Int)
+end

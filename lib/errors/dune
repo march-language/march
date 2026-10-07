@@ -1,3 +1,14 @@
 (library
  (name march_errors)
  (libraries march_ast))
+
+; The `march --explain` pages, embedded so an installed compiler can print
+; them. Source of truth: specs/lang/errors/<slug>.md.
+(rule
+ (targets explain_pages.ml)
+ (deps
+  (glob_files %{project_root}/specs/lang/errors/*.md))
+ (action
+  (with-stdout-to
+   %{targets}
+   (run gen/gen_explain_pages.exe %{deps}))))

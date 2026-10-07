@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: only arguments of type `Cap(IO)`
+mod Main do
+  -- R1 stage D (2026-08-10): the relaxation to `main`'s signature is "one
+  -- capability parameter" -> "any number of capability parameters", NOT
+  -- "arbitrary parameters".
+  --
+  -- A mixed list is rejected because a grant that described only SOME of what
+  -- `main` receives would not be a grant. The runtime supplies one erased
+  -- capability per parameter; an `Int` there has no value to supply and no
+  -- meaning in the grant.
+  needs IO
+
+  fn main(cap : Cap(IO), n : Int) : () do
+    println(int_to_string(n))
+  end
+end

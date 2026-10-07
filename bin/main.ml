@@ -1524,7 +1524,8 @@ let run_test_cmd args =
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
           Printf.eprintf "%s:%d:%d: %s: %s\n"
             d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-            d.span.March_ast.Ast.start_col (severity_word d.severity) d.message
+            d.span.March_ast.Ast.start_col (severity_word d.severity)
+            (March_errors.Errors.headline_with_code d)
         ) (March_errors.Errors.sorted desugar_errors);
       exit 1
     end;
@@ -1661,7 +1662,7 @@ let run_test_cmd args =
         | Ok e -> e
         | Error (d :: _)
           when d.March_errors.Errors.code
-               = Some March_parser.Parse.code_parse_error ->
+               = March_parser.Parse.code_parse_error ->
           failwith ("doctest parse error: " ^ d.March_errors.Errors.message)
         | Error _ ->
           failwith ("doctest parse error in: " ^ src)
@@ -2269,7 +2270,8 @@ let compile filename =
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       Printf.eprintf "%s:%d:%d: %s: %s\n"
         d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-        d.span.March_ast.Ast.start_col (severity_word d.severity) d.message
+        d.span.March_ast.Ast.start_col (severity_word d.severity)
+        (March_errors.Errors.headline_with_code d)
     ) (March_errors.Errors.sorted desugar_errors);
   let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
   stamp "desugar";
@@ -3137,7 +3139,7 @@ let compile filename =
                  cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header span
                in
                March_errors.Errors.error_with_fix ctx ~span
-                 ~code:("cap_ceiling:" ^ cap)
+                 ~code:(March_errors.Code.with_arg March_errors.Code.cap_ceiling cap)
                  ~fix:(March_errors.Errors.FInsert {
                    after_line = span.March_ast.Ast.start_line;
                    text = String.make indent ' ' ^ "needs " ^ cap })
@@ -3272,7 +3274,7 @@ let compile filename =
               message = Printf.sprintf
                   "`%s` is %s; add %s to keep it that way."
                   d.March_tir.Alloc_contract.d_name verdict attr;
-              labels = []; notes = []; code = Some "no_alloc_candidate";
+              labels = []; notes = []; code = March_errors.Code.no_alloc_candidate;
               fix = Some (contract_attr_fix ~src ~filename ~read_file
                             d.March_tir.Alloc_contract.d_decl_span attr) }
           in
@@ -4992,7 +4994,7 @@ let run_check_cmd ?(emit_caps = false) files =
       d.span.March_ast.Ast.start_line
       d.span.March_ast.Ast.start_col
       label
-      d.message
+      (March_errors.Errors.headline_with_code d)
   in
   List.iter (print_diag "warning") user_warnings;
   List.iter (print_diag "error") user_errors;
@@ -5434,6 +5436,9 @@ let () =
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--verify-tir", Arg.Set March_tir.Tir_verify.enabled_flag,
      " Check TIR well-formedness after every pass (scoping and references); a finding is an internal compiler error. Same as MARCH_VERIFY_TIR=1");
+    ("--explain", Arg.String (fun code ->
+         print_string (March_errors.Explain.explain code); exit 0),
+     "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--report-contracts", Arg.Set report_contracts,

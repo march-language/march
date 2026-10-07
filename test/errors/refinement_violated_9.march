@@ -1,0 +1,42 @@
+-- EXPECT-ERROR: refinement violation
+-- The tag composition proved by
+-- `accept/t129_refine_tag_contract_composes_call` has a deliberate limit: it
+-- fires only when the caller's OWN contract already promises the SAME
+-- constructor the callee tests. Here `outer` promises `is_None(_)`, which
+-- says nothing about `is_Some(_)`, so no fact is composed and the bare call
+-- would merely be SKIPPED -- and a skip exits 0, exactly the ambiguity an
+-- accept-only witness cannot resolve.
+--
+-- So this file pins the case that matters: through that same non-composing
+-- contract, the checker must still catch a REAL failure once one exists. The
+-- `None ->` arm narrows `p` to `None` via the ordinary match-narrowing path
+-- fact (`adt-tags`' mechanism), independently of what `outer`'s parameter
+-- refinement promises, so `inner(p)` there is a DEFINITE failure and must be
+-- reported.
+--
+-- If this file ever starts exiting 0, either the tag composition has begun
+-- firing for a constructor the caller never promised (a fact stronger than
+-- the contract -- the false positive this subsystem exists to prevent), or
+-- match narrowing has stopped being read inside a caller that itself carries
+-- a refined parameter.
+mod T130 do
+
+  fn inner(o : {Option(Int) | is_Some(_)}) : Int do
+    match o do
+      Some(v) -> v
+      None    -> panic("none")
+    end
+  end
+
+  fn outer(p : {Option(Int) | is_None(_)}) : Int do
+    match p do
+      None    -> inner(p)
+      Some(_) -> 0
+    end
+  end
+
+  fn main() : Int do
+    outer(None)
+  end
+
+end

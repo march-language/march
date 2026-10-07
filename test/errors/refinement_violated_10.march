@@ -1,0 +1,37 @@
+-- EXPECT-ERROR: refinement violation
+--
+-- `@[trusted]` does NOT rescue a definite violation (§`@[trusted] — a scoped,
+-- loud escape hatch`, 2026-07-30). This is the load-bearing limit stated
+-- alongside the feature: `@[trusted]` accepts an obligation the checker could
+-- not DECIDE (a skip) as an assertion, but a predicate the solver has
+-- PROVED can never hold is a bug in the annotation, not an incompleteness to
+-- wave through. Rescuing it would turn `@[trusted]` into a way to ship a
+-- known-false contract, silently, inside a capability whose entire premise
+-- is "these contracts are a guarantee, not a best effort".
+--
+-- `inner` demands `_ > 0`. `go` is annotated `@[trusted]` and calls
+-- `inner(0 - 5)`, which the solver can definitely refute: this is reported
+-- exactly as it would be with `@[trusted]` removed. Accept companion
+-- `accept/t132_refine_trusted_rescues_cap_verified` is the case
+-- `@[trusted]` DOES help -- an undischargeable SKIP, not a violation.
+--
+-- See specs/lang/refinement-types.md, "`@[trusted]` — a scoped, loud escape
+-- hatch".
+mod T133 do
+
+  cap verified
+
+  fn inner(n : {Int | _ > 0}) : Int do
+    n
+  end
+
+  @[trusted]
+  fn go() : Int do
+    inner(0 - 5)
+  end
+
+  fn main() : Int do
+    go()
+  end
+
+end

@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: This `_` discards the linear value `val`
+mod Main do
+  needs IO.Console
+  -- A wildcard is not a use. `launder` opts in to linear values
+  -- (`linear val : v`) and its body LOOKS like it consumes `val` exactly
+  -- once — the never-used (t215) and used-twice (t263) checks both pass —
+  -- but `let _ = val` DROPS it. Accepted before 2026-09-21, which made one
+  -- generic function enough to launder any linear value in the program out
+  -- of existence. `t203`'s check could not see this one: it judges a
+  -- wildcard by its TYPE, and an opted-in `v` is a plain type variable.
+  always_linear type S1 = S1(Int)
+  fn launder(linear val : v) : Int do
+    let _ = val
+    0
+  end
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(launder(S1(1))))
+  end
+end

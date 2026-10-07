@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: refinement violation
+-- Refinement types: a call through a LOCAL ALIAS of a named function (§2.14
+-- higher-order shapes). `resolve_call` resolves named callees directly, but
+-- `let g = takepos` binds a fresh local name to the same function value;
+-- refinecheck must track that alias and still check `g(-3)` against
+-- `takepos`'s precondition `{Int | _ >= 0}`. Losing this tracking (e.g. on a
+-- refactor of the alias-resolution path) would silently stop checking calls
+-- made through any local binding of a refined function. `-3` is a literal
+-- counterexample.
+mod M do
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn probe() : Int do
+    let g = takepos
+    g(-3)
+  end
+end

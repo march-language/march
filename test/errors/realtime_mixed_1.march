@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: takes `Tagged(_, Realtime)` but also takes `Cap(IO)`
+-- Capabilities widening, Task 3 -- Check 7 (`typecheck.ml:5755-5793`),
+-- realtime exclusion. `Realtime` is not itself pre-registered in
+-- `builtin_types` (`typecheck.ml:1843-1862`); a user declares it as an
+-- ordinary nullary ADT (`type Realtime = Realtime`) so `Tagged(Int, Realtime)`
+-- resolves as a surface type at all -- Check 7's `is_realtime_tagged`
+-- (`typecheck.ml:5760`) matches on the type NAME `"Realtime"` in the second
+-- `Tagged` argument, not on any special built-in identity, so a user-declared
+-- `Realtime` type satisfies it exactly like a hypothetical built-in one
+-- would. `step`'s signature combines a `Tagged(_, Realtime)` parameter with
+-- `Cap(IO)` -- one of the three excluded roots (`Alloc`/`IO`/`Panic`,
+-- `is_excluded_cap`, `typecheck.ml:5763-5765`) -- which Check 7 forbids:
+-- realtime functions cannot hold allocation-, IO-, or panic-capable
+-- capabilities. See core-march-types.md §2.8.9.
+mod RT do
+  type Realtime = Realtime
+
+  needs IO
+
+  fn step(_deadline : Tagged(Int, Realtime), _cap : Cap(IO)) : Int do
+    1
+  end
+end

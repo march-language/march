@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------------- errors/type_mismatch_3.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+4 |     let x = if true do 1 else "no" end
+                                  ^^^^
+
+    Both branches of an if expression must return the same type.
+
+    the expected type comes from here:
+
+4 |     let x = if true do 1 else "no" end
+                           ^
+    run `march --explain type_mismatch`
+
+

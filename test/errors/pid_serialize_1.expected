@@ -1,0 +1,3 @@
+exit: 1
+errors/pid_serialize_1.march:19:9: error: `Pid` cannot be serialized — a local pid only names an actor on this node, so `Hello` cannot derive Json. [pid_serialize]
+hint: carry a `GlobalPid.Pid` (node id, local pid, creation) in `Hello` instead; it is a plain record and derives Json.

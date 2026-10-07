@@ -1,0 +1,28 @@
+-- EXPECT-ERROR: `Cap(IO.FileRead)` used in module `NestedCap` but `IO.FileRead` is not declared in `needs`
+-- `needs` coverage, CAPABILITY NESTED IN A CONTAINER (2026-08-05).
+--
+-- reject/t148 puts the capability directly in a record field. This one buries
+-- it one constructor deep, so it passes only if the type walk RECURSES
+-- through type arguments rather than pattern-matching the field type against
+-- a bare `Cap(_)`. A shallow check reads `List(_)`, sees no capability, and
+-- reports nothing.
+--
+-- This is also the shape a real evasion would take: `List(Cap(X))`,
+-- `Option(Cap(X))` or `Map(String, Cap(X))` are how a capability actually
+-- travels in a data structure, and none of them are literally `Cap(X)`.
+--
+-- (An ALIAS right-hand side — the third arm of `type_def` — is walked by
+-- Cap_surface_ty.caps_in_type_def for completeness but has no reject witness
+-- here, because it has no source spelling: `type T = Cap(IO.FileRead)` parses
+-- as a VARIANT declaring a constructor named `Cap`, not as an alias, and
+-- `type T = (Cap(IO.FileRead), Int)` does not parse at all. Verified
+-- 2026-08-05; the coverage is defensive, not witnessed.)
+mod NestedCap do
+  needs IO.Console
+
+  type Bag = { label : String, items : List(Cap(IO.FileRead)) }
+
+  fn main() do
+    println("a capability this module never declared, one level down")
+  end
+end

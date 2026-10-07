@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: The linear value `m` is consumed on some branches but not others
+mod Main do
+  needs IO.Console
+  -- The Some branch retires the session but returns an update that does not
+  -- store the map back: every other session in it would be dropped.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  actor Host do
+    state { done : Int, sessions : LinearMap(Int, S1) }
+    init  { done: 0, sessions: LinearMap.empty_int() }
+    on Close(sid : Int) do
+      let (got, m) = LinearMap.take(state.sessions, sid)
+      match got do
+        None -> { state with sessions: m }
+        Some(s) -> { state with done: state.done + sink(s) }
+      end
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let h = spawn(Host)
+    send(h, Close(1))
+    println("ok")
+  end
+end

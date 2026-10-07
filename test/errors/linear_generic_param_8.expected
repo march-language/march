@@ -1,0 +1,22 @@
+exit: 1
+-- ERROR ------------ errors/linear_generic_param_8.march
+
+`RingBuf(a)` is linear, but `Vault.set` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
+Consume the value here instead, or, if `Vault.set` uses that parameter exactly once, mark it `linear` where `Vault.set` is defined (`linear x : a`).
+
+12 |     Vault.set(t, "k", rb)
+         ^^^^^^^^^
+
+    run `march --explain linear_generic_param`
+
+
+-- ERROR ------------ errors/linear_generic_param_8.march
+
+`RingBuf(a)` is linear, but `Vault.get` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
+Consume the value here instead, or, if `Vault.get` uses that parameter exactly once, mark it `linear` where `Vault.get` is defined (`linear x : a`).
+
+13 |     match Vault.get(t, "k") do
+               ^^^^^^^^^
+
+
+

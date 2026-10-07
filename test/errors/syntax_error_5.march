@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: I got stuck here
+-- A message label goes BEFORE the step (`item: Prod -> Cons : Int`), not
+-- between the arrow and the receiver: `protocol_step`'s labelled
+-- alternative is `lower_name COLON upper ARROW upper COLON ty`, so after
+-- `Prod ->` the parser needs an upper-case receiver and finds `item`.
+mod R17ProtocolLabelAfterArrow do
+  protocol Broken do
+    Prod -> item: Cons : Int
+  end
+end

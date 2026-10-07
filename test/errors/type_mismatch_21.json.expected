@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/type_mismatch_21.march","start_line":24,"start_col":24,"end_line":24,"end_col":37,"message":"expected `{ x : Int }` but got `{ s : String }`.","code":"type_mismatch","fix":null,"labels":[],"notes":["Argument to constructor `Cons`.","Field `s` is present in the value provided, but the expected type has no such field."]}

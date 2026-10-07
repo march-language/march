@@ -1,0 +1,18 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_15.march
+
+The linear value `r.st` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+13 |     println(int_to_string(k + eat(r)))
+                                       ^
+
+    `r` is used as a whole here, which hands on every field it still holds, including this one.
+
+    `r.st` was already consumed here:
+
+12 |     let k = sink(r.st)
+                      ^^^^
+    run `march --explain linear_used_twice`
+
+

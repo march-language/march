@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: contains a non-exhaustive `match`, which panics at runtime
+-- Capabilities widening, Task 6 (F3) -- `cap no_panic`
+-- (`check_no_panic_module`, `typecheck.ml`), the REJECT side for the
+-- match-non-exhaustiveness panic surface. A non-exhaustive `match` lowers to a
+-- runtime "no matching clause" panic, so a `cap no_panic` module must reject it
+-- just like an explicit `panic` (see reject/t42).
+--
+-- `check_exhaustiveness` (`typecheck.ml`) already finds every non-exhaustive
+-- match and, besides emitting the usual Warning, records the offending
+-- `match`'s span into `env.nonexhaustive_match_spans` (a shared ref).
+-- `check_no_panic_module` -- which runs ONLY for `cap no_panic` modules --
+-- reads that side-table and, for any recorded span nested (by `span_within`
+-- containment) inside one of THIS module's own function bodies, reports an
+-- ERROR. A non-exhaustive match in a PLAIN module stays a non-blocking Warning
+-- (see accept/t14). See core-march-types.md §2.8.11.
+mod Guarded do
+  cap no_panic
+
+  fn get(opt : Option(Int)) : Int do
+    match opt do
+      Some(x) -> x
+    end
+  end
+end

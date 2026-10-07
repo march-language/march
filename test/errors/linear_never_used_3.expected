@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR --------------- errors/linear_never_used_3.march
+
+The linear value `a` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+7 |     let a = S(1)
+        ^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+

@@ -1,0 +1,6 @@
+mod Main do
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(List.size([1, 2, 3])))
+  end
+end

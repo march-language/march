@@ -1,0 +1,36 @@
+exit: 1
+-- ERROR ---------------------- errors/cap_grant_19.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+11 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+-- ERROR ---------------------- errors/cap_grant_19.march
+
+refinement violation: argument `i` of `Simd.extract_f32x4` does not satisfy precondition `0 <= _ && _ < 4` [refinement_violated]
+note: guard the call (e.g. `if 0 <= _ && _ < 4 do …`) or pass a value known to satisfy it
+
+13 |     println(to_string(Simd.extract_f32x4(v, 4)))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+    this argument must satisfy `0 <= _ && _ < 4`:
+
+13 |     println(to_string(Simd.extract_f32x4(v, 4)))
+                                                 ^
+    run `march --explain refinement_violated`
+
+
+
+fix [cap_grant]:
+@@ lines 11-11 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do

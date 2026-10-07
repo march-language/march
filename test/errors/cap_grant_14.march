@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: `Cap(IO)` cannot be deserialized
+-- Capability unforgeability (R3), the third unconstrained builtin (2026-08-05).
+--
+-- `to_json`, `from_json` and `from_json_events` are the ONLY three builtins
+-- typed `poly2 (fun a b -> TArrow (a, b))` — see the block at
+-- lib/typecheck/typecheck.ml:2087-2094. `from_json_events` is the one easiest
+-- to forget, because it was added later and for a different reason (streaming
+-- decode, Task 7 / Phase 3), so a check wired to the two obvious names would
+-- leave a complete third path open.
+--
+-- This file exists to fail if that happens. It is not a variation on t143;
+-- it is coverage of a distinct binding.
+mod EventForge do
+  needs IO
+
+  fn main() do
+    let forged : Cap(IO) = from_json_events("[]")
+    println("forged via the streaming decoder")
+  end
+end

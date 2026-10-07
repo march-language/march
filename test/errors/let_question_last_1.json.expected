@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/let_question_last_1.march","start_line":9,"start_col":4,"end_line":9,"end_col":16,"message":"`let?` cannot be the last expression in a block.\nAdd a Result-producing expression after it — for example:\n\n    let? x = might_fail()\n    Ok(x + 1)","code":"let_question_last","fix":null,"labels":[],"notes":[]}

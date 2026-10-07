@@ -1,0 +1,48 @@
+-- EXPECT-ERROR: ActorCap
+-- R8/R2 — A PROCESS CAPABILITY IS NOT IO AUTHORITY (2026-08-06).
+--
+-- Found by the R8 audit. `get_cap : Pid(a) -> Option(Cap(a))` shared the `Cap`
+-- constructor with IO capabilities, so whenever `a` was FREE it unified with
+-- `IO` and handed the caller root authority. This program typechecked with
+-- exit 0 — in a module whose `main` takes NO parameter and is therefore
+-- granted nothing at all.
+--
+-- The route matters, and getting it right took a correction. `spawn` returns
+-- `Pid[state]`, which PINS `a` to the actor's state record, so the ordinary
+-- actor path was already safe (`expected IO but got { n : Int }`). `self()`
+-- is not a `Pid` at all. The vector is `pid_of_int : Int -> Pid(a)`, whose
+-- `a` is free — it exists so supervisors can rebuild a Pid from a state
+-- field, and is documented as unsafe. Free `a` plus a shared constructor is
+-- what produced authority from an integer.
+--
+-- That defeated R2. R2's entire content is that the root capability is
+-- GRANTED to `main`, not taken; here it was taken from an integer literal.
+-- It also made the sentence R2 earned ("a capability can only be received")
+-- false.
+--
+-- The cause was not a missing check. `Cap` named TWO unrelated things that
+-- shared one type constructor and therefore unified:
+--
+--   IO capability       VUnit, fully erased, compile-time only, governed by
+--                       `needs` + the lattice + R2/R3/R4
+--   process capability  VCap(pid, epoch), a real runtime value with epoch
+--                       validation, consumed by send_checked/revoke_cap/
+--                       is_cap_valid, governed by actor liveness
+--
+-- Process capabilities are now `ActorCap(a)`, so there is nothing to unify.
+-- A sweep would have patched this one symptom and left the next builtin
+-- returning `Cap(a)` to reopen it.
+--
+-- Accept companion: accept/t150, the legitimate process-capability flow.
+mod ProcCapIsNotIO do
+  needs IO
+
+  pfn wants_root(r : Cap(IO)) : Int do 1 end
+
+  fn main() do
+    match get_cap(pid_of_int(1)) do
+      Some(c) -> println(int_to_string(wants_root(c)))
+      None    -> println("none")
+    end
+  end
+end

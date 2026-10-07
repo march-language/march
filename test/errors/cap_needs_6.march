@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: is not declared in `needs`
+-- Capabilities widening, Task 1 -- Check 1 (`typecheck.ml:5561`), the base
+-- rejection. `listen`'s SIGNATURE uses `Cap(IO.Network)`, but the module
+-- declares no `needs` at all, so `declared_needs = []` and no cap can
+-- subsume `IO.Network`. See core-march-types.md §2.8.
+mod Server do
+  fn listen(cap : Cap(IO.Network), port : Int) : Int do
+    let _ = cap
+    port
+  end
+end

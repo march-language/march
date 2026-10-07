@@ -1,0 +1,30 @@
+-- EXPECT-ERROR: cannot be widened
+-- R4a — WIDENING IS STILL REFUSED, now by the sweep (2026-08-06).
+--
+-- This case was already rejected before R4a, but for a reason that no longer
+-- applies: `cap_narrow : Cap(IO) -> Cap(a)` made its argument literally the
+-- root, so ANY non-root argument failed to unify and widening was refused as a
+-- side effect of the argument type.
+--
+-- R4a loosened that to `Cap(a) -> Cap(b)` so attenuation can chain
+-- (accept/t148), which moved monotonicity out of unification and into a
+-- post-checking sweep. The guarantee is now weaker IN KIND: unification could
+-- not be bypassed, whereas an application site the sweep fails to record is a
+-- silently permitted widen.
+--
+-- So this file changes status rather than behaviour. It used to pass for free;
+-- it now passes only if the sweep actually works, which makes it the
+-- load-bearing witness for R4 rather than a decorative one. The subsumption
+-- direction has been written backwards twice in this codebase and shipped
+-- once — this is the file that catches the third time.
+mod Widen do
+  needs IO
+
+  pfn widen(c : Cap(IO.Console)) : Cap(IO.FileWrite) do
+    cap_narrow(c)
+  end
+
+  fn main(cap : Cap(IO)) do
+    println("console cannot become file-write")
+  end
+end

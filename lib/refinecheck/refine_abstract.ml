@@ -220,13 +220,13 @@ let check (errctx : Err.ctx) ~(is_known : string -> bool) (fd : A.fn_def) : unit
       List.iter
         (fun o ->
           if o.occ_arg = "$computed" then
-            Err.error errctx ~span:o.occ_span
+            Err.error ~code:Err.Code.abstract_refinement_misuse errctx ~span:o.occ_span
               (Printf.sprintf
                  "abstract refinement `%s` is applied to an expression. It may only be \
                   applied to the binder in scope (`%s`)."
                  name o.occ_binder)
           else if o.occ_arg <> o.occ_binder && o.occ_arg <> "_" then
-            Err.error errctx ~span:o.occ_span
+            Err.error ~code:Err.Code.abstract_refinement_misuse errctx ~span:o.occ_span
               (Printf.sprintf
                  "abstract refinement `%s` is applied to `%s`, which is not the binder in \
                   scope here (`%s`). An abstract refinement applies to the value the \
@@ -245,7 +245,7 @@ let check (errctx : Err.ctx) ~(is_known : string -> bool) (fd : A.fn_def) : unit
       if definers <> [] && consumers = [] && not malformed then
         List.iter
           (fun o ->
-            Err.warning errctx ~span:o.occ_span
+            Err.warning ~code:Err.Code.abstract_refinement_unused errctx ~span:o.occ_span
               (Printf.sprintf
                  "abstract refinement `%s` is defined by this callback but never used in \
                   the signature, so it states nothing. Use it as an element refinement, \
@@ -256,7 +256,7 @@ let check (errctx : Err.ctx) ~(is_known : string -> bool) (fd : A.fn_def) : unit
       (match List.sort_uniq compare (List.map (fun o -> o.occ_base) occs) with
        | _ :: _ :: _ as bases ->
          let o = List.hd occs in
-         Err.error errctx ~span:o.occ_span
+         Err.error ~code:Err.Code.abstract_refinement_misuse errctx ~span:o.occ_span
            (Printf.sprintf
               "abstract refinement `%s` is used at more than one type (%s). One abstract \
                refinement stands for one predicate, over one type."
@@ -294,7 +294,7 @@ let check (errctx : Err.ctx) ~(is_known : string -> bool) (fd : A.fn_def) : unit
   List.iter
     (fun (inner, span) ->
       if List.mem inner declared_names then
-        Err.error errctx ~span
+        Err.error ~code:Err.Code.abstract_refinement_misuse errctx ~span
           (Printf.sprintf
              "abstract refinement `%s` is applied inside another application. An abstract \
               refinement applies directly to the binder in scope."

@@ -2,6 +2,7 @@ Server: got 1
 Client: got 10
 before stop: session done
 queue to self before stop: some
+peers on this node told at stop: node stopped
 queue to self after stop: none
 loopback sink released: true
 send to self after stop: refused

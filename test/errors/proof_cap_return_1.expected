@@ -1,0 +1,31 @@
+exit: 1
+-- ERROR ---------------- errors/proof_cap_return_1.march
+
+function `make` returns `Cap(Db.P)` but `Cap(Db.P)` is a proof capability declared in `Db`. [proof_cap_return]
+Only public functions of `Db` can construct `Cap(Db.P)`.
+hint: accept `Cap(Db.P)` as a parameter and pass it through, or call a factory in `Db`.
+
+23 |     fn make(cap : Cap(IO)) : Cap(Db.P) do mint_cap(cap) end
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+-- HINT ---------------- errors/proof_cap_return_1.march
+
+this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
+
+23 |     fn make(cap : Cap(IO)) : Cap(Db.P) do mint_cap(cap) end
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+-- ERROR ---------------- errors/proof_cap_return_1.march
+
+mint_cap `Cap(Db.P)` is only allowed inside a public function of its declaring module `Db`. [mint_cap_invalid]
+hint: to obtain `Cap(Db.P)` elsewhere, receive it as a parameter and pass it through, or call a public factory in `Db`.
+
+23 |     fn make(cap : Cap(IO)) : Cap(Db.P) do mint_cap(cap) end
+                                               ^^^^^^^^^^^^^
+
+
+

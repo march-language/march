@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.Console
+  fn safe_div(a : Int, b : {Int | _ != 0}) : Int do a / b end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(safe_div(10, 0)))
+  end
+end

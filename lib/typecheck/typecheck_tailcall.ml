@@ -414,7 +414,7 @@ let rec check_tail_position
                If the depth is bounded and you accept the stack use, annotate \
                the function with `@[no_warn_recursion]`."
           in
-          Err.error errors ~span:sp
+          Err.error ~code:Err.Code.non_tail_recursion errors ~span:sp
             (Printf.sprintf
                "Function `%s`: recursive call to `%s` is not in tail position \
                 (%s).\n%s"
@@ -433,7 +433,7 @@ let rec check_tail_position
             | _ -> false
           ) args in
           if is_arithmetic then
-            Err.warning errors ~span:sp
+            Err.warning ~code:Err.Code.non_tail_recursion errors ~span:sp
               (Printf.sprintf
                  "Warning: function `%s` is structurally recursive but not \
                   tail-recursive. Consider using an accumulator parameter \
@@ -455,7 +455,7 @@ let rec check_tail_position
                information, so it cannot say WHICH of the two cases this
                function is. Both are therefore spelled out, with the condition
                attached, and no flag is recommended. *)
-            Err.warning errors ~span:sp
+            Err.warning ~code:Err.Code.non_tail_recursion errors ~span:sp
               (Printf.sprintf
                  "Warning: function `%s` is structurally recursive but not \
                   tail-recursive. If the recursive call is the direct argument \

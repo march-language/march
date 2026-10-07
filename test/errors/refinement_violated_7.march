@@ -1,0 +1,37 @@
+-- EXPECT-ERROR: refinement violation
+-- The rejecting half of the `List.length` → `len` alias. A guard that pins the
+-- length to zero and then calls a `{List(Int) | len(_) > 0}` function is a
+-- DEFINITE failure: under `len(ys) == 0` the predicate `len(ys) > 0` can never
+-- hold, so March reports it rather than staying silent.
+--
+-- This is the file that proves the alias is load-bearing. Its accept companion,
+-- `accept/t118_refine_length_guard_discharges`, exits 0 both when the guard is
+-- read and when the obligation is merely skipped — an accept-only witness
+-- cannot distinguish a working guard from a contract that checks nothing. Only
+-- a REPORT here shows the guard's fact reached the solver.
+--
+-- If this file ever starts exiting 0, the `List.length` alias has been
+-- withdrawn (or never applied), and every guarded non-empty call in the program
+-- is back to being unprovable-and-skipped.
+mod T117 do
+
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil        -> panic("empty")
+    end
+  end
+
+  fn broken(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do
+      head_of(ys)
+    else
+      0
+    end
+  end
+
+  fn main() : Int do
+    broken([1, 2, 3])
+  end
+
+end

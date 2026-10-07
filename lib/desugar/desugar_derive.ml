@@ -573,7 +573,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
        working encoder beside a refused decoder. *)
     let caps = March_caps.Cap_surface_ty.caps_in_type_def td in
     let cap = List.hd caps in
-    Err.error errors ~span:iface_span
+    Err.error ~code:Err.Code.cap_deserialize errors ~span:iface_span
       (Printf.sprintf
          "`Cap(%s)` cannot be deserialized — a capability may only be \
           received, never constructed, so `%s` cannot derive Json.\n\
@@ -592,7 +592,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
        `Node.send` (whose codec contract this derive is) needs the refusal to
        be a compile-time one.  The cross-node identity is `GlobalPid.Pid`, a
        plain record that derives like any other. *)
-    Err.error errors ~span:iface_span
+    Err.error ~code:Err.Code.pid_serialize errors ~span:iface_span
       (Printf.sprintf
          "`Pid` cannot be serialized — a local pid only names an actor on \
           this node, so `%s` cannot derive Json.\n\
@@ -1211,7 +1211,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     @ (match from_json_events_impl with Some d -> [d] | None -> [])
 
   | _ ->
-    Err.error errors ~span:iface_span
+    Err.error ~code:Err.Code.unknown_derive errors ~span:iface_span
       (Printf.sprintf
          "Unknown derive target `%s` for type `%s`.\n\
           Supported interfaces: Eq, Show, Hash, Ord, Json"
@@ -1229,7 +1229,7 @@ let expand_derive
   : decl list =
   match List.assoc_opt type_name.txt type_defs with
   | None ->
-    Err.error errors ~span:type_name.span
+    Err.error ~code:Err.Code.unknown_derive errors ~span:type_name.span
       (Printf.sprintf
          "Unknown type `%s` in `derive` — is it declared in this module?"
          type_name.txt);
@@ -1262,14 +1262,14 @@ let expand_satisfy
     List.concat_map (fun (type_n : name) ->
       match List.assoc_opt iface_n.txt interfaces with
       | None ->
-        Err.error errors ~span:iface_n.span
+        Err.error ~code:Err.Code.unknown_interface errors ~span:iface_n.span
           (Printf.sprintf "Unknown interface `%s` in satisfy declaration." iface_n.txt);
         []
       | Some iface ->
         let methods = List.filter_map (fun (md : method_decl) ->
           match List.assoc_opt md.md_name.txt fns with
           | None ->
-            Err.error errors ~span:sp
+            Err.error ~code:Err.Code.satisfy_missing_fn errors ~span:sp
               (Printf.sprintf
                  "satisfy %s for %s: no function `%s` found in scope."
                  iface_n.txt type_n.txt md.md_name.txt);

@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: is generic in a parameter of that type
+-- H7: Vault.set put a RingBuf in a process-global table any thread could
+-- read back. Under Part C `Vault.set` (and the raw `vault_set` builtin) is
+-- generic in its value and does not opt in to linear values, so the call is
+-- rejected by the generic-parameter rule; Phase 0 confirmed the rule
+-- reaches builtin generics. Type-checked before C2.
+mod Main do
+  needs IO.Mut
+  fn main(_m : Cap(IO.Mut)) : Int do
+    let t = Vault.new("bufs")
+    let rb = RingBuf.make(4)
+    Vault.set(t, "k", rb)
+    match Vault.get(t, "k") do
+      Some(other) -> RingBuf.drop(other)
+      None -> ()
+    end
+    0
+  end
+end

@@ -1090,6 +1090,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="GlobalRegistry.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="GlobalRegistry.html">GlobalRegistry</a></div><div class="sb-sub"><a class="sl" href="GlobalRegistry.html#type-Entry"><span class="sb-kind" style="color:var(--ty)">T</span>Entry</a>
 <a class="sl" href="GlobalRegistry.html#type-Names"><span class="sb-kind" style="color:var(--ty)">T</span>Names</a>
 <a class="sl" href="GlobalRegistry.html#fn-all_entries"><span class="sb-kind" style="color:var(--fn)">F</span>all_entries</a>
+<a class="sl" href="GlobalRegistry.html#fn-collect_tombstones"><span class="sb-kind" style="color:var(--fn)">F</span>collect_tombstones</a>
 <a class="sl" href="GlobalRegistry.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
 <a class="sl" href="GlobalRegistry.html#fn-diff_entries"><span class="sb-kind" style="color:var(--fn)">F</span>diff_entries</a>
 <a class="sl" href="GlobalRegistry.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
@@ -1104,6 +1105,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="GlobalRegistry.html#fn-register_at"><span class="sb-kind" style="color:var(--fn)">F</span>register_at</a>
 <a class="sl" href="GlobalRegistry.html#fn-root_hash"><span class="sb-kind" style="color:var(--fn)">F</span>root_hash</a>
 <a class="sl" href="GlobalRegistry.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
+<a class="sl" href="GlobalRegistry.html#fn-tombstone_count"><span class="sb-kind" style="color:var(--fn)">F</span>tombstone_count</a>
 <a class="sl" href="GlobalRegistry.html#fn-unregister"><span class="sb-kind" style="color:var(--fn)">F</span>unregister</a>
 <a class="sl" href="GlobalRegistry.html#fn-unregister_own"><span class="sb-kind" style="color:var(--fn)">F</span>unregister_own</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Hamt.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Hamt.html">Hamt</a></div><div class="sb-sub"><a class="sl" href="Hamt.html#type-HEntry"><span class="sb-kind" style="color:var(--ty)">T</span>HEntry</a>
@@ -2254,6 +2256,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Result.html#fn-unwrap_or"><span class="sb-kind" style="color:var(--fn)">F</span>unwrap_or</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="RingBuf.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="RingBuf.html">RingBuf</a></div><div class="sb-sub"><a class="sl" href="RingBuf.html#fn-cap"><span class="sb-kind" style="color:var(--fn)">F</span>cap</a>
 <a class="sl" href="RingBuf.html#fn-clear"><span class="sb-kind" style="color:var(--fn)">F</span>clear</a>
+<a class="sl" href="RingBuf.html#fn-drop"><span class="sb-kind" style="color:var(--fn)">F</span>drop</a>
 <a class="sl" href="RingBuf.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="RingBuf.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="RingBuf.html#fn-is_full"><span class="sb-kind" style="color:var(--fn)">F</span>is_full</a>
@@ -2263,6 +2266,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="RingBuf.html#fn-pop"><span class="sb-kind" style="color:var(--fn)">F</span>pop</a>
 <a class="sl" href="RingBuf.html#fn-push"><span class="sb-kind" style="color:var(--fn)">F</span>push</a>
 <a class="sl" href="RingBuf.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
+<a class="sl" href="RingBuf.html#fn-snapshot"><span class="sb-kind" style="color:var(--fn)">F</span>snapshot</a>
 <a class="sl" href="RingBuf.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Scheduler.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Scheduler.html">Scheduler</a></div><div class="sb-sub"><a class="sl" href="Scheduler.html#fn-dropped_messages"><span class="sb-kind" style="color:var(--fn)">F</span>dropped_messages</a>
 <a class="sl" href="Scheduler.html#fn-live_procs"><span class="sb-kind" style="color:var(--fn)">F</span>live_procs</a>
@@ -2939,7 +2943,17 @@ CtlWriter  one per peer: EVERY write to a control socket goes through it
 <div class="item" id="fn-config"><div class="ih"><span class="badge bfn">fn</span><span class="name">config</span><span class="sig">config(name : String, listen_port : Int, advertise : String, seeds : List(String),</span><a class="anchor-link" href="#fn-config" title="Link">#</a></div><div class="ib"><p>A configuration with the defaults: SWIM period 1 s, ack timeout 500 ms, suspect timeout 3 s, 2 indirect helpers, tick 100 ms, redial backoff</p><ol><li>[advertise] &quot;&quot;</li></ol><pre><code>means `127.0.0.1:&lt;listen_port&gt;`. The SWIM timings trade detection speed
 for false suspicions on a loaded host (a 300 ms ack timeout suspected
 healthy peers on a busy CI runner); override `swim` / `period_ms` with a
-record update to tune them.</code></pre></div></div>
+record update to tune them. The environment can move the three SWIM
+defaults without a rebuild: `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS`
+and `MARCH_SWIM_SUSPECT_MS` (each a positive integer; anything else keeps
+the default). A record update still wins over them.
+
+A name unregistered anywhere in the cluster leaves a tombstone in every
+replica of the registry; it is dropped `tombstone_grace_ms` after it was
+first seen (default 3 hours, `MARCH_REGISTRY_TOMBSTONE_GRACE_MS`). Keep it
+well above the longest partition the cluster should heal from: a partition
+longer than that can bring back a binding whose holder is gone, which the
+node service then hides and its owner unregisters again.</code></pre></div></div>
 <div class="item" id="fn-config_from_env"><div class="ih"><span class="badge bfn">fn</span><span class="name">config_from_env</span><span class="sig">config_from_env() : Result(<a href="#type-CnConfig">CnConfig</a>, String)</span><a class="anchor-link" href="#fn-config_from_env" title="Link">#</a></div><div class="ib"><p>Configuration from the environment: MARCH_NODE_NAME, MARCH_NODE_PORT, MARCH_NODE_ADVERTISE (default 127.0.0.1:&lt;port&gt;), MARCH_CLUSTER_NODES (seeds, host:port,...), MARCH_CLUSTER_SECRET, MARCH_NODE_CREATION (default: the current time in ms, which grows across restarts on one host).</p><pre><code>Certificate mode: with MARCH_NODE_CERT set, the node authenticates with a
 certificate instead of the secret, and MARCH_NODE_KEY and
 MARCH_CLUSTER_OPERATOR_PUBKEY must be set too (each may name a file
@@ -2973,7 +2987,7 @@ when they change (`replace_cert`; `cert_files`).</code></pre></div></div>
 <div class="item" id="fn-core_revocations"><div class="ih"><span class="badge bfn">fn</span><span class="name">core_revocations</span><span class="sig">core_revocations(st : <a href="#type-CnState">CnState</a>) : List(NodeCert.Revocation) do List.map(st.revs, fn r -&gt; r.rev) end</span><a class="anchor-link" href="#fn-core_revocations" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-core_revoke"><div class="ih"><span class="badge bfn">fn</span><span class="name">core_revoke</span><span class="sig">core_revoke(st : <a href="#type-CnState">CnState</a>, r : NodeCert.SignedRevocation) : (<a href="#type-CnState">CnState</a>, List(<a href="#type-CnEffect">CnEffect</a>))</span><a class="anchor-link" href="#fn-core_revoke" title="Link">#</a></div><div class="ib"><p>Add a revocation (from the API or a peer): kept and passed on to every linked peer if it is the operator's and new here, ignored otherwise. The certificates it names are dropped at the next tick.</p></div></div>
 <div class="item" id="fn-core_seed_self"><div class="ih"><span class="badge bfn">fn</span><span class="name">core_seed_self</span><span class="sig">core_seed_self(st : <a href="#type-CnState">CnState</a>, addr : String) : <a href="#type-CnState">CnState</a></span><a class="anchor-link" href="#fn-core_seed_self" title="Link">#</a></div><div class="ib"><p>A dial of [addr] reached this node itself (a seed list naming us): never dial it again.</p></div></div>
-<div class="item" id="fn-core_tick"><div class="ih"><span class="badge bfn">fn</span><span class="name">core_tick</span><span class="sig">core_tick(st0 : <a href="#type-CnState">CnState</a>, now : Int) : (<a href="#type-CnState">CnState</a>, List(<a href="#type-CnEffect">CnEffect</a>))</span><a class="anchor-link" href="#fn-core_tick" title="Link">#</a></div><div class="ib"><p>One tick at [now]: fold the queued SWIM events and step the driver (its actions become control frames to linked peers), derive the member events, and plan the dials this tick allows.</p></div></div>
+<div class="item" id="fn-core_tick"><div class="ih"><span class="badge bfn">fn</span><span class="name">core_tick</span><span class="sig">core_tick(st0 : <a href="#type-CnState">CnState</a>, now : Int) : (<a href="#type-CnState">CnState</a>, List(<a href="#type-CnEffect">CnEffect</a>))</span><a class="anchor-link" href="#fn-core_tick" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-core_unregister"><div class="ih"><span class="badge bfn">fn</span><span class="name">core_unregister</span><span class="sig">core_unregister(st : <a href="#type-CnState">CnState</a>, name : String) : (<a href="#type-CnState">CnState</a>, List(<a href="#type-CnEffect">CnEffect</a>))</span><a class="anchor-link" href="#fn-core_unregister" title="Link">#</a></div><div class="ib"><p>Unregister [name] if this node holds it (compare-and-delete).</p></div></div>
 <div class="item" id="fn-creation"><div class="ih"><span class="badge bfn">fn</span><span class="name">creation</span><span class="sig">creation(c : Cap(ClusterNode.Live)) : Int</span><a class="anchor-link" href="#fn-creation" title="Link">#</a></div><div class="ib"><p>This node's creation (its incarnation number, part of every global pid it issues).</p></div></div>
 <div class="item" id="fn-credentials"><div class="ih"><span class="badge bfn">fn</span><span class="name">credentials</span><span class="sig">credentials(name : String, key_hex : String, cert_text : String, operator_hex : String)</span><a class="anchor-link" href="#fn-credentials" title="Link">#</a></div><div class="ib"><p>Certificate credentials for node [name] from their text forms: the node's ed25519 secret key (hex, 64 bytes), its certificate (NodeCert text form) and the operator public key (hex, 32 bytes). The certificate must verify under the operator key now, name [name], and name the secret key's public key -- a misconfigured node fails here, with the reason, rather than at every handshake.</p></div></div>

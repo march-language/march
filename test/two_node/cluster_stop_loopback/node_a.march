@@ -65,7 +65,16 @@ mod ClusterStopLoopback do
             end
             let running = sinks()
             println("queue to self before stop: " ++ (if ClusterNode.queue_for(h, own) == None do "none" else "some" end))
+            -- Stop ends the loopback, a connection like any other: every
+            -- session party is told its peers on this node are gone (a party
+            -- left waiting for frames the closed loopback refused kept the
+            -- process alive; specs/progress/2026-10-07-cluster-stop-loopback-exit-hang.md).
+            let told = Vault.new("stop_told")
+            let closer = ClusterNode.on_peer_closed(h, fn (nid, why) ->
+              if nid == own do Vault.set(told, "own", why) else () end)
             ClusterNode.stop(h)
+            println("peers on this node told at stop: " ++ Vault.get_or(told, "own", "nothing"))
+            ClusterNode.off_peer_closed(h, closer)
             println("queue to self after stop: " ++ (if ClusterNode.queue_for(h, own) == None do "none" else "some" end))
             println("loopback sink released: " ++ bool_to_string(wait_sinks(running - 1, 3000) == running - 1))
             let to = ClusterNode.global_pid(h, 1)

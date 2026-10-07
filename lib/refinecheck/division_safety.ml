@@ -420,14 +420,14 @@ and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
       (* Not a refined parameter — check let-binding scope. *)
       (match List.assoc_opt var_name let_values with
        | Some (A.ELit (A.LitInt 0, _)) ->
-         Err.error errctx ~span
+         Err.error ~code:Err.Code.division_by_zero errctx ~span
            "division by zero literal in `cap no_panic` module."
        | Some (A.ELit (A.LitInt _, _)) ->
          () (* non-zero literal let-binding: trivially safe *)
        | Some rhs ->
          (match smt_of ~b:"\x00" ~var:"\x00" rhs with
           | None ->
-            Err.error errctx ~span
+            Err.error ~code:Err.Code.division_by_zero errctx ~span
               (Printf.sprintf
                  "division by `%s` in `cap no_panic` module may be by zero — \
                   bound expression cannot be verified non-zero.%s"
@@ -452,13 +452,13 @@ and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
             (match Refine.discharge ~root vc with
              | Refine.Verified -> ()
              | _ ->
-               Err.error errctx ~span
+               Err.error ~code:Err.Code.division_by_zero errctx ~span
                  (Printf.sprintf
                     "division by `%s` in `cap no_panic` module may be by zero — \
                      cannot prove bound expression is non-zero.%s"
                     var_name division_suggestion)))
        | None ->
-         Err.error errctx ~span
+         Err.error ~code:Err.Code.division_by_zero errctx ~span
            (Printf.sprintf
               "division by `%s` in `cap no_panic` module may be by zero — \
                no refinement proves `%s ≠ 0`.%s"
@@ -533,28 +533,28 @@ and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
            meaningless refinement more permissive than no refinement at all —
            `{Int | is_prime(_)}` passed while a bare `Int` divisor correctly
            errored. *)
-        Err.error errctx ~span
+        Err.error ~code:Err.Code.division_by_zero errctx ~span
           (Printf.sprintf
              "division by `%s` in `cap no_panic` module: the refinement on \
               `%s` is outside the checkable fragment, so it cannot prove \
               `%s != 0`.%s%s"
              var_name var_name var_name (div_cx model) division_suggestion)
       | Refine.Unverified, None ->
-        Err.error errctx ~span
+        Err.error ~code:Err.Code.division_by_zero errctx ~span
           (Printf.sprintf
              "division by `%s` in `cap no_panic` module: the refinement on \
               `%s` is outside the checkable fragment, so it cannot prove \
               `%s != 0`.%s"
              var_name var_name var_name division_suggestion)
       | Refine.Refuted model, Some _ ->
-        Err.error errctx ~span
+        Err.error ~code:Err.Code.division_by_zero errctx ~span
           (Printf.sprintf
              "division by `%s` in `cap no_panic` module: refinement \
               does not rule out zero%s.%s"
              var_name (div_cx model) division_suggestion)
       | Refine.Unverified, Some _ ->
         (* Z3 absent or unknown — be conservative *)
-        Err.error errctx ~span
+        Err.error ~code:Err.Code.division_by_zero errctx ~span
           (Printf.sprintf
              "division by `%s` in `cap no_panic` module: cannot verify \
               divisor is non-zero (Z3 unavailable or VC unknown).%s"
@@ -574,7 +574,7 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
     (fun span divisor c ->
       match divisor with
       | A.ELit (A.LitInt 0, _) ->
-        Err.error errctx ~span
+        Err.error ~code:Err.Code.division_by_zero errctx ~span
           "division by zero literal in `cap no_panic` module."
       | A.ELit (A.LitInt _, _) ->
         () (* non-zero literal: trivially safe *)
@@ -582,7 +582,7 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
         check_var_divisor ~root errctx span var_name params c
       | _ ->
         (* Complex expression — always flag conservatively *)
-        Err.error errctx ~span
+        Err.error ~code:Err.Code.division_by_zero errctx ~span
           ("division by a complex expression in `cap no_panic` module: \
             cannot prove divisor is non-zero."
            ^ division_suggestion))

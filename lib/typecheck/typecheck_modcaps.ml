@@ -274,7 +274,7 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
               fn_name mod_name site_name
         in
         let _ = fn_span in
-        Err.error errors ~span:site_span msg
+        Err.error ~code:Err.Code.no_panic_violation errors ~span:site_span msg
     end
   ) fn_entries;
   (* A NON-exhaustive `match` lowers to a runtime "no matching clause" panic, so
@@ -289,7 +289,7 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
   List.iter (fun (fn_name, _calls, fn_span) ->
     List.iter (fun (msp : Ast.span) ->
       if span_within msp fn_span then
-        Err.error errors ~span:msp
+        Err.error ~code:Err.Code.no_panic_violation errors ~span:msp
           (Printf.sprintf
              "`%s` in `mod %s` (declared `cap no_panic`) contains a non-exhaustive \
               `match`, which panics at runtime when no clause matches.\n\n\
@@ -349,7 +349,7 @@ let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : u
         List.iter (fun (name, site_span) ->
           if StringSet.mem name pure_banned
              && not (Hashtbl.mem locally_declared_names name) then
-            Err.error errors ~span:site_span
+            Err.error ~code:Err.Code.pure_violation errors ~span:site_span
               (Printf.sprintf
                  "`%s` in `mod %s` (declared `cap pure`) calls `%s`, which has side effects.\n\n%s"
                  def.Ast.fn_name.txt mod_name name pure_suggestion)
@@ -368,7 +368,7 @@ let check_no_extern_module (errors : Err.ctx) (env : env) (decls : Ast.decl list
   List.iter (fun d ->
     match d with
     | Ast.DExtern (edef, sp) ->
-      Err.error errors ~span:sp
+      Err.error ~code:Err.Code.no_extern_violation errors ~span:sp
         (Printf.sprintf
            "`mod %s` (declared `cap no_extern`) contains an `extern` block (`%s`).\n\n%s"
            mod_name edef.Ast.ext_lib_name no_extern_suggestion)
@@ -382,7 +382,7 @@ let check_no_extern_module (errors : Err.ctx) (env : env) (decls : Ast.decl list
         | [] -> false
       ) caps in
       if has_foreign then
-        Err.error errors ~span:sp
+        Err.error ~code:Err.Code.no_extern_violation errors ~span:sp
           (Printf.sprintf
              "`mod %s` (declared `cap no_extern`) uses `needs IO.Foreign`.\n\n%s"
              mod_name no_extern_suggestion)
@@ -421,7 +421,7 @@ let check_deterministic_module (errors : Err.ctx) (env : env) (decls : Ast.decl 
         List.iter (fun (name, site_span) ->
           if StringSet.mem name deterministic_banned
              && not (Hashtbl.mem locally_declared_names name) then
-            Err.error errors ~span:site_span
+            Err.error ~code:Err.Code.deterministic_violation errors ~span:site_span
               (Printf.sprintf
                  "`%s` in `mod %s` (declared `cap deterministic`) calls `%s`, \
                   which is non-deterministic.\n\n%s"

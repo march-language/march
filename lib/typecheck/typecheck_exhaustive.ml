@@ -689,7 +689,7 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
             message = "This pattern can never be reached.";
             labels  = [];
             notes   = ["An earlier arm already covers all values this pattern matches."];
-            code    = Some "redundant_arm";
+            code    = Err.Code.redundant_arm;
             fix     = Some (Err.FDelete {
               start_line = arm_span.March_ast.Ast.start_line;
               end_line   = arm_span.March_ast.Ast.end_line }) }
@@ -759,14 +759,14 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
              message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
              labels  = [];
              notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
-             code    = None; fix = None }
+             code    = Err.Code.non_exhaustive_match; fix = None }
        | [] ->
          Err.report env.errors
            { Err.severity = Warning; span;
              message = "Non-exhaustive pattern match";
              labels  = [];
              notes   = [ "Add a catch-all branch `_ -> ...` to handle any remaining cases." ];
-             code    = None; fix = None })
+             code    = Err.Code.non_exhaustive_match; fix = None })
   end
 
 (** Unfold one step of a recursive session type.
@@ -797,7 +797,7 @@ let rec unfold_srec s =
     `match` on the paired label (F5 residual): its state is [SOfferPending]. *)
 let offer_unrefined_error env span (r : session_ty ref) op =
   if session_pending !r then begin
-    Err.error env.errors ~span
+    Err.error ~code:Err.Code.session_offer_unrefined env.errors ~span
       (offer_unrefined_message (Printf.sprintf "%s: this channel" op));
     true
   end else false
@@ -934,7 +934,7 @@ let check_sendable (env : env) span ty =
     let where = match path with
       | [] -> ""
       | p -> Printf.sprintf "\nIt is reached through %s." (String.concat ", then " p) in
-    Err.error env.errors ~span
+    Err.error ~code:Err.Code.unsendable_type env.errors ~span
       (Printf.sprintf
          "Values of type `%s` cannot be sent in actor messages.\n\
           `%s` is a mutable buffer that must be owned by a single actor.%s\n\
