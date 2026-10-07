@@ -2725,6 +2725,13 @@ mod ClusterNode do
         NodeQueue.close_fd(q)
       None -> ()
     end
+    -- The loopback is a connection too, and it has just ended: tell every
+    -- session party (on_peer_closed) that this node's peers are gone, as a
+    -- link to another node does when it drops (data_closed). Without it, a
+    -- party whose peers are on this node waited for ever for frames the
+    -- closed loopback refused, and its non-daemon runner kept the process
+    -- from exiting (specs/progress/2026-10-07-cluster-stop-loopback-exit-hang.md).
+    discard(List.map(Vault.all(h.closes), fn kv -> match kv do (_k, f) -> f(h.node_id, "node stopped") end))
     -- Wake the acceptor, parked in tcp_accept, with a connection of our
     -- own: it sees the stop flag and returns. (Closing the listen socket
     -- under a parked accept does not wake it on every platform.)
