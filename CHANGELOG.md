@@ -248,6 +248,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Nullary constructors no longer allocate, and a lone busy thread is no
+  longer preempted by idle cores.** In compiled code, `Nil`, `Leaf`, `None`-like
+  constructors of every boxed type are now one shared static cell instead of a
+  heap allocation each, and the preemption tick only interrupts scheduler
+  threads that are running something. binary_trees went from 120 ms to 74 ms,
+  list_ops from 39 ms to 34 ms (Apple M3 Max).
 - **`RingBuf` is linear: every operation consumes the buffer and hands it
   back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
   `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer

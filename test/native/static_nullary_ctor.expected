@@ -1,0 +1,15 @@
+total: 26
+bumped: 41
+grown leaves: 8
+original still: 26
+tip == tip: true
+tip == fork: false
+trees equal: true
+colors: ruby, jade, cobalt, blend 9
+ruby == ruby: true
+ruby == cobalt: false
+rubies: 3
+list: [jade, ruby, blend 21, cobalt, jade, ruby, blend 9, cobalt, jade, ruby]
+empty list length: 0
+shown: [Ruby, Blend(1, 2)]
+loop: 66600, flat: true
