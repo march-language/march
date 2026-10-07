@@ -270,6 +270,23 @@ let run_fixture ?(extra_flags = "") main_exe name =
     rm_rf_temp_dir (Filename.dirname ll_path);
     result
 
+(* On macOS, the --debug-info pass checks every [debug_info_stride]th
+   fixture (sorted, so the same ones every run) instead of all of them.  Each
+   fixture is a full compile plus a verifier run, so the second pass over the
+   whole corpus added ~17 min to the macOS `test (all)` CI job, which then
+   timed out at its 75-minute limit on main (2026-10-07).  Linux runners
+   check the whole corpus, and the plain pass above stays whole on both:
+   what --debug-info adds is the same on either target.
+   MARCH_IR_VERIFY_FULL=1 checks everything on macOS too. *)
+let debug_info_stride = 8
+
+let debug_info_sample fixtures =
+  if not (Sys.file_exists "/usr/lib/dyld")
+  || Sys.getenv_opt "MARCH_IR_VERIFY_FULL" = Some "1" then fixtures
+  else
+    List.filteri (fun i _ -> i mod debug_info_stride = 0)
+      (List.sort compare fixtures)
+
 (** GREEN on the real corpus: every test/native/*.march fixture (excluding
     JS-target-only ones — see [is_js_only_fixture]) emits verifier-clean
     LLVM IR. Aggregated: collects every failing fixture before reporting,
@@ -277,7 +294,8 @@ let run_fixture ?(extra_flags = "") main_exe name =
     fixtures verify cleanly (see specs/todos.md — no findings filed for
     this task; if a future emitter change breaks one, this test will name
     it precisely instead of surfacing as an opaque clang/runtime failure). *)
-let rec test_native_corpus_ir_is_verifier_clean ?(extra_flags = "") () =
+let rec test_native_corpus_ir_is_verifier_clean ?(extra_flags = "")
+    ?(sample = fun fixtures -> fixtures) () =
   match find_llvm_verifier_tool () with
   | `None ->
     record_jit_skip "no LLVM verifier tool (opt/llvm-as) on PATH or in brew --prefix llvm — IR validity gate SKIPPED for the whole native/*.march corpus";
@@ -291,7 +309,7 @@ let rec test_native_corpus_ir_is_verifier_clean ?(extra_flags = "") () =
     assert_excluded_are_js_target_only excluded;
     Alcotest.(check bool) "at least one native fixture found to gate" true
       (List.length fixtures > 0);
-    let results = List.map (run_fixture ~extra_flags main_exe) fixtures in
+    let results = List.map (run_fixture ~extra_flags main_exe) (sample fixtures) in
     let emit_failures =
       List.filter_map (function
         | EmitFailed (name, rc, output) -> Some (name, rc, output)
@@ -327,7 +345,8 @@ let rec test_native_corpus_ir_is_verifier_clean ?(extra_flags = "") () =
    AND has its debug info silently dropped, so a green plain-corpus run says
    nothing about this mode. *)
 and test_native_corpus_ir_is_verifier_clean_with_debug_info () =
-  test_native_corpus_ir_is_verifier_clean ~extra_flags:"--debug-info" ()
+  test_native_corpus_ir_is_verifier_clean ~extra_flags:"--debug-info"
+    ~sample:debug_info_sample ()
 
 let suites =
   [

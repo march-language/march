@@ -1,0 +1,83 @@
+-- Leak guard: an owned record handed to a consumer only through dup'd uses
+-- is still owned at the end of its scope, and must be dropped there.
+--
+-- Perceus dups a consuming use (call argument, closure capture, constructor
+-- field) that is not the aggregate's last use. Before 2026-10-06 one dup'd
+-- hand-off anywhere in the scope stood the drop down, and the record leaked
+-- with every heap value in it
+-- (specs/progress/2026-10-03-aggregate-read-only-path-never-dropped.md; fixed
+-- by specs/progress/2026-10-06-record-ownership-drops.md).
+--
+--   - handed to a call twice (both dup'd), then read;
+--   - captured by a closure (dup'd), then only read as a `with` base on one
+--     path, while the other paths move it on;
+--   - stored into another record (dup'd), then read.
+-- Each leg prints the value it computed, so a use-after-free that changes a
+-- result fails the golden, not just the flat check.
+mod Main do
+  needs IO.Console
+
+  type R = { name : String, signature : String }
+  type Rep = { node : String, detail : String }
+  type Ob = { report : Rep }
+  type Pair = { left : R, tag : String }
+
+  pfn mk(n : Int) : R do { name: int_to_string(n), signature: int_to_string(n * 7) } end
+  pfn ser(r : R) : String do r.name ++ r.signature end
+
+  pfn twice_then_read(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let r = mk(n)
+      let a = ser(r)
+      let b = ser(r)
+      twice_then_read(n - 1, acc + string_length(a) + string_length(b) + string_length(r.signature))
+    end
+  end
+
+  pfn mk_rep(n : Int) : Rep do
+    { node: int_to_string(n % 5), detail: if n % 3 == 0 do "d" else "" end }
+  end
+  pfn report_len(l : List(Ob), r : Rep) : Int do
+    List.length(l) + string_length(r.node) + string_length(r.detail)
+  end
+  pfn step(obs : List(Ob), rep : Rep) : Int do
+    let rep2 = if rep.detail != "" do rep else
+      match List.find(obs, fn o -> o.report.node == rep.node) do
+        Some(o) -> { rep with detail: o.report.detail }
+        None -> rep
+      end
+    end
+    report_len(obs, rep2)
+  end
+  pfn captured_then_with_base(obs : List(Ob), n : Int, acc : Int) : Int do
+    if n <= 0 do acc else captured_then_with_base(obs, n - 1, acc + step(obs, mk_rep(n))) end
+  end
+
+  pfn pair_len(p : Pair) : Int do string_length(p.left.name) + string_length(p.tag) end
+  pfn stored_then_read(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let r = mk(n)
+      let p = { left: r, tag: "t" ++ int_to_string(n) }
+      let k = pair_len(p)
+      stored_then_read(n - 1, acc + k + string_length(r.name))
+    end
+  end
+
+  pfn flat(label : String, before : Int, r : String) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 200))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 3000
+    let obs = [{ report: { node: "1", detail: "x" } }, { report: { node: "2", detail: "yy" } }]
+    let a = live_allocs()
+    flat("handed to a call twice, then read", a, int_to_string(twice_then_read(n, 0)))
+    let b = live_allocs()
+    flat("captured, then a with base on one path", b,
+         int_to_string(captured_then_with_base(obs, n, 0)))
+    let c = live_allocs()
+    flat("stored in another record, then read", c, int_to_string(stored_then_read(n, 0)))
+    println(int_to_string(List.length(obs)))
+  end
+end

@@ -50,6 +50,8 @@ lint_docs() {
     find specs/lang -type f -name '*.md' 2>/dev/null || true
     find specs/impl -type f -name '*.md' 2>/dev/null || true
     echo .claude/skills/march-lang/SKILL.md
+    echo .claude/skills/march-debug/SKILL.md
+    echo .claude/skills/steward/SKILL.md
   } | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done \
     | grep -vE '/plans/|/superpowers/'   # historical/plan corpora & vendored plugin docs are not current-truth
 }
@@ -67,7 +69,10 @@ lint_docs() {
 
 OCAML_RE='(lib|runtime|bin|forge|lsp|test)/[A-Za-z0-9_./-]+\.(ml|mli|mll|mly)'
 C_RE='(runtime|lib)/[A-Za-z0-9_./-]+\.(c|h)'
-BOUNDED="(^|[^A-Za-z0-9.])($OCAML_RE|$C_RE)([^A-Za-z0-9]|\$)"
+# Repo scripts the agent skills and guides tell you to run: a renamed or
+# removed script must fail here, not in the next agent's session.
+SCRIPT_RE='scripts/[A-Za-z0-9_./-]+\.(sh|py)'
+BOUNDED="(^|[^A-Za-z0-9.])($OCAML_RE|$C_RE|$SCRIPT_RE)([^A-Za-z0-9]|\$)"
 
 echo "== Check A: source pointers in current docs =="
 a_problems=0
@@ -85,7 +90,7 @@ while IFS= read -r doc; do
   # each boundary-bracketed match.
   done < <(grep -vE 'no longer exists|removed|renamed|deleted|doc-lint:ignore' "$doc" 2>/dev/null \
              | grep -hoE "$BOUNDED" 2>/dev/null \
-             | grep -hoE "$OCAML_RE|$C_RE" 2>/dev/null | sort -u)
+             | grep -hoE "$OCAML_RE|$C_RE|$SCRIPT_RE" 2>/dev/null | sort -u)
 done < <(lint_docs)
 [ "$a_problems" -eq 0 ] && echo "  ok — all cited source paths exist"
 

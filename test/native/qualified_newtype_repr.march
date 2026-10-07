@@ -1,0 +1,45 @@
+-- A nested type named like a runtime type is built and matched with ONE layout
+-- (specs/progress/2026-10-06-kind-qualified-vs-bare-repr.md). `Kind.repr_of`
+-- answered by spelling: the qualified `UserValues.Down` found its
+-- declaration (a newtype, so the value IS its Int), the bare `Down` did not
+-- (Boxed). Lowering keys this constructor qualified (its short name is
+-- runtime-reserved), so it was built as a newtype, and matched under the bare
+-- name as a boxed cell: SIGSEGV at the tag slot of a tagged Int, compiled
+-- only. SIGNAL: the compiled output matches the interpreter's.
+mod Main do
+  needs IO.Console
+
+  mod UserValues do
+    type Down = Down(Int)
+    type Map = Map(String)
+    fn get(d : Down) : Int do
+      match d do
+        Down(n) -> n
+      end
+    end
+  end
+
+  pfn outer_get(d : UserValues.Down) : Int do
+    match d do
+      UserValues.Down(n) -> n
+    end
+  end
+
+  pfn map_s(m : UserValues.Map) : String do
+    match m do
+      UserValues.Map(s) -> s
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let a = UserValues.Down(41)
+    println(int_to_string(outer_get(a) + UserValues.get(a)))
+    let ds = [UserValues.Down(5), UserValues.Down(6)]
+    println(int_to_string(List.fold_left(ds, 0, fn (acc, d) -> acc + outer_get(d))))
+    let m = UserValues.Map("m" ++ int_to_string(2))
+    println(map_s(m))
+    let a0 = live_allocs()
+    let _ = List.map(List.range(0, 50), fn i -> map_s(UserValues.Map(int_to_string(i))))
+    println("no growth: " ++ bool_to_string(live_allocs() - a0 <= 0))
+  end
+end

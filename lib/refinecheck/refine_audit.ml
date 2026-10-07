@@ -533,9 +533,21 @@ let classify (site : site) : disposition =
      carries the fact ([Refine_scope.elem_refinement] is the single test of
      "does the checker model this container").  Tested before rule 1, which
      would otherwise call every [Nested] site unenforced. *)
+  (* An element refinement over a type variable that applies one of the
+     enclosing function's ABSTRACT refinements (`List({a | p(_)})`) is a slot
+     only inside that function's own walk ([Refine_scope.abstract_tyvar_slot]):
+     it is proved there, and instantiated at every call by
+     [Refine_check.abstract_flow].  So ask [elem_refinement] under that
+     function's abstract refinements, exactly as the checker does. *)
   | (Param _ | Return _ | Let_annot _ | Field _)
     when site.position = Type_arg
-         && Refine_post.elem_refinement (Some site.origin_ty) <> None ->
+         && (let saved = !Refine_post.current_abstracts in
+             Refine_post.current_abstracts :=
+               (match site.origin_fn with
+                | Some fd -> Refine_abstract.names ~is_known:Refine_post.known_predicate_fn fd
+                | None -> []);
+             Fun.protect ~finally:(fun () -> Refine_post.current_abstracts := saved)
+               (fun () -> Refine_post.elem_refinement (Some site.origin_ty) <> None)) ->
     Enforced
   (* Arrow DOMAIN at a function or lambda parameter (P3 design §1a): a call
      through the parameter is checked against the domain refinement via the

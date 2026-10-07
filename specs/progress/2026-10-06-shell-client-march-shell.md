@@ -181,9 +181,10 @@ unknown, and so was the bare `encode(..)` its `import Encode` brings in.
 declarations through the full `Lower.lower_module` path that the native
 build uses, which covers imports, aliases, actors and externs. Mono then
 runs, and `Dce.prune_unreachable` keeps only what the fragment's `main`
-reaches before the RC passes run. This replaced `shell_prepare`. The cost is
+reaches before the RC passes run. This replaced `shell_prepare`. The cost was
 about 470 ms of lowering and optimisation per input for a Depot-sized
-program.
+program; `2026-10-06-shell-program-lowered-once.md` brought it down to
+5-25 ms.
 
 The combined module is named after the program's entry module, and an
 input's self-qualified `DepotNode.pg()` is stripped to `pg` the way the

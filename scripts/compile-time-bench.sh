@@ -10,17 +10,22 @@
 # stamps into three buckets:
 #
 #   front end           parse … typecheck            (t[typecheck])
-#   whole-program TIR   lower … opt                  (t[opt]  - t[typecheck])
-#   back end            llvm-emit + clang            (t[clang] - t[opt])
+#   whole-program TIR   lower … opt, alloc-contract,  (t[cas-hash] - t[typecheck])
+#                       cas-hash
+#   back end            llvm-emit + clang            (t[clang] - t[cas-hash])
 #
-# The back-end bucket also holds what runs between the `opt` stamp and the
-# `llvm-emit` stamp.  That work has its own stamps since 2026-10-05:
-# `alloc-contract` (the @[no_alloc] allocation-contract analyses) and `cas-hash` (the
-# CAS SCC build + Merkle hashing before the post-TIR cache lookup).  Before
-# then they were unstamped, and on topology_app they were ~5.7 s of an 18.8 s
-# compile, mostly two quadratic name scans (lib/cas/scc.ml and
-# Alloc_contract.decl_of), both fixed.  A tir-hit row's wall minus its stamped
-# buckets is that cost, plus process start-up and the artifact copy.
+# The back end is exactly LLVM emission plus clang, the work B3-B5 would split.
+# The middle bucket ends at the post-TIR cache lookup, so a tir-hit row has it
+# in full.  Until 2026-10-07 the buckets were cut at `opt` instead, and the
+# back end also held `alloc-contract` (the @[no_alloc] allocation-contract
+# analyses) and `cas-hash` (the CAS SCC build + Merkle hashing).  On
+# topology_app those were ~5.7 s of an 18.8 s compile before two quadratic
+# name scans in them were fixed (lib/cas/scc.ml, Alloc_contract.decl_of).  The
+# TSV's post_opt_ms column is t[cas-hash] - t[opt], so the old buckets are
+# tir - post_opt and back + post_opt; the summary prints both tables.  With a
+# compiler older than the `cas-hash` stamp the cut falls back to `opt` and
+# post_opt_ms is empty.  A row's wall minus its stamped buckets is process
+# start-up, the artifact copy, and (on a miss) the CAS store.
 #
 # Scenarios, per corpus program:
 #
@@ -57,8 +62,9 @@
 # specs/plans/incremental-codegen-cas-baseline.md, not as a running count.
 #
 # Interpreting the table against the plan's gate (§3 criterion 1): if for the
-# edit scenarios at --opt 2 the back-end bucket is under half of wall time,
-# the unit-split/object-cache phases (B3–B5) are not where the time is.
+# edit scenarios at --opt 2 the back-end bucket is under ~60% of the compile,
+# the unit-split/object-cache phases (B3–B5) are not where the time is.  back%
+# is the back end's share of the stamped buckets, back%w its share of wall.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -96,7 +102,7 @@ echo "work dir: $TMP" >&2
 
 ms_now() { python3 -c 'import time;print(int(time.time()*1000))'; }
 
-printf 'corpus\tscenario\trun\topt\tstatus\ttotal_ms\tfront_ms\ttir_ms\tback_ms\tcpu_ms\n' > "$OUT"
+printf 'corpus\tscenario\trun\topt\tstatus\ttotal_ms\tfront_ms\ttir_ms\tback_ms\tcpu_ms\tpost_opt_ms\n' > "$OUT"
 
 # ── one compile ──────────────────────────────────────────────────────────────
 # compile_once <home> <projdir> <src> <corpus> <scenario> <run>
@@ -118,13 +124,13 @@ compile_once() {
   rc=$?
   t1=$(ms_now)
   local total=$((t1 - t0))
-  local status front tir back
+  local status front tir back post
   if [ $rc -ne 0 ]; then
-    status=fail; front=""; tir=""; back=""
+    status=fail; front=""; tir=""; back=""; post=""
     echo "  FAIL: $corpus/$scen run $run (rc=$rc), see $err" >&2
   else
     # Stamps are cumulative seconds since just before parsing.
-    read -r status front tir back < <(python3 - "$err" <<'PY'
+    read -r status front tir back post < <(python3 - "$err" <<'PY'
 import re, sys
 t = {}
 for line in open(sys.argv[1], errors="replace"):
@@ -133,25 +139,29 @@ for line in open(sys.argv[1], errors="replace"):
         t[m.group(2)] = float(m.group(1))
 def ms(x): return str(int(round(x * 1000)))
 if not t:
-    print("src-hit", "-", "-", "-"); sys.exit()
+    print("src-hit", "-", "-", "-", "-"); sys.exit()
 fe = t.get("typecheck")
-mid_end = t.get("opt", t.get("escape", t.get("perceus", t.get("lower"))))
+opt = t.get("opt", t.get("escape", t.get("perceus", t.get("lower"))))
+# The middle bucket ends at the post-TIR cache lookup (`cas-hash`); fall back
+# to `opt` for a compiler that predates that stamp.
+mid_end = t.get("cas-hash", opt)
+post = ms(t["cas-hash"] - opt) if ("cas-hash" in t and opt is not None) else "-"
 if fe is None or mid_end is None:
     # Something unexpected; report what we have as a miss with blanks.
-    print("miss", ms(fe) if fe else "-", "-", ms(t["clang"] - fe) if ("clang" in t and fe) else "-"); sys.exit()
+    print("miss", ms(fe) if fe else "-", "-", ms(t["clang"] - fe) if ("clang" in t and fe) else "-", "-"); sys.exit()
 if "clang" not in t:
-    print("tir-hit", ms(fe), ms(mid_end - fe), "-"); sys.exit()
-print("miss", ms(fe), ms(mid_end - fe), ms(t["clang"] - mid_end))
+    print("tir-hit", ms(fe), ms(mid_end - fe), "-", post); sys.exit()
+print("miss", ms(fe), ms(mid_end - fe), ms(t["clang"] - mid_end), post)
 PY
 )
-    [ "$front" = - ] && front=""; [ "$tir" = - ] && tir=""; [ "$back" = - ] && back=""
+    [ "$front" = - ] && front=""; [ "$tir" = - ] && tir=""; [ "$back" = - ] && back=""; [ "$post" = - ] && post=""
   fi
   local cpu
   cpu=$(awk '$1=="user"||$1=="sys"{s+=$2} END{if (NR) printf "%d", s*1000}' "$err")
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$corpus" "$scen" "$run" "$OPT" "$status" "$total" "$front" "$tir" "$back" "$cpu" >> "$OUT"
-  printf '  %-9s %-8s run %s  %-7s total %6s ms  fe %6s  tir %6s  be %6s  cpu %6s\n' \
-    "$corpus" "$scen" "$run" "$status" "$total" "${front:--}" "${tir:--}" "${back:--}" "${cpu:--}" >&2
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$corpus" "$scen" "$run" "$OPT" "$status" "$total" "$front" "$tir" "$back" "$cpu" "$post" >> "$OUT"
+  printf '  %-9s %-8s run %s  %-7s total %6s ms  fe %6s  tir %6s  be %6s  cpu %6s  post-opt %6s\n' \
+    "$corpus" "$scen" "$run" "$status" "$total" "${front:--}" "${tir:--}" "${back:--}" "${cpu:--}" "${post:--}" >&2
 }
 
 # ── edit recipes ─────────────────────────────────────────────────────────────
@@ -233,7 +243,7 @@ run_corpus() {
     esac
     if [ "$recipe" = "-" ]; then
       for r in $(seq 1 "$RUNS"); do
-        printf '%s\t%s\t%s\t%s\t%s\t\t\t\t\t\n' "$name" "$scen" "$r" "$OPT" "n/a" >> "$OUT"
+        printf '%s\t%s\t%s\t%s\t%s\t\t\t\t\t\t\n' "$name" "$scen" "$r" "$OPT" "n/a" >> "$OUT"
       done
       echo "  $name $scen: n/a (no safe edit recipe for this program)" >&2
       continue
@@ -289,24 +299,40 @@ def med(vals):
     vals = [float(v) for v in vals if v not in ("", None)]
     return statistics.median(vals) if vals else None
 def fmt(v): return f"{'-':>6}" if v is None else f"{int(round(v)):>6}"
-# back% is the back end's share of the three stamped buckets, not of wall time:
-# wall also holds process start-up and the CAS copy, which no phase can remove.
-print(f"{'corpus':<9} {'scenario':<8} {'status':<8} {'n':>2} {'total':>6} {'front':>6} {'tir':>6} {'back':>6}  back%  {'cpu':>6}   (medians over runs, ms)")
-for c in corpora:
-    for s in order:
-        rs_all = [r for r in rows if r["corpus"] == c and r["scenario"] == s]
-        if not rs_all: continue
-        if all(r["status"] == "n/a" for r in rs_all):
-            print(f"{c:<9} {s:<8} {'n/a':<8}"); continue
-        # One row per status: a scenario that hit the cache on some runs and
-        # missed on others is two populations, not one median.
-        for st in sorted(set(r["status"] for r in rs_all)):
-            rs = [r for r in rs_all if r["status"] == st]
-            tot, fe, tir, be, cpu = (med([r.get(k) for r in rs]) for k in ("total_ms", "front_ms", "tir_ms", "back_ms", "cpu_ms"))
-            parts = [x for x in (fe, tir, be) if x is not None]
-            share = f"{100*be/sum(parts):5.0f}%" if (be is not None and sum(parts)) else "      "
-            print(f"{c:<9} {s:<8} {st:<8} {len(rs):>2} {fmt(tot)} {fmt(fe)} {fmt(tir)} {fmt(be)}  {share}  {fmt(cpu)}")
-print()
+def num(v): return float(v) if v not in ("", None) else None
+# The old (pre-2026-10-07) buckets, rebuilt from the same row: the back end
+# then began at `opt`, so it also held post_opt (alloc-contract + cas-hash).
+def old_view(r):
+    p = num(r.get("post_opt_ms"))
+    if p is None: return r
+    r = dict(r)
+    if num(r["tir_ms"]) is not None: r["tir_ms"] = str(num(r["tir_ms"]) - p)
+    if num(r["back_ms"]) is not None: r["back_ms"] = str(num(r["back_ms"]) + p)
+    return r
+# back% is the back end's share of the three stamped buckets; back%w is its
+# share of wall time, which also holds process start-up and the CAS copy.
+def table(title, view):
+    print(title)
+    print(f"{'corpus':<9} {'scenario':<8} {'status':<8} {'n':>2} {'total':>6} {'front':>6} {'tir':>6} {'back':>6}  back%  back%w  {'cpu':>6}   (medians over runs, ms)")
+    for c in corpora:
+        for s in order:
+            rs_all = [view(r) for r in rows if r["corpus"] == c and r["scenario"] == s]
+            if not rs_all: continue
+            if all(r["status"] == "n/a" for r in rs_all):
+                print(f"{c:<9} {s:<8} {'n/a':<8}"); continue
+            # One row per status: a scenario that hit the cache on some runs and
+            # missed on others is two populations, not one median.
+            for st in sorted(set(r["status"] for r in rs_all)):
+                rs = [r for r in rs_all if r["status"] == st]
+                tot, fe, tir, be, cpu = (med([r.get(k) for r in rs]) for k in ("total_ms", "front_ms", "tir_ms", "back_ms", "cpu_ms"))
+                parts = [x for x in (fe, tir, be) if x is not None]
+                share = f"{100*be/sum(parts):5.0f}%" if (be is not None and sum(parts)) else "      "
+                wshare = f"{100*be/tot:5.0f}% " if (be is not None and tot) else "       "
+                print(f"{c:<9} {s:<8} {st:<8} {len(rs):>2} {fmt(tot)} {fmt(fe)} {fmt(tir)} {fmt(be)}  {share}  {wshare} {fmt(cpu)}")
+    print()
+table("back end = llvm-emit + clang (t[clang] - t[cas-hash])", lambda r: r)
+if any(num(r.get("post_opt_ms")) is not None for r in rows):
+    table("old buckets, same runs: back end = t[clang] - t[opt] (also holds alloc-contract + cas-hash)", old_view)
 print("gate (plan §3, criterion 1): for leaf/sig/field misses at --opt 2, is back% over ~60 and")
 print("the topology total over ~10 s?  Below that, B3-B5 are not where the time goes.")
 print(f"rows: {sys.argv[1]}")
