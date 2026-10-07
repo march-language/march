@@ -17447,7 +17447,37 @@ end|}
             "<lambda>"
         in
         Alcotest.(check bool) "some verdict" true (vs <> []);
-        Alcotest.(check bool) "not proved" false (List.mem "proved" vs)) ]
+        Alcotest.(check bool) "not proved" false (List.mem "proved" vs));
+
+    (* `is_pos`'s proved return names ITS parameter `n`; the expected codomain
+       names `$cb_arg` (after CB1's fix).  The pass-site obligation is the
+       LAST one recorded under callee `is_pos` (its own postcondition is
+       checked first, when `is_pos` itself is visited).  RED before: skipped. *)
+    gated "a named callable's proved return meets the codomain" (fun () ->
+        let obs =
+          typed_obligations
+            {|mod CB5 do
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
+  fn go() : Bool do ap(is_pos, 3) end
+end|}
+        in
+        Alcotest.(check (list (pair string string))) "own post + pass site, both proved"
+          [ ("proved", ""); ("proved", "") ]
+          (List.filter_map (fun (c, v, r) -> if c = "is_pos" then Some (v, r) else None) obs));
+
+    gated "a named callable with a different predicate is not proved" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod CB6 do
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn is_nonneg(n : Int) : {Bool | _ == (n >= 0)} do n >= 0 end
+  fn go() : Bool do ap(is_nonneg, 3) end
+end|}
+            "is_nonneg"
+        in
+        Alcotest.(check bool) "pass site not proved" true
+          (List.exists (fun v -> v <> "proved") vs)) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->

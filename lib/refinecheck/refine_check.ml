@@ -492,7 +492,23 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
               if captures then run () else Witness.with_lambda lam_name a run
             | A.EVar { A.txt = g; _ } ->
               (match callee_sig ctx defs cb g with
-               | Some { ret = Some (rb, rq); ret_sort = rsrt; _ } ->
+               | Some ({ ret = Some (rb, rq); ret_sort = rsrt; _ } as gsg) ->
+                 (* The callable's return names ITS parameter; the expected
+                    codomain names [callback_param_name] (see
+                    [callback_sig_of_ty]).  Rename the former so both speak of
+                    one argument: the implication is then checked for an
+                    arbitrary argument value, as covariance requires.  Without
+                    it the two names were independent, and a correct
+                    `is_pos(n) : {Bool | _ == (n > 0)}` was REJECTED against
+                    `_ == (x > 0)` with the witness `n = 0, x = 1`.  A
+                    forwarded callback's sig already names
+                    [callback_param_name] (the rename is the identity). *)
+                 let rq =
+                   match gsg.param_names with
+                   | [ gp ] when gp <> callback_param_name ->
+                     subst_params [ (gp, A.EVar { A.txt = callback_param_name; A.span = asp }) ] rq
+                   | _ -> rq
+                 in
                  let sc = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
                  let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
                  check_call cx ~span:asp ~callee:g ~subject:Callback_codomain cod_sig
