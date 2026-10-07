@@ -132,6 +132,20 @@ jobs:
           # caught, just one step later.
           dune build bin/main.exe
 
+      # A test binary killed by a signal its own handler never saw (a bare
+      # "Segmentation fault (core dumped)" from `sh -c ./native_X`) leaves no
+      # trace on a stock runner: the default core_pattern pipes to apport,
+      # which discards cores of unpackaged binaries. Write them to a known
+      # directory instead; the Test step raises the core limit, and the two
+      # steps after it backtrace and upload them, on failure only.
+      # specs/todos/2026-10-07-flake-bare-sigsegv-native-fixtures-linux.md
+      - name: Capture test cores (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo mkdir -p /tmp/march-cores && sudo chmod 1777 /tmp/march-cores
+          # %E: the executable's absolute path with '/' written as '!'.
+          sudo sysctl -w kernel.core_pattern='/tmp/march-cores/core.%p.%E'
+
       - name: Test (${{ matrix.shard }})
         # Sized for the unsharded macOS run: 37-49 min on main in late
         # September 2026 (run_codegen alone took 28-29 min on a slow macOS
@@ -142,6 +156,7 @@ jobs:
         timeout-minutes: 75
         run: |
           eval $(opam env)
+          if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi
           case "${{ matrix.shard }}" in
             codegen)     dune build @test/runtest-run_codegen ;;
             refinecheck) dune build @test/runtest-test_refinecheck ;;
@@ -150,6 +165,36 @@ jobs:
             all)         dune runtest ;;
             *) echo "::error::unknown test shard '${{ matrix.shard }}'"; exit 1 ;;
           esac
+
+      - name: Backtrace test cores (Linux)
+        if: failure() && runner.os == 'Linux'
+        run: |
+          shopt -s nullglob
+          cores=(/tmp/march-cores/core.*)
+          echo "${#cores[@]} core file(s) in /tmp/march-cores"
+          [ ${#cores[@]} -gt 0 ] || exit 0
+          sudo apt-get install -y gdb > /dev/null
+          for c in "${cores[@]:0:8}"; do
+            exe=$(basename "$c" | sed 's/^core\.[0-9]*\.//; s/!/\//g')
+            echo "::group::$c ($exe)"
+            if [ -f "$exe" ]; then
+              cp "$exe" /tmp/march-cores/ || true
+              gdb -batch -ex 'p $_siginfo' -ex 'x/6i $pc' \
+                  -ex 'thread apply all bt 40' "$exe" "$c" 2>&1 | grep -v '^\[New LWP'
+            else
+              echo "the executable is gone (rebuilt or removed since the crash)"
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Upload test cores (Linux)
+        if: failure() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cores-${{ matrix.os }}-${{ matrix.shard }}
+          path: /tmp/march-cores
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Distributed-plane guards that used to run after `dune runtest` in the ubuntu
   # `test` leg, adding ~15 min to it serially. They need no test exe, only the
