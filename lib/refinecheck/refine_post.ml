@@ -709,6 +709,8 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
              ~str_declared:(str_pre <> "")
              ~measure_attached:((record_sort <> None || scope_has_record) && !needs_axiom_preamble)
              vc
+         (* Last: an abstract symbol's argument sort is declared above. *)
+         ^ abstract_preamble vc
        in
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved; true

@@ -284,6 +284,11 @@ mod List do
   doc """
   Returns only elements satisfying `pred`.
 
+  The result's elements are known to satisfy the predicate: with
+  `sum_pos(xs : List({Int | _ > 0}))`, `sum_pos(List.filter(ys, fn y -> y > 0))`
+  is proved. `p` is an abstract refinement, instantiated from the lambda at
+  each call.
+
   ## Examples
 
       march> List.filter([1, 2, 3, 4, 5], fn x -> x > 2)
@@ -294,7 +299,7 @@ mod List do
       march> 
       ["foo", "bar"]
   """
-  fn filter(xs : List(a), pred : a -> Bool) : {List(a) | subset(elts(_), elts(xs))} do
+  fn filter(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)}) : {List({a | p(_)}) | subset(elts(_), elts(xs))} do
     -- Natural style on purpose: TRMC makes it a single-traversal loop.
     match xs do
     Nil        -> Nil

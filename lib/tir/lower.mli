@@ -33,7 +33,8 @@ val lower_module :
   ?stdlib_context:Ast.decl list ->
   ?test_mode:bool ->
   ?hot_reload:bool ->
-  ?shadow_builtins:bool -> Ast.module_ -> Tir.tir_module
+  ?shadow_builtins:bool ->
+  ?resumable:bool -> Ast.module_ -> Tir.tir_module
 (** [shadow_builtins] (default [true]): lower an entry-file top-level fn named
     like a builtin with its own C symbol under a distinct name
     ([Tir_names.builtin_shadow_name]) so codegen does not emit it as that
@@ -45,6 +46,18 @@ val lower_module :
 
     The REPL JIT and the eval/JS pipelines lower fragments rather than whole
     modules, and need the type converters and the prelude ADTs directly. *)
+
+(** [resumable] (default [false]): keep this module's lowering state so
+    [lower_more] can lower further top-level [fn]s against it.
+
+    [lower_more decls]: lower [decls] (top-level [fn]s; anything else is
+    ignored) as if declared at the end of the last [~resumable:true] module,
+    with its names, imports, aliases, interface impls and top-level lets.
+    Returns their fns plus the stdlib/library fns lowering them first reached,
+    and any types those brought.  The [type_map] given to that [lower_module]
+    must hold the new decls' spans.  Raises [Failure] if no module is
+    resumable (a later [lower_module] call ends the previous one's state). *)
+val lower_more : Ast.decl list -> Tir.fn_def list * Tir.type_def list
 
 val lower_ty : Ast.ty -> Tir.ty
 val convert_ty : Typecheck.ty -> Tir.ty

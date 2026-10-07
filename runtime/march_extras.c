@@ -2704,6 +2704,15 @@ typedef struct {
     char     *desc;       /* owned canonical descriptor string */
 } march_record_shape;
 
+/* Shape registry.  Writers ([march_record_shape_intern]) hold [rec_shape_mu];
+ * readers ([rec_shape_of], reached from every dynamic field access on any
+ * scheduler thread) take no lock.  So the table is never realloc'd in place:
+ * growing publishes a fresh copy and RETIRES the old array without freeing it
+ * (a reader may still be indexing it), and [rec_shape_count] is published
+ * with release order after the entry it covers is written.  Total retired
+ * memory is bounded by the final table size (doubling).  A realloc here was a
+ * heap-use-after-free under ASAN (march_record_field_dyn in __drop$CnState
+ * reading the array a concurrent intern had just freed). */
 static march_record_shape **rec_shape_table = NULL;   /* index = id - 1 */
 static int32_t rec_shape_count = 0;
 static int32_t rec_shape_cap   = 0;
@@ -2748,12 +2757,17 @@ int32_t march_record_shape_intern(const char *desc) {
         }
     }
     if (rec_shape_count == rec_shape_cap) {
-        rec_shape_cap = rec_shape_cap ? rec_shape_cap * 2 : 32;
-        rec_shape_table = realloc(rec_shape_table,
-                                  (size_t)rec_shape_cap * sizeof(*rec_shape_table));
+        int32_t cap = rec_shape_cap ? rec_shape_cap * 2 : 32;
+        march_record_shape **grown = calloc((size_t)cap, sizeof(*grown));
+        if (rec_shape_count > 0)
+            memcpy(grown, rec_shape_table, (size_t)rec_shape_count * sizeof(*grown));
+        /* The old array is retired, not freed: see the registry comment. */
+        __atomic_store_n(&rec_shape_table, grown, __ATOMIC_RELEASE);
+        rec_shape_cap = cap;
     }
     rec_shape_table[rec_shape_count] = rec_shape_parse(desc);
-    int32_t id = ++rec_shape_count;
+    int32_t id = rec_shape_count + 1;
+    __atomic_store_n(&rec_shape_count, id, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&rec_shape_mu);
     return id;
 }
@@ -2769,8 +2783,8 @@ void march_record_set_shape(void *rec, const char *desc, int32_t *cache) {
 
 static march_record_shape *rec_shape_of(void *rec) {
     int32_t id = ((march_hdr *)rec)->pad;
-    if (id <= 0 || id > rec_shape_count) return NULL;
-    return rec_shape_table[id - 1];
+    if (id <= 0 || id > __atomic_load_n(&rec_shape_count, __ATOMIC_ACQUIRE)) return NULL;
+    return __atomic_load_n(&rec_shape_table, __ATOMIC_ACQUIRE)[id - 1];
 }
 
 static int64_t rec_field_raw(void *rec, int32_t i) {
