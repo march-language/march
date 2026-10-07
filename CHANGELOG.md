@@ -2504,6 +2504,15 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Agent debugging guidance.** A `march-debug` skill maps each symptom
+  (compiled/interpreted divergence, crash, leak, slow compile, stale cache, red
+  CI, "prove this refactor moved nothing") to the first command and how to read
+  it; a `steward` skill records the known CI flakes and the one-re-run policy,
+  how to find the real failure in the macOS `all` log, and what CI enforces
+  (including registering a new `bench/*.march` in `test/test_bench_gate.ml`).
+  `CLAUDE.md` gains a short "When something breaks" pointer, and a hook prints a
+  one-line hint after a failed compile, test or build. doc-lint now also checks
+  `scripts/*.sh`/`*.py` pointers in the current docs and the skills.
 - **Data-race freedom, written down.** `actors.md` says what a message may
   carry (a linear value moves, everything else is immutable or copy-on-write),
   `linear-types.md` has a `RingBuf` section and the module-level `let` rule,
