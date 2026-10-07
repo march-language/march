@@ -13673,7 +13673,7 @@ let write_march_fixture (src_text : string) : string =
    stdout and stderr are each redirected to their own temp file and read
    back separately, exactly like [check_no_prelude_collision]'s sibling
    helpers in [test_cap_strip.ml]. Returns (exit code, stdout, stderr). *)
-let run_march_on_env (env : (string * string) list) (args : string list) (path : string)
+let run_march_on_env ?cwd (env : (string * string) list) (args : string list) (path : string)
     : int * string * string =
   require_refine_audit_compiler ();
   let out = Filename.temp_file "refine_audit" ".out" in
@@ -13682,9 +13682,13 @@ let run_march_on_env (env : (string * string) list) (args : string list) (path :
     String.concat ""
       (List.map (fun (k, v) -> Printf.sprintf "%s=%s " k (Filename.quote v)) env)
   in
+  (* Test_helpers.Sys.command: macOS libc system() serializes concurrent
+     callers, which made audit_sweep's parallel workers run one at a time. *)
   let rc =
-    Sys.command
-      (Printf.sprintf "%s%s %s %s > %s 2> %s" env_prefix refine_audit_compiler_exe
+    Test_helpers.Sys.command
+      (Printf.sprintf "%s%s%s %s %s > %s 2> %s"
+         (match cwd with None -> "" | Some d -> Printf.sprintf "cd %s && " (Filename.quote d))
+         env_prefix refine_audit_compiler_exe
          (String.concat " " args) (Filename.quote path) (Filename.quote out) (Filename.quote err))
   in
   let stdout_s = read_whole_file out and stderr_s = read_whole_file err in
@@ -14295,13 +14299,13 @@ let audit_tag_of (path : string) : string =
    worktree's absolute paths -- see
    project_home_cache_path_contamination_oracles.md) and returns every
    "coverage audit" line from stderr, tagged and ready to sort. Clears the
-   check-artifact CAS immediately before the run, every time: seeing this
-   inside the per-file loop (not once before the whole sweep) matters
-   because [require_refine_audit_compiler]'s own compiler build can populate
-   it via an earlier group in this same process. *)
-let audit_coverage_lines_for ~home (path : string) : string list =
-  Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote ".march/cas/artifacts-v2")) |> ignore;
-  let _, _, err = run_march_on_env [ ("HOME", home) ] [ "--check"; "--refine-audit" ] path in
+   check-artifact CAS (under [cwd], the compiler's project dir) immediately
+   before the run, every time: a warm --check exits before the audit prints,
+   and an earlier group in this process can have populated it. *)
+let audit_coverage_lines_for ~home ~cwd (path : string) : string list =
+  Test_helpers.Sys.command (Printf.sprintf "rm -rf %s"
+                 (Filename.quote (Filename.concat cwd ".march/cas/artifacts-v2"))) |> ignore;
+  let _, _, err = run_march_on_env ~cwd [ ("HOME", home) ] [ "--check"; "--refine-audit" ] path in
   let tag = audit_tag_of path in
   nonempty_lines err
   |> List.filter (fun l -> String.length l >= 14 && String.sub l 0 14 = "coverage audit")
@@ -14327,11 +14331,30 @@ let strip_root_prefix (root : string) (line : string) : string =
   done;
   Buffer.contents buf
 
+(* One `--check --refine-audit` per file, spread over [Test_helpers.parallel_map]'s
+   workers: run serially this was ~45% of the whole refinecheck suite (CI
+   audit, 2026-10-07). Each worker gets its own HOME and cwd under [home], so
+   one worker's CAS clear can never race another's compile, while each still
+   reuses its own solver-verdict cache (.march/cas/vc) across its files. The
+   lines are sorted afterwards, so which worker ran which file is invisible. *)
 let audit_sweep ~home (dirs : string list) : int * string list =
   let root = audit_root () in
   let files = List.concat_map march_files_sorted_in dirs in
+  let worker_dir w sub =
+    let d = Filename.concat home (Printf.sprintf "w%d" w) in
+    let p = Filename.concat d sub in
+    if not (Sys.file_exists p) then begin
+      (try Unix.mkdir d 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+      Unix.mkdir p 0o700
+    end;
+    p
+  in
   let lines =
-    List.concat_map (audit_coverage_lines_for ~home) files
+    Test_helpers.parallel_map
+      (fun w path ->
+        audit_coverage_lines_for ~home:(worker_dir w "home") ~cwd:(worker_dir w "cwd") path)
+      files
+    |> List.concat
     |> List.map (strip_root_prefix root)
     |> List.sort compare
   in
