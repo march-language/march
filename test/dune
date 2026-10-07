@@ -12308,6 +12308,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; ── A dead actor's record and state are released (2026-10-06): under 5
 ; objects left over 50 actors (RED before: the killed actor's List state, and
 ; the record itself once Actor.call had been used on it).
+; The exit status is echoed to stderr on failure: dune prints no status for a
+; failed action whose stderr is non-empty, and this fixture's always is (the
+; panicking on_stop logs), so a CI failure showed neither the code nor the
+; signal (specs/todos/2026-10-07-flake-actor-state-released-macos-exit.md).
 (rule
  (targets native_actor_state_released native_actor_state_released.out)
  (deps (file %{exe:../bin/main.exe})
@@ -12319,7 +12323,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_state_released
         native/actor_state_released.march)
    (with-stdout-to native_actor_state_released.out
-        (system "./native_actor_state_released")))))
+        (system "./native_actor_state_released; rc=$?; [ $rc -eq 0 ] || echo \"native_actor_state_released: exit status $rc (above 128: signal $((rc - 128)))\" >&2; exit $rc")))))
 
 (rule
  (alias runtest)
