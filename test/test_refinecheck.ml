@@ -17045,10 +17045,12 @@ let abstract_refinements_suite =
         Alcotest.(check bool) "not called vacuous" false (says "never used in the signature" msgs);
         Alcotest.(check bool) "no error" false (says "abstract refinement `p` is applied" msgs));
 
-    gated "phase 1 is inert: row n still skips, nothing proves" (fun () ->
-        (* The motivating case (design row n).  Phase 2 turns this into a
-           proof; until then the ledger must be unchanged, and this case is
-           what will show that happening. *)
+    gated "an unproved filt with an opaque callback proves nothing (rows n4, n6)" (fun () ->
+        (* Phase 1's inert-row-n witness.  After phase 2 it still proves
+           nothing, for two independent reasons: `filt`'s body (`xs`) does
+           not prove its abstract return, and `k` is an opaque callback that
+           instantiates nothing.  The proving row n is in the
+           `abstract-phase2` suite. *)
         let src =
           m (String.concat "\n"
                [ Printf.sprintf "  fn filt(xs : List(a), keep : %s) : List({a | p(_)}) do xs end" definer;
@@ -17651,7 +17653,67 @@ end|}
             (March_refinecheck.Obligation.all ())
         in
         Alcotest.(check bool) "g's tail has an obligation" true (at_g <> []);
-        Alcotest.(check bool) "and it is not proved" false (List.mem "proved" at_g)) ]
+        Alcotest.(check bool) "and it is not proved" false (List.mem "proved" at_g));
+
+    (* n: the flagship.  RED before: `parametric-source-unproved`. *)
+    gated "n: an inline lambda instantiates p and proves the demand" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             ("mod N do\n" ^ ar2_filt
+            ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\nend\n")
+             "sum_pos"));
+
+    (* n2: weaker lambda — a skip with the new reason, never a violation. *)
+    gated "n2: a weaker lambda is too-weak, not violated" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod N2 do\n" ^ ar2_filt
+           ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y >= 0)) end\nend\n")
+        in
+        Alcotest.(check (list (pair string string))) "too weak"
+          [ ("skipped", "abstract-refinement-too-weak") ]
+          (List.filter_map (fun (c, v, r) -> if c = "sum_pos" then Some (v, r) else None) obs));
+
+    (* n4: an opaque callable instantiates nothing. *)
+    gated "n4: an opaque callback is uninstantiated" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod N4 do\n" ^ ar2_filt
+           ^ "  fn go(ys : List(Int), k : ({x : Int | true}) -> Bool) : Int do sum_pos(filt(ys, k)) end\nend\n")
+        in
+        Alcotest.(check (list string)) "reason" [ "abstract-refinement-uninstantiated" ]
+          (List.filter_map (fun (c, _, r) -> if c = "sum_pos" then Some r else None) obs));
+
+    (* A lambda mentioning an outer name is declined, not mis-instantiated. *)
+    gated "a capturing lambda is uninstantiated" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod NC do\n" ^ ar2_filt
+           ^ "  fn go(ys : List(Int), m : Int) : Int do sum_pos(filt(ys, fn y -> y > m)) end\nend\n")
+        in
+        Alcotest.(check (list string)) "reason" [ "abstract-refinement-uninstantiated" ]
+          (List.filter_map (fun (c, _, r) -> if c = "sum_pos" then Some r else None) obs));
+
+    (* n6 at the call site: a callee whose body does not prove lends nothing. *)
+    gated "an unproved definition lends nothing at its call" (fun () ->
+        let obs =
+          typed_obligations
+            {|mod NB do
+  fn bad(xs : List(a), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do xs end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn go(ys : List(Int)) : Int do sum_pos(bad(ys, fn y -> y > 0)) end
+end|}
+        in
+        Alcotest.(check (list (pair string string))) "uninstantiated"
+          [ ("skipped", "abstract-refinement-uninstantiated") ]
+          (List.filter_map (fun (c, v, r) -> if c = "sum_pos" then Some (v, r) else None) obs));
+
+    gated "cap verified: a proved demand compiles, a too-weak one is an error" (fun () ->
+        let m body = "mod CV do\n  cap verified\n" ^ ar2_filt ^ body ^ "end\n" in
+        Alcotest.(check bool) "proved compiles" false
+          (has_refine_error_typed (m "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"));
+        Alcotest.(check bool) "too-weak errors" true
+          (has_refine_error_typed (m "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y >= 0)) end\n"))) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->

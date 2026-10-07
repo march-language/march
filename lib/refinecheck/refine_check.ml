@@ -826,6 +826,125 @@ let rec first_slot_pred (slots : elem option list) : string =
     (match first_slot_pred inner with "<element refinement>" -> first_slot_pred rest | s -> s)
   | None :: rest -> first_slot_pred rest
 
+(* ── Abstract refinements at a call (design 2026-09-20 §3) ─────────────────
+   [abstract_return_slot fd] is [fd]'s return element slot when it is exactly
+   an abstract-refinement application: `List({a | p(_)})`, possibly under a
+   refinement of the container itself.  Read from the declared type directly:
+   [elem_refinement] admits such a slot only inside [fd]'s own walk
+   ([abstract_tyvar_slot]), and this is asked at its call sites. *)
+let abstract_return_slot (fd : A.fn_def) : (string * string) option =
+  let rec strip (t : A.ty) =
+    match unlinear t with
+    | A.TyRefine ((A.TyCon _ as base), _, _) -> strip base
+    | t -> t
+  in
+  match Option.map strip fd.A.fn_ret_ty with
+  | Some
+      (A.TyCon
+         ( { A.txt = c; _ }
+         , [ A.TyRefine (A.TyVar _, b, A.EApp (A.EVar { A.txt = p; _ }, [ A.EVar { A.txt = v; _ } ], _)) ] ))
+    when is_container_type c && (v = binder_name b || v = "_") ->
+    Some (c, p)
+  | _ -> None
+
+(* A call [g(args)] to a combinator whose return is `List({a | p(_)})`, with a
+   demand [slots] on its result.  Instantiate `p` from the actual at its
+   definer position, then decide `q(v) ⇒ D(v)` for a fresh element `v` — one
+   query, in a scratch ledger, so a refutation is reported as too-weak rather
+   than as a definite violation (§3.3, decision 9.2).  [None]: [g] declares no
+   abstract element return; the caller falls through to [demand_flow]. *)
+let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) ~(span : A.span)
+    ~(callee : string) ((_, slots) : string * elem option list) (g : string) (args : A.expr list)
+  : [ `Proved | `Too_weak of string | `Uninstantiated of string | `Undecided ] option =
+  let abs = callee_abstracts ctx g in
+  match resolve_key ctx g, slots with
+  | Some key, [ Some (Refined demand) ] when abs <> [] ->
+    (match Hashtbl.find_opt fn_defs_tbl key with
+     | None -> None
+     | Some (_, fd) ->
+       (match abstract_return_slot fd with
+        | Some (_, p) when List.mem p abs ->
+          let is_known = known_predicate_fn in
+          let uninst w = Some (`Uninstantiated w) in
+          if not (Hashtbl.mem elem_ret_proved key) then
+            uninst
+              (Printf.sprintf "`%s`'s own body is not proved to return elements satisfying `%s`" g p)
+          else
+            (match Refine_abstract.positive_base ~is_known fd p with
+             | Some a when not (parametric_ok ctx g [ a ]) ->
+               uninst (Printf.sprintf "`%s` is not known to be parametric in `%s`" g a)
+             | _ ->
+               (match
+                  Option.bind (Refine_abstract.definer_index ~is_known fd p) (List.nth_opt args)
+                with
+                | Some (A.ELam ([ prm ], body, _)) ->
+                  let y = prm.A.param_name.A.txt in
+                  if classify_pred y [] body <> Closed then
+                    uninst
+                      (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
+                  else begin
+                    let ((_, dpred, dsort) as d) = demand in
+                    let sg = elem_sig ~name:"$elem" d in
+                    let rp = List.hd sg.refined in
+                    let sc' = ("$elem", (y, body, dsort)) :: scope_shadow sc [ "$elem" ] in
+                    let cx =
+                      { root; errctx = Err.create (); postcond = postcond_of ~cb ctx defs; path; lets
+                      ; sc = sc'; re; binds = ctx.binds }
+                    in
+                    let out = ref None in
+                    let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
+                    Fun.protect
+                      ~finally:(fun () ->
+                        strict_verified := saved_strict;
+                        unverified_hinted := saved_hinted)
+                      (fun () ->
+                        Obligation.with_scratch (fun () ->
+                            strict_verified := false;
+                            check_call cx ~span ~callee ~subject:Element_domain ~verdict_out:out sg
+                              [ A.EVar { A.txt = "$elem"; A.span = span } ] rp));
+                    match !out with
+                    | Some Obligation.Proved -> Some `Proved
+                    | Some Obligation.Violated ->
+                      Some
+                        (`Too_weak
+                          (Printf.sprintf "`fn %s -> %s` does not imply `%s`" y (pred_str body)
+                             (pred_str dpred)))
+                    | _ -> Some `Undecided
+                  end
+                | Some (A.ELam _) ->
+                  uninst (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
+                | Some _ ->
+                  uninst
+                    (Printf.sprintf
+                       "the argument passed for `%s` is not an inline one-parameter lambda (a named \
+                        function or a callback parameter instantiates nothing yet)"
+                       p)
+                | None -> uninst (Printf.sprintf "no argument at the position that defines `%s`" p)))
+        | _ -> None))
+  | _ -> None
+
+(* Record an [abstract_flow] verdict at the demanding call; escalate a skip
+   under `cap verified` the way [record_param_skip] does.  Returns whether the
+   demand was proved, as [check_elements]' arms do. *)
+let record_abstract_verdict errctx ~(span : A.span) ~(callee : string) ~(predicate : string) v : bool =
+  let verdict =
+    match v with
+    | `Proved -> Obligation.Proved
+    | `Too_weak w -> Obligation.Skipped (Obligation.Abstract_too_weak w)
+    | `Uninstantiated w -> Obligation.Skipped (Obligation.Abstract_uninstantiated w)
+    | `Undecided -> Obligation.Skipped Obligation.Solver_undecided
+  in
+  Obligation.record { Obligation.span; callee; predicate; verdict; kind = Obligation.Precondition };
+  (match verdict with
+   | Obligation.Skipped r when !strict_verified ->
+     Err.error errctx ~span
+       (Printf.sprintf
+          "`cap verified` module: cannot verify element refinement `%s` on `%s` (%s: %s)\n\
+           note: pass a predicate that implies the refinement, or remove `cap verified` from this module"
+          predicate callee (Obligation.reason_name r) (Obligation.reason_detail r))
+   | _ -> ());
+  verdict = Obligation.Proved
+
 let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
     (a : A.expr) : bool =
@@ -923,6 +1042,12 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
           false
         | A.EApp (A.EVar { A.txt = g; _ }, args, _) ->
           (match
+             abstract_flow ~root defs ctx path lets sc re cb ~span:xsp ~callee (container, slots) g args
+           with
+           | Some v ->
+             record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
+           | None ->
+          match
              demand_flow ~root errctx defs ctx path lets sc re cb ce ~span ~callee (container, slots) g args
            with
            | `Proved ->
