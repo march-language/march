@@ -300,6 +300,31 @@ let rec niche_payload_ok (t : table) (ty : Tir.ty) : bool =
     unreadable at a dispatch site that only knows the short name. *)
 and repr_of (t : table) (ty : Tir.ty) : repr =
   match ty with
+  (* One answer per declaration, whatever the spelling.  A stdlib or
+     nested-module type is registered under its QUALIFIED name, but
+     construction and matching ask with whatever key lowering gave them, and
+     that is usually the BARE name, which misses the registration and lands
+     on Boxed below.  The qualified spelling used to find the declaration and
+     answer Newtype/Unboxed: [GlobalRegistry.Names], [Map.Map], [Bytes.Bytes]
+     and [Decimal.Decimal] all disagreed with their bare spelling.  Anything
+     reading the qualified spelling was then handed a layout the program
+     never builds.  The worst case: a nested type named like a runtime one
+     ([mod UserValues do type Down = Down(Int) end]) is constructed under its
+     qualified key, so as a newtype, and matched under the bare name as a
+     boxed cell, which made a SIGSEGV (test/native/qualified_newtype_repr).  A
+     qualified name whose short name names no declaration of its own answers
+     as that short name does.  One whose short name does name another type
+     keeps its own lookup: the two are different types. *)
+  | Tir.TCon (name, args)
+    when String.contains name '.'
+         && (let short = Collision_set.short_name name in
+             find_variant t short = None
+             && not (Hashtbl.mem t.k_unboxed short)) ->
+    repr_of_spelled t (Tir.TCon (Collision_set.short_name name, args))
+  | _ -> repr_of_spelled t ty
+
+and repr_of_spelled (t : table) (ty : Tir.ty) : repr =
+  match ty with
   (* Finding-19 memory-safety fix: force actor message variant types (<Actor>_Msg)
      to Boxed regardless of their ctor shape.  A single-handler actor's message
      would otherwise classify Newtype (raw payload, NO tag) and a two-handler

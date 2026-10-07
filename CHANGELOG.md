@@ -235,6 +235,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A nested type named like a runtime type no longer crashes when it is matched.** A
+  module-local `type Down = Down(Int)` (or another name the runtime reserves) was built
+  one way and read another in compiled code, a segfault on the first `match`.
+
 - A `--hot-reload` build no longer leaks a small object each time it calls a
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary

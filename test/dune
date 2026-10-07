@@ -12154,6 +12154,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/wildcard_binder_drop.expected native_wildcard_binder_drop.out)))
+
+; ── A nested type named like a runtime type is built and matched with one
+; layout (2026-10-06). RED before: SIGSEGV (built a newtype, matched boxed).
+(rule
+ (targets native_qualified_newtype_repr native_qualified_newtype_repr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/qualified_newtype_repr.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_qualified_newtype_repr
+        native/qualified_newtype_repr.march)
+   (with-stdout-to native_qualified_newtype_repr.out
+        (system "./native_qualified_newtype_repr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/qualified_newtype_repr.expected native_qualified_newtype_repr.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),
