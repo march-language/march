@@ -194,7 +194,31 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
                    && Lower_state.shared_ctor_collision_type
                         env.Lower_state.mod_prefix tag <> None ->
               env.Lower_state.mod_prefix ^ type_name ^ "." ^ tag
-            | _ -> tag)
+            | ty ->
+              (* A module matching its OWN type that a bare-named twin
+                 shadows (entry `type Tree` vs stdlib OrderedMap.Tree): the
+                 codegen key "Tree.<Ctor>" would hit the twin exactly, so key
+                 it by the declaring module, as construction does.  A nested
+                 pattern's scrutinee var is erased ([compile_matrix]'s
+                 [unknown_ty]); the type the typechecker recorded at the
+                 pattern's own span names the type then.  See
+                 [Lower_state.own_module_ctor_key]. *)
+              let type_name = match ty with
+                | Tir.TCon (n, _) -> Some n
+                | _ ->
+                  (match pat with
+                   | Ast.PatCon ({ span; _ }, _) ->
+                     (match Lower_state.ty_of_span env span with
+                      | Tir.TCon (n, _) -> Some n
+                      | _ -> None)
+                   | _ -> None)
+              in
+              (match type_name with
+               | Some n ->
+                 (match Lower_state.own_module_ctor_key env n tag with
+                  | Some key -> key
+                  | None -> tag)
+               | None -> tag))
          | _ -> tag)
       | Some i ->
         let qual = String.sub tag 0 (i + 1) in
@@ -255,7 +279,13 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
               `Tree` means that type; everywhere else the lexically visible
               module wins. *)
            let module_reading =
-             Option.map (fun type_name -> type_name ^ "." ^ short_tag)
+             Option.map (fun type_name ->
+                 (* Shadowed by a bare-named twin (entry `type Tree` vs
+                    `OrderedMap.Node(..)`): the module-qualified key. *)
+                 match Lower_state.own_module_ctor_key ~prefix:qual env
+                         type_name short_tag with
+                 | Some key -> key
+                 | None -> type_name ^ "." ^ short_tag)
                (Lower_state.module_ctor_type qual short_tag)
            in
            if not (Lower_state.type_declares_ctor qual_tail short_tag) then

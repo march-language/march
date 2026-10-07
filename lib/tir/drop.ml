@@ -297,27 +297,42 @@ let colliding_union (env : env) (name : string) (ty_args : Tir.ty list)
     match Hashtbl.find_opt env.collision_set name with
     | None -> None
     | Some candidates ->
+      (* [`Skip] a candidate that cannot be this type: one whose constructor
+         fields mention MORE type variables than [ty_args] supplies (a type
+         applied to n arguments declares n parameters, and the parameters a
+         field mentions are a subset of those).  A user
+         `type Tree = Leaf | Node(Tree, Int, Tree)` is never a
+         [Tree(Int, String)] the other way round, but a candidate with FEWER
+         field-mentioned parameters may be a phantom-parameter type, so only a
+         parameterless one (nothing to substitute) is taken as is. *)
       let per_candidate qualified =
         match Kind.find_variant env.k_table qualified with
-        | None -> None
+        | None -> `Refuse
         | Some ctors ->
           let niche =
             match Kind.niche_repr_of_concrete env.k_table qualified with
             | Some (Kind.Niche _) -> true
             | _ -> false in
           let params = type_params_of ctors in
-          if niche || List.length params <> List.length ty_args then None
+          let n_params = List.length params and n_args = List.length ty_args in
+          if niche then `Refuse
+          else if n_params > n_args then `Skip
+          else if n_params <> n_args && n_params <> 0 then `Refuse
           else
-            let subst = List.combine params ty_args in
-            Some (List.map (fun (cn, ftys) ->
+            let subst = if n_params = 0 then [] else List.combine params ty_args in
+            `Ctors (List.map (fun (cn, ftys) ->
                 (qualified ^ "." ^ cn, List.map (apply_subst subst) ftys)) ctors)
       in
       let rec all acc = function
-        | [] -> Some (List.concat (List.rev acc))
+        | [] ->
+          (match List.concat (List.rev acc) with
+           | [] -> None
+           | ctors -> Some ctors)
         | c :: rest ->
           (match per_candidate c with
-           | Some cs -> all (cs :: acc) rest
-           | None -> None)
+           | `Ctors cs -> all (cs :: acc) rest
+           | `Skip -> all acc rest
+           | `Refuse -> None)
       in
       (* The tag only names the candidate when the constructor's key was
          qualified at the construction.  [Lower_expr] qualifies it only for the
@@ -333,10 +348,21 @@ let colliding_union (env : env) (name : string) (ty_args : Tir.ty list)
       let short q = match String.rindex_opt q '.' with
         | Some i -> String.sub q (i + 1) (String.length q - i - 1)
         | None -> q in
+      (* A pair with the BARE-named candidate (the entry module's own type,
+         key "Tree.Node") is exempt: its constructions key bare and hit their
+         own [ctor_info] entry exactly, and every module declaring a type that
+         a bare-named twin shadows keys its constructions module-qualified
+         ([Lower_state.own_module_ctor_key]), so neither side can carry the
+         other's tag. *)
+      let bare_candidate q =
+        match String.index_opt q '.' with
+        | Some i -> not (String.contains_from q (i + 1) '.')
+        | None -> true in
       let consistent ctors =
         List.for_all (fun (q, ftys) ->
             List.for_all (fun (q', ftys') ->
-                not (String.equal (short q) (short q')) || ftys = ftys')
+                not (String.equal (short q) (short q')) || ftys = ftys'
+                || bare_candidate q || bare_candidate q')
               ctors) ctors in
       (match all [] (List.sort String.compare candidates) with
        | Some ctors when consistent ctors -> Some ctors
