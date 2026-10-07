@@ -6,8 +6,9 @@ which incident a check exists for); this page is the map.
 
 **Runner budget.** The `march-language` org is on GitHub's free plan: at most
 **20 concurrent Linux jobs and 5 concurrent macOS jobs across the whole org**.
-One `CI` run asks for 26 jobs (20 Linux, 6 macOS), about 370 Linux and 88
-macOS job-minutes (measured 2026-10-07, before the in-job parallelism of PR #859), so runs from different PRs queue behind each other. What
+One `CI` run asks for 24 jobs (22 Linux, 2 macOS); on 2026-10-07, before
+that day's trims, it measured about 370 Linux and 88 macOS job-minutes, so
+runs from different PRs queue behind each other. What
 costs queue time is job-minutes on each pool, not job count: splitting a job
 only pays if the pieces add up to about the same minutes. On macOS they did not
 (one 32 min `dune runtest` became 67 min across four shards), so macOS runs the
@@ -56,16 +57,17 @@ job below, plus `doc-lint`, passed.
 ```
 test (ubuntu) × codegen | refinecheck | compiler | rest
 test (macos, all)
+macos-checks (macos)
 two-node (ubuntu) × 1/3 | 2/3 | 3/3
+sanitize-gate (ubuntu) × 1/3 | 2/3 | 3/3
 bench-gate (ubuntu)
-conformance (ubuntu, macos)
+conformance (ubuntu)
 tree-sitter (ubuntu)
-sanitize-gate (ubuntu)
-ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir | rest ─┐
-                             │                                                    └─ property-coverage
-             ubuntu leg only ├─ cross-linux-oracle
-                             ├─ determinism
-                             └─ property-oracle × 2
+ocaml-build (ubuntu) ─┬─ property-tests × soundness | tir | rest ─┐
+                      │                                           └─ property-coverage
+                      ├─ cross-linux-oracle
+                      ├─ determinism
+                      └─ property-oracle × 2
 ```
 
 | Job | What it checks | If it's red |
@@ -78,15 +80,16 @@ ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir
 | `test (ubuntu, rest)` | `MARCH_CI_RUNTEST_SPLIT=1 dune runtest`: everything else under `dune runtest` (eval, stdlib, JIT, LSP, forge, the native golden rules, snapshots, C unit tests). The env var drops exactly the three suites above; see the comment over the test runners in `test/dune`. | `dune runtest --root .` locally (without the env var, which runs the other three as well). |
 | `two-node (K/3)` | Every `test/two_node/<scenario>`, split over three shards by `scripts/two-node.sh --list K/3` (round-robin over the sorted list): two real OS processes, a fault injected from outside, per-node goldens. Shard 1 also runs the `node_discovery` soak (200 runs diffed against the golden, a torn-stdout guard). | `scripts/two-node.sh <scenario>`; `scripts/two-node.sh --list K/3` shows which shard owns it. A shard timing out with every scenario `ok` means the list outgrew the shards: add one (see the job's comment), don't raise the timeout. Two scenarios are known flaky on `main`; check `main`'s own runs before blaming your diff. A scenario that needs a helper exe (`test/hcr_deploy.exe` for the hot-deploy ones) declares it with `need_built`, and the job also builds it up front. Before the scenarios, a precompile step compiles the shard's nodes 4 at a time (`scripts/two-node.sh --precompile`); a scenario reuses a prebuilt binary only for an unflagged node with identical source and toolchain stamp, so a precompile problem can only cost time. |
 | `bench-gate` | Compiles every gated `bench/*.march` at `--opt 2`, runs it, checks the printed value. The only place benchmarks run in CI. | A benchmark stopped compiling or computes a different answer (not a timing check). |
-| `conformance (<os>)` | `@types-check` (static-semantics corpus) and `@grammar-check`, the two refinement coverage ratchets, `@vault-scale`, doc notebooks (`.scrollmd`) compile, stdlib `march>` doctests, formatting. | The step name says which. Ratchets fail when coverage drops, not just on errors. |
+| `conformance` | Ubuntu only. `@types-check` (static-semantics corpus) and `@grammar-check`, the refinement obligation ratchet, `@vault-scale`, doc notebooks (`.scrollmd`) compile, stdlib `march>` doctests. (The coverage-audit ratchet was dropped as a near-copy of refinecheck's `audit-baseline` test, and the formatting step, which could never fail, was removed.) | The step name says which. Ratchets fail when coverage drops, not just on errors. |
 | `tree-sitter` | `scripts/check-tree-sitter.sh --self-test`, then the script: `tree-sitter-march/src` regenerates byte-identical with the pinned CLI, `tree-sitter test` corpus passes, every `.scm` under `tree-sitter-march/queries/` and `zed-march/languages/march/` compiles, and every `.march` under `stdlib/ test/ examples/ bench/ specs/lang/` parses without ERROR except those in `tree-sitter-march/known-failures.txt`. | A syntax change the grammar does not cover (extend `grammar.js`, or list the file with a todo), a grammar edit without `tree-sitter generate`, a stale known-failures entry, or a query that no longer matches the grammar. |
-| `sanitize-gate` | AddressSanitizer over the golden corpus, a curated native list and the two-node sweep (`specs/lang/golden/sanitize.sh`). Guards RC/use-after-free bugs. Ubuntu only. | A memory-safety bug even if every test passed. A two-node scenario that exits 3 is reported as SKIP ("needs root" is the gate's label for every exit 3; `protocol_evolve` skips itself under ASan as timing-bound, see its scenario.sh). On a Mac, reproduce in a Linux Docker container: ASAN binaries can hang on macOS hosts running endpoint security software. |
-| `ocaml-build (<os>)` | Builds the compiler and oracle binaries once and uploads them for the jobs below. | A build break; everything downstream is skipped. |
-| `property-tests (<os>, <shard>)` | QCheck property groups from `test/test_properties.ml`, split into three shards, on both OSes (macOS matters: signal/segfault classification differs). | Shrunk counterexample is in the log. |
+| `sanitize-gate (K/3)` | AddressSanitizer over the golden corpus, a curated native list and the two-node sweep (`specs/lang/golden/sanitize.sh`). Guards RC/use-after-free bugs. Ubuntu only. Three shards: each sweeps a third of the two-node scenarios (`SANITIZE_TWO_NODE_SHARD=K/3`); shard 1 also runs golden + native, the others set `SANITIZE_TWO_NODE_ONLY=1`. | A memory-safety bug even if every test passed. A two-node scenario that exits 3 is reported as SKIP ("needs root" is the gate's label for every exit 3; `protocol_evolve` skips itself under ASan as timing-bound, see its scenario.sh). On a Mac, reproduce in a Linux Docker container: ASAN binaries can hang on macOS hosts running endpoint security software. |
+| `ocaml-build` | Ubuntu. Builds the compiler and oracle binaries once and uploads them for the jobs below. | A build break; everything downstream is skipped. |
+| `property-tests (<shard>)` | QCheck property groups from `test/test_properties.ml`, split into three shards, on Linux. | Shrunk counterexample is in the log. |
+| `macos-checks` | macOS: every property group except the interp-vs-compiled oracle, in one process (group list read from the binary), plus `@vault-scale`. Replaces five macOS jobs (ocaml-build, three property-tests shards, conformance). | A property counterexample on macOS (the log has it), or Vault's read scaling on the macOS runner. |
 | `property-coverage` | Asserts the three shards together cover every property group, so a new group can't silently run nowhere. | Add the group to a shard's filter in `ci.yml`. |
 | `property-oracle` × 2 | The differential oracle: ~1090 generated programs, interpreted vs compiled, outputs must match. Eight case lists, four running side by side on each runner (one list is one sequential process; one per runner left three cores idle). | An interpreter/compiler divergence; the log has the program. |
 | `cross-linux-oracle` | Cross-compiles the golden corpus to linux/amd64 with `zig cc` and checks output is byte-identical to the native build. | A cross-compilation or target-flag regression. |
-| `determinism` | `scripts/determinism-oracle.sh --corpus all`: every program in the IR-oracle corpus compiled with `--emit-llvm --dump-impl-hashes` under a cold and a warm private `$HOME`, from two cwds; the `.ll` and `.hashes` must be byte-identical across all four. Runs `--self-test` first (a perturbed stdlib copy must make it red). | Compiler output depends on cache state or cwd (a fresh-name counter, Hashtbl order, or a cached-vs-fresh stdlib difference, cf. PRs #805/#807). The log names the program, the condition pair and the first differing line; rerun locally with `scripts/determinism-oracle.sh -w <dir>` and diff `out/<tag>/{1,2,3,4}.ll`. A red self-test means the oracle itself is broken. |
+| `determinism` | `scripts/determinism-oracle.sh`, `--corpus small` (~30 programs) on pull requests and `--corpus all` on pushes to `main`: every program in the IR-oracle corpus compiled with `--emit-llvm --dump-impl-hashes` under a cold and a warm private `$HOME`, from two cwds; the `.ll` and `.hashes` must be byte-identical across all four. Runs `--self-test` first (a perturbed stdlib copy must make it red). | Compiler output depends on cache state or cwd (a fresh-name counter, Hashtbl order, or a cached-vs-fresh stdlib difference, cf. PRs #805/#807). The log names the program, the condition pair and the first differing line; rerun locally with `scripts/determinism-oracle.sh -w <dir>` and diff `out/<tag>/{1,2,3,4}.ll`. A red self-test means the oracle itself is broken. |
 
 **What CI does not cover:** Linux arm64 (only built, by `build.yml`), Windows,
 the tests quarantined out of `runtest` (run informationally by the nightly), and
