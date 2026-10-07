@@ -1058,10 +1058,23 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
          true (List.init n Fun.id)
      | _ ->
        (match a with
-        | A.EVar _ ->
-          record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots)
-            ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
-          false
+        | A.EVar { A.txt = xv; _ } ->
+          (* A name let-bound to a call with an abstract element return
+             (`let zs = List.filter(ys, fn y -> y > 0)`): re-examine that call
+             here.  [lets] retires the record when [xv] or any name the call
+             mentions is rebound, so the call still denotes [xv]'s value. *)
+          let via_let =
+            match List.assoc_opt xv lets with
+            | Some (A.EApp (A.EVar { A.txt = g; _ }, args, _)) ->
+              abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
+            | _ -> None
+          in
+          (match via_let with
+           | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
+           | None ->
+             record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots)
+               ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
+             false)
         | A.EApp (A.EVar { A.txt = g; _ }, args, _) ->
           (match
              abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args

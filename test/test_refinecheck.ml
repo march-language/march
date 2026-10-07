@@ -17726,6 +17726,32 @@ end|}
         Alcotest.(check (list string)) "too weak" [ "abstract-refinement-too-weak" ]
           (List.filter_map (fun (c, _, r) -> if c = "sum_pos" then Some r else None) obs));
 
+    gated "a let-bound filter result carries the instantiated fact" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             ("mod NL do\n" ^ ar2_filt
+            ^ "  fn go(ys : List(Int)) : Int do\n    let zs = filt(ys, fn y -> y > 0)\n    sum_pos(zs)\n  end\nend\n")
+             "sum_pos"));
+
+    gated "rebinding the name retires it" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem "proved"
+             (verdicts_of
+                ("mod NLR do\n" ^ ar2_filt
+               ^ "  fn go(ys : List(Int)) : Int do\n    let zs = filt(ys, fn y -> y > 0)\n    let zs = ys\n    sum_pos(zs)\n  end\nend\n")
+                "sum_pos")));
+
+    (* Conservative, not required for soundness: rebinding the INPUT does not
+       change `zs`'s elements, but the [lets] channel retires the record when
+       any name its call mentions is rebound.  A known precision loss. *)
+    gated "rebinding the input retires it (conservatively)" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem "proved"
+             (verdicts_of
+                ("mod NLI do\n" ^ ar2_filt
+               ^ "  fn go(ys : List(Int), ws : List(Int)) : Int do\n    let zs = filt(ys, fn y -> y > 0)\n    let ys = ws\n    sum_pos(zs)\n  end\nend\n")
+                "sum_pos")));
+
     gated "cap verified: a proved demand compiles, a too-weak one is an error" (fun () ->
         let m body = "mod CV do\n  cap verified\n" ^ ar2_filt ^ body ^ "end\n" in
         Alcotest.(check bool) "proved compiles" false

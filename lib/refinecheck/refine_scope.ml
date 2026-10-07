@@ -1280,12 +1280,16 @@ let let_equality_rhs (e : A.expr) : bool =
    about this value" stops being syntactically evident, and the fallback is
    the honest general message, not a guess.
 
-   The channel carries NO solver-visible fact — it is consulted only when
-   choosing the WORDING of a skip — but it obeys the same shadow discipline as
-   [scope]/[path], and for the same reason: an entry surviving a rebinding
-   attributes an outer value's guard to an inner binding, which in this
-   channel is a wrong SENTENCE rather than a wrong verdict, and a wrong
-   attribution is worse than a vague one.  Hence BOTH tests below: the KEY
+   The channel carries NO solver-visible fact of its own — it is consulted
+   when choosing the WORDING of a skip, and (since 2026-10-06) by
+   [Refine_check.check_elements] to RE-EXAMINE a let-bound call to a
+   combinator with an abstract refinement (`let zs = List.filter(…)`), whose
+   instantiated element fact has no [contenv] entry.  It obeys the same
+   shadow discipline as [scope]/[path], and for the same reason: an entry
+   surviving a rebinding attributes an outer value's guard to an inner
+   binding.  For the wording that is a wrong SENTENCE; for the abstract
+   re-examination it would be a wrong VERDICT, which is why the retirement
+   below must stay exactly as strict as it is.  Hence BOTH tests below: the KEY
    retires when the laundering name rebinds (`let n = 5` after the laundering
    `let` makes the guard's `n` a literal), and the entry retires when any name
    its RHS mentions rebinds (`let ys = zs` in between leaves `n` measuring the
