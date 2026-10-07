@@ -19,6 +19,34 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
+  March function gets a `DISubprogram` at its defining line (lifted lambdas at
+  the lambda's line, specialisations at the generic's), and the link gets `-g`,
+  so `lldb`/`gdb` backtraces, ASan reports and `perf` profiles name March
+  functions and files instead of `march_main + 1400`. The IR also carries a
+  `!march.provenance` node per function recording where the compiler derived it
+  from (monomorphisation, lambda lifting, fusion, specialisation). Off by
+  default; the emitted code is unchanged when off. `--dump-provenance` prints
+  the same table as text. Distinct from `--debug`, the interpreter's debugger.
+- **A remote shell on a running node: `forge shell` and `forge rpc`.**
+  Against a node built with `--hot-reload --signing-pubkey`, `forge shell`
+  (or `march --shell <reload socket>.shell app.march`) typechecks the
+  project once. It then compiles each input into a small signed library that
+  the node loads and runs as a task. `forge rpc 'expr'` runs one input and
+  exits 1 if it did not run. It prints the result
+  and anything the input printed. `let` bindings persist across inputs; a
+  trailing `limit: N` shortens long lists. Capabilities are pre-bound
+  (`console`, `clock`, `intro`, `debug`), and the node allows only those in
+  its `$MARCH_SHELL_POLICY` file. A panic or a timeout ends only that input,
+  and a deploy ends the session. Every input is audited with its source.
+  Inputs can call the program's own functions and its `MARCH_LIB_PATH`
+  libraries, a Depot query for example. The policy does not yet see the
+  capabilities an input reaches through that code, only the pre-bound ones
+  it names.
+- **Several native libraries per project.** forge.toml can declare `[[ffi]]`
+  once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
+  links all of them, in order. A single `[ffi]` table works as before.
+
 - **`--dump-impl-hashes`.** With `--emit-llvm` or `--compile`, writes
   `<file>.hashes` beside the output: one `symbol<TAB>impl_hash<TAB>sig_hash`
   line per post-TIR definition, sorted, straight from the CAS hashing that keys
@@ -38,6 +66,14 @@ git log is authoritative for exact commits.
   byte-identical with the switch off. `MARCH_SANITIZE=1` builds additionally
   abort on a `march_free` of a shared object and on a TRMC hole fill that finds
   its slot already written.
+- **Native arrays may be sent in messages, captured by tasks and shared with
+  parallel code.** `NativeIntArr`, `NativeFloatArr`, `NativeF32Arr`,
+  `NativeI32Arr` and `NativeU8Arr` are copy-on-write values: a write to an
+  array nobody else holds is in place, the first write to a shared array copies
+  it (O(n), once), and each holder sees only its own writes. They were rejected
+  in actor messages by analogy with `RingBuf`; the runtime never shared their
+  mutations, so the rejection is gone. The typing corpus fixtures `t164`,
+  `t165`, `t169`, `t170` flipped from reject to accept.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
@@ -192,6 +228,18 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **`RingBuf` is linear: every operation consumes the buffer and hands it
+  back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
+  `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer
+  beside it (`let (n, rb) = RingBuf.size(rb)`); new `snapshot` reads the
+  elements out and keeps the buffer; `to_list` and new `drop` end it. A buffer
+  can no longer be aliased, captured by a closure, stored at module level or
+  put in a `Vault` (each is a compile-time error, the existing linear-type
+  errors), and it may now be *sent* in a message or passed to `spawn`, which
+  moves it. In actor state write `{ state with buf: RingBuf.push(state.buf,
+  x) }`. Migration table: design spec section 5. **New rule for every linear
+  type:** a module-level `let` of a `RingBuf`, `Handle` or `LinearMap` is
+  rejected, since a module-level value can never be consumed exactly once.
 - **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
   install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
   source needed no changes. The REPL's `notty` dependency (0.2.3 does not
@@ -254,6 +302,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- A green thread started from a runtime thread that is not a scheduler (the
+  hot-reload server's drain, the new shell listener) no longer inherits that
+  thread's blocked signals. With SIGSEGV blocked, the first time its stack
+  had to grow killed the whole process silently on Linux.
+- A call of another module's function with too few arguments
+  (`List.map([1, 2])`) is now a type error. It used to typecheck, then fail
+  at run time: an `arity mismatch` panic interpreted, a crash compiled, and a
+  crash of the whole REPL session.
 - **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
   variable alias used to drop every fact about its value (`let b = a + 0`
   kept them), so `take_pos(b)` was skipped even when `a` was a refined
@@ -2405,6 +2461,11 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Data-race freedom, written down.** `actors.md` says what a message may
+  carry (a linear value moves, everything else is immutable or copy-on-write),
+  `linear-types.md` has a `RingBuf` section and the module-level `let` rule,
+  `memory-model.md` states the acquire-ordering guarantee behind every in-place
+  write, and `parallelism.md` says which captured values parallel code may touch.
 - **Observing a running node** (`docs/observe.md`), an operator's guide to the
   observe socket and `forge observe`/`top`/`status`/`diagnose`: turning the
   socket on and what it costs, the protocol and error codes, every verb with a

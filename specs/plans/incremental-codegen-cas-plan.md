@@ -228,6 +228,12 @@ pre-fix Perceus output of a fixed September leak, reconstructed) and asserting t
 
 ## 7. A2 — Source provenance that survives to the binary
 
+**Status (2026-10-06):** table, seeding/rename hooks, pass recording, `--debug-info`
+(function-level `!dbg`, plus a per-call location the verifier forces) and
+`!march.provenance` landed; see `specs/progress/2026-10-06-provenance-table-debug-info.md`
+for the two deviations (reset at the start of lowering, not of the pipeline; `!dbg` on every
+call). Manifest sidecar still open.
+
 **Problem.** TIR `fn_def` has no span (`tir.ml:158–164`); `lib/tir`, `lib/jit` and `bin` emit no
 `DILocation`/`!dbg`/`DISubprogram` at all. A compiled crash, ASan report or `perf` profile names
 `Foo.bar$Int$String+0x4c`; mapping it back is manual. `js_emit.ml:35, 57` already carries an

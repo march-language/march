@@ -291,6 +291,13 @@ type env = {
       number of arguments panics at runtime (and the compiler miscompiles
       under-application into a body call with a garbage argument).  Used to
       reject wrong-arity calls of these functions at the call site. *)
+  qual_fn_arities : (int * Ast.span) StrMap.t;
+  (** [fn_arities] for the qualified keys a public [DMod] exports
+      (`List.map` -> 2), so a qualified call is held to its arity too.
+      Populated at the [Ast.DMod] export step from the inner module's
+      [fn_arities] and its own [qual_fn_arities] (nested modules).  Never
+      cleared by [bind_var]: a qualified name cannot be shadowed by a local.
+      Registry-loaded [ExFn] exports carry no arity and are not in it. *)
   qual_fn_names : unit StrMap.t;
   (** Qualified ("Mod.name") keys in [vars] that denote a genuine top-level
       function — i.e. a [DFn], an interface method, or a registry [ExFn]
@@ -697,10 +704,19 @@ let make_env errors type_map = {
   deferred_check4 = ref [];
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
+  qual_fn_arities = StrMap.empty;
   qual_fn_names = StrMap.empty;
   plain_let_names = StringSet.empty;
   proof_caps = [];
-  always_linear_types = [];
+  (* "RingBuf" is seeded here so the builtin type is tracked as linear with
+     no declaring module (Part C, Phase C2 of
+     specs/plans/2026-09-25-send-data-race-freedom-plan.md; design spec
+     section 3.2): is_linear_ty / field_linearity consult
+     resolves_always_linear on any bare TCon, so a RingBuf binding, record
+     field or actor-state field is Linear with no `linear` keyword at any use
+     site, and the shadow rule only fires when the current module declares
+     its own RingBuf. *)
+  always_linear_types = ["RingBuf"];
   current_module = "";
   gated_shadowed = StringSet.empty;
   root_cap_allowed = false;

@@ -1,0 +1,102 @@
+-- Leak guard for the RingBuf reference-count contract on its one
+-- UNRESTRICTED path (Part C, Phase C2 of
+-- specs/plans/2026-09-25-send-data-race-freedom-plan.md).
+--
+-- For a linear variable Perceus emits no RC operation at all, so the
+-- borrow-table classification of the ring_buf_* builtins changes nothing
+-- there. It is load-bearing where a buffer is reached through an ordinary
+-- record's field: `{ r with buf: RingBuf.push(r.buf, x) }` projects a field
+-- out of an unrestricted record, and Perceus dups a BORROWED field before a
+-- consuming position. The builtins are owned (lib/tir/borrow.ml) and
+-- rc-neutral (push returns the same cell, the readers return it inside a
+-- fresh pair, to_list/drop release it), so a loop of record updates must
+-- leave live_allocs() flat; a borrowed classification would leak one cell
+-- per iteration, an owned-but-incrc'ing body would leak the buffer itself.
+--
+-- SIGNAL: live_allocs() deltas against a bound well below one object per
+-- iteration, printed as booleans so the golden is deterministic; the loop
+-- results are printed so the optimizer cannot delete the loops. Run under
+-- MARCH_SANITIZE=1 as well (test/dune) so a use-after-free on the pair
+-- shell or the cell would abort.
+mod Main do
+  needs IO.Console
+
+  type Recent = { buf : RingBuf(Int), count : Int }
+
+  pfn bump(r : Recent, x : Int) : Recent do
+    { r with buf: RingBuf.push(r.buf, x), count: r.count + 1 }
+  end
+
+  pfn read_size(r : Recent) : (Int, Recent) do
+    let (n, buf) = RingBuf.size(r.buf)
+    (n, { r with buf: buf })
+  end
+
+  pfn leg_update(r : Recent, i : Int, n : Int) : Recent do
+    if i == n do r else leg_update(bump(r, i), i + 1, n) end
+  end
+
+  pfn leg_read(r : Recent, i : Int, n : Int, acc : Int) : (Int, Recent) do
+    if i == n do (acc, r)
+    else
+      let (sz, r) = read_size(r)
+      leg_read(r, i + 1, n, acc + sz)
+    end
+  end
+
+  -- A fresh buffer per iteration, ended by to_list: make/push/to_list must
+  -- release the cell, its store and the pair shells.
+  pfn leg_churn(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let rb = RingBuf.push(RingBuf.push(RingBuf.make(2), i), i + 1)
+      let (x, rb) = RingBuf.peek_newest(rb)
+      let xs = RingBuf.to_list(rb)
+      let hit = match x do
+        Some(v) -> v
+        None -> 0
+      end
+      leg_churn(i + 1, n, acc + hit + List.length(xs))
+    end
+  end
+
+  -- Heap elements: strings displaced by overwrite and released by drop.
+  pfn leg_strings(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let rb = RingBuf.push(RingBuf.push(RingBuf.push(RingBuf.make(2), "a" ++ int_to_string(i)), "b"), "c")
+      let (xs, rb) = RingBuf.snapshot(rb)
+      RingBuf.drop(rb)
+      leg_strings(i + 1, n, acc + List.length(xs))
+    end
+  end
+
+  pfn flat(label : String, before : Int, result : Int, n : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(result) ++ ", flat: "
+            ++ bool_to_string(grew < n / 4))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 400
+    let r0 = { buf: RingBuf.make(8), count: 0 }
+    let r1 = leg_update(r0, 0, 3)
+    let a = live_allocs()
+    let r2 = leg_update(r1, 0, n)
+    flat("record update push", a, r2.count, n)
+    let b = live_allocs()
+    let (total, r3) = leg_read(r2, 0, n, 0)
+    flat("record field size", b, total, n)
+    let (items, buf) = RingBuf.snapshot(r3.buf)
+    RingBuf.drop(buf)
+    println("buffer holds " ++ int_to_string(List.length(items)))
+    leg_churn(0, 3, 0)
+    let c = live_allocs()
+    let r_c = leg_churn(0, n, 0)
+    flat("make/push/peek/to_list churn", c, r_c, n)
+    leg_strings(0, 3, 0)
+    let d = live_allocs()
+    let r_d = leg_strings(0, n, 0)
+    flat("string elements overwrite/snapshot/drop", d, r_d, n)
+  end
+end
