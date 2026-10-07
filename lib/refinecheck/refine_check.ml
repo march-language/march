@@ -853,7 +853,7 @@ let abstract_return_slot (fd : A.fn_def) : (string * string) option =
    query, in a scratch ledger, so a refutation is reported as too-weak rather
    than as a definite violation (§3.3, decision 9.2).  [None]: [g] declares no
    abstract element return; the caller falls through to [demand_flow]. *)
-let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) ~(span : A.span)
+let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv) ~(span : A.span)
     ~(callee : string) ((_, slots) : string * elem option list) (g : string) (args : A.expr list)
   : [ `Proved | `Too_weak of string | `Uninstantiated of string | `Undecided ] option =
   let abs = callee_abstracts ctx g in
@@ -883,10 +883,32 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) ~(span : 
                     uninst
                       (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
                   else begin
+                    (* §3.4: an element of the result is an element of the
+                       input it came from, so the input's own element fact
+                       holds of it as well.  Only through the single source
+                       the parametric rule traces (gated above), and only a
+                       single refined slot. *)
+                    let body' =
+                      match
+                        Option.bind (callee_sig ctx defs cb g) (fun sg ->
+                            Option.bind (Refine_abstract.positive_base ~is_known fd p) (sources_of sg))
+                      with
+                      | Some [ Src_elem (j, [ _ ]) ] ->
+                        (match
+                           Option.bind (List.nth_opt args j) (container_entry_of_expr ctx defs cb ce)
+                         with
+                         | Some (_, [ Some (Refined (b0, q0, _)) ]) ->
+                           A.EApp
+                             ( A.EVar { A.txt = "&&"; A.span = span }
+                             , [ subst_params [ (b0, A.EVar { A.txt = y; A.span = span }) ] q0; body ]
+                             , span )
+                         | _ -> body)
+                      | _ -> body
+                    in
                     let ((_, dpred, dsort) as d) = demand in
                     let sg = elem_sig ~name:"$elem" d in
                     let rp = List.hd sg.refined in
-                    let sc' = ("$elem", (y, body, dsort)) :: scope_shadow sc [ "$elem" ] in
+                    let sc' = ("$elem", (y, body', dsort)) :: scope_shadow sc [ "$elem" ] in
                     let cx =
                       { root; errctx = Err.create (); postcond = postcond_of ~cb ctx defs; path; lets
                       ; sc = sc'; re; binds = ctx.binds }
@@ -1042,7 +1064,7 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
           false
         | A.EApp (A.EVar { A.txt = g; _ }, args, _) ->
           (match
-             abstract_flow ~root defs ctx path lets sc re cb ~span:xsp ~callee (container, slots) g args
+             abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
            with
            | Some v ->
              record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v

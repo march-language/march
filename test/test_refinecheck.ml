@@ -17708,6 +17708,24 @@ end|}
           [ ("skipped", "abstract-refinement-uninstantiated") ]
           (List.filter_map (fun (c, v, r) -> if c = "sum_pos" then Some (v, r) else None) obs));
 
+    (* n1: the lambda alone (`y < 100`) does not give `> 0`; the input's own
+       element fact does (§3.4).  RED before: too-weak. *)
+    gated "n1: the input's element fact conjoins with the lambda" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             ("mod N1 do\n" ^ ar2_filt
+            ^ "  fn go(ys : List({Int | _ > 0})) : Int do sum_pos(filt(ys, fn y -> y < 100)) end\nend\n")
+             "sum_pos"));
+
+    gated "n1 control: an unrefined input lends nothing" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod N1C do\n" ^ ar2_filt
+           ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y < 100)) end\nend\n")
+        in
+        Alcotest.(check (list string)) "too weak" [ "abstract-refinement-too-weak" ]
+          (List.filter_map (fun (c, _, r) -> if c = "sum_pos" then Some r else None) obs));
+
     gated "cap verified: a proved demand compiles, a too-weak one is an error" (fun () ->
         let m body = "mod CV do\n  cap verified\n" ^ ar2_filt ^ body ^ "end\n" in
         Alcotest.(check bool) "proved compiles" false
