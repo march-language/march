@@ -1090,6 +1090,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="GlobalRegistry.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="GlobalRegistry.html">GlobalRegistry</a></div><div class="sb-sub"><a class="sl" href="GlobalRegistry.html#type-Entry"><span class="sb-kind" style="color:var(--ty)">T</span>Entry</a>
 <a class="sl" href="GlobalRegistry.html#type-Names"><span class="sb-kind" style="color:var(--ty)">T</span>Names</a>
 <a class="sl" href="GlobalRegistry.html#fn-all_entries"><span class="sb-kind" style="color:var(--fn)">F</span>all_entries</a>
+<a class="sl" href="GlobalRegistry.html#fn-collect_tombstones"><span class="sb-kind" style="color:var(--fn)">F</span>collect_tombstones</a>
 <a class="sl" href="GlobalRegistry.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
 <a class="sl" href="GlobalRegistry.html#fn-diff_entries"><span class="sb-kind" style="color:var(--fn)">F</span>diff_entries</a>
 <a class="sl" href="GlobalRegistry.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
@@ -1104,6 +1105,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="GlobalRegistry.html#fn-register_at"><span class="sb-kind" style="color:var(--fn)">F</span>register_at</a>
 <a class="sl" href="GlobalRegistry.html#fn-root_hash"><span class="sb-kind" style="color:var(--fn)">F</span>root_hash</a>
 <a class="sl" href="GlobalRegistry.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
+<a class="sl" href="GlobalRegistry.html#fn-tombstone_count"><span class="sb-kind" style="color:var(--fn)">F</span>tombstone_count</a>
 <a class="sl" href="GlobalRegistry.html#fn-unregister"><span class="sb-kind" style="color:var(--fn)">F</span>unregister</a>
 <a class="sl" href="GlobalRegistry.html#fn-unregister_own"><span class="sb-kind" style="color:var(--fn)">F</span>unregister_own</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Hamt.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Hamt.html">Hamt</a></div><div class="sb-sub"><a class="sl" href="Hamt.html#type-HEntry"><span class="sb-kind" style="color:var(--ty)">T</span>HEntry</a>
@@ -2254,6 +2256,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Result.html#fn-unwrap_or"><span class="sb-kind" style="color:var(--fn)">F</span>unwrap_or</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="RingBuf.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="RingBuf.html">RingBuf</a></div><div class="sb-sub"><a class="sl" href="RingBuf.html#fn-cap"><span class="sb-kind" style="color:var(--fn)">F</span>cap</a>
 <a class="sl" href="RingBuf.html#fn-clear"><span class="sb-kind" style="color:var(--fn)">F</span>clear</a>
+<a class="sl" href="RingBuf.html#fn-drop"><span class="sb-kind" style="color:var(--fn)">F</span>drop</a>
 <a class="sl" href="RingBuf.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="RingBuf.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="RingBuf.html#fn-is_full"><span class="sb-kind" style="color:var(--fn)">F</span>is_full</a>
@@ -2263,6 +2266,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="RingBuf.html#fn-pop"><span class="sb-kind" style="color:var(--fn)">F</span>pop</a>
 <a class="sl" href="RingBuf.html#fn-push"><span class="sb-kind" style="color:var(--fn)">F</span>push</a>
 <a class="sl" href="RingBuf.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
+<a class="sl" href="RingBuf.html#fn-snapshot"><span class="sb-kind" style="color:var(--fn)">F</span>snapshot</a>
 <a class="sl" href="RingBuf.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Scheduler.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Scheduler.html">Scheduler</a></div><div class="sb-sub"><a class="sl" href="Scheduler.html#fn-dropped_messages"><span class="sb-kind" style="color:var(--fn)">F</span>dropped_messages</a>
 <a class="sl" href="Scheduler.html#fn-live_procs"><span class="sb-kind" style="color:var(--fn)">F</span>live_procs</a>
@@ -2919,7 +2923,14 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-empty"><div class="ih"><span class="badge bfn">fn</span><span class="name">empty</span><span class="sig">empty() : List(a)</span><a class="anchor-link" href="#fn-empty" title="Link">#</a></div><div class="ib"><p>Returns an empty list.</p><h3>Examples</h3><pre><code>    march&gt; List.empty()
     []</code></pre></div></div>
 <div class="item" id="fn-enumerate"><div class="ih"><span class="badge bfn">fn</span><span class="name">enumerate</span><span class="sig">enumerate(xs : List(a)) : List((Int, a))</span><a class="anchor-link" href="#fn-enumerate" title="Link">#</a></div><div class="ib"><p>Pairs each element with its 0-based index: [a, b] -&gt; [(0, a), (1, b)].</p></div></div>
-<div class="item" id="fn-filter"><div class="ih"><span class="badge bfn">fn</span><span class="name">filter</span><span class="sig">filter(xs : List(a), pred : a -&gt; Bool) : {List(a) | subset(elts(_), elts(xs))}</span><a class="anchor-link" href="#fn-filter" title="Link">#</a></div><div class="ib"><p>Returns only elements satisfying <code>pred</code>.</p><h3>Examples</h3><pre><code>    march&gt; List.filter([1, 2, 3, 4, 5], fn x -&gt; x &gt; 2)
+<div class="item" id="fn-filter"><div class="ih"><span class="badge bfn">fn</span><span class="name">filter</span><span class="sig">filter(xs : List(a), pred : ({x : a | true}) -&gt; {Bool | _ == p(x)}) : {List({a | p(_)}) | subset(elts(_), elts(xs))}</span><a class="anchor-link" href="#fn-filter" title="Link">#</a></div><div class="ib"><p>Returns only elements satisfying <code>pred</code>.</p><pre><code>The result's elements are known to satisfy the predicate: with
+`sum_pos(xs : List({Int | _ &gt; 0}))`, `sum_pos(List.filter(ys, fn y -&gt; y &gt; 0))`
+is proved. `p` is an abstract refinement, instantiated from the lambda at
+each call.
+
+## Examples
+
+    march&gt; List.filter([1, 2, 3, 4, 5], fn x -&gt; x &gt; 2)
     march&gt; 
     [3, 4, 5]
 

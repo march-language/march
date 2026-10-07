@@ -333,6 +333,11 @@ git log is authoritative for exact commits.
   parser noticed, and it carries a fix that inserts the `end`, which `forge fix`
   can apply. An `else if` chain one `end` short gets a note explaining that each
   `if` closes separately.
+- **A program no longer hangs on exit after `ClusterNode.stop` while one of its sessions
+  is finishing.** Stopping the node ended its connection to itself without telling the
+  sessions using it, so a session whose last messages were still in flight could wait
+  for them forever and keep the process alive.
+
 - Compiled programs no longer risk a use-after-free when two scheduler threads
   touch records of a not-yet-seen shape at the same time. Registering a new
   record shape could free the shape table while another thread was reading a
