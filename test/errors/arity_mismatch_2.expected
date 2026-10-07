@@ -1,0 +1,16 @@
+exit: 1
+-- ERROR ------------------ errors/arity_mismatch_2.march
+
+`add` is a lambda with 2 parameters, but is called with 1 argument. [arity_mismatch]
+March has no partial application — a call must supply all arguments.
+
+5 |     println(int_to_string(add(1)))
+                              ^^^^^^
+
+
+    bound here with 2 parameters:
+
+4 |     let add = fn (a, b) -> a + b
+                  ^^^^^^^^^^^^^^^^^^
+
+

@@ -34,3 +34,5 @@ fix [cap_needs:IO.FileWrite]:
 @@ after line 23 @@
  mod BodyAnnCap do
 +  needs IO.FileWrite
+
+after fix: exit 0

@@ -33,3 +33,6 @@ fix [cap_grant]:
 @@ lines 5-5 @@
 -  fn main() do println(int_to_string(f(1, 2))) end
 +  fn main(_cap_console : Cap(IO.Console)) do println(int_to_string(f(1, 2))) end
+
+after fix: exit 1
+Function `f` expects 1 argument, but got 2. [arity_mismatch]

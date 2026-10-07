@@ -213,12 +213,18 @@ let run ?(filename = "") ?(stuck = "I got stuck here:") entry src =
   let refine ~generic (d : Errors.diagnostic) =
     let generic = generic || List.mem d.message generic_messages in
     refine_structural ~filename ~src ~generic (state ()) d in
+  (* Clear any value a ParseError caught elsewhere (a [*_of_lexbuf] caller)
+     may have left, so this parse's extras are its own. *)
+  ignore (Errors.take_parse_error_extra ());
   match entry lexer lexbuf with
   | v -> Ok v
   | exception Errors.ParseError (msg, hint, pos) ->
+    (* D4: the production's own code and fix, when it set them. *)
+    let (code, fix) = Errors.take_parse_error_extra () in
+    let code = Option.value code ~default:code_parse_error in
     Error [ refine ~generic:false
               { (Errors.parse_error_diagnostic_at ~filename ?hint ~src ~msg pos)
-                with code = code_parse_error } ]
+                with code; fix } ]
   | exception Parser.Error ->
     Error [ refine ~generic:true
               { (Errors.parse_error_diagnostic ~filename ~msg:stuck lexbuf)
@@ -229,6 +235,27 @@ let run ?(filename = "") ?(stuck = "I got stuck here:") entry src =
     Error [ { (Errors.parse_error_diagnostic_at ~filename ~len:1 ~msg
                  (Lexing.lexeme_start_p lexbuf))
               with code = code_lex_error } ]
+  | exception Lexer.Lexer_error_fix { msg; code; note; replace } ->
+    (* A one-character lexeme the lexer knows how to repair (`;`). The fix
+       covers the lexeme and the blanks after it: a trailing one is deleted,
+       one between two expressions becomes a line break at the current
+       indentation, so the applied program reads as if written that way. *)
+    let p = Lexing.lexeme_start_p lexbuf in
+    let lines = src_lines src in
+    let text = line_text lines p.Lexing.pos_lnum in
+    let c = col p in
+    let rec skip i = if i < String.length text && (text.[i] = ' ' || text.[i] = '\t') then skip (i + 1) else i in
+    let e = skip (c + 1) in
+    let trailing = e >= String.length text in
+    let fix =
+      let span = { (span_at ~filename p 1) with March_ast.Ast.end_col = e } in
+      Errors.FReplace
+        { span;
+          text = (if trailing then "" else if replace = "\n"
+                  then "\n" ^ String.make (indent_of text) ' ' else replace) }
+    in
+    Error [ { (Errors.parse_error_diagnostic_at ~filename ~len:1 ~msg p)
+              with code; notes = [ note ]; fix = Some fix } ]
 
 let module_ ?filename ?stuck src    = run ?filename ?stuck Parser.module_ src
 let repl_input ?filename ?stuck src = run ?filename ?stuck Parser.repl_input src

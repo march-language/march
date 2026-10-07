@@ -313,6 +313,16 @@ type env = {
       (`Mod.SOME_CONST`) is never recorded as a `` `Call `` reference, while
       a qualified function/interface-method call still is — see [local_fns]
       for the bare-name analogue of this same distinction. *)
+  lambda_arities : (int * Ast.span * Ast.span option) StrMap.t;
+  (** Names most recently bound by `let name = fn … -> …` (a lambda LITERAL
+      on the right-hand side; see the [Ast.ELet] case of [infer_block]):
+      the lambda's parameter count, its span, and, when it is exactly
+      `fn _ -> …`, the span of `fn _` so a zero-argument call can offer
+      the fix `fn ->`. A lambda's arity is fixed (March has no partial
+      application) and the runtime panics on a wrong-arity call
+      ("arity mismatch: expected 1 args, got 0"), which the type `a -> T`
+      cannot express: the thunk `fn -> e` and the discard `fn _ -> e` both
+      unify with `() -> T`. Cleared by [bind_var] like [fn_arities]. *)
   plain_let_names : StringSet.t;
   (** Names most recently bound by a simple, unrestricted `let name = expr`
       (single-variable pattern — see the [Ast.ELet] case of [infer_block]).
@@ -707,6 +717,7 @@ let make_env errors type_map = {
   qual_fn_arities = StrMap.empty;
   qual_fn_names = StrMap.empty;
   plain_let_names = StringSet.empty;
+  lambda_arities = StrMap.empty;
   proof_caps = [];
   (* "RingBuf" is seeded here so the builtin type is tracked as linear with
      no declaring module (Part C, Phase C2 of
@@ -1801,6 +1812,7 @@ let bind_var name sch env =
              gated_shadowed = note_gated_rebind name env.gated_shadowed;
              fn_arities = StrMap.remove name env.fn_arities;
              plain_let_names = StringSet.remove name env.plain_let_names;
+             lambda_arities = StrMap.remove name env.lambda_arities;
              local_fns = StrMap.remove name env.local_fns;
              offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 

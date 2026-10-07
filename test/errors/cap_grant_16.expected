@@ -28,3 +28,6 @@ fix [cap_grant]:
 @@ lines 23-23 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+`root_cap` cannot be referenced — the root capability is granted to `main`, not taken. [root_cap_reference]

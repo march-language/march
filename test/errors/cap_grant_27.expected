@@ -45,3 +45,6 @@ fix [cap_grant]:
 @@ lines 17-17 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Chan.recv: channel is at `Send(Int, Recv(Int, End))` but I expected `Recv(T, ...)`. [session_state_mismatch]
