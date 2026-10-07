@@ -17479,6 +17479,53 @@ end|}
         Alcotest.(check bool) "pass site not proved" true
           (List.exists (fun v -> v <> "proved") vs)) ]
 
+(* A definer (`keep : ({x : a | true}) -> {Bool | _ == p(x)}`) is satisfied by
+   ANY callable: `p` is, by definition, whatever the callable returns.  Before
+   this, every pass — the body's own recursive forward, a lambda, a named fn —
+   was an `unreflectable-predicate` skip, and a hard error under
+   `cap verified` (probes b1/b2, 2026-10-06).  AP3 pins that the exemption is
+   for DEFINERS only: a concrete codomain still obliges a plain named fn. *)
+let ap_filt =
+  {|  fn filt(xs : List(a), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do Cons(h, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+|}
+
+let abstract_pass_sites_suite =
+  [ gated "passing a lambda or a named fn for a definer records nothing" (fun () ->
+        let obs =
+          typed_obligations
+            ("mod AP1 do\n" ^ ap_filt
+           ^ {|  fn is_even(n : Int) : Bool do n % 2 == 0 end
+  fn go(ys : List(Int)) : Int do List.length(filt(ys, fn y -> y > 0)) + List.length(filt(ys, is_even)) end
+end|})
+        in
+        Alcotest.(check (list string)) "no definer skips" []
+          (List.filter_map
+             (fun (c, v, _) -> if v = "skipped" && List.mem c [ "keep"; "<lambda>"; "is_even" ] then Some c else None)
+             obs));
+
+    gated "a cap verified caller of a definer compiles" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_typed
+             ("mod AP2 do\n  cap verified\n" ^ ap_filt
+            ^ {|  fn is_even(n : Int) : Bool do n % 2 == 0 end
+  fn go(ys : List(Int)) : Int do List.length(filt(ys, fn y -> y > 0)) + List.length(filt(ys, is_even)) end
+end|})));
+
+    gated "a concrete codomain still obliges a plain named fn" (fun () ->
+        Alcotest.(check bool) "still an error" true
+          (has_refine_error_typed
+             {|mod AP3 do
+  cap verified
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn is_even(n : Int) : Bool do n % 2 == 0 end
+  fn go() : Bool do ap(is_even, 3) end
+end|})) ]
+
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
         let before = !March_refine.Solver.malformed_count in
@@ -18269,4 +18316,5 @@ let () =
       ("wrapper-contracts", wrapper_contracts_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("callback-binder", callback_binder_suite);
+      ("abstract-pass-sites", abstract_pass_sites_suite);
       ("z3-well-formed", z3_wellformed_suite) ]
