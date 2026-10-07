@@ -337,6 +337,9 @@ git log is authoritative for exact commits.
   component by address instead of by value, so `(1, 2.5) == (1, 2.5)` was
   false in compiled code (for example inside `List.member`). Tuples are still
   not ordered with `<`.
+- **A nested type named like a runtime type no longer crashes when it is matched.** A
+  module-local `type Down = Down(Int)` (or another name the runtime reserves) was built
+  one way and read another in compiled code, a segfault on the first `match`.
 
 - A `--hot-reload` build no longer leaks a small object each time it calls a
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
