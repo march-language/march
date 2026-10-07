@@ -7,7 +7,8 @@
 --     only reads it, so every call leaked a reference to the actor record and
 --     the record outlived the actor.
 -- SIGNAL: under 5 objects left over 50 actors each (RED before: false on
--- the first two lines). Death is asynchronous, so the count is polled. The
+-- the first two lines). Death is asynchronous, so the count is polled (for up
+-- to 5 s: a starved CI runner can take seconds to run the dying actors). The
 -- last line pins that a panicking on_stop (whose state the exit must NOT
 -- release) neither crashes nor double-frees; run it under ASAN to see the
 -- latter.
@@ -107,7 +108,7 @@ mod Main do
     sleep_ms(50)
     let a0 = live_allocs()
     let _ = times(50, f, 0)
-    println(name ++ " released: " ++ bool_to_string(settle(a0, 100) < 5))
+    println(name ++ " released: " ++ bool_to_string(settle(a0, 250) < 5))
   end
 
   fn main(_io : Cap(IO)) : () do
