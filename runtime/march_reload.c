@@ -639,7 +639,17 @@ static void *load_verified(const char *cas_path, const char *want_hex, const cha
  * memory and captures the answer.  g_vio is non-NULL only while a builtin
  * request is dispatching, always under g_req_lock, so the socket thread and
  * the builtin never overlap and the file-static scratch buffers the verb
- * handlers use stay single-user. */
+ * handlers use stay single-user.
+ *
+ * The channel is chosen by the FD, not by g_vio alone: the builtin always
+ * dispatches with fd -1, the socket thread always with its connection's fd.
+ * The socket thread reads each request LINE outside g_req_lock
+ * (handle_client), so g_vio can be set by the Agent while that read is in
+ * progress; when rl_read consulted g_vio whatever the fd, the line was read
+ * from the Agent's in-memory request instead (empty: EOF) and the deploy's
+ * connection was closed mid-batch.  g_vio is not thread-local because the
+ * builtin runs on a green thread (and lazy TLS on Darwin may malloc).
+ * specs/progress/2026-10-06-reload-socket-reads-the-agents-request.md */
 struct rl_vio {
     const unsigned char *in; size_t in_len, in_pos;
     char *out; size_t out_len, out_cap;
@@ -648,7 +658,7 @@ static struct rl_vio *g_vio;
 static pthread_mutex_t g_req_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static ssize_t rl_read(int fd, void *buf, size_t n) {
-    if (g_vio) {
+    if (fd < 0 && g_vio) {
         size_t avail = g_vio->in_len - g_vio->in_pos;
         if (avail == 0) return 0;
         if (n > avail) n = avail;
@@ -660,7 +670,7 @@ static ssize_t rl_read(int fd, void *buf, size_t n) {
 }
 
 static ssize_t rl_write(int fd, const void *buf, size_t n) {
-    if (g_vio) {
+    if (fd < 0 && g_vio) {
         if (g_vio->out_len + n + 1 > g_vio->out_cap) {
             size_t cap = g_vio->out_cap ? g_vio->out_cap : 256;
             while (cap < g_vio->out_len + n + 1) cap *= 2;

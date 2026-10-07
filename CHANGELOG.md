@@ -254,6 +254,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A hot deploy over the reload socket no longer drops its connection while
+  the control plane's Agent polls the node.** The socket server read a
+  request line from the Agent's in-process request instead of the socket
+  whenever the two overlapped, then closed the deploy's connection mid-batch
+  (`hcr_deploy: connection closed` / `Connection reset by peer`, the node
+  itself unharmed). It hit roughly one deploy session in ten on a node that
+  runs the control plane.
 - **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
   variable alias used to drop every fact about its value (`let b = a + 0`
   kept them), so `take_pos(b)` was skipped even when `a` was a refined
