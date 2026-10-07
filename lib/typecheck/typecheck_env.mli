@@ -167,6 +167,8 @@ type env = {
   fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
   qual_fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
   qual_fn_names : unit StrMap.t;
+  binder_spans : Typecheck_types.Ast.span StrMap.t;
+  pat_spans : (string, Typecheck_types.Ast.span) Hashtbl.t;
   plain_let_names : Typecheck_types.StringSet.t;
   proof_caps : (string * string) list;
   always_linear_types : string list;
@@ -313,14 +315,15 @@ val stdlib_only : (string * string) list ref
 val note_gated_rebind : string -> Typecheck_types.StringSet.t -> Typecheck_types.StringSet.t
 
 val bind_var :
-  StrMap.key -> Typecheck_types.scheme -> env -> env
+  ?span:Typecheck_types.Ast.span -> StrMap.key -> Typecheck_types.scheme -> env -> env
 val bind_vars :
   (StrMap.key * Typecheck_types.scheme) list -> env -> env
 val bind_linear :
+  ?span:Typecheck_types.Ast.span ->
   StrMap.key ->
   Typecheck_types.Ast.linearity ->
   Typecheck_types.ty -> env -> env
-val bind_pending : StrMap.key -> Typecheck_types.ty -> env -> env
+val bind_pending : ?span:Typecheck_types.Ast.span -> StrMap.key -> Typecheck_types.ty -> env -> env
 val generalize :
   int ->
   Typecheck_types.ty ->

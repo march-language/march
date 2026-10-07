@@ -313,6 +313,17 @@ type env = {
       (`Mod.SOME_CONST`) is never recorded as a `` `Call `` reference, while
       a qualified function/interface-method call still is — see [local_fns]
       for the bare-name analogue of this same distinction. *)
+  binder_spans : Ast.span StrMap.t;
+  (** Where each in-scope variable was bound: its parameter, `let` pattern
+      or match-pattern occurrence (D5, diagnostics plan §9). Scope-correct
+      because it lives in the immutable env and is set or cleared by every
+      [bind_var]/[bind_linear]: a rebinding without a span removes the stale
+      entry. [report_mismatch] labels "`x` was bound here as `T`" from it. *)
+  pat_spans : (string, Ast.span) Hashtbl.t;
+  (** Transient: [infer_pattern] records each [PatVar]'s span here and the
+      binding funnel that follows it ([bind_pattern_bindings]) moves the
+      entry into [binder_spans]. Keyed by name only, so it is read right
+      after the pattern that wrote it and never used for a lookup later. *)
   plain_let_names : StringSet.t;
   (** Names most recently bound by a simple, unrestricted `let name = expr`
       (single-variable pattern — see the [Ast.ELet] case of [infer_block]).
@@ -707,6 +718,8 @@ let make_env errors type_map = {
   qual_fn_arities = StrMap.empty;
   qual_fn_names = StrMap.empty;
   plain_let_names = StringSet.empty;
+  binder_spans = StrMap.empty;
+  pat_spans = Hashtbl.create 16;
   proof_caps = [];
   (* "RingBuf" is seeded here so the builtin type is tracked as linear with
      no declaring module (Part C, Phase C2 of
@@ -1796,11 +1809,17 @@ let note_gated_rebind name set =
   if List.mem_assoc name !stdlib_only then StringSet.add name set
   else set
 
-let bind_var name sch env =
+let binder_spans_with name span env =
+  match span with
+  | Some sp -> StrMap.add name sp env.binder_spans
+  | None -> StrMap.remove name env.binder_spans
+
+let bind_var ?span name sch env =
   { env with vars = StrMap.add name sch env.vars;
              gated_shadowed = note_gated_rebind name env.gated_shadowed;
              fn_arities = StrMap.remove name env.fn_arities;
              plain_let_names = StringSet.remove name env.plain_let_names;
+             binder_spans = binder_spans_with name span env;
              local_fns = StrMap.remove name env.local_fns;
              offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
@@ -1808,7 +1827,7 @@ let bind_vars bindings env =
   List.fold_left (fun e (n, s) -> bind_var n s e) env bindings
 
 (** Extend env with a new linear/affine variable. *)
-let bind_linear name lin ty env =
+let bind_linear ?span name lin ty env =
   let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None;
              le_pending = None; le_dup = ref None; le_mixed = ref None } in
   { env with
@@ -1816,16 +1835,17 @@ let bind_linear name lin ty env =
     gated_shadowed = note_gated_rebind name env.gated_shadowed;
     fn_arities = StrMap.remove name env.fn_arities;
     plain_let_names = StringSet.remove name env.plain_let_names;
+    binder_spans = binder_spans_with name span env;
     lin  = le :: env.lin;
     offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
 (** Bind a parameter whose type [ty] is still an unbound variable: an ordinary
     binding plus a pending linear entry, judged when the scope closes. *)
-let bind_pending name ty env =
+let bind_pending ?span name ty env =
   let le = { le_name = name; le_lin = Ast.Unrestricted; le_used = ref false;
              le_first_use = ref None; le_pending = Some ty; le_dup = ref None;
              le_mixed = ref None } in
-  { (bind_var name (Mono ty) env) with lin = le :: env.lin }
+  { (bind_var ?span name (Mono ty) env) with lin = le :: env.lin }
 
 (* =================================================================
    §8  Generalization and instantiation

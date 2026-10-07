@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Type errors now point at the provided side too.** A mismatch keeps its
+  "the expected type comes from here" label and adds where the offending
+  value came from: "this is `T`" on the expression when it is not the
+  primary caret (so `expected Int but got String` on a `List(String)`
+  argument still names the whole type), and for a variable or parameter
+  "`x` was bound here as `T`" on its binder. Applies to call arguments,
+  `let` right-hand sides, `let?` results, `if` branches and `match`
+  scrutinees; the LSP shows the labels as related information.
 - **Every diagnostic has a code, and `march --explain <code>`.** Each error,
   warning and hint ends its first line with its code in brackets
   (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always

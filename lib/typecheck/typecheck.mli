@@ -262,6 +262,8 @@ type env = {
   fn_arities : (int * Ast.span) StrMap.t;
   qual_fn_arities : (int * Ast.span) StrMap.t;
   qual_fn_names : unit StrMap.t;
+  binder_spans : Ast.span StrMap.t;
+  pat_spans : (string, Ast.span) Hashtbl.t;
   plain_let_names : StringSet.t;
   proof_caps : (string * string) list;
   always_linear_types : string list;

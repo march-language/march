@@ -358,30 +358,34 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
     | _ -> None
   in
   List.fold_left (fun acc_env (name, sch) ->
+      (* D5: the span [infer_pattern] recorded for this binder, consumed so
+         a later non-pattern binding of the same name cannot pick it up. *)
+      let span = Hashtbl.find_opt env.pat_spans name in
+      Hashtbl.remove env.pat_spans name;
       match sch with
       | Mono t ->
         (match repr t with
          | TLin (lin, inner) when lin <> Ast.Unrestricted ->
            (* Binding type carries TLin — use that linearity. *)
-           bind_linear name lin inner acc_env
+           bind_linear ?span name lin inner acc_env
          | t' ->
            (match inherited_lin with
             | Some lin when inherits_linearity env ~scrut_ty t' ->
               (* Scrutinee was linear: the bound variable inherits its linearity. *)
-              bind_linear name lin t' acc_env
+              bind_linear ?span name lin t' acc_env
             | _ ->
               (match always_linear_of t' with
-               | Some lin -> bind_linear name lin t' acc_env
+               | Some lin -> bind_linear ?span name lin t' acc_env
                | None ->
-                 let env1 = bind_var name (Mono t') acc_env in
+                 let env1 = bind_var ?span name (Mono t') acc_env in
                  bind_linear_field_sentinels name t' env1)))
       | Poly (_, _, t) ->
         (match always_linear_of t with
-         | Some lin -> bind_linear name lin t acc_env
+         | Some lin -> bind_linear ?span name lin t acc_env
          | None ->
            (* Generalised binding: bind normally but also add field sentinels for
               any linear fields in the underlying type. *)
-           let env1 = bind_var name sch acc_env in
+           let env1 = bind_var ?span name sch acc_env in
            bind_linear_field_sentinels name (repr t) env1)
     ) env bindings
 
@@ -649,6 +653,8 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
     (* Record in type_map so lower.ml can look up the resolved type via ty_of_span.
        Unification happens after infer_pattern returns; repr t follows the link. *)
     Hashtbl.replace env.type_map name.span t;
+    (* D5: the binder's span, picked up by [bind_pattern_bindings]. *)
+    Hashtbl.replace env.pat_spans name.txt name.span;
     [(name.txt, Mono t)], t
 
   | Ast.PatLit (lit, _) ->
@@ -2567,7 +2573,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let (bindings, pat_ty), wilds =
         with_wildcards (fun () -> infer_pattern ~expected:rhs_ty env b.bind_pat) in
       let reason = Some (RLetBind sp) in
-      unify env ~span:sp ~reason rhs_ty pat_ty;
+      unify env ~span:sp ~reason ~provided:(provided_of_expr b.bind_expr rhs_ty) rhs_ty pat_ty;
       check_wildcard_discards env wilds;
       check_wildcard_let_discard env b.bind_pat b.bind_expr rhs_ty;
       (* Record variable name type for hover even in tail position *)
@@ -2819,6 +2825,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       unify env ~span:else_sp
         ~reason:(Some (RBecause (RMatchArm then_sp,
           "Both branches of an if expression must return the same type.")))
+        ~provided:(provided_of_expr else_ t_else)
         t_else t_then;
       t_then
 
@@ -3030,7 +3037,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          let result_ty = infer_expr env result_expr in
          let t_ok  = fresh_var env.level in
          let t_err = fresh_var env.level in
-         unify env ~span:sp
+         unify env ~span:sp ~provided:(provided_of_expr result_expr result_ty)
            ~reason:(Some (RBuiltin
              "The right-hand side of `let?` must be a Result value."))
            result_ty (t_result t_ok t_err);
@@ -3212,7 +3219,9 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
         peel rest ret_ty env'
       | _, _ ->
         let inferred = infer_expr env (Ast.ELam (params, body, lsp)) in
-        unify env ~span:lsp ~reason inferred expected
+        unify env ~span:lsp ~reason
+          ~provided:(provided_of_expr (Ast.ELam (params, body, lsp)) inferred)
+          inferred expected
     in
     (* `fn (a, b) -> e` is a TWO-parameter (curried) lambda, not a lambda over
        a pair.  Checked against a ONE-argument callback over an n-tuple
@@ -3271,7 +3280,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     iter_arms_linear env ~span:msp branches (fun (br : Ast.branch) ->
         let (bindings, pat_ty), wilds =
           with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
-        unify env ~span:msp ~reason:(Some (RMatchArm msp)) scrut_ty pat_ty;
+        unify env ~span:msp ~reason:(Some (RMatchArm msp))
+          ~provided:(provided_of_expr scrut scrut_ty) scrut_ty pat_ty;
         (* A diverging arm drops nothing that matters: nothing after it runs. *)
         if not (path_diverges br.branch_body) then check_wildcard_discards env wilds;
         (* Propagate linearity from scrutinee to pattern-bound variables. *)
@@ -3325,12 +3335,12 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
        (* Expected type doesn't name a type defining this constructor —
           fall back to inference so the normal mismatch error is produced. *)
        let inferred = infer_expr env e in
-       unify env ~span:sp ~reason inferred expected)
+       unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected)
 
   (* All other expressions: infer then unify *)
   | _ ->
     let inferred = infer_expr env e in
-    unify env ~span:sp ~reason inferred expected
+    unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected
 
 (** Thread function application through argument list, tracking arg index. *)
 and infer_app env span f_ty args idx =
@@ -3535,7 +3545,8 @@ and infer_match env span scrut scrut_ty branches =
   iter_arms_linear env ~span branches (fun (br : Ast.branch) ->
       let (bindings, pat_ty), wilds =
         with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
-      unify env ~span ~reason:(Some (RMatchArm span)) scrut_ty pat_ty;
+      unify env ~span ~reason:(Some (RMatchArm span))
+        ~provided:(provided_of_expr scrut scrut_ty) scrut_ty pat_ty;
       if not (path_diverges br.branch_body) then check_wildcard_discards env wilds;
       (* Propagate linearity from scrutinee to pattern-bound variables. *)
       let env' = bind_pattern_bindings scrut bindings env in
@@ -3639,7 +3650,8 @@ and infer_block env exprs =
        unchanged for every other pattern shape. *)
     let (bindings, pat_ty), wilds =
       with_wildcards (fun () -> infer_pattern ~expected:rhs_ty env_rhs b.bind_pat) in
-    unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+    unify env_rhs ~span:sp ~reason:(Some (RLetBind sp))
+      ~provided:(provided_of_expr b.bind_expr rhs_ty) rhs_ty pat_ty;
     check_wildcard_discards env_rhs wilds;
     check_wildcard_let_discard env_rhs b.bind_pat b.bind_expr rhs_ty;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
@@ -4008,11 +4020,11 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
   match effective_lin with
   | Ast.Unrestricted when is_unbound_var t ->
     (* Not known yet: the body may still fix it to a linear type. *)
-    bind_pending p.param_name.txt t env
+    bind_pending ~span:p.param_name.span p.param_name.txt t env
   | Ast.Unrestricted ->
-    let env1 = bind_var p.param_name.txt (Mono t) env in
+    let env1 = bind_var ~span:p.param_name.span p.param_name.txt (Mono t) env in
     bind_linear_field_sentinels p.param_name.txt t env1
-  | lin -> bind_linear p.param_name.txt lin bind_ty env
+  | lin -> bind_linear ~span:p.param_name.span p.param_name.txt lin bind_ty env
 
 (* =================================================================
    §6  Declaration checking
@@ -4370,16 +4382,16 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                      an ERROR, not a warning — previously only let-bound and lambda
                      params registered these, so fn-param field linearity was
                      silently warning-only. *)
-                  let env1 = bind_var p.param_name.txt (Mono t) env in
+                  let env1 = bind_var ~span:p.param_name.span p.param_name.txt (Mono t) env in
                   bind_linear_field_sentinels p.param_name.txt t env1
-                | lin              -> bind_linear p.param_name.txt lin bind_ty env
+                | lin              -> bind_linear ~span:p.param_name.span p.param_name.txt lin bind_ty env
               in
               (t :: tys, env')
             | Ast.FPPat (Ast.PatVar name) ->
               (* Single variable pattern — trivially named.  Its type is not
                  known yet, so its linearity is decided at the body's close. *)
               let t = fresh_var env'.level in
-              let env' = bind_pending name.txt t env in
+              let env' = bind_pending ~span:name.span name.txt t env in
               (t :: tys, env')
             | Ast.FPPat pat ->
               (* Complex pattern parameter: should have been desugared into a
@@ -5659,7 +5671,8 @@ let rec check_decl env (d : Ast.decl) : env =
         infer_let_annotated env' sp b.bind_ty b.bind_expr) in
       Hashtbl.replace env.type_map sp (repr rhs_ty);
       let bindings, pat_ty = infer_pattern ~expected:rhs_ty env' b.bind_pat in
-      unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+      unify env' ~span:sp ~reason:(Some (RLetBind sp))
+        ~provided:(provided_of_expr b.bind_expr rhs_ty) rhs_ty pat_ty;
       (rhs_ty, bindings) in
     discharge_constraints env sp;
     ignore (leave_level env');
@@ -9342,7 +9355,7 @@ let check_letq_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
   let t_ok  = fresh_var env'.level in
   let t_err = fresh_var env'.level in
   let sp = span_of_expr e in
-  unify env' ~span:sp
+  unify env' ~span:sp ~provided:(provided_of_expr e result_ty)
     ~reason:(Some (RBuiltin "The right-hand side of `let?` must be a Result value."))
     result_ty (t_result t_ok t_err);
   let bindings, pat_ty = infer_pattern ~expected:t_ok env' p in
