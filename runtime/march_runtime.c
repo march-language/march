@@ -90,6 +90,13 @@ static void march_debug_report_oom(const char *where, int64_t requested) {
  *   {"event":"free",    "addr":"0x…","size":0,"rc":0,"tag":N,"ts_ns":N}
  *   {"event":"inc_ref", "addr":"0x…","size":0,"rc":N,"tag":N,"ts_ns":N}
  *   {"event":"dec_ref", "addr":"0x…","size":0,"rc":N,"tag":N,"ts_ns":N}
+ *
+ * Every event also carries "site":N, the id of the compiled call site that
+ * performed it (-1 when none: a release build, or an op the runtime itself
+ * made), resolved through trace/gc/sites.json; see march_rc_site below and
+ * scripts/gc-trace-report.py, which folds the file into per-object histories.
+ * Sending the process SIGUSR2 (SIGUSR1 if preemption was moved onto SIGUSR2)
+ * flushes the file so the report can run against a live process.
  */
 
 static FILE            *gc_trace_file  = NULL;
@@ -104,6 +111,7 @@ static pthread_mutex_t  gc_trace_mutex = PTHREAD_MUTEX_INITIALIZER;
 int march_gc_trace_state = 0;
 #define gc_trace_state march_gc_trace_state
 
+static void gc_trace_write_sites(void);
 static void gc_trace_init_locked(void) {
     if (getenv("MARCH_TRACE_GC") == NULL) { gc_trace_state = -1; return; }
     mkdir("trace",    0755);
@@ -113,6 +121,7 @@ static void gc_trace_init_locked(void) {
     if (gc_trace_state < 0)
         fputs("march: warning: MARCH_TRACE_GC=1 but could not open trace/gc/gc.jsonl\n",
               stderr);
+    gc_trace_write_sites();
 }
 
 /* Lazy single-check: fast path avoids the mutex once state is known. */
@@ -122,6 +131,106 @@ static inline int gc_trace_on(void) {
     if (gc_trace_state == 0) gc_trace_init_locked();
     pthread_mutex_unlock(&gc_trace_mutex);
     return gc_trace_state > 0;
+}
+
+/* ── RC trace site ids (--rc-trace) ─────────────────────────────────────
+ * A program compiled with `march --rc-trace` brackets every call it makes
+ * into the runtime (lib/tir/llvm_rc_trace.ml): it stores a dense site id
+ * into march_rc_site (through march_rc_site_set) immediately before the
+ * call and stores -1 immediately after it returns, and registers a table
+ * naming each id "<fn symbol>#<ordinal>:<callee>" from a module constructor.
+ * gc_emit copies the slot into the event's "site" field, so every event a
+ * runtime call produces -- a refcount op, a builtin's own allocations, the
+ * recursive drop of a freed cell's children -- names the compiled call site
+ * that was active, and an event with no compiled call active on the thread
+ * (a scheduler thread's housekeeping, exit-time frees) reads -1.  A release
+ * build never calls the setter; the slot then stays -1 throughout.
+ *
+ * Known imprecision: a runtime call that parks its green thread (a blocking
+ * receive) lets another task use the OS thread, and that task's bracketing
+ * overwrites the slot, so events the parked call makes after it resumes can
+ * carry a neighbouring task's site or -1.  Likewise a builtin that calls back
+ * into compiled code (a closure) sees the slot cleared when the callback
+ * returns.  Both only blur attribution; no event is lost.
+ *
+ * The slot is OS-thread-local, which is sound because a green thread cannot
+ * migrate between the store and the call it precedes: preemption is
+ * cooperative (march_tls_reductions is checked at compiled-function entry
+ * and loop back-edges, never between two consecutive instructions), and the
+ * scheduler only switches threads at those points.
+ *
+ * Out-of-band on purpose: the refcount entry points keep their C signatures
+ * because the inline fast path (lib/tir/llvm_rc_inline.ml) rewrites calls to
+ * them by text, and that rewrite must keep matching. */
+_Thread_local int32_t march_rc_site = -1;
+void march_rc_site_set(int32_t site) { march_rc_site = site; }
+
+static const char **g_rc_sites = NULL;
+static int          g_rc_sites_n = 0;
+
+/* trace/gc/sites.json: the registered table as a JSON array, index = id.
+ * Written whenever both halves are present: at trace init if a table was
+ * registered first (the usual order, the module constructor runs before
+ * main), or at registration if tracing was resolved first. */
+static void gc_trace_write_sites(void) {
+    if (!g_rc_sites || gc_trace_state <= 0) return;
+    FILE *f = fopen("trace/gc/sites.json", "w");
+    if (!f) return;
+    fputc('[', f);
+    for (int i = 0; i < g_rc_sites_n; i++) {
+        if (i) fputc(',', f);
+        fputc('"', f);
+        for (const char *c = g_rc_sites[i]; *c; c++) {
+            if (*c == '"' || *c == '\\') fputc('\\', f);
+            if ((unsigned char)*c < 0x20) fprintf(f, "\\u%04x", (unsigned)(unsigned char)*c);
+            else fputc(*c, f);
+        }
+        fputc('"', f);
+    }
+    fputs("]\n", f);
+    fclose(f);
+}
+
+void march_rc_sites_register(const char **names, int32_t n) {
+    g_rc_sites = names;
+    g_rc_sites_n = n;
+    pthread_mutex_lock(&gc_trace_mutex);
+    gc_trace_write_sites();
+    pthread_mutex_unlock(&gc_trace_mutex);
+}
+
+/* Flush-on-signal, so scripts/gc-trace-report.py can read a live process's
+ * trace.  SIGUSR1 is the scheduler's preemption tick (march_preempt_signal),
+ * so the flush signal is SIGUSR2, or SIGUSR1 when MARCH_PREEMPT_SIGNAL moved
+ * preemption onto SIGUSR2.  Installed only when tracing is on; a program that
+ * Signal.watch()es the same signal replaces the handler and loses the flush.
+ *
+ * The handler is async-signal-safe by construction: it flushes only if it can
+ * take the trace mutex without blocking (the interrupted thread may hold it
+ * mid-fprintf), and otherwise leaves a request that the next gc_emit honours.
+ * trylock on an uncontended mutex is a single CAS on both libcs. */
+static _Atomic int gc_trace_flush_requested = 0;
+int march_preempt_signal(void);
+void march_install_async_signal(int sig, void (*handler)(int));
+
+static int gc_trace_flush_signal(void) {
+    return march_preempt_signal() == SIGUSR2 ? SIGUSR1 : SIGUSR2;
+}
+
+static void gc_trace_flush_handler(int sig) {
+    (void)sig;
+    if (pthread_mutex_trylock(&gc_trace_mutex) == 0) {
+        if (gc_trace_file) fflush(gc_trace_file);
+        pthread_mutex_unlock(&gc_trace_mutex);
+    } else {
+        atomic_store_explicit(&gc_trace_flush_requested, 1, memory_order_relaxed);
+    }
+}
+
+/* Called once from spawn_main_impl after the trace state is resolved. */
+static void gc_trace_install_flush_signal(void) {
+    if (gc_trace_state > 0)
+        march_install_async_signal(gc_trace_flush_signal(), gc_trace_flush_handler);
 }
 
 /* ── String statistics (MARCH_STRING_STATS=1) ────────────────────────────
@@ -283,13 +392,16 @@ static inline int64_t gc_ts_ns(void) {
 
 static void gc_emit(const char *ev, void *addr,
                     int64_t size, int64_t rc, int32_t tag) {
+    int32_t site = march_rc_site;   /* this thread's own slot: no lock needed */
     pthread_mutex_lock(&gc_trace_mutex);
     fprintf(gc_trace_file,
             "{\"event\":\"%s\",\"addr\":\"%p\","
-            "\"size\":%lld,\"rc\":%lld,\"tag\":%d,\"ts_ns\":%lld}\n",
+            "\"size\":%lld,\"rc\":%lld,\"tag\":%d,\"site\":%d,\"ts_ns\":%lld}\n",
             ev, addr,
-            (long long)size, (long long)rc, (int)tag,
+            (long long)size, (long long)rc, (int)tag, (int)site,
             (long long)gc_ts_ns());
+    if (atomic_exchange_explicit(&gc_trace_flush_requested, 0, memory_order_relaxed))
+        fflush(gc_trace_file);
     pthread_mutex_unlock(&gc_trace_mutex);
 }
 
@@ -644,10 +756,60 @@ void march_free(void *p) {
      * free() of static-lifetime memory that every later evaluation of that
      * literal site still hands out. */
     if (IS_HEAP_PTR(p) && ((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
+#ifdef MARCH_RC_CHECKS
+    /* Sanitizer builds only (bin/main.ml passes -DMARCH_RC_CHECKS with
+     * -fsanitize): an EFree reaches here for a binding Perceus proved unique,
+     * so a count above 1 means another holder is about to read freed memory.
+     * Abort now, naming the object, instead of letting ASAN report the
+     * use-after-free at the other holder's next read.  With tracing on the
+     * trace is flushed first so the object's history is complete. */
+    if (IS_HEAP_PTR(p) && ((march_hdr *)p)->rc > 1) {
+        int32_t site = march_rc_site;
+        if (gc_trace_on()) {
+            pthread_mutex_lock(&gc_trace_mutex);
+            fflush(gc_trace_file);
+            pthread_mutex_unlock(&gc_trace_mutex);
+        }
+        fprintf(stderr,
+                "march: march_free of a SHARED object at %p (rc %lld, tag %d, site %d)"
+                " — aborting.%s\n",
+                p, (long long)((march_hdr *)p)->rc, (int)((march_hdr *)p)->tag, (int)site,
+                gc_trace_on()
+                  ? "  History: scripts/gc-trace-report.py --addr <addr> trace/gc"
+                  : "  Rebuild with --rc-trace and run under MARCH_TRACE_GC=1 for its history.");
+        abort();
+    }
+#endif
     if (gc_trace_on() && IS_HEAP_PTR(p))
         gc_emit("free", p, 0, 0, ((march_hdr *)p)->tag);
+    /* A dead LINEAR binding reaches here through EFree, bypassing march_decrc,
+     * and march_decrc is where a resource cell's destructor ran.  Without this
+     * a dead RingBuf (or any FFI resource cell) would be shallow-freed: its
+     * 40-byte cell gone, its backing store and every element it still held
+     * leaked, silently.  No accepted program reached that path while every
+     * resource cell was unrestricted or must-consume, but the moment one can
+     * be dead (an affine buffer, a later relaxation) the leak is real, so the
+     * same tag check march_decrc makes at zero is made here.  One predictable
+     * branch on an already-cold path. */
+    if (IS_HEAP_PTR(p)) march_run_resource_dtor(p);
     free(p);
 }
+
+#ifdef MARCH_RC_CHECKS
+/* Sanitizer builds: the TRMC hole fill (ESetField, lib/tir/llvm_emit.ml)
+ * calls this with the slot's previous contents.  The hole was stored null at
+ * allocation and nothing may write it before the fill; a non-null value means
+ * the cell was published or reused early, the window the null store exists
+ * to keep safe.  Never emitted in a release build (the call changes the IR,
+ * which the sanitize CAS tag already separates). */
+void march_hole_fill_check(void *cell, int64_t field, void *prev) {
+    if (prev == NULL) return;
+    fprintf(stderr,
+            "march: TRMC hole fill into cell %p field %lld found %p, not null — aborting\n",
+            cell, (long long)field, prev);
+    abort();
+}
+#endif
 
 /* Pending-drop list of a flattened tail-call loop; see march_runtime.h.
  * Layout: a header (len, cap) followed by cap (release, value) pairs.  The
@@ -913,6 +1075,11 @@ void *march_string_alloc(int64_t len) {
     s->len = len;
     MARCH_ALLOC_BUMP();
     if (str_stats_on()) str_stats_alloc(len);
+    /* Strings are the commonest leaked object and the gauge above counts
+     * them, so the trace must see their births too (it did not until the
+     * site-id work, 2026-10-06: every string history began at its first
+     * inc_ref, with no allocation site). */
+    if (gc_trace_on()) gc_emit("alloc", s, len, 1, MARCH_STRING_TAG);
     return s;
 }
 
@@ -938,9 +1105,13 @@ void *march_string_lit_static(const char *utf8, int64_t len, void **cell) {
     s->rc = MARCH_RC_IMMORTAL;
     void *winner = NULL;
     if (atomic_compare_exchange_strong_explicit(
-            slot, &winner, (void *)s, memory_order_acq_rel, memory_order_acquire))
+            slot, &winner, (void *)s, memory_order_acq_rel, memory_order_acquire)) {
+        /* Lives for the program: the report lists it apart from leaks. */
+        if (gc_trace_on()) gc_emit("immortal", s, 0, MARCH_RC_IMMORTAL, MARCH_STRING_TAG);
         return s;
+    }
     MARCH_FREE_BUMP();
+    if (gc_trace_on()) gc_emit("free", s, 0, 0, MARCH_STRING_TAG);
     free(s);
     return winner;
 }
@@ -3246,6 +3417,7 @@ static void spawn_main_impl(void (*fn)(void), int force_pin) {
     /* Resolve the GC trace state before user code runs: the inline refcount
      * fast path takes its out-of-line branch until it is resolved. */
     (void)gc_trace_on();
+    gc_trace_install_flush_signal();
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
             &g_sched_initialized, &expected, 1,
@@ -11763,9 +11935,22 @@ static inline int64_t clo_call_int_int(void *clo, int64_t x) {
     void *wire_ret = clo_apply_ptr(clo, wire_arg);
     return (int64_t)(intptr_t)wire_ret >> 1;
 }
+/* Float boxes cross the closure ABI owned by the caller both ways: the
+ * callee takes its own reference to an argument box it keeps
+ * (march_clo_param_own), and returns a box the caller owns. So the argument
+ * box is released after the call and the returned box after it is read --
+ * exactly what native_float_arr_fold does. Before 2026-10-06 neither was
+ * released: two leaked boxes per element of every runtime Float/f32 map
+ * (specs/progress/2026-10-06-nativearray-builtins-leak-their-argument.md).
+ * An identity callback returns the argument box itself with its own extra
+ * reference, so the two releases are still balanced. */
 static inline double clo_call_dbl_dbl(void *clo, double x) {
-    void *wire_ret = clo_apply_ptr(clo, march_alloc_float(x));
-    return march_unbox_float(wire_ret);
+    void *arg = march_alloc_float(x);
+    void *wire_ret = clo_apply_ptr(clo, arg);
+    double r = march_unbox_float(wire_ret);
+    march_decrc(wire_ret);
+    march_decrc(arg);
+    return r;
 }
 
 /* Two-argument variants for native_{int,float}_arr_map2 (a genuine 2-param
@@ -11783,8 +11968,14 @@ static inline int64_t clo_call_int_int_int(void *clo, int64_t x, int64_t y) {
     return (int64_t)(intptr_t)wire_ret >> 1;
 }
 static inline double clo_call_dbl_dbl_dbl(void *clo, double x, double y) {
-    void *wire_ret = clo_apply_ptr2(clo, march_alloc_float(x), march_alloc_float(y));
-    return march_unbox_float(wire_ret);
+    void *ax = march_alloc_float(x);
+    void *ay = march_alloc_float(y);
+    void *wire_ret = clo_apply_ptr2(clo, ax, ay);
+    double r = march_unbox_float(wire_ret);
+    march_decrc(wire_ret);
+    march_decrc(ax);
+    march_decrc(ay);
+    return r;
 }
 
 /* ── Stable sort of a List by a comparator: Array.sort_by, RRB.Vec.sort_by ──
@@ -12069,11 +12260,12 @@ int64_t native_int_arr_get(void *arr, int64_t i) {
  * therefore owns exactly one reference to [arr] and is responsible for
  * releasing it.
  *
- * When that reference is the ONLY one (rc == 1, the same unique-ownership
- * predicate LLVM-generated FBIP `reuse … as …` uses, which also reads ->rc as
- * a plain non-atomic load — safe precisely because a unique owner has no
- * concurrent observer), we mutate the backing array in place and hand our
- * reference straight to the result: O(1), no allocation, no copy, no free.
+ * When that reference is the ONLY one (march_rc_is_unique: an acquire load of
+ * ->rc reading 1, the same unique-ownership predicate LLVM-generated FBIP
+ * `reuse … as …` uses; acquire so that a reference another thread dropped a
+ * moment ago has its last reads ordered before our write, see the helper's
+ * comment in march_runtime.h), we mutate the backing array in place and hand
+ * our reference straight to the result: O(1), no allocation, no copy, no free.
  * That is what keeps a threaded-forward set_int accumulator flat in RSS
  * instead of leaking (or churning) a fresh 8-element copy on every call.
  *
@@ -12084,7 +12276,7 @@ int64_t native_int_arr_get(void *arr, int64_t i) {
  * arrays (rc >= MARCH_RC_IMMORTAL), which are never mutated in place. */
 void *native_int_arr_set(void *arr, int64_t i, int64_t val) {
     native_arr_check_bounds("native_int_arr_set", i, native_int_arr_length(arr));
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8) = val;
         return arr;
     }
@@ -12623,7 +12815,7 @@ NSORT_DEFINE_CORE(i32, int32_t)
  * original, so we sort a fresh copy and release our own reference. */
 void *native_int_arr_sort(void *arr) {
     int64_t len = native_int_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         nsort_i64((int64_t *)((char *)arr + NATIVE_ARR_HDR), len);
         return arr;
     }
@@ -12873,7 +13065,7 @@ double native_float_arr_get(void *arr, int64_t i) {
  * place, shared array copies-on-write then releases our reference). */
 void *native_float_arr_set(void *arr, int64_t i, double val) {
     native_arr_check_bounds("native_float_arr_set", i, native_float_arr_length(arr));
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         memcpy((char *)arr + NATIVE_ARR_HDR + i * 8, &val, 8);
         return arr;
     }
@@ -12890,7 +13082,7 @@ void *native_float_arr_set(void *arr, int64_t i, double val) {
  * place at rc == 1, a sorted fresh copy (our reference released) at rc > 1. */
 void *native_float_arr_sort(void *arr) {
     int64_t len = native_float_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         nsort_f64((double *)((char *)arr + NATIVE_ARR_HDR), len);
         return arr;
     }
@@ -13097,7 +13289,7 @@ int64_t PREFIX##_get(void *arr, int64_t i) {                                  \
 }                                                                             \
 void *PREFIX##_set(void *arr, int64_t i, int64_t val) {                       \
     native_arr_check_bounds(#PREFIX "_set", i, PREFIX##_length(arr));         \
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {                    \
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {                    \
         *(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)) = (CTYPE)val; \
         return arr;                                                           \
     }                                                                         \
@@ -13201,7 +13393,7 @@ DEF_NARROW_INT_ARR(native_u8_arr,  uint8_t, NATIVE_ELEM_U8)
  * reference released) at rc > 1. */
 void *native_i32_arr_sort(void *arr) {
     int64_t len = native_i32_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         nsort_i32((int32_t *)((char *)arr + NATIVE_ARR_HDR), len);
         return arr;
     }
@@ -13218,7 +13410,7 @@ void *native_i32_arr_sort(void *arr) {
  * array, so it needs no memcpy first. */
 void *native_u8_arr_sort(void *arr) {
     int64_t len = native_u8_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         uint8_t *d = (uint8_t *)((char *)arr + NATIVE_ARR_HDR);
         nsort_u8(d, d, len);
         return arr;
@@ -13252,7 +13444,7 @@ double native_f32_arr_get(void *arr, int64_t i) {
 /* FBIP/COW contract identical to native_float_arr_set above. */
 void *native_f32_arr_set(void *arr, int64_t i, double val) {
     native_arr_check_bounds("native_f32_arr_set", i, native_f32_arr_length(arr));
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         *(float *)((char *)arr + NATIVE_ARR_HDR + i * 4) = (float)val;
         return arr;
     }
@@ -13268,7 +13460,7 @@ void *native_f32_arr_set(void *arr, int64_t i, double val) {
  * FBIP/COW contract identical to native_float_arr_sort. */
 void *native_f32_arr_sort(void *arr) {
     int64_t len = native_f32_arr_length(arr);
-    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+    if (IS_HEAP_PTR(arr) && march_rc_is_unique(arr)) {
         nsort_f32((float *)((char *)arr + NATIVE_ARR_HDR), len);
         return arr;
     }

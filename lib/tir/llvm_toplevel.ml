@@ -57,6 +57,9 @@ type target_config =
     so a non-pinned cached artifact must never satisfy a --pin-main build. *)
 let pin_main = ref false
 
+(** See [Llvm_builtins.rc_checks] (the preamble declares the check). *)
+let rc_checks = Llvm_builtins.rc_checks
+
 let is_wasm_target = function
   | Native | LinuxGnu _ | Js -> false
   | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown -> true

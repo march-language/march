@@ -1,0 +1,18 @@
+-- H8: a task may create and return a RingBuf, and Task.await may be called
+-- twice on the same Task, so two bindings alias one buffer. Type-checks today.
+mod Main do
+  needs IO.Spawn
+  fn main(_s : Cap(IO.Spawn)) : Int do
+    let t = Task.async(fn () -> RingBuf.make(4))
+    let a = match Task.await(t) do
+      Ok(rb) -> rb
+      Err(_) -> RingBuf.make(1)
+    end
+    let b = match Task.await(t) do
+      Ok(rb) -> rb
+      Err(_) -> RingBuf.make(1)
+    end
+    RingBuf.push(a, 1)
+    RingBuf.size(b)
+  end
+end
