@@ -1,0 +1,15 @@
+exit: 1
+-- ERROR -------------------- errors/parse_error_16.march
+
+This `fn` (line 3) has no matching `end`. [parse_error]
+
+3 |   fn f(xs) do
+      ^^
+
+    I only noticed at the end of the file.
+    run `march --explain parse_error`
+
+fix [parse_error]:
+@@ after line 4 @@
+     if true do List.map(xs, fn x -> x + 1) else xs end
++  end

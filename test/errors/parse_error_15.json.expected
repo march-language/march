@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/parse_error_15.march","start_line":7,"start_col":0,"end_line":7,"end_col":3,"message":"A file may have only one top-level `mod`; everything else must live inside it.","code":"parse_error","fix":{"kind":"delete","start_line":7,"end_line":7},"labels":[],"notes":["mod Name do\n    fn helper() do ... end\n    fn main() do ... end\nend"]}

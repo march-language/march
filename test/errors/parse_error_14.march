@@ -1,0 +1,5 @@
+-- D1 (missing `end` on the `mod`: insert `end` at EOF)
+mod M do
+  fn f() do
+    1
+  end

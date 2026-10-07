@@ -1,0 +1,7 @@
+-- D1 (negative: an arrow-form lambda inside the `if` must not be reported as an opener)
+mod M do
+  fn f(xs) do
+    if true do List.map(xs, fn x -> x + 1) else xs end
+
+  fn g() do 0 end
+end

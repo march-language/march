@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/parse_error_14.march","start_line":2,"start_col":0,"end_line":2,"end_col":3,"message":"This `mod` (line 2) has no matching `end`.","code":"parse_error","fix":{"kind":"insert","after_line":5,"text":"end"},"labels":[],"notes":["I only noticed at the end of the file."]}
