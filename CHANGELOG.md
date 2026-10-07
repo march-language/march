@@ -261,6 +261,13 @@ git log is authoritative for exact commits.
   node as it passes. binary_trees is about 7% faster (75 to 70 ms median,
   Apple M3 Max). A loop that passes the same value to two such parameters
   stays a loop. `MARCH_NO_OWNED_CALLS=1` turns it off.
+- **Allocating and freeing a heap value costs less in compiled programs,
+  most of all on macOS.** The runtime no longer makes a thread-local-storage
+  call per allocation and per free, checks which allocator owns a freed
+  object with an inline range test, and is built without the arm64
+  instruction outliner. binary_trees uses 29% less CPU time (72 to 51 ms
+  median) and list_ops 19% less (Apple M3 Max); `live_allocs()` and the
+  observe snapshot count exactly as before.
 - **`RingBuf` is linear: every operation consumes the buffer and hands it
   back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
   `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer

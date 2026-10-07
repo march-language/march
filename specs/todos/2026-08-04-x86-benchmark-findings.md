@@ -188,6 +188,17 @@ each node during the read: binary_trees −7% median on an M3 Max (75 → 70 ms)
 See `specs/progress/2026-10-07-owned-call-drop-fusion.md`. The allocator and
 free costs above are untouched by it.
 
+**2026-10-07: the per-object alloc/free path is cheaper (macOS mostly).** No
+`_tlv_get_addr` call per object any more (the live gauge and mimalloc's heap
+lookup both read the pthread TSD directly), the free path's provenance test is
+an inline range check for mimalloc's first arena, the hot tails are frameless,
+and the runtime is built `-mno-outline` on arm64. binary_trees 15 CPU time
+72.0 → 50.8 ms median (−29%), list_ops −19%, tree_transform and string_build
+flat (M3 Max, loaded box). See `specs/progress/2026-10-07-alloc-free-fast-path.md`.
+On Linux only the arena check, the frameless tails and `-mno-outline` (arm64)
+apply; it has not been measured on the x86 host. Strings are still libc-malloc'd
+and so still take the slow provenance path.
+
 ## 3. simd-map: vectorizes fine; the ISA baseline costs ~13%, and the 2× gap to OCaml is still unexplained
 
 **A first pass at this was wrong twice, and the corrections are the useful part.**
