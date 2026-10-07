@@ -428,7 +428,14 @@ let is_aggregate_ty (env : env) : Tir.ty -> bool = function
      value it owned, and an actor handler that returned a new state leaked
      one record per message
      (specs/progress/2026-10-01-compiled-actor-and-nominal-record-leaks.md). *)
-  | Tir.TCon (n, _) -> Kind.is_record_type env.k_table n
+  | Tir.TCon (n, _) ->
+    Kind.is_record_type env.k_table n
+    (* ... or named by its short name ([Ops] for [Session.Ops]): without this
+       a [d : Ops] read only through its fields was neither an aggregate (no
+       scope-end drop) nor released at its last use, and every Session
+       operation leaked a reference to the session's Ops
+       (specs/progress/2026-10-06-session-ops-leak.md). *)
+    || Kind.record_fields_short env.k_table n <> None
   | _ -> false
 
 (** Result type of a primitive operator application whose callee variable
@@ -1285,14 +1292,12 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        equivalent: the caller's [env.borrowed_field_vars] is never touched). *)
     let rec result_is_borrowed_field (bfv : StringSet.t) (e : Tir.expr) : bool =
       match e with
-      | Tir.EApp (f, [Tir.AVar a])
-        when (f.Tir.v_name = "to_string" || f.Tir.v_name = "Show$String.show")
-             && a.Tir.v_ty = Tir.TString ->
-        (* `to_string` on a String now lowers to the identity `Show$String.show`
-           (the Show-dispatch reroute that fixes `to_string(container)`), so this
-           borrowed-field optimization must recognize BOTH names or it would treat
-           a borrowed field string as owned and drop it — an RC underflow. *)
-        StringSet.mem a.Tir.v_name bfv
+      (* No arm for [to_string(x)] / [Show$String.show(x)] any more: both lower
+         to march_value_to_string, which returns its OWN reference (+1, a
+         [march_incrc] on a String argument), not an alias of a borrowed [x].
+         Treating the result as borrowed skipped its release, one leaked string
+         per call: Show$Option.show's ["Some(" ++ show(x) ++ ")"] over an erased
+         payload (specs/progress/2026-10-06-record-get-erased-option-drop.md). *)
       | Tir.ELet (iv, Tir.EField (Tir.AVar src, _), ibody)
         when needs_rc env iv.Tir.v_ty
              && (StringSet.mem src.Tir.v_name bfv || field_src_is_borrowed src) ->

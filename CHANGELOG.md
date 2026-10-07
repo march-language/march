@@ -341,6 +341,30 @@ git log is authoritative for exact commits.
   never reads. It now uses the version `forge.lock` names, and only that
   version's `lib/`.
 
+- **A value matched by `_` inside a tuple or constructor pattern is now fully freed.** In
+  `match pop(q) do (None, _) -> ...`, the value the `_` stood for was freed without its
+  contents, so a dropped `Deque` leaked both of its lists. This also cost a cluster node a
+  few objects for each frame it queued.
+
+- **A dead actor's memory is released.** An actor that was killed or stopped kept its
+  state (lists, maps, strings, closures) allocated for the rest of the program, and an
+  actor that had ever been the target of `Actor.call` was never freed at all, because
+  each call leaked a reference to it.
+
+- **A cluster session no longer leaves its party behind.** Each finished session leaked the
+  party record, the session capability's closures and the handles of thirteen session
+  tables. Every session operation (send, receive, register, close) also leaked a
+  reference. A session now leaves about 90 objects behind instead of about 160.
+
+- **A program that declares a type with a stdlib type's name (`Value`, `State`, `Event`,
+  `Error`, ...) no longer crashes when compiled.** Dropping a value of the stdlib type
+  (a `Msgpack.Value`, say) segfaulted, because the drop only knew the program's own type.
+
+- **Reading a record field whose type is never pinned down (`record_get(r, "y")` printed
+  or shown) no longer double-frees or leaks in compiled code.** The result was released
+  once too often, a use-after-free that only showed under ASAN. Showing it leaked one
+  string per call.
+
 - **Every in-place write now synchronises with the reference it reuses.** The
   sole-ownership test behind FBIP reuse, `NativeArray.set`/`sort` and the SIMD
   store read the reference count with a relaxed load, so a cell another thread
