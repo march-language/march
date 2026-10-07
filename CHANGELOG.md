@@ -235,6 +235,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **No false refinement error for a lambda that uses a local.** A lambda passed
+  where a refined return is expected (`ap(fn y -> h(y), 1)` with
+  `f : (Int) -> {Int | _ > 0}`) that called or read a parameter or `let` of the
+  enclosing function could be reported as a definite violation, with a
+  counterexample computed from a module-level function of the same name. Such a
+  lambda is now left unchecked (a recorded skip), as intended.
 - A `--hot-reload` build no longer leaks a small object each time it calls a
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary

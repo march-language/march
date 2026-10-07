@@ -16198,6 +16198,29 @@ let callback_elements_suite =
           (has_refine_error_typed
              (m (apply ^ "  fn cap(x : Int, k : Int) : Int do apply(x, fn y -> y - k) end\n"))));
 
+    gated "a lambda capturing a local is never run in the module environment" (fun () ->
+        (* The capture test used to look at the free variables of the whole
+           `ELam`, which [Witness.free_vars] answered with [] — so every
+           lambda counted as closed and its witness ran with the enclosing
+           function's locals resolved against the MODULE.  A local `h`
+           shadowing a module-level `h` then "confirmed" a violation by
+           running the wrong function: `<lambda>(0) returns -1`. *)
+        let ap = "  fn ap(f : (Int) -> {Int | _ > 0}, x : Int) : Int do f(x) end\n" in
+        let shadowed =
+          m (ap ^ "  fn h(y : Int) : Int do 0 - 1 end\n\
+                  \  fn go(h : (Int) -> Int) : Int do ap(fn y -> h(y), 1) end\n")
+        in
+        Alcotest.(check bool) "a captured local called as a head: no confirmed violation" false
+          (has_refine_error_typed shadowed);
+        let (_, v, s) = ledger3 shadowed in
+        Alcotest.(check (pair int bool)) "...it is a recorded skip" (0, true) (v, s >= 1);
+        let (_, v, s) = ledger3 (m (ap ^ "  fn go(k : Int) : Int do ap(fn y -> y + k, 1) end\n")) in
+        Alcotest.(check (pair int bool)) "a captured Int parameter: a recorded skip" (0, true) (v, s >= 1);
+        (* Control: a lambda parameter spelled like a local of the enclosing
+           function binds it — the lambda is still closed and still run. *)
+        Alcotest.(check bool) "a lambda param shadowing a local is not a capture" true
+          (has_refine_error_typed (m (ap ^ "  fn go(y : Int) : Int do ap(fn y -> y - 1, y) end\n"))));
+
     gated "a container codomain is obliged at the pass site and assumed through the parameter" (fun () ->
         let hof =
           "  fn hof(x : Int, g : (Int) -> List({Int | _ > 0})) : Int do f(g(x)) end\n"
