@@ -2735,6 +2735,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          mas
          ^ set_preamble ~elem_declared:(contains mas "(declare-sort Elem 0)")
              ~str_declared:(s <> "") ~measure_attached:(m <> "") vc
+         (* Last: an abstract symbol's argument sort is declared above. *)
+         ^ abstract_preamble vc
        in
        (* Report a violation ONLY when the precondition can *never* hold under
           the assumptions (a definite failure).  If it merely *might* fail

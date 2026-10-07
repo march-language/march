@@ -2575,8 +2575,11 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
          fd.A.fn_name.A.txt);
   let saved_trusted = !trusted_fn in
   let saved_enclosing = !enclosing_fn in
+  let saved_abstracts = !current_abstracts in
   trusted_fn := is_trusted;
   enclosing_fn := Some fd;
+  (* `p` is uninterpreted for exactly this walk (design 2026-09-20 §2a). *)
+  current_abstracts := Refine_abstract.names ~is_known:known_predicate_fn fd;
   (* Constant-function folding is suspended for any name this function
      binds locally — see [const_shadowed].  Saved and restored like the two
      cells above rather than reset, for the same reason. *)
@@ -2591,7 +2594,8 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
       Hashtbl.reset const_shadowed;
       Hashtbl.iter (fun n () -> Hashtbl.replace const_shadowed n ()) saved_shadowed;
       trusted_fn := saved_trusted;
-      enclosing_fn := saved_enclosing)
+      enclosing_fn := saved_enclosing;
+      current_abstracts := saved_abstracts)
     (fun () ->
     with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd);
     let walked = if assume_params then fd else strip_param_refinements fd in
@@ -3606,6 +3610,15 @@ let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list
    round proves something new: a function whose tail calls another
    candidate proves once that candidate has.  A cycle proves nothing (no
    candidate may assume its own contract here). *)
+(* Does [fd] declare an element return?  Read under [fd]'s own abstract
+   refinements, so a `List({a | p(_)})` return counts — it is a slot only
+   inside its declaring definition ([abstract_tyvar_slot]). *)
+let has_elem_return (fd : A.fn_def) : bool =
+  let saved = !current_abstracts in
+  current_abstracts := Refine_abstract.names ~is_known:known_predicate_fn fd;
+  Fun.protect ~finally:(fun () -> current_abstracts := saved)
+    (fun () -> elem_refinement fd.A.fn_ret_ty <> None)
+
 let gate_elem_returns ~root defs (decls : A.decl list) : unit =
   let candidates = ref [] in
   let rec collect (ctx : rctx) decls =
@@ -3620,7 +3633,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
     in
     List.iter
       (function
-        | A.DFn (fd, _) when elem_refinement fd.A.fn_ret_ty <> None ->
+        | A.DFn (fd, _) when has_elem_return fd ->
           let key = if ctx.modpath = "" then fd.A.fn_name.A.txt else ctx.modpath ^ "." ^ fd.A.fn_name.A.txt in
           candidates := (key, ctx, fd) :: !candidates
         | A.DMod (name, _, ds, _) ->

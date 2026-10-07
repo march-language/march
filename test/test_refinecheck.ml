@@ -17558,12 +17558,48 @@ end|})) ]
    §2-§4; plan specs/plans/2026-10-06-abstract-refinements-phase2-plan.md, PR B).
    [ar2_filt] is the canonical definer: `p` is defined by `keep`'s codomain and
    produced in the element slot of the return. *)
+let ar2_filt =
+  {|  fn filt(xs : List(a), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do Cons(h, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+|}
+
 let abstract_phase2_suite =
   [ Alcotest.test_case "the two new reasons have stable slugs" `Quick (fun () ->
         let open March_refinecheck.Obligation in
         Alcotest.(check (pair string string)) "slugs"
           ("abstract-refinement-too-weak", "abstract-refinement-uninstantiated")
-          (reason_name (Abstract_too_weak "w"), reason_name (Abstract_uninstantiated "u"))) ]
+          (reason_name (Abstract_too_weak "w"), reason_name (Abstract_uninstantiated "u")));
+
+    (* n5: the definition side.  `keep(h)` reflects (PR A) to
+       `keep$ret == $abs_p(h)`; the Cons tail's goal is `$abs_p(h)`; the
+       recursive tails take the structural hypothesis. *)
+    gated "n5: filter's own body proves its abstract element return" (fun () ->
+        let vs =
+          List.filter_map
+            (fun (c, v, r) -> if c = "return of filt" then Some (v, r) else None)
+            (typed_obligations ("mod N5 do\n" ^ ar2_filt ^ "end\n"))
+        in
+        Alcotest.(check bool) "some" true (vs <> []);
+        Alcotest.(check (list (pair string string))) "all proved"
+          (List.map (fun _ -> ("proved", "")) vs) vs);
+
+    (* n6: returning the input proves nothing about `p`. *)
+    gated "n6: a body that ignores the callback does not prove" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod N6 do
+  fn bad(xs : List(a), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do xs end
+end|}
+            "return of bad"
+        in
+        Alcotest.(check bool) "an obligation exists" true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem "proved" vs);
+        Alcotest.(check bool) "not violated" false (List.mem "violated" vs)) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
