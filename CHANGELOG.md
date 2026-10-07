@@ -543,6 +543,9 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A dead TypedArray releases its elements (compiled).** An array of Strings
+  (or any heap values) leaked every element when the array was freed. It now
+  releases them.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

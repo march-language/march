@@ -49,6 +49,11 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * circular-include avoidance as the tags above). */
 #define MARCH_NATIVE_ARR_TAG (-6)
 #define NATIVE_ARR_HDR_SZ    32u
+/* TypedArray sentinel (must match march_runtime.h MARCH_TYPED_ARR_TAG):
+ * [rc][tag][pad][len@16][cap@24][slots@32], each slot a tagged immediate or a
+ * heap value, copied recursively. Kept in sync manually, as above. */
+#define MARCH_TYPED_ARR_TAG  (-8)
+#define TYPED_ARR_HDR_SZ     32u
 /* elem_kind at byte 24: 0=i64, 1=f64, 2=f32, 3=i32, 4=u8. */
 static size_t native_elem_size(unsigned kind) {
     switch (kind) {
@@ -222,6 +227,19 @@ static void *copy_value(march_heap_t *dst_heap, void *value, fwd_table *fwd) {
         memcpy(nv, value, sz);
         ((msg_hdr *)nv)->rc = 1;
         fwd_insert(fwd, value, nv);
+        return nv;
+    }
+
+    if (h->tag == MARCH_TYPED_ARR_TAG) {
+        int64_t len = *(int64_t *)((char *)value + 16);
+        size_t  sz  = TYPED_ARR_HDR_SZ + (size_t)len * 8u;
+        void *nv = march_process_alloc(dst_heap, sz);
+        memcpy(nv, value, sz);
+        ((msg_hdr *)nv)->rc = 1;
+        fwd_insert(fwd, value, nv);
+        void **src = (void **)((char *)value + TYPED_ARR_HDR_SZ);
+        void **dst = (void **)((char *)nv + TYPED_ARR_HDR_SZ);
+        for (int64_t i = 0; i < len; i++) dst[i] = copy_value(dst_heap, src[i], fwd);
         return nv;
     }
 

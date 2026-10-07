@@ -609,6 +609,12 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
         void *native = *(void **)((char *)p + 16);
         if (dtor) dtor(native);
+    } else if (tag == MARCH_TYPED_ARR_TAG) {
+        /* Every slot owns one reference (each typed_array_ producer takes its
+         * own); march_decrc ignores a tagged immediate. */
+        int64_t len = *(int64_t *)((char *)p + 16);
+        void **slots = (void **)((char *)p + 32);   /* TYPED_ARRAY_HDR_SIZE */
+        for (int64_t i = 0; i < len; i++) march_decrc(slots[i]);
     } else if (tag == MARCH_TASK_TAG) {
         /* A Task owns the box of a Float result. The trampoline stores
          * task[3] = (raw << 1) | 1; for a Float task raw is the
@@ -11616,6 +11622,9 @@ static void *typed_array_alloc(int64_t len) {
     }
     size_t sz = (size_t)(TYPED_ARRAY_HDR_SIZE + body);
     void *arr = march_alloc((int64_t)sz);
+    /* Its own tag, so a free releases the elements (march_run_resource_dtor).
+     * Every caller fills all [len] slots before the array is published. */
+    ((march_hdr *)arr)->tag = MARCH_TYPED_ARR_TAG;
     *(int64_t *)((char *)arr + 16) = len;   /* len field */
     *(int64_t *)((char *)arr + 24) = len;   /* cap field */
     return arr;
