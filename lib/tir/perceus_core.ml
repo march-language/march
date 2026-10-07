@@ -1025,16 +1025,32 @@ let is_actor_move_source (src : Tir.var) : bool =
 (** Owned-call drop fusion: decide whether the known call [f(args)] can go to
     an owned clone of [f] instead of being followed by caller-side drops of
     [post_dec_vars] (the arguments at [f]'s borrowed positions whose last use
-    is this call, which the caller owns).  Returns the clone's var and the
-    post-call drops that remain.
+    is this call, which the caller owns; one entry per variable).  Returns
+    the clone's var, the post-call drops that remain, and the extra
+    [EIncRC]s to emit before the call (one entry per reference).
 
-    A variable is handed over only when it occurs exactly once in [args] (one
-    reference owned, one consumer) and was not bound by an [EAlloc] in this
-    function (see [owned_calls.oc_alloc_bound]).  When a call is redirected,
-    EVERY such variable is handed over, not only the profitable ones, so the
-    redirected call keeps no post-call drop at all and stays a tail call if
-    it was one.  (A clone parameter its body never mentions is released at
-    the clone's entry, [Perceus.perceus_owned].)
+    A variable at one borrowed position is handed to that position.  Inside
+    a clone, a variable at k > 1 borrowed positions is handed to all k, and
+    the caller dups it k - 1 times before the call: its one reference
+    becomes one per position, so no release is left after the call.  In an
+    ORIGINAL function such a variable keeps its post-call drop, the base
+    pipeline's shape there, so nothing the original did is lost.  In a
+    clone the variable may be owned where the original only borrowed it,
+    and a drop kept after a clone's tail call turned a loop of the original
+    into real recursion (specs/progress/2026-10-07-owned-call-dup-arg.md).
+    A variable bound by an [EAlloc] in this function is never handed
+    ([owned_calls.oc_alloc_bound]).  A variable that also sits at an OWNED
+    position never reaches here (the caller's dual-position accounting):
+    borrow inference makes such a variable owned in the original as well (a
+    parameter at an owned position is owned, and so is a scrutinee whose
+    matched field reaches one), so the original keeps the same post-call
+    drop and the clone's call has the original's shape.
+
+    When a call is redirected, EVERY handable variable is handed over, not
+    only the profitable ones, so the redirected call keeps no post-call drop
+    at all and stays a tail call if it was one.  (A clone parameter its body
+    never mentions is released at the clone's entry,
+    [Perceus.perceus_owned].)
 
     Loops: inside [f] itself a recursive call to [f] is never redirected (its
     [Llvm_tco] back edge stays where it was).  Inside a clone, a call to [f]
@@ -1044,35 +1060,26 @@ let is_actor_move_source (src : Tir.var) : bool =
     other. *)
 let owned_call_redirect (env : env) (oc : owned_calls) (f : Tir.var)
     (args : Tir.atom list) (post_dec_vars : Tir.var list)
-    : (Tir.var * Tir.var list) option =
+    : (Tir.var * Tir.var list * Tir.var list) option =
   let callee = f.Tir.v_name in
   match Hashtbl.find_opt oc.oc_fns callee with
   | None -> None
   | Some _ ->
-    let occurrences name =
-      List.fold_left (fun n a -> match a with
-          | Tir.AVar v when String.equal v.Tir.v_name name -> n + 1
-          | _ -> n) 0 args
-    in
-    let index_of name =
-      let rec go i = function
-        | [] -> None
-        | Tir.AVar v :: _ when String.equal v.Tir.v_name name -> Some i
-        | _ :: rest -> go (i + 1) rest
-      in
-      go 0 args
+    let cur = env.current_fn_name in
+    let in_clone = Hashtbl.mem oc.oc_clones cur in
+    let positions_of name =
+      List.concat (List.mapi (fun i a -> match a with
+          | Tir.AVar v when String.equal v.Tir.v_name name -> [i]
+          | _ -> []) args)
     in
     let handed =
       List.filter_map (fun (v : Tir.var) ->
-          if occurrences v.Tir.v_name <> 1
-          || StringSet.mem v.Tir.v_name !(oc.oc_alloc_bound) then None
-          else match index_of v.Tir.v_name with
-            | None -> None
-            | Some i -> Some (i, v))
+          let ps = positions_of v.Tir.v_name in
+          if ps = [] || StringSet.mem v.Tir.v_name !(oc.oc_alloc_bound)
+             || (List.length ps > 1 && not in_clone) then None
+          else Some (v, ps))
         post_dec_vars
     in
-    let cur = env.current_fn_name in
-    let in_clone = Hashtbl.mem oc.oc_clones cur in
     (* Profitability gate, for originals only: some handed position must be
        one the clone destructures ([oc_useful]).  Inside a clone there is no
        gate: its variables that were BORROWED in the original (its owned
@@ -1082,28 +1089,30 @@ let owned_call_redirect (env : env) (oc : owned_calls) (f : Tir.var)
        original would become real recursion in the clone. *)
     let gate =
       in_clone
-      || List.exists (fun (i, _) -> Hashtbl.mem oc.oc_useful (callee, i)) handed
+      || List.exists (fun (_, ps) ->
+          List.exists (fun i -> Hashtbl.mem oc.oc_useful (callee, i)) ps)
+        handed
     in
-    if handed = [] || not gate then None
+    (* Inside [f] itself a recursive call to [f] keeps its existing shape
+       (and its [Llvm_tco] back edge). *)
+    if handed = [] || not gate || String.equal callee cur then None
     else begin
-      let positions = List.sort compare (List.map fst handed) in
-      (* Inside [f] itself a recursive call to [f] keeps its existing shape
-         (and its [Llvm_tco] back edge). *)
-      let allowed = not (String.equal callee cur) in
-      if not allowed then None
-      else begin
-        let name = owned_clone_name callee positions in
-        if not (Hashtbl.mem oc.oc_clones name) then begin
-          Hashtbl.replace oc.oc_clones name (callee, positions);
-          Queue.push (name, callee, positions) oc.oc_pending
-        end;
-        let handed_names =
-          List.fold_left (fun s (_, (v : Tir.var)) -> StringSet.add v.Tir.v_name s)
-            StringSet.empty handed in
-        let rest = List.filter (fun (v : Tir.var) ->
-            not (StringSet.mem v.Tir.v_name handed_names)) post_dec_vars in
-        Some ({ f with Tir.v_name = name }, rest)
-      end
+      let positions = List.sort compare (List.concat_map snd handed) in
+      let name = owned_clone_name callee positions in
+      if not (Hashtbl.mem oc.oc_clones name) then begin
+        Hashtbl.replace oc.oc_clones name (callee, positions);
+        Queue.push (name, callee, positions) oc.oc_pending
+      end;
+      let handed_names =
+        List.fold_left (fun s ((v : Tir.var), _) -> StringSet.add v.Tir.v_name s)
+          StringSet.empty handed in
+      let rest = List.filter (fun (v : Tir.var) ->
+          not (StringSet.mem v.Tir.v_name handed_names)) post_dec_vars in
+      (* One reference owned, [List.length ps] consumers: dup the rest. *)
+      let extra_incs =
+        List.concat_map (fun (v, ps) ->
+            List.init (List.length ps - 1) (fun _ -> v)) handed in
+      Some ({ f with Tir.v_name = name }, rest, extra_incs)
     end
 
 (** Insert RC operations into an expression.
@@ -1226,19 +1235,21 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
         post_dec_vars
     in
     (* Owned-call drop fusion: hand dying borrowed arguments to an owned
-       clone instead of dropping them after the call.  Never when a variable
-       also sits at an owned position (the dual-position accounting above
-       stays exactly as it was).  The self-call test is re-taken against the
-       final callee: a redirect can turn a call into a clone's self call. *)
-    let e, f, post_dec_vars, is_self_call =
+       clone instead of dropping them after the call (inside a clone, with
+       one dup per extra position a variable occupies; see
+       [owned_call_redirect]).  Never when a variable also sits at an owned
+       position (the dual-position accounting above stays exactly as it
+       was).  The self-call test is re-taken against the final callee: a
+       redirect can turn a call into a clone's self call. *)
+    let e, f, post_dec_vars, inc_vars, is_self_call =
       match env.owned_calls with
       | Some oc when dual_pos_vars = [] && post_dec_vars <> [] ->
         (match owned_call_redirect env oc f args post_dec_vars with
-         | Some (f', rest) ->
-           (Tir.EApp (f', args), f', rest,
+         | Some (f', rest, extra_incs) ->
+           (Tir.EApp (f', args), f', rest, inc_vars @ extra_incs,
             String.equal f'.Tir.v_name env.current_fn_name)
-         | None -> (e, f, post_dec_vars, is_self_call))
-      | _ -> (e, f, post_dec_vars, is_self_call)
+         | None -> (e, f, post_dec_vars, inc_vars, is_self_call))
+      | _ -> (e, f, post_dec_vars, inc_vars, is_self_call)
     in
     let inc_vars, post_dec_vars =
       if is_self_call then (inc_vars, post_dec_vars)

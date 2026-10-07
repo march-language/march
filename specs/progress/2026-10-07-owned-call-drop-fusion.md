@@ -109,8 +109,9 @@ the clone consumes nothing a caller still expects.
   calls by name, hot-reload migration entry points, `__drop$` helpers, RPC
   stubs, `main`, and functions with no borrowed parameter. A clone is an
   extra function; the original keeps its name, ABI and borrow modes.
-- **Arguments never handed over:** a variable passed more than once in the
-  same call (one reference, two consumers), any call where a variable sits at
+- **Arguments never handed over:** in an original function, a variable
+  passed more than once in the same call (inside a clone it is handed to
+  every position, see the closed gap below), any call where a variable sits at
   both an owned and a borrowed position (the dual-position accounting stays
   as it was), and a variable bound directly by `let v = EAlloc ...` in the
   caller: `Escape` may stack-promote such a cell through a borrowing callee,
@@ -122,12 +123,14 @@ the clone consumes nothing a caller still expects.
   `len$own0` walks a 300 000-element list in the fixture), else a sibling
   clone, with which it forms a clean tail-call cycle that `Llvm_tco`'s
   mutual-TCO groups flatten (`swap_count`, `zip_len` in the fixture).
-- **Known remaining gap:** a variable passed twice in one call stays with the
-  caller (handing it to one position would let the clone free it while the
-  other, borrowed, position still reads it). Inside a clone such a call keeps
-  its post-call drop, so if it is a tail call of a loop the clone recurses
-  where the original looped. Nothing in the native golden corpus hits it
-  (the sweep below), but it is not excluded by construction.
+- **Closed gap (follow-up, same day):** a variable passed twice in one call
+  stayed with the caller (handing it to one position would let the clone
+  free it while the other, borrowed, position still reads it). Inside a
+  clone such a call kept its post-call drop, and that was reachable: a
+  mutual loop passing a row twice overflowed the stack at 1 000 000 rows.
+  Inside a clone the variable is now handed to every borrowed position it
+  occupies, dup'd once per extra position before the call; originals keep
+  the drop. See `specs/progress/2026-10-07-owned-call-dup-arg.md`.
 - FFI externs and builtins are not functions in the module and are never
   cloned; their borrowed arguments keep the caller-side drop.
 
