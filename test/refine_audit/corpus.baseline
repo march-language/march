@@ -664,6 +664,8 @@ native_tuple_scalar_fields: coverage audit (user + stdlib): 126 enforced, 0 iner
 native_tuple_scalar_fields: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_show: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_tuple_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_typed_array_builtin_borrow_leak_probe: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
+native_typed_array_builtin_borrow_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_typed_array_map_closure_abi: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_typed_array_map_closure_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_typed_array_scalar_repr: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced

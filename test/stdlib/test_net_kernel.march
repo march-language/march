@@ -113,4 +113,61 @@ mod TestNetKernel do
 
   end
 
+  pfn stamped() : GlobalRegistry.Names do
+    let r1 = GlobalRegistry.register_at(GlobalRegistry.empty(), "gone", "n1", 3, 7, VectorClock.increment(VectorClock.new(), "n1"))
+    let r2 = GlobalRegistry.unregister(r1, "gone", VectorClock.increment(VectorClock.increment(VectorClock.new(), "n1"), "n1"))
+    GlobalRegistry.collect_tombstones(r2, 123456, 1000)
+  end
+
+  describe "NetKernel REGISTRY_SYNC_RESP carries a tombstone's expiry stamp" do
+
+    test "the stamp round-trips, and the clock and creation are untouched by it" do
+      match NetKernel.decode_registry_sync_resp(NetKernel.encode_registry_sync_resp("h", GlobalRegistry.all_entries(stamped()))) do
+        Ok((_, Cons((name, e), Nil))) ->
+          assert (name == "gone")
+          assert (e.retired_at == 123456)
+          assert (!e.present)
+          assert (e.creation == 3)
+          -- an older node's decoder skips the [0, ms] pair the same way:
+          -- the clock holds only the real actor entry
+          assert (List.length(VectorClock.entries(e.clock)) == 1)
+          assert (VectorClock.get(e.clock, "n1") == 2)
+        _ -> assert false
+      end
+    end
+
+    -- The reason the stamp travels: replicas that stamp at different times
+    -- would otherwise hand a purged tombstone back to each other with a fresh
+    -- countdown forever. With it, a copy re-sent after one side purged
+    -- carries its old stamp and is dropped at the next pass.
+    test "two replicas that stamped at different times both converge to empty" do
+      let over = fn reg -> NetKernel.decode_registry_sync_resp(NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(reg), GlobalRegistry.all_entries(reg)))
+      let r1 = GlobalRegistry.register(GlobalRegistry.empty(), "gone", "n1", 7, VectorClock.increment(VectorClock.new(), "n1"))
+      let t = GlobalRegistry.unregister(r1, "gone", VectorClock.increment(VectorClock.increment(VectorClock.new(), "n1"), "n1"))
+      let a = GlobalRegistry.collect_tombstones(t, 1000, 500)
+      let b = GlobalRegistry.collect_tombstones(t, 1300, 500)
+      -- a purges first; b, not yet, re-sends its copy
+      let a2 = GlobalRegistry.collect_tombstones(a, 1500, 500)
+      assert (GlobalRegistry.tombstone_count(a2) == 0)
+      match over(b) do
+        Ok((rb, lb)) ->
+          let a3 = GlobalRegistry.diff_entries(a2, rb, lb)
+          assert (GlobalRegistry.tombstone_count(a3) == 1)
+          -- a's next pass drops it on b's stamp; b's own pass drops its copy
+          assert (GlobalRegistry.tombstone_count(GlobalRegistry.collect_tombstones(a3, 1800, 500)) == 0)
+          assert (GlobalRegistry.tombstone_count(GlobalRegistry.collect_tombstones(b, 1800, 500)) == 0)
+        _ -> assert false
+      end
+    end
+
+    test "a present binding carries no stamp" do
+      let r = GlobalRegistry.register(GlobalRegistry.empty(), "live", "n1", 7, VectorClock.increment(VectorClock.new(), "n1"))
+      match NetKernel.decode_registry_sync_resp(NetKernel.encode_registry_sync_resp("h", GlobalRegistry.all_entries(r))) do
+        Ok((_, Cons((_, e), Nil))) -> assert (e.retired_at == 0)
+        _ -> assert false
+      end
+    end
+
+  end
+
 end

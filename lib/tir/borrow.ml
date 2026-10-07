@@ -387,13 +387,29 @@ let extern_borrow_table : (string * bool list) list = [
   ("native_u8_to_int_arr",        [true]);
   ("native_i32_to_f32_arr",       [true]);
   ("native_u8_to_f32_arr",        [true]);
-  (* ── TypedArray: slice COPIES its range into a fresh array, taking its own
-     reference on each element, and never stores or frees the source array
-     (march_typed_array_slice), so the source is borrowed. Every producer of
-     a TypedArray (create/from_list/set/map/filter/slice) returns a fresh,
-     owned array, so nothing hands it an unowned reference. The rest of the
-     family is still in [extern_owned_builtins], unaudited. ── *)
-  ("typed_array_slice",    [true; false; false]);
+  (* ── TypedArray: every builtin reads the array (and from_list its list,
+     filter its mask) and never stores or frees
+     it; whatever it copies into a fresh array or list gets its own
+     reference (the march_typed_array_ family), so the source is borrowed and the
+     caller drops it after its last use.  The closure of map/fold, fold's
+     accumulator and set's new element are consumed (stored, or released
+     by the call), so they stay owned; so does create, whose only heap
+     parameter is the default value it stores (in [extern_owned_builtins]).  Every producer of a TypedArray
+     returns a fresh, owned array, and get/to_list hand out their own
+     reference to an element, so nothing hands these builtins an unowned
+     reference.  Until 2026-10-07 all but slice were in
+     [extern_owned_builtins], unaudited: the array or list passed in was
+     never released, ~5 objects per `typed_array_length(typed_array_from_list(..))`
+     (specs/progress/2026-10-06-typed-array-builtins-leak-their-argument.md). ── *)
+  ("typed_array_from_list", [true]);
+  ("typed_array_to_list",   [true]);
+  ("typed_array_length",    [true]);
+  ("typed_array_get",       [true; false]);
+  ("typed_array_set",       [true; false; false]);
+  ("typed_array_slice",     [true; false; false]);
+  ("typed_array_map",       [true; false]);
+  ("typed_array_filter",    [true; true]);
+  ("typed_array_fold",      [true; false; false]);
   (* ── dns_resolve: march_dns_resolve copies the host's bytes into a stack
      buffer for getaddrinfo and never stores or frees the String.  Before it
      had a codegen-table row (2026-09-25) it was on no list and defaulted to
@@ -560,9 +576,13 @@ let extern_owned_builtins : string list = [
     "file_delete"; "file_copy"; "file_rename"; "file_stat"; "dir_mkdir";
     "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
     "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
-    "typed_array_create"; "typed_array_from_list"; "typed_array_to_list";
-    "typed_array_length"; "typed_array_get"; "typed_array_set";
-    "typed_array_map"; "typed_array_filter"; "typed_array_fold";
+    (* typed_array_create STORES its default value in every slot: the
+       transferred reference fills the first, each other slot takes its own
+       (march_typed_array_create).  Owned, not borrowed: for a Float default
+       the call site boxes a fresh cell (builtin_boxed_generic_params_tbl)
+       and releases nothing after a builtin call, so a borrowed parameter
+       would strand that box. *)
+    "typed_array_create";
     "native_int_arr_set"; "native_int_arr_sort";
     "native_float_arr_set"; "native_float_arr_sort";
     "native_f32_arr_set"; "native_f32_arr_sort";

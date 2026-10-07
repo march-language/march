@@ -87,7 +87,8 @@ mod ClusterNode do
                     secret : String, creation : Int, swim : Swim.Config, period_ms : Int,
                     tick_ms : Int, redial_min_ms : Int, redial_max_ms : Int,
                     dial_timeout_ms : Int, handshake_timeout_ms : Int, auth : ClusterAuth.Auth,
-                    revocations : List(NodeCert.SignedRevocation), cert_files : Option(CertFiles) }
+                    revocations : List(NodeCert.SignedRevocation), cert_files : Option(CertFiles),
+                    tombstone_grace_ms : Int }
 
   -- Where a certificate-mode node re-reads its certificate while it runs:
   -- [cert] the certificate file, [key] the key file ("" when the key was
@@ -105,6 +106,13 @@ mod ClusterNode do
   defaults without a rebuild: `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS`
   and `MARCH_SWIM_SUSPECT_MS` (each a positive integer; anything else keeps
   the default). A record update still wins over them.
+
+  A name unregistered anywhere in the cluster leaves a tombstone in every
+  replica of the registry; it is dropped `tombstone_grace_ms` after it was
+  first seen (default 3 hours, `MARCH_REGISTRY_TOMBSTONE_GRACE_MS`). Keep it
+  well above the longest partition the cluster should heal from: a partition
+  longer than that can bring back a binding whose holder is gone, which the
+  node service then hides and its owner unregisters again.
   """
   fn config(name : String, listen_port : Int, advertise : String, seeds : List(String),
             secret : String, creation : Int) : CnConfig do
@@ -113,7 +121,8 @@ mod ClusterNode do
     { name: name, listen_port: listen_port, advertise: adv, seeds: seeds, secret: secret,
       creation: creation, swim: swim, period_ms: env_ms("MARCH_SWIM_PERIOD_MS", 1000), tick_ms: 100,
       redial_min_ms: 200, redial_max_ms: 5000, dial_timeout_ms: 2000, handshake_timeout_ms: 2000,
-      auth: ClusterAuth.Secret(secret), revocations: Nil, cert_files: None }
+      auth: ClusterAuth.Secret(secret), revocations: Nil, cert_files: None,
+      tombstone_grace_ms: env_ms("MARCH_REGISTRY_TOMBSTONE_GRACE_MS", 3 * 60 * 60 * 1000) }
   end
 
   -- A positive duration from the environment, or [dflt].
@@ -442,7 +451,8 @@ mod ClusterNode do
     certs : Map(String, NodeCert.Cert),  -- each certificate-mode peer's verified certificate
     revs : List(NodeCert.SignedRevocation), -- every operator-signed revocation known here
     cert_dead : Map(String, String),     -- peers dropped for their certificate -> why
-    rotated : Bool                       -- this node's certificate was replaced since start
+    rotated : Bool,                      -- this node's certificate was replaced since start
+    reg_swept_at : Int                   -- when the registry's tombstones were last collected
   }
 
   -- What a watcher of a name sees. `Lost` goes to watchers on the node that
@@ -472,7 +482,7 @@ mod ClusterNode do
       pending: Nil, relays: Map.empty(), refused: Nil, seed_ids: Map.empty(), rejoining: Nil, stopped: false,
       reg: GlobalRegistry.empty(), regs: Map.empty(), vis: Map.empty(), certs: Map.empty(),
       revs: List.filter(cfg.revocations, fn r -> Result.is_ok(check_revocation(cfg, r))), cert_dead: Map.empty(),
-      rotated: false }
+      rotated: false, reg_swept_at: 0 }
   end
 
   -- ── revocation and expiry ──────────────────────────────────────────────
@@ -930,6 +940,18 @@ mod ClusterNode do
   actions become control frames to linked peers), derive the member events,
   and plan the dials this tick allows.
   """
+  -- Expire the registry's tombstones (GlobalRegistry.collect_tombstones), at
+  -- most once a minute and at least four times per grace period: each pass
+  -- walks the whole registry, and a tombstone outlives its grace by at most
+  -- one interval.
+  pfn collect_tombstones(st : CnState, now : Int) : CnState do
+    let grace = st.cfg.tombstone_grace_ms
+    let every = if grace / 4 < 60000 do (if grace / 4 < 1 do 1 else grace / 4 end) else 60000 end
+    if now - st.reg_swept_at < every do st
+    else { st with reg: GlobalRegistry.collect_tombstones(st.reg, now, grace), reg_swept_at: now }
+    end
+  end
+
   fn core_tick(st0 : CnState, now : Int) : (CnState, List(CnEffect)) do
     let (st, cert_effs) = core_check_certs(st0, now / 1000)
     let before = st.driver.swim.members
@@ -956,8 +978,9 @@ mod ClusterNode do
           (st3, ev_effs) ->
             match plan_dials(st3, now) do
               (st4, dials) ->
-                let ae_peers = List.filter(SwimDriver.anti_entropy_peers(st4.driver, now), fn id -> is_linked(st4, id))
-                let st5 = if List.is_empty(ae_peers) do st4 else { st4 with driver: SwimDriver.bump_anti_entropy(st4.driver, now) } end
+                let swept = collect_tombstones(st4, now)
+                let ae_peers = List.filter(SwimDriver.anti_entropy_peers(swept.driver, now), fn id -> is_linked(swept, id))
+                let st5 = if List.is_empty(ae_peers) do swept else { swept with driver: SwimDriver.bump_anti_entropy(swept.driver, now) } end
                 let req = NetKernel.encode_registry_sync_req(GlobalRegistry.root_hash(st5.reg))
                 let ae = List.map(ae_peers, fn id -> Send(id, req))
                 match refresh_names(st5) do

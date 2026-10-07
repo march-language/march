@@ -1,0 +1,10 @@
+from_list + length = 900, flat: true
+get = 45450, flat: true
+to_list = 91200, flat: true
+set = 47550, flat: true
+create = 45150, flat: true
+map = 90300, flat: true
+filter = 46050, flat: true
+fold = 91200, flat: true
+slice = 45450, flat: true
+string values: 1,s1,x1!s1!,c1

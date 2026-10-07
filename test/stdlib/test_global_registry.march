@@ -198,4 +198,52 @@ mod TestGlobalRegistry do
 
   end
 
+  pfn tomb(name : String) : GlobalRegistry.Names do
+    let r1 = GlobalRegistry.register(GlobalRegistry.empty(), name, "n1", 7, clk("n1", 1))
+    GlobalRegistry.unregister(r1, name, clk("n1", 2))
+  end
+
+  describe "GlobalRegistry.collect_tombstones" do
+
+    test "a tombstone is stamped first, kept within its grace, then dropped" do
+      let r = tomb("gone")
+      assert (GlobalRegistry.tombstone_count(r) == 1)
+      let s1 = GlobalRegistry.collect_tombstones(r, 1000, 500)
+      assert (GlobalRegistry.tombstone_count(s1) == 1)
+      let s2 = GlobalRegistry.collect_tombstones(s1, 1400, 500)
+      assert (GlobalRegistry.tombstone_count(s2) == 1)
+      let s3 = GlobalRegistry.collect_tombstones(s2, 1500, 500)
+      assert (GlobalRegistry.tombstone_count(s3) == 0)
+      assert (GlobalRegistry.entry(s3, "gone") == None)
+    end
+
+    test "present bindings are never collected" do
+      let r = GlobalRegistry.register(tomb("gone"), "live", "n1", 8, clk("n1", 1))
+      let s = GlobalRegistry.collect_tombstones(GlobalRegistry.collect_tombstones(r, 1000, 10), 5000, 10)
+      assert (GlobalRegistry.lookup(s, "live") == Some(("n1", 8)))
+      assert (GlobalRegistry.tombstone_count(s) == 0)
+    end
+
+    test "a re-sent copy of the same tombstone keeps the earlier stamp" do
+      let stamped = GlobalRegistry.collect_tombstones(tomb("gone"), 1000, 500)
+      -- the same tombstone arriving again unstamped (from a replica that has
+      -- not swept yet) must not restart the countdown
+      let merged = GlobalRegistry.merge(stamped, tomb("gone"))
+      let s = GlobalRegistry.collect_tombstones(merged, 1500, 500)
+      assert (GlobalRegistry.tombstone_count(s) == 0)
+    end
+
+    test "an expired tombstone arriving from a peer is dropped at the next pass" do
+      let old = GlobalRegistry.collect_tombstones(tomb("gone"), 1000, 500)
+      let here = GlobalRegistry.merge(GlobalRegistry.empty(), old)
+      assert (GlobalRegistry.tombstone_count(GlobalRegistry.collect_tombstones(here, 9000, 500)) == 0)
+    end
+
+    test "the stamp is not part of the root hash" do
+      let r = tomb("gone")
+      assert (GlobalRegistry.root_hash(r) == GlobalRegistry.root_hash(GlobalRegistry.collect_tombstones(r, 1000, 500)))
+    end
+
+  end
+
 end

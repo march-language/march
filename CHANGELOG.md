@@ -32,6 +32,13 @@ git log is authoritative for exact commits.
   `cap verified`). This is the first *abstract refinement* (a refinement
   parameterised by a predicate), and user functions can declare one the same
   way; see "Abstract refinements" in the refinement types reference.
+- **Cluster name registry tombstones expire.** An unregistered name used to leave a
+  tombstone in every node's registry forever, so a long-running cluster's registry, and
+  every anti-entropy round over it, grew with every name ever unregistered (two per
+  finished session). A tombstone is now dropped 3 hours after it was first seen;
+  `MARCH_REGISTRY_TOMBSTONE_GRACE_MS` or `tombstone_grace_ms` in `ClusterNode.config`
+  changes that. Keep it well above the longest partition the cluster should heal from.
+  Collection starts once every node in a cluster runs this version.
 - **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
   March function gets a `DISubprogram` at its defining line (lifted lambdas at
   the lambda's line, specialisations at the generic's), and the link gets `-g`,
@@ -330,6 +337,11 @@ git log is authoritative for exact commits.
   `--compile` whose typed IR was unchanged printed `compiled out (cached)` and then
   emitted LLVM IR, ran clang and printed `compiled out` anyway, so the hit saved
   nothing; it now stops at the cache lookup.
+- **`typed_array_*` functions no longer leak their argument.** In compiled
+  code, each call to `typed_array_from_list`, `typed_array_length`,
+  `typed_array_get`, `typed_array_map` and the rest of the family leaked the
+  array or list it was given. `DataFrame` columns are built on these.
+
 - A green thread started from a runtime thread that is not a scheduler (the
   hot-reload server's drain, the new shell listener) no longer inherits that
   thread's blocked signals. With SIGSEGV blocked, the first time its stack
