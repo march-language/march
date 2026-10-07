@@ -228,9 +228,16 @@ sweep() {
   total_pass=$((total_pass+pass)); total_fail=$((total_fail+fail)); total_ran=$((total_ran+$#))
 }
 
-sweep golden 25 "$here"/*.march
-echo
-sweep native 25 "${native_files[@]}"
+# SANITIZE_TWO_NODE_ONLY=1 skips the golden and native sweeps, for the CI
+# shards after the first: shard 1 runs them plus its two-node slice, the
+# others only their slice (see SANITIZE_TWO_NODE_SHARD below).
+if [ "${SANITIZE_TWO_NODE_ONLY:-0}" = 1 ]; then
+  echo "golden + native sweeps skipped (SANITIZE_TWO_NODE_ONLY=1)"
+else
+  sweep golden 25 "$here"/*.march
+  echo
+  sweep native 25 "${native_files[@]}"
+fi
 
 # ── Corpus 3: the two-node scenarios ──────────────────────────────────────
 # Two compiled programs as two OS processes over a real socket, with a fault
