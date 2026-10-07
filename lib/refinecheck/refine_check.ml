@@ -993,7 +993,7 @@ let record_abstract_verdict errctx ~(span : A.span) ~(callee : string) ~(predica
   Obligation.record { Obligation.span; callee; predicate; verdict; kind = Obligation.Precondition };
   (match verdict with
    | Obligation.Skipped r when !strict_verified ->
-     Err.error errctx ~span
+     Err.error ~code:Err.Code.refinement_unverified errctx ~span
        (Printf.sprintf
           "`cap verified` module: cannot verify element refinement `%s` on `%s` (%s: %s)\n\
            note: pass a predicate that implies the refinement, or remove `cap verified` from this module"
