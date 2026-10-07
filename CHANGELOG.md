@@ -310,6 +310,15 @@ git log is authoritative for exact commits.
   (`List.map([1, 2])`) is now a type error. It used to typecheck, then fail
   at run time: an `arity mismatch` panic interpreted, a crash compiled, and a
   crash of the whole REPL session.
+- **A callback contract that names its argument now works.** With
+  `keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}`, a guard `if keep(h)`
+  establishes `h > 0`, and `let b = keep(h)` binds `b == (h > 0)`; both used
+  to establish nothing. Passing a named function whose proved return matches
+  (`is_pos(n) : {Bool | _ == (n > 0)}`) was wrongly REJECTED with a bogus
+  witness (`n = 0, x = 1`) and now compiles; a matching lambda (`fn y -> y > 0`)
+  is now proved rather than skipped. A callback that defines an abstract
+  refinement (`_ == p(x)`) is no longer a skip, or a `cap verified` error, at
+  every call.
 - **`let b = a` keeps `a`'s refinement facts when `a` is an `Int`.** A plain
   variable alias used to drop every fact about its value (`let b = a + 0`
   kept them), so `take_pos(b)` was skipped even when `a` was a refined
