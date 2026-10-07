@@ -466,6 +466,22 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
                 | [ p ] when p.A.param_ty = None -> [ { p with A.param_ty = Some dom } ]
                 | ps -> ps
               in
+              (* The expected codomain names the argument by the DOMAIN's
+                 binder; this lambda calls it [y].  Rename so the body is
+                 checked against a goal about its own parameter — otherwise
+                 the binder is a fresh unconstrained constant and a correct
+                 lambda is undecided. *)
+              let cod =
+                match ps, cod with
+                | [ p ], A.TyRefine (base, cbind, pred) ->
+                  let y = p.A.param_name.A.txt in
+                  (match dom_binder dom with
+                   | Some x
+                     when x <> y && (match cbind with Some n -> n.A.txt <> x | None -> true) ->
+                     A.TyRefine (base, cbind, subst_params [ (x, A.EVar p.A.param_name) ] pred)
+                   | _ -> cod)
+                | _ -> cod
+              in
               let lam_name = "<lambda>" in
               let run () =
                 ignore

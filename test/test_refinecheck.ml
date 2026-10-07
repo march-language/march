@@ -17424,7 +17424,30 @@ end|}
            violation, not merely an unproved tail.  The guard's fact is
            confined to its branch, and its negation reaches the other. *)
         Alcotest.(check bool) "not all proved" true (List.exists (fun v -> v <> "proved") vs);
-        Alcotest.(check bool) "the else-branch Cons is a violation" true (List.mem "violated" vs)) ]
+        Alcotest.(check bool) "the else-branch Cons is a violation" true (List.mem "violated" vs));
+
+    (* The expected codomain names the argument `x`; the lambda calls it `y`.
+       RED before: `solver-undecided` on `<lambda>` — `x` was a free constant. *)
+    gated "a lambda meets a codomain over its own parameter name" (fun () ->
+        Alcotest.(check (list string)) "proved" [ "proved" ]
+          (verdicts_of
+             {|mod CB3 do
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn go() : Bool do ap(fn y -> y > 0, 3) end
+end|}
+             "<lambda>"));
+
+    gated "a lambda that disagrees with the codomain is not proved" (fun () ->
+        let vs =
+          verdicts_of
+            {|mod CB4 do
+  fn ap(keep : ({x : Int | true}) -> {Bool | _ == (x > 0)}, v : Int) : Bool do keep(v) end
+  fn go() : Bool do ap(fn y -> y >= 0, 3) end
+end|}
+            "<lambda>"
+        in
+        Alcotest.(check bool) "some verdict" true (vs <> []);
+        Alcotest.(check bool) "not proved" false (List.mem "proved" vs)) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
