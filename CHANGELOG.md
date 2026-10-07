@@ -364,6 +364,11 @@ git log is authoritative for exact commits.
   in a compiled binary when another arm bound the same fields by name, so the
   program silently fell through to a later arm. The interpreter was already
   correct.
+- **`monitor` no longer keeps both actors alive forever.** Every `monitor(watcher, target)`
+  leaked a reference to each of them, so neither actor's memory was ever freed, even
+  after both had died. The cluster node monitors every registered name's holder, so this
+  cost two actor records per cluster session.
+
 - **A missing `end` is reported at the construct that is missing it.** Instead of
   "Parse error in declaration" at the end of the file or the next `fn`, the error
   points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the

@@ -12461,6 +12461,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/mixed_tail_aggregate_drop.expected native_mixed_tail_aggregate_drop.out)))
+; ── A monitor holds its watcher and releases it, and never keeps the target
+; (2026-10-07). RED before: both actor records survived every monitor.
+(rule
+ (targets native_monitor_releases_actors native_monitor_releases_actors.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/monitor_releases_actors.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_monitor_releases_actors
+        native/monitor_releases_actors.march)
+   (with-stdout-to native_monitor_releases_actors.out
+        (system "./native_monitor_releases_actors")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/monitor_releases_actors.expected native_monitor_releases_actors.out)))
 
 ; ── A dead actor's record and state are released (2026-10-06): under 5
 ; objects left over 50 actors (RED before: the killed actor's List state, and
