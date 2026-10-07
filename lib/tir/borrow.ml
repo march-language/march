@@ -97,6 +97,8 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_actor_is_draining", [true]);
   ("mailbox_size",      [true]);
   ("march_mailbox_size", [true]);
+  ("mailbox_backlog",   [true]);
+  ("march_mailbox_backlog", [true]);
   ("get_cap",           [true]);
   ("march_get_cap",     [true]);
   (* The rest of the read-only pid family, missed by the 2026-09-14 audit and

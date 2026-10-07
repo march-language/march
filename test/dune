@@ -3061,6 +3061,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/observe_counters.expected native_observe_counters.out)))
 
+; mailbox_backlog counts the messages an Actor.call holds off the mailbox, and
+; Actor.top_by_mailbox / over_mailbox rank by it (mailbox_size reads 0 there).
+(rule
+ (targets native_mailbox_backlog_counts_held native_mailbox_backlog_counts_held.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/mailbox_backlog_counts_held.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_mailbox_backlog_counts_held native/mailbox_backlog_counts_held.march)
+   (with-stdout-to native_mailbox_backlog_counts_held.out
+        (system "./native_mailbox_backlog_counts_held")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mailbox_backlog_counts_held.expected native_mailbox_backlog_counts_held.out)))
+
 ; R2 scheduler utilisation: idle under 5%, four spinners on four schedulers
 ; over 90%.
 (rule

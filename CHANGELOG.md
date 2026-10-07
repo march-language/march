@@ -543,6 +543,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`Actor.top_by_mailbox` and `Actor.over_mailbox` see an actor stuck in
+  `Actor.call`.** While an actor waits for a reply, the messages that arrive are
+  set aside until the reply comes. Those actors used to show a depth of 0, so
+  the actor stuck in a slow call with work piling up was missed. Both functions
+  now count those messages, through the new `mailbox_backlog(pid)`.
+  `mailbox_size` still reports only the queued messages.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.
