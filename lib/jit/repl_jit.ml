@@ -499,6 +499,19 @@ let prev_slots_of ctx : March_tir.Llvm_emit.repl_slot_info list =
 (** Lower a single-expression module through the TIR pipeline.
     [repl_vars] are bare variable names of REPL globals that should be
     treated as borrowed by Perceus so they are never freed mid-session. *)
+(* TIR verifier (A1, lib/tir/tir_verify.ml) for the REPL/JIT pipeline, which
+   does not go through Contract_pipeline: on under --verify-tir /
+   MARCH_VERIFY_TIR=1.  No borrow map here (the REPL runs no
+   Borrow.infer_module); a fragment may name a function an earlier fragment
+   compiled, or a REPL global ([repl_vars]), neither of which is in this
+   module. *)
+let verify_repl ?(repl_vars = []) stage tir =
+  if March_tir.Tir_verify.enabled () then
+    March_tir.Tir_verify.enforce ~stage ?borrow_map:None
+      ~known_fn:(fun n -> March_tir.Llvm_ctx.is_repl_prior_fn n || List.mem n repl_vars)
+      tir;
+  tir
+
 let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
   (* [~shadow_builtins:false]: fragments bind fns by bare name through closure
      slots, and [is_c_runtime_fn] already keeps a runtime-defined name out of
@@ -512,15 +525,16 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      and the transform would silently see nothing.  Unconditional, like the
      compiled pipeline, and idempotent, so re-lowering an already-transformed
      module is a no-op. *)
-  let tir = March_tir.Trmc.transform_module tir in
+  let tir = verify_repl ~repl_vars "tir-lower" tir in
+  let tir = verify_repl ~repl_vars "tir-trmc" (March_tir.Trmc.transform_module tir) in
   let iface_methods = March_tir.Lower.get_iface_methods () in
-  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = verify_repl ~repl_vars "tir-mono" (March_tir.Mono.monomorphize ~iface_methods tir) in
   (* Policy audit — report any Tagged(_, P) violations before defun. *)
   let violations = March_tir.Policy_dce.audit tir in
   List.iter (fun (_fn_name, msg) ->
     Printf.eprintf "Error: %s\n\n" msg
   ) violations;
-  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = verify_repl ~repl_vars "tir-defun" (March_tir.Defun.defunctionalize tir) in
   (* [~repl:true] must track [Llvm_emit]'s [ctx.repl] exactly (every emission
      path in this file passes [~repl:true]): it is what tells Perceus that a
      capture-free closure is a real per-materialization [march_alloc] here
@@ -533,9 +547,9 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      [~repl:true] ctx the emitter builds), replaces the old process-wide
      [force_disable] latch. *)
   let k_table = March_tir.Kind.of_module ~unboxing:false tir in
-  let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir in
-  let tir = March_tir.Escape.escape_analysis ~k_table tir in
-  tir
+  let tir = verify_repl ~repl_vars "tir-perceus"
+      (March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir) in
+  verify_repl ~repl_vars "tir-escape" (March_tir.Escape.escape_analysis ~k_table tir)
 
 (* ── Heap pretty-printer ───────────────────────────────────────────── *)
 (* March heap layout (march_hdr):
@@ -1274,7 +1288,8 @@ let run_expr ctx ~tc_env m =
   let type_map = checked_type_map (time_phase "typecheck"
     (fun () -> March_typecheck.Typecheck.check_module_with_env env m)) in
   let tir = time_phase "lower+mono+opt"
-    (fun () -> lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m) in
+    (fun () -> with_prior_fns ctx (fun () ->
+         lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m)) in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
   let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name = "main") tir.March_tir.Tir.tm_fns with
@@ -1403,7 +1418,10 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
          analogous reused env. *)
       refs = ref []; current_decl = ref "" } in
   let type_map = checked_type_map (March_typecheck.Typecheck.check_module_with_env env m) in
-  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
+  (* [with_prior_fns]: the TIR verifier (when on) must see the functions
+     earlier fragments compiled, exactly as the emitter does. *)
+  let tir = with_prior_fns ctx (fun () ->
+      lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m) in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
   let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in

@@ -27,6 +27,13 @@ git log is authoritative for exact commits.
   predicate like `List.filter` does, so `one_pos(List.find(ys, fn y -> y > 0))`
   proves an `Option({Int | _ > 0})` demand. `List.take_while` is now a
   single-pass loop.
+- **`march --verify-tir`** (or `MARCH_VERIFY_TIR=1`) checks the compiler's typed IR
+  after every pass. Every variable must be bound, every called function must
+  exist, indirect calls must go through something callable, and no function
+  name may be defined twice. A violation stops the compile as an internal
+  compiler error, naming the pass and the function, instead of surfacing later
+  as an LLVM, link or runtime failure. It is always on in the compiler's own
+  IR test harnesses and its differential oracle.
 - **Every diagnostic has a code, and `march --explain <code>`.** Each error,
   warning and hint ends its first line with its code in brackets
   (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always
