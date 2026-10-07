@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    let cb = fn _ -> 42
+    let r = cb()
+    println(int_to_string(r))
+  end
+end

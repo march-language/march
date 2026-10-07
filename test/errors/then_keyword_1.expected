@@ -1,0 +1,21 @@
+exit: 1
+-- ERROR -------------------- errors/then_keyword_1.march
+
+I don't recognize `then` here — March uses do/end blocks instead. [then_keyword]
+
+4 |     if n > 0 then 1 else 0 end
+                 ^^^^
+
+    if cond do
+        expr1
+    else
+        expr2
+    end
+    run `march --explain then_keyword`
+
+fix [then_keyword]:
+@@ lines 4-4 @@
+-    if n > 0 then 1 else 0 end
++    if n > 0 do 1 else 0 end
+
+after fix: exit 0

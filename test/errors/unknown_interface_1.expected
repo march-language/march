@@ -27,3 +27,6 @@ fix [cap_grant]:
 @@ lines 14-14 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Unknown interface `NotDeclared` — is it declared above this impl? [unknown_interface]

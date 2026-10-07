@@ -48,6 +48,7 @@ let duplicate_constructor = "duplicate_constructor"
 let duplicate_field = "duplicate_field"
 let duplicate_handler = "duplicate_handler"
 let duplicate_protocol = "duplicate_protocol"
+let elif_keyword = "elif_keyword"
 let empty_match = "empty_match"
 let endpoints_label_invalid = "endpoints_label_invalid"
 let endpoints_name_clash = "endpoints_name_clash"
@@ -84,6 +85,7 @@ let mint_cap_invalid = "mint_cap_invalid"
 let missing_impl = "missing_impl"
 let missing_method = "missing_method"
 let missing_superclass_impl = "missing_superclass_impl"
+let module_keyword = "module_keyword"
 let no_alloc = "no_alloc"
 let no_alloc_candidate = "no_alloc_candidate"
 let no_alloc_policy = "no_alloc_policy"
@@ -133,6 +135,7 @@ let role_grant_unverified = "role_grant_unverified"
 let role_needs_invalid = "role_needs_invalid"
 let root_cap_reference = "root_cap_reference"
 let satisfy_missing_fn = "satisfy_missing_fn"
+let semicolon_separator = "semicolon_separator"
 let session_choice_label = "session_choice_label"
 let session_not_closed = "session_not_closed"
 let session_offer_nonexhaustive = "session_offer_nonexhaustive"
@@ -153,6 +156,7 @@ let syntax_error = "syntax_error"
 let template_fragment_position = "template_fragment_position"
 let template_unsafe_interpolation = "template_unsafe_interpolation"
 let template_unterminated = "template_unterminated"
+let then_keyword = "then_keyword"
 let transition_via_mismatch = "transition_via_mismatch"
 let trusted_linear_invalid = "trusted_linear_invalid"
 let trusted_linear_reserved = "trusted_linear_reserved"
@@ -213,6 +217,7 @@ let all = [
   duplicate_field;
   duplicate_handler;
   duplicate_protocol;
+  elif_keyword;
   empty_match;
   endpoints_label_invalid;
   endpoints_name_clash;
@@ -249,6 +254,7 @@ let all = [
   missing_impl;
   missing_method;
   missing_superclass_impl;
+  module_keyword;
   no_alloc;
   no_alloc_candidate;
   no_alloc_policy;
@@ -298,6 +304,7 @@ let all = [
   role_needs_invalid;
   root_cap_reference;
   satisfy_missing_fn;
+  semicolon_separator;
   session_choice_label;
   session_not_closed;
   session_offer_nonexhaustive;
@@ -318,6 +325,7 @@ let all = [
   template_fragment_position;
   template_unsafe_interpolation;
   template_unterminated;
+  then_keyword;
   transition_via_mismatch;
   trusted_linear_invalid;
   trusted_linear_reserved;

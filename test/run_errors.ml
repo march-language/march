@@ -6,8 +6,11 @@
 
     - [<name>.expected]: the exit code, the full rendered diagnostics on stderr
       (carets, labels, notes, the [[slug]] suffix, the [march --explain]
-      pointer) and every machine fix rendered as a before/after diff of the
-      lines it touches;
+      pointer), every machine fix rendered as a before/after diff of the
+      lines it touches, and, when there is a fix, the result of applying
+      every fix the way [forge fix] does and checking the program again
+      ([after fix: exit N], plus the first diagnostic line if any): a fix
+      the plan calls mechanical must leave a program that compiles (D4);
     - [<name>.json.expected]: the [--check-json] lines, so the machine form
       cannot drift from the human one.
 
@@ -82,7 +85,10 @@ let jobs =
   | Some n when n > 0 -> n
   | _ -> 8
 
-type result = { code : int; err : string; json : string }
+type result = { code : int; err : string; json : string;
+                mutable after : (int * string) option
+                (** exit code and stderr of `--check` on the program with
+                    every fix applied; [None] when it has no fix. *) }
 
 let script ~dir ~rel =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
@@ -92,13 +98,14 @@ let script ~dir ~rel =
      HOME=%s %s --check-json %s > json.out 2> /dev/null; true"
     (Filename.quote dir) home exe (Filename.quote rel) home exe (Filename.quote rel)
 
-let run_all (names : string list) : (string, result) Hashtbl.t =
+(* [run_jobs sources]: every (name, program text) checked in parallel;
+   returns name -> result. *)
+let run_jobs (sources : (string * string) list) : (string, result) Hashtbl.t =
   let results = Hashtbl.create 64 in
   let pending = Queue.create () in
-  List.iter (fun n -> Queue.add n pending) names;
+  List.iter (fun n -> Queue.add n pending) sources;
   let running = Hashtbl.create 16 in
-  let start name =
-    let src = read_file (Filename.concat (errors_dir ()) (name ^ ".march")) in
+  let start (name, src) =
     let tmp = Filename.temp_dir "march-errors" "" in
     let edir = Filename.concat tmp "errors" in
     Unix.mkdir edir 0o755;
@@ -115,7 +122,8 @@ let run_all (names : string list) : (string, result) Hashtbl.t =
     let f x = Filename.concat tmp x in
     let code = int_of_string (String.trim (read_file (f "check.code"))) in
     Hashtbl.replace results name
-      { code; err = read_file (f "check.err"); json = read_file (f "json.out") };
+      { code; err = read_file (f "check.err"); json = read_file (f "json.out");
+        after = None };
     (try rm_rf tmp with _ -> ())
   in
   while not (Queue.is_empty pending) || Hashtbl.length running > 0 do
@@ -127,9 +135,79 @@ let run_all (names : string list) : (string, result) Hashtbl.t =
   done;
   results
 
-(* ── Fixes as diffs ────────────────────────────────────────────────────── *)
+(* ── Applying the fixes, as forge fix does ─────────────────────────────── *)
 
 let lines_of s = String.split_on_char '\n' s
+
+(* The fixes a `--check-json` run carries, in the order they appear. *)
+let fixes_of_json json : Yojson.Safe.t list =
+  lines_of json
+  |> List.filter (fun l -> String.trim l <> "")
+  |> List.filter_map (fun l ->
+      match Yojson.Safe.from_string l with
+      | j -> (match Yojson.Safe.Util.member "fix" j with `Null -> None | f -> Some f)
+      | exception _ -> None)
+
+(* Apply every fix to [src], bottom-up so earlier line numbers stay valid,
+   with forge/lib/cmd_fix.ml's semantics: an insert goes after its line, a
+   delete removes whole lines, a replace edits within one line (a multi-line
+   replace is skipped, as forge skips it). *)
+let apply_fixes ~src (fixes : Yojson.Safe.t list) : string =
+  let open Yojson.Safe.Util in
+  let int k f = member k f |> to_int in
+  let key f = match member "kind" f |> to_string with
+    | "insert" -> int "after_line" f | "delete" -> int "end_line" f
+    | _ -> int "start_line" f in
+  let fixes = List.stable_sort (fun a b -> compare (key b) (key a)) fixes in
+  let lines = ref (Array.of_list (lines_of src)) in
+  List.iter (fun f ->
+      let ls = !lines in
+      let n = Array.length ls in
+      match member "kind" f |> to_string with
+      | "insert" ->
+        let after = int "after_line" f in
+        if after >= 0 && after <= n then
+          lines := Array.concat [ Array.sub ls 0 after;
+                                  [| member "text" f |> to_string |];
+                                  Array.sub ls after (n - after) ]
+      | "delete" ->
+        let s = int "start_line" f and e = int "end_line" f in
+        if s >= 1 && e <= n && s <= e then
+          lines := Array.concat [ Array.sub ls 0 (s - 1); Array.sub ls e (n - e) ]
+      | "replace" ->
+        let sl = int "start_line" f and el = int "end_line" f in
+        if sl = el && sl >= 1 && sl <= n then begin
+          let orig = ls.(sl - 1) in
+          let clamp c = max 0 (min c (String.length orig)) in
+          let sc = clamp (int "start_col" f) and ec = clamp (int "end_col" f) in
+          let ls = Array.copy ls in
+          ls.(sl - 1) <- String.sub orig 0 sc ^ (member "text" f |> to_string)
+                         ^ String.sub orig ec (String.length orig - ec);
+          lines := ls
+        end
+      | _ -> ())
+    fixes;
+  String.concat "\n" (Array.to_list !lines)
+
+(* Phase 1 checks every program; phase 2 re-checks, in the same way, every
+   program that carried a fix, with its fixes applied. *)
+let run_all (names : string list) : (string, result) Hashtbl.t =
+  let src_of name = read_file (Filename.concat (errors_dir ()) (name ^ ".march")) in
+  let results = run_jobs (List.map (fun n -> (n, src_of n)) names) in
+  let fixed =
+    List.filter_map (fun n ->
+        let r = Hashtbl.find results n in
+        match fixes_of_json r.json with
+        | [] -> None
+        | fixes -> Some (n, apply_fixes ~src:(src_of n) fixes))
+      names
+  in
+  let after = run_jobs fixed in
+  Hashtbl.iter (fun n (r : result) ->
+      (Hashtbl.find results n).after <- Some (r.code, r.err)) after;
+  results
+
+(* ── Fixes as diffs ────────────────────────────────────────────────────── *)
 
 let render_fix ~src (j : Yojson.Safe.t) : string option =
   let open Yojson.Safe.Util in
@@ -198,9 +276,37 @@ let render results name =
         | j -> render_fix ~src j
         | exception _ -> None)
   in
+  (* The program with every fix applied, checked again: its exit code and,
+     if it still fails, the first diagnostic headline (the line carrying the
+     [slug]), so the .expected shows what the fix leaves behind. *)
+  let after =
+    match r.after with
+    | None -> ""
+    | Some (code, err) ->
+      (* A headline ends in `[slug]` or `[slug:arg]`: a trailing bracket
+         group whose slug is lower-case letters and underscores. *)
+      let is_headline l =
+        let l = String.trim l in
+        let n = String.length l in
+        match String.rindex_opt l '[' with
+        | Some i when n > i + 2 && l.[n - 1] = ']' ->
+          let body = String.sub l (i + 1) (n - i - 2) in
+          let slug = match String.index_opt body ':' with
+            | Some k -> String.sub body 0 k | None -> body in
+          slug <> ""
+          && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') slug
+        | _ -> false
+      in
+      let headline = List.find_opt is_headline (lines_of err) in
+      Printf.sprintf "\nafter fix: exit %d%s\n" code
+        (match headline with
+         | Some h when code <> 0 -> "\n" ^ String.trim h
+         | _ -> "")
+  in
   let human =
-    Printf.sprintf "exit: %d\n%s%s" r.code r.err
+    Printf.sprintf "exit: %d\n%s%s%s" r.code r.err
       (if fixes = [] then "" else "\n" ^ String.concat "\n" fixes)
+      after
   in
   (src, human, r.json)
 

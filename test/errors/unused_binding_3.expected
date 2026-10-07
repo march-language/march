@@ -49,3 +49,6 @@ fix [cap_grant]:
 @@ lines 9-9 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+refinement violation: argument `_s` of `nonempty` does not satisfy precondition `len(_) > 0` [refinement_violated]

@@ -27,3 +27,6 @@ fix [cap_grant]:
 @@ lines 21-21 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Interface `Speak` does not declare a method `bark`. [unknown_method]

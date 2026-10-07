@@ -19,6 +19,21 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Mechanical fixes for the common syntax slips, and every compiler fix as an
+  editor quick fix.** `if … then` (`then_keyword`), `module Name do`
+  (`module_keyword`, top-level or nested) and `;` between expressions
+  (`semicolon_separator`) each get their own code and a fix that `forge fix`
+  applies and the LSP offers as a quick fix: `then` → `do`, `module` → `mod`,
+  `;` → a line break (or deleted when it ends the line). `elif`/`elsif`
+  (`elif_keyword`) names the slip and shows the `else if … end end` shape.
+  `module` and `elif` stay usable as identifiers. A `let`-bound lambda called
+  with the wrong number of arguments (`let cb = fn _ -> 42` then `cb()`, which
+  used to typecheck and panic at runtime) is now an `arity_mismatch` with the
+  fix `fn _` → `fn` when a zero-argument call was meant. The LSP carries each
+  diagnostic's fix in its `data` field, so any fix becomes a quick fix with no
+  per-message rule. The golden error corpus now re-checks every program with
+  its fixes applied (`after fix: exit N`), so a fix that leaves a broken
+  program is visible in review.
 - **Every diagnostic has a code, and `march --explain <code>`.** Each error,
   warning and hint ends its first line with its code in brackets
   (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always

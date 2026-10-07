@@ -37,3 +37,6 @@ fix [cap_grant]:
 @@ lines 36-36 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Protocol `E` involves the same participants as `D2`. If these are dual protocols (one for each direction), this is expected. Otherwise, consider merging them. [protocol_same_participants]

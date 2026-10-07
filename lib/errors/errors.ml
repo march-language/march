@@ -39,6 +39,22 @@ and label = {
 (** Accumulator for diagnostics — allows error recovery. *)
 type ctx = { mutable diagnostics : diagnostic list }
 
+(** What a grammar `error` production knows beyond [ParseError]'s
+    (message, hint, position): its own code and a mechanical fix (D4,
+    specs/plans/diagnostics-and-triage-plan.md §8). [ParseError] is matched
+    as a 3-tuple at ~40 sites, so the extra fields ride a side channel:
+    the grammar's [error_raise] sets this right before raising, every
+    time (to [None, None] when it has nothing to add), and [Parse.run]
+    reads and clears it when it catches the exception. A direct [raise
+    ParseError] that bypasses [error_raise] would leave a stale value, so
+    parser.mly has none. *)
+let parse_error_extra : (string option * fix_kind option) ref = ref (None, None)
+
+let take_parse_error_extra () =
+  let v = !parse_error_extra in
+  parse_error_extra := (None, None);
+  v
+
 let create () = { diagnostics = [] }
 
 (* Some diagnostics get re-derived at every use of a declaration whose own
