@@ -11659,6 +11659,14 @@ void march_signal_raise_self(int64_t code) {
     if (os >= 0) kill(getpid(), os);
 }
 
+/* RC contract (the typed_array_ builtins, borrow.ml's extern_borrow_table;
+ * create, which stores its default value, is the owned exception):
+ * the source array / list / mask is BORROWED -- never stored
+ * or freed here, the caller drops it after its last use -- and every element
+ * copied into a fresh array or list gets its own reference (march_incrc; a
+ * no-op on a tagged immediate).  Before 2026-10-07 the sources were owned and
+ * never released (one leaked array or list per call), and the copies took no
+ * reference, which only stayed safe because nothing released the source. */
 void *march_typed_array_from_list(void *list) {
     /* Count list length first */
     int64_t n = 0;
@@ -11671,6 +11679,7 @@ void *march_typed_array_from_list(void *list) {
     void *cur = list;
     for (int64_t i = 0; i < n; i++) {
         void *elem = *(void **)((char *)cur + 16);
+        march_incrc(elem);   /* the list keeps its element */
         *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8) = elem;
         cur = *(void **)((char *)cur + 24);
     }
@@ -11715,17 +11724,27 @@ void *march_typed_array_set(void *arr, int64_t i, void *val) {
     int64_t len = march_typed_array_length(arr);
     typed_array_check_bounds(i, len);
     void *new_arr = typed_array_alloc(len);
-    memcpy((char *)new_arr + TYPED_ARRAY_HDR_SIZE,
-           (char *)arr + TYPED_ARRAY_HDR_SIZE,
-           (size_t)(len * 8));
+    for (int64_t j = 0; j < len; j++) {
+        if (j == i) continue;
+        void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + j * 8);
+        march_incrc(elem);   /* [arr] keeps its element */
+        *(void **)((char *)new_arr + TYPED_ARRAY_HDR_SIZE + j * 8) = elem;
+    }
+    /* [val] is owned (consumed): its reference moves into the slot. */
     *(void **)((char *)new_arr + TYPED_ARRAY_HDR_SIZE + i * 8) = val;
     return new_arr;
 }
 
 void *march_typed_array_create(int64_t len, void *default_val) {
     void *arr = typed_array_alloc(len);
-    for (int64_t i = 0; i < len; i++)
+    /* [default_val] is OWNED (create stays in extern_owned_builtins): the
+     * transferred reference fills slot 0 and every other slot takes its own,
+     * so each slot owns one.  An empty array stores nothing and releases it. */
+    if (len <= 0) { march_decrc(default_val); return arr; }
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) march_incrc(default_val);
         *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8) = default_val;
+    }
     return arr;
 }
 
@@ -11809,8 +11828,11 @@ void *march_typed_array_filter(void *arr, void *mask) {
     int64_t count = 0;
     for (int64_t i = 0; i < len; i++) {
         int64_t raw_bool = *(int64_t *)((char *)mask + TYPED_ARRAY_HDR_SIZE + i * 8);
-        if (raw_bool >> 1)
-            temp[count++] = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        if (raw_bool >> 1) {
+            void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+            march_incrc(elem);   /* [arr] keeps its element */
+            temp[count++] = elem;
+        }
     }
     void *new_arr = typed_array_alloc(count);
     memcpy((char *)new_arr + TYPED_ARRAY_HDR_SIZE, temp, (size_t)(count * 8));

@@ -302,6 +302,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`typed_array_*` functions no longer leak their argument.** In compiled
+  code, each call to `typed_array_from_list`, `typed_array_length`,
+  `typed_array_get`, `typed_array_map` and the rest of the family leaked the
+  array or list it was given. `DataFrame` columns are built on these.
+
 - A green thread started from a runtime thread that is not a scheduler (the
   hot-reload server's drain, the new shell listener) no longer inherits that
   thread's blocked signals. With SIGSEGV blocked, the first time its stack
