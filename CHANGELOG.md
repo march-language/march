@@ -322,6 +322,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Interpreted `to_json` on two same-named types in two modules.** When two
+  modules each declare a `Note` and `derive Json` for it, the interpreter
+  encoded both with whichever codec it registered last (and panicked on the
+  other's constructors). It now picks the codec of the value's own type, as
+  compiled code already did. `from_json` on such a pair still reports
+  ambiguity when compiled.
 - **A missing `end` is reported at the construct that is missing it.** Instead of
   "Parse error in declaration" at the end of the file or the next `fn`, the error
   points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the

@@ -526,6 +526,10 @@ let () =
       Alcotest.test_case "derive Json x JsonStream typed decoding"
         `Quick (run_stdlib_test "test_json_typed.march" "TestJsonTyped");
     ]);
+    ("json_collision", [
+      Alcotest.test_case "derive Json on same-short-name types in two modules"
+        `Quick (run_stdlib_test "test_json_collision.march" "TestJsonCollision");
+    ]);
     ("msgpack", [
       Alcotest.test_case "Msgpack module"
         `Quick (run_stdlib_test "test_msgpack.march" "TestMsgpack");
