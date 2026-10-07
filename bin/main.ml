@@ -1520,7 +1520,8 @@ let run_test_cmd args =
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
           Printf.eprintf "%s:%d:%d: %s: %s\n"
             d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-            d.span.March_ast.Ast.start_col (severity_word d.severity) d.message
+            d.span.March_ast.Ast.start_col (severity_word d.severity)
+            (March_errors.Errors.headline_with_code d)
         ) (March_errors.Errors.sorted desugar_errors);
       exit 1
     end;
@@ -2265,7 +2266,8 @@ let compile filename =
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       Printf.eprintf "%s:%d:%d: %s: %s\n"
         d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-        d.span.March_ast.Ast.start_col (severity_word d.severity) d.message
+        d.span.March_ast.Ast.start_col (severity_word d.severity)
+        (March_errors.Errors.headline_with_code d)
     ) (March_errors.Errors.sorted desugar_errors);
   let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
   stamp "desugar";
@@ -4980,7 +4982,7 @@ let run_check_cmd ?(emit_caps = false) files =
       d.span.March_ast.Ast.start_line
       d.span.March_ast.Ast.start_col
       label
-      d.message
+      (March_errors.Errors.headline_with_code d)
   in
   List.iter (print_diag "warning") user_warnings;
   List.iter (print_diag "error") user_errors;

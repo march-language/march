@@ -29,7 +29,8 @@ Diagnostics plan (`specs/plans/diagnostics-and-triage-plan.md`) §7.
   `EXPECT-ERROR` corpora and the alcotest message assertions still matches. The
   first time a run renders a code that **has a page**, the diagnostic adds
   ``run `march --explain <slug>` ``; later diagnostics with that code don't
-  repeat it. (Deliberate narrowing of the plan's "once per distinct code": a
+  repeat it. The CLI's compact `file:line:col: error: msg` form (desugar
+  diagnostics, `march caps`) carries the same suffix. (Deliberate narrowing of the plan's "once per distinct code": a
   pointer to a page that does not exist yet would be noise.) `--check-json`'s
   `"code"` is now always a string, never `null`.
 - **`march --explain <slug>`** prints `specs/lang/errors/<slug>.md` (front matter
