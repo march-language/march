@@ -68,6 +68,11 @@ git log is authoritative for exact commits.
     build does not (changed, added, or a type numbered differently) is
     refused, with the declarations named. Inputs that reach only unchanged
     code still run.
+  - An input calls the node's own compiled copy of a library function when
+    the node's build has it with the same signature, rather than compiling
+    a copy. Each Depot query's fragment went from 338 KB of IR to 81 KB, and
+    its clang time from about 175 ms to about 105 ms.
+    `MARCH_SHELL_NO_LINK=1` turns this off.
 - **Several native libraries per project.** forge.toml can declare `[[ffi]]`
   once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
   links all of them, in order. A single `[ffi]` table works as before.

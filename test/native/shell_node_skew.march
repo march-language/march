@@ -37,6 +37,14 @@ mod Main do
   fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
     let c = spawn(Counter)
     send(c, Bump(1))
+    -- Stdlib code the node's own build carries (Json's parser and printer
+    -- survive its optimiser; List.range and friends are inlined away): a
+    -- shell input reaching it calls these instead of compiling a copy
+    -- (test/shell/link.txt).
+    match Json.parse("[1, {\"ok\": true}]") do
+      Ok(j) -> println(Json.to_string(j))
+      Err(e) -> println(e)
+    end
     println("ready")
     sleep_ms(120000)
   end

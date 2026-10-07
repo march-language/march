@@ -12751,6 +12751,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/shell_skew.expected native_shell_skew.out)))
 
+; A fragment calls the node's own copy of a function instead of compiling
+; one, when the node's build has it with the same signature (Shell_ident's
+; "calling the node's own functions").  test/native/shell_node.march's main
+; uses List.range/reverse/length, so its build carries them; the inputs of
+; test/shell/link.txt reach them, reuse a value across calls (the node's
+; parameter modes decide its RC), and pass a closure (never linked).
+; MARCH_SHELL_LINK_REPORT names what each input called on the node.
+(rule
+ (targets native_shell_link.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/link.txt)
+       (file native/shell_node.march))
+ (action
+  (with-stdout-to native_shell_link.out
+   (system "rm -rf sh_l; mkdir -p sh_l; ./shell_check.exe keygen-home sh_l/pk $PWD/sh_l/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_l/pk) -o sh_l/node native/shell_node.march > sh_l/build 2>&1 || { cat sh_l/build; exit 1; }; printf 'IO.Console\\n' > sh_l/policy; S=/tmp/march-shell-link-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_l/policy ./sh_l/node > sh_l/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_l/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_l/home MARCH_SHELL_LINK_REPORT=1 %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/link.txt native/shell_node.march 2>&1; echo \"exit=$?\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_l $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_link.expected native_shell_link.out)))
+
 ; Golden rendered-diagnostic corpus (diagnostics plan §11, D7): every
 ; test/errors/*.march checked with the real compiler; full rendered output
 ; and --check-json pinned in .expected / .json.expected. Regenerate with

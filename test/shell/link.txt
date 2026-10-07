@@ -1,0 +1,9 @@
+let s = "{\"a\": [1, 2, {\"b\": true}], \"c\": \"x\\u0041\"}"
+Json.parse(s)
+Json.parse(s)
+string_length(s)
+let j = Result.unwrap(Json.parse(s))
+Json.to_string(j)
+Json.to_string(j)
+List.map([1, 2, 3], fn x -> x * 10)
+Result.map(Json.parse("[1, 2]"), fn v -> string_length(Json.to_string(v)) + string_length(Json.to_string(v)))
