@@ -1,0 +1,8 @@
+-- D1 (missing `end` on a `match`: blame the `match`, not EOF)
+mod M do
+  fn f(x) do
+    match x do
+      1 -> 2
+      _ -> 3
+  end
+end

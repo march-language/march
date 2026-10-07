@@ -1,0 +1,8 @@
+-- D1 (`else if` chain one `end` short: blame the `if`, chain note, insert `end` before the outer block's `end`)
+mod M do
+  fn f(a, b) do
+    if a do 1 else if b do 2 else 3 end
+  end
+
+  fn g() do 0 end
+end

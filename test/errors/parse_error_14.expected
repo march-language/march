@@ -1,0 +1,15 @@
+exit: 1
+-- ERROR -------------------- errors/parse_error_14.march
+
+This `mod` (line 2) has no matching `end`. [parse_error]
+
+2 | mod M do
+    ^^^
+
+    I only noticed at the end of the file.
+    run `march --explain parse_error`
+
+fix [parse_error]:
+@@ after line 5 @@
+   end
++end

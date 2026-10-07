@@ -308,6 +308,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A missing `end` is reported at the construct that is missing it.** Instead of
+  "Parse error in declaration" at the end of the file or the next `fn`, the error
+  points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the
+  parser noticed, and it carries a fix that inserts the `end`, which `forge fix`
+  can apply. An `else if` chain one `end` short gets a note explaining that each
+  `if` closes separately.
 - A green thread started from a runtime thread that is not a scheduler (the
   hot-reload server's drain, the new shell listener) no longer inherits that
   thread's blocked signals. With SIGSEGV blocked, the first time its stack

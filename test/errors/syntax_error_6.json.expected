@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/syntax_error_6.march","start_line":4,"start_col":4,"end_line":4,"end_col":8,"message":"This `with` (line 4) has no matching `end`.","code":"syntax_error","fix":{"kind":"insert","after_line":7,"text":"    end\n  end"},"labels":[],"notes":["I only noticed at the end of the file."]}

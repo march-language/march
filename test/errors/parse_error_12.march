@@ -1,0 +1,7 @@
+-- D1 (missing `end` on a `fn`: blame the `fn`, insert `end` before the next declaration)
+mod M do
+  fn f() do
+    1
+
+  fn g() do 2 end
+end
