@@ -17554,6 +17554,17 @@ end|})));
   fn go() : Bool do ap(is_even, 3) end
 end|})) ]
 
+(* Abstract refinements, phase 2 (specs/2026-09-20-abstract-refinements-design.md
+   §2-§4; plan specs/plans/2026-10-06-abstract-refinements-phase2-plan.md, PR B).
+   [ar2_filt] is the canonical definer: `p` is defined by `keep`'s codomain and
+   produced in the element slot of the return. *)
+let abstract_phase2_suite =
+  [ Alcotest.test_case "the two new reasons have stable slugs" `Quick (fun () ->
+        let open March_refinecheck.Obligation in
+        Alcotest.(check (pair string string)) "slugs"
+          ("abstract-refinement-too-weak", "abstract-refinement-uninstantiated")
+          (reason_name (Abstract_too_weak "w"), reason_name (Abstract_uninstantiated "u"))) ]
+
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
         let before = !March_refine.Solver.malformed_count in
@@ -18345,4 +18356,5 @@ let () =
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("callback-binder", callback_binder_suite);
       ("abstract-pass-sites", abstract_pass_sites_suite);
+      ("abstract-phase2", abstract_phase2_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

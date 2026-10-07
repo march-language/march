@@ -851,6 +851,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _
                | Obligation.Parametric_source_unproved _
+               | Obligation.Abstract_too_weak _
+               | Obligation.Abstract_uninstantiated _
                | Obligation.Unreflectable_subject _
                (* Now that this reason carries a payload naming the specific
                   failing sub-expression (Task 3), it is a specific, actionable
@@ -878,6 +880,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
        | Obligation.Parametric_source_unproved _
+       | Obligation.Abstract_too_weak _
+       | Obligation.Abstract_uninstantiated _
        | Obligation.Unreflectable_subject _
        | Obligation.Unreflectable_predicate _
        | Obligation.Alias_withdrawn _ -> ());
@@ -887,6 +891,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _
         | Obligation.Parametric_source_unproved _
+        | Obligation.Abstract_too_weak _
+        | Obligation.Abstract_uninstantiated _
         | Obligation.Unreflectable_subject _
         | Obligation.Unreflectable_predicate _ ->
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
