@@ -237,7 +237,7 @@ So March chooses at runtime, on the actual data, with a single cheap length chec
 Rules of thumb:
 
 - **Prefer the sequential version by default.** Reach for the parallel one when you have evidence (a large dataset, a profiler, a slow loop) that it'll pay off.
-- **The function must be safe to run concurrently.** Pure functions (ones that only compute from their arguments) always are. A function that prints, sends actor messages, writes a file, or depends on shared mutable state is *not*, and the runtime won't stop you from misusing it. For those, keep the sequential version (or restructure so the parallel part is pure).
+- **The function must be safe to run concurrently.** Pure functions (ones that only compute from their arguments) always are. A function that prints, sends actor messages, writes a file, or depends on shared mutable state is *not*, and the runtime won't stop you from misusing it. For those, keep the sequential version (or restructure so the parallel part is pure). A captured native array (`NativeIntArr` and friends) is fine to read from parallel code, and even to write: it is a copy-on-write value, so each worker's write lands in its own copy. A `RingBuf` cannot be captured by the lambda at all; it is linear.
 - **Measure in a compiled build.** The interpreter won't show a speedup (see above).
 
 ---

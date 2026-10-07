@@ -1,6 +1,16 @@
-# [P2] Mutable stdlib types can cross threads: `RingBuf` is shared mutable state, and the sendability check has holes
+# Mutable stdlib types can cross threads: `RingBuf` is shared mutable state, and the sendability check has holes
 
-**Logged:** 2026-09-25
+**Logged:** 2026-09-25. **FIXED 2026-10-06**, Part C of the plan, in five
+PRs: Phase 0 (the hole programs), C0
+(`2026-10-06-sole-ownership-checks-acquire-and-march-free-destructor.md`),
+C1 (`2026-10-06-native-arrays-sendable.md`), C2
+(`2026-10-06-ring-buf-always-linear.md`), C4
+(`2026-10-06-send-fixtures-retired-and-docs.md`) and C5 (this move: the rule
+in `specs/lang/memory-model.md`, `is_send` as its guard with an empty root
+list, and `test/test_typecheck_send.ml`, which fails the build if a name is
+added to `non_sendable_types` while the general `Send` check is absent).
+`LiveProcess` (C3) stays deferred; Parts A (Phase 2) and B stay deferred
+until the rule is waived, and would be filed as their own todo then.
 **Plan:** `specs/plans/2026-09-25-send-data-race-freedom-plan.md`
 
 ## Symptom

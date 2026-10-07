@@ -66,6 +66,14 @@ git log is authoritative for exact commits.
   byte-identical with the switch off. `MARCH_SANITIZE=1` builds additionally
   abort on a `march_free` of a shared object and on a TRMC hole fill that finds
   its slot already written.
+- **Native arrays may be sent in messages, captured by tasks and shared with
+  parallel code.** `NativeIntArr`, `NativeFloatArr`, `NativeF32Arr`,
+  `NativeI32Arr` and `NativeU8Arr` are copy-on-write values: a write to an
+  array nobody else holds is in place, the first write to a shared array copies
+  it (O(n), once), and each holder sees only its own writes. They were rejected
+  in actor messages by analogy with `RingBuf`; the runtime never shared their
+  mutations, so the rejection is gone. The typing corpus fixtures `t164`,
+  `t165`, `t169`, `t170` flipped from reject to accept.
 - **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
   probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
   `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
@@ -220,6 +228,18 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **`RingBuf` is linear: every operation consumes the buffer and hands it
+  back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
+  `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer
+  beside it (`let (n, rb) = RingBuf.size(rb)`); new `snapshot` reads the
+  elements out and keeps the buffer; `to_list` and new `drop` end it. A buffer
+  can no longer be aliased, captured by a closure, stored at module level or
+  put in a `Vault` (each is a compile-time error, the existing linear-type
+  errors), and it may now be *sent* in a message or passed to `spawn`, which
+  moves it. In actor state write `{ state with buf: RingBuf.push(state.buf,
+  x) }`. Migration table: design spec section 5. **New rule for every linear
+  type:** a module-level `let` of a `RingBuf`, `Handle` or `LinearMap` is
+  rejected, since a module-level value can never be consumed exactly once.
 - **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
   install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
   source needed no changes. The REPL's `notty` dependency (0.2.3 does not
@@ -2441,6 +2461,11 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Data-race freedom, written down.** `actors.md` says what a message may
+  carry (a linear value moves, everything else is immutable or copy-on-write),
+  `linear-types.md` has a `RingBuf` section and the module-level `let` rule,
+  `memory-model.md` states the acquire-ordering guarantee behind every in-place
+  write, and `parallelism.md` says which captured values parallel code may touch.
 - **Observing a running node** (`docs/observe.md`), an operator's guide to the
   observe socket and `forge observe`/`top`/`status`/`diagnose`: turning the
   socket on and what it costs, the protocol and error codes, every verb with a

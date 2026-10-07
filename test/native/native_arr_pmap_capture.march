@@ -1,0 +1,13 @@
+-- A native array read from parallel code (Part C, Phase C1). Parallel.pmap
+-- runs the lambda on several worker threads at once; all of them read the
+-- captured NativeIntArr, none writes it, and the result is deterministic.
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let arr = NativeArray.from_list_int([10, 20, 30, 40, 50, 60, 70, 80])
+    let doubled = Parallel.pmap(RRB.range(0, 8), fn i -> NativeArray.get_int(arr, i) * 2)
+    println(String.join(List.map(RRB.to_list(doubled), fn x -> int_to_string(x)), ","))
+    println("sum " ++ int_to_string(NativeArray.sum_int(arr)))
+  end
+end
