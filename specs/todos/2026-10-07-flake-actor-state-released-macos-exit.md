@@ -83,3 +83,25 @@ printed this time, so the trap came after the last panicking `on_stop`, during
 or after the final assertions or teardown. Train R contained #877 (static
 nullary cells, owned-call drop fusion, per-object alloc/free changes); every
 other job passed, and the fixture's first failure (above) predates #877.
+
+## Sightings 3 and 4, and a lead on the rate (2026-10-08)
+
+Same signature (`exit status 132 (above 128: signal 4)`, `on_stop blew up` lines
+printed) on merge train U's CI (run 37794937229, `test (macos-15, all)`) and train V's
+(run 37813005310). The sightings so far, against whether the run's head contained
+#877 (per-object alloc/free: TSD gauge, mimalloc TLS slot):
+
+- before #877: once (the first sighting, main after train D, 2026-10-07; train D's own
+  CI and the re-run of that job both passed it);
+- with #877 in the tree: trains R, U and V hit it; train T's full macOS job passed it;
+  train S was cancelled before that job finished.
+
+That is 3 hits in the 4 macOS runs that finished with #877 in the tree. I did not
+count the macOS runs before #877 (many passed it), so this is a lead, not a rate.
+#877's allocator change keeps a thread-local slot, and thread-local state is what
+goes wrong when a green thread migrates OS threads between `actor_run_on_stop`'s
+`setjmp` and the panic's `longjmp` (lead 2 above: a cached TLS address is then the
+old thread's). Worth checking first: any thread-local address (or `__thread` / TSD
+key lookup) computed before a `swapcontext`/`longjmp` point and reused after it, in
+the code #877 added. Local runs still cannot reproduce it (macOS 26 here, CI is
+macOS 15).
