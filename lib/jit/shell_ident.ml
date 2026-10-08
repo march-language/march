@@ -32,7 +32,7 @@
 open March_ast
 
 type t = {
-  decls : (string, string) Hashtbl.t;   (* key -> 16-hex hash of its text *)
+  decls : (string, string) Hashtbl.t;   (* key -> [hash48] of its text *)
   tags  : (string, string) Hashtbl.t;   (* variant type -> "Ctor=tag,..." *)
   (* The node's own functions a fragment may call instead of carrying a
      copy (see [linkable]): name -> (LLVM signature, parameter modes). *)
@@ -49,6 +49,16 @@ type region = {
 }
 
 let hash16 s = String.sub (March_cas.Blake3.hash_string s) 0 16
+
+let b64url = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+(* The first 12 hex digits (48 bits) of [h] as 8 base64url characters. *)
+let b64_of_hex12 (h : string) : string =
+  let v = int_of_string ("0x" ^ String.sub h 0 12) in
+  String.init 8 (fun i -> b64url.[(v lsr (6 * (7 - i))) land 63])
+
+(* A declaration's (or a group's) hash: 48 bits, see "the table as text". *)
+let hash48 s = b64_of_hex12 (March_cas.Blake3.hash_string s)
 
 (* ── source text ─────────────────────────────────────────────────────── *)
 
@@ -131,7 +141,7 @@ let rec walk ~out ~regions ~prefix ~stop (decls : Ast.decl list) =
          let k = (try Hashtbl.find seen base with Not_found -> 0) + 1 in
          Hashtbl.replace seen base k;
          let key = if k = 1 then base else Printf.sprintf "%s#%d" base k in
-         Hashtbl.replace out key (hash16 (text ()));
+         Hashtbl.replace out key (hash48 (text ()));
          regions := { r_file = sp.file; r_start = pos sp;
                       r_end = (match next with Some p -> p | None -> (max_int, 0));
                       r_key = key; r_mod = header_key } :: !regions
@@ -144,7 +154,7 @@ let rec walk ~out ~regions ~prefix ~stop (decls : Ast.decl list) =
       go rest
   in
   go decls;
-  Hashtbl.replace out header_key (hash16 (Buffer.contents header))
+  Hashtbl.replace out header_key (hash48 (Buffer.contents header))
 
 (** The declaration table of a program's (desugared) declarations, and the
     regions to map spans back to it. *)
@@ -174,15 +184,126 @@ let tags_of_types (types : March_tir.Tir.type_def list) : (string, string) Hasht
 
 (* ── the table as text ───────────────────────────────────────────────── *)
 
-(* One line per entry, sorted: "d <key> <hash>", "t <type> <ctor=tag,...>"
-   or "x <fn> <signature> <modes>".  None of the fields contains a space or a
-   newline (a signature has its spaces removed). *)
+(* Format 2 (format 1, below, is still read):
+
+     march-shell-ident 2
+     t <type> <ctor[=tag],...>     sorted; "=tag" is left out when the tag
+                                   is the constructor's position
+     x <fn> <signature> <modes>    sorted
+     m <group> <digest>            sorted by group, each followed by its
+     <rest> <hash>                 declarations, sorted
+
+   None of the fields contains a space or a newline (a signature has its
+   spaces removed).  A declaration key is its group, the module prefix it
+   starts with ("" or "A.B."), followed by the rest ([split_key]); a group is
+   written without its trailing dot, the top level as ".", so a key's module
+   prefix, which is most of it, is written once per module.  A group's digest
+   is [hash48] of its rows' text: the client computes the same over its own
+   declarations and fetches only the groups whose digest differs (IDENT
+   SUMMARY and IDENT GROUPS, runtime/march_shell.c), which for an up-to-date
+   checkout is none.
+
+   Hashes are 48 bits, as 8 base64url characters ([hash48]).  A hash is
+   never looked up among others, only compared with the other side's hash of
+   the same key (or group), so an edit goes unnoticed only if the edited
+   text hashes to the very 48 bits the node's does: 1 in 2^48 per edited
+   declaration, with no birthday bound.  The table guards against a stale
+   checkout, not an adversary; the deploy key's signature covers what runs.
+
+   Format 1, which nodes built before format 2 serve, has no header and a
+   "d <key> <16 hex>" row per declaration; [parse] reads a hash's first 12
+   hex digits, which are the same 48 bits [hash48] encodes. *)
+
+let header = "march-shell-ident 2"
+
+(* [key] as (group prefix, rest): the prefix is everything up to the last
+   '.' before the kind's ':' (or before "<header>"). *)
+let split_key (key : string) : string * string =
+  let stop = match String.index_opt key ':' with Some c -> c | None -> String.length key in
+  match String.rindex_from_opt key (stop - 1) '.' with
+  | Some i -> String.sub key 0 (i + 1), String.sub key (i + 1) (String.length key - i - 1)
+  | None -> "", key
+
+let group_name p = if p = "" then "." else String.sub p 0 (String.length p - 1)
+let group_prefix n = if n = "." then "" else n ^ "."
+
+(* "A=0,B=1,C=5" <-> "A,B,C=5". *)
+let compact_tags (v : string) : string =
+  if v = "" then v else
+    String.split_on_char ',' v
+    |> List.mapi (fun i c ->
+        match String.index_opt c '=' with
+        | Some e when String.sub c (e + 1) (String.length c - e - 1) = string_of_int i ->
+          String.sub c 0 e
+        | _ -> c)
+    |> String.concat ","
+
+let expand_tags (v : string) : string =
+  if v = "" then v else
+    String.split_on_char ',' v
+    |> List.mapi (fun i c -> if String.contains c '=' then c else Printf.sprintf "%s=%d" c i)
+    |> String.concat ","
+
+(* The declarations by group prefix, each group's rows (rest, hash) sorted. *)
+let group_rows (decls : (string, string) Hashtbl.t) : (string, (string * string) list) Hashtbl.t =
+  let g = Hashtbl.create 64 in
+  Hashtbl.iter (fun k v ->
+      let p, r = split_key k in
+      Hashtbl.replace g p ((r, v) :: (try Hashtbl.find g p with Not_found -> []))) decls;
+  Hashtbl.filter_map_inplace (fun _ rows -> Some (List.sort compare rows)) g;
+  g
+
+let rows_text rows =
+  String.concat "" (List.map (fun (r, h) -> r ^ " " ^ h ^ "\n") rows)
+
+let group_digest rows = hash48 (rows_text rows)
+
 let to_string (t : t) : string =
-  let lines = ref [] in
-  Hashtbl.iter (fun k v -> lines := Printf.sprintf "d %s %s" k v :: !lines) t.decls;
-  Hashtbl.iter (fun k v -> lines := Printf.sprintf "t %s %s" k v :: !lines) t.tags;
-  Hashtbl.iter (fun k (sg, m) -> lines := Printf.sprintf "x %s %s %s" k sg m :: !lines) t.fns;
-  String.concat "\n" (List.sort compare !lines) ^ "\n"
+  let b = Buffer.create 65536 in
+  Buffer.add_string b header; Buffer.add_char b '\n';
+  let sorted lines = List.iter (fun l -> Buffer.add_string b l; Buffer.add_char b '\n')
+      (List.sort compare lines) in
+  sorted (Hashtbl.fold (fun k v acc -> Printf.sprintf "t %s %s" k (compact_tags v) :: acc) t.tags []);
+  sorted (Hashtbl.fold (fun k (sg, m) acc -> Printf.sprintf "x %s %s %s" k sg m :: acc) t.fns []);
+  let groups = group_rows t.decls in
+  List.iter (fun p ->
+      let rows = Hashtbl.find groups p in
+      Printf.bprintf b "m %s %s\n" (group_name p) (group_digest rows);
+      Buffer.add_string b (rows_text rows))
+    (List.sort compare (Hashtbl.fold (fun p _ acc -> p :: acc) groups []));
+  Buffer.contents b
+
+(** A table in either format, and (format 2) its groups' digests, by group
+    prefix.  A summary (IDENT SUMMARY) has the digests and no rows. *)
+let parse (s : string) : t * (string * string) list =
+  let t = { decls = Hashtbl.create 1024; tags = Hashtbl.create 256;
+            fns = Hashtbl.create 256 } in
+  let groups = ref [] in
+  (match String.split_on_char '\n' s with
+   | h :: lines when h = header ->
+     let cur = ref None in
+     List.iter (fun line ->
+         match String.split_on_char ' ' line, !cur with
+         | [ "m"; g; d ], _ ->
+           let p = group_prefix g in
+           cur := Some p; groups := (p, d) :: !groups
+         | [ r; h ], Some p -> Hashtbl.replace t.decls (p ^ r) h
+         | [ "t"; k; v ], None -> Hashtbl.replace t.tags k (expand_tags v)
+         | [ "x"; k; sg; m ], None -> Hashtbl.replace t.fns k (sg, m)
+         | _ -> ()) lines
+   | lines ->
+     let is_hex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') in
+     List.iter (fun line ->
+         match String.split_on_char ' ' line with
+         | [ "d"; k; v ] ->
+           Hashtbl.replace t.decls k
+             (if String.length v >= 12 && String.for_all is_hex v then b64_of_hex12 v else v)
+         | [ "t"; k; v ] -> Hashtbl.replace t.tags k v
+         | [ "x"; k; sg; m ] -> Hashtbl.replace t.fns k (sg, m)
+         | _ -> ()) lines);
+  (t, List.rev !groups)
+
+let of_string (s : string) : t = fst (parse s)
 
 (** A digest of a declaration table alone (the build's CAS tag). *)
 let digest (decls : (string, string) Hashtbl.t) : string =
@@ -201,16 +322,33 @@ let ir_global (t : t) : string =
   Printf.sprintf "\n@__march_shell_ident = constant [%d x i8] c\"%s\\00\"\n"
     (String.length s + 1) (Buffer.contents b)
 
-let of_string (s : string) : t =
-  let t = { decls = Hashtbl.create 1024; tags = Hashtbl.create 256;
-            fns = Hashtbl.create 256 } in
-  List.iter (fun line ->
-      match String.split_on_char ' ' line with
-      | [ "d"; k; v ] -> Hashtbl.replace t.decls k v
-      | [ "t"; k; v ] -> Hashtbl.replace t.tags k v
-      | [ "x"; k; sg; m ] -> Hashtbl.replace t.fns k (sg, m)
-      | _ -> ()) (String.split_on_char '\n' s);
-  t
+(** The node's table, as far as [client_decls] need it, fetched with [ask]
+    (a request line -> the reply's decoded table, or [Error reply]): the
+    summary (types, linkable functions and group digests), then only the
+    groups whose digest differs from the client's; a group that agrees takes
+    the client's own rows, which are the node's.  A node that predates the
+    summary (ERR unknown_verb) is asked for the whole table (IDENT). *)
+let fetch ~(ask : string -> (string, string) result)
+    (client_decls : (string, string) Hashtbl.t) : (t, string) result =
+  let starts p s = String.length s >= String.length p && String.sub s 0 (String.length p) = p in
+  match ask "IDENT SUMMARY" with
+  | Error r when starts "ERR unknown_verb" r -> Result.map of_string (ask "IDENT")
+  | Error r -> Error r
+  | Ok s ->
+    let node, digests = parse s in
+    let mine = group_rows client_decls in
+    let want = List.filter_map (fun (p, d) ->
+        match Hashtbl.find_opt mine p with
+        | Some rows when group_digest rows = d ->
+          List.iter (fun (r, h) -> Hashtbl.replace node.decls (p ^ r) h) rows; None
+        | Some _ -> Some p
+        | None -> None) digests in
+    if want = [] then Ok node
+    else match ask ("IDENT GROUPS " ^ String.concat "," (List.map group_name want)) with
+      | Error r -> Error r
+      | Ok s ->
+        Hashtbl.iter (Hashtbl.replace node.decls) (of_string s).decls;
+        Ok node
 
 (** A key as an operator reads it: [Mod.f:name] -> "Mod.name",
     [Mod.t:T] -> "type Mod.T", [Mod.<header>] -> "Mod's imports".  Keys are
@@ -306,6 +444,12 @@ type check = { node : t; client_decls : (string, string) Hashtbl.t; regions : re
 let check_of ~(node : t) (decls : Ast.decl list) : check =
   let client_decls, regions = of_decls decls in
   { node; client_decls; regions }
+
+(** [check_of] with the node's table fetched by [fetch] ([ask] as there). *)
+let fetch_check ~(ask : string -> (string, string) result) (decls : Ast.decl list)
+  : (check, string) result =
+  let client_decls, regions = of_decls decls in
+  Result.map (fun node -> { node; client_decls; regions }) (fetch ~ask client_decls)
 
 (** The declarations that differ anywhere in the program, for a summary when
     a session starts. *)

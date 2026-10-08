@@ -18,11 +18,21 @@
  *        timeout_ms:<t> caps:<csv|-> src_b64:<b64> so_b64:<b64>
  *     -> OK <b64 result> out:<b64> | PANIC <b64 msg> out:<b64>
  *        | TIMEOUT out:<b64> | TIMEOUT uncancellable | ERR <code> [detail]
- *   IDENT
- *     -> OK <b64 table> | ERR no_ident
- *        The build's shell identity (lib/jit/shell_ident.ml): a hash per
- *        source declaration and each variant type's constructor tags, which
- *        the client compares with its own source before running an input.
+ *   IDENT | IDENT SUMMARY | IDENT GROUPS <group,group,...>
+ *     -> OK <b64 table> | ERR no_ident | ERR ident_format | ERR bad_ident_request
+ *        The build's shell identity (lib/jit/shell_ident.ml, format 2): a
+ *        hash per source declaration, grouped by module with a digest per
+ *        group, each variant type's constructor tags, and the functions a
+ *        fragment may call, which the client compares with its own source
+ *        before running an input.  IDENT is the whole table; SUMMARY all of
+ *        it but the declaration rows; GROUPS the rows of the named groups.
+ *        A client asks for the summary, then for only the groups whose
+ *        digest differs from its own (none, for an up-to-date checkout).
+ *        A node built before format 2 answers SUMMARY with
+ *        ERR unknown_verb, and the client asks it for IDENT (format 1, which
+ *        it still reads); a client built before format 2 reads none of a
+ *        format-2 table's declarations, so it refuses every input that
+ *        reaches one ("... is not in the node's build").
  *   BYE
  *
  * <sig> is the deploy key's signature over the line without its signature
@@ -281,6 +291,54 @@ static void cancel_task(int64_t pid) {
     if (p) atomic_store_explicit(&p->cancel_requested, 1, memory_order_release);
     march_reclaim_exit();
     march_preempt_request = 1;
+}
+
+/* ── the identity table (IDENT) ──────────────────────────────────────── */
+
+#define IDENT_HEADER "march-shell-ident 2"
+
+/* Whether [name] (of [len] bytes) is one of the comma-separated [list]. */
+static int ident_listed(const char *list, const char *name, size_t len) {
+    const char *p = list;
+    while (*p) {
+        const char *e = strchr(p, ',');
+        size_t k = e ? (size_t)(e - p) : strlen(p);
+        if (k == len && memcmp(p, name, len) == 0) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* A part of the format-2 table [t] (lib/jit/shell_ident.ml, "the table as
+ * text"): with [groups] NULL the summary, every line but the declaration
+ * rows (the header, the `t` and `x` rows, and each group's `m <group>
+ * <digest>` line); otherwise the header and, for each group named in the
+ * comma-separated [groups], its `m` line and its rows.  0 with a malloc'd
+ * [*out] of [*n] bytes, -1 if [t] is not format 2, -2 out of memory. */
+static int ident_select(const char *t, const char *groups, char **out, size_t *n) {
+    size_t hl = strlen(IDENT_HEADER);
+    if (strncmp(t, IDENT_HEADER, hl) != 0 || t[hl] != '\n') return -1;
+    char *o = (char *)malloc(strlen(t) + 1);
+    if (!o) return -2;
+    size_t len = 0;
+    int in_groups = 0, keep = 1;
+    for (const char *p = t; *p; ) {
+        const char *e = strchr(p, '\n');
+        size_t k = e ? (size_t)(e - p) + 1 : strlen(p);
+        if (p == t) keep = 1;                       /* the header */
+        else if (k > 2 && p[0] == 'm' && p[1] == ' ') {
+            in_groups = 1;
+            const char *g = p + 2, *sp = memchr(g, ' ', k - 2);
+            keep = !groups || (sp && ident_listed(groups, g, (size_t)(sp - g)));
+        } else keep = in_groups ? groups != NULL && keep : groups == NULL;
+        if (keep) { memcpy(o + len, p, k); len += k; }
+        p += k;
+    }
+    o[len] = '\0';
+    *out = o;
+    *n = len;
+    return 0;
 }
 
 /* ── wire helpers ────────────────────────────────────────────────────── */
@@ -760,15 +818,28 @@ static void *session_thread(void *arg) {
                      range * SHELL_SLOTS_PER, range * SHELL_SLOTS_PER + SHELL_SLOTS_PER - 1,
                      SHELL_TRIPLE, session);
             send_line(fd, b);
-        } else if (strcmp(buf, "IDENT") == 0) {
+        } else if (strcmp(buf, "IDENT") == 0 || strncmp(buf, "IDENT ", 6) == 0) {
             /* The build's shell identity table (lib/jit/shell_ident.ml),
-             * which the client compares with its own source.  Public: it
-             * holds hashes of the source, not the source. */
+             * which the client compares with its own source, whole or a
+             * part (ident_select).  Public: it holds hashes of the source,
+             * not the source. */
             static void *self;
             if (!self) self = dlopen(NULL, RTLD_NOW);
             const char *ident = self ? (const char *)dlsym(self, "__march_shell_ident") : NULL;
             if (!ident) { send_line(fd, "ERR no_ident"); continue; }
-            char *b64 = b64_encode((const unsigned char *)ident, strlen(ident));
+            size_t n = strlen(ident);
+            char *part = NULL;
+            if (buf[5] == ' ') {
+                const char *arg = buf + 6;
+                int rc;
+                if (strcmp(arg, "SUMMARY") == 0) rc = ident_select(ident, NULL, &part, &n);
+                else if (strncmp(arg, "GROUPS ", 7) == 0) rc = ident_select(ident, arg + 7, &part, &n);
+                else { send_line(fd, "ERR bad_ident_request"); continue; }
+                if (rc == -1) { send_line(fd, "ERR ident_format"); continue; }
+                if (rc != 0) { send_line(fd, "ERR out_of_memory"); continue; }
+            }
+            char *b64 = b64_encode((const unsigned char *)(part ? part : ident), n);
+            free(part);
             if (!b64) { send_line(fd, "ERR out_of_memory"); continue; }
             send_all(fd, "OK ", 3);
             send_line(fd, b64);
