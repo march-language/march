@@ -3068,8 +3068,12 @@ let compile filename =
       ~diags:(diags @ contract) ~is_user_file ~typecheck_env
       ~rejected:(frontend_rejected || contract_rejected ())
   end;
+  (* Under --shell, only errors: they stop the session.  The program's
+     warnings and refinement hints are the build's business, and a real
+     project (forgepm) printed screens of them before the first prompt. *)
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      if is_user_file d then
+      if is_user_file d
+         && (!shell_socket = None || d.severity = March_errors.Errors.Error) then
         emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
     ) diags;
   (* --shell: the program typechecked as the node's build did; hand it to the

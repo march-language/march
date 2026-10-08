@@ -16596,6 +16596,44 @@ let test_tir_verify_rc_perceus_bugs_fixed () =
       ("nested projection, parent consumed", "line", rc_bug_nested_projection);
       ("record update from a find result", "pick", rc_bug_record_update) ]
 
+(* ── Dce.prune_unreachable ~roots (the remote shell's fragments) ─────────
+
+   A REPL or shell fragment lowers together with the program it attaches to,
+   and the program's library modules each declare a `main` (forge task
+   modules).  Default roots keep every function named `main` or `*.main`, so
+   `1 + 41` carried ~196 functions of forgepm's build tasks and declared their
+   file and process capabilities, which the node's policy then refused.
+   `~roots` replaces the defaults with the fragment's own entry. *)
+let test_prune_roots_ignores_other_mains () =
+  let entry = mk_fn "main" (app "helper" []) in
+  let helper = mk_fn "helper" (ilit 1 |> fun a -> March_tir.Tir.EAtom a) in
+  let task = mk_fn "Forge.Task.main" (app "task_only" []) in
+  let task_only = mk_fn "task_only" (March_tir.Tir.EAtom (ilit 2)) in
+  let m = mk_module [ entry; helper; task; task_only ] in
+  let names m = List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name) m.March_tir.Tir.tm_fns in
+  Alcotest.(check (list string)) "default roots keep every main"
+    [ "Forge.Task.main"; "helper"; "main"; "task_only" ]
+    (List.sort compare (names (March_tir.Dce.prune_unreachable m)));
+  Alcotest.(check (list string)) "~roots keeps the entry and what it reaches"
+    [ "helper"; "main" ]
+    (List.sort compare (names (March_tir.Dce.prune_unreachable ~roots:[ "main" ] m)))
+
+let test_prune_roots_keeps_exports () =
+  let entry = mk_fn "main" (March_tir.Tir.EAtom (ilit 1)) in
+  let kept = mk_fn "kept" (March_tir.Tir.EAtom (ilit 2)) in
+  let m = { (mk_module [ entry; kept ]) with March_tir.Tir.tm_exports = [ "kept" ] } in
+  Alcotest.(check (list string)) "tm_exports stay roots under ~roots"
+    [ "kept"; "main" ]
+    (List.sort compare
+       (List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name)
+          (March_tir.Dce.prune_unreachable ~roots:[ "main" ] m).March_tir.Tir.tm_fns))
+
+let prune_roots_tests =
+  [ ( "prune_roots",
+      [ Alcotest.test_case "a fragment's roots ignore other mains" `Quick
+          test_prune_roots_ignores_other_mains;
+        Alcotest.test_case "exports stay roots" `Quick test_prune_roots_keeps_exports ] ) ]
+
 let codegen_suites =
   [
       ( "tir_verify", [
@@ -17667,6 +17705,7 @@ let codegen_suites =
   @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
   @ Test_trmc.suites (* TRMC Phase 1: tail-recursion-modulo-cons eligibility *)
+  @ prune_roots_tests
   @ Test_provenance.suites (* A2: provenance side table + --debug-info *)
   @ Test_kind.suites (* type kinds: the per-type table (specs/2026-09-10-type-kinds-design.md) *)
   @ Test_rc_trace.suites (* --rc-trace site ids + scripts/gc-trace-report.py (plan §8 A3) *)
