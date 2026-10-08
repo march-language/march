@@ -412,6 +412,14 @@ git log is authoritative for exact commits.
   with no guard page, and its first stack page was made writable one page past
   that reservation. On Linux that page was usually the code of the patch just
   loaded, so the next call into the patch crashed with SIGSEGV.
+- Compiled `to_string` (and so `println` of a value) names the constructors of
+  every type declared inside a module, whatever its shape. A niche-shaped
+  module type such as `type Opt = Nope | Got(String)` printed `#<tag:0>` and
+  `#<tag:1>` compiled while the interpreter printed `Nope` and `Got("hi")`.
+- Compiled code frees the payload of a niche-shaped stdlib value when the value
+  dies. `HttpServer.Upgrade`, `ClusterNode.RegisterError`, `Session.Outcome`,
+  `RemoteCall.Verdict` and `Control.CtlGate` values released only their outer
+  cell and leaked what they held.
 - **Nested constructor patterns pick the right arm in compiled code when a
   constructor name is also used by a stdlib type.** With a user
   `type Tree = Leaf | Node(Tree, Int, Tree)` (stdlib `OrderedMap` also declares

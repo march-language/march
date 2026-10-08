@@ -119,8 +119,75 @@ let of_module ?(unboxing = true) (m : Tir.tir_module) : table =
   build ~externs:m.Tir.tm_externs ~unboxing
     ~collision_set:(Collision_set.compute m.Tir.tm_types) m.Tir.tm_types
 
+(* ── One spelling per type ─────────────────────────────────────────────
+
+   A type reaches this table under two spellings: its declaration name, which
+   lowering qualifies for anything declared inside a module
+   ([GlobalRegistry.Names], [Main.Inner.Id]), and its SHORT name, which is
+   what every construction site uses ([emit_alloc_ctor] takes the type from a
+   "Type.Ctor" key such as "Names.Names").  Keyed by whichever string a caller
+   held, the two disagreed for every module-declared newtype, niche and
+   unboxable type: the short name misses the qualified declaration and falls
+   back to Boxed, which is what the program actually builds, while the
+   qualified name finds the declaration and answers Newtype/Niche/Unboxed.
+   Consumers that held the qualified spelling were then handed a layout no
+   value has: compiled [to_string] printed [#<tag:0>] for every module-declared
+   ADT (the constructor descriptors skipped it as "unboxed"), and the drop
+   pass refused to destructure niche-shaped library types it believed were
+   niches (specs/progress/2026-10-07-kind-canonical-spelling.md).
+
+   So every name-keyed question below is asked under ONE spelling: the short
+   name, because that is the spelling the value was built under.  A short
+   name declared by two or more modules is already forced Boxed by the
+   collision set, so the short name can never resolve to a different type.
+
+   The exception is a type whose values the C runtime builds in their
+   DECLARED layout, where the declaration, not the construction site, fixes
+   the representation.  Each entry names the C function that commits to it:
+   - [CsvRow] ([CsvEof | Row(List(String))], a niche): [march_csv_next_row]
+     returns raw NULL for [CsvEof] and the bare payload for [Row]
+     (test/native/csv_niche_row.march).
+   [Bytes] and [Process.LiveProcess] also cross the C boundary and are
+   deliberately NOT listed: the runtime builds both as boxed heap cells,
+   which is exactly the short-name answer. *)
+let declared_layout_types = [ "CsvRow" ]
+
+let canonical_name (t : table) (name : string) : string =
+  let s = Collision_set.short_name name in
+  if List.mem s declared_layout_types then
+    match List.filter_map (function
+        | Tir.TDVariant (q, _) when String.equal (Collision_set.short_name q) s -> Some q
+        | _ -> None) t.k_type_defs with
+    | [ q ] -> q
+    | _ -> name
+  else s
+
+(** The DECLARATION a name refers to, for SHAPE questions ("what does a value
+    of this type contain?"), which do not depend on the layout it is built
+    in: a boxed [P2(Float, Float)] still holds two Floats.  Exact name first,
+    then the one declaration whose short name matches; ambiguous or unknown
+    names resolve to themselves.  Representation questions use
+    [canonical_name] instead, which deliberately resolves the other way. *)
+let declaration_of (t : table) (name : string) : string =
+  let decl_name = function
+    | Tir.TDVariant (n, _) | Tir.TDRecord (n, _) | Tir.TDClosure (n, _) -> n in
+  if List.exists (fun td -> String.equal (decl_name td) name) t.k_type_defs then name
+  else
+    let s = Collision_set.short_name name in
+    match List.filter (fun td -> String.equal (Collision_set.short_name (decl_name td)) s)
+            t.k_type_defs with
+    | [ td ] -> decl_name td
+    | _ -> name
+
+let canonical_ty (t : table) (ty : Tir.ty) : Tir.ty =
+  match ty with
+  | Tir.TCon (n, args) ->
+    let c = canonical_name t n in
+    if String.equal c n then ty else Tir.TCon (c, args)
+  | _ -> ty
+
 let unboxed_of_type_name (t : table) (name : string) =
-  Hashtbl.find_opt t.k_unboxed name
+  Hashtbl.find_opt t.k_unboxed (canonical_name t name)
 
 let unboxed_of_llvm_ty (t : table) (lty : string) =
   match Hashtbl.find_opt t.k_unboxed_by_llvm lty with
@@ -246,8 +313,10 @@ let is_actor_struct_type (t : table) (name : string) : bool =
     keeps BOTH on the Boxed path in lock-step, so a two-handler-one-nullary
     message shape is encoded and decoded as a tagged heap cell (no crash from an
     encode/decode repr split). *)
-let is_niche_shaped (t : table) (name : string) : bool =
-  if Migrate_msg_pins.has_actor_msg_repr name then false
+let is_niche_shaped (t : table) (name0 : string) : bool =
+  let name = canonical_name t name0 in
+  if Migrate_msg_pins.has_actor_msg_repr name0
+  || Migrate_msg_pins.has_actor_msg_repr name then false
   else if Collision_set.is_colliding t.k_collision name then false
   else
   match find_variant t name with
@@ -298,33 +367,21 @@ let rec niche_payload_ok (t : table) (ty : Tir.ty) : bool =
     representation has no runtime tag slot, so a colliding type's
     globally-unique ctor tag ([Llvm_toplevel.build_ctor_info]) would be
     unreadable at a dispatch site that only knows the short name. *)
-and repr_of (t : table) (ty : Tir.ty) : repr =
+and repr_of (t : table) (ty0 : Tir.ty) : repr =
+  (* One spelling per type: see [canonical_name].  This subsumes the earlier
+     repr_of-only rule (a qualified name whose short name has no declaration
+     answers as the short name), which fixed a live SIGSEGV: a nested type
+     named like a runtime one ([mod UserValues do type Down = Down(Int) end])
+     built under its qualified key as a newtype and matched bare as a boxed
+     cell (test/native/qualified_newtype_repr).  The actor-message pin is
+     checked under the spelling the caller held as well, so canonicalising can
+     only ever add a Boxed answer, never remove one. *)
+  let pinned0 = match ty0 with
+    | Tir.TCon (n0, _) -> Migrate_msg_pins.has_actor_msg_repr n0
+    | _ -> false in
+  let ty = canonical_ty t ty0 in
   match ty with
-  (* One answer per declaration, whatever the spelling.  A stdlib or
-     nested-module type is registered under its QUALIFIED name, but
-     construction and matching ask with whatever key lowering gave them, and
-     that is usually the BARE name, which misses the registration and lands
-     on Boxed below.  The qualified spelling used to find the declaration and
-     answer Newtype/Unboxed: [GlobalRegistry.Names], [Map.Map], [Bytes.Bytes]
-     and [Decimal.Decimal] all disagreed with their bare spelling.  Anything
-     reading the qualified spelling was then handed a layout the program
-     never builds.  The worst case: a nested type named like a runtime one
-     ([mod UserValues do type Down = Down(Int) end]) is constructed under its
-     qualified key, so as a newtype, and matched under the bare name as a
-     boxed cell, which made a SIGSEGV (test/native/qualified_newtype_repr).  A
-     qualified name whose short name names no declaration of its own answers
-     as that short name does.  One whose short name does name another type
-     keeps its own lookup: the two are different types. *)
-  | Tir.TCon (name, args)
-    when String.contains name '.'
-         && (let short = Collision_set.short_name name in
-             find_variant t short = None
-             && not (Hashtbl.mem t.k_unboxed short)) ->
-    repr_of_spelled t (Tir.TCon (Collision_set.short_name name, args))
-  | _ -> repr_of_spelled t ty
-
-and repr_of_spelled (t : table) (ty : Tir.ty) : repr =
-  match ty with
+  | Tir.TCon _ when pinned0 -> Boxed
   (* Finding-19 memory-safety fix: force actor message variant types (<Actor>_Msg)
      to Boxed regardless of their ctor shape.  A single-handler actor's message
      would otherwise classify Newtype (raw payload, NO tag) and a two-handler
@@ -395,9 +452,11 @@ and payload_needs_tag (t : table) (ty : Tir.ty) : bool =
     scalar payload (Inc(10) stored as (10<<1)|1) is untagged again at the
     match binding; decoding it as tagged=false hands the raw tagged word to
     the branch body (observed as count = 21 + 11 instead of 10 + 5). *)
-let niche_repr_of_concrete (t : table) (name : string) : repr option =
+let niche_repr_of_concrete (t : table) (name0 : string) : repr option =
+  let name = canonical_name t name0 in
   (* Finding-19: actor message types are Boxed (see [repr_of]) — never niche. *)
-  if Migrate_msg_pins.has_actor_msg_repr name then None
+  if Migrate_msg_pins.has_actor_msg_repr name0
+  || Migrate_msg_pins.has_actor_msg_repr name then None
   (* Same-short-name colliding type — never niche, same rationale as
      [repr_of]/[is_niche_shaped].  This function independently re-derives the
      ctor-shape classification for a NON-GENERIC TCon rather than delegating
@@ -600,7 +659,8 @@ let niche_repr_of_concrete (t : table) (name : string) : repr option =
     Perceus must emit EIncRC/EDecRC ops for values of this type. Diverges
     from [borrowable] on TFn / bare TVar (true here) and on TTuple / TRecord
     — see the module doc before changing ANY arm. *)
-let needs_rc_of (t : table) : Tir.ty -> bool = function
+let needs_rc_of (t : table) : Tir.ty -> bool = fun ty ->
+  match canonical_ty t ty with
   | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
   | Tir.TCon (n, _) when Hashtbl.mem t.k_unboxed n -> false
     (* inline struct value: no cell, no header, nothing to count — module doc *)
@@ -621,7 +681,8 @@ let needs_rc_of (t : table) : Tir.ty -> bool = function
     inference (the borrowed-calling-convention fixpoint). Diverges from
     [needs_rc] on TTuple / TRecord and TFn / bare TVar — see the module doc
     before changing ANY arm. *)
-let borrowable_of (t : table) : Tir.ty -> bool = function
+let borrowable_of (t : table) : Tir.ty -> bool = fun ty ->
+  match canonical_ty t ty with
   | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
   | Tir.TCon (n, _) when Hashtbl.mem t.k_unboxed n -> false
     (* copied at every boundary; no reference, so no ownership — module doc *)
@@ -657,7 +718,8 @@ let borrowable_of (t : table) : Tir.ty -> bool = function
 
 (* ── LLVM spelling — ported from llvm_ctx.ml ─────────────────────────── *)
 
-let llvm_ty_of (t : table) : Tir.ty -> string = function
+let llvm_ty_of (t : table) : Tir.ty -> string = fun ty ->
+  match canonical_ty t ty with
   | Tir.TInt    -> "i64"
   | Tir.TFloat  -> "double"
   | Tir.TBool   -> "i64"   (* booleans as i64 for uniform field layout *)
@@ -693,7 +755,8 @@ let simd_tag_of_name (name : string) : int option =
   | "F32x4" -> Some 0 | "F64x2" -> Some 1 | "I32x4" -> Some 2
   | "I64x2" -> Some 3 | "U8x16" -> Some 4 | _ -> None
 
-let layout_of (t : table) : Tir.ty -> layout = function
+let layout_of (t : table) : Tir.ty -> layout = fun ty ->
+  match canonical_ty t ty with
   | Tir.TInt | Tir.TBool | Tir.TUnit -> Imm
   | Tir.TCon ("Atom", []) -> Imm
   | Tir.TFloat -> Flt
@@ -718,7 +781,10 @@ let rec reachable_has (t : table) (visited : (string, unit) Hashtbl.t)
   | Tir.TRecord fs -> List.exists (fun (_, f) -> reachable_has t visited pred f) fs
   | Tir.TFn (args, ret) -> List.exists (reachable_has t visited pred) (ret :: args)
   | Tir.TPtr inner -> reachable_has t visited pred inner
-  | Tir.TCon (name, params) ->
+  | Tir.TCon (name0, params) ->
+    (* Shape, not layout: resolve to the declaration (see [declaration_of]),
+       so both spellings of a type walk the same fields. *)
+    let name = declaration_of t name0 in
     List.exists (reachable_has t visited pred) params
     || (if Hashtbl.mem visited name then false
         else begin

@@ -11121,6 +11121,44 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/csv_niche_row.expected native_csv_niche_row.out)))
 
+; ── Compiled to_string names the constructors of module-declared ADTs ───
+; Every type declared inside a module (stdlib or user) printed `#<tag:N>`
+; compiled while the interpreter printed the constructor: the kind table
+; answered "newtype" for the qualified spelling the descriptor pass held and
+; "boxed" for the short spelling every value is built under.  Run interpreted
+; AND compiled against the SAME .expected; 8 of its 12 lines were red before
+; either spelling fix, and the niche-shaped ones (3) stayed red after the
+; repr_of-only one (specs/progress/2026-10-07-kind-canonical-spelling.md). ──
+(rule
+ (targets native_to_string_module_types native_to_string_module_types.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/to_string_module_types.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_module_types
+        native/to_string_module_types.march)
+   (with-stdout-to native_to_string_module_types.out
+        (system "./native_to_string_module_types")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_module_types.expected native_to_string_module_types.out)))
+
+(rule
+ (targets native_to_string_module_types.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/to_string_module_types.march))
+ (action
+  (with-stdout-to native_to_string_module_types.interp.out
+   (run %{exe:../bin/main.exe} native/to_string_module_types.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_module_types.expected native_to_string_module_types.interp.out)))
+
 ; ── file_close / csv_close return :ok on BOTH backends ─────────────────
 ; The typechecker said Unit (file_close) / Atom (csv_close), the interpreter
 ; returned :ok, and compiled C returned a heap Ok(()) cell, so a compiled
