@@ -11106,7 +11106,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; answered "newtype" for the qualified spelling the descriptor pass held and
 ; "boxed" for the short spelling every value is built under.  Run interpreted
 ; AND compiled against the SAME .expected; 8 of its 12 lines were red before
-; the fix (specs/progress/2026-10-07-kind-canonical-spelling.md). ──
+; either spelling fix, and the niche-shaped ones (3) stayed red after the
+; repr_of-only one (specs/progress/2026-10-07-kind-canonical-spelling.md). ──
 (rule
  (targets native_to_string_module_types native_to_string_module_types.out)
  (deps (file %{exe:../bin/main.exe})

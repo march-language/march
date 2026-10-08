@@ -79,8 +79,10 @@ answered "float-free".
 ## Proof
 
 - New `test/native/to_string_module_types.march`, run interpreted AND compiled
-  against one `.expected`: **8 of its 12 lines were red on the pre-fix
-  compiler** (`#<tag:0>` / `#<tag:1>`), all 12 green after. The four that
+  against one `.expected`: **8 of its 12 lines were red before either fix**
+  (`#<tag:0>` / `#<tag:1>`); **3 stayed red with the repr_of-only fix** (the
+  niche-shaped `Got`/`Nope` lines, because the descriptor pass asks
+  `is_niche_shaped` first); all 12 green after this one. The four that
   matched before (a multi-field and three multi-constructor values) are boxed
   under either spelling, so they are the control that the fix only moves the
   types whose spellings disagreed.
