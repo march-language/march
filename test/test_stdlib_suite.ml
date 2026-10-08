@@ -3054,7 +3054,7 @@ let test_cas_cache_hit () =
   let tmp_dir = Filename.temp_file "march_cas_test_" "" in
   Sys.remove tmp_dir;
   Unix.mkdir tmp_dir 0o755;
-  let store = March_cas.Cas.create ~project_root:tmp_dir in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:tmp_dir () in
   let compile_count = ref 0 in
   let fake_compile _scc =
     incr compile_count;
