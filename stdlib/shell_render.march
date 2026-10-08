@@ -6,8 +6,9 @@
 -- record, tuple and ADT the type reaches, each passing the element limit
 -- down.  The rules (R5.7 of specs/plans/2026-09-28-observe-recon-shell-plan.md):
 --
--- - A collection (List, Array, Map, Set) shows at most `limit` elements and
---   then `… n more`.  A string shows at most `limit` characters (codepoints),
+-- - A collection (List, Array, Map, Set, and the other stdlib containers:
+--   HashMap, OrderedMap, SortedSet, Deque, Queue, RRB.Vec, NativeArray) shows
+--   at most `limit` elements and then `… n more`.  A string shows at most `limit` characters (codepoints),
 --   quoted and escaped, then `… n more chars`.  The limit applies at every
 --   depth; `limit <= 0` means no limit.
 -- - Records, tuples and constructors render field by field, in derive Show's
@@ -94,6 +95,22 @@ mod ShellRender do
     end
   end
 
+  doc """
+  `s` unquoted, cut after `limit` codepoints with `… n more chars`
+  (`limit <= 0` keeps all of it): the shell prints a string at the top of a
+  result this way, and the payload of a top-level one-field constructor
+  (`Ok("…")`, as `Actor.inspect_state` returns its already rendered state).
+  """
+  fn raw(s : String, limit : Int) : String do
+    let len = string_byte_length(s)
+    let cut = if limit > 0 do cp_offset(s, 0, limit) else len end
+    if cut >= len do s
+    else
+      let more = string_grapheme_count(s) - limit
+      string_slice(s, 0, cut) ++ "… " ++ int_to_string(more) ++ " more chars"
+    end
+  end
+
   doc "The most bytes `show_cut` keeps of a hand-written Show impl's string: 16 KiB."
   fn show_cap() : Int do 16384 end
 
@@ -175,6 +192,53 @@ mod ShellRender do
   pfn entry(p, fk, fv) do
     let (k, v) = p
     fk(k) ++ " => " ++ fv(v)
+  end
+
+  pfn entries(m, limit, fk, fv) do
+    items(m, limit, fn p -> entry(p, fk, fv))
+  end
+
+  doc """
+  A HashMap: `HashMap{k => v, … n more}`, as `map`, in the map's hash
+  order.
+  """
+  fn hash_map(m, limit : Int, fk, fv) : String do
+    "HashMap{" ++ entries(HashMap.to_list(m), limit, fk, fv) ++ "}"
+  end
+
+  doc """
+  An OrderedMap: `OrderedMap{k => v, … n more}`, as `map`, in key order.
+  """
+  fn ordered_map(m, limit : Int, fk, fv) : String do
+    "OrderedMap{" ++ entries(OrderedMap.to_list(m), limit, fk, fv) ++ "}"
+  end
+
+  doc "A SortedSet: `SortedSet{1, 2, … n more}`, as `list`, in order."
+  fn sorted_set(s, limit : Int, f) : String do
+    "SortedSet{" ++ items(SortedSet.to_list(s), limit, f) ++ "}"
+  end
+
+  doc "A Deque: `Deque[1, 2, … n more]`, as `list`, front to back."
+  fn deque(d, limit : Int, f) : String do
+    "Deque[" ++ items(Deque.to_list(d), limit, f) ++ "]"
+  end
+
+  doc "A Queue: `Queue[1, 2, … n more]`, as `list`, front to back."
+  fn queue(q, limit : Int, f) : String do
+    "Queue[" ++ items(Queue.to_list(q), limit, f) ++ "]"
+  end
+
+  doc "An RRB vector: `RRB.Vec[1, 2, … n more]`, as `list`, in index order."
+  fn rrb_vec(v, limit : Int, f) : String do
+    "RRB.Vec[" ++ items(RRB.to_list(v), limit, f) ++ "]"
+  end
+
+  doc """
+  A NativeArray, given as the list of its elements (its family's
+  `to_list_*`): `NativeArray[1, 2, … n more]`, as `list`.
+  """
+  fn native_array(xs : List(a), limit : Int, f : a -> String) : String do
+    "NativeArray[" ++ items(xs, limit, f) ++ "]"
   end
 
   -- ── records, tuples, constructors ──────────────────────────────────────

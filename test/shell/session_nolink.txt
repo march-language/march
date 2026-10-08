@@ -1,0 +1,2 @@
+spawn(Counter)
+Actor.list(intro)

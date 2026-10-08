@@ -2653,6 +2653,22 @@ void march_repl_set(int64_t slot, int64_t val) {
     march_repl_slots[(size_t)slot] = val;
 }
 
+/* The release of each slot's value, when the fragment that stored it gave
+ * one: its type's deep drop (the remote shell's init fragments, see
+ * lib/tir/llvm_repl.ml emit_repl_expr).  A slot is untyped here, so a
+ * release must come from code that knows the type: march_decrc frees only
+ * the top cell of a list or record, and a Float slot holds raw IEEE bits that
+ * IS_HEAP_PTR cannot tell from a pointer.  NULL for a scalar slot. */
+static void (*march_repl_slot_drops[MARCH_REPL_NSLOTS])(void *);
+
+void march_repl_set_drop(int64_t slot, void (*drop)(void *)) {
+    march_repl_slot_drops[(size_t)slot] = drop;
+}
+
+void (*march_repl_get_drop(int64_t slot))(void *) {
+    return march_repl_slot_drops[(size_t)slot];
+}
+
 /* ── Record shape registry + record introspection builtins ───────────────
  *
  * Native records are heap cells with tag 0 and fields stored SORTED BY NAME

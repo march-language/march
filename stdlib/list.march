@@ -299,7 +299,7 @@ mod List do
       march> 
       ["foo", "bar"]
   """
-  fn filter(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)}) : {List({a | p(_)}) | subset(elts(_), elts(xs))} do
+  fn filter(xs : List(a), pred : a -> Bool[p]) : {List(a[p]) | subset(elts(_), elts(xs))} do
     -- Natural style on purpose: TRMC makes it a single-traversal loop.
     match xs do
     Nil        -> Nil
@@ -502,7 +502,7 @@ mod List do
   -- ---- Searching ----
 
   doc "Returns the first element satisfying `pred`, or None. The element, when present, is known to satisfy `pred` (an abstract refinement `p`, as for `filter`)."
-  fn find(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)}) : Option({a | p(_)}) do
+  fn find(xs : List(a), pred : a -> Bool[p]) : Option(a[p]) do
     match xs do
     Nil        -> None
     Cons(h, t) -> if pred(h) do Some(h) else find(t, pred) end
@@ -621,7 +621,7 @@ mod List do
   end
 
   doc "Returns the longest prefix of elements satisfying `pred`. Every element of the result is known to satisfy `pred` (an abstract refinement `p`, as for `filter`)."
-  fn take_while(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do
+  fn take_while(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
     -- Natural style on purpose: TRMC makes it a single-traversal loop, and
     -- the element contract is proved through the self-call (an accumulator
     -- through a local helper and `reverse` proves nothing).

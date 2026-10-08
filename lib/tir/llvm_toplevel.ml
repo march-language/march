@@ -791,6 +791,48 @@ let emit_atom_show_table ctx =
          [{ i32, ptr, ptr } { i32 65535, ptr @march_atom_namer_unregister, ptr null }]\n"
   end
 
+(** Every (registry key, release function) pair [m]'s closure and actor
+    allocations ask for, in walk order: a [$Clo_*] or actor allocation whose
+    apply function [m] defines, whether or not [m] defines the release
+    function too.  [clo_drop_registration] keeps the pairs whose release is
+    defined; a REPL/shell fragment, which prunes unreachable functions after
+    [Drop.run], keeps the releases named here alive (lib/jit/repl_jit.ml). *)
+let closure_drop_wants (m : Tir.tir_module) : (string * string) list =
+  let defined = Hashtbl.create 1024 in
+  List.iter (fun (fn : Tir.fn_def) -> Hashtbl.replace defined fn.Tir.fn_name ()) m.Tir.tm_fns;
+  let acc = ref [] in
+  let note clo atoms =
+    match atoms with
+    | Tir.AVar f :: _ when Tir_names.is_clo_struct clo
+                         || Tir_names.is_actor_struct_name clo ->
+      (* A closure's key is its apply function, the code pointer at +16.  An
+         actor's field 0 holds its dispatch function as a function VALUE, a
+         closure cell whose code pointer is the dispatch's [$clo_wrap]
+         trampoline; the runtime looks the actor up by that. *)
+      let (key, drop) =
+        if Tir_names.is_clo_struct clo then
+          (Llvm_builtins.mangle_extern f.Tir.v_name, Tir_names.clo_drop_fn_name clo)
+        else
+          (Llvm_builtins.mangle_extern f.Tir.v_name ^ "$clo_wrap",
+           Tir_names.actor_drop_fn_name clo) in
+      if Hashtbl.mem defined f.Tir.v_name then acc := (key, drop) :: !acc
+    | _ -> ()
+  in
+  let rec walk (e : Tir.expr) =
+    match e with
+    | Tir.EAlloc (Tir.TCon (clo, _), atoms) -> note clo atoms
+    | Tir.EReuse (_, Tir.TCon (clo, _), atoms) -> note clo atoms
+    | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> walk a; walk b
+    | Tir.ELetRec (fns, body) ->
+      List.iter (fun (fd : Tir.fn_def) -> walk fd.Tir.fn_body) fns; walk body
+    | Tir.ECase (_, branches, default) ->
+      List.iter (fun (b : Tir.branch) -> walk b.Tir.br_body) branches;
+      Option.iter walk default
+    | _ -> ()
+  in
+  List.iter (fun (fn : Tir.fn_def) -> walk fn.Tir.fn_body) m.Tir.tm_fns;
+  List.rev !acc
+
 (** [define internal void @march_clo_drops_register()]: hands the runtime
     every (apply function, capture-release function) pair of this program, so
     a closure released without being called releases its captures
@@ -809,40 +851,13 @@ let clo_drop_registration (m : Tir.tir_module) : string =
   let defined = Hashtbl.create 1024 in
   List.iter (fun (fn : Tir.fn_def) -> Hashtbl.replace defined fn.Tir.fn_name ()) m.Tir.tm_fns;
   let pairs : (string, string option) Hashtbl.t = Hashtbl.create 64 in
-  let note clo atoms =
-    match atoms with
-    | Tir.AVar f :: _ when Tir_names.is_clo_struct clo
-                         || Tir_names.is_actor_struct_name clo ->
-      (* A closure's key is its apply function, the code pointer at +16.  An
-         actor's field 0 holds its dispatch function as a function VALUE, a
-         closure cell whose code pointer is the dispatch's [$clo_wrap]
-         trampoline; the runtime looks the actor up by that. *)
-      let (key, drop) =
-        if Tir_names.is_clo_struct clo then
-          (Llvm_builtins.mangle_extern f.Tir.v_name, Tir_names.clo_drop_fn_name clo)
-        else
-          (Llvm_builtins.mangle_extern f.Tir.v_name ^ "$clo_wrap",
-           Tir_names.actor_drop_fn_name clo) in
-      if Hashtbl.mem defined f.Tir.v_name && Hashtbl.mem defined drop then
+  List.iter (fun (key, drop) ->
+      if Hashtbl.mem defined drop then
         (match Hashtbl.find_opt pairs key with
          | None -> Hashtbl.replace pairs key (Some drop)
          | Some (Some d) when d = drop -> ()
-         | Some _ -> Hashtbl.replace pairs key None)
-    | _ -> ()
-  in
-  let rec walk (e : Tir.expr) =
-    match e with
-    | Tir.EAlloc (Tir.TCon (clo, _), atoms) -> note clo atoms
-    | Tir.EReuse (_, Tir.TCon (clo, _), atoms) -> note clo atoms
-    | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> walk a; walk b
-    | Tir.ELetRec (fns, body) ->
-      List.iter (fun (fd : Tir.fn_def) -> walk fd.Tir.fn_body) fns; walk body
-    | Tir.ECase (_, branches, default) ->
-      List.iter (fun (b : Tir.branch) -> walk b.Tir.br_body) branches;
-      Option.iter walk default
-    | _ -> ()
-  in
-  List.iter (fun (fn : Tir.fn_def) -> walk fn.Tir.fn_body) m.Tir.tm_fns;
+         | Some _ -> Hashtbl.replace pairs key None))
+    (closure_drop_wants m);
   let entries =
     Hashtbl.fold (fun apply d acc ->
         match d with Some drop -> (apply, drop) :: acc | None -> acc) pairs []

@@ -19,6 +19,26 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **The remote shell spawns the program's own actors.** `let k =
+  spawn(Counter)` in `forge shell` now starts the node's Counter: it runs
+  the node's handlers, answers `Actor.inspect_state`, has its type name in
+  `ACTORS`/`Recon`, is upgraded by a hot deploy, and outlives the session.
+  Before, the input carried its own copy of the actor, which had no state
+  renderer and no hot-reload slot. An input that could only spawn by
+  carrying its own copy (a node built by an older compiler) is refused.
+- **The `a[p]` / `Bool[p]` shorthand for abstract refinements.**
+  `fn filter(xs : List(a), pred : a -> Bool[p]) : List(a[p])` now means the
+  spelled-out `pred : ({x : a | true}) -> {Bool | _ == p(x)}` and
+  `List({a | p(_)})`. `T[p]` is `{T | p(_)}` anywhere, and a callback result
+  `D -> Bool[p]` defines `p`. The standard library's `List.filter`,
+  `List.find`, `List.take_while` and `Option.filter` are now written this way.
+  Editors using the tree-sitter grammar highlight it.
+- **`march --shell` / `forge shell` has line editing and history.** On a terminal,
+  Up/Down recall earlier inputs (kept in `~/.march/shell_history`, mode 0600,
+  last 1000), and Left/Right, Home/End, Ctrl-A/E/U/K/W/L, Delete and mid-line
+  insertion work, with UTF-8-aware cursor movement. Ctrl-C discards the line
+  without leaving the session; Ctrl-D on an empty line leaves. The terminal is
+  always restored. Pipes, `--shell-inputs` and `forge rpc` are unchanged.
 - **`march --bisect-pass FILE` finds the optimisation pass behind a
   miscompile.** It compares the compiled program's output with the
   interpreter's (or with `--expect OUT`). It then reports the smallest set of
@@ -154,7 +174,7 @@ git log is authoritative for exact commits.
   - Results render from their static type. Records, tuples and constructors
     print field by field (`{ a: 1, b: "two" }`,
     `Ok(Object([("a", Number(1.))]))`, where they used to print `#<tag:0>`),
-    strings print quoted and escaped at every depth, and `limit: N` (default
+    strings inside a value print quoted and escaped, and `limit: N` (default
     50) cuts every list, Array, Map and Set to `N` elements and every string
     to `N` characters, at every depth, not only a top-level list. A type
     with a hand-written `Show` prints through it, cut at 16 KiB; a function
@@ -344,6 +364,29 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **The remote shell's build-identity table is smaller, and a session fetches
+  only what differs.** A `--hot-reload` binary embeds the table in a compact
+  format (module prefixes written once, 48-bit hashes): 105 KB instead of
+  180 KB for the shell test node. A shell session now asks the node for a
+  summary with one digest per module (20 KB on the wire instead of 239 KB),
+  then for the modules whose digest differs from the checkout, which for an
+  up-to-date checkout is none. A shell still reads the whole table from a node
+  built before this. A shell built before this refuses every input that
+  reaches the program's code on a newer node, so upgrade the shell first.
+- **The remote shell compiles each input about twice as fast.** `forge shell`
+  / `march --shell` no longer runs clang per input: it builds the fragment's
+  object in-process with the libLLVM the REPL already loads, for the node's
+  target (including a Mac shell to a Linux node), and runs only the linker,
+  with the same arguments clang would have used. Compile time per input at
+  p50 went from 112 to 56 ms on macOS, 60 to 36 ms on Linux, and 87 to 42 ms
+  from a Mac to a Linux node. clang is still used when libLLVM or the node's
+  backend is unavailable, and `MARCH_SHELL_CLANG=1` forces it.
+- **The remote shell prints the other stdlib containers by their elements.**
+  A HashMap, OrderedMap, SortedSet, Deque, Queue, RRB.Vec or NativeArray
+  result used to print its internal structure (`HamtHashMap(HBranch(...))`,
+  `Deque(3, [1], [3, 2])`, `#<tag:-6>`). It now prints as
+  `HashMap{"a" => 1}`, `Deque[1, 2, 3]`, `NativeArray[1.5, 2.5]` and so on,
+  with the element limit at every depth, like List, Array, Map and Set.
 - **Compiler-minted symbols are structural, not counter-numbered.** A lambda
   is `$lam<k>_<host>` (nested: `$lam<j>__lam<k>_<host>`), its lifted apply fn
   `<lambda>$apply$<k>_<host>`, a fused pipeline helper `$fused_mf_<host>_<k>`,
@@ -496,6 +539,20 @@ git log is authoritative for exact commits.
   `Ok(Some(f))` next to `Ok(x)` on a `Result(Option(Float), _)`) returned a tiny garbage
   number such as `2.9e-311` from both `Some` arms, even the constant one. The inner value
   was read with the wrong memory layout; the interpreter was never affected.
+- **Remote shell: a `Float` binding no longer crashes the node, and inputs and
+  sessions no longer leak memory on it.**
+  - **The crash.** A session that ran `let f = 2.5` crashed the node with
+    SIGSEGV when it ended.
+  - **Leaks per input.** Each input leaked most of what it built, such as
+    4 000 objects for rendering a 1 000-element list. Each call of a
+    function like `List.filter` also leaked a closure.
+  - **Leaks per session.** Every input took a reference on every binding of
+    its session, so the bindings outlived the session, and ending a session
+    freed only the top cell of each binding.
+  - **What is left.** An input now keeps only its loaded code and one small
+    string per string literal it evaluates.
+  - **Disk.** The node also deletes each input's compiled file once loaded,
+    instead of leaving ~70 KB per input in its temporary directory.
 - **A hot-reload `DRAIN` before the scheduler starts no longer corrupts a
   loaded patch.** A green thread spawned before the scheduler was initialised
   (a signed `DRAIN` with a hard deadline arms one) got a stack reservation

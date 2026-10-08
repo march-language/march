@@ -234,7 +234,9 @@
     (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv UPGRADE_FIXTURES_DIR fixtures/upgrade
-       (run %{exe:test_upgrade_from.exe}))))))))
+       ; Every case at once, 3 at a time (run_cases_parallel.sh): one after
+       ; another they were the `rest` CI shard's long pole (913 s).
+       (run bash %{dep:run_cases_parallel.sh} %{exe:test_upgrade_from.exe}))))))))
 
 ; test_hcr_manifest_diff.ml: a one-line edit to a topology app's function, or
 ; to a top-level function of the entry module, flags exactly that function in

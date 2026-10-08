@@ -94,6 +94,9 @@ val emit_repl_expr :
   fns:Tir.fn_def list ->
   ?extern_fns:Tir.fn_def list ->
   ?store_as_slot:int option ->
+  ?borrow_slots:bool ->
+  ?slot_drop_fn:string ->
+  ?register_drops:bool ->
   ?session_wraps:session_wraps ->
   types:Tir.type_def list -> Tir.expr -> string
 

@@ -2014,12 +2014,30 @@ records no obligation.
 satisfy it:
 
 ```march
+fn filter(xs : List(a), pred : a -> Bool[p]) : {List(a[p]) | subset(elts(_), elts(xs))}
+```
+
+`p` is an *abstract refinement*: `pred : a -> Bool[p]` defines it (whatever
+`pred` returns for an element), and `List(a[p])` says every element of the
+result satisfies it. At each call `p` stands for whatever the passed
+predicate computes. The shorthand is exactly this spelled-out form, which is
+also accepted:
+
+```march
 fn filter(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)})
     : {List({a | p(_)}) | subset(elts(_), elts(xs))}
 ```
 
-`p` is an *abstract refinement*: the callback's codomain `_ == p(x)` defines
-it, and at each call it stands for whatever the passed predicate computes. So
+- `T[p]` anywhere is `{T | p(_)}`, e.g. `List(a[p])`, `Option(a[p])`, `List(Bool[p])`.
+- `D -> Bool[p]`, a callback's result, is the *definer*
+  `({x : D | true}) -> {Bool | _ == p(x)}`. A domain that already names its
+  argument keeps the name (`({v : Int | v > 0}) -> Bool[p]`); a domain refined
+  over `_` must name it, and a callback of several arguments (`(a, a) -> Bool[p]`)
+  cannot define one. Both are parse errors that say so.
+- A curried callback (`a -> b -> Bool[p]`) is not modelled: it instantiates
+  nothing and proves nothing.
+
+So
 with `sum_pos(xs : List({Int | _ > 0}))`:
 
 ```march
@@ -2040,17 +2058,15 @@ Inside `filter` itself `p` is an uninterpreted function: the body proves its
 own return from the guard `if pred(h)` and the callback's contract, so the
 fact is proved, not assumed.
 
-A user function can declare one the same way: a callback parameter whose
-codomain is `{Bool | _ == p(x)}` over its domain binder `x`, and `p(_)` in an
-element slot of the return (`List({a | p(_)})`). Its body must prove that
+A user function can declare one the same way: a callback parameter typed
+`a -> Bool[p]`, and `a[p]` in an element slot of the return (`List(a[p])`). Its body must prove that
 return like any other element contract; a body that does not (one returning
 its input unfiltered, say) lends nothing at its calls. Passing any callable
 for the defining parameter is always allowed — `p` is, by definition, what it
 returns — so it owes no codomain obligation where it is passed.
 
 `p` may also sit in a *parameter's* element slot, where it is an obligation
-on the caller: with `need(xs : List({a | p(_)}), keep : ({x : a | true}) ->
-{Bool | _ == p(x)})`, the call `need(pos, fn y -> y > 0)` is checked like a
+on the caller: with `need(xs : List(a[p]), keep : a -> Bool[p])`, the call `need(pos, fn y -> y > 0)` is checked like a
 call to a function taking `List({Int | _ > 0})` — proved for
 `pos : List({Int | _ > 0})` or `[1, 2]`, a violation for `[0, 1]`, a skip for
 an unrefined list — and inside `need`, `xs`'s elements carry `p`.
@@ -2104,8 +2120,6 @@ demand meets one of these):
   declare one.
 - **`p` only in an element slot**, not on a bare scalar return
   (`(a) -> {a | p(_)}`), and not through `interface`/`impl` dispatch.
-- **No shorthand.** Liquid Haskell writes `a<p>`; March has only the spelled-out
-  form above.
 
 ### What element refinements do not do
 

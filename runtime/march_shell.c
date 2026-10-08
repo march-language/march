@@ -18,11 +18,21 @@
  *        timeout_ms:<t> caps:<csv|-> src_b64:<b64> so_b64:<b64>
  *     -> OK <b64 result> out:<b64> | PANIC <b64 msg> out:<b64>
  *        | TIMEOUT out:<b64> | TIMEOUT uncancellable | ERR <code> [detail]
- *   IDENT
- *     -> OK <b64 table> | ERR no_ident
- *        The build's shell identity (lib/jit/shell_ident.ml): a hash per
- *        source declaration and each variant type's constructor tags, which
- *        the client compares with its own source before running an input.
+ *   IDENT | IDENT SUMMARY | IDENT GROUPS <group,group,...>
+ *     -> OK <b64 table> | ERR no_ident | ERR ident_format | ERR bad_ident_request
+ *        The build's shell identity (lib/jit/shell_ident.ml, format 2): a
+ *        hash per source declaration, grouped by module with a digest per
+ *        group, each variant type's constructor tags, and the functions a
+ *        fragment may call, which the client compares with its own source
+ *        before running an input.  IDENT is the whole table; SUMMARY all of
+ *        it but the declaration rows; GROUPS the rows of the named groups.
+ *        A client asks for the summary, then for only the groups whose
+ *        digest differs from its own (none, for an up-to-date checkout).
+ *        A node built before format 2 answers SUMMARY with
+ *        ERR unknown_verb, and the client asks it for IDENT (format 1, which
+ *        it still reads); a client built before format 2 reads none of a
+ *        format-2 table's declarations, so it refuses every input that
+ *        reaches one ("... is not in the node's build").
  *   BYE
  *
  * <sig> is the deploy key's signature over the line without its signature
@@ -105,6 +115,8 @@
 
 int64_t march_repl_get(int64_t slot);
 void    march_repl_set(int64_t slot, int64_t val);
+void    march_repl_set_drop(int64_t slot, void (*drop)(void *));
+void  (*march_repl_get_drop(int64_t slot))(void *);
 
 /* ── base64 (standard alphabet, padded) ──────────────────────────────── */
 
@@ -173,14 +185,31 @@ static int slot_range_take(void) {
     return r;
 }
 
-/* Drop the values the session's `let`s stored, then free the range. */
-static void slot_range_release(int r) {
+/* Drop the values the session's `let`s stored, then free the range.
+ *
+ * Each value goes through the release its init fragment registered
+ * (march_repl_set_drop): the deep drop of its type, which frees a list or a
+ * record whole.  A slot with none holds a scalar (an Int's bits, a Float's
+ * raw IEEE bits) or nothing, and is left alone: a bare march_decrc freed
+ * only a value's top cell, and dereferenced a Float's bits as a pointer
+ * (`let f = 3.5` killed the node with SIGSEGV when its session ended).
+ *
+ * [keep]: an input of this session timed out and could not be stopped, so
+ * it may still be running and reading the values (a fragment borrows its
+ * session's bindings rather than holding a count on them, see
+ * lib/tir/llvm_repl.ml emit_prev_slot_bridges): they are leaked instead. */
+static void slot_range_release(int r, int keep) {
     if (r < 0) return;
+    /* This is not a scheduler thread, and a value may also be held by tasks
+     * and actors: the drops' local RC ops must be the atomic ones. */
+    march_rc_set_thread_concurrent(1);
     for (int i = 0; i < SHELL_SLOTS_PER; i++) {
         int64_t slot = (int64_t)r * SHELL_SLOTS_PER + i;
         int64_t v = march_repl_get(slot);
-        if (v && IS_HEAP_PTR((void *)(uintptr_t)v)) march_decrc((void *)(uintptr_t)v);
+        void (*drop)(void *) = march_repl_get_drop(slot);
+        if (drop && v && !keep) drop((void *)(uintptr_t)v);
         march_repl_set(slot, 0);
+        march_repl_set_drop(slot, NULL);
     }
     pthread_mutex_lock(&g_slots_mu);
     g_slot_used[r] = 0;
@@ -281,6 +310,54 @@ static void cancel_task(int64_t pid) {
     if (p) atomic_store_explicit(&p->cancel_requested, 1, memory_order_release);
     march_reclaim_exit();
     march_preempt_request = 1;
+}
+
+/* ── the identity table (IDENT) ──────────────────────────────────────── */
+
+#define IDENT_HEADER "march-shell-ident 2"
+
+/* Whether [name] (of [len] bytes) is one of the comma-separated [list]. */
+static int ident_listed(const char *list, const char *name, size_t len) {
+    const char *p = list;
+    while (*p) {
+        const char *e = strchr(p, ',');
+        size_t k = e ? (size_t)(e - p) : strlen(p);
+        if (k == len && memcmp(p, name, len) == 0) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* A part of the format-2 table [t] (lib/jit/shell_ident.ml, "the table as
+ * text"): with [groups] NULL the summary, every line but the declaration
+ * rows (the header, the `t` and `x` rows, and each group's `m <group>
+ * <digest>` line); otherwise the header and, for each group named in the
+ * comma-separated [groups], its `m` line and its rows.  0 with a malloc'd
+ * [*out] of [*n] bytes, -1 if [t] is not format 2, -2 out of memory. */
+static int ident_select(const char *t, const char *groups, char **out, size_t *n) {
+    size_t hl = strlen(IDENT_HEADER);
+    if (strncmp(t, IDENT_HEADER, hl) != 0 || t[hl] != '\n') return -1;
+    char *o = (char *)malloc(strlen(t) + 1);
+    if (!o) return -2;
+    size_t len = 0;
+    int in_groups = 0, keep = 1;
+    for (const char *p = t; *p; ) {
+        const char *e = strchr(p, '\n');
+        size_t k = e ? (size_t)(e - p) + 1 : strlen(p);
+        if (p == t) keep = 1;                       /* the header */
+        else if (k > 2 && p[0] == 'm' && p[1] == ' ') {
+            in_groups = 1;
+            const char *g = p + 2, *sp = memchr(g, ' ', k - 2);
+            keep = !groups || (sp && ident_listed(groups, g, (size_t)(sp - g)));
+        } else keep = in_groups ? groups != NULL && keep : groups == NULL;
+        if (keep) { memcpy(o + len, p, k); len += k; }
+        p += k;
+    }
+    o[len] = '\0';
+    *out = o;
+    *n = len;
+    return 0;
 }
 
 /* ── wire helpers ────────────────────────────────────────────────────── */
@@ -515,7 +592,9 @@ static void reply_with_out(int fd, const char *head, const char *b64_text, const
     free(ob);
 }
 
-static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *session) {
+/* 1 when the input timed out and could not be stopped: it may still be
+ * running (see slot_range_release). */
+static int handle_eval(int fd, char *line, uint32_t session_epoch, const char *session) {
     /* line: "EVAL <sig> <rest>" */
     char *sig = line + 5;
     while (*sig == ' ') sig++;
@@ -523,21 +602,21 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *
     if (!march_sig_key_loaded()) {
         audit("", "", "", "", 0, "signing_not_configured");
         send_line(fd, "ERR signing_not_configured");
-        return;
+        return 0;
     }
-    if (!rest) { audit("", "", "", "", 0, "bad_args"); send_line(fd, "ERR bad_args"); return; }
+    if (!rest) { audit("", "", "", "", 0, "bad_args"); send_line(fd, "ERR bad_args"); return 0; }
     *rest++ = '\0';
     /* The signed text, before parse_eval cuts [rest] into words. */
     size_t mlen = strlen(rest) + 6;
     char *msg = (char *)malloc(mlen);
-    if (!msg) { send_line(fd, "ERR out_of_memory"); return; }
+    if (!msg) { send_line(fd, "ERR out_of_memory"); return 0; }
     snprintf(msg, mlen, "EVAL %s", rest);
     eval_req q;
     if (!parse_eval(rest, &q)) {
         free(msg);
         audit("", "", "", "", 0, "bad_args");
         send_line(fd, "ERR bad_args");
-        return;
+        return 0;
     }
     size_t src_n = 0;
     unsigned char *src = b64_decode(q.src_b64, strlen(q.src_b64), &src_n);
@@ -569,7 +648,7 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *
         snprintf(buf, sizeof buf, "ERR %s%s", why, detail);
         send_line(fd, buf);
         free(src);
-        return;
+        return 0;
     }
     size_t so_n = 0;
     unsigned char *so = b64_decode(q.so_b64, strlen(q.so_b64), &so_n);
@@ -579,10 +658,14 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *
         audit(q.name, q.caps, q.nonce, srcs, src_n, "err_write");
         send_line(fd, "ERR fragment_write");
         free(src);
-        return;
+        return 0;
     }
     free(so);
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    /* The mapping outlives the name: the file is not needed once loaded,
+     * and every input left one (~70 KB) in the directory until it was
+     * cleaned by hand. */
+    unlink(path);
     if (!h) {
         const char *e = dlerror();
         char *eb = b64_encode((const unsigned char *)(e ? e : "dlopen"), strlen(e ? e : "dlopen"));
@@ -592,14 +675,14 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *
         audit(q.name, q.caps, q.nonce, srcs, src_n, "err_dlopen");
         send_line(fd, buf);
         free(src);
-        return;
+        return 0;
     }
     void *(*entry)(void) = (void *(*)(void))dlsym(h, q.name);
     if (!entry) {
         audit(q.name, q.caps, q.nonce, srcs, src_n, "err_no_entry");
         send_line(fd, "ERR no_entry");
         free(src);
-        return;
+        return 0;
     }
     /* The policy above was checked against the signed caps; they must be the
      * fragment's own.  The handle stays open on refusal, like every other
@@ -612,19 +695,19 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *
         snprintf(buf, sizeof buf, "ERR %s", code);
         send_line(fd, buf);
         free(src);
-        return;
+        return 0;
     }
     /* Every input that runs is audited: one whose line cannot be written
      * does not run. */
     if (!audit(q.name, q.caps, q.nonce, srcs, src_n, "ok")) {
         free(src);
         send_line(fd, "ERR audit_unavailable");
-        return;
+        return 0;
     }
     free(src);
 
     shell_run *r = (shell_run *)calloc(1, sizeof *r);
-    if (!r) { send_line(fd, "ERR out_of_memory"); return; }
+    if (!r) { send_line(fd, "ERR out_of_memory"); return 0; }
     pthread_mutex_init(&r->mu, NULL);
     pthread_cond_init(&r->cv, NULL);
     r->refs = 2;
@@ -638,7 +721,7 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *
         r->refs = 1;
         run_release(r);
         send_line(fd, "ERR spawn");
-        return;
+        return 0;
     }
     struct timespec dl;
     clock_gettime(CLOCK_REALTIME, &dl);
@@ -662,7 +745,8 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *
         state = r->state;
         pthread_mutex_unlock(&r->mu);
     }
-    if (state == RUN_PENDING) {
+    int stuck = state == RUN_PENDING;
+    if (stuck) {
         send_line(fd, "TIMEOUT uncancellable");
     } else if (state == RUN_CANCELLED) {
         reply_with_out(fd, "TIMEOUT", NULL, &r->out);
@@ -672,6 +756,7 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *
         free(tb);
     }
     run_release(r);
+    return stuck;
 }
 
 /* ── connections ─────────────────────────────────────────────────────── */
@@ -731,6 +816,7 @@ static void *session_thread(void *arg) {
     int range = -1;
     uint32_t epoch = 0;
     int hello = 0;
+    int stuck = 0;
     char session[33] = "";
     for (;;) {
         int rc = read_line(fd, &buf, &cap, &len);
@@ -760,22 +846,35 @@ static void *session_thread(void *arg) {
                      range * SHELL_SLOTS_PER, range * SHELL_SLOTS_PER + SHELL_SLOTS_PER - 1,
                      SHELL_TRIPLE, session);
             send_line(fd, b);
-        } else if (strcmp(buf, "IDENT") == 0) {
+        } else if (strcmp(buf, "IDENT") == 0 || strncmp(buf, "IDENT ", 6) == 0) {
             /* The build's shell identity table (lib/jit/shell_ident.ml),
-             * which the client compares with its own source.  Public: it
-             * holds hashes of the source, not the source. */
+             * which the client compares with its own source, whole or a
+             * part (ident_select).  Public: it holds hashes of the source,
+             * not the source. */
             static void *self;
             if (!self) self = dlopen(NULL, RTLD_NOW);
             const char *ident = self ? (const char *)dlsym(self, "__march_shell_ident") : NULL;
             if (!ident) { send_line(fd, "ERR no_ident"); continue; }
-            char *b64 = b64_encode((const unsigned char *)ident, strlen(ident));
+            size_t n = strlen(ident);
+            char *part = NULL;
+            if (buf[5] == ' ') {
+                const char *arg = buf + 6;
+                int rc;
+                if (strcmp(arg, "SUMMARY") == 0) rc = ident_select(ident, NULL, &part, &n);
+                else if (strncmp(arg, "GROUPS ", 7) == 0) rc = ident_select(ident, arg + 7, &part, &n);
+                else { send_line(fd, "ERR bad_ident_request"); continue; }
+                if (rc == -1) { send_line(fd, "ERR ident_format"); continue; }
+                if (rc != 0) { send_line(fd, "ERR out_of_memory"); continue; }
+            }
+            char *b64 = b64_encode((const unsigned char *)(part ? part : ident), n);
+            free(part);
             if (!b64) { send_line(fd, "ERR out_of_memory"); continue; }
             send_all(fd, "OK ", 3);
             send_line(fd, b64);
             free(b64);
         } else if (strncmp(buf, "EVAL ", 5) == 0) {
             if (!hello) { send_line(fd, "ERR no_hello"); continue; }
-            handle_eval(fd, buf, epoch, session);
+            stuck |= handle_eval(fd, buf, epoch, session);
         } else if (strcmp(buf, "BYE") == 0) {
             break;
         } else {
@@ -783,7 +882,7 @@ static void *session_thread(void *arg) {
         }
     }
     free(buf);
-    slot_range_release(range);
+    slot_range_release(range, stuck);
     close(fd);
     atomic_fetch_sub(&g_sessions, 1);
     return NULL;

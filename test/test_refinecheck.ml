@@ -17952,6 +17952,142 @@ end|}
         Alcotest.check ps "too weak" [ ("skipped", "abstract-refinement-too-weak") ]
           (sumpos "  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end\n  fn go(ys : List(Int)) : Int do\n    let is_pos = fn y -> y >= 0\n    sum_pos(filt(ys, is_pos))\n  end\n")) ]
 
+(* Phase 4 (plan specs/plans/2026-10-07-abstract-refinements-phase4-plan.md):
+   the `a[p]` / `Bool[p]` shorthand must mean exactly the spelled-out form.
+   Equivalence is checked where it matters: [Refine_abstract.collect] (names
+   and roles) and the refinement ledger. *)
+let fd_of (src : string) (name : string) : March_ast.Ast.fn_def =
+  let m = parse src in
+  List.find_map
+    (function
+      | March_ast.Ast.DFn (fd, _) when fd.March_ast.Ast.fn_name.March_ast.Ast.txt = name -> Some fd
+      | _ -> None)
+    m.March_ast.Ast.mod_decls
+  |> Option.get
+
+let abstract_roles src name =
+  let open March_refinecheck.Refine_abstract in
+  List.map
+    (fun (p, occs) ->
+      ( p
+      , List.sort compare
+          (List.map
+             (fun o ->
+               match o.occ_role with
+               (* A real definer applies `p` to the callback's own argument
+                  (the arrow's domain binder): "D=" — the role label alone
+                  cannot tell `{Bool | p(_)}` from `{Bool | _ == p(x)}`. *)
+               | Definer -> if o.occ_arg = o.occ_binder && o.occ_arg <> "_" then "D=" else "D"
+               | Positive -> "+"
+               | Negative -> "-")
+             occs) ))
+    (collect ~is_known:(fun _ -> false) (fd_of src name))
+
+let abstract_sugar_suite =
+  let long = {|mod L do
+  fn filt(xs : List(a), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do xs end
+end|} in
+  let short = {|mod S do
+  fn filt(xs : List(a), keep : a -> Bool[p]) : List(a[p]) do xs end
+end|} in
+  let rs = Alcotest.(list (pair string (list string))) in
+  [ Alcotest.test_case "a[p] and Bool[p] declare the same abstract refinement" `Quick (fun () ->
+        Alcotest.check rs "same roles" (abstract_roles long "filt") (abstract_roles short "filt"));
+    Alcotest.test_case "a[p] alone is element sugar with the marker binder" `Quick (fun () ->
+        let fd = fd_of {|mod E do
+  fn f(xs : List(a[p]), keep : a -> Bool[p]) : Int do 0 end
+end|} "f" in
+        match fd.March_ast.Ast.fn_clauses with
+        | c :: _ ->
+          (match c.March_ast.Ast.fc_params with
+           | March_ast.Ast.FPNamed
+               { March_ast.Ast.param_ty =
+                   Some (March_ast.Ast.TyCon (_, [ March_ast.Ast.TyRefine (March_ast.Ast.TyVar _, Some b, _) ]))
+               ; _ }
+             :: _ ->
+             Alcotest.(check string) "marker binder" "_" b.March_ast.Ast.txt
+           | _ -> Alcotest.fail "List(a[p]) did not parse to List({_ : a | p(_)})")
+        | [] -> Alcotest.fail "no clause");
+
+    gated "sugar filt proves and instantiates like the long form" (fun () ->
+        let src body =
+          "mod SF do\n  fn filt(xs : List(a), keep : a -> Bool[p]) : List(a[p]) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if keep(h) do Cons(h, filt(t, keep)) else filt(t, keep) end\n    end\n  end\n  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n"
+          ^ body ^ "end\n"
+        in
+        let at body =
+          List.filter_map (fun (c, v, r) -> if c = "sum_pos" then Some (v, r) else None)
+            (typed_obligations (src body))
+        in
+        let ps = Alcotest.(list (pair string string)) in
+        Alcotest.check ps "n" [ ("proved", "") ]
+          (at "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n");
+        Alcotest.check ps "n2" [ ("skipped", "abstract-refinement-too-weak") ]
+          (at "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y >= 0)) end\n"));
+
+    Alcotest.test_case "a named domain binder is reused" `Quick (fun () ->
+        Alcotest.check rs "same as the long form"
+          (abstract_roles {|mod L2 do
+  fn f(xs : List(Int), k : ({v : Int | v > 0}) -> {Bool | _ == p(v)}) : List(Int[p]) do xs end
+end|} "f")
+          (abstract_roles {|mod S2 do
+  fn f(xs : List(Int), k : ({v : Int | v > 0}) -> Bool[p]) : List(Int[p]) do xs end
+end|} "f"));
+
+    Alcotest.test_case "Bool[p] over a several-argument callback is a parse error" `Quick (fun () ->
+        Alcotest.(check bool) "rejected" true
+          (try
+             ignore (parse {|mod T do
+  fn f(xs : List(a), k : (a, a) -> Bool[p]) : List(a[p]) do xs end
+end|});
+             false
+           with _ -> true));
+
+    Alcotest.test_case "Bool[p] over a domain refined with `_` asks for a binder" `Quick (fun () ->
+        Alcotest.(check bool) "rejected" true
+          (try
+             ignore (parse {|mod T2 do
+  fn f(xs : List(Int), k : ({Int | _ > 0}) -> Bool[p]) : List(Int[p]) do xs end
+end|});
+             false
+           with _ -> true));
+
+    (* Explicit `{Bool | p(_)}` is NOT the shorthand and must not be rewritten:
+       it stays an occurrence over the codomain's own binder ("D"), never the
+       definer form over the callback's argument ("D="); only the unforgeable
+       marker is rewritten. *)
+    Alcotest.test_case "explicit {Bool | p(_)} is untouched" `Quick (fun () ->
+        Alcotest.check rs "not rewritten"
+          [ ("p", [ "D" ]) ] (abstract_roles {|mod X do
+  fn f(xs : List(a), k : a -> {Bool | p(_)}) : List(a) do xs end
+end|} "f"));
+
+    (* Curried: the inner arrow is rewritten, nothing instantiates it, nothing
+       is proved — pinned as SAFE, not as a feature. *)
+    gated "a curried Bool[p] proves nothing and violates nothing" (fun () ->
+        let p, v, _, _ =
+          typed_ledger {|mod C do
+  fn need(xs : List(Int[p]), k : Int -> Int -> Bool[p]) : Int do 0 end
+  fn go(ys : List(Int)) : Int do need(ys, fn a -> fn b -> a > 0) end
+end|}
+        in
+        Alcotest.(check (pair int int)) "nothing proved, nothing violated" (0, 0) (p, v));
+
+    (* Diagnostics and hovers print types with [show_ty]: the shorthand prints
+       back as written, the spelled-out form is not prettified into it. *)
+    Alcotest.test_case "show_ty prints the shorthand back" `Quick (fun () ->
+        let first_param_ty src =
+          match (fd_of src "f").March_ast.Ast.fn_clauses with
+          | c :: _ ->
+            (match c.March_ast.Ast.fc_params with
+             | March_ast.Ast.FPNamed { March_ast.Ast.param_ty = Some t; _ } :: _ -> March_ast.Ast.show_ty t
+             | _ -> Alcotest.fail "no typed first parameter")
+          | [] -> Alcotest.fail "no clause"
+        in
+        Alcotest.(check string) "shorthand" "List(a[p])"
+          (first_param_ty "mod P1 do\n  fn f(xs : List(a[p]), k : a -> Bool[p]) : Int do 0 end\nend\n");
+        Alcotest.(check string) "spelled out" "List({ a | ... })"
+          (first_param_ty "mod P2 do\n  fn f(xs : List({a | p(_)}), k : a -> Bool[p]) : Int do 0 end\nend\n")) ]
+
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
         let before = !March_refine.Solver.malformed_count in
@@ -18745,4 +18881,5 @@ let () =
       ("abstract-pass-sites", abstract_pass_sites_suite);
       ("abstract-phase2", abstract_phase2_suite);
       ("abstract-phase3", abstract_phase3_suite);
+      ("abstract-sugar", abstract_sugar_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

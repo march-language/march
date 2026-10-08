@@ -986,10 +986,19 @@ march> [{ name: "first", tags: ["a", "b", "c"] }] limit: 2
 
 - Records, tuples and constructors print field by field, with constructor
   names. A type that derives `Show` prints as its derived `show` would.
-- Strings print quoted and escaped.
+- Strings inside a value print quoted and escaped (`["a", "b"]`). A string
+  that is the whole result, or the one field of a top-level constructor,
+  prints as it is: `Actor.inspect_state` shows `Ok({ n: 42 })`.
 - The limit applies at every depth: each list, Array, Map and Set shows at
   most `N` elements then `… n more`, and each string at most `N` characters
   then `… n more chars`. `limit: all` (or `:limit 0`) turns it off.
+- The other stdlib containers print by their elements too, with the same
+  limit: `HashMap{"a" => 1}`, `OrderedMap{1 => "a"}`, `SortedSet{1, 3}`,
+  `Deque[1, 2]`, `Queue[1, 2]`, `RRB.Vec[1, 2]`, `NativeArray[1.5, 2.5]`.
+  A HashMap prints in hash order; the others in their own order. RingBuf and
+  LinearMap are linear (reading one consumes it), so they print as
+  `to_string` prints them. So does a container whose type name the program
+  reuses for a type of its own (a program `Deque`, say).
 - A type with a hand-written `Show` prints through its `show`, cut at 16 KiB
   with `… (n more bytes)`.
 - A function prints `<fn>`; a Pid and other runtime values print as
@@ -1021,6 +1030,30 @@ Inputs that reach only unchanged code still run. A type whose constructors
 are numbered differently on the node (reordered, added) is always refused,
 since values built here would be read back wrongly there.
 
+**Spawning the program's actors.** An input can spawn one of the program's
+own actors and use it like any other:
+
+```
+march> let k = spawn(Counter)
+k : Pid({ n : Int })
+march> send(k, Bump(5))
+Some(())
+march> Actor.inspect_state(debug, k, 500)
+Ok({ n: 5 })
+```
+
+The actor runs the node's code, not a copy compiled into the input: the
+input calls the node's own spawn function for that actor, so the actor
+answers `inspect_state`, shows its type name in `ACTORS` and `Recon`, and is
+upgraded by a hot deploy like every other instance. It belongs to the node:
+it keeps running after the session ends (or a deploy ends it), and a later
+session finds it with `Actor.list` or `Actor.pid_from_int`. Spawning needs no
+capability of its own, but an input is charged with the capabilities the
+actor's handlers use, as for any program code it reaches. An input that
+could only spawn the actor by carrying its own copy of the handlers is
+refused instead: a node built by an older compiler, or an actor whose init
+arguments include a function.
+
 What happens when:
 
 - **An input panics.** You see `** panic: <message>`; the node and the
@@ -1037,6 +1070,37 @@ What happens when:
 - **A request is captured.** Each one is signed for its session (a random
   challenge the node hands out when you attach), so it runs on no other
   connection, no other node and not after the node restarts.
+
+**Line editing and history.** On a terminal the prompt is a real line editor
+(`lib/repl/shell_line.ml`, `bin/shell_tty.ml`). When stdin or stdout is not a
+terminal (a pipe, `--shell-inputs`, `forge rpc`) none of this is active and
+input is read exactly as before.
+
+| Keys | Action |
+|------|--------|
+| Up / Down, Ctrl-P / Ctrl-N | previous / next input; Down past the newest restores the line you were typing |
+| Left / Right, Ctrl-B / Ctrl-F | one character (a multibyte character is one step) |
+| Home / End, Ctrl-A / Ctrl-E | start / end of the line |
+| Ctrl-Left / Ctrl-Right, Alt-B / Alt-F | one word |
+| Backspace, Delete | delete before / under the cursor |
+| Ctrl-U / Ctrl-K / Ctrl-W | kill to the start / to the end / the word before the cursor |
+| Ctrl-L | clear the screen |
+| Ctrl-C | discard the line and show a new prompt; the session stays attached |
+| Ctrl-D | on an empty line, leave (like `:quit`); otherwise delete under the cursor |
+
+A line longer than the terminal scrolls sideways instead of wrapping; a
+resize is picked up on the next keystroke. Unknown escape sequences (function
+keys, PageUp) are ignored.
+
+Inputs are kept in `~/.march/shell_history`, one per line, last 1000, loaded
+at start. A line equal to the one before it, a blank line and `:quit` are not
+recorded. **The file can hold sensitive text** (a connection string or token
+typed into an input is kept verbatim), so it is created `0600` in a `0700`
+directory. Delete it, or edit it, if an input should not outlive the session.
+
+The terminal is in raw mode only while a line is being typed and is put back
+before the input runs; it is also restored on exit, an uncaught exception, and
+SIGINT, SIGTERM and SIGHUP.
 
 Under the hood `forge shell` runs `march --shell <reload socket>.shell
 <entry>` with the project's `MARCH_LIB_PATH`, through an ssh tunnel for a
@@ -1075,7 +1139,6 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
   messages of an actor, most useful exactly when it is stuck and cannot render
   them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
 - **The rest of the remote shell.** It works (see above), but:
-  - a program-defined actor cannot be spawned from the shell;
   - it has not had its security review yet (plan R5).
 - **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;
   today `forge top` is the live view.

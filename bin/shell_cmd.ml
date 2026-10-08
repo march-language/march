@@ -477,11 +477,15 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
           Printf.eprintf "march shell: bad HELLO reply: %s\n" hello; exit 1)
     | _ -> Printf.eprintf "march shell: %s\n" hello; exit 1 in
   let ident =
-    let r = send conn "IDENT"; recv conn in
-    match words r with
-    | [ "OK"; b64 ] ->
-      let c = March_jit.Shell_ident.check_of
-          ~node:(March_jit.Shell_ident.of_string (b64_decode b64)) program.Ast.mod_decls in
+    (* The summary, then only the groups that differ from ours
+       (Shell_ident.fetch); the whole table from a node that predates it. *)
+    let ask verb =
+      let r = send conn verb; recv conn in
+      match words r with
+      | [ "OK"; b64 ] -> Ok (b64_decode b64)
+      | _ -> Error r in
+    match March_jit.Shell_ident.fetch_check ~ask program.Ast.mod_decls with
+    | Ok c ->
       (match March_jit.Shell_ident.differing c with
        | [] -> ()
        | diffs ->
@@ -494,7 +498,7 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
                                   (List.filteri (fun i _ -> i < 5) diffs)))
            (if n > 5 then ", ..." else "") (if n = 1 then "it" else "them"));
       Some c
-    | _ ->
+    | Error r ->
       Printf.eprintf "march shell: the node does not report its build identity (%s); \
                       inputs are not checked against its code\n%!" r;
       None in
@@ -519,9 +523,28 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
   let lines = match inputs with
     | Some text -> ref (String.split_on_char '\n' text)
     | None -> ref [] in
+  (* Line editing + persistent history, on a terminal only: stdin and stdout
+     both ttys.  Anything else (pipe, redirect, --shell-inputs, forge rpc)
+     takes the plain path below, byte for byte as before. *)
+  let editing = interactive && Shell_tty.available () in
+  let history_path = if editing then March_repl.Shell_line.default_path () else None in
+  let history = ref (match history_path with
+      | Some p -> March_repl.Shell_line.load p
+      | None -> [||]) in
   let next_line () =
     match inputs with
     | Some _ -> (match !lines with l :: rest -> lines := rest; Some l | [] -> None)
+    | None when editing ->
+      (match Shell_tty.read_line ~prompt:"march> " !history with
+       | Shell_tty.End_of_input -> None
+       | Shell_tty.Line l ->
+         let h, added = March_repl.Shell_line.record !history l in
+         history := h;
+         (if added then
+            match history_path, March_repl.Shell_line.history_entry l with
+            | Some p, Some e -> March_repl.Shell_line.append p e
+            | _ -> ());
+         Some l)
     | None ->
       if interactive then (print_string "march> "; flush stdout);
       In_channel.input_line stdin in
