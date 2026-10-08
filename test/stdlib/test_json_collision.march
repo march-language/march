@@ -1,0 +1,36 @@
+-- `derive Json` on two types that share a short name in two modules
+-- (specs/todos/2026-10-03-derive-json-same-short-name-two-modules.md).
+-- Run: dune exec march -- test test/stdlib/test_json_collision.march
+--
+-- The interpreter's `to_json` used to look the codec up by the value's
+-- SHORT type name, so `A.Note` encoded with whichever module's codec was
+-- registered last (B's, which panicked on `NA(3)`). It now routes by the
+-- value's declaring-module-qualified type first, as compiled code does.
+-- `from_json` is not covered here: it dispatches on its result type, and
+-- the typechecker cannot yet tell `A.Note` from `B.Note` (see the todo).
+
+mod TestJsonCollision do
+
+  mod A do
+    type Note = NA(Int) | NB(String)
+    derive Json for Note
+    fn enc(n : Note) : String do Json.to_string(to_json(n)) end
+  end
+
+  mod B do
+    type Note = NC(Bool) | ND(Int, Int)
+    derive Json for Note
+    fn enc(n : Note) : String do Json.to_string(to_json(n)) end
+  end
+
+  describe "to_json on same-short-name types" do
+    test "A.Note encodes with A's codec" do
+      assert A.enc(A.NA(3)) == "{\"tag\":\"NA\",\"0\":3}"
+      assert A.enc(A.NB("x")) == "{\"tag\":\"NB\",\"0\":\"x\"}"
+    end
+    test "B.Note encodes with B's codec" do
+      assert B.enc(B.ND(1, 2)) == "{\"tag\":\"ND\",\"0\":1,\"1\":2}"
+      assert B.enc(B.NC(true)) == "{\"tag\":\"NC\",\"0\":true}"
+    end
+  end
+end
