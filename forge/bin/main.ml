@@ -1767,6 +1767,10 @@ let cluster_cert_cmd =
                      ~doc:"Comma-separated role permissions, each Proto.Role:offer or Proto.Role:initiate") in
   let flags = Arg.(value & opt string "" & info ["flags"] ~docv:"LIST"
                      ~doc:"Comma-separated flags (raw_send)") in
+  let agent = Arg.(value & flag & info ["control-agent"]
+                     ~doc:"Grant Ctl.Agent:initiate in addition to --roles") in
+  let candidate = Arg.(value & flag & info ["control-candidate"]
+                         ~doc:"Grant Ctl.Agent:initiate and Ctl.Control:offer in addition to --roles") in
   let days = Arg.(value & opt int 90 & info ["days"] ~docv:"N" ~doc:"Validity in days (default: 90)") in
   let seconds = Arg.(value & opt (some int) None & info ["seconds"] ~docv:"N"
                        ~doc:"Validity in seconds, overriding --days (short-lived certificates, tests)") in
@@ -1775,11 +1779,12 @@ let cluster_cert_cmd =
   let out = Arg.(value & opt string "." & info ["out"] ~docv:"DIR" ~doc:"Directory to write NODE.cert/NODE.key into") in
   Cmd.v (Cmd.info "cert" ~doc:"Issue a node certificate signed by the operator key (with --deliver, \
                                 also replace it live on the running node: --node-key is then required)")
-    Term.(const (fun n r f d s td p ok nk o dl ->
+    Term.(const (fun n r f a c d s td p ok nk o dl ->
+      let r = Cmd_cluster.control_roles ~roles:r ~agent:a ~candidate:c in
       let deliver = Option.map (fun d cert -> Cmd_cluster.deliver_items d { Control_release.certs = [ (n, cert) ]; revokes = [] }) dl in
       handle_msg (Cmd_cluster.run_cert ~name:n ~roles:r ~flags:f ~days:d ~seconds:s ~trust_domain:td
                     ~pool:p ~operator_key:ok ~node_key:nk ~out_dir:o ?deliver ()))
-          $ name $ roles $ flags $ days $ seconds $ cluster_trust_domain $ cluster_pool
+          $ name $ roles $ flags $ agent $ candidate $ days $ seconds $ cluster_trust_domain $ cluster_pool
           $ cluster_operator_key $ node_key $ out $ cluster_deliver)
 
 let cluster_revoke_cmd =

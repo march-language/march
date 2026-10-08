@@ -139,12 +139,25 @@ let test_deliver_flags () =
     | Ok eps -> Alcotest.(check int) "two endpoints" 2 (List.length eps)
     | Error e -> Alcotest.fail e)
 
+let test_control_roles () =
+  let roles s agent candidate = Cmd_cluster.control_roles ~roles:s ~agent ~candidate in
+  Alcotest.(check string) "unchanged without shortcuts" "App.Worker:offer"
+    (roles "App.Worker:offer" false false);
+  Alcotest.(check string) "agent grants initiate only" "Ctl.Agent:initiate"
+    (roles "" true false);
+  Alcotest.(check string) "candidate grants agent and control"
+    "Ctl.Agent:initiate,Ctl.Control:offer" (roles "" false true);
+  Alcotest.(check string) "preserves explicit roles without duplicate grants"
+    "App.Worker:offer,Ctl.Agent:initiate,Ctl.Control:offer"
+    (roles "App.Worker:offer,Ctl.Agent:initiate" true true)
+
 let () =
   Alcotest.run "forge cluster"
     [ ("certificates",
        [ Alcotest.test_case "pinned vector matches stdlib/node_cert.march" `Quick test_pinned_vector;
          Alcotest.test_case "msgpack smallest forms" `Quick test_msgpack_forms;
-         Alcotest.test_case "keygen / cert / revoke" `Quick test_keygen_cert_revoke ]);
+         Alcotest.test_case "keygen / cert / revoke" `Quick test_keygen_cert_revoke;
+         Alcotest.test_case "control role shortcuts" `Quick test_control_roles ]);
       ("delivery (step 12b)",
        [ Alcotest.test_case "certificate items in a release" `Quick test_release_items;
          Alcotest.test_case "--deliver: the node key, what is delivered, the deploy key" `Quick test_deliver_flags ]) ]

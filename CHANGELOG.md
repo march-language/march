@@ -19,6 +19,8 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- `forge cluster cert --control-agent` and `--control-candidate` add the
+  control-plane role permissions while preserving explicit `--roles`.
 - **`forge query` asks the compiler about your project's build.** It is
   `march query` with the project filled in: the entry file, the library path
   and the build's own flags (`--release`, `--target`, `[ffi]` sources, the

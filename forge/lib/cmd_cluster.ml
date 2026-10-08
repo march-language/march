@@ -126,6 +126,14 @@ let issuer_uri ~trust_domain operator_pub =
 let split_list s =
   String.split_on_char ',' s |> List.map String.trim |> List.filter (fun x -> x <> "")
 
+let control_roles ~roles ~agent ~candidate =
+  if not (agent || candidate) then roles
+  else
+    let add roles role = if List.mem role roles then roles else roles @ [role] in
+    let roles = add (split_list roles) "Ctl.Agent:initiate" in
+    let roles = if candidate then add roles "Ctl.Control:offer" else roles in
+    String.concat "," roles
+
 (* A role is "Proto.Role:offer" or "Proto.Role:initiate". *)
 let check_role r =
   match String.rindex_opt r ':' with
