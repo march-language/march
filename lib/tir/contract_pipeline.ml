@@ -74,8 +74,13 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      and the input is checked first as "tir-lower" (the driver's own
      tir-lower snap is a dump hook, not part of this pipeline). *)
   let verify = Tir_verify.enabled () in
+  (* The kind table and borrow map, from the point the pipeline computes them
+     (after Defun, before Perceus): check 2 and check 3 read them. *)
+  let verify_k = ref None and verify_borrow = ref None in
   let verify_stage name tir =
-    if verify then Tir_verify.enforce ~stage:name ?iface_methods tir in
+    if verify then
+      Tir_verify.enforce ~stage:name ?iface_methods ?k_table:!verify_k
+        ?borrow_map:!verify_borrow tir in
   verify_stage "tir-lower" tir;
   let snap name tir =
     Provenance.sweep ~pass:name tir; verify_stage name tir; snap name tir in
@@ -153,11 +158,12 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     if stubs = [] then tir
     else { tir with Tir.tm_exports = tir.Tir.tm_exports @ stubs }
   in
-  let tir = if opt then Fusion.run ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "fusion" then Fusion.run ~changed:(ref false) tir else tir in
   (* NativeArray map/map2 chain fusion (body substitution).  Native/wasm only:
      JS has no NativeArray codegen, so there is nothing to win there. *)
   let tir =
     if opt && (not is_js) && not (Lazy.force nativearr_fusion_env_disabled)
+       && Pass_switch.on "nativearr-fusion"
     then Fusion.run_nativearr tir else tir in
   snap "tir-fusion" tir;
   stamp_tir "fusion" tir;
@@ -178,6 +184,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
       ~unboxing:(not is_js && not (Lazy.force unboxing_env_disabled))
       ~collision_set tir.Tir.tm_types
   in
+  verify_k := Some k0;
   (* Known-call pass: run before Perceus so apply functions are still pure
      and eligible for inlining in the subsequent Opt fixed-point loop.  See
      the [is_apply_fn] guard in [Perceus]'s EApp post_dec_vars for why the
@@ -189,21 +196,22 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      which the HCR identity machinery does not track) and with
      MARCH_NO_HOF_SPEC=1. *)
   let hof_spec_on =
-    opt && (not is_js) && hot_reload = None && not (Lazy.force hof_spec_env_disabled) in
+    opt && (not is_js) && hot_reload = None && not (Lazy.force hof_spec_env_disabled)
+    && Pass_switch.on "hof-spec" in
   let tir = if hof_spec_on then Hof_spec.specialize tir else tir in
   snap "tir-hof-spec" tir;
-  let tir = if opt then Known_call.run ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "known-call-pre" then Known_call.run ~changed:(ref false) tir else tir in
   snap "tir-known-call" tir;
   (* Beta-ADT: reduce case-of-known-constructor before Perceus so that the
      EAlloc is DCE'd before RC insertion. *)
-  let tir = if opt then Beta_adt.run ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "beta-adt-pre" then Beta_adt.run ~changed:(ref false) tir else tir in
   snap "tir-beta-adt-pre" tir;
   (* P1 Layer 1: alpha-merge let-floating on RC-free TIR.  Must run BEFORE
      Perceus so RC is inserted once for the hoisted binding. *)
-  let tir = if opt then Join_points.run_pre ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "join-points-pre" then Join_points.run_pre ~changed:(ref false) tir else tir in
   snap "tir-join-points-pre" tir;
   (* Pre-Perceus simplify: folds that are only sound before RC insertion. *)
-  let tir = if opt then Simplify.run ~pre_perceus:true ~changed:(ref false) tir else tir in
+  let tir = if opt && Pass_switch.on "simplify-pre" then Simplify.run ~pre_perceus:true ~changed:(ref false) tir else tir in
   snap "tir-simplify-pre" tir;
   before_perceus ~k_table:k0 tir;
   (* Computed ONCE here and shared: [Perceus] places its RC ops against this
@@ -211,6 +219,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      be taken against the SAME one — re-deriving it after RC insertion could
      disagree.  See [Escape]'s module doc. *)
   let borrow_map = Borrow.infer_module ~k_table:k0 tir in
+  verify_borrow := Some borrow_map;
   let tir = Perceus.perceus ~k_table:k0 ~borrow_map
       ~heap_lambdas:(hot_reload <> None) tir in
   snap "tir-perceus" tir;
@@ -258,7 +267,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let opt_snap = match opt_snap with
     | Some f -> (fun name m -> verify_stage name m; f name m)
     | None -> snap in
-  let tir = if opt then Opt.run ~snap:opt_snap ~hot_reload tir else tir in
+  let tir = if opt && Pass_switch.on "opt" then Opt.run ~snap:opt_snap ~hot_reload tir else tir in
   (* Prune functions unreachable from the entry points BEFORE LLVM emit, even
      when the optimizer is disabled: a linkability requirement, not an
      optimization (see the comment at this call's original site). *)

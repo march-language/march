@@ -89,6 +89,17 @@ the REPL/JIT and every compile `test_oracle` runs).
 ```
 Checks scoping and references after every pass (each variable bound, each callee
 resolvable, indirect calls through something callable, no duplicate fn names).
+From `tir-mono` on, it also checks types: call arity, each argument's
+representation against its parameter, case-branch binder counts, projected
+field names, and no source-named type variable left in a signature.
+
+**RC balance:** `--verify-tir-rc` (`MARCH_VERIFY_TIR_RC=1`) also walks every
+path of every function after Perceus. It reports an over-release or a use after
+release with the object, its binding and the path (`case kv: $Tuple2`).
+`MARCH_VERIFY_TIR_LEAKS=1` adds leaks. It is a separate switch because it
+currently reports three known Perceus bugs, two in stdlib code every program
+links (`specs/todos/2026-10-07-perceus-releases-parent-before-field-use.md`).
+Filter for your own function's name.
 A finding exits 3 and names the stage and function: the first stage listed is
 the pass that broke it. Always on in `run_snapshots` and the hand-rolled
 pipelines in `test_codegen.ml`. Design: observability plan §6 (A1).
@@ -114,9 +125,30 @@ does not restage `runtime/`, and the stale `_build` stdlib copy leaks in.
 
 ## Which optional pass?
 
-`MARCH_NO_UNBOX=1`, `MARCH_NO_HOF_SPEC=1`, `MARCH_NO_INLINE_RC=1`, `--no-opt`.
-These four are every optional-pass switch (triage.sh tries all four).
-`MARCH_NO_TRMC` **does not exist** (removed 2026-09-21; TRMC is mandatory).
+**First command:** `--bisect-pass`.
+```bash
+./_build/default/bin/main.exe --bisect-pass FILE              # vs the interpreter
+./_build/default/bin/main.exe --bisect-pass FILE --expect OUT # vs a known-good stdout
+```
+It reports the smallest set of optional TIR passes whose removal makes the
+compiled output right. If disabling all of them does not help, it says so; then
+the bug is in a mandatory pass, codegen or the runtime. Any build takes
+`--disable-pass P1,P2` (or `MARCH_DISABLE_PASS`, in the CAS key), and
+`--list-passes` names the passes. Each probe is a full compile, so expect about
+twenty of them. `MARCH_BISECT_TIMEOUT` (seconds, default 60) bounds each run.
+
+Outside the TIR passes: `MARCH_NO_UNBOX=1`, `MARCH_NO_INLINE_RC=1`, `--no-opt`
+(triage.sh tries these). `MARCH_NO_TRMC` **does not exist** (removed
+2026-09-21; TRMC is mandatory).
+
+**Shrink the program first** when it is large:
+```bash
+./_build/default/bin/main.exe --reduce FILE --oracle 'sh oracle.sh {}'
+```
+The oracle exits 0 while the candidate still shows the bug. Make it check that
+the candidate still compiles and runs, or the reducer will "find" a syntax
+error. The reducer removes declarations, then lines, and writes
+`FILE.reduced.march`.
 
 **Don't:** compare an A/B with a switch on a warm cache without checking the
 switch is in the CAS key (`MARCH_DEBUG_CASFLAGS=1`, below). A switch missing from

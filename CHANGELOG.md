@@ -19,6 +19,22 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`march --bisect-pass FILE` finds the optimisation pass behind a
+  miscompile.** It compares the compiled program's output with the
+  interpreter's (or with `--expect OUT`). It then reports the smallest set of
+  optional passes whose removal makes the output right. When no optional pass
+  is to blame, it says so. `--disable-pass P1,P2` turns passes off for any
+  build, and `--list-passes` names them.
+- **`march --reduce FILE --oracle CMD` shrinks a failing program.** It removes
+  declarations, then lines, while `CMD` still exits 0 on the candidate, and
+  writes the result to `FILE.reduced.march`.
+- **The TIR verifier checks types, and optionally reference counts.**
+  - Under `--verify-tir`, a call's argument count and representations, a case
+    branch's binder count, projected field names, and leftover type variables
+    are now checked after monomorphisation.
+  - `--verify-tir-rc` additionally checks reference-count balance after Perceus
+    on every path, reporting over-releases and uses after release.
+    `MARCH_VERIFY_TIR_LEAKS=1` adds leaks.
 - **`march query`: ask one compile a question.** `march query fn NAME FILE`
   lists the passes that changed a function and prints its IR at the last one
   (or `--at PASS`); `origin NAME` shows where an emitted function came from

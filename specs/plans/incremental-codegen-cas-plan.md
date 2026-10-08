@@ -228,6 +228,12 @@ bug-yield order, each its own PR:
    `fn_def`. Post-join-points: every `$jp` defined once. Post-escape: `EStackAlloc` values do not
    escape (`Escape.escape_analysis` is a transform, `escape.ml:624`; add a checking mode).
 
+**Status (2026-10-07):** checks 1, 2 and 3 landed
+(`specs/progress/2026-10-07-tir-verifier-scoping.md`,
+`specs/progress/2026-10-07-verify-rc-types-and-pass-bisect.md`). Check 3 is behind its own
+`--verify-tir-rc` switch until the three Perceus bugs it found are fixed. Checks 4 and 5 are
+open (`specs/todos/2026-10-08-verifier-a4-followups.md`).
+
 **Prove it red.** Each check lands with a test feeding it hand-broken TIR (for check 3: the
 pre-fix Perceus output of a fixed September leak, reconstructed) and asserting the error.
 
@@ -335,6 +341,13 @@ it. No live-object dump on demand. No `EAllocHole` fill check.
 Checked extras + test integration: ½.
 
 ## 9. A4 — Pass bisection and program reduction
+
+**Status (2026-10-07):** `--disable-pass` / `--list-passes`, `--bisect-pass` and a
+declaration- and line-level `--reduce` landed
+(`specs/progress/2026-10-07-verify-rc-types-and-pass-bisect.md`). The disabled set is a
+module-level `Pass_switch`, not parameters. Bisection reports a 1-minimal set rather than the
+first pass. The `test_oracle` hook and expression-level reduction are open
+(`specs/todos/2026-10-08-verifier-a4-followups.md`). The facts below predate it.
 
 **Facts.** The optional-pass switches that exist are `MARCH_NO_HOF_SPEC` and `MARCH_NO_UNBOX`
 (`contract_pipeline.ml:32–44`), `MARCH_NO_INLINE_RC` (`llvm_rc_inline.ml:52`) and the CLI
