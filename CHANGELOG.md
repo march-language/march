@@ -19,6 +19,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`march --shell` / `forge shell` has line editing and history.** On a terminal,
+  Up/Down recall earlier inputs (kept in `~/.march/shell_history`, mode 0600,
+  last 1000), and Left/Right, Home/End, Ctrl-A/E/U/K/W/L, Delete and mid-line
+  insertion work, with UTF-8-aware cursor movement. Ctrl-C discards the line
+  without leaving the session; Ctrl-D on an empty line leaves. The terminal is
+  always restored. Pipes, `--shell-inputs` and `forge rpc` are unchanged.
 - **`march --bisect-pass FILE` finds the optimisation pass behind a
   miscompile.** It compares the compiled program's output with the
   interpreter's (or with `--expect OUT`). It then reports the smallest set of
