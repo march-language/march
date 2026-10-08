@@ -7,3 +7,4 @@
 bench/http_get.march                                 # menhir-rejects: `if` without `else`
 bench/http_get_close.march                           # menhir-rejects: `if` without `else`
 bench/http_get_keepalive.march                       # menhir-rejects: `if` without `else`
+test/imports/test_sibling_parse_error/test_b.march   # menhir-rejects: intentionally invalid fixture
