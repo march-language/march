@@ -43,9 +43,11 @@ unrelated value cannot affect whether a capture is still alive.
 - `test/native/reused_closure_captures.march`: a fold with a capturing closure, a fold
   into a map, and the `run_cluster_with` shape; RED on main on all three (101, 94 and 201
   objects left over 100 calls), GREEN after, and the interpreter agrees on every value.
-- IR over 432 programs, names normalised: 37 differ, all programs that fold a `Map`
-  with a capturing closure or contain a covered tail call. The new lines are the capture
-  releases on freed paths (`march_clo_release` and typed drops).
+- IR over 432 programs, names normalised, against main: 41 differ (37 from fix 1, 4 more
+  from fix 2: `hash_map_bench`, `record_field_tail_projection`, `signal_term_suppress`,
+  `signal_watch`). Every program that folds a `Map` with a capturing closure, or that
+  has a covered tail call behind a parameter drop, changes. The new lines are the
+  capture releases on freed paths (`march_clo_release` and typed drops).
 - Session probe with #871 and #872: from ~1 object per session (tombstones expiring at
   once) to ~0; ~16 with the default 3 h grace (the tombstones themselves).
 

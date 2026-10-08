@@ -502,6 +502,8 @@ native_remote_schema: coverage audit (user + stdlib): 126 enforced, 0 inert (war
 native_remote_schema: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_result_int_match: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_result_int_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_reused_closure_captures: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
+native_reused_closure_captures: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ring_buf_ops: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
 native_ring_buf_ops: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ring_buf_record_leak_probe: coverage audit (user + stdlib): 126 enforced, 0 inert (warned), 0 unenforced
