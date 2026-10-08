@@ -343,6 +343,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **The remote shell's build-identity table is smaller, and a session fetches
+  only what differs.** A `--hot-reload` binary embeds the table in a compact
+  format (module prefixes written once, 48-bit hashes): 105 KB instead of
+  180 KB for the shell test node. A shell session now asks the node for a
+  summary with one digest per module (20 KB on the wire instead of 239 KB),
+  then for the modules whose digest differs from the checkout, which for an
+  up-to-date checkout is none. A shell still reads the whole table from a node
+  built before this. A shell built before this refuses every input that
+  reaches the program's code on a newer node, so upgrade the shell first.
 - **Compiler-minted symbols are structural, not counter-numbered.** A lambda
   is `$lam<k>_<host>` (nested: `$lam<j>__lam<k>_<host>`), its lifted apply fn
   `<lambda>$apply$<k>_<host>`, a fused pipeline helper `$fused_mf_<host>_<k>`,
