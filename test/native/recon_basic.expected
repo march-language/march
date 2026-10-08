@@ -9,9 +9,4 @@ node_stats: actors=4 crashes=1 schedulers_ok=true rss_ok=true
 epochs: current_ok=true
 scheduler_usage in [0,1]: true
 proc_window: deltas non-negative=true
-top: rows=4 pid_order=true bogus=0
-top: supervised=2 with_parent=2
-top supervisor: policy=one_for_one limit=5 window=60 held=1 children=2 child_crashes=1
-top msgs_in: worker=true value=3
-format_top: lines=5
 names: worker

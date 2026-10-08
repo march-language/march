@@ -125,7 +125,6 @@ static void write_row(march_jw *w, const march_obs_actor *r) {
     march_jw_key(w, "msgs_out");    march_jw_u64(w, r->msgs_out);
     march_jw_key(w, "crashes");     march_jw_i64(w, r->crashes);
     march_jw_key(w, "child_crashes"); march_jw_i64(w, r->child_crashes);
-    march_jw_key(w, "stack_bytes"); march_jw_i64(w, r->stack_bytes);
     /* How long ago it last ran (march_now_ms is monotonic, not wall time). */
     march_jw_key(w, "idle_ms");
     if (r->last_run_ms > 0) march_jw_i64(w, march_now_ms() - r->last_run_ms);
@@ -884,25 +883,18 @@ static const char *verb_crashes(march_jw *w, const char *args) {
 
 /* ── TOP <attr> <n> [window_ms] ───────────────────────────────────────── */
 
-enum { TOP_MBOX, TOP_CRASHES, TOP_STACK, TOP_SLICES, TOP_MSGS_IN, TOP_MSGS_OUT };
-static const char *top_attrs[] = { "mbox", "crashes", "stack", "slices", "msgs_in", "msgs_out" };
-#define N_TOP_ATTRS 6
+enum { TOP_MBOX, TOP_CRASHES, TOP_SLICES, TOP_MSGS_IN, TOP_MSGS_OUT };
+static const char *top_attrs[] = { "mbox", "crashes", "slices", "msgs_in", "msgs_out" };
+#define N_TOP_ATTRS 5
 #define TOP_WINDOW_DEFAULT_MS 1000
 #define TOP_WINDOW_MAX_MS     5000
 
-typedef struct { int64_t value; int64_t pid; size_t row; } top_entry;
-
-/* Highest value first; equal values by ascending pid, so a ranking is the
- * same on every walk (the actor table's bucket order is not). */
-static int cmp_pid_entry(const void *x, const void *y) {
-    const top_entry *a = x, *b = y;
-    return a->pid < b->pid ? -1 : a->pid > b->pid;
-}
+typedef struct { int64_t value; size_t row; } top_entry;
 
 static int cmp_top(const void *x, const void *y) {
     const top_entry *a = x, *b = y;
     if (a->value != b->value) return a->value > b->value ? -1 : 1;
-    return a->pid < b->pid ? -1 : a->pid > b->pid;
+    return a->row < b->row ? -1 : a->row > b->row;
 }
 
 static uint64_t counter_of(const march_obs_actor *r, int attr) {
@@ -923,7 +915,7 @@ static const char *verb_top(march_jw *w, const char *args) {
     if (attr < 0) return "bad_args";
     if (!next_word(&p, word, sizeof word) || !parse_i64(word, &want)
             || want < 1 || want > ACTORS_MAX_N) return "bad_args";
-    int windowed = attr >= TOP_SLICES;   /* slices, msgs_in, msgs_out */
+    int windowed = attr >= TOP_SLICES;
     if (next_word(&p, word, sizeof word)) {
         if (!windowed || !parse_i64(word, &window) || window > TOP_WINDOW_MAX_MS)
             return "bad_args";
@@ -966,7 +958,7 @@ static const char *top_body(march_jw *w, int attr, int64_t want, int windowed, i
     }
     march_obs_actor *rows; size_t n;
     if (march_obs_actors(&rows, &n) != 0) { march_obs_actors_free(before, nb); return "out_of_memory"; }
-    fill_crash_counts(rows, n);   /* the crash columns of every row, not only the crashes ranking */
+    if (attr == TOP_CRASHES) fill_crash_counts(rows, n);
     top_entry *e = (top_entry *)malloc((n ? n : 1) * sizeof *e);
     if (!e) { march_obs_actors_free(before, nb); march_obs_actors_free(rows, n); return "out_of_memory"; }
     size_t k = 0;
@@ -976,7 +968,6 @@ static const char *top_body(march_jw *w, int attr, int64_t want, int windowed, i
         /* A crash-looping slot's crashes land on its supervisor's row (each
          * restart is a new pid), so rank by both. */
         else if (attr == TOP_CRASHES) v = rows[i].crashes + rows[i].child_crashes;
-        else if (attr == TOP_STACK) v = rows[i].stack_bytes;
         else {
             /* Delta over the window; an actor born during it counts from 0. */
             uint64_t prev = 0;
@@ -986,7 +977,7 @@ static const char *top_body(march_jw *w, int attr, int64_t want, int windowed, i
             uint64_t now = counter_of(&rows[i], attr);
             v = now >= prev ? (int64_t)(now - prev) : 0;
         }
-        e[k++] = (top_entry){ v, rows[i].pid, i };
+        e[k++] = (top_entry){ v, i };
     }
     qsort(e, k, sizeof *e, cmp_top);
     size_t shown = (size_t)want < k ? (size_t)want : k;
@@ -997,17 +988,6 @@ static const char *top_body(march_jw *w, int attr, int64_t want, int windowed, i
     march_jw_key(w, "total"); march_jw_u64(w, n);
     march_jw_key(w, "top");
     march_jw_arr_begin(w);
-    /* Supervision context for the rows shown: the supervisor's type name
-     * needs its row, found by pid in an index built once. */
-    top_entry *by_pid = NULL;
-    for (size_t i = 0; i < shown && !by_pid; i++)
-        if (rows[e[i].row].parent >= 0) {
-            by_pid = (top_entry *)malloc((n ? n : 1) * sizeof *by_pid);
-            if (by_pid) {
-                for (size_t j = 0; j < n; j++) by_pid[j] = (top_entry){ 0, rows[j].pid, j };
-                qsort(by_pid, n, sizeof *by_pid, cmp_pid_entry);
-            }
-        }
     for (size_t i = 0; i < shown; i++) {
         const march_obs_actor *r = &rows[e[i].row];
         march_jw_obj_begin(w);
@@ -1017,50 +997,11 @@ static const char *top_body(march_jw *w, int attr, int64_t want, int windowed, i
         march_jw_key(w, "names");  write_names(w, r);
         march_jw_key(w, "status"); march_jw_str(w, status_name(r->status));
         march_jw_key(w, "mbox");   march_jw_i64(w, waiting(r));
-        march_jw_key(w, "stack_bytes"); march_jw_i64(w, r->stack_bytes);
-        march_jw_key(w, "crashes");     march_jw_i64(w, r->crashes);
-        march_jw_key(w, "child_crashes"); march_jw_i64(w, r->child_crashes);
-        march_jw_key(w, "children");    march_jw_i64(w, r->num_children);
-        /* How it is supervised: "supervised" (a supervise block restarts it),
-         * "spawned" (unsupervised, but another actor spawned it), "none". */
-        march_jw_key(w, "link");
-        march_jw_str(w, r->parent >= 0 ? "supervised" : r->spawned_by >= 0 ? "spawned" : "none");
-        march_jw_key(w, "parent");
-        if (r->parent >= 0) march_jw_i64(w, r->parent); else march_jw_null(w);
-        march_jw_key(w, "parent_type");
-        {
-            const march_obs_actor *pr = NULL;
-            if (r->parent >= 0 && by_pid) {
-                size_t lo = 0, hi = n;
-                while (lo < hi) { size_t mid = (lo + hi) / 2; if (by_pid[mid].pid < r->parent) lo = mid + 1; else hi = mid; }
-                if (lo < n && by_pid[lo].pid == r->parent) pr = &rows[by_pid[lo].row];
-            }
-            if (pr) write_type(w, pr); else march_jw_null(w);
-        }
-        march_jw_key(w, "spawned_by");
-        if (r->spawned_by >= 0) march_jw_i64(w, r->spawned_by); else march_jw_null(w);
-        /* A supervisor's configuration, as ACTOR <pid> reports it. */
-        march_jw_key(w, "supervisor");
-        {
-            march_obs_actor_extra ex;
-            if (r->num_children > 0) march_obs_actor_extra_get(r->pid, &ex); else ex.supervisor = 0;
-            if (ex.supervisor) {
-                march_jw_obj_begin(w);
-                march_jw_key(w, "strategy");      march_jw_str(w, strategy_name(ex.strategy));
-                march_jw_key(w, "max_restarts");  march_jw_i64(w, ex.max_restarts);
-                march_jw_key(w, "window_secs");   march_jw_i64(w, ex.window_secs);
-                march_jw_key(w, "restarts_held"); march_jw_i64(w, ex.n_restarts);
-                march_jw_obj_end(w);
-            } else {
-                march_jw_null(w);
-            }
-        }
         march_jw_obj_end(w);
     }
     march_jw_arr_end(w);
     march_jw_obj_end(w);
     free(e);
-    free(by_pid);
     march_obs_actors_free(before, nb);
     march_obs_actors_free(rows, n);
     return NULL;
@@ -1101,7 +1042,7 @@ static const march_observe_verb snapshot_verbs[] = {
     { "CRASHES", "observe", "[n]",
       "the last n crashes, newest first (default 20, max 256): kind, pid, type, supervisor, restart; no message",
       verb_crashes },
-    { "TOP", "observe", "mbox|crashes|stack|slices|msgs_in|msgs_out <n> [window_ms]",
+    { "TOP", "observe", "mbox|crashes|slices|msgs_in|msgs_out <n> [window_ms]",
       "the n actors highest on an attribute; slices/msgs_* rank the change over window_ms (default 1000; 0 = cumulative)",
       verb_top },
 };

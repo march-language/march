@@ -106,8 +106,6 @@ let row b (pid, inst) =
     "msgs_out", (fun b -> int b inst.ai_msgs_out);
     "crashes", (fun b -> int b 0);
     "child_crashes", (fun b -> int b child_crashes);
-    (* No machine stacks under the interpreter. *)
-    "stack_bytes", (fun b -> int b 0);
     "idle_ms", null;
   ]
 
@@ -251,52 +249,13 @@ let crashes b args =
         ]));
   ]
 
-(* A supervisor's configuration; [null] for any other actor.  Restarts held
-   are those still inside the window, as the compiled runtime counts them. *)
-let supervisor_cfg inst b =
-  match inst.ai_def.actor_supervise with
-  | None -> null b
-  | Some cfg ->
-    let now = Unix.gettimeofday () and window = float_of_int cfg.sc_window_secs in
-    let held = List.fold_left (fun acc (ts, n) -> if now -. ts < window then acc + n else acc)
-        0 inst.ai_restart_count in
-    obj b [
-      "strategy", (fun b -> str b (match cfg.sc_strategy with
-          | OneForOne -> "one_for_one" | OneForAll -> "one_for_all"
-          | RestForOne -> "rest_for_one"));
-      "max_restarts", (fun b -> int b cfg.sc_max_restarts);
-      "window_secs", (fun b -> int b cfg.sc_window_secs);
-      "restarts_held", (fun b -> int b held);
-    ]
-
-(* One TOP row: the ranked value, then who the actor is and how it is
-   supervised (same fields as runtime/march_observe_snapshot.c's top_body). *)
-let top_row value b ((pid, i) as r) =
-  let parent_inst = Option.bind i.ai_supervisor (Hashtbl.find_opt actor_registry) in
-  obj b [
-    "pid", (fun b -> int b pid); "value", (fun b -> int b (value r));
-    "type", (fun b -> str b i.ai_name);
-    "names", (fun b -> arr b (names_of pid) str);
-    "status", (fun b -> str b "waiting"); "mbox", (fun b -> int b (mbox i));
-    "stack_bytes", (fun b -> int b 0);
-    "crashes", (fun b -> int b 0);
-    "child_crashes", (fun b ->
-        int b (List.length (List.filter (fun (_, c) -> c.ai_supervisor = Some pid) (crash_entries ()))));
-    "children", (fun b -> int b (List.length (children_of pid)));
-    "link", (fun b -> str b (if i.ai_supervisor <> None then "supervised" else "none"));
-    "parent", (fun b -> match i.ai_supervisor with Some p -> int b p | None -> null b);
-    "parent_type", (fun b -> match parent_inst with Some p -> str b p.ai_name | None -> null b);
-    "spawned_by", null;
-    "supervisor", supervisor_cfg i;
-  ]
-
 let top b args =
   match words args with
   | attr :: n :: rest ->
     let want = int_word n in
     if want < 1 || want > 10000 then raise (Bad "bad_args");
     let windowed = List.mem attr [ "slices"; "msgs_in"; "msgs_out" ] in
-    if not (windowed || List.mem attr [ "mbox"; "crashes"; "stack" ]) then raise (Bad "bad_args");
+    if not (windowed || attr = "mbox" || attr = "crashes") then raise (Bad "bad_args");
     (match rest with
      | [] | [ "0" ] when windowed -> ()   (* cumulative *)
      | [] -> ()
@@ -306,7 +265,6 @@ let top b args =
     let value (pid, i) = match attr with
       | "mbox" -> mbox i
       | "crashes" -> List.length (List.filter (fun (_, c) -> c.ai_supervisor = Some pid) (crash_entries ()))
-      | "stack" -> 0
       | "slices" -> i.ai_slices | "msgs_in" -> i.ai_msgs_in | _ -> i.ai_msgs_out
     in
     let rows = live () in
@@ -315,7 +273,11 @@ let top b args =
     obj b [
       "attr", (fun b -> str b attr); "window_ms", null;
       "total", (fun b -> int b (List.length rows));
-      "top", (fun b -> arr b shown (top_row value));
+      "top", (fun b -> arr b shown (fun b ((pid, i) as r) ->
+          obj b [ "pid", (fun b -> int b pid); "value", (fun b -> int b (value r));
+                  "type", (fun b -> str b i.ai_name);
+                  "names", (fun b -> arr b (names_of pid) str);
+                  "status", (fun b -> str b "waiting"); "mbox", (fun b -> int b (mbox i)) ]));
     ]
   | _ -> raise (Bad "bad_args")
 

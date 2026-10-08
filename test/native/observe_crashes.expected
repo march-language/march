@@ -17,8 +17,4 @@ ok: SNAPSHOT has a crashes section
 ok: ACTOR maker lists the two actors it spawned
 ok: TREE nests them under maker, linked as spawned
 ok: loop (spawned by main) stays unsupervised
-ok: TOP: boss is a one_for_one supervisor, 3 restarts held of 10 in 60 s, 3 child crashes
-ok: TOP: boss's current child is supervised by it and is not a supervisor
-ok: TOP: maker's two twigs are linked spawned, with spawned_by maker and no supervisor
-ok: TOP: loop, spawned by main, has link none
 ok: no reply carries the crash message

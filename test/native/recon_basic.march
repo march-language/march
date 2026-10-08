@@ -104,32 +104,6 @@ mod Main do
     println("scheduler_usage in [0,1]: " ++ bool_to_string(List.all(usage, fn p -> match p do (_, u) -> u >= 0.0 && u <= 1.0 end)))
     let win = Recon.proc_window(c, "msgs_in", 2, 20)
     println("proc_window: deltas non-negative=" ++ bool_to_string(List.all(win, fn p -> match p do (_, d) -> d >= 0 end)))
-    -- top: the ranked rows with their supervision (the same on both backends
-    -- for what is printed; type names differ, so they are not)
-    let rows = Recon.top(c, "mailbox", 10)
-    let pids = List.map(rows, fn r -> r.pid)
-    println("top: rows=" ++ int_to_string(List.length(rows))
-            ++ " pid_order=" ++ bool_to_string(pids == List.sort_by(pids, fn (x, y) -> x < y))
-            ++ " bogus=" ++ int_to_string(List.length(Recon.top(c, "bogus", 3))))
-    println("top: supervised=" ++ int_to_string(List.length(List.filter(rows, fn r -> r.link == "supervised")))
-            ++ " with_parent=" ++ int_to_string(List.length(List.filter(rows, fn r -> Option.is_some(r.parent)))))
-    match List.filter(rows, fn r -> Option.is_some(r.supervision)) do
-      Cons(r, Nil) ->
-        match r.supervision do
-          Some(sv) ->
-            println("top supervisor: policy=" ++ sv.policy ++ " limit=" ++ int_to_string(sv.limit)
-                    ++ " window=" ++ int_to_string(sv.window_secs) ++ " held=" ++ int_to_string(sv.held)
-                    ++ " children=" ++ int_to_string(r.children) ++ " child_crashes=" ++ int_to_string(r.child_crashes))
-          None -> println("top supervisor: none")
-        end
-      _ -> println("top supervisor: unexpected")
-    end
-    match Recon.top(c, "msgs_in", 1) do
-      Cons(r, _) -> println("top msgs_in: worker=" ++ bool_to_string(r.pid == wp) ++ " value=" ++ int_to_string(r.value))
-      Nil -> println("top msgs_in: empty")
-    end
-    let table = String.split(Recon.format_top(rows), "\n")
-    println("format_top: lines=" ++ int_to_string(List.length(table)))
     println("names: " ++ names_of(c, wp))
   end
 end

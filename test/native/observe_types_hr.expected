@@ -1,7 +1,3 @@
 ok: ACTORS names the actor type under --hot-reload
 ok: EPOCHS lists the dispatch slot
-ok: TOP names a supervised child's supervisor by pid and type
-ok: TOP gives the supervisor's policy: rest_for_one, 3 within 30, 1 child
-ok: TOP leaves parent_type null for an unsupervised actor
-ok: TOP stack ranks the deep-recursion actor first, over the 64 KiB floor
 ok: no reply carries the crash message
