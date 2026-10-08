@@ -477,11 +477,15 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
           Printf.eprintf "march shell: bad HELLO reply: %s\n" hello; exit 1)
     | _ -> Printf.eprintf "march shell: %s\n" hello; exit 1 in
   let ident =
-    let r = send conn "IDENT"; recv conn in
-    match words r with
-    | [ "OK"; b64 ] ->
-      let c = March_jit.Shell_ident.check_of
-          ~node:(March_jit.Shell_ident.of_string (b64_decode b64)) program.Ast.mod_decls in
+    (* The summary, then only the groups that differ from ours
+       (Shell_ident.fetch); the whole table from a node that predates it. *)
+    let ask verb =
+      let r = send conn verb; recv conn in
+      match words r with
+      | [ "OK"; b64 ] -> Ok (b64_decode b64)
+      | _ -> Error r in
+    match March_jit.Shell_ident.fetch_check ~ask program.Ast.mod_decls with
+    | Ok c ->
       (match March_jit.Shell_ident.differing c with
        | [] -> ()
        | diffs ->
@@ -494,7 +498,7 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
                                   (List.filteri (fun i _ -> i < 5) diffs)))
            (if n > 5 then ", ..." else "") (if n = 1 then "it" else "them"));
       Some c
-    | _ ->
+    | Error r ->
       Printf.eprintf "march shell: the node does not report its build identity (%s); \
                       inputs are not checked against its code\n%!" r;
       None in

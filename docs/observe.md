@@ -986,7 +986,9 @@ march> [{ name: "first", tags: ["a", "b", "c"] }] limit: 2
 
 - Records, tuples and constructors print field by field, with constructor
   names. A type that derives `Show` prints as its derived `show` would.
-- Strings print quoted and escaped.
+- Strings inside a value print quoted and escaped (`["a", "b"]`). A string
+  that is the whole result, or the one field of a top-level constructor,
+  prints as it is: `Actor.inspect_state` shows `Ok({ n: 42 })`.
 - The limit applies at every depth: each list, Array, Map and Set shows at
   most `N` elements then `… n more`, and each string at most `N` characters
   then `… n more chars`. `limit: all` (or `:limit 0`) turns it off.
@@ -1020,6 +1022,30 @@ error: this input reaches code that differs from the node's build:
 Inputs that reach only unchanged code still run. A type whose constructors
 are numbered differently on the node (reordered, added) is always refused,
 since values built here would be read back wrongly there.
+
+**Spawning the program's actors.** An input can spawn one of the program's
+own actors and use it like any other:
+
+```
+march> let k = spawn(Counter)
+k : Pid({ n : Int })
+march> send(k, Bump(5))
+Some(())
+march> Actor.inspect_state(debug, k, 500)
+Ok({ n: 5 })
+```
+
+The actor runs the node's code, not a copy compiled into the input: the
+input calls the node's own spawn function for that actor, so the actor
+answers `inspect_state`, shows its type name in `ACTORS` and `Recon`, and is
+upgraded by a hot deploy like every other instance. It belongs to the node:
+it keeps running after the session ends (or a deploy ends it), and a later
+session finds it with `Actor.list` or `Actor.pid_from_int`. Spawning needs no
+capability of its own, but an input is charged with the capabilities the
+actor's handlers use, as for any program code it reaches. An input that
+could only spawn the actor by carrying its own copy of the handlers is
+refused instead: a node built by an older compiler, or an actor whose init
+arguments include a function.
 
 What happens when:
 
@@ -1075,7 +1101,6 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
   messages of an actor, most useful exactly when it is stuck and cannot render
   them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
 - **The rest of the remote shell.** It works (see above), but:
-  - a program-defined actor cannot be spawned from the shell;
   - it has not had its security review yet (plan R5).
 - **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;
   today `forge top` is the live view.

@@ -128,11 +128,15 @@ let quote_lit s = "\"" ^ String.concat "\\\"" (String.split_on_char '"' s) ^ "\"
 
 (* A March expression rendering the value of the expression [v] (a variable)
    of type [t], with the limit in scope as [__l]. *)
-let rec render st (t : TC.ty) (v : string) : string =
+(* [outer]: [v] is the result itself, or the one argument of a constructor
+   that is (an [Ok("{ n: 42 }")], say): a String there prints unquoted.
+   Anywhere deeper (a list, a record, a tuple) strings are quoted. *)
+let rec render ?(outer = false) st (t : TC.ty) (v : string) : string =
   let lam a = Printf.sprintf "fn __x -> %s" (render st a "__x") in
   match norm t with
   | TC.TTuple [] -> "\"()\""
   | TC.TArrow _ -> "\"<fn>\""
+  | TC.TCon ("String", []) when outer -> Printf.sprintf "ShellRender.raw(%s, __l)" v
   | TC.TCon ("String", []) -> Printf.sprintf "ShellRender.string(%s, __l)" v
   | TC.TCon ("List", [ a ]) -> Printf.sprintf "ShellRender.list(%s, __l, %s)" v (lam a)
   | TC.TCon ("PVec", [ a ]) -> Printf.sprintf "ShellRender.array(%s, __l, %s)" v (lam a)
@@ -161,7 +165,7 @@ let rec render st (t : TC.ty) (v : string) : string =
   | TC.TCon (name, args) as t ->
     (match ctors_of st name with
      | None -> Printf.sprintf "to_string(%s)" v
-     | Some cs -> call st t v (fun () ->
+     | Some cs -> call ~outer st t v (fun () ->
          let arms = List.map (fun (pat, shown, (ci : TC.ctor_info)) ->
              let subst = if List.length ci.TC.ci_params = List.length args
                then List.combine ci.TC.ci_params args else [] in
@@ -171,15 +175,17 @@ let rec render st (t : TC.ty) (v : string) : string =
                let vars = List.mapi (fun i _ -> Printf.sprintf "__a%d" i) tys in
                Printf.sprintf "      %s(%s) -> ShellRender.ctor(%s, [%s])\n" pat
                  (String.concat ", " vars) (quote_lit shown)
-                 (String.concat ", " (List.map2 (fun x ty -> render st (of_surface st subst ty) x) vars tys)))
+                 (String.concat ", " (List.map2 (fun x ty ->
+                      render ~outer:(outer && List.length tys = 1) st (of_surface st subst ty) x)
+                      vars tys)))
              cs in
          Printf.sprintf "    match __v do\n%s    end\n" (String.concat "" arms)))
   | _ -> Printf.sprintf "to_string(%s)" v
 
 (* A call of the generated function for [t] on [v], generating it (its body
    from [body]) the first time [t] is seen. *)
-and call st t v (body : unit -> string) =
-  let key = TC.pp_ty t in
+and call ?(outer = false) st t v (body : unit -> string) =
+  let key = (if outer then "outer " else "") ^ TC.pp_ty t in
   match Hashtbl.find_opt st.memo key with
   | Some f -> Printf.sprintf "%s(%s, __l)" f v
   | None when st.n >= max_fns -> Printf.sprintf "to_string(%s)" v
@@ -201,5 +207,5 @@ and call st t v (body : unit -> string) =
     its own value and crashed the node). *)
 let generate ~env ~shows ~program_name ~tag (ty : TC.ty) (var : string) : string * string =
   let st = { env; shows; program_name; memo = Hashtbl.create 8; fns = Buffer.create 256; n = 0; tag } in
-  let e = render st ty var in
+  let e = render ~outer:true st ty var in
   (Buffer.contents st.fns, e)
