@@ -160,6 +160,9 @@ let recv c =
 type session = {
   conn : conn;
   epoch : int;
+  (* The node's HELLO challenge, signed into every EVAL, so a captured line
+     runs on no other connection, node or restart. *)
+  challenge : string;
   sk : bytes;
   jit : March_jit.Repl_jit.t;
   mutable tc_env : TC.env;
@@ -209,8 +212,8 @@ let eval_on_node s ~(kind : string) ~(src : string)
   let so = read_file frag.March_jit.Repl_jit.sf_so in
   let now = int_of_float (Unix.gettimeofday () *. 1000.) in
   let body =
-    Printf.sprintf "name:%s kind:%s epoch:%d nonce:%s not_after_ms:%d timeout_ms:%d caps:%s src_b64:%s so_b64:%s"
-      frag.sf_entry kind s.epoch (fresh_nonce ()) (now + 30_000) s.timeout_ms
+    Printf.sprintf "name:%s kind:%s epoch:%d session:%s nonce:%s not_after_ms:%d timeout_ms:%d caps:%s src_b64:%s so_b64:%s"
+      frag.sf_entry kind s.epoch s.challenge (fresh_nonce ()) (now + 30_000) s.timeout_ms
       (match frag.sf_caps with [] -> "-" | l -> String.concat "," l)
       (b64_encode src) (b64_encode so) in
   let signature =
@@ -479,7 +482,13 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
   let s = { conn; epoch; sk; jit; tc_env; program_name = program.Ast.mod_name.Ast.txt;
             program_decls = program.Ast.mod_decls;
             program_type_map = type_map; limit = default_limit; timeout_ms; n = 0; bound = [];
-            failed = false; triple = field hello "triple"; ident } in
+            failed = false; triple = field hello "triple"; ident;
+            challenge = (match field hello "session" with
+                | Some c -> c
+                | None ->
+                  Printf.eprintf "march shell: the node's HELLO has no session challenge \
+                                  (it predates replay protection): %s\n%!" hello;
+                  exit 1) } in
   (* Lower the program now, before the first prompt, rather than on the
      first input. *)
   March_jit.Repl_jit.shell_lower_program jit ~program_name:s.program_name

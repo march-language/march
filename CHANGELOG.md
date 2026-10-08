@@ -19,6 +19,18 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`march query`: ask one compile a question.** `march query fn NAME FILE`
+  lists the passes that changed a function and prints its IR at the last one
+  (or `--at PASS`); `origin NAME` shows where an emitted function came from
+  (source span, host function, the specialisation or lambda it derives from);
+  `callers` / `callees NAME` read the final call graph; `repr TYPE` shows how
+  each instance of a type is represented and why; `verify` runs the IR
+  verifier over every stage; `key` prints both cache keys with every input
+  that fed them; and `why-miss` says which of those inputs changed since the
+  last successful build, and whether this build will hit the source-level
+  cache, the post-TIR cache, or neither. A query writes no binary and no cache
+  entry, takes `--json`, and passes other flags (`--no-opt`, `--target`) to the
+  compile it asks about. `march-lsp query` forwards these to `march`.
 - **Type errors now point at the provided side too.** A mismatch keeps its
   "the expected type comes from here" label and adds where the offending
   value came from: "this is `T`" on the expression when it is not the
@@ -105,7 +117,9 @@ git log is authoritative for exact commits.
   trailing `limit: N` shortens long lists. Capabilities are pre-bound
   (`console`, `clock`, `intro`, `debug`). A panic or a timeout ends only that
   input, and a deploy ends the session. Every input is audited with its
-  source. Inputs can call the program's own functions and its
+  source, and one whose audit line cannot be written does not run. Each
+  request is signed for its session, so a captured request runs on no other
+  connection, node or restart. Inputs can call the program's own functions and its
   `MARCH_LIB_PATH` libraries, a Depot query for example.
   - The node runs an input only if its `$MARCH_SHELL_POLICY` file lists every
     capability the input's compiled code uses, including those reached
