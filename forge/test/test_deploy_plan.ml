@@ -414,6 +414,7 @@ let test_choice_added_monolith_split () =
       "SPLIT (D21): build shared both makes and receives Echo's changed choice (`choose by Server` gained `retry`)";
       "deploy one (expand) <- this deploy: every build compiled with --protocol-expand Echo:retry";
       "The receivers (Echo.Client) run the new version";
+      "guard it with Echo_Server.may_choose_retry()";
       Printf.sprintf "Echo.Server keeps offering and initiating under the previous fingerprint %s" (short8 old_p);
       "deploy two (contract): the plain build, once every host runs deploy one";
       "run it again for deploy two";

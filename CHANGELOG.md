@@ -19,6 +19,8 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- Generated protocol chooser APIs include `may_choose_<label>()`, false for
+  a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the
   control-plane role permissions while preserving explicit `--roles`.
 - **`forge query` asks the compiler about your project's build.** It is

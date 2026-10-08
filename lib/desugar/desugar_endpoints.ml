@@ -1011,10 +1011,12 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                      [ app "Session.emit"
                          [ var "s"; var "ep"; role_idx to_; app (msg ^ ".encode") [ con (msg ^ "." ^ ctor) [ var "v" ] ] ] ])) ]
          | LChoose brs ->
-           List.map
+           List.concat_map
              (fun (lbl, to_, ctor, payload, next) ->
                 let nx = state_of next in
-                fn ("choose_" ^ lbl) [ ("s", t_cap_session); ("st", sty this); ("v", payload) ] (sty nx)
+                [ fn ("may_choose_" ^ lbl) [] (TyCon (n "Bool", []))
+                    (ELit (LitBool (not (List.mem lbl held_labels)), sp));
+                  fn ("choose_" ^ lbl) [ ("s", t_cap_session); ("st", sty this); ("v", payload) ] (sty nx)
                   (let send_it =
                      on_ep
                        (con nx
@@ -1034,7 +1036,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                                   (--protocol-expand %s:%s); it can be chosen once the contract deploy has gone out"
                                  proto lbl proto lbl));
                          send_it ]
-                   else send_it))
+                   else send_it) ])
              brs
          | LRecv (from, ctor, payload, next) ->
            let nx = state_of next in

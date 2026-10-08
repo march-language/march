@@ -1190,8 +1190,10 @@ panics. Then deploy the plain build. `forge deploy` does both (`--plan` shows th
 it compares this build's protocols with what the environment runs
 (`.forge/deploy/<env>/protocols/`), finds the builds that both choose and receive, builds
 the expand, and on the next `forge deploy` the contract. Code that runs in both builds
-can ask whether it may choose yet: `<P>_Msg.role_fingerprint(<P>_Msg.role_<Chooser>())`
-equals `<P>_Msg.fingerprint()` only in the contract.
+can ask whether it may choose yet: `<P>_<Chooser>.may_choose_<label>()` is false
+for the held label in the expand build and true in the contract. Existing
+labels remain available in both builds; the predicate does not consume a
+session or its state.
 
 ## Configuration
 
