@@ -3468,7 +3468,14 @@ let compile filename =
        like any other instance (Repl_jit.shell_compile refuses an input that
        would carry its own copy of an actor's handlers instead). *)
     let shell_spawn_roots =
-      if !shell_ident_decls = None then []
+      (* Every hot-reload build, the node AND its --compile-so patches: the
+         kept spawn fns change what the optimiser inlines around them, and a
+         deploy compares the two builds function by function.  Rooting them
+         in the node only left e.g. `offers` a function of its own in the
+         node but inlined away in the patch, so the deploy staged it and
+         the node could not find it (`dlsym_failed offers`, two-node
+         protocol_evolve). *)
+      if !hot_reload_prefix = None then []
       else
         List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
             let n = fn.March_tir.Tir.fn_name in
