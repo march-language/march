@@ -70,7 +70,13 @@ After rewriting `List.filter`, `List.find`, `List.take_while` and
 
 ## Verification
 
-Full suite: see the PR.
+Full `scripts/run-tests.sh`:
+- Passed: compiler 1381, eval 288, codegen 702, stdlib_march 79, jit 33, lsp 383 + 5 + 37 + 10 + 8, refinecheck 1029, errors 287.
+- `run_stdlib`: 892/894. The two failures are **pre-existing on `origin/main`**, checked in a temporary worktree built from main:
+  - `track integration 6` ("cas cache hit") fails on main outright;
+  - `adversarial-regressions 49` (MARCH_SANITIZE cache isolation) passes on a fresh checkout's first run and fails on every later run, on main too: it is not idempotent and leaves cache state behind.
+
+  Neither touches the parser or refinements; filed separately.
 
 ## Abstract refinements: what is still open
 
