@@ -56,6 +56,11 @@ march query key FILE                   # both cache keys and every input that fe
 march query why-miss FILE              # which input changed since the last successful build of FILE
 ```
 `march-lsp query <same>` proxies to it (`MARCH_BIN` picks the compiler).
+`forge query <same, FILE optional>` is the project form: it adds the entry file, the
+project's `MARCH_LIB_PATH` and `forge build`'s own flags (`--release`, `--target T`,
+`[ffi]`, topology, protocol baselines), so `key`/`why-miss` describe the build
+`forge build` would run. Compiler flags go after `--`; `--opt`/`--target` are refused
+(use `--release` / `--target`). It builds no `[ffi.rust]` crate and writes nothing.
 **Read it:** a name the optimiser inlined is not in the final IR; the answer says
 the last stage that had it, and `--no-opt` keeps it. `why-miss` says which layer
 will hit (source-level, post-TIR, neither) and names each changed input; it needs

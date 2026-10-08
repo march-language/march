@@ -280,6 +280,45 @@ forge check
 
 This catches type errors in every file under `lib/` (including orphaned modules that aren't reachable from the entry point), without paying for codegen or linking.
 
+### Asking the Compiler Questions
+
+`forge query` asks the compiler one question about your project's build and prints the answer. It is for the moments `forge build` can't explain: why a function compiles to what it does, where a generated name came from, or why a build wasn't cached. It runs the compile up to the point it can answer, then stops. Nothing is built, linked, or written to the build cache.
+
+```sh
+forge query fn Server.handle                 # the passes that changed it, and its body at the last one
+forge query fn Server.handle --at tir-perceus   # its body after one named pass
+forge query origin 'Server.handle$apply$3'   # where an emitted function came from
+forge query callers Server.handle            # who references it in the final IR
+forge query callees Server.handle            # what it references
+forge query repr Server.Conn                 # how each instance of a type is represented, and why
+forge query verify                           # run the IR verifier over every compiler stage
+forge query key                              # both build-cache keys and every input that fed them
+forge query why-miss                         # which input changed since the last successful build
+```
+
+| Query | Answers |
+|---|---|
+| `fn NAME` | The passes that changed `NAME` and its specialisations, and its body after the last (or `--at PASS`) |
+| `origin NAME` | Source span, host function, and the specialisation or lambda it derives from |
+| `callers NAME`, `callees NAME` | The final call graph, one level |
+| `repr TYPE` | Whether each instance of `TYPE` is boxed, unboxed, a niche, or a newtype, and the reason |
+| `verify` | The compiler's internal consistency checks over every stage, as findings instead of a crash |
+| `key` | The source-level and post-TIR cache keys, whether each is cached, and each input behind them |
+| `why-miss` | Which input changed since the last successful build, and which cache layer the next build will hit |
+
+With no file named, a query is about the project's entry file; name a `.march` file to ask about that one instead. `--json` prints one JSON object. `--release` and `--target T` ask about the build that `forge build --release` or `--target T` would run, and the project's library path, `[ffi]` flags, topology digest (once a build has written one) and protocol baselines are passed as `forge build` passes them. That is why `forge query key` agrees with a real build: after `forge build`, it reports the same post-TIR key as cached. Anything after `--` goes to the compiler unchanged:
+
+```sh
+forge query fn main -- --no-opt     # the same question, with the optimiser off
+```
+
+Two things to know when reading an answer:
+
+- **A name the optimiser inlined is not in the final IR.** `fn` and `origin` then report the last stage that had it. Add `-- --no-opt` to keep it.
+- **`why-miss` needs one successful build first.** It compares against the record of the last build of that file, so run `forge build` once and ask again.
+
+A query never builds a `[ffi.rust]` crate, runs a preprocessor, writes a protocol baseline, or downloads a toolchain. A library project has no entry file, so name one: `forge query verify lib/parser.march`. Outside a project, `forge query verify FILE` works on a single file. `march query` is the same interface without the project: `march query fn NAME FILE`.
+
 ### Auto-fixing Diagnostics
 
 `forge fix` reads compiler warnings and applies mechanically-determined fixes automatically: no human judgment needed, no ambiguity. It's the equivalent of `cargo fix` or `eslint --fix`.

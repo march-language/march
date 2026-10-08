@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge query` asks the compiler about your project's build.** It is
+  `march query` with the project filled in: the entry file, the library path
+  and the build's own flags (`--release`, `--target`, `[ffi]` sources, the
+  topology digest, protocol baselines). `forge query fn NAME`, `origin`,
+  `callers`, `callees`, `repr`, `verify`, `key` and `why-miss` answer from one
+  compile and write nothing. The cache queries describe the build `forge build`
+  would run: after a build, `forge query key` reports its post-TIR key as
+  cached. Compiler flags go after `--`.
 - **The remote shell spawns the program's own actors.** `let k =
   spawn(Counter)` in `forge shell` now starts the node's Counter: it runs
   the node's handlers, answers `Actor.inspect_state`, has its type name in
