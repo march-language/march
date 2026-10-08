@@ -406,6 +406,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A hot-reload `DRAIN` before the scheduler starts no longer corrupts a
+  loaded patch.** A green thread spawned before the scheduler was initialised
+  (a signed `DRAIN` with a hard deadline arms one) got a stack reservation
+  with no guard page, and its first stack page was made writable one page past
+  that reservation. On Linux that page was usually the code of the patch just
+  loaded, so the next call into the patch crashed with SIGSEGV.
 - **Nested constructor patterns pick the right arm in compiled code when a
   constructor name is also used by a stdlib type.** With a user
   `type Tree = Leaf | Node(Tree, Int, Tree)` (stdlib `OrderedMap` also declares
