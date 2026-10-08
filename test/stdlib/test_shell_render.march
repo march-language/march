@@ -1,0 +1,131 @@
+-- Tests for ShellRender, the remote shell's result-rendering combinators
+-- (stdlib/shell_render.march; bin/shell_render_gen.ml generates calls to them).
+
+mod TestShellRender do
+
+describe "ShellRender" do
+
+  describe "string" do
+
+    test "quoted and escaped" do
+      assert ShellRender.string("a\"b\\c\nd\te", 50) == "\"a\\\"b\\\\c\\nd\\te\""
+    end
+
+    test "control bytes and an interpolation opener" do
+      assert ShellRender.quote("\x01\${x}$y") == "\"\\x01\\\${x}$y\""
+    end
+
+    test "cut at the limit, counting codepoints" do
+      assert ShellRender.string("abcdef", 3) == "\"abc\"… 3 more chars"
+      assert ShellRender.string("éé€x", 3) == "\"éé€\"… 1 more chars"
+    end
+
+    test "a string within the limit is whole" do
+      assert ShellRender.string("abc", 3) == "\"abc\""
+      assert ShellRender.string("", 3) == "\"\""
+    end
+
+    test "limit 0 keeps everything" do
+      assert ShellRender.string("abcdef", 0) == "\"abcdef\""
+    end
+
+  end
+
+  describe "show_cut" do
+
+    test "a short string is untouched" do
+      assert ShellRender.show_cut("Blob(3)") == "Blob(3)"
+    end
+
+    test "cut at 16 KiB" do
+      let s = string_repeat("x", 20000)
+      let r = ShellRender.show_cut(s)
+      assert string_byte_length(r) == 16384 + string_byte_length("… (3616 more bytes)")
+      assert String.ends_with(r, "x… (3616 more bytes)")
+    end
+
+    test "never splits a codepoint" do
+      let s = "x" ++ string_repeat("é", 10000)
+      let r = ShellRender.show_cut(s)
+      assert String.ends_with(r, "é… (3618 more bytes)")
+    end
+
+  end
+
+  describe "list" do
+
+    test "within the limit" do
+      assert ShellRender.list([1, 2, 3], 5, fn x -> int_to_string(x)) == "[1, 2, 3]"
+      assert ShellRender.list([], 5, fn x -> int_to_string(x)) == "[]"
+    end
+
+    test "cut at the limit" do
+      assert ShellRender.list([1, 2, 3, 4], 2, fn x -> int_to_string(x)) == "[1, 2, … 2 more]"
+    end
+
+    test "limit 0 is no limit" do
+      assert ShellRender.list([1, 2, 3, 4], 0, fn x -> int_to_string(x)) == "[1, 2, 3, 4]"
+    end
+
+    test "the limit applies inside" do
+      let xs = [["a", "b", "c"], ["d"]]
+      let r = ShellRender.list(xs, 2, fn ys -> ShellRender.list(ys, 2, fn s -> ShellRender.string(s, 2)))
+      assert r == "[[\"a\", \"b\", … 1 more], [\"d\"]]"
+    end
+
+    test "10 000 elements at 50" do
+      let r = ShellRender.list(List.range(0, 10000), 50, fn x -> int_to_string(x))
+      assert String.ends_with(r, ", 49, … 9950 more]")
+    end
+
+  end
+
+  describe "maps, sets, arrays" do
+
+    test "map" do
+      let m = Map.insert(Map.empty(), 1, "a", Map.int_cmp)
+      assert ShellRender.map(m, 5, fn k -> int_to_string(k), fn v -> ShellRender.string(v, 5)) == "Map{1 => \"a\"}"
+    end
+
+    test "map cut" do
+      let m = Map.from_list_int([(1, 1), (2, 2), (3, 3)])
+      let r = ShellRender.map(m, 1, fn k -> int_to_string(k), fn v -> int_to_string(v))
+      assert String.ends_with(r, ", … 2 more}")
+    end
+
+    test "set" do
+      let s = Set.insert(Set.empty(), 7, Map.int_cmp)
+      assert ShellRender.set(s, 5, fn x -> int_to_string(x)) == "Set{7}"
+    end
+
+    test "array" do
+      let a = Array.from_list([1, 2, 3])
+      assert ShellRender.array(a, 2, fn x -> int_to_string(x)) == "Array[1, 2, … 1 more]"
+    end
+
+  end
+
+  describe "records, tuples, constructors" do
+
+    test "ctor" do
+      assert ShellRender.ctor("Node", ["Leaf", "1"]) == "Node(Leaf, 1)"
+    end
+
+    test "tuple" do
+      assert ShellRender.tuple(["1", "\"x\""]) == "(1, \"x\")"
+    end
+
+    test "record" do
+      assert ShellRender.record("Item", ["name = \"a\"", "n = 1"]) == "Item { name = \"a\", n = 1 }"
+    end
+
+    test "anonymous record" do
+      assert ShellRender.anon_record(["a: 1", "b: \"two\""]) == "{ a: 1, b: \"two\" }"
+      assert ShellRender.anon_record([]) == "{}"
+    end
+
+  end
+
+end
+
+end

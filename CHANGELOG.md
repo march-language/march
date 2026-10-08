@@ -120,6 +120,14 @@ git log is authoritative for exact commits.
     a copy. Each Depot query's fragment went from 338 KB of IR to 81 KB, and
     its clang time from about 175 ms to about 105 ms.
     `MARCH_SHELL_NO_LINK=1` turns this off.
+  - Results render from their static type. Records, tuples and constructors
+    print field by field (`{ a: 1, b: "two" }`,
+    `Ok(Object([("a", Number(1.))]))`, where they used to print `#<tag:0>`),
+    strings print quoted and escaped at every depth, and `limit: N` (default
+    50) cuts every list, Array, Map and Set to `N` elements and every string
+    to `N` characters, at every depth, not only a top-level list. A type
+    with a hand-written `Show` prints through it, cut at 16 KiB; a function
+    prints `<fn>`. The rules live in a new stdlib module, `ShellRender`.
 - **Several native libraries per project.** forge.toml can declare `[[ffi]]`
   once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
   links all of them, in order. A single `[ffi]` table works as before.

@@ -26,6 +26,26 @@ mod Main do
   -- other order: the shell must refuse an input that builds one.
   type Shade = Dark | Light
 
+  -- For the shell's result rendering (test/shell/session.txt): a record
+  -- holding a list, a recursive ADT that derives Show (rendered
+  -- structurally, as its derived impl would), and a type whose HAND-WRITTEN
+  -- Show is called and cut at 16 KiB.
+  type Item = { name : String, tags : List(String) }
+  type Twig = Bud | Fork(Twig, Int, Twig)
+  derive Show for Twig
+  type Blob = Blob(Int)
+  impl Show(Blob) do
+    fn show(b) do
+      match b do
+        Blob(n) -> "Blob:" ++ string_repeat("x", n)
+      end
+    end
+  end
+
+  fn items(n : Int) : List(Item) do
+    List.map(range(0, n), fn i -> { name: "item" ++ int_to_string(i), tags: List.map(range(0, i), fn j -> "t" ++ int_to_string(j)) })
+  end
+
   actor Counter do
     state { n : Int }
     init  { n: 0 }
