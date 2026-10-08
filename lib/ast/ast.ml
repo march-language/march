@@ -521,6 +521,10 @@ let rec show_ty = function
   | TyNatOp (NatAdd, a, b) -> Printf.sprintf "%s + %s" (show_ty a) (show_ty b)
   | TyNatOp (NatMul, a, b) -> Printf.sprintf "%s * %s" (show_ty a) (show_ty b)
   | TyChan (role, proto) -> Printf.sprintf "Chan(%s, %s)" role.txt proto.txt
+  (* The abstract-refinement shorthand `T[p]`: the parser marks it with the
+     binder `_`, which a user cannot write, so it prints back as written. *)
+  | TyRefine (base, Some { txt = "_"; _ }, EApp (EVar p, [ EVar { txt = "_"; _ } ], _)) ->
+    Printf.sprintf "%s[%s]" (show_ty base) p.txt
   | TyRefine (base, None, _) -> Printf.sprintf "{ %s | ... }" (show_ty base)
   | TyRefine (base, Some v, _) ->
     Printf.sprintf "{ %s : %s | ... }" v.txt (show_ty base)

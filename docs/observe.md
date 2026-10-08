@@ -339,12 +339,19 @@ separate capability.
 
 ### TOP
 
-`TOP mbox|crashes|slices|msgs_in|msgs_out <n> [window_ms]`: the `n` actors
-highest on one attribute (`n` up to 10 000).
+`TOP mbox|crashes|stack|slices|msgs_in|msgs_out <n> [window_ms]`: the `n` actors
+highest on one attribute (`n` up to 10 000). Equal values come in pid order.
 
 - `mbox` ranks by waiting work (`mbox + held`) now. No window.
 - `crashes` ranks by `crashes + child_crashes` (last hour), so a crash-looping
   supervisor comes first. No window.
+- `stack` ranks by committed machine-stack bytes: the memory the runtime can
+  attribute to one actor. A green thread's stack grows on demand and never
+  shrinks, so this is the deepest recursion the actor has ever done, in pages
+  (a page is 4 KiB on Linux, 16 KiB on macOS arm64, and every actor has at
+  least one). It is 0 under the interpreter. No window. **Heap bytes per actor
+  are not tracked** (the heap is shared and reference-counted, with no
+  per-actor accounting), so there is no `heap` ranking.
 - `slices`, `msgs_in`, `msgs_out` rank by **how much the counter rose** over
   `window_ms` (default 1000, at most 5000): two walks, the observe thread asleep
   between them. An actor born during the window counts from 0. An explicit
@@ -352,11 +359,26 @@ highest on one attribute (`n` up to 10 000).
 
 ```json
 {"attr":"mbox","window_ms":null,"total":20,
- "top":[{"pid":15,"value":500,"type":null,"names":["hot"],"status":"waiting","mbox":500}, ...]}
+ "top":[{"pid":15,"value":500,"type":null,"names":["hot"],"status":"waiting","mbox":500,
+         "stack_bytes":16384,"crashes":0,"child_crashes":0,"children":0,"link":"none",
+         "parent":null,"parent_type":null,"spawned_by":null,"supervisor":null}, ...]}
 ```
 
 `value` is what was ranked; `window_ms` is `null` when no window was used. Only
 two windowed `TOP`s run at once; a third gets `busy`.
+
+Each row also says how the actor is supervised, so one call answers "the
+biggest actors, and who restarts them":
+
+| Field | Meaning |
+|---|---|
+| `link` | `supervised` (a `supervise` block restarts it), `spawned` (nobody restarts it, but an actor spawned it) or `none` (spawned from `main` or a task). |
+| `parent`, `parent_type` | Its supervisor's pid and actor type (`parent_type` only in `--hot-reload` builds). `null` unless `link` is `supervised`. |
+| `spawned_by` | The spawning actor's pid, `null` if none. |
+| `children` | Supervised children it has (greater than 0: a supervisor). |
+| `supervisor` | For a supervisor: `{strategy, max_restarts, window_secs, restarts_held}` as in `ACTOR`; `null` otherwise. |
+| `crashes`, `child_crashes` | As in an `ACTORS` row (last hour). |
+| `stack_bytes` | Committed stack bytes, whatever the ranking (`ACTORS`/`ACTOR` rows carry it too). |
 
 ### SNAPSHOT
 
@@ -497,27 +519,39 @@ not answer prints `observe unavailable (<reason>)`. `--json` prints one
 ### forge top
 
 ```
-forge top [--sort ATTR] [-n N] [--window MS] [--once] [--socket PATH] [--env NAME]
+forge top [--sort ATTR] [-n N] [--window MS] [--once] [--json] [--socket PATH] [--env NAME]
 ```
 
-Redraws the busiest actors in place until interrupted. `--sort` is `mbox`
-(default), `crashes`, `slices`, `msgs_in` or `msgs_out`; the last three rank the
+Redraws the biggest or busiest actors in place until interrupted. `--sort` is `mbox`
+(default), `stack` (committed stack bytes), `crashes`, `slices`, `msgs_in` or `msgs_out`; the last three rank the
 change over `--window` (default 1000 ms), which is also their refresh. The
 others refresh every max(1 s, 4x the time the node took to answer). `-n` is the
 row count (default 20; note it is `-n`, not `--n`). `--once` prints one frame
-with no screen control, for scripts and tickets. Over `--env`, it watches the
-first matching host.
+with no screen control, for scripts and tickets. `--json` prints the node's
+`TOP` reply (every row with its supervision fields) as one line and exits. Over
+`--env`, it watches the first matching host, through the same ssh tunnel as the
+other observe verbs; it needs only the observe tier.
+
+The quick answer to "which actors are biggest, and who supervises them":
+`forge top --once --sort stack -n 10`, or `--sort mbox` for the deepest queues.
 
 ```
-web-1  actors 1, queued 2598, rss 5 MB, busy 0%, crashes (1h) 0, deepest mailbox sink (pid 0) 2598
-sorted by msgs_out over 1000 ms
+web-1  actors 20, queued 500, rss 5 MB, busy 0%, crashes (1h) 1, deepest mailbox hot (pid 16) 500
+sorted by mbox
 
-     PID  NAME                 TYPE               STATUS        MBOX   MSGS_OUT
-       0  sink                                    waiting       2597          0
+     PID  NAME                 TYPE               STATUS        MBOX     STACK       MBOX CRASHES  LINK       SUPERVISOR             POLICY (held/max in window)
+      16  hot                                     waiting        500     16384        500       0  none       -                      -
+       1                                          waiting          0     16384          0       0  supervised 4                      -
+       4  sup_one                                 waiting          0     16384          0       1  none       -                      one_for_one 1/5 in 60s, 4 kids
 ```
 
 The first line is the `forge status` summary. `MBOX` is waiting work
-(`mbox + held`); the last column is the ranked value.
+(`mbox + held`), `STACK` the committed stack, and the column named for the sort
+is the ranked value. `CRASHES` is the actor's own plus its children's in the last
+hour. `LINK` is `supervised`, `spawned` or `none`; `SUPERVISOR` is the supervisor's
+pid and type (or `spawned by <pid>`); `POLICY` is shown for a supervisor only:
+strategy, restarts currently held out of the allowed maximum within the window,
+and its child count.
 
 ### forge diagnose
 
@@ -733,6 +767,9 @@ with `Actor.introspect(io)`; a module that names the capability declares
 | `Recon.info(c, pid)` | `Option(ActorInfo)`: one live actor (`None` if dead or never spawned) |
 | `Recon.actors(c)` | `List(ActorInfo)`, deepest mailbox first (at most 10 000) |
 | `Recon.proc_count(c, attr, n)` | `List((Int, Int))`: (pid, value), highest first; counters are cumulative |
+| `Recon.top(c, attr, n)` | `List(TopRow)`: the `n` biggest actors by `attr` (`mbox` or `mailbox`, `stack`, `crashes`, or a cumulative counter), each with `value`, `mbox`, `stack_bytes`, `link`, `parent`, `parent_type`, `spawned_by`, `children`, `crashes`, `child_crashes` and `supervision` (`Some({policy, limit, window_secs, held})` for a supervisor); ties by pid |
+| `Recon.print_top(c, attr, n)` | prints `top` as an aligned table (the shell one-liner) |
+| `Recon.format_top(rows)` | the table as a `String` |
 | `Recon.proc_window(c, attr, n, window_ms)` | the same, ranked by the rise over the window (`slices`, `msgs_in`, `msgs_out`) |
 | `Recon.tree(c)` | `List(SupNode)`: `SupNode(pid, type, names, children)` |
 | `Recon.node_stats(c)` | `NodeStats`: actors, queued, `rss_bytes`, `live_objects`, schedulers, `crashes_total` |
@@ -970,7 +1007,12 @@ Inputs:
 | `<expr> limit: N` / `limit: all` | the same, cutting at `N` / not at all |
 | `let x = <expr>` | runs it and keeps the value on the node for later inputs |
 | `:t <expr>` | the expression's type; nothing runs |
+| `:actors` | a table of the node's actors by waiting work (up to 100), with link, supervisor and restart policy: `Recon.print_top(intro, "mbox", 100)` |
+| `:top [metric] [n]` | the same table for `n` actors (default 20) ranked by `mbox` (or `mailbox`, the default), `stack`, `crashes`, `slices`, `msgs_in` or `msgs_out`: `:top stack 10` is `Recon.print_top(intro, "stack", 10)` |
 | `:limit N`, `:caps`, `:help`, `:quit` | |
+
+The two table commands print the table instead of a record per actor. For the
+rows as values, call `Recon.top(intro, "mailbox", 10)` (a list of `TopRow`).
 
 Capabilities are pre-bound names: `console` (`Cap(IO.Console)`), `clock`,
 `intro` (`Cap(Actor.Introspect)`), `debug` (`Cap(Actor.Debug)`).
@@ -986,10 +1028,19 @@ march> [{ name: "first", tags: ["a", "b", "c"] }] limit: 2
 
 - Records, tuples and constructors print field by field, with constructor
   names. A type that derives `Show` prints as its derived `show` would.
-- Strings print quoted and escaped.
+- Strings inside a value print quoted and escaped (`["a", "b"]`). A string
+  that is the whole result, or the one field of a top-level constructor,
+  prints as it is: `Actor.inspect_state` shows `Ok({ n: 42 })`.
 - The limit applies at every depth: each list, Array, Map and Set shows at
   most `N` elements then `… n more`, and each string at most `N` characters
   then `… n more chars`. `limit: all` (or `:limit 0`) turns it off.
+- The other stdlib containers print by their elements too, with the same
+  limit: `HashMap{"a" => 1}`, `OrderedMap{1 => "a"}`, `SortedSet{1, 3}`,
+  `Deque[1, 2]`, `Queue[1, 2]`, `RRB.Vec[1, 2]`, `NativeArray[1.5, 2.5]`.
+  A HashMap prints in hash order; the others in their own order. RingBuf and
+  LinearMap are linear (reading one consumes it), so they print as
+  `to_string` prints them. So does a container whose type name the program
+  reuses for a type of its own (a program `Deque`, say).
 - A type with a hand-written `Show` prints through its `show`, cut at 16 KiB
   with `… (n more bytes)`.
 - A function prints `<fn>`; a Pid and other runtime values print as
@@ -1020,6 +1071,30 @@ error: this input reaches code that differs from the node's build:
 Inputs that reach only unchanged code still run. A type whose constructors
 are numbered differently on the node (reordered, added) is always refused,
 since values built here would be read back wrongly there.
+
+**Spawning the program's actors.** An input can spawn one of the program's
+own actors and use it like any other:
+
+```
+march> let k = spawn(Counter)
+k : Pid({ n : Int })
+march> send(k, Bump(5))
+Some(())
+march> Actor.inspect_state(debug, k, 500)
+Ok({ n: 5 })
+```
+
+The actor runs the node's code, not a copy compiled into the input: the
+input calls the node's own spawn function for that actor, so the actor
+answers `inspect_state`, shows its type name in `ACTORS` and `Recon`, and is
+upgraded by a hot deploy like every other instance. It belongs to the node:
+it keeps running after the session ends (or a deploy ends it), and a later
+session finds it with `Actor.list` or `Actor.pid_from_int`. Spawning needs no
+capability of its own, but an input is charged with the capabilities the
+actor's handlers use, as for any program code it reaches. An input that
+could only spawn the actor by carrying its own copy of the handlers is
+refused instead: a node built by an older compiler, or an actor whose init
+arguments include a function.
 
 **`--force` runs a read-only input over differing code.** With
 `forge shell --force` (or `forge rpc --force`, `march --shell-force`), an
@@ -1081,6 +1156,37 @@ What happens when:
   challenge the node hands out when you attach), so it runs on no other
   connection, no other node and not after the node restarts.
 
+**Line editing and history.** On a terminal the prompt is a real line editor
+(`lib/repl/shell_line.ml`, `bin/shell_tty.ml`). When stdin or stdout is not a
+terminal (a pipe, `--shell-inputs`, `forge rpc`) none of this is active and
+input is read exactly as before.
+
+| Keys | Action |
+|------|--------|
+| Up / Down, Ctrl-P / Ctrl-N | previous / next input; Down past the newest restores the line you were typing |
+| Left / Right, Ctrl-B / Ctrl-F | one character (a multibyte character is one step) |
+| Home / End, Ctrl-A / Ctrl-E | start / end of the line |
+| Ctrl-Left / Ctrl-Right, Alt-B / Alt-F | one word |
+| Backspace, Delete | delete before / under the cursor |
+| Ctrl-U / Ctrl-K / Ctrl-W | kill to the start / to the end / the word before the cursor |
+| Ctrl-L | clear the screen |
+| Ctrl-C | discard the line and show a new prompt; the session stays attached |
+| Ctrl-D | on an empty line, leave (like `:quit`); otherwise delete under the cursor |
+
+A line longer than the terminal scrolls sideways instead of wrapping; a
+resize is picked up on the next keystroke. Unknown escape sequences (function
+keys, PageUp) are ignored.
+
+Inputs are kept in `~/.march/shell_history`, one per line, last 1000, loaded
+at start. A line equal to the one before it, a blank line and `:quit` are not
+recorded. **The file can hold sensitive text** (a connection string or token
+typed into an input is kept verbatim), so it is created `0600` in a `0700`
+directory. Delete it, or edit it, if an input should not outlive the session.
+
+The terminal is in raw mode only while a line is being typed and is put back
+before the input runs; it is also restored on exit, an uncaught exception, and
+SIGINT, SIGTERM and SIGHUP.
+
 Under the hood `forge shell` runs `march --shell <reload socket>.shell
 <entry>` with the project's `MARCH_LIB_PATH`, through an ssh tunnel for a
 remote host. Running that directly works too.
@@ -1118,7 +1224,6 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
   messages of an actor, most useful exactly when it is stuck and cannot render
   them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
 - **The rest of the remote shell.** It works (see above), but:
-  - a program-defined actor cannot be spawned from the shell;
   - it has not had its security review yet (plan R5).
 - **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;
   today `forge top` is the live view.

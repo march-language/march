@@ -230,9 +230,10 @@ bug-yield order, each its own PR:
 
 **Status (2026-10-07):** checks 1, 2 and 3 landed
 (`specs/progress/2026-10-07-tir-verifier-scoping.md`,
-`specs/progress/2026-10-07-verify-rc-types-and-pass-bisect.md`). Check 3 is behind its own
-`--verify-tir-rc` switch until the three Perceus bugs it found are fixed. Checks 4 and 5 are
-open (`specs/todos/2026-10-08-verifier-a4-followups.md`).
+`specs/progress/2026-10-07-verify-rc-types-and-pass-bisect.md`). Check 3 ran behind its own
+switch until the three Perceus bugs it found were fixed; since 2026-10-08 it is part of
+`--verify-tir` (`specs/progress/2026-10-08-perceus-parent-released-before-field-use.md`).
+Checks 4 and 5 are open (`specs/todos/2026-10-08-verifier-a4-followups.md`).
 
 **Prove it red.** Each check lands with a test feeding it hand-broken TIR (for check 3: the
 pre-fix Perceus output of a fixed September leak, reconstructed) and asserting the error.

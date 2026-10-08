@@ -788,6 +788,7 @@ let insert_rc ~(module_env : env) ?(repl = false) ?(borrowed = StringSet.empty)
       actor_sent = collect_actor_sent_vars fn'.Tir.fn_body;
       moved_vars = collect_moved_vars fn';
       borrowed_field_vars = StringSet.empty;
+      field_owner = StringMap.empty;
       var_ctx =
         List.fold_left (fun ctx v -> StringMap.add v.Tir.v_name v ctx)
           module_env.var_ctx fn'.Tir.fn_params }
@@ -909,6 +910,90 @@ let print_perceus_stats ~(label : string) ~(before : rc_counts) ~(after : rc_cou
     cancelled_inc cancelled_dec cancelled_a_inc cancelled_a_dec;
   Printf.eprintf "%!"
 
+(* ── Owned-call clones (see [Perceus_core.owned_calls]) ────────────────────── *)
+
+(** May [fn] get an owned clone (owned-call drop fusion)?  An ordinary or
+    fusion-synthesised function with at least one borrowed parameter.  Never
+    a function whose identity or calling convention something outside March
+    code depends on: apply functions (closure ABI, every parameter already
+    owned), actor glue the runtime calls by name, hot-reload migration entry
+    points, deep-drop helpers, RPC stubs and [main].  A clone is an extra
+    function; the original is untouched and stays what those callers see. *)
+let owned_clone_eligible (bm : Borrow.borrow_map) (fn : Tir.fn_def) : bool =
+  let n = fn.Tir.fn_name in
+  (match fn.Tir.fn_kind with Tir.FnNormal | Tir.FnFused -> true | _ -> false)
+  && not (Tir_names.is_apply_fn n)
+  && not (Tir_names.is_actor_dispatch_fn n)
+  && not (Tir_names.is_actor_on_stop_fn n)
+  && not (Tir_names.is_actor_inspect_fn n)
+  && not (Tir_names.is_migrate_fn_name n)
+  && not (Tir_names.is_drop_fn n)
+  && not (Tir_names.has_suffix "__rpc_stub" n)
+  && not (String.equal n "main")
+  && List.exists (fun i -> Borrow.is_borrowed bm n i)
+    (List.mapi (fun i _ -> i) fn.Tir.fn_params)
+
+(** Names bound directly to a heap allocation ([let v = EAlloc ...]) — the
+    only shape [Escape] stack-promotes, so the only arguments whose redirect
+    to an owning clone could cost a promotion. *)
+let collect_alloc_bound (e : Tir.expr) : StringSet.t =
+  let rec go acc = function
+    | Tir.ELet (v, (Tir.EAlloc _ as rhs), body) ->
+      go (go (StringSet.add v.Tir.v_name acc) rhs) body
+    | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> go (go acc e1) e2
+    | Tir.ECase (_, brs, def) ->
+      let acc = List.fold_left (fun a br -> go a br.Tir.br_body) acc brs in
+      (match def with Some d -> go acc d | None -> acc)
+    | Tir.ELetRec (fns, body) ->
+      go (List.fold_left (fun a fn -> go a fn.Tir.fn_body) acc fns) body
+    | _ -> acc
+  in
+  go StringSet.empty e
+
+(** Fill [oc.oc_useful]: the (function, borrowed position) pairs whose owned
+    clone does something the caller's drop could not — the parameter is an
+    [ECase] scrutinee in the body (destructuring an owned cell releases it in
+    the same walk), or is passed on at a useful borrowed position of another
+    eligible function (a wrapper around such a walker).  A least fixpoint over
+    the eligible functions.  Purely a profitability filter: a shadowed
+    parameter name can only make it answer wrongly in the direction of a
+    useless clone or a missed one, never an unsound redirect. *)
+let compute_useful_positions (bm : Borrow.borrow_map) (oc : owned_calls) : unit =
+  let rec used name e =
+    match e with
+    | Tir.ECase (Tir.AVar v, brs, def) ->
+      String.equal v.Tir.v_name name
+      || List.exists (fun br -> used name br.Tir.br_body) brs
+      || (match def with Some d -> used name d | None -> false)
+    | Tir.ECase (_, brs, def) ->
+      List.exists (fun br -> used name br.Tir.br_body) brs
+      || (match def with Some d -> used name d | None -> false)
+    | Tir.EApp (g, args) ->
+      List.exists (fun (j, a) -> match a with
+          | Tir.AVar v ->
+            String.equal v.Tir.v_name name
+            && Hashtbl.mem oc.oc_useful (g.Tir.v_name, j)
+          | _ -> false)
+        (List.mapi (fun j a -> (j, a)) args)
+    | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> used name e1 || used name e2
+    | Tir.ELetRec (fns, body) ->
+      List.exists (fun fn -> used name fn.Tir.fn_body) fns || used name body
+    | _ -> false
+  in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    Hashtbl.iter (fun fname (fn : Tir.fn_def) ->
+        List.iteri (fun i (p : Tir.var) ->
+            if Borrow.is_borrowed bm fname i
+            && not (Hashtbl.mem oc.oc_useful (fname, i))
+            && used p.Tir.v_name fn.Tir.fn_body then begin
+              Hashtbl.replace oc.oc_useful (fname, i) ();
+              changed := true
+            end) fn.Tir.fn_params)
+      oc.oc_fns
+  done
+
 (* ── Entry point ──────────────────────────────────────────────────────────── *)
 
 (** Run all four Perceus phases over every function in the module.
@@ -925,11 +1010,25 @@ let print_perceus_stats ~(label : string) ~(before : rc_counts) ~(after : rc_cou
       EDecRC / scrutinee-free on those params.
     - Caller: EIncRC is skipped for args at borrowed positions that are still
       live after the call; a post-call EDecRC is emitted instead when the arg
-      is the caller's last use. *)
-let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
+      is the caller's last use.
+
+    Never redirects to owned clones: see [perceus_owned]. *)
+let rec perceus ?(repl : bool = false) ?(repl_vars : string list = [])
     ?(heap_lambdas : bool = false)
     ?(borrow_map : Borrow.borrow_map option) ?(k_table : Kind.table option)
     (m : Tir.tir_module) : Tir.tir_module =
+  fst (perceus_owned ~owned_calls:false ~repl ~repl_vars ~heap_lambdas
+         ?borrow_map ?k_table m)
+
+(** [perceus] with owned-call drop fusion selectable ([~owned_calls]).  Also
+    returns the borrow map extended with every clone's parameter modes: the
+    passes after Perceus that consult the map ([Drop], [Escape]) must see a
+    clone's owned positions as owned. *)
+and perceus_owned ~(owned_calls : bool) ?(repl : bool = false)
+    ?(repl_vars : string list = [])
+    ?(heap_lambdas : bool = false)
+    ?(borrow_map : Borrow.borrow_map option) ?(k_table : Kind.table option)
+    (m : Tir.tir_module) : Tir.tir_module * Borrow.borrow_map =
   (* [heap_lambdas]: capture-free lambdas are materialised as heap closures
      rather than one immortal global, as under --hot-reload (Llvm_emit's
      static-lambda arm is off whenever [hr_config] is set).  Their apply fns
@@ -992,22 +1091,86 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
   let repl_set =
     List.fold_left (fun s n -> StringSet.add n s) StringSet.empty repl_vars
   in
-  let fns_after_insert =
-    m.Tir.tm_fns
-    |> List.map (preprocess_fn ~k_table)
-    |> List.map (fun fn ->
-         let base =
-           if fn.Tir.fn_name = "main" then repl_set else StringSet.empty
-         in
-         let borrowed =
-           List.fold_left (fun s (i, p) ->
-             if Borrow.is_borrowed borrow_map fn.Tir.fn_name i
-             then StringSet.add p.Tir.v_name s
-             else s
-           ) base (List.mapi (fun i p -> (i, p)) fn.Tir.fn_params)
-         in
-         insert_rc ~module_env ~repl:clo_drop ~borrowed fn)
+  let preprocessed = List.map (preprocess_fn ~k_table) m.Tir.tm_fns in
+  (* Owned-call drop fusion (see [Perceus_core.owned_calls]).  The table is
+     filled with the clone-eligible functions' PRE-RC bodies, exactly what
+     [insert_rc] receives for the original, so a clone is the original
+     processed under a different ownership signature. *)
+  let oc =
+    if not owned_calls || repl then None
+    else begin
+      let oc = { oc_fns = Hashtbl.create 64; oc_clones = Hashtbl.create 16;
+                 oc_pending = Queue.create ();
+                 oc_alloc_bound = ref StringSet.empty;
+                 oc_useful = Hashtbl.create 64 } in
+      List.iter (fun fn ->
+          if owned_clone_eligible borrow_map fn then
+            Hashtbl.replace oc.oc_fns fn.Tir.fn_name fn) preprocessed;
+      compute_useful_positions borrow_map oc;
+      Some oc
+    end
   in
+  let module_env = { module_env with owned_calls = oc } in
+  let rc_one ~(modes : int -> bool) (fn : Tir.fn_def) =
+    let base =
+      if fn.Tir.fn_name = "main" then repl_set else StringSet.empty
+    in
+    let borrowed =
+      List.fold_left (fun s (i, p) ->
+        if modes i then StringSet.add p.Tir.v_name s else s
+      ) base (List.mapi (fun i p -> (i, p)) fn.Tir.fn_params)
+    in
+    (match oc with
+     | Some oc -> oc.oc_alloc_bound := collect_alloc_bound fn.Tir.fn_body
+     | None -> ());
+    insert_rc ~module_env ~repl:clo_drop ~borrowed fn
+  in
+  let originals_after_insert =
+    List.map (fun fn ->
+        rc_one ~modes:(Borrow.is_borrowed borrow_map fn.Tir.fn_name) fn)
+      preprocessed
+  in
+  (* Build every requested clone; a clone's own calls may request more.
+     Clones are appended after all originals so the originals' fresh [$rc_N]
+     names (and with them the TIR snapshots) do not depend on the feature. *)
+  let clones_after_insert, borrow_map =
+    match oc with
+    | None -> ([], borrow_map)
+    | Some oc ->
+      let rec drain acc bm =
+        match Queue.take_opt oc.oc_pending with
+        | None -> (List.rev acc, bm)
+        | Some (name, orig, positions) ->
+          let src = Hashtbl.find oc.oc_fns orig in
+          let modes i =
+            Borrow.is_borrowed borrow_map orig i && not (List.mem i positions) in
+          let clone = { src with Tir.fn_name = name } in
+          let fn' = rc_one ~modes clone in
+          (* An owned parameter the body never mentions: Perceus has no use
+             to release it at (borrow inference never makes such a parameter
+             owned in an original), so the clone releases it on entry. *)
+          let fn' =
+            List.fold_left (fun (fn' : Tir.fn_def) i ->
+                match List.nth_opt fn'.Tir.fn_params i with
+                | Some p when needs_rc module_env p.Tir.v_ty
+                           && not (name_free_in p.Tir.v_name src.Tir.fn_body) ->
+                  { fn' with Tir.fn_body =
+                               Tir.ESeq (decrc_for module_env p (Tir.AVar p),
+                                         fn'.Tir.fn_body) }
+                | _ -> fn')
+              fn' positions
+          in
+          let bm =
+            Borrow.StringMap.add name
+              (Array.of_list (List.mapi (fun i _ -> modes i) src.Tir.fn_params))
+              bm in
+          Clo_flags.register name
+            (List.mapi (fun i _ -> modes i) src.Tir.fn_params);
+          drain (fn' :: acc) bm
+      in
+      drain [] borrow_map
+  in
+  let fns_after_insert = originals_after_insert @ clones_after_insert in
   let fns' =
     fns_after_insert
     |> List.map elide_cancel_pairs
@@ -1018,4 +1181,4 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
     let after  = count_rc_ops_module fns' in
     print_perceus_stats ~label:m.Tir.tm_name ~before ~after ()
   end;
-  { m with Tir.tm_fns = fns' }
+  ({ m with Tir.tm_fns = fns' }, borrow_map)

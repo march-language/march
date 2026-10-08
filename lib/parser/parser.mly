@@ -34,6 +34,41 @@
     March_errors.Errors.parse_error_extra := (code, fix);
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
+  (* `D -> Bool[p]` (the marker [ty_post] puts on `Bool`) is the definer form
+     of an abstract refinement, `({x : D | true}) -> {Bool | _ == p(x)}`
+     (design 2026-09-20 §1).  A domain that already names its binder keeps it;
+     one refined over `_` cannot be referred to, so it is rejected with the
+     fix; a tuple domain is a several-argument callback, which cannot define
+     one (§9.3).  Anything else — including an explicit `{Bool | p(_)}`, which
+     has no marker — is returned unchanged. *)
+  let abstract_definer_arrow (dom : ty) (cod : ty) (pos : Lexing.position) : ty =
+    match cod with
+    | TyRefine ((TyCon ({ txt = "Bool"; _ }, []) as b), Some { txt = "_"; _ },
+                EApp (EVar p, [ EVar { txt = "_"; _ } ], sp)) ->
+      let x, dom' =
+        match dom with
+        | TyTuple _ ->
+          error_raise
+            "`Bool[p]` defines an abstract refinement from a ONE-argument callback; \
+             this one takes several."
+            (Some "keep : a -> Bool[p]") pos
+        | TyRefine (_, Some x, _) when x.txt <> "_" -> (x, dom)
+        | TyRefine (_, _, _) ->
+          error_raise
+            "`Bool[p]` needs to name the callback's argument: write the domain as \
+             `{x : T | ...}`."
+            (Some "keep : ({x : Int | x > 0}) -> Bool[p]") pos
+        | d ->
+          let x = { p with txt = "$x" } in
+          (x, TyRefine (d, Some x, ELit (LitBool true, sp)))
+      in
+      let u = { p with txt = "_" } in
+      TyArrow
+        ( dom'
+        , TyRefine
+            (b, None, EApp (EVar { p with txt = "==" }, [ EVar u; EApp (EVar p, [ EVar x ], sp) ], sp)) )
+    | _ -> TyArrow (dom, cod)
+
   (* A replacement fix over one grammar symbol's extent. *)
   let replace_fix loc text =
     March_errors.Errors.FReplace { span = mk_span loc; text }
@@ -1228,8 +1263,9 @@ proof_cap_decl:
     `proof cap Live with SessionOps`.  Absent means the capability stays
     runtime-erased, which is every capability written before this existed.
 
-    KNOWN CONFLICT (verified 2026-08-31: this rule takes the grammar from 10
-    shift/reduce conflicts to 11).  After `PROOFCAP upper_name` with `WITH`
+    KNOWN CONFLICT (verified 2026-08-31: this rule took the grammar from 10
+    shift/reduce conflicts to 11; the total is 7 since 2026-10-08, when the
+    `let?`/`let*` annotation errors stopped parsing a type and 4 others went).  After `PROOFCAP upper_name` with `WITH`
     ahead, menhir cannot decide between reducing the empty `proof_cap_dict`
     and shifting, because the REPL entry point's `repl_sequence` can itself
     BEGIN with `WITH`.  Menhir resolves it by shifting, which is the reading
@@ -1425,7 +1461,7 @@ ty_eof:
   | t = ty EOF { t }
 
 ty:
-  | t = ty_nat_add ARROW u = ty { TyArrow (t, u) }
+  | t = ty_nat_add ARROW u = ty { abstract_definer_arrow t u $startpos(u) }
   | t = ty_nat_add { t }
 
 ty_nat_add:
@@ -1442,7 +1478,19 @@ ty_app:
   | id = upper_name; DOT; rest = dotted_upper_tail; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
     { let joined = id.txt ^ "." ^ String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.txt) rest) in
       TyCon (mk_name joined $loc, args) }
+  | t = ty_post { t }
+
+(* `T[p]`: an abstract refinement applied to a type, `{T | p(_)}`.  The binder
+   is the marker `Some "_"`: a user cannot write `{_ : T | …}` (`_` is not a
+   [lower_name]), so the shorthand stays recognisable — [show_ty] prints it
+   back, and an arrow whose codomain is `Bool[p]` reads it as a definer
+   ([abstract_definer_arrow]).  It means exactly `{T | p(_)}`.  Adds no
+   shift/reduce conflict (7 before and after, 2026-10-08). *)
+ty_post:
   | t = ty_atom { t }
+  | t = ty_atom; LBRACKET; p = lower_name; RBRACKET
+    { let u = mk_name "_" $loc in
+      TyRefine (t, Some u, EApp (EVar p, [ EVar u ], mk_span $loc)) }
 
 ty_atom:
   | n = INT { TyNat n }
@@ -1526,13 +1574,16 @@ block_expr:
             mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
     { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
-  | LET; QUESTION; _p = simple_pattern; ty = type_annot; _e = preceded(EQUALS, expr)?
-    { let _ = ty in
-      error_raise
+  (* Stops at the `:`: the rule exists only to report this error, and parsing
+     the type made it ambiguous with a statement after a bare annotation (4 of
+     the grammar's shift/reduce conflicts, and 2 more once a type may end in
+     `[p]`).  The caret is unchanged: [type_annot] began at this same COLON. *)
+  | LET; QUESTION; _p = simple_pattern; COLON
+    { error_raise
         "A `let?` binding can't have a type annotation — its type is inferred \
          from the `Ok` payload of the `Result` on the right."
         (Some "let? name = result_expr")
-        $startpos(ty) }
+        $startpos($4) }
   | LET; QUESTION; _p = simple_pattern; error
     { error_raise
         "I was expecting `=` in the let? binding here:"
@@ -1540,13 +1591,16 @@ block_expr:
         $startpos($4) }
   | LET; STAR; p = simple_pattern; EQUALS; e = expr
     { ELetStar (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
-  | LET; STAR; _p = simple_pattern; ty = type_annot; _e = preceded(EQUALS, expr)?
-    { let _ = ty in
-      error_raise
+  (* Stops at the `:`: the rule exists only to report this error, and parsing
+     the type made it ambiguous with a statement after a bare annotation (4 of
+     the grammar's shift/reduce conflicts, and 2 more once a type may end in
+     `[p]`).  The caret is unchanged: [type_annot] began at this same COLON. *)
+  | LET; STAR; _p = simple_pattern; COLON
+    { error_raise
         "A `let*` binding can't have a type annotation — its type is \
          inferred from the right-hand side."
         (Some "let* name = expr")
-        $startpos(ty) }
+        $startpos($4) }
   | LET; STAR; _p = simple_pattern; error
     { error_raise
         "I was expecting `=` in the let* binding here:"
@@ -2024,7 +2078,8 @@ pattern:
    an arm separator only ever follows a COMPLETE branch — one that has
    already consumed its ARROW and body — so LR(1) distinguishes the two uses
    without a conflict.  Verified: adding this production leaves menhir's
-   conflict count unchanged at 9. *)
+   conflict count unchanged (it was 9 then; 7 since 2026-10-08, counted with
+   `menhir --explain` on this file). *)
 pattern_no_as:
   | p = pattern_alt; PIPE; ps = separated_nonempty_list(PIPE, pattern_alt)
     { PatOr (p :: ps, mk_span ($loc)) }

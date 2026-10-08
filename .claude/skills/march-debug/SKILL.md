@@ -56,6 +56,11 @@ march query key FILE                   # both cache keys and every input that fe
 march query why-miss FILE              # which input changed since the last successful build of FILE
 ```
 `march-lsp query <same>` proxies to it (`MARCH_BIN` picks the compiler).
+`forge query <same, FILE optional>` is the project form: it adds the entry file, the
+project's `MARCH_LIB_PATH` and `forge build`'s own flags (`--release`, `--target T`,
+`[ffi]`, topology, protocol baselines), so `key`/`why-miss` describe the build
+`forge build` would run. Compiler flags go after `--`; `--opt`/`--target` are refused
+(use `--release` / `--target`). It builds no `[ffi.rust]` crate and writes nothing.
 **Read it:** a name the optimiser inlined is not in the final IR; the answer says
 the last stage that had it, and `--no-opt` keeps it. `why-miss` says which layer
 will hit (source-level, post-TIR, neither) and names each changed input; it needs
@@ -93,13 +98,13 @@ From `tir-mono` on, it also checks types: call arity, each argument's
 representation against its parameter, case-branch binder counts, projected
 field names, and no source-named type variable left in a signature.
 
-**RC balance:** `--verify-tir-rc` (`MARCH_VERIFY_TIR_RC=1`) also walks every
-path of every function after Perceus. It reports an over-release or a use after
-release with the object, its binding and the path (`case kv: $Tuple2`).
-`MARCH_VERIFY_TIR_LEAKS=1` adds leaks. It is a separate switch because it
-currently reports three known Perceus bugs, two in stdlib code every program
-links (`specs/todos/2026-10-07-perceus-releases-parent-before-field-use.md`).
-Filter for your own function's name.
+**RC balance:** after Perceus it also walks every path of every function. It
+reports an over-release or a use after release with the object, its binding and
+the path (`case kv: $Tuple2`). `MARCH_VERIFY_TIR_LEAKS=1` adds leaks.
+`--verify-tir-rc` / `MARCH_VERIFY_TIR_RC=1` are older spellings of the same switch.
+A use after release on a field read (`bound to \`d.tag\``) is the shape of the
+fixed parent-released-before-field-use bugs
+(`specs/progress/2026-10-08-perceus-parent-released-before-field-use.md`).
 A finding exits 3 and names the stage and function: the first stage listed is
 the pass that broke it. Always on in `run_snapshots` and the hand-rolled
 pipelines in `test_codegen.ml`. Design: observability plan §6 (A1).
@@ -162,6 +167,12 @@ MARCH_SANITIZE=1 ./_build/default/bin/main.exe --compile FILE -o /tmp/x_asan && 
 ```
 `MARCH_SANITIZE=1` builds also abort on `march_free` of a shared object and on a
 TRMC hole fill that finds the slot non-null.
+
+On macOS the driver first checks that the C compiler's sanitizer runtime starts
+at all: Apple clang 17 (Xcode 26) and LLVM 21 deadlock in ASAN init on macOS 26
+(every binary, even C hello-world, hangs silently before `main`). It falls back
+to Homebrew LLVM (`brew install llvm`, 22+ works) with a note, or exits with an
+explanation; `MARCH_SANITIZE_CC=/path/to/clang` picks the compiler.
 
 `--debug-info` emits per-function DWARF (a `DISubprogram` per March fn plus
 `!march.provenance`) and links with `-g`, so `lldb`, ASan reports and `perf`

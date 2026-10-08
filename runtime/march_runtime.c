@@ -449,26 +449,99 @@ typedef struct march_live_slot {
 
 static march_live_slot *_Atomic march_live_slot_head = NULL;
 static _Atomic int64_t march_live_residual = 0;   /* folded from exited threads */
-static _Thread_local march_live_slot *march_live_self = NULL;
 static pthread_key_t march_live_key;
 static pthread_once_t march_live_once = PTHREAD_ONCE_INIT;
 
+/* Where this thread's slot pointer lives.
+ *
+ * On Darwin a _Thread_local access is a call (_tlv_get_addr) every time, and
+ * this gauge is touched on every allocation and every last-reference free:
+ * the call was ~5% of bench/binary_trees.  The slot pointer is therefore kept
+ * in the thread's pthread TSD array instead, under march_live_key, and read
+ * straight from it: on Darwin pthread_getspecific(k) IS a load of tsd[k], the
+ * array whose base the kernel keeps in TPIDRRO_EL0 (arm64; low 3 bits are the
+ * CPU number) or GS (x86_64) -- the same base mimalloc reads its thread id
+ * from.  march_live_key_init checks the direct read against
+ * pthread_getspecific once, and any mismatch (a libpthread whose layout
+ * differs) permanently selects the pthread_getspecific call instead.
+ * Elsewhere (Linux: the runtime is linked into the executable, so TLS is a
+ * thread-pointer-relative load already) the _Thread_local stays. */
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__x86_64__))
+#define MARCH_LIVE_TSD 1
+static _Atomic int march_live_tsd_direct = 0;   /* 1 direct, -1 call; set once, under march_live_once */
+static inline march_live_slot *march_live_tsd_read(void) {
+#if defined(__aarch64__)
+    uintptr_t base;
+    /* volatile: never CSE'd or hoisted across a call, which could be a
+     * green-thread switch onto another OS thread (see march_sched_cancel_point). */
+    __asm__ volatile ("mrs %0, tpidrro_el0" : "=r" (base));
+    return ((march_live_slot *const *)(base & ~(uintptr_t)7))[march_live_key];
+#else
+    march_live_slot *s;
+    __asm__ volatile ("movq %%gs:0(,%1,8), %0" : "=r" (s) : "r" ((uintptr_t)march_live_key));
+    return s;
+#endif
+}
+static inline march_live_slot *march_live_self_get(void) {
+    int mode = atomic_load_explicit(&march_live_tsd_direct, memory_order_relaxed);
+    if (__builtin_expect(mode > 0, 1)) return march_live_tsd_read();
+    /* Before the first acquire (key not created yet) or after a failed
+     * self-check.  pthread_getspecific of a key not yet created would be
+     * undefined, hence the once-flag. */
+    return mode < 0
+        ? (march_live_slot *)pthread_getspecific(march_live_key) : NULL;
+}
+static inline void march_live_self_set(march_live_slot *s) {
+    pthread_setspecific(march_live_key, s);
+}
+/* The slot for a hot path that has an out-of-line fallback: NULL whenever the
+ * direct read is not available, never a call. */
+static inline march_live_slot *march_live_self_fast(void) {
+    return atomic_load_explicit(&march_live_tsd_direct, memory_order_relaxed) > 0
+        ? march_live_tsd_read() : NULL;
+}
+#else
+static _Thread_local march_live_slot *march_live_self = NULL;
+static inline march_live_slot *march_live_self_get(void) { return march_live_self; }
+static inline march_live_slot *march_live_self_fast(void) { return march_live_self; }
+static inline void march_live_self_set(march_live_slot *s) {
+    march_live_self = s;
+    pthread_setspecific(march_live_key, s);   /* registers the exit destructor */
+}
+#endif
+
 /* Thread-exit: move this thread's net count into the process-wide residual and
  * hand the slot back.  The exchange makes the move atomic with respect to a
- * concurrent reader, so the count is never seen twice nor lost. */
+ * concurrent reader, so the count is never seen twice nor lost.  (libpthread
+ * has already cleared this thread's TSD value before calling us, so a later
+ * bump on the exiting thread acquires a fresh slot, as before.) */
 static void march_live_slot_release(void *arg) {
     march_live_slot *s = (march_live_slot *)arg;
     int64_t n = atomic_exchange_explicit(&s->count, 0, memory_order_relaxed);
     if (n) atomic_fetch_add_explicit(&march_live_residual, n, memory_order_relaxed);
+#ifndef MARCH_LIVE_TSD
     march_live_self = NULL;
+#endif
     atomic_store_explicit(&s->in_use, 0, memory_order_release);
 }
 
 static void march_live_key_init(void) {
     pthread_key_create(&march_live_key, march_live_slot_release);
+#ifdef MARCH_LIVE_TSD
+    /* Self-check the direct read with a sentinel, then clear it. */
+    static march_live_slot probe;
+    int ok = 1;
+    if (pthread_setspecific(march_live_key, &probe) != 0
+            || march_live_tsd_read() != &probe)
+        ok = 0;
+    pthread_setspecific(march_live_key, NULL);
+    if (ok && march_live_tsd_read() != NULL) ok = 0;
+    atomic_store_explicit(&march_live_tsd_direct, ok ? 1 : -1, memory_order_relaxed);
+#endif
 }
 
 /* Claim a free slot (a thread that has since exited), else push a new one. */
+__attribute__((noinline, cold))
 static march_live_slot *march_live_slot_acquire(void) {
     pthread_once(&march_live_once, march_live_key_init);
     for (march_live_slot *s = atomic_load_explicit(&march_live_slot_head, memory_order_acquire);
@@ -476,8 +549,7 @@ static march_live_slot *march_live_slot_acquire(void) {
         int expected = 0;
         if (atomic_compare_exchange_strong_explicit(&s->in_use, &expected, 1,
                 memory_order_acq_rel, memory_order_relaxed)) {
-            march_live_self = s;
-            pthread_setspecific(march_live_key, s);
+            march_live_self_set(s);
             return s;
         }
     }
@@ -489,17 +561,27 @@ static march_live_slot *march_live_slot_acquire(void) {
         atomic_store_explicit(&s->next, head, memory_order_relaxed);
     } while (!atomic_compare_exchange_weak_explicit(&march_live_slot_head, &head, s,
                  memory_order_release, memory_order_relaxed));
-    march_live_self = s;
-    pthread_setspecific(march_live_key, s);
+    march_live_self_set(s);
     return s;
 }
 
-static inline void march_live_bump(int64_t d) {
-    march_live_slot *s = march_live_self;
-    if (__builtin_expect(s == NULL, 0)) s = march_live_slot_acquire();
+static inline void march_live_add(march_live_slot *s, int64_t d) {
     atomic_store_explicit(&s->count,
         atomic_load_explicit(&s->count, memory_order_relaxed) + d,
         memory_order_relaxed);
+}
+
+/* A thread's first bump; out of line so the inlined bump stays a load, a
+ * test and a store, with no call frame. */
+__attribute__((noinline, cold))
+static void march_live_bump_first(int64_t d) {
+    march_live_add(march_live_slot_acquire(), d);
+}
+
+static inline void march_live_bump(int64_t d) {
+    march_live_slot *s = march_live_self_get();
+    if (__builtin_expect(s == NULL, 0)) { march_live_bump_first(d); return; }
+    march_live_add(s, d);
 }
 
 int64_t march_live_allocs(void) {
@@ -516,8 +598,13 @@ int64_t march_live_allocs(void) {
  * the wrapped native pointer before the cell itself is freed.  Called from
  * every RC free-on-zero path.  Cell layout: native_ptr@16, dtor@24. */
 void march_decrc(void *p);
-static inline void march_run_resource_dtor(void *p) {
-    int32_t tag = ((march_hdr *)p)->tag;
+/* Only the runtime's reserved cell kinds (all NEGATIVE tags: String, Resource,
+ * Float, Task, ...) can need work here; every ADT, tuple, record and closure
+ * cell has a tag >= 0.  The tag test is therefore inlined into the free paths
+ * and the rest kept out of line, so a constructor cell's free carries no call
+ * frame for a destructor it never runs. */
+__attribute__((noinline, cold))
+static void march_run_resource_dtor_slow(void *p, int32_t tag) {
     if (tag == MARCH_RESOURCE_TAG) {
         void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
         void *native = *(void **)((char *)p + 16);
@@ -544,6 +631,21 @@ static inline void march_run_resource_dtor(void *p) {
     }
 }
 
+static inline void march_run_resource_dtor(void *p) {
+    int32_t tag = ((march_hdr *)p)->tag;
+    if (__builtin_expect(tag < 0, 0)) march_run_resource_dtor_slow(p, tag);
+}
+
+/* The string-stats tally plus the destructor check, for the last-reference
+ * tails below: both concern negative-tag cells only, so one inlined test
+ * covers them. */
+__attribute__((noinline, cold))
+static void march_rc_last_special(void *p, int32_t tag) {
+    if (tag == MARCH_STRING_TAG && str_stats_on())
+        str_stats_free(((march_string *)p)->len);
+    march_run_resource_dtor_slow(p, tag);
+}
+
 /* NOT zeroing (march_obj_malloc, 2026-10-02 -- was calloc).  The header is
  * written here; the payload is whatever the allocator's previous tenant left
  * and is the CALLER's to write, every word, before the object is published,
@@ -551,23 +653,38 @@ static inline void march_run_resource_dtor(void *p) {
  * (specs/progress/2026-10-02-march-alloc-malloc.md); the TRMC hole store in
  * lib/tir/llvm_emit_alloc.ml and the task-spawn stores below are the ones
  * that used to lean on the zeroing. */
+__attribute__((noinline, cold, noreturn))
+static void march_alloc_oom(int64_t sz) {
+    march_debug_report_oom("march_alloc", sz);
+    fputs("march: out of memory\n", stderr); exit(1);
+}
+
+/* The opt-in string-stats tally and GC trace event, out of line: they are off
+ * in every ordinary run, and inlined (gc_emit with its TLS site read) they
+ * gave march_alloc a ten-register frame on its hot path.  Also reached while
+ * either state is still 0 (unresolved), which is where the lazy init runs. */
+__attribute__((noinline, cold))
+static void march_alloc_note(void *p, int64_t sz) {
+    if (str_stats_on()) {
+        atomic_fetch_add_explicit(&obj_alloc_count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&obj_alloc_bytes, sz, memory_order_relaxed);
+    }
+    if (gc_trace_on()) gc_emit("alloc", p, sz, 1, 0);
+}
+
 void *march_alloc(int64_t sz) {
     void *p = march_obj_malloc((size_t)sz);
-    if (!p) {
-        march_debug_report_oom("march_alloc", sz);
-        fputs("march: out of memory\n", stderr); exit(1);
-    }
+    if (__builtin_expect(!p, 0)) march_alloc_oom(sz);
     /* Initialize rc=1, tag=0, pad=0 */
     march_hdr *h = (march_hdr *)p;
     h->rc  = 1;
     h->tag = 0;
     h->pad = 0;
     MARCH_ALLOC_BUMP();
-    if (str_stats_on()) {
-        atomic_fetch_add_explicit(&obj_alloc_count, 1, memory_order_relaxed);
-        atomic_fetch_add_explicit(&obj_alloc_bytes, sz, memory_order_relaxed);
-    }
-    if (gc_trace_on()) gc_emit("alloc", p, sz, 1, 0);
+    /* Both states are -1 once resolved off; anything else (on, or not yet
+     * resolved) takes the out-of-line path, which resolves and acts. */
+    if (__builtin_expect((str_stats_state & gc_trace_state) != -1, 0))
+        march_alloc_note(p, sz);
     return p;
 }
 
@@ -637,16 +754,35 @@ void march_decrc(void *p) {
  * under the closure's apply function (field 0), once, from main's prologue
  * (march_clo_register_drops).  march_clo_release runs it when the release
  * frees the cell.  A closure with no entry -- a runtime trampoline, a type
- * whose environment borrows, one built by a hot patch or REPL fragment,
- * which do not register -- is released exactly as before: never a crash,
- * at worst the old leak.  See specs/progress/2026-10-05-dropped-closure-captures.md.
+ * whose environment borrows, one built by a hot patch or a local REPL
+ * fragment, which do not register -- is released exactly as before: never a
+ * crash, at worst the old leak.  See
+ * specs/progress/2026-10-05-dropped-closure-captures.md.
  *
- * Registration happens before the scheduler starts, so lookups need no lock. */
+ * A remote-shell fragment registers its own pairs when it starts
+ * (lib/tir/llvm_repl.ml emit_repl_expr ~register_drops), while the
+ * scheduler runs and other threads look entries up, so registration is
+ * serialised by a mutex and lookups take no lock:
+ *   - an entry is filled in place, its release before its key.  A lookup
+ *     reads entries with relaxed loads, which is enough: it only looks up
+ *     the key of a closure it holds, and that closure was built by code that
+ *     ran after the key was registered and reached this thread through a
+ *     synchronising handoff, so both stores happen before the lookup.  A
+ *     lookup racing a new key's insertion is for some other key, and at
+ *     worst probes past the new entry.  (Acquire loads here cost ~10% on a
+ *     closure-release-heavy microbenchmark on an M3.)
+ *   - growing copies into a new table published with a release store, read
+ *     with an acquire load, so a lookup never sees the new table before its
+ *     copied entries.  The old table is never freed, since a lookup may still
+ *     be probing it; the tables a run ever retires add up to less than the
+ *     live one.
+ * Keys are never removed: a fragment's code is never unloaded. */
 typedef void (*march_clo_drop_fn)(void *clo);
-typedef struct { void *apply; march_clo_drop_fn drop; } march_clo_drop_entry;
-static march_clo_drop_entry *g_clo_drops = NULL;
-static size_t g_clo_drops_cap = 0;   /* a power of two, or 0 */
-static size_t g_clo_drops_n = 0;
+typedef struct { _Atomic(void *) apply; _Atomic(void *) drop; } march_clo_drop_entry;
+typedef struct { size_t cap; march_clo_drop_entry e[]; } march_clo_drop_table;  /* cap: a power of two */
+static _Atomic(march_clo_drop_table *) g_clo_drops = NULL;
+static size_t g_clo_drops_n = 0;     /* under g_clo_drops_mu */
+static pthread_mutex_t g_clo_drops_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static size_t clo_drop_slot(void *apply, size_t cap) {
     uintptr_t h = (uintptr_t)apply;
@@ -654,42 +790,56 @@ static size_t clo_drop_slot(void *apply, size_t cap) {
     return (size_t)h & (cap - 1);
 }
 
-static void clo_drop_insert(march_clo_drop_entry *tab, size_t cap, void *apply, march_clo_drop_fn drop) {
-    size_t i = clo_drop_slot(apply, cap);
-    while (tab[i].apply && tab[i].apply != apply) i = (i + 1) & (cap - 1);
-    tab[i].apply = apply;
-    tab[i].drop = drop;
+/* Under g_clo_drops_mu. */
+static void clo_drop_insert(march_clo_drop_table *tab, void *apply, void *drop) {
+    size_t i = clo_drop_slot(apply, tab->cap);
+    void *a;
+    while ((a = atomic_load_explicit(&tab->e[i].apply, memory_order_relaxed)) && a != apply)
+        i = (i + 1) & (tab->cap - 1);
+    atomic_store_explicit(&tab->e[i].drop, drop, memory_order_relaxed);
+    atomic_store_explicit(&tab->e[i].apply, apply, memory_order_release);
 }
 
 void march_clo_register_drops(void **pairs, int64_t n) {
     if (n <= 0) return;
+    pthread_mutex_lock(&g_clo_drops_mu);
+    march_clo_drop_table *tab = atomic_load_explicit(&g_clo_drops, memory_order_relaxed);
+    size_t cap0 = tab ? tab->cap : 0;
     size_t want = g_clo_drops_n + (size_t)n;
-    if (want * 2 > g_clo_drops_cap) {
-        size_t cap = g_clo_drops_cap ? g_clo_drops_cap : 64;
+    if (want * 2 > cap0) {
+        size_t cap = cap0 ? cap0 : 64;
         while (want * 2 > cap) cap *= 2;
-        march_clo_drop_entry *tab = calloc(cap, sizeof *tab);
-        if (!tab) return;   /* out of memory: keep the old (shallow) behaviour */
-        for (size_t i = 0; i < g_clo_drops_cap; i++)
-            if (g_clo_drops[i].apply)
-                clo_drop_insert(tab, cap, g_clo_drops[i].apply, g_clo_drops[i].drop);
-        free(g_clo_drops);
-        g_clo_drops = tab;
-        g_clo_drops_cap = cap;
+        march_clo_drop_table *nt = calloc(1, sizeof *nt + cap * sizeof nt->e[0]);
+        if (!nt) {   /* out of memory: keep the old (shallow) behaviour */
+            pthread_mutex_unlock(&g_clo_drops_mu);
+            return;
+        }
+        nt->cap = cap;
+        for (size_t i = 0; i < cap0; i++) {
+            void *a = atomic_load_explicit(&tab->e[i].apply, memory_order_relaxed);
+            if (a) clo_drop_insert(nt, a, atomic_load_explicit(&tab->e[i].drop, memory_order_relaxed));
+        }
+        atomic_store_explicit(&g_clo_drops, nt, memory_order_release);
+        tab = nt;   /* the old one is retired, never freed (see above) */
     }
     for (int64_t k = 0; k < n; k++) {
         void *apply = pairs[2 * k];
         if (!apply) continue;
-        clo_drop_insert(g_clo_drops, g_clo_drops_cap, apply, (march_clo_drop_fn)pairs[2 * k + 1]);
+        clo_drop_insert(tab, apply, pairs[2 * k + 1]);
     }
     g_clo_drops_n = want;
+    pthread_mutex_unlock(&g_clo_drops_mu);
 }
 
 static march_clo_drop_fn clo_drop_lookup(void *apply) {
-    if (!g_clo_drops_cap || !apply) return NULL;
-    size_t i = clo_drop_slot(apply, g_clo_drops_cap);
-    while (g_clo_drops[i].apply) {
-        if (g_clo_drops[i].apply == apply) return g_clo_drops[i].drop;
-        i = (i + 1) & (g_clo_drops_cap - 1);
+    march_clo_drop_table *tab = atomic_load_explicit(&g_clo_drops, memory_order_acquire);
+    if (!tab || !apply) return NULL;
+    size_t i = clo_drop_slot(apply, tab->cap);
+    void *a;
+    while ((a = atomic_load_explicit(&tab->e[i].apply, memory_order_relaxed))) {
+        if (a == apply)
+            return (march_clo_drop_fn)atomic_load_explicit(&tab->e[i].drop, memory_order_relaxed);
+        i = (i + 1) & (tab->cap - 1);
     }
     return NULL;
 }
@@ -986,30 +1136,46 @@ int64_t march_decrc_local_freed(void *p) {
  * point. [prev] == 1 means the caller held the last reference and the object is
  * solely owned; [prev] < 1 is an underflow. The fast path only runs with GC
  * tracing resolved off, so no trace event is due here. */
-void march_rc_last_atomic(void *p, int64_t prev) {
-    if (prev == 1) {
-        int32_t tag = ((march_hdr *)p)->tag;
-        if (tag == MARCH_STRING_TAG && str_stats_on())
-            str_stats_free(((march_string *)p)->len);
-        march_run_resource_dtor(p);
-        MARCH_FREE_BUMP();
-        free(p);
-        return;
-    }
-    fprintf(stderr, "march: RC underflow (rc was %lld) at %p — aborting\n",
-            (long long)prev, p);
+__attribute__((noinline, cold, noreturn))
+static void march_rc_last_underflow(void *p, int64_t prev, int local) {
+    if (local)
+        fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
+    else
+        fprintf(stderr, "march: RC underflow (rc was %lld) at %p — aborting\n",
+                (long long)prev, p);
     abort();
 }
 
+/* The out-of-line remainder of a last-reference free: a negative-tag cell
+ * (string stats, resource / task destructor), or a thread's first gauge bump. */
+__attribute__((noinline, cold))
+static void march_rc_last_free_slow(void *p, int32_t tag, int stats) {
+    if (stats) march_rc_last_special(p, tag);
+    else march_run_resource_dtor(p);
+    MARCH_FREE_BUMP();
+    free(p);
+}
+
+/* Hot: one call per freed cell.  Everything but the tag test, the gauge and
+ * the free is out of line and reached by a TAIL call, so the common
+ * constructor-cell case runs without a stack frame and tail-calls the
+ * allocator's free. */
+void march_rc_last_atomic(void *p, int64_t prev) {
+    if (__builtin_expect(prev != 1, 0)) march_rc_last_underflow(p, prev, 0);
+    int32_t tag = ((march_hdr *)p)->tag;
+    march_live_slot *s = march_live_self_fast();
+    if (__builtin_expect(tag < 0 || s == NULL, 0)) { march_rc_last_free_slow(p, tag, 1); return; }
+    march_live_add(s, -1);
+    free(p);
+}
+
 void march_rc_last_local(void *p, int64_t prev) {
-    if (prev == 1) {
-        march_run_resource_dtor(p);
-        MARCH_FREE_BUMP();
-        free(p);
-        return;
-    }
-    fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
-    abort();
+    if (__builtin_expect(prev != 1, 0)) march_rc_last_underflow(p, prev, 1);
+    int32_t tag = ((march_hdr *)p)->tag;
+    march_live_slot *s = march_live_self_fast();
+    if (__builtin_expect(tag < 0 || s == NULL, 0)) { march_rc_last_free_slow(p, tag, 0); return; }
+    march_live_add(s, -1);
+    free(p);
 }
 
 /* ── IOList hash ─────────────────────────────────────────────────────── */
@@ -11103,6 +11269,16 @@ static void obs_row_fill(march_actor_meta *m, int64_t pidx, march_obs_actor *r) 
         r->msgs_out = atomic_load_explicit(&p->msgs_out, memory_order_relaxed);
         r->last_run_ms = atomic_load_explicit(&p->last_run_ms, memory_order_relaxed);
         r->held = atomic_load_explicit(&p->held, memory_order_relaxed);
+        /* Committed stack = the reservation's top minus the usable bottom the
+         * guard-page handler moves down on growth.  Read racily and
+         * sanity-clamped: a death between the two loads can pair a cleared
+         * base with a live one. */
+        char *sb = __atomic_load_n((char **)&p->stack_base, __ATOMIC_RELAXED);
+        char *mb = __atomic_load_n((char **)&p->stack_mmap_base, __ATOMIC_RELAXED);
+        if (sb && mb) {
+            int64_t committed = (int64_t)((mb + p->stack_alloc) - sb);
+            if (committed > 0 && committed <= (int64_t)MARCH_STACK_MAX) r->stack_bytes = committed;
+        }
     }
     r->draining = atomic_load_explicit(&m->draining, memory_order_relaxed);
     r->spawned_by = __atomic_load_n(&m->spawned_by, __ATOMIC_RELAXED);

@@ -14,6 +14,12 @@ Actor.list(intro)
 let c = Actor.pid_from_int(intro, 0)
 send(c, Bump(41))
 Actor.inspect_state(debug, c, 500)
+let k = spawn(Counter)
+send(k, Bump(5))
+send(k, Bump(7))
+Actor.inspect_state(debug, k, 500)
+Actor.list(intro)
+Option.map(Recon.info(intro, 1), fn a -> a.type_name)
 panic("deliberate")
 List.head(List.filter(xs, fn x -> x > 100))
 nosuchfn(1)
@@ -31,4 +37,20 @@ Blob(20000)
 c
 fn x -> x + 1
 "tab\there" limit: 4
+["tab\there"] limit: 4
 Some(Map.insert(Map.empty(), 1, ["x"], Map.int_cmp))
+HashMap.put(HashMap.put(HashMap.new(), "a", 1), "b", 2)
+HashMap.from_list(List.map(List.range(0, 20), fn i -> (i, [i]))) limit: 3
+OrderedMap.from_list([(3, "c"), (1, "a"), (2, "b")], fn (a, b) -> a - b) limit: 2
+SortedSet.from_list([5, 1, 3], fn (a, b) -> a - b)
+Deque.push_front(Deque.from_list([2, 3]), 1)
+Queue.push_back(Queue.from_list(List.range(0, 100)), 100) limit: 3
+RRB.from_list([[1, 2, 3], [4]]) limit: 2
+NativeArray.from_list_float([1.5, 2.5])
+Some(Deque.from_list(["xyz", "y"])) limit: 1
+List.map(Recon.top(intro, "mailbox", 5), fn r -> (r.pid, r.type_name, r.link, r.value))
+:top 5
+:actors
+:top msgs_in 1
+:top bogus
+:top 0

@@ -1,0 +1,203 @@
+-- Regression: owned-call drop fusion
+-- (specs/progress/2026-10-07-owned-call-drop-fusion.md).
+--
+-- A call whose argument dies there and sits at a BORROWED parameter of the
+-- callee (`check(make(d))`) used to walk the value twice: once in the
+-- callee, once in the deep drop after it.  Perceus now sends such a call to
+-- an owned clone of the callee (`check$own0`), which frees each cell as its
+-- match passes it.  Every shape below must print what the interpreter
+-- prints, and the churn loop must not leak.
+--
+-- The constructor names are deliberately unlike any stdlib constructor (see
+-- specs/todos/2026-10-07-nested-pattern-ctor-name-collision-miscompile.md).
+mod Main do
+  needs IO.Console
+
+  type Grove = Twig | Bough(Grove, Grove)
+  type Holder = Holder(Grove, Int)
+
+  pfn make(d : Int) : Grove do
+    if d == 0 do Twig else Bough(make(d - 1), make(d - 1)) end
+  end
+
+  -- A plain reader: borrows its argument.
+  pfn check(t : Grove) : Int do
+    match t do
+      Twig -> 1
+      Bough(l, r) -> check(l) + check(r) + 1
+    end
+  end
+
+  -- Two mutually recursive readers.
+  pfn count_a(t : Grove) : Int do
+    match t do
+      Twig -> 1
+      Bough(l, r) -> count_b(l) + count_b(r)
+    end
+  end
+
+  pfn count_b(t : Grove) : Int do
+    match t do
+      Twig -> 0
+      Bough(l, r) -> count_a(l) + count_a(r) + 1
+    end
+  end
+
+  -- A wrapper that only hands its argument on to a reader.
+  pfn checked_twice(t : Grove) : Int do
+    check(t) * 2
+  end
+
+  -- Two borrowed tree parameters, both read.
+  pfn check2(a : Grove, b : Grove) : Int do
+    check(a) - check(b)
+  end
+
+  -- Builds a node out of existing trees (so a subtree can be shared).
+  pfn join(a : Grove, b : Grove) : Grove do
+    Bough(a, b)
+  end
+
+  pfn twig() : Grove do
+    Twig
+  end
+
+  -- Lists: a tail-recursive reader (must stay a loop when owned) and a
+  -- reader over a list of trees.
+  pfn build(i : Int, acc : List(Int)) : List(Int) do
+    if i <= 0 do acc else build(i - 1, Cons(i, acc)) end
+  end
+
+  pfn len(xs : List(Int), acc : Int) : Int do
+    match xs do
+      Nil -> acc
+      Cons(_, t) -> len(t, acc + 1)
+    end
+  end
+
+  pfn sum(xs : List(Int), acc : Int) : Int do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> sum(t, acc + h)
+    end
+  end
+
+  pfn groves(i : Int, acc : List(Grove)) : List(Grove) do
+    if i <= 0 do acc else groves(i - 1, Cons(make(i % 4), acc)) end
+  end
+
+  pfn check_all(xs : List(Grove), acc : Int) : Int do
+    match xs do
+      Nil -> acc
+      Cons(g, t) -> check_all(t, acc + check(g))
+    end
+  end
+
+  -- Mutual tail recursion that forwards a field of the walked list: in the
+  -- owned clones the field is owned, and it must be handed on rather than
+  -- dropped after the call, or the loop becomes real recursion.
+  pfn names(i : Int, acc : List(String)) : List(String) do
+    if i <= 0 do acc
+    else names(i - 1, Cons(if i % 3 == 0 do "a" ++ int_to_string(i) else "b" end, acc)) end
+  end
+
+  pfn walk_s(xs : List(String), seen : Int) : Int do
+    match xs do
+      Nil -> seen
+      Cons(x, rest) -> step_s(x, rest, seen)
+    end
+  end
+
+  pfn step_s(x : String, rest : List(String), seen : Int) : Int do
+    if String.starts_with(x, "a") do walk_s(rest, seen + 1) else walk_s(rest, seen) end
+  end
+
+  -- Two list parameters, the second only read at the end: called with both
+  -- dying, and with the second still needed afterwards.
+  pfn zip_len(a : List(Int), b : List(Int), n : Int) : Int do
+    match a do
+      Nil -> n + len(b, 0)
+      Cons(_, t) -> zip_len(t, b, n + 1)
+    end
+  end
+
+  -- The self call swaps a field into the other parameter.
+  pfn swap_count(a : Grove, b : Grove, n : Int) : Int do
+    match a do
+      Twig -> n + check(b)
+      Bough(l, r) -> swap_count(r, l, n + 1)
+    end
+  end
+
+  pfn holder_check(h : Holder) : Int do
+    match h do
+      Holder(g, k) -> check(g) + k
+    end
+  end
+
+  pfn churn(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let s = make(3)
+      let t1 = join(s, make(2))
+      let t2 = join(make(1), s)
+      let a = check(t1) + check(t2)
+      let shared = check(s)
+      let m = count_a(make(5)) + checked_twice(make(3)) + check2(make(3), make(2))
+      let l = len(build(50, Nil), 0) + check_all(groves(6, Nil), 0)
+      let tw = check(twig())
+      let z = walk_s(names(30, Nil), 0) + zip_len(build(20, Nil), build(5, Nil), 0)
+        + swap_count(make(4), make(2), 0)
+      churn(n - 1, acc + a + shared + m + l + tw + z)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println("fresh tree: " ++ int_to_string(check(make(10))))
+    -- The argument is read again after the first call: only the second
+    -- call may consume it.
+    let t = make(5)
+    let first = check(t)
+    let second = check(t)
+    println("read twice: " ++ int_to_string(first) ++ " " ++ int_to_string(second))
+    -- A shared subtree: consuming t1 and t2 must leave s intact.
+    let s = make(3)
+    let t1 = join(s, make(2))
+    let t2 = join(make(1), s)
+    println("shared: " ++ int_to_string(check(t1)) ++ " " ++ int_to_string(check(t2))
+      ++ " " ++ int_to_string(check(s)))
+    -- A static nullary cell passed owned.
+    println("twig: " ++ int_to_string(check(twig())) ++ " " ++ int_to_string(count_a(twig()))
+      ++ " " ++ int_to_string(count_b(twig())))
+    println("mutual: " ++ int_to_string(count_a(make(6))) ++ " " ++ int_to_string(count_b(make(6))))
+    println("wrapper: " ++ int_to_string(checked_twice(make(4))))
+    println("two args: " ++ int_to_string(check2(make(5), make(3))))
+    let u = make(4)
+    println("one of two: " ++ int_to_string(check2(make(4), u)) ++ " " ++ int_to_string(check(u)))
+    -- A tree captured by a closure stays the closure's.
+    let c = make(4)
+    let f = fn x -> check(c) + x
+    println("closure: " ++ int_to_string(f(1)) ++ " " ++ int_to_string(f(2)))
+    -- A tree inside a constructor field.
+    println("holder: " ++ int_to_string(holder_check(Holder(make(3), 100))))
+    -- A long list: the owned reader must still run in constant stack.
+    println("long list: " ++ int_to_string(len(build(300000, Nil), 0))
+      ++ " " ++ int_to_string(sum(build(1000, Nil), 0)))
+    println("list of trees: " ++ int_to_string(check_all(groves(12, Nil), 0)))
+    println("mutual walk: " ++ int_to_string(walk_s(names(200000, Nil), 0)))
+    let kept_list = build(10, Nil)
+    println("zip: " ++ int_to_string(zip_len(build(200000, Nil), build(7, Nil), 0))
+      ++ " " ++ int_to_string(zip_len(build(200000, Nil), kept_list, 0))
+      ++ " " ++ int_to_string(sum(kept_list, 0)))
+    let kept_tree = make(3)
+    println("swap: " ++ int_to_string(swap_count(make(6), make(2), 0))
+      ++ " " ++ int_to_string(swap_count(make(5), kept_tree, 0))
+      ++ " " ++ int_to_string(check(kept_tree)))
+    let keep = make(6)
+    let before = live_allocs()
+    let r = churn(300, 0)
+    let grew = live_allocs() - before
+    println("loop: " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 50))
+    println("kept: " ++ int_to_string(check(keep)))
+  end
+end

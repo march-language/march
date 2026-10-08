@@ -1505,7 +1505,10 @@ ty_nat_mul ::= ty_nat_mul "*" ty_app
 
 ty_app     ::= upper_name "(" separated_nonempty_list(",", ty) ")"
              | upper_name "." dotted_upper_tail "(" separated_nonempty_list(",", ty) ")"
-             | ty_atom
+             | ty_post
+
+ty_post    ::= ty_atom
+             | ty_atom "[" lower_name "]"                      (* abstract refinement: {T | p(_)} *)
 
 ty_atom    ::= INT
              | LOWER_IDENT

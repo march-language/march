@@ -9,9 +9,9 @@ Ok(Object([("a", Array([Number(1.), Number(2.), Object([("b", Bool(true))])])), 
 [shell] calls 18 node functions: Json.skip_ws, Json.match_lit_go, Json.hex4, Json.utf8_encode, Json.unescape_u, Json.unescape, Json.scan_string, Json.scan_digits, Json.scan_int, Json.scan_exp, Json.parse_number, Json.parse_value, Json.parse_array_elements, Json.parse_pairs, Json.parse, Json.rev$List_String$List_String, Json.rev$List_JsonValue$List_JsonValue, Json.rev$List_T_String_JsonValue$List_T_String_JsonValue
 j : JsonValue
 [shell] calls 3 node functions: Json.escape_go, Json.to_string, Json.rev$List_String$List_String
-"{\"a\":[1,2,{\"b\":true}],\"c\":\"xA\"}"
+{"a":[1,2,{"b":true}],"c":"xA"}
 [shell] calls 3 node functions: Json.escape_go, Json.to_string, Json.rev$List_String$List_String
-"{\"a\":[1,2,{\"b\":true}],\"c\":\"xA\"}"
+{"a":[1,2,{"b":true}],"c":"xA"}
 [shell] calls 0 node functions
 [10, 20, 30]
 [shell] calls 20 node functions: Json.skip_ws, Json.match_lit_go, Json.hex4, Json.utf8_encode, Json.unescape_u, Json.unescape, Json.scan_string, Json.scan_digits, Json.scan_int, Json.scan_exp, Json.parse_number, Json.parse_value, Json.parse_array_elements, Json.parse_pairs, Json.escape_go, Json.parse, Json.to_string, Json.rev$List_String$List_String, Json.rev$List_JsonValue$List_JsonValue, Json.rev$List_T_String_JsonValue$List_T_String_JsonValue

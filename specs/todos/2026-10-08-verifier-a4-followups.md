@@ -2,10 +2,6 @@
 
 Logged 2026-10-08, from `specs/progress/2026-10-07-verify-rc-types-and-pass-bisect.md`.
 
-- **Check 3 under plain `--verify-tir`.** Blocked on
-  `specs/todos/2026-10-07-perceus-releases-parent-before-field-use.md`. When that lands,
-  re-run the 439-program sweep with `MARCH_VERIFY_TIR_RC=1` and fold `rc_enabled` into `enabled`.
-  `test_oracle` then exercises check 3 for free.
 - **Check 3 in the snapshot harness.** `test/test_snapshots.ml` runs Perceus by hand. It
   should compute `Kind.of_module` and `Borrow.infer_module` once, pass both to Perceus, and
   pass both to `Tir_verify.check`.

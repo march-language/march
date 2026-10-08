@@ -56,7 +56,7 @@ type repl_slot_info = { rs_bare : string; rs_slot : int; rs_ty : Tir.ty }
     entry block, and register the alloca in [ctx.var_slot].
     Uses @march_repl_get(i64 slot) so no LLVM external globals are needed —
     values live in a single persistent C array that survives .so reloads. *)
-let emit_prev_slot_bridges ctx (prev_slots : repl_slot_info list) =
+let emit_prev_slot_bridges ?(borrow = false) ctx (prev_slots : repl_slot_info list) =
   List.iter (fun si ->
     let llty = Llvm_ctx.llvm_ty ctx si.rs_ty in
     let raw  = Llvm_ctx.fresh ctx "slot" in
@@ -88,7 +88,19 @@ let emit_prev_slot_bridges ctx (prev_slots : repl_slot_info list) =
            without disturbing the slot's permanent hold — mirrors
            march_signal_drain's per-delivery incrc before calling through a
            long-held watcher closure. *)
-        Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_incrc(ptr %s)\n" pt;
+        (* [borrow] (the remote shell, repl_jit.ml [shell_compile]): no
+           increment.  Perceus treats every slot variable as BORROWED in the
+           fragment's main ([Perceus.perceus ~repl_vars]): it never releases
+           one and increments it itself before any owned use, so nothing
+           ever balanced this increment and every input leaked one count on
+           every heap binding of its session, which then outlived the
+           session (specs/progress/2026-10-08-shell-slot-and-drop-leaks.md).
+           The slot's own reference covers the fragment's lifetime: a slot
+           is released only when its session ends, after its last input
+           has finished (runtime/march_shell.c keeps a session's values when
+           an input could not be stopped). *)
+        if not borrow then
+          Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_incrc(ptr %s)\n" pt;
         pt
     in
     Printf.bprintf ctx.Llvm_ctx.buf "  store %s %s, ptr %%%s.addr\n" llty converted si.rs_bare;
@@ -266,6 +278,9 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
     ?(store_as_slot : int option = None)
+    ?(borrow_slots = false)
+    ?(slot_drop_fn : string option)
+    ?(register_drops = false)
     ?(session_wraps : Llvm_ctx.session_wraps option)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
@@ -288,7 +303,24 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   let ret_llty = Llvm_ctx.llvm_ty ctx ret_ty in
   let fname = Printf.sprintf "repl_%d" n in
   Printf.bprintf ctx.Llvm_ctx.buf "\ndefine %s @%s() {\nentry:\n" ret_llty fname;
-  emit_prev_slot_bridges ctx prev_slots;
+  (* [register_drops] (the remote shell): register this fragment's closure
+     and actor releases ([Drop.run]'s [$clodrop$]/[$actordrop$]) before any
+     of its code runs, as a program's main does
+     ([Llvm_toplevel.clo_drop_registration]).  Without it a closure the
+     fragment built and released through its function type freed its cell
+     and leaked every capture: one closure per call of `List.filter`'s
+     shape, whose local `go` captures the predicate.  A fragment's code is
+     never unloaded, so the registered pointers stay valid. *)
+  let registration =
+    if not register_drops then ""
+    else begin
+      let entry_fn = { Tir.fn_name = fname; fn_params = []; fn_ret_ty = ret_ty;
+                       fn_body = body; fn_kind = Tir.FnNormal } in
+      Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_clo_drops_register()\n";
+      Llvm_toplevel.clo_drop_registration
+        { pseudo_mod with tm_fns = fns @ [ entry_fn ] }
+    end in
+  emit_prev_slot_bridges ~borrow:borrow_slots ctx prev_slots;
   let (actual_ty, result) = emit_expr ctx body in
   let result' = Llvm_ctx.coerce ctx actual_ty result ret_llty in
   (* An Int result is a BARE register value under lazy normalisation
@@ -304,9 +336,22 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   (match store_as_slot with
    | None -> ()
    | Some k -> emit_store_to_slot ~prev_slots ctx k result' ret_ty);
+  (* [slot_drop_fn]: this fragment's release for the value it stored (a
+     deep drop, [Drop.run]'s), registered for the slot, so the end of the
+     session releases the whole value rather than its top cell, and leaves a
+     scalar slot (raw Int bits, a Float's IEEE bits) alone.  The fragment's
+     code stays loaded for the life of the process. *)
+  let drop_decl = match store_as_slot, slot_drop_fn with
+    | Some k, Some f when slot_holds_heap_ref ret_ty ->
+      Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_repl_set_drop(i64 %d, ptr @%s)\n"
+        k (Llvm_builtins.mangle_extern f);
+      "declare void @march_repl_set_drop(i64, ptr)\n"
+    | _ -> "" in
   Printf.bprintf ctx.Llvm_ctx.buf "  ret %s %s\n}\n" ret_llty result';
   let out = Buffer.create 4096 in
   Llvm_toplevel.emit_preamble ~repl:true out;
+  Buffer.add_string out drop_decl;
+  Buffer.add_string out registration;
   (* Declare pre-compiled functions so LLVM IR is valid even without definitions *)
   List.iter (fun fn -> Buffer.add_string out (Llvm_toplevel.fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.Llvm_ctx.preamble;

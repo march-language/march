@@ -55,6 +55,24 @@ mod Diagnose do
     list_at(section(env, "actors"), "actors")
   end
 
+  pfn actor_coverage(env : Json.JsonValue) : Option(String) do
+    let s = section(env, "actors")
+    let total = num_at(s, "total")
+    let shown = num_at(s, "shown")
+    if shown < total do
+      Some("actors: shown " ++ int_to_string(shown) ++ " of " ++ int_to_string(total))
+    else None end
+  end
+
+  pfn crash_coverage(env : Json.JsonValue) : Option(String) do
+    let s = section(env, "crashes")
+    let total = num_at(s, "total")
+    let shown = List.length(list_at(s, "crashes"))
+    if shown < total do
+      Some("crashes: shown " ++ int_to_string(shown) ++ " of " ++ int_to_string(total))
+    else None end
+  end
+
   pfn waiting(a : Json.JsonValue) : Int do num_at(a, "mbox") + num_at(a, "held") end
 
   pfn pid(a : Json.JsonValue) : Int do num_at(a, "pid") end
@@ -259,6 +277,27 @@ mod Diagnose do
     List.concat([mailbox_growth(before, after), mailbox_over_limit(before, after),
                  sched_findings(before, after), crash_loop(before, after),
                  rc_climb(before, after), epoch_findings(before, after)])
+  end
+
+  doc "Reports actor or crash sections truncated in either SNAPSHOT envelope."
+  fn coverage(before : Json.JsonValue, after : Json.JsonValue) : List(String) do
+    let coverage_rows =
+      match actor_coverage(before) do
+      Some(s) -> [s]
+      None ->
+        match actor_coverage(after) do
+          Some(s) -> [s]
+          None -> Nil
+        end
+      end
+    match crash_coverage(before) do
+      Some(s) -> List.append(coverage_rows, [s])
+      None ->
+        match crash_coverage(after) do
+          Some(s) -> List.append(coverage_rows, [s])
+          None -> coverage_rows
+        end
+    end
   end
 
   doc """

@@ -2159,6 +2159,73 @@ let test_compile_command_pin_main () =
     "MARCH_LIB_PATH=/p/lib march --compile -o '/p/out' --opt 0 --pin-main '/p/lib/app.march'"
     (cmd true)
 
+(* `forge query`: pass the query's own arguments to `march query`, and add what
+   `forge build` adds (entry file, library path, the build's flags). *)
+let test_query_command_shape () =
+  let cmd ?(entry = Some "/p/lib/app.march") ?at ?(json = false) args =
+    Cmd_query.command ~lib_path_env:"MARCH_LIB_PATH=/p/lib " ~flags:" --opt 0"
+      ~entry ~at ~json args in
+  Alcotest.(check string) "name, then the entry file, then the build's flags"
+    "MARCH_LIB_PATH=/p/lib march query 'fn' 'main' '/p/lib/app.march' --opt 0"
+    (cmd [ "fn"; "main" ]);
+  Alcotest.(check string) "a query with no name"
+    "MARCH_LIB_PATH=/p/lib march query 'verify' '/p/lib/app.march' --opt 0"
+    (cmd [ "verify" ]);
+  Alcotest.(check string) "a named .march file replaces the entry"
+    "MARCH_LIB_PATH=/p/lib march query 'fn' 'main' 'src/other.march' --opt 0"
+    (cmd [ "fn"; "main"; "src/other.march" ]);
+  Alcotest.(check string) "--at and --json are forwarded, after the flags"
+    "MARCH_LIB_PATH=/p/lib march query 'fn' 'main' '/p/lib/app.march' --opt 0 --at 'tir-perceus' --json"
+    (cmd ~at:"tir-perceus" ~json:true [ "fn"; "main" ]);
+  Alcotest.(check string) "outside a project nothing is added but the flags"
+    "march query 'verify' 'x.march' --opt 0"
+    (Cmd_query.command ~lib_path_env:"" ~flags:" --opt 0" ~entry:None ~at:None
+       ~json:false [ "verify"; "x.march" ]);
+  (* a name is data, not shell *)
+  Alcotest.(check string) "a hostile name stays one quoted word"
+    {|MARCH_LIB_PATH=/p/lib march query 'fn' 'a'\''; rm -rf /; echo '\''' '/p/lib/app.march' --opt 0|}
+    (cmd [ "fn"; "a'; rm -rf /; echo '" ])
+
+let test_query_check_args () =
+  let bad args = Result.is_error (Cmd_query.check_args args) in
+  Alcotest.(check bool) "--opt is refused (use --release)" true (bad [ "verify"; "--opt"; "2" ]);
+  Alcotest.(check bool) "--opt=2 is refused" true (bad [ "verify"; "--opt=2" ]);
+  Alcotest.(check bool) "--target is refused (use forge query --target)" true
+    (bad [ "verify"; "--target"; "js" ]);
+  Alcotest.(check bool) "other compiler flags pass" false (bad [ "verify"; "--no-opt" ]);
+  (match Cmd_query.check_args [ "verify"; "--opt"; "2" ] with
+   | Error m -> Alcotest.(check bool) "the error names --release" true (contains m "--release")
+   | Ok () -> Alcotest.fail "expected an error")
+
+(* The flags a query passes are the flags the build passes: one function builds
+   both, so `key` and `why-miss` describe the build `forge build` would run. *)
+let test_query_flags_are_the_builds () =
+  let flags =
+    Cmd_build.compile_flags ~ffi_flags:ffi_flags_sample ~release:true ~dump_phases:false
+      ~target:"js" ~pin_main:true () in
+  let build =
+    Cmd_build.compile_command ~lib_path_env:"" ~ffi_flags:ffi_flags_sample ~output:"/o"
+      ~release:true ~dump_phases:false ~target:"js" ~pin_main:true "/p/app.march" in
+  Alcotest.(check bool) "release, target, pin-main and ffi are all in it" true
+    (contains flags " --opt 2" && contains flags " --target js"
+     && contains flags " --pin-main" && contains flags "--ffi-link '-lsqlite3'");
+  Alcotest.(check bool) "the build's compile command carries exactly those flags" true
+    (contains build flags)
+
+(* A library has no entry file: asking about it without naming one is an
+   error that says so, not a compile of nothing. *)
+let test_query_library_needs_a_file () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml") "[package]\nname = \"x\"\ntype = \"lib\"\n";
+  let cwd = Sys.getcwd () in
+  Fun.protect ~finally:(fun () -> Sys.chdir cwd) (fun () ->
+      Sys.chdir dir;
+      match Cmd_query.run [ "verify" ] with
+      | Ok () -> Alcotest.fail "a library query with no file must be an error"
+      | Error m ->
+        Alcotest.(check bool) "says it is a library and to name a file" true
+          (contains m "library" && contains m ".march"))
+
 let test_interp_command_includes_ffi_flags () =
   let cmd =
     Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
@@ -3173,6 +3240,12 @@ let () =
     ];
     "pin_main", [
       Alcotest.test_case "build command carries --pin-main iff set" `Quick test_compile_command_pin_main;
+    ];
+    "forge_query", [
+      Alcotest.test_case "command shape" `Quick test_query_command_shape;
+      Alcotest.test_case "refuses --opt and --target" `Quick test_query_check_args;
+      Alcotest.test_case "flags are the build's" `Quick test_query_flags_are_the_builds;
+      Alcotest.test_case "a library needs a named file" `Quick test_query_library_needs_a_file;
     ];
     "interp_command", [
       Alcotest.test_case "forge run threads [ffi] flags to march" `Quick

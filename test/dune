@@ -11,8 +11,8 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_b7 test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint yojson alcotest str unix threads.posix))
+ (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_b7 test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint march_jit yojson alcotest str unix threads.posix))
 
 (library
  (name march_test_eval)
@@ -55,6 +55,13 @@
 ; and alias both) from `dune runtest`. Unset -- every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
+;
+; MARCH_CI_SKIP_OS_INDEPENDENT=1 (set only by CI's macOS `test` job) drops the
+; suites whose answer does not depend on the OS: test_refinecheck (z3 over
+; --check), run_errors (golden --check diagnostics) and the lsp/test suites.
+; They still run on Linux. The macOS runner has 3 cores and its `dune runtest`
+; is CPU-bound, so these ~22 CPU-minutes were ~7 min of its wall time
+; (2026-10-08). Same caution as above: a local run with it set skips them.
 ; cap_strip / cap_markers shell out to the real compiler and inspect the
 ; linked binary, so main.exe AND the staged runtime tree must exist before
 ; this runner starts.  Without these deps the tests resolved nothing and
@@ -1315,7 +1322,9 @@
 
 (test
  (name test_refinecheck)
- (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
+ (enabled_if
+  (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
+       (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))
  (modules test_refinecheck)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
@@ -1782,6 +1791,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/tuple_eq.expected native_tuple_eq.out)))
+
+; A field projected out of a record is a borrow of it; three shapes released
+; the record before the field's last read (a string match's binder arm, a
+; nested projection after the record was consumed, a record update from a
+; find result): wrong strings or a crash, compiled only.
+(rule
+ (targets native_field_use_after_parent_release native_field_use_after_parent_release.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/field_use_after_parent_release.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_field_use_after_parent_release native/field_use_after_parent_release.march)
+   (with-stdout-to native_field_use_after_parent_release.out (system "./native_field_use_after_parent_release")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/field_use_after_parent_release.expected native_field_use_after_parent_release.out)))
 
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
@@ -2974,6 +3002,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/observe_snapshot.expected native_observe_snapshot.out)))
+
+; `forge top --once` and `--json` against the same node: the supervision
+; columns (link, supervisor and its policy, the crashed slot's restart held and
+; child crash on its supervisor) and the ranking, ties by pid.  The STACK column
+; is masked (a page is 4 KiB on Linux, 16 KiB on macOS) and so is the header
+; (node name, rss).
+(rule
+ (targets native_forge_top.out)
+ (deps (file %{exe:../bin/main.exe}) (file %{exe:../forge/bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/observe_snapshot.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_forge_top_node native/observe_snapshot.march)
+   (with-stdout-to native_forge_top.out
+    (system "rm -f ft.sock ft.prog; MARCH_OBSERVE_SOCKET=ft.sock ./native_forge_top_node > ft.prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready ft.prog 2>/dev/null && break; sleep 0.1; done; sleep 0.5; echo 'by mbox:'; %{exe:../forge/bin/main.exe} top --socket ft.sock --once --count 30 | tail -n +4 | sed -E 's/^(.{69}).{9}/\\1    <stk>/'; echo 'by stack, json:'; %{exe:../forge/bin/main.exe} top --socket ft.sock --sort stack --count 3 --json | grep -o '\"attr\":\"stack\"'; %{exe:../forge/bin/main.exe} top --socket ft.sock --sort stack --count 30 --json | grep -o '\"pid\":[0-9]*,\"value\"' | tr -d '\n'; echo; %{exe:../forge/bin/main.exe} top --socket ft.sock --sort bogus --once > /dev/null 2>&1; echo \"bogus sort exit=$?\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f ft.sock ft.prog; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/forge_top.expected native_forge_top.out)))
 
 (rule
  (targets native_observe_types_hr native_observe_types_hr.out)
@@ -4178,6 +4227,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ;; self-recursive last_seen leaked one string per step. Inputs alternate
 ;; between each function's two branches. The expected output is the
 ;; interpreter's. specs/progress/2026-09-26-mutual-tco-forwarded-arg.md
+;; Built with MARCH_NO_OWNED_CALLS=1 (here and in the IR check below):
+;; owned-call drop fusion hands `why` to an owned clone instead, so this
+;; program would no longer reach the deferred-release path it pins. That
+;; fusion path has its own fixture (owned_call_drop_fusion).
 (rule
  (targets native_mutual_tco_deferred_drop native_mutual_tco_deferred_drop.out)
  (deps (file %{exe:../bin/main.exe})
@@ -4186,8 +4239,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_mutual_tco_deferred_drop
-        native/mutual_tco_deferred_drop.march)
+   (setenv MARCH_NO_OWNED_CALLS 1
+    (run %{exe:../bin/main.exe} --compile -o native_mutual_tco_deferred_drop
+         native/mutual_tco_deferred_drop.march))
    (with-stdout-to native_mutual_tco_deferred_drop.out
         (system "./native_mutual_tco_deferred_drop")))))
 
@@ -4208,7 +4262,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --emit-llvm native/mutual_tco_deferred_drop.march)
+   (setenv MARCH_NO_OWNED_CALLS 1
+    (run %{exe:../bin/main.exe} --emit-llvm native/mutual_tco_deferred_drop.march))
    (with-stdout-to mutual_tco_deferred_drop_llvm_check.out
     (run bash -c
      "mutco=$(grep -c '^define .*@__mutco_' native/mutual_tco_deferred_drop.ll); \
@@ -11003,6 +11058,96 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nsum nfold nmap nmap2 rtsum reassoc < nativearr_fold_sum_fusion_llvm_check.out; \
     test \"$nsum\" -eq 15 -a \"$nfold\" -eq 12 -a \"$nmap\" -eq 5 -a \"$nmap2\" -eq 1 -a \"$rtsum\" -eq 2 -a \"$reassoc\" -ge 1 || { echo \"expected 15 sum-map loops, 12 fold loops, 5 map loops, 1 map2 loop, 2 runtime sums, reassociating Float sums (found nsum=$nsum nfold=$nfold nmap=$nmap nmap2=$nmap2 rtsum=$rtsum reassoc=$reassoc)\" >&2; exit 1; }")))
 
+;  Owned-call drop fusion: a call whose argument dies at a borrowed position
+; goes to an owned clone of the callee instead of being followed by a deep
+; drop (specs/progress/2026-10-07-owned-call-drop-fusion.md). Correctness:
+; every line matches the interpreter (shared subtrees, an argument read
+; again after the call, a static nullary passed owned, mutual recursion, a
+; 300000-element owned list walk), and the churn loop stays flat.
+(rule
+ (targets owned_call_drop_fusion owned_call_drop_fusion.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_drop_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o owned_call_drop_fusion
+        native/owned_call_drop_fusion.march)
+   (with-stdout-to owned_call_drop_fusion.out
+        (system "./owned_call_drop_fusion")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/owned_call_drop_fusion.expected owned_call_drop_fusion.out)))
+
+; Shape: the binary-trees-shaped `churn` calls the owned clone `check$own0`
+; and no deep drop at all, and the clone releases cells with decrc_freed.
+(rule
+ (targets owned_call_drop_fusion_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_drop_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/owned_call_drop_fusion.march)
+   (with-stdout-to owned_call_drop_fusion_llvm_check.out
+    (run bash -c
+     "f=native/owned_call_drop_fusion.ll; awk '/^define .*@churn\\(/,/^}/' $f > churn_ocdf.ll; echo \"$(grep -c 'call i64 @check\\$own0(' churn_ocdf.ll) $(grep -c 'call void @__drop\\$' churn_ocdf.ll) $(awk '/^define .*@check\\$own0\\(/,/^}/' $f | grep -c 'decrc_freed(')\"")))))
+
+(rule
+ (alias runtest)
+ (deps owned_call_drop_fusion_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r owned drops freed < owned_call_drop_fusion_llvm_check.out; \
+    test \"$owned\" -ge 1 -a \"$drops\" -eq 0 -a \"$freed\" -ge 1 || { echo \"expected churn to call check\\$own0 and no __drop\\$ helper, and check\\$own0 to release with decrc_freed (found owned=$owned drops=$drops freed=$freed)\" >&2; exit 1; }")))
+
+; Owned-call drop fusion, a dying variable at two borrowed positions of one
+; call inside an owned clone (specs/progress/2026-10-07-owned-call-dup-arg.md):
+; the clones' loops must stay loops (1 000 000 rows) and the churn loop flat.
+(rule
+ (targets owned_call_dup_arg owned_call_dup_arg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_dup_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o owned_call_dup_arg
+        native/owned_call_dup_arg.march)
+   (with-stdout-to owned_call_dup_arg.out
+        (system "./owned_call_dup_arg")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/owned_call_dup_arg.expected owned_call_dup_arg.out)))
+
+; Shape: the mutual loop's clone mg$own0 and the self loop's clone
+; dd$own0_1_2 exist and neither calls itself (both loop through a TCO back
+; edge).  Before the fix mg$own0 called itself followed by a drop of the row.
+(rule
+ (targets owned_call_dup_arg_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_dup_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/owned_call_dup_arg.march)
+   (with-stdout-to owned_call_dup_arg_llvm_check.out
+    (run bash -c
+     "f=native/owned_call_dup_arg.ll; awk '/^define .*@mg\\$own0\\(/,/^}/' $f > mg_ocda.ll; awk '/^define .*@dd\\$own0_1_2\\(/,/^}/' $f > dd_ocda.ll; echo \"$(grep -c '^define' mg_ocda.ll) $(grep -c 'call i64 @mg\\$own0(' mg_ocda.ll) $(grep -c '^define' dd_ocda.ll) $(grep -c 'call i64 @dd\\$own0_1_2(' dd_ocda.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps owned_call_dup_arg_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r mg mgself dd ddself < owned_call_dup_arg_llvm_check.out; \
+    test \"$mg\" -eq 1 -a \"$mgself\" -eq 0 -a \"$dd\" -eq 1 -a \"$ddself\" -eq 0 || { echo \"expected mg\\$own0 and dd\\$own0_1_2 to exist and loop without calling themselves (found mg=$mg mgself=$mgself dd=$dd ddself=$ddself)\" >&2; exit 1; }")))
+
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
 ; native_int_arr_map2/native_float_arr_map2 functions' check, since the
@@ -12518,6 +12663,48 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/local_colliding_type.expected native_local_colliding_type.out)))
 
+; ── A user `type Tree` beside stdlib OrderedMap.Tree(k, v) (2026-10-07):
+; OrderedMap's own bare "Tree.Node" keys hit the user's type (ICE at LLVM emit),
+; and the drop of a Tree(k, v) resolved to the user's type alone (SIGSEGV).
+; The .expected file IS the interpreter's output, including both "no growth".
+(rule
+ (targets native_user_type_named_like_stdlib_tree native_user_type_named_like_stdlib_tree.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/user_type_named_like_stdlib_tree.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_user_type_named_like_stdlib_tree
+        native/user_type_named_like_stdlib_tree.march)
+   (with-stdout-to native_user_type_named_like_stdlib_tree.out
+        (system "./native_user_type_named_like_stdlib_tree")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_type_named_like_stdlib_tree.expected native_user_type_named_like_stdlib_tree.out)))
+
+; ── A nested Some(..) pattern beside a row binding the same field by name
+; (2026-10-07): the erased sub-scrutinee decoded an Option(Float) as a niche,
+; and the function returned denormal garbage (Option(Option(Float)),
+; Result(Option(Float), _)). The .expected file IS the interpreter's output.
+(rule
+ (targets native_nested_option_float_match native_nested_option_float_match.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/nested_option_float_match.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_option_float_match
+        native/nested_option_float_match.march)
+   (with-stdout-to native_nested_option_float_match.out
+        (system "./native_nested_option_float_match")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_option_float_match.expected native_nested_option_float_match.out)))
+
 ; ── A cluster session's party is released when it ends (2026-10-06): live
 ; objects left per session under 120 (RED before: ~156, the party's Ops
 ; closures, the Party and its table handles).
@@ -12962,7 +13149,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; bindings, the list limit, captured println (and the node's own stdout
 ; never sees it), the program's actor reached through Actor.list /
 ; pid_from_int / send / inspect_state, a panic, a type error, and the
-; session carrying on after each.
+; session carrying on after each.  `spawn(Counter)` from an input runs the
+; NODE's Counter (its spawn fn, dispatched through the actor's hot-reload
+; slot, so it has a type name and the node's state renderer), and a second
+; session (shell/session_after.txt) finds that actor still alive and
+; working after the first session ended.  With linking off
+; (MARCH_SHELL_NO_LINK) the fragment would carry its own copy of Counter's
+; handlers, and the client refuses the input (shell/session_nolink.txt).
 (rule
  (targets native_shell_session.out)
  (deps (file %{exe:../bin/main.exe})
@@ -12970,10 +13163,12 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib)
        (file shell_check.exe)
        (file shell/session.txt)
+       (file shell/session_after.txt)
+       (file shell/session_nolink.txt)
        (file native/shell_node.march))
  (action
   (with-stdout-to native_shell_session.out
-   (system "rm -rf sh_s; mkdir -p sh_s; ./shell_check.exe keygen-home sh_s/pk $PWD/sh_s/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_s/pk) -o sh_s/node native/shell_node.march > sh_s/build 2>&1 || { cat sh_s/build; exit 1; }; printf 'IO.Console\\nActor.Introspect\\nActor.Debug\\n' > sh_s/policy; S=/tmp/march-shell-sess-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_s/policy MARCH_AUDIT_LOG=sh_s/audit ./sh_s/node > sh_s/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_s/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_s/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/session.txt native/shell_node.march 2>&1; echo \"exit=$?\"; echo \"node stdout lines from the shell: $(grep -c 'hi from the shell' sh_s/prog)\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_s $S $S.shell $S.observe; true"))))
+   (system "rm -rf sh_s; mkdir -p sh_s; ./shell_check.exe keygen-home sh_s/pk $PWD/sh_s/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_s/pk) -o sh_s/node native/shell_node.march > sh_s/build 2>&1 || { cat sh_s/build; exit 1; }; printf 'IO.Console\\nActor.Introspect\\nActor.Debug\\n' > sh_s/policy; S=/tmp/march-shell-sess-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_s/policy MARCH_AUDIT_LOG=sh_s/audit ./sh_s/node > sh_s/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_s/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_s/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/session.txt native/shell_node.march > sh_s/out 2>&1; rc=$?; sed -E '/^ {0,6}[0-9]+  .{16} .{8}/ s/^(.{42}).{9}/\\1    <stk>/' sh_s/out; echo \"exit=$rc\"; echo '-- a second session: the actor the first spawned outlives it'; HOME=$PWD/sh_s/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/session_after.txt native/shell_node.march 2>&1; echo \"exit=$?\"; echo '-- linking off: a spawn would carry its own handlers, and is refused'; HOME=$PWD/sh_s/home MARCH_SHELL_NO_LINK=1 %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/session_nolink.txt native/shell_node.march 2>&1; echo \"exit=$?\"; echo \"node stdout lines from the shell: $(grep -c 'hi from the shell' sh_s/prog)\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_s $S $S.shell $S.observe; true"))))
 
 (rule
  (alias runtest)
@@ -13048,6 +13243,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/shell_link.expected native_shell_link.out)))
 
+; Shell leaks (specs/progress/2026-10-08-shell-slot-and-drop-leaks.md).
+; test/shell/leak.txt repeats inputs that each leaked on the node (a closure
+; capturing a predicate, a parsed value released without being taken apart)
+; between two live_allocs() readings, after one warm-up round: the
+; difference must be 0.  (They have no string literals: each fragment keeps
+; one immortal cell per literal it evaluates.)
+; Then a second session reads live_allocs() again: ending the first one must
+; release its bindings whole (xs, ys, r: more than 1500 objects), and its
+; Float binding must not crash the node.
+(rule
+ (targets native_shell_leak.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/leak.txt)
+       (file native/shell_node.march))
+ (action
+  (with-stdout-to native_shell_leak.out
+   (system "rm -rf sh_lk; mkdir -p sh_lk; ./shell_check.exe keygen-home sh_lk/pk $PWD/sh_lk/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_lk/pk) -o sh_lk/node native/shell_node.march > sh_lk/build 2>&1 || { cat sh_lk/build; exit 1; }; printf 'IO.Console\\n' > sh_lk/policy; printf 'live_allocs()\\n' > sh_lk/after.txt; S=/tmp/march-shell-leak-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_lk/policy ./sh_lk/node > sh_lk/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_lk/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_lk/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/leak.txt native/shell_node.march > sh_lk/s1 2>&1; echo \"exit=$?\"; HOME=$PWD/sh_lk/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs sh_lk/after.txt native/shell_node.march > sh_lk/s2 2>&1; echo \"exit=$?\"; sed '$d' sh_lk/s1; awk -v e=\"$(tail -1 sh_lk/s1)\" -v a=\"$(tail -1 sh_lk/s2)\" 'BEGIN { if (e ~ /^[0-9]+$/ && a ~ /^[0-9]+$/ && e - a >= 1500) print \"the session end released its bindings\"; else print \"the session end released \" e - a \" objects (\" e \" at its end, \" a \" in the next session)\" }'; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_lk $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_leak.expected native_shell_leak.out)))
+
 ; Golden rendered-diagnostic corpus (diagnostics plan §11, D7): every
 ; test/errors/*.march checked with the real compiler; full rendered output
 ; and --check-json pinned in .expected / .json.expected. Regenerate with
@@ -13055,6 +13275,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; test/run_errors.ml).
 (test
  (name run_errors)
+ (enabled_if (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1))   ; see "CI sharding" above
  (modules run_errors)
  (libraries march_test_helpers alcotest yojson unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
