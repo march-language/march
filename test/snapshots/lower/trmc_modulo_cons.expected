@@ -194,8 +194,8 @@ List.fold_left(t, $t181, f)
 ## List.fold_right
 fn List.fold_right(xs : List('a), acc : 'b, f : ('a) -> ('b) -> 'b) : 'b =
   let $t188 : '_ = List.reverse(xs) in
-let $t190 : ('_, '_) -> '_ = letrec [$lam189] in
-$lam189 in
+let $t190 : ('_, '_) -> '_ = letrec [$lam0_fold_right] in
+$lam0_fold_right in
 List.fold_left($t188, acc, $t190)
 
 ## List.head
@@ -268,8 +268,8 @@ go(t, h)
 
 ## List.member
 fn List.member(xs : List('a), x : 'a) : Bool =
-  let $t496 : ('_) -> '_ = letrec [$lam495] in
-$lam495 in
+  let $t496 : ('_) -> '_ = letrec [$lam0_member] in
+$lam0_member in
 List.any(xs, $t496)
 
 ## List.minimum_int
@@ -325,11 +325,11 @@ let $t156 : '_ = let $t155 : '_ = List.length(xs) in
 case $t156 of
   True() -> List.filter(xs, pred)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t160 : ('_) -> '_ = letrec [$lam157] in
-$lam157 in
+let tasks : '_ = let $t160 : ('_) -> '_ = letrec [$lam0_pfilter] in
+$lam0_pfilter in
 List.map(cs, $t160) in
-let $t163 : '_ = let $t162 : ('_) -> '_ = letrec [$lam161] in
-$lam161 in
+let $t163 : '_ = let $t162 : ('_) -> '_ = letrec [$lam1_pfilter] in
+$lam1_pfilter in
 List.map(tasks, $t162) in
 List.concat($t163)
 
@@ -341,11 +341,11 @@ let $t133 : '_ = let $t132 : '_ = List.length(xs) in
 case $t133 of
   True() -> List.map(xs, f)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t137 : ('_) -> '_ = letrec [$lam134] in
-$lam134 in
+let tasks : '_ = let $t137 : ('_) -> '_ = letrec [$lam0_pmap] in
+$lam0_pmap in
 List.map(cs, $t137) in
-let $t140 : '_ = let $t139 : ('_) -> '_ = letrec [$lam138] in
-$lam138 in
+let $t140 : '_ = let $t139 : ('_) -> '_ = letrec [$lam1_pmap] in
+$lam1_pmap in
 List.map(tasks, $t139) in
 List.concat($t140)
 
@@ -371,11 +371,11 @@ case $t147 of
   True() -> 1
   _ -> csize in
 let cs : '_ = List.chunks(xs, csize2) in
-let tasks : '_ = let $t151 : ('_) -> '_ = letrec [$lam148] in
-$lam148 in
+let tasks : '_ = let $t151 : ('_) -> '_ = letrec [$lam0_pmap_n] in
+$lam0_pmap_n in
 List.map(cs, $t151) in
-let $t154 : '_ = let $t153 : ('_) -> '_ = letrec [$lam152] in
-$lam152 in
+let $t154 : '_ = let $t153 : ('_) -> '_ = letrec [$lam1_pmap_n] in
+$lam1_pmap_n in
 List.map(tasks, $t153) in
 List.concat($t154)
 
@@ -387,11 +387,11 @@ let $t165 : '_ = let $t164 : '_ = List.length(xs) in
 case $t165 of
   True() -> List.fold_left(xs, identity, combine)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t169 : ('_) -> '_ = letrec [$lam166] in
-$lam166 in
+let tasks : '_ = let $t169 : ('_) -> '_ = letrec [$lam0_preduce] in
+$lam0_preduce in
 List.map(cs, $t169) in
-let partials : '_ = let $t171 : ('_) -> '_ = letrec [$lam170] in
-$lam170 in
+let partials : '_ = let $t171 : ('_) -> '_ = letrec [$lam1_preduce] in
+$lam1_preduce in
 List.map(tasks, $t171) in
 List.fold_left(partials, identity, combine)
 

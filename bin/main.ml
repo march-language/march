@@ -1011,19 +1011,22 @@ let hr_config () =
    and the .hcr_manifest lists.  Both the --compile and the --emit-llvm path
    call this, so the hashes an .ll carries are the ones a build publishes.
 
-   1. Every fn's own hash is CANONICAL: the pretty-printed definition with
-      each compiler-counter name (`$lam39788$apply$4781`, `$jp17442`, `$t12`,
-      the inliner's `_i<n>`, an unsolved type variable `'_53109`) replaced by
-      its order of first appearance in that definition.  Those names come
-      from global counters, so a one-token edit anywhere renumbers every
-      later one, and hashing them flagged every function that merely
-      REFERENCES a lambda as changed (`Front.start`, `main`;
+   1. Every fn's own hash is CANONICAL: the CAS serializer's encoding of
+      the definition, which alpha-normalises every local binder (`$t12`,
+      the inliner's `_i<n>`, case-arm vars) by order of first appearance,
+      over symbol names that are structural since B1
+      (specs/plans/incremental-codegen-cas-plan.md §14: `$lam0_Mod_f$apply$0_Mod_f`,
+      `$jp2_Mod_f`, `$fused_mf_Mod_f_0`), plus the two raw ids that remain
+      (a residual type variable's name, and the `V_<id>` in drop-glue names).  Before B1 those symbols came from
+      global counters (`$lam39788$apply$4781`), so a one-token edit anywhere
+      renumbered every later one, and hashing them flagged every function that
+      merely REFERENCES a lambda as changed (`Front.start`, `main`;
       specs/progress/2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md):
       an unslotted `main` "changing" made `forge deploy` plan a restart for
-      any edit.  Numbering by first appearance (not collapsing every name to one
-      placeholder) keeps two distinct temporaries distinct, so swapping them
-      is still a change.  A renumbering is invisible; a real change (a
-      literal, a call, a type) is not.
+      any edit.  A regex over the pretty-printed text renumbered them by first
+      appearance as a stopgap; apart from drop glue's `V_<id>`, nothing
+      counter-shaped reaches a symbol now.  A renumbering of
+      a local is invisible; a real change (a literal, a call, a type) is not.
 
    2. A slot's identity folds in the bare-named helpers only it reaches
       (2026-09-25).  Lowering lifts every lambda a function builds into a
@@ -1045,21 +1048,45 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
   List.iter (fun (fd : March_tir.Tir.fn_def) -> Hashtbl.replace fn_tbl fd.March_tir.Tir.fn_name fd) tir.March_tir.Tir.tm_fns;
   let all_names = Hashtbl.fold (fun n _ acc -> n :: acc) fn_tbl [] in
   let known = March_cas.Scc.known_of_names all_names in
-  let counter_re = Str.regexp "\\$\\([A-Za-z_]*\\)[0-9]+\\|_i[0-9]+\\|'_[0-9]+" in
-  let canon_text fd =
-    let seen = Hashtbl.create 16 in
-    Str.global_substitute counter_re (fun text ->
-        let tok = Str.matched_string text in
-        let k = match Hashtbl.find_opt seen tok with
-          | Some k -> k
-          | None -> let k = Hashtbl.length seen in Hashtbl.replace seen tok k; k in
-        let stem = String.sub tok 0
-            (let i = ref (String.length tok) in
-             while !i > 0 && tok.[!i - 1] >= '0' && tok.[!i - 1] <= '9' do decr i done;
-             !i) in
-        Printf.sprintf "%s#%d" stem k)
-      (March_tir.Pp.string_of_fn_def fd) in
-  let canon fd = March_cas.Blake3.hash_string (canon_text fd) in
+  (* The CAS serializer alpha-normalises every binder (parameters, lets,
+     case arms, local temps), and every symbol a body names is structural
+     since B1 (specs/plans/incremental-codegen-cas-plan.md §14), so the
+     per-fn hash needs no further canonicalisation.  A regex that renumbered
+     every `$<stem><digits>` token in the pretty-printed text used to stand
+     in for both; nothing counter-shaped is left for it to find. *)
+  let canon (fd : March_tir.Tir.fn_def) =
+    (* One thing the serializer writes raw: a residual type variable's name
+       (`'_53109`), which is a typechecker fresh-var id and so depends on how
+       much was inferred before.  Rename them by first appearance in the
+       printed definition before serializing. *)
+    let tv_re = Str.regexp "'\\([A-Za-z_][A-Za-z_0-9]*\\)" in
+    let text = March_tir.Pp.string_of_fn_def fd in
+    let names =
+      let rec go pos acc =
+        match Str.search_forward tv_re text pos with
+        | i -> let n = Str.matched_group 1 text in
+          go (i + 1) (if List.mem n acc then acc else n :: acc)
+        | exception Not_found -> List.rev acc in
+      go 0 [] in
+    let subst = List.mapi (fun i n -> (n, March_tir.Tir.TVar (string_of_int i))) names in
+    let fd = if subst = [] then fd else
+        { fd with March_tir.Tir.fn_params = List.map (March_tir.Mono.subst_var subst) fd.March_tir.Tir.fn_params;
+                  fn_ret_ty = March_tir.Mono.subst_ty subst fd.March_tir.Tir.fn_ret_ty;
+                  fn_body = March_tir.Mono.subst_expr subst fd.March_tir.Tir.fn_body } in
+    (* The one symbol shape still carrying a typechecker id: drop glue for a
+       type with a residual variable ([__drop$List_V_53272], keyed by
+       [Drop.mangle]; specs/todos/2026-10-07-drop-glue-name-carries-tvar-id.md).
+       Renumber its [V_<id>] by first appearance, as the retired regex did. *)
+    let bytes = Bytes.to_string (March_cas.Serialize.serialize_fn_def fd) in
+    let seen = Hashtbl.create 4 in
+    let bytes =
+      Str.global_substitute (Str.regexp "V_[0-9]+") (fun s ->
+          let tok = Str.matched_string s in
+          let k = match Hashtbl.find_opt seen tok with
+            | Some k -> k
+            | None -> let k = Hashtbl.length seen in Hashtbl.replace seen tok k; k in
+          Printf.sprintf "V_#%d" k) bytes in
+    March_cas.Blake3.hash_string bytes in
   let own = Hashtbl.create 1024 in
   let own_of n fd =
     match Hashtbl.find_opt own n with
@@ -2284,13 +2311,47 @@ let compile filename =
          (see [valid_loadset]); the full walk otherwise. *)
       let ls_path = loadset_path ~store_root:(Sys.getcwd () ^ "/.march/cas")
           ~entry_real ~walked in
-      let src_hash =
+      let src_hash, key_mode, key_files =
+        let walk () =
+          (walk_hash (), "walk",
+           List.filter (fun f -> f <> entry_real) (files_in walked)) in
         match valid_loadset ~path:ls_path ~entry_real ~src ~walked with
         | Some listed ->
           (match depend_digest ~src ~stdlib_hash ~listed with
-           | Some h -> h
-           | None -> walk_hash ())
-        | None -> walk_hash ()
+           | Some h -> (h, "depend", listed)
+           | None -> walk ())
+        | None -> walk ()
+      in
+      (* A7: the inputs of the source-level key, for `march query key` and
+         `why-miss`; [record_key] writes them after a successful build. *)
+      let capture_key ~target_label ~flags ~ch =
+        let module K = March_query.Query.Key in
+        key_capture := Some {
+            K.target = target_label; flags;
+            compiler = Lazy.force March_cas.Cas.compiler_identity;
+            (* canonical: the same directory reached through two exe paths
+               (an installed march, the dune layout) is one input *)
+            runtime_dir = (match March_cas.Cas.resolve_runtime_dir () with
+                | Some d -> (try Unix.realpath d with Unix.Unix_error _ -> d)
+                | None -> "");
+            runtime = March_cas.Cas.runtime_identity ();
+            stdlib = stdlib_hash; entry = entry_real; mode = key_mode;
+            files = (entry_real, Digest.to_hex (Digest.string src))
+                    :: List.map (fun f -> (f, K.digest_file f)) key_files;
+            source_key = ch; tir_hash = None; post_key = None }
+      in
+      let record_key ~listed ~dep_ch =
+        (* What the NEXT run keys on: the depend-mode key over this run's
+           real load set (B7.2 stores the artifact under it too). *)
+        match !key_capture with
+        | None -> ()
+        | Some k ->
+          let module K = March_query.Query.Key in
+          let k = { k with K.mode = "depend"; source_key = dep_ch;
+                           files = (entry_real, Digest.to_hex (Digest.string src))
+                                   :: List.map (fun f -> (f, K.digest_file f)) listed } in
+          K.write ~path:(K.path ~store_root:(Sys.getcwd () ^ "/.march/cas")
+                           ~entry:k.K.entry ~target:k.K.target) k
       in
       (* After a successful run: store the result under the depend-mode key
          its real load set gives, and record that load set. *)
@@ -2301,6 +2362,7 @@ let compile filename =
             | None -> ()
             | Some dep_hash ->
               let dep_ch = key_of dep_hash in
+              record_key ~listed ~dep_ch;
               March_cas.Cas.store_artifact store dep_ch artifact;
               March_cas.Cas.store_diagnostics store dep_ch diag;
               let unlisted =
@@ -2353,8 +2415,12 @@ let compile filename =
         (* Source-level early cache: same key construction as the post-TIR check
            below (build_cas_key), keyed on the source digest instead of the
            module's impl hashes. *)
-        let (_, ch) =
+        let (cas_flags, ch) =
           build_cas_key ~target:target_parsed ~target_label ~src_hash in
+        capture_key ~target_label ~flags:cas_flags ~ch;
+        (* `march query key|why-miss`: never serve, store or register; the
+           answer comes at the post-TIR key, below. *)
+        if !query_req <> None then raise Exit;
         register_depend_store
           (fun h -> snd (build_cas_key ~target:target_parsed ~target_label ~src_hash:h))
           store;
@@ -2931,6 +2997,7 @@ let compile filename =
        going through the --dump-phases JSON. *)
     let dump_txt = Sys.getenv_opt "MARCH_DUMP_TXT" in
     let snap_tir label tir =
+      Option.iter (fun c -> March_query.Query.Collector.observe c label tir) !query_collector;
       if !dump_phases then
         phases := March_dump.Dump.tir_phase tir label :: !phases;
       match dump_txt with
@@ -3398,6 +3465,7 @@ let compile filename =
       March_tir.Contract_pipeline.run
         ~snap:snap_tir ~stamp
         ~opt_snap:(fun label m ->
+            Option.iter (fun c -> March_query.Query.Collector.observe c label m) !query_collector;
             if !dump_phases then
               phases := March_dump.Dump.tir_phase m label :: !phases)
         ~after_fusion:policy_audit ~before_opt
@@ -3414,6 +3482,12 @@ let compile filename =
                       else mainless_roots)
         ~opt:!opt_enabled tir
       with
+      | March_tir.Tir_verify.Failed (stage, findings)
+        when (match !query_req with Some r -> r.March_query.Query.sub = March_query.Query.Verify | None -> false) ->
+        let module Q = March_query.Query in
+        let stages = match !query_collector with
+          | Some c -> List.map fst (Q.Collector.stages c) | None -> [] in
+        exit (Q.print (Option.get !query_req) (Q.verify_answer ~stages ~failure:(Some (stage, findings))))
       | March_tir.Tir_verify.Failed (stage, findings) ->
         (* A malformed TIR module is a compiler bug, not a program error. *)
         prerr_endline (March_tir.Tir_verify.render ~stage findings);
@@ -3501,6 +3575,21 @@ let compile filename =
     (if !dump_phases then
        March_dump.Dump.write_phases ~source_file:filename (List.rev !phases));
     if !dump_provenance then March_tir.Provenance.dump stdout;
+    (* `march query` (A7): the pipeline queries answer here, where --dump-tir
+       stops, before any IR is emitted. *)
+    (match !query_req with
+     | Some r when not (March_query.Query.is_cache_query r.March_query.Query.sub) ->
+       let module Q = March_query.Query in
+       let c = match !query_collector with Some c -> c | None -> Q.Collector.create (fun _ -> false) in
+       let a = match r.Q.sub with
+         | Q.Fn -> Q.fn_answer r c ~final:tir
+         | Q.Origin -> Q.origin_answer r c ~final:tir
+         | Q.Callers | Q.Callees -> Q.edges_answer r c ~final:tir
+         | Q.Repr -> Q.repr_answer r ~final:tir ~k_table:pipe.March_tir.Contract_pipeline.k_table
+         | Q.Verify -> Q.verify_answer ~stages:(List.map fst (Q.Collector.stages c)) ~failure:None
+         | Q.Key | Q.Why_miss -> assert false in
+       exit (Q.print r a)
+     | _ -> ());
     if !dump_tir then begin
       List.iter (fun td ->
           Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
@@ -3716,6 +3805,28 @@ let compile filename =
            hashes instead of the source digest. *)
         let (_, ch) =
           build_cas_key ~target ~target_label ~src_hash:mod_hash in
+        Option.iter (fun (k : March_query.Query.Key.t) ->
+            k.March_query.Query.Key.tir_hash <- Some (March_cas.Blake3.hash_string mod_hash);
+            k.March_query.Query.Key.post_key <- Some ch) !key_capture;
+        (* `march query key|why-miss` (A7): both keys are known here, before
+           any lookup, emit or link. *)
+        (match !query_req, !key_capture with
+         | Some r, Some now when March_query.Query.is_cache_query r.March_query.Query.sub ->
+           let module Q = March_query.Query in
+           let cached k = March_cas.Cas.lookup_artifact store k <> None in
+           let source_cached = cached now.Q.Key.source_key in
+           let post_cached = cached ch in
+           let a = match r.Q.sub with
+             | Q.Key -> Q.key_answer now ~source_cached ~post_cached
+             | _ ->
+               let before = Q.Key.read ~path:(Q.Key.path ~store_root:(Sys.getcwd () ^ "/.march/cas")
+                                                ~entry:now.Q.Key.entry ~target:now.Q.Key.target) in
+               Q.why_miss_answer ~before ~now ~source_cached ~post_cached in
+           exit (Q.print r a)
+         | Some r, None when March_query.Query.is_cache_query r.March_query.Query.sub ->
+           prerr_endline "march query: no cache key for this build (a report flag disables the cache)";
+           exit 2
+         | _ -> ());
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
           | Some cached_bin ->
@@ -5749,7 +5860,33 @@ let () =
      2026-09-21).  The stdlib's list producers depend on it to be loops:
      specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md.
      A leftover MARCH_TRMC=1 in the environment is simply ignored. *)
-  Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
+  (* `march query <sub> ...` (A7): peel the query's own arguments and run the
+     normal compile path on the rest, stopping at the answer point. *)
+  if Array.length argv >= 2 && argv.(1) = "query" then begin
+    let module Q = March_query.Query in
+    match Q.parse_args (List.tl (List.tl (Array.to_list argv))) with
+    | Error msg -> prerr_string msg; exit 2
+    | Ok (r, rest) ->
+      query_req := Some r;
+      query_argv := Some (Array.of_list (argv.(0) :: rest));
+      if Q.is_cache_query r.Q.sub then do_compile := true else emit_llvm := true;
+      if r.Q.sub = Q.Verify then March_tir.Tir_verify.enabled_flag := true;
+      query_collector := Some (Q.Collector.create
+          (* fn keeps NAME and its derived functions; origin and the edge
+             queries keep NAME alone, to say where it went if the final IR
+             has no NAME. *)
+          (match r.Q.sub with
+           | Q.Fn -> Q.Collector.matching r.Q.arg
+           | Q.Origin | Q.Callers | Q.Callees -> String.equal r.Q.arg
+           | _ -> fun _ -> false))
+  end;
+  (match !query_argv with
+   | Some a ->
+     (try Arg.parse_argv ~current:(ref 0) a specs (fun f -> files := f :: !files)
+            "Usage: march query <sub> [NAME] FILE [options]"
+      with Arg.Bad m -> prerr_string m; exit 2 | Arg.Help m -> print_string m; exit 0)
+   | None ->
+     Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]");
   (match March_tir.Pass_switch.disabled with
    | { contents = [] } ->
      (match March_tir.Pass_switch.of_env () with

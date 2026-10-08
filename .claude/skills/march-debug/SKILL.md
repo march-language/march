@@ -41,6 +41,26 @@ line is the next command to run.
 **Don't:** rerun the ladder by hand before reading triage's screen. Don't trust a
 "no divergence" from a narrow repro; a bug can stay live in the full program.
 
+## Ask the compile a question: `march query`
+
+One compile, one answer, nothing written (no binary, no `.ll`, no cache entry);
+`--json` for a single JSON object, and any compiler flag passes through
+(`--no-opt`, `--opt 0`, `--target ...`), so the answer is about that build.
+```bash
+march query fn NAME FILE [--at PASS]   # the passes that changed NAME (and NAME$...), and its body at the last (or PASS)
+march query origin NAME FILE           # where an emitted fn came from: span, host, derivation chain, passes
+march query callers NAME FILE          # who references NAME in the final IR (callees: what NAME references)
+march query repr TYPE FILE             # each instance's representation (boxed/niche/unboxed/newtype) and why
+march query verify FILE                # the TIR verifier over every stage; findings, not exit 3
+march query key FILE                   # both cache keys and every input that fed them, cached or not
+march query why-miss FILE              # which input changed since the last successful build of FILE
+```
+`march-lsp query <same>` proxies to it (`MARCH_BIN` picks the compiler).
+**Read it:** a name the optimiser inlined is not in the final IR; the answer says
+the last stage that had it, and `--no-opt` keeps it. `why-miss` says which layer
+will hit (source-level, post-TIR, neither) and names each changed input; it needs
+one successful build of FILE in this project first.
+
 ## Which TIR stage went wrong?
 
 **First command:**
@@ -183,6 +203,9 @@ MARCH_DEBUG_CASFLAGS=1 ./_build/default/bin/main.exe --compile FILE -o /tmp/x   
 MARCH_DEBUG_CASFLAGS=2 ...                                                      # + per-SCC hash lines
 rm -rf .march/cas/artifacts-v2 ~/.march/cas/artifacts-v2                       # BOTH: builds write through to ~/.march; NOT artifacts/ (inert v1)
 ```
+`march query why-miss FILE` answers "why did this rebuild?" directly: it diffs
+every key input (compiler, runtime, stdlib, flags, each keyed file) against the
+last successful build's record. `march query key FILE` prints the inputs.
 `src=` digests only the source/TIR input and is comparable across compiler
 builds; `ch=` folds in the compiler executable. After editing `runtime/*.c`, a
 targeted `dune build bin/main.exe` does **not** restage the runtime; build

@@ -155,6 +155,15 @@ let debug_info     = ref false
 (* --dump-provenance: print the fn-name -> origin side table after the TIR
    pipeline (specs/plans/incremental-codegen-cas-plan.md §7). *)
 let dump_provenance = ref false
+
+(* `march query <sub> ...` (A7, lib/query/query.ml): the request, the
+   pipeline snapshot collector it installs, the compiler arguments left after
+   its own are stripped, and the cache-key inputs the compile path records
+   (every build, so a successful one can write them for a later why-miss). *)
+let query_req : March_query.Query.request option ref = ref None
+let query_collector : March_query.Query.Collector.t option ref = ref None
+let query_argv : string array option ref = ref None
+let key_capture : March_query.Query.Key.t option ref = ref None
 let opt_enabled    = ref true
 (* A4: --bisect-pass / --expect / --reduce / --oracle (bin/pass_tools.ml). *)
 let bisect_pass_file = ref ""

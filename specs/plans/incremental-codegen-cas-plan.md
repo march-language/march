@@ -441,6 +441,11 @@ questions answered by hand with `MARCH_DEBUG_CASFLAGS`.
 
 **Effort.** `lib/query/` + collector + `fn`/`origin`/`callers`/`key`: 2 sessions once A2 exists.
 
+**Status (2026-10-07):** landed as `march query` with `fn`, `origin`, `callers`,
+`callees`, `repr`, `verify`, `key` and `why-miss`
+(`specs/progress/2026-10-07-a7-query-interface.md`). `owners`, `bisect`/`reduce`
+and `key --unit` wait on A1 check 3, A4 and B3/B4.
+
 ### Feasibility of a query-*based* architecture
 Salsa/rustc-style: every fact a pure function of recorded inputs, dependencies recorded as read,
 re-run recomputes only what changed. Assessment:

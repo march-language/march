@@ -35,6 +35,18 @@ git log is authoritative for exact commits.
   - `--verify-tir-rc` additionally checks reference-count balance after Perceus
     on every path, reporting over-releases and uses after release.
     `MARCH_VERIFY_TIR_LEAKS=1` adds leaks.
+- **`march query`: ask one compile a question.** `march query fn NAME FILE`
+  lists the passes that changed a function and prints its IR at the last one
+  (or `--at PASS`); `origin NAME` shows where an emitted function came from
+  (source span, host function, the specialisation or lambda it derives from);
+  `callers` / `callees NAME` read the final call graph; `repr TYPE` shows how
+  each instance of a type is represented and why; `verify` runs the IR
+  verifier over every stage; `key` prints both cache keys with every input
+  that fed them; and `why-miss` says which of those inputs changed since the
+  last successful build, and whether this build will hit the source-level
+  cache, the post-TIR cache, or neither. A query writes no binary and no cache
+  entry, takes `--json`, and passes other flags (`--no-opt`, `--target`) to the
+  compile it asks about. `march-lsp query` forwards these to `march`.
 - **Type errors now point at the provided side too.** A mismatch keeps its
   "the expected type comes from here" label and adds where the offending
   value came from: "this is `T`" on the expression when it is not the
@@ -121,7 +133,9 @@ git log is authoritative for exact commits.
   trailing `limit: N` shortens long lists. Capabilities are pre-bound
   (`console`, `clock`, `intro`, `debug`). A panic or a timeout ends only that
   input, and a deploy ends the session. Every input is audited with its
-  source. Inputs can call the program's own functions and its
+  source, and one whose audit line cannot be written does not run. Each
+  request is signed for its session, so a captured request runs on no other
+  connection, node or restart. Inputs can call the program's own functions and its
   `MARCH_LIB_PATH` libraries, a Depot query for example.
   - The node runs an input only if its `$MARCH_SHELL_POLICY` file lists every
     capability the input's compiled code uses, including those reached
@@ -321,6 +335,17 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Compiler-minted symbols are structural, not counter-numbered.** A lambda
+  is `$lam<k>_<host>` (nested: `$lam<j>__lam<k>_<host>`), its lifted apply fn
+  `<lambda>$apply$<k>_<host>`, a fused pipeline helper `$fused_mf_<host>_<k>`,
+  a specialised higher-order clone `g$hspec$<i>_<apply>`, and a residual type
+  variable in a mono name `$V_<position>`; join points, `own` drop callbacks
+  and respawn thunks follow the same scheme. Each name depends only on the
+  function it appears in, so an edit to one function no longer renumbers
+  every later symbol in the module. This is what lets the hot-reload
+  manifest, `--dump-impl-hashes` and (next) cached objects compare across
+  edits. The REPL scopes each fragment's names (`$repl<n>.`) instead of
+  persisting a global lambda counter. `.ll` output changes by renames only.
 - **Nullary constructors no longer allocate, and a lone busy thread is no
   longer preempted by idle cores.** In compiled code, `Nil`, `Leaf`, `None`-like
   constructors of every boxed type are now one shared static cell instead of a
@@ -436,6 +461,14 @@ git log is authoritative for exact commits.
   dies. `HttpServer.Upgrade`, `ClusterNode.RegisterError`, `Session.Outcome`,
   `RemoteCall.Verdict` and `Control.CtlGate` values released only their outer
   cell and leaked what they held.
+- **A compiled program can call an `extern` from inside a lambda, or pass one
+  as a function value.** `List.map(xs, fn x -> acc_push(a, x))` failed to
+  build with `use of undefined value '@acc_push'`, because the generated code
+  called the extern by its March name instead of its C symbol. Passing the
+  extern itself (`List.map(xs, dbl)`) failed the same way. When the extern
+  only borrows a heap argument (a resource handle or a `String`), that
+  argument is now also released after each call. The interpreter already ran
+  these programs correctly.
 - **Nested constructor patterns pick the right arm in compiled code when a
   constructor name is also used by a stdlib type.** With a user
   `type Tree = Leaf | Node(Tree, Int, Tree)` (stdlib `OrderedMap` also declares
