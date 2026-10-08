@@ -46,12 +46,19 @@ let reset_counter () = _lower_counter := 0
    Every function minted while lowering a body (a lambda, an `own(...)` drop
    callback, a match join point, a respawn thunk) is named after its HOST,
    the function whose body it appears in, plus a per-(host, kind) ordinal:
-   [Mod.outer$lam0], [Mod.outer$lam0$lam0] (nested), [Mod.outer$jp2].  The
-   ordinal counts occurrences inside that host in lowering order, so an edit
-   to one function never renumbers another's helpers; a global counter did
-   (specs/plans/incremental-codegen-cas-plan.md §14).  Defun, Fusion and
+   [$lam0_Mod_outer], [$lam0__lam0_Mod_outer] (nested), [$jp2_Mod_outer].
+   The ordinal counts occurrences inside that host in lowering order, so an
+   edit to one function never renumbers another's helpers; a global counter
+   did (specs/plans/incremental-codegen-cas-plan.md §14).  Defun, Fusion and
    Hof_spec derive their symbols from these, so the symbols a cached object
    binds to are stable across edits elsewhere in the module.
+
+   The shape keeps everything a name used to say: it still starts with
+   ['$'] (synthetic), and it contains no ['.'] ([Tir_names.structural_tag]),
+   so [Hot_reload.module_of_name] still finds no module in it.  That rule
+   ("everything before the last ['.']") decides capability attribution and
+   which functions are hot-reload slots versus bare helpers; a first cut
+   named lambdas [Mod.outer$lam0] and changed both.
 
    [_fragment_scope] is the REPL's per-fragment prefix (["$repl7."]): each
    fragment lowers its own [main], and without the scope two fragments'
@@ -91,7 +98,7 @@ let fresh_nested_name ~(host : string) (prefix : string) : string =
      function-local [$t<n>] never reaches a symbol, and keeping its numbering
      unchanged keeps the snapshot and IR diffs of this rename symbol-only. *)
   incr _lower_counter;
-  Printf.sprintf "%s$%s%d" host prefix k
+  Printf.sprintf "$%s%d_%s" prefix k (Tir_names.structural_tag host)
 
 let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
   { v_name = fresh_name "t"; v_ty = ty; v_lin = lin }

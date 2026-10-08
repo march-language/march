@@ -1004,16 +1004,17 @@ let hr_config () =
       the definition, which alpha-normalises every local binder (`$t12`,
       the inliner's `_i<n>`, case-arm vars) by order of first appearance,
       over symbol names that are structural since B1
-      (specs/plans/incremental-codegen-cas-plan.md §14: `Mod.f$lam0$apply$0.Mod.f`,
-      `Mod.f$jp2`, `$fused_mf_Mod.f.0`).  Before B1 those symbols came from
+      (specs/plans/incremental-codegen-cas-plan.md §14: `$lam0_Mod_f$apply$0_Mod_f`,
+      `$jp2_Mod_f`, `$fused_mf_Mod_f_0`), plus the two raw ids that remain
+      (a residual type variable's name, and the `V_<id>` in drop-glue names).  Before B1 those symbols came from
       global counters (`$lam39788$apply$4781`), so a one-token edit anywhere
       renumbered every later one, and hashing them flagged every function that
       merely REFERENCES a lambda as changed (`Front.start`, `main`;
       specs/progress/2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md):
       an unslotted `main` "changing" made `forge deploy` plan a restart for
       any edit.  A regex over the pretty-printed text renumbered them by first
-      appearance as a stopgap; nothing counter-shaped reaches a symbol now, so
-      the serializer's own normalisation is the whole canon.  A renumbering of
+      appearance as a stopgap; apart from drop glue's `V_<id>`, nothing
+      counter-shaped reaches a symbol now.  A renumbering of
       a local is invisible; a real change (a literal, a call, a type) is not.
 
    2. A slot's identity folds in the bare-named helpers only it reaches
@@ -1061,8 +1062,20 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
         { fd with March_tir.Tir.fn_params = List.map (March_tir.Mono.subst_var subst) fd.March_tir.Tir.fn_params;
                   fn_ret_ty = March_tir.Mono.subst_ty subst fd.March_tir.Tir.fn_ret_ty;
                   fn_body = March_tir.Mono.subst_expr subst fd.March_tir.Tir.fn_body } in
-    March_cas.Blake3.hash_string
-      (Bytes.to_string (March_cas.Serialize.serialize_fn_def fd)) in
+    (* The one symbol shape still carrying a typechecker id: drop glue for a
+       type with a residual variable ([__drop$List_V_53272], keyed by
+       [Drop.mangle]; specs/todos/2026-10-07-drop-glue-name-carries-tvar-id.md).
+       Renumber its [V_<id>] by first appearance, as the retired regex did. *)
+    let bytes = Bytes.to_string (March_cas.Serialize.serialize_fn_def fd) in
+    let seen = Hashtbl.create 4 in
+    let bytes =
+      Str.global_substitute (Str.regexp "V_[0-9]+") (fun s ->
+          let tok = Str.matched_string s in
+          let k = match Hashtbl.find_opt seen tok with
+            | Some k -> k
+            | None -> let k = Hashtbl.length seen in Hashtbl.replace seen tok k; k in
+          Printf.sprintf "V_#%d" k) bytes in
+    March_cas.Blake3.hash_string bytes in
   let own = Hashtbl.create 1024 in
   let own_of n fd =
     match Hashtbl.find_opt own n with

@@ -13,6 +13,6 @@ println($t3)
 
 ## make_adder
 fn make_adder(n : Int) : (Int) -> Int =
-  letrec [make_adder$lam0] in
-make_adder$lam0
+  letrec [$lam0_make_adder] in
+$lam0_make_adder
 

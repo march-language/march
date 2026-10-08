@@ -126,24 +126,7 @@ let rec walk ~is_defined ~bound (caps, callees) (e : Tir.expr) =
   | Tir.EField (a, _) -> (add_atoms caps [ a ], callees)
   | Tir.EUpdate (a, fields) ->
     (add_atoms caps (a :: List.map snd fields), callees)
-  (* A closure allocation names its apply fn by value.  That is the only
-     edge from a host to the lambda it builds, and the attribution walk
-     needs it: an apply fn is reached by no [EApp], so without this edge it
-     has no callers and [responsible_owners] falls back to naming its own
-     module, which for a stdlib lambda is the stdlib module itself, and a
-     program was refused for "module `NetKernel` uses `IO.Clock`".  (Before
-     structural names, a lambda's owner parsed as the entry module and the
-     fallback happened to land there.) *)
   | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
-    let callees =
-      List.fold_left
-        (fun cs a ->
-           match a with
-           | Tir.AVar v when is_defined v.Tir.v_name && not (SSet.mem v.Tir.v_name bound) ->
-             SSet.add v.Tir.v_name cs
-           | _ -> cs)
-        callees atoms
-    in
     (add_atoms caps atoms, callees)
   | Tir.EReuse (a, _, atoms) -> (add_atoms caps (a :: atoms), callees)
   | Tir.EAllocHole (_, _, atoms, _) -> (add_atoms caps atoms, callees)

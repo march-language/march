@@ -8319,7 +8319,7 @@ let test_compiled_actor_init_params_ir_shape () =
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = March_tir.Lower.lower_module ~type_map m in
   (* Through Defun: the respawn thunk is a lambda that Defun lifts into a
-     top-level `<Actor>_spawn$respawn<k>$apply$<k>_<host>` function (B1
+     top-level `$respawn<k>_<Actor>_spawn$apply$<k>_<host>` function (B1
      structural names), which is what the IR names. *)
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
@@ -8339,7 +8339,7 @@ let test_compiled_actor_init_params_ir_shape () =
   Alcotest.(check bool) "no zero-arg spawn glue for an actor with init params" false
     (has "define ptr @Worker_spawn() {");
   Alcotest.(check bool) "a respawn thunk is lifted for the child with init args" true
-    (has "define ptr @[^ (]*respawn[0-9]*.apply");   (* `Sup_spawn$respawn0$apply$…` *)
+    (has "define ptr @[^ (]*respawn[0-9]*[^ (]*apply");   (* `$respawn0_Sup_spawn$apply$…` *)
   Alcotest.(check bool) "register_child is called" true
     (has "call void @march_actor_register_child")
 

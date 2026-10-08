@@ -45,7 +45,7 @@
         "$lam2$apply$0", which DO pin real lowering/defun shape) is kept.
       - Determinism: every name a pass mints is structural (B1,
         specs/plans/incremental-codegen-cas-plan.md §14): a lambda is
-        [<host>$lam<k>], its apply fn [<lam>$apply$<k>_<host>], a fused
+        [$lam<k>_<host>], its apply fn [<lam>$apply$<k>_<host>], a fused
         helper [$fused_mf_<host>_<k>], so a dump depends only on the program
         being lowered, never on what else this process lowered first.
         [Lower.lower_module] and [Perceus.perceus] still reset their

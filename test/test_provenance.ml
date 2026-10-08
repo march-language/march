@@ -129,7 +129,7 @@ let test_derivations () =
   List.iter (fun (n, (o : March_tir.Provenance.origin)) ->
       (match o.derived with
        | [March_tir.Provenance.Defun_of lam] ->
-         Alcotest.(check bool) (n ^ ": Defun_of names a <host>$lam") true (contains lam "$lam")
+         Alcotest.(check bool) (n ^ ": Defun_of names a $lam") true (starts_with "$lam" lam)
        | _ -> Alcotest.failf "%s: expected Defun_of, got %s" n (March_tir.Provenance.render o));
       Alcotest.(check bool) (n ^ ": lambda span recorded") true (o.src_span <> None))
     user_applies;

@@ -6,70 +6,92 @@ of the 2026-10-07 serial follow-through.
 ## What landed
 
 Every counter that reached a symbol (the §14 inventory) is replaced by a
-name derived from where the thing is:
+name derived from where the thing is. `host'` below is the host through
+`Tir_names.structural_tag`, which spells `$` and `.` as `_`.
 
 | Shape before | Generator | Shape now |
 |---|---|---|
-| `$lam<n>` (global lowering counter) | `Lower_expr` | `<host>$lam<k>`; nested `<host>$lam<k>$lam<j>`; inside a local `fn go`: `<host>$go$lam<k>` |
-| `$jp<n>`, `$own_drop<n>`, `$respawn<n>` | `Lower_match`, `Lower_expr`, `Lower_actor` | `<host>$jp<k>` etc. (same mechanism) |
-| `<lam>$apply$<n>`, `$Clo_<lam>$<n>` (`Defun.lambda_counter`, never reset) | `Defun` via `Tir_names` | `<lam>$apply$<k>_<host'>`, `$Clo_<lam>$<k>_<host'>`: `k` = ordinal among the top-level host's lambdas in defun's traversal order, `host'` = the host with `$` and `.` spelled `_` (`Tir_names.lam_uid` / `structural_tag`) |
+| `$lam<n>` (global lowering counter) | `Lower_expr` | `$lam<k>_<host'>`; nested `$lam<j>__lam<k>_<host'>`; inside a local `fn go`: `$lam<k>_<host'>_go` |
+| `$jp<n>`, `$own_drop<n>`, `$respawn<n>` | `Lower_match`, `Lower_expr`, `Lower_actor` | `$jp<k>_<host'>` etc.; a respawn thunk is hosted by its actor's `_spawn` glue |
+| `<lam>$apply$<n>`, `$Clo_<lam>$<n>` (`Defun.lambda_counter`, never reset) | `Defun` via `Tir_names` | `<lam>$apply$<k>_<host'>`, `$Clo_<lam>$<k>_<host'>`: `k` = ordinal among the top-level host's lambdas in defun's traversal order (`Tir_names.lam_uid`) |
 | `$fused_<p>_<n>` (module-level counter) | `Fusion` | `$fused_<p>_<host'>_<k>`, host from `Provenance.current_host` |
 | `g$hspec$<n>` (per-run counter) | `Hof_spec` | `g$hspec$<i>_<apply'>`: the parameter index and the specialised closure's apply symbol |
 | `$V__<id>` (typechecker fresh-var id) | `Mono.mangle_name` | `$V_<position>`: first appearance in the specialisation's type-argument list |
 
 - **Hosts.** `Lower_state.with_host` / `current_host` / `fresh_nested_name`:
-  `lower_fn_def` sets the host to the module-qualified fn name
-  (`List.map`), a lambda body is hosted by the lambda, a local `fn go` by
-  `<host>$go`. Ordinals are per `(host, kind)` and reset per `lower_module`.
-  The old `fresh_name` still ticks the shared temp counter for each nested
-  mint, so `$t<n>` numbering is unchanged and every snapshot/IR diff of this
-  change is symbol-only (locals never reach a symbol; `Serialize`
-  alpha-normalises them).
-- **The apply prefix is still the lambda's own name**: `Tir_names.apply_fn_base`
-  splits at the first `$apply$`, which `Llvm_emit_call`'s self-tail-call
-  recognition needs (§14). `lam_uid` is now a string with no `$`, so
-  `Drop.apply_name_of_clo`'s "uid is everything after the last `$`" still
-  holds for lowering names that contain `$`.
-- **REPL/JIT**: each `lower_module` of a fragment runs under
+  `lower_fn_def` sets the host to the module-qualified fn name (`List.map`),
+  a lambda body is hosted by the lambda, a local `fn go` by `<host>$go`.
+  Ordinals are per `(host, kind)` and reset per `lower_module`. Each nested
+  mint still ticks the shared temp counter, so `$t<n>` numbering is as before.
+- **A minted name keeps its leading `$` and contains no `.`.** Two rules read
+  meaning from a name's shape: `Hot_reload.module_of_name` ("everything before
+  the last `.`") decides capability attribution and which functions are
+  hot-reload slots versus bare helpers, and about sixty other consumers take
+  the text after the last `.` as a short name. The first cut named lambdas
+  `Mod.f$lam0` with apply uids `…$apply$0.Mod.f`, and it broke three things.
+  The entry thunk called a lambda, so the compiled pooled HTTP server
+  segfaulted at startup. Stdlib lambdas' capability use was charged to the
+  stdlib module ("module `NetKernel` uses `IO.Clock`"). And the embedded
+  capability report of 9 corpus programs changed. Module-less names restore
+  all three to main's behaviour, with no change to capability attribution.
+  `-` was tried as the separator and is rewritten to `_` by
+  `Llvm_ctx.llvm_name` but not at every reference, so the link failed; `_`
+  is the one character left.
+- **The apply prefix is still the lambda's own name**:
+  `Tir_names.apply_fn_base` splits at the first `$apply$`, which
+  `Llvm_emit_call`'s self-tail-call recognition needs (§14). `lam_uid` has no
+  `$`, so `Drop.apply_name_of_clo`'s "uid is everything after the last `$`"
+  still holds.
+- **REPL/JIT**: each fragment's `lower_module` runs under
   `Lower_state.set_fragment_scope "$repl<n>."` (a process-local sequence), so
-  two fragments' `main$lam0` are distinct symbols in their two shared
-  objects; the stdlib precompile passes `~fragment:false` so its names are the
-  CLI's. The `.names` file's `lambda_counter=N` sentinel is gone (a stale line
-  is ignored on read). `Defun.get/set_lambda_counter` are removed; the
-  snapshot harness no longer resets anything before defun.
+  two fragments' `main` lambdas are distinct symbols in their two shared
+  objects. The stdlib precompile passes `~fragment:false`, so its names are
+  the CLI's. The `.names` file's `lambda_counter=N` sentinel is gone (a stale
+  line is ignored on read). `Defun.get/set_lambda_counter` are removed, and
+  the snapshot harness no longer resets anything before defun.
 - **`hr_slot_hashes`**: the per-fn canon is now the CAS serializer's
-  alpha-normalised encoding, with residual type-variable names renumbered
-  by first appearance; the pretty-print regex that renumbered every
-  `$<stem><digits>` token is retired. Nothing counter-shaped is left for it to
-  find: `grep -E '\$(lam|jp|fused_[a-z]+_|respawn|own_drop)[0-9]+' *.ll`
-  over the IR-oracle corpus matches nothing but `<host>$lam<k>` forms.
-- `Provenance.current_host` is exported for `Fusion`.
+  alpha-normalised encoding, with residual type-variable names and the
+  `V_<id>` of drop-glue names renumbered by first appearance. The
+  pretty-print regex that renumbered every `$<stem><digits>` token is
+  retired.
+- **Not converted: drop glue.** `__drop$List_V_53272` (keyed by
+  `Drop.mangle`) still carries a typechecker id. Canonicalising it would merge
+  drop functions, which is not a rename. Filed as
+  `specs/todos/2026-10-07-drop-glue-name-carries-tvar-id.md`. Test fn names
+  (`Tir_names.test_fn_name <ordinal>`) keep their per-module ordinal; they are
+  not in the §14 inventory.
+- `Provenance.current_host` is exported for `Fusion`. The D24 respawn-thunk
+  regex in `test/test_codegen.ml` and the `Tir_names` unit tests follow the
+  new shapes.
 
 ## Acceptance (§14)
 
-- `scripts/determinism-oracle.sh --corpus small`: DETERMINISTIC across 28
-  programs × 4 conditions. Red-first: with main's `fresh_name` perturbed to
-  fold the working directory into every temp name, the same run goes red
-  (see the PR for the run).
-- `scripts/ir-oracle.sh`: see the PR for the renames-only verdict (the manifest
-  differs on every program with a lambda, as it must; the `.ll` texts are
-  byte-identical after mapping both name shapes to placeholders by first
-  appearance).
-- `test/snapshots/`: 12 files. Seven are pure renames under the
-  normalisation above (the renderer sorts by name, so renamed fns also
-  move). The other five `lower/` files also shift local `$t`/`$f` numbers by
-  one in some stdlib functions: that shift is **pre-existing on main**, whose
-  own `run_snapshots.exe` fails three cases against the committed files
-  (`tir_snapshots_lower` 10, 11, 17; a stdlib edit merged without a
-  regeneration), so this regeneration carries that catch-up. The compiler's
-  own `MARCH_DUMP_TXT=tir-lower` dump of the same program is identical to
-  main's modulo names, all 3835 functions.
-- `hr_slot_hashes`'s `counter_re` retired.
+- **Determinism oracle** (`scripts/determinism-oracle.sh --corpus small`):
+  DETERMINISTIC across 28 programs × 4 conditions. Red first: main's
+  `fresh_name` perturbed to fold the working directory into every temp name
+  makes the same run fail all 28.
+- **`scripts/ir-oracle.sh`** against a baseline from main (d9fbbf179): 423 of
+  431 programs change, as every program with a lambda must. All 423 are
+  identical to main's `.ll` after mapping each name shape, local temp and SSA
+  register number to a placeholder, and comparing the name-ordered
+  `march_clo_drop_pairs` table as a set. Zero programs differ in their
+  embedded capability report (`__march_capdecl_*` / `__march_capfrom_*`).
+- **`test/snapshots/`** (12 files) regenerated. Seven are symbol renames only;
+  the renderer sorts by name, so renamed fns also move. The other five `lower/`
+  files also shift some stdlib functions' local `$t`/`$f` numbers by one. That
+  shift is **pre-existing on main**: main's own `run_snapshots.exe` fails 3
+  cases (`tir_snapshots_lower` 10, 11, 17) against the committed files, so
+  this regeneration carries the catch-up. The compiler's own
+  `MARCH_DUMP_TXT=tir-lower` output is identical to main's modulo names in
+  all 3835 functions of one of those programs.
+- `hr_slot_hashes`'s `counter_re` is retired.
 - The P2 repro (`specs/progress/2026-10-06-cold-stdlib-cache-changes-specializations.md`)
-  was already fixed by 5864ef0d1; its "byte-identical `--emit-llvm`" acceptance
+  was already fixed by 5864ef0d1; its byte-identical `--emit-llvm` acceptance
   is what the determinism oracle checks.
 
-## Not done
+## Tests
 
-- Test fn names (`Tir_names.test_fn_name <ordinal>`) keep their per-module
-  ordinal: not in the §14 inventory, and a test's symbol is never a cache key.
+`run_codegen -q` (675), `run_compiler -q` (1290), `run_eval -q` (288),
+`run_stdlib -q` (825, including the compiled HTTP end-to-end servers),
+`run_errors` (277), `test_jit` (33), `test_lsp` (379), `test_deploy_plan`
+(27), `run_snapshots` (57): all green.

@@ -410,7 +410,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       Lower_state.with_scope_locals
         (List.map (fun (v : Tir.var) -> v.Tir.v_name) params')
         (fun () ->
-           (* A local `fn go` hosts its own lambdas: [<host>$go$lam0]. *)
+           (* A local `fn go` hosts its own lambdas: [$lam0_<host>_go]. *)
            Lower_state.with_host
              (Lower_state.current_host ~mod_prefix:env.mod_prefix () ^ "$" ^ fn_name)
              (fun () -> lower_expr env fn_body))
