@@ -64,6 +64,7 @@ let run ?(snap = fun _label _m -> ()) ?(hot_reload = None)
     let apply iter p =
       changed := false;
       List.fold_left (fun acc (label, pass) ->
+        if not (Pass_switch.on ("opt." ^ label)) then acc else
         let acc' = pass ~changed acc in
         snap (Printf.sprintf "tir-opt-%d-%s" iter label) acc';
         acc'
