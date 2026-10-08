@@ -1965,7 +1965,8 @@ let shell_program_lowered ctx ~program_name ~program_decls ~program_type_map =
                       { March_ast.Ast.txt = program_name;
                         span = { March_ast.Ast.dummy_span with file = "" } };
                     mod_decls = shell_program_decls program_decls } in
-    let type_map = Hashtbl.copy program_type_map in
+    (* Not a copy: the typechecker adds each input's spans to this table. *)
+    let type_map = program_type_map in
     let tir = time_phase "lower-program" (fun () ->
         let tir = March_tir.Lower.lower_module ~type_map ~shadow_builtins:false
             ~resumable:true program in
@@ -1993,10 +1994,6 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
   let input_map =
     checked_type_map (time_phase "typecheck"
       (fun () -> March_typecheck.Typecheck.check_module_with_env env m)) in
-  (* The program's map plus the input's: the input's own spans, and every
-     stdlib/app body it reaches, typed. *)
-  let type_map = Hashtbl.copy program_type_map in
-  Hashtbl.iter (fun k v -> Hashtbl.replace type_map k v) input_map;
   (* The program is lowered ONCE per session, through the full path the
      native build uses (imports, aliases, actors and externs of every module,
      a library on MARCH_LIB_PATH included), and kept resumable; each input
@@ -2005,8 +2002,14 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
      and ignores `import`, so a library like Depot (`import Encode`, then a
      bare `encode(..)`) did not lower.  Lowering the whole program again for
      every input cost ~200-270 ms for a Depot-sized one. *)
+  (* The typechecker writes the input's types into the session's own table,
+     [program_type_map] (it is [tc_env]'s, ~120k entries), which lowering
+     reads too; when it is a different table, the input's own spans (file
+     "") are merged in.  Copying the whole table cost ~10 ms an input. *)
   let sp = shell_program_lowered ctx ~program_name ~program_decls ~program_type_map in
-  Hashtbl.iter (fun k v -> Hashtbl.replace sp.sp_type_map k v) input_map;
+  if input_map != sp.sp_type_map then
+    Hashtbl.iter (fun (k : March_ast.Ast.span) v ->
+        if k.file = "" then Hashtbl.replace sp.sp_type_map k v) input_map;
   (* An input's self-qualified `DepotNode.pg` is stripped to `pg`, as the
      entry's own desugar does (typechecking accepted both spellings). *)
   let decls = March_desugar.Desugar.strip_entry_self_qual
@@ -2037,32 +2040,22 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
       let pruned = March_tir.Dce.prune_unreachable
           { tir with March_tir.Tir.tm_exports = impls } in
       { pruned with March_tir.Tir.tm_exports = [] }) in
-  let tir =
+  let pre =
       let tir = time_phase "mono" (fun () -> March_tir.Mono.monomorphize ~iface_methods tir) in
       let tir = time_phase "defun" (fun () -> March_tir.Defun.defunctionalize tir) in
-      let tir = time_phase "prune" (fun () -> March_tir.Dce.prune_unreachable tir) in
-      time_phase "rc" (fun () ->
-          let k_table = March_tir.Kind.of_module ~unboxing:false tir in
-          let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir in
-          March_tir.Escape.escape_analysis ~k_table tir) in
-  register_type_defs ctx tir.March_tir.Tir.tm_types;
-  let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
-      f.fn_name = shell_entry_fn) tir.March_tir.Tir.tm_fns with
-    | Some f -> f
-    | None -> failwith ("shell: the TIR pipeline produced no '" ^ shell_entry_fn ^ "' function") in
-  let fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
-      f.fn_name <> shell_entry_fn && not (is_c_runtime_fn f.fn_name)) tir.March_tir.Tir.tm_fns in
+      time_phase "prune" (fun () -> March_tir.Dce.prune_unreachable tir) in
+  register_type_defs ctx pre.March_tir.Tir.tm_types;
   if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None then
     List.iter (fun (f : March_tir.Tir.fn_def) ->
-        Printf.eprintf "[shell] fn %s\n%!" f.fn_name) tir.March_tir.Tir.tm_fns;
-  let n = next_id ctx in
-  let entry = Printf.sprintf "repl_%d" n in
-  let sw = fresh_wrap_state ctx in
+        Printf.eprintf "[shell] fn %s\n%!" f.fn_name) pre.March_tir.Tir.tm_fns;
   (* R5.4: refuse an input whose code differs from the node's build (see
-     shell_ident.ml), before paying for clang. *)
+     shell_ident.ml), before paying for clang.  Over everything the input
+     reaches, including what it will call on the node rather than copy. *)
   (match ident with
    | Some c ->
-     (match Shell_ident.fragment_skew c ~types:tir.March_tir.Tir.tm_types (main_fn :: fns) with
+     (match time_phase "ident" @@ fun () -> Shell_ident.fragment_skew c ~types:pre.March_tir.Tir.tm_types
+              (List.filter (fun (f : March_tir.Tir.fn_def) -> not (is_c_runtime_fn f.fn_name))
+                 pre.March_tir.Tir.tm_fns) with
       | [] -> ()
       | diffs ->
         let shown = List.filteri (fun i _ -> i < 8) diffs in
@@ -2071,26 +2064,111 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
           ("this input reaches code that differs from the node's build:" :: shown
            @ (if more > 0 then [ Printf.sprintf "... and %d more" more ] else []))))
    | None -> ());
-  (* The capabilities are those of the C symbols the emitted code calls, as
-     for a binary's cap markers (llvm_toplevel.ml): a fragment carries every
-     body it runs, so this covers what it reaches through program and library
-     code, not only the caps the input names. *)
-  March_tir.Llvm_builtins.reset_called_syms ();
-  let ir = time_phase "emit_ir" (fun () ->
-      March_tir.Llvm_emit.emit_repl_expr
-        ~n ~ret_ty:main_fn.fn_ret_ty
-        ~prev_slots:(prev_slots_of ctx)
-        ~fns ~extern_fns:[]
-        ~store_as_slot:store_as
-        ~session_wraps:sw
-        (* The program's types, in the node build's order: [combined] is
-           lowered from the same declarations in the same order (colliding
-           type names take tags from a counter over this list). *)
-        ~types:tir.March_tir.Tir.tm_types
-        main_fn.fn_body) in
+  let n = next_id ctx in
+  let entry = Printf.sprintf "repl_%d" n in
+  (* The functions this fragment calls on the node instead of carrying (see
+     [Shell_ident]'s "calling the node's own functions").  None without the
+     node's table, or with MARCH_SHELL_NO_LINK set. *)
+  let node = match ident with
+    | Some (c : Shell_ident.check) when Sys.getenv_opt "MARCH_SHELL_NO_LINK" = None -> Some c.node
+    | _ -> None in
+  (* Lower RC and emit with [linked] declared rather than defined; the node's
+     parameter modes decide RC at the fragment's calls to them. *)
+  let build (linked : March_tir.Tir.fn_def list) =
+    let is_linked name = List.exists (fun (f : March_tir.Tir.fn_def) -> f.fn_name = name) linked in
+    let tir = { pre with March_tir.Tir.tm_fns =
+                           List.filter (fun (f : March_tir.Tir.fn_def) -> not (is_linked f.fn_name))
+                             pre.March_tir.Tir.tm_fns } in
+    let tir = March_tir.Dce.prune_unreachable tir in
+    let tir = time_phase "rc" (fun () ->
+        let k_table = March_tir.Kind.of_module ~unboxing:false tir in
+        let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
+        let borrow_map = match node with
+          | None -> borrow_map
+          | Some t ->
+            List.fold_left (fun bm (f : March_tir.Tir.fn_def) ->
+                match Shell_ident.node_modes t f.fn_name with
+                | Some modes -> March_tir.Borrow.StringMap.add f.fn_name modes bm
+                | None -> bm) borrow_map linked in
+        let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table ~borrow_map tir in
+        March_tir.Escape.escape_analysis ~k_table tir) in
+    let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
+        f.fn_name = shell_entry_fn) tir.March_tir.Tir.tm_fns with
+      | Some f -> f
+      | None -> failwith ("shell: the TIR pipeline produced no '" ^ shell_entry_fn ^ "' function") in
+    let fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
+        f.fn_name <> shell_entry_fn && not (is_c_runtime_fn f.fn_name)) tir.March_tir.Tir.tm_fns in
+    let sw = fresh_wrap_state ctx in
+    (* The capabilities are those of the C symbols the emitted code calls, as
+       for a binary's cap markers (llvm_toplevel.ml): a fragment carries
+       every body it runs, so this covers what it reaches through program and
+       library code, not only the caps the input names.  A function it calls
+       on the node is not emitted here, so its caps are added below. *)
+    March_tir.Llvm_builtins.reset_called_syms ();
+    let ir = time_phase "emit_ir" (fun () ->
+        March_tir.Llvm_emit.emit_repl_expr
+          ~n ~ret_ty:main_fn.fn_ret_ty
+          ~prev_slots:(prev_slots_of ctx)
+          ~fns ~extern_fns:linked
+          ~store_as_slot:store_as
+          ~session_wraps:sw
+          (* The program's types, in the node build's order: [combined] is
+             lowered from the same declarations in the same order (colliding
+             type names take tags from a counter over this list). *)
+          ~types:tir.March_tir.Tir.tm_types
+          main_fn.fn_body) in
+    (ir, main_fn, March_tir.Llvm_builtins.called_c_symbols ()) in
+  (* Link what the node has; drop any whose declared signature turns out not
+     to be the node's, and build again.  Each round links fewer, so this
+     ends, at worst with nothing linked. *)
+  let rec link_loop linked =
+    let (ir, main_fn, syms) = build linked in
+    match node with
+    | None -> (ir, main_fn, syms, linked)
+    | Some t ->
+      let declared = Shell_ident.signatures ~declares:true ir in
+      let mismatched = List.filter (fun (f : March_tir.Tir.fn_def) ->
+          match List.assoc_opt f.fn_name declared, Hashtbl.find_opt t.Shell_ident.fns f.fn_name with
+          | Some mine, Some (theirs, _) -> mine <> theirs
+          | None, _ -> false     (* not called after all: harmless *)
+          | Some _, None -> true) linked in
+      if mismatched = [] then (ir, main_fn, syms, linked)
+      else begin
+        if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None then
+          List.iter (fun (f : March_tir.Tir.fn_def) ->
+              Printf.eprintf "[shell] not linking %s: signature %s here, %s on the node\n%!"
+                f.fn_name
+                (Option.value ~default:"?" (List.assoc_opt f.fn_name declared))
+                (match Hashtbl.find_opt t.Shell_ident.fns f.fn_name with
+                 | Some (sg, _) -> sg | None -> "?")) mismatched;
+        link_loop (List.filter (fun f -> not (List.memq f mismatched)) linked)
+      end in
+  let initial = match node with
+    | Some t -> Shell_ident.linkable t
+                  (List.filter (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> shell_entry_fn)
+                     pre.March_tir.Tir.tm_fns)
+    | None -> [] in
+  let (ir, main_fn, syms, linked) = link_loop initial in
+  if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None || Sys.getenv_opt "MARCH_SHELL_LINK_REPORT" <> None then
+    Printf.eprintf "[shell] calls %d node function%s%s\n%!" (List.length linked)
+      (if List.length linked = 1 then "" else "s")
+      (if linked = [] then "" else
+         ": " ^ String.concat ", " (List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name) linked));
+  (* A function called on the node instead of copied is not emitted here, so
+     its caps (and those of everything it reaches) come from the names its
+     copy refers to, as cap attribution reads TIR before it is optimised.
+     Taken over the whole self-contained reach set, whatever was linked, so
+     linking can only add caps to the declaration, never drop one. *)
+  let reached_caps = time_phase "caps" @@ fun () ->
+    if linked = [] then []
+    else
+      List.concat_map (fun (f : March_tir.Tir.fn_def) ->
+          March_tir.Dce.StringSet.elements (March_tir.Dce.free_vars f.fn_body)
+          @ March_tir.Dce.StringSet.elements (March_tir.Dce.called_fns f.fn_body))
+        pre.March_tir.Tir.tm_fns
+      |> List.filter_map March_tir.Cap_attrib.cap_of_call in
   let caps =
-    March_tir.Llvm_builtins.called_c_symbols ()
-    |> List.filter_map March_caps.Cap_symbols.cap_of_symbol
+    (List.filter_map March_caps.Cap_symbols.cap_of_symbol syms @ reached_caps)
     |> List.sort_uniq String.compare in
   (* The node checks this against the signed `caps:` after loading the
      fragment (runtime/march_shell.c), so a fragment cannot run under a

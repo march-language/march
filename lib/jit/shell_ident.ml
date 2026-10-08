@@ -34,6 +34,9 @@ open March_ast
 type t = {
   decls : (string, string) Hashtbl.t;   (* key -> 16-hex hash of its text *)
   tags  : (string, string) Hashtbl.t;   (* variant type -> "Ctor=tag,..." *)
+  (* The node's own functions a fragment may call instead of carrying a
+     copy (see [linkable]): name -> (LLVM signature, parameter modes). *)
+  fns   : (string, string * string) Hashtbl.t;
 }
 
 (* A declaration's place, for mapping a fragment fn's span back to it. *)
@@ -171,17 +174,19 @@ let tags_of_types (types : March_tir.Tir.type_def list) : (string, string) Hasht
 
 (* ── the table as text ───────────────────────────────────────────────── *)
 
-(* One line per entry, sorted: "d <key> <hash>" or "t <type> <ctor=tag,...>".
-   Keys and type names never contain spaces or newlines. *)
+(* One line per entry, sorted: "d <key> <hash>", "t <type> <ctor=tag,...>"
+   or "x <fn> <signature> <modes>".  None of the fields contains a space or a
+   newline (a signature has its spaces removed). *)
 let to_string (t : t) : string =
   let lines = ref [] in
   Hashtbl.iter (fun k v -> lines := Printf.sprintf "d %s %s" k v :: !lines) t.decls;
   Hashtbl.iter (fun k v -> lines := Printf.sprintf "t %s %s" k v :: !lines) t.tags;
+  Hashtbl.iter (fun k (sg, m) -> lines := Printf.sprintf "x %s %s %s" k sg m :: !lines) t.fns;
   String.concat "\n" (List.sort compare !lines) ^ "\n"
 
 (** A digest of a declaration table alone (the build's CAS tag). *)
 let digest (decls : (string, string) Hashtbl.t) : string =
-  hash16 (to_string { decls; tags = Hashtbl.create 0 })
+  hash16 (to_string { decls; tags = Hashtbl.create 0; fns = Hashtbl.create 0 })
 
 (** The table as the `__march_shell_ident` global of a node's IR, which the
     shell listener serves (IDENT).  A `--hot-reload` binary exports its
@@ -197,11 +202,13 @@ let ir_global (t : t) : string =
     (String.length s + 1) (Buffer.contents b)
 
 let of_string (s : string) : t =
-  let t = { decls = Hashtbl.create 1024; tags = Hashtbl.create 256 } in
+  let t = { decls = Hashtbl.create 1024; tags = Hashtbl.create 256;
+            fns = Hashtbl.create 256 } in
   List.iter (fun line ->
       match String.split_on_char ' ' line with
       | [ "d"; k; v ] -> Hashtbl.replace t.decls k v
       | [ "t"; k; v ] -> Hashtbl.replace t.tags k v
+      | [ "x"; k; sg; m ] -> Hashtbl.replace t.fns k (sg, m)
       | _ -> ()) (String.split_on_char '\n' s);
   t
 
@@ -312,5 +319,175 @@ let differing (c : check) : string list =
 (** [skew] for a fragment whose code is [fns], emitted with [types]. *)
 let fragment_skew (c : check) ~(types : March_tir.Tir.type_def list)
     (fns : March_tir.Tir.fn_def list) : string list =
-  skew ~client:{ decls = c.client_decls; tags = tags_of_types types }
+  skew ~client:{ decls = c.client_decls; tags = tags_of_types types; fns = Hashtbl.create 0 }
     ~regions:c.regions ~node:c.node fns
+
+(* ── calling the node's own functions ────────────────────────────────── *)
+
+(* A fragment carries a copy of every function it runs unless the node has
+   the same function, compiled the same way, which it can call instead: the
+   copy of a Depot query was ~0.5 MB of IR, compiled by clang for every
+   input.  "The same way" is three checks, none assumed:
+   - the same specialised name (mono mangles the types into it);
+   - the same LLVM signature, taken from the node's own `define` and the
+     fragment's `declare`, which covers representation (an unboxed struct
+     passed inline, a Float as double);
+   - the node's parameter modes (borrowed or owned, as its Perceus decided
+     them, [Clo_flags]), which the fragment's Perceus then uses at its call
+     sites, so neither side frees or keeps what the other expects.
+   The declaration's source is checked equal by [skew] first. *)
+
+(* Linkage words that may precede a function's return type. *)
+let linkage_words = [ "internal"; "private"; "dso_local"; "fastcc"; "ccc"; "tailcc";
+                      "linkonce_odr"; "weak_odr"; "hidden"; "protected"; "noundef";
+                      "noalias"; "nonnull"; "zeroext"; "signext"; "inreg" ]
+
+(* The type a parameter (or return) spelling starts with: a brace- or
+   bracket-balanced aggregate, or the first word.  Attributes and the
+   parameter's name after it are dropped. *)
+let leading_type (s : string) : string =
+  let s = String.trim s in
+  let n = String.length s in
+  if n > 0 && (s.[0] = '{' || s.[0] = '[' || s.[0] = '<') then begin
+    let depth = ref 0 and i = ref 0 and stop = ref n in
+    (try while !i < n do
+         (match s.[!i] with
+          | '{' | '[' | '<' -> incr depth
+          | '}' | ']' | '>' -> decr depth; if !depth = 0 then (stop := !i + 1; raise Exit)
+          | _ -> ());
+         incr i
+       done with Exit -> ());
+    String.sub s 0 !stop
+  end else
+    match String.index_opt s ' ' with Some i -> String.sub s 0 i | None -> s
+
+(* Split [s] on commas at nesting depth 0. *)
+let split_top (s : string) : string list =
+  let parts = ref [] and depth = ref 0 and start = ref 0 in
+  String.iteri (fun i c ->
+      match c with
+      | '{' | '[' | '<' | '(' -> incr depth
+      | '}' | ']' | '>' | ')' -> decr depth
+      | ',' when !depth = 0 -> parts := String.sub s !start (i - !start) :: !parts; start := i + 1
+      | _ -> ()) s;
+  let last = String.sub s !start (String.length s - !start) in
+  List.rev (if String.trim last = "" && !parts = [] then [] else last :: !parts)
+
+let strip_spaces s = String.concat "" (String.split_on_char ' ' s)
+
+(** Each `define`d (or, with [~declares:true], `declare`d) function of [ir]
+    that is visible outside its object, with its signature
+    ["ret(param,param)"].  Internal and private functions are left out. *)
+let signatures ?(declares = false) (ir : string) : (string * string) list =
+  let kw = if declares then "declare " else "define " in
+  List.filter_map (fun line ->
+      let kl = String.length kw in
+      if String.length line <= kl || String.sub line 0 kl <> kw then None
+      else match String.index_opt line '@' with
+        | None -> None
+        | Some at ->
+          let head = String.split_on_char ' ' (String.trim (String.sub line kl (at - kl))) in
+          if List.exists (fun w -> w = "internal" || w = "private") head then None
+          else
+            let ret = String.concat " " (List.filter (fun w -> w <> "" && not (List.mem w linkage_words)) head) in
+            let rest = String.sub line (at + 1) (String.length line - at - 1) in
+            let name, after =
+              if String.length rest > 0 && rest.[0] = '"' then
+                match String.index_from_opt rest 1 '"' with
+                | Some q -> String.sub rest 1 (q - 1), String.sub rest (q + 1) (String.length rest - q - 1)
+                | None -> rest, ""
+              else match String.index_opt rest '(' with
+                | Some p -> String.sub rest 0 p, String.sub rest p (String.length rest - p)
+                | None -> rest, "" in
+            if String.length after = 0 || after.[0] <> '(' then None
+            else
+              (* The parameter list: up to the ')' that closes the first '('. *)
+              let depth = ref 0 and close = ref (-1) in
+              String.iteri (fun i c ->
+                  if !close < 0 then match c with
+                    | '(' -> incr depth
+                    | ')' -> decr depth; if !depth = 0 then close := i
+                    | _ -> ()) after;
+              if !close < 0 then None
+              else
+                let params = split_top (String.sub after 1 (!close - 1)) in
+                let ps = List.map (fun p -> strip_spaces (leading_type p)) params in
+                Some (name, Printf.sprintf "%s(%s)" (strip_spaces (leading_type ret)) (String.concat "," ps)))
+    (String.split_on_char '\n' ir)
+
+(* A name the same on both sides only if it is derived from the source and
+   the types.  Lifted lambdas, their apply functions, join points and other
+   pass-made functions are numbered by a per-build counter
+   (`go$apply$1349`, `f$lam12`): the client's `go$apply$0` is an unrelated
+   function that happens to share the node's name, and calling the node's
+   would run the wrong code.  So any `$`-segment that is a number, or one of
+   the generated kinds, rules a name out.  This also rules out default-arg
+   arity wrappers (`greet$1`), which only costs a copy. *)
+let stable_name (name : string) : bool =
+  let digits s = s <> "" && String.for_all (fun c -> c >= '0' && c <= '9') s in
+  let generated seg =
+    digits seg
+    || List.mem seg [ "apply"; "clo_wrap"; "clo"; "lam"; "jp"; "trmc"; "spec"; "fused"; "inl" ]
+    (* a counter-numbered kind: lam12, jp3, t5, p2, trmc4, ... *)
+    || List.exists (fun p ->
+        let n = String.length p in
+        String.length seg > n && String.sub seg 0 n = p
+        && digits (String.sub seg n (String.length seg - n)))
+      [ "lam"; "jp"; "t"; "p"; "trmc"; "spec"; "fused"; "inl"; "clo" ] in
+  match String.split_on_char '$' name with
+  | [] -> false
+  | _ :: segs -> List.for_all (fun seg -> seg <> "" && not (generated seg)) segs
+
+(** The node side: the functions of a `--hot-reload` build's [ir] a fragment
+    may call, with their signatures and their parameter modes from [modes]
+    ("b" borrowed / "o" owned per parameter, "-" for none).  Left out: a hot
+    reload slot ([is_slot]: a deploy can replace it, and a fragment calling
+    the baseline symbol would bypass the dispatch table), anything with no
+    recorded modes, and the program's entry points and trampolines. *)
+let node_fns ~(ir : string) ~(is_slot : string -> bool)
+    ~(modes : string -> bool list option) : (string, string * string) Hashtbl.t =
+  let out = Hashtbl.create 256 in
+  List.iter (fun (name, sg) ->
+      let generated =
+        name = "main" || name = "march_main"
+        || (let sfx = "$clo_wrap" in
+            let n = String.length name and k = String.length sfx in
+            n >= k && String.sub name (n - k) k = sfx) in
+      if not generated && stable_name name && not (is_slot name) then
+        match modes name with
+        | Some ms ->
+          let m = if ms = [] then "-"
+            else String.concat "" (List.map (fun b -> if b then "b" else "o") ms) in
+          Hashtbl.replace out name (sg, m)
+        | None -> ()) (signatures ir);
+  out
+
+(* A type a fragment may pass to or get from a node function: no closure (a
+   fragment's lambda has its own apply code) and no type variable (an erased
+   slot, where ownership of a boxed Float is a per-call agreement). *)
+let rec plain_ty (t : March_tir.Tir.ty) : bool =
+  match t with
+  | March_tir.Tir.TFn _ | March_tir.Tir.TVar _ -> false
+  | March_tir.Tir.TCon (_, args) -> List.for_all plain_ty args
+  | March_tir.Tir.TTuple ts -> List.for_all plain_ty ts
+  | March_tir.Tir.TRecord fs -> List.for_all (fun (_, t) -> plain_ty t) fs
+  | March_tir.Tir.TPtr t -> plain_ty t
+  | March_tir.Tir.TInt | March_tir.Tir.TFloat | March_tir.Tir.TBool
+  | March_tir.Tir.TString | March_tir.Tir.TUnit -> true
+
+(** The client side: of [fns] (a fragment's functions), those the node [t]
+    has under the same name and whose types are plain; the caller still
+    compares signatures ([signatures ~declares:true] of its fragment). *)
+let linkable (t : t) (fns : March_tir.Tir.fn_def list) : March_tir.Tir.fn_def list =
+  List.filter (fun (fd : March_tir.Tir.fn_def) ->
+      Hashtbl.mem t.fns fd.fn_name
+      && stable_name fd.fn_name
+      && plain_ty fd.fn_ret_ty
+      && List.for_all (fun (v : March_tir.Tir.var) -> plain_ty v.v_ty) fd.fn_params) fns
+
+(** The node's modes for [name], as a borrow-map row. *)
+let node_modes (t : t) (name : string) : bool array option =
+  match Hashtbl.find_opt t.fns name with
+  | Some (_, "-") -> Some [||]
+  | Some (_, m) -> Some (Array.init (String.length m) (fun i -> m.[i] = 'b'))
+  | None -> None
