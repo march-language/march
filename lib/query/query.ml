@@ -400,7 +400,7 @@ module Key = struct
     flags       : string list;
     compiler    : string;               (** digest of the compiler executable *)
     runtime_dir : string;
-    runtime     : string;               (** digest of runtime/*.c, *.h *)
+    runtime     : string;               (** digest of runtime/**/*.c, *.h *)
     stdlib      : string;               (** digest of the stdlib sources *)
     entry       : string;               (** realpath *)
     mode        : string;               (** "depend" (B7.2 load set) or "walk" (every sibling) *)
@@ -480,7 +480,7 @@ module Key = struct
     let added_flags = List.filter (fun f -> not (List.mem f before.flags)) now.flags in
     let removed_flags = List.filter (fun f -> not (List.mem f now.flags)) before.flags in
     scalar "compiler" before.compiler now.compiler "the compiler executable changed (rebuilt or a different march)"
-    @ scalar "runtime" before.runtime now.runtime "a runtime/*.c or *.h source changed"
+    @ scalar "runtime" before.runtime now.runtime "a runtime C or header source changed"
     @ scalar "runtime_dir" before.runtime_dir now.runtime_dir "the compiler now compiles a different runtime directory"
     @ scalar "stdlib" before.stdlib now.stdlib "a stdlib source changed"
     @ scalar "target" before.target now.target "a different target"
