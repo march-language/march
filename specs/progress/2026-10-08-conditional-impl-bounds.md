@@ -8,8 +8,11 @@ checks use the same resolver.
 
 Regressions cover satisfied and missing payload interfaces, nested wrappers,
 forward declarations, circular bounds, and expanding bounds. Proof search
-rejects repeated obligations and requires a repeated implementation to reduce
-the target's structural size, terminating even for expanding bounds.
+rejects repeated obligations and limits proof depth to 128, terminating even
+for expanding bounds. Failed obligations are memoised by type, depth and active
+proof path to
+avoid exponential retries through duplicate registered heads. Finite proofs
+may revisit the same implementation with a different, equally sized target.
 
 Validation: all 226 typechecker tests pass with the expanding-bound guard,
 including the three focused conditional-bound cases.

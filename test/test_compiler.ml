@@ -1717,7 +1717,17 @@ let test_conditional_impl_use_site () =
     fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
   end|} in
   Alcotest.(check bool) "an expanding bound terminates and rejects" true
-    (has_errors (typecheck expanding))
+    (has_errors (typecheck expanding));
+  let finite = {|mod Test do
+    type Box(a) = Box(a)
+    interface Bound(a) do fn bound: a -> Bool end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+    impl Eq(Box(a)) when Bound(a) do fn eq(x, y) do true end end
+    impl Bound(Int) when Eq(Box(Bool)) do fn bound(x) do true end end
+    impl Bound(Bool) do fn bound(x) do true end end
+  end|} in
+  Alcotest.(check bool) "same-sized obligations can form a finite proof" false
+    (has_errors (typecheck finite))
 
 let test_interface_cross_module_dispatch () =
   (* A bare interface-method call from a DIFFERENT module than the one defining

@@ -5016,28 +5016,24 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
    ids as the head, so a local substitution specialises them for this call. *)
 let interface_satisfied env iface target =
   let rec strip t = match repr t with TLin (_, t) -> strip t | t -> t in
-  let rec size t = match strip t with
-    | TCon (_, ts) | TTuple ts -> 1 + List.fold_left (fun n t -> n + size t) 0 ts
-    | TArrow (a, b) -> 1 + size a + size b
-    | TRecord fs -> 1 + List.fold_left (fun n (_, t) -> n + size t) 0 fs
-    | _ -> 1
-  in
-  let rec satisfies active seen iface target =
+  let failed = Hashtbl.create 16 in
+  let rec satisfies depth seen iface target =
     let target = strip target in
     match target with
     | TVar _ | TError -> true
-    | TTuple ts when iface = "Eq" -> List.for_all (satisfies active seen iface) ts
+    | TTuple ts when iface = "Eq" -> List.for_all (satisfies depth seen iface) ts
     | _ ->
       let key = iface ^ ":" ^ pp_ty target in
-      if List.mem key seen then false
+      (* Expanding bounds need not repeat an obligation. A proof budget
+         terminates those too; memoising failures prevents duplicate registered
+         heads from turning a failed search into exponential work. Depth is
+         and the active obligations are part of the key: both affect which
+         proofs remain available. *)
+      if depth >= 128 || List.mem key seen || Hashtbl.mem failed (key, depth, seen) then false
       else
+        let failure_key = key, depth, seen in
         let seen = key :: seen in
         let matches (head, _, _, bounds) =
-          let target_size = size target in
-          (* A repeated impl must make structural progress. Exact-obligation
-             cycle detection alone misses bounds that expand their type. *)
-          let progresses = not (List.exists (fun (name, old_head, old_size) ->
-            name = iface && old_head == head && target_size >= old_size) active) in
           let subst = Hashtbl.create 8 in
           let rec match_head head target =
             match strip head, strip target with
@@ -5069,13 +5065,15 @@ let interface_satisfied env iface target =
             | TLin (l, t) -> TLin (l, specialise t)
             | t -> t
           in
-          progresses && match_head head target &&
+          match_head head target &&
           List.for_all (fun (name, ty) ->
-            satisfies ((iface, head, target_size) :: active) seen name (specialise ty)) bounds
+            satisfies (depth + 1) seen name (specialise ty)) bounds
         in
-        List.exists matches (Option.value ~default:[] (StrMap.find_opt iface env.impls))
+        let result = List.exists matches (Option.value ~default:[] (StrMap.find_opt iface env.impls)) in
+        if not result then Hashtbl.replace failed failure_key ();
+        result
   in
-  satisfies [] [] iface target
+  satisfies 0 [] iface target
 
 (** Discharge all pending Num/Ord/CInterface constraints accumulated during
     inference.  Called at each declaration boundary (DFn, DLet) to verify
