@@ -94,6 +94,7 @@ let all_stdlib_decls =
     "map.march";
     "linear_map.march";
     "math.march";
+    "range.march";
     "string.march";
     "io.march";
     (* Loaded before iolist/msgpack so their same-named constructors (Str,
@@ -638,6 +639,10 @@ let () =
     ("global_registry", [
       Alcotest.test_case "GlobalRegistry module"
         `Quick (run_stdlib_test "test_global_registry.march" "TestGlobalRegistry");
+    ]);
+    ("range", [
+      Alcotest.test_case "Range module"
+        `Quick (run_stdlib_test "test_range.march" "TestRange");
     ]);
     ("global_pid", [
       Alcotest.test_case "GlobalPid module"

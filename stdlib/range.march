@@ -112,9 +112,16 @@ mod Range do
     go(r.start)
   end
 
-  doc "Folds over the range: f(acc, element) -> acc."
+  doc """
+  Folds over the range: f(acc, element) -> acc.
+
+  ## Examples
+
+      march> Range.reduce(Range.new(1, 5), 0, fn (acc, x) -> acc + x)
+      10
+  """
   fn reduce(r : {start: Int, stop: Int, step: Int}, acc : b, f : b -> Int -> b) : b do
-    List.fold_left(to_list(r), acc, fn a -> fn x -> f(a, x))
+    List.fold_left(to_list(r), acc, f)
   end
 
   doc "Returns a new range iterating in the opposite direction."

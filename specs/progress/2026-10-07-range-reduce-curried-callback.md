@@ -50,3 +50,19 @@ calls it with two arguments.
    two-argument callback. The arity check that already rejects wrong-arity
    calls of known functions does not cover a lambda against an expected
    function type. File separately if fixing (1) first.
+
+## Fixed 2026-10-08
+
+`Range.reduce` now passes `f` straight to `List.fold_left`, whose callback type
+`b -> a -> b` is the stdlib's two-argument spelling. The repro prints `10`
+interpreted, compiled at `--opt 2` and at `--no-opt` (ranges are half-open, so
+`Range.new(1, 5)` is 1..4; the `15` above assumed a closed range).
+
+Range had no tests at all. `test/stdlib/test_range.march` (suite `stdlib_march`,
+group `range`) folds a range, checks the accumulator comes first, and checks an
+empty range; `range.march` joined the test loader's module list. It fails on the
+old `reduce` and passes on the new one. The doctest added to `reduce` is not run:
+`range` is not in `check-stdlib-doctests.py`'s pure-REPL allowlist.
+
+Fix 2 (the typechecker accepting a curried lambda for a two-argument callback) is
+filed as `specs/todos/2026-10-08-curried-lambda-unifies-with-two-arg-callback.md`.

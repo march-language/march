@@ -455,6 +455,9 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`Range.reduce` returns the fold of the range.** It wrapped its callback in a
+  curried lambda, so compiled code returned a pointer-sized integer and the
+  interpreter panicked with an arity mismatch.
 - **A hot-reload `DRAIN` before the scheduler starts no longer corrupts a
   loaded patch.** A green thread spawned before the scheduler was initialised
   (a signed `DRAIN` with a hard deadline arms one) got a stack reservation

@@ -1,0 +1,20 @@
+mod TestRange do
+
+  describe "Range.reduce" do
+
+    test "folds a half-open range with a two-argument callback" do
+      assert (Range.reduce(Range.new(1, 5), 0, fn (acc, x) -> acc + x) == 10)
+    end
+
+    test "passes the accumulator first" do
+      let r = Range.reduce(Range.new(1, 4), Nil, fn (acc, x) -> Cons(x, acc))
+      assert (r == Cons(3, Cons(2, Cons(1, Nil))))
+    end
+
+    test "an empty range returns the initial accumulator" do
+      assert (Range.reduce(Range.new(3, 3), 7, fn (acc, x) -> acc + x) == 7)
+    end
+
+  end
+
+end
