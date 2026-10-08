@@ -1443,7 +1443,19 @@ ty_app:
   | id = upper_name; DOT; rest = dotted_upper_tail; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
     { let joined = id.txt ^ "." ^ String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.txt) rest) in
       TyCon (mk_name joined $loc, args) }
+  | t = ty_post { t }
+
+(* `T[p]`: an abstract refinement applied to a type, `{T | p(_)}`.  The binder
+   is the marker `Some "_"`: a user cannot write `{_ : T | …}` (`_` is not a
+   [lower_name]), so the shorthand stays recognisable — [show_ty] prints it
+   back, and an arrow whose codomain is `Bool[p]` reads it as a definer
+   ([abstract_definer_arrow]).  It means exactly `{T | p(_)}`.  Adds no
+   shift/reduce conflict (7 before and after, 2026-10-08). *)
+ty_post:
   | t = ty_atom { t }
+  | t = ty_atom; LBRACKET; p = lower_name; RBRACKET
+    { let u = mk_name "_" $loc in
+      TyRefine (t, Some u, EApp (EVar p, [ EVar u ], mk_span $loc)) }
 
 ty_atom:
   | n = INT { TyNat n }
