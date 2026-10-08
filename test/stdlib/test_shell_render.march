@@ -31,6 +31,22 @@ describe "ShellRender" do
 
   end
 
+  describe "raw" do
+
+    test "unquoted and unescaped" do
+      assert ShellRender.raw("{ n: \"x\" }", 50) == "{ n: \"x\" }"
+    end
+
+    test "cut at the limit, counting codepoints" do
+      assert ShellRender.raw("héllo world", 5) == "héllo… 6 more chars"
+    end
+
+    test "limit 0 keeps everything" do
+      assert ShellRender.raw("abcdef", 0) == "abcdef"
+    end
+
+  end
+
   describe "show_cut" do
 
     test "a short string is untouched" do

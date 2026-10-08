@@ -94,6 +94,22 @@ mod ShellRender do
     end
   end
 
+  doc """
+  `s` unquoted, cut after `limit` codepoints with `… n more chars`
+  (`limit <= 0` keeps all of it): the shell prints a string at the top of a
+  result this way, and the payload of a top-level one-field constructor
+  (`Ok("…")`, as `Actor.inspect_state` returns its already rendered state).
+  """
+  fn raw(s : String, limit : Int) : String do
+    let len = string_byte_length(s)
+    let cut = if limit > 0 do cp_offset(s, 0, limit) else len end
+    if cut >= len do s
+    else
+      let more = string_grapheme_count(s) - limit
+      string_slice(s, 0, cut) ++ "… " ++ int_to_string(more) ++ " more chars"
+    end
+  end
+
   doc "The most bytes `show_cut` keeps of a hand-written Show impl's string: 16 KiB."
   fn show_cap() : Int do 16384 end
 

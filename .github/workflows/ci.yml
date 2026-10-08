@@ -162,7 +162,11 @@ jobs:
             refinecheck) dune build @test/runtest-test_refinecheck ;;
             compiler)    dune build @test/runtest-run_compiler ;;
             rest)        MARCH_CI_RUNTEST_SPLIT=1 dune runtest ;;
-            all)         dune runtest ;;
+            # macOS skips the suites whose answer does not depend on the OS
+            # (refinecheck, golden diagnostics, LSP; see "CI sharding" in
+            # test/dune): they run on the ubuntu shards, and this runner's 3
+            # cores are the bottleneck of the slowest job in the workflow.
+            all)         MARCH_CI_SKIP_OS_INDEPENDENT=1 dune runtest ;;
             *) echo "::error::unknown test shard '${{ matrix.shard }}'"; exit 1 ;;
           esac
 

@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **The remote shell spawns the program's own actors.** `let k =
+  spawn(Counter)` in `forge shell` now starts the node's Counter: it runs
+  the node's handlers, answers `Actor.inspect_state`, has its type name in
+  `ACTORS`/`Recon`, is upgraded by a hot deploy, and outlives the session.
+  Before, the input carried its own copy of the actor, which had no state
+  renderer and no hot-reload slot. An input that could only spawn by
+  carrying its own copy (a node built by an older compiler) is refused.
 - **`march --bisect-pass FILE` finds the optimisation pass behind a
   miscompile.** It compares the compiled program's output with the
   interpreter's (or with `--expect OUT`). It then reports the smallest set of
@@ -153,7 +160,7 @@ git log is authoritative for exact commits.
   - Results render from their static type. Records, tuples and constructors
     print field by field (`{ a: 1, b: "two" }`,
     `Ok(Object([("a", Number(1.))]))`, where they used to print `#<tag:0>`),
-    strings print quoted and escaped at every depth, and `limit: N` (default
+    strings inside a value print quoted and escaped, and `limit: N` (default
     50) cuts every list, Array, Map and Set to `N` elements and every string
     to `N` characters, at every depth, not only a top-level list. A type
     with a hand-written `Show` prints through it, cut at 16 KiB; a function
@@ -343,6 +350,23 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **The remote shell's build-identity table is smaller, and a session fetches
+  only what differs.** A `--hot-reload` binary embeds the table in a compact
+  format (module prefixes written once, 48-bit hashes): 105 KB instead of
+  180 KB for the shell test node. A shell session now asks the node for a
+  summary with one digest per module (20 KB on the wire instead of 239 KB),
+  then for the modules whose digest differs from the checkout, which for an
+  up-to-date checkout is none. A shell still reads the whole table from a node
+  built before this. A shell built before this refuses every input that
+  reaches the program's code on a newer node, so upgrade the shell first.
+- **The remote shell compiles each input about twice as fast.** `forge shell`
+  / `march --shell` no longer runs clang per input: it builds the fragment's
+  object in-process with the libLLVM the REPL already loads, for the node's
+  target (including a Mac shell to a Linux node), and runs only the linker,
+  with the same arguments clang would have used. Compile time per input at
+  p50 went from 112 to 56 ms on macOS, 60 to 36 ms on Linux, and 87 to 42 ms
+  from a Mac to a Linux node. clang is still used when libLLVM or the node's
+  backend is unavailable, and `MARCH_SHELL_CLANG=1` forces it.
 - **`--verify-tir` now includes the reference-count balance check.** It used to
   need `--verify-tir-rc`, which still works on its own.
 - **Compiler-minted symbols are structural, not counter-numbered.** A lambda
@@ -362,6 +386,21 @@ git log is authoritative for exact commits.
   heap allocation each, and the preemption tick only interrupts scheduler
   threads that are running something. binary_trees went from 120 ms to 74 ms,
   list_ops from 39 ms to 34 ms (Apple M3 Max).
+- **A value read for the last time by a function that only reads it is freed
+  during that read, not in a second pass.** In optimised compiled code,
+  `check(make(d))` used to walk the tree twice, once in `check` and once to
+  free it; the call now goes to a consuming copy of `check` that frees each
+  node as it passes. binary_trees is about 7% faster (75 to 70 ms median,
+  Apple M3 Max). A loop that passes the same value to two such parameters
+  stays a loop. `MARCH_NO_OWNED_CALLS=1` turns it off.
+- **Allocating and freeing a heap value costs less in compiled programs,
+  most of all on macOS.** The runtime no longer makes a thread-local-storage
+  call per allocation and per free, checks which allocator owns a freed
+  object with an inline range test, and is built without the arm64
+  instruction outliner. binary_trees uses 29% less CPU time (72 to 51 ms
+  median) and list_ops 19% less (Apple M3 Max); `live_allocs()` and the
+  observe snapshot count exactly as before.
+  Apple M3 Max). `MARCH_NO_OWNED_CALLS=1` turns it off.
 - **Compiled artifacts are shared across projects on the same machine.** Every
   build also stores its cache entry in `~/.march/cas`, and a project that has
   not built a program yet reuses an identical build from another project or
@@ -457,6 +496,23 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`MARCH_SANITIZE` builds no longer hang silently on macOS 26.** Apple clang 17
+  (Xcode 26) and LLVM 21 ship an ASAN runtime that deadlocks before `main` on
+  macOS 26, so every sanitized binary, even hello-world, printed nothing and never
+  exited. On macOS the driver now checks that the C compiler's sanitizer runtime
+  starts, falls back to a working Homebrew LLVM (`brew install llvm`, 22+) with a
+  note, or stops with an explanation. `MARCH_SANITIZE_CC` picks the compiler.
+- **A type named like a stdlib type no longer breaks that stdlib module when compiled.**
+  Declaring your own `type Tree = Leaf | Node(Tree, Int, Tree)` in a program that also
+  uses `OrderedMap` crashed the compiler ("constructor Tree.Node has 3 field(s) but
+  field index 3 was requested"): `OrderedMap`'s own constructors, matches and memory
+  release for its internal `Tree` resolved to your type. Each type now keeps its own;
+  the interpreter was never affected.
+- **Matching a nested `Option(Float)` returns the right value when compiled.** A match
+  like `Some(Some(f)) -> f` next to `Some(x) -> 0.5` on an `Option(Option(Float))` (or
+  `Ok(Some(f))` next to `Ok(x)` on a `Result(Option(Float), _)`) returned a tiny garbage
+  number such as `2.9e-311` from both `Some` arms, even the constant one. The inner value
+  was read with the wrong memory layout; the interpreter was never affected.
 - **Compiled code no longer reads a record field after freeing the record.** A
   field read from a record could outlive the record when the record was passed
   on or dropped first, e.g. in a `match` arm that no longer used it, or after

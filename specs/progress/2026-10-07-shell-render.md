@@ -130,3 +130,18 @@ RED proof (by file copy):
 - `stdlib/shell_render.march` emptied: 21/21 unit cases fail. Perturbing
   `take_render` so `limit 0` cuts at 0: the "limit 0 is no limit" case
   fails.
+
+## Follow-up (2026-10-08): outer strings unquoted
+
+Quoting every string made `Actor.inspect_state`, whose state is an already
+rendered String, print `Ok("{ n: 42 }")`. Two kinds of string now print
+unquoted (`ShellRender.raw`, still cut at the limit):
+- the whole result;
+- the one field of a top-level one-field constructor (`Ok`, `Err`, `Some`).
+
+So `Actor.inspect_state` prints `Ok({ n: 42 })` again, and so does a
+Depot `Err(column "nope" does not exist)`. Strings in lists, records,
+tuples and anything deeper stay quoted and escaped. The generator's `~outer`
+flag carries this into a constructor's sole argument and nowhere else; it is
+part of the memo key, so the outer and inner renderers of a type are
+separate functions.

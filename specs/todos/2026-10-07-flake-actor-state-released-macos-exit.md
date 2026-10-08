@@ -66,3 +66,20 @@ points at the runtime (lead 2). 1 is an `exit(1)` whose message went to stdout.
 
 Also hardened: the `released:` polls now wait up to 5 s instead of 2 s before
 reporting `false`, so a stalled runner cannot fail the diff rule after a clean run.
+
+## Second sighting: the signal is SIGILL (2026-10-08)
+
+Merge train R's CI (run 37773065148, job `test (macos-15, all)`) hit it again,
+and #841's exit-status reporting caught the cause this time:
+
+```
+native_actor_state_released: exit status 132 (above 128: signal 4)
+```
+
+Signal 4 is SIGILL: on arm64 macOS that's a trap instruction (`brk`), which is
+what `__builtin_trap`, a failed `__builtin_unreachable` path, or an LLVM
+`unreachable` emits, not a memory fault. All 20 `on_stop blew up` lines were
+printed this time, so the trap came after the last panicking `on_stop`, during
+or after the final assertions or teardown. Train R contained #877 (static
+nullary cells, owned-call drop fusion, per-object alloc/free changes); every
+other job passed, and the fixture's first failure (above) predates #877.

@@ -400,6 +400,8 @@ native_nested_derive_json: coverage audit (user + stdlib): 135 enforced, 0 inert
 native_nested_derive_json: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_mod_qualcall: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_nested_mod_qualcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nested_option_float_match: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_nested_option_float_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_pattern_ctor_name_collision: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_nested_pattern_ctor_name_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_record_field_capture: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -446,6 +448,10 @@ native_option_niche: coverage audit (user + stdlib): 135 enforced, 0 inert (warn
 native_option_niche: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_or_pattern: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_or_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_owned_call_drop_fusion: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_owned_call_drop_fusion: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_owned_call_dup_arg: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_owned_call_dup_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_peak_rss: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_peak_rss: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_peer_reader_loopback: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -706,6 +712,8 @@ native_user_fn_named_like_builtin: coverage audit (user + stdlib): 135 enforced,
 native_user_fn_named_like_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_user_fn_named_own: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_user_fn_named_own: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_user_type_named_like_stdlib_tree: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_user_type_named_like_stdlib_tree: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_uuid_v7_dns_parity: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_uuid_v7_dns_parity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_churn_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
