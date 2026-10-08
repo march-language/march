@@ -49,6 +49,17 @@ Queue[0, 1, 2, … 98 more]
 RRB.Vec[[1, 2, … 1 more], [4]]
 NativeArray[1.5, 2.5]
 Some(Deque["x"… 2 more chars, … 1 more])
+[(0, "Counter", "none", 0), (1, "Counter", "none", 0)]
+    PID  NAME             STATUS      MBOX    STACK    VALUE CRASHES  LINK       SUPERVISOR            POLICY (held/max in window)
+      0  Counter          waiting        0    <stk>        0       0  none       -                     -
+      1  Counter          waiting        0    <stk>        0       0  none       -                     -
+    PID  NAME             STATUS      MBOX    STACK    VALUE CRASHES  LINK       SUPERVISOR            POLICY (held/max in window)
+      0  Counter          waiting        0    <stk>        0       0  none       -                     -
+      1  Counter          waiting        0    <stk>        0       0  none       -                     -
+    PID  NAME             STATUS      MBOX    STACK    VALUE CRASHES  LINK       SUPERVISOR            POLICY (held/max in window)
+      0  Counter          waiting        0    <stk>        2       0  none       -                     -
+usage: :top [mbox|stack|crashes|slices|msgs_in|msgs_out] [n]
+usage: :top [mbox|stack|crashes|slices|msgs_in|msgs_out] [n]
 exit=1
 -- a second session: the actor the first spawned outlives it
 [Pid(0), Pid(1)]

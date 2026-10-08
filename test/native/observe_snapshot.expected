@@ -25,5 +25,14 @@ ok: ACTOR -1 -> bad_args
 ok: ACTOR 99999999 -> not_found
 ok: TREE x -> bad_args
 ok: SNAPSHOT bogus -> bad_args
+ok: TOP stack -> bad_args
+ok: TOP stack 5 100 -> bad_args
+ok: TOP stack 0 -> bad_args
+ok: TOP mbox 100 returns all 20 actors, the burst first
+ok: TOP marks exactly the 3 supervisors, each one_for_one 5 within 60 with 4 children
+ok: TOP: 12 supervised children, each naming one of the supervisors as parent
+ok: TOP: the crashed slot shows on its supervisor as 1 restart held and 1 child crash
+ok: TOP stack: every actor has a committed stack, and rows are by value then pid
+ok: TOP crashes: ties (all but the supervisor of the crashed slot) are in pid order
 ok: HELP lists every verb
 ok: no reply carries the crash message

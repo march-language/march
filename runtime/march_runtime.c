@@ -11269,6 +11269,16 @@ static void obs_row_fill(march_actor_meta *m, int64_t pidx, march_obs_actor *r) 
         r->msgs_out = atomic_load_explicit(&p->msgs_out, memory_order_relaxed);
         r->last_run_ms = atomic_load_explicit(&p->last_run_ms, memory_order_relaxed);
         r->held = atomic_load_explicit(&p->held, memory_order_relaxed);
+        /* Committed stack = the reservation's top minus the usable bottom the
+         * guard-page handler moves down on growth.  Read racily and
+         * sanity-clamped: a death between the two loads can pair a cleared
+         * base with a live one. */
+        char *sb = __atomic_load_n((char **)&p->stack_base, __ATOMIC_RELAXED);
+        char *mb = __atomic_load_n((char **)&p->stack_mmap_base, __ATOMIC_RELAXED);
+        if (sb && mb) {
+            int64_t committed = (int64_t)((mb + p->stack_alloc) - sb);
+            if (committed > 0 && committed <= (int64_t)MARCH_STACK_MAX) r->stack_bytes = committed;
+        }
     }
     r->draining = atomic_load_explicit(&m->draining, memory_order_relaxed);
     r->spawned_by = __atomic_load_n(&m->spawned_by, __ATOMIC_RELAXED);

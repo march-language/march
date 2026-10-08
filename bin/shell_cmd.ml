@@ -12,7 +12,7 @@
    Input forms:
      <expr> [limit: N | limit: all]   evaluate and print
      let <name> = <expr>              evaluate on the node, keep the value
-     :limit N   :caps   :t <expr>   :help   :quit
+     :limit N   :caps   :t <expr>   :actors   :top [metric] [n]   :help   :quit
 
    Pre-bound capabilities (they exist only as names the input may use; the
    node checks the ones an input uses against $MARCH_SHELL_POLICY):
@@ -383,6 +383,22 @@ let eval_let s name src =
        | None -> Printf.printf "%s bound (type unknown to the shell; later uses may not typecheck)\n%!" name)
     end
 
+(* An input whose printed output is the result: its value is not echoed.
+   For :actors and :top, which call Recon.print_top. *)
+let eval_quiet s src =
+  s.n <- s.n + 1;
+  match compile s (fragment_source s ~src ~body:(Printf.sprintf "    (%s)" src)) with
+  | Some (_, frag) -> ignore (print_reply ~show_result:false (eval_on_node s ~kind:"value" ~src frag))
+  | None -> ()
+
+let top_metrics = [ "mbox"; "mailbox"; "stack"; "crashes"; "slices"; "msgs_in"; "msgs_out" ]
+
+(* `:top [metric] [n]` and `:actors`, as the Recon call they stand for. *)
+let top_command s ~metric ~n =
+  eval_quiet s (Printf.sprintf "Recon.print_top(intro, \"%s\", %d)" metric n)
+
+let top_usage () = print_endline "usage: :top [mbox|stack|crashes|slices|msgs_in|msgs_out] [n]"
+
 let type_of s src =
   s.n <- s.n + 1;
   let text = fragment_source s ~src ~body:(Printf.sprintf "    (%s)" src) in
@@ -407,6 +423,11 @@ let help : (int -> unit, out_channel, unit) format = {|  <expr>                 
   :t <expr>               the type of an expression (nothing runs)
   :limit N                the session's default limit (now %d)
   :caps                   the capabilities an input may use
+  :actors                 the node's actors by waiting work, with their supervision
+                          (Recon.print_top(intro, "mbox", 100))
+  :top [metric] [n]       the n biggest actors (default mbox, 20) as a table with
+                          supervision; metric is mbox (or mailbox), stack, crashes,
+                          slices, msgs_in or msgs_out
   :quit                   end the session
 |}
 
@@ -445,6 +466,16 @@ let handle s line =
   else if line = ":help" then Printf.printf help s.limit
   else if line = ":caps" then
     List.iter (fun (name, path, _, _) -> Printf.printf "  %-8s Cap(%s)\n" name path) caps
+  else if line = ":actors" then top_command s ~metric:"mbox" ~n:100
+  else if line = ":top" || starts_with line ":top " then
+    (match List.filter (fun w -> w <> "") (words (String.sub line 4 (String.length line - 4))) with
+     | [] -> top_command s ~metric:"mbox" ~n:20
+     | [ a ] when int_of_string_opt a <> None && int_of_string a >= 1 ->
+       top_command s ~metric:"mbox" ~n:(int_of_string a)
+     | [ m ] when List.mem m top_metrics -> top_command s ~metric:m ~n:20
+     | [ m; a ] when List.mem m top_metrics && int_of_string_opt a <> None && int_of_string a >= 1 ->
+       top_command s ~metric:m ~n:(int_of_string a)
+     | _ -> top_usage ())
   else if starts_with line ":limit " then
     (match int_of_string_opt (String.trim (String.sub line 7 (String.length line - 7))) with
      | Some k when k >= 0 -> s.limit <- k
