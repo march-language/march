@@ -34,6 +34,9 @@ val record :
 (** A pass created [name]. [from] copies span/host/derivations from the
     function it was derived from; [host] overrides, else [with_host]'s. *)
 
+(** The host set by [with_host], for passes that derive a name from it. *)
+val current_host : string option ref
+
 val with_host : string -> (unit -> 'a) -> 'a
 (** Run [f] with [host] as the default host for [record]. *)
 

@@ -305,6 +305,17 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Compiler-minted symbols are structural, not counter-numbered.** A lambda
+  is `$lam<k>_<host>` (nested: `$lam<j>__lam<k>_<host>`), its lifted apply fn
+  `<lambda>$apply$<k>_<host>`, a fused pipeline helper `$fused_mf_<host>_<k>`,
+  a specialised higher-order clone `g$hspec$<i>_<apply>`, and a residual type
+  variable in a mono name `$V_<position>`; join points, `own` drop callbacks
+  and respawn thunks follow the same scheme. Each name depends only on the
+  function it appears in, so an edit to one function no longer renumbers
+  every later symbol in the module. This is what lets the hot-reload
+  manifest, `--dump-impl-hashes` and (next) cached objects compare across
+  edits. The REPL scopes each fragment's names (`$repl<n>.`) instead of
+  persisting a global lambda counter. `.ll` output changes by renames only.
 - **Nullary constructors no longer allocate, and a lone busy thread is no
   longer preempted by idle cores.** In compiled code, `Nil`, `Leaf`, `None`-like
   constructors of every boxed type are now one shared static cell instead of a
@@ -420,6 +431,14 @@ git log is authoritative for exact commits.
   dies. `HttpServer.Upgrade`, `ClusterNode.RegisterError`, `Session.Outcome`,
   `RemoteCall.Verdict` and `Control.CtlGate` values released only their outer
   cell and leaked what they held.
+- **A compiled program can call an `extern` from inside a lambda, or pass one
+  as a function value.** `List.map(xs, fn x -> acc_push(a, x))` failed to
+  build with `use of undefined value '@acc_push'`, because the generated code
+  called the extern by its March name instead of its C symbol. Passing the
+  extern itself (`List.map(xs, dbl)`) failed the same way. When the extern
+  only borrows a heap argument (a resource handle or a `String`), that
+  argument is now also released after each call. The interpreter already ran
+  these programs correctly.
 - **Nested constructor patterns pick the right arm in compiled code when a
   constructor name is also used by a stdlib type.** With a user
   `type Tree = Leaf | Node(Tree, Int, Tree)` (stdlib `OrderedMap` also declares

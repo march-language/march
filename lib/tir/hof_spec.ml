@@ -135,7 +135,6 @@ type spec_state = {
   statics : (string, int list) Hashtbl.t;              (* candidate -> static indices *)
   clones : (string * int * string, string) Hashtbl.t;  (* (g, i, apply) -> clone *)
   per_fn : (string, int) Hashtbl.t;                    (* g -> clones minted *)
-  mutable counter : int;
   mutable new_fns : Tir.fn_def list;
   (* Clones minted but whose bodies have not yet had their own call sites
      rewritten, each with the closure parameter it knows: (name, param, apply). *)
@@ -165,9 +164,14 @@ let clone_for (st : spec_state) (g : Tir.fn_def) (i : int) (apply : string) : st
     let used = Option.value ~default:0 (Hashtbl.find_opt st.per_fn g.Tir.fn_name) in
     if used >= max_clones_per_fn then None
     else begin
-      st.counter <- st.counter + 1;
       Hashtbl.replace st.per_fn g.Tir.fn_name (used + 1);
-      let name = Printf.sprintf "%s$hspec$%d" g.Tir.fn_name st.counter in
+      (* Named after what it IS (B1): [g] specialised at parameter [i] to the
+         closure whose apply fn is [apply].  The apply name is itself
+         structural, so the clone's symbol never depends on how many clones
+         any other function minted. [Tir_names.structural_tag] keeps one
+         ['$hspec$'] marker and no ['.'] (see [Tir_names.lam_uid]). *)
+      let name =
+        Printf.sprintf "%s$hspec$%d_%s" g.Tir.fn_name i (Tir_names.structural_tag apply) in
       Hashtbl.replace st.clones (g.Tir.fn_name, i, apply) name;
       let p = (List.nth g.Tir.fn_params i).Tir.v_name in
       let apply_var = { Tir.v_name = apply; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
@@ -217,7 +221,7 @@ let rec rewrite_calls (st : spec_state) (env : string SMap.t) (e : Tir.expr) : T
 
 let specialize (m : Tir.tir_module) : Tir.tir_module =
   let st = { fns = Hashtbl.create 256; statics = Hashtbl.create 64; clones = Hashtbl.create 16;
-             per_fn = Hashtbl.create 16; counter = 0; new_fns = []; pending = [] } in
+             per_fn = Hashtbl.create 16; new_fns = []; pending = [] } in
   List.iter (fun (fd : Tir.fn_def) ->
       Hashtbl.replace st.fns fd.Tir.fn_name fd;
       if fd.Tir.fn_kind = Tir.FnNormal && Inline.node_count fd.Tir.fn_body <= size_budget then
