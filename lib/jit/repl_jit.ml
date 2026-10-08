@@ -2040,13 +2040,13 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
   let tir = time_phase "prune-pre" (fun () ->
       let impls = Hashtbl.fold (fun _ rows acc -> List.map snd rows @ acc)
           iface_methods [] in
-      let pruned = March_tir.Dce.prune_unreachable
+      let pruned = March_tir.Dce.prune_unreachable ~roots:[ shell_entry_fn ]
           { tir with March_tir.Tir.tm_exports = impls } in
       { pruned with March_tir.Tir.tm_exports = [] }) in
   let pre =
       let tir = time_phase "mono" (fun () -> March_tir.Mono.monomorphize ~iface_methods tir) in
       let tir = time_phase "defun" (fun () -> March_tir.Defun.defunctionalize tir) in
-      time_phase "prune" (fun () -> March_tir.Dce.prune_unreachable tir) in
+      time_phase "prune" (fun () -> March_tir.Dce.prune_unreachable ~roots:[ shell_entry_fn ] tir) in
   register_type_defs ctx pre.March_tir.Tir.tm_types;
   if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None then
     List.iter (fun (f : March_tir.Tir.fn_def) ->
@@ -2082,7 +2082,7 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
     let tir = { pre with March_tir.Tir.tm_fns =
                            List.filter (fun (f : March_tir.Tir.fn_def) -> not (is_linked f.fn_name))
                              pre.March_tir.Tir.tm_fns } in
-    let tir = March_tir.Dce.prune_unreachable tir in
+    let tir = March_tir.Dce.prune_unreachable ~roots:[ shell_entry_fn ] tir in
     let tir = time_phase "rc" (fun () ->
         let k_table = March_tir.Kind.of_module ~unboxing:false tir in
         let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
