@@ -25,3 +25,6 @@ fix [unused_binding]:
 @@ lines 6-6 @@
 -  fn drop_it(x) : Int do 0 end
 +  fn drop_it(_x) : Int do 0 end
+
+after fix: exit 1
+`S1` is linear, but `drop_it` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]

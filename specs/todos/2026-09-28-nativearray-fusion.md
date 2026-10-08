@@ -25,8 +25,9 @@ Phase A (fold inline loop) landed 2026-09-30
 (`specs/progress/2026-09-30-nativearray-fold-inline-loop.md`). Phase B (map / map2
 composition, `Fusion.run_nativearr`) landed 2026-10-04
 (`specs/progress/2026-10-04-nativearray-map-fusion.md`): written-unfused map3 and
-map→map2 chains now run at the hand-fused speed. Still open: phase C (map → fold
-and map → sum fusion onto the inline loops, never into a `fold_*` call), phase D
+map→map2 chains now run at the hand-fused speed. Phase C (fold(map) into one
+fold, sum(map)/sum(map2) into one summing loop) landed 2026-10-06
+(`specs/progress/2026-10-06-nativearray-fold-sum-fusion.md`). Still open: phase D
 (width conversions, f32 chains, which need a scalar binary32 rounding, dividing
 callbacks, which `Purity` rejects today, and `@[vectorize]` messages naming the
 link that blocked fusion), and phase E (ASAN sweep, ir-oracle, LSP parity).

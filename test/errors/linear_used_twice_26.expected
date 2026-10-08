@@ -34,3 +34,6 @@ fix [cap_grant]:
 @@ lines 31-31 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+The affine value `ch` is used more than once here. [linear_used_twice]

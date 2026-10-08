@@ -43,3 +43,5 @@ fix [cap_grant]:
 @@ lines 21-21 @@
 -  fn main() do
 +  fn main(_cap_mut : Cap(IO.Mut)) do
+
+after fix: exit 0

@@ -10,12 +10,13 @@ both the `test (ubuntu, codegen)` shard (~50 min) and `test (macos-15, all)` (~7
 A CI audit found this by profiling the suite (per-case mtimes of alcotest's output files).
 
 The walk now runs over `Domain.recommended_domain_count ()` domains, capped at 8,
-overridable with `MARCH_IR_VERIFY_JOBS`. Each fixture already had its own temp dir and
+overridable with `MARCH_TEST_JOBS` (the shared `Test_helpers.parallel_map`; see
+`2026-10-07-parallel-test-suites.md`). Each fixture already had its own temp dir and
 subprocesses; the verifier tool is resolved before any domain spawns, and
 `Filename.temp_file`'s PRNG is domain-local. Results keep input order, and an exception
 from one fixture re-raises only after every domain is joined.
 
-Measured locally (M-series, load ~10, `MARCH_IR_VERIFY_JOBS=4` to match a CI Linux
+Measured locally (M-series, load ~10, `MARCH_TEST_JOBS=4` to match a CI Linux
 runner): the two corpus cases took 1704 s serially, 465 s in parallel; CPU time was
 unchanged (~1540 s). Proved RED: a fixture with a type error in `test/native/` fails
 case 3 with `1/335 fixtures failed ... [EMIT FAILED] zz_ci_audit_red_probe.march`.

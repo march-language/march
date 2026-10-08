@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/module_keyword_1.march","start_line":1,"start_col":0,"end_line":1,"end_col":6,"message":"`module` is spelled `mod` in March:","code":"module_keyword","fix":{"kind":"replace","start_line":1,"start_col":0,"end_line":1,"end_col":6,"text":"mod"},"labels":[],"notes":["mod Name do\n    ...\nend"]}

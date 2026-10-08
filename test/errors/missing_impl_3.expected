@@ -28,3 +28,6 @@ fix [cap_grant]:
 @@ lines 10-10 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+`Hue` does not implement interface `Eq`. [missing_impl]

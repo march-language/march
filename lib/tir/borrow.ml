@@ -79,6 +79,14 @@ let extern_borrow_table : (string * bool list) list = [
        as owned until 2026-10-06, so every call leaked a reference to the
        callee's actor record, and with it the whole record once it died. *)
   ("actor_call",        [true; false]);
+    (* march_monitor keeps the WATCHER: its monitor node holds the reference
+       the call hands over, released when the node is (on the target's
+       death, on demonitor, or at once for a dead target). The target is only
+       read. Listed as owning both until 2026-10-07, so every monitor leaked a
+       reference to the target and the node held a raw, unowned watcher: both
+       actor records outlived their actors (two per cluster session party,
+       ClusterNode's RegWatch watching each session endpoint). *)
+  ("monitor",           [false; true]);
   ("kill",              [true]);
   ("march_kill",        [true]);
   ("actor_stop",        [true; false]);
@@ -590,7 +598,7 @@ let extern_owned_builtins : string list = [
     "native_u8_arr_set"; "native_u8_arr_sort";
     "tcp_connect"; "tcp_connect_timeout"; "http_serialize_request"; "http_parse_response";
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
-    "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps"; "monitor";
+    "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps";
     "register_resource";
     "actor_register"; "actor_unregister"; "actor_whereis";
     "send_checked"; "revoke_cap"; "is_cap_valid";

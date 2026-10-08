@@ -27,3 +27,6 @@ fix [cap_grant]:
 @@ lines 31-31 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Protocol `Q`: this `choose` branch ends in a `loop`, but the protocol continues after the `choose` — those following steps are projected into EVERY branch, so they can never run in this one. Move them inside the branches that can reach them. [protocol_invalid]

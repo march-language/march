@@ -24,3 +24,5 @@ fix [cap_needs:IO]:
 @@ after line 11 @@
  mod Server do
 +  needs IO
+
+after fix: exit 0

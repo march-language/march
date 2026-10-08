@@ -3024,7 +3024,11 @@ let test_timings_covers_frontend () =
     List.iter (fun label ->
         Alcotest.(check bool)
           (Printf.sprintf "[timings] output mentions %S" label) true
-          (contains out (Printf.sprintf "  %s\n" label)))
+          (* The label ends its line, or is followed by the per-pass
+             counts (`  lower  fns=... jp=...`) that --timings prints for
+             TIR stages. *)
+          (contains out (Printf.sprintf "  %s\n" label)
+           || contains out (Printf.sprintf "  %s  " label)))
       ["parse"; "desugar"; "resolve-imports"; "stdlib-load"; "typecheck"; "lower"]
 
 let timings_unit_tests = [

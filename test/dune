@@ -10403,7 +10403,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_capture.march)
+   ; Fusion off: this checks the MAP loop, and each map here feeds a sum,
+   ; which the sum-map peephole would otherwise fuse into one sum loop
+   ; (that loop is checked by nativearr_fold_sum_fusion).
+   (setenv MARCH_NO_NATIVEARR_FUSION 1
+    (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_capture.march))
    (with-stdout-to native_arr_map_inline_capture_llvm_check.out
     (run bash -c
      "echo \"$(grep -c nmap_pre native/native_arr_map_inline_capture.ll) $(grep -c '= call ptr @native_int_arr_map(ptr\\|= call ptr @native_float_arr_map(ptr' native/native_arr_map_inline_capture.ll)\"")))))
@@ -10546,7 +10550,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_narrow_inline.march)
+   ; Fusion off: this checks the MAP loop, and each map here feeds a sum,
+   ; which the sum-map peephole would otherwise fuse into one sum loop
+   ; (that loop is checked by nativearr_fold_sum_fusion).
+   (setenv MARCH_NO_NATIVEARR_FUSION 1
+    (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_narrow_inline.march))
    (with-stdout-to native_arr_narrow_inline_llvm_check.out
     (run bash -c
      "echo \"$(grep -c nmap_pre native/native_arr_narrow_inline.ll) $(grep -c '= call ptr @native_f32_arr_map(ptr\\|= call ptr @native_u8_arr_map(ptr\\|= call ptr @native_i32_arr_map2(ptr' native/native_arr_narrow_inline.ll) $(grep -c '^define double @.*\\$mapfast\\$' native/native_arr_narrow_inline.ll) $(grep -c 'load float' native/native_arr_narrow_inline.ll)\"")))))
@@ -10847,6 +10855,96 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "read -r nmap nmap2 nruntime < nativearr_map_fusion_llvm_check.out; \
     test \"$nmap\" -eq 22 -a \"$nmap2\" -eq 8 -a \"$nruntime\" -eq 0 || { echo \"expected 22 inline map loops, 8 inline map2 loops, 0 runtime map calls in main (found map=$nmap map2=$nmap2 runtime=$nruntime)\" >&2; exit 1; }")))
+
+;  A nullary constructor of a boxed ADT is one shared immortal static cell
+; (Llvm_ctx.intern_static_nullary), not a heap allocation
+; (specs/progress/2026-10-07-binary-trees-static-nullary-and-idle-ticks.md).
+; Correctness: every line matches the interpreter, the churn loop stays flat.
+; Shape: `make` calls march_alloc exactly once (the Fork; the Tip is the
+; static cell), and the Tip cell is emitted.
+(rule
+ (targets static_nullary_ctor static_nullary_ctor.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/static_nullary_ctor.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o static_nullary_ctor
+        native/static_nullary_ctor.march)
+   (with-stdout-to static_nullary_ctor.out
+        (system "./static_nullary_ctor")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/static_nullary_ctor.expected static_nullary_ctor.out)))
+
+(rule
+ (targets static_nullary_ctor_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/static_nullary_ctor.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/static_nullary_ctor.march)
+   (with-stdout-to static_nullary_ctor_llvm_check.out
+    (run bash -c
+     "f=native/static_nullary_ctor.ll; echo \"$(awk '/^define .*@make\\(/,/^}/' $f | grep -c 'call ptr @march_alloc') $(grep -c '^@BinTree.Tip\\$static_nullary = internal global' $f)\"")))))
+
+(rule
+ (alias runtest)
+ (deps static_nullary_ctor_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r allocs tip < static_nullary_ctor_llvm_check.out; \
+    test \"$allocs\" -eq 1 -a \"$tip\" -eq 1 || { echo \"expected make to call march_alloc once (the Fork) and one static Tip cell (found allocs=$allocs tip=$tip)\" >&2; exit 1; }")))
+;  NativeArray fold(map) and sum(map) fusion (phase C of
+; specs/plans/2026-09-28-nativearray-fusion-plan.md): Fusion.run_nativearr
+; composes fold(map(..)) into one fold, Native_map_inline's sum-map peephole
+; fuses sum(map(..)) / sum(map2(..)) into one loop. Correctness: every line
+; matches the interpreter, negatives included. Shape (whole module): 15 sum-map
+; loops, 12 inline fold loops, 5 inline map loops and 1 inline map2 loop (the
+; negative cases), 2 runtime sums (the two intermediates read twice), and the
+; Float sum-map loops reassociate. With MARCH_NO_NATIVEARR_FUSION=1 the same
+; program has 0 / 12 / 28 / 4 and 17 runtime sums.
+(rule
+ (targets nativearr_fold_sum_fusion nativearr_fold_sum_fusion.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_fold_sum_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nativearr_fold_sum_fusion
+        native/nativearr_fold_sum_fusion.march)
+   (with-stdout-to nativearr_fold_sum_fusion.out
+        (system "./nativearr_fold_sum_fusion")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nativearr_fold_sum_fusion.expected nativearr_fold_sum_fusion.out)))
+
+(rule
+ (targets nativearr_fold_sum_fusion_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_fold_sum_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/nativearr_fold_sum_fusion.march)
+   (with-stdout-to nativearr_fold_sum_fusion_llvm_check.out
+    (run bash -c
+     "f=native/nativearr_fold_sum_fusion.ll; echo \"$(grep -c '^nsum_pre[0-9]*:' $f) $(grep -c '^nfold_pre[0-9]*:' $f) $(grep -c '^nmap_pre[0-9]*:' $f) $(grep -c '^nmap2_pre[0-9]*:' $f) $(grep -cE 'call [a-z0-9]+ @native_[a-z0-9]*_arr_sum\\(' $f) $(grep -c 'fadd reassoc' $f)\"")))))
+
+(rule
+ (alias runtest)
+ (deps nativearr_fold_sum_fusion_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nsum nfold nmap nmap2 rtsum reassoc < nativearr_fold_sum_fusion_llvm_check.out; \
+    test \"$nsum\" -eq 15 -a \"$nfold\" -eq 12 -a \"$nmap\" -eq 5 -a \"$nmap2\" -eq 1 -a \"$rtsum\" -eq 2 -a \"$reassoc\" -ge 1 || { echo \"expected 15 sum-map loops, 12 fold loops, 5 map loops, 1 map2 loop, 2 runtime sums, reassociating Float sums (found nsum=$nsum nfold=$nfold nmap=$nmap nmap2=$nmap2 rtsum=$rtsum reassoc=$reassoc)\" >&2; exit 1; }")))
 
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
@@ -12345,6 +12443,43 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/session_party_released.expected native_session_party_released.out)))
 
+; ── An aggregate returned on one path is released on the paths that only read
+; it (2026-10-07). RED before: 201 objects left over 100 calls of each shape.
+(rule
+ (targets native_mixed_tail_aggregate_drop native_mixed_tail_aggregate_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/mixed_tail_aggregate_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_mixed_tail_aggregate_drop
+        native/mixed_tail_aggregate_drop.march)
+   (with-stdout-to native_mixed_tail_aggregate_drop.out
+        (system "./native_mixed_tail_aggregate_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mixed_tail_aggregate_drop.expected native_mixed_tail_aggregate_drop.out)))
+; ── A monitor holds its watcher and releases it, and never keeps the target
+; (2026-10-07). RED before: both actor records survived every monitor.
+(rule
+ (targets native_monitor_releases_actors native_monitor_releases_actors.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/monitor_releases_actors.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_monitor_releases_actors
+        native/monitor_releases_actors.march)
+   (with-stdout-to native_monitor_releases_actors.out
+        (system "./native_monitor_releases_actors")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/monitor_releases_actors.expected native_monitor_releases_actors.out)))
+
 ; ── A dead actor's record and state are released (2026-10-06): under 5
 ; objects left over 50 actors (RED before: the killed actor's List state, and
 ; the record itself once Actor.call had been used on it).
@@ -12701,7 +12836,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/shell_node.march))
  (action
   (with-stdout-to native_shell_node.out
-   (system "rm -rf sh_t; mkdir -p sh_t/frags; ./shell_check.exe keygen sh_t/pk sh_t/sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_t/pk) -o sh_t/node native/shell_node.march > sh_t/build 2>&1 || { cat sh_t/build; exit 1; }; for f in ok panic loop; do if [ \"$(uname)\" = Darwin ]; then %{cc} -shared -fPIC -undefined dynamic_lookup -o sh_t/frags/frag_$f.so shell/frag_$f.c; else %{cc} -shared -fPIC -o sh_t/frags/frag_$f.so shell/frag_$f.c; fi; done; : > sh_t/policy; S=/tmp/march-shell-test-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_t/policy MARCH_AUDIT_LOG=sh_t/audit ./sh_t/node > sh_t/prog 2>&1 & prog=$!; ./shell_check.exe run $S.shell sh_t/prog sh_t/sk sh_t/policy sh_t/audit sh_t/frags; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_t $S $S.shell $S.observe; true"))))
+   (system "rm -rf sh_t; mkdir -p sh_t/frags; ./shell_check.exe keygen sh_t/pk sh_t/sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_t/pk) -o sh_t/node native/shell_node.march > sh_t/build 2>&1 || { cat sh_t/build; exit 1; }; for f in ok panic loop caps nomanifest; do if [ \"$(uname)\" = Darwin ]; then %{cc} -shared -fPIC -undefined dynamic_lookup -o sh_t/frags/frag_$f.so shell/frag_$f.c; else %{cc} -shared -fPIC -o sh_t/frags/frag_$f.so shell/frag_$f.c; fi; done; : > sh_t/policy; S=/tmp/march-shell-test-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_t/policy MARCH_AUDIT_LOG=sh_t/audit ./sh_t/node > sh_t/prog 2>&1 & prog=$!; ./shell_check.exe run $S.shell sh_t/prog sh_t/sk sh_t/policy sh_t/audit sh_t/frags; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_t $S $S.shell $S.observe; true"))))
 
 (rule
  (alias runtest)
@@ -12730,6 +12865,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/shell_session.expected native_shell_session.out)))
 
+; R5.4: a client whose source differs from the node's build.  The node is
+; test/native/shell_node.march; the client compiles inputs against
+; test/native/shell_node_skew.march, whose `evens` and `Shade` differ.  An
+; input reaching either is refused, naming it; the others run.
+(rule
+ (targets native_shell_skew.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/skew.txt)
+       (file native/shell_node.march)
+       (file native/shell_node_skew.march))
+ (action
+  (with-stdout-to native_shell_skew.out
+   (system "rm -rf sh_k; mkdir -p sh_k; ./shell_check.exe keygen-home sh_k/pk $PWD/sh_k/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_k/pk) -o sh_k/node native/shell_node.march > sh_k/build 2>&1 || { cat sh_k/build; exit 1; }; printf 'IO.Console\\n' > sh_k/policy; S=/tmp/march-shell-skew-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_k/policy ./sh_k/node > sh_k/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_k/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_k/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/skew.txt native/shell_node_skew.march 2>&1; echo \"exit=$?\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_k $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_skew.expected native_shell_skew.out)))
+
 ; Golden rendered-diagnostic corpus (diagnostics plan §11, D7): every
 ; test/errors/*.march checked with the real compiler; full rendered output
 ; and --check-json pinned in .expected / .json.expected. Regenerate with
@@ -12741,3 +12897,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (libraries march_test_helpers alcotest yojson unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
  (action (run %{test} -e)))
+
+;  Nested constructor pattern on a ctor name a stdlib type also declares
+; (specs/progress/2026-10-07-nested-pattern-ctor-name-collision-miscompile.md).
+; A user `type Tree = Leaf | Node(..)` collides with stdlib OrderedMap.Tree's
+; `Leaf`/`Node`; a nested `Node(Leaf, _, Leaf)` used to take the wrong arm when
+; compiled. The .expected file IS the interpreter's output.
+(rule
+ (targets nested_pattern_ctor_name_collision nested_pattern_ctor_name_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nested_pattern_ctor_name_collision.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nested_pattern_ctor_name_collision
+        native/nested_pattern_ctor_name_collision.march)
+   (with-stdout-to nested_pattern_ctor_name_collision.out
+        (system "./nested_pattern_ctor_name_collision")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_pattern_ctor_name_collision.expected nested_pattern_ctor_name_collision.out)))

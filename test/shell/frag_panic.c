@@ -1,5 +1,6 @@
 /* A fragment that panics: the node answers PANIC and keeps serving. */
 #include <stdint.h>
+const char __march_cap_manifest[] = "";
 void *march_string_lit(const char *utf8, int64_t len);
 void  march_print(void *s);
 void  march_panic(void *s);

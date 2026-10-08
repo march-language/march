@@ -1,0 +1,107 @@
+-- A monitor holds its watcher and releases it; it never keeps the target
+-- (specs/progress/2026-10-07-monitor-leaked-both-actors.md). `monitor` was
+-- compiled as consuming both pids while march_monitor kept neither, so every
+-- monitor leaked one reference to each actor record and both outlived their
+-- actors: two per cluster session party (ClusterNode's RegWatch watching each
+-- session endpoint). SIGNAL: under 5 objects left over 50 pairs for every
+-- path that frees a monitor node, and a watcher still receives its Down.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  actor Target do
+    state { n : Int, xs : List(Int) }
+    init  { n: 0, xs: Nil }
+    on Poke() do
+      { n: state.n + 1, xs: Cons(state.n, state.xs) }
+    end
+  end
+
+  -- Blocks in a receive inside its handler, as ClusterNode's RegWatch does.
+  actor Watch do
+    state { n : Int }
+    init  { n: 0 }
+    on WatchPid(pid : Int) do
+      match receive() do
+        Down.Down(_, _, _) -> ()
+      end
+      { n: state.n + 1 }
+    end
+  end
+
+  pfn pair(order : Int, i : Int) : Int do
+    let t = spawn(Target)
+    let _ = send(t, Poke())
+    let w = spawn(Watch)
+    let _ = send(w, WatchPid(pid_to_int(t)))
+    let r = monitor(w, t)
+    sleep_ms(1)
+    if order == 0 do
+      kill(w)
+      kill(t)
+    else if order == 1 do
+      kill(t)
+      sleep_ms(1)
+      kill(w)
+    else
+      demonitor(r)
+      kill(w)
+      kill(t)
+    end end
+    i * 0
+  end
+
+  pfn dead_target(i : Int) : Int do
+    let t = spawn(Target)
+    kill(t)
+    sleep_ms(1)
+    let w = spawn(Watch)
+    let _ = monitor(w, t)
+    sleep_ms(1)
+    kill(w)
+    i * 0
+  end
+
+  pfn times(n : Int, f : (Int) -> Int, acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, f, acc + f(n)) end
+  end
+
+  pfn settle(a0 : Int, tries : Int) : Int do
+    sleep_ms(20)
+    let d = live_allocs() - a0
+    if d < 5 || tries <= 0 do d else settle(a0, tries - 1) end
+  end
+
+  pfn probe(name : String, f : (Int) -> Int) : () do
+    let _ = times(3, f, 0)
+    sleep_ms(50)
+    let a0 = live_allocs()
+    let _ = times(50, f, 0)
+    println(name ++ ", released: " ++ bool_to_string(settle(a0, 100) < 5))
+  end
+
+  fn main(_io : Cap(IO)) do
+    probe("watcher killed, then target", fn i -> pair(0, i))
+    probe("target killed, then watcher", fn i -> pair(1, i))
+    probe("demonitored, then both killed", fn i -> pair(2, i))
+    probe("monitor of a dead target", fn i -> dead_target(i))
+    -- the Down still arrives: the watcher's handler returns once it has it
+    let t = spawn(Target)
+    let w = spawn(Watch)
+    let _ = send(w, WatchPid(pid_to_int(t)))
+    let _ = monitor(w, t)
+    sleep_ms(5)
+    kill(t)
+    println("Down delivered: " ++ bool_to_string(delivered(w, 200)))
+  end
+
+  pfn delivered(w, left : Int) : Bool do
+    match get_actor_field(w, "n") do
+      Some(1) -> true
+      _ -> if left <= 0 do false else
+        sleep_ms(10)
+        delivered(w, left - 10)
+      end
+    end
+  end
+end

@@ -172,6 +172,9 @@ type session = {
   mutable bound : string list;  (* `let` names, newest first *)
   mutable failed : bool;        (* some input failed (exit 1 with --shell-inputs) *)
   triple : string option;       (* the node's target, from HELLO *)
+  (* The node's build identity and ours (lib/jit/shell_ident.ml); [None]
+     against a node built before it, which is not checked. *)
+  ident : March_jit.Shell_ident.check option;
 }
 
 exception Session_over of string
@@ -184,14 +187,16 @@ let fresh_nonce () =
   incr nonce_n;
   Printf.sprintf "%016x%08x%08x" (int_of_float (Unix.gettimeofday () *. 1e6)) (Unix.getpid ()) !nonce_n
 
-let eval_on_node s ~(kind : string) ~(src : string) ~(caps_used : string list)
+(* The signed `caps:` is what the fragment's code uses ([sf_caps]), which the
+   node checks against the fragment's own manifest and then its policy. *)
+let eval_on_node s ~(kind : string) ~(src : string)
     (frag : March_jit.Repl_jit.shell_fragment) : string =
   let so = read_file frag.March_jit.Repl_jit.sf_so in
   let now = int_of_float (Unix.gettimeofday () *. 1000.) in
   let body =
     Printf.sprintf "name:%s kind:%s epoch:%d nonce:%s not_after_ms:%d timeout_ms:%d caps:%s src_b64:%s so_b64:%s"
       frag.sf_entry kind s.epoch (fresh_nonce ()) (now + 30_000) s.timeout_ms
-      (match caps_used with [] -> "-" | l -> String.concat "," l)
+      (match frag.sf_caps with [] -> "-" | l -> String.concat "," l)
       (b64_encode src) (b64_encode so) in
   let signature =
     March_ed25519.Ed25519.(sig_to_base64 (sign_str ("EVAL " ^ body) s.sk)) in
@@ -209,7 +214,7 @@ let fragment_source s ~src ~body =
   let text =
     Printf.sprintf "mod Shell_%d do\n%s  fn %s() do\n%s%s\n  end\nend\n" s.n needs
       March_jit.Repl_jit.shell_entry_fn cap_lets body in
-  (text, List.map (fun (_, path, _, _) -> path) used)
+  text
 
 let parse_module text =
   (* No file name: Repl_jit counts only diagnostics whose span file is "",
@@ -234,7 +239,7 @@ let compile s ?store_as text =
     List.iter (fun (d : March_errors.Errors.diagnostic) -> Printf.printf "error: %s\n%!" d.message) e; None
   | Ok m ->
     (try
-       Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple s.jit ~tc_env:s.tc_env
+       Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident s.jit ~tc_env:s.tc_env
                ~program_name:s.program_name ~program_decls:s.program_decls ~program_type_map:s.program_type_map
                ?store_as m)
      with e -> report_error e; None)
@@ -275,34 +280,34 @@ let eval_expr s src ~limit =
   let rec attempt = function
     | [] -> ()
     | render :: rest ->
-      let text, used = fragment_source s ~src ~body:(Printf.sprintf "    let __r = (%s)\n%s" src render) in
+      let text = fragment_source s ~src ~body:(Printf.sprintf "    let __r = (%s)\n%s" src render) in
       (* Only the first renderer that typechecks is used; errors from a
          failed list attempt are not the user's. *)
       let quiet = rest <> [] in
       (match (if quiet then
                 (match parse_module text with
                  | Ok m ->
-                   (try Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple s.jit ~tc_env:s.tc_env
+                   (try Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident s.jit ~tc_env:s.tc_env
                                   ~program_name:s.program_name ~program_decls:s.program_decls
                                   ~program_type_map:s.program_type_map m)
                     with _ -> None)
                  | Error _ -> None)
               else compile s text) with
-       | Some (_, frag) -> ignore (print_reply ~show_result:true (eval_on_node s ~kind:"value" ~src ~caps_used:used frag))
+       | Some (_, frag) -> ignore (print_reply ~show_result:true (eval_on_node s ~kind:"value" ~src frag))
        | None -> if quiet then attempt rest)
   in
   attempt (render_bodies ~limit)
 
 let eval_let s name src =
   s.n <- s.n + 1;
-  let text, used = fragment_source s ~src ~body:(Printf.sprintf "    (%s)" src) in
+  let text = fragment_source s ~src ~body:(Printf.sprintf "    (%s)" src) in
   (* The slot is bound only once the value is on the node. *)
   let slot = March_jit.Repl_jit.shell_bind_slot s.jit ~name:("__pending_" ^ name)
       ~ty:March_tir.Tir.TUnit in
   match compile s ~store_as:slot text with
   | None -> ()
   | Some (m, frag) ->
-    let r = eval_on_node s ~kind:"init" ~src:("let " ^ name ^ " = " ^ src) ~caps_used:used frag in
+    let r = eval_on_node s ~kind:"init" ~src:("let " ^ name ^ " = " ^ src) frag in
     if print_reply ~show_result:false r then begin
       (* Bind [name] for later inputs: its TIR type for the slot, its
          typechecker type for the environment (the type of the block's last
@@ -332,7 +337,7 @@ let eval_let s name src =
 
 let type_of s src =
   s.n <- s.n + 1;
-  let text, _ = fragment_source s ~src ~body:(Printf.sprintf "    (%s)" src) in
+  let text = fragment_source s ~src ~body:(Printf.sprintf "    (%s)" src) in
   match parse_module text with
   | Error e -> List.iter (fun (d : March_errors.Errors.diagnostic) -> Printf.printf "error: %s\n%!" d.message) e
   | Ok m ->
@@ -430,12 +435,34 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
       (match e, lo with Some e, Some lo -> (e, lo) | _ ->
           Printf.eprintf "march shell: bad HELLO reply: %s\n" hello; exit 1)
     | _ -> Printf.eprintf "march shell: %s\n" hello; exit 1 in
+  let ident =
+    let r = send conn "IDENT"; recv conn in
+    match words r with
+    | [ "OK"; b64 ] ->
+      let c = March_jit.Shell_ident.check_of
+          ~node:(March_jit.Shell_ident.of_string (b64_decode b64)) program.Ast.mod_decls in
+      (match March_jit.Shell_ident.differing c with
+       | [] -> ()
+       | diffs ->
+         let n = List.length diffs in
+         Printf.eprintf
+           "march shell: %d declaration%s here differ%s from the node's build (%s%s); \
+            inputs that reach %s are refused\n%!"
+           n (if n = 1 then "" else "s") (if n = 1 then "s" else "")
+           (String.concat ", " (List.map March_jit.Shell_ident.describe_key
+                                  (List.filteri (fun i _ -> i < 5) diffs)))
+           (if n > 5 then ", ..." else "") (if n = 1 then "it" else "them"));
+      Some c
+    | _ ->
+      Printf.eprintf "march shell: the node does not report its build identity (%s); \
+                      inputs are not checked against its code\n%!" r;
+      None in
   let jit = March_jit.Repl_jit.create_shell () in
   March_jit.Repl_jit.shell_set_slot_base jit lo;
   let s = { conn; epoch; sk; jit; tc_env; program_name = program.Ast.mod_name.Ast.txt;
             program_decls = program.Ast.mod_decls;
             program_type_map = type_map; limit = default_limit; timeout_ms; n = 0; bound = [];
-            failed = false; triple = field hello "triple" } in
+            failed = false; triple = field hello "triple"; ident } in
   (* Lower the program now, before the first prompt, rather than on the
      first input. *)
   March_jit.Repl_jit.shell_lower_program jit ~program_name:s.program_name

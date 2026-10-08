@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------- errors/semicolon_separator_2.march
+
+Unexpected `;`: March separates expressions with newlines, not semicolons. [semicolon_separator]
+
+4 |     let x = 1;
+                 ^
+
+    Put each expression on its own line.
+    run `march --explain semicolon_separator`
+
+fix [semicolon_separator]:
+@@ lines 4-4 @@
+-    let x = 1;
++    let x = 1
+
+after fix: exit 0

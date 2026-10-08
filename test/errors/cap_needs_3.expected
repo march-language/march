@@ -34,3 +34,5 @@ fix [cap_grant]:
 @@ lines 25-25 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 0

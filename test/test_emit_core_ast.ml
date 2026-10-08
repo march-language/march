@@ -507,7 +507,9 @@ let test_check_json_carries_parse_errors () =
   Alcotest.(check int) "--check-json exit on a parse error" 1 exit_code;
   let lines = List.filter (fun l -> l <> "") (String.split_on_char '\n' out) in
   Alcotest.(check int) "exactly one NDJSON line" 1 (List.length lines);
-  assert_contains out "\"code\":\"parse_error\"";
+  (* The `then` pitfall has its own code (and a mechanical fix), not the
+     generic parse_error. *)
+  assert_contains out "\"code\":\"then_keyword\"";
   assert_contains out "I don't recognize `then` here";
   (* caret on the `then` (line 4, col 12), not on the token after it *)
   assert_contains out "\"start_line\":4,\"start_col\":12,";
