@@ -1947,7 +1947,8 @@ let shell_program_lowered ctx ~program_name ~program_decls ~program_type_map =
                       { March_ast.Ast.txt = program_name;
                         span = { March_ast.Ast.dummy_span with file = "" } };
                     mod_decls = shell_program_decls program_decls } in
-    let type_map = Hashtbl.copy program_type_map in
+    (* Not a copy: the typechecker adds each input's spans to this table. *)
+    let type_map = program_type_map in
     let tir = time_phase "lower-program" (fun () ->
         let tir = March_tir.Lower.lower_module ~type_map ~shadow_builtins:false
             ~resumable:true program in
@@ -1975,10 +1976,6 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
   let input_map =
     checked_type_map (time_phase "typecheck"
       (fun () -> March_typecheck.Typecheck.check_module_with_env env m)) in
-  (* The program's map plus the input's: the input's own spans, and every
-     stdlib/app body it reaches, typed. *)
-  let type_map = Hashtbl.copy program_type_map in
-  Hashtbl.iter (fun k v -> Hashtbl.replace type_map k v) input_map;
   (* The program is lowered ONCE per session, through the full path the
      native build uses (imports, aliases, actors and externs of every module,
      a library on MARCH_LIB_PATH included), and kept resumable; each input
@@ -1987,8 +1984,14 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
      and ignores `import`, so a library like Depot (`import Encode`, then a
      bare `encode(..)`) did not lower.  Lowering the whole program again for
      every input cost ~200-270 ms for a Depot-sized one. *)
+  (* The typechecker writes the input's types into the session's own table,
+     [program_type_map] (it is [tc_env]'s, ~120k entries), which lowering
+     reads too; when it is a different table, the input's own spans (file
+     "") are merged in.  Copying the whole table cost ~10 ms an input. *)
   let sp = shell_program_lowered ctx ~program_name ~program_decls ~program_type_map in
-  Hashtbl.iter (fun k v -> Hashtbl.replace sp.sp_type_map k v) input_map;
+  if input_map != sp.sp_type_map then
+    Hashtbl.iter (fun (k : March_ast.Ast.span) v ->
+        if k.file = "" then Hashtbl.replace sp.sp_type_map k v) input_map;
   (* An input's self-qualified `DepotNode.pg` is stripped to `pg`, as the
      entry's own desugar does (typechecking accepted both spellings). *)
   let decls = March_desugar.Desugar.strip_entry_self_qual
@@ -2032,7 +2035,7 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
      reaches, including what it will call on the node rather than copy. *)
   (match ident with
    | Some c ->
-     (match Shell_ident.fragment_skew c ~types:pre.March_tir.Tir.tm_types
+     (match time_phase "ident" @@ fun () -> Shell_ident.fragment_skew c ~types:pre.March_tir.Tir.tm_types
               (List.filter (fun (f : March_tir.Tir.fn_def) -> not (is_c_runtime_fn f.fn_name))
                  pre.March_tir.Tir.tm_fns) with
       | [] -> ()
@@ -2138,7 +2141,7 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
      copy refers to, as cap attribution reads TIR before it is optimised.
      Taken over the whole self-contained reach set, whatever was linked, so
      linking can only add caps to the declaration, never drop one. *)
-  let reached_caps =
+  let reached_caps = time_phase "caps" @@ fun () ->
     if linked = [] then []
     else
       List.concat_map (fun (f : March_tir.Tir.fn_def) ->
