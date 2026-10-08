@@ -455,6 +455,20 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Remote shell: a `Float` binding no longer crashes the node, and inputs and
+  sessions no longer leak memory on it.**
+  - **The crash.** A session that ran `let f = 2.5` crashed the node with
+    SIGSEGV when it ended.
+  - **Leaks per input.** Each input leaked most of what it built, such as
+    4 000 objects for rendering a 1 000-element list. Each call of a
+    function like `List.filter` also leaked a closure.
+  - **Leaks per session.** Every input took a reference on every binding of
+    its session, so the bindings outlived the session, and ending a session
+    freed only the top cell of each binding.
+  - **What is left.** An input now keeps only its loaded code and one small
+    string per string literal it evaluates.
+  - **Disk.** The node also deletes each input's compiled file once loaded,
+    instead of leaving ~70 KB per input in its temporary directory.
 - **A hot-reload `DRAIN` before the scheduler starts no longer corrupts a
   loaded patch.** A green thread spawned before the scheduler was initialised
   (a signed `DRAIN` with a hard deadline arms one) got a stack reservation

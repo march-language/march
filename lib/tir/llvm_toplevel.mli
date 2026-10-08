@@ -70,6 +70,14 @@ val emit_fn :
 val fn_declare_str : Tir.fn_def -> string
 val emit_atom_show_table : Llvm_ctx.ctx -> unit
 
+(** The (registry key, release function) pairs the module's closure and actor
+    allocations ask for (see the implementation). *)
+val closure_drop_wants : Tir.tir_module -> (string * string) list
+
+(** [define internal void @march_clo_drops_register()], registering the
+    module's closure and actor releases with the runtime. *)
+val clo_drop_registration : Tir.tir_module -> string
+
 (** Stable actor-message constructor tags, ["<Actor>_Msg.<Ctor>" -> tag]
     (see the implementation's comment); [pins] as for {!variant_ctor_tags}. *)
 val actor_msg_tag_table :

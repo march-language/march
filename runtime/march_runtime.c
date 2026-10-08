@@ -637,16 +637,35 @@ void march_decrc(void *p) {
  * under the closure's apply function (field 0), once, from main's prologue
  * (march_clo_register_drops).  march_clo_release runs it when the release
  * frees the cell.  A closure with no entry -- a runtime trampoline, a type
- * whose environment borrows, one built by a hot patch or REPL fragment,
- * which do not register -- is released exactly as before: never a crash,
- * at worst the old leak.  See specs/progress/2026-10-05-dropped-closure-captures.md.
+ * whose environment borrows, one built by a hot patch or a local REPL
+ * fragment, which do not register -- is released exactly as before: never a
+ * crash, at worst the old leak.  See
+ * specs/progress/2026-10-05-dropped-closure-captures.md.
  *
- * Registration happens before the scheduler starts, so lookups need no lock. */
+ * A remote-shell fragment registers its own pairs when it starts
+ * (lib/tir/llvm_repl.ml emit_repl_expr ~register_drops), while the
+ * scheduler runs and other threads look entries up, so registration is
+ * serialised by a mutex and lookups take no lock:
+ *   - an entry is filled in place, its release before its key.  A lookup
+ *     reads entries with relaxed loads, which is enough: it only looks up
+ *     the key of a closure it holds, and that closure was built by code that
+ *     ran after the key was registered and reached this thread through a
+ *     synchronising handoff, so both stores happen before the lookup.  A
+ *     lookup racing a new key's insertion is for some other key, and at
+ *     worst probes past the new entry.  (Acquire loads here cost ~10% on a
+ *     closure-release-heavy microbenchmark on an M3.)
+ *   - growing copies into a new table published with a release store, read
+ *     with an acquire load, so a lookup never sees the new table before its
+ *     copied entries.  The old table is never freed, since a lookup may still
+ *     be probing it; the tables a run ever retires add up to less than the
+ *     live one.
+ * Keys are never removed: a fragment's code is never unloaded. */
 typedef void (*march_clo_drop_fn)(void *clo);
-typedef struct { void *apply; march_clo_drop_fn drop; } march_clo_drop_entry;
-static march_clo_drop_entry *g_clo_drops = NULL;
-static size_t g_clo_drops_cap = 0;   /* a power of two, or 0 */
-static size_t g_clo_drops_n = 0;
+typedef struct { _Atomic(void *) apply; _Atomic(void *) drop; } march_clo_drop_entry;
+typedef struct { size_t cap; march_clo_drop_entry e[]; } march_clo_drop_table;  /* cap: a power of two */
+static _Atomic(march_clo_drop_table *) g_clo_drops = NULL;
+static size_t g_clo_drops_n = 0;     /* under g_clo_drops_mu */
+static pthread_mutex_t g_clo_drops_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static size_t clo_drop_slot(void *apply, size_t cap) {
     uintptr_t h = (uintptr_t)apply;
@@ -654,42 +673,56 @@ static size_t clo_drop_slot(void *apply, size_t cap) {
     return (size_t)h & (cap - 1);
 }
 
-static void clo_drop_insert(march_clo_drop_entry *tab, size_t cap, void *apply, march_clo_drop_fn drop) {
-    size_t i = clo_drop_slot(apply, cap);
-    while (tab[i].apply && tab[i].apply != apply) i = (i + 1) & (cap - 1);
-    tab[i].apply = apply;
-    tab[i].drop = drop;
+/* Under g_clo_drops_mu. */
+static void clo_drop_insert(march_clo_drop_table *tab, void *apply, void *drop) {
+    size_t i = clo_drop_slot(apply, tab->cap);
+    void *a;
+    while ((a = atomic_load_explicit(&tab->e[i].apply, memory_order_relaxed)) && a != apply)
+        i = (i + 1) & (tab->cap - 1);
+    atomic_store_explicit(&tab->e[i].drop, drop, memory_order_relaxed);
+    atomic_store_explicit(&tab->e[i].apply, apply, memory_order_release);
 }
 
 void march_clo_register_drops(void **pairs, int64_t n) {
     if (n <= 0) return;
+    pthread_mutex_lock(&g_clo_drops_mu);
+    march_clo_drop_table *tab = atomic_load_explicit(&g_clo_drops, memory_order_relaxed);
+    size_t cap0 = tab ? tab->cap : 0;
     size_t want = g_clo_drops_n + (size_t)n;
-    if (want * 2 > g_clo_drops_cap) {
-        size_t cap = g_clo_drops_cap ? g_clo_drops_cap : 64;
+    if (want * 2 > cap0) {
+        size_t cap = cap0 ? cap0 : 64;
         while (want * 2 > cap) cap *= 2;
-        march_clo_drop_entry *tab = calloc(cap, sizeof *tab);
-        if (!tab) return;   /* out of memory: keep the old (shallow) behaviour */
-        for (size_t i = 0; i < g_clo_drops_cap; i++)
-            if (g_clo_drops[i].apply)
-                clo_drop_insert(tab, cap, g_clo_drops[i].apply, g_clo_drops[i].drop);
-        free(g_clo_drops);
-        g_clo_drops = tab;
-        g_clo_drops_cap = cap;
+        march_clo_drop_table *nt = calloc(1, sizeof *nt + cap * sizeof nt->e[0]);
+        if (!nt) {   /* out of memory: keep the old (shallow) behaviour */
+            pthread_mutex_unlock(&g_clo_drops_mu);
+            return;
+        }
+        nt->cap = cap;
+        for (size_t i = 0; i < cap0; i++) {
+            void *a = atomic_load_explicit(&tab->e[i].apply, memory_order_relaxed);
+            if (a) clo_drop_insert(nt, a, atomic_load_explicit(&tab->e[i].drop, memory_order_relaxed));
+        }
+        atomic_store_explicit(&g_clo_drops, nt, memory_order_release);
+        tab = nt;   /* the old one is retired, never freed (see above) */
     }
     for (int64_t k = 0; k < n; k++) {
         void *apply = pairs[2 * k];
         if (!apply) continue;
-        clo_drop_insert(g_clo_drops, g_clo_drops_cap, apply, (march_clo_drop_fn)pairs[2 * k + 1]);
+        clo_drop_insert(tab, apply, pairs[2 * k + 1]);
     }
     g_clo_drops_n = want;
+    pthread_mutex_unlock(&g_clo_drops_mu);
 }
 
 static march_clo_drop_fn clo_drop_lookup(void *apply) {
-    if (!g_clo_drops_cap || !apply) return NULL;
-    size_t i = clo_drop_slot(apply, g_clo_drops_cap);
-    while (g_clo_drops[i].apply) {
-        if (g_clo_drops[i].apply == apply) return g_clo_drops[i].drop;
-        i = (i + 1) & (g_clo_drops_cap - 1);
+    march_clo_drop_table *tab = atomic_load_explicit(&g_clo_drops, memory_order_acquire);
+    if (!tab || !apply) return NULL;
+    size_t i = clo_drop_slot(apply, tab->cap);
+    void *a;
+    while ((a = atomic_load_explicit(&tab->e[i].apply, memory_order_relaxed))) {
+        if (a == apply)
+            return (march_clo_drop_fn)atomic_load_explicit(&tab->e[i].drop, memory_order_relaxed);
+        i = (i + 1) & (tab->cap - 1);
     }
     return NULL;
 }

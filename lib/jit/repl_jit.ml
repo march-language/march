@@ -2075,6 +2075,14 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
   let node = match ident with
     | Some (c : Shell_ident.check) when Sys.getenv_opt "MARCH_SHELL_NO_LINK" = None -> Some c.node
     | _ -> None in
+  (* An init fragment storing a heap value also registers its release for
+     the slot (see [build]); a scalar slot has none. *)
+  let slot_drop =
+    match store_as, List.find_opt (fun (f : March_tir.Tir.fn_def) ->
+        f.fn_name = shell_entry_fn) pre.March_tir.Tir.tm_fns with
+    | Some _, Some f when March_tir.Llvm_repl.slot_holds_heap_ref f.fn_ret_ty ->
+      Some ("shell_slot_drop", f.fn_ret_ty)
+    | _ -> None in
   (* Lower RC and emit with [linked] declared rather than defined; the node's
      parameter modes decide RC at the fragment's calls to them. *)
   let build (linked : March_tir.Tir.fn_def list) =
@@ -2084,6 +2092,15 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
                              pre.March_tir.Tir.tm_fns } in
     let tir = March_tir.Dce.prune_unreachable tir in
     let tir = time_phase "rc" (fun () ->
+        (* Known calls first, as the native build does before Perceus
+           (Contract_pipeline): a local closure only ever called
+           (`List.filter`'s `go`) becomes a direct call of its apply
+           function, the shape [Drop.run] recognises as owning its
+           captures.  Without it the closure stayed a `call_ptr` callee, its
+           environment was judged to borrow the predicate it captured, and
+           nothing released the predicate: one closure per call. *)
+        let tir = if March_tir.Pass_switch.on "known-call-pre"
+          then March_tir.Known_call.run ~changed:(ref false) tir else tir in
         let k_table = March_tir.Kind.of_module ~unboxing:false tir in
         let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
         let borrow_map = match node with
@@ -2094,6 +2111,38 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
                 | Some modes -> March_tir.Borrow.StringMap.add f.fn_name modes bm
                 | None -> bm) borrow_map linked in
         let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table ~borrow_map tir in
+        (* An init fragment's release for the value it stores in its slot,
+           which the node runs when the session ends.  Added after Perceus
+           as a bare [dec_rc] of its parameter, so [Drop.run] below makes it
+           the type's deep drop. *)
+        let tir = match slot_drop with
+          | None -> tir
+          | Some (name, ty) ->
+            let x = { March_tir.Tir.v_name = "x"; v_ty = ty; v_lin = March_tir.Tir.Unr } in
+            let f = { March_tir.Tir.fn_name = name; fn_params = [ x ]; fn_ret_ty = March_tir.Tir.TUnit;
+                      fn_body = March_tir.Tir.ESeq (March_tir.Tir.EDecRC (March_tir.Tir.AVar x),
+                                                    March_tir.Tir.ETuple []);
+                      fn_kind = March_tir.Tir.FnNormal } in
+            { tir with March_tir.Tir.tm_fns = tir.March_tir.Tir.tm_fns @ [ f ] } in
+        (* Deep drops, as the native pipeline (Contract_pipeline) runs after
+           Perceus: without them a [dec_rc] of a list, record or variant the
+           code does not take apart freed its top cell and orphaned the rest
+           (specs/progress/2026-10-08-shell-slot-and-drop-leaks.md). *)
+        let tir = March_tir.Drop.run ~k_table ~borrow_map tir in
+        (* Drop.run also makes a release for every actor and closure type of
+           the program, which nothing in a fragment calls (more than 80 of a
+           100-function fragment); the native build prunes them the same way. *)
+        let prune roots =
+          let m = March_tir.Dce.prune_unreachable
+              { tir with March_tir.Tir.tm_exports = tir.March_tir.Tir.tm_exports @ roots } in
+          { m with March_tir.Tir.tm_exports = tir.March_tir.Tir.tm_exports } in
+        let slot_roots = match slot_drop with Some (d, _) -> [ d ] | None -> [] in
+        (* ...keeping the releases the fragment registers for the closures
+           and actors it allocates (Llvm_repl.emit_repl_expr ~register_drops). *)
+        let registered =
+          List.sort_uniq String.compare
+            (List.map snd (March_tir.Llvm_toplevel.closure_drop_wants (prune slot_roots))) in
+        let tir = prune (slot_roots @ registered) in
         March_tir.Escape.escape_analysis ~k_table tir) in
     let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
         f.fn_name = shell_entry_fn) tir.March_tir.Tir.tm_fns with
@@ -2114,6 +2163,9 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
           ~prev_slots:(prev_slots_of ctx)
           ~fns ~extern_fns:linked
           ~store_as_slot:store_as
+          ~borrow_slots:true
+          ~register_drops:true
+          ?slot_drop_fn:(Option.map fst slot_drop)
           ~session_wraps:sw
           (* The program's types, in the node build's order: [combined] is
              lowered from the same declarations in the same order (colliding
