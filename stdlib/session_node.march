@@ -2253,7 +2253,7 @@ mod SessionNode do
   pfn find_peers(node : Cap(ClusterNode.Live), session : String, peers : List(Int), left : Int,
                  abandoned : Int -> Bool) : Result(List((Int, GlobalPid.Pid)), Int) do
     let found = List.map(peers, fn r -> (r, ClusterNode.lookup(node, role_name(session, r))))
-    match List.find(found, fn rp -> match rp do (_r, o) -> o == None end) do
+    match List.find(found, fn rp -> match rp do (_r, o) -> Option.is_none(o) end) do
       None ->
         Ok(List.filter_map(found, fn rp ->
           match rp do
@@ -2275,7 +2275,7 @@ mod SessionNode do
       : Result(List(Link), Int) do
     let qs = List.map(found, fn rg ->
       match rg do (r, g) -> (r, g, ClusterNode.session_queue_for(node, g.node_id)) end)
-    match List.find(qs, fn t -> match t do (_r, _g, q) -> q == None end) do
+    match List.find(qs, fn t -> match t do (_r, _g, q) -> Option.is_none(q) end) do
       None ->
         Ok(List.filter_map(qs, fn t ->
           match t do
@@ -2983,7 +2983,7 @@ mod SessionNode do
       if skipped == 0 do ""
       else int_to_string(skipped) ++ " offer(s) at a protocol version this one cannot form a session with were not invited" end
     let linked = List.filter(found, fn c -> match c do (g, _, _) ->
-      List.member(used, g.node_id) == false && ClusterNode.session_queue_for(node, g.node_id) != None end)
+      List.member(used, g.node_id) == false && Option.is_some(ClusterNode.session_queue_for(node, g.node_id)) end)
     let rname = SessionAP.role_name(names, role)
     let denied = List.filter_map(linked, fn c -> match c do (g, _, _) ->
       match ClusterNode.authorize_peer(node, g.node_id, proto, rname, SessionAP.offer_mode()) do

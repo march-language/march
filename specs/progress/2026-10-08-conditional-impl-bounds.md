@@ -19,3 +19,8 @@ Validation: all 226 typechecker tests pass with the expanding-bound guard,
 including the three focused conditional-bound cases.
 The native Diagnose fixture also typechecks. Tuple `Ord` remains open in
 [the original TODO](../todos/2026-10-06-tuple-ord.md).
+
+SessionNode's three payload-independent presence checks now use
+`Option.is_none` / `Option.is_some`, avoiding an unnecessary `Eq` requirement
+for process and queue handles. Its focused entry-module check is clean,
+as is ClusterNode's.
