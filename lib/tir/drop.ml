@@ -935,8 +935,19 @@ let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
       note n false; scan k e2
     | Tir.EStackAlloc (Tir.TCon (n, _), _) when Tir_names.is_clo_struct n ->
       note n false
-    | Tir.EAlloc (Tir.TCon (n, _), _) when Tir_names.is_clo_struct n ->
-      (* Do NOT reach this arm from an ELet by descending into the allocation
+    | (Tir.EAlloc (Tir.TCon (n, _), _) | Tir.EReuse (_, Tir.TCon (n, _), _))
+      when Tir_names.is_clo_struct n ->
+      (* An [EReuse] of a closure struct is the same allocation after FBIP
+         recycled a dying cell for it (Map.node_fold's [go] reuses the
+         [HBranch] it destructured).  Perceus placed its RC ops while it was
+         still an [EAlloc], judging it with this same [closure_escapes], so it
+         is judged the same here.  Without this arm the type had no noted
+         allocation site, was never owning, and its environment's death
+         released nothing it held: every [Map.fold] with a capturing closure
+         leaked that closure (one per fold; ClusterNode.collect_tombstones,
+         twice per cluster session;
+         specs/progress/2026-10-07-reused-closure-captures-leak.md).
+         Do NOT reach this arm from an ELet by descending into the allocation
          with the wrong context: that is how the first version latched EVERY
          closure type to false and silently turned the pass off.  The ELet arm
          passes [`Bound], which is the judgement it used to make inline. *)
@@ -1036,14 +1047,35 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
     | op :: rest -> Tir.ESeq (op, chain rest)
   in
   (* [incs] is the run of [inc_rc x] statements IMMEDIATELY before the node
-     being visited (reset by anything else), as a list of variable names with
-     one entry per inc.  See the tail-call case below. *)
+     being visited (reset by anything else but a release of an unrelated
+     variable, [releases_other]), as a list of variable names with one entry
+     per inc.  See the tail-call case below. *)
+  let is_capture n = List.exists (fun (c : Tir.var) -> String.equal c.Tir.v_name n) !captures in
+  let releases_other (incs : string list) (e : Tir.expr) : bool =
+    let unrelated n = not (is_capture n) && not (List.mem n incs) && not (String.equal n clo) in
+    incs <> [] &&
+    (match e with
+     | Tir.EDecRC (Tir.AVar x) | Tir.EAtomicDecRC (Tir.AVar x) | Tir.EFree (Tir.AVar x) ->
+       unrelated x.Tir.v_name
+     | Tir.EApp (f, [ Tir.AVar x ]) ->
+       String.starts_with ~prefix:Tir_names.drop_fn_prefix f.Tir.v_name
+       && unrelated x.Tir.v_name
+     | _ -> false)
+  in
   let rec push ?(incs : string list = []) (freed : Tir.var) (e : Tir.expr)
     : Tir.expr =
     match e with
     | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, push freed e2)
     | Tir.ESeq ((Tir.EIncRC (Tir.AVar v) as e1), e2) ->
       Tir.ESeq (e1, push ~incs:(v.Tir.v_name :: incs) freed e2)
+    (* A release of some OTHER variable between those incs and the tail (the
+       owned-aggregate parameter drop [Perceus] places right before a tail:
+       `fn (_p, s) -> body(s)` releases [_p] there) does not touch the
+       captures, so the run of incs it interrupts still covers the call.
+       Resetting on it left SessionNode.run_cluster_with's role closure
+       leaking the role function it captured, once per cluster session
+       (specs/progress/2026-10-07-reused-closure-captures-leak.md). *)
+    | Tir.ESeq (e1, e2) when releases_other incs e1 -> Tir.ESeq (e1, push ~incs freed e2)
     | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push freed e2)
     | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push freed inner)
     | Tir.ECase (a, branches, default) ->

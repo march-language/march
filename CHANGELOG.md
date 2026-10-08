@@ -417,6 +417,10 @@ git log is authoritative for exact commits.
   leaked a reference to each of them, so neither actor's memory was ever freed, even
   after both had died. The cluster node monitors every registered name's holder, so this
   cost two actor records per cluster session.
+- **`Map.fold` with a closure that captures a value no longer leaks the closure.** Every
+  such fold leaked one closure, and so did a closure that tail-called another closure it
+  had captured after dropping an argument of its own. Cluster nodes did both on every
+  session.
 
 - **A cached build prints the same warnings as the build that produced it.**
   A `--compile` that succeeded with warnings or hints used to print only

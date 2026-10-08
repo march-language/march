@@ -12480,6 +12480,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/monitor_releases_actors.expected native_monitor_releases_actors.out)))
 
+; ── A closure whose cell FBIP reused still releases its captures (2026-10-07).
+; RED before: every Map.fold with a capturing closure leaked the closure.
+(rule
+ (targets native_reused_closure_captures native_reused_closure_captures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/reused_closure_captures.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_reused_closure_captures
+        native/reused_closure_captures.march)
+   (with-stdout-to native_reused_closure_captures.out
+        (system "./native_reused_closure_captures")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/reused_closure_captures.expected native_reused_closure_captures.out)))
+
 ; ── A dead actor's record and state are released (2026-10-06): under 5
 ; objects left over 50 actors (RED before: the killed actor's List state, and
 ; the record itself once Actor.call had been used on it).
