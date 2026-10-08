@@ -29,3 +29,8 @@ The full stdlib internal-error ratchet also exposed payload-independent
 emptiness checks in Control, Topology and NetKernel. Those now use
 `List.is_empty` / `Option.is_some`. The ratchet passes with its unchanged
 four pre-existing unknown-constructor errors; no error count was raised.
+
+CI's heterogeneous Config-key fixture also compared a `Result` with a
+non-`Eq` error payload to `Ok`. Its assertion now matches the variants and
+compares only the success String, preserving the original test without
+requiring equality for `Config.Error`.
