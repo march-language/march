@@ -154,6 +154,55 @@ fn stream(a : Acc, xs : List(Int)) : Int do
 end|} {|  println(int_to_string(stream(acc_new(), [1, 2])))|})
     [ "to `Task.async_stream`" ]
 
+let test_closure_captured_by_parallel_lambda () =
+  (* `h` captures `g` and runs it through List.pmap: after Defun, `g` is a
+     free variable of h's apply function ($clo.$fv1), so allocating `h` is
+     itself a parallel use of `g`. *)
+  rejects "closure captured by a parallel lambda"
+    (program {|
+fn nest(a : Acc, xs : List(Int)) : List(Int) do
+  let g = fn x -> push(a, x)
+  let h = fn ys -> List.pmap(ys, g)
+  h(xs)
+end|} {|  println(int_to_string(List.length(nest(acc_new(), [1]))))|})
+    [ "`nest` passes a closure that captures `a` to `List.pmap`" ]
+
+let test_alias () =
+  rejects "alias"
+    (program {|
+fn aliased(a : Acc, xs : List(Int)) : List(Int) do
+  let g = fn x -> push(a, x)
+  let k = g
+  List.pmap(xs, k)
+end|} {|  println(int_to_string(List.length(aliased(acc_new(), [1]))))|})
+    [ "`aliased` passes a closure that captures `a` to `List.pmap`" ]
+
+let test_param_shadowing_a_top_level_name () =
+  (* Top-level names are skipped as captures (they are code), but a parameter
+     named like one is a value. *)
+  rejects "parameter shadowing a top-level fn"
+    (program {|
+fn handle() : Acc do
+  acc_new()
+end
+fn shadow(handle : Acc, xs : List(Int)) : List(Int) do
+  List.pmap(xs, fn x -> push(handle, x))
+end|} {|  println(int_to_string(List.length(shadow(handle(), [1]))))|})
+    [ "captures `handle` to `List.pmap`" ]
+
+let test_specialised_over_a_nested_type () =
+  (* The combinator call is specialised as List.pmap$<types>, and a nested
+     module type puts a dot in that suffix: seeds match on the whole name. *)
+  rejects "specialised over a nested-module type"
+    (program {|
+mod Inner do
+  type Rec = Rec(Int)
+end
+fn dotted(a : Acc, rs : List(Inner.Rec)) : List(Int) do
+  List.pmap(rs, fn r -> match r do Inner.Rec(n) -> push(a, n) end)
+end|} {|  println(int_to_string(List.length(dotted(acc_new(), [Inner.Rec(1)]))))|})
+    [ "`dotted` passes a closure that captures `a` to `List.pmap`" ]
+
 (* ── Accepted ────────────────────────────────────────────────────────── *)
 
 let test_handle_created_inside_closure () =
@@ -210,6 +259,10 @@ let tests = [
   Alcotest.test_case "reject: through a captured closure"       `Quick test_through_captured_closure;
   Alcotest.test_case "reject: generic instance at a resource"   `Quick test_generic_instantiated_with_resource;
   Alcotest.test_case "reject: Task.async_stream"                `Quick test_task_async_stream;
+  Alcotest.test_case "reject: closure captured by a parallel lambda" `Quick test_closure_captured_by_parallel_lambda;
+  Alcotest.test_case "reject: through an alias"                 `Quick test_alias;
+  Alcotest.test_case "reject: param shadowing a top-level fn"   `Quick test_param_shadowing_a_top_level_name;
+  Alcotest.test_case "reject: specialised over a nested type"   `Quick test_specialised_over_a_nested_type;
   Alcotest.test_case "accept: handle created per task"          `Quick test_handle_created_inside_closure;
   Alcotest.test_case "accept: zero-arg extern is not a capture" `Quick test_zero_arg_extern_is_not_a_capture;
   Alcotest.test_case "accept: sequential map may capture"       `Quick test_sequential_map_may_capture;

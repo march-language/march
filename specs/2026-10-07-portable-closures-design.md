@@ -79,10 +79,13 @@ Errors are reported at the enclosing named function (a lambda's closure is
 traced back to the function that allocates it), naming the captured variable,
 its type, and the combinator.
 
-## Known gap
+## Known gaps
 
 A closure that reaches a parallel position through a data structure (stored
-in a record, read back, then passed) is not traced.
+in a record, read back, then passed), returned from a call, or chosen by an
+`if`/`match` is not traced. `--check` and the LSP lower only when the ENTRY
+module declares a `resource`; a resource declared in a `MARCH_LIB_PATH`
+dependency is checked by `--compile` but not by `--check`.
 
 ## Implementation notes (2026-10-07)
 
@@ -95,9 +98,21 @@ in a record, read back, then passed) is not traced.
   zero-argument one is typed by its result in TIR (`acc_new : Acc`), so the
   type alone would flag `fn x -> finish(acc_new())`, the very fix the
   diagnostic recommends.
-- Tests: `test/test_portable.ml` (7 rejects, 4 accepts; the accepts run
+- Slots are `Param j` or `Cap k`: a lifted lambda reads its captures as
+  `$clo.$fvK`, so a lambda that passes a captured closure to a parallel
+  position makes its allocation (`alloc $Clo(apply, c1, …)`) a parallel use of
+  `cK`. Aliases (`let k = g`) are followed.
+- The top-level-name skip applies only to names the function does not bind
+  itself, so a parameter `handle : Acc` shadowing a top-level `handle()` is
+  still a capture.
+- Combinators are matched on the whole callee name (`List.pmap` or
+  `List.pmap$…`), not through `strip_specialization_suffix`, whose
+  last-dot rule a dotted type suffix could defeat.
+- Tests: `test/test_portable.ml` (11 rejects, 4 accepts; the accepts run
   compiled and interpreted) and `resource_free` in `test/test_kind.ml`. With
-  the check disabled, all 7 rejects fail.
+  the check disabled, the original 7 rejects fail; the first version of the
+  pass missed the nested-lambda, alias and shadowing cases (a review found
+  them).
 - An extern referenced from inside a lambda does not link in native builds
   (undefined `@acc_push`), on main too; the accept tests call externs through
   March wrappers until that is fixed.

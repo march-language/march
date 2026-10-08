@@ -24,11 +24,20 @@ Item 3 of the OxCaml review. Design: `specs/2026-10-07-portable-closures-design.
 
 - `test/test_portable.ml` (`run_compiler`, group `portable_closures`): direct,
   through data, through a wrapper, inside a lambda, through a captured
-  closure, a generic instance, `Task.async_stream` are rejected; a per-task
-  handle, a zero-argument extern, sequential `List.map`, and `task_spawn` are
-  accepted, run compiled and interpreted. Disabling the check turns all 7
-  rejects red.
+  closure, a generic instance, `Task.async_stream`, a closure captured by a
+  lambda that runs it in parallel, an alias, a parameter shadowing a
+  top-level function, and a combinator specialised over a nested-module type
+  are rejected; a per-task handle, a zero-argument extern, sequential
+  `List.map`, and `task_spawn` are accepted, run compiled and interpreted.
+  Disabling the check turns the rejects red; the pass's first version missed
+  the nested-lambda, alias and shadowing cases.
 - `test/test_kind.ml`: `resource_free`.
+
+## Known gaps
+
+A closure reaching a parallel position through a data structure, a call's
+result, or an `if`/`match` is not traced; `--check` gates on a `resource` in
+the entry module only. See the design doc.
 
 ## Found on the way
 

@@ -27,8 +27,9 @@
       [List.pmap_n(urls, fn u -> http_get(u), 8)].
     - Compiled programs, [--check] and the LSP.  The interpreter runs tasks
       eagerly on one thread, so the hazard does not exist there.
-    Known gap: a closure that reaches a parallel position through a data
-    structure (stored in a record, read back, then passed) is not traced. *)
+    Known gaps: a closure that reaches a parallel position through a data
+    structure (stored in a record, read back, then passed), returned from a
+    call, or chosen by an [if]/[match] is not traced. *)
 
 module SMap = Map.Make (String)
 module SSet = Set.Make (String)
@@ -62,33 +63,85 @@ let is_closure_ty = function
   | Tir.TCon (n, _) -> Tir_names.is_clo_struct n
   | _ -> false
 
-(* ── Local closure allocations ──────────────────────────────────────────── *)
+(** The combinator a call targets, matched on the whole name: [List.pmap] or
+    a specialisation [List.pmap$<types>].  Not [Tir_names.strip_specialization_suffix],
+    which looks for the [$] after the LAST dot, and a type suffix such as
+    [List_Inner.Rec] has dots of its own. *)
+let seed_of (callee : string) : (string * int list) option =
+  List.find_opt (fun (s, _) ->
+      String.equal callee s || String.starts_with ~prefix:(s ^ "$") callee)
+    seeds
 
-(** Inside one function body: variable name -> the capture atoms of the
-    closure allocation it is bound to (the first [EAlloc] argument is the
-    apply function and is dropped). *)
-let local_closures (body : Tir.expr) : Tir.atom list SMap.t =
-  let rec go acc (e : Tir.expr) =
+let display (callee : string) : string =
+  match seed_of callee with Some (s, _) -> s | None -> base callee
+
+(** Where a function receives a closure it may run in parallel: a parameter,
+    or, for a lifted lambda's apply function, a captured free variable
+    ([$clo.$fvK] is capture K of the closure allocation, counting from 1). *)
+type slot = Param of int | Cap of int
+
+(* ── Function-local facts ───────────────────────────────────────────────── *)
+
+type locals = {
+  closures : Tir.atom list SMap.t;
+  (** v -> the capture atoms of the closure allocation bound to v (the apply
+      function dropped); an alias [let k = g] maps k -> [g]. *)
+  fv : int SMap.t;          (** v -> K when bound by [let v = $clo.$fvK] *)
+  bound : SSet.t;           (** every name the function binds *)
+}
+
+let rec strip_seq = function Tir.ESeq (_, e) -> strip_seq e | e -> e
+
+let locals_of (fn : Tir.fn_def) : locals =
+  let closures = ref SMap.empty and fv = ref SMap.empty in
+  let bound = ref (SSet.of_list (List.map (fun (p : Tir.var) -> p.Tir.v_name) fn.Tir.fn_params)) in
+  let bind n = bound := SSet.add n !bound in
+  let rec go (e : Tir.expr) =
     match e with
-    | Tir.ELet (v, (Tir.EAlloc (Tir.TCon (n, _), _ :: caps)), rest)
-      when Tir_names.is_clo_struct n ->
-      go (SMap.add v.Tir.v_name caps acc) rest
-    | Tir.ELet (_, rhs, rest) -> go (go acc rhs) rest
+    | Tir.ELet (v, rhs, rest) ->
+      bind v.Tir.v_name;
+      (match strip_seq rhs with
+       | Tir.EAlloc (Tir.TCon (n, _), _ :: caps) when Tir_names.is_clo_struct n ->
+         closures := SMap.add v.Tir.v_name caps !closures
+       | Tir.EAtom (Tir.AVar _ as a) -> closures := SMap.add v.Tir.v_name [ a ] !closures
+       | Tir.EField (_, f) when Tir_names.is_fv_field f ->
+         fv := SMap.add v.Tir.v_name (Tir_names.fv_field_index f) !fv
+       | _ -> ());
+      go rhs; go rest
     | Tir.ECase (_, brs, def) ->
-      let acc = List.fold_left (fun a (b : Tir.branch) -> go a b.Tir.br_body) acc brs in
-      (match def with Some d -> go acc d | None -> acc)
+      List.iter (fun (b : Tir.branch) ->
+          List.iter (fun (v : Tir.var) -> bind v.Tir.v_name) b.Tir.br_vars;
+          go b.Tir.br_body)
+        brs;
+      Option.iter go def
     | Tir.ELetRec (fns, rest) ->
-      go (List.fold_left (fun a (f : Tir.fn_def) -> go a f.Tir.fn_body) acc fns) rest
-    | Tir.ESeq (a, b) -> go (go acc a) b
-    | _ -> acc
+      List.iter (fun (f : Tir.fn_def) ->
+          bind f.Tir.fn_name;
+          List.iter (fun (p : Tir.var) -> bind p.Tir.v_name) f.Tir.fn_params;
+          go f.Tir.fn_body)
+        fns;
+      go rest
+    | Tir.ESeq (a, b) -> go a; go b
+    | _ -> ()
   in
-  go SMap.empty body
+  go fn.Tir.fn_body;
+  { closures = !closures; fv = !fv; bound = !bound }
 
-(** Every call in [body], with its argument atoms. *)
-let calls (body : Tir.expr) : (string * Tir.atom list) list =
+(** Every place [body] hands an atom to a (function, slot): the arguments of
+    a call, and the captures of a closure allocation ([alloc $Clo(apply, c1,
+    …)] hands cK to [apply]'s [Cap K]). *)
+let uses (body : Tir.expr) : (string * slot * Tir.atom) list =
   let rec go acc (e : Tir.expr) =
     match e with
-    | Tir.EApp (f, args) -> (f.Tir.v_name, args) :: acc
+    | Tir.EApp (f, args) ->
+      List.rev_append (List.mapi (fun j a -> (f.Tir.v_name, Param j, a)) args) acc
+    | Tir.EAlloc (Tir.TCon (n, _), apply :: caps) when Tir_names.is_clo_struct n ->
+      (match apply with
+       | Tir.ADefRef d ->
+         List.rev_append (List.mapi (fun k a -> (d.Tir.did_name, Cap (k + 1), a)) caps) acc
+       | Tir.AVar v ->
+         List.rev_append (List.mapi (fun k a -> (v.Tir.v_name, Cap (k + 1), a)) caps) acc
+       | _ -> acc)
     | Tir.ELet (_, rhs, rest) -> go (go acc rhs) rest
     | Tir.ECase (_, brs, def) ->
       let acc = List.fold_left (fun a (b : Tir.branch) -> go a b.Tir.br_body) acc brs in
@@ -100,9 +153,10 @@ let calls (body : Tir.expr) : (string * Tir.atom list) list =
   in
   List.rev (go [] body)
 
-(** The closure-typed parameters of [fn] that an atom reaches, directly or as
-    a capture (transitively) of a locally allocated closure. *)
-let params_reached (fn : Tir.fn_def) (locals : Tir.atom list SMap.t) (a : Tir.atom) : int list =
+(** The slots of [fn] that an atom reaches: a closure-typed parameter or
+    captured free variable, directly, through an alias, or as a capture
+    (transitively) of a locally allocated closure. *)
+let slots_reached (fn : Tir.fn_def) (l : locals) (a : Tir.atom) : slot list =
   let index = List.mapi (fun i (p : Tir.var) -> (p.Tir.v_name, i)) fn.Tir.fn_params in
   let rec go seen acc = function
     | Tir.AVar v ->
@@ -110,50 +164,58 @@ let params_reached (fn : Tir.fn_def) (locals : Tir.atom list SMap.t) (a : Tir.at
       if SSet.mem n seen then acc
       else
         let seen = SSet.add n seen in
+        let closure = is_closure_ty v.Tir.v_ty in
         let acc = match List.assoc_opt n index with
-          | Some i when is_closure_ty v.Tir.v_ty -> i :: acc
+          | Some i when closure -> Param i :: acc
           | _ -> acc in
-        (match SMap.find_opt n locals with
+        let acc = match SMap.find_opt n l.fv with
+          | Some k when closure -> Cap k :: acc
+          | _ -> acc in
+        (match SMap.find_opt n l.closures with
          | Some caps -> List.fold_left (go seen) acc caps
          | None -> acc)
     | _ -> acc
   in
   List.sort_uniq compare (go SSet.empty [] a)
 
-(* ── Which (function, parameter) pairs are parallel ─────────────────────── *)
+(* ── Which (function, slot) pairs are parallel ──────────────────────────── *)
 
-(** Fixpoint: a function parameter is a parallel position when the function
-    passes it (or a closure capturing it) to a parallel position. *)
-let parallel_positions (m : Tir.tir_module) : (string * int, position) Hashtbl.t =
-  let pos : (string * int, position) Hashtbl.t = Hashtbl.create 64 in
-  let lookup callee j =
-    match Hashtbl.find_opt pos (callee, j) with
-    | Some p -> Some p
-    | None ->
-      (match List.assoc_opt (base callee) seeds with
-       | Some js when List.mem j js -> Some { via = None; combinator = base callee }
-       | _ -> None)
-  in
+type fn_facts = { f_fn : Tir.fn_def; f_locals : locals; f_uses : (string * slot * Tir.atom) list }
+
+let facts (m : Tir.tir_module) : fn_facts list =
+  List.map (fun (fn : Tir.fn_def) ->
+      { f_fn = fn; f_locals = locals_of fn; f_uses = uses fn.Tir.fn_body })
+    m.Tir.tm_fns
+
+let lookup pos callee slot =
+  match Hashtbl.find_opt pos (callee, slot) with
+  | Some p -> Some p
+  | None ->
+    (match slot, seed_of callee with
+     | Param j, Some (s, js) when List.mem j js -> Some { via = None; combinator = s }
+     | _ -> None)
+
+(** Fixpoint: a slot of a function is parallel when the function hands it (or
+    a closure capturing it) to a parallel slot. *)
+let parallel_positions (fs : fn_facts list) : (string * slot, position) Hashtbl.t =
+  let pos : (string * slot, position) Hashtbl.t = Hashtbl.create 64 in
   let changed = ref true in
   while !changed do
     changed := false;
-    List.iter (fun (fn : Tir.fn_def) ->
-        let locals = local_closures fn.Tir.fn_body in
-        List.iter (fun (callee, args) ->
-            List.iteri (fun j a ->
-                match lookup callee j with
-                | None -> ()
-                | Some p ->
-                  List.iter (fun i ->
-                      if not (Hashtbl.mem pos (fn.Tir.fn_name, i)) then begin
-                        Hashtbl.replace pos (fn.Tir.fn_name, i)
-                          { via = Some (base callee); combinator = p.combinator };
-                        changed := true
-                      end)
-                    (params_reached fn locals a))
-              args)
-          (calls fn.Tir.fn_body))
-      m.Tir.tm_fns
+    List.iter (fun f ->
+        List.iter (fun (callee, slot, a) ->
+            match lookup pos callee slot with
+            | None -> ()
+            | Some p ->
+              List.iter (fun s ->
+                  let key = (f.f_fn.Tir.fn_name, s) in
+                  if not (Hashtbl.mem pos key) then begin
+                    Hashtbl.replace pos key { via = Some (display callee); combinator = p.combinator };
+                    changed := true
+                  end)
+                (slots_reached f.f_fn f.f_locals a))
+          f.f_uses)
+      fs
   done;
   pos
 
@@ -167,22 +229,24 @@ type violation = {
   v_capture_ty : Tir.ty;
 }
 
-(** Resource-carrying captures of the closure an atom denotes (through nested
-    closure allocations in the same function).  A top-level function or
-    extern named in a capture slot is code, not a value the closure holds;
-    a zero-argument one is typed by its result (`acc_new : Acc`), so it must
-    be skipped by name, not by type. *)
-let resource_captures k_table globals locals (a : Tir.atom) : (string * Tir.ty) list =
+(** Resource-carrying captures of the closure an atom denotes (through
+    aliases and nested closure allocations in the same function).  A
+    top-level function or extern named in a capture slot is code, not a value
+    the closure holds; a zero-argument one is typed by its result
+    (`acc_new : Acc`), so it is skipped by name, but only when the function
+    does not bind that name itself (a parameter `handle : Acc` shadowing a
+    top-level `handle()` is a value). *)
+let resource_captures k_table globals (l : locals) (a : Tir.atom) : (string * Tir.ty) list =
   let rec go seen acc = function
     | Tir.AVar v ->
       let n = v.Tir.v_name in
       if SSet.mem n seen then acc
       else
         let seen = SSet.add n seen in
-        (match SMap.find_opt n locals with
+        (match SMap.find_opt n l.closures with
          | Some caps -> List.fold_left (go seen) acc caps
          | None ->
-           if SSet.mem n globals
+           if (SSet.mem n globals && not (SSet.mem n l.bound))
            || (Kind.of_ty k_table v.Tir.v_ty).Kind.resource_free then acc
            else (n, v.Tir.v_ty) :: acc)
     | _ -> acc
@@ -190,33 +254,28 @@ let resource_captures k_table globals locals (a : Tir.atom) : (string * Tir.ty) 
   List.rev (go SSet.empty [] a)
 
 let violations ~(k_table : Kind.table) (m : Tir.tir_module) : violation list =
-  let pos = parallel_positions m in
-  let lookup callee j =
-    match Hashtbl.find_opt pos (callee, j) with
-    | Some p -> Some p
-    | None ->
-      (match List.assoc_opt (base callee) seeds with
-       | Some js when List.mem j js -> Some { via = None; combinator = base callee }
-       | _ -> None)
-  in
+  let fs = facts m in
+  let pos = parallel_positions fs in
   let globals =
     SSet.of_list
       (List.map (fun (f : Tir.fn_def) -> f.Tir.fn_name) m.Tir.tm_fns
        @ List.map (fun (e : Tir.extern_decl) -> e.Tir.ed_march_name) m.Tir.tm_externs) in
-  List.concat_map (fun (fn : Tir.fn_def) ->
-      let locals = local_closures fn.Tir.fn_body in
-      List.concat_map (fun (callee, args) ->
-          List.concat (List.mapi (fun j a ->
-              match lookup callee j, a with
-              | Some p, Tir.AVar v when SMap.mem v.Tir.v_name locals ->
-                List.map (fun (c, ty) ->
-                    { v_fn = fn.Tir.fn_name; v_callee = base callee; v_position = p;
-                      v_capture = c; v_capture_ty = ty })
-                  (resource_captures k_table globals locals a)
-              | _ -> [])
-              args))
-        (calls fn.Tir.fn_body))
-    m.Tir.tm_fns
+  List.concat_map (fun f ->
+      List.concat_map (fun (callee, slot, a) ->
+          match lookup pos callee slot, a with
+          | Some p, Tir.AVar v when SMap.mem v.Tir.v_name f.f_locals.closures ->
+            (* A closure captured by a lambda that runs it in parallel: say
+               where it ends up, not the lambda's lifted name. *)
+            let callee, p = match slot with
+              | Param _ -> display callee, p
+              | Cap _ -> p.combinator, { p with via = None } in
+            List.map (fun (c, ty) ->
+                { v_fn = f.f_fn.Tir.fn_name; v_callee = callee; v_position = p;
+                  v_capture = c; v_capture_ty = ty })
+              (resource_captures k_table globals f.f_locals a)
+          | _ -> [])
+        f.f_uses)
+    fs
 
 (* ── Naming what was captured ─────────────────────────────────────────── *)
 
@@ -291,14 +350,16 @@ let lambda_parents (m : Tir.tir_module) : string SMap.t =
   List.fold_left (fun acc (fn : Tir.fn_def) ->
       let rec go acc (e : Tir.expr) =
         match e with
-        | Tir.ELet (_, Tir.EAlloc (Tir.TCon (n, _), Tir.ADefRef d :: _), rest)
-          when Tir_names.is_clo_struct n -> go (SMap.add d.Tir.did_name fn.Tir.fn_name acc) rest
-        | Tir.ELet (_, Tir.EAlloc (Tir.TCon (n, _), Tir.AVar d :: _), rest)
-          when Tir_names.is_clo_struct n -> go (SMap.add d.Tir.v_name fn.Tir.fn_name acc) rest
+        | Tir.EAlloc (Tir.TCon (n, _), Tir.ADefRef d :: _) when Tir_names.is_clo_struct n ->
+          SMap.add d.Tir.did_name fn.Tir.fn_name acc
+        | Tir.EAlloc (Tir.TCon (n, _), Tir.AVar d :: _) when Tir_names.is_clo_struct n ->
+          SMap.add d.Tir.v_name fn.Tir.fn_name acc
         | Tir.ELet (_, rhs, rest) -> go (go acc rhs) rest
         | Tir.ECase (_, brs, def) ->
           let acc = List.fold_left (fun a (b : Tir.branch) -> go a b.Tir.br_body) acc brs in
           (match def with Some d -> go acc d | None -> acc)
+        | Tir.ELetRec (fns, rest) ->
+          go (List.fold_left (fun a (f : Tir.fn_def) -> go a f.Tir.fn_body) acc fns) rest
         | Tir.ESeq (a, b) -> go (go acc a) b
         | _ -> acc
       in
