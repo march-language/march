@@ -2564,7 +2564,7 @@ let compile filename =
                   (files_in walked) in
               write_loadset ~path:ls_path ~walked ~listed ~unlisted)
       in
-      let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
+      let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) () in
       (* A warnings-only build (an @[no_alloc(warn)] contract, an unused
          binding, ...) used to lose its warnings on a warm cache, and the
          `no_alloc` case was patched by refusing the early exit whenever the
@@ -3901,7 +3901,7 @@ let compile filename =
         end else begin
         (* CAS: check for a cached binary before running clang *)
         let target_label = cas_target_label target in
-        let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
+        let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) () in
         let h_sccs = March_cas.Pipeline.hash_module tir in
         (* Its own stamp so --timings does not fold the SCC build + Merkle
            hashing into the next stamp (llvm-emit, or nothing on a cache hit). *)

@@ -120,12 +120,16 @@ let decode_hashed_def (s : string) : hashed_def option =
 
 (* ── Public API ─────────────────────────────────────────────────────────── *)
 
-let create ~project_root =
+(* [~use_global:false] gives a store with NO global root: nothing is written
+   through to ~/.march/cas and a local miss never consults it. For tests that
+   store synthetic artifacts, which would otherwise outlive the test in the
+   shared global store and turn every later run's first-pass miss into a hit. *)
+let create ?(use_global = true) ~project_root () =
   let local_root = project_root ^ "/.march/cas" in
   mkdir_p (local_root ^ "/objects");
   mkdir_p (local_root ^ "/artifacts");
   let global_root =
-    match Sys.getenv_opt "HOME" with
+    match (if use_global then Sys.getenv_opt "HOME" else None) with
     | Some h ->
       let g = h ^ "/.march/cas" in
       (try mkdir_p (g ^ "/objects"); mkdir_p (g ^ "/artifacts"); Some g

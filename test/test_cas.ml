@@ -197,7 +197,7 @@ let with_tmpdir f =
 
 let test_cas_store_and_lookup_def () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd : fn_def = {
     fn_name   = "id";
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
@@ -217,13 +217,13 @@ let test_cas_store_and_lookup_def () =
 
 let test_cas_lookup_miss_returns_none () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let result = March_cas.Cas.lookup_def store (String.make 64 'a') in
   Alcotest.(check bool) "unknown hash returns None" true (Option.is_none result)
 
 let test_cas_name_index () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let def_id = { March_cas.Cas.did_name = "List.map"; did_hash = String.make 64 'b' } in
   March_cas.Cas.update_index store [("List.map", def_id)];
   let result = March_cas.Cas.lookup_name store "List.map" in
@@ -244,7 +244,7 @@ let read_file_str path =
 
 let test_cas_store_artifact_and_lookup () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let ch = March_cas.Cas.compilation_hash (String.make 64 'c')
              ~target:"aarch64-darwin" ~flags:["-O2"] in
   (* An artifact must be real: the store copies its CONTENT into the cache. *)
@@ -276,7 +276,7 @@ let test_cas_store_artifact_and_lookup () =
     verification loops in this repo), so this was reachable in normal use. *)
 let test_cas_artifact_survives_source_overwrite () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let ch_a = March_cas.Cas.compilation_hash (String.make 64 'a')
                ~target:"aarch64-darwin" ~flags:["-O2"] in
   let shared = Filename.concat root "shared_out.bin" in
@@ -452,7 +452,7 @@ let test_cas_compilation_hash_differs_by_target () =
 
 let test_cas_gc_removes_unreferenced () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd : fn_def = {
     fn_name   = "foo";
     fn_params = [];
@@ -666,7 +666,7 @@ let test_hash_module_independent_fns_two_sccs () =
 let test_compile_scc_cache_miss_calls_compiler () =
   (* First call: cache miss → compiler is invoked exactly once *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 42) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
@@ -680,7 +680,7 @@ let test_compile_scc_cache_miss_calls_compiler () =
 let test_compile_scc_cache_hit_skips_compiler () =
   (* Second call with same hash: artifact already cached → compiler not called *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 42) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
@@ -700,7 +700,7 @@ let test_compile_scc_cache_hit_skips_compiler () =
 
 let test_compile_scc_returns_artifact_path () =
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 7) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
@@ -713,7 +713,7 @@ let test_compile_scc_returns_artifact_path () =
 let test_compile_scc_cache_hit_returns_cached_path () =
   (* After cache is warm, returned path is the originally stored path *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 7) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
@@ -734,7 +734,7 @@ let test_compile_scc_cache_hit_returns_cached_path () =
 let test_changed_body_causes_cache_miss () =
   (* Two fns with same name but different bodies → different hashes → both miss *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd1 = make_fn "f" (int_atom 1) in
   let fd2 = make_fn "f" (int_atom 2) in
   let hmod1 = March_cas.Pipeline.hash_module
@@ -754,7 +754,7 @@ let test_changed_body_causes_cache_miss () =
 let test_different_targets_cause_separate_cache_entries () =
   (* Same SCC, different target → different compilation_hash → two misses *)
   with_tmpdir @@ fun root ->
-  let store = March_cas.Cas.create ~project_root:root in
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
   let fd = make_fn "f" (int_atom 5) in
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
