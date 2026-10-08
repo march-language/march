@@ -27,3 +27,6 @@ fix [cap_grant]:
 @@ lines 18-18 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Protocol `Bad`: `stop` outside of a `loop` has no effect — the protocol already ends here if you just write nothing. [protocol_invalid]

@@ -501,8 +501,8 @@ mod List do
 
   -- ---- Searching ----
 
-  doc "Returns the first element satisfying `pred`, or None."
-  fn find(xs : List(a), pred : a -> Bool) : Option(a) do
+  doc "Returns the first element satisfying `pred`, or None. The element, when present, is known to satisfy `pred` (an abstract refinement `p`, as for `filter`)."
+  fn find(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)}) : Option({a | p(_)}) do
     match xs do
     Nil        -> None
     Cons(h, t) -> if pred(h) do Some(h) else find(t, pred) end
@@ -620,16 +620,15 @@ mod List do
       end end
   end
 
-  doc "Returns the longest prefix of elements satisfying `pred`."
-  fn take_while(xs : List(a), pred : a -> Bool) : List(a) do
-    fn go(lst : List(a), acc : List(a)) : List(a) do
-      match lst do
-      Nil        -> reverse(acc)
-      Cons(h, t) ->
-        if pred(h) do go(t, Cons(h, acc)) else reverse(acc) end
-      end
+  doc "Returns the longest prefix of elements satisfying `pred`. Every element of the result is known to satisfy `pred` (an abstract refinement `p`, as for `filter`)."
+  fn take_while(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)}) : List({a | p(_)}) do
+    -- Natural style on purpose: TRMC makes it a single-traversal loop, and
+    -- the element contract is proved through the self-call (an accumulator
+    -- through a local helper and `reverse` proves nothing).
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, take_while(t, pred)) else Nil end
     end
-    go(xs, Nil)
   end
 
   doc "Drops elements while `pred` holds, returning the rest."

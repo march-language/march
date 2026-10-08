@@ -1,0 +1,20 @@
+-- Abstract refinements, phase 3 (specs/plans/2026-10-07-abstract-refinements-phase3-plan.md):
+-- List.find, Option.filter and List.take_while carry their predicate, and
+-- `p` is instantiated from an inline lambda, a named predicate with a proved
+-- `{Bool | _ == …}` return, or a let-bound lambda.  Under `cap verified`,
+-- exit 0 means every demand PROVED.  Reject companion: reject/t311.
+mod AbsStdlib3 do
+  cap verified
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn one_pos(o : Option({Int | _ > 0})) : Int do 0 end
+  fn all_nonempty(ss : List({String | len(_) > 0})) : Int do List.length(ss) end
+  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
+  fn f1(ys : List(Int)) : Int do one_pos(List.find(ys, fn y -> y > 0)) end
+  fn f2(o : Option(Int)) : Int do one_pos(Option.filter(o, is_pos)) end
+  fn f3(ys : List(Int)) : Int do sum_pos(List.take_while(ys, is_pos)) end
+  fn f4(ys : List(Int)) : Int do
+    let keep = fn y -> y > 0
+    sum_pos(List.filter(ys, keep))
+  end
+  fn f5(ss : List(String)) : Int do all_nonempty(List.filter(ss, fn s -> String.byte_size(s) > 0)) end
+end

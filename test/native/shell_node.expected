@@ -1,11 +1,18 @@
 ok: EVAL before HELLO is refused
-ok: HELLO answers the epoch and a slot range
+ok: HELLO answers the epoch, a slot range and a session challenge
+ok: the shell socket is owner-only
 ok: a signed fragment runs: its result comes back
 ok: its println is captured, not printed by the node
 ok: the same line again: replay
+ok: each session gets its own challenge
+ok: a line replayed on another connection: bad_session
+ok: a line signed for another session's challenge: bad_session
 ok: signed by another key: bad_signature
 ok: a cap the policy does not list: policy
-ok: listed in the policy: allowed
+ok: listed in the policy, and the fragment's manifest: allowed
+ok: signed caps the manifest does not list: cap_tamper
+ok: signed caps narrower than the manifest: cap_tamper
+ok: a fragment without a manifest: no_cap_manifest
 ok: a panicking fragment answers PANIC with its message
 ok: with the output it printed first
 ok: a fragment that never returns is cancelled: TIMEOUT
@@ -14,6 +21,7 @@ ok: the node keeps serving after a panic and a timeout
 ok: an entry the fragment does not define: no_entry
 ok: an EVAL for another epoch: epoch_changed
 ok: an unknown field: bad_args
+ok: an unwritable audit log: audit_unavailable, nothing runs
 ok: a fifth concurrent session: busy
 ok: each session owns its own slot range
 ok: every EVAL is audited, in order

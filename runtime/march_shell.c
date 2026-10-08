@@ -9,24 +9,37 @@
  * deploy.  Line protocol, one request line and one reply line:
  *
  *   HELLO
- *     -> OK epoch:<E> slots:<lo>-<hi> triple:<llvm triple>
+ *     -> OK epoch:<E> slots:<lo>-<hi> triple:<llvm triple> session:<hex>
  *        The session attaches at code epoch E and owns the march_repl_set
  *        slots lo..hi (released, values dropped, when the connection closes).
  *        The triple is what the client must compile fragments for: the
  *        operator's machine is often not the node's platform.
- *   EVAL <sig> name:<sym> [kind:value|init] epoch:<E> nonce:<hex> not_after_ms:<t>
+ *   EVAL <sig> name:<sym> [kind:value|init] epoch:<E> session:<hex> nonce:<hex> not_after_ms:<t>
  *        timeout_ms:<t> caps:<csv|-> src_b64:<b64> so_b64:<b64>
  *     -> OK <b64 result> out:<b64> | PANIC <b64 msg> out:<b64>
  *        | TIMEOUT out:<b64> | TIMEOUT uncancellable | ERR <code> [detail]
+ *   IDENT
+ *     -> OK <b64 table> | ERR no_ident
+ *        The build's shell identity (lib/jit/shell_ident.ml): a hash per
+ *        source declaration and each variant type's constructor tags, which
+ *        the client compares with its own source before running an input.
  *   BYE
  *
  * <sig> is the deploy key's signature over the line without its signature
  * word ("EVAL name:… … so_b64:…"), so it covers the fragment's bytes as well
  * as every field.  Checks, in order: a key is compiled in, the fields parse,
- * the signature, the nonce and expiry (march_sig_admit), the session's epoch
+ * the signature, the session (the random challenge this connection's HELLO
+ * returned, so a captured line runs on no other connection, node or
+ * restart: ERR bad_session), the nonce and expiry (march_sig_admit), the
+ * session's epoch
  * is still current, every cap in `caps` is listed in $MARCH_SHELL_POLICY (one
- * cap path per line; no file denies all).  Every attempt is audited with
- * "type":"shell" and the decoded source.
+ * cap path per line; no file denies all), and, once the fragment is loaded,
+ * that its `__march_cap_manifest` (the caps its compiler derived from the
+ * code it emitted) lists exactly the signed caps (ERR cap_tamper, or
+ * ERR no_cap_manifest when it has none).  Every attempt is audited with
+ * "type":"shell" and the decoded source; an input whose audit line cannot
+ * be written does not run (ERR audit_unavailable).  The socket is 0600 from
+ * before listen(), and a peer of another uid (root aside) is dropped. 
  *
  * The fragment's entry `name` is a zero-argument function returning the
  * rendered result String (the client generates it; capabilities are erased
@@ -327,6 +340,25 @@ static int64_t wall_ms(void) {
 
 /* ── policy and audit ────────────────────────────────────────────────── */
 
+/* 1 iff the fragment's own manifest (`__march_cap_manifest`: its caps, sorted,
+ * one per line, as its compiler derived them from the code it emitted) lists
+ * exactly the caps of the signed `caps:` csv ("-" = none), in the same order.
+ * The client sends the manifest's caps; a mismatch means the signed line does
+ * not describe this fragment (a stale or broken client, or an edited line),
+ * and the policy was checked against the wrong set. */
+static int caps_match_manifest(const char *csv, const char *manifest) {
+    if (!csv || strcmp(csv, "-") == 0) csv = "";
+    const char *a = csv, *b = manifest;
+    for (;;) {
+        size_t na = strcspn(a, ","), nb = strcspn(b, "\n");
+        if (na != nb || memcmp(a, b, na) != 0) return 0;
+        if (!a[na] && !b[nb]) return 1;
+        if (!a[na] || !b[nb]) return 0;
+        a += na + 1;
+        b += nb + 1;
+    }
+}
+
 /* 1 iff every cap in [csv] ("-" = none) is a line of $MARCH_SHELL_POLICY;
  * else 0 with the first missing cap in [missing]. */
 static int caps_allowed(const char *csv, char *missing, size_t mlen) {
@@ -387,10 +419,12 @@ static void json_str(FILE *f, const char *s, size_t n) {
     fputc('"', f);
 }
 
-static void audit(const char *name, const char *caps, const char *nonce,
-                  const char *src, size_t src_n, const char *result) {
+/* 1 when the line was written.  A refusal is audited best-effort; an input
+ * about to run is not run unless its line was written (handle_eval). */
+static int audit(const char *name, const char *caps, const char *nonce,
+                 const char *src, size_t src_n, const char *result) {
     FILE *f = march_audit_open();
-    if (!f) return;
+    if (!f) return 0;
     char signer[65];
     march_sig_pubkey_hex(signer);
     fprintf(f, "{\"ts\":%lld,\"type\":\"shell\",\"name\":", (long long)wall_ms());
@@ -402,13 +436,15 @@ static void audit(const char *name, const char *caps, const char *nonce,
     fprintf(f, ",\"signer\":\"%s\",\"src\":", signer);
     json_str(f, src ? src : "", src ? src_n : 0);
     fprintf(f, ",\"result\":\"%s\"}\n", result);
+    int ok = fflush(f) == 0 && !ferror(f);
     march_audit_close(f);
+    return ok;
 }
 
 /* ── EVAL ────────────────────────────────────────────────────────────── */
 
 typedef struct {
-    const char *name, *kind, *nonce, *caps, *src_b64, *so_b64;
+    const char *name, *kind, *nonce, *caps, *src_b64, *so_b64, *session;
     int64_t epoch, not_after_ms, timeout_ms;
 } eval_req;
 
@@ -428,6 +464,7 @@ static int parse_eval(char *rest, eval_req *q) {
         else if (strcmp(k, "kind") == 0)         q->kind = v;
         else if (strcmp(k, "nonce") == 0)        q->nonce = v;
         else if (strcmp(k, "caps") == 0)         q->caps = v;
+        else if (strcmp(k, "session") == 0)      q->session = v;
         else if (strcmp(k, "src_b64") == 0)      q->src_b64 = v;
         else if (strcmp(k, "so_b64") == 0)       q->so_b64 = v;
         else if (strcmp(k, "epoch") == 0)        q->epoch = strtoll(v, NULL, 10);
@@ -478,7 +515,7 @@ static void reply_with_out(int fd, const char *head, const char *b64_text, const
     free(ob);
 }
 
-static void handle_eval(int fd, char *line, uint32_t session_epoch) {
+static void handle_eval(int fd, char *line, uint32_t session_epoch, const char *session) {
     /* line: "EVAL <sig> <rest>" */
     char *sig = line + 5;
     while (*sig == ' ') sig++;
@@ -510,6 +547,10 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
     const char *why = NULL;
     char detail[256] = "";
     if (!ok) why = "bad_signature";
+    /* The line was signed for THIS session's HELLO challenge: a captured
+     * line cannot be replayed on another connection, on another node with
+     * the same key, or after a restart (whose nonce ring is empty). */
+    if (!why && (!q.session || strcmp(q.session, session) != 0)) why = "bad_session";
     if (!why) why = march_sig_admit(q.nonce, q.not_after_ms, wall_ms());
     uint32_t cur = march_epoch_current();
     if (!why && ((uint32_t)q.epoch != session_epoch || cur != session_epoch)) {
@@ -560,7 +601,26 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
         free(src);
         return;
     }
-    audit(q.name, q.caps, q.nonce, srcs, src_n, "ok");
+    /* The policy above was checked against the signed caps; they must be the
+     * fragment's own.  The handle stays open on refusal, like every other
+     * fragment's: nothing in it has run. */
+    const char *manifest = (const char *)dlsym(h, "__march_cap_manifest");
+    if (!manifest || !caps_match_manifest(q.caps, manifest)) {
+        const char *code = manifest ? "cap_tamper" : "no_cap_manifest";
+        audit(q.name, q.caps, q.nonce, srcs, src_n, code);
+        char buf[64];
+        snprintf(buf, sizeof buf, "ERR %s", code);
+        send_line(fd, buf);
+        free(src);
+        return;
+    }
+    /* Every input that runs is audited: one whose line cannot be written
+     * does not run. */
+    if (!audit(q.name, q.caps, q.nonce, srcs, src_n, "ok")) {
+        free(src);
+        send_line(fd, "ERR audit_unavailable");
+        return;
+    }
     free(src);
 
     shell_run *r = (shell_run *)calloc(1, sizeof *r);
@@ -616,6 +676,51 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
 
 /* ── connections ─────────────────────────────────────────────────────── */
 
+/* A session's HELLO challenge: 16 random bytes as hex.  Every EVAL on the
+ * connection must sign it (field `session:`). */
+static int random_hex(char out[33]) {
+    unsigned char b[16];
+    int got = 0;
+#if defined(__APPLE__)
+    arc4random_buf(b, sizeof b);
+    got = 1;
+#else
+    int rf = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (rf >= 0) {
+        size_t n = 0;
+        while (n < sizeof b) {
+            ssize_t r = read(rf, b + n, sizeof b - n);
+            if (r <= 0) { if (r < 0 && errno == EINTR) continue; break; }
+            n += (size_t)r;
+        }
+        close(rf);
+        got = n == sizeof b;
+    }
+#endif
+    if (!got) return 0;
+    for (int i = 0; i < 16; i++) snprintf(out + 2 * i, 3, "%02x", b[i]);
+    return 1;
+}
+
+/* Belt and braces over the socket's mode, as for the reload socket: a peer
+ * must run as this process's uid (or root).  1 when the platform cannot
+ * say. */
+static int peer_uid_ok(int fd) {
+#if defined(__APPLE__)
+    uid_t uid; gid_t gid;
+    if (getpeereid(fd, &uid, &gid) != 0) return 1;
+    return uid == geteuid() || uid == 0;
+#elif defined(SO_PEERCRED)
+    struct ucred cr;
+    socklen_t len = sizeof(cr);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0) return 1;
+    return cr.uid == geteuid() || cr.uid == 0;
+#else
+    (void)fd;
+    return 1;
+#endif
+}
+
 static void *session_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
     sigset_t all;
@@ -626,6 +731,7 @@ static void *session_thread(void *arg) {
     int range = -1;
     uint32_t epoch = 0;
     int hello = 0;
+    char session[33] = "";
     for (;;) {
         int rc = read_line(fd, &buf, &cap, &len);
         if (rc == 2) {
@@ -643,19 +749,33 @@ static void *session_thread(void *arg) {
         if (rc == 0) break;
         if (strcmp(buf, "HELLO") == 0) {
             if (!hello) {
+                if (!random_hex(session)) { send_line(fd, "ERR no_random"); break; }
                 range = slot_range_take();
                 if (range < 0) { send_line(fd, "ERR slots_full"); break; }
                 epoch = march_epoch_current();
                 hello = 1;
             }
             char b[256];
-            snprintf(b, sizeof b, "OK epoch:%u slots:%d-%d triple:%s", epoch,
+            snprintf(b, sizeof b, "OK epoch:%u slots:%d-%d triple:%s session:%s", epoch,
                      range * SHELL_SLOTS_PER, range * SHELL_SLOTS_PER + SHELL_SLOTS_PER - 1,
-                     SHELL_TRIPLE);
+                     SHELL_TRIPLE, session);
             send_line(fd, b);
+        } else if (strcmp(buf, "IDENT") == 0) {
+            /* The build's shell identity table (lib/jit/shell_ident.ml),
+             * which the client compares with its own source.  Public: it
+             * holds hashes of the source, not the source. */
+            static void *self;
+            if (!self) self = dlopen(NULL, RTLD_NOW);
+            const char *ident = self ? (const char *)dlsym(self, "__march_shell_ident") : NULL;
+            if (!ident) { send_line(fd, "ERR no_ident"); continue; }
+            char *b64 = b64_encode((const unsigned char *)ident, strlen(ident));
+            if (!b64) { send_line(fd, "ERR out_of_memory"); continue; }
+            send_all(fd, "OK ", 3);
+            send_line(fd, b64);
+            free(b64);
         } else if (strncmp(buf, "EVAL ", 5) == 0) {
             if (!hello) { send_line(fd, "ERR no_hello"); continue; }
-            handle_eval(fd, buf, epoch);
+            handle_eval(fd, buf, epoch, session);
         } else if (strcmp(buf, "BYE") == 0) {
             break;
         } else {
@@ -685,6 +805,7 @@ static void *accept_thread(void *arg) {
 #ifdef SO_NOSIGPIPE
         { int one = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
 #endif
+        if (!peer_uid_ok(fd)) { close(fd); continue; }
         if (atomic_fetch_add(&g_sessions, 1) >= SHELL_MAX_SESSIONS) {
             send_line(fd, "ERR busy");
             close(fd);
@@ -734,13 +855,17 @@ void march_shell_server_start(const char *reload_socket_path) {
     memset(&a, 0, sizeof a);
     a.sun_family = AF_UNIX;
     memcpy(a.sun_path, path, strlen(path) + 1);
-    if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 8) < 0) {
+    /* Owner-only, like the reload socket, and set between bind and listen:
+     * connecting needs write permission on the socket inode, and nothing
+     * can connect before listen(), so no connection is ever accepted under
+     * the inherited umask's mode. */
+    if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || chmod(path, 0600) != 0
+        || listen(ls, 8) < 0) {
         fprintf(stderr, "march: shell socket %s: %s\n", path, strerror(errno));
         close(ls);
+        unlink(path);
         return;
     }
-    /* Owner-only, like the reload and observe sockets. */
-    chmod(path, 0600);
     snprintf(g_shell_path, sizeof g_shell_path, "%s", path);
     atexit(unlink_at_exit);
     pthread_attr_t at;

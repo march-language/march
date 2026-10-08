@@ -115,6 +115,20 @@ val niche_repr_of_concrete : table -> string -> repr option
 
 (* ── Unboxed-aggregate registry queries, unchanged in meaning ───────── *)
 
+(** The ONE spelling every name-keyed query in this module uses for a type:
+    its short name, which is the spelling construction uses, except for the
+    types the C runtime builds in their declared layout ([CsvRow]), which
+    resolve to their declaration.  See the section comment in kind.ml. *)
+val canonical_name : table -> string -> string
+
+val canonical_ty : table -> Tir.ty -> Tir.ty
+
+(** The declaration a name refers to, for shape questions (what a value
+    contains), which do not depend on its layout.  Resolves the opposite way
+    to [canonical_name]: exact name, else the unique declaration with that
+    short name. *)
+val declaration_of : table -> string -> string
+
 val unboxed_of_type_name : table -> string -> (string * Tir.ty list) option
 val unboxed_of_llvm_ty : table -> string -> (string * string * Tir.ty list) option
 val unboxed_types : table -> (string * string * Tir.ty list) list

@@ -964,20 +964,9 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
    §4  Built-in environment
    ================================================================= *)
 
-let ctor_qualified_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
-
-(** Like [type_name_of_value], but a colliding [VCon]'s type resolves to its
-    declaring-module-qualified name (e.g. "NA.Thing") instead of the bare
-    short name, so a general-interface method call routes through
-    [iface_method_tbl] to the actual argument's impl rather than whichever
-    same-short-name type's impl happened to register last. Non-colliding
-    values (the common case) fall back to [type_name_of_value] unchanged. *)
-let dispatch_type_name_of_value = function
-  | VCon (tag, _) as v ->
-    (match Hashtbl.find_opt ctor_qualified_type_tbl tag with
-     | Some qualified -> Some qualified
-     | None -> type_name_of_value v)
-  | v -> type_name_of_value v
+(* [ctor_qualified_type_tbl] and [dispatch_type_name_of_value] live in
+   Eval_runtime, beside [type_name_of_value], so the `to_json` builtin can
+   route by a colliding value's qualified type too. *)
 
 (** Register every constructor of a [TDVariant] type in [ctor_type_tbl]
     (bare, as always) and, when [name_txt]'s short name collides (per
@@ -3723,6 +3712,12 @@ let rec eval_decl (env : env) (d : decl) : env =
                the wrong method and recurses forever (neq → eq → neq). *)
             if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
               Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            (* A Json codec of a same-short-name type also claims its
+               qualified slot, which the `to_json` builtin consults first via
+               [dispatch_type_name_of_value]: the bare slot above is
+               last-writer-wins across the colliding modules. *)
+            if is_json_iface && dispatch_type_name <> type_name then
+              Hashtbl.replace impl_tbl (idef.impl_iface.txt, dispatch_type_name) fn_val;
             (* General (non-builtin, non-Json) interface methods also go in the
                per-method dispatch table so a call routes by the first arg's
                runtime type, not the last-bound name (fixes multi-impl dispatch,

@@ -34,3 +34,6 @@ fix [cap_grant]:
 @@ lines 11-11 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+refinement violation: argument `c` of `serve` does not satisfy precondition `v.port >= 1` [refinement_violated]

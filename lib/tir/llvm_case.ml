@@ -199,10 +199,32 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      for every niche type at [tagged=false], so we only need to know *whether*
      the match is niche-shaped, not which type.  Boxed ADTs are unaffected — the
      heap-tag path is already correct for them. *)
+  (* A ctor tag on an erased scrutinee may arrive TYPE-qualified ("Tree.Leaf":
+     [Lower_match.pat_tag_and_subs] qualifies a nested pattern's bare tag with
+     the type the typechecker recorded for it).  The two recovery helpers below
+     identify the owning typedef by ctor name, so split the tag into its bare
+     ctor and (optional) type qualifier; a qualifier narrows the owners to the
+     typedefs whose short name matches it. *)
+  let last_seg s =
+    match String.rindex_opt s '.' with
+    | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+    | None -> s
+  in
+  let split_tag t =
+    match String.rindex_opt t '.' with
+    | Some i -> (String.sub t (i + 1) (String.length t - i - 1),
+                 Some (last_seg (String.sub t 0 i)))
+    | None -> (t, None)
+  in
+  let owner_ok qual tname =
+    match qual with
+    | None -> true
+    | Some q -> String.equal (last_seg tname) q
+  in
   let branches_match_niche_shape () =
     let ctor_tags = List.filter_map (fun br ->
       let t = br.Tir.br_tag in
-      if String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z' then Some t else None
+      if String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z' then Some (split_tag t) else None
     ) branches in
     ctor_tags <> [] &&
     (* Candidate owners: EVERY variant typedef whose ctor set contains all the
@@ -222,7 +244,8 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     (let owners = List.filter_map (function
        | Tir.TDVariant (tname, variants)
          when (let ctor_names = List.map fst variants in
-               List.for_all (fun t -> List.mem t ctor_names) ctor_tags) ->
+               List.for_all (fun (t, qual) ->
+                   List.mem t ctor_names && owner_ok qual tname) ctor_tags) ->
          Some tname
        | _ -> None) ctx.Llvm_ctx.type_defs in
      owners <> [] &&
@@ -247,7 +270,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     match branches with
     | [br] when (let t = br.Tir.br_tag in
                  String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z') ->
-      let tag = br.Tir.br_tag in
+      let (tag, qual) = split_tag br.Tir.br_tag in
       (* Classify the owning type by the SAME name construction/EAlloc uses: the
          BARE type name (its ctor key is "TypeName.CtorName").  A type defined in
          a NON-ENTRY module is registered here under its module-qualified name
@@ -261,14 +284,10 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          consistent with construction: a genuine (entry-module) newtype is
          registered bare so [last_seg] is a no-op and it still classifies
          [Newtype]. *)
-      let last_seg s =
-        match String.rindex_opt s '.' with
-        | Some i -> String.sub s (i + 1) (String.length s - i - 1)
-        | None -> s
-      in
       let owner_reprs = List.filter_map (function
         | Tir.TDVariant (tname, variants)
-          when List.exists (fun (c, _) -> c = tag) variants ->
+          when List.exists (fun (c, _) -> c = tag) variants
+               && owner_ok qual tname ->
           Some (Kind.repr_of ctx.Llvm_ctx.k_table
                   (Tir.TCon (last_seg tname, [])))
         | _ -> None) ctx.Llvm_ctx.type_defs in
@@ -971,102 +990,10 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     end
   end;
 
-  (* Helper: find the scrutinee's own EDecRC/EAtomicDecRC within a leading
-     run of bare DecRC ops and return (v, rest) with the OTHER leading decs
-     preserved in their original order around the extraction point.
-
-     The scrutinee's dec is not always the literal head of the branch body:
-     [add_cross_decrcs] in perceus.ml prepends OTHER cross-branch-dead
-     variables' EDecRC/EAtomicDecRC ops in front of it whenever the branch
-     also has, say, a closure parameter that's unused on this specific arm
-     (e.g. Map.node_insert's HLeaf arm: `dec_rc eq; dec_rc node; ...` — the
-     scrutinee `node`'s dec is SECOND, not first). A literal head-only match
-     here silently falls through to the plain (unprotected) EDecRC codegen
-     below, leaving extracted heap fields under-refcounted whenever the
-     scrutinee is actually shared at that point — this was finding C1: a
-     String map key's refcount under-counted this way, freed prematurely,
-     surfacing as a use-after-free in march_hash_string when a later
-     Map.keys/get_or traversal read it. Fixed 2026-07-11. *)
-  let strip_scrut_decrc scrut_name body =
-    let rec go acc e =
-      match e with
-      | Tir.ESeq (((Tir.EDecRC (Tir.AVar v)) as op), rest)
-      | Tir.ESeq (((Tir.EAtomicDecRC (Tir.AVar v)) as op), rest) ->
-        if String.equal v.Tir.v_name scrut_name then
-          Some (v, List.fold_left (fun inner o -> Tir.ESeq (o, inner)) rest acc)
-        else
-          go (op :: acc) rest
-      (* [Drop] runs after Perceus and rewrites those prepended decs of
-         OTHER variables into deep-drop calls ([dec_rc cfg] becomes
-         [__drop$PoolConfig(cfg)]); it never rewrites the scrutinee's own dec
-         (Drop.rewrite's [is_scrut_dec]).  Skip them like the bare decs they
-         were, or the scrutinee's dec behind one compiles as a plain release
-         with no shared-path dups -- finding C1 again: depot's
-         Pool.handle_checkout `Cons(conn, rest)` arm, behind a dead [cfg]'s
-         drop, moved [conn] and [rest] out of the still-shared idle list, and
-         releasing the old pool state then freed the connection being handed
-         to the caller. *)
-      | Tir.ESeq ((Tir.EApp (f, [ Tir.AVar _ ]) as op), rest)
-        when Tir_names.is_drop_fn f.Tir.v_name ->
-        go (op :: acc) rest
-      | _ -> None
-    in
-    go [] body
-  in
-
-  (* True iff [body] reuses the scrutinee's own storage via an
-     [EReuse (AVar scrut_name, ...)] anywhere it could execute.
-
-     This is the "reuse" counterpart of [strip_scrut_decrc].  When an arm both
-     extracts heap fields (inherited from the scrutinee with NO dup) AND reuses
-     the scrutinee box at the tail (the FBIP whole-cell-reuse pattern, e.g.
-     [Bytes.slice]: [Bytes(xs) -> ... reuse b as Bytes(...)]), the box-level
-     RC check lives at the EReuse site — which is too late.  The extracted
-     fields were already moved into a consuming callee (e.g. list_drop, which
-     FBIP-reuses xs's cons cells in place) UPSTREAM of the EReuse.  When the
-     scrutinee is shared (RC > 1) the EReuse takes its dec+alloc-Llvm_ctx.fresh path and
-     the original box survives, still pointing at those now-destroyed children
-     → use-after-free in the caller (the [b len = 0] bug).
-
-     The fix mirrors the leading-dec shared path: read the scrutinee RC at
-     branch ENTRY (a non-consuming load — the EReuse still owns and consumes the
-     box reference at the tail) and, on the shared path, IncRC each extracted
-     heap field BEFORE the body consumes them.  RC(scrut box) is invariant
-     between entry and the EReuse (the body consumes the CHILDREN, never the box
-     header), so the entry check and the EReuse check observe the same value and
-     stay consistent. *)
-  let rec body_reuses_scrut scrut_name e =
-    match e with
-    | Tir.EReuse (Tir.AVar v, _, _) -> String.equal v.Tir.v_name scrut_name
-    (* TRMC's hole allocation with a reuse token is the same take-over-or-
-       release as EReuse (Llvm_emit_alloc.emit_alloc_hole: rc = 1 reuses the
-       cell, otherwise ONE box-level march_decrc and a fresh cell), so a
-       shared scrutinee needs the same dup of its extracted fields. Without
-       this arm the fields moved out of a SHARED cell with no increment: the
-       tail passed on to the next iteration then looked unique and was reused
-       in place, mutating a list someone else still held (an append whose
-       first argument shares its tail -- Msgpack.encode of a Bin inside an
-       Array, reused payload -- RC underflow / garbage). *)
-    | Tir.EAllocHole (Some (Tir.AVar v), _, _, _) -> String.equal v.Tir.v_name scrut_name
-    | Tir.ELet (v, e1, e2) ->
-      body_reuses_scrut scrut_name e1
-      || (not (String.equal v.Tir.v_name scrut_name)
-          && body_reuses_scrut scrut_name e2)
-    | Tir.ESeq (e1, e2) ->
-      body_reuses_scrut scrut_name e1 || body_reuses_scrut scrut_name e2
-    | Tir.ECase (_, branches, default) ->
-      List.exists (fun br ->
-        not (List.exists (fun bv ->
-               String.equal bv.Tir.v_name scrut_name) br.Tir.br_vars)
-        && body_reuses_scrut scrut_name br.Tir.br_body) branches
-      || Option.fold ~none:false
-           ~some:(body_reuses_scrut scrut_name) default
-    | Tir.ELetRec (fns, body) ->
-      not (List.exists (fun fn ->
-             String.equal fn.Tir.fn_name scrut_name) fns)
-      && body_reuses_scrut scrut_name body
-    | _ -> false
-  in
+  (* [strip_scrut_decrc] and [body_reuses_scrut] live in [Case_handoff],
+     shared with the RC-balance verifier; see their docs there. *)
+  let strip_scrut_decrc = Case_handoff.strip_scrut_decrc in
+  let body_reuses_scrut = Case_handoff.body_reuses_scrut in
 
   (* Per-branch var_slot snapshot.
 

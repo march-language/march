@@ -754,20 +754,27 @@ let covered_by_incs (name : string) (e : Tir.expr) : bool =
                   && List.for_all (fun (c, i) -> c <= i) paths
   | None -> false
 
-(** True when [name] is the value the expression evaluates to, i.e. it sits in
-    tail position as a bare atom.  Used to suppress the aggregate scope-end
-    drop for [let b = {..} in b], where ownership has already been transferred
-    out by the tail EAtom and a dec here would double-free. *)
-let rec tail_value_is_var (name : string) (e : Tir.expr) : bool =
+(** True when EVERY tail of [e] is [name] itself: the scope hands the
+    aggregate to its caller on every path, so there is nothing left to drop.
+    The aggregate scope-end drop used to ask whether ANY tail was it, which
+    skipped the drop on every path as soon as one branch returned the value,
+    and the branches that only read it leaked it:
+      let st = .. in if settled(st) do { .. st.failed .. } else st end
+    leaked [st] on the [then] branch (SessionNode.Endpoint's LinkEnded, one
+    state record and everything it held per session party;
+    specs/progress/2026-10-07-mixed-tail-aggregate-leak.md).  A path that
+    returns the value is left alone by [drop_agg_at_tails] (its balance is
+    negative), so the drop now goes exactly on the other paths. *)
+let rec every_tail_is_var (name : string) (e : Tir.expr) : bool =
   match e with
   | Tir.EAtom (Tir.AVar w) -> String.equal w.Tir.v_name name
-  | Tir.ELet (_, _, body) -> tail_value_is_var name body
-  | Tir.ESeq (_, body) -> tail_value_is_var name body
+  | Tir.ELet (_, _, body) -> every_tail_is_var name body
+  | Tir.ESeq (_, body) -> every_tail_is_var name body
   | Tir.ECase (_, branches, default) ->
-    List.exists (fun br -> tail_value_is_var name br.Tir.br_body) branches
-    || (match default with
-        | Some d -> tail_value_is_var name d
-        | None -> false)
+    List.for_all (fun br -> every_tail_is_var name br.Tir.br_body) branches
+    && (match default with
+        | Some d -> every_tail_is_var name d
+        | None -> true)
   | _ -> false
 
 (** Determine which AVar atoms in a list need EIncRC because they are
@@ -967,6 +974,16 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
     | Tir.ELet (w, e1, body) ->
       (match delta e1 with
        | Some d -> Tir.ELet (w, e1, go (bal + d) body)
+       (* The paths of [e1] disagree (one hands [v] over, another only reads
+          it), and [v] is dead in [body]: its lifetime ends inside [e1], so
+          the per-path drop belongs at [e1]'s tails, each path's value bound
+          before the release. Left alone, a handler's
+            let $result = if settled(state) do state else { .. } end in ..
+          leaked [state] on the [else] path, with every heap field it held
+          (SessionNode.Endpoint's AwaitOutcome, once per session party;
+          specs/progress/2026-10-07-mixed-tail-aggregate-leak.md). *)
+       | None when is_branching e1 && not (Perceus_liveness.name_free_in name body) ->
+         Tir.ELet (w, go bal e1, body)
        | None -> x)
     | Tir.ESeq (a, body) ->
       (match delta a with
@@ -1637,7 +1654,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
               && not (StringSet.mem v.Tir.v_name env.closure_fvs)
               && not (StringSet.mem v.Tir.v_name env.moved_vars)
               && not is_borrowed_field
-              && not (tail_value_is_var v.Tir.v_name e2')
+              && not (every_tail_is_var v.Tir.v_name e2')
               (* A release on some paths no longer blocks the drop: it goes
                  on the paths that do not release ([drop_agg_at_tails]). *)
               (* Whether [v] is still owned is decided per path by
@@ -1660,7 +1677,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            independently owned.  Dropping at last use instead would require
            proving that no borrowed field outlives the projection.
 
-           [tail_value_is_var] excludes the aggregate being the scope's own
+           [every_tail_is_var] excludes the aggregate being the scope's own
            result ([let b = {..} in b]), where the EAtom arm has already handed
            ownership to the caller and this dec would be a double-free.
            [moved_vars] excludes the aggregate being stored into another

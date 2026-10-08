@@ -875,12 +875,25 @@ let base_env : env =
        directly in the env, so the env-bound version is used as fallback. *)
   ; ("to_json", VBuiltin ("to_json", function
         | [v] ->
+          (* A value whose type's short name collides (two modules each
+             declare and derive Json for a `Note`) resolves to its declaring
+             module's qualified name first, which the DImpl registered beside
+             the bare key; the bare key alone belongs to whichever of them was
+             evaluated last. *)
+          let qualified =
+            match dispatch_type_name_of_value v with
+            | Some q when q <> "" -> Hashtbl.find_opt impl_tbl ("JsonTo", q)
+            | _ -> None
+          in
+          (match qualified with
+           | Some to_fn -> !apply_hook to_fn [v]
+           | None ->
           (match type_name_of_value v with
            | Some tname ->
              (match Hashtbl.find_opt impl_tbl ("JsonTo", tname) with
               | Some to_fn -> !apply_hook to_fn [v]
               | None       -> eval_error "to_json: no Json derive for type %s" tname)
-           | None -> eval_error "to_json: cannot determine type of value")
+           | None -> eval_error "to_json: cannot determine type of value"))
         | _ -> eval_error "to_json: expected one argument"))
   ; ("from_json", VBuiltin ("from_json", function
         | [v] ->

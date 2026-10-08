@@ -163,16 +163,39 @@ let is_apply_fn (name : string) : bool =
   nl >= ml && scan 0
 
 (** The closure struct's TCon name for a lifted lambda, e.g.
-    [clo_struct_name ~fn_name:"foo" ~lam_uid:3 = "$Clo_foo$3"]. Mirrors
+    [clo_struct_name ~fn_name:"foo" ~lam_uid:"3_Main_g" = "$Clo_foo$3_Main_g"]. Mirrors
     defun.ml's inline [Printf.sprintf "$Clo_%s$%d" fn_name lam_uid]. *)
-let clo_struct_name ~(fn_name : string) ~(lam_uid : int) : string =
-  Printf.sprintf "$Clo_%s$%d" fn_name lam_uid
+let clo_struct_name ~(fn_name : string) ~(lam_uid : string) : string =
+  Printf.sprintf "$Clo_%s$%s" fn_name lam_uid
 
 (** The apply-wrapper fn name for a lifted lambda, e.g.
-    [apply_fn_name ~fn_name:"foo" ~lam_uid:3 = "foo$apply$3"]. Mirrors
+    [apply_fn_name ~fn_name:"foo" ~lam_uid:"3_Main_g" = "foo$apply$3_Main_g"]. Mirrors
     defun.ml's inline [Printf.sprintf "%s$apply$%d" fn_name lam_uid]. *)
-let apply_fn_name ~(fn_name : string) ~(lam_uid : int) : string =
-  Printf.sprintf "%s$apply$%d" fn_name lam_uid
+let apply_fn_name ~(fn_name : string) ~(lam_uid : string) : string =
+  Printf.sprintf "%s$apply$%s" fn_name lam_uid
+
+(** A lambda's uid (B1, specs/plans/incremental-codegen-cas-plan.md §14):
+    the ordinal [k] of the lambda among those of its top-level host fn, in
+    defun's traversal order, then the host spelled with ['_'] for every
+    ['$'] and ['.'] ([structural_tag]).  ["0_List_map_Int"] for the first
+    lambda of [List.map$Int].  The uid contains no ['$'], so
+    [Drop.apply_name_of_clo] can still split a closure struct's name at its
+    last ['$'], and no ['.']: about sixty name consumers take the text after
+    a name's last ['.'] as its short name or its module, and a uid ending
+    in [.main] made the entry thunk call a lambda.  ['_'] is the one other
+    character [Llvm_ctx.llvm_name] passes through unchanged (it rewrites
+    everything outside [a-zA-Z0-9_.$], and not at every reference).  Two
+    hosts that differ only in ['$'] vs ['.'] vs ['_'] at the same position
+    would share a tag; a lower-case module segment is impossible, so this
+    needs a function literally named like a mangled sibling, and the result
+    is a duplicate-symbol link error, never a silent mis-bind.
+    Structural: an edit to another function never renumbers it, which is
+    what lets a cached object keep binding to the right apply symbol. *)
+let structural_tag (s : string) : string =
+  String.map (fun c -> if c = '$' || c = '.' then '_' else c) s
+
+let lam_uid ~(host : string) (k : int) : string =
+  Printf.sprintf "%d_%s" k (structural_tag host)
 
 (** Inverse of [apply_fn_name]'s prefix: ["go$apply$3621"] → [Some "go"];
     [None] when [name] is not an apply-fn name.  Splits at the FIRST

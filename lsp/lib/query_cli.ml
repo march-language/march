@@ -191,7 +191,47 @@ let run_to_string (args : string list) ~src_override : string =
      <hover|type|definition|references|completions|diagnostics|symbols|format|inlay> \
      <file> [--line N --col M] [--stdin]  (line/col are 1-based)\"}"
 
+(* ── Compile queries: proxied to `march query` (A7) ─────────────────────
+
+   The editor-side queries above answer from the front end.  The ones below
+   answer from a compile (a function's IR at each pass, provenance, the
+   post-optimisation call graph, representations, cache keys), which only the
+   compiler's own pipeline has, so they run `march query` and pass its output
+   and exit code through (lib/query/query.ml documents the queries). *)
+let compile_queries = [ "fn"; "origin"; "callers"; "callees"; "repr"; "verify"; "key"; "why-miss" ]
+
+(** The `march` executable: [MARCH_BIN], else a `march` beside this
+    executable (an installed toolchain), else the dune build layout
+    ([_build/default/lsp/bin/main.exe] -> [_build/default/bin/main.exe]),
+    else `march` on [PATH]. *)
+let march_exe () =
+  match Sys.getenv_opt "MARCH_BIN" with
+  | Some p when p <> "" -> p
+  | _ ->
+    let dir = Filename.dirname Sys.executable_name in
+    let sibling = Filename.concat dir "march" in
+    let dune_layout = Filename.concat dir "../../bin/main.exe" in
+    let canon p = try Unix.realpath p with Unix.Unix_error _ -> p in
+    if Sys.file_exists sibling then canon sibling
+    else if Sys.file_exists dune_layout then canon dune_layout
+    else "march"
+
+let proxy_to_march (args : string list) : int =
+  let exe = march_exe () in
+  let argv = Array.of_list (exe :: "query" :: args) in
+  match Unix.create_process exe argv Unix.stdin Unix.stdout Unix.stderr with
+  | pid ->
+    (match snd (Unix.waitpid [] pid) with
+     | Unix.WEXITED n -> n
+     | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> 1)
+  | exception Unix.Unix_error (e, _, _) ->
+    Printf.eprintf "march-lsp query: cannot run %s: %s (set MARCH_BIN)\n" exe (Unix.error_message e);
+    2
+
 let main (argv : string array) : int =
+  match Array.to_list argv with
+  | _ :: q :: rest when List.mem q compile_queries -> flush_all (); proxy_to_march (q :: rest)
+  | _ ->
   let out = run_to_string (Array.to_list argv) ~src_override:None in
   print_string out;
   (* Avoid a double trailing newline when output already ends with one (e.g.

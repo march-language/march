@@ -15,3 +15,5 @@ fix [cap_needs:IO.Network]:
 @@ after line 6 @@
  mod Server do
 +  needs IO.Network
+
+after fix: exit 0

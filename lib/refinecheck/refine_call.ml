@@ -319,7 +319,11 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       expr_applies_to_free w.wd_spelling sn.A.txt cond
       || List.exists
            (fun (m, rhs) ->
-             expr_mentions_free m cond && expr_applies_to_free w.wd_spelling sn.A.txt rhs)
+             (* Application entries only: [lets] also carries `let`-bound
+                LAMBDAS (for abstract-refinement instantiation), which are
+                never a laundered guard. *)
+             (match rhs with A.EApp _ -> true | _ -> false)
+             && expr_mentions_free m cond && expr_applies_to_free w.wd_spelling sn.A.txt rhs)
            lets
     in
     (* `a op b` <=> `b (flipped op) a` — used to normalise to `X op n`.  (No

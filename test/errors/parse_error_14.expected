@@ -13,3 +13,5 @@ fix [parse_error]:
 @@ after line 5 @@
    end
 +end
+
+after fix: exit 0

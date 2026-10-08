@@ -545,4 +545,140 @@ let emit_native_fold_inline_loop
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" clo_reg);
   (acc_ty, acc)
 
+(** Sum-map inline loop (2026-10-06, phase C of
+    specs/plans/2026-09-28-nativearray-fusion-plan.md). Decodes
+    ["__native_<w>_arr_summap_inline"] (one array) and
+    ["__native_<w>_arr_summap2_inline"] (two), each optionally ["_unboxed"],
+    into the width, the array count and the unboxed flag. The suffixes end in
+    ["summap_inline"] / ["summap2_inline"], which neither
+    [decode_nmap_inline_name] (["_map_inline"] / ["_map2_inline"]) nor
+    [decode_nfold_inline_call] (["_fold_inline"]) accept. *)
+let decode_nsummap_inline_call (name : string) : (nmap_width * int * bool) option =
+  let has_suffix suf s =
+    let ls = String.length suf and ln = String.length s in
+    ln >= ls && String.sub s (ln - ls) ls = suf
+  in
+  let strip_suffix suf s = String.sub s 0 (String.length s - String.length suf) in
+  if String.length name < 2 || String.sub name 0 2 <> "__" then None
+  else
+    let rest = String.sub name 2 (String.length name - 2) in
+    let (rest, unboxed) =
+      if has_suffix "_unboxed" rest then (strip_suffix "_unboxed" rest, true) else (rest, false)
+    in
+    let decoded =
+      if has_suffix "_summap2_inline" rest then Some (strip_suffix "_summap2_inline" rest, 2)
+      else if has_suffix "_summap_inline" rest then Some (strip_suffix "_summap_inline" rest, 1)
+      else None
+    in
+    match decoded with
+    | None -> None
+    | Some (prefix, n) ->
+      (match nmap_width_of_prefix prefix with
+       | None -> None
+       | Some width -> Some (width, n, unboxed))
+
+(** Emits [sum(map(a, f))] / [sum(map2(a, b, f))] as one loop: load each
+    element, widen, DIRECT call to [apply_name], then add the result to an
+    accumulator phi. No intermediate array is allocated.
+
+    The result is exactly what the unfused pair computed, element by element:
+    the callback result is narrowed to the array's memory type and widened
+    back ([nmap_narrow] then [nmap_widen]), which is the store into the
+    intermediate array and the runtime sum's load from it (a u8 result wraps
+    mod 256, an f32 rounds to binary32). The accumulation matches
+    [native_*_arr_sum] in runtime/march_runtime.c: Int widths add in [i64];
+    Float widths add in [double] with [fadd reassoc], the same scoped
+    reassociation the runtime sum's [#pragma clang fp reassociate(on)]
+    grants, so the loop vectorizes as the runtime sum does.
+
+    [Native_map_inline]'s sum-map peephole only selects an Int-family
+    callback through the tagged ptr ABI or a Float-family one through the
+    unboxed clone (the same two cases as the fold loop). Closure contract as
+    in the map loops: [march_incrc] before each call, one [march_decrc] after
+    the loop, both skipped for [clo_reg] = ["null"]. Two arrays of different
+    lengths panic exactly as [map2] does. *)
+let emit_native_summap_inline_loop
+    ~(emit_atom : Llvm_ctx.ctx -> Tir.atom -> string * string)
+    ctx ~(width : nmap_width) ~unboxed ~(arr_atoms : Tir.atom list) ~apply_name ~clo_reg
+    : string * string =
+  let is_float = width.nw_boundary_float in
+  if is_float && not unboxed then
+    failwith "emit_native_summap_inline_loop: a Float sum-map must use the unboxed callee";
+  let acc_ty = if is_float then "double" else "i64" in
+  let mem_ty = width.nw_mem_ty in
+  let elem_size = width.nw_elem_size in
+  let preheader = fresh_block ctx "nsum_pre" in
+  emit_term ctx (Printf.sprintf "br label %%%s" preheader);
+  emit_label ctx preheader;
+  let arrs = List.map (fun a ->
+      let (ty0, v0) = emit_atom ctx a in
+      coerce ctx ty0 v0 "ptr") arr_atoms in
+  let lens = List.map (fun arr_v ->
+      let len = fresh ctx "nsum_len" in
+      emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len width.nw_len_fn arr_v);
+      len) arrs in
+  let len = List.hd lens in
+  (match lens with
+   | [ l1; l2 ] ->
+     emit ctx (Printf.sprintf "call void @native_arr_map2_check_len(i64 %s, i64 %s)" l1 l2)
+   | _ -> ());
+  let cond_lbl = fresh_block ctx "nsum_cond" in
+  let body_lbl = fresh_block ctx "nsum_body" in
+  let exit_lbl = fresh_block ctx "nsum_exit" in
+  let i = fresh ctx "nsum_i" in
+  let i_next = fresh ctx "nsum_inext" in
+  let acc = fresh ctx "nsum_acc" in
+  let acc_next = fresh ctx "nsum_accnext" in
+  let zero = if is_float then "0.000000e+00" else "0" in
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx cond_lbl;
+  emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
+  emit ctx (Printf.sprintf "%s = phi %s [ %s, %%%s ], [ %s, %%%s ]"
+              acc acc_ty zero preheader acc_next body_lbl);
+  let cmp = fresh ctx "nsum_cmp" in
+  emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len);
+  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
+
+  emit_label ctx body_lbl;
+  let soff = fresh ctx "nsum_soff" in
+  emit ctx (Printf.sprintf "%s = mul i64 %s, %d" soff i elem_size);
+  let byte_off = fresh ctx "nsum_off" in
+  emit ctx (Printf.sprintf "%s = add i64 %s, 32" byte_off soff);
+  let xs = List.map (fun arr_v ->
+      let sptr = fresh ctx "nsum_sptr" in
+      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
+      let x = fresh ctx "nsum_x" in
+      emit ctx (Printf.sprintf "%s = load %s, ptr %s, align %d" x mem_ty sptr elem_size);
+      nmap_widen ctx width x) arrs in
+  if clo_reg <> "null" then
+    emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" clo_reg);
+  let y =
+    if unboxed then begin
+      let y = fresh ctx "nsum_y" in
+      emit ctx (Printf.sprintf "%s = call double @%s(ptr %s%s)" y apply_name clo_reg
+                  (String.concat "" (List.map (fun x -> ", double " ^ x) xs)));
+      y
+    end else begin
+      let wires = List.map (fun x -> coerce ctx "i64" x "ptr") xs in
+      let y = fresh ctx "nsum_y" in
+      emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s%s)" y apply_name clo_reg
+                  (String.concat "" (List.map (fun w -> ", ptr " ^ w) wires)));
+      coerce ctx "ptr" y "i64"
+    end
+  in
+  (* The intermediate array's store and the sum's load. *)
+  let y = nmap_widen ctx width (nmap_narrow ctx width y) in
+  if is_float then
+    emit ctx (Printf.sprintf "%s = fadd reassoc double %s, %s" acc_next acc y)
+  else
+    emit ctx (Printf.sprintf "%s = add i64 %s, %s" acc_next acc y);
+  emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx exit_lbl;
+  if clo_reg <> "null" then
+    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" clo_reg);
+  (acc_ty, acc)
+
 (* ── Vault reads: niche → call-site Option encoding ───────────────────── *)

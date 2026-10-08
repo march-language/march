@@ -309,7 +309,7 @@ let rec test_native_corpus_ir_is_verifier_clean ?(extra_flags = "")
     assert_excluded_are_js_target_only excluded;
     Alcotest.(check bool) "at least one native fixture found to gate" true
       (List.length fixtures > 0);
-    let results = List.map (run_fixture ~extra_flags main_exe) (sample fixtures) in
+    let results = parallel_map (fun _ -> run_fixture ~extra_flags main_exe) (sample fixtures) in
     let emit_failures =
       List.filter_map (function
         | EmitFailed (name, rc, output) -> Some (name, rc, output)

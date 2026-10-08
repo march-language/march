@@ -40,3 +40,5 @@ fix [cap_needs:IO.Console]:
 @@ after line 3 @@
    mod Report do
 +  needs IO.Console
+
+after fix: exit 0

@@ -4,6 +4,14 @@ open March_parser.Parser
 
 exception Lexer_error of string
 
+(** A lexer error the lexer can also repair: [replace] is what the
+    offending lexeme should become ([Parse.run] turns it into an
+    [Errors.FReplace] over the lexeme), [code] its diagnostic code and
+    [note] the one-line explanation. D4 (diagnostics plan §8): the `;`
+    separator is caught here, at the character, because it never reaches
+    the grammar. *)
+exception Lexer_error_fix of { msg : string; code : string; note : string; replace : string }
+
 (** Brace depth inside a string interpolation expression `${ ... }`.
     0 means we are NOT inside an interpolation.  When `${` is seen in a
     string literal, depth is set to 1; each `{` increments it; `}` that
@@ -228,6 +236,15 @@ rule token = parse
         else LOWER_IDENT id
     }
   | eof           { EOF }
+  (* `;` between expressions is the one Elixir/ML habit that fails before
+     the grammar sees it. Name it, and fix it: [Parse.run] replaces the `;`
+     (and the blanks after it) with a newline, or deletes a trailing one. *)
+  | ';'           { raise (Lexer_error_fix
+                             { msg = "Unexpected `;`: March separates expressions \
+                                      with newlines, not semicolons.";
+                               code = March_errors.Code.semicolon_separator;
+                               note = "Put each expression on its own line.";
+                               replace = "\n" }) }
   | _ as c        { raise (Lexer_error (Printf.sprintf "Unexpected character: %c" c)) }
 
 and line_comment = parse

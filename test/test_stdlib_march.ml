@@ -197,6 +197,7 @@ let all_stdlib_decls =
        test_native_array_send.march (Part C, Phase C1). *)
     "native_array.march";
     "task.march";
+    "shell_render.march";
     (* Loaded last: datetime.march's Date/Time/Tz constructors must not steal
        bare-name lookups from modules loaded before it. *)
     "datetime.march";
@@ -518,6 +519,10 @@ let () =
       Alcotest.test_case "Json module"
         `Quick (run_stdlib_test "test_json.march" "TestJson");
     ]);
+    ("shell_render", [
+      Alcotest.test_case "ShellRender module"
+        `Quick (run_stdlib_test "test_shell_render.march" "TestShellRender");
+    ]);
     ("json_stream", [
       Alcotest.test_case "JsonStream module"
         `Quick (run_stdlib_test "test_json_stream.march" "TestJsonStream");
@@ -525,6 +530,10 @@ let () =
     ("json_typed", [
       Alcotest.test_case "derive Json x JsonStream typed decoding"
         `Quick (run_stdlib_test "test_json_typed.march" "TestJsonTyped");
+    ]);
+    ("json_collision", [
+      Alcotest.test_case "derive Json on same-short-name types in two modules"
+        `Quick (run_stdlib_test "test_json_collision.march" "TestJsonCollision");
     ]);
     ("msgpack", [
       Alcotest.test_case "Msgpack module"

@@ -27,3 +27,6 @@ fix [cap_grant]:
 @@ lines 20-20 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Protocol `Bad`: the steps after `stop` can never run — `stop` exits the loop immediately, so it must be the last step. [protocol_invalid]

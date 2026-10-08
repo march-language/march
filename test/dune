@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
+ (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_b7 test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint yojson alcotest str unix threads.posix))
 
 (library
@@ -363,6 +363,27 @@
  ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
  (action  (setenv MARCH_NUM_SCHEDULERS ""
            (run ./test_scheduler_churn_runner))))
+
+; ── C scheduler: a spawn before march_sched_init gets a whole stack ──────
+; march_hcr_drain spawns its hard-deadline proc from the reload server's
+; thread, and test_reload_activate4 never inits the scheduler: with the page
+; size uncached the reservation lost its guard page and the initial window
+; ran one page past it, stripping PROT_EXEC from a just-dlopen'd hot patch
+; on Linux arm64.  Asserts the geometry; never runs the scheduler.
+(rule
+ (targets test_scheduler_preinit_spawn_runner)
+ (deps    test_scheduler_preinit_spawn.c
+          ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_scheduler_preinit_spawn.c ../runtime/march_scheduler.c ../runtime/march_reclaim.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_preinit_spawn_runner))
+ (action  (run ./test_scheduler_preinit_spawn_runner)))
 
 ; ── march_actor_broadcast_migrate dead-target message leak regression ────
 ; Links the full runtime (same set as test_actor_registry_runner below) so
@@ -7347,6 +7368,42 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/ffi_resource.expected native_ffi_resource.out)))
 
+; ── Regression: an extern called from / passed as a closure (compiled + interp)
+; Defun captured the extern into the closure, so the IR called the March name
+; (`@acc_push`) and clang failed; an extern passed as a value built its
+; $clo_wrap around the March name too.  Both backends against one .expected.
+(rule
+ (targets native_ffi_extern_in_lambda native_ffi_extern_in_lambda.out
+          native_ffi_extern_in_lambda_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/ffi_extern_in_lambda.march))
+ (action
+  (progn
+   (with-stdout-to native_ffi_extern_in_lambda_interp.out
+     (run %{exe:../bin/main.exe} native/ffi_extern_in_lambda.march))
+   (run %{exe:../bin/main.exe} --compile -o native_ffi_extern_in_lambda
+        native/ffi_extern_in_lambda.march)
+   (with-stdout-to native_ffi_extern_in_lambda.out
+        (system "./native_ffi_extern_in_lambda")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_extern_in_lambda.expected native_ffi_extern_in_lambda.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_extern_in_lambda.expected native_ffi_extern_in_lambda_interp.out)))
+
 ; ── FFI error protocol: a Result-returning binding (march_ok / march_err) ──
 ; (Was briefly quarantined for the intermittent GH-Actions "bad int" flake —
 ; root-caused to a duplicate `mod Test` + bare extern `parse` collision between
@@ -10403,7 +10460,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_capture.march)
+   ; Fusion off: this checks the MAP loop, and each map here feeds a sum,
+   ; which the sum-map peephole would otherwise fuse into one sum loop
+   ; (that loop is checked by nativearr_fold_sum_fusion).
+   (setenv MARCH_NO_NATIVEARR_FUSION 1
+    (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_capture.march))
    (with-stdout-to native_arr_map_inline_capture_llvm_check.out
     (run bash -c
      "echo \"$(grep -c nmap_pre native/native_arr_map_inline_capture.ll) $(grep -c '= call ptr @native_int_arr_map(ptr\\|= call ptr @native_float_arr_map(ptr' native/native_arr_map_inline_capture.ll)\"")))))
@@ -10546,7 +10607,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_narrow_inline.march)
+   ; Fusion off: this checks the MAP loop, and each map here feeds a sum,
+   ; which the sum-map peephole would otherwise fuse into one sum loop
+   ; (that loop is checked by nativearr_fold_sum_fusion).
+   (setenv MARCH_NO_NATIVEARR_FUSION 1
+    (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_narrow_inline.march))
    (with-stdout-to native_arr_narrow_inline_llvm_check.out
     (run bash -c
      "echo \"$(grep -c nmap_pre native/native_arr_narrow_inline.ll) $(grep -c '= call ptr @native_f32_arr_map(ptr\\|= call ptr @native_u8_arr_map(ptr\\|= call ptr @native_i32_arr_map2(ptr' native/native_arr_narrow_inline.ll) $(grep -c '^define double @.*\\$mapfast\\$' native/native_arr_narrow_inline.ll) $(grep -c 'load float' native/native_arr_narrow_inline.ll)\"")))))
@@ -10891,6 +10956,52 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "read -r allocs tip < static_nullary_ctor_llvm_check.out; \
     test \"$allocs\" -eq 1 -a \"$tip\" -eq 1 || { echo \"expected make to call march_alloc once (the Fork) and one static Tip cell (found allocs=$allocs tip=$tip)\" >&2; exit 1; }")))
+;  NativeArray fold(map) and sum(map) fusion (phase C of
+; specs/plans/2026-09-28-nativearray-fusion-plan.md): Fusion.run_nativearr
+; composes fold(map(..)) into one fold, Native_map_inline's sum-map peephole
+; fuses sum(map(..)) / sum(map2(..)) into one loop. Correctness: every line
+; matches the interpreter, negatives included. Shape (whole module): 15 sum-map
+; loops, 12 inline fold loops, 5 inline map loops and 1 inline map2 loop (the
+; negative cases), 2 runtime sums (the two intermediates read twice), and the
+; Float sum-map loops reassociate. With MARCH_NO_NATIVEARR_FUSION=1 the same
+; program has 0 / 12 / 28 / 4 and 17 runtime sums.
+(rule
+ (targets nativearr_fold_sum_fusion nativearr_fold_sum_fusion.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_fold_sum_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nativearr_fold_sum_fusion
+        native/nativearr_fold_sum_fusion.march)
+   (with-stdout-to nativearr_fold_sum_fusion.out
+        (system "./nativearr_fold_sum_fusion")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nativearr_fold_sum_fusion.expected nativearr_fold_sum_fusion.out)))
+
+(rule
+ (targets nativearr_fold_sum_fusion_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_fold_sum_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/nativearr_fold_sum_fusion.march)
+   (with-stdout-to nativearr_fold_sum_fusion_llvm_check.out
+    (run bash -c
+     "f=native/nativearr_fold_sum_fusion.ll; echo \"$(grep -c '^nsum_pre[0-9]*:' $f) $(grep -c '^nfold_pre[0-9]*:' $f) $(grep -c '^nmap_pre[0-9]*:' $f) $(grep -c '^nmap2_pre[0-9]*:' $f) $(grep -cE 'call [a-z0-9]+ @native_[a-z0-9]*_arr_sum\\(' $f) $(grep -c 'fadd reassoc' $f)\"")))))
+
+(rule
+ (alias runtest)
+ (deps nativearr_fold_sum_fusion_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nsum nfold nmap nmap2 rtsum reassoc < nativearr_fold_sum_fusion_llvm_check.out; \
+    test \"$nsum\" -eq 15 -a \"$nfold\" -eq 12 -a \"$nmap\" -eq 5 -a \"$nmap2\" -eq 1 -a \"$rtsum\" -eq 2 -a \"$reassoc\" -ge 1 || { echo \"expected 15 sum-map loops, 12 fold loops, 5 map loops, 1 map2 loop, 2 runtime sums, reassociating Float sums (found nsum=$nsum nfold=$nfold nmap=$nmap nmap2=$nmap2 rtsum=$rtsum reassoc=$reassoc)\" >&2; exit 1; }")))
 
 ;  Owned-call drop fusion: a call whose argument dies at a borrowed position
 ; goes to an owned clone of the callee instead of being followed by a deep
@@ -11091,6 +11202,44 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/csv_niche_row.expected native_csv_niche_row.out)))
+
+; ── Compiled to_string names the constructors of module-declared ADTs ───
+; Every type declared inside a module (stdlib or user) printed `#<tag:N>`
+; compiled while the interpreter printed the constructor: the kind table
+; answered "newtype" for the qualified spelling the descriptor pass held and
+; "boxed" for the short spelling every value is built under.  Run interpreted
+; AND compiled against the SAME .expected; 8 of its 12 lines were red before
+; either spelling fix, and the niche-shaped ones (3) stayed red after the
+; repr_of-only one (specs/progress/2026-10-07-kind-canonical-spelling.md). ──
+(rule
+ (targets native_to_string_module_types native_to_string_module_types.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/to_string_module_types.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_module_types
+        native/to_string_module_types.march)
+   (with-stdout-to native_to_string_module_types.out
+        (system "./native_to_string_module_types")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_module_types.expected native_to_string_module_types.out)))
+
+(rule
+ (targets native_to_string_module_types.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/to_string_module_types.march))
+ (action
+  (with-stdout-to native_to_string_module_types.interp.out
+   (run %{exe:../bin/main.exe} native/to_string_module_types.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_module_types.expected native_to_string_module_types.interp.out)))
 
 ; ── file_close / csv_close return :ok on BOTH backends ─────────────────
 ; The typechecker said Unit (file_close) / Atom (csv_close), the interpreter
@@ -12435,6 +12584,62 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/session_party_released.expected native_session_party_released.out)))
 
+; ── An aggregate returned on one path is released on the paths that only read
+; it (2026-10-07). RED before: 201 objects left over 100 calls of each shape.
+(rule
+ (targets native_mixed_tail_aggregate_drop native_mixed_tail_aggregate_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/mixed_tail_aggregate_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_mixed_tail_aggregate_drop
+        native/mixed_tail_aggregate_drop.march)
+   (with-stdout-to native_mixed_tail_aggregate_drop.out
+        (system "./native_mixed_tail_aggregate_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mixed_tail_aggregate_drop.expected native_mixed_tail_aggregate_drop.out)))
+; ── A monitor holds its watcher and releases it, and never keeps the target
+; (2026-10-07). RED before: both actor records survived every monitor.
+(rule
+ (targets native_monitor_releases_actors native_monitor_releases_actors.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/monitor_releases_actors.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_monitor_releases_actors
+        native/monitor_releases_actors.march)
+   (with-stdout-to native_monitor_releases_actors.out
+        (system "./native_monitor_releases_actors")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/monitor_releases_actors.expected native_monitor_releases_actors.out)))
+
+; ── A closure whose cell FBIP reused still releases its captures (2026-10-07).
+; RED before: every Map.fold with a capturing closure leaked the closure.
+(rule
+ (targets native_reused_closure_captures native_reused_closure_captures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/reused_closure_captures.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_reused_closure_captures
+        native/reused_closure_captures.march)
+   (with-stdout-to native_reused_closure_captures.out
+        (system "./native_reused_closure_captures")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/reused_closure_captures.expected native_reused_closure_captures.out)))
+
 ; ── A dead actor's record and state are released (2026-10-06): under 5
 ; objects left over 50 actors (RED before: the killed actor's List state, and
 ; the record itself once Actor.call had been used on it).
@@ -12791,7 +12996,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/shell_node.march))
  (action
   (with-stdout-to native_shell_node.out
-   (system "rm -rf sh_t; mkdir -p sh_t/frags; ./shell_check.exe keygen sh_t/pk sh_t/sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_t/pk) -o sh_t/node native/shell_node.march > sh_t/build 2>&1 || { cat sh_t/build; exit 1; }; for f in ok panic loop; do if [ \"$(uname)\" = Darwin ]; then %{cc} -shared -fPIC -undefined dynamic_lookup -o sh_t/frags/frag_$f.so shell/frag_$f.c; else %{cc} -shared -fPIC -o sh_t/frags/frag_$f.so shell/frag_$f.c; fi; done; : > sh_t/policy; S=/tmp/march-shell-test-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_t/policy MARCH_AUDIT_LOG=sh_t/audit ./sh_t/node > sh_t/prog 2>&1 & prog=$!; ./shell_check.exe run $S.shell sh_t/prog sh_t/sk sh_t/policy sh_t/audit sh_t/frags; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_t $S $S.shell $S.observe; true"))))
+   (system "rm -rf sh_t; mkdir -p sh_t/frags; ./shell_check.exe keygen sh_t/pk sh_t/sk && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_t/pk) -o sh_t/node native/shell_node.march > sh_t/build 2>&1 || { cat sh_t/build; exit 1; }; for f in ok panic loop caps nomanifest; do if [ \"$(uname)\" = Darwin ]; then %{cc} -shared -fPIC -undefined dynamic_lookup -o sh_t/frags/frag_$f.so shell/frag_$f.c; else %{cc} -shared -fPIC -o sh_t/frags/frag_$f.so shell/frag_$f.c; fi; done; : > sh_t/policy; S=/tmp/march-shell-test-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_t/policy MARCH_AUDIT_LOG=sh_t/audit ./sh_t/node > sh_t/prog 2>&1 & prog=$!; ./shell_check.exe run $S.shell sh_t/prog sh_t/sk sh_t/policy sh_t/audit sh_t/frags; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_t $S $S.shell $S.observe; true"))))
 
 (rule
  (alias runtest)
@@ -12820,6 +13025,50 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/shell_session.expected native_shell_session.out)))
 
+; R5.4: a client whose source differs from the node's build.  The node is
+; test/native/shell_node.march; the client compiles inputs against
+; test/native/shell_node_skew.march, whose `evens` and `Shade` differ.  An
+; input reaching either is refused, naming it; the others run.
+(rule
+ (targets native_shell_skew.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/skew.txt)
+       (file native/shell_node.march)
+       (file native/shell_node_skew.march))
+ (action
+  (with-stdout-to native_shell_skew.out
+   (system "rm -rf sh_k; mkdir -p sh_k; ./shell_check.exe keygen-home sh_k/pk $PWD/sh_k/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_k/pk) -o sh_k/node native/shell_node.march > sh_k/build 2>&1 || { cat sh_k/build; exit 1; }; printf 'IO.Console\\n' > sh_k/policy; S=/tmp/march-shell-skew-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_k/policy ./sh_k/node > sh_k/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_k/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_k/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/skew.txt native/shell_node_skew.march 2>&1; echo \"exit=$?\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_k $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_skew.expected native_shell_skew.out)))
+
+; A fragment calls the node's own copy of a function instead of compiling
+; one, when the node's build has it with the same signature (Shell_ident's
+; "calling the node's own functions").  test/native/shell_node.march's main
+; uses List.range/reverse/length, so its build carries them; the inputs of
+; test/shell/link.txt reach them, reuse a value across calls (the node's
+; parameter modes decide its RC), and pass a closure (never linked).
+; MARCH_SHELL_LINK_REPORT names what each input called on the node.
+(rule
+ (targets native_shell_link.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/link.txt)
+       (file native/shell_node.march))
+ (action
+  (with-stdout-to native_shell_link.out
+   (system "rm -rf sh_l; mkdir -p sh_l; ./shell_check.exe keygen-home sh_l/pk $PWD/sh_l/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_l/pk) -o sh_l/node native/shell_node.march > sh_l/build 2>&1 || { cat sh_l/build; exit 1; }; printf 'IO.Console\\n' > sh_l/policy; S=/tmp/march-shell-link-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_l/policy ./sh_l/node > sh_l/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_l/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_l/home MARCH_SHELL_LINK_REPORT=1 %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/link.txt native/shell_node.march 2>&1; echo \"exit=$?\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_l $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_link.expected native_shell_link.out)))
+
 ; Golden rendered-diagnostic corpus (diagnostics plan §11, D7): every
 ; test/errors/*.march checked with the real compiler; full rendered output
 ; and --check-json pinned in .expected / .json.expected. Regenerate with
@@ -12831,3 +13080,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (libraries march_test_helpers alcotest yojson unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
  (action (run %{test} -e)))
+
+;  Nested constructor pattern on a ctor name a stdlib type also declares
+; (specs/progress/2026-10-07-nested-pattern-ctor-name-collision-miscompile.md).
+; A user `type Tree = Leaf | Node(..)` collides with stdlib OrderedMap.Tree's
+; `Leaf`/`Node`; a nested `Node(Leaf, _, Leaf)` used to take the wrong arm when
+; compiled. The .expected file IS the interpreter's output.
+(rule
+ (targets nested_pattern_ctor_name_collision nested_pattern_ctor_name_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nested_pattern_ctor_name_collision.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nested_pattern_ctor_name_collision
+        native/nested_pattern_ctor_name_collision.march)
+   (with-stdout-to nested_pattern_ctor_name_collision.out
+        (system "./nested_pattern_ctor_name_collision")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_pattern_ctor_name_collision.expected nested_pattern_ctor_name_collision.out)))

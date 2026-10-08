@@ -58,6 +58,12 @@ let emit_protocols_dir : string option ref = ref None
    every `@[endpoints]` protocol: this build's version, and the previous one
    when the protocol changed. forge passes .forge/protocols on every build. *)
 let protocol_baseline_tag : string option ref = ref None
+(* A --hot-reload native build's shell identity (lib/jit/shell_ident.ml): its
+   declaration table, computed after desugaring and embedded at emit as
+   `__march_shell_ident`.  Its digest is part of the CAS key, since a comment
+   edit changes the table without changing the TIR. *)
+let shell_ident_decls : (string, string) Hashtbl.t option ref = ref None
+let shell_ident_tag : string option ref = ref None
 (* A digest of the --protocol-baseline files, for the CAS key: the baseline
    changes the generated `compat()`, so it changes the binary. *)
 let topology_isolate_foreign = ref false
@@ -149,7 +155,21 @@ let debug_info     = ref false
 (* --dump-provenance: print the fn-name -> origin side table after the TIR
    pipeline (specs/plans/incremental-codegen-cas-plan.md §7). *)
 let dump_provenance = ref false
+
+(* `march query <sub> ...` (A7, lib/query/query.ml): the request, the
+   pipeline snapshot collector it installs, the compiler arguments left after
+   its own are stripped, and the cache-key inputs the compile path records
+   (every build, so a successful one can write them for a later why-miss). *)
+let query_req : March_query.Query.request option ref = ref None
+let query_collector : March_query.Query.Collector.t option ref = ref None
+let query_argv : string array option ref = ref None
+let key_capture : March_query.Query.Key.t option ref = ref None
 let opt_enabled    = ref true
+(* A4: --bisect-pass / --expect / --reduce / --oracle (bin/pass_tools.ml). *)
+let bisect_pass_file = ref ""
+let bisect_expect    = ref ""
+let reduce_file      = ref ""
+let reduce_oracle    = ref ""
 let fast_math      = ref false
 (* --rc-trace: store a site id before every refcount/alloc/free call and emit
    the site table (lib/tir/llvm_rc_trace.ml).  MARCH_RC_TRACE=1 is the same

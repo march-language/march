@@ -1,0 +1,5 @@
+watcher killed, then target, released: true
+target killed, then watcher, released: true
+demonitored, then both killed, released: true
+monitor of a dead target, released: true
+Down delivered: true

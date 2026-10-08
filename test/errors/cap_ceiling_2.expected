@@ -14,3 +14,5 @@ fix [cap_ceiling:IO.FileRead]:
 @@ after line 14 @@
      needs IO.Console
 +    needs IO.FileRead
+
+after fix: exit 0

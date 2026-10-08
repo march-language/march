@@ -966,16 +966,60 @@ Inputs:
 
 | You type | It does |
 |---|---|
-| `<expr>` | runs it and prints the value (lists cut at 50 elements) |
-| `<expr> limit: N` / `limit: all` | the same, cutting lists at `N` / not at all |
+| `<expr>` | runs it and prints the value (collections and strings cut at 50) |
+| `<expr> limit: N` / `limit: all` | the same, cutting at `N` / not at all |
 | `let x = <expr>` | runs it and keeps the value on the node for later inputs |
 | `:t <expr>` | the expression's type; nothing runs |
 | `:limit N`, `:caps`, `:help`, `:quit` | |
 
 Capabilities are pre-bound names: `console` (`Cap(IO.Console)`), `clock`,
-`intro` (`Cap(Actor.Introspect)`), `debug` (`Cap(Actor.Debug)`). The node
-refuses an input that uses one its policy does not list
-(`** refused: policy IO.Console`).
+`intro` (`Cap(Actor.Introspect)`), `debug` (`Cap(Actor.Debug)`).
+
+A value prints by its type, the way you would write it:
+
+```
+march> Json.parse("{\"a\": [1, true]}")
+Ok(Object([("a", Array([Number(1.), Bool(true)]))]))
+march> [{ name: "first", tags: ["a", "b", "c"] }] limit: 2
+[{ name: "fi"… 3 more chars, tags: ["a", "b", … 1 more] }]
+```
+
+- Records, tuples and constructors print field by field, with constructor
+  names. A type that derives `Show` prints as its derived `show` would.
+- Strings print quoted and escaped.
+- The limit applies at every depth: each list, Array, Map and Set shows at
+  most `N` elements then `… n more`, and each string at most `N` characters
+  then `… n more chars`. `limit: all` (or `:limit 0`) turns it off.
+- A type with a hand-written `Show` prints through its `show`, cut at 16 KiB
+  with `… (n more bytes)`.
+- A function prints `<fn>`; a Pid and other runtime values print as
+  `to_string` prints them, as does a type whose constructors are private
+  (`ptype`).
+
+The shell generates this renderer from the input's static type, into the
+input's fragment only (`bin/shell_render_gen.ml`, stdlib `ShellRender`); the
+node's code is not changed.
+
+The node refuses an input whose compiled code uses a capability its policy
+does not list (`** refused: policy IO.Clock`). This counts capabilities the
+input reaches through program and library code, not only the names it
+uses: calling a program function that reads the clock needs `IO.Clock`.
+The fragment carries its capability list, and the node checks it against the
+signed request after loading the fragment, before running it.
+
+**Your checkout must match the node's build** for the code an input reaches.
+When a session starts, the shell compares a hash of every declaration in
+your source with the node's and names the ones that differ. An input that
+reaches one of them is refused, with the list:
+
+```
+error: this input reaches code that differs from the node's build:
+  evens differs
+```
+
+Inputs that reach only unchanged code still run. A type whose constructors
+are numbered differently on the node (reordered, added) is always refused,
+since values built here would be read back wrongly there.
 
 What happens when:
 
@@ -987,7 +1031,12 @@ What happens when:
 - **A deploy happens.** The session ends with "the node was redeployed".
   Bindings belong to the session, so they go with it.
 - **Anything is sent.** Every input, accepted or not, is appended to the
-  node's audit log with `"type":"shell"`, the signer and the source.
+  node's audit log with `"type":"shell"`, the signer and the source. If the
+  log cannot be written, the input does not run
+  (`** refused: audit_unavailable`).
+- **A request is captured.** Each one is signed for its session (a random
+  challenge the node hands out when you attach), so it runs on no other
+  connection, no other node and not after the node restarts.
 
 Under the hood `forge shell` runs `march --shell <reload socket>.shell
 <entry>` with the project's `MARCH_LIB_PATH`, through an ssh tunnel for a
@@ -1026,11 +1075,8 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
   messages of an actor, most useful exactly when it is stuck and cannot render
   them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
 - **The rest of the remote shell.** It works (see above), but:
-  - strings print unquoted, and only a top-level list is cut by `limit:`;
-  - a node whose code differs from your checkout is not detected yet;
-  - capabilities are declared from the names an input uses, not from what
-    the compiled fragment can reach;
-  - a program-defined actor cannot be spawned from the shell.
+  - a program-defined actor cannot be spawned from the shell;
+  - it has not had its security review yet (plan R5).
 - **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;
   today `forge top` is the live view.
 - **Tracing (R8).** Message and call tracing with mandatory limits.

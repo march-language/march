@@ -409,7 +409,11 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     let fn_body' =
       Lower_state.with_scope_locals
         (List.map (fun (v : Tir.var) -> v.Tir.v_name) params')
-        (fun () -> lower_expr env fn_body)
+        (fun () ->
+           (* A local `fn go` hosts its own lambdas: [$lam0_<host>_go]. *)
+           Lower_state.with_host
+             (Lower_state.current_host ~mod_prefix:env.mod_prefix () ^ "$" ^ fn_name)
+             (fun () -> lower_expr env fn_body))
     in
     let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr env fn_body in
     let fn : Tir.fn_def = {
@@ -771,7 +775,9 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
           if type_name = "" then Tir.EApp (f_var, arg_atoms)
           else
             let drop_fn_name = Printf.sprintf "Drop$%s.drop" type_name in
-            let lam_name     = fresh_name "own_drop" in
+            let lam_name     =
+              Lower_state.fresh_nested_name
+                ~host:(Lower_state.current_host ~mod_prefix:env.mod_prefix ()) "own_drop" in
             let drop_var  = { Tir.v_name = drop_fn_name;
                               v_ty = Tir.TFn ([value_ty], Tir.TUnit);
                               v_lin = Tir.Unr } in
@@ -898,7 +904,9 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
 
   (* --- Lambda → ELetRec with a single fn_def --- *)
   | Ast.ELam (params, body, lam_span) ->
-    let fn_name = fresh_name "lam" in
+    let fn_name =
+      Lower_state.fresh_nested_name
+        ~host:(Lower_state.current_host ~mod_prefix:env.mod_prefix ()) "lam" in
     Provenance.note_span fn_name lam_span;
     (* Extract param types from the lambda's inferred type when no annotation. *)
     let lam_ty = ty_of_span env lam_span in
@@ -951,7 +959,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     let body' =
       Lower_state.with_scope_locals
         (List.map (fun (v : Tir.var) -> v.Tir.v_name) params')
-        (fun () -> lower_expr env body)
+        (fun () -> Lower_state.with_host fn_name (fun () -> lower_expr env body))
     in
     List.iter (fun (name, saved) ->
       match saved with

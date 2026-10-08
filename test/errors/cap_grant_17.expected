@@ -51,3 +51,6 @@ fix [cap_grant]:
 @@ lines 4-4 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+expected `Bool` but got `Int`. [type_mismatch]

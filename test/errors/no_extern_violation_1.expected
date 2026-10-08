@@ -25,3 +25,6 @@ fix [extern_needs_foreign]:
 @@ after line 16 @@
  mod NoFFI do
 +  needs IO.Foreign
+
+after fix: exit 1
+`mod NoFFI` (declared `cap no_extern`) uses `needs IO.Foreign`. [no_extern_violation]

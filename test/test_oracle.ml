@@ -633,6 +633,10 @@ let is_failure (path, verdict) =
 
 let () =
   Random.self_init ();
+  (* Every compile this oracle runs also runs the TIR verifier (A1,
+     lib/tir/tir_verify.ml): a finding exits 3, which [is_failure] already
+     counts as an internal compiler error.  MARCH_VERIFY_TIR=0 opts out. *)
+  if Sys.getenv_opt "MARCH_VERIFY_TIR" = None then Unix.putenv "MARCH_VERIFY_TIR" "1";
   Printf.printf "=== March Oracle Test ===\n";
   Printf.printf "march binary  : %s\n" march_abs;
   Printf.printf "project root  : %s\n" project_root;

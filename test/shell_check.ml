@@ -106,10 +106,10 @@ let now_ms () = int_of_float (Unix.gettimeofday () *. 1000.)
 let nonce_n = ref 0
 let fresh_nonce () = incr nonce_n; Printf.sprintf "%016x%016x" (now_ms ()) !nonce_n
 
-let eval_line ?(nonce = fresh_nonce ()) ?(timeout_ms = 5000) ?(caps = "-") ~sk ~epoch ~name ~so () =
+let eval_line ?(nonce = fresh_nonce ()) ?(timeout_ms = 5000) ?(caps = "-") ~sk ~epoch ~session ~name ~so () =
   let body =
-    Printf.sprintf "name:%s epoch:%d nonce:%s not_after_ms:%d timeout_ms:%d caps:%s src_b64:%s so_b64:%s"
-      name epoch nonce (now_ms () + 30_000) timeout_ms caps (b64_encode ("source of " ^ name))
+    Printf.sprintf "name:%s epoch:%d session:%s nonce:%s not_after_ms:%d timeout_ms:%d caps:%s src_b64:%s so_b64:%s"
+      name epoch session nonce (now_ms () + 30_000) timeout_ms caps (b64_encode ("source of " ^ name))
       (b64_encode so) in
   let s = March_ed25519.Ed25519.(sig_to_base64 (sign_str ("EVAL " ^ body) sk)) in
   "EVAL " ^ s ^ " " ^ body
@@ -153,8 +153,14 @@ let run sock prog sk_file policy log frag_dir =
   check "EVAL before HELLO is refused" (ask c "EVAL x y" = "ERR no_hello") "";
   let hello = ask c "HELLO" in
   let epoch = match field hello "epoch" with Some e -> int_of_string e | None -> -1 in
-  check "HELLO answers the epoch and a slot range"
-    (starts_with hello "OK " && epoch >= 0 && field hello "slots" <> None) hello;
+  let session = Option.value (field hello "session") ~default:"" in
+  check "HELLO answers the epoch, a slot range and a session challenge"
+    (starts_with hello "OK " && epoch >= 0 && field hello "slots" <> None
+     && String.length session = 32) hello;
+  check "the shell socket is owner-only"
+    ((Unix.stat sock).Unix.st_perm land 0o777 = 0o600) "";
+  let eval_line_for = eval_line in
+  let eval_line = eval_line_for ~session in
   let ok_line = eval_line ~sk ~epoch ~name:"__shell_frag_ok" ~so:(so "frag_ok") () in
   let r = ask c ok_line in
   check "a signed fragment runs: its result comes back"
@@ -163,6 +169,20 @@ let run sock prog sk_file policy log frag_dir =
     (match field r "out" with Some o -> b64_decode o = "hello from the fragment\n" | None -> false)
     r;
   check "the same line again: replay" (ask c ok_line = "ERR replay") "";
+  (* F1/F2 of specs/reviews/2026-10-07-shell-r5-review-packet.md: a captured
+     line is bound to the session it was signed for. *)
+  let c2 = connect sock in
+  let hello2 = ask c2 "HELLO" in
+  let session2 = Option.value (field hello2 "session") ~default:"" in
+  check "each session gets its own challenge" (session2 <> "" && session2 <> session) hello2;
+  check "a line replayed on another connection: bad_session"
+    (ask c2 (eval_line ~sk ~epoch ~name:"__shell_frag_ok" ~so:(so "frag_ok") ()) = "ERR bad_session") "";
+  check "a line signed for another session's challenge: bad_session"
+    (ask c (eval_line_for ~session:session2 ~sk ~epoch ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())
+     = "ERR bad_session") "";
+  send c2 "BYE";
+  close c2;
+  Unix.sleepf 0.3;  (* its session ends before the four-sessions check below *)
   let _, other = March_ed25519.Ed25519.keygen () in
   check "signed by another key: bad_signature"
     (ask c (eval_line ~sk:other ~epoch ~name:"__shell_frag_ok" ~so:(so "frag_ok") ()) = "ERR bad_signature") "";
@@ -170,8 +190,17 @@ let run sock prog sk_file policy log frag_dir =
     (ask c (eval_line ~sk ~epoch ~caps:"IO.NetConnect" ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())
      = "ERR policy IO.NetConnect") "";
   write_file policy "# shell caps\nIO.Console\nIO.NetConnect\n";
-  check "listed in the policy: allowed"
-    (starts_with (ask c (eval_line ~sk ~epoch ~caps:"IO.Console,IO.NetConnect" ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())) "OK ") "";
+  check "listed in the policy, and the fragment's manifest: allowed"
+    (starts_with (ask c (eval_line ~sk ~epoch ~caps:"IO.Console,IO.NetConnect" ~name:"__shell_frag_caps" ~so:(so "frag_caps") ())) "OK ") "";
+  check "signed caps the manifest does not list: cap_tamper"
+    (ask c (eval_line ~sk ~epoch ~caps:"IO.Console,IO.NetConnect" ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())
+     = "ERR cap_tamper") "";
+  check "signed caps narrower than the manifest: cap_tamper"
+    (ask c (eval_line ~sk ~epoch ~caps:"IO.Console" ~name:"__shell_frag_caps" ~so:(so "frag_caps") ())
+     = "ERR cap_tamper") "";
+  check "a fragment without a manifest: no_cap_manifest"
+    (ask c (eval_line ~sk ~epoch ~name:"__shell_frag_nomanifest" ~so:(so "frag_nomanifest") ())
+     = "ERR no_cap_manifest") "";
   let p = ask c (eval_line ~sk ~epoch ~name:"__shell_frag_panic" ~so:(so "frag_panic") ()) in
   check "a panicking fragment answers PANIC with its message"
     (starts_with p "PANIC " && b64_decode (List.nth (words p) 1) = "fragment panicked") p;
@@ -190,6 +219,16 @@ let run sock prog sk_file policy log frag_dir =
     (starts_with (ask c (eval_line ~sk ~epoch:(epoch + 5) ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())) "ERR epoch_changed") "";
   check "an unknown field: bad_args"
     (ask c "EVAL sig name:x colour:red" = "ERR bad_args") "";
+  (* F3: an input whose audit line cannot be written does not run.  (Root
+     writes through the mode, so there is nothing to check as root.) *)
+  check "an unwritable audit log: audit_unavailable, nothing runs"
+    (Unix.geteuid () = 0
+     || begin
+       Unix.chmod log 0o400;
+       let r = ask c (eval_line ~sk ~epoch ~name:"__shell_frag_ok" ~so:(so "frag_ok") ()) in
+       Unix.chmod log 0o600;
+       r = "ERR audit_unavailable"
+     end) "";
   (* Sessions: four at once, the fifth is refused. *)
   let others = List.init 3 (fun _ -> let o = connect sock in ignore (ask o "HELLO"); o) in
   let fifth = connect sock in
@@ -202,7 +241,9 @@ let run sock prog sk_file policy log frag_dir =
   send c "BYE";
   close c;
   let results = audit_results log in
-  let expected = [ "ok"; "replay"; "bad_signature"; "policy"; "ok"; "ok"; "ok"; "ok"; "err_no_entry";
+  let expected = [ "ok"; "replay"; "bad_session"; "bad_session"; "bad_signature"; "policy";
+                   "ok"; "cap_tamper"; "cap_tamper";
+                   "no_cap_manifest"; "ok"; "ok"; "ok"; "err_no_entry";
                    "epoch_changed"; "bad_args" ] in
   check "every EVAL is audited, in order" (results = expected) (String.concat "," results);
   check "the audit line carries the source"

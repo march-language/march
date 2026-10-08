@@ -266,7 +266,29 @@ let rec mangle_ty : Tir.ty -> string = function
 let mangle_name (base : string) (tys : Tir.ty list) : string =
   match tys with
   | [] -> base
-  | _  -> Tir_names.specialize_mangle base (String.concat "$" (List.map mangle_ty tys))
+  | _  ->
+    (* A residual type variable is named by its position among the
+       specialisation's type arguments ([$V_0], [$V_1], first appearance
+       wins), never by the typechecker's fresh-var id (B1): that id depends
+       on how much was inferred before, so the same specialisation got a
+       different symbol after an unrelated edit.  [mangle_ty] itself keeps
+       the raw name: [record_to_typename] uses it as a process-local key. *)
+    let seen : (string, int) Hashtbl.t = Hashtbl.create 4 in
+    let rec canon : Tir.ty -> Tir.ty = function
+      | Tir.TVar name ->
+        let i = match Hashtbl.find_opt seen name with
+          | Some i -> i
+          | None -> let i = Hashtbl.length seen in Hashtbl.replace seen name i; i in
+        Tir.TVar (string_of_int i)
+      | Tir.TTuple ts -> Tir.TTuple (List.map canon ts)
+      | Tir.TRecord fs -> Tir.TRecord (List.map (fun (n, t) -> (n, canon t)) fs)
+      | Tir.TCon (n, args) -> Tir.TCon (n, List.map canon args)
+      | Tir.TFn (ps, r) -> Tir.TFn (List.map canon ps, canon r)
+      | Tir.TPtr t -> Tir.TPtr (canon t)
+      | t -> t
+    in
+    Tir_names.specialize_mangle base
+      (String.concat "$" (List.map (fun t -> mangle_ty (canon t)) tys))
 
 (* ── Type matching (poly → concrete → subst) ────────────────────── *)
 
