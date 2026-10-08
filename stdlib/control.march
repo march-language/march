@@ -342,7 +342,7 @@ mod Control do
       end
       DoTopology -> Ok(())
       DoCerts ->
-        if r.certs == Nil && r.revokes == Nil do Err(where ++ "delivers certificates, but the release carries no `cert` or `revoke` item")
+        if List.is_empty(r.certs) && List.is_empty(r.revokes) do Err(where ++ "delivers certificates, but the release carries no `cert` or `revoke` item")
         else Ok(()) end
     end
   end
@@ -397,7 +397,7 @@ mod Control do
             match dup_cert(r.certs) do
               Some(n) -> Err("cert: node " ++ n ++ " is given two certificates")
               None ->
-                if (r.certs != Nil || r.revokes != Nil) && not(delivers) do
+                if (not(List.is_empty(r.certs)) || not(List.is_empty(r.revokes))) && not(delivers) do
                   Err("the release carries certificate items but no `do:certs` step")
                 else Ok(()) end
             end
@@ -418,7 +418,7 @@ mod Control do
     else if r.parent == "" do Err("missing parent (use `parent " ++ no_parent() ++ "` for the first release)")
     else if r.env == "" do Err("missing env")
     else if r.topology == "" do Err("missing topology")
-    else if r.steps == Nil do Err("a release needs at least one step")
+    else if List.is_empty(r.steps) do Err("a release needs at least one step")
     else match dup_build(r.builds) do
       Some(b) -> Err("build `" ++ b ++ "` is given twice")
       None ->

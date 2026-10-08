@@ -24,3 +24,8 @@ SessionNode's three payload-independent presence checks now use
 `Option.is_none` / `Option.is_some`, avoiding an unnecessary `Eq` requirement
 for process and queue handles. Its focused entry-module check is clean,
 as is ClusterNode's.
+
+The full stdlib internal-error ratchet also exposed payload-independent
+emptiness checks in Control, Topology and NetKernel. Those now use
+`List.is_empty` / `Option.is_some`. The ratchet passes with its unchanged
+four pre-existing unknown-constructor errors; no error count was raised.

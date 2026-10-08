@@ -432,7 +432,7 @@ mod Topology do
   -- Register (or release) this node's marker for a ranked role.
   pfn mark(node : Cap(ClusterNode.Live), st : TopoState, role_name : String, here : Bool) : () do
     let name = marker(role_name, ClusterNode.node_id(node))
-    let held = ClusterNode.lookup(node, name) != None
+    let held = Option.is_some(ClusterNode.lookup(node, name))
     if here && not(held) do
       let _ = ClusterNode.register(node, name, anchor(st))
       ()

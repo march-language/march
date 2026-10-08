@@ -338,7 +338,7 @@ mod NetKernel do
   end
 
   doc "Are [fd]'s frames sealed?"
-  fn sealed(fd : Int) : Bool do Vault.get(mac_table(), fk(fd)) != None end
+  fn sealed(fd : Int) : Bool do Option.is_some(Vault.get(mac_table(), fk(fd))) end
 
   doc "Frames dropped for a failed MAC, in this process, since it started."
   fn frames_rejected() : Int do Vault.get_or(mac_counts(), "bad_total", 0) end
