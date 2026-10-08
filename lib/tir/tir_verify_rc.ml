@@ -271,7 +271,15 @@ let check_fn ~(k_table : Kind.table) ~(borrow_map : Borrow.borrow_map)
     | Tir.ECallPtr (callee, args) ->
       let st = List.fold_left (fun st a -> match use st a with
           | st, Some id -> read st id where | st, None -> st) st (callee :: args) in
-      Some (consume_atoms st where (callee :: args), VFresh)
+      (* An indirect call of a [$dps] helper (a closure-carried one, before
+         Known_call makes it direct under the optimiser: [--no-opt] keeps it
+         indirect) takes the destination cell last, borrowed by protocol,
+         exactly like the direct call above. *)
+      let n = List.length args in
+      let owned = match callee with
+        | Tir.AVar fv when is_dps fv.Tir.v_name -> List.filteri (fun i _ -> i < n - 1) args
+        | _ -> args in
+      Some (consume_atoms st where (callee :: owned), VFresh)
     | Tir.EIncRC a | Tir.EAtomicIncRC a ->
       Some ((match use st a with st, Some id -> inc st id where | st, None -> st), VNone)
     | Tir.EDecRC a | Tir.EAtomicDecRC a | Tir.EFree a ->
