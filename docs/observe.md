@@ -996,6 +996,30 @@ Inputs that reach only unchanged code still run. A type whose constructors
 are numbered differently on the node (reordered, added) is always refused,
 since values built here would be read back wrongly there.
 
+**Spawning the program's actors.** An input can spawn one of the program's
+own actors and use it like any other:
+
+```
+march> let k = spawn(Counter)
+k : Pid({ n : Int })
+march> send(k, Bump(5))
+Some(())
+march> Actor.inspect_state(debug, k, 500)
+Ok({ n: 5 })
+```
+
+The actor runs the node's code, not a copy compiled into the input: the
+input calls the node's own spawn function for that actor, so the actor
+answers `inspect_state`, shows its type name in `ACTORS` and `Recon`, and is
+upgraded by a hot deploy like every other instance. It belongs to the node:
+it keeps running after the session ends (or a deploy ends it), and a later
+session finds it with `Actor.list` or `Actor.pid_from_int`. Spawning needs no
+capability of its own, but an input is charged with the capabilities the
+actor's handlers use, as for any program code it reaches. An input that
+could only spawn the actor by carrying its own copy of the handlers is
+refused instead: a node built by an older compiler, or an actor whose init
+arguments include a function.
+
 What happens when:
 
 - **An input panics.** You see `** panic: <message>`; the node and the
@@ -1046,7 +1070,6 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
   them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
 - **The rest of the remote shell.** It works (see above), but:
   - strings print unquoted, and only a top-level list is cut by `limit:`;
-  - a program-defined actor cannot be spawned from the shell;
   - it has not had its security review yet (plan R5).
 - **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;
   today `forge top` is the live view.

@@ -3389,6 +3389,30 @@ let compile filename =
           tir.March_tir.Tir.tm_fns
       end
     in
+    (* A shell node keeps each of the program's own actors' spawn fn
+       (`Counter_spawn`), which the optimiser otherwise inlines into its
+       callers and drops, so it is in the shell identity table and a shell
+       input's `spawn(Counter)` calls the NODE's: the actor then runs the
+       node's handlers through the dispatch slot, and a deploy upgrades it
+       like any other instance (Repl_jit.shell_compile refuses an input that
+       would carry its own copy of an actor's handlers instead). *)
+    let shell_spawn_roots =
+      if !shell_ident_decls = None then []
+      else
+        List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
+            let n = fn.March_tir.Tir.fn_name in
+            let sfx = March_tir.Tir_names.actor_spawn_suffix in
+            let nl = String.length n and sl = String.length sfx in
+            if nl > sl && String.sub n (nl - sl) sl = sfx
+               && March_tir.Hot_reload.is_slot_actor_dispatch
+                    (String.sub n 0 (nl - sl) ^ March_tir.Tir_names.actor_dispatch_suffix)
+               && List.exists (fun (d : March_tir.Tir.fn_def) ->
+                   d.March_tir.Tir.fn_name
+                   = String.sub n 0 (nl - sl) ^ March_tir.Tir_names.actor_dispatch_suffix)
+                 tir.March_tir.Tir.tm_fns
+            then Some n else None)
+          tir.March_tir.Tir.tm_fns
+    in
     let pipe =
       try
       March_tir.Contract_pipeline.run
@@ -3407,7 +3431,7 @@ let compile filename =
         ~extra_roots:(if !report_contracts
                       then List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
                           d.March_tir.Alloc_contract.d_name) contract_decls
-                      else mainless_roots)
+                      else mainless_roots @ shell_spawn_roots)
         ~opt:!opt_enabled tir
       with
       | March_tir.Tir_verify.Failed (stage, findings) ->

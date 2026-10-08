@@ -15,9 +15,25 @@ hi from the shell
 c : Pid(a)
 Some(())
 Ok({ n: 42 })
+k : Pid({ n : Int })
+Some(())
+Some(())
+Ok({ n: 12 })
+[Pid(0), Pid(1)]
+Some(Counter)
 ** panic: deliberate
 ** panic: List.head: empty list
 error: I cannot find `nosuchfn`.
 4
+exit=1
+-- a second session: the actor the first spawned outlives it
+[Pid(0), Pid(1)]
+k : Pid(a)
+Some(())
+Ok({ n: 112 })
+exit=0
+-- linking off: a spawn would carry its own handlers, and is refused
+error: this input spawns actor Counter, but cannot call the node's Counter_spawn (a node built by an older compiler, or MARCH_SHELL_NO_LINK set); a copy would run this input's handlers instead of the node's
+[Pid(0), Pid(1)]
 exit=1
 node stdout lines from the shell: 0

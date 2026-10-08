@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **The remote shell spawns the program's own actors.** `let k =
+  spawn(Counter)` in `forge shell` now starts the node's Counter: it runs
+  the node's handlers, answers `Actor.inspect_state`, has its type name in
+  `ACTORS`/`Recon`, is upgraded by a hot deploy, and outlives the session.
+  Before, the input carried its own copy of the actor, which had no state
+  renderer and no hot-reload slot. An input that could only spawn by
+  carrying its own copy (a node built by an older compiler) is refused.
 - **Type errors now point at the provided side too.** A mismatch keeps its
   "the expected type comes from here" label and adds where the offending
   value came from: "this is `T`" on the expression when it is not the
