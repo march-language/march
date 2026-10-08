@@ -34,7 +34,7 @@ error: this input reaches code that differs from the node's build:
 warning: --shell-force: this read-only input runs this checkout's code, which differs from the node's build:
   evens differs
 ** refused: policy IO.Clock
-Ok("{ n: 1 }")
+Ok({ n: 1 })
 4
 exit=1
 audit:

@@ -565,6 +565,18 @@ let mutating_syms = [
 (* Whole families: the logger's process-wide configuration and output. *)
 let mutating_prefixes = [ "march_logger_" ]
 
+(* Reference counting is bookkeeping every input does to the values it reads,
+   not a change to the node's state, but several of its names contain a
+   mutating word ("incr", "free").  Normally it compiles inline and is never a
+   recorded call; the slow paths ([march_decrc_freed], which owned-call drop
+   fusion emits, and the like) are.  Exact names only, so a later symbol that
+   merely starts with one of these (say a `march_decrc_and_send`) is still
+   judged by its words. *)
+let rc_bookkeeping_syms = [
+  "march_incrc"; "march_decrc"; "march_incrc_local"; "march_decrc_local";
+  "march_decrc_freed"; "march_decrc_local_freed";
+]
+
 let is_mutating_sym (s : string) : bool =
   let has sub =
     let n = String.length s and m = String.length sub in
@@ -574,6 +586,7 @@ let is_mutating_sym (s : string) : bool =
   (* The emitter records program and library functions it calls too
      (`evens`, `List.drop`): only the runtime's own entry points count. *)
   starts "march_"
+  && not (List.mem s rc_bookkeeping_syms)
   && (List.mem s mutating_syms || List.exists starts mutating_prefixes
       || List.exists has mutating_words)
 

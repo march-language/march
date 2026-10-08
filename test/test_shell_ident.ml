@@ -141,6 +141,26 @@ let test_fetch_error () =
   | Error e -> Alcotest.(check string) "the reply" "ERR no_ident" e
   | Ok _ -> Alcotest.fail "expected an error"
 
+(* --shell-force's read-only check judges the runtime symbols a fragment calls.
+   Reference counting is bookkeeping, not a change to the node's state, but
+   several RC names contain a mutating word ("incr", "free"): owned-call drop
+   fusion makes [march_decrc_freed] a real call, and the check used to refuse
+   every forced input that reached one.  The exemption is by exact name. *)
+let test_rc_bookkeeping_is_read_only () =
+  let reasons syms = S.not_read_only ~caps:[] ~syms ~fns:[] () in
+  List.iter (fun sym ->
+      Alcotest.(check (list string)) (sym ^ " is read-only") [] (reasons [ sym ]);
+      Alcotest.(check (list string)) ("_" ^ sym ^ " (macOS spelling) is read-only")
+        [] (reasons [ "_" ^ sym ]))
+    [ "march_incrc"; "march_decrc"; "march_incrc_local"; "march_decrc_local";
+      "march_decrc_freed"; "march_decrc_local_freed" ];
+  (* the words still catch what they were written for, and a name that only
+     starts with an RC name is judged by its own words *)
+  List.iter (fun sym ->
+      Alcotest.(check bool) (sym ^ " is still refused") true (reasons [ sym ] <> []))
+    [ "march_send"; "march_spawn_actor"; "march_free"; "march_decrc_and_send";
+      "march_incrc_then_kill"; "march_logger_set_level" ]
+
 let tests = [
   Alcotest.test_case "format 2 round trip" `Quick test_round_trip;
   Alcotest.test_case "48-bit hashes, format 1 read" `Quick test_hash48;
@@ -148,4 +168,5 @@ let tests = [
   Alcotest.test_case "fetch: only the differing groups" `Quick test_fetch_differing_groups;
   Alcotest.test_case "fetch: a format-1 node" `Quick test_fetch_old_node;
   Alcotest.test_case "fetch: no identity" `Quick test_fetch_error;
+  Alcotest.test_case "force: RC bookkeeping is read-only" `Quick test_rc_bookkeeping_is_read_only;
 ]

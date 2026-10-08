@@ -181,3 +181,19 @@ refused (`march_send`), and so is `Option.map` over a binding holding
 
 `forge/test/test_forge.ml` "shell": `--force` passes `--shell-force` to
 `march --shell` (`Cmd_shell.march_args`), and nothing without it.
+
+## Reference counting is read-only (2026-10-08)
+
+Merging this onto main exposed that the read-only check refuses any forced input
+whose code reaches a non-inlined RC call. `Shell_ident.is_mutating_sym` matches
+symbols by words, and the RC family's names contain two of them ("incr",
+"free"). Reference counting normally compiles inline and is never a recorded
+call, so nothing noticed until owned-call drop fusion made `march_decrc_freed` a
+real call: every forced input that reached one was refused with "calls
+march_decrc_freed" (`native_shell_skew_force`).
+
+`rc_bookkeeping_syms` now exempts exactly `march_incrc`, `march_decrc`, their
+`_local` forms and `march_decrc_freed` / `march_decrc_local_freed`. Exact names
+only: a symbol that merely starts with one of them (`march_decrc_and_send`) is
+still judged by its words. `test_shell_ident` "force: RC bookkeeping is
+read-only" covers both halves and is red without the exemption.
