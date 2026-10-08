@@ -87,3 +87,20 @@ No benchmark function changes, so no benchmark was rerun. In leak-reporting mode
 (`MARCH_VERIFY_TIR_LEAKS=1`), every changed program reports one leak fewer than with main's
 compiler and no use-after-release. The leak findings left (about 260 per program) are the
 accepted drop-glue fallbacks (`specs/todos/2026-10-08-verifier-a4-followups.md`).
+
+## Follow-up: an indirect `$dps` call in the checker
+
+Turning check 3 on under `--verify-tir` exposed a checker bug the optimised sweeps could
+not see. With `--no-opt`, Known_call has not made a local TRMC helper's recursion direct,
+so it is `call_ptr go$dps(.., $trmc)`. A direct `$dps` call already counted its last
+argument, the destination cell, as borrowed by protocol. The indirect one counted it as
+consumed, and `--verify-tir --no-opt` reported 11 over-releases in the stdlib's own
+list-producing helpers (`IOList.from_strings`, `Http.encode_query`, ...).
+
+`tir_verify_rc.ml` now treats the last argument of an indirect `$dps` call as borrowed too.
+The corpus is clean under `--no-opt`, `--opt 0` and `--opt 2` (439 programs each). The test
+`rc: indirect $dps call borrows its destination` runs a local TRMC helper through the real
+pipeline with the optimiser off and on; it fails without the fix.
+
+The earlier sweeps used the default optimisation level only. Sweep every level
+(`--no-opt`, `--opt 0`, `--opt 2`) when changing the checker.
