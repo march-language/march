@@ -271,15 +271,19 @@ let check_fn ~(k_table : Kind.table) ~(borrow_map : Borrow.borrow_map)
     | Tir.ECallPtr (callee, args) ->
       let st = List.fold_left (fun st a -> match use st a with
           | st, Some id -> read st id where | st, None -> st) st (callee :: args) in
-      (* An indirect call of a [$dps] helper (a closure-carried one, before
-         Known_call makes it direct under the optimiser: [--no-opt] keeps it
-         indirect) takes the destination cell last, borrowed by protocol,
-         exactly like the direct call above. *)
-      let n = List.length args in
-      let owned = match callee with
-        | Tir.AVar fv when is_dps fv.Tir.v_name -> List.filteri (fun i _ -> i < n - 1) args
-        | _ -> args in
-      Some (consume_atoms st where (callee :: owned), VFresh)
+      let st = match use st callee with
+        | st, Some id -> consume st id where
+        | st, None -> st
+      in
+      let callee_is_dps =
+        match callee with Tir.AVar v -> is_dps v.Tir.v_name | _ -> false
+      in
+      let nargs = List.length args in
+      let st = List.fold_left (fun st (i, a) -> match use st a with
+          | st, Some id when not (callee_is_dps && i = nargs - 1) ->
+            consume st id where
+          | st, _ -> st) st (List.mapi (fun i a -> (i, a)) args) in
+      Some (st, VFresh)
     | Tir.EIncRC a | Tir.EAtomicIncRC a ->
       Some ((match use st a with st, Some id -> inc st id where | st, None -> st), VNone)
     | Tir.EDecRC a | Tir.EAtomicDecRC a | Tir.EFree a ->

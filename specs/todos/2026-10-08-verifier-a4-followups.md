@@ -2,9 +2,6 @@
 
 Logged 2026-10-08, from `specs/progress/2026-10-07-verify-rc-types-and-pass-bisect.md`.
 
-- **Check 3 in the snapshot harness.** `test/test_snapshots.ml` runs Perceus by hand. It
-  should compute `Kind.of_module` and `Borrow.infer_module` once, pass both to Perceus, and
-  pass both to `Tir_verify.check`.
 - **Leak reporting.** `MARCH_VERIFY_TIR_LEAKS=1` has not been swept. Expect the drop-glue
   fallbacks the module doc lists as accepted leaks.
 - **Checks 4 (repr invariants) and 5 (pass contracts)** from plan §6.
