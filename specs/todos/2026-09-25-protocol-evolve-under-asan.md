@@ -24,11 +24,9 @@ The scenario exits 3 (skipped) under `MARCH_SANITIZE` until this is understood;
 container with `MARCH_SANITIZE=1 TWO_NODE_TIMEOUT=600` after removing the skip,
 and attach gdb to node-b once `deploy_a.log` says "Deploy complete".
 
-## The gate mislabels the skip
+## The gate reports the skip reason
 
-`specs/lang/golden/sanitize.sh`'s two-node sweep prints `SKIP (needs root)` for
-EVERY scenario that exits 3, so the report says `[two-node/protocol_evolve] SKIP
-(needs root)`, which is false and would send a reader to the wrong fix. A skip
-must print its real reason: have the sweep show the scenario's own last line
-(this scenario prints "skipped under MARCH_SANITIZE (timing-bound; see
-scenario.sh)"), or have `two-node.sh` distinguish exit codes per reason.
+Fixed 2026-10-08: the two-node sweep now prints the scenario's final nonempty
+log line for exit 3, or a neutral “exited 3 without a reason” fallback. Thus
+`protocol_evolve` reports its timing-bound ASan skip rather than falsely saying
+it needs root. The underlying ASan race remains open.
