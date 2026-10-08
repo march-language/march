@@ -1,0 +1,207 @@
+-- ShellRender: the combinators `march --shell` renders a result with.
+--
+-- The shell (bin/shell_cmd.ml, bin/shell_render_gen.ml) compiles each input
+-- into a fragment that returns its result as a String.  It generates, from
+-- the result's static type, a renderer built from these functions: one per
+-- record, tuple and ADT the type reaches, each passing the element limit
+-- down.  The rules (R5.7 of specs/plans/2026-09-28-observe-recon-shell-plan.md):
+--
+-- - A collection (List, Array, Map, Set) shows at most `limit` elements and
+--   then `… n more`.  A string shows at most `limit` characters (codepoints),
+--   quoted and escaped, then `… n more chars`.  The limit applies at every
+--   depth; `limit <= 0` means no limit.
+-- - Records, tuples and constructors render field by field, in derive Show's
+--   form.
+-- - A hand-written Show impl's string is cut at 16 KiB (`show_cut`).
+
+mod ShellRender do
+
+  -- ── strings ────────────────────────────────────────────────────────────
+
+  pfn hex_digit(n) do
+    if n < 10 do int_to_string(n)
+    else if n == 10 do "a" else if n == 11 do "b" else if n == 12 do "c"
+    else if n == 13 do "d" else if n == 14 do "e" else "f" end end end end end end
+  end
+
+  -- The escape for byte [c] at byte offset [i] of [s], if it needs one.
+  pfn escape_of(s, i, c) do
+    if c == 34 do Some("\\\"")
+    else if c == 92 do Some("\\\\")
+    else if c == 10 do Some("\\n")
+    else if c == 13 do Some("\\r")
+    else if c == 9 do Some("\\t")
+    else if c == 36 && string_byte_at(s, i + 1) == 123 do Some("\\$")
+    else if c < 32 || c == 127 do Some("\\x" ++ hex_digit(c / 16) ++ hex_digit(c % 16))
+    else None end end end end end end end
+  end
+
+  -- Escape bytes [start, stop) of [s], a run at a time (a string with
+  -- nothing to escape is sliced once).
+  pfn escape_go(s, i, stop, start, acc) do
+    if i >= stop do
+      let acc2 = if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+      string_join(rev(acc2), "")
+    else
+      match escape_of(s, i, string_byte_at(s, i)) do
+        None -> escape_go(s, i + 1, stop, start, acc)
+        Some(e) ->
+          let acc2 = if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+          escape_go(s, i + 1, stop, i + 1, Cons(e, acc2))
+      end
+    end
+  end
+
+  pfn rev(xs) do
+    fn go(ys, acc) do
+      match ys do
+        Nil -> acc
+        Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  -- The byte offset just past the first [n] codepoints of [s] from byte [i]
+  -- (the byte length when [s] has no more than that).
+  pfn cp_offset(s, i, n) do
+    let c = string_byte_at(s, i)
+    if c < 0 do i
+    else if c >= 128 && c < 192 do cp_offset(s, i + 1, n)
+    else if n == 0 do i
+    else cp_offset(s, i + 1, n - 1) end end end
+  end
+
+  doc """
+  `s` as a March string literal: quoted, with double quotes, backslashes,
+  control bytes and an interpolation opener escaped.
+  """
+  fn quote(s : String) : String do
+    "\"" ++ escape_go(s, 0, string_byte_length(s), 0, Nil) ++ "\""
+  end
+
+  doc """
+  `s` quoted (see `quote`), cut after `limit` codepoints with `… n more
+  chars`.  `limit <= 0` keeps all of it.
+  """
+  fn string(s : String, limit : Int) : String do
+    let len = string_byte_length(s)
+    let cut = if limit > 0 do cp_offset(s, 0, limit) else len end
+    if cut >= len do quote(s)
+    else
+      let more = string_grapheme_count(s) - limit
+      "\"" ++ escape_go(s, 0, cut, 0, Nil) ++ "\"… " ++ int_to_string(more) ++ " more chars"
+    end
+  end
+
+  doc "The most bytes `show_cut` keeps of a hand-written Show impl's string: 16 KiB."
+  fn show_cap() : Int do 16384 end
+
+  doc """
+  A hand-written Show impl's string, cut at 16 KiB (on a codepoint
+  boundary) with `… (n more bytes)`; it cannot take an element limit.
+  """
+  fn show_cut(s : String) : String do
+    let len = string_byte_length(s)
+    if len <= show_cap() do s
+    else
+      let cut = back_to_start(s, show_cap())
+      string_slice(s, 0, cut) ++ "… (" ++ int_to_string(len - cut) ++ " more bytes)"
+    end
+  end
+
+  -- The nearest codepoint start at or before byte [i].
+  pfn back_to_start(s, i) do
+    let c = string_byte_at(s, i)
+    if i > 0 && c >= 128 && c < 192 do back_to_start(s, i - 1) else i end
+  end
+
+  -- ── collections ────────────────────────────────────────────────────────
+
+  -- The first [n] elements of [xs] rendered by [f] (all when [n] <= 0),
+  -- newest first, and how many were left over.
+  pfn take_render(xs, n, f, acc, k) do
+    match xs do
+      Nil -> (acc, 0)
+      Cons(h, t) ->
+        if n > 0 && k >= n do (acc, count(xs, 0))
+        else take_render(t, n, f, Cons(f(h), acc), k + 1) end
+    end
+  end
+
+  pfn count(xs, n) do
+    match xs do
+      Nil -> n
+      Cons(_, t) -> count(t, n + 1)
+    end
+  end
+
+  -- The elements of [xs] rendered by [f] and joined with ", ", at most
+  -- [limit] of them, then `… n more`.
+  pfn items(xs, limit, f) do
+    let (shown, more) = take_render(xs, limit, f, Nil, 0)
+    let body = string_join(rev(shown), ", ")
+    if more == 0 do body
+    else if body == "" do "… " ++ int_to_string(more) ++ " more"
+    else body ++ ", … " ++ int_to_string(more) ++ " more" end end
+  end
+
+  doc """
+  A list, each element rendered by `f`: `[1, 2, … 98 more]` at most `limit`
+  elements (all when `limit <= 0`).
+  """
+  fn list(xs : List(a), limit : Int, f : a -> String) : String do
+    "[" ++ items(xs, limit, f) ++ "]"
+  end
+
+  doc "An Array: `Array[1, 2, … n more]`, as `list`."
+  fn array(v, limit : Int, f) : String do
+    "Array[" ++ items(Array.to_list(v), limit, f) ++ "]"
+  end
+
+  doc "A Set: `Set{1, 2, … n more}`, as `list`, in the set's iteration order."
+  fn set(s, limit : Int, f) : String do
+    "Set{" ++ items(Set.to_list(s), limit, f) ++ "}"
+  end
+
+  doc """
+  A Map: `Map{k => v, … n more}`, keys by `fk` and values by `fv`, at most
+  `limit` entries, in the map's iteration order.
+  """
+  fn map(m, limit : Int, fk, fv) : String do
+    "Map{" ++ items(Map.to_list(m), limit, fn p -> entry(p, fk, fv)) ++ "}"
+  end
+
+  pfn entry(p, fk, fv) do
+    let (k, v) = p
+    fk(k) ++ " => " ++ fv(v)
+  end
+
+  -- ── records, tuples, constructors ──────────────────────────────────────
+
+  doc "A constructor with arguments: `Name(a, b)`."
+  fn ctor(name : String, args : List(String)) : String do
+    name ++ "(" ++ string_join(args, ", ") ++ ")"
+  end
+
+  doc "A tuple: `(a, b)`."
+  fn tuple(parts : List(String)) : String do
+    "(" ++ string_join(parts, ", ") ++ ")"
+  end
+
+  doc """
+  A named record, in derive Show's form: `Name { a = 1, b = 2 }`.  Each
+  field arrives rendered as `a = 1`.
+  """
+  fn record(name : String, fields : List(String)) : String do
+    name ++ " { " ++ string_join(fields, ", ") ++ " }"
+  end
+
+  doc "An anonymous record: `{ a: 1, b: 2 }`.  Each field arrives rendered as `a: 1`."
+  fn anon_record(fields : List(String)) : String do
+    match fields do
+      Nil -> "{}"
+      _ -> "{ " ++ string_join(fields, ", ") ++ " }"
+    end
+  end
+end
