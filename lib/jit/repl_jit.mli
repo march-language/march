@@ -137,6 +137,9 @@ type shell_fragment = {
   sf_entry : string;
   sf_ret   : March_tir.Tir.ty;
   sf_caps  : string list;  (** the capabilities its code uses, sorted *)
+  sf_skew  : string list;  (** with [~force]: the differing declarations the
+                               input reaches (it was checked read-only);
+                               [] for an input that reaches none *)
 }
 
 (** Lower the program for [shell_compile], once per session; call it at
@@ -149,10 +152,15 @@ val shell_lower_program :
 
 (** Typecheck and compile one input (a module whose [main] is the input)
     against the program the node runs.  [store_as] makes it an init fragment
-    that stores its value in that slot. *)
+    that stores its value in that slot.  With [ident], an input reaching
+    code that differs from the node's build is refused; with [force] too,
+    one reaching only differing code (no differing type or constructor tags)
+    compiles if it is read-only ([Shell_ident.not_read_only]), and its
+    [sf_skew] names them. *)
 val shell_compile :
   ?triple:string ->
   ?ident:Shell_ident.check ->
+  ?force:bool ->
   t ->
   tc_env:March_typecheck.Typecheck.env ->
   program_name:string ->

@@ -23,6 +23,9 @@ let emit_llvm      = ref false
 let shell_socket   : string option ref = ref None
 let shell_timeout_ms = ref 10_000
 let shell_inputs   : string option ref = ref None
+(* --shell-force: run a read-only input that reaches declarations differing
+   from the node's build (observe plan R5.4; Shell_ident.not_read_only). *)
+let shell_force = ref false
 (* --dump-impl-hashes: write <basename>.hashes beside the .ll, one line per
    post-TIR definition `symbol<TAB>impl_hash<TAB>sig_hash`, sorted by symbol.
    Read-only view of the CAS hashing (Pipeline.hash_module); consumed by

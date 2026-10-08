@@ -401,14 +401,33 @@ let type_key name =
     module headers), the types they mention, and those types' constructor
     tags.  [regions] maps the client's spans to its keys.  One line per
     difference, sorted; empty when they agree. *)
-let skew ~(client : t) ~(regions : region list) ~(node : t)
-    (fns : March_tir.Tir.fn_def list) : string list =
-  let out = Hashtbl.create 8 in
+type skew_parts = {
+  sk_decls : string list;  (* functions, lets, impls and module headers that differ *)
+  sk_types : string list;  (* types, actors and protocols that differ *)
+  sk_tags  : string list;  (* types whose constructor tags differ *)
+}
+
+(* The kind of a declaration key ("f", "t", "a", ... or "<header>"). *)
+let key_kind (key : string) : string =
+  match String.index_opt key ':' with
+  | None -> "<header>"
+  | Some c ->
+    let before = String.sub key 0 c in
+    (match String.rindex_opt before '.' with
+     | Some d -> String.sub before (d + 1) (c - d - 1)
+     | None -> before)
+
+let skew_parts ~(client : t) ~(regions : region list) ~(node : t)
+    (fns : March_tir.Tir.fn_def list) : skew_parts =
+  let out = Hashtbl.create 8 and type_out = Hashtbl.create 2 and tag_out = Hashtbl.create 2 in
   let check_decl key =
+    (* A type's, actor's or protocol's definition is a value layout the
+       node's data has; anything else is code the fragment carries. *)
+    let into = if List.mem (key_kind key) [ "t"; "a"; "p" ] then type_out else out in
     match Hashtbl.find_opt client.decls key, Hashtbl.find_opt node.decls key with
     | Some a, Some b when a = b -> ()
-    | Some _, Some _ -> Hashtbl.replace out (describe_key key ^ " differs") ()
-    | Some _, None -> Hashtbl.replace out (describe_key key ^ " is not in the node's build") ()
+    | Some _, Some _ -> Hashtbl.replace into (describe_key key ^ " differs") ()
+    | Some _, None -> Hashtbl.replace into (describe_key key ^ " is not in the node's build") ()
     | None, _ -> () in
   List.iter (fun (fd : March_tir.Tir.fn_def) ->
       let span = match March_tir.Provenance.effective_span fd.fn_name with
@@ -432,9 +451,14 @@ let skew ~(client : t) ~(regions : region list) ~(node : t)
       check_decl (type_key name);
       match Hashtbl.find_opt client.tags name, Hashtbl.find_opt node.tags name with
       | Some a, Some b when a <> b ->
-        Hashtbl.replace out (Printf.sprintf "%s has constructor tags %s here, %s on the node" name a b) ()
+        Hashtbl.replace tag_out (Printf.sprintf "%s has constructor tags %s here, %s on the node" name a b) ()
       | _ -> ()) tycons;
-  List.sort compare (Hashtbl.fold (fun k () acc -> k :: acc) out [])
+  let keys h = List.sort compare (Hashtbl.fold (fun k () acc -> k :: acc) h []) in
+  { sk_decls = keys out; sk_types = keys type_out; sk_tags = keys tag_out }
+
+let skew ~client ~regions ~node fns : string list =
+  let p = skew_parts ~client ~regions ~node fns in
+  List.sort compare (p.sk_decls @ p.sk_types @ p.sk_tags)
 
 
 (** What a session checks each input against: the node's table, and the
@@ -460,11 +484,166 @@ let differing (c : check) : string list =
       | _ -> k :: acc) c.client_decls []
   |> List.sort compare
 
-(** [skew] for a fragment whose code is [fns], emitted with [types]. *)
-let fragment_skew (c : check) ~(types : March_tir.Tir.type_def list)
-    (fns : March_tir.Tir.fn_def list) : string list =
-  skew ~client:{ decls = c.client_decls; tags = tags_of_types types; fns = Hashtbl.create 0 }
+(** [skew_parts] for a fragment whose code is [fns], emitted with [types]. *)
+let fragment_skew_parts (c : check) ~(types : March_tir.Tir.type_def list)
+    (fns : March_tir.Tir.fn_def list) : skew_parts =
+  skew_parts ~client:{ decls = c.client_decls; tags = tags_of_types types; fns = Hashtbl.create 0 }
     ~regions:c.regions ~node:c.node fns
+
+
+(* ── --force: read-only inputs over skewed code ──────────────────────── *)
+
+(* `march --shell --shell-force` runs an input that reaches declarations
+   differing from the node's build, but only when the input is read-only:
+   it runs this checkout's version of that code against the node's state,
+   and must not leave anything behind that the node's own code would then
+   meet.  Only differing code is forced ([sk_decls]: functions, lets,
+   impls, module headers).  A differing type, actor or protocol definition
+   ([sk_types]) and a constructor-tag difference ([sk_tags]) never are: a
+   value of the node's (read from a Vault, say) would be decoded with this
+   checkout's layout, or as the wrong constructor.
+
+   "Read-only" is decided on the fragment as compiled, with nothing linked
+   to the node (every body it runs is in the fragment, so the C symbols it
+   calls are all of what it can do), by an allowlist and a denylist:
+
+   - its capabilities (the cap manifest) are all in [read_only_caps]:
+     printing (captured into the reply), the clock, randomness and reading
+     files.  Anything else, including a capability this list does not know
+     (IO.FileWrite, IO.Net*, IO.Process, IO.Spawn, IO.Mut (Vault writes),
+     IO.Signal, an FFI cap), disqualifies it;
+   - it calls no runtime entry point that acts on other actors or on
+     process-wide state without a capability ([is_mutating_sym]: send,
+     spawn, kill, stop, Actor.call, register, monitor, reply, setters,
+     close, cancel, the logger, epoch holds, ...);
+   - it does not reach the Actor.Debug tier ([debug_fns], and the
+     `march_actor_inspect` symbol): the plan's rule (R5.4), kept although
+     reading state is itself read-only, since Debug is the authority to see
+     anything an actor holds and the reviewer of a skewed session should
+     not also have to reason about that;
+   - it uses no earlier `let` binding that may hold a closure
+     ([may_hold_closure]): that closure's code is in an earlier fragment,
+     out of sight of the symbol check.
+
+   Limits: the runtime-symbol denylist is by name (substrings plus a list),
+   so a new entry point that mutates without a capability and has none of
+   the words is allowed until it is added here; a closure reached some
+   other way than a session binding (read out of a Vault, say), or hidden
+   in a binding whose type is a bare type variable, is not seen; and a
+   read-only input still runs this checkout's code, so its answer can
+   differ from what the node's own code would compute.  The shell says so
+   (a warning naming the declarations, `[skew]` at the prompt, `skew:1` in
+   the node's audit line). *)
+
+let read_only_caps = [ "IO.Console"; "IO.Clock"; "IO.Random"; "IO.FileRead" ]
+
+(* Runtime symbols (`march_*`, without a leading underscore) that change
+   something outside the fragment, mostly without a capability.  Matched two ways, so
+   that a runtime entry point added later with a telling name is caught
+   without an edit here:
+   - by substring ([mutating_words]): any symbol naming a send, spawn, kill,
+     stop, registration, monitor, reply, setter, close, cancel, ...;
+   - exactly ([mutating_syms]): the rest, whose names do not say so.
+   A false positive only refuses a forced input (run it on a matching
+   checkout instead); a false negative lets one through, so the words are
+   broad.  [repl_set] (a `let` storing into the session's own slot) is not
+   emitted as a call the emitter records, and is the session's anyway. *)
+let mutating_words = [
+  "send"; "spawn"; "kill"; "stop"; "register"; "monitor"; "reply"; "revoke";
+  "reload"; "_set"; "close"; "cancel"; "drop"; "free"; "write"; "delete";
+  "remove"; "rename"; "update"; "incr"; "push"; "reap"; "exit"; "drain";
+]
+
+let mutating_syms = [
+  "march_actor_call"; "march_try_call"; "march_try_call_val";
+  "march_remote_invoke_march"; "march_actor_inspect"; "march_actor_inspect_store";
+  "march_run_until_idle"; "march_io_read_line"; "march_io_read_byte";
+  "march_delivery_failed_watch"; "march_http_fetch"; "march_epoch_hold";
+  "march_epoch_release"; "march_sched_delivery_origin_clear";
+]
+
+(* Whole families: the logger's process-wide configuration and output. *)
+let mutating_prefixes = [ "march_logger_" ]
+
+(* Reference counting is bookkeeping every input does to the values it reads,
+   not a change to the node's state, but several of its names contain a
+   mutating word ("incr", "free").  Normally it compiles inline and is never a
+   recorded call; the slow paths ([march_decrc_freed], which owned-call drop
+   fusion emits, and the like) are.  Exact names only, so a later symbol that
+   merely starts with one of these (say a `march_decrc_and_send`) is still
+   judged by its words. *)
+let rc_bookkeeping_syms = [
+  "march_incrc"; "march_decrc"; "march_incrc_local"; "march_decrc_local";
+  "march_decrc_freed"; "march_decrc_local_freed";
+]
+
+let is_mutating_sym (s : string) : bool =
+  let has sub =
+    let n = String.length s and m = String.length sub in
+    let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+    go 0 in
+  let starts p = String.length s >= String.length p && String.sub s 0 (String.length p) = p in
+  (* The emitter records program and library functions it calls too
+     (`evens`, `List.drop`): only the runtime's own entry points count. *)
+  starts "march_"
+  && not (List.mem s rc_bookkeeping_syms)
+  && (List.mem s mutating_syms || List.exists starts mutating_prefixes
+      || List.exists has mutating_words)
+
+(* The stdlib functions of the Actor.Debug tier: minting the capability
+   and using it. *)
+let debug_fns = [ "Actor.debug"; "Actor.inspect_state" ]
+
+(** Whether a value of type [t] may hold a closure: a function type, or a
+    type that has one in its arguments or (by [types], the program's type
+    definitions) in a constructor's or field's type.  A named type with no
+    definition in [types] (a builtin such as [Pid]) counts by its arguments
+    only. *)
+let may_hold_closure ~(types : March_tir.Tir.type_def list) (t : March_tir.Tir.ty) : bool =
+  let module T = March_tir.Tir in
+  let seen = Hashtbl.create 8 in
+  let rec go t =
+    match t with
+    | T.TFn _ -> true
+    (* A type variable: in a definition, a parameter, whose argument is
+       checked at the use; at the top, an erased slot (a phantom such as
+       `Pid(a)`'s, in practice).  Not counted: see the limits. *)
+    | T.TVar _ -> false
+    | T.TTuple ts -> List.exists go ts
+    | T.TRecord fs -> List.exists (fun (_, t) -> go t) fs
+    | T.TPtr t -> go t
+    | T.TInt | T.TFloat | T.TBool | T.TString | T.TUnit -> false
+    | T.TCon (name, args) ->
+      List.exists go args
+      || (not (Hashtbl.mem seen name)
+          && (Hashtbl.replace seen name ();
+              List.exists (function
+                  | T.TDVariant (n, cs) when n = name -> List.exists (fun (_, ts) -> List.exists go ts) cs
+                  | T.TDRecord (n, fs) when n = name -> List.exists (fun (_, t) -> go t) fs
+                  | T.TDClosure (n, _) when n = name -> true
+                  | _ -> false) types))
+  in
+  go t
+
+(** Why a fragment is not read-only, one reason per line; empty when it is.
+    [caps] is its cap manifest, [syms] the C symbols its emitted code calls,
+    [fns] the names of the functions it reaches, [closure_lets] the earlier
+    `let` bindings it uses that may hold a closure (whose code is in another
+    fragment, out of this check's sight). *)
+let not_read_only ?(closure_lets = []) ~(caps : string list) ~(syms : string list)
+    ~(fns : string list) () : string list =
+  let strip s = if String.length s > 0 && s.[0] = '_' then String.sub s 1 (String.length s - 1) else s in
+  let stem n = match String.index_opt n '$' with Some i -> String.sub n 0 i | None -> n in
+  let caps_r = List.filter_map (fun c ->
+      if List.mem c read_only_caps then None else Some ("uses " ^ c)) caps in
+  let syms_r = List.filter_map (fun s ->
+      let s = strip s in
+      if is_mutating_sym s then Some ("calls " ^ s) else None) syms in
+  let debug_r =
+    if List.exists (fun f -> List.mem (stem f) debug_fns) fns then [ "uses Actor.Debug" ] else [] in
+  let lets_r = List.map (fun n ->
+      Printf.sprintf "uses `%s`, an earlier binding that may hold a closure" n) closure_lets in
+  List.sort_uniq compare (caps_r @ syms_r @ debug_r @ lets_r)
 
 (* ── calling the node's own functions ────────────────────────────────── *)
 
