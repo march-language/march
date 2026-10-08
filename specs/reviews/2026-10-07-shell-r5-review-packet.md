@@ -166,20 +166,24 @@ The policy bounds capabilities, not effects. An input with no caps can still:
 
 The author's own suspicions, unverified by a second reader.
 
-- **F1. Replay after a restart.** The nonce ring is in memory, and a
+- **F1. Replay after a restart.** *Fixed 2026-10-08: see the suggested fix
+  after F2, now implemented (`ERR bad_session`).* The nonce ring is in memory, and a
   restarted node starts at the same epoch (`MARCH_EPOCH_BASE`). A line
   captured up to 60 s before a restart is accepted once more after it: a
   second `INSERT`, say.
-- **F2. Replay against another node.** An EVAL names no node. A line
+- **F2. Replay against another node.** *Fixed 2026-10-08, as F1.* An EVAL names no node. A line
   captured for one node verifies on any node with the same key and epoch,
   within its 60 s.
 
   *Suggested fix for both:* `HELLO` returns a random per-session challenge,
   and the client signs it into every EVAL.
-- **F3. Audit fails open.** `audit()` returns quietly when the log cannot be
+- **F3. Audit fails open.** *Fixed 2026-10-08: an input whose audit line
+  cannot be written does not run (`ERR audit_unavailable`).* `audit()` returns quietly when the log cannot be
   opened, and the EVAL still runs. The plan says every input is audited.
   Fail closed (`ERR audit`)?
-- **F4. Socket mode window, and no peer check.** The shell socket is
+- **F4. Socket mode window, and no peer check.** *Fixed 2026-10-08: 0600 is
+  set between `bind` and `listen`, and a peer of another uid (root aside) is
+  dropped at `accept`.* The shell socket is
   `chmod 0600` after `listen()`, while the reload socket sets the mode
   between `bind` and `listen`, so a connection can be accepted under the
   umask's mode in between. The reload socket also drops peers whose uid is

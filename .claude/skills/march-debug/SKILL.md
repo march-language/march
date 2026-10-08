@@ -41,6 +41,26 @@ line is the next command to run.
 **Don't:** rerun the ladder by hand before reading triage's screen. Don't trust a
 "no divergence" from a narrow repro; a bug can stay live in the full program.
 
+## Ask the compile a question: `march query`
+
+One compile, one answer, nothing written (no binary, no `.ll`, no cache entry);
+`--json` for a single JSON object, and any compiler flag passes through
+(`--no-opt`, `--opt 0`, `--target ...`), so the answer is about that build.
+```bash
+march query fn NAME FILE [--at PASS]   # the passes that changed NAME (and NAME$...), and its body at the last (or PASS)
+march query origin NAME FILE           # where an emitted fn came from: span, host, derivation chain, passes
+march query callers NAME FILE          # who references NAME in the final IR (callees: what NAME references)
+march query repr TYPE FILE             # each instance's representation (boxed/niche/unboxed/newtype) and why
+march query verify FILE                # the TIR verifier over every stage; findings, not exit 3
+march query key FILE                   # both cache keys and every input that fed them, cached or not
+march query why-miss FILE              # which input changed since the last successful build of FILE
+```
+`march-lsp query <same>` proxies to it (`MARCH_BIN` picks the compiler).
+**Read it:** a name the optimiser inlined is not in the final IR; the answer says
+the last stage that had it, and `--no-opt` keeps it. `why-miss` says which layer
+will hit (source-level, post-TIR, neither) and names each changed input; it needs
+one successful build of FILE in this project first.
+
 ## Which TIR stage went wrong?
 
 **First command:**
@@ -69,6 +89,17 @@ the REPL/JIT and every compile `test_oracle` runs).
 ```
 Checks scoping and references after every pass (each variable bound, each callee
 resolvable, indirect calls through something callable, no duplicate fn names).
+From `tir-mono` on, it also checks types: call arity, each argument's
+representation against its parameter, case-branch binder counts, projected
+field names, and no source-named type variable left in a signature.
+
+**RC balance:** `--verify-tir-rc` (`MARCH_VERIFY_TIR_RC=1`) also walks every
+path of every function after Perceus. It reports an over-release or a use after
+release with the object, its binding and the path (`case kv: $Tuple2`).
+`MARCH_VERIFY_TIR_LEAKS=1` adds leaks. It is a separate switch because it
+currently reports three known Perceus bugs, two in stdlib code every program
+links (`specs/todos/2026-10-07-perceus-releases-parent-before-field-use.md`).
+Filter for your own function's name.
 A finding exits 3 and names the stage and function: the first stage listed is
 the pass that broke it. Always on in `run_snapshots` and the hand-rolled
 pipelines in `test_codegen.ml`. Design: observability plan §6 (A1).
@@ -94,9 +125,30 @@ does not restage `runtime/`, and the stale `_build` stdlib copy leaks in.
 
 ## Which optional pass?
 
-`MARCH_NO_UNBOX=1`, `MARCH_NO_HOF_SPEC=1`, `MARCH_NO_INLINE_RC=1`, `--no-opt`.
-These four are every optional-pass switch (triage.sh tries all four).
-`MARCH_NO_TRMC` **does not exist** (removed 2026-09-21; TRMC is mandatory).
+**First command:** `--bisect-pass`.
+```bash
+./_build/default/bin/main.exe --bisect-pass FILE              # vs the interpreter
+./_build/default/bin/main.exe --bisect-pass FILE --expect OUT # vs a known-good stdout
+```
+It reports the smallest set of optional TIR passes whose removal makes the
+compiled output right. If disabling all of them does not help, it says so; then
+the bug is in a mandatory pass, codegen or the runtime. Any build takes
+`--disable-pass P1,P2` (or `MARCH_DISABLE_PASS`, in the CAS key), and
+`--list-passes` names the passes. Each probe is a full compile, so expect about
+twenty of them. `MARCH_BISECT_TIMEOUT` (seconds, default 60) bounds each run.
+
+Outside the TIR passes: `MARCH_NO_UNBOX=1`, `MARCH_NO_INLINE_RC=1`, `--no-opt`
+(triage.sh tries these). `MARCH_NO_TRMC` **does not exist** (removed
+2026-09-21; TRMC is mandatory).
+
+**Shrink the program first** when it is large:
+```bash
+./_build/default/bin/main.exe --reduce FILE --oracle 'sh oracle.sh {}'
+```
+The oracle exits 0 while the candidate still shows the bug. Make it check that
+the candidate still compiles and runs, or the reducer will "find" a syntax
+error. The reducer removes declarations, then lines, and writes
+`FILE.reduced.march`.
 
 **Don't:** compare an A/B with a switch on a warm cache without checking the
 switch is in the CAS key (`MARCH_DEBUG_CASFLAGS=1`, below). A switch missing from
@@ -151,6 +203,9 @@ MARCH_DEBUG_CASFLAGS=1 ./_build/default/bin/main.exe --compile FILE -o /tmp/x   
 MARCH_DEBUG_CASFLAGS=2 ...                                                      # + per-SCC hash lines
 rm -rf .march/cas/artifacts-v2 ~/.march/cas/artifacts-v2                       # BOTH: builds write through to ~/.march; NOT artifacts/ (inert v1)
 ```
+`march query why-miss FILE` answers "why did this rebuild?" directly: it diffs
+every key input (compiler, runtime, stdlib, flags, each keyed file) against the
+last successful build's record. `march query key FILE` prints the inputs.
 `src=` digests only the source/TIR input and is comparable across compiler
 builds; `ch=` folds in the compiler executable. After editing `runtime/*.c`, a
 targeted `dune build bin/main.exe` does **not** restage the runtime; build

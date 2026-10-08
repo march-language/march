@@ -499,6 +499,15 @@ let prev_slots_of ctx : March_tir.Llvm_emit.repl_slot_info list =
 (** Lower a single-expression module through the TIR pipeline.
     [repl_vars] are bare variable names of REPL globals that should be
     treated as borrowed by Perceus so they are never freed mid-session. *)
+(* Every fragment lowered in this process gets its own lowering scope
+   ([$repl<n>.]), so the structural names of its lambdas, join points and
+   apply fns ([main$lam0] in every fragment otherwise) are distinct symbols
+   across the per-fragment shared objects.  The stdlib precompile passes
+   [~fragment:false]: its names must be the ones the CLI mints, since the
+   cached .so is shared with it.  This replaces the persisted
+   [lambda_counter=N] sentinel the .names file used to carry. *)
+let fragment_seq = ref 0
+
 (* TIR verifier (A1, lib/tir/tir_verify.ml) for the REPL/JIT pipeline, which
    does not go through Contract_pipeline: on under --verify-tir /
    MARCH_VERIFY_TIR=1.  No borrow map here (the REPL runs no
@@ -512,11 +521,17 @@ let verify_repl ?(repl_vars = []) stage tir =
       tir;
   tir
 
-let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
+let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) ?(fragment = true) (m : March_ast.Ast.module_) =
   (* [~shadow_builtins:false]: fragments bind fns by bare name through closure
      slots, and [is_c_runtime_fn] already keeps a runtime-defined name out of
      a fragment; renaming here would desynchronise the two. *)
-  let tir = March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false m in
+  if fragment then begin
+    incr fragment_seq;
+    March_tir.Lower_state.set_fragment_scope (Printf.sprintf "$repl%d." !fragment_seq)
+  end;
+  let tir =
+    Fun.protect ~finally:(fun () -> March_tir.Lower_state.set_fragment_scope "")
+      (fun () -> March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false m) in
   (* Match the compiled pipeline: bin/main.ml runs Trmc.transform_module
      immediately post-lower (pre-mono), and without it a function behaves
      differently in the REPL than when compiled.  The position matters as much
@@ -1691,23 +1706,16 @@ let precompile_stdlib ctx
       register_type_defs ctx cached_types;
       ctx.loaded_tir_types <- cached_types @ ctx.loaded_tir_types;
       ctx.handles <- handle :: ctx.handles;
-      (* Read function names and mark as compiled.
-         The last line of the .names file may be "lambda_counter=N" — if so,
-         restore the defun lambda counter so that fresh REPL compilations
-         always assign UIDs strictly above those used by prelude functions.
-         Without this, a cache-hit run starts the counter at 0 and the REPL's
-         freshly-generated go$apply$N functions get UIDs that collide with
-         prelude-compiled functions, causing partition_fns to treat them as
-         already-compiled externs and link the wrong implementation.
+      (* Read function names and mark as compiled.  (The file once ended
+         with a "lambda_counter=N" sentinel for the global defun counter;
+         names are structural now, so a stale line of that shape is ignored.)
          Use Fun.protect to guarantee close_in even on malformed lines. *)
       let ic = open_in names_path in
       Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
         try while true do
           let line = String.trim (input_line ic) in
-          if String.length line > 15 && String.sub line 0 15 = "lambda_counter=" then begin
-            let n = int_of_string (String.sub line 15 (String.length line - 15)) in
-            March_tir.Defun.set_lambda_counter n
-          end else if line <> "" then
+          if String.length line > 15 && String.sub line 0 15 = "lambda_counter=" then ()
+          else if line <> "" then
             Hashtbl.replace ctx.compiled_fns line ()
         done with End_of_file -> ())
     with exn ->
@@ -1735,7 +1743,7 @@ let precompile_stdlib ctx
         mod_decls = stdlib_decls } in
     (try
       let (_, type_map_stdlib) = March_typecheck.Typecheck.check_module stdlib_mod in
-      let tir = lower_module ~type_map:type_map_stdlib stdlib_mod in
+      let tir = lower_module ~type_map:type_map_stdlib ~fragment:false stdlib_mod in
       let stdlib_fns = List.filter
         (fun (f : March_tir.Tir.fn_def) ->
           not (is_c_runtime_fn f.fn_name) &&
@@ -1786,9 +1794,7 @@ let precompile_stdlib ctx
          | Unix.WEXITED 0 ->
            (* .ll no longer needed once clang succeeded. *)
            (try Sys.remove ll_path with _ -> ());
-           (* Write companion names file: one function name per line, then
-              a "lambda_counter=N" sentinel so cache-hit runs can restore
-              the counter and avoid UID collisions with prelude functions.
+           (* Write companion names file: one function name per line.
               Written to a temp and renamed BEFORE the .so is renamed: the
               cache-hit check requires both files, so publishing the .so
               last guarantees no reader ever pairs it with a partial
@@ -1799,10 +1805,7 @@ let precompile_stdlib ctx
              let nc = open_out names_tmp in
              Fun.protect ~finally:(fun () -> close_out_noerr nc) (fun () ->
                List.iter (fun (f : March_tir.Tir.fn_def) ->
-                 output_string nc (f.fn_name ^ "\n")) stdlib_fns;
-               output_string nc
-                 (Printf.sprintf "lambda_counter=%d\n"
-                    (March_tir.Defun.get_lambda_counter ())));
+                 output_string nc (f.fn_name ^ "\n")) stdlib_fns);
              Sys.rename names_tmp names_path
            with _ -> ());
            (* Companion .types: the `~types` list this .so was compiled with,
@@ -2188,8 +2191,48 @@ let shell_compile ?triple ?ident ?(force = false) ctx ~tc_env ~(program_name : s
           @ March_tir.Dce.StringSet.elements (March_tir.Dce.called_fns f.fn_body))
         pre.March_tir.Tir.tm_fns
       |> List.filter_map March_tir.Cap_attrib.cap_of_call in
+  (* Proof capabilities (Actor.Debug, Actor.Introspect, ...) are held, not
+     called: no runtime symbol carries them, so neither set above sees them,
+     and a policy without Actor.Debug let `Actor.inspect_state(debug, ...)`
+     run.  A Cap value only reaches code by being passed down from the
+     input's pre-bound roots (or a session binding holding one), so every
+     `Cap(C)` in the type of a parameter or a let-bound variable of the code
+     the input reaches is declared.  This can over-declare (refuse more),
+     never under-declare what the input holds. *)
+  let proof_caps =
+    let acc = Hashtbl.create 8 in
+    let rec of_ty (t : March_tir.Tir.ty) =
+      match t with
+      (* The root, `Cap(IO)`, only appears where the client narrows it into
+         a pre-bound name (`Actor.introspect(root_cap)`, `cap_narrow`): an
+         input that mentions root_cap is refused, so no input holds it. *)
+      | March_tir.Tir.TCon ("Cap", [ March_tir.Tir.TCon ("IO", []) ]) -> ()
+      | March_tir.Tir.TCon ("Cap", [ March_tir.Tir.TCon (c, []) ]) -> Hashtbl.replace acc c ()
+      | March_tir.Tir.TCon (_, args) -> List.iter of_ty args
+      | March_tir.Tir.TTuple ts -> List.iter of_ty ts
+      | March_tir.Tir.TRecord fs -> List.iter (fun (_, t) -> of_ty t) fs
+      | March_tir.Tir.TFn (ps, r) -> List.iter of_ty ps; of_ty r
+      | March_tir.Tir.TPtr t -> of_ty t
+      | March_tir.Tir.TInt | March_tir.Tir.TFloat | March_tir.Tir.TBool
+      | March_tir.Tir.TString | March_tir.Tir.TUnit | March_tir.Tir.TVar _ -> () in
+    let rec of_expr (e : March_tir.Tir.expr) =
+      match e with
+      | March_tir.Tir.ELet (v, rhs, body) -> of_ty v.v_ty; of_expr rhs; of_expr body
+      | March_tir.Tir.ELetRec (fds, body) -> List.iter of_fn fds; of_expr body
+      | March_tir.Tir.ECase (_, branches, default) ->
+        List.iter (fun (b : March_tir.Tir.branch) ->
+            List.iter (fun (v : March_tir.Tir.var) -> of_ty v.v_ty) b.br_vars;
+            of_expr b.br_body) branches;
+        Option.iter of_expr default
+      | March_tir.Tir.ESeq (a, b) -> of_expr a; of_expr b
+      | _ -> ()
+    and of_fn (f : March_tir.Tir.fn_def) =
+      List.iter (fun (v : March_tir.Tir.var) -> of_ty v.v_ty) f.fn_params;
+      of_expr f.fn_body in
+    List.iter of_fn pre.March_tir.Tir.tm_fns;
+    Hashtbl.fold (fun c () l -> c :: l) acc [] in
   let caps =
-    (List.filter_map March_caps.Cap_symbols.cap_of_symbol syms @ reached_caps)
+    (List.filter_map March_caps.Cap_symbols.cap_of_symbol syms @ reached_caps @ proof_caps)
     |> List.sort_uniq String.compare in
   (* --shell-force: a skewed input runs only if it is read-only
      ([Shell_ident.not_read_only]); nothing was linked, so [syms] is every C
