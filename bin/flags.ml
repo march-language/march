@@ -156,6 +156,11 @@ let debug_info     = ref false
    pipeline (specs/plans/incremental-codegen-cas-plan.md §7). *)
 let dump_provenance = ref false
 let opt_enabled    = ref true
+(* A4: --bisect-pass / --expect / --reduce / --oracle (bin/pass_tools.ml). *)
+let bisect_pass_file = ref ""
+let bisect_expect    = ref ""
+let reduce_file      = ref ""
+let reduce_oracle    = ref ""
 let fast_math      = ref false
 (* --rc-trace: store a site id before every refcount/alloc/free call and emit
    the site table (lib/tir/llvm_rc_trace.ml).  MARCH_RC_TRACE=1 is the same

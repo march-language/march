@@ -1202,6 +1202,9 @@ let codegen_cas_tags () =
      and the clang link (-g); a non-debug cached artifact must never satisfy
      a --debug-info build. *)
   @ (if !debug_info then ["dbginfo"] else [])
+  (* --disable-pass changes the emitted program; the bisector depends on a
+     probe never being satisfied by a build with the pass still on. *)
+  @ (match March_tir.Pass_switch.cas_tag () with Some t -> [t] | None -> [])
   (* --test changes the emitted program: [lower_module ~test_mode] builds a
      test-runner entry point instead of the ordinary one, and the
      capability-passing elaboration runs only in a test build.  Without this
@@ -1358,6 +1361,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            skips the TIR pipeline and so the check; keying on it means a
            verified compile is never satisfied by an unverified cached one. *)
         @ (if March_tir.Tir_verify.enabled () then ["verify-tir"] else [])
+        @ (if March_tir.Tir_verify.rc_enabled () then ["verify-tir-rc"] else [])
         @ cross_sysroot_tag
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
         (* --protocol-baseline: the previous protocol versions decide the
@@ -5666,6 +5670,26 @@ let () =
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--verify-tir", Arg.Set March_tir.Tir_verify.enabled_flag,
      " Check TIR well-formedness after every pass (scoping and references); a finding is an internal compiler error. Same as MARCH_VERIFY_TIR=1");
+    ("--disable-pass", Arg.String (fun s ->
+         match March_tir.Pass_switch.set
+                 (!March_tir.Pass_switch.disabled @ March_tir.Pass_switch.split_list s) with
+         | Ok () -> ()
+         | Error msg -> Printf.eprintf "march: --disable-pass: %s\n" msg; exit 2),
+     "P1,P2  Skip these optional TIR passes (see --list-passes). Same as MARCH_DISABLE_PASS; part of the build-cache key");
+    ("--list-passes", Arg.Unit (fun () ->
+         List.iter (fun (n, d) -> Printf.printf "%-24s %s\n" n d) March_tir.Pass_switch.known;
+         exit 0),
+     " List the optional TIR passes --disable-pass and --bisect-pass know");
+    ("--bisect-pass", Arg.Set_string bisect_pass_file,
+     "FILE  Find the optional TIR passes that make FILE's compiled output differ from the interpreter's (or --expect's)");
+    ("--expect", Arg.Set_string bisect_expect,
+     "OUT  With --bisect-pass: the expected stdout, instead of running the interpreter");
+    ("--reduce", Arg.Set_string reduce_file,
+     "FILE  Delta-debug FILE to a smaller program the --oracle still accepts; writes FILE.reduced.march");
+    ("--oracle", Arg.Set_string reduce_oracle,
+     "CMD  With --reduce: a shell command, exit 0 = still interesting; {} is the candidate's path (appended if absent)");
+    ("--verify-tir-rc", Arg.Set March_tir.Tir_verify.rc_flag,
+     " Also check reference-count balance after Perceus (implies --verify-tir). Same as MARCH_VERIFY_TIR_RC=1; MARCH_VERIFY_TIR_LEAKS=1 additionally reports leaks");
     ("--explain", Arg.String (fun code ->
          print_string (March_errors.Explain.explain code); exit 0),
      "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");
@@ -5726,6 +5750,23 @@ let () =
      specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md.
      A leftover MARCH_TRMC=1 in the environment is simply ignored. *)
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
+  (match March_tir.Pass_switch.disabled with
+   | { contents = [] } ->
+     (match March_tir.Pass_switch.of_env () with
+      | Ok () -> ()
+      | Error msg -> Printf.eprintf "march: MARCH_DISABLE_PASS: %s\n" msg; exit 2)
+   | _ -> ());
+  if !bisect_pass_file <> "" then
+    exit (Pass_tools.bisect ~file:!bisect_pass_file
+            ~expect:(if !bisect_expect = "" then None else Some !bisect_expect)
+            ~extra:(if !opt_enabled then [] else [ "--no-opt" ]));
+  if !reduce_file <> "" then begin
+    if !reduce_oracle = "" then begin
+      prerr_endline "march: --reduce needs --oracle CMD (exit 0 = the candidate is still interesting)";
+      exit 2
+    end;
+    exit (Pass_tools.reduce ~file:!reduce_file ~oracle:!reduce_oracle)
+  end;
   March_tir.Llvm_toplevel.debug_info := !debug_info;
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;
