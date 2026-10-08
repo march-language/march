@@ -156,6 +156,14 @@ type env = {
           = borrowed_field]).  Each ELet scope descends with its own updated
           copy of this field so inner bindings do not contaminate the
           caller's [env] (was: saved/restored via [_borrowed_field_vars]). *)
+  field_owner : string StringMap.t;
+      (** For each [borrowed_field_vars] binding made by a projection, the
+          variable it points into ([let t = d.f] maps [t] to [d]; an alias or
+          a nested chain [let t = (let a = d.x in a.y)] maps to the same
+          root).  A projection keeps its owner alive: the cross-branch release
+          of an owner dead in one arm must not run at the arm's head while a
+          projection of it is still read there.
+          specs/progress/2026-10-08-perceus-parent-released-before-field-use.md. *)
   cons_live : StringSet.t;
       (** Variables that are in [live_after] only CONSERVATIVELY: an
           [ECase] arm's pattern-bound fields, re-added to the arm's live set
@@ -212,6 +220,7 @@ let empty_env : env = {
   actor_sent = StringSet.empty;
   moved_vars = StringSet.empty;
   borrowed_field_vars = StringSet.empty;
+  field_owner = StringMap.empty;
   cons_live = StringSet.empty;
   var_ctx = StringMap.empty;
 }
@@ -995,6 +1004,27 @@ let is_actor_move_source (src : Tir.var) : bool =
   (String.equal src.Tir.v_name Tir_names.actor_param && src.Tir.v_lin = Tir.Lin)
   || String.equal src.Tir.v_name Tir_names.actor_state_ptr_var
 
+(** The variable a projection reads from: [src] for [src.f], and the root
+    of a nested chain, [d] for [let a = d.x in a.y] (a three-deep read
+    [st.a.b.c] lowers to exactly such a chain). *)
+let rec projection_root (e : Tir.expr) : Tir.var option =
+  match e with
+  | Tir.EField (Tir.AVar s, _) -> Some s
+  | Tir.ELet (iv, rhs, body) ->
+    (match projection_root body with
+     | Some s when String.equal s.Tir.v_name iv.Tir.v_name -> projection_root rhs
+     | r -> r)
+  | _ -> None
+
+(** [name] and every variable it points into through [field_owner]. *)
+let owner_chain (env : env) (name : string) : string list =
+  let rec go seen n =
+    match StringMap.find_opt n env.field_owner with
+    | Some o when not (List.mem o seen) -> go (o :: seen) o
+    | _ -> seen
+  in
+  go [] name
+
 (** Insert RC operations into an expression.
     Returns [(expr', live_before)] where expr' has RC ops inserted and
     live_before is the set of variables live before this expression. *)
@@ -1457,8 +1487,15 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        in [e2] releases it before the binding's scope ends. *)
     let dup_owned_field =
       is_borrowed_field
-      && (match e1 with
-          | Tir.EField (Tir.AVar src, _) ->
+      (* A nested chain [let t = (let a = o.x in a.y)] has the same hazard as
+         [let t = o.y]: [e2] consuming [o] frees what [t] reads.  Only the
+         direct projection used to qualify, so [o.ap.fingerprint] followed by
+         [active(o)] read a freed string (Topology's offer and drain lines). *)
+      && (match (match e1 with
+                 | Tir.EField (Tir.AVar src, _) -> Some src
+                 | Tir.ELet _ -> projection_root e1
+                 | _ -> None) with
+          | Some src ->
             (match src.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)
             && src.Tir.v_lin = Tir.Unr
             && v.Tir.v_lin = Tir.Unr
@@ -1471,13 +1508,27 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           | _ -> false)
     in
     let is_borrowed_field = is_borrowed_field && not dup_owned_field in
+    let owner =
+      if not is_borrowed_field then None
+      else match e1 with
+        | Tir.EAtom (Tir.AVar src) ->
+          (match StringMap.find_opt src.Tir.v_name env.field_owner with
+           | Some o -> Some o
+           | None -> Some src.Tir.v_name)
+        | _ -> Option.map (fun (s : Tir.var) -> s.Tir.v_name) (projection_root e1)
+    in
     let env_for_e2 =
       { env with
         var_ctx = StringMap.add v.Tir.v_name v env.var_ctx;
         borrowed_field_vars =
           if is_borrowed_field
           then StringSet.add v.Tir.v_name env.borrowed_field_vars
-          else env.borrowed_field_vars }
+          else env.borrowed_field_vars;
+        field_owner =
+          (match owner with
+           | Some o when not (String.equal o v.Tir.v_name) ->
+             StringMap.add v.Tir.v_name o env.field_owner
+           | _ -> StringMap.remove v.Tir.v_name env.field_owner) }
     in
     let live_after_e2 =
       if is_borrowed_field then StringSet.add v.Tir.v_name live_after
@@ -1968,6 +2019,21 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
         |> (fun s -> match scrutinee_name with
             | Some n -> StringSet.remove n s
             | None -> s)
+        (* An owner whose borrowed projection this arm still reads is not
+           released at the arm's head: [match d.tag do "k" -> .. d ..; other
+           -> "unknown " ++ other end] freed [d], and the string [other]
+           points into, before the concatenation.  Its release goes to the
+           arm's tails instead, through the passes that place drops behind
+           the last read of a projection: the owned-aggregate parameter drop
+           and the scope-end aggregate drop.  Either may give up (a leak),
+           never release early. *)
+        |> (fun s ->
+            StringSet.fold (fun live acc ->
+                if StringSet.mem live env.borrowed_field_vars then
+                  List.fold_left (fun acc o -> StringSet.remove o acc) acc
+                    (owner_chain env live)
+                else acc)
+              live_before_br s)
       in
       let prepend body =
         StringSet.fold (fun name body_acc ->
