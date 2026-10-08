@@ -666,8 +666,20 @@ let defunctionalize (m : Tir.tir_module) : Tir.tir_module =
   (* Phase 0: top-level names *)
   let top_level = collect_top_level_names m in
 
-  (* Phase 1: collect all lambdas and their free variables *)
-  let lambdas = collect_lambdas m top_level in
+  (* Phase 1: collect all lambdas and their free variables.  A user extern
+     (FFI) is a global C symbol, never a captured value: a lambda that calls
+     [acc_push] must not copy it into its closure as a free variable (the
+     apply fn would then load "[acc_push]" from [$clo] and the closure alloc
+     would store [@acc_push], a symbol nothing defines — only the extern's
+     [ed_c_name] exists).  Exempt externs from capture only: [rewrite_expr]
+     still turns the call into [ECallPtr], the shape a direct extern call
+     already has, which Perceus ([env.extern_names]) and codegen
+     ([extern_map]) resolve to the C symbol.  Shadowing still works: a local
+     binding named like an extern is removed via [top_level_eff]. *)
+  let capture_exempt =
+    List.fold_left (fun s (ed : Tir.extern_decl) ->
+      StringSet.add ed.Tir.ed_march_name s) top_level m.Tir.tm_externs in
+  let lambdas = collect_lambdas m capture_exempt in
   let known_lambdas = List.map (fun lam -> (lam.lam_fn.Tir.fn_name, lam)) lambdas in
 
   (* Phase 2: generate closure structs and lifted fns *)

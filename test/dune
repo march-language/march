@@ -7368,6 +7368,42 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/ffi_resource.expected native_ffi_resource.out)))
 
+; ── Regression: an extern called from / passed as a closure (compiled + interp)
+; Defun captured the extern into the closure, so the IR called the March name
+; (`@acc_push`) and clang failed; an extern passed as a value built its
+; $clo_wrap around the March name too.  Both backends against one .expected.
+(rule
+ (targets native_ffi_extern_in_lambda native_ffi_extern_in_lambda.out
+          native_ffi_extern_in_lambda_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/ffi_extern_in_lambda.march))
+ (action
+  (progn
+   (with-stdout-to native_ffi_extern_in_lambda_interp.out
+     (run %{exe:../bin/main.exe} native/ffi_extern_in_lambda.march))
+   (run %{exe:../bin/main.exe} --compile -o native_ffi_extern_in_lambda
+        native/ffi_extern_in_lambda.march)
+   (with-stdout-to native_ffi_extern_in_lambda.out
+        (system "./native_ffi_extern_in_lambda")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_extern_in_lambda.expected native_ffi_extern_in_lambda.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_extern_in_lambda.expected native_ffi_extern_in_lambda_interp.out)))
+
 ; ── FFI error protocol: a Result-returning binding (march_ok / march_err) ──
 ; (Was briefly quarantined for the intermittent GH-Actions "bad int" flake —
 ; root-caused to a duplicate `mod Test` + bare extern `parse` collision between
