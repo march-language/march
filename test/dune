@@ -1792,6 +1792,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/tuple_eq.expected native_tuple_eq.out)))
 
+; A field projected out of a record is a borrow of it; three shapes released
+; the record before the field's last read (a string match's binder arm, a
+; nested projection after the record was consumed, a record update from a
+; find result): wrong strings or a crash, compiled only.
+(rule
+ (targets native_field_use_after_parent_release native_field_use_after_parent_release.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/field_use_after_parent_release.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_field_use_after_parent_release native/field_use_after_parent_release.march)
+   (with-stdout-to native_field_use_after_parent_release.out (system "./native_field_use_after_parent_release")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/field_use_after_parent_release.expected native_field_use_after_parent_release.out)))
+
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
 ; its scope and must be dropped there; each shape leaked the record before.

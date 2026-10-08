@@ -788,6 +788,7 @@ let insert_rc ~(module_env : env) ?(repl = false) ?(borrowed = StringSet.empty)
       actor_sent = collect_actor_sent_vars fn'.Tir.fn_body;
       moved_vars = collect_moved_vars fn';
       borrowed_field_vars = StringSet.empty;
+      field_owner = StringMap.empty;
       var_ctx =
         List.fold_left (fun ctx v -> StringMap.add v.Tir.v_name v ctx)
           module_env.var_ctx fn'.Tir.fn_params }

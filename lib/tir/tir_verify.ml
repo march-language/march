@@ -56,7 +56,7 @@
 
     {1 Check 3: RC balance ({!Tir_verify_rc})}
 
-    Under its own switch for now ([rc_enabled]).  At [tir-perceus], given the
+    On with the verifier.  At [tir-perceus], given the
     borrow map and kind table Perceus used: no
     path consumes or releases a reference it does not hold, or reads an
     object after its last reference is gone.  Leaks only with [~rc_leaks]
@@ -79,8 +79,12 @@ let enabled_flag = ref false
 
 let enabled () = !enabled_flag || Lazy.force enabled_by_env
 
-(** Check 3 (RC balance) is its own switch for now: [--verify-tir-rc] /
-    [MARCH_VERIFY_TIR_RC=1] (each implies the verifier).  It found real
+(** [--verify-tir-rc] / [MARCH_VERIFY_TIR_RC=1]: accepted spellings of the
+    verifier, kept from when check 3 (RC balance) had its own switch.  It ran
+    separately until the Perceus bugs it found were fixed
+    (specs/progress/2026-10-08-perceus-parent-released-before-field-use.md);
+    check 3 is now part of every verified build.  The rest of this note is
+    the original rationale: it found real
     Perceus bugs in stdlib code every program compiles
     (specs/todos/2026-10-07-perceus-releases-parent-before-field-use.md);
     until they are fixed, putting it under plain [--verify-tir] would fail
@@ -89,8 +93,7 @@ let rc_flag = ref false
 let rc_by_env : bool Lazy.t =
   lazy (match Sys.getenv_opt "MARCH_VERIFY_TIR_RC" with
         | Some ("" | "0") | None -> false | Some _ -> true)
-let rc_enabled () = !rc_flag || Lazy.force rc_by_env
-let enabled () = enabled () || rc_enabled ()
+let enabled () = enabled () || !rc_flag || Lazy.force rc_by_env
 
 (* Stages before monomorphisation, where a bare interface-method call
    ([show(x)]) is legitimately unresolved. *)
@@ -308,7 +311,7 @@ let check_types ~report ~(k_table : Kind.table option) (m : Tir.tir_module) =
     m.Tir.tm_fns
 
 let check ~(stage : string) ?(borrow_map : Borrow.borrow_map option)
-    ?(k_table : Kind.table option) ?(rc = rc_enabled ()) ?rc_leaks
+    ?(k_table : Kind.table option) ?(rc = true) ?rc_leaks
     ?(iface_methods : (string, (string * string) list) Hashtbl.t option)
     ?(def_hashes : (string, string) Hashtbl.t option)
     ?(known_fn : string -> bool = fun _ -> false)

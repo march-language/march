@@ -35,13 +35,14 @@ git log is authoritative for exact commits.
 - **`march --reduce FILE --oracle CMD` shrinks a failing program.** It removes
   declarations, then lines, while `CMD` still exits 0 on the candidate, and
   writes the result to `FILE.reduced.march`.
-- **The TIR verifier checks types, and optionally reference counts.**
-  - Under `--verify-tir`, a call's argument count and representations, a case
-    branch's binder count, projected field names, and leftover type variables
-    are now checked after monomorphisation.
-  - `--verify-tir-rc` additionally checks reference-count balance after Perceus
-    on every path, reporting over-releases and uses after release.
-    `MARCH_VERIFY_TIR_LEAKS=1` adds leaks.
+- **The TIR verifier checks types and reference counts.** Under
+  `--verify-tir`:
+  - a call's argument count and representations, a case branch's binder
+    count, projected field names, and leftover type variables are checked
+    after monomorphisation;
+  - reference-count balance is checked after Perceus on every path, reporting
+    over-releases and uses after release. `MARCH_VERIFY_TIR_LEAKS=1` adds
+    leaks.
 - **`march query`: ask one compile a question.** `march query fn NAME FILE`
   lists the passes that changed a function and prints its IR at the last one
   (or `--at PASS`); `origin NAME` shows where an emitted function came from
@@ -500,6 +501,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A field read from a record no longer outlives the record in compiled
+  code.** Three shapes released the record first and then read freed memory,
+  printing wrong strings or crashing; the interpreter was always right:
+  - a `match` on a record's string field whose binder arm used the field;
+  - a nested field read (`o.ap.fingerprint`) followed by a call that consumed
+    the record. `Topology`'s offer and drain report lines did this;
+  - a record update taking fields from a `List.find` result. `Topology`'s
+    desired-role merge did this, and it crashed.
 - **`MARCH_SANITIZE` builds no longer hang silently on macOS 26.** Apple clang 17
   (Xcode 26) and LLVM 21 ship an ASAN runtime that deadlocks before `main` on
   macOS 26, so every sanitized binary, even hello-world, printed nothing and never
