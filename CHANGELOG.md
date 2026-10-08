@@ -539,6 +539,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`forge diagnose` no longer mistakes a growing mailbox for an RC leak.**
+  `rc.climb` now excludes net queued-message growth before applying its heap
+  threshold, while still reporting a genuine climb. The shared Forge/stdlib
+  fixture keeps both implementations aligned.
 - **A field read from a record no longer outlives the record in compiled
   code.** Three shapes released the record first and then read freed memory,
   printing wrong strings or crashing; the interpreter was always right:

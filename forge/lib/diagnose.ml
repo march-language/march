@@ -137,7 +137,9 @@ let crash_loop _b a =
         next = "forge observe CRASHES 20, then ACTOR <supervisor>" } ]
   | [], [] -> []
 
-(* 5. Live heap objects up more than 10% with the actor count flat (±5%). *)
+(* 5. Live heap objects up more than 10% with the actor count flat (±5%).
+   Queued messages are themselves live objects, so exclude their net growth:
+   a backed-up mailbox is reported by [mailbox_growth], not as an RC leak. *)
 let rc_climb b a =
   let objs s = member "live_objects" (section s "mem") in
   let acts s = int_of (member "actors" (section s "mem")) in
@@ -146,11 +148,15 @@ let rc_climb b a =
   | v0, v1 ->
     let o0 = int_of v0 and o1 = int_of v1 in
     let a0 = acts b and a1 = acts a in
-    if o0 >= 1000 && o1 * 10 > o0 * 11 && abs (a1 - a0) * 20 <= max a0 1 then
+    let queued_growth =
+      max 0 (int_of (member "queued_messages" (section a "mem"))
+             - int_of (member "queued_messages" (section b "mem"))) in
+    let adjusted_o1 = max 0 (o1 - queued_growth) in
+    if o0 >= 1000 && adjusted_o1 * 10 > o0 * 11 && abs (a1 - a0) * 20 <= max a0 1 then
       [ { id = "rc.climb"; severity = Warning;
           rows = [ `Assoc [ "live_objects_before", `Int o0; "live_objects_after", `Int o1;
-                            "actors", `Int a1 ] ];
-          next = "heap objects climb with no new actors: a leak; compare SNAPSHOT mem over minutes" } ]
+                            "queued_messages_growth", `Int queued_growth; "actors", `Int a1 ] ];
+          next = "heap objects climb beyond queued-message growth with no new actors: a leak; compare SNAPSHOT mem over minutes" } ]
     else []
 
 (* 6. A draining epoch; and units pinned two or more epochs behind current. *)
