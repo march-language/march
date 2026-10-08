@@ -859,11 +859,13 @@ let rec capture_read (clo : string) (e : Tir.expr) : string option =
     when String.equal src.Tir.v_name clo -> capture_read clo inner
   | _ -> None
 
-(** The apply-wrapper name for a closure struct: ["$Clo_go$7"] -> ["go$apply$7"].
+(** The apply-wrapper name for a closure struct:
+    ["$Clo_go$0_Main_outer"] -> ["go$apply$0_Main_outer"].
     Inverse of [Tir_names.clo_struct_name] / [apply_fn_name] applied to the same
-    (fn_name, lam_uid) pair — the uid is everything after the LAST ['$'], which
-    is what keeps a lambda whose defun-minted name itself contains ['$']
-    (["$lam30269"], ["$jp7650"]) resolving correctly. *)
+    (fn_name, lam_uid) pair — the uid is everything after the LAST ['$']
+    ([Tir_names.lam_uid] never contains one), which is what keeps a lambda
+    whose lowering-minted name itself contains ['$'] (["outer$lam0"],
+    ["outer$jp2"]) resolving correctly. *)
 let apply_name_of_clo (clo_name : string) : string option =
   if not (Tir_names.is_clo_struct clo_name) then None
   else
@@ -871,11 +873,9 @@ let apply_name_of_clo (clo_name : string) : string option =
     match String.rindex_opt base '$' with
     | None -> None
     | Some i ->
-      (match int_of_string_opt
-               (String.sub base (i + 1) (String.length base - i - 1)) with
-       | Some uid ->
-         Some (Tir_names.apply_fn_name ~fn_name:(String.sub base 0 i) ~lam_uid:uid)
-       | None -> None)
+      let uid = String.sub base (i + 1) (String.length base - i - 1) in
+      if uid = "" then None
+      else Some (Tir_names.apply_fn_name ~fn_name:(String.sub base 0 i) ~lam_uid:uid)
 
 (** Closure types whose environment OWNS its captures, keyed by apply-fn name.
 

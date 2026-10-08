@@ -166,6 +166,8 @@ native_ffi_codec2: coverage audit (user + stdlib): 135 enforced, 0 inert (warned
 native_ffi_codec2: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_codec: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_ffi_codec: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_extern_in_lambda: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_ffi_extern_in_lambda: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_float: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_ffi_float: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_interp2: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -926,6 +928,8 @@ stdlib_session_node: coverage audit (user + stdlib): 135 enforced, 0 inert (warn
 stdlib_session_node: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_set: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 stdlib_set: coverage audit (user code): 14 enforced, 0 inert (warned), 0 unenforced
+stdlib_shell_render: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+stdlib_shell_render: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_sigil: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 stdlib_sigil: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_signal: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

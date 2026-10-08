@@ -197,6 +197,7 @@ let _resume : (Ast.decl list -> Tir.fn_def list * Tir.type_def list) option ref 
 let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) ?(resumable=false) (m : Ast.module_) : Tir.tir_module =
   _resume := None;
   reset_counter ();
+  Lower_state.reset_hosts ();
   Provenance.reset ();
   (* Collision-conditional qualification (Task 3 of specs/plans/2026-07-20-
      fqn-impl-dispatch-identity.md, impl symbols; extended by Task 3 of

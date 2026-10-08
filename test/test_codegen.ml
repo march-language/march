@@ -135,15 +135,19 @@ let test_tir_names_fv_field_round_trip () =
     (March_tir.Tir_names.is_fv_field "name")
 
 let test_tir_names_clo_struct () =
-  let n = March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:3 in
-  Alcotest.(check string) "clo_struct_name" "$Clo_foo$3" n;
+  let n = March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:"3_Main_host" in
+  Alcotest.(check string) "clo_struct_name" "$Clo_foo$3_Main_host" n;
   Alcotest.(check bool) "is_clo_struct" true (March_tir.Tir_names.is_clo_struct n);
   Alcotest.(check bool) "not is_clo_struct Option" false
     (March_tir.Tir_names.is_clo_struct "Option")
 
 let test_tir_names_apply_fn () =
-  let n = March_tir.Tir_names.apply_fn_name ~fn_name:"foo" ~lam_uid:3 in
-  Alcotest.(check string) "apply_fn_name" "foo$apply$3" n;
+  let n = March_tir.Tir_names.apply_fn_name ~fn_name:"foo" ~lam_uid:"3_Main_host" in
+  Alcotest.(check string) "apply_fn_name" "foo$apply$3_Main_host" n;
+  (* The uid is structural: ordinal, then the host with '$' and '.' spelled
+     '_' (no '.': consumers read a name's text after its last '.'). *)
+  Alcotest.(check string) "lam_uid" "2_List_map_Int"
+    (March_tir.Tir_names.lam_uid ~host:"List.map$Int" 2);
   Alcotest.(check bool) "is_apply_fn" true (March_tir.Tir_names.is_apply_fn n);
   Alcotest.(check bool) "not is_apply_fn plain" false
     (March_tir.Tir_names.is_apply_fn "foo");
@@ -638,8 +642,9 @@ let test_unboxed_aggregate_multi_arm_joins_are_struct () =
    fusion.ml's own gensym convention. *)
 
 (** True if [name] matches fusion.ml's gensym convention: "$fused_" followed
-    by one of the three generator tags ("mf"/"ff"/"mff") then "_" and a
-    counter. Mirrors fusion.ml's [gensym] (`Printf.sprintf "$fused_%s_%d"`) —
+    by one of the three generator tags ("mf"/"ff"/"mff") then "_", the host
+    (with '$' and '.' spelled '_'), "_" and an ordinal. Mirrors fusion.ml's
+    [gensym] (`Printf.sprintf "$fused_%s_%s_%d"`) —
     kept local to this test (not a Tir_names contract: fusion.ml's synthesized
     names have no consumer that name-sniffs them, per the Wave 3 Task 3
     report, so there is nothing in Tir_names to centralize here). *)
@@ -653,8 +658,13 @@ let is_fusion_gensym_name (name : string) : bool =
     let rest = strip_prefix "$fused_" name in
     List.exists (fun tag ->
       has_prefix (tag ^ "_") rest &&
-      (let ctr = strip_prefix (tag ^ "_") rest in
-       ctr <> "" && String.for_all (fun c -> c >= '0' && c <= '9') ctr)
+      (let rest = strip_prefix (tag ^ "_") rest in
+       match String.rindex_opt rest '_' with
+       | Some i ->
+         let host = String.sub rest 0 i
+         and ctr = String.sub rest (i + 1) (String.length rest - i - 1) in
+         host <> "" && ctr <> "" && String.for_all (fun c -> c >= '0' && c <= '9') ctr
+       | None -> false)
     ) ["mf"; "ff"; "mff"]
 
 (** Cross-check, over a fused module: every fn whose name matches the
@@ -5787,9 +5797,9 @@ let test_known_call_is_clo_name_matches_tir_names () =
   in
   let representative_names =
     (* Every shape [Tir_names.clo_struct_name] can actually produce. *)
-    [ March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:0;
-      March_tir.Tir_names.clo_struct_name ~fn_name:"bar" ~lam_uid:42;
-      March_tir.Tir_names.clo_struct_name ~fn_name:"" ~lam_uid:7;
+    [ March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:"0_Main_f";
+      March_tir.Tir_names.clo_struct_name ~fn_name:"bar" ~lam_uid:"42_List_map_Int";
+      March_tir.Tir_names.clo_struct_name ~fn_name:"" ~lam_uid:"7_top";
       (* Non-closure names, must be false under both. *)
       "Option"; "List"; "$fv1"; "$Tuple2"; "main" ]
   in
@@ -8317,7 +8327,8 @@ let test_compiled_actor_init_params_ir_shape () =
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = March_tir.Lower.lower_module ~type_map m in
   (* Through Defun: the respawn thunk is a lambda that Defun lifts into a
-     top-level `$respawnN$apply$M` function, which is what the IR names. *)
+     top-level `$respawn<k>_<Actor>_spawn$apply$<k>_<host>` function (B1
+     structural names), which is what the IR names. *)
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
   let k_table = March_tir.Kind.of_module tir in
@@ -8336,7 +8347,7 @@ let test_compiled_actor_init_params_ir_shape () =
   Alcotest.(check bool) "no zero-arg spawn glue for an actor with init params" false
     (has "define ptr @Worker_spawn() {");
   Alcotest.(check bool) "a respawn thunk is lifted for the child with init args" true
-    (has "define ptr @.respawn[0-9]*.apply");   (* `$respawnN$apply$M` *)
+    (has "define ptr @[^ (]*respawn[0-9]*[^ (]*apply");   (* `$respawn0_Sup_spawn$apply$…` *)
   Alcotest.(check bool) "register_child is called" true
     (has "call void @march_actor_register_child")
 
@@ -16378,6 +16389,213 @@ let test_tir_verify_enforce_raises () =
     Alcotest.(check string) "stage carried" "tir-x" stage;
     Alcotest.(check int) "one finding" 1 (List.length fs)
 
+(* ── TIR verifier, check 2 (types): prove each rule red on hand-broken TIR ── *)
+
+let tv_types_has ?(k = true) needle m =
+  let k_table = if k then Some (March_tir.Kind.of_module m) else None in
+  List.exists (fun (_, s) -> Test_helpers.contains needle s)
+    (March_tir.Tir_verify.check ~stage:"tir-perceus" ?k_table ~rc:false m)
+
+let test_tir_verify_types_arity () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TInt in
+  let m = TV.modl [
+      TV.fn "callee" ~params:[x] (EAtom (AVar x));
+      TV.fn "main" (EApp (TV.v "callee" (TFn ([TInt], TInt)), [TV.int 1; TV.int 2])) ] in
+  Alcotest.(check bool) "a call with the wrong argument count is reported" true
+    (tv_types_has "call to `callee` passes 2 argument(s); it takes 1" m)
+
+let test_tir_verify_types_repr () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TInt in
+  let m = TV.modl [
+      TV.fn "callee" ~params:[x] (EAtom (AVar x));
+      TV.fn "main" (EApp (TV.v "callee" (TFn ([TInt], TInt)),
+                          [ALit (March_ast.Ast.LitFloat 1.5)])) ] in
+  Alcotest.(check bool) "a Float passed for an Int parameter is reported" true
+    (tv_types_has "argument 1 of `callee`" m);
+  Alcotest.(check bool) "... only with the kind table" false
+    (tv_types_has ~k:false "argument 1 of `callee`" m)
+
+let test_tir_verify_types_case_arity () =
+  let open March_tir.Tir in
+  let o = TV.v "o" (TCon ("Opt", [])) in
+  let a = TV.v "a" TInt and b = TV.v "b" TInt in
+  let m = { (TV.modl [ TV.fn "f" ~params:[o]
+                         (ECase (AVar o,
+                                 [ { br_tag = "Some"; br_vars = [a; b]; br_body = EAtom (AVar a) } ],
+                                 Some (EAtom (TV.int 0)))) ])
+            with tm_types = [ TDVariant ("Opt", [ ("None", []); ("Some", [TInt]) ]) ] } in
+  Alcotest.(check bool) "a branch binding more variables than its constructor has fields" true
+    (tv_types_has "case branch `Some` binds 2 variable(s); constructor `Some` of `Opt` has 1 field(s)" m)
+
+let test_tir_verify_types_field () =
+  let open March_tir.Tir in
+  let r = TV.v "r" (TRecord [ ("a", TInt) ]) in
+  let m = TV.modl [ TV.fn "f" ~params:[r] (EField (AVar r, "nope")) ] in
+  Alcotest.(check bool) "a projection of a field the record does not have" true
+    (tv_types_has "field `nope` is projected from the record" m);
+  let c = TV.v "c" (TCon ("Cfg", [])) in
+  let m2 = { (TV.modl [ TV.fn "g" ~params:[c] (EField (AVar c, "port")) ])
+             with tm_types = [ TDRecord ("Cfg", [ ("host", TString) ]) ] } in
+  Alcotest.(check bool) "... and of a named record type" true
+    (tv_types_has "field `port` is projected from the record type `Cfg`" m2)
+
+let test_tir_verify_types_named_tvar () =
+  let open March_tir.Tir in
+  let x = TV.v "x" (TVar "a") in
+  let m = TV.modl [ TV.fn "f" ~params:[x] (EAtom (TV.int 0)) ] in
+  Alcotest.(check bool) "a source-named type variable after mono" true
+    (tv_types_has "a named type variable survived monomorphisation" m);
+  let y = TV.v "y" (TVar "_3") in
+  let m2 = TV.modl [ TV.fn "g" ~params:[y] (EAtom (TV.int 0)) ] in
+  Alcotest.(check bool) "an erased ('_N) type variable is not" false
+    (tv_types_has "named type variable" m2);
+  Alcotest.(check bool) "... and neither is anything before mono" false
+    (List.exists (fun (_, s) -> Test_helpers.contains "named type variable" s)
+       (March_tir.Tir_verify.check ~stage:"tir-lower" ~rc:false m))
+
+(* ── TIR verifier, check 3 (RC balance) ──────────────────────────────── *)
+
+let tv_rc ?(leaks = false) m =
+  let k_table = March_tir.Kind.of_module m in
+  (* every parameter owned: inference over hand-written post-Perceus TIR
+     would read [dec_rc] as a non-consuming use and call it borrowed *)
+  let borrow_map = March_tir.Borrow.empty in
+  List.map snd (March_tir.Tir_verify_rc.check ~stage:"tir-perceus" ~leaks ~k_table ~borrow_map m)
+
+let tv_rc_has ?leaks needle m =
+  List.exists (fun s -> Test_helpers.contains needle s) (tv_rc ?leaks m)
+
+let tv_seq a b = March_tir.Tir.ESeq (a, b)
+
+let test_tir_verify_rc_balanced () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TString in
+  let m = TV.modl [ TV.fn "f" ~params:[x] (tv_seq (EDecRC (AVar x)) (EAtom (TV.int 0))) ] in
+  Alcotest.(check (list string)) "an owned parameter released once: clean" [] (tv_rc m)
+
+let test_tir_verify_rc_double_release () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TString in
+  let m = TV.modl [ TV.fn "f" ~params:[x]
+                      (tv_seq (EDecRC (AVar x)) (tv_seq (EDecRC (AVar x)) (EAtom (TV.int 0)))) ] in
+  Alcotest.(check bool) "a second dec_rc is an over-release" true
+    (tv_rc_has "rc-balance/over-release: `x`" m)
+
+let test_tir_verify_rc_use_after_release () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TString and s = TV.v "s" TString in
+  let m = TV.modl [
+      TV.fn "len" ~params:[s] (tv_seq (EDecRC (AVar s)) (EAtom (TV.int 1)));
+      TV.fn "f" ~params:[x]
+        (tv_seq (EDecRC (AVar x)) (EApp (TV.v "len" (TFn ([TString], TInt)), [AVar x]))) ] in
+  Alcotest.(check bool) "passing a released value to a call is a use after release" true
+    (tv_rc_has "rc-balance/use-after-release: `x`" m)
+
+let test_tir_verify_rc_leak () =
+  let open March_tir.Tir in
+  let s = TV.v "s" TString in
+  let mk = { (TV.fn "mk" (EAtom (ALit (March_ast.Ast.LitString "a")))) with fn_ret_ty = TString } in
+  let m = TV.modl [ mk;
+                    TV.fn "f" (ELet (s, EApp (TV.v "mk" (TFn ([], TString)), []), EAtom (TV.int 0))) ] in
+  Alcotest.(check bool) "a fresh value never released leaks, when leaks are asked for" true
+    (tv_rc_has ~leaks:true "rc-balance/leak: `s`" m);
+  Alcotest.(check (list string)) "... and is silent otherwise" [] (tv_rc m)
+
+let test_tir_verify_rc_case_arms_join () =
+  let open March_tir.Tir in
+  let x = TV.v "x" TString and b = TV.v "b" TBool in
+  let m = TV.modl [ TV.fn "f" ~params:[b; x]
+                      (ECase (AVar b,
+                              [ { br_tag = "True"; br_vars = [];
+                                  br_body = tv_seq (EDecRC (AVar x)) (EAtom (TV.int 1)) };
+                                { br_tag = "False"; br_vars = [];
+                                  br_body = tv_seq (EDecRC (AVar x))
+                                      (tv_seq (EDecRC (AVar x)) (EAtom (TV.int 2))) } ],
+                              None)) ] in
+  Alcotest.(check bool) "an over-release on one arm is reported on that arm's path" true
+    (tv_rc_has "on path `case b: False`" m)
+
+(* The three Perceus bugs check 3 found (specs/todos/
+   2026-10-07-perceus-releases-parent-before-field-use.md), through the real
+   pipeline: these assert the verifier SEES them.  When that todo is fixed,
+   these flip: assert no finding instead. *)
+let rc_pipeline_findings src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let saved = !March_tir.Tir_verify.rc_flag in
+  March_tir.Tir_verify.rc_flag := true;
+  Fun.protect ~finally:(fun () -> March_tir.Tir_verify.rc_flag := saved) (fun () ->
+      match March_tir.Contract_pipeline.run ~iface_methods ~opt:true tir with
+      | _ -> []
+      | exception March_tir.Tir_verify.Failed (_, fs) -> List.map snd fs)
+
+let rc_bug_string_case = {|mod StrCase do
+  type D = { tag : String, n : Int }
+  fn classify(d : D) : String do
+    match d.tag do
+      "known" ->
+        let a = int_to_string(d.n) ++ "a" ++ int_to_string(d.n * 3)
+        let b = a ++ int_to_string(d.n * 5) ++ a ++ int_to_string(d.n * 11)
+        let c = b ++ a ++ int_to_string(string_byte_length(b))
+        c ++ b ++ a
+      other -> "unknown " ++ other
+    end
+  end
+  fn main() : Int do
+    string_byte_length(classify({ tag: "tag-" ++ int_to_string(12345), n: 1 }))
+  end
+end|}
+
+let rc_bug_nested_projection = {|mod Nested do
+  type Ap = { fingerprint : String, k : Int }
+  type Offer = { ap : Ap, sessions : Int }
+  pfn active(o : Offer) : Int do o.sessions end
+  pfn line(name : String, o : Offer) : String do
+    "offer " ++ name ++ " fp " ++ o.ap.fingerprint ++ " sessions " ++ int_to_string(active(o))
+  end
+  fn main() : Int do
+    string_byte_length(line("r", { ap: { fingerprint: "fp-" ++ int_to_string(7), k: 1 }, sessions: 2 }))
+  end
+end|}
+
+let rc_bug_record_update = {|mod Shape3 do
+  type Place = Here(String) | Nowhere
+  type Want = { w_name : String, w_place : Place, w_cap : Int }
+  type Run = { name : String, place : Place, cap : Int }
+  type WL = WNil | WCons(Want, WL)
+  type MW = NoW | SomeW(Want)
+  fn find(ws : WL, n : String) : MW do
+    match ws do
+      WNil -> NoW
+      WCons(w, rest) -> if w.w_name == n do SomeW(w) else find(rest, n) end
+    end
+  end
+  fn pick(r : Run, wants : WL) : Run do
+    match find(wants, r.name) do
+      NoW -> { r with place: Nowhere }
+      SomeW(w) -> { r with place: w.w_place, cap: if r.cap == 0 do 0 else w.w_cap end }
+    end
+  end
+  fn main() : Int do
+    let r = pick({ name: "a", place: Nowhere, cap: 1 },
+                 WCons({ w_name: "a", w_place: Here("node-" ++ int_to_string(3)), w_cap: 3 }, WNil))
+    r.cap
+  end
+end|}
+
+let test_tir_verify_rc_sees_perceus_bugs () =
+  List.iter (fun (what, fn_name, src) ->
+      let fs = rc_pipeline_findings src in
+      Alcotest.(check bool) (what ^ ": a use-after-release in `" ^ fn_name ^ "`") true
+        (List.exists (fun s -> Test_helpers.contains "rc-balance/use-after-release" s) fs))
+    [ ("string match on a field", "classify", rc_bug_string_case);
+      ("nested projection, parent consumed", "line", rc_bug_nested_projection);
+      ("record update from a find result", "pick", rc_bug_record_update) ]
+
 let codegen_suites =
   [
       ( "tir_verify", [
@@ -16387,6 +16605,17 @@ let codegen_suites =
           Alcotest.test_case "ECallPtr through a non-function (RED)" `Quick test_tir_verify_callptr_non_function;
           Alcotest.test_case "duplicate names, dangling ADefRef (RED)" `Quick test_tir_verify_duplicate_and_defref;
           Alcotest.test_case "enforce raises Failed" `Quick test_tir_verify_enforce_raises;
+          Alcotest.test_case "types: call arity (RED)" `Quick test_tir_verify_types_arity;
+          Alcotest.test_case "types: argument representation (RED)" `Quick test_tir_verify_types_repr;
+          Alcotest.test_case "types: case binder count (RED)" `Quick test_tir_verify_types_case_arity;
+          Alcotest.test_case "types: missing field (RED)" `Quick test_tir_verify_types_field;
+          Alcotest.test_case "types: named tvar after mono (RED)" `Quick test_tir_verify_types_named_tvar;
+          Alcotest.test_case "rc: balanced owned param is clean" `Quick test_tir_verify_rc_balanced;
+          Alcotest.test_case "rc: double release (RED)" `Quick test_tir_verify_rc_double_release;
+          Alcotest.test_case "rc: use after release (RED)" `Quick test_tir_verify_rc_use_after_release;
+          Alcotest.test_case "rc: leak, opt-in (RED)" `Quick test_tir_verify_rc_leak;
+          Alcotest.test_case "rc: per-arm path (RED)" `Quick test_tir_verify_rc_case_arms_join;
+          Alcotest.test_case "rc: sees the perceus-releases-parent bugs" `Quick test_tir_verify_rc_sees_perceus_bugs;
         ]);
       ( "vectorize_check", [
           Alcotest.test_case "module loads, misuse case reports one diagnostic" `Quick
