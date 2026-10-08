@@ -26,6 +26,19 @@ git log is authoritative for exact commits.
   Before, the input carried its own copy of the actor, which had no state
   renderer and no hot-reload slot. An input that could only spawn by
   carrying its own copy (a node built by an older compiler) is refused.
+- **The `a[p]` / `Bool[p]` shorthand for abstract refinements.**
+  `fn filter(xs : List(a), pred : a -> Bool[p]) : List(a[p])` now means the
+  spelled-out `pred : ({x : a | true}) -> {Bool | _ == p(x)}` and
+  `List({a | p(_)})`. `T[p]` is `{T | p(_)}` anywhere, and a callback result
+  `D -> Bool[p]` defines `p`. The standard library's `List.filter`,
+  `List.find`, `List.take_while` and `Option.filter` are now written this way.
+  Editors using the tree-sitter grammar highlight it.
+- **`march --shell` / `forge shell` has line editing and history.** On a terminal,
+  Up/Down recall earlier inputs (kept in `~/.march/shell_history`, mode 0600,
+  last 1000), and Left/Right, Home/End, Ctrl-A/E/U/K/W/L, Delete and mid-line
+  insertion work, with UTF-8-aware cursor movement. Ctrl-C discards the line
+  without leaving the session; Ctrl-D on an empty line leaves. The terminal is
+  always restored. Pipes, `--shell-inputs` and `forge rpc` are unchanged.
 - **`march --bisect-pass FILE` finds the optimisation pass behind a
   miscompile.** It compares the compiled program's output with the
   interpreter's (or with `--expect OUT`). It then reports the smallest set of
@@ -35,13 +48,14 @@ git log is authoritative for exact commits.
 - **`march --reduce FILE --oracle CMD` shrinks a failing program.** It removes
   declarations, then lines, while `CMD` still exits 0 on the candidate, and
   writes the result to `FILE.reduced.march`.
-- **The TIR verifier checks types, and optionally reference counts.**
-  - Under `--verify-tir`, a call's argument count and representations, a case
-    branch's binder count, projected field names, and leftover type variables
-    are now checked after monomorphisation.
-  - `--verify-tir-rc` additionally checks reference-count balance after Perceus
-    on every path, reporting over-releases and uses after release.
-    `MARCH_VERIFY_TIR_LEAKS=1` adds leaks.
+- **The TIR verifier checks types and reference counts.** Under
+  `--verify-tir`:
+  - a call's argument count and representations, a case branch's binder
+    count, projected field names, and leftover type variables are checked
+    after monomorphisation;
+  - reference-count balance is checked after Perceus on every path, reporting
+    over-releases and uses after release. `MARCH_VERIFY_TIR_LEAKS=1` adds
+    leaks.
 - **`march query`: ask one compile a question.** `march query fn NAME FILE`
   lists the passes that changed a function and prints its IR at the last one
   (or `--at PASS`); `origin NAME` shows where an emitted function came from
@@ -367,6 +381,12 @@ git log is authoritative for exact commits.
   p50 went from 112 to 56 ms on macOS, 60 to 36 ms on Linux, and 87 to 42 ms
   from a Mac to a Linux node. clang is still used when libLLVM or the node's
   backend is unavailable, and `MARCH_SHELL_CLANG=1` forces it.
+- **The remote shell prints the other stdlib containers by their elements.**
+  A HashMap, OrderedMap, SortedSet, Deque, Queue, RRB.Vec or NativeArray
+  result used to print its internal structure (`HamtHashMap(HBranch(...))`,
+  `Deque(3, [1], [3, 2])`, `#<tag:-6>`). It now prints as
+  `HashMap{"a" => 1}`, `Deque[1, 2, 3]`, `NativeArray[1.5, 2.5]` and so on,
+  with the element limit at every depth, like List, Array, Map and Set.
 - **Compiler-minted symbols are structural, not counter-numbered.** A lambda
   is `$lam<k>_<host>` (nested: `$lam<j>__lam<k>_<host>`), its lifted apply fn
   `<lambda>$apply$<k>_<host>`, a fused pipeline helper `$fused_mf_<host>_<k>`,
@@ -494,6 +514,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A field read from a record no longer outlives the record in compiled
+  code.** Three shapes released the record first and then read freed memory,
+  printing wrong strings or crashing; the interpreter was always right:
+  - a `match` on a record's string field whose binder arm used the field;
+  - a nested field read (`o.ap.fingerprint`) followed by a call that consumed
+    the record. `Topology`'s offer and drain report lines did this;
+  - a record update taking fields from a `List.find` result. `Topology`'s
+    desired-role merge did this, and it crashed.
 - **`MARCH_SANITIZE` builds no longer hang silently on macOS 26.** Apple clang 17
   (Xcode 26) and LLVM 21 ship an ASAN runtime that deadlocks before `main` on
   macOS 26, so every sanitized binary, even hello-world, printed nothing and never
@@ -511,6 +539,20 @@ git log is authoritative for exact commits.
   `Ok(Some(f))` next to `Ok(x)` on a `Result(Option(Float), _)`) returned a tiny garbage
   number such as `2.9e-311` from both `Some` arms, even the constant one. The inner value
   was read with the wrong memory layout; the interpreter was never affected.
+- **Remote shell: a `Float` binding no longer crashes the node, and inputs and
+  sessions no longer leak memory on it.**
+  - **The crash.** A session that ran `let f = 2.5` crashed the node with
+    SIGSEGV when it ended.
+  - **Leaks per input.** Each input leaked most of what it built, such as
+    4 000 objects for rendering a 1 000-element list. Each call of a
+    function like `List.filter` also leaked a closure.
+  - **Leaks per session.** Every input took a reference on every binding of
+    its session, so the bindings outlived the session, and ending a session
+    freed only the top cell of each binding.
+  - **What is left.** An input now keeps only its loaded code and one small
+    string per string literal it evaluates.
+  - **Disk.** The node also deletes each input's compiled file once loaded,
+    instead of leaving ~70 KB per input in its temporary directory.
 - **A hot-reload `DRAIN` before the scheduler starts no longer corrupts a
   loaded patch.** A green thread spawned before the scheduler was initialised
   (a signed `DRAIN` with a hard deadline arms one) got a stack reservation

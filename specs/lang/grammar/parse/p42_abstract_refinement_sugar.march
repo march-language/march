@@ -1,0 +1,18 @@
+mod P42AbstractRefinementSugar do
+  -- `T[p]` is `{T | p(_)}`; `a -> Bool[p]` defines the abstract refinement
+  -- `p` (plan specs/plans/2026-10-07-abstract-refinements-phase4-plan.md).
+  fn filt(xs : List(a), keep : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if keep(h) do Cons(h, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+
+  -- A list literal on the line after a `let` is still a list literal.
+  fn g(n : Int) : List(Int) do
+    let ys = [n]
+    [1, 2]
+  end
+
+  fn main() : Int do List.length(filt(g(1), fn y -> y > 0)) end
+end

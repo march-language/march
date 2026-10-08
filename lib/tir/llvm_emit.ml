@@ -2691,10 +2691,11 @@ type repl_slot_info = Llvm_repl.repl_slot_info = {
 }
 
 let emit_repl_expr ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns
-    ?store_as_slot ?session_wraps ~types (body : Tir.expr) : string =
+    ?store_as_slot ?borrow_slots ?slot_drop_fn ?register_drops ?session_wraps ~types
+    (body : Tir.expr) : string =
   Llvm_repl.emit_repl_expr ~emit_expr
     ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns ?store_as_slot
-    ?session_wraps ~types body
+    ?borrow_slots ?slot_drop_fn ?register_drops ?session_wraps ~types body
 
 let emit_repl_decl ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns
     ?extern_fns ?session_wraps ~types (body : Tir.expr) : string =

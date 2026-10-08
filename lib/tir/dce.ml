@@ -84,9 +84,18 @@ let rec called_fns : Tir.expr -> StringSet.t = function
   | Tir.ESeq (e1, e2)       -> StringSet.union (called_fns e1) (called_fns e2)
   | _                        -> StringSet.empty
 
-(** Operational entry/root names preserved by top-level DCE. *)
-let root_names ?(extra_root = fun _ -> false) ?(fail_open = true)
+(** Operational entry/root names preserved by top-level DCE.  [roots], when
+    given, replaces them (with [tm_exports] still added): a REPL or shell
+    fragment roots at its own entry only, not at every function named
+    [main] or [*.main] that the program it was lowered with declares (a
+    library's forge task modules each have one). *)
+let rec root_names ?(extra_root = fun _ -> false) ?(fail_open = true) ?roots
     (m : Tir.tir_module) : string list =
+  match roots with
+  | Some rs -> List.sort_uniq String.compare (rs @ m.Tir.tm_exports)
+  | None -> root_names_default ~extra_root ~fail_open m
+
+and root_names_default ~extra_root ~fail_open (m : Tir.tir_module) : string list =
   let roots = ref StringSet.empty in
   let add name = roots := StringSet.add name !roots in
   let is_main_name name =
@@ -133,14 +142,14 @@ let root_names ?(extra_root = fun _ -> false) ?(fail_open = true)
 (** Transitive reachability from entry points.
     Uses [free_vars] (not [called_fns]) so that closure apply-function
     pointers stored in EAlloc args are also treated as references. *)
-let reachable_fns ?(extra_root = fun _ -> false) ?(fail_open = true)
+let reachable_fns ?(extra_root = fun _ -> false) ?(fail_open = true) ?roots
     (m : Tir.tir_module) : StringSet.t =
   let fn_map : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 16 in
   List.iter (fun fd -> Hashtbl.add fn_map fd.Tir.fn_name fd) m.Tir.tm_fns;
   let fn_names = StringSet.of_list (List.map (fun fd -> fd.Tir.fn_name) m.Tir.tm_fns) in
   let visited = ref StringSet.empty in
   let queue = Queue.create () in
-  List.iter (fun name -> Queue.push name queue) (root_names ~extra_root ~fail_open m);
+  List.iter (fun name -> Queue.push name queue) (root_names ~extra_root ~fail_open ?roots m);
   while not (Queue.is_empty queue) do
     let name = Queue.pop queue in
     if not (StringSet.mem name !visited) then begin
@@ -275,9 +284,9 @@ let rec dce_expr ~impure_fns ~changed : Tir.expr -> Tir.expr = function
    So the caller supplies the predicate. bin/main.ml builds it from the
    DESUGARED AST, where a declaration's span still says which file it came
    from — the same stdlib-span filter [own_caps_of_this_module] uses. *)
-let prune_unreachable ?(extra_root = fun _ -> false) ?(fail_open = true)
+let prune_unreachable ?(extra_root = fun _ -> false) ?(fail_open = true) ?roots
     (m : Tir.tir_module) : Tir.tir_module =
-  let reachable = reachable_fns ~extra_root ~fail_open m in
+  let reachable = reachable_fns ~extra_root ~fail_open ?roots m in
   let fns = List.filter
       (fun fd -> StringSet.mem fd.Tir.fn_name reachable) m.Tir.tm_fns in
   { m with Tir.tm_fns = fns }

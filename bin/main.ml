@@ -1579,7 +1579,6 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            skips the TIR pipeline and so the check; keying on it means a
            verified compile is never satisfied by an unverified cached one. *)
         @ (if March_tir.Tir_verify.enabled () then ["verify-tir"] else [])
-        @ (if March_tir.Tir_verify.rc_enabled () then ["verify-tir-rc"] else [])
         @ cross_sysroot_tag
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
         (* --protocol-baseline: the previous protocol versions decide the
@@ -2564,7 +2563,7 @@ let compile filename =
                   (files_in walked) in
               write_loadset ~path:ls_path ~walked ~listed ~unlisted)
       in
-      let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
+      let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) () in
       (* A warnings-only build (an @[no_alloc(warn)] contract, an unused
          binding, ...) used to lose its warnings on a warm cache, and the
          `no_alloc` case was patched by refusing the early exit whenever the
@@ -3069,8 +3068,12 @@ let compile filename =
       ~diags:(diags @ contract) ~is_user_file ~typecheck_env
       ~rejected:(frontend_rejected || contract_rejected ())
   end;
+  (* Under --shell, only errors: they stop the session.  The program's
+     warnings and refinement hints are the build's business, and a real
+     project (forgepm) printed screens of them before the first prompt. *)
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      if is_user_file d then
+      if is_user_file d
+         && (!shell_socket = None || d.severity = March_errors.Errors.Error) then
         emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
     ) diags;
   (* --shell: the program typechecked as the node's build did; hand it to the
@@ -3932,7 +3935,7 @@ let compile filename =
         end else begin
         (* CAS: check for a cached binary before running clang *)
         let target_label = cas_target_label target in
-        let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
+        let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) () in
         let h_sccs = March_cas.Pipeline.hash_module tir in
         (* Its own stamp so --timings does not fold the SCC build + Merkle
            hashing into the next stamp (llvm-emit, or nothing on a cache hit). *)
@@ -6045,7 +6048,7 @@ let () =
     ("--oracle", Arg.Set_string reduce_oracle,
      "CMD  With --reduce: a shell command, exit 0 = still interesting; {} is the candidate's path (appended if absent)");
     ("--verify-tir-rc", Arg.Set March_tir.Tir_verify.rc_flag,
-     " Also check reference-count balance after Perceus (implies --verify-tir). Same as MARCH_VERIFY_TIR_RC=1; MARCH_VERIFY_TIR_LEAKS=1 additionally reports leaks");
+     " Same as --verify-tir, which now includes the reference-count balance check (kept for compatibility; MARCH_VERIFY_TIR_RC=1 likewise). MARCH_VERIFY_TIR_LEAKS=1 additionally reports leaks");
     ("--explain", Arg.String (fun code ->
          print_string (March_errors.Explain.explain code); exit 0),
      "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");

@@ -161,6 +161,7 @@ type env = {
   actor_sent : StringSet.t;
   moved_vars : StringSet.t;
   borrowed_field_vars : StringSet.t;
+  field_owner : string StringMap.t;
   cons_live : StringSet.t;
   var_ctx : Tir.var StringMap.t;
   owned_calls : owned_calls option;

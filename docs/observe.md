@@ -992,6 +992,13 @@ march> [{ name: "first", tags: ["a", "b", "c"] }] limit: 2
 - The limit applies at every depth: each list, Array, Map and Set shows at
   most `N` elements then `… n more`, and each string at most `N` characters
   then `… n more chars`. `limit: all` (or `:limit 0`) turns it off.
+- The other stdlib containers print by their elements too, with the same
+  limit: `HashMap{"a" => 1}`, `OrderedMap{1 => "a"}`, `SortedSet{1, 3}`,
+  `Deque[1, 2]`, `Queue[1, 2]`, `RRB.Vec[1, 2]`, `NativeArray[1.5, 2.5]`.
+  A HashMap prints in hash order; the others in their own order. RingBuf and
+  LinearMap are linear (reading one consumes it), so they print as
+  `to_string` prints them. So does a container whose type name the program
+  reuses for a type of its own (a program `Deque`, say).
 - A type with a hand-written `Show` prints through its `show`, cut at 16 KiB
   with `… (n more bytes)`.
 - A function prints `<fn>`; a Pid and other runtime values print as
@@ -1063,6 +1070,37 @@ What happens when:
 - **A request is captured.** Each one is signed for its session (a random
   challenge the node hands out when you attach), so it runs on no other
   connection, no other node and not after the node restarts.
+
+**Line editing and history.** On a terminal the prompt is a real line editor
+(`lib/repl/shell_line.ml`, `bin/shell_tty.ml`). When stdin or stdout is not a
+terminal (a pipe, `--shell-inputs`, `forge rpc`) none of this is active and
+input is read exactly as before.
+
+| Keys | Action |
+|------|--------|
+| Up / Down, Ctrl-P / Ctrl-N | previous / next input; Down past the newest restores the line you were typing |
+| Left / Right, Ctrl-B / Ctrl-F | one character (a multibyte character is one step) |
+| Home / End, Ctrl-A / Ctrl-E | start / end of the line |
+| Ctrl-Left / Ctrl-Right, Alt-B / Alt-F | one word |
+| Backspace, Delete | delete before / under the cursor |
+| Ctrl-U / Ctrl-K / Ctrl-W | kill to the start / to the end / the word before the cursor |
+| Ctrl-L | clear the screen |
+| Ctrl-C | discard the line and show a new prompt; the session stays attached |
+| Ctrl-D | on an empty line, leave (like `:quit`); otherwise delete under the cursor |
+
+A line longer than the terminal scrolls sideways instead of wrapping; a
+resize is picked up on the next keystroke. Unknown escape sequences (function
+keys, PageUp) are ignored.
+
+Inputs are kept in `~/.march/shell_history`, one per line, last 1000, loaded
+at start. A line equal to the one before it, a blank line and `:quit` are not
+recorded. **The file can hold sensitive text** (a connection string or token
+typed into an input is kept verbatim), so it is created `0600` in a `0700`
+directory. Delete it, or edit it, if an input should not outlive the session.
+
+The terminal is in raw mode only while a line is being typed and is put back
+before the input runs; it is also restored on exit, an uncaught exception, and
+SIGINT, SIGTERM and SIGHUP.
 
 Under the hood `forge shell` runs `march --shell <reload socket>.shell
 <entry>` with the project's `MARCH_LIB_PATH`, through an ssh tunnel for a

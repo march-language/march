@@ -212,6 +212,22 @@ let rec fmt_ty = function
   | TyCon ({ txt; _ }, [])   -> txt
   | TyCon ({ txt; _ }, args) -> Printf.sprintf "%s(%s)" txt (fmt_tys args)
   | TyVar { txt; _ }         -> txt
+  (* The abstract-refinement DEFINER `D -> Bool[p]`.  The parser rewrites it to
+     `({x : D | true}) -> {Bool | _ == p(x)}` (a synthetic binder `$x` when the
+     domain has none, the user's binder otherwise; Parser.abstract_definer_arrow),
+     so print that exact shape back as the shorthand: it re-parses to the same
+     tree, whereas the expanded form with `$x` cannot even be lexed. *)
+  | TyArrow (dom, TyRefine (TyCon ({ txt = "Bool"; _ }, []), None,
+                            EApp (EVar { txt = "=="; _ },
+                                  [ EVar { txt = "_"; _ };
+                                    EApp (EVar p, [ EVar { txt = x; _ } ], _) ], _)))
+    when (match dom with
+        | TyRefine (_, Some { txt = bx; _ }, _) -> bx = x
+        | _ -> false) ->
+    let dom_s = match dom with
+      | TyRefine (d, Some { txt = "$x"; _ }, ELit (LitBool true, _)) -> fmt_ty_atom d
+      | d -> Printf.sprintf "(%s)" (fmt_ty d) in
+    Printf.sprintf "%s -> Bool[%s]" dom_s p.txt
   | TyArrow (a, b)           -> Printf.sprintf "%s -> %s" (fmt_ty_atom a) (fmt_ty b)
   | TyTuple tys              -> Printf.sprintf "(%s)" (fmt_tys tys)
   | TyRecord flds            ->
@@ -224,6 +240,10 @@ let rec fmt_ty = function
     let s = match op with NatAdd -> "+" | NatMul -> "*" in
     Printf.sprintf "%s %s %s" (fmt_ty a) s (fmt_ty b)
   | TyChan (r, p)            -> Printf.sprintf "Chan(%s, %s)" r.txt p.txt
+  (* The abstract-refinement shorthand `T[p]`: the parser marks it with the
+     binder `_`, which a user cannot write, so it prints back as written. *)
+  | TyRefine (base, Some { txt = "_"; _ }, EApp (EVar p, [ EVar { txt = "_"; _ } ], _)) ->
+    Printf.sprintf "%s[%s]" (fmt_ty_atom base) p.txt
   | TyRefine (base, None, pred) ->
     Printf.sprintf "{ %s | %s }" (fmt_ty base) (!fmt_pred_ref pred)
   | TyRefine (base, Some n, pred) ->

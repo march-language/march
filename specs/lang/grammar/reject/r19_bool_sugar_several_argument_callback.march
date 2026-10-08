@@ -1,0 +1,7 @@
+-- EXPECT-ERROR: defines an abstract refinement from a ONE-argument callback
+-- `Bool[p]` as a callback's result defines `p` from its one argument; a
+-- tuple domain is a several-argument callback, which cannot (design
+-- 2026-09-20 §9.3).
+mod R19BoolSugarSeveralArgumentCallback do
+  fn f(xs : List(a), k : (a, a) -> Bool[p]) : List(a[p]) do xs end
+end

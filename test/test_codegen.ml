@@ -16517,10 +16517,10 @@ let test_tir_verify_rc_case_arms_join () =
   Alcotest.(check bool) "an over-release on one arm is reported on that arm's path" true
     (tv_rc_has "on path `case b: False`" m)
 
-(* The three Perceus bugs check 3 found (specs/todos/
-   2026-10-07-perceus-releases-parent-before-field-use.md), through the real
-   pipeline: these assert the verifier SEES them.  When that todo is fixed,
-   these flip: assert no finding instead. *)
+(* The three Perceus bugs check 3 found (specs/progress/
+   2026-10-08-perceus-parent-released-before-field-use.md), through the real
+   pipeline.  Before the fix each reported a use-after-release (and each
+   compiled program printed garbage or crashed); now none may. *)
 let rc_pipeline_findings src =
   let m = parse_and_desugar src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
@@ -16587,14 +16587,52 @@ let rc_bug_record_update = {|mod Shape3 do
   end
 end|}
 
-let test_tir_verify_rc_sees_perceus_bugs () =
+let test_tir_verify_rc_perceus_bugs_fixed () =
   List.iter (fun (what, fn_name, src) ->
       let fs = rc_pipeline_findings src in
-      Alcotest.(check bool) (what ^ ": a use-after-release in `" ^ fn_name ^ "`") true
-        (List.exists (fun s -> Test_helpers.contains "rc-balance/use-after-release" s) fs))
+      Alcotest.(check (list string)) (what ^ ": no RC finding in `" ^ fn_name ^ "`") []
+        (List.filter (fun s -> Test_helpers.contains "rc-balance" s) fs))
     [ ("string match on a field", "classify", rc_bug_string_case);
       ("nested projection, parent consumed", "line", rc_bug_nested_projection);
       ("record update from a find result", "pick", rc_bug_record_update) ]
+
+(* ── Dce.prune_unreachable ~roots (the remote shell's fragments) ─────────
+
+   A REPL or shell fragment lowers together with the program it attaches to,
+   and the program's library modules each declare a `main` (forge task
+   modules).  Default roots keep every function named `main` or `*.main`, so
+   `1 + 41` carried ~196 functions of forgepm's build tasks and declared their
+   file and process capabilities, which the node's policy then refused.
+   `~roots` replaces the defaults with the fragment's own entry. *)
+let test_prune_roots_ignores_other_mains () =
+  let entry = mk_fn "main" (app "helper" []) in
+  let helper = mk_fn "helper" (ilit 1 |> fun a -> March_tir.Tir.EAtom a) in
+  let task = mk_fn "Forge.Task.main" (app "task_only" []) in
+  let task_only = mk_fn "task_only" (March_tir.Tir.EAtom (ilit 2)) in
+  let m = mk_module [ entry; helper; task; task_only ] in
+  let names m = List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name) m.March_tir.Tir.tm_fns in
+  Alcotest.(check (list string)) "default roots keep every main"
+    [ "Forge.Task.main"; "helper"; "main"; "task_only" ]
+    (List.sort compare (names (March_tir.Dce.prune_unreachable m)));
+  Alcotest.(check (list string)) "~roots keeps the entry and what it reaches"
+    [ "helper"; "main" ]
+    (List.sort compare (names (March_tir.Dce.prune_unreachable ~roots:[ "main" ] m)))
+
+let test_prune_roots_keeps_exports () =
+  let entry = mk_fn "main" (March_tir.Tir.EAtom (ilit 1)) in
+  let kept = mk_fn "kept" (March_tir.Tir.EAtom (ilit 2)) in
+  let m = { (mk_module [ entry; kept ]) with March_tir.Tir.tm_exports = [ "kept" ] } in
+  Alcotest.(check (list string)) "tm_exports stay roots under ~roots"
+    [ "kept"; "main" ]
+    (List.sort compare
+       (List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name)
+          (March_tir.Dce.prune_unreachable ~roots:[ "main" ] m).March_tir.Tir.tm_fns))
+
+let prune_roots_tests =
+  [ ( "prune_roots",
+      [ Alcotest.test_case "a fragment's roots ignore other mains" `Quick
+          test_prune_roots_ignores_other_mains;
+        Alcotest.test_case "exports stay roots" `Quick test_prune_roots_keeps_exports ] ) ]
 
 let codegen_suites =
   [
@@ -16615,7 +16653,7 @@ let codegen_suites =
           Alcotest.test_case "rc: use after release (RED)" `Quick test_tir_verify_rc_use_after_release;
           Alcotest.test_case "rc: leak, opt-in (RED)" `Quick test_tir_verify_rc_leak;
           Alcotest.test_case "rc: per-arm path (RED)" `Quick test_tir_verify_rc_case_arms_join;
-          Alcotest.test_case "rc: sees the perceus-releases-parent bugs" `Quick test_tir_verify_rc_sees_perceus_bugs;
+          Alcotest.test_case "rc: perceus parent-released-before-field-use fixed" `Quick test_tir_verify_rc_perceus_bugs_fixed;
         ]);
       ( "vectorize_check", [
           Alcotest.test_case "module loads, misuse case reports one diagnostic" `Quick
@@ -17667,6 +17705,7 @@ let codegen_suites =
   @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
   @ Test_trmc.suites (* TRMC Phase 1: tail-recursion-modulo-cons eligibility *)
+  @ prune_roots_tests
   @ Test_provenance.suites (* A2: provenance side table + --debug-info *)
   @ Test_kind.suites (* type kinds: the per-type table (specs/2026-09-10-type-kinds-design.md) *)
   @ Test_rc_trace.suites (* --rc-trace site ids + scripts/gc-trace-report.py (plan §8 A3) *)

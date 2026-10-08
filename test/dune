@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_b7 test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident)
+ (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_b7 test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint march_jit yojson alcotest str unix threads.posix))
 
 (library
@@ -1791,6 +1791,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/tuple_eq.expected native_tuple_eq.out)))
+
+; A field projected out of a record is a borrow of it; three shapes released
+; the record before the field's last read (a string match's binder arm, a
+; nested projection after the record was consumed, a record update from a
+; find result): wrong strings or a crash, compiled only.
+(rule
+ (targets native_field_use_after_parent_release native_field_use_after_parent_release.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/field_use_after_parent_release.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_field_use_after_parent_release native/field_use_after_parent_release.march)
+   (with-stdout-to native_field_use_after_parent_release.out (system "./native_field_use_after_parent_release")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/field_use_after_parent_release.expected native_field_use_after_parent_release.out)))
 
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
@@ -13177,6 +13196,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/shell_link.expected native_shell_link.out)))
+
+; Shell leaks (specs/progress/2026-10-08-shell-slot-and-drop-leaks.md).
+; test/shell/leak.txt repeats inputs that each leaked on the node (a closure
+; capturing a predicate, a parsed value released without being taken apart)
+; between two live_allocs() readings, after one warm-up round: the
+; difference must be 0.  (They have no string literals: each fragment keeps
+; one immortal cell per literal it evaluates.)
+; Then a second session reads live_allocs() again: ending the first one must
+; release its bindings whole (xs, ys, r: more than 1500 objects), and its
+; Float binding must not crash the node.
+(rule
+ (targets native_shell_leak.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/leak.txt)
+       (file native/shell_node.march))
+ (action
+  (with-stdout-to native_shell_leak.out
+   (system "rm -rf sh_lk; mkdir -p sh_lk; ./shell_check.exe keygen-home sh_lk/pk $PWD/sh_lk/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_lk/pk) -o sh_lk/node native/shell_node.march > sh_lk/build 2>&1 || { cat sh_lk/build; exit 1; }; printf 'IO.Console\\n' > sh_lk/policy; printf 'live_allocs()\\n' > sh_lk/after.txt; S=/tmp/march-shell-leak-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_lk/policy ./sh_lk/node > sh_lk/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_lk/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_lk/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/leak.txt native/shell_node.march > sh_lk/s1 2>&1; echo \"exit=$?\"; HOME=$PWD/sh_lk/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs sh_lk/after.txt native/shell_node.march > sh_lk/s2 2>&1; echo \"exit=$?\"; sed '$d' sh_lk/s1; awk -v e=\"$(tail -1 sh_lk/s1)\" -v a=\"$(tail -1 sh_lk/s2)\" 'BEGIN { if (e ~ /^[0-9]+$/ && a ~ /^[0-9]+$/ && e - a >= 1500) print \"the session end released its bindings\"; else print \"the session end released \" e - a \" objects (\" e \" at its end, \" a \" in the next session)\" }'; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_lk $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_leak.expected native_shell_leak.out)))
 
 ; Golden rendered-diagnostic corpus (diagnostics plan §11, D7): every
 ; test/errors/*.march checked with the real compiler; full rendered output
