@@ -16521,7 +16521,7 @@ let test_tir_verify_rc_case_arms_join () =
    2026-10-08-perceus-parent-released-before-field-use.md), through the real
    pipeline.  Before the fix each reported a use-after-release (and each
    compiled program printed garbage or crashed); now none may. *)
-let rc_pipeline_findings src =
+let rc_pipeline_findings ?(opt = true) src =
   let m = parse_and_desugar src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = March_tir.Lower.lower_module ~type_map m in
@@ -16529,7 +16529,7 @@ let rc_pipeline_findings src =
   let saved = !March_tir.Tir_verify.rc_flag in
   March_tir.Tir_verify.rc_flag := true;
   Fun.protect ~finally:(fun () -> March_tir.Tir_verify.rc_flag := saved) (fun () ->
-      match March_tir.Contract_pipeline.run ~iface_methods ~opt:true tir with
+      match March_tir.Contract_pipeline.run ~iface_methods ~opt tir with
       | _ -> []
       | exception March_tir.Tir_verify.Failed (_, fs) -> List.map snd fs)
 
@@ -16587,6 +16587,39 @@ let rc_bug_record_update = {|mod Shape3 do
   end
 end|}
 
+(* A local recursive helper under TRMC calls itself through its closure; with
+   the optimiser off Known_call has not made that call direct: the recursion
+   is a [call_ptr go$dps(.., $trmc)], whose last argument
+   is the destination cell, borrowed by protocol.  Check 3 once counted it as
+   consumed and reported an over-release in every list-producing stdlib
+   function under [--no-opt]. *)
+let rc_trmc_src = {|mod Trmc do
+  type L = N | C(Int, L)
+  fn dbl_all(xs : L) : L do
+    fn go(ys : L) : L do
+      match ys do
+        N -> N
+        C(h, t) -> C(h * 2, go(t))
+      end
+    end
+    go(xs)
+  end
+  fn main() : Int do
+    match dbl_all(C(1, C(2, N))) do
+      N -> 0
+      C(h, _) -> h
+    end
+  end
+end|}
+
+let test_tir_verify_rc_indirect_dps_call () =
+  List.iter (fun opt ->
+      Alcotest.(check (list string))
+        (Printf.sprintf "no RC finding for an indirect $dps call (opt=%b)" opt) []
+        (List.filter (fun s -> Test_helpers.contains "rc-balance" s)
+           (rc_pipeline_findings ~opt rc_trmc_src)))
+    [ false; true ]
+
 let test_tir_verify_rc_perceus_bugs_fixed () =
   List.iter (fun (what, fn_name, src) ->
       let fs = rc_pipeline_findings src in
@@ -16616,6 +16649,7 @@ let codegen_suites =
           Alcotest.test_case "rc: leak, opt-in (RED)" `Quick test_tir_verify_rc_leak;
           Alcotest.test_case "rc: per-arm path (RED)" `Quick test_tir_verify_rc_case_arms_join;
           Alcotest.test_case "rc: perceus parent-released-before-field-use fixed" `Quick test_tir_verify_rc_perceus_bugs_fixed;
+          Alcotest.test_case "rc: indirect $dps call borrows its destination" `Quick test_tir_verify_rc_indirect_dps_call;
         ]);
       ( "vectorize_check", [
           Alcotest.test_case "module loads, misuse case reports one diagnostic" `Quick
