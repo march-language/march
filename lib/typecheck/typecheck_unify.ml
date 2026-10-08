@@ -65,7 +65,7 @@ let format_ty_for_error t =
   else "`" ^ flat ^ "`"
 
 (** Report a type mismatch with a conversational Elm-style message. *)
-let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found =
+let report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided expected found =
   (* Build headline, using pretty-printing for long types.
      Convention: `expected` = inferred type of the expression (what was provided);
                  `found`    = required type from context (what was needed).
@@ -267,6 +267,33 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found
        | _ -> [])
     | None -> []
   in
+  (* D5: where the PROVIDED type came from. "this is `T`" on the expression
+     (dropped by the renderer when it is the primary span), and, for a
+     variable whose binder is in scope, "`x` was bound here as `T`" on the
+     binder. [p_ty] is the whole expression's type, not the inner argument
+     the headline may be about. *)
+  let labels =
+    match provided with
+    | None -> labels
+    | Some p ->
+      let t = pp_ty (repr p.p_ty) in
+      let this_is =
+        if p.p_span = span then []
+        else [ { Err.lbl_span = p.p_span;
+                 lbl_message = Printf.sprintf "this is `%s`" t } ]
+      in
+      let binder =
+        match p.p_name with
+        | Some n ->
+          (match StrMap.find_opt n env.binder_spans with
+           | Some bsp when bsp <> span && bsp <> p.p_span ->
+             [ { Err.lbl_span = bsp;
+                 lbl_message = Printf.sprintf "`%s` was bound here as `%s`" n t } ]
+           | _ -> [])
+        | None -> []
+      in
+      labels @ this_is @ binder
+  in
   (* An occurs-check failure is a fundamentally different situation than an
      ordinary mismatch: the type variable would have to equal a type that
      contains itself (e.g. a self-referential record field inferred without
@@ -383,7 +410,7 @@ let expand_record_ref : (env -> ty -> ty option) ref =
 (** Unify [t1] and [t2], reporting any mismatch to [env.errors].
     Uses [TError] as a recovery sentinel — if either side is [TError]
     the constraint is silently satisfied (the error was already reported). *)
-let rec unify env ~span ?(reason = None) t1 t2 =
+let rec unify env ~span ?(reason = None) ?provided t1 t2 =
   let t1 = normalize_tnat t1 and t2 = normalize_tnat t2 in
   match t1, t2 with
   (* Error sentinel absorbs everything *)
@@ -397,7 +424,7 @@ let rec unify env ~span ?(reason = None) t1 t2 =
     (match !r with
      | Unbound (id, level) ->
        if occurs id level t then begin
-         report_mismatch env ~span ~reason ~occurs_violation:true t1 t2;
+         report_mismatch env ~span ~reason ?provided ~occurs_violation:true t1 t2;
          r := Link TError
        end else begin
          (* Proof-cap forge hook: if [r] is a tagged [cap_narrow]-result inner
@@ -457,16 +484,16 @@ let rec unify env ~span ?(reason = None) t1 t2 =
 
   | TCon (n1, a1), TCon (n2, a2) ->
     if n1 = n2 && List.length a1 = List.length a2 then
-      List.iter2 (unify env ~span ~reason) a1 a2
+      List.iter2 (unify env ~span ~reason ?provided) a1 a2
     else
-      (report_mismatch env ~span ~reason t1 t2)
+      (report_mismatch env ~span ~reason ?provided t1 t2)
 
   | TArrow (a1, b1), TArrow (a2, b2) ->
-    unify env ~span ~reason a1 a2;
-    unify env ~span ~reason b1 b2
+    unify env ~span ~reason ?provided a1 a2;
+    unify env ~span ~reason ?provided b1 b2
 
   | TTuple ts1, TTuple ts2 when List.length ts1 = List.length ts2 ->
-    List.iter2 (unify env ~span ~reason) ts1 ts2
+    List.iter2 (unify env ~span ~reason ?provided) ts1 ts2
 
   | TRecord f1, TRecord f2 ->
     (* Defensive: check the sorted-name invariant when debug mode is on.
@@ -476,10 +503,10 @@ let rec unify env ~span ?(reason = None) t1 t2 =
     assert_trecord_sorted f2 "rhs";
     let ns1 = List.map fst f1 and ns2 = List.map fst f2 in
     if ns1 <> ns2 then
-      report_mismatch env ~span ~reason t1 t2
+      report_mismatch env ~span ~reason ?provided t1 t2
     else
       List.iter2
-        (fun (_, t1) (_, t2) -> unify env ~span ~reason t1 t2)
+        (fun (_, t1) (_, t2) -> unify env ~span ~reason ?provided t1 t2)
         f1 f2
 
   (* Reconcile a nominal record [TCon] with its structural [TRecord] form.
@@ -497,33 +524,33 @@ let rec unify env ~span ?(reason = None) t1 t2 =
      does not name an unambiguous record. *)
   | (TCon _ as tc), (TRecord _ as tr) | (TRecord _ as tr), (TCon _ as tc) ->
     (match !expand_record_ref env tc with
-     | Some (TRecord _ as expanded) -> unify env ~span ~reason expanded tr
-     | _ -> report_mismatch env ~span ~reason t1 t2)
+     | Some (TRecord _ as expanded) -> unify env ~span ~reason ?provided expanded tr
+     | _ -> report_mismatch env ~span ~reason ?provided t1 t2)
 
   | TLin (l1, inner1), TLin (l2, inner2) when l1 = l2 ->
-    unify env ~span ~reason inner1 inner2
+    unify env ~span ~reason ?provided inner1 inner2
 
   (* Transparent coercion: a linear/affine value is structurally the same
      type as its inner (unrestricted) type.  This allows e.g. a field of
      type [linear Int] to unify with an expected [Int] at a use site while
      still preserving the TLin wrapper for linearity tracking in let-bindings. *)
   | TLin (_, inner), other | other, TLin (_, inner) ->
-    unify env ~span ~reason inner other
+    unify env ~span ~reason ?provided inner other
 
   | TNat n1, TNat n2 when n1 = n2 -> ()
 
   (* Structural unification for nat ops that could not be fully normalized
      (e.g. both sides have the same un-solved variable structure). *)
   | TNatOp (op1, a1, b1), TNatOp (op2, a2, b2) when op1 = op2 ->
-    unify env ~span ~reason a1 a2;
-    unify env ~span ~reason b1 b2
+    unify env ~span ~reason ?provided a1 a2;
+    unify env ~span ~reason ?provided b1 b2
 
   (* Solve: one side is a concrete nat, the other is a partially-known op.
      E.g. TVar a + TNat 2 = TNat 5  →  a = 3. *)
   | TNatOp (op, a, b), TNat n ->
-    solve_nat_eq env ~span ~reason op a b n
+    solve_nat_eq env ~span ~reason ?provided op a b n
   | TNat n, TNatOp (op, a, b) ->
-    solve_nat_eq env ~span ~reason op a b n
+    solve_nat_eq env ~span ~reason ?provided op a b n
 
   (* Session-typed channels unify by checking their current session states match. *)
   | TChan r1, TChan r2 ->
@@ -542,28 +569,28 @@ let rec unify env ~span ?(reason = None) t1 t2 =
            (pp_session_ty !r1) (pp_session_ty !r2))
 
   | _ ->
-    report_mismatch env ~span ~reason t1 t2
+    report_mismatch env ~span ~reason ?provided t1 t2
 
 (** Solve a type-level nat equation: (op a b) = n.
     Handles exactly the cases where one operand is an unbound TVar and
     the other is a concrete TNat, so we can isolate the variable.
     Falls back to [report_mismatch] for anything more complex. *)
-and solve_nat_eq env ~span ~reason op a b n =
+and solve_nat_eq env ~span ~reason ?provided op a b n =
   match op, a, b with
   (* a + k = n  →  a = n - k  (when n >= k) *)
   | Ast.NatAdd, TVar _, TNat k when n >= k ->
-    unify env ~span ~reason a (TNat (n - k))
+    unify env ~span ~reason ?provided a (TNat (n - k))
   (* k + a = n  →  a = n - k  (when n >= k) *)
   | Ast.NatAdd, TNat k, TVar _ when n >= k ->
-    unify env ~span ~reason b (TNat (n - k))
+    unify env ~span ~reason ?provided b (TNat (n - k))
   (* a * k = n  →  a = n / k  (when k divides n) *)
   | Ast.NatMul, TVar _, TNat k when k <> 0 && n mod k = 0 ->
-    unify env ~span ~reason a (TNat (n / k))
+    unify env ~span ~reason ?provided a (TNat (n / k))
   (* k * a = n  →  a = n / k  (when k divides n) *)
   | Ast.NatMul, TNat k, TVar _ when k <> 0 && n mod k = 0 ->
-    unify env ~span ~reason b (TNat (n / k))
+    unify env ~span ~reason ?provided b (TNat (n / k))
   | _ ->
-    report_mismatch env ~span ~reason (TNatOp (op, a, b)) (TNat n)
+    report_mismatch env ~span ~reason ?provided (TNatOp (op, a, b)) (TNat n)
 
 (* =================================================================
    §2  Surface-type → internal-type conversion

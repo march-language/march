@@ -9,6 +9,11 @@ expected `Bool` but got `Int`. [type_mismatch]
     Each condition in `match do` must be Bool.
     March does not coerce Int to Bool.
     Try an explicit comparison, e.g. `x != 0`.
+
+    `n` was bound here as `Int`:
+
+4 |   fn describe(n : Int) : String do
+                  ^
     run `march --explain type_mismatch`
 
 

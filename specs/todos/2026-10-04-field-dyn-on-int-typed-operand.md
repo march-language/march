@@ -57,3 +57,20 @@ fires. Then `--dump-tir` that state and trace the operand's type back through
 `tir-lower` / `tir-mono` / `tir-defun` (`MARCH_DUMP_TXT`). Also diff
 `--dump-tir` between a fresh-`HOME` first compile and a second one, per the
 bench note above.
+
+## Retried 2026-10-07 on `d9fbbf179` (load avg ~50): still not reproduced
+
+- `--compile --opt 2` of `examples/topology_app` (no digest), fresh `HOME`, then
+  two comment-edit recompiles, then a second fresh `HOME`: all clean, all link.
+- `--emit-llvm --opt 2` twice in one fresh `HOME`: byte-identical `.ll`.
+- With the main-less rooting from #799 locally disabled (so DCE fails open and
+  the whole stdlib is emitted, 9,696 definitions, 240 `march_record_field_dyn`
+  calls, like the pre-#799 bench run), warm and cold `HOME`: clean, and the two
+  `.ll` files are byte-identical. The `dyn_record_obj` guard never fired.
+
+So on current main neither the cache-state dependence nor the bad `EField`
+shows up, even with the pre-#799 emission set. One unproven candidate for the
+original: a stale `_build/default/stdlib` copy in the bench worktree (a targeted
+`dune build bin/main.exe` does not restage it), which would type stdlib values
+differently from the source. If the guard fires again, the message names the
+operand and its type; start from that.

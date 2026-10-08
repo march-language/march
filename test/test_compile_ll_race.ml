@@ -80,10 +80,13 @@ let mkdir_in dir name =
   p
 
 (* `sh -c` so each compile gets its own CWD and redirects its own output —
-   never through a pipe (a piped `--compile` can hang). *)
+   never through a pipe (a piped `--compile` can hang).  HOME is the fresh
+   CWD too: the CAS also reads and writes through to ~/.march/cas, so a
+   shared HOME would serve one compile's artifact to the next (or to an
+   earlier test's identical probe) as a hit, with no IR to race. *)
 let compile_cmd ~cwd ~opt ~out ~src ~log =
-  Printf.sprintf "cd %s && exec %s --compile%s -o %s %s > %s 2>&1"
-    (Filename.quote cwd) (Filename.quote compiler_exe) opt
+  Printf.sprintf "cd %s && HOME=%s exec %s --compile%s -o %s %s > %s 2>&1"
+    (Filename.quote cwd) (Filename.quote cwd) (Filename.quote compiler_exe) opt
     (Filename.quote out) (Filename.quote src) (Filename.quote log)
 
 let spawn ?env cmd =

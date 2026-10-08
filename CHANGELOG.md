@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Type errors now point at the provided side too.** A mismatch keeps its
+  "the expected type comes from here" label and adds where the offending
+  value came from: "this is `T`" on the expression when it is not the
+  primary caret (so `expected Int but got String` on a `List(String)`
+  argument still names the whole type), and for a variable or parameter
+  "`x` was bound here as `T`" on its binder. Applies to call arguments,
+  `let` right-hand sides, `let?` results, `if` branches and `match`
+  scrutinees; the LSP shows the labels as related information.
 - **More predicates and combinators keep what they say.** An abstract
   refinement is now also instantiated from a named predicate with a proved
   `{Bool | _ == …}` return (`List.filter(ys, is_pos)`, or `fn y -> is_pos(y)`),
@@ -298,6 +306,18 @@ git log is authoritative for exact commits.
   heap allocation each, and the preemption tick only interrupts scheduler
   threads that are running something. binary_trees went from 120 ms to 74 ms,
   list_ops from 39 ms to 34 ms (Apple M3 Max).
+- **Compiled artifacts are shared across projects on the same machine.** Every
+  build also stores its cache entry in `~/.march/cas`, and a project that has
+  not built a program yet reuses an identical build from another project or
+  clone. To force a rebuild, clear both `.march/cas/artifacts-v2` and
+  `~/.march/cas/artifacts-v2`.
+- **Editing a file the build does not use no longer invalidates the compile
+  cache.** The cache used to key on every `.march` file in the entry's
+  directory and in `MARCH_LIB_PATH`. It now keys on the files the previous
+  build actually loaded, and falls back to the full set whenever an edit could
+  change which files are loaded. That covers a new file in one of those
+  directories, and an unloaded file that gains an `impl`, an `interface` or a
+  name another file mentions.
 - **`RingBuf` is linear: every operation consumes the buffer and hands it
   back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
   `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer
@@ -393,6 +413,17 @@ git log is authoritative for exact commits.
   after both had died. The cluster node monitors every registered name's holder, so this
   cost two actor records per cluster session.
 
+- **A cached build prints the same warnings as the build that produced it.**
+  A `--compile` that succeeded with warnings or hints used to print only
+  `compiled out (cached)` on the next identical build. The warnings are now
+  stored with the cached binary and printed again. Programs that mention
+  `no_alloc` are no longer excluded from the cache to work around this.
+- **Interpreted `to_json` on two same-named types in two modules.** When two
+  modules each declare a `Note` and `derive Json` for it, the interpreter
+  encoded both with whichever codec it registered last (and panicked on the
+  other's constructors). It now picks the codec of the value's own type, as
+  compiled code already did. `from_json` on such a pair still reports
+  ambiguity when compiled.
 - **A missing `end` is reported at the construct that is missing it.** Instead of
   "Parse error in declaration" at the end of the file or the next `fn`, the error
   points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the
