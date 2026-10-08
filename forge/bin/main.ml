@@ -18,7 +18,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
-    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host"; "observe"; "diagnose"; "top"; "status" ]
+    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host"; "observe"; "diagnose"; "top"; "status"; "query" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -1031,6 +1031,55 @@ let phases_cmd =
            ~doc:"Serve the phase viewer for --dump-phases output at http://localhost:PORT")
     Term.(const run $ port)
 
+(* ------------------------------------------------------------------ forge query *)
+
+let query_cmd =
+  let args =
+    Arg.(value & pos_all string [] &
+         info [] ~docv:"QUERY"
+           ~doc:"The query and its arguments, then an optional $(b,.march) file \
+                 (default: the project's entry file): $(b,fn NAME), $(b,origin NAME), \
+                 $(b,callers NAME), $(b,callees NAME), $(b,repr TYPE), $(b,verify), \
+                 $(b,key), $(b,why-miss). Compiler flags go after $(b,--).")
+  in
+  let release =
+    Arg.(value & flag & info ["release"]
+           ~doc:"Ask about the release build ($(b,--opt 2)), as $(b,forge build --release)")
+  in
+  let target =
+    Arg.(value & opt (some string) None &
+         info ["target"] ~docv:"TARGET"
+           ~doc:"Ask about the build for this target, as $(b,forge build --target)")
+  in
+  let at =
+    Arg.(value & opt (some string) None &
+         info ["at"] ~docv:"PASS"
+           ~doc:"With $(b,fn): show the function as it was after this pass")
+  in
+  let json =
+    Arg.(value & flag & info ["json"] ~doc:"Print one JSON object instead of text")
+  in
+  let run args r tgt at j =
+    handle (Cmd_query.run ~release:r ?target:tgt ?at ~json:j args)
+  in
+  Cmd.v (Cmd.info "query"
+           ~doc:"Ask the compiler one question about the project's build (march query)"
+           ~man:[
+             `S Manpage.s_description;
+             `P "Runs $(b,march query) with the project's entry file, library path and \
+                 build flags, so the answer describes the build $(b,forge build) would run. \
+                 Nothing is built, written or downloaded.";
+             `S Manpage.s_examples;
+             `Pre "  forge query fn Server.handle               # a function, at the last pass that changed it\n\
+                  \  forge query fn Server.handle --at tir-perceus\n\
+                  \  forge query origin Server.handle\\$apply\\$3   # where a lambda's apply fn came from\n\
+                  \  forge query callers Server.handle\n\
+                  \  forge query verify --json                  # the TIR verifier over every stage\n\
+                  \  forge query why-miss --release             # why the release build is not cached\n\
+                  \  forge query fn main src/app.march -- --no-opt";
+           ])
+    Term.(const run $ args $ release $ target $ at $ json)
+
 (* --------------------------------------------------------------- forge cap *)
 
 let cap_query_cmd =
@@ -2024,7 +2073,7 @@ let () =
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd; retire_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
-      licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
+      licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; query_cmd;
       cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; shell_cmd; rpc_cmd; observe_cmd; diagnose_cmd; top_cmd; status_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
   in
   let main =
