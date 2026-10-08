@@ -17397,6 +17397,7 @@ let compiler_suites =
       ("prog_argv", Test_prog_argv.tests);
       ("compile_ll_race", Test_compile_ll_race.tests);
       ("post_tir_cache", Test_post_tir_cache.tests);
+      ("cas_b7", Test_cas_b7.tests);
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
