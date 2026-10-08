@@ -205,8 +205,19 @@ The author's own suspicions, unverified by a second reader.
 - **F9. Session bindings and borrowed callees.** A `let`-bound value loaded
   from its slot is incremented on load, and is not released after a call to
   a callee that only borrows it. That would be one leaked reference per such
-  call, a leak rather than a safety issue. Unverified; possibly related to
-  `specs/todos/2026-10-06-shell-fragment-leaks.md`.
+  call, a leak rather than a safety issue.
+  - **Status: confirmed, and fixed 2026-10-08**
+    ([progress](../progress/2026-10-08-shell-slot-and-drop-leaks.md)).
+  - **Broader than stated.** The slot bridge incremented every heap binding
+    at the start of every input, used or not, and Perceus (which treats
+    bindings as borrowed) never released them. So every input added one
+    count to each binding, whatever it called. Calls to borrowing callees
+    were themselves balanced.
+  - **Effect.** A session's bindings outlived the session.
+  - **Fix.** Fragments now borrow their session's bindings. The node keeps
+    them when an input of the session could not be stopped.
+  - **The same fix found** that ending a session freed each binding's top
+    cell only, and crashed the node on a Float binding.
 
 ## 6. Suggested exercises
 
