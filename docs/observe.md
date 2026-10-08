@@ -1006,7 +1006,12 @@ What happens when:
 - **A deploy happens.** The session ends with "the node was redeployed".
   Bindings belong to the session, so they go with it.
 - **Anything is sent.** Every input, accepted or not, is appended to the
-  node's audit log with `"type":"shell"`, the signer and the source.
+  node's audit log with `"type":"shell"`, the signer and the source. If the
+  log cannot be written, the input does not run
+  (`** refused: audit_unavailable`).
+- **A request is captured.** Each one is signed for its session (a random
+  challenge the node hands out when you attach), so it runs on no other
+  connection, no other node and not after the node restarts.
 
 Under the hood `forge shell` runs `march --shell <reload socket>.shell
 <entry>` with the project's `MARCH_LIB_PATH`, through an ssh tunnel for a
