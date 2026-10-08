@@ -2818,7 +2818,7 @@ let compile filename =
    | Some socket ->
      if frontend_rejected then exit 1;
      Shell_cmd.run ~socket ~program:desugared ~type_map ~tc_env:typecheck_env
-       ~timeout_ms:!shell_timeout_ms ~inputs:!shell_inputs
+       ~timeout_ms:!shell_timeout_ms ~force:!shell_force ~inputs:!shell_inputs
    | None -> ());
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
   (* --jit: replace the tree-walking interpreter with the in-process ORC JIT
@@ -5620,6 +5620,8 @@ let () =
      "<ms> With --shell: how long each input may run on the node (default 10000, max 30000)");
     ("--shell-inputs", Arg.String (fun f -> shell_inputs := Some (In_channel.with_open_bin f In_channel.input_all)),
      "<file> With --shell: read the inputs from <file>, one per line, instead of the terminal");
+    ("--shell-force", Arg.Set shell_force,
+     " With --shell: run an input that reaches declarations differing from the node's build, if it is read-only (no capability beyond IO.Console/Clock/Random/FileRead, no send/spawn/kill/call/register/setter, no Actor.Debug, no closure from an earlier let); never when a type it reaches differs. The session is marked [skew] and the node audits the input with skew:1");
     ("--dump-impl-hashes", Arg.Set dump_impl_hashes,
      " With --emit-llvm/--compile: write <file>.hashes (symbol, impl_hash, sig_hash per post-TIR def, sorted)");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");

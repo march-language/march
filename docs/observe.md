@@ -996,6 +996,49 @@ Inputs that reach only unchanged code still run. A type whose constructors
 are numbered differently on the node (reordered, added) is always refused,
 since values built here would be read back wrongly there.
 
+**`--force` runs a read-only input over differing code.** With
+`forge shell --force` (or `forge rpc --force`, `march --shell-force`), an
+input that reaches differing declarations runs if it is read-only. It runs
+*your checkout's* version of those declarations against the node's state,
+so its answer is what your code computes, not necessarily what the node's
+would:
+
+```
+$ forge shell --env prod --force
+march> evens(4)
+warning: --shell-force: this read-only input runs this checkout's code, which differs from the node's build:
+  evens differs
+[0, 2, 4]
+march [skew]> send(c, Bump(List.length(evens(4))))
+error: this input reaches code that differs from the node's build:
+  evens differs
+  --shell-force runs such an input only when it is read-only, and this one is not:
+    calls march_send
+```
+
+Read-only is decided on the compiled input, which carries a copy of all
+the code it runs (it calls none of the node's functions when forced):
+
+- every capability its code uses is one of `IO.Console`, `IO.Clock`,
+  `IO.Random`, `IO.FileRead` (no file writes, network, processes, tasks,
+  Vault writes, signals or foreign code);
+- it calls none of the runtime's operations that change something without
+  a capability: `send`, `spawn`, `kill`, `Actor.call`, replies, `register`,
+  `monitor`, setters such as `Actor.set_queue_limit`, the logger, and the
+  like;
+- it does not use `Actor.Debug` (`debug`, `Actor.inspect_state`);
+- it does not use an earlier `let` that may hold a closure, since that
+  closure's code was compiled with an earlier input and is not checked.
+
+The node's policy still applies on top. Only differing *code* is forced:
+an input that reaches a type, actor or protocol whose definition differs
+is refused even with `--force`, since a value of the node's could be read
+with the wrong layout. Once a forced input has run, the prompt
+reads `march [skew]>`, and the node's audit line for each forced input
+carries `"skew":1`. The operations are recognised by the names of the
+runtime functions the input calls, so treat `--force` as an operator's tool
+for looking, not as a sandbox.
+
 What happens when:
 
 - **An input panics.** You see `** panic: <message>`; the node and the

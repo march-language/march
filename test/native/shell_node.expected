@@ -14,6 +14,8 @@ ok: with the output it printed first
 ok: a fragment that never returns is cancelled: TIMEOUT
 ok: within the timeout plus a second
 ok: the node keeps serving after a panic and a timeout
+ok: a signed skew:1 runs like any other EVAL
+ok: a skew value other than 0 or 1: bad_args
 ok: an entry the fragment does not define: no_entry
 ok: an EVAL for another epoch: epoch_changed
 ok: an unknown field: bad_args
@@ -21,3 +23,4 @@ ok: a fifth concurrent session: busy
 ok: each session owns its own slot range
 ok: every EVAL is audited, in order
 ok: the audit line carries the source
+ok: the skew:1 EVAL, and only it, is audited with "skew":1

@@ -175,6 +175,12 @@ type session = {
   (* The node's build identity and ours (lib/jit/shell_ident.ml); [None]
      against a node built before it, which is not checked. *)
   ident : March_jit.Shell_ident.check option;
+  (* --shell-force: run a read-only input that reaches declarations
+     differing from the node's build (Shell_ident.not_read_only). *)
+  force : bool;
+  (* A forced input has run: the session's answers (and any `let` made
+     since) may come from code the node does not run.  Shown as `[skew]`. *)
+  mutable skewed : bool;
 }
 
 exception Session_over of string
@@ -202,16 +208,26 @@ let timed (acc : float ref) (f : unit -> 'a) : 'a =
   end
 
 (* The signed `caps:` is what the fragment's code uses ([sf_caps]), which the
-   node checks against the fragment's own manifest and then its policy. *)
+   node checks against the fragment's own manifest and then its policy.
+   A forced skewed input ([sf_skew], --shell-force) is announced on stderr
+   and signed with `skew:1`, which the node records in its audit line. *)
 let eval_on_node s ~(kind : string) ~(src : string)
     (frag : March_jit.Repl_jit.shell_fragment) : string =
+  let skew = frag.March_jit.Repl_jit.sf_skew in
+  if skew <> [] then begin
+    s.skewed <- true;
+    Printf.eprintf "warning: --shell-force: this read-only input runs this checkout's code, \
+                    which differs from the node's build:\n  %s\n%!"
+      (String.concat "\n  " skew)
+  end;
   timed t_node @@ fun () ->
   let so = read_file frag.March_jit.Repl_jit.sf_so in
   let now = int_of_float (Unix.gettimeofday () *. 1000.) in
   let body =
-    Printf.sprintf "name:%s kind:%s epoch:%d nonce:%s not_after_ms:%d timeout_ms:%d caps:%s src_b64:%s so_b64:%s"
+    Printf.sprintf "name:%s kind:%s epoch:%d nonce:%s not_after_ms:%d timeout_ms:%d caps:%s%s src_b64:%s so_b64:%s"
       frag.sf_entry kind s.epoch (fresh_nonce ()) (now + 30_000) s.timeout_ms
       (match frag.sf_caps with [] -> "-" | l -> String.concat "," l)
+      (if skew <> [] then " skew:1" else "")
       (b64_encode src) (b64_encode so) in
   let signature =
     March_ed25519.Ed25519.(sig_to_base64 (sign_str ("EVAL " ^ body) s.sk)) in
@@ -255,7 +271,7 @@ let compile s ?store_as text =
   | Ok m ->
     (try
        Some (m, timed t_compile @@ fun () ->
-               March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident s.jit ~tc_env:s.tc_env
+               March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident ~force:s.force s.jit ~tc_env:s.tc_env
                ~program_name:s.program_name ~program_decls:s.program_decls ~program_type_map:s.program_type_map
                ?store_as m)
      with e -> report_error e; None)
@@ -304,7 +320,7 @@ let eval_expr s src ~limit =
                 (match parse_module text with
                  | Ok m ->
                    (try Some (m, timed t_compile @@ fun () ->
-                                  March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident s.jit ~tc_env:s.tc_env
+                                  March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident ~force:s.force s.jit ~tc_env:s.tc_env
                                   ~program_name:s.program_name ~program_decls:s.program_decls
                                   ~program_type_map:s.program_type_map m)
                     with _ -> None)
@@ -436,7 +452,8 @@ let handle s line =
       eval_expr s expr ~limit:(Option.value lim ~default:s.limit)
 
 (* Entry point from the driver.  [socket] is the node's `<reload>.shell`. *)
-let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs : string option) =
+let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(force : bool)
+    ~(inputs : string option) =
   let sk = match March_forge.Cmd_hot_reload.read_sk_raw () with
     | Ok sk -> sk
     | Error m -> Printf.eprintf "march shell: %s\n" m; exit 1 in
@@ -464,11 +481,12 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
          let n = List.length diffs in
          Printf.eprintf
            "march shell: %d declaration%s here differ%s from the node's build (%s%s); \
-            inputs that reach %s are refused\n%!"
+            inputs that reach %s are refused%s\n%!"
            n (if n = 1 then "" else "s") (if n = 1 then "s" else "")
            (String.concat ", " (List.map March_jit.Shell_ident.describe_key
                                   (List.filteri (fun i _ -> i < 5) diffs)))
-           (if n > 5 then ", ..." else "") (if n = 1 then "it" else "them"));
+           (if n > 5 then ", ..." else "") (if n = 1 then "it" else "them")
+           (if force then " unless read-only (--shell-force)" else ""));
       Some c
     | _ ->
       Printf.eprintf "march shell: the node does not report its build identity (%s); \
@@ -479,7 +497,7 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
   let s = { conn; epoch; sk; jit; tc_env; program_name = program.Ast.mod_name.Ast.txt;
             program_decls = program.Ast.mod_decls;
             program_type_map = type_map; limit = default_limit; timeout_ms; n = 0; bound = [];
-            failed = false; triple = field hello "triple"; ident } in
+            failed = false; triple = field hello "triple"; ident; force; skewed = false } in
   (* Lower the program now, before the first prompt, rather than on the
      first input. *)
   March_jit.Repl_jit.shell_lower_program jit ~program_name:s.program_name
@@ -492,7 +510,7 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
     match inputs with
     | Some _ -> (match !lines with l :: rest -> lines := rest; Some l | [] -> None)
     | None ->
-      if interactive then (print_string "march> "; flush stdout);
+      if interactive then (print_string (if s.skewed then "march [skew]> " else "march> "); flush stdout);
       In_channel.input_line stdin in
   if interactive then
     Printf.printf "attached at epoch %d (:help for commands, :quit to leave)\n%!" epoch;

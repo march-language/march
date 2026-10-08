@@ -1428,27 +1428,36 @@ let shell_target_args =
     Arg.(value & opt int 10_000 & info ["timeout-ms"] ~docv:"MS"
            ~doc:"How long each input may run on the node (default 10000, max 30000).")
   in
-  (socket, env_name, timeout_ms)
+  let force =
+    Arg.(value & flag & info ["force"]
+           ~doc:"Run an input that reaches declarations differing from the node's build, \
+                 when it is read-only (no capability beyond IO.Console, IO.Clock, IO.Random \
+                 and IO.FileRead; no send, spawn, kill, call or register; no Actor.Debug). \
+                 Never when a type it reaches differs. The input runs this checkout's \
+                 code, prints a warning naming the differences, marks the session [skew], \
+                 and is audited on the node with skew:1.")
+  in
+  (socket, env_name, timeout_ms, force)
 
 let shell_cmd =
-  let socket, env_name, timeout_ms = shell_target_args in
-  let run socket env timeout_ms = exit (Cmd_shell.shell ~socket ~env ~timeout_ms ()) in
+  let socket, env_name, timeout_ms, force = shell_target_args in
+  let run socket env timeout_ms force = exit (Cmd_shell.shell ~socket ~env ~timeout_ms ~force ()) in
   Cmd.v (Cmd.info "shell"
            ~doc:"A remote shell on a running node: each input is compiled against this project, \
                  signed with the deploy key, and run on the node (a --hot-reload --signing-pubkey \
                  build whose MARCH_SHELL_POLICY lists the capabilities inputs may use). A deploy \
                  ends the session.")
-    Term.(const run $ socket $ env_name $ timeout_ms)
+    Term.(const run $ socket $ env_name $ timeout_ms $ force)
 
 let rpc_cmd =
-  let socket, env_name, timeout_ms = shell_target_args in
+  let socket, env_name, timeout_ms, force = shell_target_args in
   let expr = Arg.(required & pos 0 (some string) None & info [] ~docv:"EXPR"
                     ~doc:"One input, as typed at $(b,forge shell).") in
-  let run socket env timeout_ms expr = exit (Cmd_shell.rpc ~socket ~env ~timeout_ms expr) in
+  let run socket env timeout_ms force expr = exit (Cmd_shell.rpc ~socket ~env ~timeout_ms ~force expr) in
   Cmd.v (Cmd.info "rpc"
            ~doc:"Run one input on a running node and print its result (see $(b,forge shell)); \
                  exit 1 if it did not run.")
-    Term.(const run $ socket $ env_name $ timeout_ms $ expr)
+    Term.(const run $ socket $ env_name $ timeout_ms $ force $ expr)
 
 let observe_cmd =
   let words =

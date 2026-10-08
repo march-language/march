@@ -506,7 +506,9 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
    - So identity is per-declaration source hashes plus constructor tags,
      embedded in the node (`__march_shell_ident`, `IDENT`) and checked per
      input against what its code reaches.
-   - No `--force` yet.
+   - `--force` **done 2026-10-07**
+     ([progress](../progress/2026-10-07-shell-force.md)): read-only inputs
+     only, a constructor-tag difference still a hard stop, audited `skew:1`.
 
    The original design: forge fetches `ABI_QUERY` and `HCR_INFO`,
    compiles the fragment with the pinned table, and compares, for every

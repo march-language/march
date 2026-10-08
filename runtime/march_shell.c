@@ -15,7 +15,7 @@
  *        The triple is what the client must compile fragments for: the
  *        operator's machine is often not the node's platform.
  *   EVAL <sig> name:<sym> [kind:value|init] epoch:<E> nonce:<hex> not_after_ms:<t>
- *        timeout_ms:<t> caps:<csv|-> src_b64:<b64> so_b64:<b64>
+ *        timeout_ms:<t> caps:<csv|-> [skew:1] src_b64:<b64> so_b64:<b64>
  *     -> OK <b64 result> out:<b64> | PANIC <b64 msg> out:<b64>
  *        | TIMEOUT out:<b64> | TIMEOUT uncancellable | ERR <code> [detail]
  *   IDENT
@@ -35,6 +35,16 @@
  * code it emitted) lists exactly the signed caps (ERR cap_tamper, or
  * ERR no_cap_manifest when it has none).  Every attempt is audited with
  * "type":"shell" and the decoded source.
+ *
+ * `skew:1` (optional; `skew:0` is the same as leaving it out, any other
+ * value is bad_args) says the client ran with --shell-force and this input
+ * reaches declarations that differ from this build: its code is the
+ * operator's checkout's, and the client let it through only as read-only
+ * (lib/jit/shell_ident.ml, not_read_only).  It is signed like every field,
+ * and the node does nothing with it but record it: the audit line gets
+ * "skew":1.  The node cannot tell skew itself (it never sees the client's
+ * source), so a client that omits it is not caught here; the field exists
+ * so an operator's forced inputs stand out in the audit trail.
  *
  * The fragment's entry `name` is a zero-argument function returning the
  * rendered result String (the client generates it; capabilities are erased
@@ -415,7 +425,7 @@ static void json_str(FILE *f, const char *s, size_t n) {
 }
 
 static void audit(const char *name, const char *caps, const char *nonce,
-                  const char *src, size_t src_n, const char *result) {
+                  const char *src, size_t src_n, int skew, const char *result) {
     FILE *f = march_audit_open();
     if (!f) return;
     char signer[65];
@@ -428,6 +438,7 @@ static void audit(const char *name, const char *caps, const char *nonce,
     json_str(f, nonce ? nonce : "", nonce ? strlen(nonce) : 0);
     fprintf(f, ",\"signer\":\"%s\",\"src\":", signer);
     json_str(f, src ? src : "", src ? src_n : 0);
+    if (skew) fputs(",\"skew\":1", f);
     fprintf(f, ",\"result\":\"%s\"}\n", result);
     march_audit_close(f);
 }
@@ -437,6 +448,7 @@ static void audit(const char *name, const char *caps, const char *nonce,
 typedef struct {
     const char *name, *kind, *nonce, *caps, *src_b64, *so_b64;
     int64_t epoch, not_after_ms, timeout_ms;
+    int skew;                       /* skew:1, a --shell-force input */
 } eval_req;
 
 /* Field value after "key:" within [rest]'s space-separated words; the
@@ -460,6 +472,10 @@ static int parse_eval(char *rest, eval_req *q) {
         else if (strcmp(k, "epoch") == 0)        q->epoch = strtoll(v, NULL, 10);
         else if (strcmp(k, "not_after_ms") == 0) q->not_after_ms = strtoll(v, NULL, 10);
         else if (strcmp(k, "timeout_ms") == 0)   q->timeout_ms = strtoll(v, NULL, 10);
+        else if (strcmp(k, "skew") == 0) {
+            if (strcmp(v, "1") == 0) q->skew = 1;
+            else if (strcmp(v, "0") != 0) return 0;
+        }
         else return 0;
         w = sp ? sp + 1 : NULL;
     }
@@ -511,11 +527,11 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
     while (*sig == ' ') sig++;
     char *rest = strchr(sig, ' ');
     if (!march_sig_key_loaded()) {
-        audit("", "", "", "", 0, "signing_not_configured");
+        audit("", "", "", "", 0, 0, "signing_not_configured");
         send_line(fd, "ERR signing_not_configured");
         return;
     }
-    if (!rest) { audit("", "", "", "", 0, "bad_args"); send_line(fd, "ERR bad_args"); return; }
+    if (!rest) { audit("", "", "", "", 0, 0, "bad_args"); send_line(fd, "ERR bad_args"); return; }
     *rest++ = '\0';
     /* The signed text, before parse_eval cuts [rest] into words. */
     size_t mlen = strlen(rest) + 6;
@@ -525,7 +541,7 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
     eval_req q;
     if (!parse_eval(rest, &q)) {
         free(msg);
-        audit("", "", "", "", 0, "bad_args");
+        audit("", "", "", "", 0, 0, "bad_args");
         send_line(fd, "ERR bad_args");
         return;
     }
@@ -550,7 +566,7 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
     if (!why && q.timeout_ms > SHELL_TIMEOUT_MAX_MS) why = "bad_args";
     if (!why && q.kind && strcmp(q.kind, "value") != 0 && strcmp(q.kind, "init") != 0) why = "bad_args";
     if (why) {
-        audit(q.name, q.caps, q.nonce, srcs, src_n, why);
+        audit(q.name, q.caps, q.nonce, srcs, src_n, q.skew, why);
         char buf[320];
         snprintf(buf, sizeof buf, "ERR %s%s", why, detail);
         send_line(fd, buf);
@@ -562,7 +578,7 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
     char path[700];
     if (!so || so_n == 0 || so_n > SHELL_SO_MAX || !write_fragment(so, so_n, path, sizeof path)) {
         free(so);
-        audit(q.name, q.caps, q.nonce, srcs, src_n, "err_write");
+        audit(q.name, q.caps, q.nonce, srcs, src_n, q.skew, "err_write");
         send_line(fd, "ERR fragment_write");
         free(src);
         return;
@@ -575,14 +591,14 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
         char buf[2048];
         snprintf(buf, sizeof buf, "ERR dlopen %s", eb ? eb : "");
         free(eb);
-        audit(q.name, q.caps, q.nonce, srcs, src_n, "err_dlopen");
+        audit(q.name, q.caps, q.nonce, srcs, src_n, q.skew, "err_dlopen");
         send_line(fd, buf);
         free(src);
         return;
     }
     void *(*entry)(void) = (void *(*)(void))dlsym(h, q.name);
     if (!entry) {
-        audit(q.name, q.caps, q.nonce, srcs, src_n, "err_no_entry");
+        audit(q.name, q.caps, q.nonce, srcs, src_n, q.skew, "err_no_entry");
         send_line(fd, "ERR no_entry");
         free(src);
         return;
@@ -593,14 +609,14 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
     const char *manifest = (const char *)dlsym(h, "__march_cap_manifest");
     if (!manifest || !caps_match_manifest(q.caps, manifest)) {
         const char *code = manifest ? "cap_tamper" : "no_cap_manifest";
-        audit(q.name, q.caps, q.nonce, srcs, src_n, code);
+        audit(q.name, q.caps, q.nonce, srcs, src_n, q.skew, code);
         char buf[64];
         snprintf(buf, sizeof buf, "ERR %s", code);
         send_line(fd, buf);
         free(src);
         return;
     }
-    audit(q.name, q.caps, q.nonce, srcs, src_n, "ok");
+    audit(q.name, q.caps, q.nonce, srcs, src_n, q.skew, "ok");
     free(src);
 
     shell_run *r = (shell_run *)calloc(1, sizeof *r);

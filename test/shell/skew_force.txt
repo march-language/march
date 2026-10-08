@@ -1,0 +1,12 @@
+evens(4)
+let c = Actor.pid_from_int(intro, 0)
+let f = fn x -> x + 1
+send(c, Bump(List.length(evens(4))))
+Actor.set_queue_limit(c, List.length(evens(4)), 1)
+Actor.inspect_state(debug, c, List.length(evens(4)) * 100)
+file_write("never_written", to_string(evens(2)))
+f(List.length(evens(2)))
+List.length([Dark, Light]) + List.length(evens(2))
+nap() + List.length(evens(2))
+Actor.inspect_state(debug, c, 500)
+2 + 2
