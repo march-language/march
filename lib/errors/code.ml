@@ -104,6 +104,7 @@ let parse_error = "parse_error"
 let pid_serialize = "pid_serialize"
 let pipe_into_match = "pipe_into_match"
 let pipe_match_pattern = "pipe_match_pattern"
+let portable_capture = "portable_capture"
 let prelude_collision = "prelude_collision"
 let proof_cap_foreign = "proof_cap_foreign"
 let proof_cap_mint_private = "proof_cap_mint_private"
@@ -273,6 +274,7 @@ let all = [
   pid_serialize;
   pipe_into_match;
   pipe_match_pattern;
+  portable_capture;
   prelude_collision;
   proof_cap_foreign;
   proof_cap_mint_private;

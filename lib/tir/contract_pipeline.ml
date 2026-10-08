@@ -178,6 +178,14 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
       ~unboxing:(not is_js && not (Lazy.force unboxing_env_disabled))
       ~collision_set tir.Tir.tm_types
   in
+  (* Portable closures (specs/2026-10-07-portable-closures-design.md): a
+     closure handed to a many-call parallel combinator must not capture a
+     native resource handle.  Here, right after Defun and the table build,
+     every closure is still an explicit [alloc $Clo_...] at its call site,
+     before Hof_spec clones higher-order functions per lambda.  The JS backend
+     has no threads. *)
+  let portable_diags =
+    if is_js then [] else Portable.check ~k_table:k0 ~decls tir in
   (* Known-call pass: run before Perceus so apply functions are still pure
      and eligible for inlining in the subsequent Opt fixed-point loop.  See
      the [is_apply_fn] guard in [Perceus]'s EApp post_dec_vars for why the
@@ -297,7 +305,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let allocating = Alloc_contract.allocating_fns ~k_table ~decls tir in
   let retaining = Alloc_contract.retaining_fns ~k_table ~decls tir in
   let contract_diags =
-    Alloc_contract.check ~decls ~allocating ~retaining ~opt tir in
+    portable_diags @ Alloc_contract.check ~decls ~allocating ~retaining ~opt tir in
   stamp_tir "alloc-contract" tir;
   { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table }
 
@@ -316,7 +324,8 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     run, which is not evidence the contract is broken. *)
 let check_contracts ?type_map ~opt ~(user_decls : Alloc_contract.decl_info list)
     (m : March_ast.Ast.module_) : March_errors.Errors.diagnostic list =
-  if not (List.exists Alloc_contract.is_obligation user_decls) then []
+  if not (List.exists Alloc_contract.is_obligation user_decls
+          || Portable.declares_resource m) then []
   else
     match
       (try

@@ -22,6 +22,7 @@ type kind = {
   needs_tag    : bool;
   closure_free : bool;
   float_free   : bool;
+  resource_free : bool;
 }
 
 type table = {
@@ -779,7 +780,11 @@ let rec reachable_has (t : table) (visited : (string, unit) Hashtbl.t)
   match ty with
   | Tir.TTuple ts -> List.exists (reachable_has t visited pred) ts
   | Tir.TRecord fs -> List.exists (fun (_, f) -> reachable_has t visited pred f) fs
-  | Tir.TFn (args, ret) -> List.exists (reachable_has t visited pred) (ret :: args)
+  (* A function VALUE holds none of its argument or result types: a captured
+     [acc_push : (Acc, Int) -> Int] carries no [Acc].  What a closure does
+     capture is in its [TDClosure] struct (arm below), not in its arrow type.
+     [pred] still sees the [TFn] itself, which is all [closure_free] needs. *)
+  | Tir.TFn _ -> false
   | Tir.TPtr inner -> reachable_has t visited pred inner
   | Tir.TCon (name0, params) ->
     (* Shape, not layout: resolve to the declaration (see [declaration_of]),
@@ -814,6 +819,25 @@ let float_free_of (t : table) (ty : Tir.ty) : bool =
   not (reachable_has t (Hashtbl.create 8)
          (function Tir.TFloat -> true | _ -> false) ty)
 
+(** True iff [name] is a native [resource] handle type.  `resource X`
+    desugars to a variant with NO constructors, which no other declaration
+    can produce (the grammar requires at least one), so the shape is a
+    reliable signal; the interpreter uses the same one (eval.ml).  Resolved
+    to the declaration, because this is a question about what a value IS,
+    not about the layout it is built in. *)
+let is_resource_name (t : table) (name : string) : bool =
+  let d = declaration_of t name in
+  List.exists (function
+      | Tir.TDVariant (n, []) -> String.equal n d
+      | _ -> false) t.k_type_defs
+
+(** DEEP: no native [resource] handle reachable through fields, type
+    arguments or closure captures.  Read by [Portable], which rejects a
+    resource captured by a closure that runs on several tasks at once. *)
+let resource_free_of (t : table) (ty : Tir.ty) : bool =
+  not (reachable_has t (Hashtbl.create 8)
+         (function Tir.TCon (n, _) -> is_resource_name t n | _ -> false) ty)
+
 (* ── The record ──────────────────────────────────────────────────────── *)
 
 let of_ty (t : table) (ty : Tir.ty) : kind =
@@ -830,6 +854,7 @@ let of_ty (t : table) (ty : Tir.ty) : kind =
       needs_tag    = payload_needs_tag t ty;
       closure_free = closure_free_of t ty;
       float_free   = float_free_of t ty;
+      resource_free = resource_free_of t ty;
     } in
     Hashtbl.replace t.k_memo ty k;
     k
