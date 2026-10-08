@@ -965,6 +965,16 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
       (List.mapi (fun i _ -> Borrow.is_borrowed borrow_map fn.Tir.fn_name i)
          fn.Tir.fn_params)
   ) m.Tir.tm_fns;
+  (* A user extern passed as a value gets a [$clo_wrap] too, forwarding to
+     its C symbol: publish its seeded modes (heap params borrowed unless
+     `consume`), so the trampoline releases what the C callee only borrows. *)
+  List.iter (fun (ed : Tir.extern_decl) ->
+    let name = ed.Tir.ed_march_name in
+    if Clo_flags.borrowed_params name = None then
+      Clo_flags.register name
+        (List.mapi (fun i _ -> Borrow.is_borrowed borrow_map name i)
+           ed.Tir.ed_params)
+  ) m.Tir.tm_externs;
   let extern_names =
     List.fold_left (fun s (ed : Tir.extern_decl) ->
       StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs

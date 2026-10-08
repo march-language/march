@@ -381,6 +381,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A compiled program can call an `extern` from inside a lambda, or pass one
+  as a function value.** `List.map(xs, fn x -> acc_push(a, x))` failed to
+  build with `use of undefined value '@acc_push'`, because the generated code
+  called the extern by its March name instead of its C symbol. Passing the
+  extern itself (`List.map(xs, dbl)`) failed the same way. When the extern
+  only borrows a heap argument (a resource handle or a `String`), that
+  argument is now also released after each call. The interpreter already ran
+  these programs correctly.
 - **Nested constructor patterns pick the right arm in compiled code when a
   constructor name is also used by a stdlib type.** With a user
   `type Tree = Leaf | Node(Tree, Int, Tree)` (stdlib `OrderedMap` also declares

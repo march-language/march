@@ -352,6 +352,16 @@ let static_closure_ok ctx (march_name : string) : bool =
       | Some cfg ->
         not (Hot_reload.needs_dispatch_to cfg march_name))
 
+(* The LLVM symbol a top-level function value names: a user extern's C symbol
+   ([ed_c_name], via [extern_map]) — the extern's March name is defined
+   nowhere — else the mangled March name.  Externs are registered in
+   [top_fns], so the [top_fns] arms of [emit_atom_raw] below reach this for an
+   extern passed as a value (`List.map(xs, dbl)`). *)
+let top_fn_symbol ctx (name : string) : string =
+  match Hashtbl.find_opt ctx.extern_map name with
+  | Some c_name -> c_name
+  | None -> mangle_extern name
+
 (** Emit code for [atom], returning (llvm_type, llvm_value). *)
 let emit_atom_raw ctx (atom : Tir.atom) : string * string =
   match atom with
@@ -413,7 +423,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
        and make the raw fn accept an extra leading ptr arg that it ignores.
        Actually, all top-level fn_defs DON'T take a clo arg. So we need
        a wrapper. Let's create one inline. *)
-    let fn_name = llvm_name (mangle_extern v.Tir.v_name) in
+    let fn_name = llvm_name (top_fn_symbol ctx v.Tir.v_name) in
     (* Determine the wrapper name *)
     let wrap_name = fn_name ^ "$clo_wrap" in
     (* Register wrapper if not already generated *)
@@ -499,7 +509,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
        to materialise the value rather than returning a function pointer.
        A local binding of the same name (in var_slot) shadows the top-level
        function — fall through to the local-load path in that case. *)
-    ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
+    ("ptr", "@" ^ llvm_name (top_fn_symbol ctx v.Tir.v_name))
   | Tir.AVar v when Hashtbl.mem ctx.repl_slot_fns v.Tir.v_name
                  && not (Hashtbl.mem ctx.top_fns v.Tir.v_name)
                  && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->

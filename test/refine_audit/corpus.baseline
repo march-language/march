@@ -166,6 +166,8 @@ native_ffi_codec2: coverage audit (user + stdlib): 135 enforced, 0 inert (warned
 native_ffi_codec2: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_codec: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_ffi_codec: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_extern_in_lambda: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_ffi_extern_in_lambda: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_float: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_ffi_float: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_interp2: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
