@@ -142,6 +142,14 @@ module StringMap :
     val of_seq : (key * 'a) Seq.t -> 'a t
   end
 val _rc_fresh_ctr : int ref
+type owned_calls = {
+  oc_fns : (string, Tir.fn_def) Hashtbl.t;
+  oc_clones : (string, string * int list) Hashtbl.t;
+  oc_pending : (string * string * int list) Queue.t;
+  oc_alloc_bound : StringSet.t ref;
+  oc_useful : (string * int, unit) Hashtbl.t;
+}
+val owned_clone_name : string -> int list -> string
 type env = {
   borrow_map : Borrow.borrow_map;
   type_defs : Tir.type_def list;
@@ -156,6 +164,7 @@ type env = {
   field_owner : string StringMap.t;
   cons_live : StringSet.t;
   var_ctx : Tir.var StringMap.t;
+  owned_calls : owned_calls option;
 }
 val empty_env : env
 val scrutinee_shares_payload_storage : env -> Tir.ty -> bool
@@ -201,3 +210,12 @@ val perceus :
   ?borrow_map:Borrow.borrow_map ->
   ?k_table:Kind.table ->
   Tir.tir_module -> Tir.tir_module
+val owned_clone_eligible : Borrow.borrow_map -> Tir.fn_def -> bool
+val perceus_owned :
+  owned_calls:bool ->
+  ?repl:bool ->
+  ?repl_vars:string list ->
+  ?heap_lambdas:bool ->
+  ?borrow_map:Borrow.borrow_map ->
+  ?k_table:Kind.table ->
+  Tir.tir_module -> Tir.tir_module * Borrow.borrow_map

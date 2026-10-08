@@ -64,6 +64,11 @@ mod CertOrderA do
   end
 
   -- Three rounds of four sessions at once; each round must end within 60 s.
+  -- That is not a timing guess to scale under ASan: a session takes 0.3-5.5 s
+  -- there even with the CPUs oversubscribed, and one that misses the round
+  -- has hung for good (still running at 400 s, past the session's own
+  -- ASan-scaled heartbeat and setup bounds). A stall here is the open
+  -- offer-to-offer hang, specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md.
   pfn round(c : Cap(IO), h : Cap(ClusterNode.Live), done : Vault(Int), r : Int) : () do
     if r > 3 do () else
       let _ = List.map(List.range(0, 4), fn _ ->
@@ -74,7 +79,8 @@ mod CertOrderA do
         end))
       if wait_done(done, r * 4, 60000) do () else
         panic("node-a: round " ++ int_to_string(r) ++ " stalled, "
-              ++ int_to_string(Vault.get_or(done, "n", 0)) ++ " sessions done in all")
+              ++ int_to_string(Vault.get_or(done, "n", 0)) ++ " sessions done in all"
+              ++ " (a hung session: specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md)")
       end
       println("Client: round " ++ int_to_string(r) ++ " done")
       round(c, h, done, r + 1)

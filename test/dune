@@ -4197,6 +4197,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ;; self-recursive last_seen leaked one string per step. Inputs alternate
 ;; between each function's two branches. The expected output is the
 ;; interpreter's. specs/progress/2026-09-26-mutual-tco-forwarded-arg.md
+;; Built with MARCH_NO_OWNED_CALLS=1 (here and in the IR check below):
+;; owned-call drop fusion hands `why` to an owned clone instead, so this
+;; program would no longer reach the deferred-release path it pins. That
+;; fusion path has its own fixture (owned_call_drop_fusion).
 (rule
  (targets native_mutual_tco_deferred_drop native_mutual_tco_deferred_drop.out)
  (deps (file %{exe:../bin/main.exe})
@@ -4205,8 +4209,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_mutual_tco_deferred_drop
-        native/mutual_tco_deferred_drop.march)
+   (setenv MARCH_NO_OWNED_CALLS 1
+    (run %{exe:../bin/main.exe} --compile -o native_mutual_tco_deferred_drop
+         native/mutual_tco_deferred_drop.march))
    (with-stdout-to native_mutual_tco_deferred_drop.out
         (system "./native_mutual_tco_deferred_drop")))))
 
@@ -4227,7 +4232,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --emit-llvm native/mutual_tco_deferred_drop.march)
+   (setenv MARCH_NO_OWNED_CALLS 1
+    (run %{exe:../bin/main.exe} --emit-llvm native/mutual_tco_deferred_drop.march))
    (with-stdout-to mutual_tco_deferred_drop_llvm_check.out
     (run bash -c
      "mutco=$(grep -c '^define .*@__mutco_' native/mutual_tco_deferred_drop.ll); \
@@ -11022,6 +11028,96 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nsum nfold nmap nmap2 rtsum reassoc < nativearr_fold_sum_fusion_llvm_check.out; \
     test \"$nsum\" -eq 15 -a \"$nfold\" -eq 12 -a \"$nmap\" -eq 5 -a \"$nmap2\" -eq 1 -a \"$rtsum\" -eq 2 -a \"$reassoc\" -ge 1 || { echo \"expected 15 sum-map loops, 12 fold loops, 5 map loops, 1 map2 loop, 2 runtime sums, reassociating Float sums (found nsum=$nsum nfold=$nfold nmap=$nmap nmap2=$nmap2 rtsum=$rtsum reassoc=$reassoc)\" >&2; exit 1; }")))
 
+;  Owned-call drop fusion: a call whose argument dies at a borrowed position
+; goes to an owned clone of the callee instead of being followed by a deep
+; drop (specs/progress/2026-10-07-owned-call-drop-fusion.md). Correctness:
+; every line matches the interpreter (shared subtrees, an argument read
+; again after the call, a static nullary passed owned, mutual recursion, a
+; 300000-element owned list walk), and the churn loop stays flat.
+(rule
+ (targets owned_call_drop_fusion owned_call_drop_fusion.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_drop_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o owned_call_drop_fusion
+        native/owned_call_drop_fusion.march)
+   (with-stdout-to owned_call_drop_fusion.out
+        (system "./owned_call_drop_fusion")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/owned_call_drop_fusion.expected owned_call_drop_fusion.out)))
+
+; Shape: the binary-trees-shaped `churn` calls the owned clone `check$own0`
+; and no deep drop at all, and the clone releases cells with decrc_freed.
+(rule
+ (targets owned_call_drop_fusion_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_drop_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/owned_call_drop_fusion.march)
+   (with-stdout-to owned_call_drop_fusion_llvm_check.out
+    (run bash -c
+     "f=native/owned_call_drop_fusion.ll; awk '/^define .*@churn\\(/,/^}/' $f > churn_ocdf.ll; echo \"$(grep -c 'call i64 @check\\$own0(' churn_ocdf.ll) $(grep -c 'call void @__drop\\$' churn_ocdf.ll) $(awk '/^define .*@check\\$own0\\(/,/^}/' $f | grep -c 'decrc_freed(')\"")))))
+
+(rule
+ (alias runtest)
+ (deps owned_call_drop_fusion_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r owned drops freed < owned_call_drop_fusion_llvm_check.out; \
+    test \"$owned\" -ge 1 -a \"$drops\" -eq 0 -a \"$freed\" -ge 1 || { echo \"expected churn to call check\\$own0 and no __drop\\$ helper, and check\\$own0 to release with decrc_freed (found owned=$owned drops=$drops freed=$freed)\" >&2; exit 1; }")))
+
+; Owned-call drop fusion, a dying variable at two borrowed positions of one
+; call inside an owned clone (specs/progress/2026-10-07-owned-call-dup-arg.md):
+; the clones' loops must stay loops (1 000 000 rows) and the churn loop flat.
+(rule
+ (targets owned_call_dup_arg owned_call_dup_arg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_dup_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o owned_call_dup_arg
+        native/owned_call_dup_arg.march)
+   (with-stdout-to owned_call_dup_arg.out
+        (system "./owned_call_dup_arg")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/owned_call_dup_arg.expected owned_call_dup_arg.out)))
+
+; Shape: the mutual loop's clone mg$own0 and the self loop's clone
+; dd$own0_1_2 exist and neither calls itself (both loop through a TCO back
+; edge).  Before the fix mg$own0 called itself followed by a drop of the row.
+(rule
+ (targets owned_call_dup_arg_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/owned_call_dup_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/owned_call_dup_arg.march)
+   (with-stdout-to owned_call_dup_arg_llvm_check.out
+    (run bash -c
+     "f=native/owned_call_dup_arg.ll; awk '/^define .*@mg\\$own0\\(/,/^}/' $f > mg_ocda.ll; awk '/^define .*@dd\\$own0_1_2\\(/,/^}/' $f > dd_ocda.ll; echo \"$(grep -c '^define' mg_ocda.ll) $(grep -c 'call i64 @mg\\$own0(' mg_ocda.ll) $(grep -c '^define' dd_ocda.ll) $(grep -c 'call i64 @dd\\$own0_1_2(' dd_ocda.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps owned_call_dup_arg_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r mg mgself dd ddself < owned_call_dup_arg_llvm_check.out; \
+    test \"$mg\" -eq 1 -a \"$mgself\" -eq 0 -a \"$dd\" -eq 1 -a \"$ddself\" -eq 0 || { echo \"expected mg\\$own0 and dd\\$own0_1_2 to exist and loop without calling themselves (found mg=$mg mgself=$mgself dd=$dd ddself=$ddself)\" >&2; exit 1; }")))
+
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
 ; native_int_arr_map2/native_float_arr_map2 functions' check, since the
@@ -12536,6 +12632,48 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/local_colliding_type.expected native_local_colliding_type.out)))
+
+; ── A user `type Tree` beside stdlib OrderedMap.Tree(k, v) (2026-10-07):
+; OrderedMap's own bare "Tree.Node" keys hit the user's type (ICE at LLVM emit),
+; and the drop of a Tree(k, v) resolved to the user's type alone (SIGSEGV).
+; The .expected file IS the interpreter's output, including both "no growth".
+(rule
+ (targets native_user_type_named_like_stdlib_tree native_user_type_named_like_stdlib_tree.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/user_type_named_like_stdlib_tree.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_user_type_named_like_stdlib_tree
+        native/user_type_named_like_stdlib_tree.march)
+   (with-stdout-to native_user_type_named_like_stdlib_tree.out
+        (system "./native_user_type_named_like_stdlib_tree")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_type_named_like_stdlib_tree.expected native_user_type_named_like_stdlib_tree.out)))
+
+; ── A nested Some(..) pattern beside a row binding the same field by name
+; (2026-10-07): the erased sub-scrutinee decoded an Option(Float) as a niche,
+; and the function returned denormal garbage (Option(Option(Float)),
+; Result(Option(Float), _)). The .expected file IS the interpreter's output.
+(rule
+ (targets native_nested_option_float_match native_nested_option_float_match.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/nested_option_float_match.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_option_float_match
+        native/nested_option_float_match.march)
+   (with-stdout-to native_nested_option_float_match.out
+        (system "./native_nested_option_float_match")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_option_float_match.expected native_nested_option_float_match.out)))
 
 ; ── A cluster session's party is released when it ends (2026-10-06): live
 ; objects left per session under 120 (RED before: ~156, the party's Ops
