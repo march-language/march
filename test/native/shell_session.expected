@@ -33,5 +33,14 @@ Pid(0)
 <fn>
 "tab\t"… 4 more chars
 Some(Map{1 => ["x"]})
+[(0, "Counter", "none", 0)]
+    PID  NAME             STATUS      MBOX    STACK    VALUE CRASHES  LINK       SUPERVISOR            POLICY (held/max in window)
+      0  Counter          waiting        0    <stk>        0       0  none       -                     -
+    PID  NAME             STATUS      MBOX    STACK    VALUE CRASHES  LINK       SUPERVISOR            POLICY (held/max in window)
+      0  Counter          waiting        0    <stk>        0       0  none       -                     -
+    PID  NAME             STATUS      MBOX    STACK    VALUE CRASHES  LINK       SUPERVISOR            POLICY (held/max in window)
+      0  Counter          waiting        0    <stk>        2       0  none       -                     -
+usage: :top [mbox|stack|crashes|slices|msgs_in|msgs_out] [n]
+usage: :top [mbox|stack|crashes|slices|msgs_in|msgs_out] [n]
 exit=1
 node stdout lines from the shell: 0

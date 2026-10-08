@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Ask a node for its biggest actors, with who supervises them.** `forge top
+  --once --sort stack -n 10` (or `--sort mbox`), `Recon.top(intro, "mailbox", 10)`
+  and, in the remote shell, `:top stack 10` / `:actors` list actors ranked by
+  mailbox depth, committed stack bytes, crashes or a message counter. Every row
+  carries its supervision: whether it is supervised, spawned or neither, its
+  supervisor's pid and type, and for a supervisor its strategy, restart limit and
+  restarts held. `forge top --json` prints the node's reply. Per-actor heap bytes
+  are not tracked, so `stack` is the memory measure. `TOP` ties now break by pid.
 - **`march --bisect-pass FILE` finds the optimisation pass behind a
   miscompile.** It compares the compiled program's output with the
   interpreter's (or with `--expect OUT`). It then reports the smallest set of

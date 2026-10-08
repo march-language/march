@@ -32,3 +32,9 @@ c
 fn x -> x + 1
 "tab\there" limit: 4
 Some(Map.insert(Map.empty(), 1, ["x"], Map.int_cmp))
+List.map(Recon.top(intro, "mailbox", 5), fn r -> (r.pid, r.type_name, r.link, r.value))
+:top 5
+:actors
+:top msgs_in 1
+:top bogus
+:top 0

@@ -218,6 +218,31 @@ let summary_request = "SNAPSHOT mem,sched,crashes,actors"
 let reply_summary (reply : Yojson.Safe.t) : summary =
   summary_of (Observe_client.data_of reply) ~now_ms:(ji (jm "at_ms" reply))
 
+let clip n s = if String.length s > n then String.sub s 0 n else s
+
+(** One table row of a [TOP] reply: the actor, what it was ranked on, its
+    size, and how it is supervised ([link]: supervised, spawned or none;
+    [SUPERVISOR] its supervisor's pid and type, or the spawner; [POLICY]
+    only for a supervisor). Fields an older node does not send read as 0 or
+    empty. *)
+let top_row_line (r : Yojson.Safe.t) : string =
+  let name = match jl (jm "names" r) with `String n :: _ -> n | _ -> "" in
+  let typ = match jm "type" r with `String t -> t | _ -> "" in
+  let sup = match jm "parent" r with
+    | `Int p ->
+      string_of_int p ^ (match jm "parent_type" r with `String t when t <> "" -> " (" ^ t ^ ")" | _ -> "")
+    | _ -> (match jm "spawned_by" r with `Int p -> "spawned by " ^ string_of_int p | _ -> "-") in
+  let policy = match jm "supervisor" r with
+    | `Assoc _ as sj ->
+      Printf.sprintf "%s %d/%d in %ds, %d kids" (js (jm "strategy" sj)) (ji (jm "restarts_held" sj))
+        (ji (jm "max_restarts" sj)) (ji (jm "window_secs" sj)) (ji (jm "children" r))
+    | _ -> "-" in
+  Printf.sprintf "%8d  %-20s %-18s %-9s %8d %9d %10d %7d  %-10s %-22s %s"
+    (ji (jm "pid" r)) (clip 20 name) (clip 18 typ) (js (jm "status" r))
+    (ji (jm "mbox" r)) (ji (jm "stack_bytes" r)) (ji (jm "value" r))
+    (ji (jm "crashes" r) + ji (jm "child_crashes" r))
+    (match jm "link" r with `String l -> l | _ -> "-") (clip 22 sup) policy
+
 (** One [forge top] frame from a [TOP] reply and a summary. *)
 let render_top ~(node : string) ~(sort : string) ~(window_ms : int option)
     (s : summary) (top : Yojson.Safe.t) : string =
@@ -225,14 +250,9 @@ let render_top ~(node : string) ~(sort : string) ~(window_ms : int option)
   Printf.bprintf b "%s  %s\n" node (summary_line s);
   Printf.bprintf b "sorted by %s%s\n\n" sort
     (match window_ms with Some w -> Printf.sprintf " over %d ms" w | None -> "");
-  Printf.bprintf b "%8s  %-20s %-18s %-9s %8s %10s\n" "PID" "NAME" "TYPE" "STATUS" "MBOX" (String.uppercase_ascii sort);
-  List.iter (fun r ->
-      let name = match jl (jm "names" r) with `String n :: _ -> n | _ -> "" in
-      let typ = match jm "type" r with `String t -> t | _ -> "" in
-      let clip n s = if String.length s > n then String.sub s 0 n else s in
-      Printf.bprintf b "%8d  %-20s %-18s %-9s %8d %10d\n"
-        (ji (jm "pid" r)) (clip 20 name) (clip 18 typ) (js (jm "status" r))
-        (ji (jm "mbox" r)) (ji (jm "value" r)))
+  Printf.bprintf b "%8s  %-20s %-18s %-9s %8s %9s %10s %7s  %-10s %-22s %s\n" "PID" "NAME" "TYPE" "STATUS" "MBOX"
+    "STACK" (String.uppercase_ascii sort) "CRASHES" "LINK" "SUPERVISOR" "POLICY (held/max in window)";
+  List.iter (fun r -> Printf.bprintf b "%s\n" (top_row_line r))
     (jl (jm "top" (Observe_client.data_of top)));
   Buffer.contents b
 
@@ -243,7 +263,7 @@ let counter_sort s = List.mem s [ "slices"; "msgs_in"; "msgs_out" ]
     window, which is also the refresh; others refresh every
     max(1 s, 4 x the snapshot's cost). *)
 let run_top ~(socket : string option) ~(env : string) ~(sort : string) ~(n : int)
-    ~(window_ms : int) ~(once : bool) () : (unit, string) result =
+    ~(window_ms : int) ~(once : bool) ?(json = false) () : (unit, string) result =
   let target =
     match socket with
     | Some path -> Ok (path, Observe_client.query_socket path)
@@ -268,6 +288,7 @@ let run_top ~(socket : string option) ~(env : string) ~(sort : string) ~(n : int
     let rec loop () =
       match ask top_req with
       | Error _ as e -> e
+      | Ok top when json -> print_reply ~json:true top; Ok ()   (* the TOP envelope, one frame *)
       | Ok top ->
         match ask summary_request with
         | Error _ as e -> e

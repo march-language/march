@@ -195,7 +195,53 @@ let tree sock =
     [ "ACTORS bogus", "bad_args"; "ACTORS 10001", "bad_args";
       "ACTORS mbox 5 extra", "bad_args"; "ACTORS 5 7", "bad_args"; "ACTORS mbox pid", "bad_args"; "ACTOR", "bad_args"; "ACTOR -1", "bad_args";
       "ACTOR 99999999", "not_found"; "TREE x", "bad_args";
-      "SNAPSHOT bogus", "bad_args" ];
+      "SNAPSHOT bogus", "bad_args"; "TOP stack", "bad_args";
+      "TOP stack 5 100", "bad_args"; "TOP stack 0", "bad_args" ];
+  (* TOP rows carry the supervision columns (the ranked list is the point of
+     Recon.top / forge top). *)
+  let top req = data (get sock req) |> member "top" |> to_list in
+  let rows_by_pid = List.map (fun r -> (member "pid" r |> to_int, r)) (top "TOP mbox 100") in
+  check "TOP mbox 100 returns all 20 actors, the burst first"
+    (List.length rows_by_pid = 20
+     && (match top "TOP mbox 1" with
+         | [ r ] -> member "names" r = `List [ `String "hot" ] && member "value" r |> to_int = 500
+                    && member "link" r = `String "none" && member "parent" r = `Null
+                    && member "supervisor" r = `Null
+         | _ -> false))
+    "";
+  let sups = List.filter (fun (_, r) -> member "supervisor" r <> `Null) rows_by_pid in
+  check "TOP marks exactly the 3 supervisors, each one_for_one 5 within 60 with 4 children"
+    (List.length sups = 3
+     && List.for_all (fun (_, r) ->
+         let sj = member "supervisor" r in
+         member "strategy" sj = `String "one_for_one" && member "max_restarts" sj |> to_int = 5
+         && member "window_secs" sj |> to_int = 60 && member "children" r |> to_int = 4) sups)
+    "";
+  let supervised = List.filter (fun (_, r) -> member "link" r = `String "supervised") rows_by_pid in
+  check "TOP: 12 supervised children, each naming one of the supervisors as parent"
+    (List.length supervised = 12
+     && List.for_all (fun (_, r) ->
+         List.mem_assoc (member "parent" r |> to_int) sups && member "supervisor" r = `Null) supervised)
+    "";
+  check "TOP: the crashed slot shows on its supervisor as 1 restart held and 1 child crash"
+    (List.exists (fun (_, r) ->
+         member "child_crashes" r |> to_int = 1
+         && member "supervisor" r |> member "restarts_held" |> to_int = 1) sups)
+    "";
+  let ranked = top "TOP stack 20" in
+  let keyed = List.map (fun r -> (- (member "value" r |> to_int), member "pid" r |> to_int)) ranked in
+  check "TOP stack: every actor has a committed stack, and rows are by value then pid"
+    (List.length ranked = 20
+     && List.for_all (fun r -> member "stack_bytes" r |> to_int > 0
+                               && member "stack_bytes" r = member "value" r) ranked
+     && keyed = List.sort compare keyed)
+    "";
+  let zero_ties = List.map (fun r -> member "pid" r |> to_int) (top "TOP crashes 20") in
+  check "TOP crashes: ties (all but the supervisor of the crashed slot) are in pid order"
+    (match zero_ties with
+     | _ :: rest -> rest = List.sort compare rest
+     | [] -> false)
+    (String.concat "," (List.map string_of_int zero_ties));
   let h = data (get sock "HELP") |> member "verbs" |> to_list
           |> List.map (fun v -> member "name" v |> to_string) in
   check "HELP lists every verb"
@@ -205,14 +251,39 @@ let tree sock =
 
 let types sock =
   let a = data (get sock "ACTORS pid 10") |> member "actors" |> to_list in
+  let type_of r = member "type" r in
+  let count t = List.length (List.filter (fun r -> type_of r = `String t) a) in
   check "ACTORS names the actor type under --hot-reload"
-    (List.length a = 2
-     && List.for_all (fun r -> member "type" r = `String "Counter") a)
+    (List.length a = 5 && count "Counter" = 3 && count "Sup" = 1 && count "Deep" = 1)
     (Yojson.Safe.to_string (`List a));
   let e = data (get sock "EPOCHS") |> member "slots" |> to_list in
   check "EPOCHS lists the dispatch slot"
     (List.exists (fun s -> member "name" s = `String "Counter_dispatch") e)
-    (Yojson.Safe.to_string (`List e))
+    (Yojson.Safe.to_string (`List e));
+  (* TOP: the supervisor's type name, and stack as the size ranking. *)
+  let top req = data (get sock req) |> member "top" |> to_list in
+  let rows = top "TOP mbox 10" in
+  let sup = List.find (fun r -> member "type" r = `String "Sup") rows in
+  let child = List.find (fun r -> member "link" r = `String "supervised") rows in
+  check "TOP names a supervised child's supervisor by pid and type"
+    (member "parent" child = member "pid" sup && member "parent_type" child = `String "Sup"
+     && member "type" child = `String "Counter")
+    (Yojson.Safe.to_string child);
+  check "TOP gives the supervisor's policy: rest_for_one, 3 within 30, 1 child"
+    (let sj = member "supervisor" sup in
+     member "strategy" sj = `String "rest_for_one" && member "max_restarts" sj |> to_int = 3
+     && member "window_secs" sj |> to_int = 30 && member "restarts_held" sj |> to_int = 0
+     && member "children" sup |> to_int = 1)
+    (Yojson.Safe.to_string sup);
+  check "TOP leaves parent_type null for an unsupervised actor"
+    (List.exists (fun r -> member "link" r = `String "none" && member "parent_type" r = `Null) rows) "";
+  (match top "TOP stack 2" with
+   | first :: second :: _ ->
+     check "TOP stack ranks the deep-recursion actor first, over the 64 KiB floor"
+       (member "type" first = `String "Deep" && member "stack_bytes" first |> to_int >= 65536
+        && (member "stack_bytes" second |> to_int) < (member "stack_bytes" first |> to_int))
+       (Yojson.Safe.to_string (`List [ first; second ]))
+   | _ -> check "TOP stack returns two rows" false "")
 
 (* R2 counters: test/native/observe_counters.march. *)
 let counters sock =
@@ -386,7 +457,31 @@ let crashes sock =
     (Yojson.Safe.to_string t);
   check "loop (spawned by main) stays unsupervised"
     (List.exists (fun p -> p = `Int (List.find (fun e -> member "name" e = `String "loop") names |> member "pid" |> to_int))
-       (member "unsupervised" t |> to_list)) ""
+       (member "unsupervised" t |> to_list)) "";
+  (* TOP's supervision columns over the same tree. *)
+  let all = top "TOP mbox 100" in
+  let row_of name =
+    List.find (fun r -> member "names" r = `List [ `String name ]) all in
+  let boss_row = row_of "boss" in
+  check "TOP: boss is a one_for_one supervisor, 3 restarts held of 10 in 60 s, 3 child crashes"
+    (let sj = member "supervisor" boss_row in
+     member "strategy" sj = `String "one_for_one" && member "max_restarts" sj |> to_int = 10
+     && member "window_secs" sj |> to_int = 60 && member "restarts_held" sj |> to_int = 3
+     && member "child_crashes" boss_row |> to_int = 3 && member "children" boss_row |> to_int = 1
+     && member "link" boss_row = `String "none")
+    (Yojson.Safe.to_string boss_row);
+  let boss_pid = member "pid" boss_row in
+  check "TOP: boss's current child is supervised by it and is not a supervisor"
+    (List.exists (fun r ->
+         member "link" r = `String "supervised" && member "parent" r = boss_pid
+         && member "supervisor" r = `Null) all) "";
+  let twigs = List.filter (fun r -> member "link" r = `String "spawned") all in
+  check "TOP: maker's two twigs are linked spawned, with spawned_by maker and no supervisor"
+    (List.length twigs = 2
+     && List.for_all (fun r -> member "spawned_by" r = `Int maker && member "parent" r = `Null) twigs)
+    (Yojson.Safe.to_string (`List twigs));
+  check "TOP: loop, spawned by main, has link none"
+    (member "link" (row_of "loop") = `String "none") ""
 
 let () =
   match Sys.argv with
