@@ -429,19 +429,11 @@ type lambda_info = {
   lam_fn           : Tir.fn_def;           (* the original fn_def inside ELetRec *)
   lam_fvs          : Tir.var list;             (* free variables, sorted by name, with linearity preserved *)
   lam_is_recursive : bool;                 (* body refers to fn's own name *)
-  lam_uid          : int;                  (* globally unique id — used to disambiguate
-                                              multiple lambdas with the same fn_name *)
+  lam_uid          : string;               (* [Tir_names.lam_uid]: the lambda's
+                                              ordinal in its top-level host fn plus
+                                              the host, so two local `fn go`s in
+                                              different hosts stay distinct *)
 }
-
-let lambda_counter : int ref = ref 0
-let fresh_lambda_uid () = let n = !lambda_counter in incr lambda_counter; n
-
-(** Read the current lambda counter value (for persisting to cache). *)
-let get_lambda_counter () = !lambda_counter
-
-(** Restore the lambda counter (when loading from cache, set it above all
-    prelude-compiled UIDs so fresh REPL fragments never reuse a prelude UID). *)
-let set_lambda_counter n = lambda_counter := n
 
 (** Collect all lambdas from all top-level fn bodies.
 
@@ -458,6 +450,12 @@ let set_lambda_counter n = lambda_counter := n
     below — this is the capture-side half. *)
 let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info list =
   let lambdas = ref [] in
+  (* The top-level fn being walked and how many lambdas it has yielded so far:
+     the two halves of every uid minted below. *)
+  let host = ref "" and host_k = ref 0 in
+  let fresh_lambda_uid () =
+    let uid = Tir_names.lam_uid ~host:!host !host_k in
+    incr host_k; uid in
 
   let add_bound bound (vs : Tir.var list) =
     List.fold_left (fun s (v : Tir.var) -> StringSet.add v.Tir.v_name s) bound vs
@@ -518,6 +516,7 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
   in
 
   List.iter (fun fn ->
+    host := fn.Tir.fn_name; host_k := 0;
     collect_expr (add_bound StringSet.empty fn.Tir.fn_params) fn.Tir.fn_body)
     m.Tir.tm_fns;
   List.rev !lambdas

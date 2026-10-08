@@ -305,6 +305,17 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Compiler-minted symbols are structural, not counter-numbered.** A lambda
+  is `$lam<k>_<host>` (nested: `$lam<j>__lam<k>_<host>`), its lifted apply fn
+  `<lambda>$apply$<k>_<host>`, a fused pipeline helper `$fused_mf_<host>_<k>`,
+  a specialised higher-order clone `g$hspec$<i>_<apply>`, and a residual type
+  variable in a mono name `$V_<position>`; join points, `own` drop callbacks
+  and respawn thunks follow the same scheme. Each name depends only on the
+  function it appears in, so an edit to one function no longer renumbers
+  every later symbol in the module. This is what lets the hot-reload
+  manifest, `--dump-impl-hashes` and (next) cached objects compare across
+  edits. The REPL scopes each fragment's names (`$repl<n>.`) instead of
+  persisting a global lambda counter. `.ll` output changes by renames only.
 - **Nullary constructors no longer allocate, and a lone busy thread is no
   longer preempted by idle cores.** In compiled code, `Nil`, `Leaf`, `None`-like
   constructors of every boxed type are now one shared static cell instead of a

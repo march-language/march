@@ -1011,19 +1011,22 @@ let hr_config () =
    and the .hcr_manifest lists.  Both the --compile and the --emit-llvm path
    call this, so the hashes an .ll carries are the ones a build publishes.
 
-   1. Every fn's own hash is CANONICAL: the pretty-printed definition with
-      each compiler-counter name (`$lam39788$apply$4781`, `$jp17442`, `$t12`,
-      the inliner's `_i<n>`, an unsolved type variable `'_53109`) replaced by
-      its order of first appearance in that definition.  Those names come
-      from global counters, so a one-token edit anywhere renumbers every
-      later one, and hashing them flagged every function that merely
-      REFERENCES a lambda as changed (`Front.start`, `main`;
+   1. Every fn's own hash is CANONICAL: the CAS serializer's encoding of
+      the definition, which alpha-normalises every local binder (`$t12`,
+      the inliner's `_i<n>`, case-arm vars) by order of first appearance,
+      over symbol names that are structural since B1
+      (specs/plans/incremental-codegen-cas-plan.md §14: `$lam0_Mod_f$apply$0_Mod_f`,
+      `$jp2_Mod_f`, `$fused_mf_Mod_f_0`), plus the two raw ids that remain
+      (a residual type variable's name, and the `V_<id>` in drop-glue names).  Before B1 those symbols came from
+      global counters (`$lam39788$apply$4781`), so a one-token edit anywhere
+      renumbered every later one, and hashing them flagged every function that
+      merely REFERENCES a lambda as changed (`Front.start`, `main`;
       specs/progress/2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md):
       an unslotted `main` "changing" made `forge deploy` plan a restart for
-      any edit.  Numbering by first appearance (not collapsing every name to one
-      placeholder) keeps two distinct temporaries distinct, so swapping them
-      is still a change.  A renumbering is invisible; a real change (a
-      literal, a call, a type) is not.
+      any edit.  A regex over the pretty-printed text renumbered them by first
+      appearance as a stopgap; apart from drop glue's `V_<id>`, nothing
+      counter-shaped reaches a symbol now.  A renumbering of
+      a local is invisible; a real change (a literal, a call, a type) is not.
 
    2. A slot's identity folds in the bare-named helpers only it reaches
       (2026-09-25).  Lowering lifts every lambda a function builds into a
@@ -1045,21 +1048,45 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
   List.iter (fun (fd : March_tir.Tir.fn_def) -> Hashtbl.replace fn_tbl fd.March_tir.Tir.fn_name fd) tir.March_tir.Tir.tm_fns;
   let all_names = Hashtbl.fold (fun n _ acc -> n :: acc) fn_tbl [] in
   let known = March_cas.Scc.known_of_names all_names in
-  let counter_re = Str.regexp "\\$\\([A-Za-z_]*\\)[0-9]+\\|_i[0-9]+\\|'_[0-9]+" in
-  let canon_text fd =
-    let seen = Hashtbl.create 16 in
-    Str.global_substitute counter_re (fun text ->
-        let tok = Str.matched_string text in
-        let k = match Hashtbl.find_opt seen tok with
-          | Some k -> k
-          | None -> let k = Hashtbl.length seen in Hashtbl.replace seen tok k; k in
-        let stem = String.sub tok 0
-            (let i = ref (String.length tok) in
-             while !i > 0 && tok.[!i - 1] >= '0' && tok.[!i - 1] <= '9' do decr i done;
-             !i) in
-        Printf.sprintf "%s#%d" stem k)
-      (March_tir.Pp.string_of_fn_def fd) in
-  let canon fd = March_cas.Blake3.hash_string (canon_text fd) in
+  (* The CAS serializer alpha-normalises every binder (parameters, lets,
+     case arms, local temps), and every symbol a body names is structural
+     since B1 (specs/plans/incremental-codegen-cas-plan.md §14), so the
+     per-fn hash needs no further canonicalisation.  A regex that renumbered
+     every `$<stem><digits>` token in the pretty-printed text used to stand
+     in for both; nothing counter-shaped is left for it to find. *)
+  let canon (fd : March_tir.Tir.fn_def) =
+    (* One thing the serializer writes raw: a residual type variable's name
+       (`'_53109`), which is a typechecker fresh-var id and so depends on how
+       much was inferred before.  Rename them by first appearance in the
+       printed definition before serializing. *)
+    let tv_re = Str.regexp "'\\([A-Za-z_][A-Za-z_0-9]*\\)" in
+    let text = March_tir.Pp.string_of_fn_def fd in
+    let names =
+      let rec go pos acc =
+        match Str.search_forward tv_re text pos with
+        | i -> let n = Str.matched_group 1 text in
+          go (i + 1) (if List.mem n acc then acc else n :: acc)
+        | exception Not_found -> List.rev acc in
+      go 0 [] in
+    let subst = List.mapi (fun i n -> (n, March_tir.Tir.TVar (string_of_int i))) names in
+    let fd = if subst = [] then fd else
+        { fd with March_tir.Tir.fn_params = List.map (March_tir.Mono.subst_var subst) fd.March_tir.Tir.fn_params;
+                  fn_ret_ty = March_tir.Mono.subst_ty subst fd.March_tir.Tir.fn_ret_ty;
+                  fn_body = March_tir.Mono.subst_expr subst fd.March_tir.Tir.fn_body } in
+    (* The one symbol shape still carrying a typechecker id: drop glue for a
+       type with a residual variable ([__drop$List_V_53272], keyed by
+       [Drop.mangle]; specs/todos/2026-10-07-drop-glue-name-carries-tvar-id.md).
+       Renumber its [V_<id>] by first appearance, as the retired regex did. *)
+    let bytes = Bytes.to_string (March_cas.Serialize.serialize_fn_def fd) in
+    let seen = Hashtbl.create 4 in
+    let bytes =
+      Str.global_substitute (Str.regexp "V_[0-9]+") (fun s ->
+          let tok = Str.matched_string s in
+          let k = match Hashtbl.find_opt seen tok with
+            | Some k -> k
+            | None -> let k = Hashtbl.length seen in Hashtbl.replace seen tok k; k in
+          Printf.sprintf "V_#%d" k) bytes in
+    March_cas.Blake3.hash_string bytes in
   let own = Hashtbl.create 1024 in
   let own_of n fd =
     match Hashtbl.find_opt own n with

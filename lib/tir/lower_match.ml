@@ -440,7 +440,9 @@ let record_fields_in_column (rows : (Ast.pattern list * Tir.expr) list)
     name and [ty_of_span] type, so the argument at each call site resolves to
     the decision tree's own binding. *)
 let hoist_fallback_jp ?(params : Tir.var list = []) (fb : Tir.expr) : Tir.var * Tir.expr =
-  let jp_fn_name = Lower_state.fresh_name "jp" in
+  let jp_fn_name =
+    Lower_state.fresh_nested_name
+      ~host:(Lower_state.current_host ~mod_prefix:"" ()) "jp" in
   let jp_fn_ty   =
     Tir.TFn (List.map (fun (v : Tir.var) -> v.Tir.v_ty) params,
              Lower_types.unknown_ty) in
