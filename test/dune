@@ -4178,6 +4178,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ;; self-recursive last_seen leaked one string per step. Inputs alternate
 ;; between each function's two branches. The expected output is the
 ;; interpreter's. specs/progress/2026-09-26-mutual-tco-forwarded-arg.md
+;; Built with MARCH_NO_OWNED_CALLS=1 (here and in the IR check below):
+;; owned-call drop fusion hands `why` to an owned clone instead, so this
+;; program would no longer reach the deferred-release path it pins. That
+;; fusion path has its own fixture (owned_call_drop_fusion).
 (rule
  (targets native_mutual_tco_deferred_drop native_mutual_tco_deferred_drop.out)
  (deps (file %{exe:../bin/main.exe})
@@ -4186,8 +4190,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_mutual_tco_deferred_drop
-        native/mutual_tco_deferred_drop.march)
+   (setenv MARCH_NO_OWNED_CALLS 1
+    (run %{exe:../bin/main.exe} --compile -o native_mutual_tco_deferred_drop
+         native/mutual_tco_deferred_drop.march))
    (with-stdout-to native_mutual_tco_deferred_drop.out
         (system "./native_mutual_tco_deferred_drop")))))
 
@@ -4208,7 +4213,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --emit-llvm native/mutual_tco_deferred_drop.march)
+   (setenv MARCH_NO_OWNED_CALLS 1
+    (run %{exe:../bin/main.exe} --emit-llvm native/mutual_tco_deferred_drop.march))
    (with-stdout-to mutual_tco_deferred_drop_llvm_check.out
     (run bash -c
      "mutco=$(grep -c '^define .*@__mutco_' native/mutual_tco_deferred_drop.ll); \
