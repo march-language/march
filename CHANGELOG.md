@@ -530,6 +530,9 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Cross-built hot-reload patches now carry the same ABI identifier as their
+  running server.** The runtime reports the compiler's canonical ABI ID, so
+  `forge deploy hot` no longer needs to normalize quotes in target triples.
 - **A field read from a record no longer outlives the record in compiled
   code.** Three shapes released the record first and then read freed memory,
   printing wrong strings or crashing; the interpreter was always right:

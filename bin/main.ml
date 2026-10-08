@@ -4191,7 +4191,8 @@ let compile filename =
               | Ok abi, Some prefix ->
                 let macro name value =
                   " -D" ^ name ^ "=" ^ Filename.quote ("\"" ^ value ^ "\"") in
-                macro "MARCH_HCR_TRIPLE" abi.llvm_triple
+                macro "MARCH_HCR_ABI_ID" (March_tir.Hcr_abi.abi_id abi)
+                ^ macro "MARCH_HCR_TRIPLE" abi.llvm_triple
                 ^ macro "MARCH_HCR_TARGET" abi.canonical_target
                 ^ macro "MARCH_HCR_PREFIX" prefix
               | _ -> "" in
