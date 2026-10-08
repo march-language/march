@@ -5,12 +5,12 @@ by mbox:
        2                                          waiting          0     <stk>          0       0  supervised 4                      -
        3                                          waiting          0     <stk>          0       0  supervised 4                      -
        4  sup_one                                 waiting          0     <stk>          0       1  none       -                      one_for_one 1/5 in 60s, 4 kids
-       5                                          waiting          0     <stk>          0       0  supervised 9                      -
-       6                                          waiting          0     <stk>          0       0  supervised 9                      -
-       7                                          waiting          0     <stk>          0       0  supervised 9                      -
-       8                                          waiting          0     <stk>          0       0  supervised 9                      -
-       9                                          waiting          0     <stk>          0       0  none       -                      one_for_one 0/5 in 60s, 4 kids
-      10                                          waiting          0     <stk>          0       0  supervised 4                      -
+       5                                          waiting          0     <stk>          0       0  supervised 4                      -
+       6                                          waiting          0     <stk>          0       0  supervised 10                     -
+       7                                          waiting          0     <stk>          0       0  supervised 10                     -
+       8                                          waiting          0     <stk>          0       0  supervised 10                     -
+       9                                          waiting          0     <stk>          0       0  supervised 10                     -
+      10                                          waiting          0     <stk>          0       0  none       -                      one_for_one 0/5 in 60s, 4 kids
       11                                          waiting          0     <stk>          0       0  supervised 15                     -
       12                                          waiting          0     <stk>          0       0  supervised 15                     -
       13                                          waiting          0     <stk>          0       0  supervised 15                     -
