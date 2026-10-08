@@ -16634,8 +16634,22 @@ let prune_roots_tests =
           test_prune_roots_ignores_other_mains;
         Alcotest.test_case "exports stay roots" `Quick test_prune_roots_keeps_exports ] ) ]
 
+(* Strings are March heap objects.  In native builds [march_obj_malloc] routes
+   them to mimalloc, whose objects take [march_free_any]'s inline fast path.
+   Keep this source-level contract explicit: libc [malloc] here silently puts
+   every string release back on the provenance slow path. *)
+let test_string_alloc_uses_march_allocator () =
+  let path = Filename.concat (march_project_root ()) "runtime/march_runtime.c" in
+  let source = read_file_contents path in
+  Alcotest.(check bool) "march_string_alloc routes through march_obj_malloc" true
+    (Test_helpers.contains "march_string *s = march_obj_malloc" source)
+
 let codegen_suites =
   [
+      ( "string_allocator", [
+          Alcotest.test_case "strings use the March object allocator" `Quick
+            test_string_alloc_uses_march_allocator;
+        ] );
       ( "tir_verify", [
           Alcotest.test_case "clean module has no findings" `Quick test_tir_verify_clean_module;
           Alcotest.test_case "unbound variable (RED)" `Quick test_tir_verify_unbound_var;
