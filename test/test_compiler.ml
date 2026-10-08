@@ -1718,6 +1718,15 @@ let test_conditional_impl_use_site () =
   end|} in
   Alcotest.(check bool) "an expanding bound terminates and rejects" true
     (has_errors (typecheck expanding));
+  let duplicating = {|mod Test do
+    type Box(a) = Box(a)
+    impl Eq(Box(a)) when Eq(Box((a, a))) do
+      fn eq(x, y) do true end
+    end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+  end|} in
+  Alcotest.(check bool) "a duplicating bound has bounded search size" true
+    (has_errors (typecheck duplicating));
   let finite = {|mod Test do
     type Box(a) = Box(a)
     interface Bound(a) do fn bound: a -> Bool end

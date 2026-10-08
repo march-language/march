@@ -5016,20 +5016,33 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
    ids as the head, so a local substitution specialises them for this call. *)
 let interface_satisfied env iface target =
   let rec strip t = match repr t with TLin (_, t) -> strip t | t -> t in
+  let within_size_budget ty =
+    let remaining = ref 4096 in
+    let rec visit t =
+      decr remaining;
+      !remaining >= 0 && match strip t with
+      | TCon (_, ts) | TTuple ts -> List.for_all visit ts
+      | TArrow (a, b) -> visit a && visit b
+      | TRecord fs -> List.for_all (fun (_, t) -> visit t) fs
+      | _ -> true
+    in
+    visit ty
+  in
   let failed = Hashtbl.create 16 in
   let rec satisfies depth seen iface target =
     let target = strip target in
     match target with
     | TVar _ | TError -> true
+    | _ when depth >= 128 || not (within_size_budget target) -> false
     | TTuple ts when iface = "Eq" -> List.for_all (satisfies depth seen iface) ts
     | _ ->
       let key = iface ^ ":" ^ pp_ty target in
       (* Expanding bounds need not repeat an obligation. A proof budget
          terminates those too; memoising failures prevents duplicate registered
-         heads from turning a failed search into exponential work. Depth is
+         heads from turning a failed search into exponential work. Depth
          and the active obligations are part of the key: both affect which
          proofs remain available. *)
-      if depth >= 128 || List.mem key seen || Hashtbl.mem failed (key, depth, seen) then false
+      if List.mem key seen || Hashtbl.mem failed (key, depth, seen) then false
       else
         let failure_key = key, depth, seen in
         let seen = key :: seen in

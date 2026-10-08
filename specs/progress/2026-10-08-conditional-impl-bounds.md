@@ -8,7 +8,8 @@ checks use the same resolver.
 
 Regressions cover satisfied and missing payload interfaces, nested wrappers,
 forward declarations, circular bounds, and expanding bounds. Proof search
-rejects repeated obligations and limits proof depth to 128, terminating even
+rejects repeated obligations and limits proof depth to 128 and each obligation
+to 4096 type nodes (checked before rendering memo keys), terminating even
 for expanding bounds. Failed obligations are memoised by type, depth and active
 proof path to
 avoid exponential retries through duplicate registered heads. Finite proofs
