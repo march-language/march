@@ -46,7 +46,9 @@ cores of unpackaged binaries.
 - **A full `rest` shard** (`MARCH_CI_RUNTEST_SPLIT=1 dune runtest -j 4`, arm64,
   7 GB, cores captured): no March binary crashed. (One unrelated C harness did:
   `test_reload_activate4_runner` faulted in `__march_init` of a dlopen'd stub on
-  the reload-server thread.)
+  the reload-server thread. That was a pre-`march_sched_init` spawn overrunning
+  its stack reservation, fixed separately:
+  `specs/progress/2026-10-07-preinit-spawn-stack-overruns-reservation.md`.)
 - **A signal sent from outside.** Nothing in `test/` or `scripts/` sends SIGSEGV
   to a process, so a stray kill of a recycled PID cannot produce this.
 - **Memory pressure (OOM) in the failing job.** Its log has no OOM-killer or

@@ -443,9 +443,29 @@ static _Thread_local march_scheduler *tl_sched = NULL;
 /* Definition of the sentinel exported via march_scheduler.h. */
 int march_recv_no_msg_sentinel;
 
-/* Cached OS page size — initialised once in march_sched_init().
- * Used by the SIGSEGV handler (sysconf is not async-signal-safe). */
+/* Cached OS page size.  Used by the SIGSEGV handler (sysconf is not
+ * async-signal-safe), so it is cached ahead of time -- and by the stack
+ * helpers, which must never see 0: a spawn can come BEFORE march_sched_init
+ * (march_hcr_drain arms its hard-deadline proc from whatever thread runs
+ * the reload server, and a C harness may never init the scheduler at all).
+ * With page 0, stack_alloc_lazy reserved MARCH_STACK_MAX bytes with no
+ * guard page and then mprotect'ed the page just PAST its own reservation
+ * read/write: whatever mapping sat directly above it (on Linux, mmap hands
+ * out addresses top-down, so typically the most recent one -- e.g. a
+ * just-dlopen'd hot patch's text page) lost PROT_EXEC.  Always read it
+ * through sched_page_size() outside the signal handler; every stack exists
+ * only after that call, so the handler never reads it as 0. */
 static size_t g_page_size = 0;
+static pthread_once_t g_page_size_once = PTHREAD_ONCE_INIT;
+
+static void page_size_init(void) {
+    g_page_size = (size_t)sysconf(_SC_PAGE_SIZE);
+}
+
+static size_t sched_page_size(void) {
+    pthread_once(&g_page_size_once, page_size_init);
+    return g_page_size;
+}
 
 /* ── Process registry (for march_sched_find) ──────────────────────────── */
 
@@ -562,7 +582,7 @@ static void registry_remove(march_proc *p) {
  * base of the mmap (for munmap on process death).
  */
 static void *stack_alloc_lazy(size_t *alloc_size, void **mmap_base_out) {
-    size_t page  = g_page_size;
+    size_t page  = sched_page_size();
     size_t total = MARCH_STACK_MAX + page;   /* guard page + max usable */
 
     /* Reserve the full range as PROT_NONE. */
@@ -638,7 +658,7 @@ static void *stack_reuse(size_t *alloc_size, void **mmap_base_out) {
     void *mem = n->mmap_base;
     free(n);
 
-    size_t page  = g_page_size;
+    size_t page  = sched_page_size();
     size_t total = MARCH_STACK_MAX + page;
     /* Re-protect the whole range PROT_NONE, then re-commit the top
      * MARCH_STACK_INITIAL window — mirrors stack_alloc_lazy's fresh-mmap
@@ -668,7 +688,7 @@ static void stack_retire(void *mmap_base) {
     stack_free_node *n = (stack_free_node *)malloc(sizeof *n);
     if (!n) {
         /* Can't record it on the free-list; don't leak the mapping either. */
-        munmap(mmap_base, MARCH_STACK_MAX + g_page_size);
+        munmap(mmap_base, MARCH_STACK_MAX + sched_page_size());
         return;
     }
     n->mmap_base = mmap_base;
@@ -1503,8 +1523,7 @@ static int default_sched_count(void) {
 
 void march_sched_init(void) {
     /* Cache the OS page size for use in the async-signal-safe SIGSEGV handler. */
-    if (g_page_size == 0)
-        g_page_size = (size_t)sysconf(_SC_PAGE_SIZE);
+    (void)sched_page_size();
 
     atomic_store_explicit(&g_next_pid, 0, memory_order_relaxed);
     atomic_store_explicit(&g_all_done,       0, memory_order_relaxed);
