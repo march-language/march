@@ -1,0 +1,12 @@
+Duration(5000)
+UUID("abc")
+Id(3)
+Pair(1, "x")
+Got("hi")
+Nope
+Circle(2)
+Rect(3, 4)
+Dot
+Some(Duration(2000))
+[Id(1), Id(2)]
+(Got("t"), Id(9))

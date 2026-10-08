@@ -364,6 +364,27 @@
  (action  (setenv MARCH_NUM_SCHEDULERS ""
            (run ./test_scheduler_churn_runner))))
 
+; ── C scheduler: a spawn before march_sched_init gets a whole stack ──────
+; march_hcr_drain spawns its hard-deadline proc from the reload server's
+; thread, and test_reload_activate4 never inits the scheduler: with the page
+; size uncached the reservation lost its guard page and the initial window
+; ran one page past it, stripping PROT_EXEC from a just-dlopen'd hot patch
+; on Linux arm64.  Asserts the geometry; never runs the scheduler.
+(rule
+ (targets test_scheduler_preinit_spawn_runner)
+ (deps    test_scheduler_preinit_spawn.c
+          ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_scheduler_preinit_spawn.c ../runtime/march_scheduler.c ../runtime/march_reclaim.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_preinit_spawn_runner))
+ (action  (run ./test_scheduler_preinit_spawn_runner)))
+
 ; ── march_actor_broadcast_migrate dead-target message leak regression ────
 ; Links the full runtime (same set as test_actor_registry_runner below) so
 ; the test drives march_actor_inject_migrate_msg and
@@ -11100,6 +11121,44 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/csv_niche_row.expected native_csv_niche_row.out)))
 
+; ── Compiled to_string names the constructors of module-declared ADTs ───
+; Every type declared inside a module (stdlib or user) printed `#<tag:N>`
+; compiled while the interpreter printed the constructor: the kind table
+; answered "newtype" for the qualified spelling the descriptor pass held and
+; "boxed" for the short spelling every value is built under.  Run interpreted
+; AND compiled against the SAME .expected; 8 of its 12 lines were red before
+; either spelling fix, and the niche-shaped ones (3) stayed red after the
+; repr_of-only one (specs/progress/2026-10-07-kind-canonical-spelling.md). ──
+(rule
+ (targets native_to_string_module_types native_to_string_module_types.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/to_string_module_types.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_module_types
+        native/to_string_module_types.march)
+   (with-stdout-to native_to_string_module_types.out
+        (system "./native_to_string_module_types")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_module_types.expected native_to_string_module_types.out)))
+
+(rule
+ (targets native_to_string_module_types.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/to_string_module_types.march))
+ (action
+  (with-stdout-to native_to_string_module_types.interp.out
+   (run %{exe:../bin/main.exe} native/to_string_module_types.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_module_types.expected native_to_string_module_types.interp.out)))
+
 ; ── file_close / csv_close return :ok on BOTH backends ─────────────────
 ; The typechecker said Unit (file_close) / Atom (csv_close), the interpreter
 ; returned :ok, and compiled C returned a heap Ok(()) cell, so a compiled
@@ -12480,6 +12539,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/monitor_releases_actors.expected native_monitor_releases_actors.out)))
 
+; ── A closure whose cell FBIP reused still releases its captures (2026-10-07).
+; RED before: every Map.fold with a capturing closure leaked the closure.
+(rule
+ (targets native_reused_closure_captures native_reused_closure_captures.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/reused_closure_captures.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_reused_closure_captures
+        native/reused_closure_captures.march)
+   (with-stdout-to native_reused_closure_captures.out
+        (system "./native_reused_closure_captures")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/reused_closure_captures.expected native_reused_closure_captures.out)))
+
 ; ── A dead actor's record and state are released (2026-10-06): under 5
 ; objects left over 50 actors (RED before: the killed actor's List state, and
 ; the record itself once Actor.call had been used on it).
@@ -12885,6 +12963,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/shell_skew.expected native_shell_skew.out)))
+
+; A fragment calls the node's own copy of a function instead of compiling
+; one, when the node's build has it with the same signature (Shell_ident's
+; "calling the node's own functions").  test/native/shell_node.march's main
+; uses List.range/reverse/length, so its build carries them; the inputs of
+; test/shell/link.txt reach them, reuse a value across calls (the node's
+; parameter modes decide its RC), and pass a closure (never linked).
+; MARCH_SHELL_LINK_REPORT names what each input called on the node.
+(rule
+ (targets native_shell_link.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/link.txt)
+       (file native/shell_node.march))
+ (action
+  (with-stdout-to native_shell_link.out
+   (system "rm -rf sh_l; mkdir -p sh_l; ./shell_check.exe keygen-home sh_l/pk $PWD/sh_l/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_l/pk) -o sh_l/node native/shell_node.march > sh_l/build 2>&1 || { cat sh_l/build; exit 1; }; printf 'IO.Console\\n' > sh_l/policy; S=/tmp/march-shell-link-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_l/policy ./sh_l/node > sh_l/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_l/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_l/home MARCH_SHELL_LINK_REPORT=1 %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/link.txt native/shell_node.march 2>&1; echo \"exit=$?\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_l $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_link.expected native_shell_link.out)))
 
 ; Golden rendered-diagnostic corpus (diagnostics plan §11, D7): every
 ; test/errors/*.march checked with the real compiler; full rendered output

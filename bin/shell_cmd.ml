@@ -187,10 +187,25 @@ let fresh_nonce () =
   incr nonce_n;
   Printf.sprintf "%016x%08x%08x" (int_of_float (Unix.gettimeofday () *. 1e6)) (Unix.getpid ()) !nonce_n
 
+(* MARCH_SHELL_TIMING=1: per input, on stderr, the time spent compiling
+   (every fragment the input built, renderer attempts included) and waiting
+   on the node (signing, the EVAL round trip: upload, load, run, reply), in
+   ms.  The R6 latency gate reads these. *)
+let timing = Sys.getenv_opt "MARCH_SHELL_TIMING" <> None
+let t_compile = ref 0.0
+let t_node = ref 0.0
+let timed (acc : float ref) (f : unit -> 'a) : 'a =
+  if not timing then f ()
+  else begin
+    let t0 = Unix.gettimeofday () in
+    Fun.protect ~finally:(fun () -> acc := !acc +. (Unix.gettimeofday () -. t0) *. 1000.) f
+  end
+
 (* The signed `caps:` is what the fragment's code uses ([sf_caps]), which the
    node checks against the fragment's own manifest and then its policy. *)
 let eval_on_node s ~(kind : string) ~(src : string)
     (frag : March_jit.Repl_jit.shell_fragment) : string =
+  timed t_node @@ fun () ->
   let so = read_file frag.March_jit.Repl_jit.sf_so in
   let now = int_of_float (Unix.gettimeofday () *. 1000.) in
   let body =
@@ -239,7 +254,8 @@ let compile s ?store_as text =
     List.iter (fun (d : March_errors.Errors.diagnostic) -> Printf.printf "error: %s\n%!" d.message) e; None
   | Ok m ->
     (try
-       Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident s.jit ~tc_env:s.tc_env
+       Some (m, timed t_compile @@ fun () ->
+               March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident s.jit ~tc_env:s.tc_env
                ~program_name:s.program_name ~program_decls:s.program_decls ~program_type_map:s.program_type_map
                ?store_as m)
      with e -> report_error e; None)
@@ -287,7 +303,8 @@ let eval_expr s src ~limit =
       (match (if quiet then
                 (match parse_module text with
                  | Ok m ->
-                   (try Some (m, March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident s.jit ~tc_env:s.tc_env
+                   (try Some (m, timed t_compile @@ fun () ->
+                                  March_jit.Repl_jit.shell_compile ?triple:s.triple ?ident:s.ident s.jit ~tc_env:s.tc_env
                                   ~program_name:s.program_name ~program_decls:s.program_decls
                                   ~program_type_map:s.program_type_map m)
                     with _ -> None)
@@ -486,8 +503,13 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
         | None -> ()
         | Some l ->
           last_failed := false;
+          t_compile := 0.0; t_node := 0.0;
+          let t0 = Unix.gettimeofday () in
           (try handle s l with Unix.Unix_error (e, f, _) ->
              raise (Session_over (Printf.sprintf "%s: %s" f (Unix.error_message e))));
+          if timing && String.trim l <> "" then
+            Printf.eprintf "[shell-timing] compile %.1f node %.1f total %.1f ms\n%!"
+              !t_compile !t_node ((Unix.gettimeofday () -. t0) *. 1000.);
           if !last_failed then s.failed <- true;
           loop ()
       in

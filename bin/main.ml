@@ -3743,9 +3743,17 @@ let compile filename =
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           let ir = match !shell_ident_decls with
             | Some decls ->
+              (* The functions a shell fragment may call instead of copying:
+                 this build's, with the signatures it emitted and the
+                 parameter modes its Perceus placed RC against. *)
+              let is_slot n = match hr_config () with
+                | Some cfg -> March_tir.Hot_reload.is_slot_fn cfg n
+                | None -> false in
               ir ^ March_jit.Shell_ident.ir_global
                 { March_jit.Shell_ident.decls;
-                  tags = March_jit.Shell_ident.tags_of_types tir.March_tir.Tir.tm_types }
+                  tags = March_jit.Shell_ident.tags_of_types tir.March_tir.Tir.tm_types;
+                  fns = March_jit.Shell_ident.node_fns ~ir ~is_slot
+                      ~modes:March_tir.Clo_flags.borrowed_params }
             | None -> ir in
           let ir = finish_ir target ir in
           stamp "llvm-emit";

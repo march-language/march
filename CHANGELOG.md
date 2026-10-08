@@ -115,6 +115,11 @@ git log is authoritative for exact commits.
     build does not (changed, added, or a type numbered differently) is
     refused, with the declarations named. Inputs that reach only unchanged
     code still run.
+  - An input calls the node's own compiled copy of a library function when
+    the node's build has it with the same signature, rather than compiling
+    a copy. Each Depot query's fragment went from 338 KB of IR to 81 KB, and
+    its clang time from about 175 ms to about 105 ms.
+    `MARCH_SHELL_NO_LINK=1` turns this off.
 - **Several native libraries per project.** forge.toml can declare `[[ffi]]`
   once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
   links all of them, in order. A single `[ffi]` table works as before.
@@ -401,6 +406,20 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A hot-reload `DRAIN` before the scheduler starts no longer corrupts a
+  loaded patch.** A green thread spawned before the scheduler was initialised
+  (a signed `DRAIN` with a hard deadline arms one) got a stack reservation
+  with no guard page, and its first stack page was made writable one page past
+  that reservation. On Linux that page was usually the code of the patch just
+  loaded, so the next call into the patch crashed with SIGSEGV.
+- Compiled `to_string` (and so `println` of a value) names the constructors of
+  every type declared inside a module, whatever its shape. A niche-shaped
+  module type such as `type Opt = Nope | Got(String)` printed `#<tag:0>` and
+  `#<tag:1>` compiled while the interpreter printed `Nope` and `Got("hi")`.
+- Compiled code frees the payload of a niche-shaped stdlib value when the value
+  dies. `HttpServer.Upgrade`, `ClusterNode.RegisterError`, `Session.Outcome`,
+  `RemoteCall.Verdict` and `Control.CtlGate` values released only their outer
+  cell and leaked what they held.
 - **Nested constructor patterns pick the right arm in compiled code when a
   constructor name is also used by a stdlib type.** With a user
   `type Tree = Leaf | Node(Tree, Int, Tree)` (stdlib `OrderedMap` also declares
@@ -412,6 +431,10 @@ git log is authoritative for exact commits.
   leaked a reference to each of them, so neither actor's memory was ever freed, even
   after both had died. The cluster node monitors every registered name's holder, so this
   cost two actor records per cluster session.
+- **`Map.fold` with a closure that captures a value no longer leaks the closure.** Every
+  such fold leaked one closure, and so did a closure that tail-called another closure it
+  had captured after dropping an argument of its own. Cluster nodes did both on every
+  session.
 
 - **A cached build prints the same warnings as the build that produced it.**
   A `--compile` that succeeded with warnings or hints used to print only

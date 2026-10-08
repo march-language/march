@@ -23,9 +23,21 @@ session. One of them is a 40-byte `GlobalPid.Pid` record.
   unmatched site at three frames. Walking more than three frames up crashes at the green
   thread's stack root, so a deeper view needs a bounded frame-pointer walk.
 
+## Narrowed 2026-10-07 (with specs/progress/2026-10-07-reused-closure-captures-leak.md)
+
+- That fix (a closure cell reused by FBIP now releases its captures) took the probe from
+  ~2 objects per session to ~16 total for 40 sessions; the GlobalPid is what remains,
+  about one per session.
+- The surviving pid is the session's offer actor (`local_pid=2`), not a party's.
+- A bounded frame-pointer walk (32 frames, stopping at the green thread's stack top)
+  replaced the three-frame view. It still shows no unmatched increment site.
+- A compile-time listing of every apply function that keeps a used capture alive
+  (the class the closure fix closed) names no closure that captures a `GlobalPid`
+  directly, so the pid is not held by a leaked closure cell.
+
 ## Next step
 
-Record, for each watched object, the running balance per (inc site, dec site) pair, or
-walk frame pointers with a bound at the proc's stack top, and look for the increment
-whose holder never runs its release: likely a `Named(Bound(..))` watcher callback, or
-`SessionNode.invite_role` / `fill_roles` storing the pid somewhere off-heap.
+Follow the offer actor's pid off-heap: log every `Vault.set` / mailbox enqueue /
+timer registration whose payload contains a `GlobalPid` with `local_pid=2`, and pair it
+with its release. Candidates are the offer's `Named(Bound(..))` watcher registration and
+`SessionNode.invite_role` / `fill_roles`.
