@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: is used more than once here
+mod Main do
+  -- Linearity slice 7 -- (T-LinUse), fn-param surface: passing a `linear`
+  -- param to a callee twice is a double use; the SECOND `q` reference trips
+  -- record_use. The callee consumes its own (plain) param via an exhaustive
+  -- match, so this is the only diagnostic. See §2.9.2.
+  type Res = R(Int)
+  fn close_it(h : Res) : Int do
+    match h do
+      R(n) -> n
+    end
+  end
+  fn also_bad(linear q : Res) : Int do
+    let a = close_it(q)
+    let b = close_it(q)
+    a + b
+  end
+  fn main() : () do
+    ()
+  end
+end

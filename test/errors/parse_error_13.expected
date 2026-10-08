@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------------- errors/parse_error_13.march
+
+This `match` (line 4) needs its own `end`: the `end` on line 7 belongs to an outer block. [parse_error]
+
+4 |     match x do
+        ^^^^^
+
+    I only noticed at the end of the file.
+    run `march --explain parse_error`
+
+fix [parse_error]:
+@@ after line 6 @@
+       _ -> 3
++    end
+
+after fix: exit 0

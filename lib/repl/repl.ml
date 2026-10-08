@@ -55,7 +55,7 @@ let parse_repl_input ~report src =
   | Ok input -> Some input
   | Error diags ->
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      if d.code = Some March_parser.Parse.code_lex_error then
+      if d.code = March_parser.Parse.code_lex_error then
         raise (March_lexer.Lexer.Lexer_error d.message)
       else report (March_errors.Errors.render_diagnostic ~src d)) diags;
     None

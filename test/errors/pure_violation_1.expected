@@ -1,0 +1,28 @@
+exit: 1
+-- ERROR ------------------ errors/pure_violation_1.march
+
+`write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects. [pure_violation]
+
+Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module.
+
+26 |     file_write(path, contents)
+         ^^^^^^^^^^
+
+
+
+-- ERROR ------------------ errors/pure_violation_1.march
+
+expected `String` but got `FileError`. [type_mismatch]
+
+26 |     file_write(path, contents)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    This is the declared return type of `write`.
+
+    the expected type comes from here:
+
+25 |   fn write(path : String, contents : String) : Result(Unit, String) do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

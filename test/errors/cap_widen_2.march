@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: cannot be widened
+-- R4a — SIBLINGS: neither subsumes the other (2026-08-06).
+--
+-- `IO.FileRead` and `IO.FileWrite` are siblings under `IO.FileSystem`.
+-- Neither is an ancestor of the other, so this is not attenuation in either
+-- direction — it is a lateral move, and a lateral move is authority the holder
+-- was never given.
+--
+-- Separate from reject/t153 because the two fail different halves of the
+-- check. t153's source (`IO.Console`) is strictly NARROWER than its target;
+-- here the two are simply unrelated. A check written as "reject when the
+-- target subsumes the source" catches t153 and lets this through; only
+-- "require the SOURCE to subsume the target" catches both.
+mod Siblings do
+  needs IO
+
+  pfn sideways(r : Cap(IO.FileRead)) : Cap(IO.FileWrite) do
+    cap_narrow(r)
+  end
+
+  fn main(cap : Cap(IO)) do
+    println("file-read cannot become file-write")
+  end
+end

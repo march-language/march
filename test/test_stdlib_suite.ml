@@ -15237,7 +15237,19 @@ let stdlib_suites =
         Alcotest.test_case "panic under lib/ dir IS flagged"       `Quick test_lint_no_panic_lib_dir_flagged;
       ]);
       (* ── Adversarial bug regression tests ─────────────────────────────── *)
-      ("adversarial-regressions", [
+      (* Its `Slow cases are compile-and-run programs, run as one parallel
+         batch (Test_helpers.parallel_slow): one at a time they were ~80% of
+         run_stdlib's wall time (CI audit, 2026-10-07). [serial] keeps
+         inline the cases that run forge in-process (global compiler state)
+         or that time an HTTP server and would flake under parallel load. *)
+      ("adversarial-regressions", parallel_slow
+         ~serial:[
+           "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call";
+           "HCR migrate_msg: a compiled deploy converts a real old-format message (Tally Add|Legacy -> Add)";
+           "HCR ACTIVATE6: a widened role closure is refused by the client gate and the server (DD step 10)";
+           "interp http_server_listen: idle client does not block second client (event-loop fix)";
+           "interp http_server_listen: idle upgraded WebSocket does not block other connections (WS fiber fix)";
+         ] [
         Alcotest.test_case "float /. 0.0 raises div-by-zero" `Quick
           test_adv_float_div_zero_dot;
         Alcotest.test_case "float / 0.0 generic raises div-by-zero" `Quick

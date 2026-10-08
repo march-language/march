@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: was never used
+mod Main do
+  -- Linearity slice 7 -- (T-LinDrop), linear-let surface: a `linear let`
+  -- binding never consumed before its scope closes is rejected. See §2.9.2.
+  type Res = R(Int)
+  fn main() : () do
+    linear let r : Res = R(1)
+    ()
+  end
+end

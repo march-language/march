@@ -1,0 +1,21 @@
+exit: 1
+-- ERROR --------------------- errors/parse_error_3.march
+
+I don't recognize `then` here — March uses do/end blocks instead. [then_keyword]
+
+4 |     if true then
+                ^^^^
+
+    if cond do
+        expr1
+    else
+        expr2
+    end
+    run `march --explain then_keyword`
+
+fix [then_keyword]:
+@@ lines 4-4 @@
+-    if true then
++    if true do
+
+after fix: exit 0

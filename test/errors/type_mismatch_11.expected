@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_11.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+7 |   let x : Int = "hello"
+                    ^^^^^^^
+
+    I got this expectation from the type annotation.
+
+    the expected type comes from here:
+
+7 |   let x : Int = "hello"
+      ^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

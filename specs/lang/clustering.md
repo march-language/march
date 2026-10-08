@@ -117,7 +117,10 @@ What `start` gives you:
   which reports `Bound`, `Unbound` and `Lost`. A registration is pushed to every peer at
   once and repaired by periodic anti-entropy. `lookup` hides a binding whose holder is dead,
   or has restarted since it registered. The registered process is monitored, and its death
-  unregisters the name.
+  unregisters the name. An unregistered name leaves a tombstone in every replica, so a
+  delayed older binding cannot bring it back. It is dropped 3 hours after it was first
+  seen (`MARCH_REGISTRY_TOMBSTONE_GRACE_MS`, or `tombstone_grace_ms` in the config). Keep
+  the grace well above the longest partition the cluster should heal from.
 
 **Messages and monitors over the node.** Every actor message, remote monitor and flow-control
 frame between two nodes shares the node's one connection pair.
@@ -614,6 +617,10 @@ end
 
 -- Remove a name (tombstone — converges with concurrent registrations)
 let reg = GlobalRegistry.unregister(reg, "worker-1", my_clock)
+
+-- Expire tombstones: stamp new ones at `now` (Unix ms), drop those stamped
+-- at least `grace_ms` ago. ClusterNode does this on its own tick.
+let reg = GlobalRegistry.collect_tombstones(reg, now, grace_ms)
 
 -- Merge two registry views (idempotent)
 let reg = GlobalRegistry.merge(local_reg, remote_reg)

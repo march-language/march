@@ -199,10 +199,32 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      for every niche type at [tagged=false], so we only need to know *whether*
      the match is niche-shaped, not which type.  Boxed ADTs are unaffected — the
      heap-tag path is already correct for them. *)
+  (* A ctor tag on an erased scrutinee may arrive TYPE-qualified ("Tree.Leaf":
+     [Lower_match.pat_tag_and_subs] qualifies a nested pattern's bare tag with
+     the type the typechecker recorded for it).  The two recovery helpers below
+     identify the owning typedef by ctor name, so split the tag into its bare
+     ctor and (optional) type qualifier; a qualifier narrows the owners to the
+     typedefs whose short name matches it. *)
+  let last_seg s =
+    match String.rindex_opt s '.' with
+    | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+    | None -> s
+  in
+  let split_tag t =
+    match String.rindex_opt t '.' with
+    | Some i -> (String.sub t (i + 1) (String.length t - i - 1),
+                 Some (last_seg (String.sub t 0 i)))
+    | None -> (t, None)
+  in
+  let owner_ok qual tname =
+    match qual with
+    | None -> true
+    | Some q -> String.equal (last_seg tname) q
+  in
   let branches_match_niche_shape () =
     let ctor_tags = List.filter_map (fun br ->
       let t = br.Tir.br_tag in
-      if String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z' then Some t else None
+      if String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z' then Some (split_tag t) else None
     ) branches in
     ctor_tags <> [] &&
     (* Candidate owners: EVERY variant typedef whose ctor set contains all the
@@ -222,7 +244,8 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     (let owners = List.filter_map (function
        | Tir.TDVariant (tname, variants)
          when (let ctor_names = List.map fst variants in
-               List.for_all (fun t -> List.mem t ctor_names) ctor_tags) ->
+               List.for_all (fun (t, qual) ->
+                   List.mem t ctor_names && owner_ok qual tname) ctor_tags) ->
          Some tname
        | _ -> None) ctx.Llvm_ctx.type_defs in
      owners <> [] &&
@@ -247,7 +270,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     match branches with
     | [br] when (let t = br.Tir.br_tag in
                  String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z') ->
-      let tag = br.Tir.br_tag in
+      let (tag, qual) = split_tag br.Tir.br_tag in
       (* Classify the owning type by the SAME name construction/EAlloc uses: the
          BARE type name (its ctor key is "TypeName.CtorName").  A type defined in
          a NON-ENTRY module is registered here under its module-qualified name
@@ -261,14 +284,10 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          consistent with construction: a genuine (entry-module) newtype is
          registered bare so [last_seg] is a no-op and it still classifies
          [Newtype]. *)
-      let last_seg s =
-        match String.rindex_opt s '.' with
-        | Some i -> String.sub s (i + 1) (String.length s - i - 1)
-        | None -> s
-      in
       let owner_reprs = List.filter_map (function
         | Tir.TDVariant (tname, variants)
-          when List.exists (fun (c, _) -> c = tag) variants ->
+          when List.exists (fun (c, _) -> c = tag) variants
+               && owner_ok qual tname ->
           Some (Kind.repr_of ctx.Llvm_ctx.k_table
                   (Tir.TCon (last_seg tname, [])))
         | _ -> None) ctx.Llvm_ctx.type_defs in

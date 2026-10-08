@@ -632,9 +632,9 @@ case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
 panic("List.maximum_int: empty list")
-  Cons($f756, $f757) -> dec_rc xs;
-let t : '_ = $f757 in
-let h : '_ = $f756 in
+  Cons($f755, $f756) -> dec_rc xs;
+let t : '_ = $f756 in
+let h : '_ = $f755 in
 call_ptr go(t, h)
   _ -> dec_rc xs;
 dec_rc go;
@@ -647,9 +647,9 @@ case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
 panic("List.minimum_int: empty list")
-  Cons($f743, $f744) -> dec_rc xs;
-let t : '_ = $f744 in
-let h : '_ = $f743 in
+  Cons($f742, $f743) -> dec_rc xs;
+let t : '_ = $f743 in
+let h : '_ = $f742 in
 call_ptr go(t, h)
   _ -> dec_rc xs;
 dec_rc go;
@@ -741,93 +741,93 @@ case $t274 of
 List.reverse$List_Int(acc)
   _ -> dec_rc $t274;
 let byte : '_ = Bytes.get(b, i) in
-let $t780 : '_ = <(byte, 128) in
-case $t780 of
-  True() -> dec_rc $t780;
-let $t781 : '_ = +(i, 1) in
-let $t782 : '_ = alloc Cons(byte, acc) in
-String.decode_go(b, n, $t781, $t782)
-  _ -> dec_rc $t780;
-let $t783 : '_ = <(byte, 224) in
-case $t783 of
-  True() -> dec_rc $t783;
-let $t785 : '_ = let $t784 : '_ = +(i, 1) in
-let $rc_22 : '_ = <($t784, n) in
-dec_rc $t784;
+let $t779 : '_ = <(byte, 128) in
+case $t779 of
+  True() -> dec_rc $t779;
+let $t780 : '_ = +(i, 1) in
+let $t781 : '_ = alloc Cons(byte, acc) in
+String.decode_go(b, n, $t780, $t781)
+  _ -> dec_rc $t779;
+let $t782 : '_ = <(byte, 224) in
+case $t782 of
+  True() -> dec_rc $t782;
+let $t784 : '_ = let $t783 : '_ = +(i, 1) in
+let $rc_22 : '_ = <($t783, n) in
+dec_rc $t783;
 $rc_22 in
-case $t785 of
-  True() -> dec_rc $t785;
-let b2 : '_ = let $t786 : '_ = +(i, 1) in
-Bytes.get(b, $t786) in
-let $t787 : '_ = +(i, 2) in
-let $t792 : '_ = let $t791 : '_ = let $t789 : '_ = let $t788 : '_ = -(byte, 192) in
-int_shl($t788, 6) in
-let $t790 : '_ = -(b2, 128) in
-int_or($t789, $t790) in
-alloc Cons($t791, acc) in
-String.decode_go(b, n, $t787, $t792)
-  _ -> dec_rc $t785;
-let $t793 : '_ = +(i, 1) in
-let $t794 : '_ = alloc Cons(byte, acc) in
-String.decode_go(b, n, $t793, $t794)
-  _ -> dec_rc $t783;
-let $t795 : '_ = <(byte, 240) in
-case $t795 of
-  True() -> dec_rc $t795;
-let $t797 : '_ = let $t796 : '_ = +(i, 2) in
-let $rc_23 : '_ = <($t796, n) in
-dec_rc $t796;
+case $t784 of
+  True() -> dec_rc $t784;
+let b2 : '_ = let $t785 : '_ = +(i, 1) in
+Bytes.get(b, $t785) in
+let $t786 : '_ = +(i, 2) in
+let $t791 : '_ = let $t790 : '_ = let $t788 : '_ = let $t787 : '_ = -(byte, 192) in
+int_shl($t787, 6) in
+let $t789 : '_ = -(b2, 128) in
+int_or($t788, $t789) in
+alloc Cons($t790, acc) in
+String.decode_go(b, n, $t786, $t791)
+  _ -> dec_rc $t784;
+let $t792 : '_ = +(i, 1) in
+let $t793 : '_ = alloc Cons(byte, acc) in
+String.decode_go(b, n, $t792, $t793)
+  _ -> dec_rc $t782;
+let $t794 : '_ = <(byte, 240) in
+case $t794 of
+  True() -> dec_rc $t794;
+let $t796 : '_ = let $t795 : '_ = +(i, 2) in
+let $rc_23 : '_ = <($t795, n) in
+dec_rc $t795;
 $rc_23 in
-case $t797 of
-  True() -> dec_rc $t797;
-let b2 : '_ = let $t798 : '_ = +(i, 1) in
+case $t796 of
+  True() -> dec_rc $t796;
+let b2 : '_ = let $t797 : '_ = +(i, 1) in
+Bytes.get(b, $t797) in
+let b3 : '_ = let $t798 : '_ = +(i, 2) in
 Bytes.get(b, $t798) in
-let b3 : '_ = let $t799 : '_ = +(i, 2) in
-Bytes.get(b, $t799) in
-let $t800 : '_ = +(i, 3) in
-let $t808 : '_ = let $t807 : '_ = let $t805 : '_ = let $t802 : '_ = let $t801 : '_ = -(byte, 224) in
-int_shl($t801, 12) in
-let $t804 : '_ = let $t803 : '_ = -(b2, 128) in
-int_shl($t803, 6) in
-int_or($t802, $t804) in
-let $t806 : '_ = -(b3, 128) in
-int_or($t805, $t806) in
-alloc Cons($t807, acc) in
-String.decode_go(b, n, $t800, $t808)
-  _ -> dec_rc $t797;
-let $t809 : '_ = +(i, 1) in
-let $t810 : '_ = alloc Cons(byte, acc) in
-String.decode_go(b, n, $t809, $t810)
-  _ -> dec_rc $t795;
-let $t812 : '_ = let $t811 : '_ = +(i, 3) in
-let $rc_24 : '_ = <($t811, n) in
-dec_rc $t811;
+let $t799 : '_ = +(i, 3) in
+let $t807 : '_ = let $t806 : '_ = let $t804 : '_ = let $t801 : '_ = let $t800 : '_ = -(byte, 224) in
+int_shl($t800, 12) in
+let $t803 : '_ = let $t802 : '_ = -(b2, 128) in
+int_shl($t802, 6) in
+int_or($t801, $t803) in
+let $t805 : '_ = -(b3, 128) in
+int_or($t804, $t805) in
+alloc Cons($t806, acc) in
+String.decode_go(b, n, $t799, $t807)
+  _ -> dec_rc $t796;
+let $t808 : '_ = +(i, 1) in
+let $t809 : '_ = alloc Cons(byte, acc) in
+String.decode_go(b, n, $t808, $t809)
+  _ -> dec_rc $t794;
+let $t811 : '_ = let $t810 : '_ = +(i, 3) in
+let $rc_24 : '_ = <($t810, n) in
+dec_rc $t810;
 $rc_24 in
-case $t812 of
-  True() -> dec_rc $t812;
-let b2 : '_ = let $t813 : '_ = +(i, 1) in
+case $t811 of
+  True() -> dec_rc $t811;
+let b2 : '_ = let $t812 : '_ = +(i, 1) in
+Bytes.get(b, $t812) in
+let b3 : '_ = let $t813 : '_ = +(i, 2) in
 Bytes.get(b, $t813) in
-let b3 : '_ = let $t814 : '_ = +(i, 2) in
+let b4 : '_ = let $t814 : '_ = +(i, 3) in
 Bytes.get(b, $t814) in
-let b4 : '_ = let $t815 : '_ = +(i, 3) in
-Bytes.get(b, $t815) in
-let $t816 : '_ = +(i, 4) in
-let $t827 : '_ = let $t826 : '_ = let $t824 : '_ = let $t821 : '_ = let $t818 : '_ = let $t817 : '_ = -(byte, 240) in
-int_shl($t817, 18) in
-let $t820 : '_ = let $t819 : '_ = -(b2, 128) in
-int_shl($t819, 12) in
-int_or($t818, $t820) in
-let $t823 : '_ = let $t822 : '_ = -(b3, 128) in
-int_shl($t822, 6) in
-int_or($t821, $t823) in
-let $t825 : '_ = -(b4, 128) in
-int_or($t824, $t825) in
-alloc Cons($t826, acc) in
-String.decode_go(b, n, $t816, $t827)
-  _ -> dec_rc $t812;
-let $t828 : '_ = +(i, 1) in
-let $t829 : '_ = alloc Cons(byte, acc) in
-String.decode_go(b, n, $t828, $t829)
+let $t815 : '_ = +(i, 4) in
+let $t826 : '_ = let $t825 : '_ = let $t823 : '_ = let $t820 : '_ = let $t817 : '_ = let $t816 : '_ = -(byte, 240) in
+int_shl($t816, 18) in
+let $t819 : '_ = let $t818 : '_ = -(b2, 128) in
+int_shl($t818, 12) in
+int_or($t817, $t819) in
+let $t822 : '_ = let $t821 : '_ = -(b3, 128) in
+int_shl($t821, 6) in
+int_or($t820, $t822) in
+let $t824 : '_ = -(b4, 128) in
+int_or($t823, $t824) in
+alloc Cons($t825, acc) in
+String.decode_go(b, n, $t815, $t826)
+  _ -> dec_rc $t811;
+let $t827 : '_ = +(i, 1) in
+let $t828 : '_ = alloc Cons(byte, acc) in
+String.decode_go(b, n, $t827, $t828)
 
 ## String.encode_cp
 fn String.encode_cp(cp : Int) : List(Int) =
@@ -992,9 +992,9 @@ fn String.starts_with(s : '_, prefix : '_) : '_ =
 ## String.to_codepoints
 fn String.to_codepoints(s : String) : List(Int) =
   let b : '_ = Bytes.from_string(s) in
-let $t830 : '_ = Bytes.length(b) in
-let $t831 : '_ = alloc Nil() in
-let $rc_25 : '_ = String.decode_go(b, $t830, 0, $t831) in
+let $t829 : '_ = Bytes.length(b) in
+let $t830 : '_ = alloc Nil() in
+let $rc_25 : '_ = String.decode_go(b, $t829, 0, $t830) in
 dec_rc b;
 $rc_25
 
@@ -1068,11 +1068,11 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 acc
-  Cons($f723, $f724) -> dec_rc lst;
-let t : '_ = $f724 in
-let x : '_ = $f723 in
-let $t722 : '_ = +(acc, x) in
-call_ptr go(t, $t722)
+  Cons($f722, $f723) -> dec_rc lst;
+let t : '_ = $f723 in
+let x : '_ = $f722 in
+let $t721 : '_ = +(acc, x) in
+call_ptr go(t, $t721)
   _ -> dec_rc lst;
 dec_rc go;
 panic("non-exhaustive pattern match")
@@ -1084,11 +1084,11 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 acc
-  Cons($f730, $f731) -> dec_rc lst;
-let t : '_ = $f731 in
-let x : '_ = $f730 in
-let $t729 : '_ = *(acc, x) in
-call_ptr go(t, $t729)
+  Cons($f729, $f730) -> dec_rc lst;
+let t : '_ = $f730 in
+let x : '_ = $f729 in
+let $t728 : '_ = *(acc, x) in
+call_ptr go(t, $t728)
   _ -> dec_rc lst;
 dec_rc go;
 panic("non-exhaustive pattern match")
@@ -1100,14 +1100,14 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 m
-  Cons($f737, $f738) -> dec_rc lst;
-let r : '_ = $f738 in
-let x : '_ = $f737 in
-let $t736 : '_ = <(x, m) in
-case $t736 of
-  True() -> dec_rc $t736;
+  Cons($f736, $f737) -> dec_rc lst;
+let r : '_ = $f737 in
+let x : '_ = $f736 in
+let $t735 : '_ = <(x, m) in
+case $t735 of
+  True() -> dec_rc $t735;
 call_ptr go(r, x)
-  _ -> dec_rc $t736;
+  _ -> dec_rc $t735;
 dec_rc x;
 call_ptr go(r, m)
   _ -> dec_rc lst;
@@ -1121,14 +1121,14 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 m
-  Cons($f750, $f751) -> dec_rc lst;
-let r : '_ = $f751 in
-let x : '_ = $f750 in
-let $t749 : '_ = >(x, m) in
-case $t749 of
-  True() -> dec_rc $t749;
+  Cons($f749, $f750) -> dec_rc lst;
+let r : '_ = $f750 in
+let x : '_ = $f749 in
+let $t748 : '_ = >(x, m) in
+case $t748 of
+  True() -> dec_rc $t748;
 call_ptr go(r, x)
-  _ -> dec_rc $t749;
+  _ -> dec_rc $t748;
 dec_rc x;
 call_ptr go(r, m)
   _ -> dec_rc lst;
@@ -1155,10 +1155,10 @@ panic("non-exhaustive pattern match")
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
   let pair : (String, String) = ("hello", "world") in
-let $t837 : String = let $t836 : Int = process_pairs(pair, 3, 0) in
-int_to_string($t836) in
-let $rc_27 : () = println($t837) in
-dec_rc $t837;
+let $t836 : String = let $t835 : Int = process_pairs(pair, 3, 0) in
+int_to_string($t835) in
+let $rc_27 : () = println($t836) in
+dec_rc $t836;
 $rc_27
 
 ## process_pairs
@@ -1168,9 +1168,9 @@ fn process_pairs(pair : (String, String), n : Int, acc : Int) : Int =
 acc
   _ -> let k : Int = inc_rc pair;
 use_first(pair) in
-let $t832 : Int = -(n, 1) in
-let $t833 : Int = +(acc, k) in
-process_pairs(pair, $t832, $t833)
+let $t831 : Int = -(n, 1) in
+let $t832 : Int = +(acc, k) in
+process_pairs(pair, $t831, $t832)
 
 ## use_first
 fn use_first(pair : (String, String)) : Int =

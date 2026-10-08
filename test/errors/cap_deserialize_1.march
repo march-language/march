@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: `Cap(IO)` cannot be serialized
+-- Capability unforgeability (R3), the ENCODE direction (2026-08-05).
+--
+-- Encoding a capability leaks nothing at run time — capabilities are opaque
+-- unit sentinels and `march_cap_narrow` in runtime/march_runtime.c is
+-- literally `return cap;`. This is rejected anyway, for two reasons:
+--
+--   1. it manufactures the wire value a decoder would consume, so leaving it
+--      open keeps half of the round trip alive;
+--   2. `derive Json for T` generates BOTH directions from one declaration, so
+--      a rule that rejected only decoding would leave the derive half
+--      generated — a working encoder beside a rejected decoder.
+--
+-- One symmetric rule ("`Cap` is not a serializable type") is easier to state,
+-- easier to test, and leaves no direction to reopen later.
+mod EncodeCap do
+  needs IO
+
+  fn main(cap : Cap(IO)) do
+    println(to_json(cap))
+  end
+end

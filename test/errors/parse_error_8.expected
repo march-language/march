@@ -1,0 +1,10 @@
+exit: 1
+-- ERROR --------------------- errors/parse_error_8.march
+
+`f(...)(...)` is not a chained call — March functions are not curried. [parse_error]
+
+8 |     let r = adder(1)(side(99))
+                        ^
+
+    Write `f(a, b)` for a multi-argument call, or put the second call on its own line if you meant two separate statements.
+    run `march --explain parse_error`

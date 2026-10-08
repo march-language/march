@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/linear_never_used_3.march","start_line":7,"start_col":4,"end_line":7,"end_col":16,"message":"The linear value `a` was never used.\nLinear values must be consumed exactly once — did you mean to pass it somewhere?","code":"linear_never_used","fix":null,"labels":[],"notes":[]}

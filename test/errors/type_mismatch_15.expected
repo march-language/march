@@ -1,0 +1,30 @@
+exit: 1
+-- ERROR ------------------ errors/type_mismatch_15.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+19 |     let cc2 = Chan.send(cc, "not an int")
+                                 ^^^^^^^^^^^^
+
+    Payload type of Chan.send
+    run `march --explain type_mismatch`
+
+
+-- ERROR ------------------ errors/type_mismatch_15.march
+
+Chan.close: channel is at `Recv(Int, End)` but I expected `End`. [session_state_mismatch]
+
+20 |     Chan.close(cc2)
+         ^^^^^^^^^^^^^^^
+
+
+
+-- ERROR ------------------ errors/type_mismatch_15.march
+
+Chan.close: channel is at `Recv(Int, Send(Int, End))` but I expected `End`. [session_state_mismatch]
+
+21 |     Chan.close(sc)
+         ^^^^^^^^^^^^^^
+
+
+

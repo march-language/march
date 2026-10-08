@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: is used more than once here
+mod Main do
+  -- (T-LinField), fn-PARAM twin of reject/t63 (L3 fix, 2026-07-17): a
+  -- `linear` field of a fn-PARAM-bound record now registers a `p#data`
+  -- sentinel (check_fn's param loop calls bind_linear_field_sentinels), so a
+  -- second `p.data` access is an ERROR — was warning-only. See §2.9.3.
+  type Packet = { linear data : Int, size : Int }
+  fn bad(p : Packet) : Int do
+    p.data + p.data
+  end
+  fn main() : () do
+    ()
+  end
+end

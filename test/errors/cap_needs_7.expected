@@ -1,0 +1,28 @@
+exit: 1
+-- ERROR ----------------------- errors/cap_needs_7.march
+
+`Cap(IO)` used in module `Server` but `IO` is not declared in `needs`. [cap_needs]
+help: add `needs IO` to the module body.
+
+14 |   fn listen(cap : Cap(IO), port : Int) : Int do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain cap_needs`
+
+
+-- HINT ----------------------- errors/cap_needs_7.march
+
+this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
+
+14 |   fn listen(cap : Cap(IO), port : Int) : Int do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+
+fix [cap_needs:IO]:
+@@ after line 11 @@
+ mod Server do
++  needs IO
+
+after fix: exit 0

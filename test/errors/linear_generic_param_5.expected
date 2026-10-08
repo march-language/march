@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ------------ errors/linear_generic_param_5.march
+
+`y` has type `a`, which holds a type variable that a `linear` parameter of `f` opts in to linear values, so a caller may pass a linear value here too.  Mark it `linear y` (or `affine y`) so the body is checked to use it once. [linear_generic_param]
+
+10 |   fn f(linear x : a, y : a) : (a, a, a) do (x, y, y) end
+                          ^
+
+    run `march --explain linear_generic_param`
+
+

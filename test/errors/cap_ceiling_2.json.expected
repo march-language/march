@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/cap_ceiling_2.march","start_line":14,"start_col":4,"end_line":14,"end_col":20,"message":"module `Dep` uses `IO.FileRead` but does not declare `needs IO.FileRead`.\nhelp: add `needs IO.FileRead` to the module body.","code":"cap_ceiling:IO.FileRead","fix":{"kind":"insert","after_line":14,"text":"    needs IO.FileRead"},"labels":[],"notes":[]}

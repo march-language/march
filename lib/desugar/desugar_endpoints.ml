@@ -154,7 +154,7 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
       let c = capitalize label.txt in
       if String.length c >= 4 && String.sub c 0 4 = "Msg_" then begin
         ok := false;
-        Err.error errors ~span:label.span
+        Err.error ~code:Err.Code.endpoints_label_invalid errors ~span:label.span
           (Printf.sprintf
              "Protocol `%s`: the label `%s` would name the message `%s`, which is the shape \
               of the names `@[endpoints]` makes up for unlabelled steps (`Msg_<From>_<To>_<k>`), \
@@ -195,7 +195,7 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
                      | None -> ()
                      | Some l ->
                        ok := false;
-                       Err.error errors ~span:l.span
+                       Err.error ~code:Err.Code.endpoints_label_invalid errors ~span:l.span
                          (Printf.sprintf
                             "Protocol `%s`: the branch label `%s` already names this message \
                              (`%s`), so the step cannot carry a label of its own. Remove `%s:`."
@@ -208,7 +208,7 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
                   | _ when lbl.txt = "crash" -> (lbl.txt, go arm)
                   | _ ->
                     ok := false;
-                    Err.error errors ~span:lbl.span
+                    Err.error ~code:Err.Code.endpoints_label_invalid errors ~span:lbl.span
                       (Printf.sprintf
                          "Protocol `%s`: `@[endpoints]` needs every branch of `choose by %s` \
                           to begin with a message from `%s`, because the label travels \
@@ -542,7 +542,7 @@ let collect_ctors (errors : Err.ctx) ~proto ~span (steps : astep list) : (string
     | Some t' ->
       if not (ty_equal t t') then begin
         ok := false;
-        Err.error errors ~span
+        Err.error ~code:Err.Code.endpoints_label_invalid errors ~span
           (Printf.sprintf
              "Protocol `%s`: the label `%s` is used for two messages with different payload \
               types, so `@[endpoints]` cannot give it one constructor. Rename one of them."
@@ -1117,7 +1117,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
         | DFn (fd, _) ->
           let f = fd.fn_name.txt in
           if Hashtbl.mem seen f then
-            Err.error errors ~span
+            Err.error ~code:Err.Code.endpoints_name_clash errors ~span
               (Printf.sprintf
                  "Protocol `%s`, role %s: two steps %s takes are named alike, so the role module \
                   would define `%s` twice. A message name can be shared only by steps no single \
@@ -1182,7 +1182,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
               | None -> acc @ [ (ctor, (payload, nx)) ]
               | Some (_, nx') ->
                 if nx <> nx' then
-                  Err.error errors ~span
+                  Err.error ~code:Err.Code.endpoints_name_clash errors ~span
                     (Printf.sprintf
                        "Protocol `%s`, role %s: message `%s` is received in two states with \
                         different continuations, so the event API cannot give it one \
@@ -2333,7 +2333,7 @@ let warn_unlabelled (errors : Err.ctx) ~proto (steps : protocol_step list) : uni
   in
   let warn (s : name) (r : name) =
     let c = name s.txt r.txt in
-    Err.warning errors ~span:s.span
+    Err.warning ~code:Err.Code.protocol_unlabelled_step errors ~span:s.span
       (Printf.sprintf
          "Protocol `%s` is used by this app's topology, and the step `%s -> %s` has no label, so its \
           wire tag is the positional `%s`. A step added before it renumbers it and breaks a hot deploy \
@@ -2403,7 +2403,7 @@ let check_payload_codecs (errors : Err.ctx) ~proto ~span (decls : decl list) (st
        | names ->
          ok := false;
          List.iter (fun nm ->
-           Err.error errors ~span
+           Err.error ~code:Err.Code.codec_missing errors ~span
              (Printf.sprintf
                 "Protocol `%s`: the message `%s -> %s : %s` carries `%s`, which has no JSON codec. \
                  Every payload crosses the network as JSON: add `derive Json for %s`."
@@ -2463,7 +2463,7 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                   let prior = Option.bind (Hashtbl.find_opt baselines proto) (fun b -> prior_version b ~fp:fingerprint) in
                   (match prior with
                    | None ->
-                     Err.error errors ~span
+                     Err.error ~code:Err.Code.protocol_expand_invalid errors ~span
                        (Printf.sprintf
                           "--protocol-expand %s:%s needs the protocol's previous version (--protocol-baseline) to split against."
                           proto label);
@@ -2472,11 +2472,11 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                      (match compare_versions ~old_ ~new_:version with
                       | Compatible { chooser; label = l; _ } when l = label -> Some (chooser, label, old_.v_fingerprint)
                       | Compatible { label = l; _ } ->
-                        Err.error errors ~span
+                        Err.error ~code:Err.Code.protocol_expand_invalid errors ~span
                           (Printf.sprintf "--protocol-expand %s:%s: the branch this version adds is `%s`." proto label l);
                         None
                       | Same | Incompatible _ ->
-                        Err.error errors ~span
+                        Err.error ~code:Err.Code.protocol_expand_invalid errors ~span
                           (Printf.sprintf
                              "--protocol-expand %s:%s: this version is not the previous one plus that branch, so there is nothing to split."
                              proto label);

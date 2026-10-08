@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: uses `IO.FileRead` but does not declare `needs IO.FileRead`
+-- A module-level `let` is an always-run setup effect (lowered into
+-- `__march_setup__`), so `March_tir.Dce` roots it unconditionally — a stdlib-
+-- mediated capability it reaches is NOT dead code even if `main` never
+-- references its bound name. The `--check` ceiling must seed its reachability
+-- walk with these roots too, or it would silently miss a violation `--compile`
+-- still catches. (Accept counterpart to the DEAD-function case is accept/t181.)
+mod CeilApp do
+  needs IO.Console
+  let _leaked = match File.read("/etc/hosts") do
+    Ok(s) -> s
+    Err(_) -> ""
+  end
+  fn main(_cap : Cap(IO.Console)) : () do
+    println("hi")
+  end
+end

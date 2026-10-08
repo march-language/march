@@ -1,0 +1,6 @@
+mod Main
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    println("hello")
+  end
+end

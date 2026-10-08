@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR --------------- errors/linear_used_twice_9.march
+
+The linear value `s` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+17 |       let b = sink(s)
+                        ^
+
+
+    `s` was already consumed here:
+
+16 |       let a = sink(s)
+                        ^
+    run `march --explain linear_used_twice`
+
+

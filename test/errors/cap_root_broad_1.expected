@@ -1,0 +1,34 @@
+exit: 1
+errors/cap_root_broad_1.march:19:9: error: `Cap(IO)` cannot be deserialized — a capability may only be received, never constructed, so `Loot` cannot derive Json. [cap_deserialize]
+hint: hold the capability in a separate value and pass it as a parameter, keeping `Loot` free of capability fields.
+-- HINT ------------------ errors/cap_root_broad_1.march
+
+this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
+
+18 |   type Loot = Loot(Cap(IO))
+       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+
+-- ERROR ------------------ errors/cap_root_broad_1.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+21 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+
+fix [cap_grant]:
+@@ lines 21-21 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+errors/cap_root_broad_1.march:19:9: error: `Cap(IO)` cannot be deserialized — a capability may only be received, never constructed, so `Loot` cannot derive Json. [cap_deserialize]

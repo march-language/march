@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------- errors/refinement_violated_4.march
+
+refinement violation: argument `xs` of `head` does not satisfy precondition `len(_) > 0` [refinement_violated]
+note: guard the call (e.g. `if len(_) > 0 do …`) or pass a value known to satisfy it
+
+20 |     head([])
+         ^^^^^^^^
+
+
+    this argument must satisfy `len(_) > 0`:
+
+20 |     head([])
+              ^^
+    run `march --explain refinement_violated`
+
+

@@ -1,0 +1,51 @@
+---
+layout: docs
+title: "linear_discarded"
+permalink: /docs/errors/linear_discarded/
+---
+
+# `linear_discarded`: `_` discards a linear value
+
+A linear value is bound to `_` (or matched by a `_` pattern). A wildcard is
+not a use: it drops the value.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+  always_linear type Token = Token(Int)
+
+  fn main(_console : Cap(IO.Console)) do
+    let _ = Token(1)
+    println("dropped")
+  end
+end
+```
+
+## The fix
+
+Bind the value to a name and pass it to something that consumes it.
+
+```march
+mod Main do
+  needs IO.Console
+  always_linear type Token = Token(Int)
+
+  fn consume(t : Token) : Int do
+    match t do Token(n) -> n end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let t = Token(1)
+    println(int_to_string(consume(t)))
+  end
+end
+```
+
+## Why the rule exists
+
+Same reason as `linear_never_used`: a linear value's release must happen,
+and `_` is the easiest way to drop one by accident.
+
+See also: [the language reference](../linear-types.md).

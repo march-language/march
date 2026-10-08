@@ -327,7 +327,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          checker supports, or remove `cap verified` from this module — it asks \
          for every obligation to be discharged"
       in
-      Err.error errctx ~span
+      Err.error ~code:Err.Code.refinement_unverified errctx ~span
         (Printf.sprintf
            "`cap verified` module: cannot verify return type constraint `%s` on `%s` (%s: %s)\n%s"
            (pred_str ret_pred) fn_label (Obligation.reason_name r)
@@ -363,7 +363,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
               Err.report errctx
                 { March_errors.Errors.severity = March_errors.Errors.Error
                 ; span; message = msg; labels = []
-                ; notes = [hint]; code = None; fix = None };
+                ; notes = [hint]; code = March_errors.Errors.Code.return_refinement_violated; fix = None };
               true
             | _ -> false)
          | None -> false)
@@ -709,6 +709,8 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
              ~str_declared:(str_pre <> "")
              ~measure_attached:((record_sort <> None || scope_has_record) && !needs_axiom_preamble)
              vc
+         (* Last: an abstract symbol's argument sort is declared above. *)
+         ^ abstract_preamble vc
        in
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved; true
@@ -731,7 +733,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
               Err.report errctx
                 { March_errors.Errors.severity = March_errors.Errors.Error
                 ; span; message = msg; labels = []
-                ; notes = [hint]; code = None; fix = None }
+                ; notes = [hint]; code = March_errors.Errors.Code.return_refinement_violated; fix = None }
             end
           in
           (* An executed-and-confirmed witness reports with the failing call
@@ -757,7 +759,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
                    Err.report errctx
                      { March_errors.Errors.severity = March_errors.Errors.Error
                      ; span; message = msg; labels = []
-                     ; notes = [hint]; code = None; fix = None }
+                     ; notes = [hint]; code = March_errors.Errors.Code.return_refinement_violated; fix = None }
                  | None -> emit_error ())
               | _ -> emit_error ()
             end
@@ -1102,7 +1104,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                   self p but
             ; labels = []
             ; notes = [ Printf.sprintf "Every branch must produce a return value satisfying `%s`." p ]
-            ; code = None; fix = None };
+            ; code = March_errors.Errors.Code.return_refinement_violated; fix = None };
           Obligation.Violated
       in
       (* ── The single VC builder, shared by every accepted body shape ────────

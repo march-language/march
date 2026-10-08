@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------------- errors/parse_error_17.march
+
+This `fn` (line 10) has no matching `end`. [parse_error]
+
+10 |   fn f() do
+       ^^
+
+    I only noticed at the end of the file.
+    run `march --explain parse_error`
+
+fix [parse_error]:
+@@ after line 11 @@
+     1
++  end
+
+after fix: exit 0

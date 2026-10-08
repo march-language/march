@@ -81,6 +81,18 @@ type t = {
      per session mirrors the clang backend's natural per-session semantics
      (per-fragment .so + per-session dl handles closed by [cleanup]). *)
   mutable orc : Jit_orc.t option;
+  (* The remote shell's program, lowered once per session (see
+     [shell_compile]); [None] until the first input. *)
+  mutable shell_prog : shell_prog option;
+}
+
+and shell_prog = {
+  (* Lowered and TRMC'd, before mono: the program's fns, plus every library
+     fn an earlier input lowered first. *)
+  mutable sp_tir : March_tir.Tir.tir_module;
+  (* The table lowering reads types from: the program's, plus each input's
+     spans as it arrives. *)
+  sp_type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t;
 }
 
 (* Backend selector — see the plan file for the motivation.
@@ -194,7 +206,7 @@ let create ~runtime_so ?(clang="clang") () =
     global_type_defs = Hashtbl.create 16;
     stdlib_decls = [];
     loaded_tir_types = [];
-    orc = None } in
+    orc = None; shell_prog = None } in
   (* Pre-warm this session's LLJIT so its one-time libLLVM-load + JIT-target-machine
      setup cost (~80-90 ms, previously paid on the FIRST REPL fragment) happens
      here at startup instead, overlapping with the rest of [create]'s work.
@@ -487,6 +499,19 @@ let prev_slots_of ctx : March_tir.Llvm_emit.repl_slot_info list =
 (** Lower a single-expression module through the TIR pipeline.
     [repl_vars] are bare variable names of REPL globals that should be
     treated as borrowed by Perceus so they are never freed mid-session. *)
+(* TIR verifier (A1, lib/tir/tir_verify.ml) for the REPL/JIT pipeline, which
+   does not go through Contract_pipeline: on under --verify-tir /
+   MARCH_VERIFY_TIR=1.  No borrow map here (the REPL runs no
+   Borrow.infer_module); a fragment may name a function an earlier fragment
+   compiled, or a REPL global ([repl_vars]), neither of which is in this
+   module. *)
+let verify_repl ?(repl_vars = []) stage tir =
+  if March_tir.Tir_verify.enabled () then
+    March_tir.Tir_verify.enforce ~stage ?borrow_map:None
+      ~known_fn:(fun n -> March_tir.Llvm_ctx.is_repl_prior_fn n || List.mem n repl_vars)
+      tir;
+  tir
+
 let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
   (* [~shadow_builtins:false]: fragments bind fns by bare name through closure
      slots, and [is_c_runtime_fn] already keeps a runtime-defined name out of
@@ -500,15 +525,16 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      and the transform would silently see nothing.  Unconditional, like the
      compiled pipeline, and idempotent, so re-lowering an already-transformed
      module is a no-op. *)
-  let tir = March_tir.Trmc.transform_module tir in
+  let tir = verify_repl ~repl_vars "tir-lower" tir in
+  let tir = verify_repl ~repl_vars "tir-trmc" (March_tir.Trmc.transform_module tir) in
   let iface_methods = March_tir.Lower.get_iface_methods () in
-  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = verify_repl ~repl_vars "tir-mono" (March_tir.Mono.monomorphize ~iface_methods tir) in
   (* Policy audit — report any Tagged(_, P) violations before defun. *)
   let violations = March_tir.Policy_dce.audit tir in
   List.iter (fun (_fn_name, msg) ->
     Printf.eprintf "Error: %s\n\n" msg
   ) violations;
-  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = verify_repl ~repl_vars "tir-defun" (March_tir.Defun.defunctionalize tir) in
   (* [~repl:true] must track [Llvm_emit]'s [ctx.repl] exactly (every emission
      path in this file passes [~repl:true]): it is what tells Perceus that a
      capture-free closure is a real per-materialization [march_alloc] here
@@ -521,9 +547,9 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      [~repl:true] ctx the emitter builds), replaces the old process-wide
      [force_disable] latch. *)
   let k_table = March_tir.Kind.of_module ~unboxing:false tir in
-  let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir in
-  let tir = March_tir.Escape.escape_analysis ~k_table tir in
-  tir
+  let tir = verify_repl ~repl_vars "tir-perceus"
+      (March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir) in
+  verify_repl ~repl_vars "tir-escape" (March_tir.Escape.escape_analysis ~k_table tir)
 
 (* ── Heap pretty-printer ───────────────────────────────────────────── *)
 (* March heap layout (march_hdr):
@@ -1262,7 +1288,8 @@ let run_expr ctx ~tc_env m =
   let type_map = checked_type_map (time_phase "typecheck"
     (fun () -> March_typecheck.Typecheck.check_module_with_env env m)) in
   let tir = time_phase "lower+mono+opt"
-    (fun () -> lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m) in
+    (fun () -> with_prior_fns ctx (fun () ->
+         lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m)) in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
   let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name = "main") tir.March_tir.Tir.tm_fns with
@@ -1391,7 +1418,10 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
          analogous reused env. *)
       refs = ref []; current_decl = ref "" } in
   let type_map = checked_type_map (March_typecheck.Typecheck.check_module_with_env env m) in
-  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
+  (* [with_prior_fns]: the TIR verifier (when on) must see the functions
+     earlier fragments compiled, exactly as the emitter does. *)
+  let tir = with_prior_fns ctx (fun () ->
+      lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m) in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
   let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
@@ -1884,7 +1914,7 @@ let create_shell ?(clang = "clang") () =
     compiled_fns = Hashtbl.create 1; wrap_defined = Hashtbl.create 1;
     fn_fingerprints = Hashtbl.create 1; global_tir_tys = Hashtbl.create 16;
     global_type_defs = Hashtbl.create 16; stdlib_decls = [];
-    loaded_tir_types = []; orc = None }
+    loaded_tir_types = []; orc = None; shell_prog = None }
 
 let shell_set_slot_base ctx base = ctx.next_slot <- base
 
@@ -1906,6 +1936,7 @@ type shell_fragment = {
   sf_so    : string;               (** path of the compiled .so *)
   sf_entry : string;               (** its one exported symbol *)
   sf_ret   : March_tir.Tir.ty;     (** the entry's return type *)
+  sf_caps  : string list;          (** the capabilities its code uses, sorted *)
 }
 
 (** The shell fragment's function.  It is `main` because monomorphisation
@@ -1921,12 +1952,37 @@ let shell_program_decls (decls : March_ast.Ast.decl list) =
       | March_ast.Ast.DFn (d, _) -> d.March_ast.Ast.fn_name.March_ast.Ast.txt <> "main"
       | _ -> true) decls
 
+(** Lower the program for the shell, once per session (see [shell_compile]).
+    The shell calls it at session start, so no input pays for it. *)
+let shell_program_lowered ctx ~program_name ~program_decls ~program_type_map =
+  match ctx.shell_prog with
+  | Some sp -> sp
+  | None ->
+    (* Named as the program's entry module, whose members the node's build
+       emits bare.  File "" (an input's), so no declaration counts as the
+       entry file's: the shell lowers no builtin shadows. *)
+    let program = { March_ast.Ast.mod_name =
+                      { March_ast.Ast.txt = program_name;
+                        span = { March_ast.Ast.dummy_span with file = "" } };
+                    mod_decls = shell_program_decls program_decls } in
+    let type_map = Hashtbl.copy program_type_map in
+    let tir = time_phase "lower-program" (fun () ->
+        let tir = March_tir.Lower.lower_module ~type_map ~shadow_builtins:false
+            ~resumable:true program in
+        March_tir.Trmc.transform_module tir) in
+    let sp = { sp_tir = tir; sp_type_map = type_map } in
+    ctx.shell_prog <- Some sp;
+    sp
+
+let shell_lower_program ctx ~program_name ~program_decls ~program_type_map =
+  ignore (shell_program_lowered ctx ~program_name ~program_decls ~program_type_map)
+
 (** Compile one shell input (already wrapped as a module whose
     [shell_entry_fn] is the input) against the program.  [store_as] stores the result in that slot
     and makes the entry return nothing useful (an init fragment); otherwise
     the entry returns the value of [main] (a String: the caller wraps the
     input in its renderer).  Raises [Typecheck_failed] / [Failure]. *)
-let shell_compile ?triple ctx ~tc_env ~(program_name : string)
+let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
     ~(program_decls : March_ast.Ast.decl list)
     ~(program_type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t)
     ?store_as (m : March_ast.Ast.module_) : shell_fragment =
@@ -1941,34 +1997,54 @@ let shell_compile ?triple ctx ~tc_env ~(program_name : string)
      stdlib/app body it reaches, typed. *)
   let type_map = Hashtbl.copy program_type_map in
   Hashtbl.iter (fun k v -> Hashtbl.replace type_map k v) input_map;
-  (* Lower the fragment TOGETHER with the program, through the full path the
+  (* The program is lowered ONCE per session, through the full path the
      native build uses (imports, aliases, actors and externs of every module,
-     a library on MARCH_LIB_PATH included), then keep only what the
-     fragment's `main` reaches.  The REPL's lazy per-module lowering cannot
-     do this: it re-reads stdlib files from disk and ignores `import`, so a
-     library like Depot (`import Encode`, then a bare `encode(..)`) did not
-     lower.  The prune runs after monomorphisation, where interface impls are
-     tied to their uses, and before the RC passes, so those run on the
-     fragment alone. *)
-  (* Named as the program's entry module, whose members the node's build
-     emits bare; an input's self-qualified `DepotNode.pg` is stripped to
-     `pg` as the entry's own desugar does (typechecking accepted both). *)
-  let combined = { March_ast.Ast.mod_name =
-                     { m.March_ast.Ast.mod_name with March_ast.Ast.txt = program_name };
-                   mod_decls = shell_program_decls program_decls
-                               @ March_desugar.Desugar.strip_entry_self_qual
-                                   ~members_of:program_decls program_name
-                                   m.March_ast.Ast.mod_decls } in
-  let tir = time_phase "lower+mono+opt" (fun () ->
-      let tir = March_tir.Lower.lower_module ~type_map ~shadow_builtins:false combined in
-      let tir = March_tir.Trmc.transform_module tir in
-      let iface_methods = March_tir.Lower.get_iface_methods () in
-      let tir = March_tir.Mono.monomorphize ~iface_methods tir in
-      let tir = March_tir.Defun.defunctionalize tir in
-      let tir = March_tir.Dce.prune_unreachable tir in
-      let k_table = March_tir.Kind.of_module ~unboxing:false tir in
-      let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir in
-      March_tir.Escape.escape_analysis ~k_table tir) in
+     a library on MARCH_LIB_PATH included), and kept resumable; each input
+     is then lowered on top of it with [Lower.lower_more].  The REPL's lazy
+     per-module lowering cannot do this: it re-reads stdlib files from disk
+     and ignores `import`, so a library like Depot (`import Encode`, then a
+     bare `encode(..)`) did not lower.  Lowering the whole program again for
+     every input cost ~200-270 ms for a Depot-sized one. *)
+  let sp = shell_program_lowered ctx ~program_name ~program_decls ~program_type_map in
+  Hashtbl.iter (fun k v -> Hashtbl.replace sp.sp_type_map k v) input_map;
+  (* An input's self-qualified `DepotNode.pg` is stripped to `pg`, as the
+     entry's own desugar does (typechecking accepted both spellings). *)
+  let decls = March_desugar.Desugar.strip_entry_self_qual
+      ~members_of:program_decls program_name m.March_ast.Ast.mod_decls in
+  let input_fns = time_phase "lower" (fun () ->
+      let fns, types = March_tir.Lower.lower_more decls in
+      let fns = (March_tir.Trmc.transform_module
+                   { sp.sp_tir with March_tir.Tir.tm_fns = fns }).March_tir.Tir.tm_fns in
+      (* Library fns this input lowered first belong to the program from now
+         on: a later input reaching them finds them already lowered.  Empty
+         under `--compile`'s program, which declares every stdlib and
+         MARCH_LIB_PATH module itself; kept for a module it does not. *)
+      let mine, lib = List.partition (fun (f : March_tir.Tir.fn_def) ->
+          f.fn_name = shell_entry_fn) fns in
+      if lib <> [] || types <> [] then
+        sp.sp_tir <- { sp.sp_tir with
+                       tm_fns = sp.sp_tir.tm_fns @ lib;
+                       tm_types = sp.sp_tir.tm_types @ types };
+      mine) in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = { sp.sp_tir with March_tir.Tir.tm_fns = sp.sp_tir.tm_fns @ input_fns } in
+  (* Keep only what the input's `main` can reach before mono, which
+     otherwise specialises the whole program for every input.  An interface
+     method call names no impl until mono picks one, so every impl is a root. *)
+  let tir = time_phase "prune-pre" (fun () ->
+      let impls = Hashtbl.fold (fun _ rows acc -> List.map snd rows @ acc)
+          iface_methods [] in
+      let pruned = March_tir.Dce.prune_unreachable
+          { tir with March_tir.Tir.tm_exports = impls } in
+      { pruned with March_tir.Tir.tm_exports = [] }) in
+  let tir =
+      let tir = time_phase "mono" (fun () -> March_tir.Mono.monomorphize ~iface_methods tir) in
+      let tir = time_phase "defun" (fun () -> March_tir.Defun.defunctionalize tir) in
+      let tir = time_phase "prune" (fun () -> March_tir.Dce.prune_unreachable tir) in
+      time_phase "rc" (fun () ->
+          let k_table = March_tir.Kind.of_module ~unboxing:false tir in
+          let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir in
+          March_tir.Escape.escape_analysis ~k_table tir) in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
   let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
       f.fn_name = shell_entry_fn) tir.March_tir.Tir.tm_fns with
@@ -1982,6 +2058,24 @@ let shell_compile ?triple ctx ~tc_env ~(program_name : string)
   let n = next_id ctx in
   let entry = Printf.sprintf "repl_%d" n in
   let sw = fresh_wrap_state ctx in
+  (* R5.4: refuse an input whose code differs from the node's build (see
+     shell_ident.ml), before paying for clang. *)
+  (match ident with
+   | Some c ->
+     (match Shell_ident.fragment_skew c ~types:tir.March_tir.Tir.tm_types (main_fn :: fns) with
+      | [] -> ()
+      | diffs ->
+        let shown = List.filteri (fun i _ -> i < 8) diffs in
+        let more = List.length diffs - List.length shown in
+        failwith (String.concat "\n  "
+          ("this input reaches code that differs from the node's build:" :: shown
+           @ (if more > 0 then [ Printf.sprintf "... and %d more" more ] else []))))
+   | None -> ());
+  (* The capabilities are those of the C symbols the emitted code calls, as
+     for a binary's cap markers (llvm_toplevel.ml): a fragment carries every
+     body it runs, so this covers what it reaches through program and library
+     code, not only the caps the input names. *)
+  March_tir.Llvm_builtins.reset_called_syms ();
   let ir = time_phase "emit_ir" (fun () ->
       March_tir.Llvm_emit.emit_repl_expr
         ~n ~ret_ty:main_fn.fn_ret_ty
@@ -1994,6 +2088,20 @@ let shell_compile ?triple ctx ~tc_env ~(program_name : string)
            type names take tags from a counter over this list). *)
         ~types:tir.March_tir.Tir.tm_types
         main_fn.fn_body) in
+  let caps =
+    March_tir.Llvm_builtins.called_c_symbols ()
+    |> List.filter_map March_caps.Cap_symbols.cap_of_symbol
+    |> List.sort_uniq String.compare in
+  (* The node checks this against the signed `caps:` after loading the
+     fragment (runtime/march_shell.c), so a fragment cannot run under a
+     narrower declaration than its own code. *)
+  let manifest = String.concat "\n" caps in
+  let ir = ir ^ Printf.sprintf
+      "\n@__march_cap_manifest = constant [%d x i8] c\"%s\\00\"\n"
+      (String.length manifest + 1)
+      (String.concat "" (List.map (fun c ->
+           if c = '\n' then "\\0A" else String.make 1 c)
+           (List.of_seq (String.to_seq manifest)))) in
   let base = Filename.concat ctx.tmp_dir (Printf.sprintf "shell_%d" n) in
   let ll = base ^ ".ll" and so = base ^ ".so" in
   let oc = open_out ll in
@@ -2018,11 +2126,12 @@ let shell_compile ?triple ctx ~tc_env ~(program_name : string)
      the fragment bind to the fragment's own copies. *)
   let export_flags =
     if target_is_mac then
-      Printf.sprintf " -undefined dynamic_lookup -Wl,-exported_symbol,_%s" entry
+      Printf.sprintf " -undefined dynamic_lookup -Wl,-exported_symbol,_%s \
+                      -Wl,-exported_symbol,___march_cap_manifest" entry
     else begin
       let vs = base ^ ".map" in
       let oc = open_out vs in
-      Printf.fprintf oc "{ global: %s; local: *; };\n" entry;
+      Printf.fprintf oc "{ global: %s; __march_cap_manifest; local: *; };\n" entry;
       close_out oc;
       Printf.sprintf " -Wl,--version-script=%s -Wl,-Bsymbolic" (Filename.quote vs)
     end in
@@ -2034,4 +2143,4 @@ let shell_compile ?triple ctx ~tc_env ~(program_name : string)
     let msg = try In_channel.with_open_text log In_channel.input_all with _ -> "" in
     failwith ("shell: clang failed:\n" ^ msg)
   end;
-  { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty }
+  { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty; sf_caps = caps }

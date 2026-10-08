@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR -------------- errors/linear_never_used_15.march
+
+The linear value `s` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+14 |     println(int_to_string(n + LinearMap.drain(m, 0, fn (acc, k, s) -> acc + k)))
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+

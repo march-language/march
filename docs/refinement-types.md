@@ -2008,12 +2008,111 @@ signature) does not constrain what may be passed for it: `p` stands for
 whatever that callable returns, so any callable satisfies it and the pass site
 records no obligation.
 
+### Abstract refinements: `filter` keeps what its predicate says
+
+`List.filter`'s signature names a predicate `p` and says the result's elements
+satisfy it:
+
+```march
+fn filter(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)})
+    : {List({a | p(_)}) | subset(elts(_), elts(xs))}
+```
+
+`p` is an *abstract refinement*: the callback's codomain `_ == p(x)` defines
+it, and at each call it stands for whatever the passed predicate computes. So
+with `sum_pos(xs : List({Int | _ > 0}))`:
+
+```march
+sum_pos(List.filter(ys, fn y -> y > 0))     -- proved
+let zs = List.filter(ys, fn y -> y > 0)
+sum_pos(zs)                                 -- proved
+sum_pos(List.filter(pos, fn y -> y < 100))  -- proved when pos : List({Int | _ > 0}):
+                                            --   the input's own fact carries over
+sum_pos(List.filter(ys, fn y -> y >= 0))    -- skip: abstract-refinement-too-weak
+```
+
+At the call the checker substitutes the lambda's body for `p` and decides one
+implication, "body ⇒ demand", for an arbitrary element. A predicate too weak
+for the demand is a skip, **never a violation** — `List.filter([], …)` is
+fine whatever the predicate — so it is an error only under `cap verified`
+(reason `abstract-refinement-too-weak`, naming the lambda and the demand).
+Inside `filter` itself `p` is an uninterpreted function: the body proves its
+own return from the guard `if pred(h)` and the callback's contract, so the
+fact is proved, not assumed.
+
+A user function can declare one the same way: a callback parameter whose
+codomain is `{Bool | _ == p(x)}` over its domain binder `x`, and `p(_)` in an
+element slot of the return (`List({a | p(_)})`). Its body must prove that
+return like any other element contract; a body that does not (one returning
+its input unfiltered, say) lends nothing at its calls. Passing any callable
+for the defining parameter is always allowed — `p` is, by definition, what it
+returns — so it owes no codomain obligation where it is passed.
+
+`p` may also sit in a *parameter's* element slot, where it is an obligation
+on the caller: with `need(xs : List({a | p(_)}), keep : ({x : a | true}) ->
+{Bool | _ == p(x)})`, the call `need(pos, fn y -> y > 0)` is checked like a
+call to a function taking `List({Int | _ > 0})` — proved for
+`pos : List({Int | _ > 0})` or `[1, 2]`, a violation for `[0, 1]`, a skip for
+an unrefined list — and inside `need`, `xs`'s elements carry `p`.
+
+**What can instantiate `p`.** Besides an inline lambda:
+
+```march
+fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
+
+sum_pos(List.filter(ys, is_pos))              -- a named predicate: proved
+sum_pos(List.filter(ys, fn y -> is_pos(y)))   -- the same (`fn y -> g(y)` is `g`)
+let keep = fn y -> y > 0
+sum_pos(List.filter(ys, keep))                -- a let-bound lambda: proved
+fn keep_pos(ys : List(Int), k : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : Int do
+  sum_pos(List.filter(ys, k))                 -- a callback parameter: proved
+end
+```
+
+A named function or callback contributes its *proved* return `{Bool | _ == e}`
+(either side of the `==`) over its one parameter. A return the definition does
+not prove never reaches a caller, so it never instantiates `p` either; a
+predicate with no such contract (`fn is_pos(n : Int) : Bool`) instantiates
+nothing. A `let`-bound lambda is read as the lambda itself (it shadows a
+top-level function of the same name), and stops counting once its name is
+rebound.
+
+**The standard library.** `List.filter`, `List.find`
+(`Option({a | p(_)})`), `List.take_while` and `Option.filter` all carry `p`:
+
+```march
+fn one_pos(o : Option({Int | _ > 0})) : Int do … end
+one_pos(List.find(ys, fn y -> y > 0))         -- proved
+one_pos(Option.filter(o, is_pos))             -- proved
+sum_pos(List.take_while(ys, is_pos))          -- proved
+```
+
+What it does not do (reason `abstract-refinement-uninstantiated` where a
+demand meets one of these):
+
+- **A predicate with no proved `{Bool | _ == …}` contract over one parameter**
+  instantiates nothing: no contract is inferred from a body, and a
+  two-parameter function (`gt(n, m)`, even as `fn y -> gt(y, 0)`) is declined.
+- **A lambda that mentions any name besides its parameter** (`fn y -> y > m`)
+  is declined rather than read with `m` unknown, and so is one whose body
+  calls a function other than as the single eta-reducible call
+  (`fn y -> is_pos(y) && y < 100`).
+- **One argument only.** `Map.filter`'s `(k, v) -> Bool` and a `fold_left`
+  accumulator invariant would need a two-argument `p(k, v)`.
+- **Not every combinator.** `List.partition` would need `p` inside a tuple and
+  under `not`; `drop_while` keeps no element fact; `Deque.filter` does not
+  declare one.
+- **`p` only in an element slot**, not on a bare scalar return
+  (`(a) -> {a | p(_)}`), and not through `interface`/`impl` dispatch.
+- **No shorthand.** Liquid Haskell writes `a<p>`; March has only the spelled-out
+  form above.
+
 ### What element refinements do not do
 
-- **`filter` does not produce a refinement it was not given.**
-  `sum_pos(List.filter(ys, fn y -> y > 0))` is a skip: stating "the predicate
-  held for every element kept" needs a predicate parameterised by another
-  predicate (Liquid Haskell's abstract refinements).
+- **Only four combinators carry an abstract refinement** (`List.filter`,
+  `List.find`, `List.take_while`, `Option.filter`), instantiated from a lambda,
+  a named predicate with a proved contract, a callback parameter or a
+  `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
 - **Only a container demand is traced.** A single element flowing into a scalar
   position (`need_pos(Option.unwrap_or(o, 1))`, the result of `fold_left`) is
   not checked through the callee's sources.

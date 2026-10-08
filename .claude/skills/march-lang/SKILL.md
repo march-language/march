@@ -1103,9 +1103,12 @@ The OCaml test suites live under `test/`, split by area: `test_compiler.ml`, `te
 ```ocaml
 (* Helper functions *)
 let parse_module src =
-  let lexbuf = Lexing.from_string src in
-  March_parser.Parser.module_
-    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  (* The one parse entry point; returns diagnostics instead of raising. *)
+  match March_parser.Parse.module_ ~filename:"test.march" src with
+  | Ok m -> m
+  | Error diags ->
+    failwith (String.concat "\n"
+      (List.map (fun (d : March_errors.Errors.diagnostic) -> d.message) diags))
 
 let parse_and_desugar src =
   March_desugar.Desugar.desugar_module (parse_module src)

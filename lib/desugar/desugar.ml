@@ -449,13 +449,13 @@ let csrf_form_close_pos (s : string) : int option =
     uses — loud failure, never silently-wrong desugared code. *)
 let expr_err_ctx : Err.ctx option ref = ref None
 
-let desugar_expr_error ~(sp : span) ?hint msg : unit =
+let desugar_expr_error ~code ~(sp : span) ?hint msg : unit =
   match !expr_err_ctx with
   | Some ctx ->
     Err.report ctx
       { severity = Err.Error; span = sp; message = msg; labels = [];
         notes = (match hint with Some h -> [h] | None -> []);
-        code = None; fix = None }
+        code; fix = None }
   | None ->
     let pos = { Lexing.pos_fname = sp.file;
                 pos_lnum = sp.start_line;
@@ -466,13 +466,13 @@ let desugar_expr_error ~(sp : span) ?hint msg : unit =
 (* Same sink, Warning severity. Unlike the error path this does NOT raise when
    no context is installed: a warning that aborts the REPL would be worse than
    the thing it warns about. *)
-let desugar_expr_warning ~(sp : span) ?hint msg : unit =
+let desugar_expr_warning ~code ~(sp : span) ?hint msg : unit =
   match !expr_err_ctx with
   | Some ctx ->
     Err.report ctx
       { severity = Err.Warning; span = sp; message = msg; labels = [];
         notes = (match hint with Some h -> [h] | None -> []);
-        code = Some "redundant_csrf_token"; fix = None }
+        code; fix = None }
   | None -> ()
 
 (** Inject CSRF hidden-input string expressions into a ~H parts list.
@@ -556,7 +556,7 @@ let inject_csrf_tokens (parts : expr list) (sp : span) : expr list =
               returns IOList. Skip, and say so: the explicit call is now
               redundant, and silence would leave the author believing it is
               load-bearing. *)
-           desugar_expr_warning ~sp
+           desugar_expr_warning ~code:Err.Code.redundant_csrf_token ~sp
              ~hint:("Remove the explicit token — ~H injects one automatically \
                      for a mutating <form> whenever `conn` is in scope.")
              "This <form> already interpolates a CSRF token, so ~H did not \
@@ -631,7 +631,7 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
       (match March_ctxesc.Automaton.consume_literal tbl !ctx s with
        | Ok o -> ctx := o.March_ctxesc.Automaton.ctx; [lit o.March_ctxesc.Automaton.emit psp]
        | Error (msg, _off) ->
-         desugar_expr_error ~sp:psp msg;
+         desugar_expr_error ~code:Err.Code.template_unsafe_interpolation ~sp:psp msg;
          [part])
     | EApp (EVar { txt = "to_string"; _ }, args, psp) ->
       let inner =
@@ -650,7 +650,7 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
                  [ELit (LitInt id, psp); inner], psp) in
          if subst = "" then [call] else [lit subst psp; call]
        | Error diag ->
-         desugar_expr_error ~sp:psp
+         desugar_expr_error ~code:Err.Code.template_unsafe_interpolation ~sp:psp
            ~hint:(Printf.sprintf
                     "This interpolation is %s. Move the dynamic part into a \
                      value position instead."
@@ -662,7 +662,7 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
          content. If the walk says we are anywhere else, the template is
          malformed in a way that would splice into a tag. *)
       (if (!ctx).March_ctxesc.Context.state <> March_ctxesc.Context.Pcdata then
-         desugar_expr_error ~sp
+         desugar_expr_error ~code:Err.Code.template_fragment_position ~sp
            "A template fragment can only be inserted in element content, not \
             inside a tag or attribute.");
       [part]
@@ -671,7 +671,7 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
      the caller concatenates next would splice into it, which is exactly the
      composition hazard this analysis exists to stop. *)
   if not (March_ctxesc.Automaton.is_valid_terminal !ctx) then
-    desugar_expr_error ~sp
+    desugar_expr_error ~code:Err.Code.template_unterminated ~sp
       (Printf.sprintf
          "This ~H template does not end in a well-formed state — it ends %s. \
           Anything concatenated after it would be spliced into that position."
@@ -808,7 +808,7 @@ let rec desugar_expr (e : expr) : expr =
          | EAtom (a, args, epsp) -> PatAtom (a, List.map expr_to_pat args, epsp)
          | ETuple (es, epsp) -> PatTuple (List.map expr_to_pat es, epsp)
          | _ ->
-           desugar_expr_error ~sp
+           desugar_expr_error ~code:Err.Code.pipe_match_pattern ~sp
              ~hint:"Only constructors, variables, literals, and tuples are \
                     allowed as match arms in a `|>` pipe expression."
              "pipe-to-match: expression cannot be used as a pattern here.";
@@ -827,7 +827,7 @@ let rec desugar_expr (e : expr) : expr =
           The supported scrutinee-less form (`x |> (match do ... end)`)
           parses as ECond and is handled above; an explicit scrutinee
           here is always a mistake, so report it. *)
-       desugar_expr_error ~sp:match_sp
+       desugar_expr_error ~code:Err.Code.pipe_into_match ~sp:match_sp
          ~hint:"The piped value becomes the scrutinee. Use \
                 `x |> (match do pat -> ... end)` (no scrutinee), or write \
                 `match x do ... end` directly."
@@ -1038,7 +1038,7 @@ let rec desugar_expr (e : expr) : expr =
           parts
       in
       if has_hole then
-        desugar_expr_error ~sp
+        desugar_expr_error ~code:Err.Code.sigil_interpolation ~sp
           ~hint:("Build the value programmatically instead — e.g. parse a "
                  ^ "literal document and set fields on it — so the "
                  ^ "interpolated value is data rather than source text.")
@@ -1415,7 +1415,7 @@ let check_app_main_exclusivity (errors : Err.ctx) (decls : decl list) : unit =
       | _ -> None) decls in
   match main_span, app_span with
   | Some ms, Some as_ ->
-    Err.error errors ~span:ms
+    Err.error ~code:Err.Code.main_and_app errors ~span:ms
       (Printf.sprintf
          "A module cannot define both `main()` and an `app` declaration.\n\
           `main()` is for programs that run once and exit.\n\
@@ -1492,7 +1492,7 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
            | params ->
              let n = List.length params in
              let n_caps = List.length (List.filter cap_param params) in
-             Err.error errors ~span:clause.fc_span
+             Err.error ~code:Err.Code.main_signature errors ~span:clause.fc_span
                (Printf.sprintf
                   "`main` must take zero arguments, or only arguments of type `Cap(IO)` (or narrower points of the IO lattice, e.g. `Cap(IO.Console)`) — the capabilities the runtime GRANTS the program at startup; the whole program is then held to their union.\n\
                    Found %d parameter%s, %d of which %s a capability.\n\

@@ -120,6 +120,30 @@ let severity_to_lsp (sev : Err.severity) =
   | Err.Warning -> Lsp.Types.DiagnosticSeverity.Warning
   | Err.Hint    -> Lsp.Types.DiagnosticSeverity.Hint
 
+(* A diagnostic's mechanical fix, carried to the editor in the LSP
+   diagnostic's [data] field as the same JSON `--check-json` prints
+   (`{"fix": {"kind": "replace", ...}}`), so the generic quick-fix adapter in
+   [Code_actions_diag] can offer every compiler fix without a per-message
+   rule, and any other client can apply it too (D4, diagnostics plan §8). *)
+let fix_data (fix : Err.fix_kind option) : Yojson.Safe.t option =
+  match fix with
+  | None -> None
+  | Some (Err.FInsert { after_line; text }) ->
+    Some (`Assoc [ ("fix", `Assoc [ ("kind", `String "insert");
+                                    ("after_line", `Int after_line);
+                                    ("text", `String text) ]) ])
+  | Some (Err.FDelete { start_line; end_line }) ->
+    Some (`Assoc [ ("fix", `Assoc [ ("kind", `String "delete");
+                                    ("start_line", `Int start_line);
+                                    ("end_line", `Int end_line) ]) ])
+  | Some (Err.FReplace { span; text }) ->
+    Some (`Assoc [ ("fix", `Assoc [ ("kind", `String "replace");
+                                    ("start_line", `Int span.Ast.start_line);
+                                    ("start_col", `Int span.Ast.start_col);
+                                    ("end_line", `Int span.Ast.end_line);
+                                    ("end_col", `Int span.Ast.end_col);
+                                    ("text", `String text) ]) ])
+
 let diag_to_lsp ~filename (d : Err.diagnostic) =
   let is_user =
     d.span.Ast.file = filename ||
@@ -154,7 +178,13 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
         String.concat " "
           (flatten d.message :: List.map (fun n -> "note: " ^ flatten n) d.notes)
     in
-    let code = Option.map (fun s -> `String s) d.code in
+    let code = Some (`String d.code) in
+    (* Link the code to its `march --explain` page on the site, for the codes
+       that have one (specs/lang/errors/<slug>.md, rendered to docs/errors/). *)
+    let codeDescription =
+      Option.map (fun href -> Lsp.Types.CodeDescription.create ~href:(Lsp.Uri.of_string href))
+        (March_errors.Explain.url_of_code d.code)
+    in
     let relatedInformation =
       let infos = List.filter_map (fun (lbl : Err.label) ->
         if lbl.lbl_span.Ast.start_line <= 0 then None
@@ -180,7 +210,9 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
       ~message:(`String message)
       ~source:"march"
       ?code
+      ?codeDescription
       ?relatedInformation
+      ?data:(fix_data d.fix)
       ())
 
 (* ------------------------------------------------------------------ *)
@@ -2458,7 +2490,9 @@ let analyse ~filename ~src : t =
     Lsp.Types.Diagnostic.create
       ~range:(Pos.span_to_lsp_range sp)
       ~severity:Lsp.Types.DiagnosticSeverity.Error
-      ~message:(`String msg) ~source:"march" ()
+      ~message:(`String msg) ~source:"march"
+      ~code:(`String d.code)
+      ?data:(fix_data d.fix) ()
   in
   match parse_result with
   | Error diags ->

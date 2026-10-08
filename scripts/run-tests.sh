@@ -16,6 +16,7 @@
 #   scripts/run-tests.sh refinecheck     # the z3-backed refinement-check suite
 #
 # Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
+# errors (the golden rendered-diagnostic corpus, test/errors/),
 # jsonrpc, incremental, query_cli, refinecheck.  The first four are
 # test/run_<name>.exe; stdlib_march is test/test_stdlib_march.exe, which runs
 # the .march test files under test/stdlib/; test_jit is test/test_jit.exe,
@@ -112,7 +113,8 @@ fi
 # feature in the tree and still see a fully green `scripts/run-tests.sh`.  They
 # live under lsp/test/, not test/, so the exe path is per-runner from here on.
 ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib test_stdlib_march test_jit
-             test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli test_refinecheck)
+             test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli test_refinecheck
+             run_errors)
 # Suites whose executable is lsp/test/<name>.exe rather than test/<name>.exe.
 LSP_RUNNERS=(test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli)
 # Runners excluded from the DEFAULT (no suite names given) set under -q; see

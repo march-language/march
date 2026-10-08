@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/let_star_no_flat_map_1.march","start_line":8,"start_col":4,"end_line":8,"end_col":14,"message":"`let*` needs `Widget.flat_map`, but it doesn't exist.\nDefine `flat_map(x : Widget(a), f : a -> Widget(b)) : Widget(b)` in a module named `Widget` to make `let*` work with `Widget`.","code":"let_star_no_flat_map","fix":null,"labels":[],"notes":[]}

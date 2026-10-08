@@ -1,0 +1,39 @@
+exit: 1
+-- ERROR ---------------------- errors/cap_grant_11.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+51 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+-- ERROR ---------------------- errors/cap_grant_11.march
+
+refinement violation: argument `k` of `run` does not satisfy precondition `k != 0` [refinement_violated]
+note: guard the call (e.g. `if k != 0 do …`) or pass a value known to satisfy it
+
+52 |     println(int_to_string(run(Box(4), 0)))
+                               ^^^^^^^^^^^^^^
+
+
+    this argument must satisfy `k != 0`:
+
+52 |     println(int_to_string(run(Box(4), 0)))
+                                           ^
+    run `march --explain refinement_violated`
+
+
+
+fix [cap_grant]:
+@@ lines 51-51 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+refinement violation: argument `k` of `run` does not satisfy precondition `k != 0` [refinement_violated]

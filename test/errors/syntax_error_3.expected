@@ -1,0 +1,8 @@
+exit: 1
+-- ERROR -------------------- errors/syntax_error_3.march
+
+I got stuck here: [syntax_error]
+
+13 |       max_restarts 3 within 5
+           ^^^^^^^^^^^^
+

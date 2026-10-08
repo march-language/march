@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/linear_discarded_10.march","start_line":10,"start_col":9,"end_line":10,"end_col":10,"message":"This `_` discards a linear value of type `Option(S1)`.\nLinear values must be consumed exactly once. Bind it to a name and pass it to something that consumes it.","code":"linear_discarded","fix":null,"labels":[],"notes":[]}

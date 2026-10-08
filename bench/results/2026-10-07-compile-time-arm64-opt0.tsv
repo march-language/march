@@ -1,0 +1,55 @@
+corpus	scenario	run	opt	status	total_ms	front_ms	tir_ms	back_ms	cpu_ms	post_opt_ms
+small	cold	1	0	miss	7304	1543	1580	4069	5830	222
+small	cold	2	0	miss	7327	1485	1558	4184	5740	223
+small	cold	3	0	miss	7379	1469	1601	4183	5780	226
+small	warm	1	0	src-hit	92				40	
+small	warm	2	0	src-hit	91				30	
+small	warm	3	0	src-hit	101				40	
+small	comment	1	0	miss	2749	423	1823	385	2510	230
+small	comment	2	0	miss	2643	418	1715	379	2450	230
+small	comment	3	0	miss	2504	421	1619	361	2390	241
+small	leaf	1	0	miss	2598	387	1618	474	2380	234
+small	leaf	2	0	miss	2697	475	1712	396	2460	234
+small	leaf	3	0	miss	2593	409	1642	431	2390	231
+small	sig	1	0	miss	2452	405	1602	343	2370	233
+small	sig	2	0	miss	2664	428	1732	394	2420	225
+small	sig	3	0	miss	2709	408	1780	418	2420	237
+small	field	1	0	miss	2529	425	1655	342	2390	229
+small	field	2	0	miss	2639	421	1665	440	2380	227
+small	field	3	0	miss	2518	420	1628	357	2400	242
+bench	cold	1	0	miss	6867	1431	1567	3730	5640	241
+bench	cold	2	0	miss	13664	2141	2728	8664	6810	517
+bench	cold	3	0	miss	8225	1969	1654	4452	6190	224
+bench	warm	1	0	src-hit	94				40	
+bench	warm	2	0	src-hit	81				30	
+bench	warm	3	0	src-hit	99				30	
+bench	comment	1	0	miss	2480	394	1626	354	2370	226
+bench	comment	2	0	miss	2854	428	1785	498	2470	287
+bench	comment	3	0	miss	2773	455	1840	364	2460	230
+bench	leaf	1	0	miss	2800	417	1901	337	2420	252
+bench	leaf	2	0	miss	2470	386	1577	401	2340	226
+bench	leaf	3	0	miss	2624	418	1695	341	2420	228
+bench	sig	1	0	n/a						
+bench	sig	2	0	n/a						
+bench	sig	3	0	n/a						
+bench	field	1	0	n/a						
+bench	field	2	0	n/a						
+bench	field	3	0	n/a						
+topology	cold	1	0	miss	14670	1561	2732	10236	11670	699
+topology	cold	2	0	miss	13186	1774	2792	8492	11520	624
+topology	cold	3	0	miss	13248	1702	2686	8728	11690	625
+topology	warm	1	0	src-hit	109				50	
+topology	warm	2	0	src-hit	151				40	
+topology	warm	3	0	src-hit	92				40	
+topology	comment	1	0	miss	8913	536	2833	5407	8270	692
+topology	comment	2	0	miss	9047	558	2986	5379	8520	695
+topology	comment	3	0	miss	8837	575	2976	5148	8160	672
+topology	leaf	1	0	miss	8796	656	2875	5112	8250	666
+topology	leaf	2	0	miss	8373	547	2791	4893	8080	640
+topology	leaf	3	0	miss	8418	539	2759	4984	8090	638
+topology	sig	1	0	n/a						
+topology	sig	2	0	n/a						
+topology	sig	3	0	n/a						
+topology	field	1	0	n/a						
+topology	field	2	0	n/a						
+topology	field	3	0	n/a						

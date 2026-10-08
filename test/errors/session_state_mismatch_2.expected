@@ -1,0 +1,10 @@
+exit: 1
+-- ERROR ---------- errors/session_state_mismatch_2.march
+
+Chan.close: channel is at `Recv(Int, End)` but I expected `End`. [session_state_mismatch]
+
+19 |     Chan.close(sc)
+         ^^^^^^^^^^^^^^
+
+
+

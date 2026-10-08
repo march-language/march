@@ -1,0 +1,9 @@
+mod Main do
+  needs IO.Console
+  always_linear type Token = Token(Int)
+
+  fn main(_console : Cap(IO.Console)) do
+    let _ = Token(1)
+    println("dropped")
+  end
+end

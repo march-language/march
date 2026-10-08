@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/parse_error_3.march","start_line":4,"start_col":12,"end_line":4,"end_col":16,"message":"I don't recognize `then` here — March uses do/end blocks instead.","code":"then_keyword","fix":{"kind":"replace","start_line":4,"start_col":12,"end_line":4,"end_col":16,"text":"do"},"labels":[],"notes":["if cond do\n    expr1\nelse\n    expr2\nend"]}

@@ -1,0 +1,30 @@
+exit: 1
+-- WARNING ------------------ errors/unused_binding_6.march
+
+Unused variable `x`. [unused_binding]
+Use `_` to mark intentionally unused params.
+
+6 |   fn drop_it(x) : Int do 0 end
+                 ^
+
+
+
+-- ERROR ------------------ errors/unused_binding_6.march
+
+`S1` is linear, but `drop_it` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]
+Consume the value here instead, or, if `drop_it` uses that parameter exactly once, mark it `linear` where `drop_it` is defined (`linear x : a`).
+
+8 |     println(int_to_string(drop_it(S1(1))))
+                              ^^^^^^^
+
+    run `march --explain linear_generic_param`
+
+
+
+fix [unused_binding]:
+@@ lines 6-6 @@
+-  fn drop_it(x) : Int do 0 end
++  fn drop_it(_x) : Int do 0 end
+
+after fix: exit 1
+`S1` is linear, but `drop_it` is generic in a parameter of that type, so it may drop or duplicate the value. [linear_generic_param]

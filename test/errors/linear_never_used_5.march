@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: The linear value `st` was never used
+mod Main do
+  needs IO.Console
+  -- A lambda checked against a known arrow type got no must-use check at its
+  -- close: the ELam arms never called check_linear_all_consumed, so a
+  -- callback could abandon the linear value it was handed. Accepted before
+  -- 2026-09-13.
+  always_linear type S1 = S1(Int)
+  fn run(k : S1 -> Int) : Int do k(S1(1)) end
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(run(fn st -> 0)))
+  end
+end

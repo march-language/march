@@ -1090,6 +1090,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="GlobalRegistry.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="GlobalRegistry.html">GlobalRegistry</a></div><div class="sb-sub"><a class="sl" href="GlobalRegistry.html#type-Entry"><span class="sb-kind" style="color:var(--ty)">T</span>Entry</a>
 <a class="sl" href="GlobalRegistry.html#type-Names"><span class="sb-kind" style="color:var(--ty)">T</span>Names</a>
 <a class="sl" href="GlobalRegistry.html#fn-all_entries"><span class="sb-kind" style="color:var(--fn)">F</span>all_entries</a>
+<a class="sl" href="GlobalRegistry.html#fn-collect_tombstones"><span class="sb-kind" style="color:var(--fn)">F</span>collect_tombstones</a>
 <a class="sl" href="GlobalRegistry.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
 <a class="sl" href="GlobalRegistry.html#fn-diff_entries"><span class="sb-kind" style="color:var(--fn)">F</span>diff_entries</a>
 <a class="sl" href="GlobalRegistry.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
@@ -1104,6 +1105,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="GlobalRegistry.html#fn-register_at"><span class="sb-kind" style="color:var(--fn)">F</span>register_at</a>
 <a class="sl" href="GlobalRegistry.html#fn-root_hash"><span class="sb-kind" style="color:var(--fn)">F</span>root_hash</a>
 <a class="sl" href="GlobalRegistry.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
+<a class="sl" href="GlobalRegistry.html#fn-tombstone_count"><span class="sb-kind" style="color:var(--fn)">F</span>tombstone_count</a>
 <a class="sl" href="GlobalRegistry.html#fn-unregister"><span class="sb-kind" style="color:var(--fn)">F</span>unregister</a>
 <a class="sl" href="GlobalRegistry.html#fn-unregister_own"><span class="sb-kind" style="color:var(--fn)">F</span>unregister_own</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Hamt.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Hamt.html">Hamt</a></div><div class="sb-sub"><a class="sl" href="Hamt.html#type-HEntry"><span class="sb-kind" style="color:var(--ty)">T</span>HEntry</a>
@@ -2254,6 +2256,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Result.html#fn-unwrap_or"><span class="sb-kind" style="color:var(--fn)">F</span>unwrap_or</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="RingBuf.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="RingBuf.html">RingBuf</a></div><div class="sb-sub"><a class="sl" href="RingBuf.html#fn-cap"><span class="sb-kind" style="color:var(--fn)">F</span>cap</a>
 <a class="sl" href="RingBuf.html#fn-clear"><span class="sb-kind" style="color:var(--fn)">F</span>clear</a>
+<a class="sl" href="RingBuf.html#fn-drop"><span class="sb-kind" style="color:var(--fn)">F</span>drop</a>
 <a class="sl" href="RingBuf.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="RingBuf.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="RingBuf.html#fn-is_full"><span class="sb-kind" style="color:var(--fn)">F</span>is_full</a>
@@ -2263,6 +2266,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="RingBuf.html#fn-pop"><span class="sb-kind" style="color:var(--fn)">F</span>pop</a>
 <a class="sl" href="RingBuf.html#fn-push"><span class="sb-kind" style="color:var(--fn)">F</span>push</a>
 <a class="sl" href="RingBuf.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
+<a class="sl" href="RingBuf.html#fn-snapshot"><span class="sb-kind" style="color:var(--fn)">F</span>snapshot</a>
 <a class="sl" href="RingBuf.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Scheduler.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Scheduler.html">Scheduler</a></div><div class="sb-sub"><a class="sl" href="Scheduler.html#fn-dropped_messages"><span class="sb-kind" style="color:var(--fn)">F</span>dropped_messages</a>
 <a class="sl" href="Scheduler.html#fn-live_procs"><span class="sb-kind" style="color:var(--fn)">F</span>live_procs</a>
@@ -2944,7 +2948,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Forge.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Forge</h3><p>forge_nb.march — Notebook package management</p><div class="st"><span>1 functions</span><span>0 types</span></div></div></a>
 <a href="Gen.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Gen</h3><p>Gen module: Hedgehog-style property-test value generators with integrated shrinking.</p><div class="st"><span>31 functions</span><span>4 types</span></div></div></a>
 <a href="GlobalPid.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>GlobalPid</h3><p>GlobalPid: a serializable, cluster-wide process handle (P1 L4 prerequisite).</p><div class="st"><span>6 functions</span><span>1 types</span></div></div></a>
-<a href="GlobalRegistry.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>GlobalRegistry</h3><p>GlobalRegistry: the cluster-wide name registry as a composite CRDT (P1 L5).</p><div class="st"><span>17 functions</span><span>2 types</span></div></div></a>
+<a href="GlobalRegistry.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>GlobalRegistry</h3><p>GlobalRegistry: the cluster-wide name registry as a composite CRDT (P1 L5).</p><div class="st"><span>19 functions</span><span>2 types</span></div></div></a>
 <a href="Hamt.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Hamt</h3><p>HAMT — Hash Array Mapped Trie engine.</p><div class="st"><span>6 functions</span><span>1 types</span></div></div></a>
 <a href="Handle.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Handle</h3><div class="st"><span>0 functions</span><span>0 types</span></div></div></a>
 <a href="Handshake.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Handshake</h3><p>Handshake: the net-kernel greeting + authentication decision.</p><div class="st"><span>11 functions</span><span>2 types</span></div></div></a>
@@ -3001,7 +3005,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Regex.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Regex</h3><p>Regex module: simple regular expression engine (pure March implementation).</p><div class="st"><span>12 functions</span><span>5 types</span></div></div></a>
 <a href="RemoteCall.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>RemoteCall</h3><p>RemoteCall: the L4 remote-procedure-call safety core (P1 L4).</p><div class="st"><span>11 functions</span><span>6 types</span></div></div></a>
 <a href="Result.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Result</h3><p>Result module: operations on Result(a, e) = Ok(a) Err(e)</p><div class="st"><span>12 functions</span><span>0 types</span></div></div></a>
-<a href="RingBuf.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>RingBuf</h3><p>RingBuf: mutable fixed-capacity circular buffer.</p><div class="st"><span>12 functions</span><span>0 types</span></div></div></a>
+<a href="RingBuf.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>RingBuf</h3><p>RingBuf: a fixed-capacity circular buffer with exactly one owner.</p><div class="st"><span>14 functions</span><span>0 types</span></div></div></a>
 <a href="Scheduler.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Scheduler</h3><p>Scheduler: runtime observability for the actor/task scheduler.</p><div class="st"><span>5 functions</span><span>0 types</span></div></div></a>
 <a href="Seq.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Seq</h3><p>Seq module: lazy fold-based sequences (church-encoded).</p><div class="st"><span>27 functions</span><span>2 types</span></div></div></a>
 <a href="Session.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Session</h3><div class="st"><span>18 functions</span><span>4 types</span></div></div></a>

@@ -1,0 +1,18 @@
+exit: 1
+-- ERROR -------------------- errors/syntax_error_6.march
+
+This `with` (line 4) has no matching `end`. [syntax_error]
+
+4 |     with x <- a, y <- b do
+        ^^^^
+
+    I only noticed at the end of the file.
+
+fix [syntax_error]:
+@@ after line 7 @@
+       Err(e) -> Err(e)
++    end
++  end
+
+after fix: exit 1
+`Result(a, b)` does not implement Num. [missing_impl]

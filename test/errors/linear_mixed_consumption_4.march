@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: The linear value `st` is consumed on some branches but not others
+mod Main do
+  needs IO.Console
+  -- An unannotated parameter is judged once its type is known, so a branch
+  -- mismatch on it is recorded and reported at the function's close.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn g(b : Bool, st) : Int do
+    if b do sink(st) else 0 end
+  end
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(g(false, S1(1))))
+  end
+end

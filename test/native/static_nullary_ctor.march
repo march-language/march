@@ -1,0 +1,125 @@
+-- Regression: a nullary constructor of a boxed ADT is one shared immortal
+-- static cell, not a heap allocation
+-- (specs/progress/2026-10-07-binary-trees-static-nullary-and-idle-ticks.md).
+--
+-- `Tip`, `Nil`, `Ruby` ... are built by Llvm_ctx.intern_static_nullary: rc =
+-- MARCH_RC_IMMORTAL, so no release frees it and the FBIP `rc == 1` test never
+-- reuses or rewrites it in place. Every shape below shares those cells with
+-- code that matches, rebuilds, compares, prints, stores and drops them; every
+-- line must print what the interpreter prints, and the loops must not leak.
+-- The dune rule's IR check pins that `make` allocates no Tip.
+--
+-- The constructor names are deliberately unlike any stdlib constructor:
+-- `Leaf`/`Node` here hit a separate, pre-existing compiled-only miscompile of
+-- nested patterns on a name the stdlib also uses
+-- (specs/todos/2026-10-07-nested-pattern-ctor-name-collision-miscompile.md).
+mod Main do
+  needs IO.Console
+
+  type BinTree = Tip | Fork(BinTree, Int, BinTree)
+  type Shade = Ruby | Jade | Cobalt | Blend(Int, Int)
+
+  derive Eq for BinTree
+  derive Eq for Shade
+  derive Show for Shade
+
+  pfn make(d : Int) : BinTree do
+    if d == 0 do Tip else Fork(make(d - 1), d, make(d - 1)) end
+  end
+
+  pfn total(t : BinTree) : Int do
+    match t do
+      Tip -> 0
+      Fork(l, v, r) -> total(l) + v + total(r)
+    end
+  end
+
+  -- Rebuilds every node (FBIP reuse of the Node cells); a Tip is returned
+  -- as is, so the shared cell flows back into the new tree.
+  pfn bump(t : BinTree) : BinTree do
+    match t do
+      Tip -> Tip
+      Fork(l, v, r) -> Fork(bump(l), v + 1, bump(r))
+    end
+  end
+
+  -- Replaces every Tip with a fresh one-node tree, and every Fork(Tip, _,
+  -- Tip) with a Tip: cells move both ways between nullary and not.
+  pfn grow(t : BinTree) : BinTree do
+    match t do
+      Tip -> Fork(Tip, 0, Tip)
+      Fork(Tip, _, Tip) -> Tip
+      Fork(l, v, r) -> Fork(grow(l), v, grow(r))
+    end
+  end
+
+  pfn count_leaves(t : BinTree) : Int do
+    match t do
+      Tip -> 1
+      Fork(l, _, r) -> count_leaves(l) + count_leaves(r)
+    end
+  end
+
+  pfn shade_of(i : Int) : Shade do
+    if i % 4 == 0 do Ruby
+    else if i % 4 == 1 do Jade
+    else if i % 4 == 2 do Cobalt
+    else Blend(i, i * 2) end end end
+  end
+
+  pfn shade_name(c : Shade) : String do
+    match c do
+      Ruby -> "ruby"
+      Jade -> "jade"
+      Cobalt -> "cobalt"
+      Blend(a, b) -> "blend " ++ int_to_string(a + b)
+    end
+  end
+
+  pfn shades(i : Int, n : Int, acc : List(Shade)) : List(Shade) do
+    if i >= n do acc else shades(i + 1, n, Cons(shade_of(i), acc)) end
+  end
+
+  pfn count_ruby(xs : List(Shade), acc : Int) : Int do
+    match xs do
+      Nil -> acc
+      Cons(Ruby, t) -> count_ruby(t, acc + 1)
+      Cons(_, t) -> count_ruby(t, acc)
+    end
+  end
+
+  pfn churn(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let t = bump(make(6))
+      let g = grow(t)
+      let xs = shades(0, 20, Nil)
+      let m = Map.insert(Map.insert(Map.empty(), "a", Ruby, Map.str_cmp), "b", Cobalt, Map.str_cmp)
+      churn(n - 1, acc + total(t) + count_leaves(g) + count_ruby(xs, 0) + Map.size(m))
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let t = make(4)
+    println("total: " ++ int_to_string(total(t)))
+    println("bumped: " ++ int_to_string(total(bump(t))))
+    println("grown leaves: " ++ int_to_string(count_leaves(grow(t))))
+    println("original still: " ++ int_to_string(total(t)))
+    println("tip == tip: " ++ bool_to_string(Tip == Tip))
+    println("tip == fork: " ++ bool_to_string(Tip == Fork(Tip, 1, Tip)))
+    println("trees equal: " ++ bool_to_string(make(3) == make(3)))
+    println("colors: " ++ shade_name(shade_of(0)) ++ ", " ++ shade_name(shade_of(1)) ++ ", "
+      ++ shade_name(shade_of(2)) ++ ", " ++ shade_name(shade_of(3)))
+    println("ruby == ruby: " ++ bool_to_string(shade_of(0) == shade_of(4)))
+    println("ruby == cobalt: " ++ bool_to_string(shade_of(0) == shade_of(2)))
+    let xs = shades(0, 10, Nil)
+    println("rubies: " ++ int_to_string(count_ruby(xs, 0)))
+    println("list: " ++ to_string(List.map(xs, fn c -> shade_name(c))))
+    println("empty list length: " ++ int_to_string(List.length(Nil)))
+    println("shown: " ++ to_string(Cons(Ruby, Cons(Blend(1, 2), Nil))))
+    let before = live_allocs()
+    let r = churn(300, 0)
+    let grew = live_allocs() - before
+    println("loop: " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 50))
+  end
+end

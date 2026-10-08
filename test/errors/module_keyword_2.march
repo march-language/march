@@ -1,0 +1,9 @@
+mod Main do
+  needs IO.Console
+  module Util do
+    fn one() : Int do 1 end
+  end
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(Util.one()))
+  end
+end

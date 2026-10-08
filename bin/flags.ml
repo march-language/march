@@ -58,6 +58,12 @@ let emit_protocols_dir : string option ref = ref None
    every `@[endpoints]` protocol: this build's version, and the previous one
    when the protocol changed. forge passes .forge/protocols on every build. *)
 let protocol_baseline_tag : string option ref = ref None
+(* A --hot-reload native build's shell identity (lib/jit/shell_ident.ml): its
+   declaration table, computed after desugaring and embedded at emit as
+   `__march_shell_ident`.  Its digest is part of the CAS key, since a comment
+   edit changes the table without changing the TIR. *)
+let shell_ident_decls : (string, string) Hashtbl.t option ref = ref None
+let shell_ident_tag : string option ref = ref None
 (* A digest of the --protocol-baseline files, for the CAS key: the baseline
    changes the generated `compat()`, so it changes the binary. *)
 let topology_isolate_foreign = ref false

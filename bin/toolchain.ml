@@ -134,9 +134,9 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
     : March_errors.Errors.diagnostic list =
   let module E = March_errors.Errors in
   let cap_needs_code (d : E.diagnostic) =
-    match d.E.code with
-    | Some c when String.length c > 10 && String.sub c 0 10 = "cap_needs:" -> Some c
-    | _ -> None
+    let c = d.E.code in
+    if E.Code.slug_of c = E.Code.cap_needs && String.length c > 10 then Some c
+    else None
   in
   let caps_of_code code =
     let rest = String.sub code 10 (String.length code - 10) in

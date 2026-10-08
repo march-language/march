@@ -1,8 +1,11 @@
 `[P2]` - [x] **The kind table answers one way per type, whichever spelling asks.**
 
-Filed 2026-10-06 as `specs/todos/2026-10-06-kind-qualified-vs-bare-repr.md`
-(found in `specs/progress/2026-10-06-nominal-record-short-name-drop.md`,
-"Left"); landed 2026-10-07.
+Follow-up to `specs/progress/2026-10-06-kind-qualified-vs-bare-repr.md`, which
+fixed `Kind.repr_of` alone (a qualified name whose short name has no
+declaration answers as the short name) after a live compiled SIGSEGV on a
+nested type named like a runtime one. The two were developed in parallel;
+this one extends the rule to every name-keyed query and to the deep crossing
+facts. Landed 2026-10-07.
 
 ## What was wrong
 
@@ -25,11 +28,13 @@ disagreed; about 300 programs) found it for **73 types**: 61 declared
 newtypes, 6 niches and 6 unboxable aggregates, stdlib and user alike
 (`Map`, `Bytes`, `DataFrame`, `Decimal`, `Duration`, `UUID`, `Date`, ...).
 
-Construction and decode both ask the short name, so no value was ever
-miscompiled by it; a direct probe of a user nested-module newtype, multi-field
-type and niche, built and matched from both sides of the module, agreed
-compiled and interpreted. The damage was in the consumers that held the
-qualified spelling:
+Construction and decode almost always ask the short name. The exception that
+crashed was a nested type built under a qualified key
+(`test/native/qualified_newtype_repr.march`, fixed by the earlier repr_of
+rule). Everywhere else the damage was in the consumers that held the
+qualified spelling, and the repr_of rule left most of them in place because
+they ask `is_niche_shaped`, `niche_repr_of_concrete` or the RC and LLVM-type
+fields instead:
 
 | Caller | Queries in the trace | Consequence |
 |---|---|---|

@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: Function `secret` is private to module `A`.
+mod Main do
+  mod A do
+    pfn secret() : Int do 42 end
+    fn pub_fn() : Int do 1 end
+  end
+  fn main() : Int do A.secret() end
+end

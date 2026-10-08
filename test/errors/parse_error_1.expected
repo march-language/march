@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR --------------------- errors/parse_error_1.march
+
+I was expecting `do` to start the module body here: [parse_error]
+
+2 |   needs IO.Console
+      ^^^^^
+
+    mod Name do
+        ...
+    end
+    run `march --explain parse_error`

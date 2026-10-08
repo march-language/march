@@ -1,0 +1,9 @@
+exit: 1
+-- ERROR --------------------- errors/parse_error_5.march
+
+Parse error in declaration [parse_error]
+
+3 |   pub fn add(a, b) do
+      ^^^
+
+    run `march --explain parse_error`

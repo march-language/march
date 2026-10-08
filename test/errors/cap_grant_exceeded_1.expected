@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR -------------- errors/cap_grant_exceeded_1.march
+
+`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite` (reached from `main`: main → greet). The grant is a ceiling on the WHOLE program — declaring `needs IO.FileWrite` does not raise it. [cap_grant_exceeded]
+help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`), or widen the whole grant to `Cap(IO)`, or remove the use.
+
+23 |   fn main(cap : Cap(IO.Console)) : () do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+

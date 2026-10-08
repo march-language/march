@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: This `_` discards a linear value of type `S1`
+mod Main do
+  needs IO.Console
+  -- A wildcard nested in a pattern discards just as a top-level one does:
+  -- the second S1 is gone.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn main(c : Cap(IO.Console)) do
+    let (a, _) = (S1(1), S1(2))
+    println(int_to_string(sink(a)))
+  end
+end

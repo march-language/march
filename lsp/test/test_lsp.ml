@@ -323,6 +323,12 @@ let () =
       "param labels",            `Quick, test_sig_help_param_labels;
       "non-resolvable callee",   `Quick, test_sig_help_not_a_known_function;
     ];
+    "code actions: compiler-fix adapter", [
+      "then -> do",                    `Quick, test_fix_adapter_then_to_do;
+      "not offered off the range",     `Quick, test_fix_adapter_not_offered_off_range;
+      "`;` -> line break",             `Quick, test_fix_adapter_semicolon;
+      "fn _ arity fix edits the lambda", `Quick, test_fix_adapter_lambda_arity_edits_the_lambda;
+    ];
     "code actions: make-linear", [
       "offered for single-use binding",  `Quick, test_make_linear_offered_for_single_use;
       "not offered for multi-use",        `Quick, test_make_linear_not_offered_for_multi_use;

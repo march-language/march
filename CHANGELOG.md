@@ -19,6 +19,65 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **More predicates and combinators keep what they say.** An abstract
+  refinement is now also instantiated from a named predicate with a proved
+  `{Bool | _ == …}` return (`List.filter(ys, is_pos)`, or `fn y -> is_pos(y)`),
+  from a callback parameter with such a contract, and from a `let`-bound
+  lambda. `List.find`, `Option.filter` and `List.take_while` now carry their
+  predicate like `List.filter` does, so `one_pos(List.find(ys, fn y -> y > 0))`
+  proves an `Option({Int | _ > 0})` demand. `List.take_while` is now a
+  single-pass loop.
+- **`march --verify-tir`** (or `MARCH_VERIFY_TIR=1`) checks the compiler's typed IR
+  after every pass. Every variable must be bound, every called function must
+  exist, indirect calls must go through something callable, and no function
+  name may be defined twice. A violation stops the compile as an internal
+  compiler error, naming the pass and the function, instead of surfacing later
+  as an LLVM, link or runtime failure. It is always on in the compiler's own
+  IR test harnesses and its differential oracle.
+- **`scripts/bisect-ir.sh` and `scripts/bisect-output.sh`** find the merge on
+  `main` that changed a program's emitted LLVM IR or its compiled output. Each
+  step runs in a throwaway worktree against that commit's own stdlib and
+  runtime. The result prints the blamed merge and its `specs/progress/` entry.
+  `bisect-ir` ignores the renumbering of compiler-generated names that any
+  stdlib lambda causes.
+- **`--timings` shows per-pass IR counts.** Each compiler pass's line carries
+  the number of functions, allocation sites, RC increments and decrements,
+  reuse tokens and join points at that point.
+- **Mechanical fixes for the common syntax slips, and every compiler fix as an
+  editor quick fix.** `if … then` (`then_keyword`), `module Name do`
+  (`module_keyword`, top-level or nested) and `;` between expressions
+  (`semicolon_separator`) each get their own code and a fix that `forge fix`
+  applies and the LSP offers as a quick fix: `then` → `do`, `module` → `mod`,
+  `;` → a line break (or deleted when it ends the line). `elif`/`elsif`
+  (`elif_keyword`) names the slip and shows the `else if … end end` shape.
+  `module` and `elif` stay usable as identifiers. A `let`-bound lambda called
+  with the wrong number of arguments (`let cb = fn _ -> 42` then `cb()`, which
+  used to typecheck and panic at runtime) is now an `arity_mismatch` with the
+  fix `fn _` → `fn` when a zero-argument call was meant. The LSP carries each
+  diagnostic's fix in its `data` field, so any fix becomes a quick fix with no
+  per-message rule. The golden error corpus now re-checks every program with
+  its fixes applied (`after fix: exit N`), so a fix that leaves a broken
+  program is visible in review.
+- **Every diagnostic has a code, and `march --explain <code>`.** Each error,
+  warning and hint ends its first line with its code in brackets
+  (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always
+  carries it, and the LSP links codes to their page. `march --explain <code>`
+  prints an explanation with a failing and a fixed program; the ten most common
+  codes have pages so far (also on the site under `docs/errors/`).
+- **`List.filter` keeps what its predicate says.** `sum_pos(List.filter(ys, fn y -> y > 0))`
+  now proves a `List({Int | _ > 0})` demand, directly or through a `let`, and
+  combines with the input's own element refinement. A predicate too weak for
+  the demand is reported as `abstract-refinement-too-weak` (an error only under
+  `cap verified`). This is the first *abstract refinement* (a refinement
+  parameterised by a predicate), and user functions can declare one the same
+  way; see "Abstract refinements" in the refinement types reference.
+- **Cluster name registry tombstones expire.** An unregistered name used to leave a
+  tombstone in every node's registry forever, so a long-running cluster's registry, and
+  every anti-entropy round over it, grew with every name ever unregistered (two per
+  finished session). A tombstone is now dropped 3 hours after it was first seen;
+  `MARCH_REGISTRY_TOMBSTONE_GRACE_MS` or `tombstone_grace_ms` in `ClusterNode.config`
+  changes that. Keep it well above the longest partition the cluster should heal from.
+  Collection starts once every node in a cluster runs this version.
 - **`march --debug-info`.** Compiled binaries carry function-level DWARF: every
   March function gets a `DISubprogram` at its defining line (lifted lambdas at
   the lambda's line, specialisations at the generic's), and the link gets `-g`,
@@ -36,13 +95,18 @@ git log is authoritative for exact commits.
   exits 1 if it did not run. It prints the result
   and anything the input printed. `let` bindings persist across inputs; a
   trailing `limit: N` shortens long lists. Capabilities are pre-bound
-  (`console`, `clock`, `intro`, `debug`), and the node allows only those in
-  its `$MARCH_SHELL_POLICY` file. A panic or a timeout ends only that input,
-  and a deploy ends the session. Every input is audited with its source.
-  Inputs can call the program's own functions and its `MARCH_LIB_PATH`
-  libraries, a Depot query for example. The policy does not yet see the
-  capabilities an input reaches through that code, only the pre-bound ones
-  it names.
+  (`console`, `clock`, `intro`, `debug`). A panic or a timeout ends only that
+  input, and a deploy ends the session. Every input is audited with its
+  source. Inputs can call the program's own functions and its
+  `MARCH_LIB_PATH` libraries, a Depot query for example.
+  - The node runs an input only if its `$MARCH_SHELL_POLICY` file lists every
+    capability the input's compiled code uses, including those reached
+    through program and library code. The fragment carries that list, and
+    the node checks it against the signed request after loading it.
+  - An input that reaches a declaration your checkout has but the node's
+    build does not (changed, added, or a type numbered differently) is
+    refused, with the declarations named. Inputs that reach only unchanged
+    code still run.
 - **Several native libraries per project.** forge.toml can declare `[[ffi]]`
   once per C library and `[[ffi.rust]]` once per Rust crate. forge compiles and
   links all of them, in order. A single `[ffi]` table works as before.
@@ -228,6 +292,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Nullary constructors no longer allocate, and a lone busy thread is no
+  longer preempted by idle cores.** In compiled code, `Nil`, `Leaf`, `None`-like
+  constructors of every boxed type are now one shared static cell instead of a
+  heap allocation each, and the preemption tick only interrupts scheduler
+  threads that are running something. binary_trees went from 120 ms to 74 ms,
+  list_ops from 39 ms to 34 ms (Apple M3 Max).
 - **`RingBuf` is linear: every operation consumes the buffer and hands it
   back.** `push` and `clear` return the buffer; `pop`, `get`, `peek_oldest`,
   `peek_newest`, `size`, `cap`, `is_empty` and `is_full` return their answer
@@ -240,6 +310,15 @@ git log is authoritative for exact commits.
   x) }`. Migration table: design spec section 5. **New rule for every linear
   type:** a module-level `let` of a `RingBuf`, `Handle` or `LinearMap` is
   rejected, since a module-level value can never be consumed exactly once.
+- **`fold` and `sum` over a NativeArray `map` compile to one loop.**
+  `NativeArray.fold_*(map_*(a, f), z, g)` now runs as a single fold, and
+  `sum_*(map_*(a, f))` or `sum_*(map2_*(a, b, f))` (a dot product, say) as a
+  single summing loop, with no intermediate array, when the callbacks are
+  lambdas written at the call. A fold keeps its strict left-to-right order; a
+  Float sum reassociates exactly as `sum_float` already does. Measured on a
+  4M-element array (`bench/native_array_chains.march`): Int `fold(map(..))`
+  2.9 ms to 0.48 ms, `sum(map(..))` 1.1 ms to 0.49 ms (Int) and 0.46 ms
+  (Float). `MARCH_NO_NATIVEARR_FUSION=1` turns it off.
 - **Builds against OCaml 5.5.1 (was 5.3.0).** CI, the CI Docker images and the
   install docs now use OCaml 5.5.1; the minimum stays `ocaml >= 5.3.0`, and the
   source needed no changes. The REPL's `notty` dependency (0.2.3 does not
@@ -303,14 +382,55 @@ git log is authoritative for exact commits.
 
 ### Fixed
 - Compiled `to_string` (and so `println` of a value) names the constructors of
-  types declared inside a module. `Duration.seconds(5)`, `UUID.UUID("abc")`
-  and a user's `Inner.Id(3)` printed `#<tag:0>` compiled while the
-  interpreter printed `Duration(5000)`, `UUID("abc")` and `Id(3)`; this
-  covered every single-field or niche-shaped type declared in a `mod`,
-  including the stdlib's. The compiler's per-type table answered differently
-  for a type's qualified and short names, and the pass that records
-  constructor names asked with the spelling whose answer no value is built
-  with.
+  every type declared inside a module, whatever its shape. A niche-shaped
+  module type such as `type Opt = Nope | Got(String)` printed `#<tag:0>` and
+  `#<tag:1>` compiled while the interpreter printed `Nope` and `Got("hi")`.
+- Compiled code frees the payload of a niche-shaped stdlib value when the value
+  dies. `HttpServer.Upgrade`, `ClusterNode.RegisterError`, `Session.Outcome`,
+  `RemoteCall.Verdict` and `Control.CtlGate` values released only their outer
+  cell and leaked what they held.
+- **Nested constructor patterns pick the right arm in compiled code when a
+  constructor name is also used by a stdlib type.** With a user
+  `type Tree = Leaf | Node(Tree, Int, Tree)` (stdlib `OrderedMap` also declares
+  `Leaf` and `Node`), an arm like `Node(Leaf, _, Leaf) -> ...` never matched
+  in a compiled binary when another arm bound the same fields by name, so the
+  program silently fell through to a later arm. The interpreter was already
+  correct.
+- **`monitor` no longer keeps both actors alive forever.** Every `monitor(watcher, target)`
+  leaked a reference to each of them, so neither actor's memory was ever freed, even
+  after both had died. The cluster node monitors every registered name's holder, so this
+  cost two actor records per cluster session.
+
+- **A missing `end` is reported at the construct that is missing it.** Instead of
+  "Parse error in declaration" at the end of the file or the next `fn`, the error
+  points at the `if`/`fn`/`match`/`mod` that was never closed. It says where the
+  parser noticed, and it carries a fix that inserts the `end`, which `forge fix`
+  can apply. An `else if` chain one `end` short gets a note explaining that each
+  `if` closes separately.
+- **A program no longer hangs on exit after `ClusterNode.stop` while one of its sessions
+  is finishing.** Stopping the node ended its connection to itself without telling the
+  sessions using it, so a session whose last messages were still in flight could wait
+  for them forever and keep the process alive.
+- **A record or tuple returned on one branch is now freed on the branches that only read
+  it.** In `let st = .. ; if cond do { ..st.x.. } else st end`, compiled code leaked `st`
+  (and everything it held) whenever the first branch ran, and the same in a `let` whose
+  value came from such an `if`. Actor handlers often have this shape: a cluster session
+  left about 70 objects behind per session, now about 6 once its tombstones expire.
+
+- Compiled programs no longer risk a use-after-free when two scheduler threads
+  touch records of a not-yet-seen shape at the same time. Registering a new
+  record shape could free the shape table while another thread was reading a
+  field through it (seen as an ASAN heap-use-after-free in a cluster node's
+  state drop).
+- A comment-only edit is a compile-cache hit again. Since the `--rc-trace` change, a
+  `--compile` whose typed IR was unchanged printed `compiled out (cached)` and then
+  emitted LLVM IR, ran clang and printed `compiled out` anyway, so the hit saved
+  nothing; it now stops at the cache lookup.
+- **`typed_array_*` functions no longer leak their argument.** In compiled
+  code, each call to `typed_array_from_list`, `typed_array_length`,
+  `typed_array_get`, `typed_array_map` and the rest of the family leaked the
+  array or list it was given. `DataFrame` columns are built on these.
+
 - A green thread started from a runtime thread that is not a scheduler (the
   hot-reload server's drain, the new shell listener) no longer inherits that
   thread's blocked signals. With SIGSEGV blocked, the first time its stack
@@ -346,7 +466,16 @@ git log is authoritative for exact commits.
   component by address instead of by value, so `(1, 2.5) == (1, 2.5)` was
   false in compiled code (for example inside `List.member`). Tuples are still
   not ordered with `<`.
+- **A nested type named like a runtime type no longer crashes when it is matched.** A
+  module-local `type Down = Down(Int)` (or another name the runtime reserves) was built
+  one way and read another in compiled code, a segfault on the first `match`.
 
+- **No false refinement error for a lambda that uses a local.** A lambda passed
+  where a refined return is expected (`ap(fn y -> h(y), 1)` with
+  `f : (Int) -> {Int | _ > 0}`) that called or read a parameter or `let` of the
+  enclosing function could be reported as a definite violation, with a
+  counterexample computed from a module-level function of the same name. Such a
+  lambda is now left unchecked (a recorded skip), as intended.
 - A `--hot-reload` build no longer leaks a small object each time it calls a
   lambda that captures nothing (`List.map(xs, fn x -> x + 1)`, `to_string` of
   a list, `Actor.inspect_state` of an actor with a list field). Ordinary
@@ -2510,6 +2639,15 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Agent debugging guidance.** A `march-debug` skill maps each symptom
+  (compiled/interpreted divergence, crash, leak, slow compile, stale cache, red
+  CI, "prove this refactor moved nothing") to the first command and how to read
+  it; a `steward` skill records the known CI flakes and the one-re-run policy,
+  how to find the real failure in the macOS `all` log, and what CI enforces
+  (including registering a new `bench/*.march` in `test/test_bench_gate.ml`).
+  `CLAUDE.md` gains a short "When something breaks" pointer, and a hook prints a
+  one-line hint after a failed compile, test or build. doc-lint now also checks
+  `scripts/*.sh`/`*.py` pointers in the current docs and the skills.
 - **Data-race freedom, written down.** `actors.md` says what a message may
   carry (a linear value moves, everything else is immutable or copy-on-write),
   `linear-types.md` has a `RingBuf` section and the module-level `let` rule,

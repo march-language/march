@@ -1,0 +1,19 @@
+exit: 1
+-- ERROR ----------------------- errors/cap_needs_8.march
+
+`Cap(IO.FileWrite)` used in module `Store` but `IO.FileWrite` is not declared in `needs`. [cap_needs]
+help: add `needs IO.FileWrite` to the module body.
+
+13 |   fn save(cap : Cap(IO.FileWrite), path : String, data : String) : String do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain cap_needs`
+
+
+
+fix [cap_needs:IO.FileWrite]:
+@@ after line 10 @@
+ mod Store do
++  needs IO.FileWrite
+
+after fix: exit 0

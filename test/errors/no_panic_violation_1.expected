@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR -------------- errors/no_panic_violation_1.march
+
+`fail` in `mod Guarded` (declared `cap no_panic`) calls `panic`, which can panic. [no_panic_violation]
+
+Return an error value (`Result`, `Option`) instead of calling `panic`.
+
+16 |     panic("boom")
+         ^^^^^
+
+
+

@@ -1,0 +1,11 @@
+exit: 1
+-- ERROR ---------- errors/unknown_qualified_name_1.march
+
+Module `List` does not export `size`. [unknown_qualified_name]
+
+4 |     println(int_to_string(List.size([1, 2, 3])))
+                              ^^^^^^^^^
+
+    run `march --explain unknown_qualified_name`
+
+

@@ -552,10 +552,18 @@ mod NetKernel do
     let leaf_vals = List.map(leaves, fn pair ->
       match pair do
         (name, e) ->
-          let clock = Msgpack.array(List.map(VectorClock.entries(e.clock), fn kv ->
+          -- A tombstone's expiry stamp rides in the clock array as a [0, ms]
+          -- pair: a node that predates it skips any pair that is not
+          -- [actor_id, ts] (decode_clock), so the leaf format is unchanged
+          -- for it, and the Merkle hash never sees the stamp.
+          let pairs = List.map(VectorClock.entries(e.clock), fn kv ->
             match kv do
               (aid, ts) -> Msgpack.array(Cons(Msgpack.str(aid), Cons(Msgpack.int(ts), Nil)))
-            end))
+            end)
+          let clock = Msgpack.array(
+            if e.retired_at > 0 do
+              List.append(pairs, Cons(Msgpack.array(Cons(Msgpack.int(0), Cons(Msgpack.int(e.retired_at), Nil))), Nil))
+            else pairs end)
           Msgpack.array(Cons(Msgpack.str(name),
             Cons(Msgpack.str(e.node_id),
             Cons(Msgpack.int(e.pid),
@@ -566,6 +574,15 @@ mod NetKernel do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(6),
       Cons(Msgpack.str(root_hash),
       Cons(Msgpack.array(leaf_vals), Nil)))))
+  end
+
+  -- A leaf's tombstone stamp: the [0, ms] pair in its clock array, 0 if none.
+  pfn decode_retired(pairs : List(Msgpack.Value)) : Int do
+    List.fold_left(pairs, 0, fn (acc, p) ->
+      match p do
+        Msgpack.Array(Cons(Msgpack.Int(0), Cons(Msgpack.Int(ms), Nil))) -> if ms > 0 do ms else acc end
+        _ -> acc
+      end)
   end
 
   -- A leaf's clock: [[actor_id, ts], ...]; a malformed pair is skipped.
@@ -606,6 +623,10 @@ mod NetKernel do
                         Cons(Msgpack.Array(pairs), _) -> decode_clock(pairs)
                         _ -> VectorClock.new()
                       end
+                      let retired_at = match more do
+                        Cons(Msgpack.Array(pairs), _) -> decode_retired(pairs)
+                        _ -> 0
+                      end
                       let creation = match more do
                         Cons(_, Cons(Msgpack.Int(cr), Nil)) -> cr
                         _ -> 0
@@ -614,7 +635,8 @@ mod NetKernel do
                                     clock: clock,
                                     present: present_int != 0,
                                     creation: creation,
-                                    registrant: "" }
+                                    registrant: "",
+                                    retired_at: if present_int != 0 do 0 else retired_at end }
                       Some((name, entry))
                   _ -> None
                 end)

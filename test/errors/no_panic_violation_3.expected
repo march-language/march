@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR -------------- errors/no_panic_violation_3.march
+
+`classify` in `mod Guarded` (declared `cap no_panic`) contains a non-exhaustive `match`, which panics at runtime when no clause matches. [no_panic_violation]
+
+A `cap no_panic` module must handle every case, or add a `_ -> ...` catch-all arm.
+
+22 |     match opt do
+               ^^^^^^
+
+
+

@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR --------------- errors/linear_never_used_2.march
+
+The linear value `st` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+20 |     let st = Stream_Prod.register(s, 0)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+

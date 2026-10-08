@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR ------------------ errors/pure_violation_2.march
+
+`gen` in `mod LeakyPure` (declared `cap pure`) calls `random_bytes`, which has side effects. [pure_violation]
+
+Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module.
+
+21 |     random_bytes(16)
+         ^^^^^^^^^^^^
+
+
+

@@ -1,0 +1,24 @@
+exit: 1
+-- ERROR ------------------ errors/arity_mismatch_1.march
+
+`cb` is a lambda with 1 parameter, but is called with 0 arguments. [arity_mismatch]
+March has no partial application — a call must supply all arguments.
+
+5 |     let r = cb()
+                ^^^^
+
+    `fn _ -> …` takes one argument and ignores it; a zero-argument lambda is written `fn -> …`.
+
+    bound here with 1 parameter:
+
+4 |     let cb = fn _ -> 42
+                 ^^^^^^^^^^
+
+
+
+fix [arity_mismatch]:
+@@ lines 4-4 @@
+-    let cb = fn _ -> 42
++    let cb = fn -> 42
+
+after fix: exit 0

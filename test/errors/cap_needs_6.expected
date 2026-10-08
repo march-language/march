@@ -1,0 +1,19 @@
+exit: 1
+-- ERROR ----------------------- errors/cap_needs_6.march
+
+`Cap(IO.Network)` used in module `Server` but `IO.Network` is not declared in `needs`. [cap_needs]
+help: add `needs IO.Network` to the module body.
+
+ 7 |   fn listen(cap : Cap(IO.Network), port : Int) : Int do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain cap_needs`
+
+
+
+fix [cap_needs:IO.Network]:
+@@ after line 6 @@
+ mod Server do
++  needs IO.Network
+
+after fix: exit 0

@@ -79,6 +79,14 @@ let extern_borrow_table : (string * bool list) list = [
        as owned until 2026-10-06, so every call leaked a reference to the
        callee's actor record, and with it the whole record once it died. *)
   ("actor_call",        [true; false]);
+    (* march_monitor keeps the WATCHER: its monitor node holds the reference
+       the call hands over, released when the node is (on the target's
+       death, on demonitor, or at once for a dead target). The target is only
+       read. Listed as owning both until 2026-10-07, so every monitor leaked a
+       reference to the target and the node held a raw, unowned watcher: both
+       actor records outlived their actors (two per cluster session party,
+       ClusterNode's RegWatch watching each session endpoint). *)
+  ("monitor",           [false; true]);
   ("kill",              [true]);
   ("march_kill",        [true]);
   ("actor_stop",        [true; false]);
@@ -387,13 +395,29 @@ let extern_borrow_table : (string * bool list) list = [
   ("native_u8_to_int_arr",        [true]);
   ("native_i32_to_f32_arr",       [true]);
   ("native_u8_to_f32_arr",        [true]);
-  (* ── TypedArray: slice COPIES its range into a fresh array, taking its own
-     reference on each element, and never stores or frees the source array
-     (march_typed_array_slice), so the source is borrowed. Every producer of
-     a TypedArray (create/from_list/set/map/filter/slice) returns a fresh,
-     owned array, so nothing hands it an unowned reference. The rest of the
-     family is still in [extern_owned_builtins], unaudited. ── *)
-  ("typed_array_slice",    [true; false; false]);
+  (* ── TypedArray: every builtin reads the array (and from_list its list,
+     filter its mask) and never stores or frees
+     it; whatever it copies into a fresh array or list gets its own
+     reference (the march_typed_array_ family), so the source is borrowed and the
+     caller drops it after its last use.  The closure of map/fold, fold's
+     accumulator and set's new element are consumed (stored, or released
+     by the call), so they stay owned; so does create, whose only heap
+     parameter is the default value it stores (in [extern_owned_builtins]).  Every producer of a TypedArray
+     returns a fresh, owned array, and get/to_list hand out their own
+     reference to an element, so nothing hands these builtins an unowned
+     reference.  Until 2026-10-07 all but slice were in
+     [extern_owned_builtins], unaudited: the array or list passed in was
+     never released, ~5 objects per `typed_array_length(typed_array_from_list(..))`
+     (specs/progress/2026-10-06-typed-array-builtins-leak-their-argument.md). ── *)
+  ("typed_array_from_list", [true]);
+  ("typed_array_to_list",   [true]);
+  ("typed_array_length",    [true]);
+  ("typed_array_get",       [true; false]);
+  ("typed_array_set",       [true; false; false]);
+  ("typed_array_slice",     [true; false; false]);
+  ("typed_array_map",       [true; false]);
+  ("typed_array_filter",    [true; true]);
+  ("typed_array_fold",      [true; false; false]);
   (* ── dns_resolve: march_dns_resolve copies the host's bytes into a stack
      buffer for getaddrinfo and never stores or frees the String.  Before it
      had a codegen-table row (2026-09-25) it was on no list and defaulted to
@@ -560,9 +584,13 @@ let extern_owned_builtins : string list = [
     "file_delete"; "file_copy"; "file_rename"; "file_stat"; "dir_mkdir";
     "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
     "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
-    "typed_array_create"; "typed_array_from_list"; "typed_array_to_list";
-    "typed_array_length"; "typed_array_get"; "typed_array_set";
-    "typed_array_map"; "typed_array_filter"; "typed_array_fold";
+    (* typed_array_create STORES its default value in every slot: the
+       transferred reference fills the first, each other slot takes its own
+       (march_typed_array_create).  Owned, not borrowed: for a Float default
+       the call site boxes a fresh cell (builtin_boxed_generic_params_tbl)
+       and releases nothing after a builtin call, so a borrowed parameter
+       would strand that box. *)
+    "typed_array_create";
     "native_int_arr_set"; "native_int_arr_sort";
     "native_float_arr_set"; "native_float_arr_sort";
     "native_f32_arr_set"; "native_f32_arr_sort";
@@ -570,7 +598,7 @@ let extern_owned_builtins : string list = [
     "native_u8_arr_set"; "native_u8_arr_sort";
     "tcp_connect"; "tcp_connect_timeout"; "http_serialize_request"; "http_parse_response";
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
-    "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps"; "monitor";
+    "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps";
     "register_resource";
     "actor_register"; "actor_unregister"; "actor_whereis";
     "send_checked"; "revoke_cap"; "is_cap_valid";

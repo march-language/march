@@ -368,7 +368,12 @@ let rec niche_payload_ok (t : table) (ty : Tir.ty) : bool =
     globally-unique ctor tag ([Llvm_toplevel.build_ctor_info]) would be
     unreadable at a dispatch site that only knows the short name. *)
 and repr_of (t : table) (ty0 : Tir.ty) : repr =
-  (* One spelling per type: see [canonical_name].  The actor-message pin is
+  (* One spelling per type: see [canonical_name].  This subsumes the earlier
+     repr_of-only rule (a qualified name whose short name has no declaration
+     answers as the short name), which fixed a live SIGSEGV: a nested type
+     named like a runtime one ([mod UserValues do type Down = Down(Int) end])
+     built under its qualified key as a newtype and matched bare as a boxed
+     cell (test/native/qualified_newtype_repr).  The actor-message pin is
      checked under the spelling the caller held as well, so canonicalising can
      only ever add a Boxed answer, never remove one. *)
   let pinned0 = match ty0 with

@@ -1,0 +1,42 @@
+exit: 1
+-- ERROR ---------------------- errors/cap_grant_33.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+25 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+-- ERROR ---------------------- errors/cap_grant_33.march
+
+Chan.recv: this channel came from `Chan.offer`, and the protocol's branches continue differently, so I don't know which one the peer chose. [session_offer_unrefined]
+Match on the label first — `match lbl do :ok -> ... :err -> ... end` — and use the channel inside each arm.
+
+31 |     let (v, cc3) = Chan.recv(cc2)
+                        ^^^^^^^^^^^^^^
+
+
+
+-- ERROR ---------------------- errors/cap_grant_33.march
+
+Chan.close: expected a channel endpoint but got `a`. [session_state_mismatch]
+
+32 |     Chan.close(cc3)
+         ^^^^^^^^^^^^^^^
+
+
+
+
+fix [cap_grant]:
+@@ lines 25-25 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Chan.recv: this channel came from `Chan.offer`, and the protocol's branches continue differently, so I don't know which one the peer chose. [session_offer_unrefined]

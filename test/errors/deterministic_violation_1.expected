@@ -1,0 +1,12 @@
+exit: 1
+-- ERROR --------- errors/deterministic_violation_1.march
+
+`ts` in `mod LeakyDet` (declared `cap deterministic`) calls `unix_time_ms`, which is non-deterministic. [deterministic_violation]
+
+Use deterministic operations only in a `cap deterministic` module. Avoid random/time builtins.
+
+26 |     unix_time_ms(())
+         ^^^^^^^^^^^^
+
+
+

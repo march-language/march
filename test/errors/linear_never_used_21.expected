@@ -1,0 +1,30 @@
+exit: 1
+-- ERROR -------------- errors/linear_never_used_21.march
+
+The linear value `r` was never used. [linear_never_used]
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
+
+7 |   fn bad(linear r : Res) : () do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    run `march --explain linear_never_used`
+
+
+-- WARNING -------------- errors/linear_never_used_21.march
+
+Unused variable `r`. [unused_binding]
+Use `_` to mark intentionally unused params.
+
+7 |   fn bad(linear r : Res) : () do
+                    ^
+
+
+
+
+fix [unused_binding]:
+@@ lines 7-7 @@
+-  fn bad(linear r : Res) : () do
++  fn bad(linear _r : Res) : () do
+
+after fix: exit 1
+The linear value `_r` was never used. [linear_never_used]

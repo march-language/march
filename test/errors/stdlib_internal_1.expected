@@ -1,0 +1,10 @@
+exit: 1
+-- ERROR ----------------- errors/stdlib_internal_1.march
+
+`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`) [stdlib_internal]
+
+18 |     println(bool_to_string(is_alive(pid_of_int(7))))
+                                         ^^^^^^^^^^
+
+
+

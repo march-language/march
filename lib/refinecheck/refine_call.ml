@@ -319,7 +319,11 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       expr_applies_to_free w.wd_spelling sn.A.txt cond
       || List.exists
            (fun (m, rhs) ->
-             expr_mentions_free m cond && expr_applies_to_free w.wd_spelling sn.A.txt rhs)
+             (* Application entries only: [lets] also carries `let`-bound
+                LAMBDAS (for abstract-refinement instantiation), which are
+                never a laundered guard. *)
+             (match rhs with A.EApp _ -> true | _ -> false)
+             && expr_mentions_free m cond && expr_applies_to_free w.wd_spelling sn.A.txt rhs)
            lets
     in
     (* `a op b` <=> `b (flipped op) a` — used to normalise to `X op n`.  (No
@@ -827,7 +831,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               remove `cap verified` from this module — it asks for every obligation \
               to be discharged")
       in
-      Err.error errctx ~span
+      Err.error ~code:Err.Code.refinement_unverified errctx ~span
         (display_measures
            (Printf.sprintf
               "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\n%s"
@@ -851,6 +855,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _
                | Obligation.Parametric_source_unproved _
+               | Obligation.Abstract_too_weak _
+               | Obligation.Abstract_uninstantiated _
                | Obligation.Unreflectable_subject _
                (* Now that this reason carries a payload naming the specific
                   failing sub-expression (Task 3), it is a specific, actionable
@@ -878,6 +884,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
        | Obligation.Parametric_source_unproved _
+       | Obligation.Abstract_too_weak _
+       | Obligation.Abstract_uninstantiated _
        | Obligation.Unreflectable_subject _
        | Obligation.Unreflectable_predicate _
        | Obligation.Alias_withdrawn _ -> ());
@@ -887,6 +895,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _
         | Obligation.Parametric_source_unproved _
+        | Obligation.Abstract_too_weak _
+        | Obligation.Abstract_uninstantiated _
         | Obligation.Unreflectable_subject _
         | Obligation.Unreflectable_predicate _ ->
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
@@ -913,7 +923,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             obligation_noun (pred_str rp.pred) callee
             (Obligation.reason_name r) (Obligation.reason_detail r)
       in
-      Err.hint errctx ~span (display_measures body)
+      Err.hint ~code:Err.Code.refinement_unverified errctx ~span (display_measures body)
     | _ -> ()
   in
   match List.nth_opt args rp.idx with
@@ -2729,6 +2739,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          mas
          ^ set_preamble ~elem_declared:(contains mas "(declare-sort Elem 0)")
              ~str_declared:(s <> "") ~measure_attached:(m <> "") vc
+         (* Last: an abstract symbol's argument sort is declared above. *)
+         ^ abstract_preamble vc
        in
        (* Report a violation ONLY when the precondition can *never* hold under
           the assumptions (a definite failure).  If it merely *might* fail
@@ -2859,7 +2871,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                          if its own proved return refinement implies that — declare and \
                          prove one on the passed function, or weaken the expected codomain"
                         (pred_str rp.pred));
-                 labels; notes = []; code = None; fix = None }
+                 labels; notes = []; code = Err.Code.refinement_violated; fix = None }
            | _ ->
              (* [!self_symbol] is what the CHECK runs against — see
                 [mark_self]'s comment above [resolve_var].  [self_source_name]
@@ -2951,8 +2963,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                    that category.  `cap verified` is the established opt-in for
                    turning unverifiable obligations into errors. *)
                 let text = display_measures text in
-                if !strict_verified then Err.error errctx ~span text
-                else Err.warning errctx ~span text;
+                if !strict_verified then Err.error ~code:Err.Code.undeclared_requirement errctx ~span text
+                else Err.warning ~code:Err.Code.undeclared_requirement errctx ~span text;
                 (* Record the site for the post-walk suggestion pass.  The
                    qualified name is resolved HERE, while [Witness]'s module
                    snapshot still describes the program (a probe re-walk swaps

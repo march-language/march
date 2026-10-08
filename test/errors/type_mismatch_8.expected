@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR ------------------- errors/type_mismatch_8.march
+
+expected `Pid(a)` but got `Int`. [type_mismatch]
+
+18 |       Some(p) -> is_alive(p)
+                               ^
+
+    This is argument #1 of a function call.
+
+    the expected type comes from here:
+
+18 |       Some(p) -> is_alive(p)
+                      ^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

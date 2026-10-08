@@ -1,0 +1,34 @@
+-- EXPECT-ERROR: can never run in this one
+mod Main do
+  -- Session-types final review, Finding 4 (2026-07-27) -- a blind spot created
+  -- by the INTERACTION of Task 1 and Task 2.
+  --
+  -- Task 1 made `project_steps`' `ProtoChoice` arm project the steps that
+  -- FOLLOW the `choose` block (`rest_ty ()`) into EVERY branch. Task 2 added
+  -- the "steps after a `loop` can never run" rule -- but it walked each branch's
+  -- OWN step list, where `rest = []`, so a branch ending in a `loop` never
+  -- tripped it, even though Task 1 had just projected the post-`choose` tail
+  -- into that branch, where it is provably dead.
+  --
+  -- Here the `more` branch loops forever, so the trailing `C -> S : Bool` can
+  -- never run on that side. Not UNSOUND (both roles agree on the same dead
+  -- tail), but it is exactly the defect class Task 2 exists to reject.
+  -- `check_unreachable_after_loop` now threads the enclosing tail into the
+  -- branch recursion. Related: `t93` (tail written at the SAME level as the
+  -- `loop`), `t91` (the Task 1 tail projection itself).
+  needs IO.Console
+  type C = C
+  type S = S
+
+  protocol Q do
+    choose by S:
+      more -> loop do S -> C : Int end
+      done -> S -> C : Bool
+    end
+    C -> S : Bool
+  end
+
+  fn main() do
+    println("unreachable-tail witness")
+  end
+end

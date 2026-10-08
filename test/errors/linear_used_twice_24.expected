@@ -1,0 +1,17 @@
+exit: 1
+-- ERROR -------------- errors/linear_used_twice_24.march
+
+The affine value `c` is used more than once here. [linear_used_twice]
+Affine values may be used at most once.
+
+18 |     let b = use_it(c)
+                        ^
+
+
+    `c` was already consumed here:
+
+17 |     let a = use_it(c)
+                        ^
+    run `march --explain linear_used_twice`
+
+

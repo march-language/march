@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/parse_error_5.march","start_line":3,"start_col":2,"end_line":3,"end_col":5,"message":"Parse error in declaration","code":"parse_error","fix":null,"labels":[],"notes":[]}

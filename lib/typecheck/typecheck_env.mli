@@ -167,6 +167,7 @@ type env = {
   fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
   qual_fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
   qual_fn_names : unit StrMap.t;
+  lambda_arities : (int * Typecheck_types.Ast.span * Typecheck_types.Ast.span option) StrMap.t;
   plain_let_names : Typecheck_types.StringSet.t;
   proof_caps : (string * string) list;
   always_linear_types : string list;

@@ -1,0 +1,14 @@
+exit: 1
+-- ERROR ------------------- errors/let_star_last_1.march
+
+`let*` cannot be the last expression in a block. [let_star_last]
+Add an expression of the same type as the right-hand side after it — for example, if the right-hand side is an `Option`:
+
+    let* x = might_be_none()
+    Some(x + 1)
+
+6 |     let* x = a
+        ^^^^^^^^^^
+
+
+

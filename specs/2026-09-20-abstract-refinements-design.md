@@ -1,6 +1,10 @@
 # Design: abstract refinements (a refinement parameterised by a predicate)
 
 **Date:** 2026-09-20
+**Status:** phase 1 landed 2026-09-21; phase 2 landed 2026-10-06 (preceded by
+the callback-binder PR; plan `specs/plans/2026-10-06-abstract-refinements-phase2-plan.md`,
+record `specs/progress/2026-10-06-abstract-refinements-phase2.md`). Phase 3 landed 2026-10-07
+(`specs/progress/2026-10-07-abstract-refinements-phase3.md`; `Map.filter` stays out per §9.3). Phase 4 open.
 **Closes:** item 6 of `specs/todos/2026-09-18-refine-element-flow-followups.md`
 ("Abstract refinements, so `filter` can produce `List({Int | p})` from a
 predicate. A new mechanism in the logic, not plumbing; its own design.")
