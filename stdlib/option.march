@@ -108,7 +108,7 @@ mod Option do
   end
 
   doc "Returns None if the value does not satisfy `pred`. A `Some` result is known to satisfy `pred` (an abstract refinement `p`, as for `List.filter`)."
-  fn filter(opt : Option(a), pred : ({x : a | true}) -> {Bool | _ == p(x)}) : Option({a | p(_)}) do
+  fn filter(opt : Option(a), pred : a -> Bool[p]) : Option(a[p]) do
     match opt do
     Some(x) -> if pred(x) do Some(x) else None end
     None    -> None
