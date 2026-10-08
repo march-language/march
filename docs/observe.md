@@ -990,6 +990,13 @@ march> [{ name: "first", tags: ["a", "b", "c"] }] limit: 2
 - The limit applies at every depth: each list, Array, Map and Set shows at
   most `N` elements then `… n more`, and each string at most `N` characters
   then `… n more chars`. `limit: all` (or `:limit 0`) turns it off.
+- The other stdlib containers print by their elements too, with the same
+  limit: `HashMap{"a" => 1}`, `OrderedMap{1 => "a"}`, `SortedSet{1, 3}`,
+  `Deque[1, 2]`, `Queue[1, 2]`, `RRB.Vec[1, 2]`, `NativeArray[1.5, 2.5]`.
+  A HashMap prints in hash order; the others in their own order. RingBuf and
+  LinearMap are linear (reading one consumes it), so they print as
+  `to_string` prints them. So does a container whose type name the program
+  reuses for a type of its own (a program `Deque`, say).
 - A type with a hand-written `Show` prints through its `show`, cut at 16 KiB
   with `… (n more bytes)`.
 - A function prints `<fn>`; a Pid and other runtime values print as

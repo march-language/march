@@ -343,6 +343,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **The remote shell prints the other stdlib containers by their elements.**
+  A HashMap, OrderedMap, SortedSet, Deque, Queue, RRB.Vec or NativeArray
+  result used to print its internal structure (`HamtHashMap(HBranch(...))`,
+  `Deque(3, [1], [3, 2])`, `#<tag:-6>`). It now prints as
+  `HashMap{"a" => 1}`, `Deque[1, 2, 3]`, `NativeArray[1.5, 2.5]` and so on,
+  with the element limit at every depth, like List, Array, Map and Set.
 - **Compiler-minted symbols are structural, not counter-numbered.** A lambda
   is `$lam<k>_<host>` (nested: `$lam<j>__lam<k>_<host>`), its lifted apply fn
   `<lambda>$apply$<k>_<host>`, a fused pipeline helper `$fused_mf_<host>_<k>`,
