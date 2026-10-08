@@ -1228,8 +1228,9 @@ proof_cap_decl:
     `proof cap Live with SessionOps`.  Absent means the capability stays
     runtime-erased, which is every capability written before this existed.
 
-    KNOWN CONFLICT (verified 2026-08-31: this rule takes the grammar from 10
-    shift/reduce conflicts to 11).  After `PROOFCAP upper_name` with `WITH`
+    KNOWN CONFLICT (verified 2026-08-31: this rule took the grammar from 10
+    shift/reduce conflicts to 11; the total is 7 since 2026-10-08, when the
+    `let?`/`let*` annotation errors stopped parsing a type and 4 others went).  After `PROOFCAP upper_name` with `WITH`
     ahead, menhir cannot decide between reducing the empty `proof_cap_dict`
     and shifting, because the REPL entry point's `repl_sequence` can itself
     BEGIN with `WITH`.  Menhir resolves it by shifting, which is the reading
@@ -1526,13 +1527,16 @@ block_expr:
             mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
     { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
-  | LET; QUESTION; _p = simple_pattern; ty = type_annot; _e = preceded(EQUALS, expr)?
-    { let _ = ty in
-      error_raise
+  (* Stops at the `:`: the rule exists only to report this error, and parsing
+     the type made it ambiguous with a statement after a bare annotation (4 of
+     the grammar's shift/reduce conflicts, and 2 more once a type may end in
+     `[p]`).  The caret is unchanged: [type_annot] began at this same COLON. *)
+  | LET; QUESTION; _p = simple_pattern; COLON
+    { error_raise
         "A `let?` binding can't have a type annotation — its type is inferred \
          from the `Ok` payload of the `Result` on the right."
         (Some "let? name = result_expr")
-        $startpos(ty) }
+        $startpos($4) }
   | LET; QUESTION; _p = simple_pattern; error
     { error_raise
         "I was expecting `=` in the let? binding here:"
@@ -1540,13 +1544,16 @@ block_expr:
         $startpos($4) }
   | LET; STAR; p = simple_pattern; EQUALS; e = expr
     { ELetStar (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
-  | LET; STAR; _p = simple_pattern; ty = type_annot; _e = preceded(EQUALS, expr)?
-    { let _ = ty in
-      error_raise
+  (* Stops at the `:`: the rule exists only to report this error, and parsing
+     the type made it ambiguous with a statement after a bare annotation (4 of
+     the grammar's shift/reduce conflicts, and 2 more once a type may end in
+     `[p]`).  The caret is unchanged: [type_annot] began at this same COLON. *)
+  | LET; STAR; _p = simple_pattern; COLON
+    { error_raise
         "A `let*` binding can't have a type annotation — its type is \
          inferred from the right-hand side."
         (Some "let* name = expr")
-        $startpos(ty) }
+        $startpos($4) }
   | LET; STAR; _p = simple_pattern; error
     { error_raise
         "I was expecting `=` in the let* binding here:"
@@ -2024,7 +2031,8 @@ pattern:
    an arm separator only ever follows a COMPLETE branch — one that has
    already consumed its ARROW and body — so LR(1) distinguishes the two uses
    without a conflict.  Verified: adding this production leaves menhir's
-   conflict count unchanged at 9. *)
+   conflict count unchanged (it was 9 then; 7 since 2026-10-08, counted with
+   `menhir --explain` on this file). *)
 pattern_no_as:
   | p = pattern_alt; PIPE; ps = separated_nonempty_list(PIPE, pattern_alt)
     { PatOr (p :: ps, mk_span ($loc)) }
