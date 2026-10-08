@@ -4853,6 +4853,8 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
     | Ast.TyRefine (base, _, _) -> lenient_ty base
   in
   let inst_ty = lenient_ty idef.impl_ty in
+  let bounds = List.concat_map (fun ((name : Ast.name), ts) ->
+      List.map (fun t -> name.txt, lenient_ty t) ts) idef.impl_constraints in
   let key = idef.impl_iface.txt in
   let sp  = idef.impl_iface.span in
   let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
@@ -4918,12 +4920,12 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
      machinery test fixtures — rejecting it (DECIDE-1) is deferred as a follow-on
      so this ships without that disruptive change. *)
   match List.find_opt
-          (fun (t, s, m_old) ->
+          (fun (t, s, m_old, _) ->
              s <> sp && s <> Ast.dummy_span
              && types_overlap t inst_ty
              && not (modules_distinct m_old head_type_module))
           lst with
-  | Some (_, prev_sp, _) ->
+  | Some (_, prev_sp, _, _) ->
     Err.error ~code:Err.Code.overlapping_impl env.errors ~span:sp
       (Printf.sprintf
          "Overlapping implementation: `impl %s(%s)` conflicts with the \
@@ -4937,10 +4939,10 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
   | None ->
     (* No conflict. Register (unless our own same-span entry is already present
        from a Pass-1 re-registration, in which case this is a no-op). *)
-    if List.exists (fun (t, s, _) -> s = sp && types_overlap t inst_ty) lst
+    if List.exists (fun (t, s, _, _) -> s = sp && types_overlap t inst_ty) lst
     then env
     else { env with impls =
-             StrMap.add key ((inst_ty, sp, head_type_module) :: lst) env.impls }
+             StrMap.add key ((inst_ty, sp, head_type_module, bounds) :: lst) env.impls }
 
 (** Pre-register a forward-reference interface declared in [prefix]: its name
     (qualified `Mod.Iface` AND bare `Iface`) plus each method (qualified and
@@ -5009,6 +5011,72 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
     end
   ) e1 idef.iface_methods
 
+(* Resolve conditional impls without unifying their stored head variables:
+   those variables are shared by every use site. Bounds use the same variable
+   ids as the head, so a local substitution specialises them for this call. *)
+let interface_satisfied env iface target =
+  let rec strip t = match repr t with TLin (_, t) -> strip t | t -> t in
+  let rec size t = match strip t with
+    | TCon (_, ts) | TTuple ts -> 1 + List.fold_left (fun n t -> n + size t) 0 ts
+    | TArrow (a, b) -> 1 + size a + size b
+    | TRecord fs -> 1 + List.fold_left (fun n (_, t) -> n + size t) 0 fs
+    | _ -> 1
+  in
+  let rec satisfies active seen iface target =
+    let target = strip target in
+    match target with
+    | TVar _ | TError -> true
+    | TTuple ts when iface = "Eq" -> List.for_all (satisfies active seen iface) ts
+    | _ ->
+      let key = iface ^ ":" ^ pp_ty target in
+      if List.mem key seen then false
+      else
+        let seen = key :: seen in
+        let matches (head, _, _, bounds) =
+          let target_size = size target in
+          (* A repeated impl must make structural progress. Exact-obligation
+             cycle detection alone misses bounds that expand their type. *)
+          let progresses = not (List.exists (fun (name, old_head, old_size) ->
+            name = iface && old_head == head && target_size >= old_size) active) in
+          let subst = Hashtbl.create 8 in
+          let rec match_head head target =
+            match strip head, strip target with
+            | TVar r, t ->
+              (match !r with
+               | Unbound (id, _) ->
+                 (match Hashtbl.find_opt subst id with
+                  | Some old -> types_overlap old t
+                  | None -> Hashtbl.add subst id t; true)
+               | Link _ -> assert false)
+            | TCon (n, xs), TCon (m, ys) when n = m && List.length xs = List.length ys ->
+              List.for_all2 match_head xs ys
+            | TTuple xs, TTuple ys when List.length xs = List.length ys ->
+              List.for_all2 match_head xs ys
+            | TArrow (a, b), TArrow (c, d) -> match_head a c && match_head b d
+            | TRecord xs, TRecord ys when List.map fst xs = List.map fst ys ->
+              List.for_all2 (fun (_, x) (_, y) -> match_head x y) xs ys
+            | x, y -> impl_matches_ty x y
+          in
+          let rec specialise t = match repr t with
+            | TVar r ->
+              (match !r with
+               | Unbound (id, _) -> Option.value ~default:t (Hashtbl.find_opt subst id)
+               | Link _ -> assert false)
+            | TCon (n, ts) -> TCon (n, List.map specialise ts)
+            | TTuple ts -> TTuple (List.map specialise ts)
+            | TArrow (a, b) -> TArrow (specialise a, specialise b)
+            | TRecord fs -> TRecord (List.map (fun (n, t) -> n, specialise t) fs)
+            | TLin (l, t) -> TLin (l, specialise t)
+            | t -> t
+          in
+          progresses && match_head head target &&
+          List.for_all (fun (name, ty) ->
+            satisfies ((iface, head, target_size) :: active) seen name (specialise ty)) bounds
+        in
+        List.exists matches (Option.value ~default:[] (StrMap.find_opt iface env.impls))
+  in
+  satisfies [] [] iface target
+
 (** Discharge all pending Num/Ord/CInterface constraints accumulated during
     inference.  Called at each declaration boundary (DFn, DLet) to verify
     that constrained type variables were unified with a compatible type. *)
@@ -5072,17 +5140,7 @@ let discharge_constraints env span =
               tuples structurally, and no impl can be written for every
               arity. A component that is still a type variable is
               polymorphic, like the top-level case above. *)
-           let rec satisfies t =
-             match strip_lin t with
-             | TVar _ -> true
-             | TTuple ts when iface_name = "Eq" -> List.for_all satisfies ts
-             | t' ->
-               (match StrMap.find_opt iface_name env.impls with
-                | None -> false
-                | Some impl_tys -> List.exists (fun (impl_ty, _, _) ->
-                    impl_matches_ty (repr impl_ty) t') impl_tys)
-           in
-           let satisfied = satisfies ty in
+           let satisfied = interface_satisfied env iface_name ty in
            if not satisfied then begin
              (* Record field auto-satisfy: discharge a single-method
                 accessor-shaped interface against an anonymous TRecord when
@@ -6550,13 +6608,17 @@ let rec check_decl env (d : Ast.decl) : env =
     (* The impl header's own type (`impl Iface(T)`) has no enclosing
        function — see [with_no_caller]. *)
     let inst_ty = with_no_caller env (fun () -> surface_ty env ~tvars idef.impl_ty) in
+    let bounds = with_no_caller env (fun () ->
+        List.concat_map (fun ((name : Ast.name), ts) ->
+            List.map (fun t -> name.txt, surface_ty env ~tvars t) ts)
+          idef.impl_constraints) in
     (* Register this implementation so CInterface constraints can be discharged. *)
     let env_with_impl = { env with impls =
       (let key = idef.impl_iface.txt in
        let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
        (* Pass-2 re-registration for constraint discharge; coherence is enforced
           in [register_impl_shape] (Pass 1). Carry the span for the new shape. *)
-       StrMap.add key ((inst_ty, idef.impl_iface.span, None) :: lst) env.impls) } in
+       StrMap.add key ((inst_ty, idef.impl_iface.span, None, bounds) :: lst) env.impls) } in
     (* A derived Json encoder is a module-wide fact (see [env.json_codecs]). *)
     if idef.impl_iface.txt = "JsonTo" then
       env.json_codecs := inst_ty :: !(env.json_codecs);
@@ -6570,10 +6632,7 @@ let rec check_decl env (d : Ast.decl) : env =
           (match cty with
            | TVar _ -> ()   (* Polymorphic param — checked at use sites *)
            | _ ->
-             if not (match StrMap.find_opt cname.txt env.impls with
-                 | None -> false
-                 | Some tys -> List.exists (fun (impl_ty, _, _) ->
-                     impl_matches_ty (repr impl_ty) cty) tys) then
+             if not (interface_satisfied env cname.txt cty) then
                Err.error ~code:Err.Code.unsatisfied_constraint env.errors ~span:cname.span
                  (Printf.sprintf
                     "Constraint `%s(%s)` in `when` clause is not satisfied.\n\
@@ -6606,10 +6665,7 @@ let rec check_decl env (d : Ast.decl) : env =
               (match sc_inst_ty with
                | TVar _ -> ()  (* polymorphic param — checked at use sites *)
                | _ ->
-                 if not (match StrMap.find_opt sc_name.txt env.impls with
-                     | None -> false
-                     | Some tys -> List.exists (fun (impl_ty, _, _) ->
-                         impl_matches_ty (repr impl_ty) sc_inst_ty) tys) then
+                 if not (interface_satisfied env sc_name.txt sc_inst_ty) then
                    Err.error ~code:Err.Code.missing_superclass_impl env.errors ~span:idef.impl_iface.span
                      (Printf.sprintf
                         "Cannot implement `%s(%s)`: required superclass `%s(%s)` is not \

@@ -158,7 +158,7 @@ type env = {
   protocols : proto_info StrMap.t;
   impls :
     (Typecheck_types.ty *
-     Typecheck_types.Ast.span * string option)
+     Typecheck_types.Ast.span * string option * (string * Typecheck_types.ty) list)
     list StrMap.t;
   import_tracker : import_entry list ref;
   import_idx : import_index;

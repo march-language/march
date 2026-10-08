@@ -539,6 +539,9 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- Conditional interface implementations now check their specialised `when`
+  bounds at use sites, rejecting types whose nested payload lacks the required
+  interface instead of accepting the implementation's head alone.
 - **`forge diagnose` no longer mistakes a growing mailbox for an RC leak.**
   `rc.climb` now excludes net queued-message growth before applying its heap
   threshold, while still reporting a genuine climb. The shared Forge/stdlib

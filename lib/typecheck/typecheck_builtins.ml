@@ -2070,6 +2070,5 @@ let base_env errors type_map =
                    let lst = Option.value ~default:[] (StrMap.find_opt k m) in
                    (* Built-ins carry [dummy_span]; the coherence check reads it
                       to phrase a user-impl-over-builtin conflict specially. *)
-                   StrMap.add k ((v, Ast.dummy_span, None) :: lst) m) StrMap.empty builtin_impls;
+                   StrMap.add k ((v, Ast.dummy_span, None, []) :: lst) m) StrMap.empty builtin_impls;
   }
-
