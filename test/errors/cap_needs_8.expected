@@ -15,3 +15,5 @@ fix [cap_needs:IO.FileWrite]:
 @@ after line 10 @@
  mod Store do
 +  needs IO.FileWrite
+
+after fix: exit 0

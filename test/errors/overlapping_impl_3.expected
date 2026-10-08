@@ -28,3 +28,6 @@ fix [cap_grant]:
 @@ lines 19-19 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Overlapping implementation: `impl Descr(Box(Int))` conflicts with the implementation at errors/overlapping_impl_3.march:13:7 — their heads overlap. [overlapping_impl]

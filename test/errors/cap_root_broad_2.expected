@@ -57,3 +57,6 @@ fix [cap_grant]:
 @@ lines 42-42 @@
 -  fn main() do
 +  fn main(_cap_io : Cap(IO)) do
+
+after fix: exit 1
+this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]

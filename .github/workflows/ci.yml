@@ -14,14 +14,16 @@
 #   test          (ubuntu) × 4          `dune runtest`, sharded: codegen, refinecheck,
 #                                       compiler, rest (see the job's comment)
 #                 (macos)               `dune runtest`, unsharded
+#   macos-checks  (macos)               property groups (all but the oracle) + @vault-scale
 #   two-node      (ubuntu) × 3          two-node scenarios, sharded 1/3, 2/3, 3/3;
 #                                       shard 1 also runs the node_discovery soak
-#   conformance   (ubuntu, macos)       @types-check, @grammar-check, @vault-scale, docs, fmt
+#   conformance   (ubuntu)              @types-check, @grammar-check, @vault-scale, docs
 #   tree-sitter   (ubuntu)              tree-sitter-march/ parses what the compiler accepts
-#   sanitize-gate (ubuntu)              ASAN gate: golden corpus + curated native + two-node
-#   ocaml-build   (ubuntu, macos) ─┬─ property-tests × 3 (per OS)
-#                  ubuntu leg only ─┼─ cross-linux-oracle
-#                                   └─ property-oracle × 8
+#   sanitize-gate (ubuntu) × 3          ASAN: golden + curated native (shard 1) + two-node 1/3..3/3
+#   ocaml-build   (ubuntu) ─┬─ property-tests × 3
+#                           ├─ cross-linux-oracle
+#                           ├─ determinism (small corpus on PRs, full on main)
+#                           └─ property-oracle × 2 (4 case lists each)
 #
 # Two other changes cut the per-job floor and the per-compile cost:
 #   - .github/actions/opam-deps caches ~/.opam, so `opam install --deps-only`
@@ -130,6 +132,20 @@ jobs:
           # caught, just one step later.
           dune build bin/main.exe
 
+      # A test binary killed by a signal its own handler never saw (a bare
+      # "Segmentation fault (core dumped)" from `sh -c ./native_X`) leaves no
+      # trace on a stock runner: the default core_pattern pipes to apport,
+      # which discards cores of unpackaged binaries. Write them to a known
+      # directory instead; the Test step raises the core limit, and the two
+      # steps after it backtrace and upload them, on failure only.
+      # specs/todos/2026-10-07-flake-bare-sigsegv-native-fixtures-linux.md
+      - name: Capture test cores (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo mkdir -p /tmp/march-cores && sudo chmod 1777 /tmp/march-cores
+          # %E: the executable's absolute path with '/' written as '!'.
+          sudo sysctl -w kernel.core_pattern='/tmp/march-cores/core.%p.%E'
+
       - name: Test (${{ matrix.shard }})
         # Sized for the unsharded macOS run: 37-49 min on main in late
         # September 2026 (run_codegen alone took 28-29 min on a slow macOS
@@ -140,6 +156,7 @@ jobs:
         timeout-minutes: 75
         run: |
           eval $(opam env)
+          if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi
           case "${{ matrix.shard }}" in
             codegen)     dune build @test/runtest-run_codegen ;;
             refinecheck) dune build @test/runtest-test_refinecheck ;;
@@ -148,6 +165,36 @@ jobs:
             all)         dune runtest ;;
             *) echo "::error::unknown test shard '${{ matrix.shard }}'"; exit 1 ;;
           esac
+
+      - name: Backtrace test cores (Linux)
+        if: failure() && runner.os == 'Linux'
+        run: |
+          shopt -s nullglob
+          cores=(/tmp/march-cores/core.*)
+          echo "${#cores[@]} core file(s) in /tmp/march-cores"
+          [ ${#cores[@]} -gt 0 ] || exit 0
+          sudo apt-get install -y gdb > /dev/null
+          for c in "${cores[@]:0:8}"; do
+            exe=$(basename "$c" | sed 's/^core\.[0-9]*\.//; s/!/\//g')
+            echo "::group::$c ($exe)"
+            if [ -f "$exe" ]; then
+              cp "$exe" /tmp/march-cores/ || true
+              gdb -batch -ex 'p $_siginfo' -ex 'x/6i $pc' \
+                  -ex 'thread apply all bt 40' "$exe" "$c" 2>&1 | grep -v '^\[New LWP'
+            else
+              echo "the executable is gone (rebuilt or removed since the crash)"
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Upload test cores (Linux)
+        if: failure() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cores-${{ matrix.os }}-${{ matrix.shard }}
+          path: /tmp/march-cores
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Distributed-plane guards that used to run after `dune runtest` in the ubuntu
   # `test` leg, adding ~15 min to it serially. They need no test exe, only the
@@ -322,12 +369,12 @@ jobs:
         timeout-minutes: 3
         run: scripts/check-tree-sitter.sh
 
+  # Ubuntu only since 2026-10-07. Every step here is either frontend-only
+  # (`--check`, the same answer on both OSes) or already skipped on macOS;
+  # the one OS-sensitive check, @vault-scale, runs in `macos-checks` too.
+  # The macOS leg cost a macOS slot (5 for the whole org) per run.
   conformance:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -534,76 +581,6 @@ jobs:
             exit 1
           fi
 
-      # --refine-audit (lib/refinecheck/refine_audit.ml) answers a different
-      # question than the ratchet above: not "did a filed obligation stop
-      # being proved" but "does the checker ever look at this declared
-      # refinement at all". Task 2/3's sweep over the ~300-file corpus
-      # (test/native/*.march, stdlib/*.march) found 63 declared refinements,
-      # every one Enforced, zero Unenforced. See test/refine_audit/
-      # corpus.baseline (the alcotest `audit-baseline` group under
-      # `dune runtest`, which the `test` job above already runs, diffs the
-      # full sweep against that file exactly). This step is a second,
-      # narrower ratchet in this job specifically: it reads the SAME
-      # `user + stdlib` slice the ceiling step above uses (stdlib/list.march
-      # sees the whole prepended stdlib regardless of which stdlib file is
-      # named, per that comment), and fails if its Unenforced count rises
-      # above what the corpus baseline currently records. A rise here means
-      # a newly declared refinement landed in a position the checker never
-      # enforces (a lambda param, a block-level fn, a non-adoptable impl
-      # method, an actor field/handler param, ...) with nothing else in CI
-      # catching it, because an Unenforced site files no obligation and so
-      # never touches the ratchet above at all.
-      - name: Refinement coverage audit ratchet
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          eval $(opam env)
-          unenforced_baseline=0
-          rm -rf .march/cas/artifacts-v2
-          ./_build/default/bin/main.exe --check --stdlib-source --refine-audit stdlib/list.march \
-            > /tmp/refine_audit_ceiling.txt 2>&1 || true
-          cat /tmp/refine_audit_ceiling.txt
-          unenforced=$(sed -n \
-            's/^coverage audit (user + stdlib): [0-9][0-9]* enforced, [0-9][0-9]* inert (warned), \([0-9][0-9]*\) unenforced$/\1/p' \
-            /tmp/refine_audit_ceiling.txt)
-          if [ -z "$unenforced" ]; then
-            echo "FAIL: could not find the 'coverage audit (user + stdlib)' line in"
-            echo "--refine-audit output for stdlib/list.march."
-            echo "Likely causes: a warm --check CAS short-circuited before the audit"
-            echo "printed (the rm above should prevent this), the compiler errored"
-            echo "before printing, or the audit's summary line format changed (update"
-            echo "the sed above to match). This step must never pass vacuously."
-            exit 1
-          fi
-          echo "unenforced=$unenforced (ceiling: $unenforced_baseline), read from stdlib/list.march's user + stdlib slice"
-          if [ "$unenforced" -gt "$unenforced_baseline" ]; then
-            echo ""
-            echo "FAIL: the refinement coverage audit's Unenforced count rose from"
-            echo "$unenforced_baseline to $unenforced."
-            echo "A declared refinement now sits somewhere the checker never enforces"
-            echo "it. See test/refine_audit/corpus.baseline and"
-            echo "docs/refinement-types.md's 'Coverage audit' section for the full"
-            echo "list of unenforced positions (a lambda's own param, a block-level"
-            echo "fn's param/return, a non-adoptable impl method's param, an actor's"
-            echo "state field or handler param, a nested refinement, a String"
-            echo "return, ...)."
-            echo ""
-            echo "What to do:"
-            echo "  1. Reproduce locally:"
-            echo "       rm -rf .march/cas/artifacts-v2"
-            echo "       ./_build/default/bin/main.exe --check --stdlib-source --refine-audit stdlib/list.march"
-            echo "  2. Read the per-site lines this prints (file:line:col, the"
-            echo "     predicate, and why it is Unenforced) to find what changed."
-            echo "  3. Fix the regression, or move the new refinement to a position"
-            echo "     the checker enforces (a top-level fn's own parameter, its"
-            echo "     return when the base is Int/Bool/Float/a registered record, or"
-            echo "     a let-binding)."
-            echo "  4. Only raise this ceiling if the rise is intentional and filed as"
-            echo "     a specs/todos/ entry with a reproducer, exactly like the four"
-            echo "     Task 4 todos this ratchet was introduced alongside."
-            exit 1
-          fi
-
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
         timeout-minutes: 5
         run: |
@@ -637,18 +614,17 @@ jobs:
 
       # Runs the JIT REPL and validates every stdlib `march>` example against the
       # value it renders. A HARD gate on Linux, where it is deterministic and
-      # clean. Scoped OFF macOS: the JIT's core cross-dylib string miscompile is
+      # clean. Not run on macOS (this job is Linux-only): the JIT's core cross-dylib string miscompile is
       # now FIXED (repl_jit.ml two-level runtime link, see
       # specs/progress/2026-08-09-jit-macos-cross-dylib-string-miscompile.md), but
       # the GitHub macos-15 runner has a RESIDUAL nondeterminism even with the fix
       # (first runtime .so built in a job can still miscompile) that needs a
-      # macOS 15 host to root-cause. Re-enable on macOS once that residual is gone.
+      # macOS 15 host to root-cause. Once that residual is gone, add it to `macos-checks`.
       #
       # The build is its own step so the doctest step's time is the script
       # alone. (bin/main.exe is normally already built by the refinement
       # ratchet above, so the build step should take seconds.)
       - name: Build compiler for stdlib doctests
-        if: runner.os != 'macOS'
         timeout-minutes: 10
         run: |
           eval $(opam env)
@@ -663,18 +639,11 @@ jobs:
       # a minute, and the script fails if the prelude ever falls back to
       # recompiling again.
       - name: Check stdlib `march>` doctests
-        if: runner.os != 'macOS'
         timeout-minutes: 5
         run: |
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             python3 scripts/check-stdlib-doctests.py --check
-
-      - name: Check formatting
-        timeout-minutes: 3
-        run: |
-          eval $(opam env)
-          dune fmt 2>&1 || true
 
   # AddressSanitizer sweep over three corpora on this runner.
   # sanitize.sh covers every specs/lang/golden/*.march; a curated by-name list of
@@ -690,10 +659,24 @@ jobs:
   #
   # Ubuntu-only: the gate no-ops on a Mac running CrowdStrike Falcon, whose
   # syscall interception hangs ASAN's shadow-memory setup.
+  #
+  # Three shards since 2026-10-07 (the split the 2026-10-02 note below asked
+  # for). The single job took 36-42 min, ~31 of them the two-node sweep: ~8
+  # compiling every node up front and ~23 running the scenarios one at a time,
+  # 18 of those in the 11 scenarios that compile their own nodes. Now each
+  # shard sweeps a third of the scenarios (`scripts/two-node.sh --list K/3`,
+  # round-robin over the sorted list, which deals the heavy control_* family
+  # across the shards); shard 1 also runs the golden and native corpora
+  # (~4 min), and the others skip them with SANITIZE_TWO_NODE_ONLY=1.
   sanitize-gate:
+    name: sanitize-gate (${{ matrix.shard }}/3)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: ubuntu-24.04
-    # Step (85) + toolchain setup (12), rounded up.
-    timeout-minutes: 100
+    # Step (45) + toolchain setup (12), rounded up.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -701,32 +684,18 @@ jobs:
         timeout-minutes: 12
         uses: ./.github/actions/march-setup
 
-      - name: AddressSanitizer gate (RC/UAF guard) — golden + curated SIMD/NativeArray
-        # The two-node sweep runs every scenario under ASan; the cluster node
-        # service added eleven (each compiles 2-3 ASan binaries). 15 minutes
-        # covered the golden + native corpora and the first 14 scenarios.
-        # Node certificates (step 11a) added five more, and forge, which the
-        # cert_* scenarios issue their certificates with.
-        #
-        # 45 -> 65 on 2026-09-26. Nothing hung or regressed. ubuntu runners
-        # come in two speeds: the same sweep took 29-34 min on a fast one and
-        # 38-39 min on a slow one (about 25% slower on every program). #663
-        # then added hcr_new_code_session (four ASan compiles, ~150 s), and
-        # on a slow runner the sweep ran past 45 min (main runs 36218685305,
-        # 36221645823). 65 leaves ~40% headroom over that for the scenario
-        # list to keep growing. It is not sharded: this job ends well before
-        # test (macos-15, all) at ~60 min, so a shard buys no wall time and
-        # adds a second setup + build to every run's Linux job-minutes. A
-        # longer timeout costs nothing while the sweep passes.
-        #
-        # 65 -> 85 on 2026-10-02. The four control_* two-node scenarios (each
-        # 135-200 s without ASan) took the step to 60 min on a slow runner
-        # (main run 36953454223; 45-52 min on fast ones), the same growth that
-        # timed the two-node job out. If a fast runner's sweep passes ~60
-        # min, shard the two-node corpus with `scripts/two-node.sh --list K/N`
-        # (SANITIZE_TWO_NODE_SHARD) instead of raising this again: by then it
-        # is past test (macos-15, all) and on the critical path.
-        timeout-minutes: 85
+      - name: AddressSanitizer gate (RC/UAF guard) — shard ${{ matrix.shard }}/3
+        # History of the unsharded step's limit: 15 min covered golden + native
+        # and the first 14 two-node scenarios; 45 -> 65 on 2026-09-26 and
+        # 65 -> 85 on 2026-10-02 as the scenario list grew (ubuntu runners come
+        # in two speeds, ~25% apart; main runs 36218685305, 36953454223). A
+        # shard should take ~15 min on a slow runner; 45 leaves room for the
+        # list to grow. When a shard's green runs pass ~30 min, add a fourth
+        # shard (N here and in the matrix) rather than raising this.
+        timeout-minutes: 45
+        env:
+          SANITIZE_TWO_NODE_SHARD: ${{ matrix.shard }}/3
+          SANITIZE_TWO_NODE_ONLY: ${{ matrix.shard != 1 && '1' || '0' }}
         run: |
           eval $(opam env)
           dune shutdown 2>/dev/null || true
@@ -736,7 +705,7 @@ jobs:
             ./specs/lang/golden/sanitize.sh
 
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
-  # cross-linux-oracle and all 8 property-oracle shards below each used to
+  # cross-linux-oracle and the property-oracle shards below each used to
   # independently pay ~2.3min opam-install + a fresh `dune build` — 9 job
   # instances redoing identical work. Neither of them needs a coherent local
   # `_build`/incremental dune state the way the `dune runtest`-based test job
@@ -748,16 +717,19 @@ jobs:
   # across worktrees), and a run-scoped artifact can't leak across runs by
   # construction, which a persistent cache key can't guarantee no matter how
   # carefully the key is chosen.
-  # Matrixed over both runners because `property-tests` below consumes this,
-  # and its groups must run on macOS too (see that job's comment). The Linux
-  # leg additionally feeds cross-linux-oracle and the 8 property-oracle shards.
+  # Ubuntu only since 2026-10-07: the macOS property groups run in
+  # `macos-checks`, which builds its own exes, so a macOS leg here would be
+  # one more macOS job per run (5 slots for the whole org). It feeds
+  # property-tests, cross-linux-oracle, determinism and the property-oracle
+  # shards. The `os` matrix and artifact names keep the OS in them, so a
+  # second leg is a one-line change.
   ocaml-build:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04]
     steps:
       - uses: actions/checkout@v4
 
@@ -867,6 +839,12 @@ jobs:
   # (one that cannot go red) fails the job rather than passing it.
   # Like cross-linux-oracle, no OCaml toolchain: it runs the ubuntu
   # ocaml-build exe, which only needs libblake3.so at process start.
+  #
+  # Corpus by event (2026-10-07): pull requests run `--corpus small` (the
+  # TIR snapshot programs + topology_app, ~30 programs, ~2 min), pushes to
+  # main run `--corpus all` (~417 programs, ~50 min). The full corpus was the
+  # slowest job on every PR. A drift that only a program outside the small
+  # corpus shows is caught by the next main run, which the nightly gate reads.
   determinism:
     runs-on: ubuntu-24.04
     needs: [ocaml-build]
@@ -906,9 +884,9 @@ jobs:
         timeout-minutes: 5
         run: scripts/determinism-oracle.sh --self-test
 
-      - name: Determinism oracle over the full corpus
+      - name: Determinism oracle (${{ github.event_name == 'push' && 'full' || 'small' }} corpus)
         timeout-minutes: 60
-        run: scripts/determinism-oracle.sh --corpus all
+        run: scripts/determinism-oracle.sh --corpus ${{ github.event_name == 'push' && 'all' || 'small' }}
 
   # Differential-oracle CI (test/test_properties.ml's "oracle: interp = compiled"
   # group, ~1090 QCheck-generated compile-vs-interpret comparisons). This is NOT
@@ -918,10 +896,10 @@ jobs:
   # directly isn't viable either: each unique generated program is a real
   # `--compile` that the whole-binary CAS can never hit (distinct sources), so
   # all 1090 would add well over an hour to the Test job on every push.
-  # Instead this runs as its own job, sharded 8-way via alcotest's own
-  # case-number filtering (`test <suite> <cases>`), hand-balanced by measured
-  # per-case cost (not a naive index range) so no single shard is dominated by
-  # the two heavier cases (case 0 = println_arith at QCheck count 100; case 20
+  # Instead this runs as its own job: eight case lists selected by alcotest's
+  # own case-number filtering (`test <suite> <cases>`), run four at a time on
+  # each of two runners, hand-balanced by measured per-case cost (not a naive
+  # index range) so no single list is dominated by the two heavier cases (case 0 = println_arith at QCheck count 100; case 20
   # = opt_matrix at count 20 * 2 opt levels).
   # test_properties.exe's QCheck property groups — everything in that binary
   # EXCEPT the interp-vs-compiled oracle group (which property-oracle below
@@ -942,14 +920,13 @@ jobs:
   #   - the oracle group must NOT be matched here. It is excluded by omission,
   #     so a new group added upstream would also be silently skipped — hence
   #     the guard asserting every listed group is covered by some shard.
-  # Matrixed over BOTH runners, not just Linux. Before this job existed these
-  # groups ran under `dune runtest`, which the `test` job runs on macOS and
-  # Linux alike — making this Linux-only would have silently dropped every
-  # QCheck property from macOS. That matters concretely: `classify_compile`
-  # asserts how the compiler classifies signal deaths and segfault return
-  # codes, precisely the macOS-vs-Linux divergent surface (test_properties.ml
-  # already carries a macOS-only Sys_error special case), so a macOS-only
-  # regression there would ship unseen.
+  # Linux here; macOS runs the same groups in ONE job, `macos-checks` below.
+  # They must still run on macOS: before this job existed they ran under
+  # `dune runtest` on both OSes, and the groups that shell out to the
+  # compiler (record-update converged, cli: timings) and test_properties.ml's
+  # macOS-only Sys_error case are where the OSes can differ. Until 2026-10-07
+  # this matrix had a macOS leg of three shards plus a macOS ocaml-build:
+  # four macOS jobs for ~7 min of tests.
   property-tests:
     runs-on: ${{ matrix.os }}
     needs: [ocaml-build]
@@ -962,8 +939,9 @@ jobs:
         # into every os combination and later objects would overwrite earlier
         # ones' `shard`/`filter` rather than producing the os × shard product
         # — silently running a subset. Listing both dimensions makes this a
-        # true 2 × 3 = 6, with `include` only attaching each shard's filter.
-        os: [ubuntu-24.04, macos-15]
+        # true os × shard product, with `include` only attaching each shard's
+        # filter. One os today (see above).
+        os: [ubuntu-24.04]
         shard: [soundness, tir, rest]
         include:
           # `type soundness + eval` is isolated: it evaluates generated
@@ -1066,37 +1044,30 @@ jobs:
           fi
 
   property-oracle:
+    name: property-oracle (${{ matrix.shard }}/2)
+    needs: ocaml-build
     runs-on: ubuntu-24.04
-    needs: [ocaml-build]
     timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        # 8-way (not 4-way): the first version of this job was sized against
-        # local timing (~4s/compile on a 14-core Apple Silicon dev machine)
-        # and failed on real GH Actions hardware, which measured ~6.5s/compile
-        # (case 0 alone: 100 iterations in 10m48s) — shard 1 (250 cases) needed
-        # ~27min against a 25min timeout. Re-balanced by measured cost. The
-        # runtime-object cache has since cut the per-compile cost roughly in
-        # half again; the shard split is left as-is rather than re-tuned
-        # optimistically, per the same lesson.
+        # Two runners, each running FOUR case lists side by side. Each list is
+        # one test_properties.exe process, and each process is one compile at
+        # a time: run one per runner (8 jobs, the layout until 2026-10-07),
+        # three of a 4-vCPU runner's cores sat idle and the group cost ~95
+        # Linux job-minutes plus 8 setups for ~15 min of wall time.
+        #
+        # The lists are the old eight shards, hand-balanced by measured cost
+        # (case 0 = println_arith at QCheck count 100 and case 20 = opt_matrix
+        # at count 20 * 2 opt levels are the heavy ones; on CI the old shards
+        # took 9-16 min each). Each runner gets two of the slow lists and two
+        # of the fast ones. The guard step below pins the case count, so a new
+        # oracle case cannot land in no list.
         include:
           - shard: 1
-            cases: "0,20"
+            cases: "0,20 4,5,6 10,11,12 16,17"
           - shard: 2
-            cases: "1,2,3"
-          - shard: 3
-            cases: "4,5,6"
-          - shard: 4
-            cases: "7,8,9"
-          - shard: 5
-            cases: "10,11,12"
-          - shard: 6
-            cases: "13,14,15"
-          - shard: 7
-            cases: "16,17"
-          - shard: 8
-            cases: "18,19"
+            cases: "1,2,3 7,8,9 13,14,15 18,19"
     steps:
       - uses: actions/checkout@v4
 
@@ -1147,7 +1118,7 @@ jobs:
       # stay green; deleting one would shift every later index and silently
       # re-cover the wrong cases. The property-tests coverage guard cannot
       # catch either — it checks group NAMES, and this group is named there.
-      # Pin the count instead: the 8 shards' index lists union to exactly
+      # Pin the count instead: the two shards' index lists union to exactly
       # 0..20, so any change to the case count must come with a re-shard here.
       - name: Guard — oracle case count still matches the shard split
         run: |
@@ -1158,15 +1129,35 @@ jobs:
             | grep -c '^oracle: interp = compiled' || true)
           echo "oracle cases: expected $expected, found $actual"
           if [ "$actual" -ne "$expected" ]; then
-            echo "::error::the 'oracle: interp = compiled' group has $actual cases but the 8 property-oracle shards cover exactly $expected (indices 0..$((expected-1))). Re-balance the shard 'cases' lists in this workflow and update this guard, or the new/removed cases will silently run in no shard at all."
+            echo "::error::the 'oracle: interp = compiled' group has $actual cases but the property-oracle case lists cover exactly $expected (indices 0..$((expected-1))). Re-balance the shard 'cases' lists in this workflow and update this guard, or the new/removed cases will silently run in no shard at all."
             exit 1
           fi
 
-      - name: Differential oracle (shard ${{ matrix.shard }}/8, cases ${{ matrix.cases }})
+      - name: Differential oracle (shard ${{ matrix.shard }}/2, cases ${{ matrix.cases }})
         timeout-minutes: 25
         run: |
-          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
-            ./_build/default/test/test_properties.exe test 'oracle: interp = compiled' "${{ matrix.cases }}" -e
+          # One process per case list, all at once, each with its own alcotest
+          # log dir. Every process is waited for and every log printed, so one
+          # failing list never hides another's result.
+          pids=""; n=0
+          for cases in ${{ matrix.cases }}; do
+            n=$((n + 1))
+            mkdir -p "$RUNNER_TEMP/oracle-$n"   # alcotest's -o refuses a missing dir
+            MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+              ./_build/default/test/test_properties.exe test 'oracle: interp = compiled' "$cases" \
+                -e -o "$RUNNER_TEMP/oracle-$n" > "$RUNNER_TEMP/oracle-$n.log" 2>&1 &
+            pids="$pids $!:$cases:$n"
+          done
+          rc=0
+          for p in $pids; do
+            pid=${p%%:*}; rest=${p#*:}; cases=${rest%%:*}; n=${rest##*:}
+            if wait "$pid"; then status=ok; else status=FAILED; rc=1; fi
+            echo "::group::cases $cases: $status"
+            cat "$RUNNER_TEMP/oracle-$n.log"
+            echo "::endgroup::"
+            [ "$status" = ok ] || echo "::error::oracle cases $cases failed (log in the group above)"
+          done
+          exit $rc
 
   # Asserts that every property group in test_properties.exe is actually run by
   # SOME property-tests shard (or is the oracle group, which property-oracle
@@ -1224,3 +1215,60 @@ jobs:
             exit 1
           fi
           echo "OK: all $(wc -l < all.txt) property groups are covered by a shard or the oracle."
+
+  # Everything macOS needs beyond `test (macos-15, all)`, in one job: every
+  # QCheck property group except the interp-vs-compiled oracle (Linux-only,
+  # in property-oracle), and the OS-sensitive @vault-scale benchmark. Until
+  # 2026-10-07 this was five macOS jobs (ocaml-build, three property-tests
+  # shards, conformance) against an org-wide cap of five macOS runners.
+  #
+  # The group list comes from the binary itself (minus the oracle group),
+  # regex-escaped, so a new group runs here without anyone editing this.
+  macos-checks:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Build compiler + property tests
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          dune build bin/main.exe test/test_properties.exe
+
+      - name: Property tests (every group but the oracle)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          B=_build/default/test/test_properties.exe
+          # Same group extraction as property-coverage. No MARCH_BIN: the
+          # oracle group is excluded by the filter, not by a missing compiler.
+          filter=$($B list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+            | sed -E 's/[[:space:]]+[0-9]+[[:space:]]+.*$//' | sed -E 's/[[:space:]]+$//' \
+            | grep -v '^$' | grep -v 'qcheck random seed' | sort -u \
+            | grep -vxF 'oracle: interp = compiled' \
+            | sed 's/[][\.*^$+?(){}|]/\\&/g' | paste -sd'|' -)
+          [ -n "$filter" ] || { echo "::error::no property groups listed"; exit 1; }
+          echo "filter: $filter"
+          $B test "$filter" -e 2>&1 | tee /tmp/props.log
+          ran=$(grep -cE '\[(OK|FAIL)\]' /tmp/props.log || true)
+          echo "cases actually run: $ran"
+          [ "$ran" -gt 0 ] || { echo "::error::the property filter matched no cases"; exit 1; }
+          # Filtered-out cases still print as [SKIP]; only a case that RAN counts.
+          if grep -qE '\[(OK|FAIL)\][[:space:]]+oracle: interp = compiled' /tmp/props.log; then
+            echo "::error::the oracle group ran here; it belongs to property-oracle"; exit 1
+          fi
+
+      # See conformance's history of this step: a C threading benchmark whose
+      # bound adapts to the runner's core count, so it is the one conformance
+      # check whose answer depends on the OS.
+      - name: Vault distinct-key read-scaling benchmark (not part of runtest)
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          dune build @vault-scale

@@ -229,6 +229,90 @@ end
   Alcotest.(check bool) "no crash" true true
 
 (* ------------------------------------------------------------------ *)
+(* 14b. Code actions: the generic compiler-fix adapter (D4)            *)
+(* ------------------------------------------------------------------ *)
+
+(* The one quick fix whose edit comes straight from the diagnostic's
+   [fix] (carried in the LSP diagnostic's [data]), with no per-message
+   rule in the engine. *)
+let fix_edits (acts : Lsp.Types.CodeAction.t list) =
+  List.filter_map (fun (ca : Lsp.Types.CodeAction.t) ->
+      match ca.kind, ca.edit with
+      | Some k, Some { changes = Some [ (_, edits) ]; _ }
+        when k = Lsp.Types.CodeActionKind.QuickFix ->
+        Some (ca.title, List.map (fun (e : Lsp.Types.TextEdit.t) ->
+            (e.range.start.line, e.range.start.character,
+             e.range.end_.line, e.range.end_.character, e.newText)) edits)
+      | _ -> None) acts
+
+let test_fix_adapter_then_to_do () =
+  let src = {|mod M do
+  fn sign(n : Int) : Int do
+    if n > 0 then 1 else 0 end
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "then" in
+  let acts = An.code_actions_at a ~line ~character:(col + 1) () in
+  let found = List.filter (fun (t, _) -> t = "Replace `then` with `do`") (fix_edits acts) in
+  match found with
+  | [ (_, [ (sl, sc, el, ec, text) ]) ] ->
+    Alcotest.(check (list int)) "edit range" [ 2; 13; 2; 17 ] [ sl; sc; el; ec ];
+    Alcotest.(check string) "edit text" "do" text
+  | _ -> Alcotest.fail "expected exactly one `then` -> `do` quick fix"
+
+let test_fix_adapter_not_offered_off_range () =
+  let src = {|mod M do
+  fn sign(n : Int) : Int do
+    if n > 0 then 1 else 0 end
+  end
+end
+|} in
+  let a = analyse src in
+  let acts = An.code_actions_at a ~line:0 ~character:0 () in
+  Alcotest.(check bool) "no fix at the module line" true
+    (not (List.exists (fun (t, _) -> t = "Replace `then` with `do`") (fix_edits acts)))
+
+let test_fix_adapter_semicolon () =
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 1; let y = 2
+    x + y
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src ";" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  match fix_edits acts with
+  | [ (title, [ (2, 13, 2, 15, text) ]) ] ->
+    Alcotest.(check string) "title" "Replace `;` with a line break" title;
+    Alcotest.(check string) "edit text" "\n    " text
+  | other ->
+    Alcotest.failf "expected one `;` quick fix, got %d" (List.length other)
+
+let test_fix_adapter_lambda_arity_edits_the_lambda () =
+  let src = {|mod M do
+  fn f() : Int do
+    let cb = fn _ -> 42
+    cb()
+  end
+end
+|} in
+  let a = analyse src in
+  (* Offered both at the call (the diagnostic) and at the lambda (the fix). *)
+  let (l1, c1) = pos_of src "cb()" in
+  let (l2, c2) = pos_of src "fn _" in
+  List.iter (fun (line, character) ->
+      let acts = An.code_actions_at a ~line ~character () in
+      match fix_edits acts with
+      | [ (title, [ (2, 13, 2, 17, "fn") ]) ] ->
+        Alcotest.(check string) "title" "Replace `fn _` with `fn`" title
+      | other -> Alcotest.failf "expected the `fn _` -> `fn` quick fix, got %d" (List.length other))
+    [ (l1, c1); (l2, c2) ]
+
+(* ------------------------------------------------------------------ *)
 (* 15. Code actions: make-linear                                       *)
 (* ------------------------------------------------------------------ *)
 

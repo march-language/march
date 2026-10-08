@@ -39,3 +39,6 @@ fix [cap_grant]:
 @@ lines 25-25 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+expected `Int` but got `String`. [type_mismatch]

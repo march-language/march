@@ -2373,8 +2373,50 @@ let rec infer_expr env (e : Ast.expr) : ty =
            | _ -> Some name)
         | _ -> None
       in
-      (match arity_error, noncallable_error with
-       | Some (name, arity, n_args, def_span), _ ->
+      (* The same rule for a let-bound lambda literal ([lambda_arities]):
+         `let cb = fn _ -> 42` then `cb()` panics at runtime and today
+         typechecks as the lambda itself (an empty-parens call of a known
+         arrow applies nothing). A zero-parameter lambda is left alone:
+         `fn -> e` has the surface type `Unit -> T`, which `g(())` may
+         legitimately apply. *)
+      let lambda_arity_error =
+        match f with
+        | Ast.EVar name when not (String.contains name.txt '.') ->
+          (match StrMap.find_opt name.txt env.lambda_arities with
+           | Some (arity, lam_sp, wildcard)
+             when arity >= 1 && List.length args <> arity
+                  && count_arrows f_ty >= arity ->
+             Some (name, arity, List.length args, lam_sp, wildcard)
+           | _ -> None)
+        | _ -> None
+      in
+      (match arity_error, noncallable_error, lambda_arity_error with
+       | None, None, Some (name, arity, n_args, lam_sp, wildcard) ->
+         List.iter (fun a -> ignore (infer_expr env a)) args;
+         let plural n = if n = 1 then "" else "s" in
+         let fix_here = n_args = 0 && wildcard <> None in
+         Err.report env.errors
+           { Err.severity = Err.Error; span = sp;
+             message = Printf.sprintf
+               "`%s` is a lambda with %d parameter%s, but is called with %d argument%s.\n\
+                March has no partial application — a call must supply all arguments."
+               name.txt arity (plural arity) n_args (plural n_args);
+             labels = [{ Err.lbl_span = lam_sp;
+                         Err.lbl_message = Printf.sprintf "bound here with %d parameter%s"
+                             arity (plural arity) }];
+             notes = (if fix_here then
+                        [ "`fn _ -> …` takes one argument and ignores it; a \
+                           zero-argument lambda is written `fn -> …`." ]
+                      else []);
+             code = Err.Code.arity_mismatch;
+             fix = (match wildcard with
+                    | Some w when fix_here -> Some (Err.FReplace { span = w; text = "fn" })
+                    | _ -> None) };
+         let rec peel n t =
+           if n <= 0 then t
+           else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
+         peel arity f_ty
+       | Some (name, arity, n_args, def_span), _, _ ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
          Err.report env.errors
            { Err.severity = Err.Error; span = sp;
@@ -2401,14 +2443,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
            if n <= 0 then t
            else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
          peel arity f_ty
-       | None, Some name ->
+       | None, Some name, _ ->
          Err.error ~code:Err.Code.not_a_function env.errors ~span:sp
            (Printf.sprintf
               "`%s` is not a function — it has type `%s`.\n\
                Remove the `()` and use `%s` directly."
               name.txt (pp_ty (repr f_ty)) name.txt);
          TError
-       | None, None ->
+       | None, None, _ ->
          let res = infer_app env sp f_ty args 0 in
          (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
             result — recorded in check_fn), taint the call's result so the unify
@@ -3770,8 +3812,19 @@ and infer_block env exprs =
        test/native/unit_callback_zero_arg.march.) *)
     let env' =
       match b.bind_pat, auto_lin, b.bind_expr with
-      | Ast.PatVar _, Ast.Unrestricted, Ast.ELam _ ->
-        env'
+      | Ast.PatVar name, Ast.Unrestricted, Ast.ELam (params, _, lam_sp) ->
+        (* Remember the lambda's arity for the call-site check (D4): see
+           [lambda_arities]. `fn _ -> e` also records the `fn _` extent,
+           which is the text the fix replaces with `fn`. *)
+        let wildcard =
+          match params with
+          | [ p ] when p.Ast.param_name.Ast.txt = "_" ->
+            Some { lam_sp with Ast.end_line = p.Ast.param_name.Ast.span.Ast.end_line;
+                               Ast.end_col = p.Ast.param_name.Ast.span.Ast.end_col }
+          | _ -> None
+        in
+        { env' with lambda_arities =
+            StrMap.add name.txt (List.length params, lam_sp, wildcard) env'.lambda_arities }
       | Ast.PatVar name, Ast.Unrestricted, _ ->
         { env' with plain_let_names = StringSet.add name.txt env'.plain_let_names }
       | _ -> env'

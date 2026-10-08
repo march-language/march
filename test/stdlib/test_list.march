@@ -362,6 +362,18 @@ describe "splitting" do
     assert (List.length(List.take_while(five(), fn x -> x > 0)) == 5)
   end
 
+  test "take_while stops at the first failure even if later elements pass" do
+    let r = List.take_while([1, 2, 0, 3, 4], fn x -> x > 0)
+    assert (List.length(r) == 2)
+    assert (List.head(r) == 1)
+    assert (List.last(r) == 2)
+  end
+
+  test "take_while on an empty list gives empty" do
+    let empty : List(Int) = Nil
+    assert List.is_empty(List.take_while(empty, fn x -> x > 0))
+  end
+
   test "drop_while drops while predicate holds" do
     let r = List.drop_while(five(), fn x -> x < 3)
     assert (List.head(r) == 3)

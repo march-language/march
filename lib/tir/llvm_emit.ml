@@ -843,6 +843,12 @@ let emit_native_fold_inline_loop ctx ~width ~unboxed ~acc_atom ~arr_atom ~apply_
   Llvm_emit_nmap.emit_native_fold_inline_loop ~emit_atom ctx ~width ~unboxed
     ~acc_atom ~arr_atom ~apply_name ~clo_reg
 
+let decode_nsummap_inline_call = Llvm_emit_nmap.decode_nsummap_inline_call
+
+let emit_native_summap_inline_loop ctx ~width ~unboxed ~arr_atoms ~apply_name ~clo_reg =
+  Llvm_emit_nmap.emit_native_summap_inline_loop ~emit_atom ctx ~width ~unboxed
+    ~arr_atoms ~apply_name ~clo_reg
+
 (** [march_vault_get] / [march_vault_ns_get] return the NICHE encoding of
     [Option] UNCONDITIONALLY — [None] is a raw null, [Some v] is [v] itself (see
     [make_some]/[make_none] in runtime/march_extras.c).  The C side has no way to
@@ -2235,6 +2241,31 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
     emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
+
+  (* ── Native array sum-map inline loop (2026-10-06) ───────────────────
+     [Native_map_inline]'s sum-map peephole fuses [sum(map(a, f))] /
+     [sum(map2(a, b, f))] into [__native_<w>_arr_summap{,2}_inline] with the
+     map's own arguments: the array(s), the apply fn, and the closure when it
+     captures. See [emit_native_summap_inline_loop]. *)
+  | Tir.EApp (f, args)
+    when (match decode_nsummap_inline_call f.Tir.v_name with
+        | Some (_, n, _) ->
+          (match List.filteri (fun i _ -> i >= n) args with
+           | [ Tir.AVar _ ] | [ Tir.AVar _; _ ] -> true
+           | _ -> false)
+        | None -> false) ->
+    let (width, n, unboxed) = Option.get (decode_nsummap_inline_call f.Tir.v_name) in
+    let arr_atoms = List.filteri (fun i _ -> i < n) args in
+    let (apply_v, clo_reg) =
+      match List.filteri (fun i _ -> i >= n) args with
+      | [ Tir.AVar apply_v ] -> (apply_v, "null")
+      | [ Tir.AVar apply_v; clo_atom ] ->
+        let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
+        (apply_v, coerce ctx clo_ty0 clo_v0 "ptr")
+      | _ -> assert false
+    in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    emit_native_summap_inline_loop ctx ~width ~unboxed ~arr_atoms ~apply_name ~clo_reg
 
   (* ── Native array fold inline loop (2026-09-30) ──────────────────────
      [Native_map_inline] rewrites a fold whose callback is a fresh, single-use

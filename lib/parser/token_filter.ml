@@ -147,7 +147,34 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         | Parser.LPAREN -> Parser.INIT_PAREN
         | _ -> Parser.INIT
       in
+      (* `module` and `elif`/`elsif` (D4, diagnostics plan §8) are NOT
+         keywords: stdlib/logger.march names a parameter `module`, and
+         reserving a word has broken the stdlib before (`restart`, above).
+         The same one-token lookahead promotes them to a token the grammar
+         has an error production for, only in the position the slip is
+         written: `module` directly before an upper-case name, and `elif`
+         directly before a token that can start its condition but can never
+         follow an identifier in an expression (a name, a literal, `!`):
+         March calls take parentheses, so `elif n` is never a value use,
+         while `elif + 1`, `elif = …`, `elif(…)` and `elif` at a line end
+         all stay identifiers. *)
+      let promote_to kw ~when_ =
+        let nxt = orig lexbuf in
+        pending := Some (nxt, lexbuf.Lexing.lex_start_p, lexbuf.Lexing.lex_curr_p);
+        restore ();
+        if when_ nxt then kw else tok
+      in
+      let starts_condition = function
+        | Parser.LOWER_IDENT _ | Parser.UPPER_IDENT _ | Parser.INT _
+        | Parser.FLOAT _ | Parser.STRING _ | Parser.BOOL _ | Parser.ATOM _
+        | Parser.BANG -> true
+        | _ -> false
+      in
       match tok with
+      | Parser.LOWER_IDENT "module" ->
+        promote_to Parser.MODULE_KW ~when_:after_upper_ident
+      | Parser.LOWER_IDENT ("elif" | "elsif") ->
+        promote_to Parser.ELIF ~when_:starts_condition
       | Parser.ROLE      -> demote "role"      ~keep_when:after_upper_ident
       | Parser.INIT      -> promote_init ()
       | Parser.MAY       -> demote "may"       ~keep_when:after_crash

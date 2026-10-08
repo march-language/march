@@ -18,3 +18,5 @@ fix [cap_grant]:
 @@ lines 17-17 @@
 -  fn main() : () do
 +  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+
+after fix: exit 0

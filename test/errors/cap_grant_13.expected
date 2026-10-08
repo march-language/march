@@ -20,3 +20,6 @@ fix [cap_grant]:
 @@ lines 18-18 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+errors/cap_grant_13.march:16:9: error: `Cap(IO.FileWrite)` cannot be deserialized — a capability may only be received, never constructed, so `Handle` cannot derive Json. [cap_deserialize]

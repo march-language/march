@@ -49,3 +49,6 @@ fix [cap_grant]:
 @@ lines 19-19 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+refinement violation: argument `_o` of `unwrap` does not satisfy precondition `is_Some(_)` (e.g. x = None) [refinement_violated]

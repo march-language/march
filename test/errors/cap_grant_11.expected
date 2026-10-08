@@ -34,3 +34,6 @@ fix [cap_grant]:
 @@ lines 51-51 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+refinement violation: argument `k` of `run` does not satisfy precondition `k != 0` [refinement_violated]

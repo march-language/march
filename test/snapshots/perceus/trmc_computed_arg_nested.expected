@@ -14,9 +14,9 @@ case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
 panic("List.maximum_int: empty list")
-  Cons($f489, $f490) -> dec_rc xs;
-let t : '_ = $f490 in
-let h : '_ = $f489 in
+  Cons($f488, $f489) -> dec_rc xs;
+let t : '_ = $f489 in
+let h : '_ = $f488 in
 call_ptr go(t, h)
   _ -> dec_rc xs;
 dec_rc go;
@@ -29,9 +29,9 @@ case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
 panic("List.minimum_int: empty list")
-  Cons($f476, $f477) -> dec_rc xs;
-let t : '_ = $f477 in
-let h : '_ = $f476 in
+  Cons($f475, $f476) -> dec_rc xs;
+let t : '_ = $f476 in
+let h : '_ = $f475 in
 call_ptr go(t, h)
   _ -> dec_rc xs;
 dec_rc go;
@@ -154,11 +154,11 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 acc
-  Cons($f456, $f457) -> dec_rc lst;
-let t : '_ = $f457 in
-let x : '_ = $f456 in
-let $t455 : '_ = +(acc, x) in
-call_ptr go(t, $t455)
+  Cons($f455, $f456) -> dec_rc lst;
+let t : '_ = $f456 in
+let x : '_ = $f455 in
+let $t454 : '_ = +(acc, x) in
+call_ptr go(t, $t454)
   _ -> dec_rc lst;
 dec_rc go;
 panic("non-exhaustive pattern match")
@@ -170,11 +170,11 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 acc
-  Cons($f463, $f464) -> dec_rc lst;
-let t : '_ = $f464 in
-let x : '_ = $f463 in
-let $t462 : '_ = *(acc, x) in
-call_ptr go(t, $t462)
+  Cons($f462, $f463) -> dec_rc lst;
+let t : '_ = $f463 in
+let x : '_ = $f462 in
+let $t461 : '_ = *(acc, x) in
+call_ptr go(t, $t461)
   _ -> dec_rc lst;
 dec_rc go;
 panic("non-exhaustive pattern match")
@@ -186,14 +186,14 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 m
-  Cons($f470, $f471) -> dec_rc lst;
-let r : '_ = $f471 in
-let x : '_ = $f470 in
-let $t469 : '_ = <(x, m) in
-case $t469 of
-  True() -> dec_rc $t469;
+  Cons($f469, $f470) -> dec_rc lst;
+let r : '_ = $f470 in
+let x : '_ = $f469 in
+let $t468 : '_ = <(x, m) in
+case $t468 of
+  True() -> dec_rc $t468;
 call_ptr go(r, x)
-  _ -> dec_rc $t469;
+  _ -> dec_rc $t468;
 dec_rc x;
 call_ptr go(r, m)
   _ -> dec_rc lst;
@@ -207,14 +207,14 @@ case lst of
   Nil() -> dec_rc lst;
 dec_rc go;
 m
-  Cons($f483, $f484) -> dec_rc lst;
-let r : '_ = $f484 in
-let x : '_ = $f483 in
-let $t482 : '_ = >(x, m) in
-case $t482 of
-  True() -> dec_rc $t482;
+  Cons($f482, $f483) -> dec_rc lst;
+let r : '_ = $f483 in
+let x : '_ = $f482 in
+let $t481 : '_ = >(x, m) in
+case $t481 of
+  True() -> dec_rc $t481;
 call_ptr go(r, x)
-  _ -> dec_rc $t482;
+  _ -> dec_rc $t481;
 dec_rc x;
 call_ptr go(r, m)
   _ -> dec_rc lst;
@@ -240,15 +240,15 @@ call_ptr go$dps($t6, $trmc4)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t514 : String = let $t513 : List(Int) = ascending(0, 5) in
-List.sum_int($t513) in
-let $rc_2 : () = println($t514) in
-dec_rc $t514;
+  let $t513 : String = let $t512 : List(Int) = ascending(0, 5) in
+List.sum_int($t512) in
+let $rc_2 : () = println($t513) in
+dec_rc $t513;
 $rc_2;
-let $t516 : String = let $t515 : List(Int) = squares(5) in
-List.sum_int($t515) in
-let $rc_1 : () = println($t516) in
-dec_rc $t516;
+let $t515 : String = let $t514 : List(Int) = squares(5) in
+List.sum_int($t514) in
+let $rc_1 : () = println($t515) in
+dec_rc $t515;
 $rc_1
 
 ## squares

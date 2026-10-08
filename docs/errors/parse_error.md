@@ -17,32 +17,24 @@ went wrong.)
 ## A program that triggers it
 
 ```march
-mod Main do
+mod Main
   needs IO.Console
-  fn sign(n : Int) : Int do
-    if n > 0 then 1 else 0 end
-  end
-
   fn main(_console : Cap(IO.Console)) do
-    println(int_to_string(sign(3)))
+    println("hello")
   end
 end
 ```
 
 ## The fix
 
-Rewrite the construct in the shape the note shows. Here: March's `if` uses
-`do … else … end`, never `then`.
+Rewrite the construct in the shape the note shows. Here: a module header
+is `mod Name do`, and the `do` was missing.
 
 ```march
 mod Main do
   needs IO.Console
-  fn sign(n : Int) : Int do
-    if n > 0 do 1 else 0 end
-  end
-
   fn main(_console : Cap(IO.Console)) do
-    println(int_to_string(sign(3)))
+    println("hello")
   end
 end
 ```
@@ -50,8 +42,11 @@ end
 ## Why the rule exists
 
 March borrows ML and Elixir syntax, so a few constructs from those
-languages (`then`, `elif`, `;` separators, `module`) are common slips. The
-grammar has explicit productions for the known ones so the message names
-the fix instead of reporting a generic parse failure.
+languages are common slips. The grammar has explicit productions for the
+known ones so the message names the fix instead of reporting a generic
+parse failure, and the most common slips have a code of their own with a
+mechanical fix: `then_keyword` (`then` for `do`), `module_keyword`
+(`module` for `mod`), `elif_keyword` (`elif` for `else if … end end`) and
+`semicolon_separator` (`;` between expressions).
 
 See also: [the language reference](https://github.com/march-language/march/blob/main/specs/lang/surface-syntax.md).

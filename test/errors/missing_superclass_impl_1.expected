@@ -28,3 +28,6 @@ fix [cap_grant]:
 @@ lines 28-28 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Cannot implement `Greet(Dog)`: required superclass `Speak(Dog)` is not satisfied. [missing_superclass_impl]

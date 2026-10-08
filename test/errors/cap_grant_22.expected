@@ -20,3 +20,6 @@ fix [cap_grant]:
 @@ lines 15-15 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+errors/cap_grant_22.march:13:9: error: Unknown derive target `Frobnicate` for type `Color`. [unknown_derive]

@@ -27,8 +27,16 @@
 
   (** Raise [ParseError] from an `error` production.  [pos] is the position
       the message is about; [Parse] renders the diagnostic there. *)
-  let error_raise msg hint pos =
+  let error_raise ?code ?fix msg hint pos =
+    (* The code and fix ride [Errors.parse_error_extra] (see its comment):
+       set on EVERY raise so a production without them cannot inherit a
+       stale pair from an earlier error. *)
+    March_errors.Errors.parse_error_extra := (code, fix);
     raise (March_errors.Errors.ParseError (msg, hint, pos))
+
+  (* A replacement fix over one grammar symbol's extent. *)
+  let replace_fix loc text =
+    March_errors.Errors.FReplace { span = mk_span loc; text }
 
   (* `backoff base 25 cap 5000 jitter 25%` — the labels are parsed as ordinary
      lowercase identifiers and validated here rather than lexed as keywords.
@@ -285,6 +293,10 @@
 %token <string> LOWER_IDENT
 %token <string> UPPER_IDENT
 %token FN LET DO END IF THEN ELSE MATCH WITH WHEN
+(* Minted by the token filter only, for the D4 pitfall productions:
+   `module Name` (MODULE_KW) and `elif`/`elsif` (ELIF). Neither is a
+   lexer keyword, so both words stay usable as identifiers. *)
+%token MODULE_KW ELIF
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT INIT_PAREN PROTOCOL LOOP
 %token LINEAR AFFINE
@@ -359,21 +371,27 @@ module_:
      inside the module.  Give a precise diagnostic instead of menhir's
      generic "I got stuck here". *)
   | MOD; _path = upper_dot_path; DO; _decls = decl_list_r; END; error
-    { raise (March_errors.Errors.ParseError (
+    { error_raise
         "A file may have only one top-level `mod`; \
-         everything else must live inside it.",
-        Some "mod Name do\n    fn helper() do ... end\n    fn main() do ... end\nend",
-        $startpos($6))) }
+         everything else must live inside it."
+        (Some "mod Name do\n    fn helper() do ... end\n    fn main() do ... end\nend")
+        $startpos($6) }
   | MOD; _n = upper_dot_path; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` to start the module body here:",
-        Some "mod Name do\n    ...\nend",
-        $startpos($3))) }
+    { error_raise
+        "I was expecting `do` to start the module body here:"
+        (Some "mod Name do\n    ...\nend")
+        $startpos($3) }
+  | MODULE_KW; error
+    { error_raise ~code:March_errors.Code.module_keyword
+        ~fix:(replace_fix $loc($1) "mod")
+        "`module` is spelled `mod` in March:"
+        (Some "mod Name do\n    ...\nend")
+        $startpos($1) }
   | error
-    { raise (March_errors.Errors.ParseError (
-        "March programs must start with a module declaration:",
-        Some "mod Main do\n    fn main() do\n        ...\n    end\nend",
-        $startpos($1))) }
+    { error_raise
+        "March programs must start with a module declaration:"
+        (Some "mod Main do\n    fn main() do\n        ...\n    end\nend")
+        $startpos($1) }
 
 (** Recoverable declaration list.  On error, collects the diagnostic and
     skips tokens (via Menhir's default error-recovery token-dropping)
@@ -403,6 +421,15 @@ fn_attr:
       { name ^ ":transient" }
 
 decl:
+  (* `module Name do` (D4): the token filter mints MODULE_KW for `module`
+     followed by an upper-case name, so the slip is named and fixed instead
+     of surfacing as a generic declaration error. *)
+  | MODULE_KW; error
+    { error_raise ~code:March_errors.Code.module_keyword
+        ~fix:(replace_fix $loc($1) "mod")
+        "`module` is spelled `mod` in March:"
+        (Some "mod Name do\n    ...\nend")
+        $startpos($1) }
   (* `doc` attaches to FUNCTIONS only: [fn_doc] is a field of the function
      definition record, and neither [DType] nor [DProofCap] has a doc slot to
      put a string in.  Without these rules a `doc` before a `type` or a
@@ -1578,8 +1605,15 @@ expr:
         "March `if` expressions always need an `else` branch:"
         (Some "if cond do\n    expr1\nelse\n    expr2\nend")
         $startpos($5) }
+  | IF; _c = expr; DO; _t = block_body; ELIF; error
+    { error_raise ~code:March_errors.Code.elif_keyword
+        "March has no `elif`: an `else if` is a nested `if`, and each `if` \
+         needs its own `end`."
+        (Some "if a do\n    1\nelse if b do\n    2\nelse\n    3\nend end")
+        $startpos($5) }
   | IF; _c = expr; THEN; _t = expr; error
-    { error_raise
+    { error_raise ~code:March_errors.Code.then_keyword
+        ~fix:(replace_fix $loc($3) "do")
         "I don't recognize `then` here — March uses do/end blocks instead."
         (Some "if cond do\n    expr1\nelse\n    expr2\nend")
         $startpos($3) }
@@ -1750,8 +1784,15 @@ expr_no_bare_lambda:
         "March `if` expressions always need an `else` branch:"
         (Some "if cond do\n    expr1\nelse\n    expr2\nend")
         $startpos($5) }
+  | IF; _c = expr; DO; _t = block_body; ELIF; error
+    { error_raise ~code:March_errors.Code.elif_keyword
+        "March has no `elif`: an `else if` is a nested `if`, and each `if` \
+         needs its own `end`."
+        (Some "if a do\n    1\nelse if b do\n    2\nelse\n    3\nend end")
+        $startpos($5) }
   | IF; _c = expr; THEN; _t = expr; error
-    { error_raise
+    { error_raise ~code:March_errors.Code.then_keyword
+        ~fix:(replace_fix $loc($3) "do")
         "I don't recognize `then` here -- March uses do/end blocks instead."
         (Some "if cond do\n    expr1\nelse\n    expr2\nend")
         $startpos($3) }
@@ -2089,11 +2130,11 @@ repl_input:
   (* Hint: `name = expr` looks like an assignment but should be `let name = expr`.
      This rule must come last so that valid decls/exprs are preferred above. *)
   | name = LOWER_IDENT; EQUALS
-    { raise (March_errors.Errors.ParseError (
-        Printf.sprintf
-          "unexpected `%s = ...` — did you mean `let %s = ...`?" name name,
-        Some (Printf.sprintf "let %s = expr" name),
-        $startpos($2))) }
+    { error_raise
+        (Printf.sprintf
+           "unexpected `%s = ...` — did you mean `let %s = ...`?" name name)
+        (Some (Printf.sprintf "let %s = expr" name))
+        $startpos($2) }
 
 (** Parse a sequence of zero or more declarations and expressions, then EOF.
     Used by the browser REPL so multi-item inputs work:

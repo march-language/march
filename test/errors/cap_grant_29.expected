@@ -34,3 +34,6 @@ fix [cap_grant]:
 @@ lines 12-12 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+refinement violation: argument `n` of `take_n` does not satisfy precondition `_ >= 0` [refinement_violated]
