@@ -12,6 +12,65 @@ let test_orc_available_never_raises () =
   (* Second call must agree with the first (cached) *)
   Alcotest.(check bool) "stable" a (March_jit.Jit_orc.available ())
 
+(* ── In-process shell-fragment emission (Jit_emit) ─────────────────────────
+   Repl_jit.shell_compile emits each fragment's object in-process for the
+   NODE's triple, then links it.  Check the object really is for the asked
+   target (cross-target from either host), and that bad IR is an [Error]
+   (the caller then falls back to clang), not a crash.  A backend this
+   libLLVM lacks is skipped, as the shell itself falls back to clang. *)
+let emit_ir = {|
+define i64 @f(i64 %x) {
+  %c = icmp eq i64 %x, 0
+  br i1 %c, label %z, label %r
+z:
+  ret i64 0
+r:
+  %y = sub i64 %x, 1
+  %t = tail call i64 @g(i64 %y)
+  ret i64 %t
+}
+define i64 @g(i64 %x) {
+  %t = tail call i64 @f(i64 %x)
+  ret i64 %t
+}
+|}
+
+let test_emit_object_targets () =
+  let out = Filename.temp_file "march_emit_test" ".o" in
+  let read_header () =
+    In_channel.with_open_bin out (fun ic -> really_input_string ic 20) in
+  let u16 s o = Char.code s.[o] lor (Char.code s.[o + 1] lsl 8) in
+  let u32 s o = u16 s o lor (u16 s (o + 2) lsl 16) in
+  List.iter (fun (triple, check) ->
+      match March_jit.Jit_emit.target_of_triple triple with
+      | None -> Alcotest.failf "%s: no in-process target" triple
+      | Some (arch, cpu) ->
+        if March_jit.Jit_emit.available ~arch then begin
+          (match March_jit.Jit_emit.emit_object ~ir:emit_ir ~triple ~cpu ~out with
+           | Ok () -> ()
+           | Error m -> Alcotest.failf "%s: %s" triple m);
+          check triple (read_header ())
+        end)
+    [ ("aarch64-unknown-linux-gnu", fun t h ->
+          Alcotest.(check string) (t ^ " ELF") "\127ELF" (String.sub h 0 4);
+          Alcotest.(check int) (t ^ " EM_AARCH64") 183 (u16 h 18));
+      ("x86_64-unknown-linux-gnu", fun t h ->
+          Alcotest.(check string) (t ^ " ELF") "\127ELF" (String.sub h 0 4);
+          Alcotest.(check int) (t ^ " EM_X86_64") 62 (u16 h 18));
+      ("arm64-apple-macosx15.0.0", fun t h ->
+          Alcotest.(check int) (t ^ " MH_MAGIC_64") 0xfeedfacf (u32 h 0);
+          Alcotest.(check int) (t ^ " CPU_TYPE_ARM64") 0x0100000c (u32 h 4)) ];
+  (match March_jit.Jit_emit.target_of_triple "aarch64-unknown-linux-gnu" with
+   | Some (arch, cpu) when March_jit.Jit_emit.available ~arch ->
+     (match March_jit.Jit_emit.emit_object ~ir:"define i64 @f( {" ~triple:"aarch64-unknown-linux-gnu"
+              ~cpu ~out with
+      | Error _ -> ()
+      | Ok () -> Alcotest.fail "bad IR emitted an object")
+   | _ -> ());
+  Alcotest.(check (option (pair string string))) "unhandled arch"
+    None (March_jit.Jit_emit.target_of_triple "riscv64-unknown-linux-gnu");
+  (try Sys.remove out with _ -> ())
+
 (* ── ORC REPL-session regression ──────────────────────────────────────────
 
    Regression for the SIGSEGV filed as
@@ -1011,6 +1070,7 @@ let () =
     "jit", [
       Alcotest.test_case "dlopen_libc" `Quick test_dlopen_libc;
       Alcotest.test_case "orc_available" `Quick test_orc_available_never_raises;
+      Alcotest.test_case "shell emit_object targets" `Quick test_emit_object_targets;
       Alcotest.test_case "prelude .so loads cross-process" `Slow
         test_prelude_so_loads_cross_process;
       Alcotest.test_case "orc_two_consecutive_fns" `Slow

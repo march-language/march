@@ -343,6 +343,14 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **The remote shell compiles each input about twice as fast.** `forge shell`
+  / `march --shell` no longer runs clang per input: it builds the fragment's
+  object in-process with the libLLVM the REPL already loads, for the node's
+  target (including a Mac shell to a Linux node), and runs only the linker,
+  with the same arguments clang would have used. Compile time per input at
+  p50 went from 112 to 56 ms on macOS, 60 to 36 ms on Linux, and 87 to 42 ms
+  from a Mac to a Linux node. clang is still used when libLLVM or the node's
+  backend is unavailable, and `MARCH_SHELL_CLANG=1` forces it.
 - **Compiler-minted symbols are structural, not counter-numbered.** A lambda
   is `$lam<k>_<host>` (nested: `$lam<j>__lam<k>_<host>`), its lifted apply fn
   `<lambda>$apply$<k>_<host>`, a fused pipeline helper `$fused_mf_<host>_<k>`,

@@ -1986,11 +1986,136 @@ let shell_lower_program ctx ~program_name ~program_decls ~program_type_map =
     and makes the entry return nothing useful (an init fragment); otherwise
     the entry returns the value of [main] (a String: the caller wraps the
     input in its renderer).  Raises [Typecheck_failed] / [Failure]. *)
+(* ── In-process fragment emission ────────────────────────────────────────
+   `clang -shared -O1 -x ir` costs ~90 ms per input on macOS and ~46 ms on
+   Linux, almost all of it fixed cost: two process starts (driver + cc1-in-
+   process + linker), the driver itself, and its link step.  Instead the
+   shell emits the object in-process (Jit_emit: parse, `default<O1>`, object
+   for the node's triple) and runs the linker directly, with exactly the argv
+   `clang -###` reports for the same link — so the export list, version
+   script, -Bsymbolic, undefined-symbol allowance, platform version and libs
+   are clang's own.  MARCH_SHELL_CLANG=1 forces the old path; it is also the
+   fallback whenever libLLVM, the node's backend, or the link probe is
+   unavailable. *)
+
+let shell_force_clang () =
+  match Sys.getenv_opt "MARCH_SHELL_CLANG" with
+  | Some ("" | "0") | None -> false
+  | Some _ -> true
+
+(** The node triple, LLVM backend and CPU to emit in-process for, or [None]
+    to compile with clang. *)
+let shell_inprocess_target (triple : string option) : (string * string) option =
+  if shell_force_clang () then None
+  else match triple with
+    | Some t when t <> "" && t <> "unknown" ->
+      (match Jit_emit.target_of_triple t with
+       | Some (arch, cpu) when Jit_emit.available ~arch -> Some (t, cpu)
+       | _ -> None)
+    | _ -> None
+
+(* Replace every occurrence of [sub] in [s] by [by]. *)
+let replace_all (s : string) ~(sub : string) ~(by : string) : string =
+  let n = String.length sub in
+  if n = 0 then s else begin
+    let b = Buffer.create (String.length s) in
+    let i = ref 0 in
+    while !i < String.length s do
+      if !i + n <= String.length s && String.sub s !i n = sub then
+        (Buffer.add_string b by; i := !i + n)
+      else (Buffer.add_char b s.[!i]; incr i)
+    done;
+    Buffer.contents b
+  end
+
+(* The arguments of one `clang -###` job line: each is double-quoted, with
+   backslash, double quote and dollar backslash-escaped (llvm::sys::printArg). *)
+let parse_hash_job (line : string) : string list =
+  let args = ref [] and cur = Buffer.create 64 in
+  let n = String.length line in
+  let i = ref 0 in
+  while !i < n do
+    if line.[!i] = '"' then begin
+      Buffer.clear cur;
+      incr i;
+      while !i < n && line.[!i] <> '"' do
+        if line.[!i] = '\\' && !i + 1 < n then (Buffer.add_char cur line.[!i + 1]; i := !i + 2)
+        else (Buffer.add_char cur line.[!i]; incr i)
+      done;
+      args := Buffer.contents cur :: !args;
+      incr i
+    end else incr i
+  done;
+  List.rev !args
+
+(* Link templates by (clang, target flags): built once per process. *)
+let shell_link_cache : (string, (obj:string -> so:string -> entry:string -> map:string
+                                  -> string array) option) Hashtbl.t =
+  Hashtbl.create 2
+
+(** The linker argv clang would run to link one object into a fragment .so,
+    as a function of the object, output, entry and version-script paths.
+    Found by running `clang -### ... probe.o -o probe.so <exports>` once and
+    substituting the probe names; [None] if clang does not report exactly
+    one job. *)
+let shell_link_argv ctx ~target_flags
+    ~(export_flags : entry:string -> map:string -> string) =
+  let key = ctx.clang ^ "\000" ^ target_flags in
+  match Hashtbl.find_opt shell_link_cache key with
+  | Some t -> t
+  | None ->
+    let t = time_phase "link-probe" (fun () ->
+        try
+          let p = Filename.concat ctx.tmp_dir "march_link_probe" in
+          let p_obj = p ^ ".o" and p_so = p ^ ".so" and p_map = p ^ ".map"
+          and p_entry = "march_link_probe_entry" in
+          (* clang -### checks that its inputs exist. *)
+          close_out (open_out p_obj);
+          let out = p ^ ".hash" in
+          let cmd = Printf.sprintf "%s -###%s -shared -fPIC %s -o %s%s > %s 2>&1"
+              ctx.clang target_flags (Filename.quote p_obj) (Filename.quote p_so)
+              (export_flags ~entry:p_entry ~map:p_map) (Filename.quote out) in
+          if Sys.command cmd <> 0 then None
+          else begin
+            let jobs =
+              In_channel.with_open_text out In_channel.input_all
+              |> String.split_on_char '\n'
+              |> List.filter (fun l -> String.length l > 1 && l.[0] = ' ' && l.[1] = '"') in
+            match jobs with
+            | [ job ] ->
+              let args = parse_hash_job job in
+              if args = [] || not (List.mem p_obj args) then None
+              else Some (fun ~obj ~so ~entry ~map ->
+                  Array.of_list (List.map (fun a ->
+                      a |> replace_all ~sub:p_obj ~by:obj
+                        |> replace_all ~sub:p_so ~by:so
+                        |> replace_all ~sub:p_map ~by:map
+                        |> replace_all ~sub:p_entry ~by:entry) args))
+            | _ -> None
+          end
+        with _ -> None) in
+    Hashtbl.replace shell_link_cache key t;
+    t
+
+(* Run [argv] directly (no shell), stdout and stderr to [log]; its exit
+   code, or 127 if it could not be started. *)
+let run_argv (argv : string array) ~(log : string) : int =
+  try
+    let fd = Unix.openfile log [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC; Unix.O_CLOEXEC] 0o644 in
+    let pid = Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
+        Unix.create_process argv.(0) argv Unix.stdin fd fd) in
+    let rec wait () =
+      match Unix.waitpid [] pid with
+      | _, Unix.WEXITED c -> c
+      | _, _ -> 128
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait () in
+    wait ()
+  with _ -> 127
+
 let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
     ~(program_decls : March_ast.Ast.decl list)
     ~(program_type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t)
-    ?store_as (m : March_ast.Ast.module_) : shell_fragment =
-  let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
+    ?store_as (m : March_ast.Ast.module_) : shell_fragment =  let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
   let errors = March_errors.Errors.create () in
   let env = { tc_env with March_typecheck.Typecheck.errors;
               refs = ref []; current_decl = ref "" } in
@@ -2245,23 +2370,55 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
     | _ -> "" in
   (* Export the entry only: every other symbol is local, so references inside
      the fragment bind to the fragment's own copies. *)
-  let export_flags =
+  let export_flags ~entry ~map =
     if target_is_mac then
       Printf.sprintf " -undefined dynamic_lookup -Wl,-exported_symbol,_%s \
                       -Wl,-exported_symbol,___march_cap_manifest" entry
     else begin
-      let vs = base ^ ".map" in
-      let oc = open_out vs in
+      let oc = open_out map in
       Printf.fprintf oc "{ global: %s; __march_cap_manifest; local: *; };\n" entry;
       close_out oc;
-      Printf.sprintf " -Wl,--version-script=%s -Wl,-Bsymbolic" (Filename.quote vs)
+      Printf.sprintf " -Wl,--version-script=%s -Wl,-Bsymbolic" (Filename.quote map)
     end in
   let log = base ^ ".clang.log" in
-  let cmd = Printf.sprintf "%s%s -shared -fPIC -O1 -Wno-override-module -x ir %s -o %s%s > %s 2>&1"
-      ctx.clang target_flags (Filename.quote ll) (Filename.quote so) export_flags (Filename.quote log) in
-  let rc = time_phase "clang" (fun () -> Sys.command cmd) in
-  if rc <> 0 then begin
-    let msg = try In_channel.with_open_text log In_channel.input_all with _ -> "" in
-    failwith ("shell: clang failed:\n" ^ msg)
-  end;
+  let via_clang () =
+    let cmd = Printf.sprintf "%s%s -shared -fPIC -O1 -Wno-override-module -x ir %s -o %s%s > %s 2>&1"
+        ctx.clang target_flags (Filename.quote ll) (Filename.quote so)
+        (export_flags ~entry ~map:(base ^ ".map")) (Filename.quote log) in
+    let rc = time_phase "clang" (fun () -> Sys.command cmd) in
+    if rc <> 0 then begin
+      let msg = try In_channel.with_open_text log In_channel.input_all with _ -> "" in
+      failwith ("shell: clang failed:\n" ^ msg)
+    end in
+  (match shell_inprocess_target triple with
+   | None -> via_clang ()
+   | Some (t, cpu) ->
+     (* Emit the object in-process, then run only the linker clang would
+        have run (see [shell_link_argv]).  Any failure falls back to the
+        full clang command, which then reports the real diagnostic. *)
+     let obj = base ^ ".o" in
+     let linked =
+       match time_phase "emit-obj" (fun () ->
+           Jit_emit.emit_object ~ir ~triple:t ~cpu ~out:obj) with
+       | Error msg -> Error ("emit: " ^ msg)
+       | Ok () ->
+         match shell_link_argv ctx ~target_flags ~export_flags with
+         | None -> Error "no link command from `clang -###`"
+         | Some tmpl ->
+           let argv = tmpl ~obj ~so ~entry ~map:(base ^ ".map") in
+           (* [export_flags] writes the ELF version script as a side effect;
+              the template was made against a probe path, so write the real
+              one here. *)
+           if not target_is_mac then ignore (export_flags ~entry ~map:(base ^ ".map"));
+           let rc = time_phase "link" (fun () -> run_argv argv ~log) in
+           if rc = 0 then Ok ()
+           else Error ("link failed: "
+                       ^ (try In_channel.with_open_text log In_channel.input_all
+                          with _ -> "")) in
+     match linked with
+     | Ok () -> ()
+     | Error why ->
+       if profile_enabled then
+         Printf.eprintf "[jit-prof] in-process emit fell back to clang: %s\n%!" why;
+       via_clang ());
   { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty; sf_caps = caps }
