@@ -499,7 +499,16 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
    slots on the node); calls to them stay direct.
    Unit tests in `test/test_hot_reload.ml`; a TIR snapshot fixture showing a
    baked id that differs from the sorted default.
-4. **Attach identity** (C2): forge fetches `ABI_QUERY` and `HCR_INFO`,
+4. **Attach identity** (C2). **Done 2026-10-07, adapted**
+   ([progress](../progress/2026-10-07-shell-build-identity.md)):
+   - Shell fragments are self-contained and call nothing on the node
+     through dispatch.
+   - So identity is per-declaration source hashes plus constructor tags,
+     embedded in the node (`__march_shell_ident`, `IDENT`) and checked per
+     input against what its code reaches.
+   - No `--force` yet.
+
+   The original design: forge fetches `ABI_QUERY` and `HCR_INFO`,
    compiles the fragment with the pinned table, and compares, for every
    boundary function the fragment reaches through dispatch, the client's
    `impl_hash` with the node's. Any mismatch is a hard stop listing the
@@ -532,7 +541,16 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
    - Acceptance: a one-expression fragment's `.so` is under 64 KB and builds
      in under 300 ms cold from the command line (no warm session) on the
      conduit test app.
-6. **Marker check** (C4): today's cap markers are one symbol per cap
+6. **Marker check** (C4). **Done 2026-10-07 for shell fragments**
+   ([progress](../progress/2026-10-06-shell-cap-manifest-library-caps.md)):
+   - The client derives the caps from the emitted code and embeds
+     `__march_cap_manifest`.
+   - The node requires it to equal the signed `caps:` (`ERR cap_tamper`,
+     `ERR no_cap_manifest`).
+   - The `--hot-reload` deploy patch and `forge cap inspect` halves are not
+     done.
+
+   The original design: today's cap markers are one symbol per cap
    (`@__march_cap_<path> = constant i8 1`, `llvm_toplevel.ml:1652`) and forge
    reads them with `nm` (`forge/lib/cap_binary.ml:22`); there is no
    in-process reader, and walking a loaded image's symbol table differs per

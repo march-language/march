@@ -352,6 +352,16 @@ let static_closure_ok ctx (march_name : string) : bool =
       | Some cfg ->
         not (Hot_reload.needs_dispatch_to cfg march_name))
 
+(* The LLVM symbol a top-level function value names: a user extern's C symbol
+   ([ed_c_name], via [extern_map]) — the extern's March name is defined
+   nowhere — else the mangled March name.  Externs are registered in
+   [top_fns], so the [top_fns] arms of [emit_atom_raw] below reach this for an
+   extern passed as a value (`List.map(xs, dbl)`). *)
+let top_fn_symbol ctx (name : string) : string =
+  match Hashtbl.find_opt ctx.extern_map name with
+  | Some c_name -> c_name
+  | None -> mangle_extern name
+
 (** Emit code for [atom], returning (llvm_type, llvm_value). *)
 let emit_atom_raw ctx (atom : Tir.atom) : string * string =
   match atom with
@@ -413,7 +423,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
        and make the raw fn accept an extra leading ptr arg that it ignores.
        Actually, all top-level fn_defs DON'T take a clo arg. So we need
        a wrapper. Let's create one inline. *)
-    let fn_name = llvm_name (mangle_extern v.Tir.v_name) in
+    let fn_name = llvm_name (top_fn_symbol ctx v.Tir.v_name) in
     (* Determine the wrapper name *)
     let wrap_name = fn_name ^ "$clo_wrap" in
     (* Register wrapper if not already generated *)
@@ -499,7 +509,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
        to materialise the value rather than returning a function pointer.
        A local binding of the same name (in var_slot) shadows the top-level
        function — fall through to the local-load path in that case. *)
-    ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
+    ("ptr", "@" ^ llvm_name (top_fn_symbol ctx v.Tir.v_name))
   | Tir.AVar v when Hashtbl.mem ctx.repl_slot_fns v.Tir.v_name
                  && not (Hashtbl.mem ctx.top_fns v.Tir.v_name)
                  && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
@@ -842,6 +852,12 @@ let decode_nfold_inline_call = Llvm_emit_nmap.decode_nfold_inline_call
 let emit_native_fold_inline_loop ctx ~width ~unboxed ~acc_atom ~arr_atom ~apply_name ~clo_reg =
   Llvm_emit_nmap.emit_native_fold_inline_loop ~emit_atom ctx ~width ~unboxed
     ~acc_atom ~arr_atom ~apply_name ~clo_reg
+
+let decode_nsummap_inline_call = Llvm_emit_nmap.decode_nsummap_inline_call
+
+let emit_native_summap_inline_loop ctx ~width ~unboxed ~arr_atoms ~apply_name ~clo_reg =
+  Llvm_emit_nmap.emit_native_summap_inline_loop ~emit_atom ctx ~width ~unboxed
+    ~arr_atoms ~apply_name ~clo_reg
 
 (** [march_vault_get] / [march_vault_ns_get] return the NICHE encoding of
     [Option] UNCONDITIONALLY — [None] is a raw null, [Some v] is [v] itself (see
@@ -2235,6 +2251,31 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
     emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
+
+  (* ── Native array sum-map inline loop (2026-10-06) ───────────────────
+     [Native_map_inline]'s sum-map peephole fuses [sum(map(a, f))] /
+     [sum(map2(a, b, f))] into [__native_<w>_arr_summap{,2}_inline] with the
+     map's own arguments: the array(s), the apply fn, and the closure when it
+     captures. See [emit_native_summap_inline_loop]. *)
+  | Tir.EApp (f, args)
+    when (match decode_nsummap_inline_call f.Tir.v_name with
+        | Some (_, n, _) ->
+          (match List.filteri (fun i _ -> i >= n) args with
+           | [ Tir.AVar _ ] | [ Tir.AVar _; _ ] -> true
+           | _ -> false)
+        | None -> false) ->
+    let (width, n, unboxed) = Option.get (decode_nsummap_inline_call f.Tir.v_name) in
+    let arr_atoms = List.filteri (fun i _ -> i < n) args in
+    let (apply_v, clo_reg) =
+      match List.filteri (fun i _ -> i >= n) args with
+      | [ Tir.AVar apply_v ] -> (apply_v, "null")
+      | [ Tir.AVar apply_v; clo_atom ] ->
+        let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
+        (apply_v, coerce ctx clo_ty0 clo_v0 "ptr")
+      | _ -> assert false
+    in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    emit_native_summap_inline_loop ctx ~width ~unboxed ~arr_atoms ~apply_name ~clo_reg
 
   (* ── Native array fold inline loop (2026-09-30) ──────────────────────
      [Native_map_inline] rewrites a fold whose callback is a fresh, single-use

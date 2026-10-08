@@ -302,6 +302,85 @@ let test_option_int_and_option_tvar_disagree () =
   Alcotest.(check bool) "so the two disagree -- the check has something to fire on"
     true (concrete <> generic)
 
+
+(* ── One spelling per type (specs/progress/2026-10-07-kind-canonical-spelling.md)
+
+   Lowering registers a module-declared type under its qualified name and
+   builds every value under the short one.  Each of these types used to get
+   one answer per spelling; now both spellings must give the short name's
+   answer, which is the layout the program builds. *)
+
+let module_defs : Tir.type_def list =
+  let open Tir in
+  [
+    TDVariant ("Lib.Dur",    [ ("Dur", [TInt]) ]);                        (* newtype-shaped *)
+    TDVariant ("Lib.Wrap",   [ ("Wrap", [TString]) ]);                    (* newtype over a heap value *)
+    TDVariant ("Lib.Maybe2", [ ("NoneX", []); ("SomeX", [TString]) ]);    (* niche-shaped *)
+    TDVariant ("Lib.P2",     [ ("P2", [TFloat; TFloat]) ]);               (* unboxable *)
+    TDVariant ("Csv.CsvRow", [ ("CsvEof", []); ("Row", [TCon ("List", [TString])]) ]);
+    TDVariant ("Top",        [ ("Top", [TInt]) ]);                        (* bare-registered newtype *)
+  ]
+
+let both_spellings_agree label t q =
+  let open Tir in
+  let s = Collision_set.short_name q in
+  let kq = Kind.of_ty t (TCon (q, [])) and ks = Kind.of_ty t (TCon (s, [])) in
+  Alcotest.(check bool) (label ^ ": of_ty identical under both spellings") true (kq = ks);
+  Alcotest.(check bool) (label ^ ": is_niche_shaped identical") true
+    (Kind.is_niche_shaped t q = Kind.is_niche_shaped t s);
+  Alcotest.(check bool) (label ^ ": niche_repr_of_concrete identical") true
+    (Kind.niche_repr_of_concrete t q = Kind.niche_repr_of_concrete t s);
+  Alcotest.(check bool) (label ^ ": unboxed_of_type_name identical") true
+    (Kind.unboxed_of_type_name t q = Kind.unboxed_of_type_name t s);
+  ks
+
+let test_both_spellings_agree () =
+  let t = table module_defs in
+  let r l q = (both_spellings_agree l t q).Kind.repr in
+  (* module-declared: the short name is what is built, so Boxed *)
+  Alcotest.check repr_pp "Lib.Dur is Boxed under both" Kind.Boxed (r "newtype" "Lib.Dur");
+  Alcotest.check repr_pp "Lib.Wrap is Boxed under both" Kind.Boxed (r "heap newtype" "Lib.Wrap");
+  Alcotest.check repr_pp "Lib.Maybe2 is Boxed under both" Kind.Boxed (r "niche" "Lib.Maybe2");
+  Alcotest.check repr_pp "Lib.P2 is Boxed under both" Kind.Boxed (r "unboxable" "Lib.P2");
+  Alcotest.(check string) "and spelled ptr under both" "ptr"
+    (Kind.of_ty t (Tir.TCon ("Lib.P2", []))).Kind.llvm_ty;
+  Alcotest.(check bool) "and refcounted under both" true
+    (Kind.of_ty t (Tir.TCon ("Lib.Dur", []))).Kind.needs_rc;
+  (* a bare-registered type keeps its shape answer, qualified or not *)
+  Alcotest.check repr_pp "Top is a newtype under both" (Kind.Newtype Tir.TInt) (r "top" "Main.Top")
+
+let test_csv_row_declared_layout_pin () =
+  (* march_csv_next_row returns raw NULL for CsvEof: the C runtime fixes this
+     type's layout to its declaration, under either spelling. *)
+  let t = table module_defs in
+  let k = both_spellings_agree "CsvRow" t "Csv.CsvRow" in
+  Alcotest.(check bool) "CsvRow is niche-shaped under both" true (Kind.is_niche_shaped t "CsvRow");
+  Alcotest.(check bool) "niche_repr_of_concrete is a Niche under both" true
+    (match Kind.niche_repr_of_concrete t "CsvRow" with Some (Kind.Niche _) -> true | _ -> false);
+  Alcotest.(check string) "canonical spelling is the declaration" "Csv.CsvRow"
+    (Kind.canonical_name t "CsvRow");
+  ignore k
+
+let test_canonical_name () =
+  let t = table module_defs in
+  Alcotest.(check string) "qualified -> short" "Dur" (Kind.canonical_name t "Lib.Dur");
+  Alcotest.(check string) "short stays short" "Dur" (Kind.canonical_name t "Dur");
+  Alcotest.(check string) "deeply qualified -> short" "Id" (Kind.canonical_name t "Main.Inner.Id");
+  Alcotest.(check string) "idempotent on the pin" "Csv.CsvRow"
+    (Kind.canonical_name t (Kind.canonical_name t "Csv.CsvRow"))
+
+let test_short_collision_stays_boxed_under_both () =
+  (* Two modules declare `Dur`: the short name is ambiguous, so the collision
+     set forces Boxed and canonicalising cannot reach the other module's
+     declaration. *)
+  let open Tir in
+  let defs = [ TDVariant ("A.Dur", [ ("Dur", [TInt]) ]);
+               TDVariant ("B.Dur", [ ("Dur", [TString]) ]) ] in
+  let t = table defs in
+  List.iter (fun n ->
+      Alcotest.check repr_pp (n ^ " Boxed") Kind.Boxed (Kind.of_ty t (TCon (n, []))).Kind.repr)
+    [ "A.Dur"; "B.Dur"; "Dur" ]
+
 let suites = [
   ( "kind", [
       Alcotest.test_case "needs_rc/borrowable truth table"        `Quick test_truth_table;
@@ -318,5 +397,9 @@ let suites = [
       Alcotest.test_case "rebind keeps the unboxed decision"      `Quick test_rebind_keeps_decision;
       Alcotest.test_case "Option(Int) and Option('a) disagree (mono's check)" `Quick
         test_option_int_and_option_tvar_disagree;
+      Alcotest.test_case "both spellings of a type get one answer" `Quick test_both_spellings_agree;
+      Alcotest.test_case "CsvRow keeps its declared (niche) layout" `Quick test_csv_row_declared_layout_pin;
+      Alcotest.test_case "canonical_name"                          `Quick test_canonical_name;
+      Alcotest.test_case "short-name collision stays Boxed"        `Quick test_short_collision_stays_boxed_under_both;
     ] );
 ]

@@ -1,0 +1,14 @@
+march shell: 2 declarations here differ from the node's build (evens, type Shade); inputs that reach them are refused
+3
+3
+error: this input reaches code that differs from the node's build:
+  evens differs
+error: this input reaches code that differs from the node's build:
+  evens differs
+error: this input reaches code that differs from the node's build:
+  Shade has constructor tags Dark=0,Light=1 here, Light=0,Dark=1 on the node
+  type Shade differs
+4
+** refused: policy Actor.Debug
+** refused: policy Actor.Introspect
+exit=1

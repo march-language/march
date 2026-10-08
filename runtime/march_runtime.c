@@ -2688,7 +2688,9 @@ typedef struct march_cleanup_node {
 
 /* Monitor node: one (watcher, ref) entry registered on a target actor. */
 typedef struct march_monitor_node {
-    void                       *watcher;   /* watcher actor ptr */
+    void                       *watcher;   /* watcher actor ptr: an OWNED reference
+                                            * (march_monitor's caller hands it over),
+                                            * released wherever the node is freed */
     int64_t                     mon_ref;   /* monitor reference ID */
     struct march_monitor_node  *next;
 } march_monitor_node;
@@ -3687,7 +3689,9 @@ static void meta_free(void *p) {
     /* Both lists are detached at the death claim; a meta that never died (a
      * C-test stand-in) has nothing here that anything else still owns. */
     for (march_cleanup_node *c = m->cleanup_head, *n; c; c = n) { n = c->next; free(c); }
-    for (march_monitor_node *mn = m->monitor_head, *n; mn; mn = n) { n = mn->next; free(mn); }
+    for (march_monitor_node *mn = m->monitor_head, *n; mn; mn = n) {
+        n = mn->next; march_decrc(mn->watcher); free(mn);
+    }
     free(m);
 }
 
@@ -6528,6 +6532,7 @@ static void do_actor_death_kind(void *actor, march_death_reason reason,
         deliver_monitor_down(monitors->watcher, monitors->mon_ref, actor,
                              reason, pe ? pe->terminal_message : message,
                              pe ? pe->terminal_message_len : message_len);
+        march_decrc(monitors->watcher);   /* the node's reference */
         free(monitors);
         monitors = next_mn;
     }
@@ -10618,8 +10623,12 @@ void march_demonitor(int64_t ref) {
                 if ((*pp)->mon_ref == ref) {
                     march_monitor_node *dead = *pp;
                     *pp = dead->next;
+                    void *watcher = dead->watcher;
                     free(dead);
                     pthread_mutex_unlock(&g_tbl_mu);
+                    /* Outside the table lock: the last release of an actor
+                     * record runs its resource destructors. */
+                    march_decrc(watcher);
                     return;
                 }
                 pp = &(*pp)->next;
@@ -10729,6 +10738,7 @@ int64_t march_monitor(void *watcher, void *target) {
     if (!IS_HEAP_PTR(target)) {
         /* Invalid/never-spawned target: interpreter-compatible Normal fallback. */
         deliver_monitor_down(watcher, ref, target, MARCH_DEATH_NORMAL, NULL, 0);
+        march_decrc(watcher);   /* the caller's reference: no node keeps it */
         return ref;
     }
 
@@ -10774,6 +10784,7 @@ int64_t march_monitor(void *watcher, void *target) {
         free(node);
         deliver_monitor_down(watcher, ref, target, terminal_reason,
                              terminal_message, terminal_message_len);
+        march_decrc(watcher);   /* the caller's reference: no node keeps it */
     }
     return ref;
 }

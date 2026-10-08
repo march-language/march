@@ -159,5 +159,11 @@ type message_part =
   | MPBullet of message_part list
 val render_parts : message_part list -> string
 val span_of_expr : Ast.expr -> Ast.span
+
+(** The provided side of a type mismatch (D5): the sub-expression whose
+    inferred type [p_ty] failed to meet the context, and its name when it
+    is a plain variable. See [Typecheck_unify.report_mismatch]. *)
+type provided = { p_span : Ast.span; p_name : string option; p_ty : ty }
+val provided_of_expr : Ast.expr -> ty -> provided
 val free_vars_expr : string list -> Ast.expr -> string list
 val free_vars_pattern : Ast.pattern -> string list

@@ -24,7 +24,9 @@
 (test
  (name test_query_cli)
  (modules test_query_cli)
- (libraries march_lsp_lib alcotest))
+ (libraries march_lsp_lib alcotest unix)
+ ; the compile queries proxy to `march query` (lsp/lib/query_cli.ml)
+ (deps %{exe:../../bin/main.exe} (source_tree ../../stdlib) (source_tree ../../runtime)))
 
 (test
  (name test_incremental)

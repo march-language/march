@@ -7,6 +7,7 @@ Main.evens(9)
 evens(4)
 Math.abs(-2.5)
 Math.sqrt(Math.abs(-16.0))
+nap()
 List.map(xs, fn x -> x * x) limit: 3
 println("hi from the shell")
 Actor.list(intro)
@@ -17,3 +18,17 @@ panic("deliberate")
 List.head(List.filter(xs, fn x -> x > 100))
 nosuchfn(1)
 2 + 2
+{ a: 1, b: "two" }
+[(1, "x"), (2, "y")]
+Json.parse("{\"a\": [1, true, null], \"b\": \"s\"}")
+String.split("a,b", ",")
+List.reverse(items(5)) limit: 3
+List.range(0, 10000)
+()
+Fork(Bud, 1, Fork(Bud, 2, Bud))
+Blob(3)
+Blob(20000)
+c
+fn x -> x + 1
+"tab\there" limit: 4
+Some(Map.insert(Map.empty(), 1, ["x"], Map.int_cmp))

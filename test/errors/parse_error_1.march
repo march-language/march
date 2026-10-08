@@ -1,10 +1,6 @@
-mod Main do
+mod Main
   needs IO.Console
-  fn sign(n : Int) : Int do
-    if n > 0 then 1 else 0 end
-  end
-
   fn main(_console : Cap(IO.Console)) do
-    println(int_to_string(sign(3)))
+    println("hello")
   end
 end

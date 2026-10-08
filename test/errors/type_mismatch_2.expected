@@ -30,4 +30,9 @@ expected `String` but got `Int`. [type_mismatch]
 3 |   fn f(x : Int) : Int do x ++ "no" end
                              ^^^^^^^^^
 
+    `x` was bound here as `Int`:
+
+3 |   fn f(x : Int) : Int do x ++ "no" end
+           ^
+
 

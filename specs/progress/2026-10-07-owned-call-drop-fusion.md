@@ -112,6 +112,8 @@ the clone consumes nothing a caller still expects.
 - **Arguments never handed over:** in an original function, a variable
   passed more than once in the same call (inside a clone it is handed to
   every position, see the closed gap below), any call where a variable sits at
+- **Arguments never handed over:** a variable passed more than once in the
+  same call (one reference, two consumers), any call where a variable sits at
   both an owned and a borrowed position (the dual-position accounting stays
   as it was), and a variable bound directly by `let v = EAlloc ...` in the
   caller: `Escape` may stack-promote such a cell through a borrowing callee,
@@ -131,6 +133,12 @@ the clone consumes nothing a caller still expects.
   Inside a clone the variable is now handed to every borrowed position it
   occupies, dup'd once per extra position before the call; originals keep
   the drop. See `specs/progress/2026-10-07-owned-call-dup-arg.md`.
+- **Known remaining gap:** a variable passed twice in one call stays with the
+  caller (handing it to one position would let the clone free it while the
+  other, borrowed, position still reads it). Inside a clone such a call keeps
+  its post-call drop, so if it is a tail call of a loop the clone recurses
+  where the original looped. Nothing in the native golden corpus hits it
+  (the sweep below), but it is not excluded by construction.
 - FFI externs and builtins are not functions in the module and are never
   cloned; their borrowed arguments keep the caller-side drop.
 

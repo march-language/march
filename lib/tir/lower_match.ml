@@ -112,7 +112,35 @@ let span_of_pat : Ast.pattern -> Ast.span = function
 let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.pattern)
   : (string * Ast.pattern list) option =
   match pat with
-  | Ast.PatCon ({ txt = tag; _ }, subs) ->
+  | Ast.PatCon ({ txt = tag; span = pat_span }, subs) ->
+    (* A NESTED constructor pattern's scrutinee is a sub-pattern variable that
+       [compile_matrix] minted with [unknown_ty] whenever any row binds that
+       field to a plain name (see [field_ty_at]: a concrete type there would
+       elide the uniform->natural untag at the name's rebinding).  With the
+       scrutinee type erased, codegen had only the BARE tag to go on, and
+       [Llvm_data.ctor_entry]'s ".<Ctor>" suffix resolver picks between every
+       type declaring that ctor name by arity, then by hashtable order: a user
+       `type Tree = Leaf | Node(..)` matched `Node(Leaf, _, Leaf)` against
+       stdlib OrderedMap.Tree's `Leaf` tag, so the arm never fired (compiled
+       only; the interpreter was right).  The typechecker recorded this
+       pattern's own type at its span; when the scrutinee var carries no type,
+       use that one for the tag resolution below, and qualify a bare tag with
+       it ("Tree.Leaf") so codegen's [qualified_br_key] resolves the ctor by
+       type exactly as it does for a top-level scrutinee.  The sub-variable's
+       own [v_ty] is left erased, so the rebinding untag is unaffected. *)
+    let erased_scrut_ty =
+      match scrut with
+      | Tir.AVar { Tir.v_ty = Tir.TCon _; _ } -> None
+      | Tir.AVar _ ->
+        (match Lower_state.ty_of_span env pat_span with
+         | Tir.TCon _ as t -> Some t
+         | _ -> None)
+      | _ -> None
+    in
+    let scrut = match erased_scrut_ty, scrut with
+      | Some t, Tir.AVar v -> Tir.AVar { v with Tir.v_ty = t }
+      | _ -> scrut
+    in
     (* Keep the constructor pattern's FULL text (e.g. "Inline.Text", "T.B").
        A type-qualified pattern carries its own disambiguating qualifier; codegen
        (qualified_br_key in llvm_emit) resolves it to the right ctor_info key.
@@ -202,7 +230,10 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
                  pattern's scrutinee var is erased ([compile_matrix]'s
                  [unknown_ty]); the type the typechecker recorded at the
                  pattern's own span names the type then.  See
-                 [Lower_state.own_module_ctor_key]. *)
+                 [Lower_state.own_module_ctor_key].  That key is tried FIRST;
+                 failing it, an erased nested scrutinee whose type was
+                 recovered above ([erased_scrut_ty]) qualifies the bare tag
+                 with that type, then the bare tag. *)
               let type_name = match ty with
                 | Tir.TCon (n, _) -> Some n
                 | _ ->
@@ -213,12 +244,15 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
                       | _ -> None)
                    | _ -> None)
               in
-              (match type_name with
-               | Some n ->
-                 (match Lower_state.own_module_ctor_key env n tag with
-                  | Some key -> key
-                  | None -> tag)
-               | None -> tag))
+              let own_key = match type_name with
+                | Some n -> Lower_state.own_module_ctor_key env n tag
+                | None -> None
+              in
+              (match own_key, ty with
+               | Some key, _ -> key
+               | None, Tir.TCon (type_name, _) when erased_scrut_ty <> None ->
+                 type_name ^ "." ^ tag
+               | None, _ -> tag))
          | _ -> tag)
       | Some i ->
         let qual = String.sub tag 0 (i + 1) in
@@ -440,7 +474,9 @@ let record_fields_in_column (rows : (Ast.pattern list * Tir.expr) list)
     name and [ty_of_span] type, so the argument at each call site resolves to
     the decision tree's own binding. *)
 let hoist_fallback_jp ?(params : Tir.var list = []) (fb : Tir.expr) : Tir.var * Tir.expr =
-  let jp_fn_name = Lower_state.fresh_name "jp" in
+  let jp_fn_name =
+    Lower_state.fresh_nested_name
+      ~host:(Lower_state.current_host ~mod_prefix:"" ()) "jp" in
   let jp_fn_ty   =
     Tir.TFn (List.map (fun (v : Tir.var) -> v.Tir.v_ty) params,
              Lower_types.unknown_ty) in

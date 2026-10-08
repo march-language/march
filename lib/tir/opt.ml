@@ -42,6 +42,17 @@ let named_passes = [
   "dce",         Dce.run;
 ]
 
+(** Did the most recent [run] reach its fixed point?  [true] when an
+    iteration made no change (the loop stopped on its own), [false] when it
+    ran out of its 5 iterations with the last one still changing something.
+    Read by the A6 convergence test (test/test_snapshots.ml), which asserts
+    convergence, not idempotence: the cap is the design, a module that needs
+    a 6th iteration is the finding. *)
+let last_converged = ref true
+
+(** How many iterations the most recent [run] took (1-5). *)
+let last_iterations = ref 0
+
 let run ?(snap = fun _label _m -> ()) ?(hot_reload = None)
     (m : Tir.tir_module) : Tir.tir_module =
   (* Hot Code Reload: keep boundary functions out of the inliner for this run
@@ -53,17 +64,19 @@ let run ?(snap = fun _label _m -> ()) ?(hot_reload = None)
     let apply iter p =
       changed := false;
       List.fold_left (fun acc (label, pass) ->
+        if not (Pass_switch.on ("opt." ^ label)) then acc else
         let acc' = pass ~changed acc in
         snap (Printf.sprintf "tir-opt-%d-%s" iter label) acc';
         acc'
       ) p named_passes
     in
     let rec loop p n =
-      if n = 0 then p
+      if n = 0 then (last_converged := false; p)
       else
         let iter = 6 - n in
+        last_iterations := iter;
         let p' = apply iter p in
-        if not !changed then p'
+        if not !changed then (last_converged := true; p')
         else loop p' (n - 1)
     in
     loop m 5)

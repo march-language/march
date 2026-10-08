@@ -32,10 +32,21 @@ module StringSet = Set.Make(String)
 
 let mk_var name ty = { Tir.v_name = name; Tir.v_ty = ty; Tir.v_lin = Tir.Unr }
 
-let gensym_ctr = ref 0
+(* A fused helper is named after the function it is fused INTO (the
+   provenance host, set by [Provenance.with_host] around each rewrite) and
+   its ordinal among that host's fused helpers of the same shape (B1):
+   [$fused_mf_Main_total_0] ([Tir_names.structural_tag] spells the host's
+   ['$'] and ['.'] as ['_']; see [Tir_names.lam_uid] for why no ['.']).
+   Reset per module in [run] / [run_struct]. *)
+let gensym_ordinals : (string * string, int) Hashtbl.t = Hashtbl.create 16
+let reset_gensym () = Hashtbl.reset gensym_ordinals
 let gensym prefix =
-  incr gensym_ctr;
-  Printf.sprintf "$fused_%s_%d" prefix !gensym_ctr
+  let host = match !Provenance.current_host with
+    | Some h -> Tir_names.structural_tag h
+    | None -> "top" in
+  let k = Option.value ~default:0 (Hashtbl.find_opt gensym_ordinals (host, prefix)) in
+  Hashtbl.replace gensym_ordinals (host, prefix) (k + 1);
+  Printf.sprintf "$fused_%s_%s_%d" prefix host k
 
 (** Atom type — uses TVar "_" as a fallback for unknown. *)
 let ty_of_atom : Tir.atom -> Tir.ty = function
@@ -682,6 +693,7 @@ and try_fuse_2step_let
 (* ── Module-level pass ───────────────────────────────────────────────── *)
 
 let run ~(changed : bool ref) (m : Tir.tir_module) : Tir.tir_module =
+  reset_gensym ();
   let new_fns_acc = ref [] in
   let fns' = List.map (fun fd ->
     Provenance.with_host fd.Tir.fn_name (fun () ->
@@ -747,11 +759,12 @@ let rec fuse_struct_expr ~changed : Tir.expr -> Tir.expr = function
     Pipeline position: Opt coordinator (after Defun/Perceus/Escape).
     Runs in the fixed-point loop alongside Inline/CProp/Fold/Simplify/DCE. *)
 let run_struct ~(changed : bool ref) (m : Tir.tir_module) : Tir.tir_module =
+  reset_gensym ();
   { m with Tir.tm_fns = List.map (fun fd ->
     { fd with Tir.fn_body = fuse_struct_expr ~changed fd.Tir.fn_body }
   ) m.Tir.tm_fns }
 
-(* ══ NativeArray map / map2 chain fusion (phase B) ═══════════════════════════
+(* ══ NativeArray map / map2 / fold chain fusion (phases B and C) ═════════════
 
    specs/plans/2026-09-28-nativearray-fusion-plan.md, "Design: fusion by body
    substitution".  Separate from the list patterns above, and stricter: every
@@ -763,6 +776,14 @@ let run_struct ~(changed : bool ref) (m : Tir.tir_module) : Tir.tir_module =
      map2(map(a, f), b, g)   → map2(a, b, fn (x, y) -> let t = f_body[x] in g_body[t, y])
      map2(a, map(b, f), g)   → map2(a, b, fn (x, y) -> let t = f_body[y] in g_body[x, t])
      map(map2(a, b, f), g)   → map2(a, b, fn (x, y) -> let t = f_body[x, y] in g_body[t])
+     fold(map(a, f), z, g)   → fold(a, z, fn (s, x) -> let t = f_body[x] in g_body[s, t])
+
+   The fold link (phase C) only ever removes the mapped intermediate: the fold
+   keeps its own strict, in-order callback, which [Native_map_inline] then
+   turns into the inline fold loop when the accumulator is a scalar.
+   [sum(map(..))] is not handled here: it is fused after Perceus by
+   [Native_map_inline]'s sum-map peephole, onto a loop that reassociates the
+   sum exactly as the runtime's [native_*_arr_sum] does.
 
    Applied to a fixed point per chain, so longer chains collapse; a composed
    callback stands for at most [na_max_depth] original links.  The composed
@@ -812,13 +833,21 @@ let na_fresh prefix =
 (** Most original map links one composed callback may stand for. *)
 let na_max_depth = 8
 
-type na_wrapper = { w_width : string; w_arity : int (* callback arity *) }
+type na_kind = NaMap | NaFold
+
+type na_wrapper = {
+  w_width : string;
+  w_arity : int;     (* callback arity *)
+  w_kind  : na_kind;
+}
 
 let na_widths = [ "int"; "float"; "f32"; "i32"; "u8" ]
 
-(** Wrapper fn name → width/arity, for every module fn named
+(** Wrapper fn name → width/arity/kind, for every module fn named
     [NativeArray.map_<w>]/[NativeArray.map2_<w>] (modulo a mono suffix) whose
-    body is exactly [native_<w>_arr_map(2)(params…)]. *)
+    body is exactly [native_<w>_arr_map(2)(params…)], and every
+    [NativeArray.fold_<w>(arr, acc, f)] whose body is exactly
+    [native_<w>_arr_fold(acc, arr, f)] (the builtin swaps the first two). *)
 let na_wrapper_table (m : Tir.tir_module) : (string, na_wrapper) Hashtbl.t =
   let t = Hashtbl.create 16 in
   List.iter (fun (fd : Tir.fn_def) ->
@@ -836,9 +865,20 @@ let na_wrapper_table (m : Tir.tir_module) : (string, na_wrapper) Hashtbl.t =
                         match a with
                         | Tir.AVar v -> v.Tir.v_name = p.Tir.v_name
                         | _ -> false) fd.Tir.fn_params args ->
-                  Hashtbl.replace t fd.Tir.fn_name { w_width = w; w_arity = arity }
+                  Hashtbl.replace t fd.Tir.fn_name
+                    { w_width = w; w_arity = arity; w_kind = NaMap }
                 | _ -> ())
-            [ (1, "map"); (2, "map2") ])
+            [ (1, "map"); (2, "map2") ];
+          if base = Printf.sprintf "NativeArray.fold_%s" w then
+            match fd.Tir.fn_params, fd.Tir.fn_body with
+            | [ arr; acc; f ],
+              Tir.EApp (b, [ Tir.AVar a0; Tir.AVar a1; Tir.AVar a2 ])
+              when b.Tir.v_name = Printf.sprintf "native_%s_arr_fold" w
+                && a0.Tir.v_name = acc.Tir.v_name
+                && a1.Tir.v_name = arr.Tir.v_name
+                && a2.Tir.v_name = f.Tir.v_name ->
+              Hashtbl.replace t fd.Tir.fn_name { w_width = w; w_arity = 2; w_kind = NaFold }
+            | _ -> ())
         na_widths)
     m.Tir.tm_fns;
   t
@@ -985,7 +1025,51 @@ let na_try_one (ctx : na_ctx) (items : na_item array) (term : Tir.expr)
   in
   let names_of fd = Inline.add_expr_names NaSet.empty (Tir.ELetRec ([ fd ], na_dummy)) in
   let disjoint a b = NaSet.is_empty (NaSet.inter a b) in
-  (* Build the fused chain once every check passed. *)
+  (* Splice the composed callback [cfd] (bound to a fresh [h]) and the new
+     [call] into the chain in place of the consumer at [j]; the producer at
+     [it] disappears, and a callback binding nothing references any more is
+     dropped. *)
+  let splice ~j ~it ~fv ~gv ~fdf ~fdg (cfd : Tir.fn_def) (call_of : Tir.atom -> Tir.expr) =
+    let cb_ty = Tir.TFn (List.map (fun (v : Tir.var) -> v.Tir.v_ty) cfd.Tir.fn_params,
+                         cfd.Tir.fn_ret_ty) in
+    Provenance.record cfd.Tir.fn_name
+      ~derived:(Provenance.Fusion_of (fdf.Tir.fn_name, fdg.Tir.fn_name))
+      ~pass:"fusion_nativearr" ();
+    Hashtbl.replace ctx.depth cfd.Tir.fn_name (na_depth ctx fdf + na_depth ctx fdg);
+    let h = mk_var (na_fresh "cb") cb_ty in
+    let cb_item =
+      NBind (h, Tir.ELetRec ([ cfd ], Tir.EAtom (Tir.AVar (mk_var cfd.Tir.fn_name cb_ty)))) in
+    let call = call_of (Tir.AVar h) in
+    let acc = ref [] in
+    for k = 0 to n - 1 do
+      if k = it then ()
+      else if k = j then begin
+        acc := cb_item :: !acc;
+        (match items.(k) with
+         | NBind (v, _) -> acc := NBind (v, call) :: !acc
+         | NSeq _ -> assert false)
+      end
+      else acc := items.(k) :: !acc
+    done;
+    let new_term = if j = n then call else term in
+    let new_items = List.rev (if j = n then cb_item :: !acc else !acc) in
+    let rec prune kept = function
+      | [] -> List.rev kept
+      | (NBind (v, rhs) as item) :: rest ->
+        let dead =
+          (v.Tir.v_name = fv.Tir.v_name || v.Tir.v_name = gv.Tir.v_name)
+          && na_lambda_of_rhs rhs <> None
+          && use_count v.Tir.v_name (na_unflatten rest new_term) = 0 in
+        prune (if dead then kept else item :: kept) rest
+      | item :: rest -> prune (item :: kept) rest
+    in
+    (prune [] new_items, new_term)
+  in
+  let mk_lambda params ret_ty body =
+    { Tir.fn_name = na_fresh "lam"; fn_params = params;
+      fn_ret_ty = ret_ty; fn_body = body; fn_kind = Tir.FnLambda } in
+  (* map/map2 consumer: input [p] of the consumer is the producer's result,
+     and the consumer's callback parameter [p] is its element. *)
   let rewrite ~j ~p ~it ~g ~wg ~gin ~gv ~f ~wf ~fin ~fv ~fdf ~fdg =
     let m = wf.w_arity in
     let new_inputs = na_take p gin @ fin @ na_drop (p + 1) gin in
@@ -1004,46 +1088,29 @@ let na_try_one (ctx : na_ctx) (items : na_item array) (term : Tir.expr)
       Inline.subst_args fps f_args
         (Tir.ELet (List.nth gps p, na_narrow wf.w_width fbody,
                    Inline.subst_args g_other_params g_other_args gbody)) in
-    let ret_ty = fdg.Tir.fn_ret_ty in
-    let cb_ty = Tir.TFn (param_tys, ret_ty) in
-    let lam_name = na_fresh "lam" in
-    let cfd = { Tir.fn_name = lam_name; fn_params = params;
-                fn_ret_ty = ret_ty; fn_body = body; fn_kind = Tir.FnLambda } in
-    Provenance.record lam_name
-      ~derived:(Provenance.Fusion_of (fdf.Tir.fn_name, fdg.Tir.fn_name))
-      ~pass:"fusion_nativearr" ();
-    Hashtbl.replace ctx.depth lam_name (na_depth ctx fdf + na_depth ctx fdg);
-    let h = mk_var (na_fresh "cb") cb_ty in
-    let cb_item =
-      NBind (h, Tir.ELetRec ([ cfd ], Tir.EAtom (Tir.AVar (mk_var lam_name cb_ty)))) in
+    let cfd = mk_lambda params fdg.Tir.fn_ret_ty body in
     (* map∘map2 becomes a map2: call the producer's wrapper (same width). *)
     let call_var = if wg.w_arity - 1 + m = wg.w_arity then g else f in
-    let call = Tir.EApp (call_var, new_inputs @ [ Tir.AVar h ]) in
-    let acc = ref [] in
-    for k = 0 to n - 1 do
-      if k = it then ()
-      else if k = j then begin
-        acc := cb_item :: !acc;
-        (match items.(k) with
-         | NBind (v, _) -> acc := NBind (v, call) :: !acc
-         | NSeq _ -> assert false)
-      end
-      else acc := items.(k) :: !acc
-    done;
-    let new_term = if j = n then call else term in
-    let new_items = List.rev (if j = n then cb_item :: !acc else !acc) in
-    (* Drop a callback binding nothing references any more. *)
-    let rec prune kept = function
-      | [] -> List.rev kept
-      | (NBind (v, rhs) as item) :: rest ->
-        let dead =
-          (v.Tir.v_name = fv.Tir.v_name || v.Tir.v_name = gv.Tir.v_name)
-          && na_lambda_of_rhs rhs <> None
-          && use_count v.Tir.v_name (na_unflatten rest new_term) = 0 in
-        prune (if dead then kept else item :: kept) rest
-      | item :: rest -> prune (item :: kept) rest
-    in
-    (prune [] new_items, new_term)
+    splice ~j ~it ~fv ~gv ~fdf ~fdg cfd (fun h -> Tir.EApp (call_var, new_inputs @ [ h ]))
+  in
+  (* fold consumer [fold(t, z, g)] with [t = map(a, f)]: the ARRAY input (0)
+     is the producer's result and the callback's ELEMENT is its parameter 1;
+     parameter 0 (the accumulator) passes through. *)
+  let rewrite_fold ~j ~it ~g ~gin ~gv ~wf ~fin ~fv ~fdf ~fdg =
+    let (fps, fbody) = Inline.alpha_rename fdf.Tir.fn_params fdf.Tir.fn_body in
+    let (gps, gbody) = Inline.alpha_rename fdg.Tir.fn_params fdg.Tir.fn_body in
+    match gps, fdg.Tir.fn_params, fdf.Tir.fn_params with
+    | [ gs; ge ], [ s0; _ ], [ x0 ] ->
+      let s = mk_var (na_fresh "x") s0.Tir.v_ty in
+      let x = mk_var (na_fresh "x") x0.Tir.v_ty in
+      let body =
+        Inline.subst_args fps [ Tir.AVar x ]
+          (Tir.ELet (ge, na_narrow wf.w_width fbody,
+                     Inline.subst_args [ gs ] [ Tir.AVar s ] gbody)) in
+      let cfd = mk_lambda [ s; x ] fdg.Tir.fn_ret_ty body in
+      let new_inputs = fin @ na_drop 1 gin in
+      splice ~j ~it ~fv ~gv ~fdf ~fdg cfd (fun h -> Tir.EApp (g, new_inputs @ [ h ]))
+    | _ -> assert false   (* arities checked by [lambda_at] *)
   in
   let try_at j (g, wg, gargs) p =
     match na_last_and_init gargs with
@@ -1056,7 +1123,9 @@ let na_try_one (ctx : na_ctx) (items : na_item array) (term : Tir.expr)
              | NBind (_, Tir.EApp (f, fargs)) ->
                (match Hashtbl.find_opt ctx.wrappers f.Tir.v_name, na_last_and_init fargs with
                 | Some wf, Some (fin, Tir.AVar fv)
-                  when wf.w_width = wg.w_width
+                  when wf.w_kind = NaMap
+                    && (wg.w_kind = NaMap || (p = 0 && wf.w_arity = 1))
+                    && wf.w_width = wg.w_width
                     && na_fusible_width wf.w_width
                     && List.length fargs = wf.w_arity + 1
                     && wg.w_arity - 1 + wf.w_arity <= 2
@@ -1070,7 +1139,9 @@ let na_try_one (ctx : na_ctx) (items : na_item array) (term : Tir.expr)
                        && disjoint (binders_between i_g j) (names_of fdg)
                        && disjoint (binders_between it j)
                          (List.fold_left Inline.add_atom_name NaSet.empty fin) ->
-                     Some (rewrite ~j ~p ~it ~g ~wg ~gin ~gv ~f ~wf ~fin ~fv ~fdf ~fdg)
+                     (match wg.w_kind with
+                      | NaMap -> Some (rewrite ~j ~p ~it ~g ~wg ~gin ~gv ~f ~wf ~fin ~fv ~fdf ~fdg)
+                      | NaFold -> Some (rewrite_fold ~j ~it ~g ~gin ~gv ~wf ~fin ~fv ~fdf ~fdg))
                    | _ -> None)
                 | _ -> None)
              | _ -> None)

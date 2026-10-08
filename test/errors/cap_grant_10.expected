@@ -34,3 +34,6 @@ fix [cap_grant]:
 @@ lines 10-10 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+refinement violation: argument `x` of `sqrtish` does not satisfy precondition `_ >= 0.0` [refinement_violated]

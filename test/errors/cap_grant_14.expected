@@ -28,3 +28,6 @@ fix [cap_grant]:
 @@ lines 16-16 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+`Cap(IO)` cannot be deserialized — a capability may only be received, never constructed. [cap_deserialize]
