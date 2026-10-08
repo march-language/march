@@ -31,4 +31,5 @@ Blob(20000)
 c
 fn x -> x + 1
 "tab\there" limit: 4
+["tab\there"] limit: 4
 Some(Map.insert(Map.empty(), 1, ["x"], Map.int_cmp))
