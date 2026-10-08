@@ -523,9 +523,28 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(inputs 
   let lines = match inputs with
     | Some text -> ref (String.split_on_char '\n' text)
     | None -> ref [] in
+  (* Line editing + persistent history, on a terminal only: stdin and stdout
+     both ttys.  Anything else (pipe, redirect, --shell-inputs, forge rpc)
+     takes the plain path below, byte for byte as before. *)
+  let editing = interactive && Shell_tty.available () in
+  let history_path = if editing then March_repl.Shell_line.default_path () else None in
+  let history = ref (match history_path with
+      | Some p -> March_repl.Shell_line.load p
+      | None -> [||]) in
   let next_line () =
     match inputs with
     | Some _ -> (match !lines with l :: rest -> lines := rest; Some l | [] -> None)
+    | None when editing ->
+      (match Shell_tty.read_line ~prompt:"march> " !history with
+       | Shell_tty.End_of_input -> None
+       | Shell_tty.Line l ->
+         let h, added = March_repl.Shell_line.record !history l in
+         history := h;
+         (if added then
+            match history_path, March_repl.Shell_line.history_entry l with
+            | Some p, Some e -> March_repl.Shell_line.append p e
+            | _ -> ());
+         Some l)
     | None ->
       if interactive then (print_string "march> "; flush stdout);
       In_channel.input_line stdin in
