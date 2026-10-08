@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **The `a[p]` / `Bool[p]` shorthand for abstract refinements.**
+  `fn filter(xs : List(a), pred : a -> Bool[p]) : List(a[p])` now means the
+  spelled-out `pred : ({x : a | true}) -> {Bool | _ == p(x)}` and
+  `List({a | p(_)})`. `T[p]` is `{T | p(_)}` anywhere, and a callback result
+  `D -> Bool[p]` defines `p`. The standard library's `List.filter`,
+  `List.find`, `List.take_while` and `Option.filter` are now written this way.
+  Editors using the tree-sitter grammar highlight it.
 - **`march --bisect-pass FILE` finds the optimisation pass behind a
   miscompile.** It compares the compiled program's output with the
   interpreter's (or with `--expect OUT`). It then reports the smallest set of
