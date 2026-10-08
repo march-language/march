@@ -1538,7 +1538,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
       ~(target_label : string) ~(src_hash : string) : string list * string =
   (* Cross-toolchain identity: the target OpenSSL/zlib .so live OUTSIDE the
      repo (~/.cache/march/cross-sysroot), so runtime_identity (which digests
-     only runtime/*.c/*.h) does NOT cover them.  Fold a digest of the three
+     only runtime/**/*.c and runtime/**/*.h) does NOT cover them.  Fold a digest of the three
      sysroot .so files into cas_flags so re-fetching a different
      OpenSSL/zlib version invalidates cached cross binaries.  The glibc
      floor is already in target_label. *)
