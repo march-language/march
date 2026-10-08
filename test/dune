@@ -55,6 +55,13 @@
 ; and alias both) from `dune runtest`. Unset -- every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
+;
+; MARCH_CI_SKIP_OS_INDEPENDENT=1 (set only by CI's macOS `test` job) drops the
+; suites whose answer does not depend on the OS: test_refinecheck (z3 over
+; --check), run_errors (golden --check diagnostics) and the lsp/test suites.
+; They still run on Linux. The macOS runner has 3 cores and its `dune runtest`
+; is CPU-bound, so these ~22 CPU-minutes were ~7 min of its wall time
+; (2026-10-08). Same caution as above: a local run with it set skips them.
 ; cap_strip / cap_markers shell out to the real compiler and inspect the
 ; linked binary, so main.exe AND the staged runtime tree must exist before
 ; this runner starts.  Without these deps the tests resolved nothing and
@@ -1315,7 +1322,9 @@
 
 (test
  (name test_refinecheck)
- (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
+ (enabled_if
+  (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
+       (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))
  (modules test_refinecheck)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
@@ -13176,6 +13185,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; test/run_errors.ml).
 (test
  (name run_errors)
+ (enabled_if (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1))   ; see "CI sharding" above
  (modules run_errors)
  (libraries march_test_helpers alcotest yojson unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
