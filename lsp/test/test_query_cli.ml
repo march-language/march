@@ -111,6 +111,22 @@ let test_cli_format () =
   let out2 = run ["query"; "format"; "t.march"] ~src:out in
   Alcotest.(check string) "formatting is idempotent" out out2
 
+(* The compile queries (A7) are proxied to `march query`; the dune stanza
+   depends on bin/main.exe, which the proxy finds through the build layout.
+   The answer goes to stdout; the exit code is what the proxy owns. *)
+let test_cli_proxies_compile_queries () =
+  let dir = Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "lsp_query_proxy.%d" (Unix.getpid ())) in
+  (try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  let file = Filename.concat dir "p.march" in
+  Out_channel.with_open_bin file (fun oc ->
+      output_string oc "mod P do\n  fn twice(x : Int) : Int do x + x end\n  fn main() do twice(2) end\nend\n");
+  let main args = March_lsp_lib.Query_cli.main (Array.of_list ("query" :: args)) in
+  Alcotest.(check int) "verify via the proxy" 0 (main [ "verify"; file; "--json" ]);
+  Alcotest.(check int) "an unknown name keeps march's exit code" 1
+    (main [ "fn"; "no_such_fn"; file; "--json" ]);
+  (try Sys.remove file; Unix.rmdir dir with _ -> ())
+
 let () =
   Alcotest.run "query_cli"
     [ "cli",
@@ -120,4 +136,5 @@ let () =
         Alcotest.test_case "symbols" `Quick test_cli_symbols_json;
         Alcotest.test_case "diagnostics UTF-16 columns" `Quick test_cli_diagnostics_utf16_columns;
         Alcotest.test_case "unknown query" `Quick test_cli_unknown_query_is_error;
-        Alcotest.test_case "format" `Quick test_cli_format ] ]
+        Alcotest.test_case "format" `Quick test_cli_format;
+        Alcotest.test_case "compile queries proxy to march" `Quick test_cli_proxies_compile_queries ] ]

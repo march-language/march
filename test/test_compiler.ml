@@ -17406,6 +17406,7 @@ let compiler_suites =
       ("cap_dict", Test_cap_dict.tests);
       ("endpoints", Test_endpoints.tests);
       ("topology_flag", Test_topology_flag.tests);
+      ("march_query", Test_march_query.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
       ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
       ("cap_sandbox_runtime", Test_cap_sandbox_runtime.tests);
