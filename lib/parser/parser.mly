@@ -34,6 +34,41 @@
     March_errors.Errors.parse_error_extra := (code, fix);
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
+  (* `D -> Bool[p]` (the marker [ty_post] puts on `Bool`) is the definer form
+     of an abstract refinement, `({x : D | true}) -> {Bool | _ == p(x)}`
+     (design 2026-09-20 §1).  A domain that already names its binder keeps it;
+     one refined over `_` cannot be referred to, so it is rejected with the
+     fix; a tuple domain is a several-argument callback, which cannot define
+     one (§9.3).  Anything else — including an explicit `{Bool | p(_)}`, which
+     has no marker — is returned unchanged. *)
+  let abstract_definer_arrow (dom : ty) (cod : ty) (pos : Lexing.position) : ty =
+    match cod with
+    | TyRefine ((TyCon ({ txt = "Bool"; _ }, []) as b), Some { txt = "_"; _ },
+                EApp (EVar p, [ EVar { txt = "_"; _ } ], sp)) ->
+      let x, dom' =
+        match dom with
+        | TyTuple _ ->
+          error_raise
+            "`Bool[p]` defines an abstract refinement from a ONE-argument callback; \
+             this one takes several."
+            (Some "keep : a -> Bool[p]") pos
+        | TyRefine (_, Some x, _) when x.txt <> "_" -> (x, dom)
+        | TyRefine (_, _, _) ->
+          error_raise
+            "`Bool[p]` needs to name the callback's argument: write the domain as \
+             `{x : T | ...}`."
+            (Some "keep : ({x : Int | x > 0}) -> Bool[p]") pos
+        | d ->
+          let x = { p with txt = "$x" } in
+          (x, TyRefine (d, Some x, ELit (LitBool true, sp)))
+      in
+      let u = { p with txt = "_" } in
+      TyArrow
+        ( dom'
+        , TyRefine
+            (b, None, EApp (EVar { p with txt = "==" }, [ EVar u; EApp (EVar p, [ EVar x ], sp) ], sp)) )
+    | _ -> TyArrow (dom, cod)
+
   (* A replacement fix over one grammar symbol's extent. *)
   let replace_fix loc text =
     March_errors.Errors.FReplace { span = mk_span loc; text }
@@ -1426,7 +1461,7 @@ ty_eof:
   | t = ty EOF { t }
 
 ty:
-  | t = ty_nat_add ARROW u = ty { TyArrow (t, u) }
+  | t = ty_nat_add ARROW u = ty { abstract_definer_arrow t u $startpos(u) }
   | t = ty_nat_add { t }
 
 ty_nat_add:
