@@ -1,14 +1,12 @@
 exit: 1
 -- ERROR --------------------- errors/parse_error_1.march
 
-I don't recognize `then` here — March uses do/end blocks instead. [parse_error]
+I was expecting `do` to start the module body here: [parse_error]
 
-4 |     if n > 0 then 1 else 0 end
-                 ^^^^
+2 |   needs IO.Console
+      ^^^^^
 
-    if cond do
-        expr1
-    else
-        expr2
+    mod Name do
+        ...
     end
     run `march --explain parse_error`

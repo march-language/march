@@ -1,0 +1,6 @@
+1 + 2
+List.length([1, 2, 3])
+evens(4)
+Main.evens(3)
+List.length([Dark, Light])
+2 + 2

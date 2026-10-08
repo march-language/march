@@ -540,6 +540,16 @@ typedef struct march_scheduler {
                                    * SIGUSR1 — a plain int there is a data race
                                    * (TSan: sched_loop write vs preempt_daemon
                                    * read). */
+    /* Non-zero while a green thread is running on this scheduler (set just
+     * before the switch into it, cleared when it switches back).  The
+     * preemption daemon only ticks a busy scheduler: march_preempt_request
+     * is ONE global flag, so a tick handled by an idle scheduler used to
+     * preempt whatever ran on every other one -- a lone CPU-bound proc on a
+     * 14-scheduler machine yielded ~7x per quantum and was stolen by an idle
+     * scheduler almost every time (2026-10-07,
+     * specs/progress/2026-10-07-binary-trees-static-nullary-and-idle-ticks.md).
+     * Owner writes, the daemon and the tick handler read. */
+    _Atomic int     busy;
     int             id;           /* Scheduler index (0..N-1)                    */
     pthread_t       thread;       /* OS thread handle (for schedulers 1..N-1)    */
     /* What this scheduler thread has done since the last march_sched_init;

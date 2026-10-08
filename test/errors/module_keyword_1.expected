@@ -1,0 +1,19 @@
+exit: 1
+-- ERROR ------------------ errors/module_keyword_1.march
+
+`module` is spelled `mod` in March: [module_keyword]
+
+1 | module Main do
+    ^^^^^^
+
+    mod Name do
+        ...
+    end
+    run `march --explain module_keyword`
+
+fix [module_keyword]:
+@@ lines 1-1 @@
+-module Main do
++mod Main do
+
+after fix: exit 0

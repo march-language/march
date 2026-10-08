@@ -2,6 +2,21 @@
 
 (** March test suite — basic smoke tests. *)
 
+(* [Sys.command] for this file and every test file that opens Test_helpers:
+   same contract (runs [cmd] under /bin/sh -c, returns its exit code, 255 if
+   a signal killed it), but built on [Unix.system] instead of libc system().
+   On macOS libc system() lets only one caller run at a time, so tests run
+   concurrently by [parallel_map] / [parallel_cases] would otherwise wait for
+   each other's compiles (measured: 4 domains x `sleep 1` take 4.1 s through
+   Sys.command, 1.0 s through Unix.system). *)
+module Sys = struct
+  include Stdlib.Sys
+  let command cmd =
+    match Unix.system cmd with
+    | Unix.WEXITED n -> n
+    | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> 255
+end
+
 let parse_module src =
   let lexbuf = Lexing.from_string src in
   March_parser.Parse.module_of_lexbuf lexbuf
@@ -566,7 +581,12 @@ let jit_skip_count = ref 0
 let jit_skip_reasons = ref []
 let jit_skip_teardown_registered = ref false
 
+(* Guards the three refs above: [parallel_map] / [parallel_cases] can run
+   tool-gated tests on several domains at once. *)
+let jit_skip_mu = Mutex.create ()
+
 let record_jit_skip reason =
+  Mutex.protect jit_skip_mu @@ fun () ->
   incr jit_skip_count;
   jit_skip_reasons := reason :: !jit_skip_reasons;
   if not !jit_skip_teardown_registered then begin
@@ -583,6 +603,106 @@ let record_jit_skip reason =
         flush stdout
       end)
   end
+
+(** Worker count for [parallel_map] / [parallel_cases]: [MARCH_TEST_JOBS] if
+    set, else [Domain.recommended_domain_count ()] capped at 8. *)
+let test_jobs () =
+  match Option.bind (Sys.getenv_opt "MARCH_TEST_JOBS") int_of_string_opt with
+  | Some n when n >= 1 -> n
+  | _ -> max 1 (min 8 (Domain.recommended_domain_count ()))
+
+(** [List.mapi f xs] over up to [test_jobs ()] domains, results in input
+    order; [f] also gets the worker index (0 .. jobs-1), for callers that
+    keep per-worker state such as a private cwd or HOME.
+
+    For corpus walks whose every element is a subprocess (a compile, a
+    verifier run): run serially they left a 4-core CI runner ~75% idle and
+    were the long pole of whole suites (CI audit, 2026-10-07). [f] must not
+    touch process-global state: no [Sys.chdir], no [Unix.putenv], no
+    in-process compiler pipeline (typecheck/eval keep global tables). Temp
+    files are fine: [Filename.temp_file]'s PRNG is domain-local. An exception
+    from [f] is re-raised for the first failing input, after every domain
+    has been joined. *)
+let parallel_map (f : int -> 'a -> 'b) (xs : 'a list) : 'b list =
+  let input = Array.of_list xs in
+  let n = Array.length input in
+  let output = Array.make n None in
+  let next = Atomic.make 0 in
+  let rec worker w =
+    let i = Atomic.fetch_and_add next 1 in
+    if i < n then begin
+      output.(i) <- Some (try Ok (f w input.(i)) with e -> Error e);
+      worker w
+    end
+  in
+  let jobs = max 1 (min n (test_jobs ())) in
+  let domains = List.init (jobs - 1) (fun w -> Domain.spawn (fun () -> worker (w + 1))) in
+  worker 0;
+  List.iter Domain.join domains;
+  Array.to_list output
+  |> List.map (function
+    | Some (Ok r) -> r
+    | Some (Error e) -> raise e
+    | None -> assert false)
+
+(** Alcotest cases whose bodies all run up front, concurrently, the first
+    time any one of them is reached; each case then reports its own stored
+    outcome (pass, failure or skip, by re-raising what its body raised).
+    For a group of independent, subprocess-bound cases (compile a program,
+    run it, compare) that alcotest would otherwise run one after another.
+    The bodies must obey [parallel_map]'s rules. A [-q] run that skips the
+    `Slow cases never forces the batch.
+
+    Costs: anything a body prints lands on the real stdout while the batch
+    runs rather than in its own case log (a failure's message travels in the
+    exception and is reported normally), and filtering a run down to ONE of
+    these cases still runs the whole batch. [MARCH_TEST_JOBS=1] runs each
+    body inline, in its own case, as before. *)
+let parallel_cases (cases : (string * Alcotest.speed_level * (unit -> unit)) list)
+    : unit Alcotest.test_case list =
+  if test_jobs () = 1 then
+    List.map (fun (name, speed, body) -> Alcotest.test_case name speed body) cases
+  else begin
+    let outcomes =
+      lazy (Array.of_list
+              (parallel_map
+                 (fun _ (_, _, body) -> try Ok (body ()) with e -> Error e)
+                 cases))
+    in
+    List.mapi (fun i (name, speed, _) ->
+      Alcotest.test_case name speed (fun () ->
+        match (Lazy.force outcomes).(i) with
+        | Ok () -> ()
+        | Error e -> raise e))
+      cases
+  end
+
+(** A group's `Slow cases run as one [parallel_cases] batch, except those
+    named in [serial] (in-process compiler use, timing-sensitive servers),
+    which run inline as before. `Quick cases are untouched, and every case
+    keeps its position, so case indices do not move. *)
+let parallel_slow ?(serial = []) (cases : unit Alcotest.test_case list)
+    : unit Alcotest.test_case list =
+  (* A misspelt [serial] name would silently leave its case in the batch. *)
+  List.iter (fun n ->
+    if not (List.exists (fun (name, _, _) -> name = n) cases) then
+      invalid_arg ("parallel_slow: ~serial names no case in this group: " ^ n))
+    serial;
+  let batched (name, speed, _) = speed = `Slow && not (List.mem name serial) in
+  let batch =
+    parallel_cases (List.filter_map
+                      (fun ((name, speed, fn) as c) ->
+                        if batched c then Some (name, speed, fn) else None)
+                      cases)
+  in
+  let rest = ref batch in
+  List.map (fun c ->
+    if batched c then
+      match !rest with
+      | b :: tl -> rest := tl; b
+      | [] -> assert false
+    else c)
+    cases
 
 (** True iff a `clang` binary is reachable on PATH. Distinguishes "tool
     genuinely absent" (legitimate skip) from "clang is present but the link

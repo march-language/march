@@ -19,3 +19,6 @@ fix [cap_grant]:
 @@ lines 19-19 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+errors/cap_grant_23.march:17:2: error: satisfy Named for Person: no function `name` found in scope. [satisfy_missing_fn]

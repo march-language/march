@@ -1,0 +1,43 @@
+---
+layout: docs
+title: "module_keyword"
+permalink: /docs/errors/module_keyword/
+---
+
+# `module_keyword`: `module Name do` instead of `mod Name do`
+
+The module keyword is `mod`. The caret is on `module`, and the fix replaces
+it with `mod`. It fires for a top-level module and for a nested one.
+
+## A program that triggers it
+
+```march
+module Main do
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    println("hello")
+  end
+end
+```
+
+## The fix
+
+Replace `module` with `mod`. `forge fix` and the editor's quick fix apply it.
+
+```march
+mod Main do
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    println("hello")
+  end
+end
+```
+
+## Why the rule exists
+
+`module` is the OCaml and Elixir spelling (`defmodule`). It is not reserved
+in March: the standard library uses `module` as a parameter name, so the
+parser only treats it as this slip when an upper-case name follows it
+directly.
+
+See also: [the language reference](../surface-syntax.md).

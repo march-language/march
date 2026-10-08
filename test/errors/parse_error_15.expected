@@ -15,3 +15,5 @@ A file may have only one top-level `mod`; everything else must live inside it. [
 fix [parse_error]:
 @@ lines 7-7 @@
 -end
+
+after fix: exit 0

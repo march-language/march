@@ -1,0 +1,30 @@
+fold int: 53
+fold int capturing: 1507500
+fold float: 74875.
+fold float in order: 2394.
+fold u8 wraps: 376
+fold i32 wraps: -1290967296
+fold of a map chain: 996007
+fold empty: 42
+sum int: 1498500
+sum int capturing: 1497500
+sum float: 299500.
+sum float capturing: 152750.
+sum f32 rounds: 4.33333328366
+sum u8 wraps: 162
+sum i32 wraps: -1290967296
+dot float: 43258375.
+sum map2 int capturing: 332836500
+sum of a map chain: 300500.
+sum empty: 0 0.
+intermediate used twice: 500500 1000
+read before the sum: 499500
+fold of map2: 1000
+  visit 10
+  visit 20
+  visit 70
+impure fold callback: 100
+map as the fold accumulator: 1000
+fold f32 of a map: 6.5
+sum through a parameter: 999000
+leak loop: 199200600, flat: true

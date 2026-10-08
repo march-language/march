@@ -13,3 +13,6 @@ fix [syntax_error]:
        Err(e) -> Err(e)
 +    end
 +  end
+
+after fix: exit 1
+`Result(a, b)` does not implement Num. [missing_impl]

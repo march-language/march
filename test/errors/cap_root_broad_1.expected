@@ -29,3 +29,6 @@ fix [cap_grant]:
 @@ lines 21-21 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+errors/cap_root_broad_1.march:19:9: error: `Cap(IO)` cannot be deserialized — a capability may only be received, never constructed, so `Loot` cannot derive Json. [cap_deserialize]

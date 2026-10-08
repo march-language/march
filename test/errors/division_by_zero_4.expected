@@ -29,3 +29,6 @@ fix [cap_grant]:
 @@ lines 16-16 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+division by `d` in `cap no_panic` module: refinement does not rule out zero (e.g. d = 0). [division_by_zero]

@@ -1343,11 +1343,16 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            must never satisfy the plain spelling (measured: it did, and the
            gate's own driver test went silent on a warm CAS). *)
         @ (if !stdlib_source then ["stdlib-source"] else [])
+        (* --verify-tir / MARCH_VERIFY_TIR changes no output, but a cache hit
+           skips the TIR pipeline and so the check; keying on it means a
+           verified compile is never satisfied by an unverified cached one. *)
+        @ (if March_tir.Tir_verify.enabled () then ["verify-tir"] else [])
         @ cross_sysroot_tag
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
         (* --protocol-baseline: the previous protocol versions decide the
            generated `<P>_Msg.compat()` table, so they are part of the binary. *)
         @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+        @ (match !shell_ident_tag with Some t -> ["sident:" ^ t] | None -> [])
         @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
             (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
@@ -2410,6 +2415,13 @@ let compile filename =
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
   in
   stamp "stdlib-load";
+  (* The shell's identity table, over the same declarations `march --shell`
+     hashes on the client (both see this [desugared]). *)
+  if !do_compile && !hot_reload_prefix <> None && not !compile_so then begin
+    let decls, _ = March_jit.Shell_ident.of_decls desugared.March_ast.Ast.mod_decls in
+    shell_ident_decls := Some decls;
+    shell_ident_tag := Some (March_jit.Shell_ident.digest decls)
+  end;
   (* source_cas_state = early_cas — the CAS lookup already ran before parse.
      On a cache hit we already exited; if we reach this point it's a miss.
      We still pass the (store, ch) pair forward so the post-clang store fires. *)
@@ -2816,7 +2828,11 @@ let compile filename =
     in
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
     snap_tir "tir-lower" tir;
-    stamp "lower";
+    (* A6: the same per-pass counts Contract_pipeline puts on its stamps. *)
+    stamp (if !do_timings
+           then "lower  " ^ March_tir.Tir_metrics.to_string
+                  (March_tir.Tir_metrics.of_module tir)
+           else "lower");
     (* Phase 5: collect actor state schemas for .schemas.json emission.
        Picks up TDRecord entries named *_State — the state record emitted
        by lower_actor for every actor definition. Only collected when both
@@ -3201,7 +3217,7 @@ let compile filename =
         ~after_fusion:policy_audit ~before_opt
         ~wasm_island:(parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown)
         ~is_js:is_js_target ~hot_reload:(hr_config ()) ~iface_methods
-        ~decls:contract_decls
+        ~decls:contract_decls ~stamp_metrics:!do_timings
         (* --report-contracts judges functions nothing calls, so they must
            survive DCE and inlining to be judged at all.  Their BODIES are
            optimised exactly as always; only reachability changes, and the
@@ -3211,7 +3227,12 @@ let compile filename =
                           d.March_tir.Alloc_contract.d_name) contract_decls
                       else mainless_roots)
         ~opt:!opt_enabled tir
-      with March_tir.Mono.Repr_disagreement msg ->
+      with
+      | March_tir.Tir_verify.Failed (stage, findings) ->
+        (* A malformed TIR module is a compiler bug, not a program error. *)
+        prerr_endline (March_tir.Tir_verify.render ~stage findings);
+        exit 3
+      | March_tir.Mono.Repr_disagreement msg ->
         (* A real defect in the program or the stdlib manifest, not a compiler
            bug: render it as one clean error rather than letting it reach the
            `| exn ->` internal-compiler-error handler with a backtrace. *)
@@ -3526,6 +3547,12 @@ let compile filename =
           let () = March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None in
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
+          let ir = match !shell_ident_decls with
+            | Some decls ->
+              ir ^ March_jit.Shell_ident.ir_global
+                { March_jit.Shell_ident.decls;
+                  tags = March_jit.Shell_ident.tags_of_types tir.March_tir.Tir.tm_types }
+            | None -> ir in
           let ir = finish_ir target ir in
           stamp "llvm-emit";
           (* clang reads the per-process temp, never the shared [ll_file]
@@ -5425,6 +5452,8 @@ let () =
     ("--stdlib-source", Arg.Set stdlib_source, " The entry file(s) are standard-library sources checked under a path outside the resolved stdlib root (e.g. `march --check --stdlib-source stdlib/actor.march` from the repo root): exempt them from the stdlib-only builtin gate. Never inferred from the file name");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
+    ("--verify-tir", Arg.Set March_tir.Tir_verify.enabled_flag,
+     " Check TIR well-formedness after every pass (scoping and references); a finding is an internal compiler error. Same as MARCH_VERIFY_TIR=1");
     ("--explain", Arg.String (fun code ->
          print_string (March_errors.Explain.explain code); exit 0),
      "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");
