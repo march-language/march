@@ -2170,8 +2170,48 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
           @ March_tir.Dce.StringSet.elements (March_tir.Dce.called_fns f.fn_body))
         pre.March_tir.Tir.tm_fns
       |> List.filter_map March_tir.Cap_attrib.cap_of_call in
+  (* Proof capabilities (Actor.Debug, Actor.Introspect, ...) are held, not
+     called: no runtime symbol carries them, so neither set above sees them,
+     and a policy without Actor.Debug let `Actor.inspect_state(debug, ...)`
+     run.  A Cap value only reaches code by being passed down from the
+     input's pre-bound roots (or a session binding holding one), so every
+     `Cap(C)` in the type of a parameter or a let-bound variable of the code
+     the input reaches is declared.  This can over-declare (refuse more),
+     never under-declare what the input holds. *)
+  let proof_caps =
+    let acc = Hashtbl.create 8 in
+    let rec of_ty (t : March_tir.Tir.ty) =
+      match t with
+      (* The root, `Cap(IO)`, only appears where the client narrows it into
+         a pre-bound name (`Actor.introspect(root_cap)`, `cap_narrow`): an
+         input that mentions root_cap is refused, so no input holds it. *)
+      | March_tir.Tir.TCon ("Cap", [ March_tir.Tir.TCon ("IO", []) ]) -> ()
+      | March_tir.Tir.TCon ("Cap", [ March_tir.Tir.TCon (c, []) ]) -> Hashtbl.replace acc c ()
+      | March_tir.Tir.TCon (_, args) -> List.iter of_ty args
+      | March_tir.Tir.TTuple ts -> List.iter of_ty ts
+      | March_tir.Tir.TRecord fs -> List.iter (fun (_, t) -> of_ty t) fs
+      | March_tir.Tir.TFn (ps, r) -> List.iter of_ty ps; of_ty r
+      | March_tir.Tir.TPtr t -> of_ty t
+      | March_tir.Tir.TInt | March_tir.Tir.TFloat | March_tir.Tir.TBool
+      | March_tir.Tir.TString | March_tir.Tir.TUnit | March_tir.Tir.TVar _ -> () in
+    let rec of_expr (e : March_tir.Tir.expr) =
+      match e with
+      | March_tir.Tir.ELet (v, rhs, body) -> of_ty v.v_ty; of_expr rhs; of_expr body
+      | March_tir.Tir.ELetRec (fds, body) -> List.iter of_fn fds; of_expr body
+      | March_tir.Tir.ECase (_, branches, default) ->
+        List.iter (fun (b : March_tir.Tir.branch) ->
+            List.iter (fun (v : March_tir.Tir.var) -> of_ty v.v_ty) b.br_vars;
+            of_expr b.br_body) branches;
+        Option.iter of_expr default
+      | March_tir.Tir.ESeq (a, b) -> of_expr a; of_expr b
+      | _ -> ()
+    and of_fn (f : March_tir.Tir.fn_def) =
+      List.iter (fun (v : March_tir.Tir.var) -> of_ty v.v_ty) f.fn_params;
+      of_expr f.fn_body in
+    List.iter of_fn pre.March_tir.Tir.tm_fns;
+    Hashtbl.fold (fun c () l -> c :: l) acc [] in
   let caps =
-    (List.filter_map March_caps.Cap_symbols.cap_of_symbol syms @ reached_caps)
+    (List.filter_map March_caps.Cap_symbols.cap_of_symbol syms @ reached_caps @ proof_caps)
     |> List.sort_uniq String.compare in
   (* The node checks this against the signed `caps:` after loading the
      fragment (runtime/march_shell.c), so a fragment cannot run under a
