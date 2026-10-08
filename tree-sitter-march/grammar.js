@@ -301,7 +301,15 @@ module.exports = grammar({
       $.linear_type,
       $.tuple_type,
       $.refinement_type,
+      $.abstract_refinement_type,
     ),
+
+    // `a[p]`, `Bool[p]`: an abstract refinement applied to a type
+    // (parser.mly `ty_post`).
+    abstract_refinement_type: $ => prec(2, seq(
+      field('base', choice($.type_variable, $.type_constructor, $.type_application, $.qualified_type)),
+      '[', field('predicate', $.identifier), ']',
+    )),
 
     // { Int | _ > 0 }, { List(a) | len(_) > 0 }, { v : Int | v != 0 }
     refinement_type: $ => seq(
