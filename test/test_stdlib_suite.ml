@@ -3054,7 +3054,14 @@ let test_cas_cache_hit () =
   let tmp_dir = Filename.temp_file "march_cas_test_" "" in
   Sys.remove tmp_dir;
   Unix.mkdir tmp_dir 0o755;
+  (* [Cas.create] also opens the user-global read-through store under $HOME
+     (~/.march/cas).  A real run's entry for this exact SCC hash would turn
+     the "first pass" into a hit, so point HOME at the temp dir for the
+     store's lifetime: the test then sees no state but its own. *)
+  let old_home = Sys.getenv_opt "HOME" in
+  Unix.putenv "HOME" (tmp_dir ^ "/home");
   let store = March_cas.Cas.create ~project_root:tmp_dir in
+  (match old_home with Some h -> Unix.putenv "HOME" h | None -> ());
   let compile_count = ref 0 in
   let fake_compile _scc =
     incr compile_count;
@@ -3084,6 +3091,7 @@ let test_cas_cache_hit () =
     in ()
   ) sccs;
   let second_count = !compile_count in
+  ignore (Sys.command ("rm -rf " ^ Filename.quote tmp_dir));
   Alcotest.(check bool) "first pass: compile called" true (first_count > 0);
   Alcotest.(check int)  "second pass: all cache hits (compile=0)" 0 second_count
 
@@ -12879,8 +12887,13 @@ let test_sanitize_modes_do_not_share_cas_artifact () =
       count_files (Filename.concat tmp ".march/cas/artifacts-v2") in
     let compile mode =
       let bin = Filename.concat tmp ("bin_" ^ mode) in
-      let cmd = Printf.sprintf "cd %s && MARCH_SANITIZE=%s %s --compile -o %s %s"
-          (Filename.quote tmp) mode (Filename.quote main_exe)
+      (* Private HOME: the compiler also writes through to / reads from the
+         user-global ~/.march/cas, which would serve this fixed-content
+         program's artifact on every run after the first. *)
+      let cmd = Printf.sprintf
+          "cd %s && HOME=%s MARCH_SANITIZE=%s %s --compile -o %s %s"
+          (Filename.quote tmp) (Filename.quote (Filename.concat tmp "home"))
+          mode (Filename.quote main_exe)
           (Filename.quote bin) (Filename.quote src) in
       let (rc, out) = run_capture cmd in
       if rc <> 0 then
@@ -12907,7 +12920,8 @@ let test_sanitize_modes_do_not_share_cas_artifact () =
     Alcotest.(check bool) "control: repeating =thread hits the cache" true
       (compile "thread");
     Alcotest.(check int) "control: a cache hit stores nothing new"
-      after_address (artifacts ())
+      after_address (artifacts ());
+    ignore (Sys.command ("rm -rf " ^ Filename.quote tmp))
   end
 
 (* IO.read_byte: reads raw stdin bytes one at a time, returns -1 on EOF.
