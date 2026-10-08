@@ -127,15 +127,19 @@ let test_tir_names_fv_field_round_trip () =
     (March_tir.Tir_names.is_fv_field "name")
 
 let test_tir_names_clo_struct () =
-  let n = March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:3 in
-  Alcotest.(check string) "clo_struct_name" "$Clo_foo$3" n;
+  let n = March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:"3_Main_host" in
+  Alcotest.(check string) "clo_struct_name" "$Clo_foo$3_Main_host" n;
   Alcotest.(check bool) "is_clo_struct" true (March_tir.Tir_names.is_clo_struct n);
   Alcotest.(check bool) "not is_clo_struct Option" false
     (March_tir.Tir_names.is_clo_struct "Option")
 
 let test_tir_names_apply_fn () =
-  let n = March_tir.Tir_names.apply_fn_name ~fn_name:"foo" ~lam_uid:3 in
-  Alcotest.(check string) "apply_fn_name" "foo$apply$3" n;
+  let n = March_tir.Tir_names.apply_fn_name ~fn_name:"foo" ~lam_uid:"3_Main_host" in
+  Alcotest.(check string) "apply_fn_name" "foo$apply$3_Main_host" n;
+  (* The uid is structural: ordinal, then the host with '$' and '.' spelled
+     '_' (no '.': consumers read a name's text after its last '.'). *)
+  Alcotest.(check string) "lam_uid" "2_List_map_Int"
+    (March_tir.Tir_names.lam_uid ~host:"List.map$Int" 2);
   Alcotest.(check bool) "is_apply_fn" true (March_tir.Tir_names.is_apply_fn n);
   Alcotest.(check bool) "not is_apply_fn plain" false
     (March_tir.Tir_names.is_apply_fn "foo");
@@ -630,8 +634,9 @@ let test_unboxed_aggregate_multi_arm_joins_are_struct () =
    fusion.ml's own gensym convention. *)
 
 (** True if [name] matches fusion.ml's gensym convention: "$fused_" followed
-    by one of the three generator tags ("mf"/"ff"/"mff") then "_" and a
-    counter. Mirrors fusion.ml's [gensym] (`Printf.sprintf "$fused_%s_%d"`) —
+    by one of the three generator tags ("mf"/"ff"/"mff") then "_", the host
+    (with '$' and '.' spelled '_'), "_" and an ordinal. Mirrors fusion.ml's
+    [gensym] (`Printf.sprintf "$fused_%s_%s_%d"`) —
     kept local to this test (not a Tir_names contract: fusion.ml's synthesized
     names have no consumer that name-sniffs them, per the Wave 3 Task 3
     report, so there is nothing in Tir_names to centralize here). *)
@@ -645,8 +650,13 @@ let is_fusion_gensym_name (name : string) : bool =
     let rest = strip_prefix "$fused_" name in
     List.exists (fun tag ->
       has_prefix (tag ^ "_") rest &&
-      (let ctr = strip_prefix (tag ^ "_") rest in
-       ctr <> "" && String.for_all (fun c -> c >= '0' && c <= '9') ctr)
+      (let rest = strip_prefix (tag ^ "_") rest in
+       match String.rindex_opt rest '_' with
+       | Some i ->
+         let host = String.sub rest 0 i
+         and ctr = String.sub rest (i + 1) (String.length rest - i - 1) in
+         host <> "" && ctr <> "" && String.for_all (fun c -> c >= '0' && c <= '9') ctr
+       | None -> false)
     ) ["mf"; "ff"; "mff"]
 
 (** Cross-check, over a fused module: every fn whose name matches the
@@ -5779,9 +5789,9 @@ let test_known_call_is_clo_name_matches_tir_names () =
   in
   let representative_names =
     (* Every shape [Tir_names.clo_struct_name] can actually produce. *)
-    [ March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:0;
-      March_tir.Tir_names.clo_struct_name ~fn_name:"bar" ~lam_uid:42;
-      March_tir.Tir_names.clo_struct_name ~fn_name:"" ~lam_uid:7;
+    [ March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:"0_Main_f";
+      March_tir.Tir_names.clo_struct_name ~fn_name:"bar" ~lam_uid:"42_List_map_Int";
+      March_tir.Tir_names.clo_struct_name ~fn_name:"" ~lam_uid:"7_top";
       (* Non-closure names, must be false under both. *)
       "Option"; "List"; "$fv1"; "$Tuple2"; "main" ]
   in
@@ -8309,7 +8319,8 @@ let test_compiled_actor_init_params_ir_shape () =
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = March_tir.Lower.lower_module ~type_map m in
   (* Through Defun: the respawn thunk is a lambda that Defun lifts into a
-     top-level `$respawnN$apply$M` function, which is what the IR names. *)
+     top-level `<Actor>_spawn$respawn<k>$apply$<k>_<host>` function (B1
+     structural names), which is what the IR names. *)
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
   let k_table = March_tir.Kind.of_module tir in
@@ -8328,7 +8339,7 @@ let test_compiled_actor_init_params_ir_shape () =
   Alcotest.(check bool) "no zero-arg spawn glue for an actor with init params" false
     (has "define ptr @Worker_spawn() {");
   Alcotest.(check bool) "a respawn thunk is lifted for the child with init args" true
-    (has "define ptr @.respawn[0-9]*.apply");   (* `$respawnN$apply$M` *)
+    (has "define ptr @[^ (]*respawn[0-9]*.apply");   (* `Sup_spawn$respawn0$apply$…` *)
   Alcotest.(check bool) "register_child is called" true
     (has "call void @march_actor_register_child")
 

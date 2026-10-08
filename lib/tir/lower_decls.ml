@@ -307,7 +307,10 @@ let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
   let saved_scope = Hashtbl.copy Lower_state._fn_param_types in
   Hashtbl.clear Lower_state._fn_param_types;
   List.iter (fun v -> Hashtbl.replace Lower_state._fn_param_types v.Tir.v_name v.Tir.v_ty) params;
-  let body = Lower_match.lower_expr env clause.fc_body in
+  let body =
+    Lower_state.with_host
+      (Lower_state.host_name ~mod_prefix:env.Lower_state.mod_prefix def.fn_name.txt)
+      (fun () -> Lower_match.lower_expr env clause.fc_body) in
   Hashtbl.clear Lower_state._fn_param_types;
   Hashtbl.iter (fun k v -> Hashtbl.replace Lower_state._fn_param_types k v) saved_scope;
   Provenance.note_span def.fn_name.txt def.fn_name.span;

@@ -1,12 +1,6 @@
 -- types (1) --
-closure $Clo_$lam2$0(Ptr(Unit), Int)
+closure $Clo_make_adder$lam0$0_make_adder(Ptr(Unit), Int)
 -- fns (4) --
-## $lam2$apply$0
-fn $lam2$apply$0($clo : Ptr(Unit), x : Int) : Int =
-  let n : Int = $clo.$fv1 in
-dec_rc $clo;
-+(x, n)
-
 ## apply_twice
 fn apply_twice(f : (Int) -> Int, x : Int) : Int =
   let $t1 : Int = inc_rc f;
@@ -21,5 +15,11 @@ println($t3)
 
 ## make_adder
 fn make_adder(n : Int) : (Int) -> Int =
-  alloc $Clo_$lam2$0($lam2$apply$0, n)
+  alloc $Clo_make_adder$lam0$0_make_adder(make_adder$lam0$apply$0_make_adder, n)
+
+## make_adder$lam0$apply$0_make_adder
+fn make_adder$lam0$apply$0_make_adder($clo : Ptr(Unit), x : Int) : Int =
+  let n : Int = $clo.$fv1 in
+dec_rc $clo;
++(x, n)
 

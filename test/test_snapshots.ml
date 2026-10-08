@@ -43,19 +43,14 @@
         ("Option", "Result", "List") — everything else (including
         compiler-generated lambda/join-point/apply names like
         "$lam2$apply$0", which DO pin real lowering/defun shape) is kept.
-      - Determinism: [Lower.lower_module] and [Perceus.perceus] each reset
-        their own fresh-name counter at entry (see [Lower.reset_counter]/
-        [_lower_counter] and [Perceus._rc_fresh_ctr]), but
-        [Defun.lambda_counter] is intentionally a cross-call counter (so a
-        REPL session never reuses a UID) and does NOT reset itself — so a
-        test process compiling multiple corpus programs back-to-back would
-        make later programs' "$Clo_name$N"/"name$apply$N" suffixes depend on
-        how many lambdas every earlier program in the run defined. Each
-        dump call below resets it explicitly
-        ([March_tir.Defun.set_lambda_counter 0]) before defunctionalizing,
-        so every corpus program's snapshot is independent of run order —
-        verified by the Step-4 determinism check (3 repeated runs, byte
-        identical, including a run with a fresh isolated $HOME). *)
+      - Determinism: every name a pass mints is structural (B1,
+        specs/plans/incremental-codegen-cas-plan.md §14): a lambda is
+        [<host>$lam<k>], its apply fn [<lam>$apply$<k>_<host>], a fused
+        helper [$fused_mf_<host>_<k>], so a dump depends only on the program
+        being lowered, never on what else this process lowered first.
+        [Lower.lower_module] and [Perceus.perceus] still reset their
+        function-local temp counters ($t<n>) at entry.  Verified by the
+        determinism canary below and the 3-run check at landing. *)
 
 let update_mode = Sys.getenv_opt "UPDATE_SNAPSHOTS" = Some "1"
 
@@ -184,7 +179,6 @@ let render_module (m : March_tir.Tir.tir_module) =
    on/off state. *)
 
 let dump_post_lower src =
-  March_tir.Defun.set_lambda_counter 0;
   render_module (Test_helpers.lower_module_typed src)
 
 (* TRMC runs post-lower / pre-mono, exactly as [Contract_pipeline] runs it,
@@ -194,7 +188,6 @@ let dump_post_lower src =
    zero snapshot lines, which reads as "nothing changed" when it actually
    meant "nothing was looking". *)
 let dump_post_perceus src =
-  March_tir.Defun.set_lambda_counter 0;
   let tir = Test_helpers.lower_module_typed src in
   let tir = March_tir.Trmc.transform_module tir in
   let tir = March_tir.Mono.monomorphize tir in

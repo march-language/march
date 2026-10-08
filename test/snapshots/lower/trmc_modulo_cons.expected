@@ -38,8 +38,8 @@ alloc Cons(h, $t87)
 fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
   let go : (List('a), List(List('a))) -> List(List('a)) = letrec [go] in
 go in
-let $t397 : '_ = alloc Nil() in
-go(xs, $t397)
+let $t396 : '_ = alloc Nil() in
+go(xs, $t396)
 
 ## List.concat
 fn List.concat(xss : List(List('a))) : List('a) =
@@ -56,11 +56,11 @@ fn List.dedup(xs : List('a)) : List('a) =
 go in
 case xs of
   Nil() -> alloc Nil()
-  Cons($f508, $f509) -> let t : '_ = $f509 in
-let h : '_ = $f508 in
-let $t507 : '_ = let $t506 : '_ = alloc Nil() in
-alloc Cons(h, $t506) in
-go(t, h, $t507)
+  Cons($f507, $f508) -> let t : '_ = $f508 in
+let h : '_ = $f507 in
+let $t506 : '_ = let $t505 : '_ = alloc Nil() in
+alloc Cons(h, $t505) in
+go(t, h, $t506)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop
@@ -77,11 +77,11 @@ List.drop(t, $t338)
 
 ## List.drop_last
 fn List.drop_last(xs : List('a)) : List('a) =
-  let $t387 : '_ = List.reverse(xs) in
-case $t387 of
+  let $t386 : '_ = List.reverse(xs) in
+case $t386 of
   Nil() -> alloc Nil()
-  Cons($f388, $f389) -> let rest : '_ = $f389 in
-let ig : '_ = $f388 in
+  Cons($f387, $f388) -> let rest : '_ = $f388 in
+let ig : '_ = $f387 in
 List.reverse(rest)
   _ -> panic("non-exhaustive pattern match")
 
@@ -89,10 +89,10 @@ List.reverse(rest)
 fn List.drop_while(xs : List('a), pred : ('a) -> Bool) : List('a) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f355, $f356) -> let t : '_ = $f356 in
-let h : '_ = $f355 in
-let $t354 : '_ = pred(h) in
-case $t354 of
+  Cons($f354, $f355) -> let t : '_ = $f355 in
+let h : '_ = $f354 in
+let $t353 : '_ = pred(h) in
+case $t353 of
   True() -> List.drop_while(t, pred)
   _ -> xs
   _ -> panic("non-exhaustive pattern match")
@@ -111,8 +111,8 @@ fn List.empty() : List('a) =
 fn List.enumerate(xs : List('a)) : List((Int, 'a)) =
   let go : (List('a), Int, List((Int, 'a))) -> List((Int, 'a)) = letrec [go] in
 go in
-let $t455 : '_ = alloc Nil() in
-go(xs, 0, $t455)
+let $t454 : '_ = alloc Nil() in
+go(xs, 0, $t454)
 
 ## List.filter
 fn List.filter(xs : List('a), pred : ('a) -> Bool) : List('a) =
@@ -194,8 +194,8 @@ List.fold_left(t, $t181, f)
 ## List.fold_right
 fn List.fold_right(xs : List('a), acc : 'b, f : ('a) -> ('b) -> 'b) : 'b =
   let $t188 : '_ = List.reverse(xs) in
-let $t190 : ('_, '_) -> '_ = letrec [$lam189] in
-$lam189 in
+let $t190 : ('_, '_) -> '_ = letrec [fold_right$lam0] in
+fold_right$lam0 in
 List.fold_left($t188, acc, $t190)
 
 ## List.head
@@ -261,16 +261,16 @@ fn List.maximum_int(xs : List(Int)) : Int =
 go in
 case xs of
   Nil() -> panic("List.maximum_int: empty list")
-  Cons($f490, $f491) -> let t : '_ = $f491 in
-let h : '_ = $f490 in
+  Cons($f489, $f490) -> let t : '_ = $f490 in
+let h : '_ = $f489 in
 go(t, h)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.member
 fn List.member(xs : List('a), x : 'a) : Bool =
-  let $t497 : ('_) -> '_ = letrec [$lam496] in
-$lam496 in
-List.any(xs, $t497)
+  let $t496 : ('_) -> '_ = letrec [member$lam0] in
+member$lam0 in
+List.any(xs, $t496)
 
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
@@ -278,8 +278,8 @@ fn List.minimum_int(xs : List(Int)) : Int =
 go in
 case xs of
   Nil() -> panic("List.minimum_int: empty list")
-  Cons($f477, $f478) -> let t : '_ = $f478 in
-let h : '_ = $f477 in
+  Cons($f476, $f477) -> let t : '_ = $f477 in
+let h : '_ = $f476 in
 go(t, h)
   _ -> panic("non-exhaustive pattern match")
 
@@ -313,9 +313,9 @@ List.nth_opt(t, $t65)
 fn List.partition(xs : List('a), pred : ('a) -> Bool) : (List('a), List('a)) =
   let go : (List('a), List('a), List('a)) -> (List('a), List('a)) = letrec [go] in
 go in
+let $t384 : '_ = alloc Nil() in
 let $t385 : '_ = alloc Nil() in
-let $t386 : '_ = alloc Nil() in
-go(xs, $t385, $t386)
+go(xs, $t384, $t385)
 
 ## List.pfilter
 fn List.pfilter(xs : List('a), pred : ('a) -> Bool) : List('a) =
@@ -325,11 +325,11 @@ let $t156 : '_ = let $t155 : '_ = List.length(xs) in
 case $t156 of
   True() -> List.filter(xs, pred)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t160 : ('_) -> '_ = letrec [$lam157] in
-$lam157 in
+let tasks : '_ = let $t160 : ('_) -> '_ = letrec [pfilter$lam0] in
+pfilter$lam0 in
 List.map(cs, $t160) in
-let $t163 : '_ = let $t162 : ('_) -> '_ = letrec [$lam161] in
-$lam161 in
+let $t163 : '_ = let $t162 : ('_) -> '_ = letrec [pfilter$lam1] in
+pfilter$lam1 in
 List.map(tasks, $t162) in
 List.concat($t163)
 
@@ -341,11 +341,11 @@ let $t133 : '_ = let $t132 : '_ = List.length(xs) in
 case $t133 of
   True() -> List.map(xs, f)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t137 : ('_) -> '_ = letrec [$lam134] in
-$lam134 in
+let tasks : '_ = let $t137 : ('_) -> '_ = letrec [pmap$lam0] in
+pmap$lam0 in
 List.map(cs, $t137) in
-let $t140 : '_ = let $t139 : ('_) -> '_ = letrec [$lam138] in
-$lam138 in
+let $t140 : '_ = let $t139 : ('_) -> '_ = letrec [pmap$lam1] in
+pmap$lam1 in
 List.map(tasks, $t139) in
 List.concat($t140)
 
@@ -371,11 +371,11 @@ case $t147 of
   True() -> 1
   _ -> csize in
 let cs : '_ = List.chunks(xs, csize2) in
-let tasks : '_ = let $t151 : ('_) -> '_ = letrec [$lam148] in
-$lam148 in
+let tasks : '_ = let $t151 : ('_) -> '_ = letrec [pmap_n$lam0] in
+pmap_n$lam0 in
 List.map(cs, $t151) in
-let $t154 : '_ = let $t153 : ('_) -> '_ = letrec [$lam152] in
-$lam152 in
+let $t154 : '_ = let $t153 : ('_) -> '_ = letrec [pmap_n$lam1] in
+pmap_n$lam1 in
 List.map(tasks, $t153) in
 List.concat($t154)
 
@@ -387,11 +387,11 @@ let $t165 : '_ = let $t164 : '_ = List.length(xs) in
 case $t165 of
   True() -> List.fold_left(xs, identity, combine)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t169 : ('_) -> '_ = letrec [$lam166] in
-$lam166 in
+let tasks : '_ = let $t169 : ('_) -> '_ = letrec [preduce$lam0] in
+preduce$lam0 in
 List.map(cs, $t169) in
-let partials : '_ = let $t171 : ('_) -> '_ = letrec [$lam170] in
-$lam170 in
+let partials : '_ = let $t171 : ('_) -> '_ = letrec [preduce$lam1] in
+preduce$lam1 in
 List.map(tasks, $t171) in
 List.fold_left(partials, identity, combine)
 
@@ -471,8 +471,8 @@ sort_loop($t326)
 fn List.split_at(xs : List('a), n : Int) : (List('a), List('a)) =
   let go : (List('a), Int, List('a)) -> (List('a), List('a)) = letrec [go] in
 go in
-let $t373 : '_ = alloc Nil() in
-go(xs, n, $t373)
+let $t372 : '_ = alloc Nil() in
+go(xs, n, $t372)
 
 ## List.sum_int
 fn List.sum_int(xs : List(Int)) : Int =
@@ -505,32 +505,38 @@ go(xs, n, $t336)
 
 ## List.take_while
 fn List.take_while(xs : List('a), pred : ('a) -> Bool) : List('a) =
-  let go : (List('a), List('a)) -> List('a) = letrec [go] in
-go in
-let $t353 : '_ = alloc Nil() in
-go(xs, $t353)
+  case xs of
+  Nil() -> alloc Nil()
+  Cons($f347, $f348) -> let t : '_ = $f348 in
+let h : '_ = $f347 in
+let $t345 : '_ = pred(h) in
+case $t345 of
+  True() -> let $t346 : '_ = List.take_while(t, pred) in
+alloc Cons(h, $t346)
+  _ -> alloc Nil()
+  _ -> panic("non-exhaustive pattern match")
 
 ## List.unzip
 fn List.unzip(pairs : List(('a, 'b))) : (List('a), List('b)) =
   let go : (List(('a, 'b)), List('a), List('b)) -> (List('a), List('b)) = letrec [go] in
 go in
+let $t443 : '_ = alloc Nil() in
 let $t444 : '_ = alloc Nil() in
-let $t445 : '_ = alloc Nil() in
-go(pairs, $t444, $t445)
+go(pairs, $t443, $t444)
 
 ## List.zip
 fn List.zip(xs : List('a), ys : List('b)) : List(('a, 'b)) =
   let go : (List('a), List('b), List(('a, 'b))) -> List(('a, 'b)) = letrec [go] in
 go in
-let $t412 : '_ = alloc Nil() in
-go(xs, ys, $t412)
+let $t411 : '_ = alloc Nil() in
+go(xs, ys, $t411)
 
 ## List.zip_with
 fn List.zip_with(xs : List('a), ys : List('b), f : ('a) -> ('b) -> 'c) : List('c) =
   let go : (List('a), List('b), List('c)) -> List('c) = letrec [go] in
 go in
-let $t427 : '_ = alloc Nil() in
-go(xs, ys, $t427)
+let $t426 : '_ = alloc Nil() in
+go(xs, ys, $t426)
 
 ## bump
 fn bump(xs : List(Int)) : List(Int) =
@@ -545,8 +551,8 @@ alloc List.Cons($t1, $t2)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t516 : String = let $t515 : List(Int) = let $t514 : List(Int) = List.range(1, 5) in
-bump($t514) in
-List.sum_int($t515) in
-println($t516)
+  let $t515 : String = let $t514 : List(Int) = let $t513 : List(Int) = List.range(1, 5) in
+bump($t513) in
+List.sum_int($t514) in
+println($t515)
 

@@ -18,7 +18,19 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
-### Added
+### Changed
+- **Compiler-minted symbols are structural, not counter-numbered.** A lambda
+  is `<host>$lam<k>` (nested: `<host>$lam<k>$lam<j>`, a local `fn go`'s:
+  `<host>$go$lam<k>`), its lifted apply fn `<lambda>$apply$<k>_<host>`, a
+  fused pipeline helper `$fused_mf_<host>_<k>`, a specialised higher-order
+  clone `g$hspec$<i>_<apply>`, and a residual type variable in a mono name
+  `$V_<position>`; join points and respawn thunks follow the same scheme.
+  Each name depends only on the function it appears in, so an edit to one
+  function no longer renumbers every later symbol in the module. This is
+  what lets the hot-reload manifest, `--dump-impl-hashes` and (next) cached
+  objects compare across edits. The REPL scopes each fragment's names
+  (`$repl<n>.`) instead of persisting a global lambda counter. TIR
+  snapshots and `.ll` output change by renames only.
 - **Every diagnostic has a code, and `march --explain <code>`.** Each error,
   warning and hint ends its first line with its code in brackets
   (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always

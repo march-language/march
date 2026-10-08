@@ -42,6 +42,57 @@ let fresh_name (prefix : string) : string =
 
 let reset_counter () = _lower_counter := 0
 
+(* ── Structural names for nested functions (B1) ──────────────────────────
+   Every function minted while lowering a body (a lambda, an `own(...)` drop
+   callback, a match join point, a respawn thunk) is named after its HOST,
+   the function whose body it appears in, plus a per-(host, kind) ordinal:
+   [Mod.outer$lam0], [Mod.outer$lam0$lam0] (nested), [Mod.outer$jp2].  The
+   ordinal counts occurrences inside that host in lowering order, so an edit
+   to one function never renumbers another's helpers; a global counter did
+   (specs/plans/incremental-codegen-cas-plan.md §14).  Defun, Fusion and
+   Hof_spec derive their symbols from these, so the symbols a cached object
+   binds to are stable across edits elsewhere in the module.
+
+   [_fragment_scope] is the REPL's per-fragment prefix (["$repl7."]): each
+   fragment lowers its own [main], and without the scope two fragments'
+   [main$lam0] would be one symbol in two shared objects. *)
+let _fragment_scope = ref ""
+let set_fragment_scope (s : string) = _fragment_scope := s
+let _current_host : string option ref = ref None
+let _nested_ordinals : (string * string, int) Hashtbl.t = Hashtbl.create 64
+
+let reset_hosts () =
+  _current_host := None;
+  Hashtbl.reset _nested_ordinals
+
+(** The host name for a top-level fn [fn] of the module with [mod_prefix]
+    (["Mod."] or [""]). *)
+let host_name ~(mod_prefix : string) (fn : string) : string =
+  !_fragment_scope ^ mod_prefix ^ fn
+
+let with_host (h : string) (f : unit -> 'a) : 'a =
+  let saved = !_current_host in
+  _current_host := Some h;
+  Fun.protect ~finally:(fun () -> _current_host := saved) f
+
+(** The current host, or a module-level stand-in for the few bodies lowered
+    outside any function (module-level lets). *)
+let current_host ~(mod_prefix : string) () : string =
+  match !_current_host with
+  | Some h -> h
+  | None -> !_fragment_scope ^ mod_prefix ^ "$top"
+
+(** [fresh_nested_name ~host "lam"] = ["<host>$lam<k>"], [k] the number of
+    ["lam"]s already minted in [host]. *)
+let fresh_nested_name ~(host : string) (prefix : string) : string =
+  let k = Option.value ~default:0 (Hashtbl.find_opt _nested_ordinals (host, prefix)) in
+  Hashtbl.replace _nested_ordinals (host, prefix) (k + 1);
+  (* Still tick the temp counter, as the old [fresh_name "lam"] did: a
+     function-local [$t<n>] never reaches a symbol, and keeping its numbering
+     unchanged keeps the snapshot and IR diffs of this rename symbol-only. *)
+  incr _lower_counter;
+  Printf.sprintf "%s$%s%d" host prefix k
+
 let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
   { v_name = fresh_name "t"; v_ty = ty; v_lin = lin }
 
