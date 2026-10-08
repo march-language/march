@@ -147,7 +147,7 @@ let run_diagnose ~(socket : string option) ~(env : string) ~(json : bool)
               let node = match after with
                 | `Assoc kv -> (match List.assoc_opt "node" kv with Some (`String n) -> n | _ -> name)
                 | _ -> name in
-              print_reply ~json (Diagnose.to_json ~node ~window_ms fs);
+              print_reply ~json (Diagnose.to_json ~node ~window_ms ~before ~after fs);
               Diagnose.exit_code fs
         in
         max worst code) 0 targets

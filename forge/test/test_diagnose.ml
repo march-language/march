@@ -35,7 +35,11 @@ let test_exit_codes () =
   Alcotest.(check int) "critical -> 2" 2 (Diagnose.exit_code (run_fixture "crash_loop_critical"))
 
 let test_envelope () =
-  let j = Diagnose.to_json ~node:"n1" ~window_ms:1000 (run_fixture "mailbox_growth_critical") in
+  let fixture = Yojson.Safe.from_file (Filename.concat (fixture_dir ()) "mailbox_growth_critical.json") in
+  let m k = match fixture with `Assoc kv -> List.assoc k kv | _ -> `Null in
+  let before = m "before" and after = m "after" in
+  let j = Diagnose.to_json ~node:"n1" ~window_ms:1000 ~before ~after
+      (Diagnose.run ~before ~after) in
   let m k = match j with `Assoc kv -> List.assoc k kv | _ -> `Null in
   Alcotest.(check string) "proto" "\"march.diagnose/1\"" (Yojson.Safe.to_string (m "proto"));
   let cov = Yojson.Safe.to_string (m "coverage") in
@@ -48,11 +52,19 @@ let test_envelope () =
     Alcotest.(check bool) "the finding carries its rows" true (rows <> `List [])
   | _ -> Alcotest.fail "one finding expected"
 
+let test_capped_coverage () =
+  let capped = Yojson.Safe.from_string
+      {|{"data":{"actors":{"total":101,"shown":100},"crashes":{"total":21,"crashes":[]}}}|} in
+  Alcotest.(check (list (pair string string))) "capped snapshot coverage"
+    [ "actors", "shown 100 of 101"; "crashes", "shown 0 of 21" ]
+    (Diagnose.coverage ~before:capped ~after:capped)
+
 let () =
   Alcotest.run "diagnose" [
     "fixtures", List.map (fun (n, w) -> Alcotest.test_case n `Quick (test_fixture (n, w))) (expected ());
     "output", [
       Alcotest.test_case "exit codes" `Quick test_exit_codes;
       Alcotest.test_case "envelope and coverage" `Quick test_envelope;
+      Alcotest.test_case "capped snapshot coverage" `Quick test_capped_coverage;
     ];
   ]

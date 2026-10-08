@@ -108,6 +108,7 @@ cd "$ROOT" || exit 2
 export EXE ROOT DIR
 sweep_one() {
   f="$1"
+  rel="${f#$ROOT/}"
   # Namespace by parent dir: basenames collide across the four corpora.
   tag="$(basename "$(dirname "$f")")_$(basename "$f" .march)"
   # Normalise: strip the repo root, then collapse any directory prefix on a
@@ -116,14 +117,14 @@ sweep_one() {
   # spelling appears is not a property of the checker.
   # Tier 1: the checker's whole result, hashed.  The JSON is kept on disk so a
   # mismatch can be diffed rather than merely reported.
-  "$EXE" --emit-core-ast "$f" 2>&1 \
+  (cd "$ROOT" && "$EXE" --emit-core-ast "$rel") 2>&1 \
     | sed "s|$ROOT/||g" | sed -E 's#[A-Za-z0-9_./-]*stdlib/#stdlib/#g' \
     > "$DIR/json/$tag.json"
   printf '%s  %s\n' "$(shasum -a 256 < "$DIR/json/$tag.json" | cut -d' ' -f1)" "$tag" \
     >> "$DIR/sha.parts/$tag"
   # Tier 2: the rendered diagnostic text, tagged so a fixture that stops
   # emitting shows up as its lines disappearing rather than as a silent shift.
-  "$EXE" --check "$f" 2>&1 \
+  (cd "$ROOT" && "$EXE" --check "$rel") 2>&1 \
     | sed "s|$ROOT/||g" | sed -E 's#[A-Za-z0-9_./-]*stdlib/#stdlib/#g' \
     | sed "s|^|$tag: |" >> "$DIR/diag.parts/$tag"
 }

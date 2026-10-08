@@ -183,6 +183,24 @@ let partial = [
   "mailbox.over_limit", "per-actor dropped counts are not tracked; the node total is used";
 ]
 
+let snapshot_coverage env =
+  let snap = snap_of env in
+  let actors = section snap "actors" in
+  let crashes = section snap "crashes" in
+  let actor_total = int_of (member "total" actors) in
+  let actor_shown = int_of (member "shown" actors) in
+  let crash_total = int_of (member "total" crashes) in
+  let crash_shown = List.length (list_of (member "crashes" crashes)) in
+  (if actor_shown < actor_total then
+     [ "actors", Printf.sprintf "shown %d of %d" actor_shown actor_total ] else [])
+  @ (if crash_shown < crash_total then
+       [ "crashes", Printf.sprintf "shown %d of %d" crash_shown crash_total ] else [])
+
+let coverage ~before ~after =
+  List.fold_left (fun acc (key, value) ->
+      if List.mem_assoc key acc then acc else acc @ [ key, value ])
+    [] (snapshot_coverage before @ snapshot_coverage after)
+
 (** All findings over a before/after pair of [SNAPSHOT] envelopes. *)
 let run ~(before : Yojson.Safe.t) ~(after : Yojson.Safe.t) : finding list =
   let b = snap_of before and a = snap_of after in
@@ -196,7 +214,7 @@ let exit_code (fs : finding list) =
   else if fs <> [] then 1 else 0
 
 (** The [march.diagnose/1] envelope. *)
-let to_json ~node ~window_ms (fs : finding list) : Yojson.Safe.t =
+let to_json ~node ~window_ms ~before ~after (fs : finding list) : Yojson.Safe.t =
   `Assoc [
     "proto", `String "march.diagnose/1";
     "node", `String node;
@@ -207,7 +225,7 @@ let to_json ~node ~window_ms (fs : finding list) : Yojson.Safe.t =
     "coverage", `Assoc [
       "ran", `List (List.map (fun p -> `String p) probes);
       "unavailable", `Assoc (List.map (fun (k, v) -> (k, `String v)) unavailable);
-      "partial", `Assoc (List.map (fun (k, v) -> (k, `String v)) partial);
+      "partial", `Assoc (List.map (fun (k, v) -> (k, `String v)) (partial @ coverage ~before ~after));
     ];
   ]
 
