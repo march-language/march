@@ -12684,6 +12684,50 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/user_type_named_like_stdlib_tree.expected native_user_type_named_like_stdlib_tree.out)))
 
+; ── Range.reduce must pass an uncurried reducer to List.fold_left ──
+(rule
+ (targets native_range_reduce native_range_reduce.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/range_reduce.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_range_reduce native/range_reduce.march)
+   (with-stdout-to native_range_reduce.out (system "./native_range_reduce")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/range_reduce.expected native_range_reduce.out)))
+
+(rule
+ (targets native_range_reduce_no_opt native_range_reduce_no_opt.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/range_reduce.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --no-opt -o native_range_reduce_no_opt native/range_reduce.march)
+   (with-stdout-to native_range_reduce_no_opt.out (system "./native_range_reduce_no_opt")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/range_reduce.expected native_range_reduce_no_opt.out)))
+
+(rule
+ (targets interp_range_reduce.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/range_reduce.march))
+ (action
+  (with-stdout-to interp_range_reduce.out
+   (run %{exe:../bin/main.exe} native/range_reduce.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/range_reduce.expected interp_range_reduce.out)))
+
 ; ── A nested Some(..) pattern beside a row binding the same field by name
 ; (2026-10-07): the erased sub-scrutinee decoded an Option(Float) as a niche,
 ; and the function returned denormal garbage (Option(Option(Float)),
