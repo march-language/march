@@ -222,9 +222,37 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
                    && Lower_state.shared_ctor_collision_type
                         env.Lower_state.mod_prefix tag <> None ->
               env.Lower_state.mod_prefix ^ type_name ^ "." ^ tag
-            | Tir.TCon (type_name, _) when erased_scrut_ty <> None ->
-              type_name ^ "." ^ tag
-            | _ -> tag)
+            | ty ->
+              (* A module matching its OWN type that a bare-named twin
+                 shadows (entry `type Tree` vs stdlib OrderedMap.Tree): the
+                 codegen key "Tree.<Ctor>" would hit the twin exactly, so key
+                 it by the declaring module, as construction does.  A nested
+                 pattern's scrutinee var is erased ([compile_matrix]'s
+                 [unknown_ty]); the type the typechecker recorded at the
+                 pattern's own span names the type then.  See
+                 [Lower_state.own_module_ctor_key].  That key is tried FIRST;
+                 failing it, an erased nested scrutinee whose type was
+                 recovered above ([erased_scrut_ty]) qualifies the bare tag
+                 with that type, then the bare tag. *)
+              let type_name = match ty with
+                | Tir.TCon (n, _) -> Some n
+                | _ ->
+                  (match pat with
+                   | Ast.PatCon ({ span; _ }, _) ->
+                     (match Lower_state.ty_of_span env span with
+                      | Tir.TCon (n, _) -> Some n
+                      | _ -> None)
+                   | _ -> None)
+              in
+              let own_key = match type_name with
+                | Some n -> Lower_state.own_module_ctor_key env n tag
+                | None -> None
+              in
+              (match own_key, ty with
+               | Some key, _ -> key
+               | None, Tir.TCon (type_name, _) when erased_scrut_ty <> None ->
+                 type_name ^ "." ^ tag
+               | None, _ -> tag))
          | _ -> tag)
       | Some i ->
         let qual = String.sub tag 0 (i + 1) in
@@ -285,7 +313,13 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
               `Tree` means that type; everywhere else the lexically visible
               module wins. *)
            let module_reading =
-             Option.map (fun type_name -> type_name ^ "." ^ short_tag)
+             Option.map (fun type_name ->
+                 (* Shadowed by a bare-named twin (entry `type Tree` vs
+                    `OrderedMap.Node(..)`): the module-qualified key. *)
+                 match Lower_state.own_module_ctor_key ~prefix:qual env
+                         type_name short_tag with
+                 | Some key -> key
+                 | None -> type_name ^ "." ^ short_tag)
                (Lower_state.module_ctor_type qual short_tag)
            in
            if not (Lower_state.type_declares_ctor qual_tail short_tag) then
@@ -609,6 +643,42 @@ let rec compile_matrix
     let body    = compile_matrix_impl env scruts rows (Some jp_call) in
     bind_jp clo_var lambda_expr body
 
+(** The scrutinee atom an [ECase] on a constructor column switches on, typed
+    for codegen.  A NESTED column's scrutinee is a sub-pattern variable that
+    [compile_matrix_impl] mints at [unknown_ty] whenever another row binds that
+    field to a plain name (see [field_ty_at]), and [Llvm_case.emit_case] then
+    has only the branch tags to choose a decode by: for Some/None it picks the
+    NICHE decode (every Option-shaped owner is niche-shaped).  That is wrong for
+    an Option over a niche-UNSAFE payload: [Some(Some(f)) -> f | Some(x) -> ..]
+    on an Option(Option(Float)) read the boxed inner Option(Float) cell as the
+    payload's float box and returned a denormal, compiled only.  The
+    typechecker recorded the constructor pattern's own type at its span; give
+    the [ECase]'s atom that type, the same variable re-annotated in place (no
+    new binding, no RC change, as [expand_record_column] does for a nested
+    record).  The sub-variable itself, and so every [let n = <sub_var>]
+    rebinding of a name-bound row, stays erased, which keeps the uniform ->
+    natural untag at those bindings. *)
+and case_scrut_ty
+    (env  : Lower_state.env)
+    (scrut : Tir.atom)
+    (ctor_rows : (Ast.pattern list * Tir.expr) list)
+  : Tir.atom =
+  match scrut with
+  | Tir.AVar ({ Tir.v_ty = Tir.TVar _; _ } as v) ->
+    let pattern_ty =
+      List.find_map (fun (pats, _) ->
+          match pats with
+          | (Ast.PatCon _ as p) :: _ ->
+            (match Lower_state.ty_of_span env (span_of_pat p) with
+             | Tir.TCon _ as t -> Some t
+             | _ -> None)
+          | _ -> None) ctor_rows
+    in
+    (match pattern_ty with
+     | Some t -> Tir.AVar { v with Tir.v_ty = t }
+     | None -> scrut)
+  | _ -> scrut
+
 and compile_matrix_impl
     (env      : Lower_state.env)
     (scruts   : Tir.atom list)
@@ -834,7 +904,7 @@ and compile_matrix_impl
           | Some _ -> default
           | None -> Some (Lower_state.nonexhaustive_panic ())
         in
-        Tir.ECase (scrut, tir_branches, default))
+        Tir.ECase (case_scrut_ty env scrut ctor_rows, tir_branches, default))
 
 (** Replace a first-column record pattern with one column per field.
 

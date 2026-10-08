@@ -886,7 +886,21 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
                 if env.mod_prefix <> ""
                    && Lower_state.shared_ctor_collision_type env.mod_prefix short_tag <> None
                 then env.mod_prefix ^ type_name ^ "." ^ short_tag
-                else type_name ^ "." ^ short_tag))
+                else
+                  (* A module's OWN type shadowed by a bare-named twin (the
+                     entry module's `type Tree` vs stdlib OrderedMap.Tree):
+                     key it by the declaring module, as the match side does.
+                     See [Lower_state.own_module_ctor_key]. *)
+                  let written_module =
+                    match String.rindex_opt tag '.' with
+                    | Some i when not (String.equal tag (type_name ^ "." ^ short_tag)) ->
+                      Some (String.sub tag 0 (i + 1))
+                    | _ -> None
+                  in
+                  (match Lower_state.own_module_ctor_key ?prefix:written_module
+                           env type_name short_tag with
+                   | Some key -> key
+                   | None -> type_name ^ "." ^ short_tag)))
         | _ -> short_tag
       in
       (* For a NULLARY constructor (e.g. [None]) thread the enclosing type's

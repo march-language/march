@@ -1,0 +1,17 @@
+fresh tree: 2047
+read twice: 63 63
+shared: 23 19 15
+twig: 1 1 0
+mutual: 106 21
+wrapper: 62
+two args: 48
+one of two: 0 31
+closure: 32 33
+holder: 115
+long list: 300000 500500
+list of trees: 78
+mutual walk: 66666
+zip: 200007 200010 55
+swap: 7 6 15
+loop: 69600, flat: true
+kept: 127
