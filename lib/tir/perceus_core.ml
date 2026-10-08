@@ -156,6 +156,21 @@ type env = {
           = borrowed_field]).  Each ELet scope descends with its own updated
           copy of this field so inner bindings do not contaminate the
           caller's [env] (was: saved/restored via [_borrowed_field_vars]). *)
+  field_roots : (string, string * string) Hashtbl.t;
+      (** Function-scoped, filled while the body is processed: each variable
+          classified as a borrowed field maps to [(root, origin)].  [root] is
+          the record the reference ultimately points into (through any chain
+          of projections and aliases); [origin] is the projection binding
+          itself (an alias maps to its source's origin).  [Perceus.insert_rc]
+          uses it after the function is done to find a borrow read after its
+          root was released ([read_after_owner_dies]). *)
+  must_dup_fields : StringSet.t;
+      (** Function-scoped: projection bindings that must take their own
+          reference ([dup_owned_field]) because, borrowed, they were read on a
+          path after their root's release.  Empty on the first pass over a
+          function; [Perceus.insert_rc] reruns the function with the origins
+          [read_after_owner_dies] found.
+          specs/progress/2026-10-07-perceus-releases-parent-before-field-use.md *)
   cons_live : StringSet.t;
       (** Variables that are in [live_after] only CONSERVATIVELY: an
           [ECase] arm's pattern-bound fields, re-added to the arm's live set
@@ -212,6 +227,8 @@ let empty_env : env = {
   actor_sent = StringSet.empty;
   moved_vars = StringSet.empty;
   borrowed_field_vars = StringSet.empty;
+  field_roots = Hashtbl.create 0;
+  must_dup_fields = StringSet.empty;
   cons_live = StringSet.empty;
   var_ctx = StringMap.empty;
 }
@@ -546,6 +563,72 @@ let discarded_call_result_ty (env : env) (e : Tir.expr) : Tir.ty option =
      | Some ty when needs_rc env ty -> Some ty
      | _ -> None)
   | _ -> None
+
+(** Is [v] read, on some path through [e], where [root] does not occur later
+    on that path?  [e] is RC-inserted code, where an owned [root]'s last
+    occurrence on a path is the point it is released or handed off (an
+    explicit drop, a consuming call, a capture), so such a read of [v], a
+    borrowed projection out of [root], reads memory that may be freed.
+
+    The walk runs backwards in evaluation order, carrying whether [root]
+    occurs on EVERY path after the current point.  A node that is not a
+    binding, sequence or case is one evaluation step: reading [v] there is
+    unsafe unless [root] occurs after it, even when [root] occurs in the same
+    step ([f(root, v)] may release [root] before it reads [v]).  A local
+    function group counts as one step at its definition, which only errs
+    towards a dup.  Over-reporting costs an inc/dec pair; under-reporting is
+    a use-after-free. *)
+let read_after_owner_dies ~(root : string) ~(v : string) (e : Tir.expr) : bool =
+  (* State carried backwards: [root_later] — [root] occurs on every path
+     after this point; [next_bad] — the next occurrence of [v] forward is an
+     unsafe read; [later_bad] — some occurrence beyond that one is.  An
+     [inc_rc v] taken while [root] is alive gives the use it was emitted for
+     (the next one, a consuming call or capture) its own reference, so it
+     discards [next_bad]; it covers nothing further.
+
+     The walk covers the whole function, so it sees a release a post-pass
+     added after the binding's own scope (an owned aggregate parameter's
+     drop at the function's tails).  A function may bind the same name more
+     than once (one per branch); the reads under each binding are judged on
+     their own, and only for a binding [root] occurs in. *)
+  let found = ref false in
+  let is_v_inc = function
+    | Tir.EIncRC (Tir.AVar x) | Tir.EAtomicIncRC (Tir.AVar x) -> String.equal x.Tir.v_name v
+    | _ -> false
+  in
+  let rec walk ((root_later, next_bad, later_bad) as st) (e : Tir.expr) =
+    match e with
+    | Tir.ESeq (a, b) -> walk (walk st b) a
+    | Tir.ELet (x, rhs, body) when String.equal x.Tir.v_name v ->
+      let (rb, nb, lb) = walk st body in
+      if (nb || lb) && name_free_in root e then found := true;
+      (* Reads before this binding are of another binding of [v]. *)
+      walk (rb, next_bad, later_bad) rhs
+    | Tir.ELet (_, rhs, body) -> walk (walk st body) rhs
+    | Tir.ECase (scrut, branches, default) ->
+      let arms = List.map (fun (br : Tir.branch) -> br.Tir.br_body) branches
+                 @ Option.to_list default in
+      let rs = List.map (walk st) arms in
+      let (r, nb, lb) =
+        if rs = [] then st
+        else
+          ( List.for_all (fun (r, _, _) -> r) rs,
+            List.exists (fun (_, nb, _) -> nb) rs,
+            List.exists (fun (_, _, lb) -> lb) rs )
+      in
+      (match scrut with
+       | Tir.AVar x when String.equal x.Tir.v_name v -> (r, not r, lb || nb)
+       | Tir.AVar x when String.equal x.Tir.v_name root -> (true, nb, lb)
+       | _ -> (r, nb, lb))
+    | _ when is_v_inc e ->
+      (root_later, not root_later, later_bad)
+    | _ ->
+      let r = root_later || name_free_in root e in
+      if name_free_in v e then (r, not root_later, later_bad || next_bad)
+      else (r, next_bad, later_bad)
+  in
+  ignore (walk (false, false, false) e);
+  !found
 
 (** True when every occurrence of [name] in [e] is as the SOURCE of an
     [EField] projection — i.e. the aggregate is only ever read, never handed
@@ -1470,7 +1553,63 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
             && not (used_only_as_field_source src.Tir.v_name e2)
           | _ -> false)
     in
+    (* [(root, origin)] for a borrowed [v]: the record the reference points
+       into, looking through projection chains ([let t = o.ap in t.fp]) and
+       earlier borrowed bindings, and the binding that took the projection
+       (an alias [let w = v] keeps [v]'s origin: the dup must happen where the
+       root is still alive, not at the alias). *)
+    let borrow_root : (string * string) option =
+      let root_of_src local (src : Tir.var) =
+        match List.assoc_opt src.Tir.v_name local with
+        | Some r -> r
+        | None ->
+          (match Hashtbl.find_opt env.field_roots src.Tir.v_name with
+           | Some (r, _) -> r
+           | None -> src.Tir.v_name)
+      in
+      let rec chain local (e : Tir.expr) : string option =
+        match e with
+        | Tir.EField (Tir.AVar src, _) -> Some (root_of_src local src)
+        | Tir.ELet (iv, rhs, body) ->
+          (match chain local rhs with
+           | Some r -> chain ((iv.Tir.v_name, r) :: local) body
+           | None -> chain local body)
+        | _ -> None
+      in
+      match e1 with
+      | Tir.EAtom (Tir.AVar src) -> Hashtbl.find_opt env.field_roots src.Tir.v_name
+      | _ -> Option.map (fun r -> (r, v.Tir.v_name)) (chain [] e1)
+    in
+    (* A second pass over the function found this projection read after its
+       root's release ([Perceus.insert_rc]): it takes its own reference. *)
+    let dup_owned_field =
+      dup_owned_field
+      || (is_borrowed_field
+          && v.Tir.v_lin = Tir.Unr
+          && StringSet.mem v.Tir.v_name env.must_dup_fields)
+    in
     let is_borrowed_field = is_borrowed_field && not dup_owned_field in
+    (* Record a borrow whose root may be released inside its scope: the root
+       is a local that does not outlive this binding and is not itself a
+       borrowed reference.  A root in [live_after] (a borrowed parameter, or
+       a value used after this scope) outlives every read of [v]. *)
+    (match borrow_root with
+     | Some (root, origin) when is_borrowed_field ->
+       let releasable =
+         not (StringSet.mem root live_after)
+         && not (StringSet.mem root env.borrowed_field_vars)
+         && not (StringSet.mem root env.closure_fvs)
+         && not (String.equal root v.Tir.v_name)
+         && (match StringMap.find_opt root env.var_ctx with
+             | Some rv ->
+               rv.Tir.v_lin = Tir.Unr
+               && (match rv.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)
+               && needs_rc env rv.Tir.v_ty
+             | None -> false)
+       in
+       if releasable then Hashtbl.add env.field_roots v.Tir.v_name (root, origin)
+     | _ -> ())
+    ;
     let env_for_e2 =
       { env with
         var_ctx = StringMap.add v.Tir.v_name v env.var_ctx;

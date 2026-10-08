@@ -153,6 +153,8 @@ type env = {
   actor_sent : StringSet.t;
   moved_vars : StringSet.t;
   borrowed_field_vars : StringSet.t;
+  field_roots : (string, string * string) Hashtbl.t;
+  must_dup_fields : StringSet.t;
   cons_live : StringSet.t;
   var_ctx : Tir.var StringMap.t;
 }

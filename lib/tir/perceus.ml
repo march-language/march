@@ -781,39 +781,68 @@ let insert_rc ~(module_env : env) ?(repl = false) ?(borrowed = StringSet.empty)
   (* Seed the variable context with function parameters so that the ECase
      cross-branch dead-variable pass can emit correctly-typed EDecRC ops
      for parameters that are live in some arms but unused in others. *)
-  let fn_env =
+  let fn_env_for must_dup =
     { module_env with
       current_fn_name = fn'.Tir.fn_name;
       closure_fvs;
       actor_sent = collect_actor_sent_vars fn'.Tir.fn_body;
       moved_vars = collect_moved_vars fn';
       borrowed_field_vars = StringSet.empty;
+      field_roots = Hashtbl.create 8;
+      must_dup_fields = must_dup;
       var_ctx =
         List.fold_left (fun ctx v -> StringMap.add v.Tir.v_name v ctx)
           module_env.var_ctx fn'.Tir.fn_params }
   in
-  let (body', _) = insert_rc_expr fn_env fn'.Tir.fn_body borrowed' in
-  (* Give the callee its explicit ownership drop of $clo AFTER RC insertion has
-     already run — see [insert_apply_fn_clo_drop] for the post-pass rationale
-     and for why this is sound only alongside the $clo pin in
-     [Borrow.infer_module]'s [init].
+  let run fn_env =
+    let (body', _) = insert_rc_expr fn_env fn'.Tir.fn_body borrowed' in
+    (* Give the callee its explicit ownership drop of $clo AFTER RC insertion has
+       already run — see [insert_apply_fn_clo_drop] for the post-pass rationale
+       and for why this is sound only alongside the $clo pin in
+       [Borrow.infer_module]'s [init].
 
-     The [is_borrowed] conjunct is an ASSERTION of that coupling, not a
-     narrowing: the pin makes it uniformly true for apply functions today.  It
-     is kept so that narrowing the pin later (e.g. exempting one apply-fn
-     class) automatically withdraws the matching drop instead of silently
-     leaving caller and callee disagreeing — the exact split that caused the
-     double-free wave. *)
-  let body_clo =
-    if Tir_names.is_apply_fn fn.Tir.fn_name
-       && not (Borrow.is_borrowed module_env.borrow_map fn.Tir.fn_name 0)
-    then insert_apply_fn_clo_drop ~repl body'
-    else body'
+       The [is_borrowed] conjunct is an ASSERTION of that coupling, not a
+       narrowing: the pin makes it uniformly true for apply functions today.  It
+       is kept so that narrowing the pin later (e.g. exempting one apply-fn
+       class) automatically withdraws the matching drop instead of silently
+       leaving caller and callee disagreeing — the exact split that caused the
+       double-free wave. *)
+    let body_clo =
+      if Tir_names.is_apply_fn fn.Tir.fn_name
+         && not (Borrow.is_borrowed module_env.borrow_map fn.Tir.fn_name 0)
+      then insert_apply_fn_clo_drop ~repl body'
+      else body'
+    in
+    let body_agg =
+      insert_owned_aggregate_param_drops fn_env borrowed' fn' body_clo in
+    insert_dead_apply_param_drops fn_env borrowed' fn' body_agg
   in
-  let body_agg =
-    insert_owned_aggregate_param_drops fn_env borrowed' fn' body_clo in
-  let body_final = insert_dead_apply_param_drops fn_env borrowed' fn' body_agg in
-  { fn' with Tir.fn_body = body_final }
+  (* A field projection is kept as a borrow of its record whenever the record
+     is still in scope, but the record may be released (at its last use, or
+     at the start of a case arm where it is dead) while the projection is
+     still to be read.  Check the finished body for such a read and redo the
+     function with those projections taking their own reference.  Each round
+     only adds origins, so this terminates; in practice one rerun at most.
+     specs/progress/2026-10-07-perceus-releases-parent-before-field-use.md *)
+  (* A rerun reuses the fresh names the discarded run took, so a redone
+     function does not shift the [$rc_N] names of every later function. *)
+  let ctr0 = !Perceus_core._rc_fresh_ctr in
+  let rec settle must_dup rounds =
+    Perceus_core._rc_fresh_ctr := ctr0;
+    let fn_env = fn_env_for must_dup in
+    let body = run fn_env in
+    (* [Hashtbl.fold] visits every binding of a name bound more than once. *)
+    let fresh =
+      Hashtbl.fold (fun v (root, origin) acc ->
+          if not (StringSet.mem origin must_dup)
+             && Perceus_core.read_after_owner_dies ~root ~v body
+          then StringSet.add origin acc else acc)
+        fn_env.field_roots StringSet.empty
+    in
+    if StringSet.is_empty fresh || rounds = 0 then body
+    else settle (StringSet.union must_dup fresh) (rounds - 1)
+  in
+  { fn' with Tir.fn_body = settle StringSet.empty 4 }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
 

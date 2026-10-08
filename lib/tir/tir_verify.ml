@@ -56,7 +56,7 @@
 
     {1 Check 3: RC balance ({!Tir_verify_rc})}
 
-    Under its own switch for now ([rc_enabled]).  At [tir-perceus], given the
+    Part of [--verify-tir] ([rc_enabled]).  At [tir-perceus], given the
     borrow map and kind table Perceus used: no
     path consumes or releases a reference it does not hold, or reads an
     object after its last reference is gone.  Leaks only with [~rc_leaks]
@@ -79,17 +79,17 @@ let enabled_flag = ref false
 
 let enabled () = !enabled_flag || Lazy.force enabled_by_env
 
-(** Check 3 (RC balance) is its own switch for now: [--verify-tir-rc] /
-    [MARCH_VERIFY_TIR_RC=1] (each implies the verifier).  It found real
-    Perceus bugs in stdlib code every program compiles
-    (specs/todos/2026-10-07-perceus-releases-parent-before-field-use.md);
-    until they are fixed, putting it under plain [--verify-tir] would fail
-    every verified build. *)
+(** Check 3 (RC balance) runs under plain [--verify-tir].  It had its own
+    switch while the Perceus bugs it found in stdlib code every program
+    compiles were open
+    (specs/progress/2026-10-07-perceus-releases-parent-before-field-use.md);
+    [--verify-tir-rc] / [MARCH_VERIFY_TIR_RC=1] still enable it (and the
+    verifier) on their own. *)
 let rc_flag = ref false
 let rc_by_env : bool Lazy.t =
   lazy (match Sys.getenv_opt "MARCH_VERIFY_TIR_RC" with
         | Some ("" | "0") | None -> false | Some _ -> true)
-let rc_enabled () = !rc_flag || Lazy.force rc_by_env
+let rc_enabled () = !rc_flag || Lazy.force rc_by_env || enabled ()
 let enabled () = enabled () || rc_enabled ()
 
 (* Stages before monomorphisation, where a bare interface-method call

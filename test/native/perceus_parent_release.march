@@ -1,0 +1,78 @@
+-- A field projected from a record is read after the record's release on some
+-- path (specs/progress/2026-10-07-perceus-releases-parent-before-field-use.md).
+-- Compiled, each shape read freed memory: an empty or wrong string, or SIGTRAP.
+mod PerceusParentRelease do
+  needs IO.Console
+
+  -- 1. String match on a field; the binder arm drops the record first.
+  type D = { tag : String, n : Int }
+
+  fn classify(d : D) : String do
+    match d.tag do
+      "known" ->
+        let a = int_to_string(d.n) ++ "a" ++ int_to_string(d.n * 3)
+        let b = a ++ int_to_string(d.n * 5) ++ a ++ int_to_string(d.n * 11)
+        let c = b ++ a ++ int_to_string(string_byte_length(b))
+        c ++ b ++ a
+      other -> "unknown " ++ other
+    end
+  end
+
+  fn go1(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let d = { tag: "t" ++ int_to_string(i * 7919), n: i }
+      let s = classify(d)
+      let junk = "x" ++ int_to_string(i) ++ "yyyyyyyyyyyy"
+      go1(i - 1, acc + string_byte_length(s) + string_byte_length(junk) - string_byte_length(junk))
+    end
+  end
+
+  -- 2. A nested projection, then the record consumed by a call.
+  type Ap = { fingerprint : String, k : Int }
+  type Offer = { ap : Ap, sessions : List(Int) }
+
+  pfn active(o : Offer) : Int do
+    List.length(o.sessions)
+  end
+
+  pfn line(kv : (String, Offer)) : String do
+    match kv do
+      (name, o) -> "offer " ++ name ++ " fp " ++ o.ap.fingerprint ++ " sessions " ++ int_to_string(active(o)) ++ "\n"
+    end
+  end
+
+  -- 3. A record update from a List.find result.
+  type Place = Here(String) | Nowhere
+  type Want = { w_name : String, w_place : Place, w_cap : Int }
+  type Run = { name : String, place : Place, cap : Int }
+
+  fn pick(r : Run, wants : List(Want)) : Run do
+    match List.find(wants, fn w -> w.w_name == r.name) do
+      None -> { r with place: Nowhere }
+      Some(w) -> { r with place: w.w_place, cap: if r.cap == 0 do 0 else w.w_cap end }
+    end
+  end
+
+  fn go3(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let wants = [{ w_name: "a", w_place: Here("node-" ++ int_to_string(i)), w_cap: i }]
+      let r = pick({ name: "a", place: Nowhere, cap: i % 2 }, wants)
+      let n = match r.place do
+        Here(s) -> string_byte_length(s)
+        Nowhere -> 0
+      end
+      go3(i - 1, acc + n + r.cap)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(classify({ tag: "tag-" ++ int_to_string(12345), n: 1 }))
+    println(int_to_string(go1(20000, 0)))
+    let offers = List.map([1, 2, 3], fn i ->
+      ("role" ++ int_to_string(i), { ap: { fingerprint: "fp-" ++ int_to_string(i * 1000003), k: i }, sessions: [i, i + 1] }))
+    print(String.join(List.map(offers, fn kv -> line(kv)), ""))
+    println(int_to_string(go3(2000, 0)))
+  end
+end

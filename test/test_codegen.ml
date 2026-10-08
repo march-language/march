@@ -16517,10 +16517,11 @@ let test_tir_verify_rc_case_arms_join () =
   Alcotest.(check bool) "an over-release on one arm is reported on that arm's path" true
     (tv_rc_has "on path `case b: False`" m)
 
-(* The three Perceus bugs check 3 found (specs/todos/
+(* The three Perceus bugs check 3 found (specs/progress/
    2026-10-07-perceus-releases-parent-before-field-use.md), through the real
-   pipeline: these assert the verifier SEES them.  When that todo is fixed,
-   these flip: assert no finding instead. *)
+   pipeline.  This asserted the verifier SAW them while they were open; with
+   the fix (a borrowed projection read after its root's release takes its own
+   reference) each must come out clean. *)
 let rc_pipeline_findings src =
   let m = parse_and_desugar src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
@@ -16587,11 +16588,11 @@ let rc_bug_record_update = {|mod Shape3 do
   end
 end|}
 
-let test_tir_verify_rc_sees_perceus_bugs () =
+let test_tir_verify_rc_perceus_parent_release_fixed () =
   List.iter (fun (what, fn_name, src) ->
       let fs = rc_pipeline_findings src in
-      Alcotest.(check bool) (what ^ ": a use-after-release in `" ^ fn_name ^ "`") true
-        (List.exists (fun s -> Test_helpers.contains "rc-balance/use-after-release" s) fs))
+      Alcotest.(check (list string)) (what ^ ": no rc finding in `" ^ fn_name ^ "`") []
+        (List.filter (fun s -> Test_helpers.contains "rc-balance" s) fs))
     [ ("string match on a field", "classify", rc_bug_string_case);
       ("nested projection, parent consumed", "line", rc_bug_nested_projection);
       ("record update from a find result", "pick", rc_bug_record_update) ]
@@ -16615,7 +16616,7 @@ let codegen_suites =
           Alcotest.test_case "rc: use after release (RED)" `Quick test_tir_verify_rc_use_after_release;
           Alcotest.test_case "rc: leak, opt-in (RED)" `Quick test_tir_verify_rc_leak;
           Alcotest.test_case "rc: per-arm path (RED)" `Quick test_tir_verify_rc_case_arms_join;
-          Alcotest.test_case "rc: sees the perceus-releases-parent bugs" `Quick test_tir_verify_rc_sees_perceus_bugs;
+          Alcotest.test_case "rc: perceus-releases-parent shapes are clean" `Quick test_tir_verify_rc_perceus_parent_release_fixed;
         ]);
       ( "vectorize_check", [
           Alcotest.test_case "module loads, misuse case reports one diagnostic" `Quick

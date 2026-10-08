@@ -343,6 +343,8 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **`--verify-tir` now includes the reference-count balance check.** It used to
+  need `--verify-tir-rc`, which still works on its own.
 - **Compiler-minted symbols are structural, not counter-numbered.** A lambda
   is `$lam<k>_<host>` (nested: `$lam<j>__lam<k>_<host>`), its lifted apply fn
   `<lambda>$apply$<k>_<host>`, a fused pipeline helper `$fused_mf_<host>_<k>`,
@@ -455,6 +457,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled code no longer reads a record field after freeing the record.** A
+  field read from a record could outlive the record when the record was passed
+  on or dropped first, e.g. in a `match` arm that no longer used it, or after
+  `o.ap.fingerprint` was read and `o` was handed to a call. The program then
+  printed the wrong string or crashed. The stdlib's `Topology` code had this.
 - **`Range.reduce` returns the fold of the range.** It wrapped its callback in a
   curried lambda, so compiled code returned a pointer-sized integer and the
   interpreter panicked with an arity mismatch.

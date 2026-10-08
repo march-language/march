@@ -131,3 +131,86 @@ Reproduce any of them:
 march --compile -o /tmp/repro repro.march && /tmp/repro
 MARCH_VERIFY_TIR_RC=1 march --emit-llvm repro.march
 ```
+
+## Fixed 2026-10-08
+
+All three shapes had one cause. A projection `let v = src.f` is kept as a borrow
+of `src` whenever `src` is still in scope, but nothing checked that `src`
+outlives the projection's last read. The 2026-09-28 fix
+(`specs/progress/2026-09-28-borrowed-field-outlives-owner.md`, `dup_owned_field`)
+covered only a one-level `EField` whose source is later used other than as a
+projection source. It missed:
+
+- a projection chain (`let t = o.ap in t.fingerprint`, shape 2), which it did
+  not match at all;
+- a source used only as a projection source but released at the start of a
+  case arm where it is dead (shape 1's binder arm, shape 3's `Some(w)` arm),
+  which it assumed is released only at scope end.
+
+Rather than predict where Perceus will release the owner, the fix checks the
+finished body:
+
+- While classifying, each borrowed field var whose root could be released
+  inside its scope (a local `Unr` RC'd value, not in `live_after`, not itself a
+  borrow, not a closure FV) is recorded in `env.field_roots` as
+  `(root, origin)`. `root` looks through projection chains and earlier borrows;
+  an alias keeps its source's `origin`, so the dup happens where the root is
+  still alive.
+- `Perceus.insert_rc` then runs `Perceus_core.read_after_owner_dies` over the
+  finished body, post-passes included (an owned aggregate parameter's drop is
+  added by one, at the function's tails, outside any binding's own scope). In
+  that code an owned root's last occurrence on a path is its release or
+  handoff, so a read of `v` with no later occurrence of `root` on that path
+  may read freed memory. The walk runs backwards in evaluation order:
+  - an evaluation step that mentions both counts as unsafe (`f(root, v)` may
+    release `root` first);
+  - an `inc_rc v` taken while `root` is alive covers the one use it was
+    emitted for (Perceus dups a borrowed field before a consuming use), and
+    nothing after it;
+  - reads are attributed to their own binding of `v`, and a binding counts
+    only if `root` occurs in it. A function can bind one name once per
+    branch (`Toml.parse_number`'s `exp_str`), each from a different tuple.
+- If any origin is flagged, the function is redone with those origins in
+  `env.must_dup_fields`, which sends them down the existing `dup_owned_field`
+  path (`inc_rc` after the projection, released as an owned binding). At most
+  four rounds; a round only adds origins. The redo restores Perceus's fresh
+  name counter first, so a redone function does not renumber the `$rc_N`
+  names of every later one (the TIR snapshots caught that).
+
+A function with no unsafe read is processed once, exactly as before.
+
+### Evidence
+
+- The three repros print the interpreter's output compiled (`--opt 2`); shape 3
+  no longer dies with SIGTRAP.
+- `test/test_codegen.ml`'s pinned verifier test (`rc: sees the
+  perceus-releases-parent bugs`) went red with the fix, as intended, and is
+  flipped to `rc: perceus-releases-parent shapes are clean`.
+- `test/native/perceus_parent_release.march` runs all three shapes in loops,
+  compiled.
+- A projection whose owner's last use is the projection itself (owner dropped
+  at scope end) gets no dup.
+- Over the stdlib a small program links, 9 functions are redone, each in one
+  round: the three `Topology` lambdas above, `Session.ip_step`,
+  `ClusterNode.keeps_new`, `ClusterNode.start_writers`, the actor's `CtlFrame`
+  handler and two `SessionNode.candidates` lambdas.
+- Known over-report: when the root is never released on a path (it leaks
+  there), its last occurrence is not a release, and a later read gets an
+  unneeded dup (one inc/dec pair, no change in behaviour).
+  `Session.ip_step`'s crash-handler arm is one: `st` is passed to `ip_forget`
+  with a fresh `inc_rc` and its own reference is not released on that path.
+  That looks like a separate leak; not investigated here.
+
+- `--emit-llvm --opt 2` over `test/native/` and `bench/` (413 programs with
+  IR), old compiler vs new, `%` names and fresh-name/drop-glue type-variable
+  ids normalised: 406 identical, 7 differ (`cert_downgrade_after_restart`,
+  `cluster_node_vaults_unnamed`, `node_discovery`, `node_send_loopback`,
+  `session_party_released`, `topology_place`, and the new fixture). Every
+  benchmark's IR is identical, so no benchmark can move.
+- `MARCH_VERIFY_TIR_RC=1 --emit-llvm` over all 360 `test/native/` programs: no
+  finding (the one non-zero exit is `js_dom_timeout_callback`, a JS-target
+  program). Control: the old compiler reports 4 `rc-balance` findings on
+  shape 2.
+
+Check 3 now runs under plain `--verify-tir` (`Tir_verify.rc_enabled`);
+`--verify-tir-rc` / `MARCH_VERIFY_TIR_RC=1` still turn it on alone.

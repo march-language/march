@@ -93,13 +93,12 @@ From `tir-mono` on, it also checks types: call arity, each argument's
 representation against its parameter, case-branch binder counts, projected
 field names, and no source-named type variable left in a signature.
 
-**RC balance:** `--verify-tir-rc` (`MARCH_VERIFY_TIR_RC=1`) also walks every
-path of every function after Perceus. It reports an over-release or a use after
-release with the object, its binding and the path (`case kv: $Tuple2`).
-`MARCH_VERIFY_TIR_LEAKS=1` adds leaks. It is a separate switch because it
-currently reports three known Perceus bugs, two in stdlib code every program
-links (`specs/todos/2026-10-07-perceus-releases-parent-before-field-use.md`).
-Filter for your own function's name.
+**RC balance:** `--verify-tir` also walks every path of every function after
+Perceus. It reports an over-release or a use after release with the object, its
+binding and the path (`case kv: $Tuple2`). `--verify-tir-rc`
+(`MARCH_VERIFY_TIR_RC=1`) still turns it on by itself, and
+`MARCH_VERIFY_TIR_LEAKS=1` adds leaks. The whole native corpus is clean under it
+(2026-10-08), so a finding is a new bug.
 A finding exits 3 and names the stage and function: the first stage listed is
 the pass that broke it. Always on in `run_snapshots` and the hand-rolled
 pipelines in `test_codegen.ml`. Design: observability plan §6 (A1).

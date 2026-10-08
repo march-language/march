@@ -5800,7 +5800,7 @@ let () =
     ("--oracle", Arg.Set_string reduce_oracle,
      "CMD  With --reduce: a shell command, exit 0 = still interesting; {} is the candidate's path (appended if absent)");
     ("--verify-tir-rc", Arg.Set March_tir.Tir_verify.rc_flag,
-     " Also check reference-count balance after Perceus (implies --verify-tir). Same as MARCH_VERIFY_TIR_RC=1; MARCH_VERIFY_TIR_LEAKS=1 additionally reports leaks");
+     " Check reference-count balance after Perceus (part of --verify-tir; this flag implies it). Same as MARCH_VERIFY_TIR_RC=1; MARCH_VERIFY_TIR_LEAKS=1 additionally reports leaks");
     ("--explain", Arg.String (fun code ->
          print_string (March_errors.Explain.explain code); exit 0),
      "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");
