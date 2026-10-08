@@ -590,11 +590,36 @@ end|} in
   check_parses "wide record let" src;
   Alcotest.(check string) "output is a fixpoint" out (fmt out)
 
+(* The abstract-refinement shorthand `T[p]` / `D -> Bool[p]` (phase 4).  The
+   parser rewrites the definer arrow to `({x : D | true}) -> {Bool | _ == p(x)}`
+   with a synthetic binder `$x`; printing that expansion back cannot be lexed.
+   The formatter must print the shorthand, losslessly. *)
+let test_abstract_refinement_shorthand () =
+  let src = {|mod Test do
+fn keep(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+  xs
+end
+fn keep_pos(xs : List(Int), pred : ({x : Int | x > 0}) -> Bool[q]) : List(Int[q]) do
+  xs
+end
+end|} in
+  check_parses "abstract refinement shorthand" src;
+  check_idempotent "abstract refinement shorthand" src;
+  let out = fmt src in
+  let has needle =
+    let n = String.length out and m = String.length needle in
+    let rec go i = i + m <= n && (String.sub out i m = needle || go (i + 1)) in go 0 in
+  Alcotest.(check bool) "definer printed as shorthand" true (has "-> Bool[p]");
+  Alcotest.(check bool) "refined domain keeps its binder" true (has "-> Bool[q]");
+  Alcotest.(check bool) "no synthetic binder leaks" false (has "$x");
+  Alcotest.(check bool) "T[p] printed as shorthand" true (has "List(a[p])")
+
 let () =
   let open Alcotest in
   run "formatter" [
     "basic", [
       test_case "simple fn"       `Quick test_simple_fn;
+      test_case "abstract refinement shorthand" `Quick test_abstract_refinement_shorthand;
       test_case "match expr"      `Quick test_match_expr;
       test_case "if expr"         `Quick test_if_expr;
       test_case "let binding"     `Quick test_let_binding;
