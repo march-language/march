@@ -772,7 +772,7 @@ jobs:
   cross-linux-oracle:
     runs-on: ubuntu-24.04
     needs: [ocaml-build]
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -825,7 +825,11 @@ jobs:
           done
 
       - name: Cross oracle (linux/amd64, native-referenced, runs natively on the x86_64 runner)
-        timeout-minutes: 20
+        # Measured 2026-10-08: main's run took 1,181 s (14.8 s per program, 81
+        # programs, mostly the native reference compile on a cold CAS) against
+        # the old 20-minute (1,200 s) limit, 19 s of headroom; a run 4% slower
+        # (merge train, PR #924) was killed at program 79 of 81.
+        timeout-minutes: 30
         run: |
           MARCH_ORACLE_CROSS=amd64 \
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \

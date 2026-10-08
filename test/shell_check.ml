@@ -106,11 +106,12 @@ let now_ms () = int_of_float (Unix.gettimeofday () *. 1000.)
 let nonce_n = ref 0
 let fresh_nonce () = incr nonce_n; Printf.sprintf "%016x%016x" (now_ms ()) !nonce_n
 
-let eval_line ?(nonce = fresh_nonce ()) ?(timeout_ms = 5000) ?(caps = "-") ~sk ~epoch ~session ~name ~so () =
+let eval_line ?(nonce = fresh_nonce ()) ?(timeout_ms = 5000) ?(caps = "-") ?skew ~sk ~epoch ~session ~name ~so () =
   let body =
-    Printf.sprintf "name:%s epoch:%d session:%s nonce:%s not_after_ms:%d timeout_ms:%d caps:%s src_b64:%s so_b64:%s"
-      name epoch session nonce (now_ms () + 30_000) timeout_ms caps (b64_encode ("source of " ^ name))
-      (b64_encode so) in
+    Printf.sprintf "name:%s epoch:%d session:%s nonce:%s not_after_ms:%d timeout_ms:%d caps:%s%s src_b64:%s so_b64:%s"
+      name epoch session nonce (now_ms () + 30_000) timeout_ms caps
+      (match skew with Some v -> " skew:" ^ v | None -> "")
+      (b64_encode ("source of " ^ name)) (b64_encode so) in
   let s = March_ed25519.Ed25519.(sig_to_base64 (sign_str ("EVAL " ^ body) sk)) in
   "EVAL " ^ s ^ " " ^ body
 
@@ -213,6 +214,11 @@ let run sock prog sk_file policy log frag_dir =
   check "within the timeout plus a second" (dt < 1.5) (Printf.sprintf "%.2fs" dt);
   check "the node keeps serving after a panic and a timeout"
     (starts_with (ask c (eval_line ~sk ~epoch ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())) "OK ") "";
+  (* --shell-force's marker: signed, recorded in the audit line, nothing else. *)
+  check "a signed skew:1 runs like any other EVAL"
+    (starts_with (ask c (eval_line ~sk ~epoch ~skew:"1" ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())) "OK ") "";
+  check "a skew value other than 0 or 1: bad_args"
+    (ask c (eval_line ~sk ~epoch ~skew:"yes" ~name:"__shell_frag_ok" ~so:(so "frag_ok") ()) = "ERR bad_args") "";
   check "an entry the fragment does not define: no_entry"
     (ask c (eval_line ~sk ~epoch ~name:"__shell_nope" ~so:(so "frag_ok") ()) = "ERR no_entry") "";
   check "an EVAL for another epoch: epoch_changed"
@@ -243,11 +249,17 @@ let run sock prog sk_file policy log frag_dir =
   let results = audit_results log in
   let expected = [ "ok"; "replay"; "bad_session"; "bad_session"; "bad_signature"; "policy";
                    "ok"; "cap_tamper"; "cap_tamper";
-                   "no_cap_manifest"; "ok"; "ok"; "ok"; "err_no_entry";
+                   "no_cap_manifest"; "ok"; "ok"; "ok"; "ok"; "bad_args"; "err_no_entry";
                    "epoch_changed"; "bad_args" ] in
   check "every EVAL is audited, in order" (results = expected) (String.concat "," results);
   check "the audit line carries the source"
     (contains (try read_file log with _ -> "") "\"src\":\"source of __shell_frag_ok\"") "";
+  let skew_lines =
+    (try read_file log with _ -> "") |> String.split_on_char '\n'
+    |> List.filter (fun l -> contains l "\"type\":\"shell\"" && contains l "\"skew\":1") in
+  check "the skew:1 EVAL, and only it, is audited with \"skew\":1"
+    (match skew_lines with [ l ] -> contains l "\"result\":\"ok\"" | _ -> false)
+    (String.concat "\n" skew_lines);
   if !failures > 0 then exit 1
 
 let keygen pk_file sk_file =

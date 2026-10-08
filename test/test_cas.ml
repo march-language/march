@@ -333,6 +333,56 @@ let test_cas_runtime_identity_ignores_non_c_files () =
   let h2 = March_cas.Cas.runtime_identity_of_dir dir in
   Alcotest.(check string) "non-.c/.h files do not affect digest" h1 h2
 
+let test_cas_runtime_identity_tracks_nested_sources () =
+  with_tmpdir @@ fun dir ->
+  let third_party = Filename.concat dir "third_party/mimalloc" in
+  Unix.mkdir (Filename.concat dir "third_party") 0o755;
+  Unix.mkdir third_party 0o755;
+  let write name data =
+    let oc = open_out_bin (Filename.concat third_party name) in
+    output_string oc data;
+    close_out oc
+  in
+  write "mimalloc.c" "int mimalloc_version(void) { return 1; }";
+  let h1 = March_cas.Cas.runtime_identity_of_dir dir in
+  write "mimalloc.c" "int mimalloc_version(void) { return 2; }";
+  let h2 = March_cas.Cas.runtime_identity_of_dir dir in
+  Alcotest.(check bool) "edited nested .c source → different digest"
+    false (String.equal h1 h2)
+
+let test_cas_runtime_identity_tracks_symlinked_sources () =
+  with_tmpdir @@ fun dir ->
+  let write path data =
+    let oc = open_out_bin path in
+    output_string oc data;
+    close_out oc
+  in
+  let linked_file = Filename.concat dir "mimalloc.c" in
+  let file_target = Filename.concat dir "mimalloc-target" in
+  write file_target "int mimalloc_version(void) { return 1; }";
+  Unix.symlink "mimalloc-target" linked_file;
+  Unix.symlink "." (Filename.concat dir "loop");
+  let h1 = March_cas.Cas.runtime_identity_of_dir dir in
+  write file_target "int mimalloc_version(void) { return 2; }";
+  let h2 = March_cas.Cas.runtime_identity_of_dir dir in
+  Alcotest.(check bool) "edited symlinked .c source → different digest"
+    false (String.equal h1 h2);
+  let vendor = Filename.temp_file "march_cas_vendor" "" in
+  Unix.unlink vendor;
+  Unix.mkdir vendor 0o700;
+  Fun.protect
+    ~finally:(fun () ->
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote vendor)) in ())
+    (fun () ->
+       let header = Filename.concat vendor "mimalloc.h" in
+       write header "#define MIMALLOC_VERSION 1";
+       Unix.symlink vendor (Filename.concat dir "third_party");
+       let h3 = March_cas.Cas.runtime_identity_of_dir dir in
+       write header "#define MIMALLOC_VERSION 2";
+       let h4 = March_cas.Cas.runtime_identity_of_dir dir in
+       Alcotest.(check bool) "edited source under symlinked directory → different digest"
+         false (String.equal h3 h4))
+
 (* The compilation_hash must follow the runtime directory the DRIVER says it
    compiles (bin/main.ml registers it via set_runtime_dir), not a directory
    cas.ml guessed for itself.  When those two resolutions disagreed — cas.ml
@@ -922,6 +972,8 @@ let () =
         test_cas_artifact_survives_source_overwrite;
       Alcotest.test_case "runtime identity tracks sources"    `Quick test_cas_runtime_identity_changes_with_sources;
       Alcotest.test_case "runtime identity ignores non-C"     `Quick test_cas_runtime_identity_ignores_non_c_files;
+      Alcotest.test_case "runtime identity tracks nested sources" `Quick test_cas_runtime_identity_tracks_nested_sources;
+      Alcotest.test_case "runtime identity tracks symlinked sources" `Quick test_cas_runtime_identity_tracks_symlinked_sources;
       Alcotest.test_case "compilation hash follows registered runtime dir" `Quick
         test_cas_compilation_hash_follows_registered_runtime_dir;
       Alcotest.test_case "runtime dir fallback prefers exe-relative over cwd" `Quick

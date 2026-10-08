@@ -4,7 +4,7 @@
     Why this exists
     ───────────────
     [bin/main.ml]'s native [--compile] path used to hand clang the generated
-    [.ll] file AND every [runtime/*.c] file in a single command, so every
+    [.ll] file AND every [runtime/**/*.c] file in a single command, so every
     invocation recompiled the whole ~20-file C runtime from source.  Measured
     at ~6.5s per invocation on GitHub Actions hardware, essentially all of it
     clang — and it is paid by all 232 native-compiling rules in [test/dune]
@@ -18,7 +18,7 @@
     ────────────────
     The runtime object files themselves, keyed on what actually determines
     their compilation:
-      - [Cas.runtime_identity] — content digest of every runtime/*.{c,h}
+      - [Cas.runtime_identity] — content digest of every runtime/**/*.{c,h}
         (reused verbatim, so editing any runtime source invalidates this the
         same way it already invalidates the whole-binary CAS);
       - [Cas.compiler_identity] — the march executable's own bytes, so a march

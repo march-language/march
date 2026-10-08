@@ -3014,6 +3014,22 @@ let test_split_changes_of_dirs () =
     Alcotest.(check string) "new: this build" "f2" c.new_.v_fingerprint
   | l -> Alcotest.failf "expected one change, got %d" (List.length l)
 
+(* forge shell / forge rpc --force passes --shell-force to `march --shell`
+   (forge/lib/cmd_shell.ml); without it, nothing. *)
+let test_shell_force_flag () =
+  let args force =
+    Cmd_shell.march_args ~sock:"/tmp/n.sock.shell" ~timeout_ms:5000 ~force
+      ~inputs:(Some "/tmp/in.txt") ~entry:"app.march" in
+  let has s sub =
+    let n = String.length s and m = String.length sub in
+    let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+    go 0 in
+  Alcotest.(check bool) "--force adds --shell-force" true (has (args true) " --shell-force ");
+  Alcotest.(check bool) "no --force, no --shell-force" false (has (args false) "--shell-force");
+  Alcotest.(check bool) "the entry stays last" true
+    (let a = args true and e = " " ^ Filename.quote "app.march" in
+     String.sub a (String.length a - String.length e) (String.length e) = e)
+
 let () =
   Alcotest.run "forge" [
     "protocol split", [
@@ -3266,6 +3282,9 @@ let () =
         test_compiled_project_build_generated_entrypoint;
       Alcotest.test_case "forge bench links the project's [ffi] C sources" `Slow
         test_bench_links_ffi_sources;
+    ];
+    "shell", [
+      Alcotest.test_case "--force passes --shell-force" `Quick test_shell_force_flag;
     ];
     "search_index_cache", [
       Alcotest.test_case "stale version cache is rebuilt" `Quick

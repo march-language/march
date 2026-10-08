@@ -182,6 +182,15 @@ git log is authoritative for exact commits.
     build does not (changed, added, or a type numbered differently) is
     refused, with the declarations named. Inputs that reach only unchanged
     code still run.
+  - `forge shell --force` / `forge rpc --force` (`march --shell-force`) runs
+    such an input anyway when it is read-only: its compiled code uses no
+    capability beyond `IO.Console`, `IO.Clock`, `IO.Random` and
+    `IO.FileRead`, sends, spawns, kills, calls, registers or sets nothing,
+    does not use `Actor.Debug`, and calls no closure kept by an earlier
+    `let`. It runs your checkout's version of the differing
+    code, prints a warning naming it, marks the prompt `[skew]`, and is
+    recorded in the node's audit log with `"skew":1`. An input reaching a
+    type whose definition differs is still always refused.
   - An input calls the node's own compiled copy of a library function when
     the node's build has it with the same signature, rather than compiling
     a copy. Each Depot query's fragment went from 338 KB of IR to 81 KB, and

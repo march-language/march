@@ -188,17 +188,32 @@ let compiler_identity : string Lazy.t = lazy (
    binaries.  The runtime sources are NOT part of the compiler executable,
    so compiler_identity does not cover them: editing runtime/march_extras.c
    would still serve the stale binary cached under the same key.  Digest
-   every .c/.h file (sorted name + contents) in the runtime directory. *)
+   every .c/.h file (sorted relative name + contents) below the runtime
+   directory. *)
 let runtime_identity_of_dir (dir : string) : string =
-  let files =
-    try
-      Sys.readdir dir
-      |> Array.to_list
-      |> List.filter (fun f ->
-           Filename.check_suffix f ".c" || Filename.check_suffix f ".h")
-      |> List.sort String.compare
-    with Sys_error _ -> []
+  let rec source_files visited_dirs rel_dir =
+    let path = Filename.concat dir rel_dir in
+    let canonical_dir =
+      try Unix.realpath path with Unix.Unix_error _ -> path
+    in
+    if List.mem canonical_dir visited_dirs then [] else
+      try
+        Sys.readdir path
+        |> Array.to_list
+        |> List.sort String.compare
+        |> List.concat_map (fun name ->
+             let rel_path = Filename.concat rel_dir name in
+             let full_path = Filename.concat dir rel_path in
+             try
+               match (Unix.stat full_path).Unix.st_kind with
+               | Unix.S_DIR -> source_files (canonical_dir :: visited_dirs) rel_path
+               | _ when Filename.check_suffix name ".c"
+                        || Filename.check_suffix name ".h" -> [rel_path]
+               | _ -> []
+             with Unix.Unix_error _ -> [])
+      with Sys_error _ -> []
   in
+  let files = source_files [] "" |> List.sort String.compare in
   let buf = Buffer.create (1 lsl 16) in
   List.iter (fun f ->
     Buffer.add_string buf f;

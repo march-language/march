@@ -1940,6 +1940,8 @@ type shell_fragment = {
   sf_entry : string;               (** its one exported symbol *)
   sf_ret   : March_tir.Tir.ty;     (** the entry's return type *)
   sf_caps  : string list;          (** the capabilities its code uses, sorted *)
+  sf_skew  : string list;          (** with [~force]: the differing declarations it
+                                       reaches (it is read-only); else [] *)
 }
 
 (** The shell fragment's function.  It is `main` because monomorphisation
@@ -2112,7 +2114,7 @@ let run_argv (argv : string array) ~(log : string) : int =
     wait ()
   with _ -> 127
 
-let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
+let shell_compile ?triple ?ident ?(force = false) ctx ~tc_env ~(program_name : string)
     ~(program_decls : March_ast.Ast.decl list)
     ~(program_type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t)
     ?store_as (m : March_ast.Ast.module_) : shell_fragment =  let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
@@ -2178,27 +2180,46 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
         Printf.eprintf "[shell] fn %s\n%!" f.fn_name) pre.March_tir.Tir.tm_fns;
   (* R5.4: refuse an input whose code differs from the node's build (see
      shell_ident.ml), before paying for clang.  Over everything the input
-     reaches, including what it will call on the node rather than copy. *)
-  (match ident with
-   | Some c ->
-     (match time_phase "ident" @@ fun () -> Shell_ident.fragment_skew c ~types:pre.March_tir.Tir.tm_types
-              (List.filter (fun (f : March_tir.Tir.fn_def) -> not (is_c_runtime_fn f.fn_name))
-                 pre.March_tir.Tir.tm_fns) with
-      | [] -> ()
-      | diffs ->
-        let shown = List.filteri (fun i _ -> i < 8) diffs in
-        let more = List.length diffs - List.length shown in
-        failwith (String.concat "\n  "
-          ("this input reaches code that differs from the node's build:" :: shown
-           @ (if more > 0 then [ Printf.sprintf "... and %d more" more ] else []))))
-   | None -> ());
+     reaches, including what it will call on the node rather than copy.
+     With [force], differing code (not a type's definition or constructor
+     tags) is let through here and the input must then prove read-only
+     ([skewed]). *)
+  let refuse ?(extra = []) head diffs =
+    let shown = List.filteri (fun i _ -> i < 8) diffs in
+    let more = List.length diffs - List.length shown in
+    failwith (String.concat "\n  "
+      (head :: shown
+       @ (if more > 0 then [ Printf.sprintf "... and %d more" more ] else [])
+       @ extra)) in
+  let differs_head = "this input reaches code that differs from the node's build:" in
+  let skewed =
+    match ident with
+    | Some c ->
+      let p = time_phase "ident" @@ fun () ->
+        Shell_ident.fragment_skew_parts c ~types:pre.March_tir.Tir.tm_types
+          (List.filter (fun (f : March_tir.Tir.fn_def) -> not (is_c_runtime_fn f.fn_name))
+             pre.March_tir.Tir.tm_fns) in
+      (match p.Shell_ident.sk_decls, p.Shell_ident.sk_types @ p.Shell_ident.sk_tags with
+       | [], [] -> []
+       | decls, [] when force -> decls
+       | decls, layout ->
+         refuse differs_head (List.sort compare (decls @ layout))
+           ~extra:(if force && layout <> [] then
+                     [ "(--shell-force never overrides a differing type or constructor numbering)" ]
+                   else []))
+    | None -> [] in
   let n = next_id ctx in
   let entry = Printf.sprintf "repl_%d" n in
   (* The functions this fragment calls on the node instead of carrying (see
      [Shell_ident]'s "calling the node's own functions").  None without the
-     node's table, or with MARCH_SHELL_NO_LINK set. *)
+     node's table, or with MARCH_SHELL_NO_LINK set, or for a forced skewed
+     input: that one runs this checkout's copy of everything it reaches (a
+     differing function must not be swapped for the node's), and its
+     read-only check reads the emitted code's symbols, which must then be
+     all of it. *)
   let node = match ident with
-    | Some (c : Shell_ident.check) when Sys.getenv_opt "MARCH_SHELL_NO_LINK" = None -> Some c.node
+    | Some (c : Shell_ident.check)
+      when skewed = [] && Sys.getenv_opt "MARCH_SHELL_NO_LINK" = None -> Some c.node
     | _ -> None in
   (* An init fragment storing a heap value also registers its release for
      the slot (see [build]); a scalar slot has none. *)
@@ -2410,6 +2431,33 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
   let caps =
     (List.filter_map March_caps.Cap_symbols.cap_of_symbol syms @ reached_caps @ proof_caps)
     |> List.sort_uniq String.compare in
+  (* --shell-force: a skewed input runs only if it is read-only
+     ([Shell_ident.not_read_only]); nothing was linked, so [syms] is every C
+     symbol its code calls. *)
+  if skewed <> [] then begin
+    (* A closure kept by an earlier input's `let` has its code in that
+       input's fragment, where these symbols cannot see it: a forced input
+       may not use such a binding. *)
+    let referenced = List.fold_left (fun acc (f : March_tir.Tir.fn_def) ->
+        March_tir.Dce.StringSet.union acc
+          (List.fold_left (fun s (v : March_tir.Tir.var) ->
+               March_tir.Dce.StringSet.remove v.v_name s)
+              (March_tir.Dce.free_vars f.fn_body) f.fn_params))
+        March_tir.Dce.StringSet.empty pre.March_tir.Tir.tm_fns in
+    if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None then
+      Printf.eprintf "[shell] forced input calls: %s\n%!" (String.concat " " (List.sort compare syms));
+    let closure_lets = List.filter_map (fun (name, _, ty) ->
+        if March_tir.Dce.StringSet.mem name referenced
+        && Shell_ident.may_hold_closure ~types:pre.March_tir.Tir.tm_types ty
+        then Some name else None) ctx.var_slots in
+    match Shell_ident.not_read_only ~caps ~syms ~closure_lets
+            ~fns:(List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name) pre.March_tir.Tir.tm_fns) () with
+    | [] -> ()
+    | why ->
+      refuse differs_head skewed
+        ~extra:("--shell-force runs such an input only when it is read-only, and this one is not:"
+                :: List.map (fun w -> "  " ^ w) why)
+  end;
   (* The node checks this against the signed `caps:` after loading the
      fragment (runtime/march_shell.c), so a fragment cannot run under a
      narrower declaration than its own code. *)
@@ -2493,4 +2541,4 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
        if profile_enabled then
          Printf.eprintf "[jit-prof] in-process emit fell back to clang: %s\n%!" why;
        via_clang ());
-  { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty; sf_caps = caps }
+  { sf_so = so; sf_entry = entry; sf_ret = main_fn.fn_ret_ty; sf_caps = caps; sf_skew = skewed }

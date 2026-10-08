@@ -12684,6 +12684,50 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/user_type_named_like_stdlib_tree.expected native_user_type_named_like_stdlib_tree.out)))
 
+; ── Range.reduce must pass an uncurried reducer to List.fold_left ──
+(rule
+ (targets native_range_reduce native_range_reduce.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/range_reduce.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_range_reduce native/range_reduce.march)
+   (with-stdout-to native_range_reduce.out (system "./native_range_reduce")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/range_reduce.expected native_range_reduce.out)))
+
+(rule
+ (targets native_range_reduce_no_opt native_range_reduce_no_opt.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/range_reduce.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --no-opt -o native_range_reduce_no_opt native/range_reduce.march)
+   (with-stdout-to native_range_reduce_no_opt.out (system "./native_range_reduce_no_opt")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/range_reduce.expected native_range_reduce_no_opt.out)))
+
+(rule
+ (targets interp_range_reduce.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/range_reduce.march))
+ (action
+  (with-stdout-to interp_range_reduce.out
+   (run %{exe:../bin/main.exe} native/range_reduce.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/range_reduce.expected interp_range_reduce.out)))
+
 ; ── A nested Some(..) pattern beside a row binding the same field by name
 ; (2026-10-07): the erased sub-scrutinee decoded an Option(Float) as a niche,
 ; and the function returned denormal garbage (Option(Option(Float)),
@@ -13194,6 +13238,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/shell_skew.expected native_shell_skew.out)))
+
+; The same skewed client with --shell-force (observe plan R5.4): an input
+; reaching the differing `evens` runs when it is read-only, with a warning
+; naming it, and is audited on the node with "skew":1; one that also sends
+; a message, reads actor state (Actor.Debug) or writes a file is still
+; refused before it is compiled, so the actor's state after the refused send
+; is unchanged; a differing type with a constructor-tag difference
+; (`Shade`) is refused even
+; forced; and the node's policy still applies to a forced input (IO.Clock).
+(rule
+ (targets native_shell_skew_force.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file shell_check.exe)
+       (file shell/skew_force.txt)
+       (file native/shell_node.march)
+       (file native/shell_node_skew.march))
+ (action
+  (with-stdout-to native_shell_skew_force.out
+   (system "rm -rf sh_f; mkdir -p sh_f; ./shell_check.exe keygen-home sh_f/pk $PWD/sh_f/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_f/pk) -o sh_f/node native/shell_node.march > sh_f/build 2>&1 || { cat sh_f/build; exit 1; }; printf 'IO.Console\\nActor.Introspect\\nActor.Debug\\n' > sh_f/policy; S=/tmp/march-shell-force-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_f/policy MARCH_AUDIT_LOG=$PWD/sh_f/audit ./sh_f/node > sh_f/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_f/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_f/home %{exe:../bin/main.exe} --shell $S.shell --shell-force --shell-inputs shell/skew_force.txt native/shell_node_skew.march 2>&1; echo \"exit=$?\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; echo 'audit:'; grep -o '\"src\":\"[^\"]*\"\\(,\"skew\":1\\)\\{0,1\\},\"result\":\"[a-z_]*\"' sh_f/audit; test -e never_written && echo 'a refused input wrote its file'; rm -rf sh_f $S $S.shell $S.observe; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shell_skew_force.expected native_shell_skew_force.out)))
 
 ; A fragment calls the node's own copy of a function instead of compiling
 ; one, when the node's build has it with the same signature (Shell_ident's
