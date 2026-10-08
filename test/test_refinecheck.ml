@@ -18070,7 +18070,23 @@ end|} "f"));
   fn go(ys : List(Int)) : Int do need(ys, fn a -> fn b -> a > 0) end
 end|}
         in
-        Alcotest.(check (pair int int)) "nothing proved, nothing violated" (0, 0) (p, v)) ]
+        Alcotest.(check (pair int int)) "nothing proved, nothing violated" (0, 0) (p, v));
+
+    (* Diagnostics and hovers print types with [show_ty]: the shorthand prints
+       back as written, the spelled-out form is not prettified into it. *)
+    Alcotest.test_case "show_ty prints the shorthand back" `Quick (fun () ->
+        let first_param_ty src =
+          match (fd_of src "f").March_ast.Ast.fn_clauses with
+          | c :: _ ->
+            (match c.March_ast.Ast.fc_params with
+             | March_ast.Ast.FPNamed { March_ast.Ast.param_ty = Some t; _ } :: _ -> March_ast.Ast.show_ty t
+             | _ -> Alcotest.fail "no typed first parameter")
+          | [] -> Alcotest.fail "no clause"
+        in
+        Alcotest.(check string) "shorthand" "List(a[p])"
+          (first_param_ty "mod P1 do\n  fn f(xs : List(a[p]), k : a -> Bool[p]) : Int do 0 end\nend\n");
+        Alcotest.(check string) "spelled out" "List({ a | ... })"
+          (first_param_ty "mod P2 do\n  fn f(xs : List({a | p(_)}), k : a -> Bool[p]) : Int do 0 end\nend\n")) ]
 
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
