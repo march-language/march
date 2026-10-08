@@ -138,7 +138,17 @@ let suggestions (names : string list) (q : string) : string list =
     let n = String.length h and m = String.length lq in
     let rec go i = i + m <= n && (String.sub h i m = lq || go (i + 1)) in
     m > 0 && go 0 in
-  List.filter contains names |> List.sort_uniq compare |> List.filteri (fun i _ -> i < 12)
+  (* Best first: a name a user wrote before a compiler-minted one (`$lam…`,
+     `…$apply$…`, specialisations), then one that starts with the query, then
+     the shorter, then alphabetical.  Plain alphabetical order let minted
+     names (`$` sorts first) crowd the user's own function out of the 12. *)
+  let minted s = String.contains s '$' in
+  let starts s = let ls = String.lowercase_ascii s in
+    String.length ls >= String.length lq && String.sub ls 0 (String.length lq) = lq in
+  let key s = (minted s, not (starts s), String.length s, s) in
+  List.filter contains names |> List.sort_uniq compare
+  |> List.sort (fun a b -> compare (key a) (key b))
+  |> List.filteri (fun i _ -> i < 12)
 
 (** [last_seen]: the last pipeline stage that still had [name], when it
     existed earlier and an optimisation removed it (inlined, or dead). *)
