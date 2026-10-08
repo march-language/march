@@ -986,7 +986,9 @@ march> [{ name: "first", tags: ["a", "b", "c"] }] limit: 2
 
 - Records, tuples and constructors print field by field, with constructor
   names. A type that derives `Show` prints as its derived `show` would.
-- Strings print quoted and escaped.
+- Strings inside a value print quoted and escaped (`["a", "b"]`). A string
+  that is the whole result, or the one field of a top-level constructor,
+  prints as it is: `Actor.inspect_state` shows `Ok({ n: 42 })`.
 - The limit applies at every depth: each list, Array, Map and Set shows at
   most `N` elements then `… n more`, and each string at most `N` characters
   then `… n more chars`. `limit: all` (or `:limit 0`) turns it off.

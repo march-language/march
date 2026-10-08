@@ -153,7 +153,7 @@ git log is authoritative for exact commits.
   - Results render from their static type. Records, tuples and constructors
     print field by field (`{ a: 1, b: "two" }`,
     `Ok(Object([("a", Number(1.))]))`, where they used to print `#<tag:0>`),
-    strings print quoted and escaped at every depth, and `limit: N` (default
+    strings inside a value print quoted and escaped, and `limit: N` (default
     50) cuts every list, Array, Map and Set to `N` elements and every string
     to `N` characters, at every depth, not only a top-level list. A type
     with a hand-written `Show` prints through it, cut at 16 KiB; a function
