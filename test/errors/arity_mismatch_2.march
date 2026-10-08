@@ -1,0 +1,7 @@
+mod Main do
+  needs IO.Console
+  fn main(_console : Cap(IO.Console)) do
+    let add = fn (a, b) -> a + b
+    println(int_to_string(add(1)))
+  end
+end

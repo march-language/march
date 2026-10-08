@@ -681,6 +681,21 @@ let type_name_of_value = function
     Hashtbl.find_opt record_type_tbl key
   | _         -> None
 
+let ctor_qualified_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
+
+(** Like [type_name_of_value], but a colliding [VCon]'s type resolves to its
+    declaring-module-qualified name (e.g. "NA.Thing") instead of the bare
+    short name, so a general-interface method call routes through
+    [iface_method_tbl] to the actual argument's impl rather than whichever
+    same-short-name type's impl happened to register last. Non-colliding
+    values (the common case) fall back to [type_name_of_value] unchanged. *)
+let dispatch_type_name_of_value = function
+  | VCon (tag, _) as v ->
+    (match Hashtbl.find_opt ctor_qualified_type_tbl tag with
+     | Some qualified -> Some qualified
+     | None -> type_name_of_value v)
+  | v -> type_name_of_value v
+
 let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
     | [VInt a;    VInt b]    -> VBool (op_i a b)
     | [VFloat a;  VFloat b]  -> VBool (op_f a b)

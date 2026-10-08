@@ -12,6 +12,16 @@ mod Main do
     filter(range(0, n), fn x -> x % 2 == 0)
   end
 
+  -- Uses IO.Clock, which the session's shell policy does not list: an input
+  -- calling it is refused, though the input names no capability itself.
+  fn nap() : Int do
+    if unix_time_ms() > 0 do 7 else 0 end
+  end
+
+  -- test/native/shell_node_skew.march declares these constructors in the
+  -- other order: the shell must refuse an input that builds one.
+  type Shade = Light | Dark
+
   actor Counter do
     state { n : Int }
     init  { n: 0 }

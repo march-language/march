@@ -37,3 +37,6 @@ fix [cap_grant]:
 @@ lines 35-35 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Chan.recv: this channel came from `Chan.offer`, and the protocol's branches continue differently, so I don't know which one the peer chose. [session_offer_unrefined]

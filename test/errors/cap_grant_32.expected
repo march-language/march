@@ -27,3 +27,6 @@ fix [cap_grant]:
 @@ lines 17-17 @@
 -  fn main() do
 +  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+Chan.new: protocol `Tri` has 3 roles but Chan.new needs exactly 2. Use MPST.new for multi-party protocols. [session_role_count]

@@ -14234,7 +14234,16 @@ let test_parse_diag_codes () =
     | Some d -> d.March_errors.Errors.code
     | None -> Alcotest.fail "expected a parse error" in
   Alcotest.(check string) "grammar production" "parse_error"
+    (code "mod T\n  fn f() do 1 end\nend");
+  (* D4: a pitfall production carries its own code and a fix. *)
+  Alcotest.(check string) "then production" "then_keyword"
     (code "mod T do\n  fn f(x) do\n    if x then 1 end\n  end\nend");
+  (match parse_error_diag "mod T do\n  fn f(x) do\n    if x then 1 else 0 end\n  end\nend" with
+   | Some { March_errors.Errors.fix = Some (March_errors.Errors.FReplace { span; text }); _ } ->
+     Alcotest.(check string) "then fix text" "do" text;
+     Alcotest.(check (list int)) "then fix span" [3; 9; 3; 13]
+       [span.March_ast.Ast.start_line; span.start_col; span.end_line; span.end_col]
+   | _ -> Alcotest.fail "expected the `then` -> `do` fix");
   Alcotest.(check string) "menhir stuck" "syntax_error"
     (code "mod T do\n  fn f() do 1 + end\nend");
   Alcotest.(check string) "lexer" "lex_error"
@@ -17388,6 +17397,7 @@ let compiler_suites =
       ("prog_argv", Test_prog_argv.tests);
       ("compile_ll_race", Test_compile_ll_race.tests);
       ("post_tir_cache", Test_post_tir_cache.tests);
+      ("cas_b7", Test_cas_b7.tests);
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);

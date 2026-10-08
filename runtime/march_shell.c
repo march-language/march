@@ -18,6 +18,11 @@
  *        timeout_ms:<t> caps:<csv|-> src_b64:<b64> so_b64:<b64>
  *     -> OK <b64 result> out:<b64> | PANIC <b64 msg> out:<b64>
  *        | TIMEOUT out:<b64> | TIMEOUT uncancellable | ERR <code> [detail]
+ *   IDENT
+ *     -> OK <b64 table> | ERR no_ident
+ *        The build's shell identity (lib/jit/shell_ident.ml): a hash per
+ *        source declaration and each variant type's constructor tags, which
+ *        the client compares with its own source before running an input.
  *   BYE
  *
  * <sig> is the deploy key's signature over the line without its signature
@@ -25,7 +30,10 @@
  * as every field.  Checks, in order: a key is compiled in, the fields parse,
  * the signature, the nonce and expiry (march_sig_admit), the session's epoch
  * is still current, every cap in `caps` is listed in $MARCH_SHELL_POLICY (one
- * cap path per line; no file denies all).  Every attempt is audited with
+ * cap path per line; no file denies all), and, once the fragment is loaded,
+ * that its `__march_cap_manifest` (the caps its compiler derived from the
+ * code it emitted) lists exactly the signed caps (ERR cap_tamper, or
+ * ERR no_cap_manifest when it has none).  Every attempt is audited with
  * "type":"shell" and the decoded source.
  *
  * The fragment's entry `name` is a zero-argument function returning the
@@ -327,6 +335,25 @@ static int64_t wall_ms(void) {
 
 /* ── policy and audit ────────────────────────────────────────────────── */
 
+/* 1 iff the fragment's own manifest (`__march_cap_manifest`: its caps, sorted,
+ * one per line, as its compiler derived them from the code it emitted) lists
+ * exactly the caps of the signed `caps:` csv ("-" = none), in the same order.
+ * The client sends the manifest's caps; a mismatch means the signed line does
+ * not describe this fragment (a stale or broken client, or an edited line),
+ * and the policy was checked against the wrong set. */
+static int caps_match_manifest(const char *csv, const char *manifest) {
+    if (!csv || strcmp(csv, "-") == 0) csv = "";
+    const char *a = csv, *b = manifest;
+    for (;;) {
+        size_t na = strcspn(a, ","), nb = strcspn(b, "\n");
+        if (na != nb || memcmp(a, b, na) != 0) return 0;
+        if (!a[na] && !b[nb]) return 1;
+        if (!a[na] || !b[nb]) return 0;
+        a += na + 1;
+        b += nb + 1;
+    }
+}
+
 /* 1 iff every cap in [csv] ("-" = none) is a line of $MARCH_SHELL_POLICY;
  * else 0 with the first missing cap in [missing]. */
 static int caps_allowed(const char *csv, char *missing, size_t mlen) {
@@ -560,6 +587,19 @@ static void handle_eval(int fd, char *line, uint32_t session_epoch) {
         free(src);
         return;
     }
+    /* The policy above was checked against the signed caps; they must be the
+     * fragment's own.  The handle stays open on refusal, like every other
+     * fragment's: nothing in it has run. */
+    const char *manifest = (const char *)dlsym(h, "__march_cap_manifest");
+    if (!manifest || !caps_match_manifest(q.caps, manifest)) {
+        const char *code = manifest ? "cap_tamper" : "no_cap_manifest";
+        audit(q.name, q.caps, q.nonce, srcs, src_n, code);
+        char buf[64];
+        snprintf(buf, sizeof buf, "ERR %s", code);
+        send_line(fd, buf);
+        free(src);
+        return;
+    }
     audit(q.name, q.caps, q.nonce, srcs, src_n, "ok");
     free(src);
 
@@ -653,6 +693,19 @@ static void *session_thread(void *arg) {
                      range * SHELL_SLOTS_PER, range * SHELL_SLOTS_PER + SHELL_SLOTS_PER - 1,
                      SHELL_TRIPLE);
             send_line(fd, b);
+        } else if (strcmp(buf, "IDENT") == 0) {
+            /* The build's shell identity table (lib/jit/shell_ident.ml),
+             * which the client compares with its own source.  Public: it
+             * holds hashes of the source, not the source. */
+            static void *self;
+            if (!self) self = dlopen(NULL, RTLD_NOW);
+            const char *ident = self ? (const char *)dlsym(self, "__march_shell_ident") : NULL;
+            if (!ident) { send_line(fd, "ERR no_ident"); continue; }
+            char *b64 = b64_encode((const unsigned char *)ident, strlen(ident));
+            if (!b64) { send_line(fd, "ERR out_of_memory"); continue; }
+            send_all(fd, "OK ", 3);
+            send_line(fd, b64);
+            free(b64);
         } else if (strncmp(buf, "EVAL ", 5) == 0) {
             if (!hello) { send_line(fd, "ERR no_hello"); continue; }
             handle_eval(fd, buf, epoch);

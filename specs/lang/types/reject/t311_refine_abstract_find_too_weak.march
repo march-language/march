@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: abstract-refinement-too-weak
+-- Abstract refinements, phase 3: a named predicate whose proved return is
+-- weaker than the demand (`n >= 0` admits 0).  A too-weak skip, which
+-- `cap verified` makes this error.  Accept companion: accept/t310.
+mod AbsFindWeak do
+  cap verified
+  fn one_pos(o : Option({Int | _ > 0})) : Int do 0 end
+  fn nonneg(n : Int) : {Bool | _ == (n >= 0)} do n >= 0 end
+  fn weak(ys : List(Int)) : Int do one_pos(List.find(ys, nonneg)) end
+end

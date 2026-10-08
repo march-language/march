@@ -56,6 +56,17 @@ let user_diag ~filename ~user_files (d : March_errors.Errors.diagnostic) =
     user_diag_file ~filename ~user_files f
     && not (f = synthetic_file && d.severity = March_errors.Errors.Hint)
 
+(* Diagnostics replay (observability plan B7.1): every diagnostic text a
+   compile prints to stderr goes through [emit_diag_text], which also keeps
+   it in [replay_log].  A successful compile stores the log beside its
+   source-level cache entry (Cas.store_diagnostics); a hit on that entry
+   prints it again, so a warm build shows the same warnings as a cold one. *)
+let replay_log = Buffer.create 1024
+
+let emit_diag_text (s : string) : unit =
+  prerr_string s;
+  Buffer.add_string replay_log s
+
 (** Render a diagnostic against the file its span points into — an
     imported-module error must not be shown with the entry file's lines.  A
     synthetic span has no source at all (its line number is a counter), so it
@@ -1370,11 +1381,16 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            must never satisfy the plain spelling (measured: it did, and the
            gate's own driver test went silent on a warm CAS). *)
         @ (if !stdlib_source then ["stdlib-source"] else [])
+        (* --verify-tir / MARCH_VERIFY_TIR changes no output, but a cache hit
+           skips the TIR pipeline and so the check; keying on it means a
+           verified compile is never satisfied by an unverified cached one. *)
+        @ (if March_tir.Tir_verify.enabled () then ["verify-tir"] else [])
         @ cross_sysroot_tag
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
         (* --protocol-baseline: the previous protocol versions decide the
            generated `<P>_Msg.compat()` table, so they are part of the binary. *)
         @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+        @ (match !shell_ident_tag with Some t -> ["sident:" ^ t] | None -> [])
         @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
             (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
@@ -2076,6 +2092,132 @@ let write_impl_hashes basename (h_sccs : March_cas.Pipeline.hashed_scc list) =
   List.iter (fun l -> output_string oc l; output_char oc '\n') lines;
   close_out oc
 
+(* ── Depend-mode source key (observability plan B7.2) ─────────────────────
+
+   The source-level cache key used to hash every `.march` file in the entry's
+   directory and every MARCH_LIB_PATH directory, because the resolver may
+   auto-discover any of them.  So editing an UNRELATED sibling (one the build
+   never loads) was a miss.  ccache's depend mode, adapted: after a
+   successful run, record the load set the resolver actually produced
+   ([resolve_imports]'s [user_files]); on the next run, if that record is
+   still valid, key on the entry + stdlib + exactly those files.
+
+   "Still valid" must mean "the resolver would load the same set", or a hit
+   is stale.  The resolver keeps a discovered module iff it is reachable by
+   name from kept sources or carries a global-effect declaration
+   (Resolver.keep), so the record is valid only when
+   - the walked directories are the same, and no `.march` file appeared in
+     any of them (a new sibling can become reachable);
+   - every recorded load-set file still exists;
+   - every recorded NON-loaded sibling whose bytes changed still parses, has
+     no global-effect declaration, and none of its anchors (its module name,
+     type and constructor names: Resolver.provided_anchor_names) is a token
+     of the entry or a loaded file (Resolver.referenced_name_tokens): i.e.
+     the resolver would prune it again.
+   Anything else falls back to today's full-directory key. *)
+
+let loadset_version = "march-loadset v1"
+
+let realpath_or p = try Unix.realpath p with Unix.Unix_error _ -> p
+
+let read_opt path =
+  try
+    let ic = open_in_bin path in
+    let s = really_input_string ic (in_channel_length ic) in
+    close_in ic; Some s
+  with Sys_error _ -> None
+
+let loadset_path ~store_root ~entry_real ~walked =
+  Printf.sprintf "%s/loadsets/%s" store_root
+    (Digest.to_hex (Digest.string (String.concat "\x00" (entry_real :: walked))))
+
+(* The depend-mode digest: entry bytes + stdlib digest + each loaded file's
+   path and bytes, in sorted order.  [None] if a listed file cannot be read. *)
+let depend_digest ~src ~stdlib_hash ~(listed : string list) : string option =
+  let buf = Buffer.create (64 * 1024) in
+  Buffer.add_string buf src;
+  Buffer.add_string buf stdlib_hash;
+  let ok = List.for_all (fun f ->
+      match read_opt f with
+      | Some b -> Buffer.add_string buf ("\x00" ^ f ^ "\x00"); Buffer.add_string buf b; true
+      | None -> false) listed in
+  if ok then Some ("dep:" ^ Digest.to_hex (Digest.string (Buffer.contents buf))) else None
+
+(* The loaded files of a run, canonical, without the entry, sorted. *)
+let canonical_listed ~entry_real (user_files : string list) =
+  List.sort_uniq String.compare
+    (List.filter (fun f -> f <> entry_real) (List.map realpath_or user_files))
+
+let write_loadset ~path ~walked ~listed ~unlisted =
+  let lines =
+    loadset_version
+    :: List.map (fun d -> "dir\t" ^ d) walked
+    @ List.map (fun f -> "listed\t" ^ f) listed
+    @ List.map (fun (f, h) -> "unlisted\t" ^ f ^ "\t" ^ h) unlisted in
+  try
+    let dir = Filename.dirname path in
+    (try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+    let tmp = path ^ ".tmp." ^ string_of_int (Unix.getpid ()) in
+    Out_channel.with_open_bin tmp (fun oc -> output_string oc (String.concat "\n" lines ^ "\n"));
+    Sys.rename tmp path
+  with Sys_error _ | Unix.Unix_error _ -> ()
+
+(* [files_in walked]: every `.march` file the resolver would discover. *)
+let files_in walked =
+  List.concat_map (fun d ->
+      List.map realpath_or (March_resolver.Resolver.collect_lib_files d)) walked
+  |> List.sort_uniq String.compare
+
+(* The listed files if the record at [path] is still valid (see above). *)
+let valid_loadset ~path ~entry_real ~src ~walked : string list option =
+  match read_opt path with
+  | None -> None
+  | Some text ->
+    let lines = List.filter (fun l -> l <> "") (String.split_on_char '\n' text) in
+    (match lines with
+     | v :: rest when v = loadset_version ->
+       let fields l = String.split_on_char '\t' l in
+       let dirs = List.filter_map (fun l -> match fields l with ["dir"; d] -> Some d | _ -> None) rest in
+       let listed = List.filter_map (fun l -> match fields l with ["listed"; f] -> Some f | _ -> None) rest in
+       let unlisted = List.filter_map (fun l -> match fields l with ["unlisted"; f; h] -> Some (f, h) | _ -> None) rest in
+       let known = entry_real :: listed @ List.map fst unlisted in
+       if dirs <> walked then None
+       else if List.exists (fun f -> not (List.mem f known)) (files_in walked) then None
+       else if List.exists (fun f -> not (Sys.file_exists f)) listed then None
+       else begin
+         let changed = List.filter_map (fun (f, h) ->
+             match read_opt f with
+             | None -> None   (* deleted: it was not loaded, so nothing changes *)
+             | Some b -> if Digest.to_hex (Digest.string b) = h then None else Some (f, b))
+             unlisted in
+         if changed = [] then Some listed
+         else begin
+           let tokens = Hashtbl.create 256 in
+           List.iter (fun t ->
+               Hashtbl.iter (fun k () -> Hashtbl.replace tokens k ())
+                 (March_resolver.Resolver.referenced_name_tokens t))
+             (src :: List.filter_map read_opt listed);
+           let still_pruned (f, b) =
+             match March_parser.Parse.module_ ~filename:f b with
+             | Error _ -> false
+             | Ok m ->
+               let decls = m.March_ast.Ast.mod_decls in
+               not (March_resolver.Resolver.has_global_effect_decl decls)
+               && not (List.exists (fun a -> Hashtbl.mem tokens a)
+                         (m.March_ast.Ast.mod_name.March_ast.Ast.txt
+                          :: March_resolver.Resolver.provided_anchor_names decls))
+           in
+           if List.for_all still_pruned changed then Some listed else None
+         end
+       end
+     | _ -> None)
+
+(* Set by the early cache lookup in [compile]: given a successful run's
+   [user_files], also store [artifact] (and its diagnostics) under the
+   depend-mode key and record the load set for the next run. *)
+let depend_store : (user_files:string list -> artifact:string -> diag:string -> unit) option ref =
+  ref None
+
 let compile filename =
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
@@ -2120,11 +2262,12 @@ let compile filename =
     then None
     else if not !do_compile && not !do_check then None
     else try
+      let stdlib_hash = match stdlib_source_hash ~for_js:is_js_target () with
+        | Some (_, h, _) -> h
+        | None -> "" in
       let buf = Buffer.create (256 * 1024) in
       Buffer.add_string buf src;
-      (match stdlib_source_hash ~for_js:is_js_target () with
-       | Some (_, h, _) -> Buffer.add_string buf h
-       | None -> ());
+      Buffer.add_string buf stdlib_hash;
       (* Hash every .march file the resolver will load as user code: the
          entry's OWN source directory (siblings are auto-discovered by
          resolve_imports — search_path = source_dir :: lib paths) plus all
@@ -2139,6 +2282,8 @@ let compile filename =
         List.filter (fun d -> d <> "") (String.split_on_char ':' lib_path) in
       let entry_real =
         (try Unix.realpath filename with Unix.Unix_error _ -> filename) in
+      let walked = Filename.dirname filename :: lib_dirs in
+      let walk_hash () =
       List.iter (fun dir ->
         let files = List.sort String.compare (collect_lib_files dir) in
         List.iter (fun fp ->
@@ -2156,18 +2301,48 @@ let compile filename =
             with Sys_error _ -> ())
           end
         ) files
-      ) (Filename.dirname filename :: lib_dirs);
-      let cache_input = Buffer.contents buf in
-      let src_hash = "src:" ^ Digest.to_hex (Digest.string cache_input) in
+      ) walked;
+      "src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)) in
+      (* B7.2: key on the previous run's load set when it is still valid
+         (see [valid_loadset]); the full walk otherwise. *)
+      let ls_path = loadset_path ~store_root:(Sys.getcwd () ^ "/.march/cas")
+          ~entry_real ~walked in
+      let src_hash =
+        match valid_loadset ~path:ls_path ~entry_real ~src ~walked with
+        | Some listed ->
+          (match depend_digest ~src ~stdlib_hash ~listed with
+           | Some h -> h
+           | None -> walk_hash ())
+        | None -> walk_hash ()
+      in
+      (* After a successful run: store the result under the depend-mode key
+         its real load set gives, and record that load set. *)
+      let register_depend_store (key_of : string -> string) store =
+        depend_store := Some (fun ~user_files ~artifact ~diag ->
+            let listed = canonical_listed ~entry_real user_files in
+            match depend_digest ~src ~stdlib_hash ~listed with
+            | None -> ()
+            | Some dep_hash ->
+              let dep_ch = key_of dep_hash in
+              March_cas.Cas.store_artifact store dep_ch artifact;
+              March_cas.Cas.store_diagnostics store dep_ch diag;
+              let unlisted =
+                List.filter_map (fun f ->
+                    if f = entry_real || List.mem f listed then None
+                    else Option.map (fun b -> (f, Digest.to_hex (Digest.string b)))
+                        (read_opt f))
+                  (files_in walked) in
+              write_loadset ~path:ls_path ~walked ~listed ~unlisted)
+      in
       let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
-      (* Same rule as --refine-report above, for a diagnostic that lives even
-         further down the pipeline: an @[no_alloc(warn)] contract (or a hard
-         one downgraded by --no-opt) produces a WARNING and a successful
-         binary, so a warm artifact would satisfy the next build and the
-         warning would silently disappear.  A textual mention anywhere in the
-         hashed sources is enough to suppress the early exit — the check
-         itself decides whether anything is reported. *)
-      if contains_substring cache_input "no_alloc" then raise Exit;
+      (* A warnings-only build (an @[no_alloc(warn)] contract, an unused
+         binding, ...) used to lose its warnings on a warm cache, and the
+         `no_alloc` case was patched by refusing the early exit whenever the
+         sources mentioned it.  The compile path now replays the stored
+         diagnostics on a hit (Cas.lookup_diagnostics, below), so the bailout
+         is gone; --check caches only runs that printed nothing (see the check
+         path), so it needs neither.  Runs whose OUTPUT is a report stay
+         bypassed entirely, above. *)
       if !do_check then begin
         (* Every flag that changes the verdict is part of the key, or a
            clean run under one setting satisfies the next run under another
@@ -2192,6 +2367,8 @@ let compile filename =
         (match March_cas.Cas.lookup_artifact store ch with
          | Some _ -> exit 0
          | None -> ());
+        register_depend_store
+          (fun h -> March_cas.Cas.compilation_hash h ~target:"check" ~flags) store;
         Some (store, ch)
       end else begin (* !do_compile *)
         let target_parsed = parse_target !target_str in
@@ -2201,6 +2378,9 @@ let compile filename =
            module's impl hashes. *)
         let (_, ch) =
           build_cas_key ~target:target_parsed ~target_label ~src_hash in
+        register_depend_store
+          (fun h -> snd (build_cas_key ~target:target_parsed ~target_label ~src_hash:h))
+          store;
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
         let out_bin  =
@@ -2209,18 +2389,24 @@ let compile filename =
           else if target_parsed = March_tir.Llvm_emit.Js then basename ^ ".mjs"
           else basename
         in
-        (match March_cas.Cas.lookup_artifact store ch with
-         | Some cached_bin
+        (match March_cas.Cas.lookup_artifact store ch,
+               March_cas.Cas.lookup_diagnostics store ch with
+         | Some cached_bin, Some diag_text
            when (not !compile_so || March_cas.Cas.restore_sidecars store ch out_bin)
                 && March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin ->
+           (* B7.1: print what the compile that produced this artifact
+              printed.  No [.diag] record (an entry cached before replay
+              existed) falls through as a miss. *)
+           prerr_string diag_text;
            (* A --compile-so build's output includes its sidecars
               (.hcr_manifest, .schemas.json): restored with the .so, or the
               hit is a miss. This early exit skips the code that writes
               them. *)
            Printf.eprintf "compiled %s (cached)\n" out_bin;
            exit 0
-         (* Stale/missing artifact or failed copy → recompile *)
-         | Some _ | None -> ());
+         (* Stale/missing artifact, no diagnostics record, or failed copy
+            → recompile *)
+         | _ -> ());
         Some (store, ch)
       end
     with Exit -> None
@@ -2291,10 +2477,10 @@ let compile filename =
   let desugar_errors = March_errors.Errors.create () in
   let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      Printf.eprintf "%s:%d:%d: %s: %s\n"
+      emit_diag_text (Printf.sprintf "%s:%d:%d: %s: %s\n"
         d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
         d.span.March_ast.Ast.start_col (severity_word d.severity)
-        (March_errors.Errors.headline_with_code d)
+        (March_errors.Errors.headline_with_code d))
     ) (March_errors.Errors.sorted desugar_errors);
   let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
   stamp "desugar";
@@ -2437,6 +2623,13 @@ let compile filename =
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
   in
   stamp "stdlib-load";
+  (* The shell's identity table, over the same declarations `march --shell`
+     hashes on the client (both see this [desugared]). *)
+  if !do_compile && !hot_reload_prefix <> None && not !compile_so then begin
+    let decls, _ = March_jit.Shell_ident.of_decls desugared.March_ast.Ast.mod_decls in
+    shell_ident_decls := Some decls;
+    shell_ident_tag := Some (March_jit.Shell_ident.digest decls)
+  end;
   (* source_cas_state = early_cas — the CAS lookup already ran before parse.
      On a cache hit we already exited; if we reach this point it's a miss.
      We still pass the (store, ch) pair forward so the post-clang store fires. *)
@@ -2644,7 +2837,7 @@ let compile filename =
   end;
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
-        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
+        emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
     ) diags;
   (* --shell: the program typechecked as the node's build did; hand it to the
      remote shell instead of running or compiling it (bin/shell_cmd.ml). *)
@@ -2743,7 +2936,8 @@ let compile filename =
     in
     (match source_cas_state with
      | Some (src_store, src_ch) when not printed_user_diag ->
-       March_cas.Cas.store_artifact src_store src_ch filename
+       March_cas.Cas.store_artifact src_store src_ch filename;
+       Option.iter (fun f -> f ~user_files ~artifact:filename ~diag:"") !depend_store
      | Some _ | None -> ());
     exit 0
   end
@@ -2843,7 +3037,11 @@ let compile filename =
     in
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
     snap_tir "tir-lower" tir;
-    stamp "lower";
+    (* A6: the same per-pass counts Contract_pipeline puts on its stamps. *)
+    stamp (if !do_timings
+           then "lower  " ^ March_tir.Tir_metrics.to_string
+                  (March_tir.Tir_metrics.of_module tir)
+           else "lower");
     (* Phase 5: collect actor state schemas for .schemas.json emission.
        Picks up TDRecord entries named *_State — the state record emitted
        by lower_actor for every actor definition. Only collected when both
@@ -3228,7 +3426,7 @@ let compile filename =
         ~after_fusion:policy_audit ~before_opt
         ~wasm_island:(parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown)
         ~is_js:is_js_target ~hot_reload:(hr_config ()) ~iface_methods
-        ~decls:contract_decls
+        ~decls:contract_decls ~stamp_metrics:!do_timings
         (* --report-contracts judges functions nothing calls, so they must
            survive DCE and inlining to be judged at all.  Their BODIES are
            optimised exactly as always; only reachability changes, and the
@@ -3238,7 +3436,12 @@ let compile filename =
                           d.March_tir.Alloc_contract.d_name) contract_decls
                       else mainless_roots)
         ~opt:!opt_enabled tir
-      with March_tir.Mono.Repr_disagreement msg ->
+      with
+      | March_tir.Tir_verify.Failed (stage, findings) ->
+        (* A malformed TIR module is a compiler bug, not a program error. *)
+        prerr_endline (March_tir.Tir_verify.render ~stage findings);
+        exit 3
+      | March_tir.Mono.Repr_disagreement msg ->
         (* A real defect in the program or the stdlib manifest, not a compiler
            bug: render it as one clean error rather than letting it reach the
            `| exn ->` internal-compiler-error handler with a backtrace. *)
@@ -3256,7 +3459,7 @@ let compile filename =
       pipe.March_tir.Contract_pipeline.vectorize_diags
       @ pipe.March_tir.Contract_pipeline.contract_diags in
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
-        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
+        emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
       ) vectorize_diags;
     if List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error) vectorize_diags
@@ -3542,9 +3745,21 @@ let compile filename =
             March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin
           | None -> false
         in
-        (if cached_ok then
+        (if cached_ok then begin
+          (* A post-TIR hit ran the whole front end, so it knows this
+             source's diagnostics and load set: record the source-level
+             entry too (artifact, diagnostics, depend-mode key), or every
+             later identical build would stop at this same, slower hit. *)
+          (match source_cas_state with
+           | Some (src_store, src_ch) ->
+             March_cas.Cas.store_artifact src_store src_ch out_bin;
+             March_cas.Cas.store_diagnostics src_store src_ch
+               (Buffer.contents replay_log);
+             Option.iter (fun f -> f ~user_files ~artifact:out_bin
+                             ~diag:(Buffer.contents replay_log)) !depend_store
+           | None -> ());
           Printf.eprintf "compiled %s (cached)\n" out_bin
-        else
+        end else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary.  [let () = … in], not a
              bare [;]: [;] binds looser than if/else, which would leave
@@ -3553,6 +3768,12 @@ let compile filename =
           let () = March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None in
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
+          let ir = match !shell_ident_decls with
+            | Some decls ->
+              ir ^ March_jit.Shell_ident.ir_global
+                { March_jit.Shell_ident.decls;
+                  tags = March_jit.Shell_ident.tags_of_types tir.March_tir.Tir.tm_types }
+            | None -> ir in
           let ir = finish_ir target ir in
           stamp "llvm-emit";
           (* clang reads the per-process temp, never the shared [ll_file]
@@ -3617,7 +3838,12 @@ let compile filename =
               stamp "clang";
               March_cas.Cas.store_artifact store ch out_bin;
               (match source_cas_state with
-               | Some (src_store, src_ch) -> March_cas.Cas.store_artifact src_store src_ch out_bin
+               | Some (src_store, src_ch) ->
+                 March_cas.Cas.store_artifact src_store src_ch out_bin;
+                 March_cas.Cas.store_diagnostics src_store src_ch
+                   (Buffer.contents replay_log);
+                 Option.iter (fun f -> f ~user_files ~artifact:out_bin
+                                 ~diag:(Buffer.contents replay_log)) !depend_store
                | None -> ());
               Printf.eprintf "compiled %s (%s)\n" out_bin target_label
             end
@@ -4262,7 +4488,12 @@ let compile filename =
               stamp "clang";
               March_cas.Cas.store_artifact store ch out_bin;
               (match source_cas_state with
-               | Some (src_store, src_ch) -> March_cas.Cas.store_artifact src_store src_ch out_bin
+               | Some (src_store, src_ch) ->
+                 March_cas.Cas.store_artifact src_store src_ch out_bin;
+                 March_cas.Cas.store_diagnostics src_store src_ch
+                   (Buffer.contents replay_log);
+                 Option.iter (fun f -> f ~user_files ~artifact:out_bin
+                                 ~diag:(Buffer.contents replay_log)) !depend_store
                | None -> ());
               Printf.eprintf "compiled %s\n" out_bin
             end
@@ -5452,6 +5683,8 @@ let () =
     ("--stdlib-source", Arg.Set stdlib_source, " The entry file(s) are standard-library sources checked under a path outside the resolved stdlib root (e.g. `march --check --stdlib-source stdlib/actor.march` from the repo root): exempt them from the stdlib-only builtin gate. Never inferred from the file name");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
+    ("--verify-tir", Arg.Set March_tir.Tir_verify.enabled_flag,
+     " Check TIR well-formedness after every pass (scoping and references); a finding is an internal compiler error. Same as MARCH_VERIFY_TIR=1");
     ("--explain", Arg.String (fun code ->
          print_string (March_errors.Explain.explain code); exit 0),
      "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");

@@ -45,7 +45,8 @@ let hof_spec_env_disabled : bool Lazy.t =
       | _ -> false)
 
 (** Escape hatch: [MARCH_NO_NATIVEARR_FUSION=1] turns off the NativeArray
-    map/map2 chain fusion ([Fusion.run_nativearr]) for A/B runs and
+    map/map2/fold chain fusion ([Fusion.run_nativearr]) and the sum-map
+    peephole ([Native_map_inline.run ~sum_map]) for A/B runs and
     bisection.  Read once per process; part of the CAS key (bin/main.ml). *)
 let nativearr_fusion_env_disabled : bool Lazy.t =
   lazy (match Sys.getenv_opt "MARCH_NO_NATIVEARR_FUSION" with
@@ -56,11 +57,28 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(after_fusion = fun _ -> ()) ?(before_perceus = fun ~k_table:_ _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
     ?(wasm_island = false) ?(is_js = false) ?(hot_reload = None)
-    ?iface_methods ?(decls = []) ~opt (tir : Tir.tir_module) : result =
+    ?iface_methods ?(decls = []) ?(stamp_metrics = false)
+    ~opt (tir : Tir.tir_module) : result =
+  (* A6: with [stamp_metrics] (the driver passes it under --timings) each
+     stamp also carries the module's Tir_metrics counts at that point. *)
+  let stamp_tir name (m : Tir.tir_module) =
+    if stamp_metrics then
+      stamp (name ^ "  " ^ Tir_metrics.to_string (Tir_metrics.of_module m))
+    else stamp name
+  in
   (* Provenance completeness: after every pass, any top-level fn still
      without an origin gets one naming that pass (see lib/tir/provenance.ml).
      Hooked on [snap] because every pass already reports to it. *)
-  let snap name tir = Provenance.sweep ~pass:name tir; snap name tir in
+  (* TIR verifier (A1; lib/tir/tir_verify.ml): under --verify-tir /
+     MARCH_VERIFY_TIR=1 every pass's output is checked as it is reported,
+     and the input is checked first as "tir-lower" (the driver's own
+     tir-lower snap is a dump hook, not part of this pipeline). *)
+  let verify = Tir_verify.enabled () in
+  let verify_stage name tir =
+    if verify then Tir_verify.enforce ~stage:name ?iface_methods tir in
+  verify_stage "tir-lower" tir;
+  let snap name tir =
+    Provenance.sweep ~pass:name tir; verify_stage name tir; snap name tir in
   let decls = Alloc_contract.resolve_names decls tir in
   (* TRMC eligibility analysis (gated on MARCH_TRMC_REPORT).  Must run here:
      by tir-perceus the stdlib's nested `go` helpers are closures invoked via
@@ -98,7 +116,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   in
   let tir = Mono.monomorphize ?iface_methods tir in
   snap "tir-mono" tir;
-  stamp "mono";
+  stamp_tir "mono" tir;
   (* After mono, update tm_exports to use monomorphized names *)
   let tir =
     if tir.Tir.tm_exports <> [] then begin
@@ -142,11 +160,11 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     if opt && (not is_js) && not (Lazy.force nativearr_fusion_env_disabled)
     then Fusion.run_nativearr tir else tir in
   snap "tir-fusion" tir;
-  stamp "fusion";
+  stamp_tir "fusion" tir;
   after_fusion tir;
   let tir = Defun.defunctionalize tir in
   snap "tir-defun" tir;
-  stamp "defun";
+  stamp_tir "defun" tir;
   (* The per-type table is decided here — after Mono (which instantiates
      generic variants) and Defun (which adds the closure structs), so the
      decision is made on the type list the remaining passes see, and BEFORE
@@ -196,15 +214,15 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = Perceus.perceus ~k_table:k0 ~borrow_map
       ~heap_lambdas:(hot_reload <> None) tir in
   snap "tir-perceus" tir;
-  stamp "perceus";
+  stamp_tir "perceus" tir;
   (* Deep-drop synthesis (lib/tir/drop.ml).  Skipped for the JS target, whose
      runtime is GC'd and ignores RC ops entirely. *)
   let tir = if is_js then tir else Drop.run ~k_table:k0 ~borrow_map tir in
   snap "tir-drop" tir;
-  stamp "drop";
+  stamp_tir "drop" tir;
   let tir = Escape.escape_analysis ~k_table:k0 ~borrow_map tir in
   snap "tir-escape" tir;
-  stamp "escape";
+  stamp_tir "escape" tir;
   let pre_opt = tir in
   before_opt pre_opt;
   (* Extra DCE roots, given by pre-Mono name: expand to every clone whose
@@ -237,7 +255,9 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   (* The driver records Opt's per-pass snapshots through a different observer
      than the top-level stages (phases only, never MARCH_DUMP_TXT); default to
      [snap] for callers that don't care. *)
-  let opt_snap = match opt_snap with Some f -> f | None -> snap in
+  let opt_snap = match opt_snap with
+    | Some f -> (fun name m -> verify_stage name m; f name m)
+    | None -> snap in
   let tir = if opt then Opt.run ~snap:opt_snap ~hot_reload tir else tir in
   (* Prune functions unreachable from the entry points BEFORE LLVM emit, even
      when the optimizer is disabled: a linkability requirement, not an
@@ -256,7 +276,9 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   in
   (* P10 Phase 2: inline non-capturing NativeArray.map closures.  Native/wasm
      only — Js_emit has no codegen arm for the synthetic call. *)
-  let tir = if is_js then tir else Native_map_inline.run tir in
+  let tir =
+    if is_js then tir
+    else Native_map_inline.run ~sum_map:(not (Lazy.force nativearr_fusion_env_disabled)) tir in
   snap "tir-native-map-inline" tir;
   (* Hof_spec.redirect_unboxed: a direct call to a Float/Int-signature apply fn
      goes to a clone emitted with native double/i64 parameters, so nothing is
@@ -265,7 +287,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   snap "tir-hof-unboxed" tir;
   (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
   if not opt then snap "tir-opt" tir;
-  stamp "opt";
+  stamp_tir "opt" tir;
   (* @[no_alloc]: the last pass before emission, on the exact TIR Llvm_emit
      will consume. *)
   (* Hand the emitter exactly this decision: the same unboxed set the passes
@@ -276,7 +298,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let retaining = Alloc_contract.retaining_fns ~k_table ~decls tir in
   let contract_diags =
     Alloc_contract.check ~decls ~allocating ~retaining ~opt tir in
-  stamp "alloc-contract";
+  stamp_tir "alloc-contract" tir;
   { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table }
 
 (** The allocation contracts, judged without emitting anything: what `march

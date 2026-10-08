@@ -1,0 +1,49 @@
+-- An aggregate returned on one path and only read on another is released on
+-- the reading path (specs/progress/2026-10-07-mixed-tail-aggregate-leak.md).
+-- Perceus skipped the scope-end drop of a let-bound record as soon as ANY
+-- tail returned it, and gave up when the deciding branch sat in a let's
+-- right-hand side, so the reading path leaked the record and everything it
+-- held (SessionNode.Endpoint's handlers: one state record per session party).
+-- SIGNAL: under 5 objects left over 100 calls of each shape, half taking each
+-- branch (RED before: 201 each).
+mod Main do
+  needs IO.Console
+
+  type R = { n : Int, xs : List(Int) }
+
+  pfn mk(n : Int) : R do { n: n, xs: [n, n + 1] } end
+
+  -- the deciding branch is the scope's tail
+  pfn at_tail(i : Int) : R do
+    let st = mk(i)
+    if i % 2 == 0 do { n: st.n + 1, xs: st.xs } else st end
+  end
+
+  -- the deciding branch is a let's right-hand side; the record is dead after
+  pfn in_let(i : Int) : Int do
+    let st = mk(i)
+    let next = if i % 2 == 0 do st else { n: st.n, xs: Cons(i, Nil) } end
+    List.length(next.xs)
+  end
+
+  pfn use_tail(i : Int) : Int do
+    let r = at_tail(i)
+    List.length(r.xs)
+  end
+
+  pfn times(n : Int, f : (Int) -> Int, acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, f, acc + f(n)) end
+  end
+
+  pfn probe(name : String, f : (Int) -> Int) : () do
+    let _ = times(4, f, 0)
+    let a0 = live_allocs()
+    let r = times(100, f, 0)
+    println(name ++ " = " ++ int_to_string(r) ++ ", no growth: " ++ bool_to_string(live_allocs() - a0 < 5))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    probe("returned at the tail on one branch", fn i -> use_tail(i))
+    probe("returned from a let on one branch", fn i -> in_let(i))
+  end
+end

@@ -170,8 +170,17 @@ let run sock prog sk_file policy log frag_dir =
     (ask c (eval_line ~sk ~epoch ~caps:"IO.NetConnect" ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())
      = "ERR policy IO.NetConnect") "";
   write_file policy "# shell caps\nIO.Console\nIO.NetConnect\n";
-  check "listed in the policy: allowed"
-    (starts_with (ask c (eval_line ~sk ~epoch ~caps:"IO.Console,IO.NetConnect" ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())) "OK ") "";
+  check "listed in the policy, and the fragment's manifest: allowed"
+    (starts_with (ask c (eval_line ~sk ~epoch ~caps:"IO.Console,IO.NetConnect" ~name:"__shell_frag_caps" ~so:(so "frag_caps") ())) "OK ") "";
+  check "signed caps the manifest does not list: cap_tamper"
+    (ask c (eval_line ~sk ~epoch ~caps:"IO.Console,IO.NetConnect" ~name:"__shell_frag_ok" ~so:(so "frag_ok") ())
+     = "ERR cap_tamper") "";
+  check "signed caps narrower than the manifest: cap_tamper"
+    (ask c (eval_line ~sk ~epoch ~caps:"IO.Console" ~name:"__shell_frag_caps" ~so:(so "frag_caps") ())
+     = "ERR cap_tamper") "";
+  check "a fragment without a manifest: no_cap_manifest"
+    (ask c (eval_line ~sk ~epoch ~name:"__shell_frag_nomanifest" ~so:(so "frag_nomanifest") ())
+     = "ERR no_cap_manifest") "";
   let p = ask c (eval_line ~sk ~epoch ~name:"__shell_frag_panic" ~so:(so "frag_panic") ()) in
   check "a panicking fragment answers PANIC with its message"
     (starts_with p "PANIC " && b64_decode (List.nth (words p) 1) = "fragment panicked") p;
@@ -202,7 +211,8 @@ let run sock prog sk_file policy log frag_dir =
   send c "BYE";
   close c;
   let results = audit_results log in
-  let expected = [ "ok"; "replay"; "bad_signature"; "policy"; "ok"; "ok"; "ok"; "ok"; "err_no_entry";
+  let expected = [ "ok"; "replay"; "bad_signature"; "policy"; "ok"; "cap_tamper"; "cap_tamper";
+                   "no_cap_manifest"; "ok"; "ok"; "ok"; "err_no_entry";
                    "epoch_changed"; "bad_args" ] in
   check "every EVAL is audited, in order" (results = expected) (String.concat "," results);
   check "the audit line carries the source"

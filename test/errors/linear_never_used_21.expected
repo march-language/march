@@ -25,3 +25,6 @@ fix [unused_binding]:
 @@ lines 7-7 @@
 -  fn bad(linear r : Res) : () do
 +  fn bad(linear _r : Res) : () do
+
+after fix: exit 1
+The linear value `_r` was never used. [linear_never_used]

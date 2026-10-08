@@ -76,14 +76,10 @@ name derived from where the thing is. `host'` below is the host through
   register number to a placeholder, and comparing the name-ordered
   `march_clo_drop_pairs` table as a set. Zero programs differ in their
   embedded capability report (`__march_capdecl_*` / `__march_capfrom_*`).
-- **`test/snapshots/`** (12 files) regenerated. Seven are symbol renames only;
-  the renderer sorts by name, so renamed fns also move. The other five `lower/`
-  files also shift some stdlib functions' local `$t`/`$f` numbers by one. That
-  shift is **pre-existing on main**: main's own `run_snapshots.exe` fails 3
-  cases (`tir_snapshots_lower` 10, 11, 17) against the committed files, so
-  this regeneration carries the catch-up. The compiler's own
-  `MARCH_DUMP_TXT=tir-lower` output is identical to main's modulo names in
-  all 3835 functions of one of those programs.
+- **`test/snapshots/`** (12 files) regenerated on top of current main: symbol
+  renames only (the renderer sorts by name, so renamed fns also move). The
+  harness runs main's A1 verifier at every stage and main's A6 metrics pins;
+  both pass unchanged (61 cases).
 - `hr_slot_hashes`'s `counter_re` is retired.
 - The P2 repro (`specs/progress/2026-10-06-cold-stdlib-cache-changes-specializations.md`)
   was already fixed by 5864ef0d1; its byte-identical `--emit-llvm` acceptance
@@ -94,4 +90,4 @@ name derived from where the thing is. `host'` below is the host through
 `run_codegen -q` (675), `run_compiler -q` (1290), `run_eval -q` (288),
 `run_stdlib -q` (825, including the compiled HTTP end-to-end servers),
 `run_errors` (277), `test_jit` (33), `test_lsp` (379), `test_deploy_plan`
-(27), `run_snapshots` (57): all green.
+(27), `run_snapshots` (61): all green.

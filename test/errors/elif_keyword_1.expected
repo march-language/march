@@ -1,0 +1,16 @@
+exit: 1
+-- ERROR -------------------- errors/elif_keyword_1.march
+
+March has no `elif`: an `else if` is a nested `if`, and each `if` needs its own `end`. [elif_keyword]
+
+6 |     elif n < 0 do
+        ^^^^
+
+    if a do
+        1
+    else if b do
+        2
+    else
+        3
+    end end
+    run `march --explain elif_keyword`

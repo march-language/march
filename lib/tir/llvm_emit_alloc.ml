@@ -227,6 +227,22 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
             emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
           ) args;
           ("ptr", ptr))
+     (* A nullary constructor of a boxed type: one shared immortal cell
+        ([Llvm_ctx.intern_static_nullary]) instead of a heap allocation.
+        Same eligibility as the static closure arm in [Llvm_emit] (no REPL or
+        JIT fragment, no hot reload: a cell in a patch .so would dangle once
+        the patch is unloaded), and never for an actor struct (mutated in
+        place) or an actor message type (its tag may be rewritten when a
+        message migrates). *)
+     | _ when args = []
+              && (not ctx.repl)
+              && ctx.hr_config = None
+              && not (Tir_names.is_actor_struct_name alloc_type_name)
+              && not (Migrate_msg_pins.has_actor_msg_repr alloc_type_name) ->
+       audit "Boxed" "alloc-static";
+       let entry = ctor_entry ctx ctor 0 in
+       ("ptr", Llvm_ctx.intern_static_nullary ctx (llvm_name ctor)
+                 entry.ce_tag entry.ce_type_id)
      | _ ->
        audit "Boxed" "alloc";
        let entry = ctor_entry ctx ctor (List.length args) in

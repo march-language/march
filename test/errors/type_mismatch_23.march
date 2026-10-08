@@ -1,0 +1,11 @@
+mod Main do
+  needs IO.Console
+  fn count(xs : List(Int)) : Int do
+    List.length(xs)
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let names = ["a", "b"]
+    println(int_to_string(count(names)))
+  end
+end

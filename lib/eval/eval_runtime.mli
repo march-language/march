@@ -52,6 +52,8 @@ val value_to_string : value -> string
 val value_display : value -> string
 val show_dispatch : value -> string
 val type_name_of_value : value -> string option
+val ctor_qualified_type_tbl : (string, string) Hashtbl.t
+val dispatch_type_name_of_value : value -> string option
 val type_tag_of : value -> string option
 
 (** {1 Actors, supervision and monitors} *)

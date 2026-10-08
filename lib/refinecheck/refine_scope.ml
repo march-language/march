@@ -1280,6 +1280,11 @@ let let_equality_rhs (e : A.expr) : bool =
    about this value" stops being syntactically evident, and the fallback is
    the honest general message, not a guess.
 
+   Since 2026-10-07 it also maps a name to the LAMBDA a `let` bound it to
+   (`let f = fn y -> y > 0`), read only to instantiate an abstract
+   refinement from that name; the wording consumer
+   ([Refine_call.alias_withdrawal_cause]) reads application entries only.
+
    The channel carries NO solver-visible fact of its own — it is consulted
    when choosing the WORDING of a skip, and (since 2026-10-06) by
    [Refine_check.check_elements] to RE-EXAMINE a let-bound call to a

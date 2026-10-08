@@ -44,6 +44,11 @@ expected `Cap(IO)` but got `ActorCap(a)`. [type_mismatch]
 
 44 |       Some(c) -> println(int_to_string(wants_root(c)))
                                             ^^^^^^^^^^^^^
+
+    `c` was bound here as `ActorCap(a)`:
+
+44 |       Some(c) -> println(int_to_string(wants_root(c)))
+                ^
     run `march --explain type_mismatch`
 
 
@@ -52,3 +57,6 @@ fix [cap_grant]:
 @@ lines 42-42 @@
 -  fn main() do
 +  fn main(_cap_io : Cap(IO)) do
+
+after fix: exit 1
+this function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]

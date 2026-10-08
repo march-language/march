@@ -5,7 +5,10 @@ ok: its println is captured, not printed by the node
 ok: the same line again: replay
 ok: signed by another key: bad_signature
 ok: a cap the policy does not list: policy
-ok: listed in the policy: allowed
+ok: listed in the policy, and the fragment's manifest: allowed
+ok: signed caps the manifest does not list: cap_tamper
+ok: signed caps narrower than the manifest: cap_tamper
+ok: a fragment without a manifest: no_cap_manifest
 ok: a panicking fragment answers PANIC with its message
 ok: with the output it printed first
 ok: a fragment that never returns is cancelled: TIMEOUT

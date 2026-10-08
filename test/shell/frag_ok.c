@@ -1,6 +1,8 @@
 /* A hand-written shell fragment (test/shell_check.ml): prints a line, which
  * the node must capture, and returns its rendered result. */
 #include <stdint.h>
+/* Declares no caps, so the checker can sign it with or without any. */
+const char __march_cap_manifest[] = "";
 void *march_string_lit(const char *utf8, int64_t len);
 void  march_println(void *s);
 void *__shell_frag_ok(void) {
