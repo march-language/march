@@ -1230,7 +1230,7 @@ void *march_iolist_hash_fnv1a(void *iol) {
  * distinguishable from ADT/tuple/record cells in the type-erased
  * march_value_to_string path. */
 void *march_string_alloc(int64_t len) {
-    march_string *s = malloc(sizeof(march_string) + (size_t)len + 1);
+    march_string *s = march_obj_malloc(sizeof(march_string) + (size_t)len + 1);
     if (!s) {
         march_debug_report_oom("march_string_alloc", len);
         fputs("march: out of memory\n", stderr); exit(1);

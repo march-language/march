@@ -539,6 +539,9 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Short-lived strings use the fast allocator-free path in compiled programs.**
+  Strings now use the same March object allocator as other heap values, so
+  native mimalloc builds release them without a provenance-table lookup.
 - **A field read from a record no longer outlives the record in compiled
   code.** Three shapes released the record first and then read freed memory,
   printing wrong strings or crashing; the interpreter was always right:
