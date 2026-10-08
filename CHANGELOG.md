@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Type errors now point at the provided side too.** A mismatch keeps its
+  "the expected type comes from here" label and adds where the offending
+  value came from: "this is `T`" on the expression when it is not the
+  primary caret (so `expected Int but got String` on a `List(String)`
+  argument still names the whole type), and for a variable or parameter
+  "`x` was bound here as `T`" on its binder. Applies to call arguments,
+  `let` right-hand sides, `let?` results, `if` branches and `match`
+  scrutinees; the LSP shows the labels as related information.
 - **More predicates and combinators keep what they say.** An abstract
   refinement is now also instantiated from a named predicate with a proved
   `{Bool | _ == …}` return (`List.filter(ys, is_pos)`, or `fn y -> is_pos(y)`),

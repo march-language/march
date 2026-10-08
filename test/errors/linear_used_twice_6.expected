@@ -29,6 +29,11 @@ expected `S_end` but got `S_send_Msg_Prod_Cons_1`. [type_mismatch]
 
 21 |     let _ = Stream_Prod.offer_more_done(s, a, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
                                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `st2` was bound here as `S_send_Msg_Prod_Cons_1`:
+
+21 |     let _ = Stream_Prod.offer_more_done(s, a, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
+                                                           ^^^
     run `march --explain type_mismatch`
 
 
@@ -46,5 +51,10 @@ expected `S_end` but got `S_send_Msg_Prod_Cons_1`. [type_mismatch]
 
 22 |     Stream_Prod.offer_more_done(s, b, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `st2` was bound here as `S_send_Msg_Prod_Cons_1`:
+
+22 |     Stream_Prod.offer_more_done(s, b, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
+                                                   ^^^
 
 
