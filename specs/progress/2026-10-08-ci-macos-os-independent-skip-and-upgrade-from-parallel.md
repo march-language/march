@@ -34,7 +34,7 @@ if any failed.
 - Remaining risk: the control-plane case also uses `port + 1000`, which nothing
   reserves, so two concurrent runs could rarely collide on it.
 
-Guards, both found by testing the script:
+Guards, all three found by testing the script:
 - **Missing last line.** Alcotest's `list` output has no final newline, so BSD `sed`
   plus `while read` dropped the last case (6 of 7 ran, reported green). The listing is
   normalised with `awk 1`, and the parsed count is cross-checked against a plain count
