@@ -1514,8 +1514,8 @@ let observe_cmd =
 let top_cmd =
   let sort =
     Arg.(value & opt string "mbox" & info ["sort"] ~docv:"ATTR"
-           ~doc:"Rank by mbox (default), crashes, slices, msgs_in or msgs_out; the last three \
-                 rank the change over $(b,--window).")
+           ~doc:"Rank by mbox (default), stack (committed machine-stack bytes), crashes, slices, \
+                 msgs_in or msgs_out; the last three rank the change over $(b,--window).")
   in
   let n = Arg.(value & opt int 20 & info ["n"; "count"] ~docv:"N" ~doc:"Rows to show (default 20).") in
   let window =
@@ -1523,6 +1523,11 @@ let top_cmd =
            ~doc:"Window for the rate sorts, and their refresh (default 1000).")
   in
   let once = Arg.(value & flag & info ["once"] ~doc:"Print one frame and exit (for scripts).") in
+  let json =
+    Arg.(value & flag & info ["json"]
+           ~doc:"Print the node's TOP reply as one JSON line and exit (every row carries its \
+                 supervision: link, parent, parent_type, supervisor policy).")
+  in
   let socket =
     Arg.(value & opt (some string) None & info ["socket"] ~docv:"PATH"
            ~doc:"A local observe socket instead of the first forge.toml host.")
@@ -1531,13 +1536,14 @@ let top_cmd =
     Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
            ~doc:"The [[hot-reload.env]] entry to watch (the first one named NAME).")
   in
-  let run sort n window once socket env_name =
-    handle (Cmd_observe.run_top ~socket ~env:env_name ~sort ~n ~window_ms:window ~once ())
+  let run sort n window once json socket env_name =
+    handle (Cmd_observe.run_top ~socket ~env:env_name ~sort ~n ~window_ms:window ~once ~json ())
   in
   Cmd.v (Cmd.info "top"
-           ~doc:"Watch a running node's busiest actors: mailbox depth, crashes, or message and \
-                 dispatch rates, refreshed in place")
-    Term.(const run $ sort $ n $ window $ once $ socket $ env_name)
+           ~doc:"Watch a running node's biggest or busiest actors with their supervision: mailbox \
+                 depth, stack, crashes, or message and dispatch rates, refreshed in place \
+                 ($(b,--once) for one table)")
+    Term.(const run $ sort $ n $ window $ once $ json $ socket $ env_name)
 
 let status_cmd =
   let json = Arg.(value & flag & info ["json"] ~doc:"One JSON document instead of text.") in

@@ -1,0 +1,26 @@
+by mbox:
+     PID  NAME                 TYPE               STATUS        MBOX     <stk>       MBOX CRASHES  LINK       SUPERVISOR             POLICY (held/max in window)
+      16  hot                                     waiting        500     <stk>        500       0  none       -                      -
+       1                                          waiting          0     <stk>          0       0  supervised 4                      -
+       2                                          waiting          0     <stk>          0       0  supervised 4                      -
+       3                                          waiting          0     <stk>          0       0  supervised 4                      -
+       4  sup_one                                 waiting          0     <stk>          0       1  none       -                      one_for_one 1/5 in 60s, 4 kids
+       5                                          waiting          0     <stk>          0       0  supervised 4                      -
+       6                                          waiting          0     <stk>          0       0  supervised 10                     -
+       7                                          waiting          0     <stk>          0       0  supervised 10                     -
+       8                                          waiting          0     <stk>          0       0  supervised 10                     -
+       9                                          waiting          0     <stk>          0       0  supervised 10                     -
+      10                                          waiting          0     <stk>          0       0  none       -                      one_for_one 0/5 in 60s, 4 kids
+      11                                          waiting          0     <stk>          0       0  supervised 15                     -
+      12                                          waiting          0     <stk>          0       0  supervised 15                     -
+      13                                          waiting          0     <stk>          0       0  supervised 15                     -
+      14                                          waiting          0     <stk>          0       0  supervised 15                     -
+      15                                          waiting          0     <stk>          0       0  none       -                      one_for_one 0/5 in 60s, 4 kids
+      17                                          waiting          0     <stk>          0       0  none       -                      -
+      18                                          waiting          0     <stk>          0       0  none       -                      -
+      19                                          waiting          0     <stk>          0       0  none       -                      -
+      20                                          waiting          0     <stk>          0       0  none       -                      -
+by stack, json:
+"attr":"stack"
+"pid":1,"value""pid":2,"value""pid":3,"value""pid":4,"value""pid":5,"value""pid":6,"value""pid":7,"value""pid":8,"value""pid":9,"value""pid":10,"value""pid":11,"value""pid":12,"value""pid":13,"value""pid":14,"value""pid":15,"value""pid":16,"value""pid":17,"value""pid":18,"value""pid":19,"value""pid":20,"value"
+bogus sort exit=1
