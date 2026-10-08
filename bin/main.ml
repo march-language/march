@@ -2307,13 +2307,47 @@ let compile filename =
          (see [valid_loadset]); the full walk otherwise. *)
       let ls_path = loadset_path ~store_root:(Sys.getcwd () ^ "/.march/cas")
           ~entry_real ~walked in
-      let src_hash =
+      let src_hash, key_mode, key_files =
+        let walk () =
+          (walk_hash (), "walk",
+           List.filter (fun f -> f <> entry_real) (files_in walked)) in
         match valid_loadset ~path:ls_path ~entry_real ~src ~walked with
         | Some listed ->
           (match depend_digest ~src ~stdlib_hash ~listed with
-           | Some h -> h
-           | None -> walk_hash ())
-        | None -> walk_hash ()
+           | Some h -> (h, "depend", listed)
+           | None -> walk ())
+        | None -> walk ()
+      in
+      (* A7: the inputs of the source-level key, for `march query key` and
+         `why-miss`; [record_key] writes them after a successful build. *)
+      let capture_key ~target_label ~flags ~ch =
+        let module K = March_query.Query.Key in
+        key_capture := Some {
+            K.target = target_label; flags;
+            compiler = Lazy.force March_cas.Cas.compiler_identity;
+            (* canonical: the same directory reached through two exe paths
+               (an installed march, the dune layout) is one input *)
+            runtime_dir = (match March_cas.Cas.resolve_runtime_dir () with
+                | Some d -> (try Unix.realpath d with Unix.Unix_error _ -> d)
+                | None -> "");
+            runtime = March_cas.Cas.runtime_identity ();
+            stdlib = stdlib_hash; entry = entry_real; mode = key_mode;
+            files = (entry_real, Digest.to_hex (Digest.string src))
+                    :: List.map (fun f -> (f, K.digest_file f)) key_files;
+            source_key = ch; tir_hash = None; post_key = None }
+      in
+      let record_key ~listed ~dep_ch =
+        (* What the NEXT run keys on: the depend-mode key over this run's
+           real load set (B7.2 stores the artifact under it too). *)
+        match !key_capture with
+        | None -> ()
+        | Some k ->
+          let module K = March_query.Query.Key in
+          let k = { k with K.mode = "depend"; source_key = dep_ch;
+                           files = (entry_real, Digest.to_hex (Digest.string src))
+                                   :: List.map (fun f -> (f, K.digest_file f)) listed } in
+          K.write ~path:(K.path ~store_root:(Sys.getcwd () ^ "/.march/cas")
+                           ~entry:k.K.entry ~target:k.K.target) k
       in
       (* After a successful run: store the result under the depend-mode key
          its real load set gives, and record that load set. *)
@@ -2324,6 +2358,7 @@ let compile filename =
             | None -> ()
             | Some dep_hash ->
               let dep_ch = key_of dep_hash in
+              record_key ~listed ~dep_ch;
               March_cas.Cas.store_artifact store dep_ch artifact;
               March_cas.Cas.store_diagnostics store dep_ch diag;
               let unlisted =
@@ -2376,8 +2411,12 @@ let compile filename =
         (* Source-level early cache: same key construction as the post-TIR check
            below (build_cas_key), keyed on the source digest instead of the
            module's impl hashes. *)
-        let (_, ch) =
+        let (cas_flags, ch) =
           build_cas_key ~target:target_parsed ~target_label ~src_hash in
+        capture_key ~target_label ~flags:cas_flags ~ch;
+        (* `march query key|why-miss`: never serve, store or register; the
+           answer comes at the post-TIR key, below. *)
+        if !query_req <> None then raise Exit;
         register_depend_store
           (fun h -> snd (build_cas_key ~target:target_parsed ~target_label ~src_hash:h))
           store;
@@ -2954,6 +2993,7 @@ let compile filename =
        going through the --dump-phases JSON. *)
     let dump_txt = Sys.getenv_opt "MARCH_DUMP_TXT" in
     let snap_tir label tir =
+      Option.iter (fun c -> March_query.Query.Collector.observe c label tir) !query_collector;
       if !dump_phases then
         phases := March_dump.Dump.tir_phase tir label :: !phases;
       match dump_txt with
@@ -3421,6 +3461,7 @@ let compile filename =
       March_tir.Contract_pipeline.run
         ~snap:snap_tir ~stamp
         ~opt_snap:(fun label m ->
+            Option.iter (fun c -> March_query.Query.Collector.observe c label m) !query_collector;
             if !dump_phases then
               phases := March_dump.Dump.tir_phase m label :: !phases)
         ~after_fusion:policy_audit ~before_opt
@@ -3437,6 +3478,12 @@ let compile filename =
                       else mainless_roots)
         ~opt:!opt_enabled tir
       with
+      | March_tir.Tir_verify.Failed (stage, findings)
+        when (match !query_req with Some r -> r.March_query.Query.sub = March_query.Query.Verify | None -> false) ->
+        let module Q = March_query.Query in
+        let stages = match !query_collector with
+          | Some c -> List.map fst (Q.Collector.stages c) | None -> [] in
+        exit (Q.print (Option.get !query_req) (Q.verify_answer ~stages ~failure:(Some (stage, findings))))
       | March_tir.Tir_verify.Failed (stage, findings) ->
         (* A malformed TIR module is a compiler bug, not a program error. *)
         prerr_endline (March_tir.Tir_verify.render ~stage findings);
@@ -3524,6 +3571,21 @@ let compile filename =
     (if !dump_phases then
        March_dump.Dump.write_phases ~source_file:filename (List.rev !phases));
     if !dump_provenance then March_tir.Provenance.dump stdout;
+    (* `march query` (A7): the pipeline queries answer here, where --dump-tir
+       stops, before any IR is emitted. *)
+    (match !query_req with
+     | Some r when not (March_query.Query.is_cache_query r.March_query.Query.sub) ->
+       let module Q = March_query.Query in
+       let c = match !query_collector with Some c -> c | None -> Q.Collector.create (fun _ -> false) in
+       let a = match r.Q.sub with
+         | Q.Fn -> Q.fn_answer r c ~final:tir
+         | Q.Origin -> Q.origin_answer r c ~final:tir
+         | Q.Callers | Q.Callees -> Q.edges_answer r c ~final:tir
+         | Q.Repr -> Q.repr_answer r ~final:tir ~k_table:pipe.March_tir.Contract_pipeline.k_table
+         | Q.Verify -> Q.verify_answer ~stages:(List.map fst (Q.Collector.stages c)) ~failure:None
+         | Q.Key | Q.Why_miss -> assert false in
+       exit (Q.print r a)
+     | _ -> ());
     if !dump_tir then begin
       List.iter (fun td ->
           Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
@@ -3739,6 +3801,28 @@ let compile filename =
            hashes instead of the source digest. *)
         let (_, ch) =
           build_cas_key ~target ~target_label ~src_hash:mod_hash in
+        Option.iter (fun (k : March_query.Query.Key.t) ->
+            k.March_query.Query.Key.tir_hash <- Some (March_cas.Blake3.hash_string mod_hash);
+            k.March_query.Query.Key.post_key <- Some ch) !key_capture;
+        (* `march query key|why-miss` (A7): both keys are known here, before
+           any lookup, emit or link. *)
+        (match !query_req, !key_capture with
+         | Some r, Some now when March_query.Query.is_cache_query r.March_query.Query.sub ->
+           let module Q = March_query.Query in
+           let cached k = March_cas.Cas.lookup_artifact store k <> None in
+           let source_cached = cached now.Q.Key.source_key in
+           let post_cached = cached ch in
+           let a = match r.Q.sub with
+             | Q.Key -> Q.key_answer now ~source_cached ~post_cached
+             | _ ->
+               let before = Q.Key.read ~path:(Q.Key.path ~store_root:(Sys.getcwd () ^ "/.march/cas")
+                                                ~entry:now.Q.Key.entry ~target:now.Q.Key.target) in
+               Q.why_miss_answer ~before ~now ~source_cached ~post_cached in
+           exit (Q.print r a)
+         | Some r, None when March_query.Query.is_cache_query r.March_query.Query.sub ->
+           prerr_endline "march query: no cache key for this build (a report flag disables the cache)";
+           exit 2
+         | _ -> ());
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
           | Some cached_bin ->
@@ -5752,7 +5836,33 @@ let () =
      2026-09-21).  The stdlib's list producers depend on it to be loops:
      specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md.
      A leftover MARCH_TRMC=1 in the environment is simply ignored. *)
-  Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
+  (* `march query <sub> ...` (A7): peel the query's own arguments and run the
+     normal compile path on the rest, stopping at the answer point. *)
+  if Array.length argv >= 2 && argv.(1) = "query" then begin
+    let module Q = March_query.Query in
+    match Q.parse_args (List.tl (List.tl (Array.to_list argv))) with
+    | Error msg -> prerr_string msg; exit 2
+    | Ok (r, rest) ->
+      query_req := Some r;
+      query_argv := Some (Array.of_list (argv.(0) :: rest));
+      if Q.is_cache_query r.Q.sub then do_compile := true else emit_llvm := true;
+      if r.Q.sub = Q.Verify then March_tir.Tir_verify.enabled_flag := true;
+      query_collector := Some (Q.Collector.create
+          (* fn keeps NAME and its derived functions; origin and the edge
+             queries keep NAME alone, to say where it went if the final IR
+             has no NAME. *)
+          (match r.Q.sub with
+           | Q.Fn -> Q.Collector.matching r.Q.arg
+           | Q.Origin | Q.Callers | Q.Callees -> String.equal r.Q.arg
+           | _ -> fun _ -> false))
+  end;
+  (match !query_argv with
+   | Some a ->
+     (try Arg.parse_argv ~current:(ref 0) a specs (fun f -> files := f :: !files)
+            "Usage: march query <sub> [NAME] FILE [options]"
+      with Arg.Bad m -> prerr_string m; exit 2 | Arg.Help m -> print_string m; exit 0)
+   | None ->
+     Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]");
   March_tir.Llvm_toplevel.debug_info := !debug_info;
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;
