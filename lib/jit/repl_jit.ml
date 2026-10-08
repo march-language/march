@@ -2120,14 +2120,14 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
              type names take tags from a counter over this list). *)
           ~types:tir.March_tir.Tir.tm_types
           main_fn.fn_body) in
-    (ir, main_fn, March_tir.Llvm_builtins.called_c_symbols ()) in
+    (ir, main_fn, March_tir.Llvm_builtins.called_c_symbols (), fns) in
   (* Link what the node has; drop any whose declared signature turns out not
      to be the node's, and build again.  Each round links fewer, so this
      ends, at worst with nothing linked. *)
   let rec link_loop linked =
-    let (ir, main_fn, syms) = build linked in
+    let (ir, main_fn, syms, fns) = build linked in
     match node with
-    | None -> (ir, main_fn, syms, linked)
+    | None -> (ir, main_fn, syms, linked, fns)
     | Some t ->
       let declared = Shell_ident.signatures ~declares:true ir in
       let mismatched = List.filter (fun (f : March_tir.Tir.fn_def) ->
@@ -2135,7 +2135,7 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
           | Some mine, Some (theirs, _) -> mine <> theirs
           | None, _ -> false     (* not called after all: harmless *)
           | Some _, None -> true) linked in
-      if mismatched = [] then (ir, main_fn, syms, linked)
+      if mismatched = [] then (ir, main_fn, syms, linked, fns)
       else begin
         if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None then
           List.iter (fun (f : March_tir.Tir.fn_def) ->
@@ -2151,7 +2151,27 @@ let shell_compile ?triple ?ident ctx ~tc_env ~(program_name : string)
                   (List.filter (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> shell_entry_fn)
                      pre.March_tir.Tir.tm_fns)
     | None -> [] in
-  let (ir, main_fn, syms, linked) = link_loop initial in
+  let (ir, main_fn, syms, linked, emitted) = link_loop initial in
+  (* An actor of the program's own runs the NODE's handlers: a fragment that
+     spawns one calls the node's `<Actor>_spawn` (kept and offered by a shell
+     node's build, bin/main.ml), so the actor is dispatched through its
+     hot-reload slot, answers inspect with the node's renderer, and is
+     upgraded by a deploy like every other instance.  A fragment carrying
+     its own copy of the handlers would spawn an actor running the shell's
+     code for ever (fragments are never unloaded), which no deploy reaches:
+     refuse it rather than run it.  The stdlib's actors have no slot and are
+     not affected. *)
+  (match List.filter (fun (f : March_tir.Tir.fn_def) ->
+       March_tir.Hot_reload.is_slot_actor_dispatch f.fn_name) emitted with
+   | [] -> ()
+   | f :: _ ->
+     let sfx = March_tir.Tir_names.actor_dispatch_suffix in
+     let actor = String.sub f.fn_name 0 (String.length f.fn_name - String.length sfx) in
+     failwith (Printf.sprintf
+       "this input spawns actor %s, but cannot call the node's %s%s (a node \
+        built by an older compiler, or MARCH_SHELL_NO_LINK set); a copy would \
+        run this input's handlers instead of the node's"
+       actor actor March_tir.Tir_names.actor_spawn_suffix));
   if Sys.getenv_opt "MARCH_SHELL_DEBUG" <> None || Sys.getenv_opt "MARCH_SHELL_LINK_REPORT" <> None then
     Printf.eprintf "[shell] calls %d node function%s%s\n%!" (List.length linked)
       (if List.length linked = 1 then "" else "s")

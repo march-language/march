@@ -13100,7 +13100,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; bindings, the list limit, captured println (and the node's own stdout
 ; never sees it), the program's actor reached through Actor.list /
 ; pid_from_int / send / inspect_state, a panic, a type error, and the
-; session carrying on after each.
+; session carrying on after each.  `spawn(Counter)` from an input runs the
+; NODE's Counter (its spawn fn, dispatched through the actor's hot-reload
+; slot, so it has a type name and the node's state renderer), and a second
+; session (shell/session_after.txt) finds that actor still alive and
+; working after the first session ended.  With linking off
+; (MARCH_SHELL_NO_LINK) the fragment would carry its own copy of Counter's
+; handlers, and the client refuses the input (shell/session_nolink.txt).
 (rule
  (targets native_shell_session.out)
  (deps (file %{exe:../bin/main.exe})
@@ -13108,10 +13114,12 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib)
        (file shell_check.exe)
        (file shell/session.txt)
+       (file shell/session_after.txt)
+       (file shell/session_nolink.txt)
        (file native/shell_node.march))
  (action
   (with-stdout-to native_shell_session.out
-   (system "rm -rf sh_s; mkdir -p sh_s; ./shell_check.exe keygen-home sh_s/pk $PWD/sh_s/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_s/pk) -o sh_s/node native/shell_node.march > sh_s/build 2>&1 || { cat sh_s/build; exit 1; }; printf 'IO.Console\\nActor.Introspect\\nActor.Debug\\n' > sh_s/policy; S=/tmp/march-shell-sess-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_s/policy MARCH_AUDIT_LOG=sh_s/audit ./sh_s/node > sh_s/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_s/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_s/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/session.txt native/shell_node.march 2>&1; echo \"exit=$?\"; echo \"node stdout lines from the shell: $(grep -c 'hi from the shell' sh_s/prog)\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_s $S $S.shell $S.observe; true"))))
+   (system "rm -rf sh_s; mkdir -p sh_s; ./shell_check.exe keygen-home sh_s/pk $PWD/sh_s/home && %{exe:../bin/main.exe} --compile --hot-reload Main --signing-pubkey $(cat sh_s/pk) -o sh_s/node native/shell_node.march > sh_s/build 2>&1 || { cat sh_s/build; exit 1; }; printf 'IO.Console\\nActor.Introspect\\nActor.Debug\\n' > sh_s/policy; S=/tmp/march-shell-sess-$$.sock; MARCH_HOT_RELOAD_SOCKET=$S MARCH_SHELL_POLICY=sh_s/policy MARCH_AUDIT_LOG=sh_s/audit ./sh_s/node > sh_s/prog 2>&1 & prog=$!; for i in $(seq 1 300); do grep -q ready sh_s/prog 2>/dev/null && break; sleep 0.1; done; HOME=$PWD/sh_s/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/session.txt native/shell_node.march 2>&1; echo \"exit=$?\"; echo '-- a second session: the actor the first spawned outlives it'; HOME=$PWD/sh_s/home %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/session_after.txt native/shell_node.march 2>&1; echo \"exit=$?\"; echo '-- linking off: a spawn would carry its own handlers, and is refused'; HOME=$PWD/sh_s/home MARCH_SHELL_NO_LINK=1 %{exe:../bin/main.exe} --shell $S.shell --shell-inputs shell/session_nolink.txt native/shell_node.march 2>&1; echo \"exit=$?\"; echo \"node stdout lines from the shell: $(grep -c 'hi from the shell' sh_s/prog)\"; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -rf sh_s $S $S.shell $S.observe; true"))))
 
 (rule
  (alias runtest)
