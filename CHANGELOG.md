@@ -302,6 +302,15 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- Compiled `to_string` (and so `println` of a value) names the constructors of
+  types declared inside a module. `Duration.seconds(5)`, `UUID.UUID("abc")`
+  and a user's `Inner.Id(3)` printed `#<tag:0>` compiled while the
+  interpreter printed `Duration(5000)`, `UUID("abc")` and `Id(3)`; this
+  covered every single-field or niche-shaped type declared in a `mod`,
+  including the stdlib's. The compiler's per-type table answered differently
+  for a type's qualified and short names, and the pass that records
+  constructor names asked with the spelling whose answer no value is built
+  with.
 - A green thread started from a runtime thread that is not a scheduler (the
   hot-reload server's drain, the new shell listener) no longer inherits that
   thread's blocked signals. With SIGSEGV blocked, the first time its stack

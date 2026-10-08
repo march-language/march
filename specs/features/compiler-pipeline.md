@@ -117,6 +117,17 @@ Source Code
 > representation state any more: the registry `Repr` used to hold (and its
 > never-cleared `force_disable` latch) was removed by the type-kinds refactor;
 > `repr.ml` is now only a type re-export and `rc_types.ml` no longer exists.
+> **One spelling per type.** Lowering registers a module-declared type under its
+> qualified name but builds every value under the short one, so every
+> name-keyed representation query (`repr_of`, `is_niche_shaped`,
+> `niche_repr_of_concrete`, `needs_rc`, LLVM spelling) is asked under the short
+> name (`Kind.canonical_name`). That is the layout programs build, and it makes
+> both spellings agree. The one exception is a type the C runtime builds in its
+> declared layout (`CsvRow`), which resolves to its declaration. Shape
+> questions (what a value contains) resolve the other way, to the declaration
+> (`Kind.declaration_of`). Consequence worth knowing: types declared inside a
+> module are never newtype, niche or unboxed today, because their short name
+> misses the qualified declaration (see `specs/todos/2026-10-07-module-type-layouts.md`).
 >
 > In particular **Perceus runs *before* Escape** (see `bin/main.ml`, `Perceus.perceus` then `Escape.escape_analysis`). Earlier revisions of this document had the two reversed; that was wrong.
 >

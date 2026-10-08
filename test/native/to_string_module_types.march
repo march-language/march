@@ -1,0 +1,41 @@
+-- Regression: compiled `to_string` printed `#<tag:0>` for every ADT declared
+-- inside a module (stdlib or user), while the interpreter printed the
+-- constructor.  Lowering registers such a type under its qualified name
+-- ("Duration.Duration", "Main.Inner.Id") but builds every value under the
+-- short one ("Duration.Duration" ctor key -> type "Duration"), and the kind
+-- table answered differently for the two spellings: the short name missed
+-- the declaration and fell back to Boxed (what is actually built), the
+-- qualified name found it and said Newtype.  The constructor-descriptor pass
+-- asked the qualified name, so it skipped these types as "unboxed" and the
+-- runtime renderer, handed a boxed cell with no descriptor, printed its tag.
+-- specs/progress/2026-10-07-kind-canonical-spelling.md.
+--
+-- Run interpreted AND compiled against the SAME .expected.
+mod Main do
+  needs IO.Console
+
+  mod Inner do
+    type Id = Id(Int)
+    type Pair = Pair(Int, String)
+    type Opt = Nope | Got(String)
+    type Shape = Circle(Int) | Rect(Int, Int) | Dot
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    -- stdlib single-field types (declared Newtype, built Boxed)
+    println(to_string(Duration.seconds(5)))
+    println(to_string(UUID.UUID("abc")))
+    -- user nested-module types of each shape
+    println(to_string(Inner.Id(3)))
+    println(to_string(Inner.Pair(1, "x")))
+    println(to_string(Inner.Got("hi")))
+    println(to_string(Inner.Nope))
+    println(to_string(Inner.Circle(2)))
+    println(to_string(Inner.Rect(3, 4)))
+    println(to_string(Inner.Dot))
+    -- nested inside prelude containers
+    println(to_string(Some(Duration.seconds(2))))
+    println(to_string([Inner.Id(1), Inner.Id(2)]))
+    println(to_string((Inner.Got("t"), Inner.Id(9))))
+  end
+end
