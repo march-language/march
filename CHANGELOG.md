@@ -117,7 +117,9 @@ git log is authoritative for exact commits.
   trailing `limit: N` shortens long lists. Capabilities are pre-bound
   (`console`, `clock`, `intro`, `debug`). A panic or a timeout ends only that
   input, and a deploy ends the session. Every input is audited with its
-  source. Inputs can call the program's own functions and its
+  source, and one whose audit line cannot be written does not run. Each
+  request is signed for its session, so a captured request runs on no other
+  connection, node or restart. Inputs can call the program's own functions and its
   `MARCH_LIB_PATH` libraries, a Depot query for example.
   - The node runs an input only if its `$MARCH_SHELL_POLICY` file lists every
     capability the input's compiled code uses, including those reached
