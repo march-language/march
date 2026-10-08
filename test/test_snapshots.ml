@@ -180,15 +180,53 @@ let render_module (m : March_tir.Tir.tir_module) =
 
 (* TIR verifier (A1, lib/tir/tir_verify.ml), always on here: this harness
    hand-rolls the pipeline instead of going through Contract_pipeline, so it
-   would otherwise never see the check.  A finding fails the case. *)
-let verified stage tir =
-  (match March_tir.Tir_verify.check ~stage tir with
+   explicitly shares Perceus's kind table and borrow map with the post-Perceus
+   RC-balance check.  A finding fails the case. *)
+let verified ?k_table ?borrow_map stage tir =
+  (match March_tir.Tir_verify.check ?k_table ?borrow_map ~stage tir with
    | [] -> ()
    | findings -> failwith (March_tir.Tir_verify.render ~stage findings));
   tir
 
+let verified_perceus ~k_table ~borrow_map tir =
+  verified ~k_table ~borrow_map "tir-perceus" tir
+
+let test_perceus_verifier_checks_rc_balance () =
+  let open March_tir.Tir in
+  let x = { v_name = "x"; v_ty = TString; v_lin = Unr } in
+  let f =
+    { fn_name = "double_drop";
+      fn_params = [x];
+      fn_ret_ty = TInt;
+      fn_body = ESeq (EDecRC (AVar x),
+                       ESeq (EDecRC (AVar x), EAtom (ALit (March_ast.Ast.LitInt 0))));
+      fn_kind = FnNormal }
+  in
+  let tir =
+    { tm_name = "SnapshotRc";
+      tm_fns = [f];
+      tm_types = [];
+      tm_externs = [];
+      tm_exports = [];
+      tm_tests = [];
+      tm_io_fns = [] }
+  in
+  let k_table = March_tir.Kind.of_module tir in
+  match verified_perceus ~k_table ~borrow_map:March_tir.Borrow.empty tir with
+  | _ -> Alcotest.fail "the Perceus snapshot verifier accepted a double release"
+  | exception Failure message ->
+    Alcotest.(check bool) "reports the RC over-release" true
+      (Test_helpers.contains "rc-balance/over-release: `x`" message)
+
 let dump_post_lower src =
   render_module (verified "tir-lower" (Test_helpers.lower_module_typed src))
+
+let run_perceus tir =
+  let k_table = March_tir.Kind.of_module tir in
+  let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
+  tir
+  |> March_tir.Perceus.perceus ~k_table ~borrow_map
+  |> verified_perceus ~k_table ~borrow_map
 
 (* TRMC runs post-lower / pre-mono, exactly as [Contract_pipeline] runs it,
    and it always runs — so these snapshots pin TRMC's emitted shape.  Before
@@ -201,7 +239,7 @@ let dump_post_perceus src =
   let tir = verified "tir-trmc" (March_tir.Trmc.transform_module tir) in
   let tir = verified "tir-mono" (March_tir.Mono.monomorphize tir) in
   let tir = verified "tir-defun" (March_tir.Defun.defunctionalize tir) in
-  let tir = verified "tir-perceus" (March_tir.Perceus.perceus tir) in
+  let tir = run_perceus tir in
   render_module tir
 
 (* ── Diffing ────────────────────────────────────────────────────────────
@@ -295,7 +333,7 @@ let dump_metrics src =
   let tir = line "tir-trmc" (March_tir.Trmc.transform_module tir) in
   let tir = line "tir-mono" (March_tir.Mono.monomorphize tir) in
   let tir = line "tir-defun" (March_tir.Defun.defunctionalize tir) in
-  ignore (line "tir-perceus" (March_tir.Perceus.perceus tir));
+  ignore (line "tir-perceus" (run_perceus tir));
   Buffer.contents buf
 
 let metrics_cases =
@@ -348,5 +386,9 @@ let suites = [
   ("tir_snapshots_determinism", [
      Alcotest.test_case "dumps are stable across repeated in-process runs" `Quick
        test_double_run_determinism;
+   ]);
+  ("tir_snapshots_verify", [
+     Alcotest.test_case "post-Perceus snapshots run RC balance verification" `Quick
+       test_perceus_verifier_checks_rc_balance;
    ]);
 ]

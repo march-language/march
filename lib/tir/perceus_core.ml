@@ -839,6 +839,23 @@ let find_inc_vars ?(include_borrowed_fields = true)
        let n = count - 1 + (if StringSet.mem name live_after then 1 else 0) in
        List.init n (fun _ -> v))
 
+(* TRMC's destination-passing helpers take their parent cell as their final
+   argument and write through it without consuming it.  After Defun the helper
+   can be a closure, so the indirect-call branch must preserve this protocol
+   too. *)
+let dps_consumed_args callee args =
+  let marker = "$dps" in
+  let has_marker name =
+    let rec go i =
+      i + String.length marker <= String.length name
+      && (String.sub name i (String.length marker) = marker || go (i + 1))
+    in
+    go 0
+  in
+  match callee, List.rev args with
+  | Tir.AVar f, _ :: rev_args when has_marker f.Tir.v_name -> List.rev rev_args
+  | _ -> args
+
 (** Dup every TAIL-position projection of [name] in [e]: the value the scope
     returns.  Used by the aggregate scope-end drop in [insert_rc_expr]'s ELet
     case, which releases the aggregate AFTER its scope's result is computed
@@ -1449,7 +1466,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        parameter owned, and a [$clo_wrap] releases what its target borrows.
        Before both, a read-only parameter stayed borrowed and a fresh argument
        leaked once per call. *)
-    let all_atoms = a :: args in
+    let all_atoms = a :: dps_consumed_args a args in
     let inc_vars = find_inc_vars env all_atoms live_after in
     let e' = wrap_incrcs env inc_vars e in
     let lb =

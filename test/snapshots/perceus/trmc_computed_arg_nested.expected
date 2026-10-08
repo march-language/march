@@ -217,7 +217,6 @@ case $t4 of
 let $t6 : Int = +(i, 1) in
 let $trmc6 : List.Cons = alloc_hole List.Cons($t5, _) in
 inc_rc go$dps;
-inc_rc $trmc6;
 call_ptr go$dps($t6, $trmc6);
 $trmc6
 
