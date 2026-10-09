@@ -13,3 +13,7 @@ This closes the expand-build availability-predicate TODO.
 Validation: five focused endpoint tests pass, including plain/expand
 availability, unchanged existing labels, and typechecking a predicate call.
 The Forge protocol deploy-plan tests pin the guard's rendered name.
+
+CI follow-up: the shared exact generated-function list now includes
+`may_choose_more` and `may_choose_done`; the existing labelled and unlabelled
+shape tests pin these additions alongside their corresponding transitions.

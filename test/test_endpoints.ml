@@ -244,7 +244,8 @@ let stream_prod_fns =
 
 let stream_cons_fns =
   [ "register"; "cancelled"; "drained"; "leave_recv_Msg_Prod_Cons_1"; "recv_Msg_Prod_Cons_1";
-    "recv_Msg_Prod_Cons_1_or"; "recv_Msg_Prod_Cons_1_or_drain"; "leave_choose_more_done"; "choose_more"; "choose_done"; "close";
+    "recv_Msg_Prod_Cons_1_or"; "recv_Msg_Prod_Cons_1_or_drain"; "leave_choose_more_done";
+    "may_choose_more"; "choose_more"; "may_choose_done"; "choose_done"; "close";
     "idle"; "take_idle"; "take_closed"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume";
     "step_name"; "script_S_recv_Msg_Prod_Cons_1"; "script_S_choose_more_done"; "script_S_end"; "script";
     "chaos_S_recv_Msg_Prod_Cons_1"; "chaos_S_choose_more_done"; "chaos_S_end"; "chaos" ]
