@@ -840,7 +840,32 @@ and drop_op (env : env) (v : Tir.var) : Tir.expr =
      | Some (`Newtype pty) ->
        let p = { Tir.v_name = fresh env "dp"; v_ty = pty; v_lin = Tir.Unr } in
        Tir.ELet (p, Tir.EAtom (Tir.AVar v), drop_op env p)
-     | None -> Tir.EDecRC (Tir.AVar v))
+     | None ->
+       (* A niche-CAPABLE declaration whose CONCRETE instantiation is Boxed:
+          [Option(Float)] — 0.0 bitcasts to the None niche, so the Some side
+          is encoded as a BOXED cell holding a march_alloc_float box
+          ([Kind.repr_of] says Boxed) while [may_be_non_heap], decided from
+          the declaration's [TVar] payload, says niche.  The null-test route
+          does not apply; fall through to the ordinary route so the release
+          goes through the synthesized Boxed-convention drop
+          ([__drop$Option_Float], which releases the float box behind
+          [march_decrc_freed]'s unique path).  A bare [EDecRC] here was
+          shallow: it freed the Some cell and orphaned its float box — 200
+          calls of typed(Some(Some(3.5))) grew [live_allocs] by 200
+          (specs/todos/2026-10-07-option-float-payload-shallow-drop.md), and
+          Json.parse leaked one box per number
+          (specs/todos/2026-10-08-json-parse-number-float-leak.md).
+          Scalar payloads that ARE niche-safe ([Option(Int)],
+          [Option(Bool)]) reach here too and still take the bare [EDecRC]:
+          their value is a tagged immediate, [march_decrc] is a no-op on it,
+          and their own [drop_fn_for] memoizes negative (no heap child). *)
+       (match drop_fn_for env ty with
+        | Some callee ->
+          let f = { Tir.v_name = callee;
+                    v_ty = Tir.TFn ([ty], Tir.TUnit);
+                    v_lin = Tir.Unr } in
+          Tir.EApp (f, [Tir.AVar v])
+        | None -> Tir.EDecRC (Tir.AVar v)))
   | ty ->
     (match drop_fn_for env ty with
      | Some callee ->

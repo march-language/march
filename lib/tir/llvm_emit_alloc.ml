@@ -633,8 +633,42 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
          | _ -> "")
       | _ -> ""
     in
-    if reuse_atom_parent_type <> ""
-       && Kind.is_niche_shaped ctx.k_table reuse_atom_parent_type
+    (* The skip must fire only when the reuse atom is GENUINELY niche-encoded
+       at runtime.  [is_niche_shaped] classifies by the DECLARATION's ctor
+       shape, so it answers true for [Option] even at [Option(Float)] — whose
+       payload is niche-UNSAFE (0.0 bitcasts to the None niche) and is
+       therefore encoded as a BOXED cell holding a march_alloc_float box.  In
+       that case there IS a wrapper cell: its own reference (the scrutinee dec
+       the caller will never emit is skipped here) and its slot content are
+       orphaned if this arm just allocates fresh.  The [Some(f) ->
+       reuse $opt as JsonValue.Number(f)] shape of Json.parse_number leaked
+       one float box per parsed number that way
+       (specs/todos/2026-10-08-json-parse-number-float-leak.md).  Narrow the
+       skip to a payload that is niche-safe: [niche_repr_of_concrete] refuses
+       a Float (and Unit) payload, so a boxed-encoded Option falls through to
+       the FBIP branch below, where rc==1 guards the release of both the cell
+       and the slot content it owns. *)
+    let reuse_atom_niche_encoded =
+      reuse_atom_parent_type <> ""
+      && Kind.is_niche_shaped ctx.k_table reuse_atom_parent_type
+      && (match Kind.niche_repr_of_concrete ctx.k_table reuse_atom_parent_type with
+          | Some _ -> true
+          | None ->
+            (* Generic instantiation: the payload comes from the reuse atom's
+               TIR type, not the declaration.  [repr_of] on [Option(Float)]
+               answers Boxed (niche-unsafe payload) — that is exactly the
+               misfire this narrowing exists to prevent. *)
+            (match reuse_atom with
+             | Tir.AVar v ->
+               (match v.Tir.v_ty with
+                | Tir.TCon (n, _) ->
+                  (match Kind.repr_of ctx.k_table (Tir.TCon (n, [])) with
+                   | Kind.Boxed -> false
+                   | _ -> true)
+                | _ -> true)
+             | _ -> true))
+    in
+    if reuse_atom_niche_encoded
     then begin
       let entry = ctor_entry ctx ctor (List.length args) in
       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
@@ -743,6 +777,85 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       let v_coerced = coerce ctx v_ty v_val field_ty in
       (field_ty, v_coerced)
     ) args in
+    (* FBIP CROSS-TYPE SLOT ORPHANS.  [same_arity] matches field COUNT, never
+       slot convention, so a dying cell of one type can be reused as a ctor
+       of another whose field at the same index is stored RAW where the old
+       cell's slot was POINTER-convention.  The everyday instance is
+       Json.parse_number: [reuse $opt as JsonValue.Number(f)] — the dying
+       [Option.Some] cell's erased slot holds the [march_alloc_float] box the
+       cell OWNS, the new [Number] ctor stores a raw [double] over it, and
+       the box is orphaned on BOTH branches (the reuse branch overwrites the
+       slot; the fresh branch's [march_decrc] frees the cell SHALLOWLY).  One
+       leaked box per parsed number
+       (specs/todos/2026-10-08-json-parse-number-float-leak.md).
+
+       Fix: on the unique-RC paths (both branches — rc==1 is the proof the
+       cell owned the slot's reference), load each old slot the new ctor
+       will store a raw [double] over and release it.  [march_decrc] is
+       IS_HEAP_PTR-guarded, so a tagged immediate or the niche null in an
+       old erased slot is a no-op; only a genuine heap reference (the float
+       box, a heap field) is freed.
+
+       The OLD slot's convention comes from the reuse atom's own type: every
+       arity-matching ctor of that type must hold the index pointer-convention
+       (a [TVar] erased field, or a heap field type).  A same-type reuse whose
+       old slot was already a raw [double] (JsonValue.Number reusing a Number
+       cell) is excluded — [march_decrc] on raw double bits would sniff
+       garbage.  Mixed candidates (some ptr, some raw at the same index) are
+       skipped too: leak, never crash.  Same-type erased-slot reuse
+       (Cons->Cons, Some->Some) never stores a raw double over a ptr slot, so
+       the ordinary FBIP ownership handoff through the case-arm binders is
+       untouched. *)
+    let old_slots_all_ptr i =
+      match reuse_atom with
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         (* Perceus rewrites a freed scrutinee's type to the FBIP arity
+            marker ["$fbip$<Type>.<Ctor>(<Unit-arity>)"] before codegen, so
+            the reuse atom reaching here carries the MARKER, not the real
+            type.  Strip to the type name behind it or the variant lookup
+            misses and the slot release is silently skipped — which is how
+            this fix first shipped dead: Json.parse_number still leaked one
+            box per number until the marker was traced in the emitted IR. *)
+         | Tir.TCon (oname0, _) ->
+           let oname =
+             if Perceus_fbip.is_fbip_encoded oname0 then
+               let rest = String.sub oname0 (String.length Perceus_fbip.fbip_arity_marker)
+                   (String.length oname0 - String.length Perceus_fbip.fbip_arity_marker) in
+               match String.index_opt rest '.' with
+               | Some d -> String.sub rest 0 d
+               | None -> rest
+             else oname0 in
+           (match Kind.find_variant ctx.k_table oname with
+            | Some ctors ->
+              let matching =
+                List.filter (fun (_, fs) -> List.length fs = List.length args) ctors in
+              matching <> []
+              && List.for_all (fun (_, fs) ->
+                  match List.nth_opt fs i with
+                  | Some (Tir.TVar _) -> true
+                  | Some t -> llvm_field_ty ctx t = "ptr"
+                  | None -> false) matching
+            | None -> false)
+         | _ -> false)
+      | _ -> false
+    in
+    (* Indices of the raw-double slots whose old content is ptr-convention. *)
+    let orphaned_slot_idxs =
+      List.filteri (fun i (field_ty, _) ->
+          field_ty = "double" && old_slots_all_ptr i)
+        arg_vals
+      |> List.map (fun _ -> ())
+      |> List.mapi (fun i _ -> i)
+    in
+    let release_orphaned_slots () =
+      (* Load BEFORE the reuse branch's stores overwrite the slot, and
+         BEFORE the fresh branch's [march_decrc] frees the cell. *)
+      List.iter (fun i ->
+          let old = Llvm_data.emit_load_field ctx rv i "ptr" in
+          emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" old)
+        ) orphaned_slot_idxs
+    in
     (* Load RC and check if uniquely owned.  An ACQUIRE atomic load, not a
        relaxed one: another thread that dropped its reference did so with
        march_decrc's acq_rel RMW, which releases that thread's last reads of
@@ -765,6 +878,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
        — safe to use as phi source labels.  Audit L6: phi instead of
        alloca/store/load slot. *)
     emit_label ctx reuse_lbl;
+    release_orphaned_slots ();
     emit_store_tag ctx rv entry.ce_tag entry.ce_type_id;
     List.iteri (fun i (field_ty, v_coerced) ->
       emit_store_field ctx rv i field_ty v_coerced
@@ -772,6 +886,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
     emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
     (* Fresh branch: DecRC original, alloc fresh, write tag/fields *)
     emit_label ctx fresh_lbl;
+    release_orphaned_slots ();
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
     let hp = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
     List.iteri (fun i (field_ty, v_coerced) ->
