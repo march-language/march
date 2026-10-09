@@ -9617,6 +9617,48 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; diffed so a crash-after-partial-output cannot pass, (c) only then is the
 ; delta read from a captured FILE rather than from a pipeline whose status
 ; belongs to its last stage.
+; Option(Float) deep-drop + Json.parse float-box leak guard
+; (specs/progress/2026-10-09-option-float-deep-drop-and-json-parse-leak.md).
+; Two release sites that both classified Option by its DECLARATION (niche)
+; instead of its concrete instantiation (Boxed, because 0.0 bitcasts to the
+; None niche): Drop.drop_op's bare dec_rc on a record member, and
+; emit_reuse_ctor's FBIP/niche-skip paths overwriting a pointer-convention
+; slot with a raw double. Same three-rule structure as
+; native_arr_fold_leak_probe above.
+(rule
+ (targets option_float_box_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/option_float_box_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o option_float_box_leak_probe
+       native/option_float_box_leak_probe.march)))
+
+(rule
+ (targets option_float_box_leak_probe.out option_float_box_leak_probe.live)
+ (deps option_float_box_leak_probe)
+ (action
+  (with-stdout-to option_float_box_leak_probe.out
+   (with-stderr-to option_float_box_leak_probe.live
+    (run ./option_float_box_leak_probe)))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/option_float_box_leak_probe.expected
+        option_float_box_leak_probe.out)))
+
+(rule
+ (alias runtest)
+ (deps option_float_box_leak_probe.live)
+ (action
+  (run bash -c
+   "live=$(cat option_float_box_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from option_float_box_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"option_float_box_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. An Option(Float) is BOXED-encoded (Some is a heap cell holding a march_alloc_float box), so every un-released one accumulates one box per value -- healthy is a small constant (~3 objects, independent of iteration counts). Check (a) that Drop.drop_op's may_be_non_heap None leg still falls through to drop_fn_for (lib/tir/drop.ml) so Option(Float) routes to __drop$Option_Float, and (b) that emit_reuse_ctor (lib/tir/llvm_emit_alloc.ml) still releases old pointer-convention slots a new ctor stores a raw double over, with the $fbip$ type marker stripped before the variant lookup.\" >&2; exit 1; }; \
+    echo \"option_float_box_leak_probe live_allocs delta = ${live} objects\"")))
+
 (rule
  (targets native_arr_fold_leak_probe)
  (deps (file %{exe:../bin/main.exe})

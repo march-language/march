@@ -543,6 +543,20 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A dropped `Option(Float)` (or `Result` field of it) no longer leaks its
+  boxed Float.** The compiler's drop synthesis classified `Option` as
+  niche-encoded from its declaration even at `Option(Float)`, whose payload
+  is niche-UNSAFE and therefore Boxed-encoded: the release freed the Some
+  cell shallowly and orphaned the `march_alloc_float` box it held. Records,
+  tuples and cross-function boundaries holding such a value leaked one box
+  per value.
+- **`Json.parse` no longer leaks one Float box per parsed number.** The
+  parsed `Option(Float)`'s Some cell was reused in place as the
+  `JsonValue.Number` cell (`FBIP`), overwriting the pointer-convention slot
+  that held the owned Float box without releasing it, on both the reuse and
+  the fresh-alloc paths. The reuse's slot-convention check now runs against
+  the real type behind Perceus's `$fbip$` arity marker, and any old slot the
+  new constructor stores a raw `double` over is released first.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.
