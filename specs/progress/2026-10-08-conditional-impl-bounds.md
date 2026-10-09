@@ -42,3 +42,6 @@ specific `Err(Backpressure)` variant by matching it, rather than accepting any
 error. All nineteen changed fixtures typecheck; the three focused generated
 control-wiring tests (`topology_flag` 17–19) pass. No two-node processes or
 full local suites were run for this follow-up.
+
+The LSP analysis projection also accepts the added bounds metadata while
+retaining its existing head-type-only model.
