@@ -667,7 +667,7 @@ end
 -- every reachable candidate got a copy before forge was told "accepted".
 pfn ctl_ensure_loaded() : () do
   let lv = ctl_leaders()
-  let held = Vault.get(lv, "leader") != Option.None
+  let held = Option.is_some(Vault.get(lv, "leader"))
   let cur = ctl_leader_state()
   match ctl_load_newest() do
     Option.None -> if held do () else ctl_put_leader(cur) end
@@ -811,7 +811,7 @@ end
 -- bound to an actor that lives as long as the node.
 pfn ctl_mark_agent(node : Cap(ClusterNode.Live), pid : Pid(CtlRespawnerState)) : () do
   let name = Topology.marker("Ctl.Agent", ClusterNode.node_id(node))
-  if ClusterNode.lookup(node, name) == Option.None do
+  if Option.is_none(ClusterNode.lookup(node, name)) do
     let _ = ClusterNode.register(node, name, pid)
     ()
   else () end

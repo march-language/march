@@ -44,7 +44,7 @@ mod TopologyMoveB do
   end
 
   pfn wait_marker(h : Cap(ClusterNode.Live), name : String, left : Int) : () do
-    if ClusterNode.lookup(h, name) != None || left <= 0 do () else
+    if Option.is_some(ClusterNode.lookup(h, name)) || left <= 0 do () else
       sleep_ms(50)
       wait_marker(h, name, left - 50)
     end

@@ -23,7 +23,7 @@ mod CertRawSendDeniedB do
   end
 
   pfn wait_cert(h : Cap(ClusterNode.Live), id : String, left : Int) : Bool do
-    if ClusterNode.peer_cert(h, id) != None do true
+    if Option.is_some(ClusterNode.peer_cert(h, id)) do true
     else if left <= 0 do false else
       sleep_ms(50)
       wait_cert(h, id, left - 50)
@@ -69,7 +69,7 @@ mod CertRawSendDeniedB do
   end
 
   pfn shown(h : Cap(ClusterNode.Live), name : String) : String do
-    if ClusterNode.lookup(h, name) == None do "hidden" else "visible" end
+    if Option.is_none(ClusterNode.lookup(h, name)) do "hidden" else "visible" end
   end
 
   pfn said(r : Result(Int, NodeQueue.EnqueueError)) : String do
@@ -178,7 +178,7 @@ mod CertRawSendDeniedB do
         let to_sess = GlobalPid.make(a, sess, cr)
         -- This node's own raw primitives are refused.
         println(me() ++ ": raw send_msg to node-a: " ++ said(ClusterNode.send_msg(h, to_raw, "Raw.Ping", [1], NodeQueue.Unbounded)))
-        println(me() ++ ": queue_for node-a: " ++ (if ClusterNode.queue_for(h, a) == None do "refused" else "given (wrong)" end))
+        println(me() ++ ": queue_for node-a: " ++ (if Option.is_none(ClusterNode.queue_for(h, a)) do "refused" else "given (wrong)" end))
         -- ... but a node's frames to itself are not raw sends.
         let _ = ClusterNode.route_type(h, "Raw.Self", fn _d -> do
           println(me() ++ ": loopback raw send delivered")

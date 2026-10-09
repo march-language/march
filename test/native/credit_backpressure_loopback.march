@@ -107,19 +107,23 @@ mod CreditBackpressureLoopback do
     -- until it has, so the rest does not depend on how fast it ran.
     let r1 = NodeQueue.enqueue(q, 1, frame(), NodeQueue.DropNew)
     let r2 = NodeQueue.enqueue(q, 2, frame(), NodeQueue.DropNew)
-    println("node-a: two frames admitted: " ++ bool_to_string(r1 == Ok(()) && r2 == Ok(())))
+    println("node-a: two frames admitted: " ++ bool_to_string(Result.is_ok(r1) && Result.is_ok(r2)))
     println("node-a: both written under the initial credit: " ++ bool_to_string(wait_depth(q, 0, 500)))
     -- 88 of 100 bytes of credit are in flight and the receiver has consumed
     -- nothing (no "go" yet), so no CREDIT can exist: frames 3-4 are admitted
     -- and stay queued -- depth reads 88 for as long as we look.
     let r3 = NodeQueue.enqueue(q, 3, frame(), NodeQueue.DropNew)
     let r4 = NodeQueue.enqueue(q, 4, frame(), NodeQueue.DropNew)
-    println("node-a: two more queued behind the credit line: " ++ bool_to_string(r3 == Ok(()) && r4 == Ok(())))
+    println("node-a: two more queued behind the credit line: " ++ bool_to_string(Result.is_ok(r3) && Result.is_ok(r4)))
     let _ = Process.run("sleep", Cons("0.05", Nil))
     println("node-a: depth held at 88 without credit: " ++ bool_to_string(NodeQueue.depth(q) == 88))
     -- Budget 100: the fifth frame (88 + 44) does not fit.
     let r5 = NodeQueue.enqueue(q, 5, frame(), NodeQueue.DropNew)
-    println("node-a: fifth refused with Backpressure: " ++ bool_to_string(r5 == Err(NodeQueue.Backpressure)))
+    let backpressured = match r5 do
+      Err(NodeQueue.Backpressure) -> true
+      _ -> false
+    end
+    println("node-a: fifth refused with Backpressure: " ++ bool_to_string(backpressured))
     println("node-a: refused frame not charged: " ++ bool_to_string(NodeQueue.depth(q) == 88))
     -- Let the receiver consume; its CREDIT frames arrive on control, the
     -- writer drains 3-4, and the fifth fits again.

@@ -34,3 +34,11 @@ CI's heterogeneous Config-key fixture also compared a `Result` with a
 non-`Eq` error payload to `Ok`. Its assertion now matches the variants and
 compares only the success String, preserving the original test without
 requiring equality for `Config.Error`.
+
+CI follow-up: generated control-plane wiring and nineteen native/session/two-node
+fixtures also used payload-independent variant checks. They now use presence,
+emptiness, or success predicates. The backpressure fixture still checks the
+specific `Err(Backpressure)` variant by matching it, rather than accepting any
+error. All nineteen changed fixtures typecheck; the three focused generated
+control-wiring tests (`topology_flag` 17–19) pass. No two-node processes or
+full local suites were run for this follow-up.

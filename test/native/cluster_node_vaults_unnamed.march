@@ -17,7 +17,7 @@ mod ClusterNodeVaultsUnnamed do
     if i >= stop do acc else
       let meta : Option(Vault(Int)) = Vault.whereis("cluster_node_meta_" ++ name ++ "." ++ int_to_string(i))
       let names : Option(Vault(Int)) = Vault.whereis("cluster_node_names_" ++ name ++ "." ++ int_to_string(i))
-      let hit = (if meta != None do 1 else 0 end) + (if names != None do 1 else 0 end)
+      let hit = (if Option.is_some(meta) do 1 else 0 end) + (if Option.is_some(names) do 1 else 0 end)
       scan(name, i + 1, stop, acc + hit)
     end
   end
