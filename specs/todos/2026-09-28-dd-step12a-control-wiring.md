@@ -28,8 +28,8 @@ leader's audit log, [../progress/2026-10-01-dd-step12a-forge-cluster-backend.md]
   ([2026-10-01-session-message-encoding-leak.md](2026-10-01-session-message-encoding-leak.md)),
   so artifacts go over the control API as raw bytes (`CAS_GET`). A byte payload type for
   sessions would let a chunked fetch over a session come back.
-- `forge cluster cert --control-agent/--control-candidate` conveniences (the roles are
-  Ctl.Agent:initiate; candidates add Ctl.Control:offer).
+- Certificate role shortcuts are implemented:
+  [control certificate shortcuts](../progress/2026-10-08-control-cert-shortcuts.md).
 - A provoked skipped-gate report (STATUS has `NOTE` lines for it; the partition scenario heals
   without the old leader racing ahead).
 - The two compiled-only record-update misbehaviours the wiring works around are fixed

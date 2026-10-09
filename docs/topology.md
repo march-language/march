@@ -507,7 +507,7 @@ plan splits it in two (D21) and says so under "3. Order and splits":
 `forge deploy` stops after the expand; running it again for the same source is the
 contract. In the expand build the chooser's `choose_<label>` panics, so chooser code that
 must run in both builds asks first:
-`<P>_Msg.role_fingerprint(<P>_Msg.role_<Chooser>()) == <P>_Msg.fingerprint()` is false
+`<P>_<Chooser>.may_choose_<label>()` is false
 until the contract. Which changes are compatible is the compiler's rule, computed over
 wire tags against what the environment runs (`.forge/deploy/<env>/protocols/`, never the
 build-to-build `.forge/protocols/`). Anything else is breaking: every node offers both

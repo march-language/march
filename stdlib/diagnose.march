@@ -223,6 +223,8 @@ mod Diagnose do
   end
 
   -- 5. Live heap objects up more than 10% with the actor count flat (±5%).
+  -- Queued messages are live objects too, so mailbox backlog is accounted for
+  -- by mailbox.growth rather than reported as an RC leak.
   pfn rc_climb(b : Json.JsonValue, a : Json.JsonValue) : List(Finding) do
     match (get(section(b, "mem"), "live_objects"), get(section(a, "mem"), "live_objects")) do
       (Json.Number(f0), Json.Number(f1)) ->
@@ -230,11 +232,15 @@ mod Diagnose do
         let o1 = float_to_int(f1)
         let a0 = num_at(section(b, "mem"), "actors")
         let a1 = num_at(section(a, "mem"), "actors")
+        let queued_b = num_at(section(b, "mem"), "queued_messages")
+        let queued_a = num_at(section(a, "mem"), "queued_messages")
+        let queued_growth = if queued_a > queued_b do queued_a - queued_b else 0 end
+        let adjusted_o1 = if o1 > queued_growth do o1 - queued_growth else 0 end
         let d = if a1 > a0 do a1 - a0 else a0 - a1 end
         let base = if a0 > 1 do a0 else 1 end
-        if o0 >= 1000 && o1 * 10 > o0 * 11 && d * 20 <= base do
+        if o0 >= 1000 && adjusted_o1 * 10 > o0 * 11 && d * 20 <= base do
           [finding("rc.climb", "warning", [o0, o1],
-                   "heap objects climb with no new actors: a leak; compare SNAPSHOT mem over minutes")]
+                   "heap objects climb beyond queued-message growth with no new actors: a leak; compare SNAPSHOT mem over minutes")]
         else Nil end
       _ -> Nil
     end

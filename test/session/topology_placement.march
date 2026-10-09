@@ -99,7 +99,7 @@ mod TopologyPlacement do
     println("ranking: " ++ String.join(ranked, " > "))
     Topology.place(c, [ Topology.role("Echo.Server", Topology.count(1),
                           fn () -> Echo_Run.offer_Server(io, c, 4, fn (s, st) -> serve_one(s, st))) ])
-    println("n0's marker registered: " ++ (if Vault.get(fk.names, Topology.marker("Echo.Server", "n0")) != None do "yes" else "no" end))
+    println("n0's marker registered: " ++ (if Option.is_some(Vault.get(fk.names, Topology.marker("Echo.Server", "n0"))) do "yes" else "no" end))
     report(c, "placed")
     let ahead = above(ranked)
     List.each(ahead, fn id -> do
@@ -120,7 +120,7 @@ mod TopologyPlacement do
     -- A draining node withdraws from the ranking at once, so its count(1)
     -- role is offered elsewhere before SWIM declares it dead.
     println("after close_all, n0's marker still registered: "
-            ++ (if Vault.get(fk.names, Topology.marker("Echo.Server", "n0")) != None do "yes" else "no" end))
+            ++ (if Option.is_some(Vault.get(fk.names, Topology.marker("Echo.Server", "n0"))) do "yes" else "no" end))
     println("a peer sees eligible ids: [" ++ String.join(List.sort_by(Topology.marked("Echo.Server", Vault.keys(fk.names)), fn (a, b) -> a < b), ", ") ++ "]")
     -- Placement's own task is still asleep (a long tick); a fake node has
     -- no `stop`, so end the program here.

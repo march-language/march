@@ -19,6 +19,10 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- Generated protocol chooser APIs include `may_choose_<label>()`, false for
+  a held-back expand label and true otherwise. Deploy plans name the guard.
+- `forge cluster cert --control-agent` and `--control-candidate` add the
+  control-plane role permissions while preserving explicit `--roles`.
 - **`forge query` asks the compiler about your project's build.** It is
   `march query` with the project filled in: the entry file, the library path
   and the build's own flags (`--release`, `--target`, `[ffi]` sources, the
@@ -539,6 +543,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- Conditional interface implementations now check their specialised `when`
+  bounds at use sites, rejecting types whose nested payload lacks the required
+  interface instead of accepting the implementation's head alone.
+- **`forge diagnose` no longer mistakes a growing mailbox for an RC leak.**
+  `rc.climb` now excludes net queued-message growth before applying its heap
+  threshold, while still reporting a genuine climb. The shared Forge/stdlib
+  fixture keeps both implementations aligned.
 - **Short-lived strings use the fast allocator-free path in compiled programs.**
   Strings now use the same March object allocator as other heap values, so
   native mimalloc builds release them without a provenance-table lookup.

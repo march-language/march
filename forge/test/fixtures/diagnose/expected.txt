@@ -8,4 +8,6 @@ crash_loop_critical: crash.loop/critical
 crash_loop_warning: crash.loop/warning
 rc_climb: rc.climb/warning
 rc_climb_with_actors: 
+rc_climb_mailbox_growth: mailbox.growth/critical
+rc_climb_mailbox_and_heap_growth: mailbox.growth/critical,rc.climb/warning
 epoch_stuck: epoch.old_units/warning,epoch.stuck/warning

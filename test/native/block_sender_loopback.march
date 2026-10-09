@@ -93,7 +93,7 @@ mod BlockSenderLoopback do
     let q = NodeQueue.start(peer.data_fd, budget())
     let r1 = NodeQueue.enqueue(q, 1, frame(), NodeQueue.DropNew)
     let r2 = NodeQueue.enqueue(q, 2, frame(), NodeQueue.DropNew)
-    println("node-a: two frames admitted: " ++ bool_to_string(r1 == Ok(()) && r2 == Ok(())))
+    println("node-a: two frames admitted: " ++ bool_to_string(Result.is_ok(r1) && Result.is_ok(r2)))
     -- Wait for the writer to put those two on the wire (initial credit
     -- covers 100), so depth is 0 and frames 3-4 both fit the budget. Poll the
     -- observable state rather than sleeping a fixed time: under load the
@@ -105,7 +105,7 @@ mod BlockSenderLoopback do
     end
     let r3 = NodeQueue.enqueue(q, 3, frame(), NodeQueue.DropNew)
     let r4 = NodeQueue.enqueue(q, 4, frame(), NodeQueue.DropNew)
-    println("node-a: two more queued behind the credit line: " ++ bool_to_string(r3 == Ok(()) && r4 == Ok(())))
+    println("node-a: two more queued behind the credit line: " ++ bool_to_string(Result.is_ok(r3) && Result.is_ok(r4)))
     let ctl = task_spawn(fn _ -> match PeerReader.serve(peer.fd, Nil, fn (tag, fr) -> on_control(q, tag, fr)) do
       Ok(_) -> 0
       Err(e) -> panic("control reader: " ++ e)
@@ -119,7 +119,7 @@ mod BlockSenderLoopback do
     let t0 = unix_time_ms()
     let r5 = NodeQueue.enqueue(q, 5, frame(), NodeQueue.BlockSender(5000))
     let waited = unix_time_ms() - t0
-    println("node-a: fifth admitted by blocking: " ++ bool_to_string(r5 == Ok(())))
+    println("node-a: fifth admitted by blocking: " ++ bool_to_string(Result.is_ok(r5)))
     println("node-a: blocked until credit (>= 150 ms): " ++ bool_to_string(waited >= 150))
     let _ = task_await(go)
     let _ = task_await(ctl)

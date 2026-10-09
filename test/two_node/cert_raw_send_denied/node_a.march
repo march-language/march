@@ -32,7 +32,7 @@ mod CertRawSendDeniedA do
   end
 
   pfn wait_cert(h : Cap(ClusterNode.Live), id : String, left : Int) : Bool do
-    if ClusterNode.peer_cert(h, id) != None do true
+    if Option.is_some(ClusterNode.peer_cert(h, id)) do true
     else if left <= 0 do false else
       sleep_ms(50)
       wait_cert(h, id, left - 50)
@@ -51,7 +51,7 @@ mod CertRawSendDeniedA do
   end
 
   pfn shown(h : Cap(ClusterNode.Live), name : String) : String do
-    if ClusterNode.lookup(h, name) == None do "hidden" else "visible" end
+    if Option.is_none(ClusterNode.lookup(h, name)) do "hidden" else "visible" end
   end
 
   pfn said(r : Result(Int, NodeQueue.EnqueueError)) : String do
@@ -106,7 +106,7 @@ mod CertRawSendDeniedA do
         if wait_cert(h, b, 60000) do () else panic("node-a: node-b never linked") end
         let to_b = GlobalPid.make(b, 1, 0)
         println(me() ++ ": raw send_msg to node-b: " ++ said(ClusterNode.send_msg(h, to_b, "Raw.Ping", [1], NodeQueue.Unbounded)))
-        println(me() ++ ": queue_for node-b: " ++ (if ClusterNode.queue_for(h, b) == None do "refused" else "given (wrong)" end))
+        println(me() ++ ": queue_for node-b: " ++ (if Option.is_none(ClusterNode.queue_for(h, b)) do "refused" else "given (wrong)" end))
         -- Cross-node references: node-b's binding reaches this replica,
         -- recorded with its registrant, but lookup hides it (node-b has no
         -- raw_send); this node's own shows.

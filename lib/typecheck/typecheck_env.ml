@@ -254,9 +254,11 @@ type env = {
       written, which Check 4 looks up).  Entries from modules nested inside a
       [DMod] propagate outward through it. *)
   protocols  : proto_info StrMap.t; (** Registered session-type protocols *)
-  impls      : (ty * Ast.span * string option) list StrMap.t;
+  impls      : (ty * Ast.span * string option * (string * ty) list) list StrMap.t;
   (** iface_name → (bare impl head type, decl span, resolved declaring-module of
-      the head type — None when unresolved). Head type stays BARE so
+      the head type — None when unresolved, conditional interface bounds).
+      Bounds share the head's type variables and are specialised at use sites.
+      Head type stays BARE so
       [discharge_constraints] is unaffected; the module is used ONLY by the
       coherence overlap test. *)
   import_tracker : import_entry list ref;

@@ -31,7 +31,7 @@ mod CertInitiateDeniedA do
   end
 
   pfn wait_name(h : Cap(ClusterNode.Live), name : String, left : Int) : Bool do
-    if ClusterNode.lookup(h, name) != None do true
+    if Option.is_some(ClusterNode.lookup(h, name)) do true
     else if left <= 0 do false else
       sleep_ms(50)
       wait_name(h, name, left - 50)

@@ -39,3 +39,15 @@ Start with the post-Perceus TIR of `Json.parse_number`
 the one `Number(..)` holds, is not released on some path. See also the
 `string_to_float` boxed-Float history in
 `specs/progress/` (`grep -l string_to_float specs/progress`).
+
+## Narrowed 2026-10-08
+
+A 100-parse `live_allocs()` probe still grows beyond the fixed threshold on
+current main. Post-Perceus TIR identifies the ownership boundary: it reuses
+the `Option(Float)` cell from `string_to_float` as `JsonValue.Number(f)`, then
+the generated `__drop$JsonValue` Number arm releases only that outer cell. The
+boxed Float payload is not released. This is the same general boxed-Float ADT
+drop limitation tracked by `2026-10-07-option-float-payload-shallow-drop.md`,
+not a parser-local release that can safely be added here (a local `dec_rc f`
+would leave `Number(f)` with a dangling payload). Fix that general drop path,
+then add this probe as its Json coverage.

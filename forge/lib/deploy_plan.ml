@@ -831,10 +831,11 @@ let render (p : plan) : string =
       let this = " <- this deploy" in
       say "    deploy one (expand)%s: every build compiled with %s. The receivers (%s) run the new version \
            (fingerprint %s) and accept the previous one; %s keeps offering and initiating under the previous \
-           fingerprint %s and cannot choose `%s`\n"
+           fingerprint %s and cannot choose `%s`; guard it with %s.may_choose_%s()\n"
         (if sp.sp_phase = `Expand then this else ", done")
         (Protocol_split.expand_flag ~proto:sp.sp_protocol ~label:sp.sp_choice.ca_label)
-        (roles sp.sp_choice.ca_receivers) (fp8 sp.sp_new_fp) chooser (fp8 sp.sp_old_fp) sp.sp_choice.ca_label;
+        (roles sp.sp_choice.ca_receivers) (fp8 sp.sp_new_fp) chooser (fp8 sp.sp_old_fp) sp.sp_choice.ca_label
+        (sp.sp_protocol ^ "_" ^ sp.sp_choice.ca_by) sp.sp_choice.ca_label;
       say "    deploy two (contract)%s: the plain build, once every host runs deploy one. %s moves to fingerprint \
            %s and may choose `%s`%s\n"
         (if sp.sp_phase = `Contract then this else "")

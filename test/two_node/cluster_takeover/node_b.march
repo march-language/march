@@ -65,7 +65,7 @@ mod ClusterTakeoverB do
             None -> println("node-b: leader not found")
           end
           println("node-b: my stale bindings: " ++ int_to_string(ClusterNode.stale_bindings(h)))
-          println("node-b: cfg visible: " ++ bool_to_string(ClusterNode.lookup(h, "cfg") != None))
+          println("node-b: cfg visible: " ++ bool_to_string(Option.is_some(ClusterNode.lookup(h, "cfg"))))
           wait_file(Env.require("CLUSTER_STOP_FILE"))
           ClusterNode.stop(h)
           println("node-b: done")

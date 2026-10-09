@@ -1675,6 +1675,69 @@ let test_impl_when_constraint_unsatisfied () =
   end|} in
   Alcotest.(check bool) "impl when Eq(Color) but no Eq(Color) in scope: error" true (has_errors ctx)
 
+let test_conditional_impl_use_site () =
+  let source payload = Printf.sprintf {|mod Test do
+    type Box(a) = Box(a)
+    type Color = Red | Green
+    impl Eq(Box(a)) when Eq(a) do
+      fn eq(x, y) do true end
+    end
+    fn check(x : Box(%s), y : Box(%s)) do eq(x, y) end
+  end|} payload payload in
+  Alcotest.(check bool) "Eq(Box(Int)) satisfies its bound" false
+    (has_errors (typecheck (source "Int")));
+  Alcotest.(check bool) "Eq(Box(Color)) rejects its missing bound" true
+    (has_errors (typecheck (source "Color")));
+  let nested payload = Printf.sprintf {|mod Test do
+    type Box(a) = Box(a)
+    type Color = Red | Green
+    fn check(x : Box(Box(%s)), y : Box(Box(%s))) do eq(x, y) end
+    impl Eq(Box(a)) when Eq(a) do
+      fn eq(x, y) do true end
+    end
+  end|} payload payload in
+  Alcotest.(check bool) "forward nested bound succeeds" false
+    (has_errors (typecheck (nested "Int")));
+  Alcotest.(check bool) "forward nested bound rejects" true
+    (has_errors (typecheck (nested "Color")));
+  let cyclic = {|mod Test do
+    type Box(a) = Box(a)
+    impl Eq(Box(a)) when Eq(Box(a)) do
+      fn eq(x, y) do true end
+    end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+  end|} in
+  Alcotest.(check bool) "a circular bound cannot prove itself" true
+    (has_errors (typecheck cyclic));
+  let expanding = {|mod Test do
+    type Box(a) = Box(a)
+    impl Eq(Box(a)) when Eq(Box(Box(a))) do
+      fn eq(x, y) do true end
+    end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+  end|} in
+  Alcotest.(check bool) "an expanding bound terminates and rejects" true
+    (has_errors (typecheck expanding));
+  let duplicating = {|mod Test do
+    type Box(a) = Box(a)
+    impl Eq(Box(a)) when Eq(Box((a, a))) do
+      fn eq(x, y) do true end
+    end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+  end|} in
+  Alcotest.(check bool) "a duplicating bound has bounded search size" true
+    (has_errors (typecheck duplicating));
+  let finite = {|mod Test do
+    type Box(a) = Box(a)
+    interface Bound(a) do fn bound: a -> Bool end
+    fn check(x : Box(Int), y : Box(Int)) do eq(x, y) end
+    impl Eq(Box(a)) when Bound(a) do fn eq(x, y) do true end end
+    impl Bound(Int) when Eq(Box(Bool)) do fn bound(x) do true end end
+    impl Bound(Bool) do fn bound(x) do true end end
+  end|} in
+  Alcotest.(check bool) "same-sized obligations can form a finite proof" false
+    (has_errors (typecheck finite))
+
 let test_interface_cross_module_dispatch () =
   (* A bare interface-method call from a DIFFERENT module than the one defining
      the interface+impl must resolve. Sibling [mod] blocks are exactly how the
@@ -17728,6 +17791,7 @@ let compiler_suites =
           Alcotest.test_case "ctor lexical preference: lookup_ctor returns own-module candidate directly" `Quick test_ctor_lexical_preference_directly_inspects_lookup_ctor;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
+          Alcotest.test_case "conditional impl use site"    `Quick test_conditional_impl_use_site;
           Alcotest.test_case "cross-module dispatch"        `Quick test_interface_cross_module_dispatch;
           Alcotest.test_case "cross-module record dispatch" `Quick test_interface_cross_module_dispatch_record;
           Alcotest.test_case "test keywords as idents"      `Quick test_test_keywords_as_identifiers;

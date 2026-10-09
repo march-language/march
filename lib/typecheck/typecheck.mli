@@ -254,7 +254,7 @@ type env = {
   mod_need_scopes : (string * string option) list;
   module_caps : (string * string list) list;
   protocols : proto_info StrMap.t;
-  impls : (ty * Ast.span * string option) list StrMap.t;
+  impls : (ty * Ast.span * string option * (string * ty) list) list StrMap.t;
   import_tracker : import_entry list ref;
   import_idx : import_index;
   deferred_check4 : (string * string list * string * Ast.span) list ref;
@@ -389,4 +389,3 @@ val check_module_full :
   ?seed_env:env -> Ast.module_ -> Err.ctx * (Ast.span, ty) Hashtbl.t * env
 val check_letq_repl : env -> Ast.pattern -> Ast.expr -> env
 val check_letstar_repl : env -> Ast.pattern -> Ast.expr -> env
-

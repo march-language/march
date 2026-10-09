@@ -114,6 +114,22 @@ extra = [actor(100 + i) for i in range(5)]
 a["actors"]["actors"] += extra; a["actors"]["total"] += 5; a["mem"]["actors"] += 5
 cases["rc_climb_with_actors"] = (b, a, [])
 
+# A growing mailbox is also live queued work, not an RC leak.  The raw heap
+# gauge crosses rc.climb's threshold, but its entire increase is queued
+# messages, so only mailbox.growth must report it.
+b = healthy(); a = healthy(); busy_threads(a, [900, 900])
+b["mem"]["live_objects"] = 1_000
+a["mem"]["live_objects"] = 1_120
+a["actors"]["actors"][1]["mbox"] = 120; requeue(b); requeue(a)
+cases["rc_climb_mailbox_growth"] = (b, a, ["mailbox.growth/critical"])
+
+# Mailbox growth must not hide an independent increase above the RC threshold.
+b = healthy(); a = healthy(); busy_threads(a, [900, 900])
+b["mem"]["live_objects"] = 1_000
+a["mem"]["live_objects"] = 1_250
+a["actors"]["actors"][1]["mbox"] = 120; requeue(b); requeue(a)
+cases["rc_climb_mailbox_and_heap_growth"] = (b, a, ["mailbox.growth/critical", "rc.climb/warning"])
+
 # epoch.stuck + epoch.old_units: a draining epoch, and units two epochs back.
 b = healthy(); a = healthy(); busy_threads(a, [900, 900])
 for d in (b, a):

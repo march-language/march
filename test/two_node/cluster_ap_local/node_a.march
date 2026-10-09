@@ -86,7 +86,7 @@ mod ClusterApLocal do
   -- An offer registers its name asynchronously (through the node actor):
   -- wait until it is visible before inviting it.
   pfn visible(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
-    if ClusterNode.lookup(h, o.name) != None do ()
+    if Option.is_some(ClusterNode.lookup(h, o.name)) do ()
     else if left <= 0 do panic("the offer never became visible") else
       sleep_ms(20)
       visible(h, o, left - 20)
