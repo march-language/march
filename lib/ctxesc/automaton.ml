@@ -184,7 +184,10 @@ let escaper_for (c : C.t) =
   | C.Attrvalue ->
     (match c.C.attr with
      | C.AtUrl | C.AtUrlSchemeHole -> C.EscUrlWhole
-     | C.AtUrlMid | C.AtUrlScheme | C.AtUrlSchemeHoleMid -> C.EscUrlComponent
+     (* Path (and authority) positions refuse a dot segment; query and
+        fragment positions are plain components. See [C.EscUrlPath]. *)
+     | C.AtUrlMid | C.AtUrlScheme | C.AtUrlSchemeHoleMid -> C.EscUrlPath
+     | C.AtUrlQuery | C.AtUrlFragment -> C.EscUrlComponent
      | C.AtStyle -> C.EscCssDecl
      | C.AtStyleValue -> C.EscCssValue
      | C.AtCssUrl -> C.EscCssUrl

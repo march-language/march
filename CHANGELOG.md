@@ -29,6 +29,12 @@ git log is authoritative for exact commits.
   the scheme literally (`href="https://${host}/"`) are unaffected.
   Any app that renders links from `~H` templates with an interpolated scheme
   should be rebuilt; a template the check now rejects was exploitable.
+- **`~H` no longer lets an interpolated path segment climb out of its
+  directory.** In `href="/users/${id}/edit"`, a value of `..` rendered
+  `/users/../edit`, which the browser resolves to `/edit`; the same held for
+  `src`, `action` and every other URL attribute. A path hole whose value is
+  nothing but dots is now replaced with an inert token. Query and fragment
+  holes are unaffected (`?q=..` still renders `..`).
 
 ### Added
 - **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**
@@ -593,6 +599,12 @@ git log is authoritative for exact commits.
   value as `None`, so a match took the `None` branch. An `Option` over such a
   type is now stored as a heap cell. A recursive type of that shape
   (`End | Link(Chain)`) inside an `Option` also no longer hangs the compiler.
+- **`forge publish` no longer demands a major version for a rename.**
+  Renaming a function parameter or a type variable used to read as a breaking
+  signature change. Signatures are now compared by structure, so those are a
+  patch. The comparison also became stricter in two places it was blind:
+  adding a parameter to a type (`Box(a)` -> `Box(a, b)`) and making a type's
+  constructors private (`opaque type`) now require a major bump.
 - **Drop functions keep the same symbol across unrelated edits.** The compiler
   named the drop function of a type with an unresolved type variable after the
   typechecker's internal variable number (`__drop$List_V_53272`), so it moved

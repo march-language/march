@@ -22,7 +22,13 @@ See `specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md`.
   `javascript://%0Aalert%281%29`. The URL attribute now has a scheme
   sub-automaton (`urlscheme` / `urlschemehole` / `urlschemeholemid`) and a
   literal `:` that would let a hole choose the scheme is a compile error.
-- **URL authority / path / query / fragment — still flat.** See below.
+- **URL path vs query vs fragment — DONE 2026-10-11, and the path half WAS
+  exploitable.** See `specs/progress/2026-10-11-h-sigil-url-path-dot-segments.md`.
+  `href="/users/${id}/edit"` with `id = ".."` rendered `/users/../edit`, which
+  resolves to `/edit` (client-side path traversal for every fetching
+  attribute). `urlquery` / `urlfragment` are now tracked, and path holes get a
+  `url_path` escaper that replaces an all-dot value.
+- **URL authority — still flat.** See below.
 
 ## What this file got wrong, which is the part worth keeping
 
@@ -69,7 +75,7 @@ it is still a flat encoding of a sub-automaton, not a nested one.
 
 | Nested language | Sub-positions | Escapers |
 |---|---|---|
-| URL | `url` → `urlmid` | `EscUrlWhole`, `EscUrlComponent` |
+| URL | `url` → scheme positions → `urlmid` (path) → `urlquery` → `urlfragment` | `EscUrlWhole`, `EscUrlPath`, `EscUrlComponent` |
 | CSS | `style` → `stylevalue` → `cssurl` | `EscCssDecl`, `EscCssValue`, `EscCssUrl` |
 | JS | `script` ⇄ `jsstring`, plus `jscomment` / `jsregex` / `jstemplate` | `EscJsExpr`, `EscJsString` |
 
@@ -83,8 +89,18 @@ still one flat `urlmid` component. What that leaves:
   escaper, which percent-encodes `/`, `@` and `:`, so it cannot move the host,
   but it also breaks an honest `host:port`. A real authority position would
   allow `:port` and reject `@` (userinfo spoofing).
-- Query vs path vs fragment all get the same component escaper. That is safe
-  (it encodes more than any of them needs) but over-encodes `/` in a path hole.
+- Query vs path vs fragment are now distinct (2026-10-11). Path holes still
+  over-encode `/`; that stays deliberate, since a hole that could write `/`
+  could also write `//host` at the start of a path (an open redirect).
+- **Residual of the path slice:** a template that writes a raw `%` (or a
+  character reference for one: `&#37;`, `&percnt;`) immediately before a path
+  hole lets the hole finish a `%2e`, which the URL parser reads as a dot:
+  `href="/a/%${x}/b"` with `x = "2e"`. Closing it needs a "percent-escape
+  pending" position in the path AND in every open-scheme position (an entity
+  there must not settle the scheme), which is where the slice stopped. A
+  template that puts `%` before a hole is already double-encoding, so this is
+  recorded rather than fixed; same caveat as below about arguing from the
+  cases examined.
 - CSS `url(${s}:x)` has the same composition shape as the href exploit:
   `css_url` checks `s` alone and leaves `:` unescaped. Not executable in any
   current browser (`javascript:` in CSS `url()` is not run), so it was left out

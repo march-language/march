@@ -67,6 +67,7 @@ int main(void) {
         { MARCH_ESC_CSS_DECL,      "css_decl" },
         { MARCH_ESC_CSS_URL,       "css_url" },
         { MARCH_ESC_JS_EXPR,       "js_expr" },
+        { MARCH_ESC_URL_PATH,      "url_path" },
     };
     for (int i = 0; i < MARCH_ESC__COUNT; i++) {
         checks++;
@@ -137,6 +138,23 @@ int main(void) {
     expect(MARCH_ESC_URL_COMPONENT, "a/b", "a%2Fb", "component encodes slash");
     expect(MARCH_ESC_URL_COMPONENT, "aZ0-_.~", "aZ0-_.~",
            "component leaves unreserved alone");
+
+    /* ── URL path: a component that refuses a dot segment ──────────────────
+       `/users/${id}/edit` with id = `..` renders `/users/../edit`, which the
+       URL parser resolves to `/edit`. `%2e` is `.` to that parser, so the
+       value is replaced rather than encoded. */
+    expect(MARCH_ESC_URL_PATH, "..", "zSoyz", "path refuses a double-dot segment");
+    expect(MARCH_ESC_URL_PATH, ".", "zSoyz", "path refuses a single-dot segment");
+    expect(MARCH_ESC_URL_PATH, "....", "zSoyz", "path refuses any all-dot value");
+    expect(MARCH_ESC_URL_PATH, "%2e%2e", "%252e%252e",
+           "path encodes the percent of a pre-encoded dot");
+    expect(MARCH_ESC_URL_PATH, "../admin", "..%2Fadmin",
+           "path encodes the slash of a traversal");
+    expect(MARCH_ESC_URL_PATH, "0.2.3", "0.2.3", "path keeps a version");
+    expect(MARCH_ESC_URL_PATH, "a b", "a%20b", "path encodes like a component");
+    expect(MARCH_ESC_URL_PATH, "", "", "path handles empty");
+    expect(MARCH_ESC_URL_COMPONENT, "..", "..",
+           "a query component keeps dots: `?q=..` is data");
 
     /* ── JS string ───────────────────────────────────────────────────────
        `</script` ends a script element even inside a JS string literal, and
