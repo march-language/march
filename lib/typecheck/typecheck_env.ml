@@ -893,22 +893,114 @@ let rec demote_to_monomorphic (t : ty) : unit =
 
     Scoped to [Vault] on purpose: no type that does not mention [Vault]
     anywhere changes generalization behaviour by one variable. *)
-let rec demote_vault_handle_vars (t : ty) : unit =
+let rec demote_vault_handle_vars_with (demote : ty -> unit) (t : ty) : unit =
+  let go = demote_vault_handle_vars_with demote in
   match t with
-  | TCon ("Vault", args) -> List.iter demote_to_monomorphic args
+  | TCon ("Vault", args) -> List.iter demote args
   | TVar r ->
     (match !r with
-     | Link t'   -> demote_vault_handle_vars t'
+     | Link t'   -> go t'
      | Unbound _ -> ())
-  | TCon   (_, args)    -> List.iter demote_vault_handle_vars args
-  | TArrow (a, b)       -> demote_vault_handle_vars a; demote_vault_handle_vars b
-  | TTuple ts           -> List.iter demote_vault_handle_vars ts
-  | TRecord flds        -> List.iter (fun (_, t) -> demote_vault_handle_vars t) flds
-  | TLin   (_, t)       -> demote_vault_handle_vars t
-  | TNatOp (_, a, b)    -> demote_vault_handle_vars a; demote_vault_handle_vars b
+  | TCon   (_, args)    -> List.iter go args
+  | TArrow (a, b)       -> go a; go b
+  | TTuple ts           -> List.iter go ts
+  | TRecord flds        -> List.iter (fun (_, t) -> go t) flds
+  | TLin   (_, t)       -> go t
+  | TNatOp (_, a, b)    -> go a; go b
   | TChan  _            -> ()
-  | TRefine (base, _, _) -> demote_vault_handle_vars base
+  | TRefine (base, _, _) -> go base
   | TNat _ | TError     -> ()
+
+let demote_vault_handle_vars (t : ty) : unit =
+  demote_vault_handle_vars_with demote_to_monomorphic t
+
+(** Lower every unbound var in [t] to at most [lvl]. *)
+let rec demote_to_level (lvl : int) (t : ty) : unit =
+  let go = demote_to_level lvl in
+  match t with
+  | TVar r ->
+    (match !r with
+     | Unbound (id, l) -> if l > lvl then r := Unbound (id, lvl)
+     | Link t'         -> go t')
+  | TCon   (_, args)    -> List.iter go args
+  | TArrow (a, b)       -> go a; go b
+  | TTuple ts           -> List.iter go ts
+  | TRecord flds        -> List.iter (fun (_, t) -> go t) flds
+  | TLin   (_, t)       -> go t
+  | TNatOp (_, a, b)    -> go a; go b
+  | TChan  _            -> ()
+  | TRefine (base, _, _) -> go base
+  | TNat _ | TError     -> ()
+
+(** One frame per [check_fn] in progress: the level of the fn's body (its
+    generalization threshold + 1) and the types of the unannotated block
+    [let]s in that body that hold a Vault handle.
+
+    The block-[let] Vault value restriction used to demote a handle's element
+    type straight to level 0, i.e. pin it for the WHOLE program.  That is right
+    for a variable only the body can name, but wrong for one the enclosing
+    function's parameters name: in
+    [fn keep(mk : () -> Pid(a)) do let t = Vault.new("x") ... Vault.set(t, "h", mk()) end]
+    the handle's element type IS [Pid(a)], and pinning it made [a] itself
+    monomorphic, so the first caller fixed [a] for every other caller.
+
+    So a block [let] demotes the handle's vars only to the enclosing fn's body
+    level (no [let] or local fn inside the body generalizes them, so every use
+    in one call still shares one element type), and [settle_vault_pins] at the
+    fn's own generalization demotes to level 0 only the vars that no parameter
+    type mentions.  A var a parameter mentions is chosen by each caller through
+    its arguments; one only the body or the return type mentions
+    ([fn g() : Option(b) do Vault.get(Vault.open("x"), "k") end]) stays pinned,
+    as before. *)
+let vault_pin_frames : (int * ty list ref) list ref = ref []
+
+(** The block-[let] Vault value restriction; see [vault_pin_frames]. *)
+let demote_block_vault_handle_vars (t : ty) : unit =
+  match !vault_pin_frames with
+  | (lvl, acc) :: _ ->
+    demote_vault_handle_vars_with (demote_to_level lvl) t;
+    acc := t :: !acc
+  | [] -> demote_vault_handle_vars t
+
+(** Run [f] with a fresh pin frame at body level [lvl]; [f] receives the
+    frame's [settle] function, to call (with the parameter types) just before
+    the fn generalizes. *)
+let with_vault_pin_frame (lvl : int) (f : (ty list -> unit) -> 'a) : 'a =
+  let acc = ref [] in
+  let saved = !vault_pin_frames in
+  vault_pin_frames := (lvl, acc) :: saved;
+  let settle (param_tys : ty list) =
+    let param_ids = Hashtbl.create 8 in
+    let rec collect t =
+      match t with
+      | TVar r ->
+        (match !r with
+         | Unbound (id, _) -> Hashtbl.replace param_ids id ()
+         | Link t' -> collect t')
+      | TCon (_, args) | TTuple args -> List.iter collect args
+      | TArrow (a, b) | TNatOp (_, a, b) -> collect a; collect b
+      | TRecord flds -> List.iter (fun (_, t) -> collect t) flds
+      | TLin (_, t) | TRefine (t, _, _) -> collect t
+      | TChan _ | TNat _ | TError -> ()
+    in
+    List.iter collect param_tys;
+    let rec pin t =
+      match t with
+      | TVar r ->
+        (match !r with
+         | Unbound (id, l) ->
+           if l > 0 && not (Hashtbl.mem param_ids id) then r := Unbound (id, 0)
+         | Link t' -> pin t')
+      | TCon (_, args) | TTuple args -> List.iter pin args
+      | TArrow (a, b) | TNatOp (_, a, b) -> pin a; pin b
+      | TRecord flds -> List.iter (fun (_, t) -> pin t) flds
+      | TLin (_, t) | TRefine (t, _, _) -> pin t
+      | TChan _ | TNat _ | TError -> ()
+    in
+    List.iter (demote_vault_handle_vars_with pin) !acc
+  in
+  Fun.protect ~finally:(fun () -> vault_pin_frames := saved)
+    (fun () -> f settle)
 
 (** Tag the inner cap-argument var of a [cap_narrow] result [Cap(a)] so [unify]
     can reject the instant [a] is bound to a nominal proof cap — closing the

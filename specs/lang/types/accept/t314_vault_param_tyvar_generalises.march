@@ -1,0 +1,46 @@
+-- A function that keeps a value of a PARAMETER's type variable in a Vault it
+-- binds with an unannotated `let` is still polymorphic in that variable
+-- (2026-10-11, specs/progress/2026-10-11-vault-pid-param-generalised.md).
+-- The block-`let` Vault value restriction used to pin the handle's element
+-- type, and with it `a`, for the whole program, so the second call below (an
+-- actor of another state type) was "expected `{ n : Int }` but got
+-- `{ s : String }`". The handle's element type is still pinned inside one call
+-- (every use of `spare` in `keep` shares one `Pid(a)`); reject/t315 pins that
+-- a variable no parameter names stays monomorphic.
+mod M do
+  needs IO.Console, IO.Mut
+
+  actor A do
+    state { n : Int }
+    init { n: 0 }
+    on Ping() do state end
+  end
+
+  actor B do
+    state { s : String }
+    init { s: "" }
+    on Ping() do state end
+  end
+
+  fn keep(mk : () -> Pid(a), open : Pid(a) -> Int) : Int do
+    let spare = Vault.new("spare")
+    let host = match Vault.get(spare, "h") do
+      Some(h) -> h
+      None -> mk()
+    end
+    Vault.set(spare, "h", host)
+    open(host)
+  end
+
+  fn keep_value(x : a) : Int do
+    let t = Vault.new("value")
+    Vault.set(t, "k", x)
+    Vault.size(t)
+  end
+
+  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
+    println(int_to_string(keep(fn () -> spawn(A), fn _ -> 1)))
+    println(int_to_string(keep(fn () -> spawn(B), fn _ -> 2)))
+    println(int_to_string(keep_value(1) + keep_value("s")))
+  end
+end

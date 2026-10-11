@@ -548,6 +548,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A function that keeps a parameter's value in a `Vault` stays generic.**
+  `fn keep(mk : () -> Pid(a)) do let t = Vault.new("x") ... Vault.set(t, "h",
+  mk()) end` was polymorphic in `a` only until its first caller: the Vault
+  value restriction pinned the handle's element type for the whole program, so
+  a second call with another type (for example two `Topology.offer_actor_role`
+  roles over actors of different state types) was a type error. The handle is
+  now pinned for one call of the function; an element type no parameter names
+  is still pinned program-wide.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

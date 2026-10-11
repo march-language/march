@@ -3713,8 +3713,10 @@ and infer_block env exprs =
     (* Vault handles are the ML [ref []] case: `let t = Vault.new("t")` is an
        application, and generalizing its element type would let each use pick a
        different one.  Skipped when the binding is annotated — writing the type
-       out is the explicit opt-out.  See [demote_vault_handle_vars]. *)
-    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
+       out is the explicit opt-out.  Inside a fn body the element type is pinned
+       for that fn (not the whole program) when a parameter type names it; see
+       [vault_pin_frames]. *)
+    if b.bind_ty = None then demote_block_vault_handle_vars rhs_ty;
     let gen_binding bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)
       | other          -> other
@@ -4287,6 +4289,9 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
   env.current_decl := qualify_ref_name env.current_module def.fn_name.txt;
   Fun.protect ~finally:(fun () -> env.current_decl := saved_caller) (fun () ->
   let env'    = enter_level env in
+  (* Block-`let` Vault handles in this body; settled against the parameter
+     types before generalization (see [vault_pin_frames]). *)
+  with_vault_pin_frame env'.level @@ fun settle_vault_pins ->
   (* Captured BEFORE the self-bind below (which unconditionally clears any
      [local_fns] entry for this name, per [bind_var]'s shadowing discipline)
      so we know whether to restore it afterward — this fn is only a genuine
@@ -4675,6 +4680,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       (* Generalize; attach bound constraints and any when-clause class constraints *)
       let all_constraints = bound_constraints @ class_constraints in
       mark_trusted_linear_vars env def ~fn_span ~fn_tvars:!fn_tvars trusted_vars;
+      settle_vault_pins param_tys;
       let base_sch = generalize env.level fn_ty in
       (match all_constraints with
        | [] -> base_sch
@@ -5827,7 +5833,7 @@ let rec check_decl env (d : Ast.decl) : env =
             what (pp_ty t))
      | _ -> ());
     (* Same Vault value restriction as the block-[let] path above. *)
-    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
+    if b.bind_ty = None then demote_block_vault_handle_vars rhs_ty;
     (* Generalise simple variable bindings at module level *)
     let gen_bnd bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)
