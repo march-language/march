@@ -627,6 +627,12 @@ git log is authoritative for exact commits.
   The runtime read an object's count with a plain load (to skip immortal static cells)
   while other threads decremented it atomically; that read is now a relaxed atomic load.
   The generated machine code is unchanged on arm64.
+- **A NativeArray read with `Simd.load_*` is no longer leaked, and SIMD index
+  loops are faster.** Each load used to add a reference to the array that
+  nothing released, so the array was never freed. It also cost an atomic
+  RC operation on every iteration. `bench/simd_kernels.march`'s `dot_simd`
+  went from 4.3 ms to 1.35 ms (median), and a loop over 400 fresh 1 MB arrays
+  went from 411 MB peak RSS to 8 MB.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.
