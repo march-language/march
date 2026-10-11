@@ -696,6 +696,38 @@ let dispatch_type_name_of_value = function
      | None -> type_name_of_value v)
   | v -> type_name_of_value v
 
+(** Lexicographic order of two tuples: the first component pair that
+    differs decides, each compared as [compare] would (a total order on
+    Float, the component type's own [Ord] impl for an ADT). The prelude's
+    [impl Ord((a, b))] .. 5-tuples are the compiled side of the same rule.
+    [None] when a component pair has no order here (no [Ord] impl). *)
+let rec tuple_compare (xs : value list) (ys : value list) : int option =
+  match xs, ys with
+  | [], [] -> Some 0
+  | x :: xs', y :: ys' ->
+    (match ord_compare_value x y with
+     | Some 0 -> tuple_compare xs' ys'
+     | r -> r)
+  | _ -> None
+
+and ord_compare_value (a : value) (b : value) : int option =
+  match a, b with
+  | VInt x, VInt y -> Some (Int.compare x y)
+  | VFloat x, VFloat y -> Some (Float.compare x y)
+  | VString x, VString y -> Some (String.compare x y)
+  | VBool x, VBool y -> Some (Bool.compare x y)
+  | VTuple xs, VTuple ys -> tuple_compare xs ys
+  | _ ->
+    (match type_name_of_value a with
+     | Some tname ->
+       (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+        | Some cmp_fn ->
+          (match !iface_dispatch_hook cmp_fn [a; b] with
+           | VInt n -> Some n
+           | _ -> None)
+        | None -> None)
+     | None -> None)
+
 let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
     | [VInt a;    VInt b]    -> VBool (op_i a b)
     | [VFloat a;  VFloat b]  -> VBool (op_f a b)
@@ -718,7 +750,11 @@ let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
          VBool (if name = "==" then a = b else a <> b))
     | [a; b] when (name = "<" || name = "<=" || name = ">" || name = ">=") ->
       (* For ordering operators, look up the Ord impl if available. *)
-      let cmp_result = match type_name_of_value a with
+      let cmp_result = match a, b with
+        | VTuple xs, VTuple ys ->
+          Option.map (fun n -> VInt n) (tuple_compare xs ys)
+        | _ ->
+        match type_name_of_value a with
         | Some tname ->
           (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
            | Some cmp_fn -> Some (!iface_dispatch_hook cmp_fn [a; b])

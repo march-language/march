@@ -805,6 +805,29 @@ let rec rewrite_calls
        `List.length(xs)` runs the user's `go` and returns garbage. *)
     if SSet.mem orig_name shadowed then expr
     else
+    (* `<` / `<=` / `>` / `>=` on two TUPLES: the order is the prelude's
+       lexicographic `impl Ord((a, b))` (2..5-tuples), so route the operator
+       through the prelude's `__tuple_lt` & co. (`compare(a, b) <op> 0`),
+       specialised here like any generic call, which in turn specialises each
+       component's own `compare`.  Done in Mono, not at lowering, because a
+       generic `fn lt(a, b) do a < b end` only learns that [a] is a tuple
+       here.  Left to the emitter, a tuple operand is a plain `ptr` and fell
+       to `march_poly_compare`, which has no static type to order a heap cell
+       by and returns 0: every tuple `<` was false. *)
+    let tuple_ord_helper =
+      match orig_name, first_arg_ty args with
+      | ("<" | "<=" | ">" | ">="), Tir.TTuple (_ :: _) when List.length args = 2 ->
+        let h = match orig_name with
+          | "<" -> "__tuple_lt" | "<=" -> "__tuple_le"
+          | ">" -> "__tuple_gt" | _ -> "__tuple_ge" in
+        if Hashtbl.mem fn_table h then Some h else None
+      | _ -> None
+    in
+    (match tuple_ord_helper with
+    | Some h ->
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+        shadowed (Tir.EApp ({ f_var with Tir.v_name = h }, args))
+    | None ->
     (match Hashtbl.find_opt fn_table orig_name with
      | None ->
        (* Not in fn_table (builtin or external).  Before giving up, check if
@@ -1020,7 +1043,7 @@ let rec rewrite_calls
          let f_var' = { f_var with Tir.v_name = mangled;
                                    v_ty = subst_ty subst f_var.Tir.v_ty } in
          Tir.EApp (f_var', args)
-       end)
+       end))
   (* ECallPtr: if the callee is a known top-level fn, ensure it's discovered *)
   | Tir.ECallPtr (fn_atom, args) ->
     (match fn_atom with

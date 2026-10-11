@@ -135,6 +135,11 @@ git log is authoritative for exact commits.
   per-message rule. The golden error corpus now re-checks every program with
   its fixes applied (`after fix: exit N`), so a fix that leaves a broken
   program is visible in review.
+- **Tuples are ordered.** `(1, 2) < (1, 3)`, `<=`, `>`, `>=` and `compare`
+  work on tuples of 2 to 5 components whose components are all `Ord`. The order
+  is lexicographic: the first pair of components that differs decides. Before,
+  the typechecker rejected them; and where they got through (inside generic
+  code), compiled `<` on a tuple was always `false`.
 - **Every diagnostic has a code, and `march --explain <code>`.** Each error,
   warning and hint ends its first line with its code in brackets
   (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always
@@ -393,6 +398,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **A type variable in a function signature is rigid: a body that fixes it is
+  an error.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end`, and a body that
+  makes two signature variables the same type (`fn second(x : a, y : b) : a do
+  y end`), now fail with `annotated_tyvar_fixed` at the signature. It was a
+  warning since 2026-09-22. No stdlib or in-repo test program was affected; a
+  library that relied on it should write the concrete type (the hint names it)
+  or make the body generic.
 - **The remote shell's build-identity table is smaller, and a session fetches
   only what differs.** A `--hot-reload` binary embeds the table in a compact
   format (module prefixes written once, 48-bit hashes): 105 KB instead of
@@ -556,6 +568,14 @@ git log is authoritative for exact commits.
 - **A dead TypedArray releases its elements (compiled).** An array of Strings
   (or any heap values) leaked every element when the array was freed. It now
   releases them.
+- **A function that keeps a parameter's value in a `Vault` stays generic.**
+  `fn keep(mk : () -> Pid(a)) do let t = Vault.new("x") ... Vault.set(t, "h",
+  mk()) end` was polymorphic in `a` only until its first caller: the Vault
+  value restriction pinned the handle's element type for the whole program, so
+  a second call with another type (for example two `Topology.offer_actor_role`
+  roles over actors of different state types) was a type error. The handle is
+  now pinned for one call of the function; an element type no parameter names
+  is still pinned program-wide.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

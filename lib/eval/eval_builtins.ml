@@ -838,6 +838,13 @@ let base_env : env =
         | [VFloat a;  VFloat b]  -> VInt (Float.compare a b)
         | [VString a; VString b] -> VInt (String.compare a b)
         | [VBool a;   VBool b]   -> VInt (Bool.compare a b)
+        | [VTuple xs; VTuple ys] as args ->
+          (* Lexicographic, each component by its own order; OCaml's
+             structural [compare] ordered an ADT component by constructor
+             NAME and never consulted its Ord impl. *)
+          (match tuple_compare xs ys with
+           | Some n -> VInt n
+           | None -> (match args with [a; b] -> VInt (compare a b) | _ -> VInt 0))
         | [a; b] ->
           (match type_name_of_value a with
            | Some tname ->
