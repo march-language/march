@@ -9599,6 +9599,41 @@ let test_simd_vector_ir () =
   Alcotest.(check bool) "no runtime-call fallthrough for simd_f32x4_add" false
     (ir_contains ir "call ptr @simd_f32x4_add")
 
+(** [simd_<lane>_load] BORROWS its array (2026-10-11).  It was classified owned
+    while its lowering (a bounds check + a plain vector load) never released
+    the array, so Perceus dup'd the array before every load and nothing
+    dropped it: an atomic +1 per iteration of every SIMD index loop, and an
+    array that could never be freed once loaded from (a 400 x 1 MB loop peaked
+    at 411 MB RSS; 8 MB after).  Pinned on the IR of a self-tail-recursive
+    index loop: its array parameter must carry no RC op at all.  [_store]
+    stays owned -- it consumes the array FBIP-style -- and the classification
+    half below keeps that from being flipped along with [_load]. *)
+let test_simd_load_borrows_array () =
+  let ir = emit_actor_ir {|mod Test do
+    fn dot_loop(a, i : Int, limit : Int, acc) do
+      if i >= limit do acc
+      else
+        let va = simd_f32x4_load(a, i)
+        dot_loop(a, i + 4, limit, simd_f32x4_add(va, acc))
+      end
+    end
+  end|} in
+  let start = Str.search_forward (Str.regexp_string "@dot_loop(") ir 0 in
+  let stop = Str.search_forward (Str.regexp_string "\n}\n") ir start in
+  let body = String.sub ir start (stop - start) in
+  Alcotest.(check bool) "dot_loop lowers the load inline" true
+    (ir_contains body "load <4 x float>");
+  Alcotest.(check int) "no incrc in the index loop" 0
+    (ir_count body "incrc");
+  Alcotest.(check int) "no decrc in the index loop" 0
+    (ir_count body "decrc");
+  List.iter (fun lane ->
+      Alcotest.(check bool) (Printf.sprintf "simd_%s_load borrows its array" lane) true
+        (March_tir.Borrow.is_extern_borrowed (Printf.sprintf "simd_%s_load" lane) 0);
+      Alcotest.(check bool) (Printf.sprintf "simd_%s_store owns its array" lane) false
+        (March_tir.Borrow.is_extern_borrowed (Printf.sprintf "simd_%s_store" lane) 0))
+    [ "f32x4"; "f64x2"; "i32x4"; "i64x2"; "u8x16" ]
+
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
 let test_cancel_token_new () =
@@ -17322,6 +17357,7 @@ let codegen_suites =
           Alcotest.test_case "float arr IR" `Quick (with_reset test_native_float_arr_ir);
           Alcotest.test_case "narrow arr IR" `Quick (with_reset test_native_narrow_arr_ir);
           Alcotest.test_case "simd vector IR" `Quick (with_reset test_simd_vector_ir);
+          Alcotest.test_case "simd load borrows its array" `Quick (with_reset test_simd_load_borrows_array);
         ] );
       ( "tasks",
         [

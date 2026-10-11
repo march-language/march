@@ -432,6 +432,25 @@ over binary64) instead of double-rounding a binary64 `Float.fma`, and parity is
 fuzzed over 400k boundary-heavy lanes by `test/native/simd_fma_fuzz.march`. See
 `specs/progress/2026-08-13-simd-fma-rounding-parity.md`.
 
+**Refreshed 2026-10-11 (`simd_<lane>_load` borrows its array).** The
+per-iteration `march_incrc_local` on each loaded array was a classification
+bug, not a loop-framework cost: `load` was owned but never released, so every
+load dup'd the array (and the array was never freed). With it borrowed,
+`dot_loop` carries no RC op. Same box, origin/main compiler vs the patched
+one, 11 interleaved rounds after a discarded warmup round, 1-min load average
+55-78 (heavily loaded; non-SIMD benches compile to byte-identical IR):
+
+| leg, ms      | base median / min | patched median / min |
+|--------------|-------------------|----------------------|
+| dot_simd     | 4.29 / 2.73       | 1.35 / 1.32          |
+| dot_composed | 0.55 / 0.48       | 0.64 / 0.49          |
+| scan_simd    | 4.61 / 4.08       | 3.63 / 3.29          |
+| scan_scalar  | 59.22 / 52.66     | 55.10 / 53.09        |
+
+`dot_composed` is now a fused pipeline (~0.5 ms), so `dot_simd` still trails
+it; what is left in `dot_loop` is the preemption check and the
+`stacksave`/`stackrestore` pair. See the todo for the remaining shapes.
+
 ## DataFrame Min/Max: not migrated
 
 Per the plan's guidance ("ONLY migrate if DataFrame tests stay green AND the
