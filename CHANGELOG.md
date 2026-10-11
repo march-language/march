@@ -610,6 +610,10 @@ git log is authoritative for exact commits.
   the actor stuck in a slow call with work piling up was missed. Both functions
   now count those messages, through the new `mailbox_backlog(pid)`.
   `mailbox_size` still reports only the queued messages.
+- **`MARCH_SANITIZE=thread` no longer flags the refcount release path as a data race.**
+  The runtime read an object's count with a plain load (to skip immortal static cells)
+  while other threads decremented it atomically; that read is now a relaxed atomic load.
+  The generated machine code is unchanged on arm64.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

@@ -15,3 +15,15 @@ inlined across a green-thread switch, which reads the old thread's scheduler aft
 migrated (the fix is `noinline`). Check any helper Observe R2 added on the dispatch or
 park path for that first. Next step: a loop of this binary on an amd64 machine (or
 `--platform linux/amd64` emulation), with a core dump to get the faulting pc.
+
+## TSAN on macOS, 2026-10-11: nothing, apart from a TSAN-only wedge
+
+`MARCH_SANITIZE=thread` build (macOS arm64, LLVM 22), 14 schedulers: no TSAN report, but
+every run (11 of 11) wedges before printing anything. A 1000-ball version wedges in 9 of
+11 runs at 2 schedulers and finishes at 1. It never wedges in plain or ASAN+UBSan builds,
+and it still wedges with the runtime at `-O0` (so it is not the TLS-hoist class named
+above) and with `-DMARCH_DEBUG` (no run-queue tripwire fires). That is a lost-proc hang,
+not a SIGSEGV, so it does not explain this crash. Filed as
+`specs/todos/2026-10-11-macos-tsan-scheduler-wedge.md`. The only refcount race TSAN
+reported (the immortal-check read in `march_decrc`, now relaxed-atomic) cannot cause a
+fault: a mortal count can never reach the 2^40 immortal threshold.
