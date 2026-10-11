@@ -37,6 +37,16 @@ mod Main do
     end
   end
 
+  -- A boundary function called every 20 ms, for the TRACE_* checks.  The
+  -- recursive branch never runs; it keeps the inliner away so `tick` keeps a
+  -- dispatch slot.
+  fn tick(n : Int) : Int do if n > 1000000 do tick(n - 1) else n + 1 end end
+
+  fn spin(n : Int) : Int do
+    sleep_ms(20)
+    spin(tick(n))
+  end
+
   fn main(io : Cap(IO)) do
     let intro = Actor.introspect(io)
     let _s = spawn(Sup)
@@ -50,6 +60,7 @@ mod Main do
     sleep_ms(300)
     println("counter " ++ int_to_string(pid_to_int(c)))
     println("ready")
-    sleep_ms(120000)
+    let _ = spin(0)
+    ()
   end
 end

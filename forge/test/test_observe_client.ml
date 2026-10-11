@@ -147,12 +147,12 @@ let test_hosts_of () =
 let test_signed_request () =
   let pk, sk = March_ed25519.Ed25519.keygen () in
   let line = Observe_client.signed_request ~sk ~nonce:"00112233445566778899aabbccddeeff"
-      ~now_ms:1_000_000 "STATE" [ "pid:7"; "timeout_ms:500" ] in
+      ~boot:"ffeeddccbbaa99887766554433221100" ~now_ms:1_000_000 "STATE" [ "pid:7"; "timeout_ms:500" ] in
   match String.split_on_char ' ' line with
   | verb :: sig_b64 :: rest ->
     Alcotest.(check string) "verb first" "STATE" verb;
     Alcotest.(check (list string)) "fields after the signature"
-      [ "nonce:00112233445566778899aabbccddeeff"; "not_after_ms:1030000"; "pid:7"; "timeout_ms:500" ] rest;
+      [ "nonce:00112233445566778899aabbccddeeff"; "boot:ffeeddccbbaa99887766554433221100"; "not_after_ms:1030000"; "pid:7"; "timeout_ms:500" ] rest;
     let signed = String.concat " " (verb :: rest) in
     let raw = Cmd_hot_reload.b64_decode_raw sig_b64 in
     let ok = match raw with

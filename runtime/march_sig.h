@@ -22,6 +22,11 @@ const unsigned char *march_sig_pubkey(void);
 /* The key as 64 lowercase hex chars, or "" without a key. */
 void march_sig_pubkey_hex(char out[65]);
 
+/* This process's boot id: 32 lowercase hex chars from the OS entropy source,
+ * drawn once.  A signed observe request names it (`boot:`), so a captured
+ * request is useless against a restarted process or another node. */
+const char *march_sig_boot_id(void);
+
 /* 1 iff [sig_b64] (base64, standard or URL-safe, padding optional) is a valid
  * ed25519 signature over [msg] by the compiled-in key. */
 int  march_sig_verify(const char *msg, const char *sig_b64);

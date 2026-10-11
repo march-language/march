@@ -37,7 +37,15 @@ let print_reply ~json (reply : Yojson.Safe.t) =
 
 (** A debug request ([--state], [--crashes-full]): signed with the deploy
     key, so it is built here rather than taken from the positional words. *)
-type debug = No_debug | State of { pid : int; timeout_ms : int } | Crashes_full of int option
+type trace_limit = Max_events of int | Rate of int * int
+
+type debug =
+  | No_debug
+  | State of { pid : int; timeout_ms : int }
+  | Crashes_full of int option
+  | Trace_start of { fns : string; limit : trace_limit; ring : int option }
+  | Trace_drain of { session : int; max : int option }
+  | Trace_stop of int
 
 (** The longest [--state --timeout-ms] forge allows: the client reads the
     reply with a 10 s socket timeout ([Remote.connect_with_timeout]), so a
@@ -45,26 +53,51 @@ type debug = No_debug | State of { pid : int; timeout_ms : int } | Crashes_full 
     up, and the user would see a socket error instead of ["timeout"]. *)
 let max_state_timeout_ms = 8000
 
-let debug_request (d : debug) : (string option, string) result =
+(** A debug request, ready to sign: the verb, its fields, and the key. The
+    node's boot id (HELLO) is added per target, just before signing. *)
+let debug_request (d : debug) : ((boot:string -> string) option, string) result =
   match d with
   | No_debug -> Ok None
   | State { timeout_ms; _ } when timeout_ms < 0 || timeout_ms > max_state_timeout_ms ->
     Error (Printf.sprintf
              "observe: --timeout-ms must be between 0 and %d (forge waits at most 10 s for a reply)"
              max_state_timeout_ms)
-  | State _ | Crashes_full _ ->
+  | Trace_start { limit = Max_events n; _ } when n < 1 || n > 65536 ->
+    Error "observe: --max-events must be between 1 and 65536"
+  | Trace_start { limit = Rate (n, s); _ } when n < 1 || n > 100000 || s < 1 || s > 3600 ->
+    Error "observe: --rate N/SECS needs N in 1..100000 and SECS in 1..3600"
+  | _ ->
     match Cmd_hot_reload.read_sk_raw () with
     | Error m -> Error ("observe: " ^ m)
     | Ok sk ->
-      let now_ms = int_of_float (Unix.gettimeofday () *. 1000.) in
-      let nonce = Observe_client.fresh_nonce () in
       let verb, fields = match d with
         | State { pid; timeout_ms } ->
           "STATE", [ Printf.sprintf "pid:%d" pid; Printf.sprintf "timeout_ms:%d" timeout_ms ]
         | Crashes_full n ->
           "CRASHES_FULL", (match n with Some n -> [ Printf.sprintf "n:%d" n ] | None -> [])
+        | Trace_start { fns; limit; ring } ->
+          "TRACE_START",
+          (match limit with
+           | Max_events n -> [ Printf.sprintf "count:%d" n ]
+           | Rate (n, s) -> [ Printf.sprintf "rate:%d" n; Printf.sprintf "per_s:%d" s ])
+          @ [ "fn:" ^ fns ]
+          @ (match ring with Some r -> [ Printf.sprintf "ring:%d" r ] | None -> [])
+        | Trace_drain { session; max } ->
+          "TRACE_DRAIN", Printf.sprintf "session:%d" session
+                         :: (match max with Some m -> [ Printf.sprintf "max:%d" m ] | None -> [])
+        | Trace_stop session -> "TRACE_STOP", [ Printf.sprintf "session:%d" session ]
         | No_debug -> assert false in
-      Ok (Some (Observe_client.signed_request ~sk ~nonce ~now_ms verb fields))
+      Ok (Some (fun ~boot ->
+          let now_ms = int_of_float (Unix.gettimeofday () *. 1000.) in
+          let nonce = Observe_client.fresh_nonce () in
+          Observe_client.signed_request ~sk ~nonce ~boot ~now_ms verb fields))
+
+(** The boot id in a HELLO reply. *)
+let boot_of (hello : Yojson.Safe.t) : (string, string) result =
+  match Yojson.Safe.Util.(member "data" hello |> member "boot") with
+  | `String b when b <> "" -> Ok b
+  | _ -> Error "observe: the node's HELLO gave no boot id"
+  | exception _ -> Error "observe: the node's HELLO gave no boot id"
 
 (** Run one request; every target's reply is printed (one line each with
     [~json]).  The result is an error if any target failed. *)
@@ -74,16 +107,26 @@ let run ?(debug = No_debug) ~(socket : string option) ~(env : string) ~(json : b
     match debug_request debug with
     | Error _ as e -> e
     | Ok (Some _) when words <> [] || sections <> [] ->
-      Error "observe: give --state or --crashes-full alone, without a request or --section"
-    | Ok (Some r) -> Ok r
-    | Ok None -> request_of ~words ~sections in
+      Error "observe: give a debug flag alone, without a request or --section"
+    | Ok (Some mk) -> Ok (`Signed mk)
+    | Ok None -> Result.map (fun r -> `Plain r) (request_of ~words ~sections) in
+  (* A signed request names the target's boot id, so it is built per target,
+     after a HELLO. *)
+  let send ask = function
+    | `Plain r -> ask r
+    | `Signed mk ->
+      match ask "HELLO" with
+      | Error _ as e -> e
+      | Ok h -> match boot_of h with
+        | Error _ as e -> e
+        | Ok boot -> ask (mk ~boot) in
   let explain = if debug = No_debug then Fun.id else Observe_client.explain_debug_error in
   match request with
   | Error _ as e -> e
   | Ok request ->
     match socket with
     | Some path ->
-      Result.map (print_reply ~json) (Observe_client.query_socket path request)
+      Result.map (print_reply ~json) (send (Observe_client.query_socket path) request)
       |> Result.map_error explain
     | None ->
       match Project.load () with
@@ -96,7 +139,7 @@ let run ?(debug = No_debug) ~(socket : string option) ~(env : string) ~(json : b
           | Error _ as e -> e
           | Ok hosts ->
             let failures = List.filter_map (fun h ->
-                match Observe_client.query Remote.ssh h request with
+                match send (Observe_client.query Remote.ssh h) request with
                 | Ok reply -> print_reply ~json reply; None
                 | Error m -> Some (h.Hosts.name ^ ": " ^ explain m)) hosts
             in

@@ -109,6 +109,11 @@ int march_observe_add_verbs(const march_observe_verb *v, size_t n);
  * gets the same envelope a socket client would. */
 void march_observe_handle(const char *line, size_t n, march_jw *out);
 
+/* 1 while the calling thread is answering an in-process request (the
+ * observe_query builtin) rather than a socket client.  The debug verbs use
+ * it to take Cap(Actor.Debug), not a signature, as the authority. */
+int march_observe_in_process(void);
+
 /* Register the R1 snapshot verbs (march_observe_snapshot.c).  Idempotent. */
 void march_observe_snapshot_install(void);
 

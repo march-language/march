@@ -525,6 +525,8 @@ static const char *verb_names(march_jw *w, const char *args) {
  * thread instead).  No verb switches green threads, so the flag cannot leak. */
 static _Thread_local int tl_in_process;
 
+int march_observe_in_process(void) { return tl_in_process; }
+
 #define SCHED_WINDOW_DEFAULT_MS 200
 #define SCHED_WINDOW_MAX_MS     5000
 
