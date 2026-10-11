@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t316 accept, t01–t315 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (188 accept, 249 reject; see the Result line below) -->
+# Typing corpus index (t01–t316 accept, t01–t317 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (188 accept, 250 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -248,7 +248,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 434/434: 186 accept, 248
+Exit 0 iff every program behaves as declared (currently 438/438: 188 accept, 250
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -621,7 +621,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 437 / 437 (188 accept, 249 reject).** `accept/t296`–`t299` and
+**Result: 438 / 438 (188 accept, 250 reject).** `accept/t296`–`t299` and
 `reject/t300`–`t307` (2026-10-06, Part C, Phase C2 of
 `specs/plans/2026-09-25-send-data-race-freedom-plan.md`): `RingBuf` is
 `always_linear`. The eight rejects are the plan's holes H1–H8, each of which
@@ -751,6 +751,7 @@ their own table entries.
 | `t311_refine_abstract_find_too_weak` | **Abstract refinements, a weaker NAMED predicate (2026-10-07, phase 3):** `nonneg(n) : {Bool \| _ == (n >= 0)}` passed to `List.find` against `Option({Int \| _ > 0})`: the proved return admits 0. A too-weak skip naming `nonneg`, which `cap verified` makes this error. Accept twin: `t310` | `abstract-refinement-too-weak` |
 | `t313_refine_abstract_shorthand_too_weak` | **Abstract refinements, phase 4: the shorthand, a weaker lambda (2026-10-08).** t312's combinator with `fn y -> y >= 0` against `List({Int \| _ > 0})`: a too-weak skip, which `cap verified` makes this error. Accept twin: `t312` | `abstract-refinement-too-weak` |
 | `t315_vault_body_only_tyvar_stays_pinned` | **A Vault element type no parameter names stays pinned program-wide (2026-10-11).** `peek() : Option(b)` reads a named table; the narrowed restriction of `t314` must not generalize `b`, or one caller could read the table as `Int` and another as `String`. Accept twin `t314` | ``expected `String` but got `Int` `` |
+| `t317_annotated_tyvar_rigid` | **Annotation type variables are rigid (2026-10-11, `specs/progress/2026-10-11-annotated-tyvars-rigid.md`).** `bad(xs : List(a)) : List(a)` returns `[0 - 5]`, fixing `a` to `Int`; nothing calls it at another type, so only the definition can report it. Accepted silently before 2026-09-22, a warning (exit 0) until 2026-10-11 | ``The type variable `a` in `bad`'s signature is not generic`` |
 | `t285_linear_param_rebound_then_dropped` | **A plain `let` rename can't launder a binding-linear value (2026-09-22).** `h` is linear only because of its binding (`linear h : Res`, a plain ADT), so `ELet`'s type-driven auto-promotion bound `let h2 = h` Unrestricted: the read of `h` was its one use and `h2` was then dropped silently — the named twin of `t283`. `h2` now inherits the tracked binding's linearity. Accepted before the fix | `` The linear value `h2` was never used. `` |
 | `t291_config_typed_key_read_as_pid` | **Config typed keys (2026-09-22): the `specs/progress/2026-09-22-config-typed-keys.md` witness, spelled with the typed API.** The untyped `Config.put(:ns, :name, 42)` / `Config.get(:ns, :name)` pair typechecked and handed the stored `Int` to `is_alive` as a `Pid`; `Config.get(key : Key(v)) : Option(v)` on a `Key(Int)` now yields `Option(Int)`. Accept twin `t292` | ``expected `Pid(`` |
 

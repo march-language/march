@@ -12203,16 +12203,16 @@ let test_ordinary_unused_param_still_warned () =
   Alcotest.(check bool) "an ordinary unused parameter still warns"
     true (has_warning_with ctx "Unused variable `x`")
 
-(* ── Annotated type variable fixed by the body (warning) ──────────────────
-   specs/progress/2026-09-22-annotated-tyvar-fixed-warning.md: a signature
-   type variable is an ordinary unification variable, so a body can fix it
-   (`fn bad(xs : List(a)) : List(a) do [0 - 5] end` is `List(Int) ->
-   List(Int)`); the warning names that at the definition instead of leaving
-   it to surface as a mismatch at some caller. *)
+(* ── Annotated type variable fixed by the body (error) ────────────────────
+   specs/progress/2026-09-22-annotated-tyvar-fixed-warning.md introduced it as
+   a warning; specs/progress/2026-10-11-annotated-tyvars-rigid.md made
+   annotation type variables rigid, so it is an error: a body that fixes a
+   signature variable (`fn bad(xs : List(a)) : List(a) do [0 - 5] end`) is
+   rejected at the definition instead of leaving it to surface as a mismatch
+   at some caller. (Helper names keep "warnings" for history.) *)
 let tyvar_fixed_warnings ctx =
   List.filter (fun (d : March_errors.Errors.diagnostic) ->
-      d.severity = March_errors.Errors.Warning
-      && d.code = "annotated_tyvar_fixed")
+      d.code = "annotated_tyvar_fixed")
     ctx.March_errors.Errors.diagnostics
 
 let test_tyvar_fixed_concrete_warns () =
@@ -12224,14 +12224,15 @@ let test_tyvar_fixed_concrete_warns () =
   match tyvar_fixed_warnings ctx with
   | [ d ] ->
     Alcotest.(check bool) "names the variable, the function and the type" true
-      (has_warning_with ctx "type variable `a` in `bad`'s signature is not generic: the body fixes it to `Int`");
+      (has_error_with ctx "type variable `a` in `bad`'s signature is not generic: the body fixes it to `Int`");
     Alcotest.(check (pair int int)) "points at the variable in the signature"
       (2, 21) (d.span.start_line, d.span.start_col);
     Alcotest.(check bool) "hints at writing the concrete type" true
       (List.exists (fun n -> n = "hint: write `Int` in place of `a` if that is \
                                   what you mean, or make the body generic in `a`.")
          d.notes);
-    Alcotest.(check bool) "a warning, not an error" false (has_errors ctx)
+    Alcotest.(check bool) "an error (rigid annotation variables)" true
+      (d.severity = March_errors.Errors.Error)
   | ds -> Alcotest.failf "expected exactly one tyvar warning, got %d" (List.length ds)
 
 let test_tyvar_generic_does_not_warn () =
@@ -12274,7 +12275,7 @@ let test_tyvar_aliased_warns () =
   Alcotest.(check int) "one warning, on the later variable" 1
     (List.length (tyvar_fixed_warnings ctx));
   Alcotest.(check bool) "names both variables" true
-    (has_warning_with ctx "type variables `a` and `b` in `second`'s signature are not independent")
+    (has_error_with ctx "type variables `a` and `b` in `second`'s signature are not independent")
 
 let test_tyvar_fixed_to_function_type_warns () =
   (* The variable is fixed to a type that still MENTIONS variables (`b -> b`),
@@ -12285,16 +12286,16 @@ let test_tyvar_fixed_to_function_type_warns () =
   let ctx = typecheck {|mod TvFn do
     fn apply_it(f : a, x : b) : b do f(x) end
   end|} in
-  Alcotest.(check bool) "no error: the signature merely over-claims" false (has_errors ctx);
+  Alcotest.(check bool) "an error: the signature over-claims" true (has_errors ctx);
   match tyvar_fixed_warnings ctx with
   | [ d ] ->
     (* The fixing type prints with a fresh-counter variable name (`b -> b`,
        `j2 -> j2`, … depending on what was checked before), so match the
        stable prefix and assert the arrow shape separately. *)
     Alcotest.(check bool) "names the variable and the function" true
-      (has_warning_with ctx "type variable `a` in `apply_it`'s signature is not generic: the body fixes it to");
+      (has_error_with ctx "type variable `a` in `apply_it`'s signature is not generic: the body fixes it to");
     Alcotest.(check bool) "the fixing type is an arrow" true
-      (has_warning_with ctx " -> ");
+      (has_error_with ctx " -> ");
     Alcotest.(check bool) "hint does not try to name internal variables" true
       (List.exists (fun n -> n = "hint: write the type the body needs in place \
                                   of `a`, or make the body generic in `a`.")

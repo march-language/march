@@ -4231,14 +4231,16 @@ let rec ty_mentions_var t = match repr t with
   | TLin (_, t) | TRefine (t, _, _) -> ty_mentions_var t
   | TError | TNat _ | TChan _ -> false
 
-(** Warn, at its first mention in the signature, about each type variable
-    of [def] that its body did not leave generic
-    (specs/todos/2026-09-18-typecheck-annotated-tyvars-flexible.md, option
-    (b)).  Both a variable fixed to a concrete type and one made equal to
-    another of the signature's variables are reported: each is a signature
-    that promises callers a freedom the body does not give them, and each
-    would be an error were annotation variables rigid. *)
-let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
+(** Reject, at its first mention in the signature, each type variable of
+    [def] that its body did not leave generic: annotation type variables are
+    rigid (specs/progress/2026-10-11-annotated-tyvars-rigid.md; option (a) of
+    the 2026-09-18 todo, a Warning under option (b) from 2026-09-22).  Both a
+    variable fixed to a concrete type and one made equal to another of the
+    signature's variables are errors: each is a signature that promises
+    callers a freedom the body does not give them.  Checked after the body,
+    not by skolemising during it, so the error points at the signature and
+    names the type the body needed. *)
+let check_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
   List.iter (fun (v, span, fixing) ->
       let message, note = match fixing with
         | Tyvar_concrete t ->
@@ -4265,7 +4267,7 @@ let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
              same type, or make the body generic in each." other v
       in
       Err.report env.errors
-        { Err.severity = Err.Warning; span; message; labels = [];
+        { Err.severity = Err.Error; span; message; labels = [];
           notes = [ note ]; code = Err.Code.annotated_tyvar_fixed; fix = None })
     (annotated_tyvar_fixings def fn_tvars)
 
@@ -4675,7 +4677,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          mismatch at the call.  Skipped when the body reported an error: its
          unifications are then unreliable evidence of what the author meant. *)
       if not (Err.error_since env.errors diag_mark) then
-        warn_annotated_tyvar_fixings env def !fn_tvars;
+        check_annotated_tyvar_fixings env def !fn_tvars;
 
       (* Generalize; attach bound constraints and any when-clause class constraints *)
       let all_constraints = bound_constraints @ class_constraints in

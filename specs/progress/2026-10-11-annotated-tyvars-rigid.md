@@ -1,5 +1,7 @@
 # `[P3]` Typecheck: a type variable in a signature can be silently fixed by the body
 
+**Closed 2026-10-11: option (a) landed** (see "Option (a)" at the end).
+
 Filed 2026-09-18, found while designing `specs/2026-09-18-parametric-element-flow-design.md` §1.
 
 `fn bad(xs : List(a)) : List(a) do [0 - 5] end` typechecks: `a` is an
@@ -76,3 +78,34 @@ masks the result. Measuring those needs each project's own `forge` build.
   the repo today. Open questions for (a): the ecosystem count (above), and
   whether an aliased pair (`fn f(x : a, y : b) : a do y end`) is rejected as
   well, as it would be under rigid skolems.
+
+## Option (a) (2026-10-11): annotation type variables are rigid
+
+The `annotated_tyvar_fixed` diagnostic is now an **Error**
+(`check_annotated_tyvar_fixings`, lib/typecheck/typecheck.ml, formerly
+`warn_annotated_tyvar_fixings`). The accept/reject set is that of rigid
+skolems for written signature variables, checked after the body rather than by
+skolemising during it, so the error points at the signature and names the type
+the body needed.
+
+- **Aliased pairs are rejected too** (`fn f(x : a, y : b) : a do y end`), as
+  under rigid skolems. That answers the second open question; (b) already
+  warned on them as a preview.
+- **Re-measured before flipping** (`--check` on every `.march` under
+  `test/native`, `test/stdlib`, `test/golden`, `specs/lang/types/accept`,
+  `examples`, `bench`: 792 files): 0 sites. The stdlib internal-type-error
+  ratchet (`run-tests.sh -q compiler`) is unchanged, so no stdlib function
+  relies on a flexible signature variable. The one golden diagnostic that
+  showed the warning (`test/errors/annotated_tyvar_fixed_1`) now shows it as
+  an error.
+- **Not measured: the ecosystem** (depot, conduit, envoy, forgepm, ...), for
+  the reason given above. A library that relied on a flexible signature
+  variable now fails to compile; the hint names the concrete type to write.
+- Unchanged scope: local `let x : a = ...` and lambda annotations are not
+  checked; the check is skipped after a body error.
+
+Tests: `specs/lang/types/reject/t317_annotated_tyvar_rigid.march` (exit 0
+before, rejected after), the `annotated_tyvar_fixed` group in
+`test/test_compiler.ml` (now asserting Error severity), and the regenerated
+`test/errors/annotated_tyvar_fixed_1` golden. Docs: `docs/types.md` and
+`specs/lang/type-system.md` ("A signature's type variables must stay generic").

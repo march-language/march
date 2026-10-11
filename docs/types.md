@@ -261,15 +261,15 @@ map_option(Some("hi"), String.byte_size) -- Option(Int) — there is no `String.
 
 ### A signature's type variables must stay generic
 
-A type variable in a signature is not yet a promise the compiler enforces: the
-body can fix it. This typechecks, and every caller sees `List(Int) -> List(Int)`:
+A type variable in a signature means "for all": the body may not fix it. This
+is an error, because `bad` promises any `List(a)` and returns a `List(Int)`:
 
 ```march
 fn bad(xs : List(a)) : List(a) do [0 - 5] end
 ```
 
-The compiler warns at the variable in the signature (warning code
-`annotated_tyvar_fixed`), naming the type the body gave it:
+The error (code `annotated_tyvar_fixed`) points at the variable in the
+signature and names the type the body gave it:
 
 ```
 The type variable `a` in `bad`'s signature is not generic: the body fixes it
@@ -278,19 +278,21 @@ to `Int`, so every caller gets `Int` in its place.
     body generic in `a`.
 ```
 
-It also warns when the body makes two of the signature's variables the same
-type, as in `fn second(x : a, y : b) : a do y end` (the body returns `y`, so
-`b` must be `a`). That signature promises callers two independent types, and
-they get only one.
+Making two of the signature's variables the same type is an error too, as in
+`fn second(x : a, y : b) : a do y end` (the body returns `y`, so `b` must be
+`a`). That signature promises callers two independent types, and they get only
+one.
 
-The warning covers only type variables you wrote in a function's parameter or
-return annotations (or its bounds). It is skipped when the function's body has
-a type error, since that error is the one to fix first — including the
-`curried_lambda_over_tuple` error for `fn (k, v) -> …` passed where a callback
-over a pair is expected, which names that mistake directly.
+The rule covers only type variables you wrote in a function's parameter or
+return annotations (or its bounds); an unannotated parameter's type is the
+body's to decide, and type variables in a local `let x : a = …` or a lambda
+annotation are not checked. The check is skipped when the function's body
+already has a type error, since that error is the one to fix first, including
+the `curried_lambda_over_tuple` error for `fn (k, v) -> …` passed where a
+callback over a pair is expected, which names that mistake directly.
 
-A later release plans to make these variables rigid, which turns this warning
-into an error.
+Until 2026-10-11 this was a warning, and before 2026-09-22 the body fixed the
+variable silently.
 
 ---
 

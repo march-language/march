@@ -398,6 +398,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **A type variable in a function signature is rigid: a body that fixes it is
+  an error.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end`, and a body that
+  makes two signature variables the same type (`fn second(x : a, y : b) : a do
+  y end`), now fail with `annotated_tyvar_fixed` at the signature. It was a
+  warning since 2026-09-22. No stdlib or in-repo test program was affected; a
+  library that relied on it should write the concrete type (the hint names it)
+  or make the body generic.
 - **The remote shell's build-identity table is smaller, and a session fetches
   only what differs.** A `--hot-reload` binary embeds the table in a compact
   format (module prefixes written once, 48-bit hashes): 105 KB instead of
