@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**
+  Editing a dependency's version in `forge.toml` and running `forge deps` used
+  to lock the new release whatever it asked for. Now a release that asks for
+  capabilities the baseline does not grant is refused like `forge add`: the
+  change is printed, `forge.lock` is left as it was, and
+  `forge deps --accept-caps` keeps it. Installing what `forge.lock` already
+  says is never checked.
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the

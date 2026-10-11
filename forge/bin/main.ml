@@ -527,8 +527,18 @@ let deps_update_cmd =
     Term.(const run $ name)
 
 let deps_cmd =
+  let accept_caps =
+    Arg.(value & flag & info ["accept-caps"]
+           ~doc:"Keep a dependency change that asks for capabilities \
+                 forge.caps.lock does not grant, and record the new set. \
+                 Without it, such a change (a version edited in forge.toml, \
+                 say) is refused and forge.lock is left as it was. Installing \
+                 what forge.lock already says is never gated.")
+  in
   let install_term =
-    Term.(const (fun () -> handle (Cmd_deps.run ())) $ const ())
+    Term.(const (fun ac ->
+        handle (Cmd_audit.deps_with_gate ~accept:ac ~resolve:Cmd_deps.run))
+          $ accept_caps)
   in
   Cmd.group ~default:install_term
     (Cmd.info "deps" ~doc:"Install and manage project dependencies")

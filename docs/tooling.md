@@ -1041,11 +1041,14 @@ forge audit                                      # exit 1 if a dependency gained
 forge audit --inferred                           # infer each set from the code (`march caps`), not `needs`
 forge audit --inferred --allow-unanalyzable      # gate on the deps that typecheck; list the rest
 forge add <name> ... --accept-caps               # keep a new dep that widens the baseline
+forge deps --accept-caps                         # keep a hand-edited upgrade that widens it
 ```
 
-`forge add` and `forge outdated` use the baseline too: an add that brings in
-new authority is refused unless `--accept-caps`, and `forge outdated` shows
-what each available upgrade would newly ask for.
+`forge add`, `forge deps` and `forge outdated` use the baseline too: an add, or
+a `forge deps` after a hand edit to `forge.toml`, that brings in new authority
+is refused unless `--accept-caps`, and `forge outdated` shows what each
+available upgrade would newly ask for. Installing what `forge.lock` already
+says is never gated.
 
 `--inferred` needs a toolchain whose `march` supports `caps` (0.3.0 or later)
 and stops with the toolchain's path and version if it does not. It caches

@@ -356,6 +356,82 @@ let test_outdated_preview_line () =
   Alcotest.(check bool) "a failed fetch is unknown, never 'no new'" true
     (contains (line ~before:(Some []) (fun () -> Error "offline")) "caps: unknown (offline)")
 
+(* ------------------------------------------------------------------ *)
+(*  `forge deps` after a hand edit                                     *)
+(* ------------------------------------------------------------------ *)
+
+(* `forge deps` as the CLI runs it: the install under the gate. *)
+let gated_deps ?(accept_caps = false) f =
+  in_fixture f (fun () ->
+      capture (fun () ->
+          Cmd_audit.deps_with_gate ~accept:accept_caps ~resolve:Cmd_deps.run))
+
+(* The hand edit the todo describes: forge.toml now points `clock` at a
+   different release (here a second path, clock2, whose copy also needs
+   IO.Process). Before the gate, `forge deps` locked it silently and only a
+   later `forge audit` noticed. *)
+let hand_edit_clock_to_clock2 f =
+  add_package f ~name:"clock2" ~needs:[ "IO.Clock"; "IO.Process" ];
+  let t = toml f in
+  let needle = "clock = { path = \"../clock\" }" in
+  let i =
+    let n = String.length t and m = String.length needle in
+    let rec find k = if k + m > n then Alcotest.fail "fixture toml has no clock dep"
+      else if String.sub t k m = needle then k else find (k + 1) in
+    find 0 in
+  write_file (Filename.concat f.app "forge.toml")
+    (String.sub t 0 i ^ "clock = { path = \"../clock2\" }"
+     ^ String.sub t (i + String.length needle) (String.length t - i - String.length needle))
+
+let test_deps_after_hand_edit_is_gated () =
+  let f = recorded_fixture [] in
+  hand_edit_clock_to_clock2 f;
+  let toml1 = toml f and lock0 = lock f and caps0 = read_file (caps_lock_path f) in
+  let r, out = gated_deps f in
+  (match r with
+   | Ok () -> Alcotest.failf "a widening hand edit must be refused:\n%s" out
+   | Error msg ->
+     Alcotest.(check bool) "names the dependency" true (contains msg "clock");
+     Alcotest.(check bool) "names the deps flag" true
+       (contains msg "forge deps --accept-caps"));
+  Alcotest.(check bool) "shows the widening" true
+    (contains out "! clock — now ALSO needs: IO.Process");
+  Alcotest.(check string) "forge.lock restored byte-for-byte" lock0 (lock f);
+  Alcotest.(check string) "forge.toml keeps the user's edit" toml1 (toml f);
+  Alcotest.(check string) "forge.caps.lock untouched" caps0 (read_file (caps_lock_path f));
+  (* Still refused on the next run: the edit is re-resolved every time. *)
+  let r, _ = gated_deps f in
+  Alcotest.(check bool) "refused again" true (Result.is_error r);
+  let r, _ = gated_deps ~accept_caps:true f in
+  Alcotest.(check bool) "accepted with --accept-caps" true (Result.is_ok r);
+  Alcotest.(check bool) "forge.lock now locks clock2" true (contains (lock f) "clock2");
+  Alcotest.(check (option (list string))) "clock's new set recorded"
+    (Some [ "IO.Clock"; "IO.Process" ])
+    (List.assoc_opt "clock" (Cmd_audit.read_baseline (caps_lock_path f)));
+  let code, _ = in_fixture f (fun () -> capture (fun () -> Cmd_audit.run ())) in
+  Alcotest.(check bool) "forge audit passes afterwards" true (code = Ok 0)
+
+let test_deps_restore_is_not_gated () =
+  (* The restore path: forge.lock already says what to install. The baseline
+     is deliberately STALE for clock (it records no capabilities), so a gate
+     that analyzed anything here would refuse. *)
+  let f = recorded_fixture [] in
+  write_file (caps_lock_path f) "mode = \"declared\"\n\n[[package]]\nname = \"clock\"\ncaps = []\n";
+  let lock0 = lock f in
+  let r, out = gated_deps f in
+  Alcotest.(check bool) "install succeeds" true (Result.is_ok r);
+  Alcotest.(check bool) "nothing analyzed" false (contains out "clock —");
+  Alcotest.(check string) "forge.lock unchanged" lock0 (lock f)
+
+let test_deps_without_baseline_is_a_plain_install () =
+  let f = make_fixture ~app_deps:[ "clock" ] ~packages:[ ("clock", [ "IO.Clock" ]) ] in
+  deps f;
+  hand_edit_clock_to_clock2 f;
+  let r, out = gated_deps f in
+  Alcotest.(check bool) "install succeeds" true (Result.is_ok r);
+  Alcotest.(check bool) "no capability report" false (contains out "capabilities");
+  Alcotest.(check bool) "forge.lock locks clock2" true (contains (lock f) "clock2")
+
 let () =
   Alcotest.run "forge-add-capgate"
     [ ( "fixtures", [ Alcotest.test_case "fixtures parse and declare" `Quick test_fixtures_parse ] );
@@ -370,6 +446,11 @@ let () =
             test_changed_existing_dependency_is_gated;
           Alcotest.test_case "untouched dependency is not gated" `Quick
             test_untouched_dependency_is_not_gated ] );
+      ( "forge deps",
+        [ Alcotest.test_case "hand edit is gated" `Quick test_deps_after_hand_edit_is_gated;
+          Alcotest.test_case "restore is not gated" `Quick test_deps_restore_is_not_gated;
+          Alcotest.test_case "no baseline: plain install" `Quick
+            test_deps_without_baseline_is_a_plain_install ] );
       ( "inferred",
         [ Alcotest.test_case "bounded to touched deps, cached" `Quick
             test_inferred_gate_is_bounded_and_cached;

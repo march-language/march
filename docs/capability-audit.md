@@ -121,8 +121,18 @@ dependency declares.
 registry dependency it fetches the newer release (through the verified tarball
 cache) and prints `caps: asks for NEW capabilities: …` under its row when the
 release asks for more than its `forge.caps.lock` entry (or, with no baseline,
-the installed copy). Upgrading by editing the version in `forge.toml` and
-running `forge deps` is not gated; `forge audit` in CI catches it.
+the installed copy).
+
+### At `forge deps` time
+
+Upgrading by editing a version (or a tag, or a path) in `forge.toml` and
+running `forge deps` goes through the same gate. Only the entries the
+re-resolve adds or moves are analyzed; a refused change prints the delta,
+writes `forge.lock` back exactly (your `forge.toml` edit is kept) and exits 1,
+and `forge deps --accept-caps` keeps it and records the new set. Installing
+what `forge.lock` already says (a fresh clone, CI, `--offline`) moves no entry,
+so it is never gated and never needs the flag. Without a `forge.caps.lock`,
+`forge deps` is a plain install.
 
 ### In CI
 
