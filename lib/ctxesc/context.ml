@@ -30,6 +30,21 @@ type attr =
   | AtUrlMid
       (** a URL attribute value with literal content already before the hole —
           the interpolation is a component, so it needs percent-encoding *)
+  | AtUrlScheme
+      (** a URL attribute value holding only literal, scheme-shaped text so far
+          (`java`, `http`): the scheme may still be open. A hole here is a
+          component, as at [AtUrlMid], but it moves to [AtUrlSchemeHoleMid] so a
+          later literal `:` cannot complete a scheme the hole helped spell. *)
+  | AtUrlSchemeHole
+      (** the scheme is still open and a whole-URL hole has written into it
+          (an `href` value that opens with a hole). The whole-URL escaper checked the scheme of that ONE
+          value; a literal `:` here would make the value itself the scheme
+          (`javascript` + `:`), so the table rejects one. Consecutive holes stay
+          here and keep the whole-URL escaper. *)
+  | AtUrlSchemeHoleMid
+      (** the scheme is still open, a hole has written into it, and literal or
+          component text followed. Holes here are components again; a literal
+          `:` is rejected for the same reason as at [AtUrlSchemeHole]. *)
   | AtStyle
       (** a `style` attribute at a DECLARATION position — the start of the
           value, or just after a `;`. A hole here is a declaration list
@@ -109,7 +124,8 @@ let all_states =
 
 let all_elements = [ ElNormal; ElScript; ElStyle; ElTextarea; ElTitle ]
 let all_attrs =
-  [ AtNormal; AtUrl; AtUrlMid; AtStyle; AtStyleValue; AtCssUrl; AtScript;
+  [ AtNormal; AtUrl; AtUrlMid; AtUrlScheme; AtUrlSchemeHole;
+    AtUrlSchemeHoleMid; AtStyle; AtStyleValue; AtCssUrl; AtScript;
     AtJsString; AtJsComment; AtJsRegex; AtJsTemplate; AtSrcset; AtHtmlDoc ]
 let all_delims = [ DlNone; DlSingle; DlDouble; DlUnquoted; DlDoubleSubst ]
 
@@ -135,6 +151,9 @@ let attr_name = function
   | AtNormal -> "normal"
   | AtUrl -> "url"
   | AtUrlMid -> "urlmid"
+  | AtUrlScheme -> "urlscheme"
+  | AtUrlSchemeHole -> "urlschemehole"
+  | AtUrlSchemeHoleMid -> "urlschemeholemid"
   | AtStyle -> "style"
   | AtStyleValue -> "stylevalue"
   | AtCssUrl -> "cssurl"
@@ -184,7 +203,10 @@ let describe c =
   | Afterattrname, _, _ -> "just after an attribute name"
   | Beforeattrvalue, _, _ -> "just before an attribute value"
   | Attrvalue, AtUrl, _ -> "at the start of a URL attribute value"
-  | Attrvalue, AtUrlMid, _ -> "inside a URL attribute value"
+  | Attrvalue, (AtUrlMid | AtUrlScheme), _ -> "inside a URL attribute value"
+  | Attrvalue, (AtUrlSchemeHole | AtUrlSchemeHoleMid), _ ->
+    "inside a URL attribute value whose scheme an interpolation may still be \
+     spelling"
   | Attrvalue, AtStyle, _ -> "at a declaration position in a style attribute"
   | Attrvalue, AtStyleValue, _ -> "at a value position in a style attribute"
   | Attrvalue, AtCssUrl, _ -> "inside a CSS url() in a style attribute"

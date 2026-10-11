@@ -543,6 +543,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`~H` no longer lets an interpolated value choose a link's scheme.** In
+  `href="${s}://${rest}"`, a value of `javascript` passed the URL check because
+  it has no colon of its own; the template's `:` then made it the scheme, and
+  the rendered link ran script. A literal `:` (or `&#58;`, `&colon;`) that
+  would complete a scheme an interpolation helped write is now a compile error
+  telling you to interpolate the whole URL as one value. Templates that write
+  the scheme literally (`href="https://${host}/"`) are unaffected.
 - **`Actor.top_by_mailbox` and `Actor.over_mailbox` see an actor stuck in
   `Actor.call`.** While an actor waits for a reply, the messages that arrive are
   set aside until the reply comes. Those actors used to show a depth of 0, so

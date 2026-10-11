@@ -96,6 +96,14 @@ afterattrname,*,*,*   | any             |  | beforeattrname,=,=,=     |
 beforeattrvalue,*,*,* | cls+:[ \t\r\n]  |  | =,=,=,=                  |
 beforeattrvalue,*,*,* | lit:"\""        |  | attrvalue,=,=,double     |
 beforeattrvalue,*,*,* | lit:"'"         |  | attrvalue,=,=,single     |
+# An unquoted URL value: a hole here is the whole URL, exactly as after `href="`,
+# and its first literal character starts the scheme sub-automaton below rather
+# than being swallowed by the generic `any` (which would leave the context at
+# the START of the URL with one character already written).
+beforeattrvalue,*,url,* | interp                  | "\"" | attrvalue,=,urlschemehole,doublesubst |
+beforeattrvalue,*,url,* | lit:"&#"                |  | attrvalue,=,urlscheme,unquoted |
+beforeattrvalue,*,url,* | cls:[a-zA-Z0-9+.&;-]    |  | attrvalue,=,urlscheme,unquoted |
+beforeattrvalue,*,url,* | any                     |  | attrvalue,=,urlmid,unquoted   |
 beforeattrvalue,*,*,* | interp          | "\"" | attrvalue,=,=,doublesubst |
 beforeattrvalue,*,*,* | any             |  | attrvalue,=,=,unquoted   |
 
@@ -108,8 +116,8 @@ beforeattrvalue,*,*,* | any             |  | attrvalue,=,=,unquoted   |
 # 2. URL position: a hole at the START of a url attribute IS the whole URL and
 #    needs a scheme allowlist (`href="${u}"` with `javascript:` must not pass),
 #    while a hole after literal content is a COMPONENT needing percent-encoding.
-#    Rather than add a fifth context field, the first literal character of a
-#    url-classified value demotes `url` -> `urlmid`.
+#    Rather than add a fifth context field, the URL's scheme sub-automaton is
+#    encoded in `attr` (see "URL scheme tracking" below).
 
 # -- rows that leave the attribute value --
 attrvalue,*,*,double      | lit:"\""       |  | beforeattrname,=,normal,none |
@@ -123,9 +131,65 @@ attrvalue,*,*,unquoted    | lit:"/>"       |  | pcdata,normal,normal,none |
 attrvalue,*,*,unquoted    | lit:">"        |  | pcdata,=,normal,none     |
 attrvalue,*,*,unquoted    | cls+:[ \t\r\n] |  | beforeattrname,=,normal,none |
 
-# -- URL position tracking (must precede the generic `any`) --
-attrvalue,*,url,*         | interp         |  | =,=,=,=                  |
-attrvalue,*,url,*         | any            |  | =,=,urlmid,=             |
+# -- URL scheme tracking (must precede the generic `any`) --
+# The scheme is everything before the first `:`, provided all of it is
+# scheme-shaped. The whole-URL escaper checks the scheme of ONE VALUE, so it is
+# only sound if no other text can extend that value's scheme. Until 2026-10-11
+# the first literal character demoted `url` -> `urlmid` unconditionally, so
+#   href="${s}://${rest}"   with s = `javascript`
+# passed `javascript` (no colon: a relative reference), then appended a literal
+# `:` that turned it into the scheme, and rendered an executable
+# `javascript://%0Aalert%281%29`. The positions below track whether the
+# scheme is still open and whether a hole has contributed to it:
+#
+#   url              nothing written yet (leading space/C0 is stripped by
+#                    the URL parser, so it does not count)
+#   urlscheme        only literal, scheme-shaped text so far
+#   urlschemehole    scheme still open, and a whole-URL hole wrote into it
+#   urlschemeholemid scheme still open, a hole wrote into it, and literal
+#                    text followed (later holes are components again)
+#   urlmid           the scheme is settled: `/`, `?`, `:`, or any other
+#                    non-scheme character was written by the template
+#
+# A literal `:` (or an entity that decodes to one) while a hole has written
+# into the open scheme is REJECTED: that colon would let the interpolated
+# value choose the scheme. `&`, `&#` and `;` keep the scheme open because they
+# spell character references (`java&#115;cript:` is `javascript:` once the
+# HTML parser has decoded the attribute); tab, CR and LF keep it open because
+# the URL parser deletes them. Both are over-approximations: the cost is a
+# compile error for a template like `href="${a}&x:y"`, never a missed scheme.
+# A `#` on its own settles the scheme (it starts the fragment).
+# The escapers are unchanged by this tracking, with one exception: a hole
+# after nothing but leading whitespace (`href=" ${u}"`) is at the start of the
+# URL once the URL parser strips that whitespace, so it now gets the whole-URL
+# escaper rather than the component one. Otherwise only the rejection is new.
+attrvalue,*,url,*              | interp                  |  | =,=,urlschemehole,=    |
+attrvalue,*,url,*              | cls+:[ \t\r\n]          |  | =,=,=,=                |
+attrvalue,*,url,*              | lit:"&#"                |  | =,=,urlscheme,=        |
+attrvalue,*,url,*              | cls:[a-zA-Z0-9+.&;-]    |  | =,=,urlscheme,=        |
+attrvalue,*,url,*              | any                     |  | =,=,urlmid,=           |
+attrvalue,*,urlscheme,*        | interp                  |  | =,=,urlschemeholemid,= |
+attrvalue,*,urlscheme,*        | lit:"&#"                |  | =,=,=,=                |
+attrvalue,*,urlscheme,*        | lit:"&"                 |  | =,=,=,=                |
+attrvalue,*,urlscheme,*        | cls+:[a-zA-Z0-9+.;\t\r\n-] |  | =,=,=,=            |
+attrvalue,*,urlscheme,*        | any                     |  | =,=,urlmid,=           |
+attrvalue,*,urlschemehole,*    | lit:":"                 |  | =,=,=,=                | A literal `:` right after an interpolation at the start of a URL lets the interpolated value choose the URL's scheme: `${s}:` with s = `javascript` passes the scheme allowlist (it has no colon of its own) and then becomes `javascript:`. Build the whole URL first and interpolate it as ONE hole, so the allowlist sees its scheme, or write the scheme literally in the template.
+attrvalue,*,urlschemehole,*    | lit:"&#"                |  | =,=,=,=                | A numeric character reference right after an interpolation at the start of a URL can decode to `:` and let the interpolated value choose the URL's scheme. Write the character literally, or build the whole URL in one interpolation.
+attrvalue,*,urlschemehole,*    | ilit:"&colon;"          |  | =,=,=,=                | `&colon;` right after an interpolation at the start of a URL decodes to `:` and lets the interpolated value choose the URL's scheme. Build the whole URL in one interpolation so the scheme allowlist sees it.
+attrvalue,*,urlschemehole,*    | interp                  |  | =,=,=,=                |
+attrvalue,*,urlschemehole,*    | cls+:[\t\r\n]           |  | =,=,=,=                |
+attrvalue,*,urlschemehole,*    | cls:[a-zA-Z0-9+.&;-]    |  | =,=,urlschemeholemid,= |
+attrvalue,*,urlschemehole,*    | any                     |  | =,=,urlmid,=           |
+attrvalue,*,urlschemeholemid,* | lit:":"                 |  | =,=,=,=                | A literal `:` after an interpolation that is still part of the URL's scheme lets the interpolated value choose the scheme: `java${s}:` with s = `script` renders `javascript:`. Build the whole URL in one interpolation so the scheme allowlist sees it, or write the scheme literally in the template.
+attrvalue,*,urlschemeholemid,* | lit:"&#"                |  | =,=,=,=                | A numeric character reference after an interpolation that is still part of the URL's scheme can decode to `:` and let the interpolated value choose the scheme. Write the character literally, or build the whole URL in one interpolation.
+attrvalue,*,urlschemeholemid,* | ilit:"&colon;"          |  | =,=,=,=                | `&colon;` after an interpolation that is still part of the URL's scheme decodes to `:` and lets the interpolated value choose the scheme. Build the whole URL in one interpolation so the scheme allowlist sees it.
+attrvalue,*,urlschemeholemid,* | interp                  |  | =,=,=,=                |
+# `&` is consumed ONE AT A TIME (here and in `urlscheme`), never inside a
+# greedy class: a greedy run would stop between `&` and `#`, and the `&#`
+# rows would never see the reference.
+attrvalue,*,urlschemeholemid,* | lit:"&"                 |  | =,=,=,=                |
+attrvalue,*,urlschemeholemid,* | cls+:[a-zA-Z0-9+.;\t\r\n-] |  | =,=,=,=            |
+attrvalue,*,urlschemeholemid,* | any                     |  | =,=,urlmid,=           |
 
 # -- CSS url() gets its own context --
 # A hole inside url(...) is a URL, not a CSS value. Escaping it as CSS mangles
