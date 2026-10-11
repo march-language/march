@@ -1,0 +1,11 @@
+actors 2, queued 0, rss 4 MB, busy 0%, crashes (1h) 4
+
+node               pid:19089
+dumped at          2026-10-11 18:34:58 UTC
+actors             2   queued messages 0
+memory             rss 4.5 MiB   peak 4.5 MiB   live heap objects 10
+schedulers         14   run queue 0   live procs 3
+code epoch         1
+hot-reload slots   0
+crashes            4 in the last hour, 4 in the ring
+reply cost         90 us

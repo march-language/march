@@ -89,3 +89,22 @@ void    march_reclaim_poll(void);
 /* Observability: objects retired and freed since process start. */
 int64_t march_reclaim_retired_count(void);
 int64_t march_reclaim_freed_count(void);
+
+/* ── Fatal exits (R7.4 of the observe plan) ──────────────────────────────
+ * Every runtime-internal abort() goes through march_abort(why) instead.  When
+ * a crash-dump writer is installed (MARCH_CRASH_DUMP, march_observe_snapshot.c)
+ * it is asked for a dump first, and only if it is safe to ask:
+ *   - not inside a reclamation critical section (the data the dump walks may
+ *     be mid-update, and this thread's announcement is what holds frees back);
+ *   - not on a signal stack (a handler may have interrupted anything).
+ * Then abort().  No signal handler writes the dump: a fatal signal produces
+ * none.  [why] is a short constant string, kept in the dump as the reason. */
+void march_abort(const char *why) __attribute__((noreturn));
+
+/* The dump half alone (an unsupervised panic exits with exit(1), not abort).
+ * Returns 1 if a dump was attempted, 0 if no writer is installed or the
+ * caller's context forbids it. */
+int  march_fatal_dump(const char *why);
+
+/* Install the dump writer; called once from march_observe_snapshot_install. */
+void march_fatal_set_hook(void (*fn)(const char *why));
