@@ -52,6 +52,12 @@ git log is authoritative for exact commits.
   crash ring with panic text there when it dies of an unsupervised panic or a
   fatal runtime error (never from a signal handler: a segfault leaves none);
   read it with `forge observe --dump FILE` or `forge diagnose --from-dump FILE`.
+- **`--verify-tir` checks Defun's contracts.** From `tir-defun` on, a lambda
+  creation site that Defun should have replaced, or a call through a locally
+  bound name that should be indirect, is reported as a `[contract]` finding.
+  It caught a compiled-only wrong value: a top-level function named like a
+  stdlib callback parameter (`f`) is called through that parameter after
+  inlining (`specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md`).
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the
