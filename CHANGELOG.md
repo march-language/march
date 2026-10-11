@@ -19,6 +19,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`--verify-tir` checks Defun's contracts.** From `tir-defun` on, a lambda
+  creation site that Defun should have replaced, or a call through a locally
+  bound name that should be indirect, is reported as a `[contract]` finding.
+  It caught a compiled-only wrong value: a top-level function named like a
+  stdlib callback parameter (`f`) is called through that parameter after
+  inlining (`specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md`).
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the
