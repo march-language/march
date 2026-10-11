@@ -586,6 +586,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`forge publish` no longer demands a major version for a rename.**
+  Renaming a function parameter or a type variable used to read as a breaking
+  signature change. Signatures are now compared by structure, so those are a
+  patch. The comparison also became stricter in two places it was blind:
+  adding a parameter to a type (`Box(a)` -> `Box(a, b)`) and making a type's
+  constructors private (`opaque type`) now require a major bump.
 - **Drop functions keep the same symbol across unrelated edits.** The compiler
   named the drop function of a type with an unresolved type variable after the
   typechecker's internal variable number (`__drop$List_V_53272`), so it moved

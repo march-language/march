@@ -26,9 +26,14 @@
       MINOR: add a new public fn or type
       PATCH: no API change
 
-    Signatures are still compared as rendered text, so renaming a parameter
-    reads as MAJOR although no caller breaks.  Comparing inferred types
-    instead is specs/todos/2026-07-31-forge-semantic-semver.md.
+    Signatures are compared STRUCTURALLY, not as rendered text (2026-10-11):
+    parameter names are dropped and type variables are renamed to a canonical
+    order, so renaming a parameter or a type variable is no longer a false
+    MAJOR.  A type's parameters are part of its comparison too: before,
+    they were ignored, and `type Box(a)` -> `type Box(a, b)` diffed as no
+    change.  Still not done: comparing INFERRED types (so an unannotated
+    function gets a precise verdict) and classifying a refinement change by
+    direction -- see specs/todos/2026-07-31-forge-semantic-semver.md.
 
     Pre-1.0.0 packages skip enforcement entirely.
 *)
@@ -39,6 +44,15 @@ module Fmt = March_format.Format
 (* ------------------------------------------------------------------ *)
 (*  Surface representation                                             *)
 (* ------------------------------------------------------------------ *)
+
+(** The parts of a function's definition its signature is made of, kept as
+    AST so [diff] can compare them structurally.  [None] for a signature built
+    by hand (tests), which then compares by its rendered text. *)
+type fn_ast = {
+  fa_params : Ast.fn_param list list; (** one list per clause *)
+  fa_ret    : Ast.ty option;
+  fa_bounds : (Ast.name * Ast.ty) list;
+}
 
 (** A public function signature as read off the AST. *)
 type fn_sig = {
@@ -52,12 +66,21 @@ type fn_sig = {
                               its doc string or comments, so layout and doc
                               edits do not register.  Compared only when
                               [return_raw] is empty; see [UnverifiableFn]. *)
+  sig_ast : fn_ast option;
+}
+
+(** A type declaration's parameters and right-hand side, kept for the
+    structural comparison.  [None] for a hand-built declaration. *)
+type type_ast = {
+  ta_params : string list;
+  ta_def    : Ast.type_def;
 }
 
 (** A public type declaration. *)
 type type_decl = {
   type_name : string;
   body_raw  : string;   (** rendered RHS of the type declaration *)
+  type_ast  : type_ast option;
 }
 
 (** The public API surface of a package. *)
@@ -153,6 +176,12 @@ let rec extract_decls decls surf =
   List.fold_left extract_one surf decls
 
 and extract_one surf (d : Ast.decl) =
+  let names ps = List.map (fun (n : Ast.name) -> n.Ast.txt) ps in
+  let public_type surf (name : Ast.name) params tdef =
+    let t = { type_name = name.Ast.txt; body_raw = render_type_def tdef;
+              type_ast = Some { ta_params = names params; ta_def = tdef } } in
+    { surf with types = surf.types @ [t] }
+  in
   match d with
   | Ast.DFn (fn, _) ->
     (match fn.Ast.fn_vis with
@@ -161,16 +190,19 @@ and extract_one surf (d : Ast.decl) =
        let s = { name       = fn.Ast.fn_name.Ast.txt;
                  params_raw = render_fn_params fn;
                  return_raw = render_return fn;
-                 clauses_raw = render_clauses fn } in
+                 clauses_raw = render_clauses fn;
+                 sig_ast = Some {
+                     fa_params =
+                       List.map (fun c -> c.Ast.fc_params) fn.Ast.fn_clauses;
+                     fa_ret = fn.Ast.fn_ret_ty;
+                     fa_bounds = fn.Ast.fn_bounds } } in
        { surf with fns = surf.fns @ [s] })
   | Ast.DType (Ast.Private, _, _, _, _) -> surf
-  | Ast.DType (Ast.Public, name, _params, tdef, _) ->
-    let t = { type_name = name.Ast.txt; body_raw = render_type_def tdef } in
-    { surf with types = surf.types @ [t] }
+  | Ast.DType (Ast.Public, name, params, tdef, _) ->
+    public_type surf name params tdef
   | Ast.DAlwaysLinearType (Ast.Private, _, _, _, _) -> surf
-  | Ast.DAlwaysLinearType (Ast.Public, name, _params, tdef, _) ->
-    let t = { type_name = name.Ast.txt; body_raw = render_type_def tdef } in
-    { surf with types = surf.types @ [t] }
+  | Ast.DAlwaysLinearType (Ast.Public, name, params, tdef, _) ->
+    public_type surf name params tdef
   | Ast.DMod (_, _, inner, _) ->
     extract_decls inner surf
   | _ -> surf
@@ -289,6 +321,142 @@ let required_bump changes =
   else if List.exists (fun c -> change_kind_of c = Minor) changes then Minor
   else Patch
 
+(* ------------------------------------------------------------------ *)
+(*  Structural signature keys                                          *)
+(* ------------------------------------------------------------------ *)
+
+(* What a caller can observe of a signature, as a string that is equal for two
+   signatures exactly when the comparison calls them the same
+   (specs/2026-09-18-forge-p1-design.md section 3, step 1, as far as it goes
+   without the typechecker):
+
+   - parameter NAMES are dropped (a caller never spells one), but each
+     parameter's linearity, type and whether it has a default are kept;
+   - type variables are renamed '0, '1, ... in order of first occurrence
+     across the parameters, the return type and then the bounds, so `List(a)`
+     and `List(b)` agree (a quote cannot appear in a written type, so a
+     renamed variable never collides with a real one).
+
+   The design's "aliases expanded" has nothing to do: the grammar has no
+   user-written alias.  `type UserId = Int` parses as a variant with ONE
+   constructor named `Int` (see the comment on [walk_type_def] in
+   lib/refinecheck/refine_audit.ml), so `UserId` and `Int` are different
+   types and replacing one with the other is rightly MAJOR.
+
+   Anything the key does not model is compared as written: a pattern head is
+   rendered (behaviour, not a type, but a multi-head function's heads were
+   always part of the comparison), and a refinement keeps its binder and
+   predicate verbatim, so changing either is still MAJOR (step 3, classifying
+   a refinement change by direction, is not done). *)
+
+let rec ty_vars acc (t : Ast.ty) =
+  match t with
+  | Ast.TyVar n -> if List.mem n.Ast.txt acc then acc else acc @ [n.Ast.txt]
+  | Ast.TyCon (_, args) | Ast.TyTuple args -> List.fold_left ty_vars acc args
+  | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> ty_vars (ty_vars acc a) b
+  | Ast.TyRecord flds -> List.fold_left (fun acc (_, t) -> ty_vars acc t) acc flds
+  | Ast.TyLinear (_, t) | Ast.TyRefine (t, _, _) -> ty_vars acc t
+  | Ast.TyNat _ | Ast.TyChan _ -> acc
+
+let rec map_ty_vars f (t : Ast.ty) : Ast.ty =
+  let go = map_ty_vars f in
+  match t with
+  | Ast.TyVar n -> f n
+  | Ast.TyCon (c, args) -> Ast.TyCon (c, List.map go args)
+  | Ast.TyTuple args -> Ast.TyTuple (List.map go args)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (go a, go b)
+  | Ast.TyNatOp (op, a, b) -> Ast.TyNatOp (op, go a, go b)
+  | Ast.TyRecord flds -> Ast.TyRecord (List.map (fun (n, t) -> (n, go t)) flds)
+  | Ast.TyLinear (l, t) -> Ast.TyLinear (l, go t)
+  | Ast.TyRefine (t, b, p) -> Ast.TyRefine (go t, b, p)
+  | Ast.TyNat _ | Ast.TyChan _ -> t
+
+(* A renderer that writes each variable as its position in [order]. *)
+let canonical_renderer order =
+  let rn v =
+    let rec idx i = function
+      | [] -> v
+      | x :: _ when x = v -> Printf.sprintf "'%d" i
+      | _ :: r -> idx (i + 1) r in
+    idx 0 order in
+  let render t =
+    Fmt.fmt_ty (map_ty_vars (fun n -> Ast.TyVar { n with Ast.txt = rn n.Ast.txt }) t) in
+  (rn, render)
+
+let fn_key (f : fn_sig) =
+  match f.sig_ast with
+  | None -> f.params_raw ^ " : " ^ f.return_raw
+  | Some a ->
+    let param_ty = function
+      | Ast.FPNamed p | Ast.FPDefault (p, _) -> p.Ast.param_ty
+      | Ast.FPPat _ -> None in
+    let ptys = List.concat_map (List.filter_map param_ty) a.fa_params in
+    let ret = a.fa_ret in
+    let bounds = List.map (fun ((n : Ast.name), t) -> (n.Ast.txt, t)) a.fa_bounds in
+    let order = List.fold_left ty_vars [] (ptys @ Option.to_list ret) in
+    let order =
+      List.fold_left (fun acc (v, _) -> if List.mem v acc then acc else acc @ [v])
+        order bounds in
+    let order = List.fold_left ty_vars order (List.map snd bounds) in
+    let rn, render = canonical_renderer order in
+    let param_key = function
+      | Ast.FPNamed p ->
+        Fmt.fmt_lin p.Ast.param_lin
+        ^ (match p.Ast.param_ty with Some t -> render t | None -> "_")
+      | Ast.FPDefault (p, _) ->
+        Fmt.fmt_lin p.Ast.param_lin
+        ^ (match p.Ast.param_ty with Some t -> render t | None -> "_")
+        ^ " = default"
+      | Ast.FPPat pat -> "pattern " ^ Fmt.fmt_pat pat in
+    let clauses =
+      List.map (fun ps -> "(" ^ String.concat ", " (List.map param_key ps) ^ ")")
+        a.fa_params in
+    let ret_key = match ret with Some t -> render t | None -> "" in
+    let bounds_key =
+      List.map (fun (v, t) -> rn v ^ " : " ^ render t) bounds in
+    String.concat " | " clauses ^ " : " ^ ret_key
+    ^ (if bounds_key = [] then "" else " where " ^ String.concat ", " bounds_key)
+
+let type_key (t : type_decl) =
+  match t.type_ast with
+  | None -> t.body_raw
+  | Some a ->
+    (* The declared parameters fix the variable order, so `Pair(a, b)` and
+       `Pair(x, y)` with the body renamed to match agree, and an added or
+       removed parameter changes the key: every use `Box(Int)` breaks. *)
+    let tys =
+      match a.ta_def with
+      | Ast.TDAlias ty -> [ ty ]
+      | Ast.TDVariant vs -> List.concat_map (fun v -> v.Ast.var_args) vs
+      | Ast.TDRecord fs -> List.map (fun f -> f.Ast.fld_ty) fs in
+    let order = List.fold_left ty_vars a.ta_params tys in
+    let rn, render = canonical_renderer order in
+    let body =
+      match a.ta_def with
+      | Ast.TDAlias ty -> render ty
+      | Ast.TDVariant vs ->
+        String.concat " | "
+          (List.map
+             (fun (v : Ast.variant) ->
+                (match v.Ast.var_vis with Ast.Private -> "private " | Ast.Public -> "")
+                ^ v.Ast.var_name.Ast.txt
+                ^ (match v.Ast.var_args with
+                   | [] -> ""
+                   | args ->
+                     "(" ^ String.concat ", " (List.map (fun t -> render t) args)
+                     ^ ")"))
+             vs)
+      | Ast.TDRecord fs ->
+        "{ "
+        ^ String.concat ", "
+          (List.map
+             (fun (f : Ast.field) ->
+                Fmt.fmt_lin f.Ast.fld_lin ^ f.Ast.fld_name.Ast.txt ^ " : "
+                ^ render f.Ast.fld_ty)
+             fs)
+        ^ " }" in
+    "(" ^ String.concat ", " (List.map rn a.ta_params) ^ ") = " ^ body
+
 (** Diff two API surfaces and return the list of changes. *)
 let diff ~old_ ~new_ =
   let changes = ref [] in
@@ -298,8 +466,7 @@ let diff ~old_ ~new_ =
       | None ->
         changes := RemovedFn old_fn :: !changes
       | Some new_fn ->
-        if old_fn.params_raw <> new_fn.params_raw ||
-           old_fn.return_raw <> new_fn.return_raw then
+        if fn_key old_fn <> fn_key new_fn then
           changes := ChangedFn (old_fn, new_fn) :: !changes
         else if new_fn.return_raw = ""
              && old_fn.clauses_raw <> new_fn.clauses_raw then
@@ -316,7 +483,7 @@ let diff ~old_ ~new_ =
       | None ->
         changes := RemovedType old_ty :: !changes
       | Some new_ty ->
-        if old_ty.body_raw <> new_ty.body_raw then
+        if type_key old_ty <> type_key new_ty then
           changes := ChangedType (old_ty, new_ty) :: !changes
     ) old_.types;
   (* Check for added types *)
