@@ -129,7 +129,7 @@ let emit_html_escape_ctx_static ~emit_atom ctx (id : int) (a : Tir.atom)
        Safe path already used.
 
        Escaper ids are Context.escaper_id / MARCH_ESC_* (see
-       runtime/march_ctx_escape.h). A url trust covers both the whole-URL and
+       runtime/march_ctx_escape.h). A url trust covers the whole-URL, path and
        component escapers, and a css trust both the value and declaration
        ones, because those pairs differ in POSITION within one language, not in
        which language the string is. *)
@@ -139,7 +139,7 @@ let emit_html_escape_ctx_static ~emit_atom ctx (id : int) (a : Tir.atom)
         match name with
         | "Safe" | "TrustedHtml" -> Some [ 0 ]
         | "TrustedAttr" -> Some [ 1 ]
-        | "TrustedUrl" -> Some [ 2; 3 ]
+        | "TrustedUrl" -> Some [ 2; 3; 10 ]
         | "TrustedCss" -> Some [ 4; 7 ]
         (* A js trust covers BOTH JS escapers. 5 is a hole inside a string
            literal, 9 a hole at an expression position; they differ in

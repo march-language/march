@@ -29,6 +29,12 @@ git log is authoritative for exact commits.
   the scheme literally (`href="https://${host}/"`) are unaffected.
   Any app that renders links from `~H` templates with an interpolated scheme
   should be rebuilt; a template the check now rejects was exploitable.
+- **`~H` no longer lets an interpolated path segment climb out of its
+  directory.** In `href="/users/${id}/edit"`, a value of `..` rendered
+  `/users/../edit`, which the browser resolves to `/edit`; the same held for
+  `src`, `action` and every other URL attribute. A path hole whose value is
+  nothing but dots is now replaced with an inert token. Query and fragment
+  holes are unaffected (`?q=..` still renders `..`).
 
 ### Added
 - **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**

@@ -865,27 +865,199 @@ let test_url_scheme_exploits_do_not_compile () =
    parser strips that space, so the hole is the start of the URL and now gets
    the scheme allowlist (it used to get the component escaper). *)
 let test_url_templates_keep_their_escapers () =
-  let w = C.EscUrlWhole and c = C.EscUrlComponent in
+  (* [p] is the path escaper: the component escaper plus a dot-segment
+     refusal. It replaced [c] at every path/authority position on 2026-10-11;
+     query and fragment holes keep [c]. *)
+  let w = C.EscUrlWhole and c = C.EscUrlComponent and p = C.EscUrlPath in
   let case what lits want =
     Alcotest.(check (list escaper)) what want (escapers_of what lits) in
   case "whole URL" [ "<a href=\""; "\">x</a>" ] [ w ];
   case "query component" [ "<a href=\"/search?q="; "\">x</a>" ] [ c ];
-  case "literal scheme" [ "<a href=\"https://x.example/"; "\">x</a>" ] [ c ];
-  case "mailto" [ "<a href=\"mailto:"; "\">x</a>" ] [ c ];
-  case "relative page name" [ "<a href=\"page"; ".html\">x</a>" ] [ c ];
-  case "literal scheme-shaped head" [ "<a href=\"java"; "\">x</a>" ] [ c ];
-  case "base then path" [ "<a href=\""; "/"; "\">x</a>" ] [ w; c ];
+  case "literal scheme" [ "<a href=\"https://x.example/"; "\">x</a>" ] [ p ];
+  case "mailto" [ "<a href=\"mailto:"; "\">x</a>" ] [ p ];
+  case "relative page name" [ "<a href=\"page"; ".html\">x</a>" ] [ p ];
+  case "literal scheme-shaped head" [ "<a href=\"java"; "\">x</a>" ] [ p ];
+  case "base then path" [ "<a href=\""; "/"; "\">x</a>" ] [ w; p ];
   case "base then query" [ "<a href=\""; "?page="; "\">x</a>" ] [ w; c ];
   case "two adjacent holes" [ "<a href=\""; ""; "\">x</a>" ] [ w; w ];
-  case "hole, letters, hole" [ "<a href=\""; "x"; "\">x</a>" ] [ w; c ];
+  case "hole, letters, hole" [ "<a href=\""; "x"; "\">x</a>" ] [ w; p ];
   case "base then ampersand query" [ "<a href=\""; "&page=2\">x</a>" ] [ w ];
   case "fragment after a hole" [ "<a href=\""; "#top\">x</a>" ] [ w ];
   case "leading space then hole" [ "<a href=\" "; "\">x</a>" ] [ w ];
   case "unquoted whole URL" [ "<a href="; ">x</a>" ] [ w ];
-  case "unquoted relative path" [ "<a href=/p/"; ">x</a>" ] [ c ];
+  case "unquoted relative path" [ "<a href=/p/"; ">x</a>" ] [ p ];
   case "single-quoted whole URL" [ "<a href='"; "'>x</a>" ] [ w ];
   case "colon after a settled path" [ "<a href=\""; "/a:b\">x</a>" ] [ w ];
-  case "port after a literal host" [ "<a href=\"http://h:"; "/\">x</a>" ] [ c ]
+  case "port after a literal host" [ "<a href=\"http://h:"; "/\">x</a>" ] [ p ]
+
+(* ── URL path / query / fragment ────────────────────────────────────────
+   After the scheme settles, every hole is a percent-encoded component, so it
+   cannot write a delimiter. What that did not stop, until 2026-10-11, is a
+   value of nothing but dots: in a path it fills a segment and becomes a DOT
+   SEGMENT. `href="/users/${id}/edit"` with id = `..` rendered
+   `/users/../edit`, which a browser resolves to `/edit`. *)
+
+let test_url_positions_split_path_query_fragment () =
+  let c = C.EscUrlComponent and p = C.EscUrlPath and w = C.EscUrlWhole in
+  let case what lits want =
+    Alcotest.(check (list escaper)) what want (escapers_of what lits) in
+  case "path segment" [ "<a href=\"/users/"; "/edit\">x</a>" ] [ p ];
+  case "path, then query" [ "<a href=\"/u/"; "?tab="; "\">x</a>" ] [ p; c ];
+  case "query, then fragment" [ "<a href=\"/s?q="; "#"; "\">x</a>" ] [ c; c ];
+  case "path, then fragment" [ "<a href=\"/doc/"; "#"; "\">x</a>" ] [ p; c ];
+  case "question mark inside a query is data"
+    [ "<a href=\"/s?a=1?b="; "\">x</a>" ] [ c ];
+  case "bare query" [ "<a href=\"?page="; "\">x</a>" ] [ c ];
+  case "bare fragment" [ "<a href=\"#"; "\">x</a>" ] [ c ];
+  case "whole URL then query" [ "<a href=\""; "?page="; "\">x</a>" ] [ w; c ];
+  case "unquoted query" [ "<a href=?q="; ">x</a>" ] [ c ];
+  case "authority is a path-class position"
+    [ "<a href=\"https://"; "/x\">x</a>" ] [ p ];
+  (* An entity spelling of `?` leaves the walk in the path: the over-strict
+     direction, since only the path escaper refuses anything. *)
+  case "entity question mark stays in the path"
+    [ "<a href=\"/s&#63;q="; "\">x</a>" ] [ p ]
+  ;
+  (* ... and the `#` of a numeric reference does not start a fragment. *)
+  case "numeric reference is not a fragment"
+    [ "<a href=\"/a/&#46;"; "/b\">x</a>" ] [ p ]
+
+(* The path of the first URL attribute value in [rendered], as the browser
+   resolves it: entity-decode `&amp;` and decimal references, cut the query and fragment, read `\`
+   as `/` (special schemes do), drop an authority, then remove dot segments --
+   including their percent-encoded spellings, which the URL parser honours. *)
+let resolved_path_segments rendered =
+  let value =
+    match String.index_opt rendered '=' with
+    | None -> rendered
+    | Some i ->
+      let n = String.length rendered in
+      let quoted = i + 1 < n && rendered.[i + 1] = '"' in
+      let start = if quoted then i + 2 else i + 1 in
+      let stop =
+        match String.index_from_opt rendered start (if quoted then '"' else '>')
+        with Some j -> j | None -> n in
+      String.sub rendered start (stop - start)
+  in
+  let value =
+    let b = Buffer.create (String.length value) in
+    let n = String.length value in
+    let rec go i =
+      if i >= n then ()
+      else if i + 5 <= n && String.sub value i 5 = "&amp;" then
+        (Buffer.add_char b '&'; go (i + 5))
+      else if i + 2 < n && value.[i] = '&' && value.[i + 1] = '#'
+              && Option.is_some (String.index_from_opt value i ';') then begin
+        let j = String.index_from value i ';' in
+        match int_of_string_opt (String.sub value (i + 2) (j - i - 2)) with
+        | Some code when code < 128 ->
+          Buffer.add_char b (Char.chr code); go (j + 1)
+        | _ -> Buffer.add_char b '&'; go (i + 1)
+      end
+      else (Buffer.add_char b (if value.[i] = '\\' then '/' else value.[i]);
+            go (i + 1)) in
+    go 0; Buffer.contents b in
+  let cut c v = match String.index_opt v c with
+    | Some i -> String.sub v 0 i | None -> v in
+  let v = cut '#' (cut '?' value) in
+  let v =
+    match String.index_opt v ':' with
+    | Some i when i > 0 && not (String.contains (String.sub v 0 i) '/') ->
+      String.sub v (i + 1) (String.length v - i - 1)
+    | _ -> v in
+  let v =
+    if String.length v >= 2 && String.sub v 0 2 = "//" then
+      (match String.index_from_opt v 2 '/' with
+       | Some j -> String.sub v j (String.length v - j)
+       | None -> "/")
+    else v in
+  let is_dot s = String.lowercase_ascii s = "." || String.lowercase_ascii s = "%2e" in
+  let is_dotdot s =
+    match String.lowercase_ascii s with
+    | ".." | ".%2e" | "%2e." | "%2e%2e" -> true
+    | _ -> false in
+  let segs = match String.split_on_char '/' v with "" :: r -> r | r -> r in
+  List.fold_left
+    (fun acc seg ->
+       if is_dot seg then acc
+       else if is_dotdot seg then (match acc with [] -> [] | _ :: t -> t)
+       else seg :: acc)
+    [] segs
+  |> List.rev
+
+let rec is_prefix pre l =
+  match pre, l with
+  | [], _ -> true
+  | x :: pre', y :: l' -> x = y && is_prefix pre' l'
+  | _ -> false
+
+(* Every path hole, with every dot-ish payload: the resolved path keeps the
+   template's literal prefix. Before the path escaper, the first shape
+   rendered `/users/../edit` and resolved to `/edit`. *)
+let test_url_path_holes_cannot_traverse () =
+  let payloads =
+    [ ".."; "."; "..."; "%2e%2e"; ".%2e"; "%2E%2E"; "../admin"; "..\\admin";
+      "..%2fadmin"; ".. "; "..;"; "x"; "" ] in
+  let shapes =
+    [ "users",  [ "<a href=\"/users/"; "/edit\">x</a>" ];
+      "static", [ "<img src=\"/static/"; "\">" ];
+      "a",      [ "<a href=\"/a/."; "/b\">x</a>" ];
+      "a",      [ "<a href=\"/a/"; "."; "/b\">x</a>" ];
+      "files",  [ "<a href=\"https://h.example/files/"; "\">x</a>" ];
+      "users",  [ "<a href=/users/"; "/edit>x</a>" ];
+      "u",      [ "<a href=\"/u/"; "/"; "\">x</a>" ];
+      "api",    [ "<form action=\"/api/"; "/save\"></form>" ];
+      "img",    [ "<a href=\""; "/img/"; "\">x</a>" ];
+      "a",      [ "<a href=\"/a/&#46;"; "/b\">x</a>" ] ] in
+  List.iter
+    (fun (prefix, shape) ->
+       List.iter
+         (fun p1 ->
+            List.iter
+              (fun p2 ->
+                 let parts =
+                   match shape with
+                   | [ a; b ] -> [ a; p1; b ]
+                   | [ a; b; c ] -> [ a; p1; b; p2; c ]
+                   | s -> s in
+                 (* The whole-URL hole is the author's to choose; only the
+                    path holes after it are under test. *)
+                 let parts =
+                   match parts with
+                   | [ a; _; b; v; c ] when a = "<a href=\"" ->
+                     [ a; "/base"; b; v; c ]
+                   | ps -> ps in
+                 match render_parts parts with
+                 | Error e -> Alcotest.failf "legitimate shape rejected: %s" e
+                 | Ok out ->
+                   let segs = resolved_path_segments out in
+                   let want =
+                     if List.hd parts = "<a href=\"" then [ "base"; prefix ]
+                     else [ prefix ] in
+                   if not (is_prefix want segs) then
+                     Alcotest.failf "%S resolves to /%s, outside /%s/" out
+                       (String.concat "/" segs) (String.concat "/" want))
+              payloads)
+         payloads)
+    shapes
+
+(* The refusal is confined to the path: a query or fragment value of `..` is
+   data and must come out unchanged, and a path value with anything besides
+   dots is untouched. *)
+let test_url_query_and_fragment_keep_dots () =
+  let check what parts want =
+    match render_parts parts with
+    | Error e -> Alcotest.failf "%s: rejected: %s" what e
+    | Ok out -> Alcotest.(check string) what want out in
+  check "query value of dots"
+    [ "<a href=\"/s?q="; ".."; "\">x</a>" ] "<a href=\"/s?q=..\">x</a>";
+  check "fragment of dots"
+    [ "<a href=\"/doc#"; ".."; "\">x</a>" ] "<a href=\"/doc#..\">x</a>";
+  check "version in a path"
+    [ "<a href=\"/pkg/"; "0.2.3"; "/\">x</a>" ] "<a href=\"/pkg/0.2.3/\">x</a>";
+  check "dot segment in a path"
+    [ "<a href=\"/users/"; ".."; "/edit\">x</a>" ]
+    "<a href=\"/users/zSoyz/edit\">x</a>"
 
 (* Every allowed URL shape, with every scheme payload in every hole: nothing
    renders a dangerous scheme. The escaper-choice test above says what is
@@ -958,6 +1130,12 @@ let corpus_tests =
       test_url_templates_keep_their_escapers;
     Alcotest.test_case "url corpus renders no dangerous scheme" `Quick
       test_url_corpus_renders_no_dangerous_scheme;
+    Alcotest.test_case "url positions split path, query, fragment" `Quick
+      test_url_positions_split_path_query_fragment;
+    Alcotest.test_case "url path holes cannot traverse" `Quick
+      test_url_path_holes_cannot_traverse;
+    Alcotest.test_case "url query and fragment keep dots" `Quick
+      test_url_query_and_fragment_keep_dots;
     Alcotest.test_case "scheme colon rejection names the scheme" `Quick
       test_scheme_colon_rejection_names_the_colon ]
 

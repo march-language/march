@@ -48,7 +48,7 @@ Four fields, exactly as the paper describes:
 |---|---|
 | `state` | `pcdata` `rcdata` `tagname` `closetagname` `beforeattrname` `afterattrname` `beforeattrvalue` `attrvalue` `comment` |
 | `element` | `normal` `script` `style` `textarea` `title` |
-| `attr` | `normal` `url` `urlmid` `urlscheme` `urlschemehole` `urlschemeholemid` `style` `stylevalue` `cssurl` `script` `jsstring` `jscomment` `jsregex` `jstemplate` `srcset` `htmldoc` |
+| `attr` | `normal` `url` `urlmid` `urlscheme` `urlschemehole` `urlschemeholemid` `urlquery` `urlfragment` `style` `stylevalue` `cssurl` `script` `jsstring` `jscomment` `jsregex` `jstemplate` `srcset` `htmldoc` |
 | `delim` | `none` `single` `double` `unquoted` `doublesubst` |
 
 `element` tracks which element's content we are inside, because `<script>` and
@@ -113,13 +113,26 @@ rendered `javascript://%0Aalert%281%29` executes. Now:
 | `urlscheme` | only literal, scheme-shaped text so far (`java`, `http`) |
 | `urlschemehole` | the scheme is still open and a whole-URL hole wrote into it |
 | `urlschemeholemid` | the scheme is still open, a hole wrote into it, and more text followed |
-| `urlmid` | the scheme is settled (`/`, `?`, `#`, `:` written by the template, or any non-scheme character) |
+| `urlmid` | the scheme is settled (`/`, `:` written by the template, or any non-scheme character): the PATH, or the authority |
+| `urlquery` | the template wrote a literal `?` (from any of the above) |
+| `urlfragment` | the template wrote a literal `#` (not the `#` of a `&#` reference) |
 
 In the two `…hole…` positions a literal `:` is a compile error, and so are
 `&#` and `&colon;`, which the HTML parser can decode into one. `&` and `;` keep
 the scheme open (they spell character references); tab, CR and LF keep it open
 (the URL parser deletes them). The tracking changes no escaper except one: a
 hole after nothing but leading whitespace now gets the whole-URL escaper.
+
+Path holes and query/fragment holes get different escapers (2026-10-11). Both
+percent-encode every non-unreserved byte, so neither can write a delimiter; the
+path one (`url_path`) additionally replaces a value made of nothing but dots
+with the inert token `zSoyz`. In a path such a value is a dot segment:
+`href="/users/${id}/edit"` with id = `..` used to render `/users/../edit`, which
+resolves to `/edit`. Percent-encoding cannot help, since the URL parser reads
+`%2e` as `.`. In a query or fragment a dot segment means nothing and `?q=..` is
+data, which is why those positions are tracked at all. Only a literal `?`/`#`
+moves the walk out of the path; an entity spelling of either leaves it there
+(over-strict), and the `#` of a `&#` reference is not a fragment delimiter.
 
 ### `doublesubst` — the substitution mechanism
 
@@ -201,7 +214,8 @@ row — one less thing to get out of sync:
 | `pcdata`, `rcdata` in `textarea`/`title` | HTML entity-encode |
 | `attrvalue` with `attr = normal` | HTML entity-encode, plus backtick |
 | `attrvalue` with `attr = url` / `urlschemehole` (start of value, or right after a start hole) | URL scheme allowlist |
-| `attrvalue` with `attr = urlmid` / `urlscheme` / `urlschemeholemid` | percent-encode |
+| `attrvalue` with `attr = urlmid` / `urlscheme` / `urlschemeholemid` (path or authority) | percent-encode, and refuse a dot segment (`url_path`) |
+| `attrvalue` with `attr = urlquery` / `urlfragment` | percent-encode |
 | `attrvalue` with `attr = style`, or `rcdata` in `style` | CSS **declaration** escape |
 | `attrvalue` with `attr = stylevalue` | CSS **value** escape |
 | `attr = cssurl`, or `rcdata` in `style` inside `url(` | CSS **url** escape |
@@ -258,6 +272,12 @@ might first appear:
   check; the scheme is therefore extracted by skipping those bytes rather than
   by comparing a prefix. Anything not on the list becomes
   `about:invalid#zSoyz`.
+- **URL path** is the component escaper plus one refusal: an all-dot value
+  (`.`, `..`, ...) becomes `zSoyz`, because it would be a dot segment and no
+  encoding stops that. A dot segment the TEMPLATE writes around an empty value
+  (`/a/.${x}./b` with x = ``) is the template's own text and is not caught,
+  and neither is a raw `%` (or `&#37;`) written right before a path hole,
+  which lets the hole finish a `%2e`; see the open todo.
 - **CSS** is an allowlist too — anything outside `[A-Za-z0-9-_#%., ]` becomes a
   `\XX ` hex escape. That means interpolating a whole declaration
   (`style="${'color: red'}"`) will not work: the colon is escaped. This is

@@ -748,7 +748,7 @@ let base_env : env =
             statically, the interpreter at runtime, and they must agree. *)
          | VCon (("Safe" | "TrustedHtml"), [VString s]) when id = 0 -> VString s
          | VCon ("TrustedAttr", [VString s]) when id = 1 -> VString s
-         | VCon ("TrustedUrl", [VString s]) when id = 2 || id = 3 -> VString s
+         | VCon ("TrustedUrl", [VString s]) when id = 2 || id = 3 || id = 10 -> VString s
          | VCon ("TrustedCss", [VString s]) when id = 4 || id = 7 -> VString s
          (* Both JS escapers: 5 inside a string literal, 9 at an expression
             position. They differ in POSITION within one language, like the
