@@ -2789,11 +2789,16 @@ int32_t march_record_shape_intern(const char *desc) {
 }
 
 /* Called by compiled code after every record allocation.  [cache] is a
- * per-shape module global that memoizes the interned id (benign race: the
- * intern is idempotent). */
+ * per-shape module global that memoizes the interned id (racy by design:
+ * the intern is idempotent). */
 void march_record_set_shape(void *rec, const char *desc, int32_t *cache) {
-    int32_t id = *cache;
-    if (id == 0) { id = march_record_shape_intern(desc); *cache = id; }
+    /* Relaxed atomics: the same plain ldr/str, but the idempotent race is
+     * not a C data race (and not a TSAN report). */
+    int32_t id = __atomic_load_n(cache, __ATOMIC_RELAXED);
+    if (id == 0) {
+        id = march_record_shape_intern(desc);
+        __atomic_store_n(cache, id, __ATOMIC_RELAXED);
+    }
     ((march_hdr *)rec)->pad = id;
 }
 

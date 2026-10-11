@@ -547,6 +547,14 @@ git log is authoritative for exact commits.
   The runtime read an object's count with a plain load (to skip immortal static cells)
   while other threads decremented it atomically; that read is now a relaxed atomic load.
   The generated machine code is unchanged on arm64.
+- **`MARCH_SANITIZE=thread` binaries no longer hang with 2+ schedulers.** The
+  preemption signal handler raised TSAN reports (a plain write of the preemption flag,
+  and errno not restored). When TSAN delivered a deferred preemption tick while it was
+  still symbolizing an earlier report on the same green thread, the second report waited
+  on a lock the first one held, and the whole process stopped without printing anything.
+  The handler is now report-free, and the runtime's other benign races (the record-shape
+  memo, the scheduler signal-mask record) are relaxed atomics. Plain builds compile to
+  the same instructions.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

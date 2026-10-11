@@ -1680,6 +1680,7 @@ static uint32_t spawn_code_epoch(int from_parent) {
  * mask instead. */
 static sigset_t   g_sched_sigmask;
 static _Atomic int g_sched_sigmask_set;
+static _Atomic int g_sched_sigmask_claim;   /* sched_loop: who records it */
 
 static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
                                       int is_daemon, int pinned,
@@ -1922,7 +1923,11 @@ static void sched_loop(march_scheduler *sched) {
      * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
      * so it can run even when the green thread's stack is exhausted. */
     setup_alt_stack();
-    if (!atomic_load_explicit(&g_sched_sigmask_set, memory_order_acquire)) {
+    /* One writer: the first scheduler to claim it (they all start at once,
+     * and two plain writes of the mask would race). */
+    int unclaimed = 0;
+    if (atomic_compare_exchange_strong_explicit(&g_sched_sigmask_claim,
+            &unclaimed, 1, memory_order_relaxed, memory_order_relaxed)) {
         sigset_t m;
         if (pthread_sigmask(SIG_SETMASK, NULL, &m) == 0) {
             g_sched_sigmask = m;
@@ -2860,7 +2865,7 @@ void march_yield_from_compiled(void) {
     /* Clear the request FIRST.  If we cleared it after yielding, this thread
      * would re-enter compiled code, immediately observe the still-set flag,
      * and yield again in a tight loop until the daemon happened to clear it. */
-    march_preempt_request = 0;
+    MARCH_PREEMPT_REQUEST_SET(0);
     /* Refill the budget before yielding so the process gets a fresh quantum
      * when it is rescheduled.  Do this unconditionally — if we are not inside
      * a scheduler context the yield below is a no-op, but the counter should
@@ -3439,7 +3444,7 @@ int64_t march_sched_stop_epoch(uint32_t upto) {
     pthread_mutex_unlock(&g_registry_mu);
     /* Make every running green thread reach a compiled yield point now, so a
      * task computing without yielding meets its cancellation promptly. */
-    if (n > 0) march_preempt_request = 1;
+    if (n > 0) MARCH_PREEMPT_REQUEST_SET(1);
     return n;
 }
 
@@ -4234,7 +4239,7 @@ static void chain_prev_preempt_handler(int sig, siginfo_t *si, void *uctx) {
  * 400ms on two schedulers), and treating 0 as "another process" chained our
  * own ticks to the host.  A real sending process always has a nonzero pid.  A host's in-process use of the signal (its own pthread_kill)
  * carries our pid, but finds no pending tick, so it is chained too. */
-static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
+static void preempt_signal_handler_body(int sig, siginfo_t *si, void *uctx) {
     /* From another process: the host's, full stop.  Decided BEFORE looking at
      * the tick flag, and without consuming it: a host signal landing on a
      * scheduler thread between the daemon setting that thread's flag and its
@@ -4260,13 +4265,14 @@ static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
                                          memory_order_acquire)
                     && atomic_load_explicit(&g_scheds[i].busy,
                                             memory_order_relaxed)) {
-                    /* Both writes are async-signal-safe here (volatile scalar
-                     * stores, TLS already materialised).
+                    /* Both writes are async-signal-safe here (a relaxed
+                     * atomic and a volatile scalar store, TLS already
+                     * materialised).
                      * march_preempt_request is what compiled code actually
                      * polls; march_tls_reductions is kept in sync so
                      * task_reductions() and any interpreter-side budget
                      * logic see a spent quantum. */
-                    march_preempt_request = 1;
+                    MARCH_PREEMPT_REQUEST_SET(1);
                     march_tls_reductions  = 0;
                 }
                 ours = 1;
@@ -4279,6 +4285,21 @@ static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
         ours = 1;
     if (!ours)
         chain_prev_preempt_handler(sig, si, uctx);
+}
+
+
+/* The installed handler: the body above with errno saved and restored, as
+ * every asynchronous handler must (the interrupted code may be between a
+ * failing call and its errno read; a chained host handler may change it).
+ * Under TSAN this is also what keeps the handler free of reports: TSAN
+ * checks errno across an async handler ("signal handler spoils errno"), and
+ * a report raised in this handler can deadlock TSAN outright when the tick
+ * was deferred into a TSAN report already in progress on the same thread
+ * (specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md). */
+static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
+    int saved_errno = errno;
+    preempt_signal_handler_body(sig, si, uctx);
+    errno = saved_errno;
 }
 
 /* ── fd readiness: park a green thread on a socket ────────────────────────
