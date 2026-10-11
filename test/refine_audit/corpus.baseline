@@ -320,6 +320,8 @@ native_march_prefixed_local: coverage audit (user + stdlib): 135 enforced, 0 ine
 native_march_prefixed_local: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mixed_tail_aggregate_drop: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_mixed_tail_aggregate_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_module_unboxed_aggregate: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_module_unboxed_aggregate: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_monitor_ack_retry_loopback: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_monitor_ack_retry_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_monitor_after_death_loopback: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

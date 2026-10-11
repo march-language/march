@@ -439,6 +439,57 @@ let test_unboxed_aggregate_rc_predicates () =
    box would be a fresh rc=1 cell no one owns — [needs_rc] is false for the
    aggregate, so Perceus emits no caller-side drop.  Keeping the type boxed end
    to end removes the question. *)
+(* A scalar-only single-constructor type declared in a NESTED module gets the
+   unboxed layout too (specs/progress/2026-10-11-module-unboxed-aggregates.md).
+   Lowering registers it as [Geo.Vec3] and builds it under the short key
+   [Vec3.Vec3]; the kind table used to answer the short spelling Boxed, so
+   every module-declared aggregate was a heap cell.  The RED control is the
+   same program compiled with unboxing off, as in
+   [test_unboxed_aggregate_boxed_control]. *)
+let module_vec3_src = {|mod UB do
+  needs IO.Console
+  mod Geo do
+    type Vec3 = Vec3(Float, Float, Float)
+    fn forward(yaw : Float, pitch : Float) : Vec3 do
+      Vec3(0.0 -. yaw, pitch, yaw *. pitch)
+    end
+    fn vx(v : Vec3) : Float do
+      match v do
+        Vec3(x, _, _) -> x
+      end
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(Geo.vx(Geo.forward(1.0, 2.0))))
+  end
+end|}
+
+let test_module_unboxed_aggregate () =
+  let ir = emit_tco_opt_ir module_vec3_src in
+  Alcotest.(check bool) "the struct type is declared under the qualified name" true
+    (ir_contains ir "%ub.Geo_Vec3 = type { double, double, double }");
+  Alcotest.(check bool) "constructed with insertvalue" true
+    (ir_contains ir "insertvalue %ub.Geo_Vec3");
+  Alcotest.(check bool) "destructured with extractvalue" true
+    (ir_contains ir "extractvalue %ub.Geo_Vec3");
+  Alcotest.(check int) "no march_alloc call anywhere in the module" 0
+    (ir_count ir "call ptr @march_alloc(")
+
+(* A C-built module type keeps its boxed layout under both spellings even
+   though its shape is unboxable: [process_spawn_async] builds
+   [Process.LiveProcess] as a tag-0 cell with two int64 fields. *)
+let test_module_unboxed_c_built_stays_boxed () =
+  let open March_tir in
+  let defs = [ Tir.TDVariant ("Process.LiveProcess", [ ("LiveProcess", [Tir.TInt; Tir.TInt]) ]);
+               Tir.TDVariant ("Geo.P2", [ ("P2", [Tir.TInt; Tir.TInt]) ]) ] in
+  let t = Kind.build ~collision_set:(Collision_set.compute defs) defs in
+  let is_unboxed n = match (Kind.of_ty t (Tir.TCon (n, []))).Kind.repr with
+    | Kind.Unboxed _ -> true | _ -> false in
+  Alcotest.(check bool) "LiveProcess Boxed (short)" false (is_unboxed "LiveProcess");
+  Alcotest.(check bool) "LiveProcess Boxed (qualified)" false (is_unboxed "Process.LiveProcess");
+  Alcotest.(check bool) "P2 Unboxed (short)" true (is_unboxed "P2");
+  Alcotest.(check bool) "P2 Unboxed (qualified)" true (is_unboxed "Geo.P2")
+
 let test_unboxed_aggregate_ffi_type_stays_boxed () =
   let open March_tir.Tir in
   let td = TDVariant ("Vec3", [("Vec3", [TFloat; TFloat; TFloat])]) in
@@ -16784,6 +16835,8 @@ let codegen_suites =
           Alcotest.test_case "compiled branch-built aggregate loop does not leak" `Slow
             test_unboxed_aggregate_branch_join_no_leak_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
+          Alcotest.test_case "module-declared aggregate is unboxed" `Quick test_module_unboxed_aggregate;
+          Alcotest.test_case "C-built module aggregate stays boxed" `Quick test_module_unboxed_c_built_stays_boxed;
         ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;

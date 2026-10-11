@@ -393,6 +393,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Small scalar types declared inside a module are now unboxed when
+  compiled.** A single-constructor type of two to four `Int`/`Float`/`Bool`
+  fields (`mod Geo do type P2 = P2(Int, Int) end`) is passed and returned as
+  a struct value with no heap cell, as it already was when declared directly
+  in the entry module. This also applies to the stdlib's `DateTime.Date`,
+  `DateTime.Time`, `Decimal` and `JsonStream` limits. Output is unchanged.
 - **The remote shell's build-identity table is smaller, and a session fetches
   only what differs.** A `--hot-reload` binary embeds the table in a compact
   format (module prefixes written once, 48-bit hashes): 105 KB instead of
@@ -543,6 +549,9 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- A compiled `match` over a tuple that returns a small unboxed type
+  (`match (a, b) do (P2(x1, y1), P2(x2, y2)) -> P2(...) end`) no longer
+  fails in clang with "integer constant must have integer type".
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

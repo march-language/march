@@ -12886,6 +12886,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/qualified_newtype_repr.expected native_qualified_newtype_repr.out)))
+; ── A scalar-only aggregate declared in a nested module is unboxed like a
+; top-level one (2026-10-11); the .expected is the interpreter's output.
+(rule
+ (targets native_module_unboxed_aggregate native_module_unboxed_aggregate.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/module_unboxed_aggregate.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_module_unboxed_aggregate
+        native/module_unboxed_aggregate.march)
+   (with-stdout-to native_module_unboxed_aggregate.out
+        (system "./native_module_unboxed_aggregate")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/module_unboxed_aggregate.expected native_module_unboxed_aggregate.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),
