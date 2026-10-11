@@ -67,4 +67,4 @@ before/after report count to quote.
 about a third of TSAN runs, `actor_monitor_down_reason` in 4 of 11, and
 `run_until_idle_ping_pong` at 14 schedulers in 11 of 11, all with no report. `actor_counter` wedges on origin/main, with this change and at
 975bb7353 alike. It does not happen without TSAN, or under ASAN.
-Filed separately: `specs/todos/2026-10-11-macos-tsan-scheduler-wedge.md`.
+Filed separately: `specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md`.

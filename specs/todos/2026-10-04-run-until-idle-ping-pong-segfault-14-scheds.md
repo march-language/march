@@ -24,6 +24,10 @@ every run (11 of 11) wedges before printing anything. A 1000-ball version wedges
 and it still wedges with the runtime at `-O0` (so it is not the TLS-hoist class named
 above) and with `-DMARCH_DEBUG` (no run-queue tripwire fires). That is a lost-proc hang,
 not a SIGSEGV, so it does not explain this crash. Filed as
-`specs/todos/2026-10-11-macos-tsan-scheduler-wedge.md`. The only refcount race TSAN
+`specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md`. The only refcount race TSAN
 reported (the immortal-check read in `march_decrc`, now relaxed-atomic) cannot cause a
 fault: a mortal count can never reach the 2^40 immortal threshold.
+
+**Update 2026-10-11:** the wedge was not a lost proc. It was TSAN deadlocking in its own
+report path, re-entered through the preemption signal handler; fixed, see
+`specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md`. It is unrelated to this crash.

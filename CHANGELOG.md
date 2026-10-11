@@ -645,6 +645,14 @@ git log is authoritative for exact commits.
   RC operation on every iteration. `bench/simd_kernels.march`'s `dot_simd`
   went from 4.3 ms to 1.35 ms (median), and a loop over 400 fresh 1 MB arrays
   went from 411 MB peak RSS to 8 MB.
+- **`MARCH_SANITIZE=thread` binaries no longer hang with 2+ schedulers.** The
+  preemption signal handler raised TSAN reports (a plain write of the preemption flag,
+  and errno not restored). When TSAN delivered a deferred preemption tick while it was
+  still symbolizing an earlier report on the same green thread, the second report waited
+  on a lock the first one held, and the whole process stopped without printing anything.
+  The handler is now report-free, and the runtime's other benign races (the record-shape
+  memo, the scheduler signal-mask record) are relaxed atomics. Plain builds compile to
+  the same instructions.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

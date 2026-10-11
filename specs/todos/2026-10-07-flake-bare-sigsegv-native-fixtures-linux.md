@@ -85,5 +85,9 @@ racy read always gave the right answer. So it is not the cause here.
 What TSAN did show is a TSAN-only scheduler wedge (`ping_pong` wedged in all 11 runs, with
 no output). That is a hang, not a fault, and it never happens in plain or ASAN builds, so
 it is not this crash either
-(`specs/todos/2026-10-11-macos-tsan-scheduler-wedge.md`). If that wedge turns out to be a
+(`specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md`). If that wedge turns out to be a
 real lost-proc bug that TSAN's timing exposes, look at it again here.
+
+**Update 2026-10-11:** the wedge was not a lost proc. It was TSAN deadlocking in its own
+report path, re-entered through the preemption signal handler; fixed, see
+`specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md`. It is unrelated to this crash.
