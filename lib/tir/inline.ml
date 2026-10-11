@@ -354,30 +354,85 @@ let expand_call (fd : Tir.fn_def) args =
         (List.length new_params) (List.length args));
     Some (subst_args ~fn_name:fd.Tir.fn_name new_params args new_body)
 
-let inline_expr ~changed (fn_env : (string, Tir.fn_def) Hashtbl.t)
-    : Tir.expr -> Tir.expr =
-  let rec go = function
+(** The names a function body refers to without binding them: for a
+    top-level function, the module functions, externs and builtins it calls
+    or mentions.  [alpha_rename] freshens a body's own binders; these it
+    cannot touch, because they must keep meaning the global. *)
+let free_names (fd : Tir.fn_def) : SSet.t =
+  let acc = ref SSet.empty in
+  let use bound name = if not (SSet.mem name bound) then acc := SSet.add name !acc in
+  let atom bound = function Tir.AVar v -> use bound v.Tir.v_name | _ -> () in
+  let atoms bound = List.iter (atom bound) in
+  let add_vars bound vs = List.fold_left (fun s (v : Tir.var) -> SSet.add v.Tir.v_name s) bound vs in
+  let rec go bound = function
+    | Tir.EAtom a | Tir.EField (a, _) | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
+    | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> atom bound a
+    | Tir.EApp (f, args) -> use bound f.Tir.v_name; atoms bound args
+    | Tir.ECallPtr (f, args) -> atom bound f; atoms bound args
+    | Tir.ELet (v, rhs, body) -> go bound rhs; go (SSet.add v.Tir.v_name bound) body
+    | Tir.ELetRec (fns, body) ->
+      let bound = List.fold_left (fun s (f : Tir.fn_def) -> SSet.add f.Tir.fn_name s) bound fns in
+      List.iter (fun (f : Tir.fn_def) -> go (add_vars bound f.Tir.fn_params) f.Tir.fn_body) fns;
+      go bound body
+    | Tir.ECase (a, branches, default) ->
+      atom bound a;
+      List.iter (fun (b : Tir.branch) -> go (add_vars bound b.Tir.br_vars) b.Tir.br_body) branches;
+      Option.iter (go bound) default
+    | Tir.ETuple xs | Tir.EAlloc (_, xs) | Tir.EStackAlloc (_, xs) -> atoms bound xs
+    | Tir.ERecord fs -> atoms bound (List.map snd fs)
+    | Tir.EUpdate (a, fs) -> atom bound a; atoms bound (List.map snd fs)
+    | Tir.EReuse (a, _, xs) -> atom bound a; atoms bound xs
+    | Tir.EAllocHole (tok, _, xs, _) -> Option.iter (atom bound) tok; atoms bound xs
+    | Tir.ESetField (o, _, v) -> atom bound o; atom bound v
+    | Tir.ESeq (a, b) -> go bound a; go bound b
+  in
+  go (add_vars SSet.empty fd.Tir.fn_params) fd.Tir.fn_body;
+  !acc
+
+(** [bound]: the names bound at this point of the caller (its parameters, and
+    the lets, branch binders and local functions in scope).  A call is not
+    inlined when the callee refers, by name, to something the caller binds
+    there: TIR names are not distinct local and global identifiers, so the
+    callee's [f] would mean the caller's [f] once inlined.  Renaming the
+    callee's own binders ([alpha_rename]) cannot repair that.  This is
+    [Single_use_inline]'s capture guard, applied to the general inliner,
+    which had none: a lambda calling a top-level [f], inlined into a
+    [List.map] clone whose callback parameter is [f], called the callback
+    instead (compiled-only wrong value,
+    specs/progress/2026-10-11-inline-capture-guard.md).  The guard is
+    lexical; [Single_use_inline]'s comment explains why that is enough. *)
+let inline_expr ~changed ?(bound = SSet.empty) (fn_env : (string, Tir.fn_def) Hashtbl.t)
+    (free : (string, SSet.t) Hashtbl.t) : Tir.expr -> Tir.expr =
+  let add_vars bound vs = List.fold_left (fun s (v : Tir.var) -> SSet.add v.Tir.v_name s) bound vs in
+  let captures bound name =
+    match Hashtbl.find_opt free name with
+    | Some names -> not (SSet.is_empty (SSet.inter bound names))
+    | None -> false in
+  let rec go bound = function
     | Tir.EApp (f, args) ->
       (match Hashtbl.find_opt fn_env f.Tir.v_name with
-       | Some fd ->
+       | Some fd when not (SSet.mem f.Tir.v_name bound) && not (captures bound f.Tir.v_name) ->
          (match expand_call fd args with
           | Some inlined ->
             changed := true;
             inlined
           | None -> Tir.EApp (f, args))
-       | None -> Tir.EApp (f, args))
-    | Tir.ELet (v, rhs, body) -> Tir.ELet (v, go rhs, go body)
+       | _ -> Tir.EApp (f, args))
+    | Tir.ELet (v, rhs, body) -> Tir.ELet (v, go bound rhs, go (SSet.add v.Tir.v_name bound) body)
     | Tir.ELetRec (fns, body) ->
+      let bound = List.fold_left (fun s (f : Tir.fn_def) -> SSet.add f.Tir.fn_name s) bound fns in
       Tir.ELetRec (List.map (fun fd ->
-        { fd with Tir.fn_body = go fd.Tir.fn_body }) fns, go body)
+        { fd with Tir.fn_body = go (add_vars bound fd.Tir.fn_params) fd.Tir.fn_body }) fns,
+        go bound body)
     | Tir.ECase (a, branches, default) ->
       Tir.ECase (a,
-        List.map (fun b -> { b with Tir.br_body = go b.Tir.br_body }) branches,
-        Option.map go default)
-    | Tir.ESeq (e1, e2) -> Tir.ESeq (go e1, go e2)
+        List.map (fun b -> { b with Tir.br_body = go (add_vars bound b.Tir.br_vars) b.Tir.br_body })
+          branches,
+        Option.map (go bound) default)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (go bound e1, go bound e2)
     | other -> other
   in
-  go
+  go bound
 
 let run ~changed (m : Tir.tir_module) : Tir.tir_module =
   let fn_env : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 16 in
@@ -392,6 +447,10 @@ let run ~changed (m : Tir.tir_module) : Tir.tir_module =
   ) m.Tir.tm_fns;
   let recursive = recursive_candidate_names fn_env in
   SSet.iter (Hashtbl.remove fn_env) recursive;
+  let free = Hashtbl.create (Hashtbl.length fn_env) in
+  Hashtbl.iter (fun name fd -> Hashtbl.replace free name (free_names fd)) fn_env;
   { m with Tir.tm_fns = List.map (fun fd ->
-      { fd with Tir.fn_body = inline_expr ~changed fn_env fd.Tir.fn_body }
+      let bound =
+        List.fold_left (fun s (v : Tir.var) -> SSet.add v.Tir.v_name s) SSet.empty fd.Tir.fn_params in
+      { fd with Tir.fn_body = inline_expr ~changed ~bound fn_env free fd.Tir.fn_body }
     ) m.Tir.tm_fns }

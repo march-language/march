@@ -22,9 +22,7 @@ git log is authoritative for exact commits.
 - **`--verify-tir` checks Defun's contracts.** From `tir-defun` on, a lambda
   creation site that Defun should have replaced, or a call through a locally
   bound name that should be indirect, is reported as a `[contract]` finding.
-  It caught a compiled-only wrong value: a top-level function named like a
-  stdlib callback parameter (`f`) is called through that parameter after
-  inlining (`specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md`).
+  It caught the compiled-only wrong value fixed below.
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the
@@ -549,6 +547,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A top-level function named like a stdlib callback parameter is called
+  correctly when compiled.** Declaring your own `f` and calling it from a lambda
+  passed to `List.map` (whose callback parameter is also `f`) called the
+  callback instead at `--opt 0` and `--opt 2`, so the mapped values were wrong.
+  The interpreter and `--no-opt` were always right.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.
