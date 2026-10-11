@@ -109,6 +109,8 @@ val emit_repl_decl :
   prev_slots:repl_slot_info list ->
   fns:Tir.fn_def list ->
   ?extern_fns:Tir.fn_def list ->
+  ?borrow_slots:bool ->
+  ?register_drops:bool ->
   ?session_wraps:session_wraps ->
   types:Tir.type_def list -> Tir.expr -> string
 

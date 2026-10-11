@@ -57,7 +57,7 @@ name derived from where the thing is. `host'` below is the host through
 - **Not converted: drop glue.** `__drop$List_V_53272` (keyed by
   `Drop.mangle`) still carries a typechecker id. Canonicalising it would merge
   drop functions, which is not a rename. Filed as
-  `specs/todos/2026-10-07-drop-glue-name-carries-tvar-id.md`. Test fn names
+  `specs/progress/2026-10-07-drop-glue-name-carries-tvar-id.md` (fixed 2026-10-11). Test fn names
   (`Tir_names.test_fn_name <ordinal>`) keep their per-module ordinal; they are
   not in the §14 inventory.
 - `Provenance.current_host` is exported for `Fusion`. The D24 respawn-thunk

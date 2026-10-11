@@ -266,6 +266,24 @@ let emit_prev_global_bridges ctx (prev_globals : (string * string) list) =
     Hashtbl.replace ctx.Llvm_ctx.var_slot bare bare
   ) prev_globals
 
+(* [register_drops]: register this fragment's closure and actor releases
+   ([Drop.run]'s [$clodrop$]/[$actordrop$]) before any of its code runs, as a
+   program's main does ([Llvm_toplevel.clo_drop_registration]).  Without it a
+   closure the fragment built and released through its function type freed
+   its cell and leaked every capture: one closure per call of
+   `List.filter`'s shape, whose local `go` captures the predicate.  A
+   fragment's code is never unloaded, so the registered pointers stay valid.
+   Emits the registration call into [ctx.buf] (the entry block being
+   written) and returns the module-level text that defines it. *)
+let emit_drop_registration ctx ~(register_drops : bool) ~(pseudo_mod : Tir.tir_module)
+    (entry_fn : Tir.fn_def) : string =
+  if not register_drops then ""
+  else begin
+    Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_clo_drops_register()\n";
+    Llvm_toplevel.clo_drop_registration
+      { pseudo_mod with tm_fns = pseudo_mod.Tir.tm_fns @ [ entry_fn ] }
+  end
+
 (** Emit a REPL expression as a standalone .ll fragment.
     Returns textual LLVM IR with a function [@repl_<n>] that computes
     and returns the expression result.
@@ -303,23 +321,10 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   let ret_llty = Llvm_ctx.llvm_ty ctx ret_ty in
   let fname = Printf.sprintf "repl_%d" n in
   Printf.bprintf ctx.Llvm_ctx.buf "\ndefine %s @%s() {\nentry:\n" ret_llty fname;
-  (* [register_drops] (the remote shell): register this fragment's closure
-     and actor releases ([Drop.run]'s [$clodrop$]/[$actordrop$]) before any
-     of its code runs, as a program's main does
-     ([Llvm_toplevel.clo_drop_registration]).  Without it a closure the
-     fragment built and released through its function type freed its cell
-     and leaked every capture: one closure per call of `List.filter`'s
-     shape, whose local `go` captures the predicate.  A fragment's code is
-     never unloaded, so the registered pointers stay valid. *)
   let registration =
-    if not register_drops then ""
-    else begin
-      let entry_fn = { Tir.fn_name = fname; fn_params = []; fn_ret_ty = ret_ty;
-                       fn_body = body; fn_kind = Tir.FnNormal } in
-      Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_clo_drops_register()\n";
-      Llvm_toplevel.clo_drop_registration
-        { pseudo_mod with tm_fns = fns @ [ entry_fn ] }
-    end in
+    emit_drop_registration ctx ~register_drops ~pseudo_mod
+      { Tir.fn_name = fname; fn_params = []; fn_ret_ty = ret_ty;
+        fn_body = body; fn_kind = Tir.FnNormal } in
   emit_prev_slot_bridges ~borrow:borrow_slots ctx prev_slots;
   let (actual_ty, result) = emit_expr ctx body in
   let result' = Llvm_ctx.coerce ctx actual_ty result ret_llty in
@@ -373,6 +378,8 @@ let emit_repl_decl ~emit_expr ?(fast_math=false) ~(n : int) ~(name : string)
     ~(prev_slots : repl_slot_info list)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
+    ?(borrow_slots = false)
+    ?(register_drops = false)
     ?(session_wraps : Llvm_ctx.session_wraps option)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
@@ -395,13 +402,18 @@ let emit_repl_decl ~emit_expr ?(fast_math=false) ~(n : int) ~(name : string)
   let llty = Llvm_ctx.llvm_ty ctx val_ty in
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.Llvm_ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
-  emit_prev_slot_bridges ctx prev_slots;
+  let registration =
+    emit_drop_registration ctx ~register_drops ~pseudo_mod
+      { Tir.fn_name = init_name; fn_params = []; fn_ret_ty = val_ty;
+        fn_body = body; fn_kind = Tir.FnNormal } in
+  emit_prev_slot_bridges ~borrow:borrow_slots ctx prev_slots;
   let (actual_ty, result) = emit_expr ctx body in
   let result' = Llvm_ctx.coerce ctx actual_ty result llty in
   emit_store_to_slot ~prev_slots ctx dest_slot result' val_ty;
   Printf.bprintf ctx.Llvm_ctx.buf "  ret void\n}\n";
   let out = Buffer.create 4096 in
   Llvm_toplevel.emit_preamble ~repl:true out;
+  Buffer.add_string out registration;
   List.iter (fun fn -> Buffer.add_string out (Llvm_toplevel.fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.Llvm_ctx.preamble;
   Buffer.add_buffer out ctx.Llvm_ctx.buf;

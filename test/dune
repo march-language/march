@@ -1255,7 +1255,7 @@
 (test
  (name test_jit)
  (modules test_jit)
- (libraries march_jit alcotest unix)
+ (libraries march_jit alcotest unix str)
  ; The session tests spawn the real compiler binary and need the staged
  ; stdlib + runtime trees next to it (same dep shape as the bench_gate rule).
  ; MARCH_BIN serves the check_session and redefinition harnesses.
@@ -10900,6 +10900,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/typed_array_builtin_borrow_leak_probe.expected typed_array_builtin_borrow_leak_probe.out)))
+
+; A dead TypedArray releases every element it holds (its own reserved tag,
+; MARCH_TYPED_ARR_TAG, and march_run_resource_dtor). Before 2026-10-07 each
+; leg leaked one String per element per iteration.
+(rule
+ (targets typed_array_elements_released_probe typed_array_elements_released_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/typed_array_elements_released_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o typed_array_elements_released_probe
+        native/typed_array_elements_released_probe.march)
+   (with-stdout-to typed_array_elements_released_probe.out
+        (system "./typed_array_elements_released_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/typed_array_elements_released_probe.expected typed_array_elements_released_probe.out)))
 
 (rule
  (targets nativearray_builtin_borrow_leak_probe nativearray_builtin_borrow_leak_probe.out)
