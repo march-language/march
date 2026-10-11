@@ -500,6 +500,36 @@ let test_cas_compilation_hash_differs_by_target () =
   Alcotest.(check bool) "different targets → different compilation hashes"
     false (String.equal ch1 ch2)
 
+(* R10: a function's source text is kept under its impl_hash. *)
+let test_cas_source_roundtrip () =
+  with_tmpdir @@ fun root ->
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
+  let h = String.make 64 'a' in
+  Alcotest.(check (option string)) "nothing before" None (March_cas.Cas.lookup_source store h);
+  March_cas.Cas.store_source store h "fn f() do 1 end";
+  Alcotest.(check (option string)) "stored text comes back"
+    (Some "fn f() do 1 end") (March_cas.Cas.lookup_source store h);
+  (* the key is the code's identity: an entry is never rewritten *)
+  March_cas.Cas.store_source store h "something else";
+  Alcotest.(check (option string)) "same hash keeps its first text"
+    (Some "fn f() do 1 end") (March_cas.Cas.lookup_source store h);
+  Alcotest.(check bool) "laid out as sources/<2>/<62>" true
+    (Sys.file_exists (root ^ "/.march/cas/sources/aa/" ^ String.make 62 'a'))
+
+let test_cas_source_refuses_bad_keys_and_big_text () =
+  with_tmpdir @@ fun root ->
+  let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
+  let up = String.make 64 'A' and short = "abc" and dots = "../" ^ String.make 61 'a' in
+  List.iter (fun h ->
+      March_cas.Cas.store_source store h "x";
+      Alcotest.(check (option string)) ("no lookup for " ^ h) None (March_cas.Cas.lookup_source store h))
+    [ up; short; dots ];
+  Alcotest.(check bool) "nothing written outside sources/" false
+    (Sys.file_exists (root ^ "/.march/cas/sources/ab"));
+  let h = String.make 64 'b' in
+  March_cas.Cas.store_source store h (String.make (March_cas.Cas.source_max_bytes + 1) 'x');
+  Alcotest.(check (option string)) "over the limit: not stored" None (March_cas.Cas.lookup_source store h)
+
 let test_cas_gc_removes_unreferenced () =
   with_tmpdir @@ fun root ->
   let store = March_cas.Cas.create ~use_global:false ~project_root:root () in
@@ -983,6 +1013,8 @@ let () =
       Alcotest.test_case "copy_artifact same file ok"         `Quick test_cas_copy_artifact_same_file_ok;
       Alcotest.test_case "compilation hash differs by target" `Quick test_cas_compilation_hash_differs_by_target;
       Alcotest.test_case "gc removes unreferenced"            `Quick test_cas_gc_removes_unreferenced;
+      Alcotest.test_case "source text round trip (R10)"       `Quick test_cas_source_roundtrip;
+      Alcotest.test_case "source: bad keys and big text (R10)" `Quick test_cas_source_refuses_bad_keys_and_big_text;
     ]);
     ("scc", [
       Alcotest.test_case "single non-recursive fn"            `Quick test_scc_single_non_recursive;

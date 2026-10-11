@@ -15,3 +15,4 @@ top supervisor: policy=one_for_one limit=5 window=60 held=1 children=2 child_cra
 top msgs_in: worker=true value=3
 format_top: lines=5
 names: worker
+which: not_found

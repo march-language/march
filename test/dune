@@ -2889,6 +2889,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/diagnose_runaway.expected native_diagnose_runaway.out)))
+
+; MARCH_CRASH_DUMP (R7.4 of the observe plan): an unsupervised panic leaves a
+; dump that `forge diagnose --from-dump` and `forge observe --dump` read back:
+; the crash.loop of the supervisor whose child panicked three times, and the
+; panic message text, which no live observe verb carries.  Also: no dump
+; without the variable, and an unwritable path costs the dump, not the exit.
+(rule
+ (targets native_crash_dump native_crash_dump.out)
+ (deps (file %{exe:../bin/main.exe}) (file %{exe:../forge/bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/crash_dump.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_crash_dump native/crash_dump.march)
+   (with-stdout-to native_crash_dump.out
+    (system "rm -f cd.json cd.json.tmp cd2.json; MARCH_CRASH_DUMP=cd.json ./native_crash_dump > cd.prog 2>&1; echo \"program exit=$?\"; test -f cd.json && echo \"dump written\"; test -f cd.json.tmp || echo \"no .tmp left behind\"; %{exe:../forge/bin/main.exe} diagnose --from-dump cd.json --json > cd.diag; echo \"diagnose exit=$?\"; grep -o '\"id\":\"[^\"]*\",\"severity\":\"[^\"]*\"' cd.diag; grep -o '\"dump\":{\"reason\":\"[^\"]*\"' cd.diag; %{exe:../forge/bin/main.exe} observe --dump cd.json --panel crashes > cd.crashes; grep -c 'dump-main-panic-xyzzy' cd.crashes | sed 's/^/crash rows with the panic message: /'; grep -c 'dump-child-crash-xyzzy' cd.crashes | sed 's/^/crash rows with a child message: /'; %{exe:../forge/bin/main.exe} observe --dump cd.json --panel actor | grep -o 'live-only'; %{exe:../forge/bin/main.exe} observe --dump cd.json --json | grep -c '\"proto\": \"march.observe/1\"' | sed 's/^/snapshot envelopes: /'; ./native_crash_dump > cd2.prog 2>&1; echo \"unset exit=$?\"; test -f cd2.json || echo \"no dump without MARCH_CRASH_DUMP\"; MARCH_CRASH_DUMP=/nonexistent-dir/x.json ./native_crash_dump > cd3.prog 2>&1; echo \"unwritable path exit=$?\"; %{exe:../forge/bin/main.exe} diagnose --from-dump cd.prog > /dev/null 2>&1; echo \"not a dump exit=$?\"; rm -f cd.json cd.diag cd.crashes cd.prog cd2.prog cd3.prog; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/crash_dump.expected native_crash_dump.out)))
 ; ── Leak guard: compiled actors leaked every received message, every state
 ; record a handler returned and the Some(()) of a statement `send`; a nominal
 ; record read only through its fields leaked with every heap field. Red before
@@ -2949,6 +2970,20 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias   runtest)
  (deps    (file test_observe_runner))
  (action  (run ./test_observe_runner)))
+
+; The gate in front of the crash-dump writer (march_abort / march_fatal_dump,
+; runtime/march_reclaim.c): the hook runs on a clean abort and not inside a
+; reclamation critical section or on a signal stack, and the process aborts
+; either way.
+(rule
+ (targets test_fatal_hook_runner)
+ (deps    test_fatal_hook.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets} test_fatal_hook.c ../runtime/march_reclaim.c -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_fatal_hook_runner))
+ (action  (run ./test_fatal_hook_runner)))
 
 (rule
  (targets observe_client)
@@ -13113,6 +13148,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_inspect_block.expected native_actor_inspect_block.out)))
+
+; ── WHICH / SOURCE across a hot deploy (observe R10) ───────────────────────
+; specs/progress/2026-10-11-observe-r10-which-source.md.
+; observe_which_source_check.exe builds the v1 fixture as a --hot-reload node
+; (fresh deploy key) and the v2 fixture as a --compile-so patch, starts the
+; node under a private HOME, and checks WHICH / SOURCE before and after
+; Cmd_deploy_hot.run (what `forge deploy hot` runs) switches it to the patch:
+; the hash, the body, the signature and policy gates, names that must not reach
+; a path, the CAS_PUT kind:source guards, and the audit log.
+(executable
+ (name observe_which_source_check)
+ (modules observe_which_source_check)
+ (libraries unix str yojson march_ed25519 march_forge))
+
+(rule
+ (targets native_observe_which_source.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_which_source_check.exe)
+       (file native/observe_which_source_v1.march)
+       (file native/observe_which_source_v2.march))
+ (action
+  (with-stdout-to native_observe_which_source.out
+   (system "./observe_which_source_check.exe %{exe:../bin/main.exe} native/observe_which_source_v1.march native/observe_which_source_v2.march; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_which_source.expected native_observe_which_source.out)))
 
 ; ── Signed debug verbs on the observe socket (observe R4b) ─────────────────
 ; specs/progress/2026-10-05-observe-r4b-signed-debug-verbs.md.

@@ -1,0 +1,56 @@
+{
+ "proto": "march.observe/1",
+ "node": "web-1",
+ "at_ms": 1791743838508,
+ "took_us": 13,
+ "truncated": false,
+ "data": {
+  "pid": 1,
+  "alive": true,
+  "cap_epoch": 0,
+  "actor": {
+   "pid": 1,
+   "type": "Boss",
+   "names": [
+    "boss"
+   ],
+   "status": "waiting",
+   "mbox": 0,
+   "user_mbox": 0,
+   "held": 0,
+   "mbox_limit": 0,
+   "mbox_policy": "unbounded",
+   "code_epoch": 1,
+   "cap_epoch": 0,
+   "sched": 7,
+   "pinned": false,
+   "draining": false,
+   "parent": null,
+   "children": 1,
+   "spawned_by": null,
+   "slices": 1,
+   "msgs_in": 0,
+   "msgs_out": 0,
+   "crashes": 0,
+   "child_crashes": 3,
+   "stack_bytes": 16384,
+   "idle_ms": 119291
+  },
+  "children": [
+   4
+  ],
+  "spawned": [],
+  "supervisor": {
+   "strategy": "one_for_one",
+   "max_restarts": 10,
+   "window_secs": 60,
+   "restarts_held": 3,
+   "restart_ages_ms": [
+    118164,
+    118731,
+    119290
+   ]
+  },
+  "terminal": null
+ }
+}

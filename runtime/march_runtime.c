@@ -740,7 +740,7 @@ void march_decrc(void *p) {
          * rather than silently double-freeing and corrupting the heap. */
         fprintf(stderr, "march: RC underflow (rc was %lld) at %p — aborting\n",
                 (long long)prev, p);
-        abort();
+        march_abort(__func__);
     }
 }
 
@@ -862,7 +862,7 @@ void march_clo_release(void *p) {
     } else if (prev < 1) {
         fprintf(stderr, "march: RC underflow in march_clo_release (rc was %lld) at %p — aborting\n",
                 (long long)prev, p);
-        abort();
+        march_abort(__func__);
     }
 }
 
@@ -888,7 +888,7 @@ int64_t march_decrc_freed(void *p) {
         fprintf(stderr,
                 "march: RC underflow in march_decrc_freed (rc was %lld) at %p — aborting\n",
                 (long long)prev, p);
-        abort();
+        march_abort(__func__);
     }
     return 0;
 }
@@ -927,7 +927,7 @@ void march_free(void *p) {
                 gc_trace_on()
                   ? "  History: scripts/gc-trace-report.py --addr <addr> trace/gc"
                   : "  Rebuild with --rc-trace and run under MARCH_TRACE_GC=1 for its history.");
-        abort();
+        march_abort(__func__);
     }
 #endif
     if (gc_trace_on() && IS_HEAP_PTR(p))
@@ -957,7 +957,7 @@ void march_hole_fill_check(void *cell, int64_t field, void *prev) {
     fprintf(stderr,
             "march: TRMC hole fill into cell %p field %lld found %p, not null — aborting\n",
             cell, (long long)field, prev);
-    abort();
+    march_abort(__func__);
 }
 #endif
 
@@ -984,7 +984,7 @@ void *march_tco_defer_push(void *buf, void (*release)(void *), void *v) {
             b, sizeof(march_tco_defer_buf) + (size_t)cap * sizeof(march_tco_defer_item));
         if (nb == NULL) {
             fprintf(stderr, "march: out of memory growing a tail-call pending-drop list\n");
-            abort();
+            march_abort(__func__);
         }
         if (b == NULL) nb->len = 0;
         nb->cap = cap;
@@ -1076,7 +1076,7 @@ void march_decrc_local(void *p) {
     if (h->rc <= 0) {
         if (h->rc < 0) {
             fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
-            abort();
+            march_abort(__func__);
         }
         march_run_resource_dtor(p);
         MARCH_FREE_BUMP();
@@ -1119,7 +1119,7 @@ int64_t march_decrc_local_freed(void *p) {
     if (h->rc <= 0) {
         if (h->rc < 0) {
             fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
-            abort();
+            march_abort(__func__);
         }
         march_run_resource_dtor(p);
         MARCH_FREE_BUMP();
@@ -1143,7 +1143,7 @@ static void march_rc_last_underflow(void *p, int64_t prev, int local) {
     else
         fprintf(stderr, "march: RC underflow (rc was %lld) at %p — aborting\n",
                 (long long)prev, p);
-    abort();
+    march_abort(__func__);
 }
 
 /* The out-of-line remainder of a last-reference free: a negative-tag cell
@@ -2134,6 +2134,9 @@ void march_panic(void *s) {
     fputc('\n', stderr);
     march_print_backtrace();
     fflush(stderr);
+    /* MARCH_CRASH_DUMP: the unsupervised panic leaves a dump (see
+     * march_observe_snapshot.c; a no-op when unset). */
+    (void)march_fatal_dump("panic");
     exit(1);
 }
 
@@ -3740,7 +3743,7 @@ static void meta_put(march_actor_meta *m) {
     else if (prev <= 0) {
         fprintf(stderr, "march: actor meta reference underflow (%lld)\n",
                 (long long)prev);
-        abort();
+        march_abort(__func__);
     }
 }
 
@@ -8102,7 +8105,7 @@ static void call_held_push(call_held *h, void *msg, uint64_t seq) {
         uint64_t *seqs = realloc(h->seqs, (size_t)cap * sizeof *seqs);
         if (!msgs || !seqs) {
             fputs("march: OOM (actor_call held messages)\n", stderr);
-            abort();
+            march_abort(__func__);
         }
         h->msgs = msgs;
         h->seqs = seqs;

@@ -1,0 +1,10 @@
+{
+ "proto": "march.observe/1",
+ "node": "web-1",
+ "at_ms": 1791743838484,
+ "took_us": 3,
+ "truncated": false,
+ "data": {
+  "available": false
+ }
+}
