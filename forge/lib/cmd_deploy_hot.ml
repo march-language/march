@@ -1996,7 +1996,7 @@ let run_status ?(env="") () : (unit, string) result =
 
 (* ─── Build step ─────────────────────────────────────────────────────────── *)
 
-let build_so ~proj ~output : (string * string, string) result =
+let build_so_for ~(target : string option) ~proj ~output : (string * string, string) result =
   let so_path = output ^ ".so" in
   let manifest_path = output ^ ".so.hcr_manifest" in
   let lib_env = Cmd_build.lib_path_env proj in
@@ -2004,7 +2004,7 @@ let build_so ~proj ~output : (string * string, string) result =
   let target_flag, hcr_flags =
     match proj.Project.hot_reload with
     | Some hr ->
-      let target = match hr.Project.hr_target with
+      let target = match (match target with Some _ as t -> t | None -> hr.Project.hr_target) with
         | Some t -> " --target " ^ Filename.quote t | None -> "" in
       let hcr = match hr.Project.hr_module_prefix, hr.Project.hr_public_key with
         | Some p, Some k -> " --hot-reload " ^ Filename.quote p ^
@@ -2026,6 +2026,9 @@ let build_so ~proj ~output : (string * string, string) result =
     Error (Printf.sprintf "no manifest at %s — rebuild with a hot-reload enabled compiler" manifest_path)
   else
     Ok (so_path, manifest_path)
+
+(** [build_so_for] with the project's own target ([hr_target]). *)
+let build_so ~proj ~output = build_so_for ~target:None ~proj ~output
 
 (* ─── Entry point ────────────────────────────────────────────────────────── *)
 

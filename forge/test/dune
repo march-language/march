@@ -301,3 +301,21 @@
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv TOPOLOGY_APP_DIR %{workspace_root}/examples/topology_app
        (run %{exe:test_deploy_e2e.exe}))))))))
+
+; test_release_build.ml: `forge release build` and the bin/<app> launcher
+; (R9). Real native compiles, a real node started with `sh bin/<app> daemon`.
+; test_procs's hermetic shape plus the just-built forge for the CLI-shape case.
+(executable
+ (name test_release_build)
+ (modules test_release_build)
+ (libraries march_forge alcotest unix str))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+      (run %{exe:test_release_build.exe})))))))

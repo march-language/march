@@ -886,9 +886,41 @@ let release_cmd =
     Arg.(value & opt string "patch" &
          info ["bump"] ~docv:"KIND" ~doc:"Version bump for the release: patch|minor|major.")
   in
-  let run b = handle (Cmd_release.run ~bump:b ()) in
-  Cmd.v (Cmd.info "release" ~doc:"Guarded release: clean tree -> build -> test -> bump + tag")
-    Term.(const run $ bump)
+  let tag_run b = handle (Cmd_release.run ~bump:b ()) in
+  let tag_doc = "Guarded release: clean tree -> build -> test -> bump + tag" in
+  let tag_term = Term.(const tag_run $ bump) in
+  let tag_cmd = Cmd.v (Cmd.info "tag" ~doc:tag_doc) tag_term in
+  let build_cmd =
+    let target =
+      Arg.(value & opt (some string) None &
+           info ["target"] ~docv:"T"
+             ~doc:"Cross target (linux/amd64, linux/arm64; needs zig), as $(b,forge build --target). \
+                   Default: this machine.")
+    in
+    let profile =
+      Arg.(value & opt string "release" &
+           info ["profile"] ~docv:"P"
+             ~doc:"$(b,release) (default, $(b,--opt 2)) or $(b,debug).")
+    in
+    let tar = Arg.(value & flag & info ["tar"] ~doc:"Also write the tarball next to the directory.") in
+    let run target profile tar =
+      match Cmd_release_build.build ?target ~profile ~tar () with
+      | Ok (dir, tarball) ->
+        Printf.printf "release: %s\n%!" dir;
+        Option.iter (Printf.printf "release: %s\n%!") tarball
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    in
+    Cmd.v (Cmd.info "build"
+             ~doc:"Build the app and lay out a self-contained release directory \
+                   .march/release/APP-VERSION-TARGET/ with a bin/APP launcher (start, daemon, \
+                   stop, restart, pid, version, ping, status, rpc, shell, observe, diagnose)")
+      Term.(const run $ target $ profile $ tar)
+  in
+  Cmd.group ~default:tag_term
+    (Cmd.info "release"
+       ~doc:"Release: $(b,forge release build) lays out a deployable bundle; \
+             $(b,forge release) [--bump] (or $(b,tag)) is the guarded clean-tree -> build -> test -> bump + tag")
+    [build_cmd; tag_cmd]
 
 (* ------------------------------------------------------------- forge bench *)
 
@@ -1892,7 +1924,14 @@ let topology_gen_cmd =
            ~doc:"Write the generated files under DIR instead of printing them \
                  (built-in generators only).")
   in
-  let run env target out =
+  let release_dir =
+    Arg.(value & opt (some string) None &
+         info ["release-dir"] ~docv:"DIR"
+           ~doc:"systemd only: the unit runs $(b,DIR/bin/APP start), the launcher of a \
+                 $(b,forge release build) bundle installed at DIR on the host, instead of \
+                 /opt/march/APP/APP.")
+  in
+  let run env target out release_dir =
     match topology_load_checked env with
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
     | Ok (proj, t, index, _) ->
@@ -1900,7 +1939,7 @@ let topology_gen_cmd =
       match Topology.export_of_json json with
       | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
       | Ok ex ->
-        match Topology.Gen.builtin ~project:proj.Project.name target ex with
+        match Topology.Gen.builtin ?release_dir ~project:proj.Project.name target ex with
         | Some files -> Topology.Gen.emit ?out files
         | None ->
           match Cli_ext.external_subcommand ~known:Topology.Gen.builtins
@@ -1916,7 +1955,7 @@ let topology_gen_cmd =
   Cmd.v (Cmd.info "gen"
            ~doc:"Generate deployment files from the topology: a built-in target or \
                  a forge-topology-<target> plugin")
-    Term.(const run $ topology_env $ target $ out)
+    Term.(const run $ topology_env $ target $ out $ release_dir)
 
 let topology_status_cmd =
   let run env =

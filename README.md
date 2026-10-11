@@ -317,6 +317,7 @@ forge version                # print the current version
 forge version patch          # 1.2.3 -> 1.2.4 (rewrites [package].version)
 forge version minor --tag    # bump, commit, and tag vX.Y.Z (needs a clean tree)
 forge release                # clean tree -> build -> test -> bump + tag
+forge release build --tar    # a self-contained bundle with a bin/<app> launcher
 ```
 
 `forge fmt --check` and `forge lint` (which exits non-zero on errors) round out the CI checks.
