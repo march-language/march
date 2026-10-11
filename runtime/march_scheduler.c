@@ -3453,6 +3453,11 @@ int64_t march_sched_mbox_count(march_proc *p) {
     return atomic_load_explicit(&p->mbox_count, memory_order_relaxed);
 }
 
+int64_t march_sched_held_count(march_proc *p) {
+    if (!p) return 0;
+    return atomic_load_explicit(&p->held, memory_order_relaxed);
+}
+
 /* One park + resume for march_sched_recv_mode's loop, in its OWN NOINLINE
  * function so the `tl_sched` read happens FRESH on every iteration.
  *

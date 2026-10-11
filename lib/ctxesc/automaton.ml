@@ -116,6 +116,14 @@ let consume_literal t (start : C.t) (src : string) =
               template -- every state needs an `any` catch-all."
              src.[!i] (C.describe !ctx),
            !i)
+    | Some ({ P.diag = Some d; _ }, _, _) ->
+      (* A literal row with a diagnostic is a compile error, exactly as an
+         `interp` row with one is (specs/security/README.md: "if present, this
+         transition is a compile error"). Until the URL scheme rows needed it
+         (a literal `:` after a hole that may be spelling the scheme), no
+         literal row carried one, and this function silently ignored the
+         field. *)
+      err := Some (d, !i)
     | Some (r, len, name) ->
       (match r.P.subst with Some sub -> Buffer.add_string buf sub | None -> ());
       Buffer.add_string buf (String.sub src !i len);
@@ -175,8 +183,8 @@ let escaper_for (c : C.t) =
      | _ -> C.EscHtml)
   | C.Attrvalue ->
     (match c.C.attr with
-     | C.AtUrl -> C.EscUrlWhole
-     | C.AtUrlMid -> C.EscUrlComponent
+     | C.AtUrl | C.AtUrlSchemeHole -> C.EscUrlWhole
+     | C.AtUrlMid | C.AtUrlScheme | C.AtUrlSchemeHoleMid -> C.EscUrlComponent
      | C.AtStyle -> C.EscCssDecl
      | C.AtStyleValue -> C.EscCssValue
      | C.AtCssUrl -> C.EscCssUrl

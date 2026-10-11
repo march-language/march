@@ -266,13 +266,18 @@ mod Actor do
         Nil                   -> ()
       end
 
-  A snapshot: it walks `Actor.list(c)` and asks `mailbox_size` of each, so an
+  The depth is the actor's waiting work, `mailbox_backlog`: its queued
+  messages plus any that an `Actor.call` it is blocked in has set aside until
+  the reply. An actor stuck in a slow call with work piling up is exactly the
+  one this should find, and `mailbox_size` alone reads 0 for it.
+
+  A snapshot: it walks `Actor.list(c)` and asks `mailbox_backlog` of each, so an
   actor can die or drain between the walk and your reaction. Ties keep spawn
   order. Cost is one pass over every live actor plus a sort, so call it from a
   timer, not from a hot path.
   """
   fn top_by_mailbox(c : Cap(Actor.Introspect), n : Int) : List((Pid(a), Int)) do
-    let depths = List.map(list(c), fn p -> (p, mailbox_size(p)))
+    let depths = List.map(list(c), fn p -> (p, mailbox_backlog(p)))
     let deeper = fn (a, b) ->
       match a do
         (_, da) -> match b do (_, db) -> da > db end
@@ -288,11 +293,11 @@ mod Actor do
       List.each(Actor.over_mailbox(c, 500), fn hot ->
         match hot do (p, d) -> log_slow_actor(p, d) end)
 
-  Same snapshot caveats as `top_by_mailbox`. A threshold below zero returns
-  every live actor.
+  Depth is `mailbox_backlog`, as for `top_by_mailbox`. Same snapshot caveats.
+  A threshold below zero returns every live actor.
   """
   fn over_mailbox(c : Cap(Actor.Introspect), threshold : Int) : List((Pid(a), Int)) do
-    let depths = List.map(list(c), fn p -> (p, mailbox_size(p)))
+    let depths = List.map(list(c), fn p -> (p, mailbox_backlog(p)))
     List.filter(depths, fn pd -> match pd do (_, d) -> d > threshold end)
   end
 

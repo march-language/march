@@ -10841,6 +10841,23 @@ int64_t march_mailbox_size(void *pid) {
     return depth;
 }
 
+/* mailbox_backlog: the work waiting for this actor, which is its mailbox
+ * depth (as mailbox_size) plus the user messages an Actor.call it is blocked
+ * in has taken off the mailbox to put back after the reply (the proc's
+ * `held`). An actor stuck in a slow call with work piling up reads 0 by
+ * mailbox_size; this is the count Actor.top_by_mailbox / over_mailbox rank
+ * by, as the observe socket's ACTORS mbox / TOP mbox already do. */
+int64_t march_mailbox_backlog(void *pid) {
+    if (!IS_HEAP_PTR(pid)) return 0;
+    int64_t depth = 0;
+    march_reclaim_enter();   /* meta and gt: resolved and used inside */
+    march_actor_meta *meta = find_meta(pid);
+    march_proc *gt = meta ? meta_gt(meta) : NULL;
+    if (gt) depth = march_sched_mbox_count(gt) + march_sched_held_count(gt);
+    march_reclaim_exit();
+    return depth;
+}
+
 /* actor_set_mailbox_limit: bind a mailbox capacity + overflow policy to the
    green thread backing this actor. limit <= 0 means unbounded; policy is a
    march_mbox_policy value (0 unbounded, 1 drop_new, 2 drop_old, 3 block).

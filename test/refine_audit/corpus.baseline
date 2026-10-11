@@ -306,6 +306,8 @@ native_local_named_like_builtin: coverage audit (user + stdlib): 135 enforced, 0
 native_local_named_like_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_logger_appenders_parity: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_logger_appenders_parity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_mailbox_backlog_counts_held: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_mailbox_backlog_counts_held: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_bounded: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_bounded: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_decl: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

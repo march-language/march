@@ -15,7 +15,14 @@ See `specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md`.
   rendered `alert(document.cookie)` as executable code. The table now tracks JS
   string literals, comments, regex literals and template literals, and
   expression position has its own escaper.
-- **URL — still flat**, and still not known to be exploitable; see below.
+- **URL scheme — DONE 2026-10-11, and it WAS exploitable.** See
+  `specs/progress/2026-10-11-h-sigil-url-scheme-automaton.md`. The "not known to
+  be exploitable" below was wrong in exactly the way this file warns about:
+  `href="${s}://${rest}"` with `s = "javascript"` rendered an executable
+  `javascript://%0Aalert%281%29`. The URL attribute now has a scheme
+  sub-automaton (`urlscheme` / `urlschemehole` / `urlschemeholemid`) and a
+  literal `:` that would let a hole choose the scheme is a compile error.
+- **URL authority / path / query / fragment — still flat.** See below.
 
 ## What this file got wrong, which is the part worth keeping
 
@@ -69,9 +76,23 @@ it is still a flat encoding of a sub-automaton, not a nested one.
 ## What is left
 
 **URL.** A real URL automaton would track scheme / authority / path / query /
-fragment; we have two positions. The codec's absence is still not exploitable,
-because the attribute escaper escapes `&` after the URL check, so an entity
-cannot be decoded a second time:
+fragment. The scheme part is now tracked (2026-10-11); after it, every hole is
+still one flat `urlmid` component. What that leaves:
+
+- A hole in the authority (`href="https://${host}/"`) gets the component
+  escaper, which percent-encodes `/`, `@` and `:`, so it cannot move the host,
+  but it also breaks an honest `host:port`. A real authority position would
+  allow `:port` and reject `@` (userinfo spoofing).
+- Query vs path vs fragment all get the same component escaper. That is safe
+  (it encodes more than any of them needs) but over-encodes `/` in a path hole.
+- CSS `url(${s}:x)` has the same composition shape as the href exploit:
+  `css_url` checks `s` alone and leaves `:` unescaped. Not executable in any
+  current browser (`javascript:` in CSS `url()` is not run), so it was left out
+  of the 2026-10-11 slice; the same scheme rows would close it if wanted.
+
+The codec's absence is still not known to be exploitable, because the attribute
+escaper escapes `&` after the URL check, so an entity cannot be decoded a second
+time:
 
 ```
 href="${'javascript&#58;alert(1)'}"  ->  href="javascript&amp;#58;alert(1)"

@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**
+  Editing a dependency's version in `forge.toml` and running `forge deps` used
+  to lock the new release whatever it asked for. Now a release that asks for
+  capabilities the baseline does not grant is refused like `forge add`: the
+  change is printed, `forge.lock` is left as it was, and
+  `forge deps --accept-caps` keeps it. Installing what `forge.lock` already
+  says is never checked.
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the
@@ -585,6 +592,19 @@ git log is authoritative for exact commits.
 - A compiled `match` over a tuple that returns a small unboxed type
   (`match (a, b) do (P2(x1, y1), P2(x2, y2)) -> P2(...) end`) no longer
   fails in clang with "integer constant must have integer type".
+- **`~H` no longer lets an interpolated value choose a link's scheme.** In
+  `href="${s}://${rest}"`, a value of `javascript` passed the URL check because
+  it has no colon of its own; the template's `:` then made it the scheme, and
+  the rendered link ran script. A literal `:` (or `&#58;`, `&colon;`) that
+  would complete a scheme an interpolation helped write is now a compile error
+  telling you to interpolate the whole URL as one value. Templates that write
+  the scheme literally (`href="https://${host}/"`) are unaffected.
+- **`Actor.top_by_mailbox` and `Actor.over_mailbox` see an actor stuck in
+  `Actor.call`.** While an actor waits for a reply, the messages that arrive are
+  set aside until the reply comes. Those actors used to show a depth of 0, so
+  the actor stuck in a slow call with work piling up was missed. Both functions
+  now count those messages, through the new `mailbox_backlog(pid)`.
+  `mailbox_size` still reports only the queued messages.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.
