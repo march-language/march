@@ -47,6 +47,10 @@ changed" is the same sound-but-noisy trade the return-type guard made; it was
 left as a product call rather than widened silently. The inferred-type
 comparison below retires both.
 
+**Decision 2026-10-11 (owner): not for now.** Don't widen `UnverifiableFn` to
+unannotated parameters; accept the false PATCH until the inferred-type comparison
+below lands, which closes it without the extra noise.
+
 **Imprecise for unannotated functions.** Any body change to one now requires a
 major bump, even when the inferred return type is unchanged.
 
