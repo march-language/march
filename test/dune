@@ -11396,6 +11396,42 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/to_string_module_types.expected native_to_string_module_types.interp.out)))
 
+; ── Compiled to_string prints newtype and niche values like the interpreter ──
+; `Meters(7)` printed `7`, `Named("x")` printed `x`, `NoName` printed `nil`:
+; the values have no heap cell, so the renderer had no tag to read.  Top level
+; and nested (List/Option/Result/tuple, boxed constructor field, declared
+; record field), interpolation, inspect and ~H.  Interpreted AND compiled
+; against the same .expected. ──
+(rule
+ (targets native_to_string_newtype_niche native_to_string_newtype_niche.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/to_string_newtype_niche.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_newtype_niche
+        native/to_string_newtype_niche.march)
+   (with-stdout-to native_to_string_newtype_niche.out
+        (system "./native_to_string_newtype_niche")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_newtype_niche.expected native_to_string_newtype_niche.out)))
+
+(rule
+ (targets native_to_string_newtype_niche.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/to_string_newtype_niche.march))
+ (action
+  (with-stdout-to native_to_string_newtype_niche.interp.out
+   (run %{exe:../bin/main.exe} native/to_string_newtype_niche.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_newtype_niche.expected native_to_string_newtype_niche.interp.out)))
+
 ; ── An Option over a niche-shaped type must not be a niche itself ─────
 ; `Some(NoName)` was encoded as raw 0 and matched as `None`; a recursive
 ; niche-shaped payload hung the compiler.  Interpreted AND compiled against

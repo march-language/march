@@ -580,6 +580,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled `to_string` prints single-constructor and option-like types like
+  the interpreter.** For `type Meters = Meters(Int)` and
+  `type MaybeName = NoName | Named(String)` declared in the entry module,
+  compiled code printed `7` for `Meters(7)`, `x` for `Named("x")` and `nil`
+  for `NoName`. They now print `Meters(7)`, `Named("x")` and `NoName`, also
+  inside lists, options, tuples, constructor and record fields, string
+  interpolation, `inspect` and `~H`. Still wrong: such a value inside a field
+  of your own generic type (`Box(Meters(9))` prints `Box(9)`).
 - **`Some(NoName)` is no longer `None` (compiled).** For a type shaped like
   `NoName | Named(String)`, compiled code stored `Some(NoName)` as the same
   value as `None`, so a match took the `None` branch. An `Option` over such a
