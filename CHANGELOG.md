@@ -18,6 +18,18 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Security
+
+- **`~H` no longer lets an interpolated value choose a link's scheme.** In
+  `href="${s}://${rest}"`, a value of `javascript` passed the URL check because
+  it has no colon of its own; the template's `:` then made it the scheme, and
+  the rendered link ran script. A literal `:` (or `&#58;`, `&colon;`) that
+  would complete a scheme an interpolation helped write is now a compile error
+  telling you to interpolate the whole URL as one value. Templates that write
+  the scheme literally (`href="https://${host}/"`) are unaffected.
+  Any app that renders links from `~H` templates with an interpolated scheme
+  should be rebuilt; a template the check now rejects was exploitable.
+
 ### Added
 - **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**
   Editing a dependency's version in `forge.toml` and running `forge deps` used
@@ -405,7 +417,7 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
-- **A type variable in a function signature is rigid: a body that fixes it is
+- **Breaking: a type variable in a function signature is rigid: a body that fixes it is
   an error.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end`, and a body that
   makes two signature variables the same type (`fn second(x : a, y : b) : a do
   y end`), now fail with `annotated_tyvar_fixed` at the signature. It was a
@@ -592,13 +604,6 @@ git log is authoritative for exact commits.
 - A compiled `match` over a tuple that returns a small unboxed type
   (`match (a, b) do (P2(x1, y1), P2(x2, y2)) -> P2(...) end`) no longer
   fails in clang with "integer constant must have integer type".
-- **`~H` no longer lets an interpolated value choose a link's scheme.** In
-  `href="${s}://${rest}"`, a value of `javascript` passed the URL check because
-  it has no colon of its own; the template's `:` then made it the scheme, and
-  the rendered link ran script. A literal `:` (or `&#58;`, `&colon;`) that
-  would complete a scheme an interpolation helped write is now a compile error
-  telling you to interpolate the whole URL as one value. Templates that write
-  the scheme literally (`href="https://${host}/"`) are unaffected.
 - **`Actor.top_by_mailbox` and `Actor.over_mailbox` see an actor stuck in
   `Actor.call`.** While an actor waits for a reply, the messages that arrive are
   set aside until the reply comes. Those actors used to show a depth of 0, so
