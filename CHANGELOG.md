@@ -19,6 +19,19 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge release build` lays out a deployable bundle with a `bin/<app>`
+  launcher.** `forge release build [--target T] [--profile P] [--tar]` writes
+  `.march/release/<app>-<version>-<target>/` (`bin/`, `lib/` with the binary,
+  hot-reload manifest and schemas, `etc/` with the topology, policies, public
+  key and `env`, and a `RELEASE` file). The launcher is generated POSIX `sh`:
+  `start`, `daemon`, `stop` (SIGTERM, then SIGKILL after the topology's soft
+  drain deadline), `restart`, `pid`, `version` (with the node's code epoch),
+  `ping` and `status` over the observe socket (needs `nc -U`, `socat` or
+  `python3`), and `rpc`/`shell`/`observe`/`diagnose`, which run `forge` when
+  it is on the host and otherwise print what to run. `forge release` is now a
+  group whose default is the old guarded tag flow (`forge release --bump`
+  still works; `forge release tag` is the same). `forge topology gen systemd
+  --release-dir DIR` points `ExecStart` at `DIR/bin/<app> start`.
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the

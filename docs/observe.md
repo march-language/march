@@ -612,6 +612,16 @@ forge diagnose --env prod --json > diagnose.json; rc=$?
 [ "$rc" -ge 2 ] && page-someone < diagnose.json
 ```
 
+### On the host: the release launcher
+
+A bundle built with `forge release build` (see [tooling](tooling.md#release-bundles-forge-release-build))
+carries a `bin/<app>` launcher that sets `MARCH_HOT_RELOAD_SOCKET` (hot-reload
+builds) or `MARCH_OBSERVE_SOCKET` to `run/<app>.sock[.observe]` and speaks the
+protocol above itself: `bin/<app> ping` sends `PING`, `version` and `status`
+send `EPOCHS` and `MEM`. It needs `nc -U`, `socat` or `python3` on the host for
+that. `bin/<app> observe` and `diagnose` run `forge observe --socket` /
+`forge diagnose --socket` when `forge` is installed there.
+
 ---
 
 ## Reading diagnose findings
