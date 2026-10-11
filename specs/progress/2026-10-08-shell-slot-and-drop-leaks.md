@@ -179,7 +179,7 @@ node's `main` returns after a fixed sleep, so LSan reports at exit:
   a 1000-element list live at the panic stays. Bindings are not affected:
   inputs no longer hold references on them.
 - **The local REPL** (`march repl`, `Repl_jit.lower_module`) has causes 1,
-  2 and 4 too: `specs/todos/2026-10-08-repl-jit-fragment-leaks.md`.
+  2 and 4 too: `specs/progress/2026-10-08-repl-jit-fragment-leaks.md` (fixed 2026-10-11).
 
 ## Tests
 

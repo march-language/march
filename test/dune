@@ -1255,7 +1255,7 @@
 (test
  (name test_jit)
  (modules test_jit)
- (libraries march_jit alcotest unix)
+ (libraries march_jit alcotest unix str)
  ; The session tests spawn the real compiler binary and need the staged
  ; stdlib + runtime trees next to it (same dep shape as the bench_gate rule).
  ; MARCH_BIN serves the check_session and redefinition harnesses.

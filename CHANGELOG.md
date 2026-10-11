@@ -543,6 +543,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **The JIT REPL no longer leaks on every input.** Fragments and the precompiled
+  stdlib now release whole lists, records and variants instead of their top
+  cell, so `to_string(List.range(1, 100))` at the prompt no longer leaves about
+  200 objects behind per input. Fragments also stop adding a reference to every
+  heap binding on each input, and register their closures' capture releases.
 - **A dead TypedArray releases its elements (compiled).** An array of Strings
   (or any heap values) leaked every element when the array was freed. It now
   releases them.

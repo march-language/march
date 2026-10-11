@@ -2698,10 +2698,11 @@ let emit_repl_expr ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns
     ?borrow_slots ?slot_drop_fn ?register_drops ?session_wraps ~types body
 
 let emit_repl_decl ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns
-    ?extern_fns ?session_wraps ~types (body : Tir.expr) : string =
+    ?extern_fns ?borrow_slots ?register_drops ?session_wraps ~types
+    (body : Tir.expr) : string =
   Llvm_repl.emit_repl_decl ~emit_expr
     ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns ?extern_fns
-    ?session_wraps ~types body
+    ?borrow_slots ?register_drops ?session_wraps ~types body
 
 let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
     ~prev_slots ?helper_fns ?extern_fns ?session_wraps ~types (fn : Tir.fn_def) : string =
