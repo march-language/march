@@ -1,0 +1,60 @@
+-- Regression: `Some(NoName)` matched as `None` compiled.
+--
+-- `MaybeName` is niche-shaped (one nullary + one single-field ctor), so its
+-- values are niche-encoded: `NoName` is raw 0 and `Named(s)` is `s`.
+-- `Option(MaybeName)` asked `Kind.niche_payload_ok` whether its payload can
+-- ever be raw 0; the payload type reaches it as `TCon ("MaybeName", [])`,
+-- `repr_of` cannot classify a niche without type arguments and answered
+-- Boxed, so the answer was "never 0" and the Option was niche-encoded too.
+-- `Some(NoName)` then encoded as raw 0, which is `None`.  The interpreter
+-- printed `some` on every line below; compiled printed `none` for the first.
+--
+-- `Chain` is a RECURSIVE niche-shaped type: the fix must not ask whether its
+-- payload is niche-safe, which would recurse forever.
+--
+-- Run interpreted AND compiled against the SAME .expected.
+mod Main do
+  needs IO.Console
+
+  type MaybeName = NoName | Named(String)
+  type MaybeN = NoN | SomeN(Int)
+  type Chain = End | Link(Chain)
+
+  fn wrap_name(b : Bool) : Option(MaybeName) do
+    if b do Some(MaybeName.NoName) else None end
+  end
+
+  fn wrap_n(b : Bool) : Option(MaybeN) do
+    if b do Some(MaybeN.NoN) else None end
+  end
+
+  fn wrap_chain(b : Bool) : Option(Chain) do
+    if b do Some(Chain.End) else None end
+  end
+
+  fn describe(o : Option(MaybeName)) : String do
+    match o do
+      Some(NoName) -> "some(noname)"
+      Some(Named(s)) -> "some(named " ++ s ++ ")"
+      None -> "none"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(describe(wrap_name(true)))
+    println(describe(Some(MaybeName.Named("x"))))
+    println(describe(wrap_name(false)))
+    match wrap_n(true) do
+      Some(NoN) -> println("some(non)")
+      Some(SomeN(k)) -> println("some(somen " ++ int_to_string(k) ++ ")")
+      None -> println("none")
+    end
+    match wrap_chain(true) do
+      Some(End) -> println("some(end)")
+      Some(Link(_)) -> println("some(link)")
+      None -> println("none")
+    end
+    let xs = [wrap_name(true), wrap_name(false), Some(MaybeName.Named("y"))]
+    println(int_to_string(List.length(List.filter(xs, fn o -> Option.is_some(o)))))
+  end
+end

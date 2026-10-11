@@ -26,7 +26,7 @@
 
 (** Field token for a constructor/record slot of type [ty].  [id_of] resolves
     a type name to its local descriptor id, or [None] if that type is not
-    described (unboxed/newtype/niche repr, or not declared here) — in which
+    described (a generic niche, or not declared here) — in which
     case the slot falls back to the generic 'p' renderer, which is exactly
     today's behaviour for it. *)
 let field_token ~(id_of : string -> int option) (ty : Tir.ty) : string =
@@ -45,33 +45,63 @@ let field_token ~(id_of : string -> int option) (ty : Tir.ty) : string =
     (match id_of name with Some id -> Printf.sprintf "A%d" id | None -> "p")
   | _ -> "p"
 
-(** True if a value of type [name] presents to the renderer as a heap cell
-    whose tag is its own constructor tag — the only shape the table can walk.
+(** How the renderer must read a value of type [name], or [None] if the table
+    cannot describe it (the value then keeps the generic renderer).
 
-    [Unboxed] qualifies even though it is an LLVM struct value in registers:
-    every call site coerces to ["ptr"] before rendering, and [Llvm_ctx.coerce]
-    reconstructs exactly the cell the boxed allocator would have built (16-byte
-    header carrying the type's own ctor tag, fields at 16 + 8i).
+    - ['V']: a heap cell whose tag is its own constructor tag (a record is
+      described the same way; [build_desc] writes it as an ['R'] row set).
+      [Unboxed] qualifies even though it is an LLVM struct value in registers:
+      every call site coerces to ["ptr"] before rendering, and
+      [Llvm_ctx.coerce] reconstructs exactly the cell the boxed allocator would
+      have built (16-byte header carrying the type's own ctor tag, fields at
+      16 + 8i).
+    - ['N']: a [Newtype].  The value IS its payload, with no cell and no tag
+      of its own, so the renderer must not read a header: it prints the one
+      constructor's name around the payload, read by the payload token
+      ([payload_token]).
+    - ['X']: a non-generic niche.  The nullary constructor IS raw 0 and the
+      other one IS its payload, so the renderer decides the constructor from
+      the word itself.
 
-    [Newtype] and [Niche] do NOT.  A newtype IS its payload with no cell of its
-    own, and a niche-encoded [Some x] IS [x], so there is no header to read and
-    no tag to look up — the renderer would walk the PAYLOAD's cell and print
-    the payload's constructor under the wrapper's name.  Those keep the generic
-    renderer; that residual is recorded in
-    specs/todos/2026-08-05-boxed-adt-type-id.md. *)
-let describable ctx (name : string) : bool =
-  (* [repr_of_ty] on a BARE [TCon (name, [])] answers [Boxed] for an
-     Option-shaped type, because the niche decision needs the type arguments
-     this key does not carry — the same trap [Llvm_emit_alloc]'s niche arm
-     documents.  Ask [is_niche_shaped] directly rather than trusting that
-     answer: without this a niche type is described, and since [Some x] IS [x]
-     the renderer reads the PAYLOAD's header as the wrapper's tag and prints a
-     confidently wrong constructor. *)
-  if Kind.is_niche_shaped ctx.Llvm_ctx.k_table name then false
+    A niche-shaped type whose payload is a TYPE VARIABLE is not described: its
+    encoding depends on the instance ([Option(Float)] is boxed,
+    [Option(String)] is a niche), and the type name alone does not say which.
+    A niche-shaped type whose payload is not niche-safe is a plain boxed cell
+    ([Kind.niche_repr_of_concrete] answers [None], which is the predicate the
+    allocator and [Llvm_case] both key on), so it is described as ['V'].
+
+    [repr_of] on a BARE [TCon (name, [])] answers [Boxed] for an Option-shaped
+    type, because the niche decision needs the type arguments this key does not
+    carry -- the same trap [Llvm_emit_alloc]'s niche arm documents -- so the
+    niche question is asked first and directly. *)
+let desc_kind ctx (name : string) : char option =
+  let tbl = ctx.Llvm_ctx.k_table in
+  if Kind.is_niche_shaped tbl name then
+    match Kind.niche_repr_of_concrete tbl name with
+    | Some (Kind.Niche { payload = Tir.TVar _; _ }) -> None
+    | Some (Kind.Niche _) -> Some 'X'
+    | Some _ -> None
+    | None -> Some 'V'
   else
-    match Kind.repr_of ctx.Llvm_ctx.k_table (Tir.TCon (name, [])) with
-    | Kind.Boxed | Kind.Unboxed _ -> true
-    | Kind.Newtype _ | Kind.Niche _ -> false
+    match Kind.repr_of tbl (Tir.TCon (name, [])) with
+    | Kind.Boxed | Kind.Unboxed _ -> Some 'V'
+    | Kind.Newtype _ -> Some 'N'
+    | Kind.Niche _ -> None
+
+let describable ctx (name : string) : bool = desc_kind ctx name <> None
+
+(** Token for the payload of an ['N'] or ['X'] type.  Unlike a heap-cell slot
+    ([field_token]), the payload word is what the allocator handed out for
+    the WRAPPER: a scalar payload is TAGGED [(v<<1)|1]
+    ([Kind.payload_needs_tag], [Llvm_emit_alloc]'s newtype and niche arms),
+    so Int and Bool get their own tagged tokens ['I'] / ['B'].  A payload
+    whose type is itself an ['N'] newtype over a scalar carries the same
+    tagged word, which that type's own row reads. *)
+let payload_token ~(id_of : string -> int option) (ty : Tir.ty) : string =
+  match ty with
+  | Tir.TInt -> "I"
+  | Tir.TBool -> "B"
+  | _ -> field_token ~id_of ty
 
 (** Assign local ids to every describable variant/record type, first-wins on
     the short name — the same rule [Llvm_toplevel.build_ctor_info] uses to
@@ -110,7 +140,10 @@ let build_desc ctx : string =
          | None -> ()
          | Some id ->
            Hashtbl.replace emitted name ();
-           Printf.bprintf buf "T\t%d\tV\t%s\n" id name;
+           let kind = match desc_kind ctx name with Some k -> k | None -> 'V' in
+           let token = if kind = 'V' then field_token ~id_of
+             else payload_token ~id_of in
+           Printf.bprintf buf "T\t%d\t%c\t%s\n" id kind name;
            List.iteri (fun idx (cname, field_tys) ->
                let tag =
                  match Hashtbl.find_opt ctx.Llvm_ctx.ctor_info (name ^ "." ^ cname) with
@@ -118,7 +151,7 @@ let build_desc ctx : string =
                  | None -> idx
                in
                Printf.bprintf buf "C\t%d\t%s\t%s\n" tag cname
-                 (String.concat "," (List.map (field_token ~id_of) field_tys)))
+                 (String.concat "," (List.map token field_tys)))
              ctors)
       | Tir.TDRecord (name, fields) when not (Hashtbl.mem emitted name) ->
         (match id_of name with
@@ -154,7 +187,7 @@ let ensure_globals ctx : string * string =
 
 (** The local descriptor id for [ty], or [None] if it is not a type this table
     describes.  Deliberately EMITS NOTHING: it is called as a match guard at
-    sites that mostly answer [None] (a tuple, a `TVar`, a newtype), and forcing
+    sites that mostly answer [None] (a tuple, a `TVar`), and forcing
     the descriptor here put ~13KB of unreferenced string constant into the
     .rodata of every binary that merely called `to_string` on a non-primitive.
     [emit_to_string] is what emits, so the descriptor exists exactly when some

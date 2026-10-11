@@ -79,3 +79,51 @@ with the table (`k_unboxed_short`). Extending it to newtype/niche means
 indexing those declarations the same way, minus `c_boxed_types` (`Bytes`)
 and plus `declared_layout_types` (`CsvRow`). The `test_kind` "both spellings
 of a type get one answer" test lists the expected answer for each shape.
+
+## 2026-10-11: printing fixed, newtype and niche still not widened
+
+The printing blocker is gone
+([`progress/2026-10-11-compiled-to-string-newtype-niche.md`](../progress/2026-10-11-compiled-to-string-newtype-niche.md)):
+compiled `to_string` renders newtype and niche values by their static type,
+top level and nested. One printing gap remains: a newtype or niche value in a
+type-variable slot of a user generic type, or under an erased `to_string`
+([`todos/2026-10-11-to-string-newtype-in-generic-slot.md`](2026-10-11-to-string-newtype-in-generic-slot.md)).
+Widening would spread that gap to module types too.
+
+A nested-niche miscompile was fixed on the way
+([`progress/2026-10-11-nested-niche-option-payload.md`](../progress/2026-10-11-nested-niche-option-payload.md)):
+`Some(NoName)` for an Option-shaped `NoName | Named(String)` was raw 0, i.e.
+`None`. Widening niches to module types would have spread it to e.g.
+`Option(Verdict)`.
+
+The layouts were NOT widened, because the C-runtime audit found two more
+types the runtime builds or reads as boxed cells. Neither is in
+`c_boxed_types` today, so widening as the 2026-10-11 slice describes would
+break them:
+
+- **`WebSocket.WsSocket`** (`WsSocket(Int)`, a newtype). The C runtime
+  allocates it as a 24-byte cell with the fd at +16 in three places:
+  `runtime/march_http.c` (two upgrade paths, `march_alloc(16 + 8)` near
+  `march_ws_handshake`) and `runtime/march_http_evloop.c` (`ws_sock`). March
+  code would read the cell pointer as a tagged Int.
+- **`HttpServer.Upgrade`** (`NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)`,
+  one of the 6 niches). `runtime/march_http.c` reads `upgrade_tag` at +8 and
+  the closure at +16 (two sites). As a niche the value is raw 0 or the
+  closure itself, so the tag read is a read of the closure's header.
+
+How the audit was done, for the next pass: `grep -n 'march_alloc(24)\|march_alloc(16 + 8)' runtime/*.c`
+lists every C site that builds a one-field cell (about 35, most of them
+`Option`/`Result` helpers that already follow the niche rule, see
+`march_ffi.c`'s `mk_cell1` comment); each one has to be matched to the
+March type it builds. Reads are harder to grep: look for `->tag` /
+`+ 8)` reads on values that arrive from March (`upgrade_val` was found this
+way). Pin every hit in `c_boxed_types` (or `declared_layout_types` when C
+already uses the declared layout) before widening.
+
+Still open from the original list: the cluster wire format and `migrate_msg`
+for values that stop being cells (point 2 above), which this pass did not
+touch.
+
+`bench/tree_transform.march` and `bench/binary_trees.march` were run with
+the printing fix against the train compiler; no layout changed, so they
+measure only that the fix costs nothing (see the progress file).
