@@ -1,0 +1,8 @@
+ranked by crashes (s cycles: mbox stack crashes slices msgs_in msgs_out)   showing 6 of 6
+     PID  NAME                 TYPE               STATUS        MBOX     STACK    CRASHES CRASHES  LINK       SUPERVISOR         ~
+       1  boss                 Boss               waiting          0     16384          3       3  none       -                  ~
+       4                       Fragile            waiting          0     16384          0       0  supervised 1                  ~
+       5  loop                 Loop               running          0     16384          0       0  none       -                  ~
+       6  maker                Maker              waiting          0     16384          0       0  none       -                  ~
+       7                       Twig               waiting          0     16384          0       0  spawned    spawned by 6       ~
+       8                       Twig               waiting          0     16384          0       0  spawned    spawned by 6       ~

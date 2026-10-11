@@ -62,7 +62,27 @@
     object after its last reference is gone.  Leaks only with [~rc_leaks]
     (or [MARCH_VERIFY_TIR_LEAKS=1]).
 
-    Checks 4-5 (repr, pass contracts) are not built. *)
+    {1 Check 5: pass contracts}
+
+    Postconditions a pass documents, checked from the stage after it.  So far
+    Defun's, from [tir-defun] on ({!post_defun_stage}):
+
+    - no lambda creation site, [letrec f = .. in f], remains: each became an
+      allocation of its closure struct;
+    - a name bound locally (parameter, let, branch binder) is never called
+      directly: a call through a local binding is an indirect call, even when
+      a top-level function shares its name.
+
+    Reported with a [[contract]] tag.  The second one catches a name captured
+    by a later pass: an inlined body that calls a top-level [f] landing in a
+    scope that binds its own [f]
+    (specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md).
+    Post-mono "no polymorphic fn_def" is check 2's named-type-variable rule;
+    "every [$jp] is defined once" is not an invariant (inlining the same body
+    twice repeats the name in one function, and scoping makes that harmless),
+    and "stack allocations do not escape" needs the escape analysis itself.
+
+    Check 4 (repr invariants) is not built. *)
 
 module StringSet = Set.Make (String)
 
@@ -99,6 +119,14 @@ let enabled () = enabled () || !rc_flag || Lazy.force rc_by_env
    ([show(x)]) is legitimately unresolved. *)
 let pre_mono_stage stage =
   List.mem stage [ "tir-lower"; "tir-trmc" ]
+
+(* Stages from [tir-defun] on: Defun's postconditions hold (check 5, pass
+   contracts).  Every stage name the pipeline, the REPL and the test harnesses
+   pass starts with "tir-"; those before Defun are listed, so a new later stage
+   is covered without touching this. *)
+let post_defun_stage stage =
+  String.starts_with ~prefix:"tir-" stage
+  && not (List.mem stage [ "tir-lower"; "tir-trmc"; "tir-mono"; "tir-fusion" ])
 
 (* Callee names the emitter handles in a dedicated [emit_expr] arm BEFORE
    its general known-callee test ([Llvm_calls.is_known_callee]), and which
@@ -338,6 +366,7 @@ let check ~(stage : string) ?(borrow_map : Borrow.borrow_map option)
   let is_iface name =
     match iface_methods with Some h -> Hashtbl.mem h name | None -> false in
   let pre_mono = pre_mono_stage stage in
+  let post_defun = post_defun_stage stage in
   (* Bare interface-method names: the method part of an interface-mangled
      fn ([Json$Point.from_json] -> [from_json]).  Before mono a call may still
      name the method bare (return-position dispatch); mono resolves it. *)
@@ -417,6 +446,13 @@ let check ~(stage : string) ?(borrow_map : Borrow.borrow_map option)
         report fn (Printf.sprintf "call to `%s`, which is not a function in \
                                    tm_fns, an extern, a builtin or a local \
                                    binding" f.Tir.v_name);
+      (* Check 5, Defun: a locally bound name that is called is a closure
+         pointer and dispatches through ECallPtr, even when a top-level
+         function shares its name (Defun.rw, case B). *)
+      if post_defun && StringSet.mem f.Tir.v_name env && not (emitter_arm f.Tir.v_name) then
+        report fn (Printf.sprintf "[contract] `%s` is bound locally but is called \
+                                   directly after Defun; a call through a local \
+                                   binding must be an indirect call" f.Tir.v_name);
       atoms args
     | Tir.ECallPtr (callee, args) ->
       check_atom fn env callee;
@@ -433,6 +469,15 @@ let check ~(stage : string) ?(borrow_map : Borrow.borrow_map option)
       check_expr fn env rhs;
       check_expr fn (StringSet.add v.Tir.v_name env) body
     | Tir.ELetRec (fns, body) ->
+      (* Check 5, Defun: a lambda creation site, [letrec f = .. in f], is
+         replaced by an allocation of its closure struct. *)
+      (match fns, body with
+       | [ fd ], Tir.EAtom (Tir.AVar v)
+         when post_defun && String.equal v.Tir.v_name fd.Tir.fn_name ->
+         report fn (Printf.sprintf "[contract] lambda `%s` survived Defun as a \
+                                    letrec creation site; it should be an \
+                                    allocation of its closure struct" fd.Tir.fn_name)
+       | _ -> ());
       let env' =
         List.fold_left (fun s (fd : Tir.fn_def) -> StringSet.add fd.Tir.fn_name s)
           env fns in

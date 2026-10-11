@@ -237,7 +237,7 @@ static void dbg_mark_enqueued(march_proc *p, const char *site) {
                 (long long)p->pid, site,
                 (int)atomic_load_explicit(&p->status, memory_order_acquire),
                 atomic_load_explicit(&p->dbg_running_on, memory_order_acquire));
-        abort();
+        march_abort(__func__);
     }
 }
 static void dbg_mark_dequeued(march_proc *p, const char *site) {
@@ -249,7 +249,7 @@ static void dbg_mark_dequeued(march_proc *p, const char *site) {
                 (long long)p->pid, site,
                 (int)atomic_load_explicit(&p->status, memory_order_acquire),
                 atomic_load_explicit(&p->dbg_running_on, memory_order_acquire));
-        abort();
+        march_abort(__func__);
     }
 }
 static void dbg_mark_dispatched(march_proc *p, int sched_id) {
@@ -261,7 +261,7 @@ static void dbg_mark_dispatched(march_proc *p, int sched_id) {
                 "claiming while already running on scheduler %d (status=%d)\n",
                 (long long)p->pid, sched_id, prev - 1,
                 (int)atomic_load_explicit(&p->status, memory_order_acquire));
-        abort();
+        march_abort(__func__);
     }
 }
 static void dbg_mark_undispatched(march_proc *p) {
@@ -523,7 +523,7 @@ static march_registry *registry_alloc(int64_t cap) {
         (march_registry *)calloc(1, sizeof(march_registry) + cap * sizeof(march_proc *));
     if (!r) {
         fputs("march_sched: out of memory (registry alloc)\n", stderr);
-        abort();
+        march_abort(__func__);
     }
     r->cap = cap;
     return r;
@@ -732,7 +732,7 @@ static void setup_alt_stack(void) {
 #else
     if (tl_alt_stack) return;   /* already set up for this thread */
     char *alt = (char *)malloc(MARCH_SIGALTSTACK_SIZE);
-    if (!alt) { fputs("march_sched: OOM (sigaltstack)\n", stderr); abort(); }
+    if (!alt) { fputs("march_sched: OOM (sigaltstack)\n", stderr); march_abort(__func__); }
     stack_t ss;
     ss.ss_sp    = alt;
     ss.ss_size  = MARCH_SIGALTSTACK_SIZE;
@@ -1088,7 +1088,7 @@ void march_sched_delivery_origin_clear(void) {
 
 static march_mbox_node *mbox_node_new(void *msg) {
     march_mbox_node *node = malloc(sizeof(march_mbox_node));
-    if (!node) { fputs("march_sched: OOM (mbox node)\n", stderr); abort(); }
+    if (!node) { fputs("march_sched: OOM (mbox node)\n", stderr); march_abort(__func__); }
     node->msg = msg;
     node->next = NULL;
     node->epoch = march_sched_send_epoch();
@@ -1424,7 +1424,7 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
     MARCH_TSAN_SWITCH_TO_SCHED(proc->owner_sched);
     swapcontext(proc->ctx, &proc->owner_sched->sched_ctx);
     /* If we ever return here the OS context is gone — abort defensively. */
-    abort();
+    march_abort(__func__);
 }
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -2115,7 +2115,7 @@ static void sched_loop(march_scheduler *sched) {
                             "march_sched[BUG]: claim of dequeued pid %lld "
                             "failed twice (status=%d)\n",
                             (long long)p->pid, (int)claim);
-                    abort();
+                    march_abort(__func__);
 #endif
                     continue;
                 }
@@ -2128,7 +2128,7 @@ static void sched_loop(march_scheduler *sched) {
                         (long long)p->pid, (int)claim,
                         atomic_load_explicit(&p->dbg_running_on,
                                              memory_order_acquire));
-                abort();
+                march_abort(__func__);
 #endif
                 continue;   /* stale/duplicate reference: drop, never run */
             }
@@ -2154,7 +2154,7 @@ static void sched_loop(march_scheduler *sched) {
         if (!p->ctx) {
             fprintf(stderr, "march_sched[BUG]: dispatch of reaped pid %lld (no context)\n",
                     (long long)p->pid);
-            abort();
+            march_abort(__func__);
         }
         MARCH_ASAN_SWITCH_TO_PROC(sched, p);
         MARCH_TSAN_SWITCH_TO_PROC(p);
@@ -2768,7 +2768,7 @@ void march_sched_exit(void) {
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(p->ctx, &tl_sched->sched_ctx);
-    abort(); /* Should never be reached. */
+    march_abort(__func__); /* Should never be reached. */
 }
 
 march_proc *march_sched_current(void) {
@@ -3776,7 +3776,7 @@ static void timer_heap_push_ent(march_timer_ent ent) {
         g_timer_cap = g_timer_cap ? g_timer_cap * 2 : 64;
         g_timer_heap = realloc(g_timer_heap,
                                (size_t)g_timer_cap * sizeof(march_timer_ent));
-        if (!g_timer_heap) { fputs("march_sched: OOM (timer)\n", stderr); abort(); }
+        if (!g_timer_heap) { fputs("march_sched: OOM (timer)\n", stderr); march_abort(__func__); }
     }
     int i = g_timer_len++;
     g_timer_heap[i] = ent;
@@ -4786,7 +4786,7 @@ march_cancel_token *march_cancel_token_new(void) {
     march_cancel_token *tok = (march_cancel_token *)malloc(sizeof(march_cancel_token));
     if (!tok) {
         fputs("march_cancel_token: OOM\n", stderr);
-        abort();
+        march_abort(__func__);
     }
     atomic_init(&tok->cancelled, 0);
     atomic_init(&tok->refcount, 1);

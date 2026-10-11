@@ -97,6 +97,10 @@ resolvable, indirect calls through something callable, no duplicate fn names).
 From `tir-mono` on, it also checks types: call arity, each argument's
 representation against its parameter, case-branch binder counts, projected
 field names, and no source-named type variable left in a signature.
+From `tir-defun` on it also checks Defun's contracts, tagged `[contract]`: no lambda
+creation site survives, and a call through a locally bound name is indirect. A
+`[contract]` finding on a name that is also a top-level function means a later pass
+captured it; the wrong value shows only compiled, at `--opt 0`/`--opt 2`.
 
 **RC balance:** after Perceus it also walks every path of every function. It
 reports an over-release or a use after release with the object, its binding and
