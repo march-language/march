@@ -382,6 +382,16 @@ let region_of regions (sp : Ast.span) =
   List.find_opt (fun r ->
       r.r_file = sp.file && not (before p r.r_start) && before p r.r_end) regions
 
+(** A declaration's source text, from its start to the next declaration's
+    (comments before the next one included), trailing blank space dropped.
+    R10's SOURCE verb serves it. *)
+let region_text (r : region) : string =
+  let stop = if r.r_end = (max_int, 0) then None else Some r.r_end in
+  let s = slice r.r_file r.r_start stop in
+  let n = ref (String.length s) in
+  while !n > 0 && (match s.[!n - 1] with ' ' | '\t' | '\n' | '\r' -> true | _ -> false) do decr n done;
+  String.sub s 0 !n
+
 (* The type a TIR type name was declared as: an actor's message type is the
    actor's, every other is itself. *)
 let type_key name =

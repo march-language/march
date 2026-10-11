@@ -109,6 +109,16 @@ int march_observe_add_verbs(const march_observe_verb *v, size_t n);
  * gets the same envelope a socket client would. */
 void march_observe_handle(const char *line, size_t n, march_jw *out);
 
+/* 1 iff [name] looks like a function name (letters, digits, '_', '.', '$', a
+ * quote; 1-255 bytes): what WHICH and SOURCE accept before looking it up
+ * among the registered reload slots.  Never used to build a path. */
+int march_observe_fn_name_ok(const char *name);
+
+/* 1 while the calling thread is answering an in-process request
+ * (observe_query), 0 on a socket connection thread.  A debug verb uses it to
+ * take the capability the caller holds in place of a signature. */
+int march_observe_in_process(void);
+
 /* Register the R1 snapshot verbs (march_observe_snapshot.c).  Idempotent. */
 void march_observe_snapshot_install(void);
 

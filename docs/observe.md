@@ -142,10 +142,12 @@ Error codes:
 | `SCHED` | `[window_ms]` | scheduler threads, utilisation, scheduler counters |
 | `MEM` | | RSS, peak RSS, live heap objects, queued messages |
 | `EPOCHS` | | hot-reload epochs, pins, dispatch slots, reload counters |
+| `WHICH` | `<name>` | which version of a reloadable function runs: `impl_hash`, baseline, epoch, `activated_at_ms` |
 | `CRASHES` | `[n]` | the last `n` crashes, without messages |
 | `TOP` | `<attr> <n> [window_ms]` | the `n` actors highest on one attribute |
 | `SNAPSHOT` | `[sections]` | several of the above from one actor walk |
 | `STATE` | `<sig> nonce:… not_after_ms:… pid:<p> [timeout_ms:<t>]` | debug tier: one actor's state ([below](#the-debug-tier-signed-requests)) |
+| `SOURCE` | `<sig> nonce:… not_after_ms:… name:<fn>` | debug tier: the source text of the version of a function that runs now ([below](#which-code-is-running-which-and-source)) |
 | `CRASHES_FULL` | `<sig> nonce:… not_after_ms:… [n:<n>]` | debug tier: `CRASHES` with each crash's message |
 
 The example replies below are real output from
@@ -399,8 +401,9 @@ is `CRASHES 20`. This is what `forge diagnose` and `forge status` read.
 
 ## The debug tier: signed requests
 
-The verbs above show counts, never data. Two more show data: `STATE` (an
-actor's state) and `CRASHES_FULL` (crashes with their panic messages). A node
+The verbs above show counts, never data. Three more show data: `STATE` (an
+actor's state), `CRASHES_FULL` (crashes with their panic messages) and
+`SOURCE` (the text of a function's source). A node
 answers them only when all of these hold:
 
 1. **It was built with a deploy key**: `march --compile --hot-reload <Mod>
@@ -458,6 +461,68 @@ field that holds functions. When the actor cannot answer, `state` is `null` and
   that may have changed the state's layout.
 
 The request skips the actor's mailbox limit, so a full mailbox still answers.
+
+## Which code is running: WHICH and SOURCE
+
+After a hot deploy, "which version of `Billing.price` is this node running?"
+has two answers, an identity and a body.
+
+**`WHICH <name>`** (observe tier) names the identity. `name` is a reload slot as
+`EPOCHS` lists it (`Billing.price`, or an actor's `Counter_dispatch`):
+
+```json
+{"name":"Billing.price","id":2,"impl_hash":"5e9d…","baseline_hash":"41c7…",
+ "patched":true,"epoch":3,"activated_at_ms":1791743066781}
+```
+
+`impl_hash` is the hash `forge deploy hot` diffs and `VERSIONS` prints.
+`baseline_hash` is the one the program was built with, and `patched` says
+whether they differ. `activated_at_ms` is 0 for the baseline. A name that is
+not a slot (a typo, a function the build does not make reloadable, a build
+without `--hot-reload`) answers `not_found`.
+
+**`SOURCE <sig> nonce:… not_after_ms:… name:<fn>`** (debug tier) returns the text
+of the version `WHICH` names: `{"name":…,"impl_hash":…,"epoch":…,"source":"fn
+price(qty : Int) : Int do\n  qty * 12 + 1\nend"}`. It is signed, fresh and
+policy-gated exactly like `STATE` (see the next section), and `forge observe`
+does not send it yet. `$MARCH_DEBUG_POLICY` must list `SOURCE`. Source is
+debug tier because it is the program's own text: comments, names, and
+whatever a developer left in a function.
+
+The text is the function's declaration, from its first token to where the next
+declaration starts (so a multi-clause function is whole and comments written
+before the next declaration come with this one). It is the text that was
+compiled into that exact `impl_hash`; nothing is read from disk when you ask.
+That is also the safety: the name has to be a registered slot, `SOURCE` looks the
+text up by that slot's current `impl_hash` alone, and a name containing a path
+(`../x`, `/etc/passwd`) is `bad_args` before any lookup.
+
+Where the text comes from:
+
+1. A `--hot-reload` build, node or `--compile-so` patch, stores each slot
+   function's text under its `impl_hash` in `.march/cas/sources/` and
+   `~/.march/cas/sources/` (each up to 256 KiB; a longer function has no
+   source).
+2. `forge deploy hot` uploads the text of every version it activates, and of
+   the version it replaces when this machine has it, to the node
+   (`CAS_PUT <impl_hash> <size> kind:source`, stored under the node's
+   `~/.march/cas/sources/`), **only when `$MARCH_DEBUG_POLICY` on the machine
+   running forge lists `SOURCE`**. With no such policy nothing is uploaded and
+   `SOURCE` answers `no_source` for that version.
+3. A node built on the machine it runs on already has its baseline's text.
+   A node built elsewhere has the baseline's text after the first deploy that
+   replaces it, or never (`no_source`).
+
+Sources are not garbage-collected, and a hash with the same text is never
+rewritten. A cluster release through the control API does not carry source yet.
+
+From inside the program (and in `forge shell`, where `intro` and `debug` are
+pre-bound), `Recon.which(intro, "Billing.price")` returns a `FnVersion`, and
+`Recon.source(debug, "Billing.price")` the text or an error code. In-process the
+caller's `Cap(Actor.Debug)` stands in for the signature, as it does for
+`Actor.inspect_state`, but `$MARCH_DEBUG_POLICY` must still list `SOURCE`
+(`Err("policy")` otherwise), and every attempt is audited with the signer
+`in-process`.
 
 ## The forge commands
 
@@ -775,6 +840,8 @@ with `Actor.introspect(io)`; a module that names the capability declares
 | `Recon.node_stats(c)` | `NodeStats`: actors, queued, `rss_bytes`, `live_objects`, schedulers, `crashes_total` |
 | `Recon.crashes(c, n)` | `List(CrashReport)`: seq, kind, pid, type, supervisor, restart, at_ms |
 | `Recon.epochs(c)` | `EpochReport`: current epoch and (epoch, pins) pairs |
+| `Recon.which(c, name)` | `Result(FnVersion, String)`: `impl_hash`, `baseline_hash`, `patched`, `epoch`, `activated_at_ms` of a reloadable function (`Err("not_found")` if `name` is no slot) |
+| `Recon.source(d, name)` | `Result(String, String)`: the running version's source; needs `Cap(Actor.Debug)` and `SOURCE` in `$MARCH_DEBUG_POLICY` (`Err("policy")`, `Err("no_source")`) |
 | `Recon.scheduler_usage(c, window_ms)` | `List((Int, Float))`: (scheduler id, fraction busy) |
 | `Diagnose.run(c, window_ms)` | `List(Finding)`: the `forge diagnose` findings for this program |
 | `Diagnose.findings(before, after)` | the same over two `SNAPSHOT` envelopes you already have |

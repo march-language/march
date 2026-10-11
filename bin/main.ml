@@ -1126,6 +1126,41 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
            else h)
       end)
     all_names
+(* R10: keep each boundary function's source text under its reload identity
+   ([hr_impl_hashes], after [hr_slot_hashes]) in the CAS, for the node's
+   WHICH / SOURCE verbs and `forge deploy hot`'s upload.  The text is the
+   declaration's, from where it starts to where the next one does (the same
+   regions the shell's identity table hashes), found by the function's
+   provenance span.  A function with no span of its own (derived, lifted),
+   or whose text is over the store's limit, simply has no source. *)
+let hr_store_sources ~(cfg : March_tir.Hot_reload.config) ~(store : March_cas.Cas.t)
+    ~(decls : March_ast.Ast.decl list) (hr_impl_hashes : (string, string) Hashtbl.t) : unit =
+  let module SI = March_jit.Shell_ident in
+  let regions = lazy (snd (SI.of_decls decls)) in
+  let ends_with s sfx =
+    let n = String.length s and k = String.length sfx in
+    n >= k && String.sub s (n - k) k = sfx in
+  (* An actor's dispatch fn has no span of its own: its source is the actor
+     declaration (its handlers), found by name when exactly one actor has it. *)
+  let actor_region n =
+    let sfx = "_dispatch" in
+    if not (ends_with n sfx) then None
+    else
+      let actor = String.sub n 0 (String.length n - String.length sfx) in
+      match List.filter (fun (r : SI.region) -> ends_with r.SI.r_key ("a:" ^ actor))
+              (Lazy.force regions) with
+      | [ r ] -> Some r
+      | _ -> None in
+  Hashtbl.iter (fun n h ->
+      if n <> "" && n.[0] <> '$' && March_tir.Hot_reload.is_slot_fn cfg n then begin
+        let region =
+          match March_tir.Provenance.span_of n with
+          | Some sp when sp.March_ast.Ast.start_line > 0 ->
+            SI.region_of (Lazy.force regions) sp
+          | _ -> actor_region n in
+        Option.iter (fun r -> March_cas.Cas.store_source store h (SI.region_text r)) region
+      end)
+    hr_impl_hashes
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
 (* The sanitizer MARCH_SANITIZE selects, or [None] when it is unset.
@@ -4024,7 +4059,9 @@ let compile filename =
         in
         (match hr_config () with
          | None -> ()
-         | Some cfg -> hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes);
+         | Some cfg ->
+           hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes;
+           hr_store_sources ~cfg ~store ~decls:desugared.March_ast.Ast.mod_decls hr_impl_hashes);
         (* Post-TIR cache: same key construction as the source-level early
            check above (build_cas_key), keyed on the module's per-SCC impl
            hashes instead of the source digest. *)

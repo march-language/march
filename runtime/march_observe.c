@@ -567,3 +567,14 @@ void march_observe_maybe_start(void) {
     }
     (void)march_observe_server_start(path);
 }
+
+int march_observe_fn_name_ok(const char *name) {
+    size_t n = name ? strlen(name) : 0;
+    if (n == 0 || n > 255) return 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+              || c == '_' || c == '.' || c == '$' || c == '\'')) return 0;
+    }
+    return 1;
+}
