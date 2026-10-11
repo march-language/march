@@ -72,3 +72,18 @@ the three cases above: `si_code` 128 (`SI_KERNEL`) is case 3, a fault code
 (1, 2) with the runtime's line missing is case 1 or 2, and the backtrace says
 which; 0 or a negative code would mean a signal sent by a process after all.
 Fix from that evidence, then move this file to `specs/progress/`.
+
+## TSAN on macOS, 2026-10-11: no race found that explains it
+
+Both fixtures were built with `MARCH_SANITIZE=thread` (macOS arm64, LLVM 22) and run
+(`run_until_idle_ping_pong` at 14 schedulers 11 times, `branch_alias_tail_drop` 35
+times at 1 to 14 schedulers). Every run that finished printed no TSAN report. The one
+refcount race TSAN had flagged elsewhere (the plain immortal-check read in `march_decrc`,
+fixed in `specs/progress/2026-10-07-macos-tsan-green-thread-races.md`) cannot cause a
+fault: it compares the count against 2^40, and a mortal count cannot reach 2^40, so the
+racy read always gave the right answer. So it is not the cause here.
+What TSAN did show is a TSAN-only scheduler wedge (`ping_pong` wedged in all 11 runs, with
+no output). That is a hang, not a fault, and it never happens in plain or ASAN builds, so
+it is not this crash either
+(`specs/todos/2026-10-11-macos-tsan-scheduler-wedge.md`). If that wedge turns out to be a
+real lost-proc bug that TSAN's timing exposes, look at it again here.
