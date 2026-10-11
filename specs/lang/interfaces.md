@@ -225,7 +225,14 @@ neq(1, 2)          -- true (once `impl Eq(Int)` above is in scope)
 ["x"])` is `true`, with the components compared left to right. No `impl` is
 needed, and none could be written for every arity. A tuple with a component
 that is not `Eq` (a function, or an ADT without `derive Eq`) is rejected as
-before. Tuples are not `Ord` yet: `(1, 2) < (1, 3)` is rejected.
+before.
+
+Tuples are `Ord` the same way, ordered lexicographically: the first pair of
+components that differs decides, each compared by its own `Ord`. So
+`(1, 2) < (1, 3)` and `(1, "b") > (1, "ab")` are both `true`, and
+`compare((Zed, 1), (Amber, 0))` follows the declaration order of a
+`derive Ord` type, not the constructor names. This covers tuples of 2 to 5
+components; a longer tuple is not `Ord`.
 
 ### `Ord(a)`: Ordering
 

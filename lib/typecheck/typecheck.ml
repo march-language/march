@@ -5035,6 +5035,10 @@ let interface_satisfied env iface target =
     | TVar _ | TError -> true
     | _ when depth >= 128 || not (within_size_budget target) -> false
     | TTuple ts when iface = "Eq" -> List.for_all (satisfies depth seen iface) ts
+    (* Ord only through 5-tuples: the prelude's per-arity impls are what
+       compiled `compare` and `<` dispatch to. *)
+    | TTuple ts when iface = "Ord" && List.length ts >= 2 && List.length ts <= 5 ->
+      List.for_all (satisfies depth seen iface) ts
     | _ ->
       let key = iface ^ ":" ^ pp_ty target in
       (* Expanding bounds need not repeat an obligation. A proof budget
@@ -5147,9 +5151,10 @@ let discharge_constraints env span =
         (match ty with
          | TVar _ -> ()   (* Still polymorphic — cannot check yet *)
          | _ ->
-           (* A tuple is Eq when every component is: both backends compare
-              tuples structurally, and no impl can be written for every
-              arity. A component that is still a type variable is
+           (* A tuple is Eq (Ord) when every component is: both backends
+              compare tuples structurally (Ord: lexicographically, via the
+              prelude's per-arity impls when compiled), and no impl can be
+              written for every arity. A component that is still a type variable is
               polymorphic, like the top-level case above. *)
            let satisfied = interface_satisfied env iface_name ty in
            if not satisfied then begin

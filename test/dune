@@ -1811,6 +1811,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/field_use_after_parent_release.expected native_field_use_after_parent_release.out)))
 
+; Tuple `<`/`compare`: Ord when every component is, lexicographic; compiled
+; `<` on a tuple goes through the prelude's per-arity Ord impls (it was
+; always false via march_poly_compare), generic callers included.
+(rule
+ (targets native_tuple_ord native_tuple_ord.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/tuple_ord.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tuple_ord native/tuple_ord.march)
+   (with-stdout-to native_tuple_ord.out (system "./native_tuple_ord")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_ord.expected native_tuple_ord.out)))
+
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
 ; its scope and must be dropped there; each shape leaked the record before.

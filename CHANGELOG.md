@@ -135,6 +135,11 @@ git log is authoritative for exact commits.
   per-message rule. The golden error corpus now re-checks every program with
   its fixes applied (`after fix: exit N`), so a fix that leaves a broken
   program is visible in review.
+- **Tuples are ordered.** `(1, 2) < (1, 3)`, `<=`, `>`, `>=` and `compare`
+  work on tuples of 2 to 5 components whose components are all `Ord`. The order
+  is lexicographic: the first pair of components that differs decides. Before,
+  the typechecker rejected them; and where they got through (inside generic
+  code), compiled `<` on a tuple was always `false`.
 - **Every diagnostic has a code, and `march --explain <code>`.** Each error,
   warning and hint ends its first line with its code in brackets
   (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always

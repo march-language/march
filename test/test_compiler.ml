@@ -5047,6 +5047,34 @@ let test_tuple_eq_component_without_eq_rejects () =
   Alcotest.(check bool) "tuple with a non-Eq component rejected" true
     (count_errors_matching ctx "`(Int, Hue)` does not implement interface `Eq`." >= 1)
 
+(* A tuple is Ord when every component is (2026-10-07), lexicographically. *)
+let test_tuple_ord_structural_accepts () =
+  let ctx = typecheck {|mod M do
+  needs IO.Console
+    fn main(_cap_console : Cap(IO.Console)) do
+      let a = (1, "x") < (1, "y")
+      let b = compare(((1, "s"), 2.5), ((1, "s"), 2.0)) > 0
+      let c = (1, 2, 3) >= (1, 2, 3)
+      if a && b && c do println("y") else println("n") end
+    end
+  end|} in
+  Alcotest.(check bool) "tuple of Ord components accepted" false (has_errors ctx)
+
+(* ...and only then: a component without Ord still rejects the tuple, for the
+   operators and for `compare`. *)
+let test_tuple_ord_component_without_ord_rejects () =
+  let ctx = typecheck {|mod M do
+  needs IO.Console
+    type Hue = Rood | Bloo
+    fn main(_cap_console : Cap(IO.Console)) do
+      if (1, Rood) < (1, Bloo) do println("y") else println("n") end
+      println(int_to_string(compare((Rood, 1), (Bloo, 2))))
+    end
+  end|} in
+  Alcotest.(check bool) "tuple with a non-Ord component rejected" true
+    (count_errors_matching ctx "`(Int, Hue)` does not implement interface `Ord`." >= 1
+     && count_errors_matching ctx "`(Hue, Int)` does not implement interface `Ord`." >= 1)
+
 (* ── Finding 15: generic when-constraint re-checked at call sites ───────── *)
 
 (* An explicit `when Eq(a)` bound on an UNANNOTATED generic parameter must be
@@ -18539,6 +18567,8 @@ let compiler_suites =
           Alcotest.test_case "finding 15: satisfied generic bound accepts"    `Quick test_generic_when_constraint_satisfied_accepts;
           Alcotest.test_case "tuple of Eq components is Eq"                   `Quick test_tuple_eq_structural_accepts;
           Alcotest.test_case "tuple with a non-Eq component is not Eq"        `Quick test_tuple_eq_component_without_eq_rejects;
+          Alcotest.test_case "tuple of Ord components is Ord"                  `Quick test_tuple_ord_structural_accepts;
+          Alcotest.test_case "tuple with a non-Ord component is not Ord"        `Quick test_tuple_ord_component_without_ord_rejects;
           Alcotest.test_case "finding 15: unconstrained generic accepts"      `Quick test_generic_no_constraint_accepts;
         ] );
       ( "test_body_constraints", [
