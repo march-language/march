@@ -1,0 +1,202 @@
+{
+ "proto": "march.observe/1",
+ "node": "web-1",
+ "at_ms": 1791743838484,
+ "took_us": 51,
+ "truncated": false,
+ "data": {
+  "names": {
+   "names": []
+  },
+  "mem": {
+   "rss_bytes": 6815744,
+   "peak_rss_bytes": 6832128,
+   "live_objects": 16,
+   "stacks_recycled": 5,
+   "queued_messages": 0,
+   "actors": 6
+  },
+  "actors": {
+   "total": 0,
+   "shown": 0,
+   "sort": "mbox",
+   "actors": []
+  },
+  "tree": {
+   "total": 0,
+   "roots": [],
+   "unsupervised": [],
+   "truncated": false
+  },
+  "sched": {
+   "schedulers": 14,
+   "window_ms": null,
+   "threads": [
+    {
+     "id": 0,
+     "started": true,
+     "entered": true,
+     "dispatches": 27033,
+     "idle_polls": 69102,
+     "idle_ms": 111204,
+     "utilisation": null,
+     "lifetime_utilisation": 0.06759925401352085
+    },
+    {
+     "id": 1,
+     "started": true,
+     "entered": true,
+     "dispatches": 19049,
+     "idle_polls": 70481,
+     "idle_ms": 113401,
+     "utilisation": null,
+     "lifetime_utilisation": 0.049183342586915146
+    },
+    {
+     "id": 2,
+     "started": true,
+     "entered": true,
+     "dispatches": 28345,
+     "idle_polls": 69311,
+     "idle_ms": 111709,
+     "utilisation": null,
+     "lifetime_utilisation": 0.06336848383595939
+    },
+    {
+     "id": 3,
+     "started": true,
+     "entered": true,
+     "dispatches": 20891,
+     "idle_polls": 70215,
+     "idle_ms": 113174,
+     "utilisation": null,
+     "lifetime_utilisation": 0.05108283760274135
+    },
+    {
+     "id": 4,
+     "started": true,
+     "entered": true,
+     "dispatches": 49608,
+     "idle_polls": 65208,
+     "idle_ms": 105630,
+     "utilisation": null,
+     "lifetime_utilisation": 0.11434125195441225
+    },
+    {
+     "id": 5,
+     "started": true,
+     "entered": true,
+     "dispatches": 28793,
+     "idle_polls": 68678,
+     "idle_ms": 110893,
+     "utilisation": null,
+     "lifetime_utilisation": 0.07021306703335228
+    },
+    {
+     "id": 6,
+     "started": true,
+     "entered": true,
+     "dispatches": 24753,
+     "idle_polls": 69536,
+     "idle_ms": 112023,
+     "utilisation": null,
+     "lifetime_utilisation": 0.06073835374591774
+    },
+    {
+     "id": 7,
+     "started": true,
+     "entered": true,
+     "dispatches": 31381,
+     "idle_polls": 68535,
+     "idle_ms": 109779,
+     "utilisation": null,
+     "lifetime_utilisation": 0.07955113506612999
+    },
+    {
+     "id": 8,
+     "started": true,
+     "entered": true,
+     "dispatches": 28648,
+     "idle_polls": 68769,
+     "idle_ms": 110729,
+     "utilisation": null,
+     "lifetime_utilisation": 0.07158082081637451
+    },
+    {
+     "id": 9,
+     "started": true,
+     "entered": true,
+     "dispatches": 30493,
+     "idle_polls": 67832,
+     "idle_ms": 109844,
+     "utilisation": null,
+     "lifetime_utilisation": 0.07900170241118643
+    },
+    {
+     "id": 10,
+     "started": true,
+     "entered": true,
+     "dispatches": 33938,
+     "idle_polls": 68080,
+     "idle_ms": 109906,
+     "utilisation": null,
+     "lifetime_utilisation": 0.07847956376228948
+    },
+    {
+     "id": 11,
+     "started": true,
+     "entered": true,
+     "dispatches": 25233,
+     "idle_polls": 69437,
+     "idle_ms": 112158,
+     "utilisation": null,
+     "lifetime_utilisation": 0.05960049339499707
+    },
+    {
+     "id": 12,
+     "started": true,
+     "entered": true,
+     "dispatches": 30879,
+     "idle_polls": 68372,
+     "idle_ms": 110259,
+     "utilisation": null,
+     "lifetime_utilisation": 0.0755265296414186
+    },
+    {
+     "id": 13,
+     "started": true,
+     "entered": true,
+     "dispatches": 30525,
+     "idle_polls": 68639,
+     "idle_ms": 110805,
+     "utilisation": null,
+     "lifetime_utilisation": 0.07093898784968866
+    }
+   ],
+   "utilisation": null,
+   "lifetime_utilisation": 0.07080041597963597,
+   "live_procs": 7,
+   "procs_spawned": 12,
+   "runq": 0,
+   "stack_failures": 0,
+   "msgs_dropped": 0,
+   "stacks_recycled": 5,
+   "timers": 1,
+   "ctx_released": 5,
+   "procs_freed": 5,
+   "procs_awaiting_free": 0,
+   "metas_freed": 3,
+   "metas_awaiting_free": 0
+  },
+  "epochs": {
+   "current": 1,
+   "pins": [],
+   "slots": [],
+   "counters": {}
+  },
+  "crashes": {
+   "total": 0,
+   "crashes": []
+  }
+ }
+}

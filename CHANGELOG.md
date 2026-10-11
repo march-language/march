@@ -41,6 +41,17 @@ git log is authoritative for exact commits.
   text in the CAS under its `impl_hash`, and `forge deploy hot` uploads it when
   the operator's `$MARCH_DEBUG_POLICY` lists `SOURCE`. See
   [Which code is running](docs/observe.md#which-code-is-running-which-and-source).
+- **`forge observe` is an interactive view, with a `WATCH` stream and crash
+  dumps.** On a terminal, `forge observe` opens panels for System, Load,
+  Actors (the `forge top` table, re-rankable), Actor, Supervision, Names,
+  Epochs, Cluster and Crashes, fed by a new observe-socket verb `WATCH
+  <sections> <interval_ms> <max>` (at most 3600 frames, at least 250 ms apart,
+  four streams at once, freed the moment the client hangs up). `n` cycles the
+  hosts of `--env`; `--panel NAME` prints one panel as text for scripts. A node
+  started with `MARCH_CRASH_DUMP=<path>` now leaves a complete snapshot plus the
+  crash ring with panic text there when it dies of an unsupervised panic or a
+  fatal runtime error (never from a signal handler: a segfault leaves none);
+  read it with `forge observe --dump FILE` or `forge diagnose --from-dump FILE`.
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the

@@ -16,6 +16,7 @@ depends: [
   "alcotest" {>= "1.7.0"}
   "digestif" {>= "1.0"}
   "yojson" {>= "2.0"}
+  "notty" {>= "0.2.3"}
   "qcheck-core" {>= "0.91" & with-test}
   "qcheck-alcotest" {>= "0.91" & with-test}
   "odoc" {with-doc}

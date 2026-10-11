@@ -67,6 +67,9 @@ void march_jw_u64(march_jw *w, uint64_t v);
 void march_jw_f64(march_jw *w, double v);   /* non-finite -> null */
 void march_jw_bool(march_jw *w, int v);
 void march_jw_null(march_jw *w);
+/* Splice [n] bytes of already-valid JSON in as a value (an array element or
+ * after march_jw_key). */
+void march_jw_raw(march_jw *w, const char *json, size_t n);
 
 /* ── Server ───────────────────────────────────────────────────────────── */
 
@@ -82,6 +85,8 @@ int march_observe_server_start(const char *path);
 
 /* Connections currently being served (for tests). */
 int march_observe_active_conns(void);
+/* WATCH streams currently running (for tests). */
+int march_observe_active_watches(void);
 
 /* Extra verbs, registered before the server starts.  The server itself
  * serves HELP and PING; march_observe_snapshot.c registers the snapshot

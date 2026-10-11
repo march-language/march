@@ -245,7 +245,7 @@ let tree sock =
   let h = data (get sock "HELP") |> member "verbs" |> to_list
           |> List.map (fun v -> member "name" v |> to_string) in
   check "HELP lists every verb"
-    (h = ["HELP"; "PING"; "SNAPSHOT"; "ACTORS"; "ACTOR"; "TREE"; "NAMES";
+    (h = ["HELP"; "PING"; "WATCH"; "SNAPSHOT"; "ACTORS"; "ACTOR"; "TREE"; "NAMES";
           "SCHED"; "MEM"; "EPOCHS"; "WHICH"; "CRASHES"; "TOP"; "STATE"; "SOURCE";
           "CRASHES_FULL"])
     (String.concat "," h)
