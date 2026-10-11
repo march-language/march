@@ -525,6 +525,8 @@ static const char *verb_names(march_jw *w, const char *args) {
  * thread instead).  No verb switches green threads, so the flag cannot leak. */
 static _Thread_local int tl_in_process;
 
+int march_observe_in_process(void) { return tl_in_process; }
+
 #define SCHED_WINDOW_DEFAULT_MS 200
 #define SCHED_WINDOW_MAX_MS     5000
 
@@ -725,6 +727,37 @@ static void write_epochs(march_jw *w) {
 static const char *verb_epochs(march_jw *w, const char *args) {
     if (!only_spaces(args)) return "bad_args";
     write_epochs(w);
+    return NULL;
+}
+
+/* ── WHICH <name> ─────────────────────────────────────────────────────── */
+
+/* Which version of a function this node is running (R10): the registered
+ * reload slot's identity.  A name that is not a slot (an unreloadable
+ * function, a typo, a build without --hot-reload) is not_found. */
+static const char *verb_which(march_jw *w, const char *args) {
+    char name[256];
+    const char *p = args;
+    if (!next_word(&p, name, sizeof name) || !only_spaces(p)) return "bad_args";
+    if (!march_observe_fn_name_ok(name)) return "bad_args";
+    uint32_t id;
+    if (!march_dispatch_name_to_id(name, &id)) return "not_found";
+    uint32_t v = march_dispatch_current(id);
+    const char *h = march_dispatch_impl_hash(id, v);
+    const char *base = march_dispatch_baseline_hash(id);
+    long long at = march_dispatch_activated_at(id);
+    march_jw_obj_begin(w);
+    march_jw_key(w, "name");  march_jw_str(w, name);
+    march_jw_key(w, "id");    march_jw_u64(w, id);
+    march_jw_key(w, "impl_hash");
+    if (h && h[0]) march_jw_str(w, h); else march_jw_null(w);
+    march_jw_key(w, "baseline_hash");
+    if (base && base[0]) march_jw_str(w, base); else march_jw_null(w);
+    march_jw_key(w, "patched");
+    march_jw_bool(w, h && h[0] && base && base[0] && strcmp(h, base) != 0);
+    march_jw_key(w, "epoch"); march_jw_u64(w, march_dispatch_epoch(id, v));
+    march_jw_key(w, "activated_at_ms"); march_jw_i64(w, at);
+    march_jw_obj_end(w);
     return NULL;
 }
 
@@ -1098,6 +1131,9 @@ static const march_observe_verb snapshot_verbs[] = {
       "scheduler threads, utilisation over window_ms (default 200, 0 = lifetime only), counters", verb_sched },
     { "MEM", "observe", "", "RSS, peak RSS, live heap objects, queued messages", verb_mem },
     { "EPOCHS", "observe", "", "hot-reload epochs, pins, slots and counters", verb_epochs },
+    { "WHICH", "observe", "<name>",
+      "the version of a reloadable function this node runs: impl_hash, baseline, epoch, activated_at_ms",
+      verb_which },
     { "CRASHES", "observe", "[n]",
       "the last n crashes, newest first (default 20, max 256): kind, pid, type, supervisor, restart; no message",
       verb_crashes },

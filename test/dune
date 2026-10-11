@@ -13114,6 +13114,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_inspect_block.expected native_actor_inspect_block.out)))
 
+; ── WHICH / SOURCE across a hot deploy (observe R10) ───────────────────────
+; specs/progress/2026-10-11-observe-r10-which-source.md.
+; observe_which_source_check.exe builds the v1 fixture as a --hot-reload node
+; (fresh deploy key) and the v2 fixture as a --compile-so patch, starts the
+; node under a private HOME, and checks WHICH / SOURCE before and after
+; Cmd_deploy_hot.run (what `forge deploy hot` runs) switches it to the patch:
+; the hash, the body, the signature and policy gates, names that must not reach
+; a path, the CAS_PUT kind:source guards, and the audit log.
+(executable
+ (name observe_which_source_check)
+ (modules observe_which_source_check)
+ (libraries unix str yojson march_ed25519 march_forge))
+
+(rule
+ (targets native_observe_which_source.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_which_source_check.exe)
+       (file native/observe_which_source_v1.march)
+       (file native/observe_which_source_v2.march))
+ (action
+  (with-stdout-to native_observe_which_source.out
+   (system "./observe_which_source_check.exe %{exe:../bin/main.exe} native/observe_which_source_v1.march native/observe_which_source_v2.march; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_which_source.expected native_observe_which_source.out)))
+
 ; ── Signed debug verbs on the observe socket (observe R4b) ─────────────────
 ; specs/progress/2026-10-05-observe-r4b-signed-debug-verbs.md.
 ; observe_debug_check.exe makes a fresh deploy keypair, the fixture is built

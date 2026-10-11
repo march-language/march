@@ -32,6 +32,15 @@ git log is authoritative for exact commits.
   group whose default is the old guarded tag flow (`forge release --bump`
   still works; `forge release tag` is the same). `forge topology gen systemd
   --release-dir DIR` points `ExecStart` at `DIR/bin/<app> start`.
+- **`WHICH` and `SOURCE` on the observe socket, `Recon.which` and `Recon.source`:
+  which code a node runs, and its text.** `WHICH <name>` (observe tier) answers a
+  reloadable function's `impl_hash`, its baseline, epoch and activation time;
+  `SOURCE` (debug tier: signed, fresh, `$MARCH_DEBUG_POLICY`, audited) returns the
+  source of that exact version. After a hot deploy, `WHICH` shows the new hash and
+  `SOURCE` the new body. A `--hot-reload` build keeps each boundary function's
+  text in the CAS under its `impl_hash`, and `forge deploy hot` uploads it when
+  the operator's `$MARCH_DEBUG_POLICY` lists `SOURCE`. See
+  [Which code is running](docs/observe.md#which-code-is-running-which-and-source).
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the

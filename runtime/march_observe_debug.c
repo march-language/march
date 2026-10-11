@@ -3,6 +3,7 @@
  *
  *   STATE        <sig> nonce:<hex> not_after_ms:<t> pid:<p> [timeout_ms:<t>]
  *   CRASHES_FULL <sig> nonce:<hex> not_after_ms:<t> [n:<n>]
+ *   SOURCE       <sig> nonce:<hex> not_after_ms:<t> name:<fn>
  *
  * <sig> is the deploy key's ed25519 signature (base64) over the request line
  * with the signature word removed ("STATE nonce:... not_after_ms:... pid:7").
@@ -24,11 +25,15 @@
  * no-op there instead. */
 #include "march_observe.h"
 #include "march_scheduler.h"
+#include "march_dispatch.h"
 #include "march_sig.h"
 
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #define STATE_TIMEOUT_DEFAULT_MS 1000
 #define STATE_TIMEOUT_MAX_MS     10000
@@ -48,6 +53,8 @@ typedef struct {
     int64_t pid;
     int64_t timeout_ms;
     int64_t n;
+    char    name[256];
+    int     local;     /* in-process caller: capability, not signature */
 } dbg_req;
 
 static void audit(const char *verb, const dbg_req *r, const char *result) {
@@ -62,7 +69,11 @@ static void audit(const char *verb, const dbg_req *r, const char *result) {
      * printed only as far as it is hex, so it can never break the line. */
     fputs(",\"nonce\":\"", f);
     for (const char *p = r->nonce; *p && strchr("0123456789abcdefABCDEF", *p); p++) fputc(*p, f);
-    fprintf(f, "\",\"signer\":\"%s\",\"result\":\"%s\"}\n", signer, result);
+    /* SOURCE names the function it asked for: validated by
+     * march_observe_fn_name_ok, so it cannot break the line either. */
+    if (r->name[0]) fprintf(f, "\",\"name\":\"%s", r->name);
+    fprintf(f, "\",\"signer\":\"%s\",\"result\":\"%s\"}\n",
+            r->local ? "in-process" : signer, result);
     march_audit_close(f);
 }
 
@@ -93,16 +104,20 @@ static int parse_num(const char *v, int64_t *out) {
  * policy.  NULL when the request may run, else the error code.  [allowed]
  * lists the keys this verb takes besides nonce and not_after_ms. */
 static const char *admit(const char *verb, const char *args, const char *allowed,
-                         dbg_req *r) {
+                         dbg_req *r, int allow_local) {
     memset(r, 0, sizeof *r);
     r->not_after_ms = r->pid = r->timeout_ms = r->n = -1;
-    if (!march_sig_key_loaded()) return "signing_not_configured";
-
     while (*args == ' ') args++;
     const char *sp = strchr(args, ' ');
     size_t sl = sp ? (size_t)(sp - args) : strlen(args);
     if (sl == 0 || sl >= sizeof r->sig) return "bad_args";
     memcpy(r->sig, args, sl);
+    /* "<verb> local name:<fn>" from Recon.source, via observe_query: the
+     * caller holds Cap(Actor.Debug), the same authority Actor.inspect_state
+     * takes, so there is no signature or nonce to check.  Only an in-process
+     * call may say it; on a socket the word is just a bad signature. */
+    r->local = allow_local && strcmp(r->sig, "local") == 0 && march_observe_in_process();
+    if (!r->local && !march_sig_key_loaded()) return "signing_not_configured";
     const char *rest = sp ? sp + 1 : "";
     while (*rest == ' ') rest++;
 
@@ -125,6 +140,12 @@ static const char *admit(const char *verb, const char *args, const char *allowed
             slot = &r->not_after_ms;
         } else if (!has_word(allowed, k)) {
             return "bad_args";
+        } else if (strcmp(k, "name") == 0) {
+            /* The only text-valued argument: a function name, and only that
+             * (march_observe_fn_name_ok), so it can never carry a path. */
+            if (r->name[0] || !march_observe_fn_name_ok(v)) return "bad_args";
+            snprintf(r->name, sizeof r->name, "%s", v);
+            continue;
         } else if (strcmp(k, "pid") == 0) {
             slot = &r->pid;
         } else if (strcmp(k, "timeout_ms") == 0) {
@@ -135,6 +156,10 @@ static const char *admit(const char *verb, const char *args, const char *allowed
             return "bad_args";
         }
         if (*slot != -1 || !parse_num(v, slot) || *slot < 0) return "bad_args";
+    }
+    if (r->local) {
+        if (r->nonce[0] || r->not_after_ms >= 0) return "bad_args";
+        return march_sig_debug_allowed(verb) ? NULL : "policy";
     }
     if (!r->nonce[0] || r->not_after_ms < 0) return "bad_args";
 
@@ -157,7 +182,7 @@ static const char *admit(const char *verb, const char *args, const char *allowed
 
 static const char *verb_state(march_jw *w, const char *args) {
     dbg_req r;
-    const char *err = admit("STATE", args, "pid timeout_ms", &r);
+    const char *err = admit("STATE", args, "pid timeout_ms", &r, 0);
     if (!err && r.pid < 0) err = "bad_args";
     /* A green thread (observe_query) must not block its scheduler on the
      * reply: the actor it waits for may need that very scheduler. */
@@ -193,7 +218,7 @@ static const char *crash_kind(int k) {
 /* CRASHES, plus each crash's message (kept up to MARCH_CRASH_MSG_MAX bytes). */
 static const char *verb_crashes_full(march_jw *w, const char *args) {
     dbg_req r;
-    const char *err = admit("CRASHES_FULL", args, "n", &r);
+    const char *err = admit("CRASHES_FULL", args, "n", &r, 0);
     if (!err && r.n == 0) err = "bad_args";
     if (!err && r.n > MARCH_CRASH_RING) err = "bad_args";
     if (err) { audit("CRASHES_FULL", &r, err); return err; }
@@ -230,10 +255,69 @@ static const char *verb_crashes_full(march_jw *w, const char *args) {
     return NULL;
 }
 
+/* ── SOURCE ───────────────────────────────────────────────────────────── */
+
+/* The source text of the version of a function this node runs now (R10).
+ * The name must be a registered reload slot; the text is looked up by that
+ * slot's current impl_hash alone, in <cas>/sources/, so no argument ever
+ * reaches a path.  Text is stored by `march --hot-reload` builds and uploaded
+ * by `forge deploy hot` (CAS_PUT kind:source); a version nobody uploaded
+ * answers no_source. */
+static const char *verb_source(march_jw *w, const char *args) {
+    dbg_req r;
+    const char *err = admit("SOURCE", args, "name", &r, 1);
+    if (!err && !r.name[0]) err = "bad_args";
+    uint32_t id = 0;
+    if (!err && !march_dispatch_name_to_id(r.name, &id)) err = "not_found";
+    const char *h = NULL;
+    uint32_t v = 0;
+    if (!err) {
+        v = march_dispatch_current(id);
+        h = march_dispatch_impl_hash(id, v);
+    }
+    char path[640];
+    if (!err && !(h && march_source_path(path, sizeof path, h))) err = "no_source";
+    char *text = NULL;
+    size_t len = 0;
+    if (!err) {
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        struct stat st;
+        if (fd < 0) err = "no_source";
+        else if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0
+                 || st.st_size > MARCH_SOURCE_MAX_BYTES) { err = "no_source"; close(fd); }
+        else {
+            len = (size_t)st.st_size;
+            text = (char *)malloc(len + 1);
+            size_t got = 0;
+            while (text && got < len) {
+                ssize_t k = read(fd, text + got, len - got);
+                if (k <= 0) break;
+                got += (size_t)k;
+            }
+            close(fd);
+            if (!text) err = "out_of_memory";
+            else if (got != len) { err = "no_source"; free(text); text = NULL; }
+        }
+    }
+    if (err) { audit("SOURCE", &r, err); return err; }
+    audit("SOURCE", &r, "ok");
+    march_jw_obj_begin(w);
+    march_jw_key(w, "name");      march_jw_str(w, r.name);
+    march_jw_key(w, "impl_hash"); march_jw_str(w, h);
+    march_jw_key(w, "epoch");     march_jw_u64(w, march_dispatch_epoch(id, v));
+    march_jw_key(w, "source");    march_jw_strn(w, text, len);
+    march_jw_obj_end(w);
+    free(text);
+    return NULL;
+}
+
 static const march_observe_verb debug_verbs[] = {
     { "STATE", "debug", "<sig> nonce:<hex> not_after_ms:<t> pid:<p> [timeout_ms:<t>]",
       "an actor's state as Actor.inspect_state renders it (signed; $MARCH_DEBUG_POLICY)",
       verb_state },
+    { "SOURCE", "debug", "<sig> nonce:<hex> not_after_ms:<t> name:<fn>",
+      "the source text of the version of a reloadable function this node runs (signed; $MARCH_DEBUG_POLICY)",
+      verb_source },
     { "CRASHES_FULL", "debug", "<sig> nonce:<hex> not_after_ms:<t> [n:<n>]",
       "CRASHES with each crash's message (signed; $MARCH_DEBUG_POLICY)",
       verb_crashes_full },

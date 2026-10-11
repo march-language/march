@@ -19,6 +19,7 @@
 -- R3 of specs/plans/2026-09-28-observe-recon-shell-plan.md.
 mod Recon do
   needs Actor.Introspect
+  needs Actor.Debug
 
   -- One live actor, as `info` and the other actor views report it.
   type ActorInfo = {
@@ -94,6 +95,19 @@ mod Recon do
 
   -- Hot-reload epochs: the current one and (epoch, pins) for every pinned epoch.
   type EpochReport = { current : Int, pins : List((Int, Int)) }
+
+  -- The version of a reloadable function a node runs: `impl_hash` is the
+  -- code's identity (what `forge deploy hot` diffs), `baseline_hash` the one
+  -- the program was built with, `patched` whether they differ, `epoch` the hot-reload epoch
+  -- that activated it, and `activated_at_ms` when (0 for the baseline).
+  type FnVersion = {
+    name : String,
+    impl_hash : String,
+    baseline_hash : Option(String),
+    patched : Bool,
+    epoch : Int,
+    activated_at_ms : Int
+  }
 
   -- ── Decoding the envelope ─────────────────────────────────────────────
 
@@ -442,6 +456,58 @@ mod Recon do
           Err(_) -> Nil
         end
       Err(_) -> Nil
+    end
+  end
+
+  -- ── Which code is running ─────────────────────────────────────────────
+
+  doc """
+  Which version of the reloadable function `name` ("Mod.fn", or an actor's
+  "Counter_dispatch") this node runs: its impl_hash, the baseline it was built
+  with, and when the current version was activated. `Err("not_found")` when
+  `name` is not a reload slot of this node (a typo, a function the build does
+  not make reloadable, or an interpreted program).
+
+      match Recon.which(intro, "Billing.total") do
+        Ok(v) -> println(v.impl_hash)
+        Err(e) -> println(e)
+      end
+  """
+  fn which(_c : Cap(Actor.Introspect), name : String) : Result(FnVersion, String) do
+    match ask("WHICH " ++ name) do
+      Ok(d) ->
+        let baseline = match Json.get(d, "baseline_hash") do
+          Some(Json.Str(h)) -> Some(h)
+          _ -> None
+        end
+        let patched = match Json.get(d, "patched") do
+          Some(Json.Bool(b)) -> b
+          _ -> false
+        end
+        Ok({ name: str_of(d, "name"), impl_hash: str_of(d, "impl_hash"),
+             baseline_hash: baseline, patched: patched,
+             epoch: int_of(d, "epoch"), activated_at_ms: int_of(d, "activated_at_ms") })
+      Err(code) -> Err(code)
+    end
+  end
+
+  doc """
+  The source text of the version of `name` this node runs now, as it stood
+  when that version was built and uploaded: the declaration, with the comments
+  up to the next one. Debug tier: it needs `Cap(Actor.Debug)` and a
+  `$MARCH_DEBUG_POLICY` file that lists `SOURCE`, else `Err("policy")`.
+  `Err("no_source")` when the text of this version was never uploaded
+  (`forge deploy hot` uploads it; a node built elsewhere has only its own).
+
+      match Recon.source(debug, "Billing.total") do
+        Ok(text) -> println(text)
+        Err(e) -> println("no source: " ++ e)
+      end
+  """
+  fn source(_d : Cap(Actor.Debug), name : String) : Result(String, String) do
+    match ask("SOURCE local name:" ++ name) do
+      Ok(d) -> Ok(str_of(d, "source"))
+      Err(code) -> Err(code)
     end
   end
 end
