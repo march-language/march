@@ -543,6 +543,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`MARCH_SANITIZE=thread` no longer flags the refcount release path as a data race.**
+  The runtime read an object's count with a plain load (to skip immortal static cells)
+  while other threads decremented it atomically; that read is now a relaxed atomic load.
+  The generated machine code is unchanged on arm64.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

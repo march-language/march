@@ -28,6 +28,19 @@ static inline int march_rc_is_unique(const void *p) {
     return __atomic_load_n(&((const march_hdr *)p)->rc, __ATOMIC_ACQUIRE) == 1;
 }
 
+/* A read of a count another thread may be updating with an atomic RMW, for a
+ * check that orders nothing: the immortal-cell test at the top of every
+ * release (rc >= MARCH_RC_IMMORTAL) and diagnostic prints.  A plain load there
+ * is a C11 data race (MARCH_SANITIZE=thread reported it in march_decrc), even
+ * though the only value it can misjudge is a mortal count, and a mortal count
+ * stays mortal whatever it races with.  Relaxed is enough and is the same
+ * `ldr` as the plain load on arm64 and x86-64.  The inline twins in
+ * lib/tir/llvm_rc_inline.ml load it as `load atomic ... monotonic`, the LLVM
+ * name for the same ordering; keep the two in step. */
+static inline int64_t march_rc_peek(const void *p) {
+    return __atomic_load_n(&((const march_hdr *)p)->rc, __ATOMIC_RELAXED);
+}
+
 /* ── What the header pad word means ───────────────────────────────────
  *
  * `pad` is multiplexed, decided by SIGN and by tag:

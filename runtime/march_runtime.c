@@ -718,9 +718,9 @@ void march_decrc(void *p) {
     /* An immortal cell (rc >= MARCH_RC_IMMORTAL: a static, program-image
      * object such as send's shared Some(())) is never released, so it is never
      * decremented either: decrementing would make every holder contend on the
-     * one cache line and walk the count toward zero.  One plain load of a line
+     * one cache line and walk the count toward zero.  One relaxed load of a line
      * the decrement touches anyway. */
-    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
+    if (march_rc_peek(p) >= MARCH_RC_IMMORTAL) return;
     /* acq_rel: release our writes before decrement; acquire before free so
      * we see all other threads' writes to the object. */
     int32_t tag  = ((march_hdr *)p)->tag;
@@ -846,7 +846,7 @@ static march_clo_drop_fn clo_drop_lookup(void *apply) {
 
 void march_clo_release(void *p) {
     if (!IS_HEAP_PTR(p)) return;
-    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
+    if (march_rc_peek(p) >= MARCH_RC_IMMORTAL) return;
     march_clo_drop_fn drop = clo_drop_lookup(*(void **)((char *)p + 16));
     if (!drop) { march_decrc(p); return; }
     int32_t tag  = ((march_hdr *)p)->tag;
@@ -869,7 +869,7 @@ void march_clo_release(void *p) {
 int64_t march_decrc_freed(void *p) {
     if (!IS_HEAP_PTR(p)) return 1;
     /* Immortal: not freed, so the caller must not release its children. */
-    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return 0;
+    if (march_rc_peek(p) >= MARCH_RC_IMMORTAL) return 0;
     int32_t tag  = ((march_hdr *)p)->tag;
     int64_t prev = atomic_fetch_sub_explicit(
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
@@ -905,7 +905,7 @@ void march_free(void *p) {
      * One predictable branch on an already-cold path is worth not risking a
      * free() of static-lifetime memory that every later evaluation of that
      * literal site still hands out. */
-    if (IS_HEAP_PTR(p) && ((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
+    if (IS_HEAP_PTR(p) && march_rc_peek(p) >= MARCH_RC_IMMORTAL) return;
 #ifdef MARCH_RC_CHECKS
     /* Sanitizer builds only (bin/main.ml passes -DMARCH_RC_CHECKS with
      * -fsanitize): an EFree reaches here for a binding Perceus proved unique,
@@ -913,7 +913,7 @@ void march_free(void *p) {
      * Abort now, naming the object, instead of letting ASAN report the
      * use-after-free at the other holder's next read.  With tracing on the
      * trace is flushed first so the object's history is complete. */
-    if (IS_HEAP_PTR(p) && ((march_hdr *)p)->rc > 1) {
+    if (IS_HEAP_PTR(p) && march_rc_peek(p) > 1) {
         int32_t site = march_rc_site;
         if (gc_trace_on()) {
             pthread_mutex_lock(&gc_trace_mutex);
@@ -923,7 +923,7 @@ void march_free(void *p) {
         fprintf(stderr,
                 "march: march_free of a SHARED object at %p (rc %lld, tag %d, site %d)"
                 " — aborting.%s\n",
-                p, (long long)((march_hdr *)p)->rc, (int)((march_hdr *)p)->tag, (int)site,
+                p, (long long)march_rc_peek(p), (int)((march_hdr *)p)->tag, (int)site,
                 gc_trace_on()
                   ? "  History: scripts/gc-trace-report.py --addr <addr> trace/gc"
                   : "  Rebuild with --rc-trace and run under MARCH_TRACE_GC=1 for its history.");
@@ -1063,7 +1063,7 @@ void march_incrc_local(void *p) {
 
 void march_decrc_local(void *p) {
     if (!IS_HEAP_PTR(p)) return;
-    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;  /* see march_decrc */
+    if (march_rc_peek(p) >= MARCH_RC_IMMORTAL) return;  /* see march_decrc */
     /* Matching atomic path for the scheduler context (see march_incrc_local). */
     if (march_sched_in_scheduler() || march_tls_concurrent_rc) {
         march_decrc(p);
@@ -1109,7 +1109,7 @@ void march_decrc_local(void *p) {
  * tagged-scalar value. */
 int64_t march_decrc_local_freed(void *p) {
     if (!IS_HEAP_PTR(p)) return 0;
-    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return 0;  /* see march_decrc */
+    if (march_rc_peek(p) >= MARCH_RC_IMMORTAL) return 0;  /* see march_decrc */
     if (march_sched_in_scheduler() || march_tls_concurrent_rc)
         return march_decrc_freed(p);
     march_hdr *h = (march_hdr *)p;
