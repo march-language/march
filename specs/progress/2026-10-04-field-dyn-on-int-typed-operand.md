@@ -1,4 +1,4 @@
-`[P2]` Invalid IR: `march_record_field_dyn` handed an `Int`-typed operand
+`[P2]` - [x] Invalid IR: `march_record_field_dyn` handed an `Int`-typed operand
 
 **Filed:** 2026-10-04, from `scripts/compile-time-bench.sh` (branch
 `bench/compile-time-harness`) compiling `examples/topology_app/src/topology_app.march`
@@ -74,3 +74,22 @@ original: a stale `_build/default/stdlib` copy in the bench worktree (a targeted
 `dune build bin/main.exe` does not restage it), which would type stdlib values
 differently from the source. If the guard fires again, the message names the
 operand and its type; start from that.
+
+## Closed 2026-10-11 on `8b6a4b7da`: not reproduced a third time
+
+The todo's recipe once more, with the origin/main compiler and again with the
+`group-c/representation` branch compiler: `--compile --opt 2` of
+`examples/topology_app` (no `--topology` digest) in a fresh `HOME`, a
+comment-edit recompile in the now-warm `HOME`, then `--emit-llvm --opt 2`
+(125 `march_record_field_dyn` calls). All clean and linking; the
+`dyn_record_obj` guard never fired.
+
+Closed as believed gone. No commit is known to have fixed it: the original
+ICE was never reproduced on any commit, the leading theory remains a stale
+`_build/default/stdlib` in the bench worktree, and the emission set it came
+from was cut by #799 (`31e176add`, main-less compiles rooted on the file's own
+functions). The regression guard #799 added already pins the case:
+`test_codegen` / `field_dyn_on_scalar_operand_refused` hands `emit_field` an
+`Int`-typed operand and asserts the named `llvm_emit` failure instead of
+invalid IR. If it ever fires, its message names the operand and its TIR type;
+reopen from there.
