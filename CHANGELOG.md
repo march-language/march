@@ -543,6 +543,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Drop functions keep the same symbol across unrelated edits.** The compiler
+  named the drop function of a type with an unresolved type variable after the
+  typechecker's internal variable number (`__drop$List_V_53272`), so it moved
+  whenever anything earlier changed. It is now named by position
+  (`__drop$List_V0`), and identical drop functions are emitted once.
 - **The JIT REPL no longer leaks on every input.** Fragments and the precompiled
   stdlib now release whole lists, records and variants instead of their top
   cell, so `to_string(List.range(1, 100))` at the prompt no longer leaves about

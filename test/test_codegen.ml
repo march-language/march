@@ -1546,6 +1546,62 @@ let test_deep_drop_of_borrowed_container () =
     "deep drop: walks the spine as a TCO loop, not C-stack recursion (a 150K-element list must not overflow)"
     true (ir_contains drop_ir "br label %tco_loop")
 
+(** Drop glue for a type with a residual type variable is named by the
+    variable's POSITION ([__drop$List_V0]), not by its typechecker id
+    ([__drop$List_V_53272]).  The id comes from a global fresh-variable
+    counter, so the symbol moved whenever more (or less) was inferred before,
+    exactly the cascade B1 removed for every other minted name
+    (specs/progress/2026-10-07-drop-glue-name-carries-tvar-id.md).  Compiling
+    the same program twice in one process advances that counter, which is the
+    "unrelated edit" here: the two drop-glue symbol sets must be identical. *)
+let test_drop_glue_name_is_structural () =
+  let src = {|mod Test do
+  needs IO.Console
+  pfn outer(n : Int) : List(Int) do
+    fn ascend(nd, stk) do
+      match stk do
+      Nil -> nd
+      Cons(frame, rest) -> do
+        let (c, s) = frame
+        ascend(Cons(s, c), rest)
+      end
+      end
+    end
+    fn descend(k, path) do
+      if k == 0 do ascend(Nil, path)
+      else descend(k - 1, Cons(([k, k], k), path)) end
+    end
+    descend(n, Nil)
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(int_to_string(List.length(outer(5))))
+  end
+end|} in
+  let drop_syms ir =
+    let re = Str.regexp "@__drop\\$[A-Za-z0-9_$]+" in
+    let rec go i acc =
+      match Str.search_forward re ir i with
+      | j -> let m = Str.matched_string ir in
+        go (j + String.length m)
+          (if List.mem m acc then acc else m :: acc)
+      | exception Not_found -> List.sort compare acc in
+    go 0 [] in
+  let first = drop_syms (emit_tco_opt_ir src) in
+  let second = drop_syms (emit_tco_opt_ir src) in
+  let tvar_named =
+    List.filter (fun m ->
+        try ignore (Str.search_forward (Str.regexp "V_[0-9]") m 0); true
+        with Not_found -> false) first in
+  Alcotest.(check bool)
+    "drop glue: the program has drop glue for a residual-type-variable type"
+    true (List.exists (fun m -> ir_contains m "_V") first);
+  Alcotest.(check (list string))
+    "drop glue: the same program gets the same drop symbols on a second compile"
+    first second;
+  Alcotest.(check (list string))
+    "drop glue: no symbol spells a type variable by its typechecker id"
+    [] tvar_named
+
 (** Final-review regression: [has_non_tail_group_call]'s dec-chain-wrapper
     arm used to recognise [ELet (tmp, EApp (f, _), dec-chain-returning-tmp)]
     at ANY position without checking [in_tail], so a Perceus-wrapped group
@@ -16824,6 +16880,8 @@ let codegen_suites =
             `Quick test_tco_self_dup_arg_decref_on_live_path;
           Alcotest.test_case "deep drop: never-destructured container releases its children"
             `Quick test_deep_drop_of_borrowed_container;
+          Alcotest.test_case "drop glue: name spells a residual type variable by position"
+            `Quick test_drop_glue_name_is_structural;
           Alcotest.test_case "final-review: non-tail dec-chain-wrapped group call rejected"
             `Quick test_mutual_tco_non_tail_dec_chain_wrapped_no_loop;
           Alcotest.test_case "B8: reduction check present in mutual loop"
