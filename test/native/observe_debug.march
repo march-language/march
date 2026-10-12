@@ -37,14 +37,24 @@ mod Main do
     end
   end
 
+  -- Messaged every 20 ms by main, for the TRACE_* actor-event checks.
+  actor Beat do
+    state { n : Int }
+    init  { n: 0 }
+    on Pulse() do
+      { n: state.n + 1 }
+    end
+  end
+
   -- A boundary function called every 20 ms, for the TRACE_* checks.  The
   -- recursive branch never runs; it keeps the inliner away so `tick` keeps a
   -- dispatch slot.
   fn tick(n : Int) : Int do if n > 1000000 do tick(n - 1) else n + 1 end end
 
-  fn spin(n : Int) : Int do
+  fn spin(n : Int, b) : Int do
     sleep_ms(20)
-    spin(tick(n))
+    send(b, Pulse())
+    spin(tick(n), b)
   end
 
   fn main(io : Cap(IO)) do
@@ -57,10 +67,12 @@ mod Main do
     end
     let c = spawn(Counter)
     send(c, Bump(5))
+    let b = spawn(Beat)
     sleep_ms(300)
     println("counter " ++ int_to_string(pid_to_int(c)))
+    println("beat " ++ int_to_string(pid_to_int(b)))
     println("ready")
-    let _ = spin(0)
+    let _ = spin(0, b)
     ()
   end
 end

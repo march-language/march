@@ -43,9 +43,15 @@ type debug =
   | No_debug
   | State of { pid : int; timeout_ms : int }
   | Crashes_full of int option
-  | Trace_start of { fns : string; limit : trace_limit; ring : int option }
+  | Trace_start of { fns : string; limit : trace_limit; ring : int option;
+                     events : string list; pids : int list }
   | Trace_drain of { session : int; max : int option }
   | Trace_stop of int
+
+(** The actor-event kinds a trace session can record, and how many pids it may
+    name (the node enforces both; this is the early, readable refusal). *)
+let trace_event_kinds = [ "sent"; "received"; "spawned"; "exited"; "dropped" ]
+let max_trace_pids = 8
 
 (** The longest [--state --timeout-ms] forge allows: the client reads the
     reply with a 10 s socket timeout ([Remote.connect_with_timeout]), so a
@@ -62,6 +68,19 @@ let debug_request (d : debug) : ((boot:string -> string) option, string) result 
     Error (Printf.sprintf
              "observe: --timeout-ms must be between 0 and %d (forge waits at most 10 s for a reply)"
              max_state_timeout_ms)
+  | Trace_start { events; pids; fns; _ } when events <> [] && pids = [] ->
+    ignore fns;
+    Error "observe: --events needs --pids: actor events are recorded only for the actors you name (1 to 8)"
+  | Trace_start { events; pids; _ } when events = [] && pids <> [] ->
+    Error "observe: --pids needs --events"
+  | Trace_start { pids; _ } when List.length pids > max_trace_pids || List.exists (fun p -> p < 0) pids ->
+    Error (Printf.sprintf "observe: --pids takes 1 to %d non-negative pids" max_trace_pids)
+  | Trace_start { events; _ } when List.exists (fun k -> not (List.mem k trace_event_kinds)) events
+                                   || List.length (List.sort_uniq compare events) <> List.length events ->
+    Error (Printf.sprintf "observe: --events takes each of %s at most once"
+             (String.concat ", " trace_event_kinds))
+  | Trace_start { fns; events; _ } when events = [] && (fns = "" || fns = "-") ->
+    Error "observe: --trace-start needs boundary function names, or - with --events and --pids"
   | Trace_start { limit = Max_events n; _ } when n < 1 || n > 65536 ->
     Error "observe: --max-events must be between 1 and 65536"
   | Trace_start { limit = Rate (n, s); _ } when n < 1 || n > 100000 || s < 1 || s > 3600 ->
@@ -75,12 +94,15 @@ let debug_request (d : debug) : ((boot:string -> string) option, string) result 
           "STATE", [ Printf.sprintf "pid:%d" pid; Printf.sprintf "timeout_ms:%d" timeout_ms ]
         | Crashes_full n ->
           "CRASHES_FULL", (match n with Some n -> [ Printf.sprintf "n:%d" n ] | None -> [])
-        | Trace_start { fns; limit; ring } ->
+        | Trace_start { fns; limit; ring; events; pids } ->
           "TRACE_START",
           (match limit with
            | Max_events n -> [ Printf.sprintf "count:%d" n ]
            | Rate (n, s) -> [ Printf.sprintf "rate:%d" n; Printf.sprintf "per_s:%d" s ])
-          @ [ "fn:" ^ fns ]
+          @ (if fns = "" || fns = "-" then [] else [ "fn:" ^ fns ])
+          @ (if events = [] then [] else [ "events:" ^ String.concat "," events ])
+          @ (if pids = [] then []
+             else [ "pids:" ^ String.concat "," (List.map string_of_int pids) ])
           @ (match ring with Some r -> [ Printf.sprintf "ring:%d" r ] | None -> [])
         | Trace_drain { session; max } ->
           "TRACE_DRAIN", Printf.sprintf "session:%d" session
