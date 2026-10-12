@@ -180,6 +180,8 @@ native_erased_render_show: coverage audit (user + stdlib): 135 enforced, 0 inert
 native_erased_render_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_fatal_trap_report: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_fatal_trap_report: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_blocking: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_ffi_blocking: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_codec2: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

@@ -732,6 +732,13 @@ git log is authoritative for exact commits.
   result, the `None` arm of a niche `Option`, and `Some(i)` of an
   `Option(Int)` as held references. What remains is listed in
   `specs/todos/2026-10-08-verifier-a4-followups.md`.
+- **A compiled program that hits an illegal or trap instruction now says
+  where, instead of dying silently.** SIGILL and SIGTRAP had no handler, so
+  the only trace was the shell's exit status (132 or 133). The runtime now
+  prints a `march: fatal SIGILL ...` line with the faulting pc, lr and a
+  frame-pointer walk (image-relative on macOS, for `lldb <binary>` and
+  `image lookup -a`), then exits with the same status. Set
+  `MARCH_FATAL_BACKTRACE=1` to also print symbol names.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a

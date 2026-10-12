@@ -830,7 +830,8 @@ static void march_report_fatal_fault(int sig, siginfo_t *info, void *uctx) {
     char buf[512];
     size_t cap = sizeof buf, at = 0;
     at = fatal_put_str(buf, at, cap, "march: fatal ");
-    at = fatal_put_str(buf, at, cap, sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : "signal");
+    at = fatal_put_str(buf, at, cap, sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS"
+                                     : sig == SIGILL ? "SIGILL" : sig == SIGTRAP ? "SIGTRAP" : "signal");
     at = fatal_put_str(buf, at, cap, " si_code=");
     at = fatal_put_dec(buf, at, cap, info ? info->si_code : -1);
     at = fatal_put_str(buf, at, cap, " addr=");
@@ -1026,6 +1027,163 @@ fatal:
     _exit(128 + sig);
 }
 
+/* ── Fatal trap report: SIGILL / SIGTRAP ──────────────────────────────────
+ *
+ * An illegal or trap instruction used to kill a compiled program with no
+ * output at all: nothing handled SIGILL or SIGTRAP, so the only trace was the
+ * shell's exit status.  native_actor_state_released died that way on macOS CI
+ * (status 132, SIGILL) several times, and never locally, so the status was
+ * all there was to go on (specs/todos/2026-10-07-flake-actor-state-released-
+ * macos-exit.md).  On arm64 a `brk` (__builtin_trap, llvm.trap, an
+ * `unreachable` lowered as a trap) raises SIGTRAP; SIGILL means the CPU ran a
+ * word that is not an instruction, i.e. control reached a bad address that
+ * happens to be executable (zeros, a constant, a string in __TEXT).
+ *
+ * This writes the march_report_fatal_fault line, then one line with the
+ * faulting pc, lr and fp in both runtime and STATIC (image-relative, for
+ * `lldb <binary>` + `image lookup -a`) form, then a frame-pointer walk of the
+ * interrupted context, also static.  All of that is write(2) and hand-rolled
+ * hex.  With MARCH_FATAL_BACKTRACE=1 (read at install time; the fixture's
+ * dune rule sets it) the walked frames are also symbolised with
+ * backtrace_symbols_fd, which is not async-signal-safe (dladdr) but is on the
+ * way to _exit, and the binary that trapped on CI is not kept, so names are
+ * the only thing that survives the run.  Then _exit(128 + sig), for the same
+ * reason the SIGSEGV path never re-raises (see its `fatal:` comment). */
+#include <execinfo.h>
+#if defined(__APPLE__)
+extern intptr_t _dyld_get_image_vmaddr_slide(uint32_t image_index);
+#endif
+
+static int g_fatal_backtrace_symbols = 0;
+
+static void fatal_fault_regs(void *uctx, uint64_t *lr, uint64_t *fp) {
+    *lr = 0;
+    *fp = 0;
+    if (!uctx) return;
+    ucontext_t *uc = (ucontext_t *)uctx;
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (uc->uc_mcontext) {
+        *lr = (uint64_t)uc->uc_mcontext->__ss.__lr;
+        *fp = (uint64_t)uc->uc_mcontext->__ss.__fp;
+    }
+#elif defined(__APPLE__) && defined(__x86_64__)
+    if (uc->uc_mcontext) *fp = (uint64_t)uc->uc_mcontext->__ss.__rbp;
+#elif defined(__linux__) && defined(__x86_64__)
+    *fp = (uint64_t)uc->uc_mcontext.gregs[REG_RBP];
+#elif defined(__linux__) && defined(__aarch64__)
+    *lr = (uint64_t)uc->uc_mcontext.regs[30];
+    *fp = (uint64_t)uc->uc_mcontext.regs[29];
+#else
+    (void)uc;
+#endif
+}
+
+static uint64_t fatal_image_slide(void) {
+#if defined(__APPLE__)
+    return (uint64_t)_dyld_get_image_vmaddr_slide(0);
+#else
+    return 0;   /* Linux: no static form; pc - load base via /proc/self/maps */
+#endif
+}
+
+#define MARCH_FATAL_MAX_FRAMES 32
+
+static void march_fatal_trap_handler(int sig, siginfo_t *info, void *uctx) {
+    march_report_fatal_fault(sig, info, uctx);
+
+    char buf[768];
+    size_t cap = sizeof buf, at = 0;
+    uint64_t pc = fatal_fault_pc(uctx), lr, fp;
+    fatal_fault_regs(uctx, &lr, &fp);
+    uint64_t slide = fatal_image_slide();
+    at = fatal_put_str(buf, at, cap, "march: fatal ");
+    at = fatal_put_str(buf, at, cap, sig == SIGILL ? "SIGILL" : sig == SIGTRAP ? "SIGTRAP" : "signal");
+    at = fatal_put_str(buf, at, cap, " static pc=");
+    at = fatal_put_hex(buf, at, cap, pc - slide);
+    at = fatal_put_str(buf, at, cap, " lr=");
+    at = fatal_put_hex(buf, at, cap, lr ? lr - slide : 0);
+    at = fatal_put_str(buf, at, cap, " (runtime lr=");
+    at = fatal_put_hex(buf, at, cap, lr);
+    at = fatal_put_str(buf, at, cap, " fp=");
+    at = fatal_put_hex(buf, at, cap, fp);
+    at = fatal_put_str(buf, at, cap, " slide=");
+    at = fatal_put_hex(buf, at, cap, slide);
+    at = fatal_put_str(buf, at, cap, ")");
+#if defined(__aarch64__)
+    /* The word at pc, when pc is plausibly mapped code (the kernel already
+     * fetched it to raise SIGILL/SIGTRAP, so reading it cannot fault). */
+    if (pc && (pc & 3) == 0) {
+        at = fatal_put_str(buf, at, cap, " insn=");
+        at = fatal_put_hex(buf, at, cap, (uint64_t)*(volatile uint32_t *)(uintptr_t)pc);
+    }
+#endif
+    buf[at++] = '\n';
+    ssize_t ignored = write(2, buf, at);
+
+    /* Frame-pointer walk of the interrupted context: [fp] = caller's fp,
+     * [fp + 8] = return address.  Stops at the first implausible fp (zero,
+     * misaligned, not strictly increasing, or a jump of over 8 MiB), so a
+     * corrupted chain ends the walk rather than faulting in it. */
+    void *frames[MARCH_FATAL_MAX_FRAMES + 2];
+    int nf = 0;
+    if (pc) frames[nf++] = (void *)(uintptr_t)pc;
+    if (lr) frames[nf++] = (void *)(uintptr_t)lr;
+    /* Walk only inside a stack we know is mapped: the running green
+     * thread's reservation, else this OS thread's own stack. */
+    uint64_t lo = 0, hi = 0;
+    march_scheduler *s = tl_sched;
+    march_proc *p = s ? s->current : NULL;
+    if (p && p->stack_mmap_base) {
+        lo = (uint64_t)(uintptr_t)p->stack_base;
+        hi = (uint64_t)(uintptr_t)p->stack_mmap_base + p->stack_alloc;
+    }
+#if defined(__APPLE__)
+    if (!(fp >= lo && fp < hi)) {
+        pthread_t me = pthread_self();
+        hi = (uint64_t)(uintptr_t)pthread_get_stackaddr_np(me);
+        lo = hi - pthread_get_stacksize_np(me);
+    }
+#endif
+    uint64_t f = fp;
+    while (nf < MARCH_FATAL_MAX_FRAMES && f >= lo && f + 16 <= hi && (f & 7) == 0) {
+        uint64_t next = ((volatile uint64_t *)(uintptr_t)f)[0];
+        uint64_t ret  = ((volatile uint64_t *)(uintptr_t)f)[1];
+        if (!ret) break;
+        frames[nf++] = (void *)(uintptr_t)ret;
+        if (next <= f) break;
+        f = next;
+    }
+    at = 0;
+    at = fatal_put_str(buf, at, cap, "march: fatal trap frames (static):");
+    for (int i = 0; i < nf; i++) {
+        at = fatal_put_str(buf, at, cap, " ");
+        at = fatal_put_hex(buf, at, cap, (uint64_t)(uintptr_t)frames[i] - slide);
+    }
+    buf[at++] = '\n';
+    ignored = write(2, buf, at);
+    (void)ignored;
+    if (g_fatal_backtrace_symbols && nf > 0)
+        backtrace_symbols_fd(frames, nf, 2);
+    _exit(128 + sig);
+}
+
+static void install_fatal_trap_handler(void) {
+    const char *v = getenv("MARCH_FATAL_BACKTRACE");
+    g_fatal_backtrace_symbols = v && *v && strcmp(v, "0") != 0;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = march_fatal_trap_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    /* Only over the default disposition: a host (or a sanitizer runtime)
+     * that installed its own handler keeps it. */
+    struct sigaction old;
+    if (sigaction(SIGILL, NULL, &old) == 0 && old.sa_handler == SIG_DFL)
+        (void)sigaction(SIGILL, &sa, NULL);
+    if (sigaction(SIGTRAP, NULL, &old) == 0 && old.sa_handler == SIG_DFL)
+        (void)sigaction(SIGTRAP, &sa, NULL);
+}
+
 static _Atomic int g_sigsegv_installed = 0;
 
 static void install_stack_growth_handler(void) {
@@ -1050,6 +1208,7 @@ static void install_stack_growth_handler(void) {
     if (sigaction(SIGBUS, &sa, NULL) != 0) {
         perror("march_sched: sigaction(SIGBUS)");
     }
+    install_fatal_trap_handler();
 }
 
 /* ── Mailbox spinlock ────────────────────────────────────────────────── */
