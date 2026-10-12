@@ -1,0 +1,31 @@
+-- The callback shapes that stay legal next to reject/t320 (2026-10-12): a
+-- callee that applies its parameter one argument at a time takes a curried
+-- lambda or a curried named fn; a callee that applies it to two arguments at
+-- once takes a two-argument fn or lambda. Both have the type `a -> b -> c`.
+-- Run-witnessed on both backends: prints 3, 3, 7, 7, 10, 2.
+mod Main do
+  needs IO.Console
+
+  pfn ap2(f, x, y) do
+    let g = f(x)
+    g(y)
+  end
+
+  pfn both(f, x, y) do f(x, y) end
+
+  pfn add(a : Int, b : Int) : Int do a + b end
+
+  pfn add_c(a : Int) do fn b -> a + b end
+
+  pfn lt(a : Int) do fn b -> a < b end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(ap2(fn a -> fn b -> a + b, 1, 2)))
+    println(int_to_string(ap2(add_c, 1, 2)))
+    println(int_to_string(both(add, 3, 4)))
+    println(int_to_string(both(fn (a, b) -> a + b, 3, 4)))
+    println(int_to_string(List.fold_left([1, 2, 3, 4], 0, add)))
+    let m = Map.insert(Map.insert(Map.empty(), 2, "two", lt), 1, "one", fn a -> fn b -> a < b)
+    println(int_to_string(Map.size(m)))
+  end
+end

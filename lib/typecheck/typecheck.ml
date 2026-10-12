@@ -1328,6 +1328,86 @@ let check_wildcard_let_discard env (pat : Ast.pattern) rhs_expr rhs_ty =
      | None -> ())
   | _ -> ()
 
+(** The callback call-arity check (see [Typecheck_callarity]): in a call of a
+    known function [f], an argument that is a function of KNOWN arity — a
+    module fn named by value, a let-bound lambda, or a lambda literal — must
+    take exactly as many arguments as [f]'s body applies that parameter to.
+    Curried arrow types cannot tell `fn add(a, b)` from `fn a -> fn b -> …`,
+    and March has no partial application, so a mismatch typechecked and then
+    failed at runtime (an arity panic interpreted, a SIGSEGV compiled). *)
+let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
+  let callee =
+    match f with
+    | Ast.EVar name when String.contains name.txt '.' ->
+      (match StrMap.find_opt name.txt env.qual_fn_arities,
+             StrMap.find_opt name.txt env.param_call_arities with
+       | Some (_, sp), Some (sp', ps) when sp = sp' -> Some (name.txt, ps)
+       | _ -> None)
+    | Ast.EVar name ->
+      (match StrMap.find_opt name.txt env.fn_arities,
+             StrMap.find_opt name.txt env.param_call_arities with
+       | Some (_, sp), Some (sp', ps) when sp = sp' -> Some (name.txt, ps)
+       | _ -> None)
+    | _ -> None
+  in
+  match callee with
+  | None -> ()
+  | Some (fname, ps) when List.length ps = List.length args ->
+    List.iter2 (fun (pname, m) (arg : Ast.expr) ->
+        let rec strip = function Ast.EAnnot (e, _, _) -> strip e | e -> e in
+        let arg = strip arg in
+        let known =
+          match m, arg with
+          | None, _ -> None
+          | Some _, Ast.ELam (params, _, lsp) ->
+            Some ("This lambda", List.length params, lsp)
+          | Some _, Ast.EVar v when String.contains v.txt '.' ->
+            (match StrMap.find_opt v.txt env.qual_fn_arities with
+             | Some (n, _) -> Some (Printf.sprintf "`%s`" v.txt, n, v.span)
+             | None -> None)
+          | Some _, Ast.EVar v ->
+            (match StrMap.find_opt v.txt env.fn_arities,
+                   StrMap.find_opt v.txt env.lambda_arities with
+             | Some (n, _), _ -> Some (Printf.sprintf "`%s`" v.txt, n, v.span)
+             | None, Some (n, _, _) ->
+               Some (Printf.sprintf "`%s` (a lambda)" v.txt, n, v.span)
+             | None, None -> None)
+          | Some _, _ -> None
+        in
+        match m, known with
+        | Some m, Some (what, n, span) when n >= 1 && n <> m ->
+          let plural k = if k = 1 then "" else "s" in
+          let vars = List.init n (fun i -> String.make 1 (Char.chr (97 + i mod 26))) in
+          let hint =
+            if m = 1 && n >= 2 then
+              Printf.sprintf
+                "`%s` applies `%s` one argument at a time (a curried \
+                 function, `a -> b -> …`), and March has no partial \
+                 application.\nPass a curried function instead:\n    %s"
+                fname pname
+                (match arg with
+                 | Ast.EVar v ->
+                   Printf.sprintf "fn %s -> %s(%s)"
+                     (String.concat " -> fn " vars) v.txt (String.concat ", " vars)
+                 | _ ->
+                   Printf.sprintf "fn %s -> …" (String.concat " -> fn " vars))
+            else
+              Printf.sprintf
+                "March functions are not curried: a function is always \
+                 called with exactly its own number of arguments.\nPass a \
+                 function of %d parameter%s." m (plural m)
+          in
+          Err.report env.errors
+            { Err.severity = Err.Error; span;
+              message = Printf.sprintf
+                  "%s takes %d argument%s, but `%s` calls its parameter `%s` \
+                   with %d argument%s.\n%s"
+                  what n (plural n) fname pname m (plural m) hint;
+              labels = []; notes = [];
+              code = Err.Code.callback_arity_mismatch; fix = None }
+        | _ -> ()) ps args
+  | Some _ -> ()
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -2451,6 +2531,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
               name.txt (pp_ty (repr f_ty)) name.txt);
          TError
        | None, None, _ ->
+         check_callback_arities env f args;
          let res = infer_app env sp f_ty args 0 in
          (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
             result — recorded in check_fn), taint the call's result so the unify
@@ -6161,7 +6242,7 @@ let rec check_decl env (d : Ast.decl) : env =
           cap_qual_prefix =
             (if env.cap_qual_prefix = "" then name.txt
              else env.cap_qual_prefix ^ "." ^ name.txt) } decls in
-    let inner_env = List.fold_left check_decl pre_env (reorder_decls decls) in
+    let inner_env = check_decls_with_callarity pre_env decls in
     (* Collect the names that are explicitly public within this module. *)
     let pub_set =
       List.filter_map (function
@@ -6306,6 +6387,14 @@ let rec check_decl env (d : Ast.decl) : env =
           | Some a -> StrMap.add (name.txt ^ "." ^ k) a acc
           | None -> acc
       ) inner_env.vars StrMap.empty in
+    (* Their callback call-arities, re-keyed the same way (a nested module's
+       entry is already qualified relative to this module). *)
+    let new_param_call_arities = StrMap.fold (fun k _ acc ->
+        match StrMap.find_opt k inner_env.param_call_arities with
+        | Some e -> StrMap.add (name.txt ^ "." ^ k) e acc
+        | None -> acc
+      ) (StrMap.filter (fun k _ -> StrMap.mem (name.txt ^ "." ^ k) new_fn_arities)
+           inner_env.vars) StrMap.empty in
     (* Also export type names and constructors from public DMod into outer scope.
        Types defined in a module (e.g. IOList, Option) are referred to by their
        bare name throughout user code, not prefixed.
@@ -6441,6 +6530,8 @@ let rec check_decl env (d : Ast.decl) : env =
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
       qual_fn_names = StrMap.union (fun _k a _ -> Some a) new_fn_quals env'.qual_fn_names;
       qual_fn_arities = StrMap.union (fun _k a _ -> Some a) new_fn_arities env'.qual_fn_arities;
+      param_call_arities =
+        StrMap.union (fun _k a _ -> Some a) new_param_call_arities env'.param_call_arities;
       module_caps = module_caps';
       proof_caps = inner_env.proof_caps;
       cap_dicts = inner_env.cap_dicts;
@@ -7234,6 +7325,30 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DSatisfy _ ->
     (* DSatisfy is expanded to DImpl blocks by the desugar pass; nothing to typecheck here. *)
     env
+
+(** [List.fold_left check_decl env (reorder_decls decls)] for one module's
+    declarations, keeping the module's callback call-arity table
+    ([Typecheck_callarity], [env.param_call_arities]) current: computed up
+    front, and recomputed after each nested/sibling [DMod] is checked, since a
+    fn here may hand a parameter to that module's exported fns
+    (`Map.insert(m, k, v, cmp)`) whose entries only exist once it is checked. *)
+and check_decls_with_callarity env decls =
+  let defs = List.filter_map (function
+      | Ast.DFn (def, _) -> Some def | _ -> None) decls in
+  let refresh env =
+    if defs = [] then env
+    else
+      let lookup n =
+        if String.contains n '.' then StrMap.find_opt n env.param_call_arities
+        else None in
+      let entries = Typecheck_callarity.compute ~lookup defs in
+      { env with param_call_arities =
+          List.fold_left (fun m (n, e) -> StrMap.add n e m)
+            env.param_call_arities entries } in
+  List.fold_left (fun env d ->
+      let env = check_decl env d in
+      match d with Ast.DMod _ -> refresh env | _ -> env)
+    (refresh env) (reorder_decls decls)
 
 (** Emit warnings for any imports or aliases that were never referenced. *)
 let warn_unused_imports env =
@@ -9199,7 +9314,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
       enclosing_package =
         (if pre_env.enclosing_package = "" then m.Ast.mod_name.txt
          else pre_env.enclosing_package) } in
-  let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
+  let final_env = check_decls_with_callarity pre_env m.Ast.mod_decls in
   (* Part 1: the cap_narrow proof-cap forge is closed by the [unify] hook
      ([cap_producer_ivars]), which fires at the exact moment a cap_narrow-derived
      inner var is bound to a nominal proof cap — position- and flow-independent
@@ -9544,7 +9659,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
       always_linear_types =
         always_linear_names ~modname:m.Ast.mod_name.txt m.Ast.mod_decls
         @ pre_env.always_linear_types } in
-  let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
+  let final_env = check_decls_with_callarity pre_env m.Ast.mod_decls in
   last_with_env_final := { final_env with record_names_snapshot = record_names_dump () };
   (* Pass 3: tail-call enforcement *)
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
