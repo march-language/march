@@ -63,7 +63,9 @@ That is ~4 function calls and a volatile load per 4 elements of useful work.
    dynamic, so `mem2reg` can promote them and `stacksave`/`stackrestore` can
    be dropped for loops with no dynamic alloca.~~ **Tried 2026-10-01: works as
    IR, buys nothing measurable. Not shipped.** See "Direction 3 measured" below.
-4. **Preemption check throttling** — CAUTION: an in-TLS-counter throttle was
+4. ~~**Preemption check throttling**~~ — **declined 2026-10-11** (owner
+   accepts the per-iteration check; see "What per-iteration overhead is left"
+   below). CAUTION: an in-TLS-counter throttle was
    already tried and measured **+65% WORSE** (see
    `project_fib_throttle_counter_rejected` in repo memory). Do not rebuild
    that specific design. In-register (BEAM-style) reduction counting is the
@@ -172,10 +174,12 @@ cannot regress; their timings moved only within the load noise.
 
 ### What per-iteration overhead is left
 
-1. **The preemption check** (volatile load + branch) in every TCO loop. This is
-   the remaining cost in `dot_loop`. The TLS throttle counter stays rejected
-   (+65% on fib). In-register reduction counting is still untried and is a
-   design decision with a fib/benchmark matrix of its own.
+1. ~~**The preemption check** (volatile load + branch) in every TCO loop.~~
+   **Accepted as is** (owner decision, 2026-10-11): the per-iteration
+   preemption-check cost stays, and no register-held (BEAM-style) budget
+   counter is to be built for now. The TLS throttle counter stays rejected
+   (+65% on fib). This was the remaining cost in `dot_loop`; reopen it only
+   with a new reason, not as an optimisation to try.
 2. **`stacksave`/`stackrestore`**: cheap at `--opt 2` (direction 3 measured
    nothing).
 3. **Scalar element reads are real C calls.** `NativeArray.get_f32` /
@@ -188,3 +192,10 @@ cannot regress; their timings moved only within the load noise.
    on the captured array: about 4 atomic RC ops per byte. The top-level
    `pfn` form has none of this. Making a self-TCO closure's `$clo` borrowed
    inside its own loop is a Perceus change, not a codegen one.
+
+## Status 2026-10-11
+
+Open only for items 3 and 4 of the list above: inlining the scalar
+`NativeArray.get_f32` / `get_u8` reads, and the closure-loop RC churn on
+`$clo`. The preemption check (item 1) is accepted by owner decision, and
+`stacksave`/`stackrestore` (item 2) measured as free at `--opt 2`.

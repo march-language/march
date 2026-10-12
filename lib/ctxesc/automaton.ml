@@ -167,6 +167,11 @@ let consume_literal t (start : C.t) (src : string) =
    returns [Error] before asking for an escaper. They still map to the strictest
    JS escaper here rather than being left to a catch-all, so that adding an
    accepting row for one of them by mistake fails closed. *)
+let css_url = function
+  | C.AtCssUrl | C.AtCssUrlScheme | C.AtCssUrlRef | C.AtCssUrlHole
+  | C.AtCssUrlMid -> true
+  | _ -> false
+
 let escaper_for (c : C.t) =
   let js = function
     | C.AtJsString -> C.EscJsString
@@ -179,7 +184,7 @@ let escaper_for (c : C.t) =
      | C.ElScript -> js c.C.attr
      | C.ElStyle ->
        (* a url() inside a <style> body is a URL, not a CSS value *)
-       if c.C.attr = C.AtCssUrl then C.EscCssUrl else C.EscCssDecl
+       if css_url c.C.attr then C.EscCssUrl else C.EscCssDecl
      | _ -> C.EscHtml)
   | C.Attrvalue ->
     (match c.C.attr with
@@ -187,10 +192,16 @@ let escaper_for (c : C.t) =
      (* Path (and authority) positions refuse a dot segment; query and
         fragment positions are plain components. See [C.EscUrlPath]. *)
      | C.AtUrlMid | C.AtUrlScheme | C.AtUrlSchemeHoleMid -> C.EscUrlPath
+     (* Rejected by the table (a hole could finish the escape or reference
+        the template started). Mapped to the path escaper so that an
+        accepting row added by mistake fails closed. *)
+     | C.AtUrlSchemeRef | C.AtUrlPct | C.AtUrlPct1 | C.AtUrlRef ->
+       C.EscUrlPath
      | C.AtUrlQuery | C.AtUrlFragment -> C.EscUrlComponent
      | C.AtStyle -> C.EscCssDecl
      | C.AtStyleValue -> C.EscCssValue
-     | C.AtCssUrl -> C.EscCssUrl
+     | C.AtCssUrl | C.AtCssUrlScheme | C.AtCssUrlRef | C.AtCssUrlHole
+     | C.AtCssUrlMid -> C.EscCssUrl
      | (C.AtScript | C.AtJsString | C.AtJsComment | C.AtJsRegex
        | C.AtJsTemplate) as a -> js a
      (* srcset and srcdoc are rejected by the table; EscAttr is what they were

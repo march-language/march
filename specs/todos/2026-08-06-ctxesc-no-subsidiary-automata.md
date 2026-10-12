@@ -28,7 +28,19 @@ See `specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md`.
   resolves to `/edit` (client-side path traversal for every fetching
   attribute). `urlquery` / `urlfragment` are now tracked, and path holes get a
   `url_path` escaper that replaces an all-dot value.
+- **A hole finishing an escape — DONE 2026-10-11.** See
+  `specs/progress/2026-10-11-h-sigil-css-url-scheme-and-escape-completion.md`.
+  A literal `%` (or `%X`, `&#37;`, `&percnt;`, any numeric reference) right
+  before a URL path hole is now a compile error, closing the `%2e` residual
+  recorded below. Closing it found a scheme twin that WAS exploitable:
+  `href="javascript&#${x}alert(1)"` with x = `58` rendered
+  `javascript&#58alert(1)`, which the HTML parser decodes to `javascript:`.
+- **CSS `url()` scheme — DONE 2026-10-11** (owner decision: same rule as
+  `href`). `url(${s}:x)` is a compile error, as are a reference or CSS escape
+  after such a hole and a hole right after one (`url(javascript\${x})` with
+  x = `00003a`). Same progress file.
 - **URL authority — still flat.** See below.
+- **CSS `url()` in a `style` attribute decodes `&` — still open.** See below.
 
 ## What this file got wrong, which is the part worth keeping
 
@@ -75,8 +87,8 @@ it is still a flat encoding of a sub-automaton, not a nested one.
 
 | Nested language | Sub-positions | Escapers |
 |---|---|---|
-| URL | `url` → scheme positions → `urlmid` (path) → `urlquery` → `urlfragment` | `EscUrlWhole`, `EscUrlPath`, `EscUrlComponent` |
-| CSS | `style` → `stylevalue` → `cssurl` | `EscCssDecl`, `EscCssValue`, `EscCssUrl` |
+| URL | `url` → scheme positions → `urlmid` (path, with `urlpct` / `urlpct1` / `urlref` pending-escape positions) → `urlquery` → `urlfragment` | `EscUrlWhole`, `EscUrlPath`, `EscUrlComponent` |
+| CSS | `style` → `stylevalue` → `cssurl` → CSS url scheme positions → `cssurlmid` | `EscCssDecl`, `EscCssValue`, `EscCssUrl` |
 | JS | `script` ⇄ `jsstring`, plus `jscomment` / `jsregex` / `jstemplate` | `EscJsExpr`, `EscJsString` |
 
 ## What is left
@@ -92,19 +104,30 @@ still one flat `urlmid` component. What that leaves:
 - Query vs path vs fragment are now distinct (2026-10-11). Path holes still
   over-encode `/`; that stays deliberate, since a hole that could write `/`
   could also write `//host` at the start of a path (an open redirect).
-- **Residual of the path slice:** a template that writes a raw `%` (or a
-  character reference for one: `&#37;`, `&percnt;`) immediately before a path
-  hole lets the hole finish a `%2e`, which the URL parser reads as a dot:
-  `href="/a/%${x}/b"` with `x = "2e"`. Closing it needs a "percent-escape
-  pending" position in the path AND in every open-scheme position (an entity
-  there must not settle the scheme), which is where the slice stopped. A
-  template that puts `%` before a hole is already double-encoding, so this is
-  recorded rather than fixed; same caveat as below about arguing from the
-  cases examined.
-- CSS `url(${s}:x)` has the same composition shape as the href exploit:
-  `css_url` checks `s` alone and leaves `:` unescaped. Not executable in any
-  current browser (`javascript:` in CSS `url()` is not run), so it was left out
-  of the 2026-10-11 slice; the same scheme rows would close it if wanted.
+- ~~**Residual of the path slice:** a raw `%` (or `&#37;`, `&percnt;`)
+  immediately before a path hole lets the hole finish a `%2e`.~~ **Closed
+  2026-10-11** (owner decision): the hole is a compile error. It took
+  `urlpct` / `urlpct1` / `urlref` in the path and `urlschemeref` in the open
+  scheme, and the "argued from the cases examined" caveat was borne out
+  again: the reference half had an executable scheme twin
+  (`javascript&#${x}` + `58`).
+- ~~CSS `url(${s}:x)` has the same composition shape as the href
+  exploit.~~ **Closed 2026-10-11** (owner decision): `cssurlscheme` /
+  `cssurlref` / `cssurlhole` / `cssurlmid` mirror the URL scheme positions.
+
+**CSS `url()` in a `style` attribute — one hole is enough (found 2026-10-11,
+not fixed).** `css_url` keeps `&`, `#` and `;` unescaped (they are URL
+structure), and in a `style` attribute the HTML parser decodes references
+before CSS sees the value. So a single hole with
+`javascript&#58;alert(1)` passes the scheme check (`&` is not a scheme
+character, so it reads as relative) and renders
+`url(javascript&#58;alert%281%29)`, which the attribute decodes to
+`url(javascript:alert%281%29)`. Not executable in any current browser, which
+is why this slice stopped at the table. The fix belongs in the escaper, and it
+is a design choice: percent-encoding `&` breaks an honest `?a=1&b=2` in a CSS
+url, and entity-encoding it is right for the attribute but wrong for a
+`<style>` body, so it probably wants a separate escaper id for the attribute
+wrapper (C runtime, interpreter, and the parity tests together).
 
 The codec's absence is still not known to be exploitable, because the attribute
 escaper escapes `&` after the URL check, so an entity cannot be decoded a second
