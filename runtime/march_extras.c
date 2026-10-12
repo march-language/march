@@ -2789,11 +2789,16 @@ int32_t march_record_shape_intern(const char *desc) {
 }
 
 /* Called by compiled code after every record allocation.  [cache] is a
- * per-shape module global that memoizes the interned id (benign race: the
- * intern is idempotent). */
+ * per-shape module global that memoizes the interned id (racy by design:
+ * the intern is idempotent). */
 void march_record_set_shape(void *rec, const char *desc, int32_t *cache) {
-    int32_t id = *cache;
-    if (id == 0) { id = march_record_shape_intern(desc); *cache = id; }
+    /* Relaxed atomics: the same plain ldr/str, but the idempotent race is
+     * not a C data race (and not a TSAN report). */
+    int32_t id = __atomic_load_n(cache, __ATOMIC_RELAXED);
+    if (id == 0) {
+        id = march_record_shape_intern(desc);
+        __atomic_store_n(cache, id, __ATOMIC_RELAXED);
+    }
     ((march_hdr *)rec)->pad = id;
 }
 
@@ -3513,14 +3518,22 @@ void *march_html_auto_escape(void *v) {
  *
  * Descriptor grammar (tab-separated, newline-terminated lines):
  *
- *   T \t <local id> \t <V|R> \t <TypeName>       start a type
+ *   T \t <local id> \t <V|R|N|X> \t <TypeName>   start a type
  *   C \t <tag> \t <CtorName> \t <f1,f2,...>      a variant constructor
  *   F \t <FieldName> \t <f>                      a record field, slot order
  *
+ * V and R are heap cells read by their tag.  N (newtype) and X (non-generic
+ * niche) have NO cell: an N value IS its one constructor's payload, and an X
+ * value is raw 0 for its nullary constructor and the payload for the other.
+ * Their rows' field tokens describe the payload WORD, which the allocator
+ * tags for a scalar payload (lib/tir/llvm_emit_alloc.ml), hence I and B.
+ *
  * A field token is one character, optionally followed by a decimal id:
  *   i  raw i64 Int          b  raw i64 Bool        u  Unit
+ *   I  tagged Int (v<<1|1)  B  tagged Bool
  *   f  raw double bits      s  march_string ptr    p  generic ptr slot
- *   A<id>  pointer to a cell of the type with that LOCAL id
+ *   A<id>  value of the type with that LOCAL id (a cell for V/R; the
+ *          wrapper's own word for N/X)
  *
  * These MUST agree with [Llvm_ctx.llvm_field_ty] — the slot representation a
  * boxed constructor actually stores — and with lib/tir/llvm_ctor_desc.ml,
@@ -3732,7 +3745,11 @@ int32_t march_ctor_table_ensure(const char *desc, int32_t *cache) {
             cur = &ctor_types[base + local - 1];
             cur->kind = *f2;
             cur->name = ctor_strndup(f3, (size_t)(eol - f3));
-            ctor_id_put(march_type_id_of_name(cur->name), base + local, cur->name);
+            /* Only a cell can carry a header id; registering a cell-less
+             * N/X type would let a stamped cell of a same-named type from
+             * another unit resolve to rows that do not read cells. */
+            if (cur->kind == 'V' || cur->kind == 'R')
+                ctor_id_put(march_type_id_of_name(cur->name), base + local, cur->name);
             int32_t nrows = 0;
             for (const char *q = eol + 1; *q && *q != 'T'; ) {
                 const char *e2 = strchr(q, '\n');
@@ -3859,6 +3876,13 @@ static void ctor_render_field(ctor_buf *b, int64_t raw, march_ctor_field f, int 
             break;
         }
         case 'b': cb_putz(b, raw ? "true" : "false"); break;
+        case 'I': {
+            char tmp[24];
+            int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)(raw >> 1));
+            cb_puts(b, tmp, (size_t)n);
+            break;
+        }
+        case 'B': cb_putz(b, (raw >> 1) ? "true" : "false"); break;
         case 'u': cb_putz(b, "()"); break;
         case 'f': {
             double d;
@@ -3950,8 +3974,39 @@ static void ctor_put_generic(ctor_buf *b, void *v, int nohook, int repr) {
  * interpreter's value_to_string, which `~H` uses); 0 is `to_string`/Show,
  * which renders a string bare where its container has a Show impl and
  * switches to repr beneath any container that does not. */
+/* An N (newtype) or X (niche) value: no cell, so the constructor is decided
+ * by the type (N) or by whether the word is raw 0 (X), never by a header.
+ * Always repr form: neither has an element-showing Show impl, so the
+ * interpreter renders it with value_to_string, which quotes nested strings. */
+static void ctor_render_wrapper(ctor_buf *b, void *v, march_ctor_type *t, int depth) {
+    int64_t raw = (int64_t)(uintptr_t)v;
+    march_ctor_row *row = NULL;
+    for (int32_t i = 0; i < t->nrows && !row; i++) {
+        march_ctor_row *r = &t->rows[i];
+        if (t->kind == 'N' ? r->nfields == 1 : (r->nfields == 0) == (raw == 0))
+            row = r;
+    }
+    if (!row) { ctor_put_generic(b, v, 1, 1); return; }
+    cb_putz(b, row->name);
+    if (row->nfields == 0) return;
+    cb_putc(b, '(');
+    ctor_render_field(b, raw, row->fields[0], depth + 1, 1);
+    cb_putc(b, ')');
+}
+
+static int ctor_type_is_wrapper(int32_t type_id) {
+    if (type_id <= 0 || type_id > ctor_type_count) return 0;
+    char k = ctor_types[type_id - 1].kind;
+    return k == 'N' || k == 'X';
+}
+
 static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int repr) {
     if (depth >= CTOR_MAX_DEPTH) { cb_putz(b, "..."); return; }
+    /* Before any header read: a wrapper's word is a payload (or 0). */
+    if (ctor_type_is_wrapper(type_id)) {
+        ctor_render_wrapper(b, v, &ctor_types[type_id - 1], depth);
+        return;
+    }
     if (type_id <= 0 || type_id > ctor_type_count || !IS_HEAP_PTR(v)) {
         ctor_put_generic(b, v, 0, repr);
         return;
@@ -4031,7 +4086,8 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int re
  * builtin is reached, so the static type here is always one with NO Show
  * impl, and Show falls back to repr for it. */
 void *march_value_to_string_typed(void *v, int32_t type_id) {
-    if (!v || !IS_HEAP_PTR(v)) return march_value_to_string(v);
+    if ((!v || !IS_HEAP_PTR(v)) && !ctor_type_is_wrapper(type_id))
+        return march_value_to_string(v);
     ctor_buf b = { NULL, 0, 0 };
     ctor_render(&b, v, type_id, 0, 1);
     void *s = march_string_lit(b.p ? b.p : "", (int64_t)b.len);

@@ -1735,7 +1735,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         render through it so a user ADT prints `Circle(7)` rather than
         `#<tag:0>`.  This is the ONE place the static TIR type is still known;
         [Llvm_ctor_desc.id_for] returns [None] for every shape the table
-        cannot walk (unboxed/newtype/niche repr, an erased TVar), which falls
+        cannot walk (a generic niche, an erased TVar), which falls
         through to the generic renderer below — never worse than before. *)
      | _ when Llvm_ctor_desc.id_for ctx tir_ty <> None ->
        let v = coerce ctx arg_ty arg_val "ptr" in

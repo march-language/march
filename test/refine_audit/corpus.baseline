@@ -426,6 +426,8 @@ native_niche_concrete_payload_drop: coverage audit (user + stdlib): 135 enforced
 native_niche_concrete_payload_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_niche_ctor_ambiguity: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_niche_ctor_ambiguity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_niche_nested_option: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_niche_nested_option: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_niche_reuse_closure: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_niche_reuse_closure: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_node_call_loopback: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -676,6 +678,8 @@ native_to_string_ctor_names: coverage audit (user + stdlib): 135 enforced, 0 ine
 native_to_string_ctor_names: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_to_string_module_types: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_to_string_module_types: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_to_string_newtype_niche: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_to_string_newtype_niche: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_to_string_show: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_to_string_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_toml_get_int: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

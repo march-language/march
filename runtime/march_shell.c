@@ -319,7 +319,7 @@ static void cancel_task(int64_t pid) {
     march_proc *p = march_sched_find(pid);
     if (p) atomic_store_explicit(&p->cancel_requested, 1, memory_order_release);
     march_reclaim_exit();
-    march_preempt_request = 1;
+    MARCH_PREEMPT_REQUEST_SET(1);
 }
 
 /* ── the identity table (IDENT) ──────────────────────────────────────── */

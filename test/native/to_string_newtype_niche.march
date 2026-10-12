@@ -1,0 +1,78 @@
+-- Regression: compiled `to_string` printed a newtype's payload and a niche's
+-- nullary constructor as `nil`: `Meters(7)` printed `7`, `Named("x")`
+-- printed `x`, `NoName` printed `nil`.  A newtype or niche value has no heap
+-- cell, so the runtime renderer had no constructor tag to read.
+--
+-- The constructor-name descriptor (lib/tir/llvm_ctor_desc.ml, read by
+-- ctor_render in runtime/march_extras.c) now describes these types as N
+-- (newtype) and X (niche) rows, which are decided by the static type and by
+-- the word itself rather than by a header.  The same rows serve every place
+-- the static type reaches the renderer: a top-level `to_string`, the
+-- element `to_string` the List/Option/Result/tuple Show impls make, a field
+-- of a boxed constructor or a declared record, string interpolation,
+-- `inspect`, and a `~H` hole.
+--
+-- Run interpreted AND compiled against the SAME .expected.
+mod Main do
+  needs IO.Console
+
+  type Meters = Meters(Int)
+  type Name = Name(String)
+  type Flag = Flag(Bool)
+  type Wrapped = Wrapped(Meters)
+  type Shape = Circle(Int) | Square(Int)
+  type Held = Held(Shape)
+  type Box(a) = Box(a)
+  type MaybeName = NoName | Named(String)
+  type MaybeN = NoN | SomeN(Int)
+  type MaybeS = NoS | SomeS(Shape)
+  type MaybeF = NoF | SomeF(Float)
+  type Pair = Pair(Meters, MaybeName)
+  type Rec = { m : Meters, n : MaybeName }
+  type Tree = Leaf | Node(Tree, Meters, Tree)
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    -- top level, newtypes
+    println(to_string(Meters(7)))
+    println(to_string(Name("bob")))
+    println(to_string(Flag(true)))
+    println(to_string(Flag(false)))
+    println(to_string(Wrapped(Meters(3))))
+    println(to_string(Held(Square(4))))
+    println(to_string(Box(5)))
+    println(to_string(Box("s")))
+    -- top level, niches (and a niche-shaped type that is boxed)
+    println(to_string(MaybeName.Named("x")))
+    println(to_string(MaybeName.NoName))
+    println(to_string(MaybeN.SomeN(-5)))
+    println(to_string(MaybeN.NoN))
+    println(to_string(MaybeS.SomeS(Circle(2))))
+    println(to_string(MaybeS.NoS))
+    println(to_string(MaybeF.SomeF(1.5)))
+    println(to_string(MaybeF.NoF))
+    -- nested in prelude containers
+    println(to_string([Meters(1), Meters(2)]))
+    println(to_string([MaybeName.NoName, MaybeName.Named("y")]))
+    println(to_string([[Meters(1)], []]))
+    println(to_string(Some(Meters(3))))
+    println(to_string(Some(MaybeName.NoName)))
+    println(to_string([Some(Meters(2)), None]))
+    println(to_string((Meters(4), MaybeName.Named("z"))))
+    let ok : Result(Meters, String) = Ok(Meters(1))
+    println(to_string(ok))
+    let ok_niche : Result(MaybeN, String) = Ok(MaybeN.NoN)
+    println(to_string(ok_niche))
+    -- nested in a boxed constructor and a declared record
+    println(to_string(Pair(Meters(5), MaybeName.NoName)))
+    println(to_string(Node(Leaf, Meters(1), Node(Leaf, Meters(2), Leaf))))
+    let r : Rec = { m: Meters(6), n: MaybeName.Named("w") }
+    println(to_string(r))
+    -- interpolation, inspect, ~H
+    let w = Wrapped(Meters(11))
+    println("w=${w} n=${MaybeName.NoName}")
+    println(inspect(Meters(8)))
+    println(inspect(MaybeName.NoName))
+    let n = MaybeName.Named("<b>")
+    println(IOList.to_string(~H"<p>${w} ${n} ${MaybeName.NoName}</p>"))
+  end
+end

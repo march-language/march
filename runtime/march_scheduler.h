@@ -1129,6 +1129,17 @@ extern volatile _Thread_local int64_t march_tls_reductions;
  * re-read rather than cached in a register across a signal delivery point. */
 extern volatile int64_t march_preempt_request;
 
+/* Every C-side write of march_preempt_request goes through this: a relaxed
+ * atomic store, which on arm64/x86-64 is the same single store instruction
+ * as the plain volatile one (no fence), but is not a data race in the C11
+ * sense.  The writers are the preemption signal handler, the yield path and
+ * cancellation, on different threads.  A plain store there is a race TSAN
+ * reports, and a report raised INSIDE the signal handler can self-deadlock
+ * TSAN (specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md).  Compiled
+ * code's `load volatile` read is uninstrumented and stays as it is. */
+#define MARCH_PREEMPT_REQUEST_SET(v) \
+    __atomic_store_n(&march_preempt_request, (int64_t)(v), __ATOMIC_RELAXED)
+
 /* Called by compiled code when march_preempt_request is set.
  * Clears the request, refills the reduction budget, and cooperatively yields
  * back to the scheduler via march_sched_yield(). No-op outside a

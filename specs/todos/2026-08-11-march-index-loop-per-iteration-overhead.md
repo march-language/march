@@ -129,3 +129,62 @@ loop is the volatile preempt load and the `march_incrc_local` calls, i.e. direct
 and 4. Do not retry direction 3 expecting a speedup; it could still be worth doing for
 IR readability or to drop the `stacksave`/`stackrestore` pair at `--opt 0`, but that
 is a separate (unmeasured) motive.
+
+## Re-measured 2026-10-11; direction 2 done for SIMD loads
+
+Fresh `--emit-llvm --opt 2` of `bench/simd_kernels.march` on origin/main
+(a937a9c0b), then `clang -O2` on that IR to see what survives the optimizer.
+
+**`dot_loop` (top-level self-TCO SIMD loop), before:** the length calls are
+hoisted (direction 1) and the `$t`/`%va` slots are promoted, but per iteration
+it still had the volatile `march_preempt_request` load + branch, a
+`stacksave`/`stackrestore` pair, and an inlined `__march_rc_incrc_local` on
+EACH array (a `march_gc_trace_state` load plus an `atomicrmw add`).
+
+The incrc was not borrow inference failing on a forwarded parameter. It was a
+classification bug in `Borrow.is_simd_builtin`: `simd_<lane>_load` was excluded
+from the "SIMD builtins borrow" rule together with `_store`, so its array
+argument was OWNED, while its lowering (`Llvm_emit_simd`'s `load` arm: bounds
+check + plain vector load) never releases it. Perceus dup'd the array before
+every load and nothing dropped the dup, so the array's RC grew by one per
+iteration and it was never freed. A loop that makes a 1 MB `f32` array 400
+times and SIMD-sums each peaked at 411 MB RSS; 8 MB after the fix.
+
+**Fix:** `_load` borrows its array; `_store` stays owned (it consumes the
+array FBIP-style, and borrowing it is what broke `simd_vector_mem` in #498).
+`dot_loop` now has no RC op at all. Pinned by codegen test "simd load borrows
+its array".
+
+**Numbers.** Same box, origin/main compiler vs patched, `--compile --opt 2`,
+11 interleaved rounds after a discarded warmup round, medians (min). Load
+average 55-78 throughout, from other sessions:
+
+| leg | base | patched |
+|---|---|---|
+| dot_simd | 4.29 (2.73) ms | 1.35 (1.32) ms |
+| scan_simd | 4.61 (4.08) ms | 3.63 (3.29) ms |
+| dot_composed | 0.55 (0.48) ms | 0.64 (0.49) ms |
+| scan_scalar | 59.2 (52.7) ms | 55.1 (53.1) ms |
+
+`fib`, `list_ops`, `binary_trees`, `tree_transform`, `array_numeric`,
+`heapsort` and `mergesort` emit byte-identical IR before and after, so they
+cannot regress; their timings moved only within the load noise.
+
+### What per-iteration overhead is left
+
+1. **The preemption check** (volatile load + branch) in every TCO loop. This is
+   the remaining cost in `dot_loop`. The TLS throttle counter stays rejected
+   (+65% on fib). In-register reduction counting is still untried and is a
+   design decision with a fib/benchmark matrix of its own.
+2. **`stacksave`/`stackrestore`**: cheap at `--opt 2` (direction 3 measured
+   nothing).
+3. **Scalar element reads are real C calls.** `NativeArray.get_f32` /
+   `get_u8` lower to `call @native_f32_arr_get` / `@native_u8_arr_get` per
+   element (see `dot_tail`, `scan_scalar`). Inlining them like the SIMD load
+   (bounds check + GEP + load) is the next candidate for scalar index loops.
+4. **Closure-captured index loops churn RC on `$clo`.** `scan_scalar`'s nested
+   `go` (captures `hay`, `n`, `needle`) does, per iteration, an incrc of
+   `$clo`, `march_decrc_freed($clo)` after unpacking its fields, and incrc/decrc
+   on the captured array: about 4 atomic RC ops per byte. The top-level
+   `pfn` form has none of this. Making a self-TCO closure's `$clo` borrowed
+   inside its own loop is a Perceus change, not a codegen one.

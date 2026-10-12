@@ -29,6 +29,12 @@ git log is authoritative for exact commits.
   the scheme literally (`href="https://${host}/"`) are unaffected.
   Any app that renders links from `~H` templates with an interpolated scheme
   should be rebuilt; a template the check now rejects was exploitable.
+- **`~H` no longer lets an interpolated path segment climb out of its
+  directory.** In `href="/users/${id}/edit"`, a value of `..` rendered
+  `/users/../edit`, which the browser resolves to `/edit`; the same held for
+  `src`, `action` and every other URL attribute. A path hole whose value is
+  nothing but dots is now replaced with an inert token. Query and fragment
+  holes are unaffected (`?q=..` still renders `..`).
 
 ### Added
 - **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**
@@ -617,6 +623,25 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled `to_string` prints single-constructor and option-like types like
+  the interpreter.** For `type Meters = Meters(Int)` and
+  `type MaybeName = NoName | Named(String)` declared in the entry module,
+  compiled code printed `7` for `Meters(7)`, `x` for `Named("x")` and `nil`
+  for `NoName`. They now print `Meters(7)`, `Named("x")` and `NoName`, also
+  inside lists, options, tuples, constructor and record fields, string
+  interpolation, `inspect` and `~H`. Still wrong: such a value inside a field
+  of your own generic type (`Box(Meters(9))` prints `Box(9)`).
+- **`Some(NoName)` is no longer `None` (compiled).** For a type shaped like
+  `NoName | Named(String)`, compiled code stored `Some(NoName)` as the same
+  value as `None`, so a match took the `None` branch. An `Option` over such a
+  type is now stored as a heap cell. A recursive type of that shape
+  (`End | Link(Chain)`) inside an `Option` also no longer hangs the compiler.
+- **`forge publish` no longer demands a major version for a rename.**
+  Renaming a function parameter or a type variable used to read as a breaking
+  signature change. Signatures are now compared by structure, so those are a
+  patch. The comparison also became stricter in two places it was blind:
+  adding a parameter to a type (`Box(a)` -> `Box(a, b)`) and making a type's
+  constructors private (`opaque type`) now require a major bump.
 - **A top-level function named like a stdlib callback parameter is called
   correctly when compiled.** Declaring your own `f` and calling it from a lambda
   passed to `List.map` (whose callback parameter is also `f`) called the
@@ -652,6 +677,24 @@ git log is authoritative for exact commits.
   the actor stuck in a slow call with work piling up was missed. Both functions
   now count those messages, through the new `mailbox_backlog(pid)`.
   `mailbox_size` still reports only the queued messages.
+- **`MARCH_SANITIZE=thread` no longer flags the refcount release path as a data race.**
+  The runtime read an object's count with a plain load (to skip immortal static cells)
+  while other threads decremented it atomically; that read is now a relaxed atomic load.
+  The generated machine code is unchanged on arm64.
+- **A NativeArray read with `Simd.load_*` is no longer leaked, and SIMD index
+  loops are faster.** Each load used to add a reference to the array that
+  nothing released, so the array was never freed. It also cost an atomic
+  RC operation on every iteration. `bench/simd_kernels.march`'s `dot_simd`
+  went from 4.3 ms to 1.35 ms (median), and a loop over 400 fresh 1 MB arrays
+  went from 411 MB peak RSS to 8 MB.
+- **`MARCH_SANITIZE=thread` binaries no longer hang with 2+ schedulers.** The
+  preemption signal handler raised TSAN reports (a plain write of the preemption flag,
+  and errno not restored). When TSAN delivered a deferred preemption tick while it was
+  still symbolizing an earlier report on the same green thread, the second report waited
+  on a lock the first one held, and the whole process stopped without printing anything.
+  The handler is now report-free, and the runtime's other benign races (the record-shape
+  memo, the scheduler signal-mask record) are relaxed atomics. Plain builds compile to
+  the same instructions.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

@@ -388,6 +388,18 @@ let rec niche_payload_ok (t : table) (ty : Tir.ty) : bool =
      the boxed None (non-null) decoded as Some, so `send(dead_pid, M)`
      appeared delivered compiled while the interpreter said None. *)
   | Tir.TTuple [] -> false
+  (* A niche-shaped type named WITHOUT its type arguments.  [repr_of] cannot
+     classify it (the niche decision reads the payload from the params) and
+     answers Boxed, but its values are niche-encoded all the same: a
+     non-generic one by [niche_repr_of_concrete], an erased generic one by
+     the TVar convention.  Its nullary constructor is raw 0, so it is a
+     nested niche exactly like the arm below rejects: `Some(NoName)` was
+     encoded as raw 0 and matched as `None`.  Answered without asking whether
+     the inner type really is a niche (that question recurses through its
+     payload, which for a recursive type never ends): the cost of a false
+     "no" is a boxed outer Option, which every encode and decode site agrees
+     on because they all ask this function. *)
+  | Tir.TCon (name, []) when is_niche_shaped t name -> false
   | Tir.TCon _ ->
     (match repr_of t ty with
      | Niche _  -> false  (* nested niche: Some(None)=0=None *)

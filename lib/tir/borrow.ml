@@ -516,17 +516,24 @@ let is_simd_builtin (fn_name : string) : bool =
   let p = "simd_" in
   String.length fn_name > String.length p
   && String.sub fn_name 0 (String.length p) = p
-  (* …except the two that touch a NativeArray rather than only vectors.
-     [simd_<lane>_load] reads lanes out of an array and [_store] writes them
-     back; their FIRST parameter is that array, and the array's ownership is
-     the array builtins' story, not this one.  Classifying it borrowed moved
-     the release of a live array to its last syntactic use and broke
-     simd_vector_mem ("native_f32_arr_get: index 2 out of bounds (len=0)"),
-     simd_vector_core and native_arr_map_inline_vectorize.  The vector operand
-     they also take is the one this rule is about, and it is not the leak this
-     closes: a vector reaching an array builtin is stored lane-wise, never
-     boxed. *)
-  && not (ends_with ~suffix:"_load" fn_name)
+  (* …except [simd_<lane>_store], which CONSUMES its array: it follows the
+     FBIP contract of [native_f32_arr_set] (rc==1 -> store in place and hand
+     the same array back; rc>1 -> copy and release the original), so its
+     first parameter is owned.  Classifying it borrowed made the caller drop
+     an array the store had already handed back, and broke simd_vector_mem
+     ("native_f32_arr_get: index 2 out of bounds (len=0)"), simd_vector_core
+     and native_arr_map_inline_vectorize.
+
+     [simd_<lane>_load] is NOT excluded: it lowers to a bounds check and a
+     plain vector load ([Llvm_emit_simd]'s "load" arm) that neither stores
+     nor frees the array, exactly like [native_<w>_arr_get] in
+     [extern_borrow_table].  It was excluded together with [_store] until
+     2026-10-11, and owned-but-never-released meant Perceus dup'd the array
+     before every load and nothing dropped it: a +1 atomic RC op per load in
+     every index loop (the per-iteration overhead of
+     specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md) and an
+     array that could never be freed once loaded from.  Guard: the
+     codegen test "simd load borrows its array". *)
   && not (ends_with ~suffix:"_store" fn_name)
 
 (** Builtins with a heap ([ptr]) parameter that are deliberately OWNED: each

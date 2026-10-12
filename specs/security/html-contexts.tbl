@@ -103,6 +103,8 @@ beforeattrvalue,*,*,* | lit:"'"         |  | attrvalue,=,=,single     |
 beforeattrvalue,*,url,* | interp                  | "\"" | attrvalue,=,urlschemehole,doublesubst |
 beforeattrvalue,*,url,* | lit:"&#"                |  | attrvalue,=,urlscheme,unquoted |
 beforeattrvalue,*,url,* | cls:[a-zA-Z0-9+.&;-]    |  | attrvalue,=,urlscheme,unquoted |
+beforeattrvalue,*,url,* | lit:"?"                 |  | attrvalue,=,urlquery,unquoted |
+beforeattrvalue,*,url,* | lit:"#"                 |  | attrvalue,=,urlfragment,unquoted |
 beforeattrvalue,*,url,* | any                     |  | attrvalue,=,urlmid,unquoted   |
 beforeattrvalue,*,*,* | interp          | "\"" | attrvalue,=,=,doublesubst |
 beforeattrvalue,*,*,* | any             |  | attrvalue,=,=,unquoted   |
@@ -167,11 +169,15 @@ attrvalue,*,url,*              | interp                  |  | =,=,urlschemehole,
 attrvalue,*,url,*              | cls+:[ \t\r\n]          |  | =,=,=,=                |
 attrvalue,*,url,*              | lit:"&#"                |  | =,=,urlscheme,=        |
 attrvalue,*,url,*              | cls:[a-zA-Z0-9+.&;-]    |  | =,=,urlscheme,=        |
+attrvalue,*,url,*              | lit:"?"                 |  | =,=,urlquery,=         |
+attrvalue,*,url,*              | lit:"#"                 |  | =,=,urlfragment,=      |
 attrvalue,*,url,*              | any                     |  | =,=,urlmid,=           |
 attrvalue,*,urlscheme,*        | interp                  |  | =,=,urlschemeholemid,= |
 attrvalue,*,urlscheme,*        | lit:"&#"                |  | =,=,=,=                |
 attrvalue,*,urlscheme,*        | lit:"&"                 |  | =,=,=,=                |
 attrvalue,*,urlscheme,*        | cls+:[a-zA-Z0-9+.;\t\r\n-] |  | =,=,=,=            |
+attrvalue,*,urlscheme,*        | lit:"?"                 |  | =,=,urlquery,=         |
+attrvalue,*,urlscheme,*        | lit:"#"                 |  | =,=,urlfragment,=      |
 attrvalue,*,urlscheme,*        | any                     |  | =,=,urlmid,=           |
 attrvalue,*,urlschemehole,*    | lit:":"                 |  | =,=,=,=                | A literal `:` right after an interpolation at the start of a URL lets the interpolated value choose the URL's scheme: `${s}:` with s = `javascript` passes the scheme allowlist (it has no colon of its own) and then becomes `javascript:`. Build the whole URL first and interpolate it as ONE hole, so the allowlist sees its scheme, or write the scheme literally in the template.
 attrvalue,*,urlschemehole,*    | lit:"&#"                |  | =,=,=,=                | A numeric character reference right after an interpolation at the start of a URL can decode to `:` and let the interpolated value choose the URL's scheme. Write the character literally, or build the whole URL in one interpolation.
@@ -179,6 +185,8 @@ attrvalue,*,urlschemehole,*    | ilit:"&colon;"          |  | =,=,=,=           
 attrvalue,*,urlschemehole,*    | interp                  |  | =,=,=,=                |
 attrvalue,*,urlschemehole,*    | cls+:[\t\r\n]           |  | =,=,=,=                |
 attrvalue,*,urlschemehole,*    | cls:[a-zA-Z0-9+.&;-]    |  | =,=,urlschemeholemid,= |
+attrvalue,*,urlschemehole,*    | lit:"?"                 |  | =,=,urlquery,=         |
+attrvalue,*,urlschemehole,*    | lit:"#"                 |  | =,=,urlfragment,=      |
 attrvalue,*,urlschemehole,*    | any                     |  | =,=,urlmid,=           |
 attrvalue,*,urlschemeholemid,* | lit:":"                 |  | =,=,=,=                | A literal `:` after an interpolation that is still part of the URL's scheme lets the interpolated value choose the scheme: `java${s}:` with s = `script` renders `javascript:`. Build the whole URL in one interpolation so the scheme allowlist sees it, or write the scheme literally in the template.
 attrvalue,*,urlschemeholemid,* | lit:"&#"                |  | =,=,=,=                | A numeric character reference after an interpolation that is still part of the URL's scheme can decode to `:` and let the interpolated value choose the scheme. Write the character literally, or build the whole URL in one interpolation.
@@ -189,7 +197,39 @@ attrvalue,*,urlschemeholemid,* | interp                  |  | =,=,=,=           
 # rows would never see the reference.
 attrvalue,*,urlschemeholemid,* | lit:"&"                 |  | =,=,=,=                |
 attrvalue,*,urlschemeholemid,* | cls+:[a-zA-Z0-9+.;\t\r\n-] |  | =,=,=,=            |
+attrvalue,*,urlschemeholemid,* | lit:"?"                 |  | =,=,urlquery,=         |
+attrvalue,*,urlschemeholemid,* | lit:"#"                 |  | =,=,urlfragment,=      |
 attrvalue,*,urlschemeholemid,* | any                     |  | =,=,urlmid,=           |
+
+# -- URL path vs query vs fragment (must precede the generic `any`) --
+# Once the scheme is settled, a hole is a percent-encoded component wherever it
+# sits, so it can never write a `/`, `?`, `#`, `@` or `:` of its own. What the
+# component escaper does NOT stop is a value of nothing but dots: in a PATH it
+# fills a segment and becomes a dot segment, so
+#   href="/users/${id}/edit"   with id = `..`
+# renders `/users/../edit`, which the URL parser resolves to `/edit` -- a
+# client-side path traversal for every attribute that fetches (`src`,
+# `action`, `ping`, ...). Percent-encoding cannot fix it, because the URL
+# parser reads `%2e` as `.` when it removes dot segments, so path holes get
+# their own escaper (`url_path`) that replaces an all-dot value outright. A
+# dot segment means nothing in a query or fragment, and `?q=..` is honest
+# data, so those positions are tracked separately and keep the plain component
+# escaper. `urlmid` is therefore the PATH (or authority) position.
+#
+# The literal `?` / `#` is the only way in. An entity spelling of either
+# (`&#63;`) leaves the walk in the path, which costs an honest query value of
+# `..` its dots -- the over-strict direction. A hole can never move the walk,
+# because the escapers encode both characters.
+#
+# The `&#` rows come FIRST, and are not decoration: the `#` of a numeric
+# character reference is not a fragment delimiter. Without them
+# `href="/a/&#46;${x}/b"` would read as a fragment, give the hole the plain
+# component escaper, and render `/a/../b` for x = `.`.
+attrvalue,*,urlmid,*           | lit:"&#"                |  | =,=,=,=                |
+attrvalue,*,urlquery,*         | lit:"&#"                |  | =,=,=,=                |
+attrvalue,*,urlmid,*           | lit:"?"                 |  | =,=,urlquery,=         |
+attrvalue,*,urlmid,*           | lit:"#"                 |  | =,=,urlfragment,=      |
+attrvalue,*,urlquery,*         | lit:"#"                 |  | =,=,urlfragment,=      |
 
 # -- CSS url() gets its own context --
 # A hole inside url(...) is a URL, not a CSS value. Escaping it as CSS mangles
