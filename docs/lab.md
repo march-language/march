@@ -158,8 +158,9 @@ What the lab has found so far, each filed with its repro:
   ever, nearly always in certificate mode and occasionally with a shared secret.
 - [`2026-10-05-lab-leaderless-agents-leak.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-leaderless-agents-leak.md):
   with no leader, every node grows by ~13k heap objects a second with no traffic at all.
-- [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-simultaneous-restart-memory-burst.md):
-  nodes restarted together can each allocate ~1 GB in 30 s and be OOM-killed.
+- [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-simultaneous-restart-memory-burst.md)
+  (fixed): nodes restarted together could each allocate ~1 GB in 30 s and be OOM-killed,
+  a leak on every cluster message; the two-node scenario `control_restart_together` guards it.
 - [`2026-10-04-lab-control-topology-step-races-report.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-04-lab-control-topology-step-races-report.md):
   a release's topology step halts when the Agent checks the node's report before the
   placement loop has re-read the topology.

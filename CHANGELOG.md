@@ -739,6 +739,15 @@ git log is authoritative for exact commits.
   frame-pointer walk (image-relative on macOS, for `lldb <binary>` and
   `image lookup -a`), then exits with the same status. Set
   `MARCH_FATAL_BACKTRACE=1` to also print symbol names.
+- **Cluster nodes started or restarted together no longer run out of
+  memory.** Nodes of a topology app that started at the same moment (a
+  `forge deploy`, or restarting every host) could each allocate about 1 GB of
+  heap within a minute and be OOM-killed. The cause was a leak on every
+  cluster message, already fixed by the colliding-type drop fix below
+  (`Msgpack.Value` frames are now freed with their payload). A new two-node
+  scenario, `control_restart_together`, starts and then restarts three nodes
+  together under session traffic and fails if any node's heap passes 400,000
+  objects.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a
