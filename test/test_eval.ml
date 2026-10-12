@@ -1676,7 +1676,9 @@ let test_repl_pretty_record () =
   let v = March_eval.Eval.VRecord [("name", March_eval.Eval.VString "Alice");
                                     ("age",  March_eval.Eval.VInt 30)] in
   let s = March_eval.Eval.value_to_string_pretty v in
-  Alcotest.(check string) "record" {|{ name: "Alice", age: 30 }|} s
+  (* Fields print sorted by name, matching compiled code, not in the order
+     the record was built. *)
+  Alcotest.(check string) "record" {|{ age: 30, name: "Alice" }|} s
 
 (** value_to_string_pretty: depth truncation *)
 let test_repl_pretty_depth_truncation () =

@@ -48,6 +48,10 @@ val vault_shard_for : string -> vault_shard array -> vault_shard
 val is_list_value : value -> bool
 val list_elems : value list -> value -> value list
 val display_tag : string -> string
+
+(** A record's fields in display order: sorted by field name, the order the
+    compiled backend lays them out in. *)
+val sorted_record_fields : (string * 'a) list -> (string * 'a) list
 val value_to_string : value -> string
 val value_display : value -> string
 val show_dispatch : value -> string

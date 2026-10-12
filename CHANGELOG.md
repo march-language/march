@@ -636,6 +636,13 @@ git log is authoritative for exact commits.
   `println(Some({ a: 1 }))` used to fail to compile with "ambiguous
   interface-method call to `show`". They now print `[{ a: 1 }]` and
   `Some({ a: 1 })`, the same as the interpreter.
+- **The interpreter prints record fields sorted by name, the same as compiled
+  code.** `to_string({ z: 1, y: 2 })` printed `{ z: 1, y: 2 }` interpreted
+  and `{ y: 2, z: 1 }` compiled. Two values of one record type could also
+  print in different orders, depending on how each literal was written. Both
+  backends, `println`, string interpolation, `inspect` and the REPL now
+  print `{ y: 2, z: 1 }`. Only the display changed: fields are still
+  evaluated in the order you write them.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,

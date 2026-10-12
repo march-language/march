@@ -11605,6 +11605,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/to_string_anon_record_container.expected native_to_string_anon_record_container.interp.out)))
 
+; ── Record fields print sorted by name in both backends ─────────────────
+; The interpreter printed a record in the order its literal wrote it; compiled
+; code prints fields sorted.  Literals written unsorted.  Interpreted AND
+; compiled against the same .expected. ──
+(rule
+ (targets native_to_string_record_order native_to_string_record_order.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/to_string_record_order.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_record_order
+        native/to_string_record_order.march)
+   (with-stdout-to native_to_string_record_order.out
+        (system "./native_to_string_record_order")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_record_order.expected native_to_string_record_order.out)))
+
+(rule
+ (targets native_to_string_record_order.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/to_string_record_order.march))
+ (action
+  (with-stdout-to native_to_string_record_order.interp.out
+   (run %{exe:../bin/main.exe} native/to_string_record_order.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_record_order.expected native_to_string_record_order.interp.out)))
+
 ; ── An Option over a niche-shaped type must not be a niche itself ─────
 ; `Some(NoName)` was encoded as raw 0 and matched as `None`; a recursive
 ; niche-shaped payload hung the compiler.  Interpreted AND compiled against

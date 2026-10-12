@@ -1,4 +1,4 @@
-`[P3]` - [ ] **Record printing: field order differs between interpreter and compiled; an undeclared record inside a List/Option does not compile.**
+`[P3]` - [x] **Record printing: field order differs between interpreter and compiled; an undeclared record inside a List/Option does not compile.**
 
 Filed 2026-10-11 while fixing
 `specs/progress/2026-10-11-compiled-to-string-anonymous-record.md`.
@@ -23,6 +23,29 @@ the static type (`TRecord`) is sorted, so compiled code cannot recover the
 literal order. Needs a decision: make the interpreter print records sorted
 (or in declaration order for a declared type, which compiled code could
 match from the `TDRecord`), or carry the order at run time.
+
+**Fixed 2026-10-12: the interpreter prints fields sorted by name.** That is
+the only order compiled code can produce for every record. A declared
+record's declaration order would not cover an undeclared one, and carrying
+the order at run time would cost a word per record. Sorting by name also
+makes two values of one type print the same way. No document under
+`specs/lang/` specifies a record display order, so nothing there needed to
+change.
+
+`Eval_runtime.value_to_string` (which `to_string`, `println`, interpolation
+and `inspect` all reach) and the REPL pretty-printer
+(`Eval.value_to_string_pretty`) both go through the new
+`sorted_record_fields`, a stable sort by field name. Field values are still
+evaluated in literal order. Only the display changed.
+
+Goldens: one golden depended on literal order. `test_eval`'s
+`test_repl_pretty_record` built `[name; age]` and expected
+`{ name: "Alice", age: 30 }`. It now expects `{ age: 30, name: "Alice" }`.
+`test/native/actor_inspect_state.expected` prints its state record unsorted,
+but it is compiled-only and uses the observe plane's own state formatter,
+which this change does not touch. The record-print fixture
+`test/native/to_string_record_order.march` writes literals unsorted and
+checks that the interpreter and compiled code print the same thing.
 
 ## 2. Undeclared record inside a prelude container
 

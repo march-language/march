@@ -90,6 +90,10 @@ let display_tag (tag : string) : string =
   | Some i -> String.sub tag (i + 1) (String.length tag - i - 1)
   | None -> tag
 
+(** A record's fields in display order: sorted by field name (stable). *)
+let sorted_record_fields (fields : (string * 'a) list) : (string * 'a) list =
+  List.stable_sort (fun (a, _) (b, _) -> String.compare a b) fields
+
 let rec value_to_string v =
   match v with
   | VInt n    -> string_of_int n
@@ -104,8 +108,14 @@ let rec value_to_string v =
   | VTuple vs ->
     "(" ^ String.concat ", " (List.map value_to_string vs) ^ ")"
   | VRecord fields ->
+    (* Fields print sorted by name, whatever order the literal wrote them in:
+       compiled code lays a record out sorted by field name and has no other
+       order to recover, so this is the only order both backends can agree
+       on, and two values of one type no longer print differently.
+       specs/progress/2026-10-11-record-print-order-and-anon-record-show.md *)
     "{ " ^ String.concat ", "
-      (List.map (fun (k, v) -> k ^ ": " ^ value_to_string v) fields)
+      (List.map (fun (k, v) -> k ^ ": " ^ value_to_string v)
+         (sorted_record_fields fields))
     ^ " }"
   | VCon ("Nil", []) -> "[]"
   | VCon ("Cons", _) as v when is_list_value v ->
