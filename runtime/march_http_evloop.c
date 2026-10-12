@@ -23,6 +23,7 @@
 #include "march_http.h"
 #include "march_http_parse_simd.h"
 #include "march_http_response.h"
+#include "march_scheduler.h"   /* march_sched_run_on_sched_stack */
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -654,6 +655,47 @@ static void *evloop_run(void *arg) {
 
 /* ── Public API: start the event-loop server ──────────────────────────── */
 
+typedef struct {
+    pthread_t *threads;
+    int        nthreads;
+    int        port;
+    void      *pipeline;
+    int        started;    /* out */
+} evloop_spawn_t;
+
+/* Open the listeners and start the event-loop threads.  Runs on the
+ * scheduler's NATIVE stack (march_sched_run_on_sched_stack): the caller,
+ * march_http_server_listen, is a green thread, and under ASAN pthread_create
+ * runs with every signal blocked, so a lazy green-stack growth fault inside
+ * it is fatal (silent exit 139; see march_sched_getaddrinfo's resolver spawn
+ * in march_scheduler.c). */
+static void evloop_spawn_all(void *argp) {
+    evloop_spawn_t *s = (evloop_spawn_t *)argp;
+    s->started = 0;
+    for (int i = 0; i < s->nthreads; i++) {
+        int lfd = create_reuseport_listener(s->port);
+        if (lfd < 0) {
+            fprintf(stderr, "march: SO_REUSEPORT listener[%d] failed: %s\n",
+                    i, strerror(errno));
+            continue;
+        }
+
+        evloop_thread_arg_t *arg = malloc(sizeof(evloop_thread_arg_t));
+        if (!arg) { close(lfd); continue; }
+        arg->listener_fd = lfd;
+        arg->pipeline    = s->pipeline;
+
+        if (pthread_create(&s->threads[s->started], NULL, evloop_run, arg) != 0) {
+            fprintf(stderr, "march: evloop thread[%d] create failed: %s\n",
+                    i, strerror(errno));
+            free(arg);
+            close(lfd);
+            continue;
+        }
+        s->started++;
+    }
+}
+
 void march_evloop_server_listen(int port, void *pipeline) {
     long ncpus = sysconf(_SC_NPROCESSORS_ONLN);
     if (ncpus <= 0) ncpus = 4;
@@ -668,29 +710,9 @@ void march_evloop_server_listen(int port, void *pipeline) {
         return;
     }
 
-    int started = 0;
-    for (int i = 0; i < nthreads; i++) {
-        int lfd = create_reuseport_listener(port);
-        if (lfd < 0) {
-            fprintf(stderr, "march: SO_REUSEPORT listener[%d] failed: %s\n",
-                    i, strerror(errno));
-            continue;
-        }
-
-        evloop_thread_arg_t *arg = malloc(sizeof(evloop_thread_arg_t));
-        if (!arg) { close(lfd); continue; }
-        arg->listener_fd = lfd;
-        arg->pipeline    = pipeline;
-
-        if (pthread_create(&threads[started], NULL, evloop_run, arg) != 0) {
-            fprintf(stderr, "march: evloop thread[%d] create failed: %s\n",
-                    i, strerror(errno));
-            free(arg);
-            close(lfd);
-            continue;
-        }
-        started++;
-    }
+    evloop_spawn_t spawn = { threads, nthreads, port, pipeline, 0 };
+    march_sched_run_on_sched_stack(evloop_spawn_all, &spawn);
+    int started = spawn.started;
 
     if (started == 0) {
         fprintf(stderr, "march: no event-loop threads started — falling back\n");

@@ -17512,6 +17512,90 @@ let test_curried_lambda_pair_then_arg_ok () =
   end|} in
   Alcotest.(check bool) "(pair) -> Int -> Int: no error" false (has_errors ctx)
 
+(* Callback call-arity (2026-10-12, specs/progress/2026-10-12-two-arg-fn-
+   accepted-as-curried.md): `fn add(a, b)` and `fn a -> fn b -> …` share the
+   curried type `a -> b -> c`, but a closure is always called with exactly the
+   arguments at the call site, so passing one where the callee applies its
+   parameter the other way typechecked and then failed at runtime. *)
+let callarity_prelude = {|
+    pfn ap2(f, x, y) do
+      let g = f(x)
+      g(y)
+    end
+    pfn both(f, x, y) do f(x, y) end
+    pfn add(a : Int, b : Int) : Int do a + b end
+|}
+
+let test_callarity_two_arg_fn_to_curried_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do ap2(add, 1, 2) end
+  end|}) in
+  Alcotest.(check bool) "named 2-arg fn as curried: error" true
+    (has_error_with ctx "`add` takes 2 arguments, but `ap2` calls its parameter `f` with 1 argument");
+  Alcotest.(check bool) "suggests a curried wrapper" true
+    (has_error_with ctx "fn a -> fn b -> add(a, b)")
+
+let test_callarity_two_arg_lambda_to_curried_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do ap2(fn (a, b) -> a + b, 1, 2) end
+  end|}) in
+  Alcotest.(check bool) "2-arg lambda as curried: error" true
+    (has_error_with ctx "This lambda takes 2 arguments, but `ap2` calls")
+
+let test_callarity_curried_lambda_to_two_arg_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do both(fn a -> fn b -> a + b, 1, 2) end
+  end|}) in
+  Alcotest.(check bool) "curried lambda called with 2 args: error" true
+    (has_error_with ctx "This lambda takes 1 argument, but `both` calls its parameter `f` with 2 arguments")
+
+(* The Map.insert shape: the parameter is only applied inside a helper it is
+   handed to, from inside a lambda. *)
+let test_callarity_inherited_through_helper_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    pfn cmp_eq(cmp, a, b) do
+      let ab = cmp(a)
+      not ab(b)
+    end
+    fn ins(x : Int, cmp) do
+      let eq = fn (a, b) -> cmp_eq(cmp, a, b)
+      eq(x, x)
+    end
+    pfn lt(a : Int, b : Int) : Bool do a < b end
+    fn main() : Bool do
+      let lt2 = fn (a, b) -> a < b
+      ins(1, lt) && ins(2, lt2)
+    end
+  end|}) in
+  Alcotest.(check bool) "named fn through helper: error" true
+    (has_error_with ctx "`lt` takes 2 arguments, but `ins` calls its parameter `cmp` with 1 argument");
+  Alcotest.(check bool) "let-bound lambda through helper: error" true
+    (has_error_with ctx "`lt2` (a lambda) takes 2 arguments")
+
+let test_callarity_matching_shapes_ok () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    pfn add_c(a : Int) do fn b -> a + b end
+    fn main() : Int do
+      ap2(fn a -> fn b -> a + b, 1, 2) + ap2(add_c, 1, 2)
+        + both(add, 1, 2) + both(fn (a, b) -> a + b, 1, 2)
+    end
+  end|}) in
+  Alcotest.(check bool) "matching callback arities: no error" false (has_errors ctx)
+
+(* A parameter rebound before it is applied is a different value: its calls
+   say nothing about the argument. *)
+let test_callarity_shadowed_param_ignored () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    pfn shadow(f, x) do
+      let f = fn a -> fn b -> a + b
+      let g = f(x)
+      g(x)
+    end
+    fn main() : Int do shadow(add, 1) end
+  end|}) in
+  Alcotest.(check bool) "shadowed parameter: no callback-arity error" false
+    (has_error_with ctx "calls its parameter")
+
 let compiler_suites =
   [
       sigil_interp_suite;
@@ -18739,6 +18823,14 @@ let compiler_suites =
         ] );
       ( "sha256_builtin_type", [
           Alcotest.test_case "sha256(Bytes) : String, not Bytes"               `Quick test_sha256_builtin_returns_string;
+        ] );
+      ( "callback_call_arity", [
+          Alcotest.test_case "2-arg fn where applied curried: error"            `Quick test_callarity_two_arg_fn_to_curried_errors;
+          Alcotest.test_case "2-arg lambda where applied curried: error"        `Quick test_callarity_two_arg_lambda_to_curried_errors;
+          Alcotest.test_case "curried lambda where applied to 2 args: error"   `Quick test_callarity_curried_lambda_to_two_arg_errors;
+          Alcotest.test_case "inherited through a helper (Map.insert): error"   `Quick test_callarity_inherited_through_helper_errors;
+          Alcotest.test_case "matching shapes: no error"                        `Quick test_callarity_matching_shapes_ok;
+          Alcotest.test_case "shadowed parameter: ignored"                      `Quick test_callarity_shadowed_param_ignored;
         ] );
       ( "curried_lambda_over_tuple", [
           Alcotest.test_case "fn (_, w) over a pair (silent case): error"       `Quick test_curried_lambda_over_pair_silent_case_errors;

@@ -1,0 +1,63 @@
+-- `tcp_connect` to a hostname resolves it from a green thread.
+--
+-- With preemption on (always, once the scheduler runs) the lookup goes to a
+-- helper OS thread while the calling green thread parks
+-- (march_sched_getaddrinfo). The helper used to be created with pthread_create
+-- ON the green thread's stack. Under ASAN, pthread_create runs with every
+-- signal blocked, so if glibc's allocate_stack (or ASAN's allocator under it)
+-- touched a green-stack page not yet grown, the growth fault could not be
+-- delivered and the kernel killed the process: a silent SIGSEGV, the same
+-- failure as the blocking-FFI pool
+-- (specs/progress/2026-10-12-asan-getaddrinfo-helper-thread-spawn.md). The
+-- helper is now created on the scheduler's native stack
+-- (march_sched_run_on_sched_stack).
+--
+-- `localhost`, not a numeric address, so the resolver really runs. The port
+-- has no listener, so every dial ends "refused" -- AFTER a successful lookup
+-- (a failed lookup says "getaddrinfo failed"). The lookups start at many
+-- depths into fresh green stacks, so some of them start near the edge of the
+-- grown part of the stack.
+mod GetaddrinfoGreenThread do
+  needs IO
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+
+  -- 1 if dialling localhost:[port] resolved and was refused, else 0.
+  pfn dial(port : Int) : Int do
+    match tcp_connect("localhost", port) do
+      Ok(fd) ->
+        tcp_close(fd)
+        0
+      Err(e) -> if String.contains(e, "refused") do 1 else 0 end
+    end
+  end
+
+  -- dial(port), called [length(xs)] frames down.
+  pfn at_depth(xs : List(Int), port : Int) : Int do
+    match xs do
+      Nil -> dial(port)
+      Cons(x, rest) ->
+        let r = at_depth(rest, port)
+        if r > x do r else r end
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    -- A port nothing listens on: bind one, learn its number, close it.
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("port: " ++ e)
+    end
+    tcp_close(listen_fd)
+    println("main: " ++ int_to_string(dial(port)) ++ "/1")
+    let tasks = List.map(List.range(0, 160), fn d -> task_spawn(fn _ -> at_depth(List.range(0, d), port)))
+    let total = List.fold_left(tasks, 0, fn (acc, t) -> acc + task_await_unwrap(t))
+    println("tasks: " ++ int_to_string(total) ++ "/160")
+  end
+end
