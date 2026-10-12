@@ -612,6 +612,75 @@ let test_cluster_segments () =
   Alcotest.(check string) "nothing to do" "" (seg [ pp "a" P.Nothing false; pp "b" (P.Blocked [ "x" ]) false ]);
   Alcotest.(check string) "a placement push alone" "release[]+topology" (seg [ pp "a" P.Placement true ])
 
+(** A first deploy whose restarts succeed and whose release then halts
+    records the restarted build (2026-10-05 lab finding): the retry's plan
+    sees it deployed and only sends the release again, instead of planning a
+    first deploy and restarting every node a second time. *)
+let test_cluster_halted_release_records_restarts () =
+  let dir = Filename.temp_dir "deploy_resume_" "" in
+  let deploy = Filename.concat dir "deploy" in
+  let mpath = Filename.concat dir "patch.so.hcr_manifest" in
+  Out_channel.with_open_bin mpath (fun oc ->
+      Printf.fprintf oc "# march-hcr-manifest v2\n# cas_hash c\n# target linux/arm64\n# hcr_abi %s\n# module_prefix App\n%s"
+        abi_arm (String.concat "" (List.map (fun (f : Cmd_deploy_hot.fn_manifest) ->
+            Printf.sprintf "%s %s %s caps=\n" f.fn_name f.fn_impl_hash f.fn_sig_hash) base_fns)));
+  let parse path = match Cmd_deploy_hot.parse_manifest path with
+    | Ok m -> m | Error e -> Alcotest.failf "manifest %s: %s" path e in
+  let nw = parse mpath in
+  let show segs =
+    String.concat " | " (List.map (function
+        | Cmd_deploy.Release { pools; topology } ->
+          "release[" ^ String.concat "," (List.map (fun (x : P.pool_plan) -> x.pp_pool) pools) ^ "]" ^ (if topology then "+topology" else "")
+        | Cmd_deploy.Process (x, _) -> "ssh:" ^ x.pp_pool) segs)
+  in
+  let first = Cmd_deploy.segments (P.classify (input ~old_t:None [ build nw ])) in
+  Alcotest.(check string) "the first deploy" "ssh:back | ssh:front | release[]+topology" (show first);
+  let artifacts = [ { Cmd_deploy.a_build = "shared"; a_target = "linux/arm64"; a_so = Filename.concat dir "patch.so";
+                      a_manifest = nw; a_manifest_path = mpath; a_schemas = Filename.concat dir "none.schemas.json" } ] in
+  let settled = ref [] in
+  let r =
+    Cmd_deploy.run_segments first
+      ~step:(fun _ _ -> function Cmd_deploy.Process _ -> Ok () | Cmd_deploy.Release _ -> Error "the release halted")
+      ~settle:(fun builds ->
+          settled := !settled @ [ builds ];
+          Cmd_deploy.record_builds ~dir:deploy ~artifacts ~restarted:[ "shared" ] builds)
+  in
+  (match r with
+   | Error m -> expect "the deploy fails on the release" m [ "the release halted"; "(3 of 3; this was the last part)" ]
+   | Ok () -> Alcotest.fail "a halted release passed");
+  (* Both pools run build shared: it is deployed once the second restart is done, not before. *)
+  Alcotest.(check (list (list string))) "settled after the restarts" [ [ "shared" ] ] !settled;
+  Alcotest.(check bool) "its base image is recorded" true (Sys.file_exists (Filename.concat deploy "shared.base.json"));
+  let old = parse (Filename.concat deploy "shared.hcr_manifest") in
+  let retry = P.classify (input ~old_t:None [ build ~old nw ]) in
+  Alcotest.(check string) "the retry only sends the release" "release[]+topology" (show (Cmd_deploy.segments retry))
+
+(** Following a release through a leader change: every candidate answering
+    [ERR no_leader] for a while (longer than the old 30-poll allowance) is a
+    handover, not a failure; a candidate that never answers again still
+    ends the follow, after [leader_wait_s]. A fake clock: no sleeping. *)
+let test_cluster_follow_rides_out_leader_change () =
+  let clock = ref 0. in
+  let sleep s = clock := !clock +. s and now () = !clock in
+  let st ~leader state =
+    { Cluster_deploy.head_seq = 7; head_digest = "d"; state; leader; decision = "step 1: " ^ state; nodes = []; notes = [] } in
+  let script =
+    ref ([ Ok (st ~leader:"work-lab-3" "running") ]
+         @ List.init 60 (fun i -> Error (if i = 0 then "connection closed; ERR no_leader" else "ERR no_leader; ERR no_leader"))
+         @ [ Ok (st ~leader:"work-lab-1" "running"); Ok (st ~leader:"work-lab-1" "complete") ]) in
+  let poll () = match !script with
+    | x :: rest -> script := rest; x
+    | [] -> Alcotest.fail "polled past the end of the script" in
+  (match Cluster_deploy.follow ~poll ~sleep ~now [] ~seq:7 ~timeout_s:1800. with
+   | Ok report -> expect "the report" report [ "leader work-lab-1: complete" ]
+   | Error m -> Alcotest.failf "gave up on a leader change: %s" m);
+  clock := 0.;
+  (match Cluster_deploy.follow ~poll:(fun () -> Error "ERR no_leader") ~sleep ~now [] ~seq:7 ~timeout_s:1800. with
+   | Ok _ -> Alcotest.fail "no leader at all, and the follow succeeded"
+   | Error m ->
+     expect "bounded" m [ "ERR no_leader"; "no leader for 120 s" ];
+     if !clock > 130. then Alcotest.failf "waited %.0f s for a leader, not about 120" !clock)
+
 let test_cluster_backend_choice () =
   let with_control = { (topo ()) with Topology.control = Some { Topology.candidates = "ctl"; control_port = 7947 } } in
   let pick via t = match Cmd_deploy.choose_backend ~via t with Ok `Cluster -> "cluster" | Ok `Ssh -> "ssh" | Error _ -> "error" in
@@ -684,6 +753,8 @@ let () =
     ("render", [ Alcotest.test_case "the six blocks of 6.8, in order" `Quick test_six_blocks ]);
     ("cluster backend", [
         Alcotest.test_case "segments: releases between restarts, the topology last" `Quick test_cluster_segments;
+        Alcotest.test_case "a halted release after restarts: the retry skips them" `Quick test_cluster_halted_release_records_restarts;
+        Alcotest.test_case "following a release through a leader change" `Quick test_cluster_follow_rides_out_leader_change;
         Alcotest.test_case "which backend: [control], --via" `Quick test_cluster_backend_choice;
         Alcotest.test_case "control API endpoints" `Quick test_cluster_endpoints;
         Alcotest.test_case "the recorder's baseline is the nodes' slots" `Quick test_restrict_manifest;

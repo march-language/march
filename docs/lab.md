@@ -160,9 +160,10 @@ What the lab has found so far, each filed with its repro:
   with no leader, every node grows by ~13k heap objects a second with no traffic at all.
 - [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-simultaneous-restart-memory-burst.md):
   nodes restarted together can each allocate ~1 GB in 30 s and be OOM-killed.
-- [`2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md):
-  a halted first `forge deploy` records nothing (the retry restarts every node again), and
-  following a release gives up on `ERR no_leader`.
+- [`2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md)
+  (fixed 2026-10-12): a halted first `forge deploy` recorded nothing (the retry restarted
+  every node again), and following a release gave up on `ERR no_leader`. A retry now
+  sends only what is left, and a leader change is waited out.
 - [`2026-10-04-lab-control-wiring-none-ctor-ambiguous.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-04-lab-control-wiring-none-ctor-ambiguous.md):
   a protocol branch labelled `none` breaks the control-plane wiring of a `[control]` app;
   the lab's branch is called `out`.

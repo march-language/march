@@ -49,9 +49,9 @@ lab_expect "first plan" "$LAB_OUT" "nothing has been deployed to this environmen
 # (the default, since the topology has [control]) forge restarts every node
 # over ssh and then sends the topology as a release through the control
 # plane; on the lab that release halts nearly every time
-# (specs/todos/2026-10-04-lab-control-topology-step-races-report.md), and a
-# halted first deploy is not recorded, so running it again restarts every
-# node a second time (specs/todos/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md).
+# (specs/todos/2026-10-04-lab-control-topology-step-races-report.md). (Since
+# 2026-10-12 a retry of that halted deploy sends only the release again, the
+# restarts being recorded: specs/progress/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md.)
 lab_forge_ok deploy --env lab --yes --via ssh
 lab_expect "first deploy" "$LAB_OUT" "ingress-lab-1: restarted" "work-lab-2: restarted" "work-lab-3: restarted" \
   "work-lab-4: restarted" "deploy complete"

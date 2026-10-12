@@ -44,7 +44,7 @@ next report. Add a control scenario whose release has a topology step and a slow
 
 Seen again 2026-10-05 at load 5 (so not only under load): the first deploy's topology
 release halted the same way, on work-lab-2. The lab's first deploy now goes `--via ssh`
-(see [2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md](2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md)
+(see [2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md](../progress/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md)
 for why retrying did not work either).
 
 ## Fixed 2026-10-12
