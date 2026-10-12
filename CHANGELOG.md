@@ -743,6 +743,13 @@ git log is authoritative for exact commits.
   `blocking` extern. The runtime now starts the blocking-call worker threads
   from a scheduler thread instead of from the calling green thread.
   Builds without the sanitizer behave the same as before.
+- **Hostname lookups and HTTP server start-up no longer risk a segfault
+  under AddressSanitizer.** `tcp_connect` to a hostname resolves it on a
+  helper thread, and `HttpServer.listen` starts its worker threads; both
+  created those threads from the calling green thread, which under
+  `MARCH_SANITIZE=1` can kill the process without a report. They are now
+  created from a scheduler thread, like the `blocking` extern workers above.
+  Builds without the sanitizer behave the same as before.
 - **`task_cancel_by_id` no longer leaks the task.** Cancelling a task as the
   last thing done with it (as `Task.race` and `Task.any` do for the tasks that
   lost) leaked the task object every time in compiled code.
