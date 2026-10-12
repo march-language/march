@@ -95,7 +95,8 @@ node-c's Ledger cancelled toward node-a but could not reach node-b, which had
 no link yet. Node-b's Stock then sat in `find_peers` and gave up without telling
 node-a.
 
-What is left, filed as specs/todos/2026-10-12-lab-shared-secret-session-stall.md:
+What is left, filed as specs/todos/2026-10-12-lab-shared-secret-session-stall.md
+(since fixed: specs/progress/2026-10-12-session-redial-hang.md):
 the lab's one shared-secret stall, which none of these fixes explains. Its likely
 cause, a session whose node pair ends and is redialled while it runs, hangs
 `session_churn` under ASan about 3 runs in 8, on main and on this branch alike.

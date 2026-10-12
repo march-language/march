@@ -1,0 +1,63 @@
+-- Two-node harness, scenario "session_refused": node-b binds role B's name
+-- of session "refused-1" to an actor that is no session endpoint (no
+-- session route: a stale name), then runs role B of the normal session
+-- "refused-2" once node-a's first session has ended. See node_a.march.
+mod SessionRefusedB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  actor Stale do
+    state { n : Int }
+    init  { n: 0 }
+    on Nop() do state end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Echo_B.S_recv_Msg_A_B_1) : Echo_B.Yield do
+    Echo_B.recv_Msg_A_B_1(s, st, fn (n, st1) -> Echo_B.close(s, Echo_B.send_Msg_B_A_1(s, st1, n * 2)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "refused-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-b: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        let stale = spawn(Stale)
+        match ClusterNode.register(h, "session:refused-1/2", stale) do
+          Ok(_) -> ()
+          Err(_) -> panic("node-b: could not register the stale name")
+        end
+        -- Up until A's first session has ended: node-b stopping would end
+        -- it too ("connection lost"), hiding a hang.
+        wait_file(Env.require("REFUSED_GO_FILE"))
+        match Echo_Run.cluster_B(c, h, "refused-2", fn (s, st) -> role_b(s, st)) do
+          Ok(_) -> println("B: next session finished")
+          Err(e) -> println("B: next session failed: " ++ Echo_Run.error_message(e))
+        end
+        ClusterNode.stop(h)
+    end
+  end
+end

@@ -83,13 +83,14 @@ lab_until 30 "a Ledger total from $ledger" lab_stat_ge "booked@$(lab_node "$ledg
 
 # Every started session should end (finish, or be refused or fail within the
 # session setup time). Some never did, once, with a shared secret
-# (specs/todos/2026-10-12-lab-shared-secret-session-stall.md): reported, not
-# asserted, since every later scenario starts from this one.
+# (specs/progress/2026-10-12-session-redial-hang.md, fixed on one machine,
+# not yet re-run here): reported, not asserted, since every later scenario
+# starts from this one.
 lab_traffic 0
 ended_all() { [ "$(lab_unended)" = 0 ]; }
 end=$((SECONDS + 60))
 until ended_all || [ $SECONDS -ge $end ]; do sleep 1; done
-n=$(lab_unended); [ "$n" = 0 ] || lab_note "FINDING: $n of $(lab_stat started) sessions never ended (specs/todos/2026-10-12-lab-shared-secret-session-stall.md)"
+n=$(lab_unended); [ "$n" = 0 ] || lab_note "FINDING: $n of $(lab_stat started) sessions never ended (specs/progress/2026-10-12-session-redial-hang.md)"
 lab_traffic 1000 16
 
 lab_forge_ok topology status --env lab

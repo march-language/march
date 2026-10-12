@@ -675,6 +675,18 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A cluster session no longer hangs when its two nodes reconnect while it
+  runs.** If the connection between two nodes dropped and was redialled while
+  a session was forming, one party could end with the old connection while
+  the other formed on the new one and then waited for a reply that could
+  never come, with no error. Two things now make that session fail promptly
+  on both sides. A party whose connection ends sends its cancellation over
+  the new connection to the peer's node once there is one. A frame the peer's
+  node refuses (`DELIVERY_FAILED`, for example because the peer's endpoint
+  has already ended) now fails the session that sent it, where before it was
+  silently ignored. Those refusals now go to the session itself, not to
+  `ClusterNode.on_delivery_failed`'s handler. This was the intermittent
+  `session_churn` hang in the ASan CI gate.
 - **Cluster sessions with two offered roles on different nodes no longer hang
   in certificate mode.** A session could stall for good, with no error or
   cancellation, when a party checked another node's certificate before its

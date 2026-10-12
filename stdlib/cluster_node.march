@@ -1627,7 +1627,7 @@ mod ClusterNode do
                   routes : Vault(NodeSend.Delivery -> Result((), String)),
                   closes : Vault(String -> String -> Unit),
                   downs : Vault(DistLink.DownReason -> Unit), fired : Vault(List(Int)),
-                  failed : Vault(Int -> String -> Unit),
+                  failed : Vault(Int -> String -> Unit), sfailed : Vault(String -> String -> Unit),
                   certs : Vault(NodeCert.Cert), sec : Vault(SecurityEvent -> Unit),
                   revs : Vault(NodeCert.Revocation), op_pub : Bytes,
                   auth : Vault(ClusterAuth.Auth), strs : Vault(String), registrants : Vault(String) }
@@ -1664,6 +1664,7 @@ mod ClusterNode do
                  downs: Vault.new("cluster_node_unset_downs"),
                  fired: Vault.new("cluster_node_unset_fired"),
                  failed: Vault.new("cluster_node_unset_failed"),
+                 sfailed: Vault.new("cluster_node_unset_sfailed"),
                  certs: Vault.new("cluster_node_unset_certs"),
                  sec: Vault.new("cluster_node_unset_sec"),
                  revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty(),
@@ -1948,6 +1949,15 @@ mod ClusterNode do
         -- The data reader reads the cause when its connection ends, and
         -- tells the routes; set before the sockets are shut.
         Vault.set(h.causes, "c" ++ int_to_string(l.cfd), why)
+        -- Off the mirror NOW, not at the `mirror` after this step's
+        -- effects: a session forming meanwhile on another scheduler took
+        -- the dropped pair's queue from `session_queue_for`, and its reader
+        -- could tell the close handlers before that session installed its
+        -- own, and its `recheck_links` still saw the pair as current.
+        match Vault.get(h.links, l.node_id) do
+          Some(cur) -> if cur.gen == l.gen do Vault.drop(h.links, l.node_id) else () end
+          None -> ()
+        end
         drop_link(l)
         release_link(h, l, 3)
       Discard(l) ->
@@ -2152,6 +2162,24 @@ mod ClusterNode do
     end
   end
 
+  -- A DELIVERY_FAILED from [from_node] for our frame [seq]: a session
+  -- frame's (a negative seq, `session_seq`) goes to the session that sent it
+  -- (`on_session_failed`), anything else to the node's handler
+  -- (`on_delivery_failed`).
+  pfn delivery_failed(h : CnHandle, from_node : String, seq : Int, reason : String) : () do
+    if seq < 0 do
+      match Vault.get(h.sfailed, int_to_string(session_seq_key(seq))) do
+        Some(f) -> f(from_node, reason)
+        None -> ()
+      end
+    else
+      match Vault.get(h.failed, "f") do
+        Some(f) -> f(seq, reason)
+        None -> ()
+      end
+    end
+  end
+
   pfn control_frame(node, h : CnHandle, l : CnLink, tag : Int, frame : List(Int)) : () do
     if tag == 7 do
       match DistLink.decode_req(frame) do
@@ -2163,10 +2191,7 @@ mod ClusterNode do
     else if tag == 10 do
       match NodeSend.decode_failed(frame) do
         Ok((seq, reason)) ->
-          match Vault.get(h.failed, "f") do
-            Some(f) -> f(seq, reason)
-            None -> ()
-          end
+          delivery_failed(h, l.node_id, seq, reason)
         Err(_) -> ()
       end
     else if tag == 11 do
@@ -2308,11 +2333,7 @@ mod ClusterNode do
   -- by the first `start` (a later node's handle replaces it: the loopback
   -- handler is per node, the writer pids are not).
   pfn delivery_failed_hook(h : CnHandle, conn : Int, seq : Int, reason : String) : () do
-    if conn < 0 do
-      match Vault.get(h.failed, "f") do
-        Some(f) -> f(seq, reason)
-        None -> ()
-      end
+    if conn < 0 do delivery_failed(h, h.node_id, seq, reason)
     else
       discard(send(pid_of_int(conn), CtlWrite(NodeSend.encode_failed(seq, reason))))
     end
@@ -2567,6 +2588,8 @@ mod ClusterNode do
     on_peer_closed     : (String -> String -> Unit) -> Int,
     off_peer_closed    : Int -> (),
     on_delivery_failed : (Int -> String -> Unit) -> (),
+    on_session_failed  : Int -> (String -> String -> Unit) -> (),
+    off_session_failed : Int -> (),
     monitor_remote     : GlobalPid.Pid -> (DistLink.DownReason -> Unit) -> Result(Int, String),
     demonitor_remote   : GlobalPid.Pid -> Int -> (),
     peer_cert          : String -> Option(NodeCert.Cert),
@@ -2631,6 +2654,8 @@ mod ClusterNode do
       on_peer_closed: fn _ -> unsupported("on_peer_closed"),
       off_peer_closed: fn _ -> unsupported("off_peer_closed"),
       on_delivery_failed: fn _ -> unsupported("on_delivery_failed"),
+      on_session_failed: fn (_, _) -> unsupported("on_session_failed"),
+      off_session_failed: fn _ -> unsupported("off_session_failed"),
       monitor_remote: fn (_, _) -> unsupported("monitor_remote"),
       demonitor_remote: fn (_, _) -> unsupported("demonitor_remote"),
       peer_cert: fn _ -> unsupported("peer_cert"),
@@ -2676,6 +2701,8 @@ mod ClusterNode do
       on_peer_closed: fn f -> h_on_peer_closed(h, f),
       off_peer_closed: fn id -> Vault.drop(h.closes, int_to_string(id)),
       on_delivery_failed: fn f -> Vault.set(h.failed, "f", f),
+      on_session_failed: fn (key, f) -> Vault.set(h.sfailed, int_to_string(key), f),
+      off_session_failed: fn key -> Vault.drop(h.sfailed, int_to_string(key)),
       monitor_remote: fn (target, on_down) -> h_monitor_remote(h, target, on_down),
       demonitor_remote: fn (target, r) -> Vault.drop(h.downs, mkey(target.node_id, target.local_pid) ++ int_to_string(r)),
       peer_cert: fn id -> Vault.get(h.certs, id),
@@ -3122,6 +3149,7 @@ mod ClusterNode do
                   downs: Vault.new("cluster_node_downs_" ++ tag),
                   fired: Vault.new("cluster_node_fired_" ++ tag),
                   failed: Vault.new("cluster_node_failed_" ++ tag),
+                  sfailed: Vault.new("cluster_node_sfailed_" ++ tag),
                   certs: Vault.new("cluster_node_certs_" ++ tag),
                   sec: Vault.new("cluster_node_sec_" ++ tag),
                   revs: Vault.new("cluster_node_revs_" ++ tag),
@@ -3433,10 +3461,49 @@ mod ClusterNode do
     d.off_peer_closed(id)
   end
 
-  doc "Call [f](seq, reason) for every DELIVERY_FAILED a peer sends back."
+  doc """
+  Call [f](seq, reason) for every DELIVERY_FAILED a peer sends back, except
+  for a session's frames (a negative seq, `session_seq`): those go to the
+  session's own handler (`on_session_failed`).
+  """
   fn on_delivery_failed(c : Cap(ClusterNode.Live), f : Int -> String -> Unit) : () do
     let d = ops(c)
     d.on_delivery_failed(f)
+  end
+
+  pfn session_seq_span() : Int do 16777216 end
+
+  doc """
+  The wire seq of the [n]th frame a session sends under [key] (> 0, never
+  reused in this process: SessionNode draws it from a process-wide
+  counter, so a late refusal of an ended session's frame finds no handler
+  rather than another session's). Negative, so it never collides with a user's own seqs: a
+  DELIVERY_FAILED for it goes to the handler `on_session_failed` installed
+  under [key], not to `on_delivery_failed`'s.
+  """
+  fn session_seq(key : Int, n : Int) : Int do
+    0 - (key * session_seq_span() + n % session_seq_span())
+  end
+
+  doc "The key a `session_seq` was made under."
+  fn session_seq_key(seq : Int) : Int do
+    (0 - seq) / session_seq_span()
+  end
+
+  doc """
+  Call [f](peer_node_id, reason) for every DELIVERY_FAILED a peer sends back
+  for a frame sent with a `session_seq` under [key] (a frame the peer could
+  not route: its endpoint is gone, a stale creation, or refused). Replaces
+  any handler under [key]; `off_session_failed` removes it.
+  """
+  fn on_session_failed(c : Cap(ClusterNode.Live), key : Int, f : String -> String -> Unit) : () do
+    let d = ops(c)
+    d.on_session_failed(key, f)
+  end
+
+  fn off_session_failed(c : Cap(ClusterNode.Live), key : Int) : () do
+    let d = ops(c)
+    d.off_session_failed(key)
   end
 
   doc """
