@@ -278,6 +278,13 @@ let builtin_names : StringSet.t =
          These appear unqualified in stdlib code (session.march, csrf.march, etc.)
          and must be treated as top-level to avoid ECallPtr generation. *)
       "hmac_sha256"; "pbkdf2_sha256";
+      (* Missing here, every call was an indirect call, whose convention
+         consumes its arguments, to a C entry that only reads them: the
+         message (and key) of every MAC leaked.  NetFrame.mac_tag seals every
+         cluster frame with it, so a node leaked two objects per frame it
+         sent or received (specs/progress/2026-10-05-lab-leaderless-agents-leak.md).
+         The other two were missing the same way. *)
+      "hmac_sha256_bytes"; "stdlib_hmac_sha256"; "md5";
       "ed25519_seed_keypair"; "ed25519_sign"; "ed25519_verify"; "x25519";
       "sha256"; "sha512";
       "base64_encode"; "base64_decode";

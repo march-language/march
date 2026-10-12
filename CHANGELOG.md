@@ -817,6 +817,16 @@ git log is authoritative for exact commits.
   dropped when its last peers closed first, leaving the other roles waiting
   for it. An initiating node no longer risks a use-after-free when an offer's
   answer arrives late, after the initiator has stopped waiting for it.
+- **A cluster node with no control-plane leader no longer grows.** Two leaks
+  were left on every node's hot path: a compiled actor handler with a nested
+  pattern match (`Ok((x, y)) -> ...`) kept its old state on every message
+  (ClusterNode's frame handler; fixed by the partial-release drop above), and
+  every `hmac_sha256_bytes` call kept its input, so every sealed cluster frame
+  leaked two objects (`md5` and `stdlib_hmac_sha256` had the same bug). The
+  control plane's Agent also no longer sets up a session for each retry when
+  no leader offers one. A leaderless node that grew ~65 objects a second on
+  the previous main (~13,000 a second in the multi-host lab before the leak
+  fixes of the last week) is now flat.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a

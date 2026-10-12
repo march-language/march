@@ -3189,6 +3189,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_message_record_leak_probe.expected native_actor_message_record_leak_probe.out)))
 
+; ── Leak guard: an actor handler with a nested match leaked its old state
+; record on every message (Perceus's aggregate scope-end drop stopped at a
+; release on ONE path, the nested pattern's non-exhaustive arm), and every
+; hmac_sha256_bytes call leaked its message (an indirect call: the builtin was
+; missing from Defun.builtin_names). Red before the fix: every leg but the
+; last line reads `flat: false`.
+; specs/progress/2026-10-05-lab-leaderless-agents-leak.md
+(rule
+ (targets native_actor_nested_match_state_leak_probe native_actor_nested_match_state_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_nested_match_state_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_nested_match_state_leak_probe
+        native/actor_nested_match_state_leak_probe.march)
+   (with-stdout-to native_actor_nested_match_state_leak_probe.out
+        (system "./native_actor_nested_match_state_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_nested_match_state_leak_probe.expected native_actor_nested_match_state_leak_probe.out)))
+
 ; ── Leak guard: a --hot-reload build has no static closures, so a
 ; capture-free lambda is a heap closure that its apply fn must release
 ; (Perceus.perceus ~heap_lambdas). Red before the fix: all three legs read
