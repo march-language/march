@@ -684,6 +684,8 @@ native_to_string_module_types: coverage audit (user + stdlib): 135 enforced, 0 i
 native_to_string_module_types: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_to_string_newtype_niche: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_to_string_newtype_niche: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_to_string_one_field_record: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_to_string_one_field_record: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_to_string_record_order: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_to_string_record_order: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_to_string_show: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

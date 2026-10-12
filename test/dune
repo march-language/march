@@ -11639,6 +11639,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/to_string_record_order.expected native_to_string_record_order.interp.out)))
 
+; ── A one-field record must not borrow another declared record's row ──
+; `{ n: true }` matched the stdlib's `{ n : Int }` by slot kind and printed
+; `{ n: 1 }`.  Interpreted AND compiled against the same .expected. ──
+(rule
+ (targets native_to_string_one_field_record native_to_string_one_field_record.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/to_string_one_field_record.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_one_field_record
+        native/to_string_one_field_record.march)
+   (with-stdout-to native_to_string_one_field_record.out
+        (system "./native_to_string_one_field_record")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_one_field_record.expected native_to_string_one_field_record.out)))
+
+(rule
+ (targets native_to_string_one_field_record.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/to_string_one_field_record.march))
+ (action
+  (with-stdout-to native_to_string_one_field_record.interp.out
+   (run %{exe:../bin/main.exe} native/to_string_one_field_record.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_one_field_record.expected native_to_string_one_field_record.interp.out)))
+
 ; ── An Option over a niche-shaped type must not be a niche itself ─────
 ; `Some(NoName)` was encoded as raw 0 and matched as `None`; a recursive
 ; niche-shaped payload hung the compiler.  Interpreted AND compiled against
