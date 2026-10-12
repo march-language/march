@@ -127,3 +127,11 @@ touch.
 `bench/tree_transform.march` and `bench/binary_trees.march` were run with
 the printing fix against the train compiler; no layout changed, so they
 measure only that the fix costs nothing (see the progress file).
+
+## Decision (owner, 2026-10-11)
+
+Add `WebSocket.WsSocket` and `HttpServer.Upgrade` to the C-boxed exclusion
+list (`Kind.c_boxed_types`), then proceed with newtype and niche layouts for
+module-declared types, **once the distributed session confirms** that the
+cluster wire format and `migrate_msg` are not affected (point 2 above). Not
+implemented yet: nothing is pinned or widened until that confirmation.
