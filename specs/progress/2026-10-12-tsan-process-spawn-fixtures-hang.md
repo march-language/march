@@ -67,3 +67,6 @@ by the spawn rather than a child that exits 127), so it is filed separately:
 Checked: `scripts/tsan-sweep.sh -s "1 14" live_process_registry process_handle_leak_probe
 js_let_shadowing supervisor_one_for_one_restart actor_counter supervisor_concurrent_child_crash`
 -> 3 skipped with reasons, 6 runs, 0 failed.
+
+**Update 2026-10-12:** spawning now uses `posix_spawn` and the skip is removed; see
+`specs/progress/2026-10-12-process-spawn-posix-spawn.md`.

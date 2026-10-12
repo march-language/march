@@ -1,0 +1,66 @@
+-- Process spawning goes through posix_spawnp (runtime/march_runtime.c,
+-- spawn_child).  A command that cannot be executed is an Err from the spawn
+-- call itself on both backends -- before 2026-10-12 the compiled runtime
+-- forked, the child's execvp failed, and the caller got Ok with exit 127.
+-- The rest pins what did not change: capture of stdout/stderr and exit
+-- codes, stdin to a live child, the child seeing the parent's cwd and a
+-- Process.set_env made before the spawn.  The signal state the child gets is
+-- pinned (compiled only) by process_spawn_sigmask.march.
+-- specs/progress/2026-10-12-process-spawn-posix-spawn.md
+-- Expected output is the interpreter's; the compiled run is diffed against
+-- the same file.
+mod ProcessSpawnErrors do
+  needs IO.Console
+  needs IO.Process
+
+  pfn show_run(label : String, r) : () do
+    match r do
+      Ok(res) ->
+        println(label ++ ": Ok code=" ++ int_to_string(Process.exit_code(res))
+                ++ " out=[" ++ Process.stdout(res) ++ "]")
+      Err(e) -> println(label ++ ": Err " ++ e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    -- Missing program: Err from every spawn entry point.
+    show_run("run missing", Process.run("march_no_such_program_xyz", ["a"]))
+    match Process.run_stream("march_no_such_program_xyz", []) do
+      Ok(_) -> println("run_stream missing: Ok")
+      Err(e) -> println("run_stream missing: Err " ++ e)
+    end
+    match Process.spawn_async("march_no_such_program_xyz", []) do
+      Ok(p) -> println("spawn_async missing: Ok code=" ++ int_to_string(Process.wait_proc(p)))
+      Err(e) -> println("spawn_async missing: Err " ++ e)
+    end
+    -- A path that exists but is not executable.
+    show_run("run not executable", Process.run("/etc/hosts", []))
+    -- Normal spawn and capture are unchanged, non-zero exit codes included.
+    show_run("echo", Process.run("echo", ["hello", "world"]))
+    show_run("exit 3", Process.run("sh", ["-c", "printf out; exit 3"]))
+    -- The shell runs, and its own exit 127 for a missing command is still
+    -- an ordinary Ok exit code.
+    show_run("sh missing", Process.run("sh", ["-c", "march_no_such_program_xyz 2>/dev/null"]))
+    -- stdin/stdout of a live child.
+    match Process.spawn_async("cat", []) do
+      Ok(p) ->
+        Process.write(p, "ping\n")
+        let line = Process.read_line(p)
+        Process.kill(p)
+        let _ = Process.wait_proc(p)
+        match line do
+          Some(s) -> println("cat: " ++ s)
+          None -> println("cat: <none>")
+        end
+      Err(e) -> println("cat: Err " ++ e)
+    end
+    -- cwd and environment are inherited, including a set_env made here.
+    Process.set_env("MARCH_SPAWN_FIXTURE_VAR", "from-parent")
+    show_run("env", Process.run("sh", ["-c", "printf %s \"$MARCH_SPAWN_FIXTURE_VAR\""]))
+    match Process.run("sh", ["-c", "pwd -P"]) do
+      Ok(res) ->
+        println("cwd matches: " ++ to_string(String.trim(Process.stdout(res)) == Process.cwd()))
+      Err(e) -> println("pwd: Err " ++ e)
+    end
+  end
+end

@@ -170,6 +170,11 @@ val uname_info : (string * string) option Lazy.t
 val live_proc_tbl : (int, in_channel * out_channel * int) Hashtbl.t
 val live_proc_next_id : int ref
 
+(** Err message of a Process.* spawn builtin for a [Unix_error (err, fn, _)]:
+    ["cannot execute <cmd>: <strerror>"] when the command could not be
+    executed, the bare message otherwise.  Matches the compiled runtime. *)
+val process_spawn_error : string -> string -> Unix.error -> string
+
 (** {1 Declaration tables populated at load time} *)
 
 val impl_tbl : (string * string, value) Hashtbl.t

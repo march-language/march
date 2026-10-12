@@ -3654,8 +3654,8 @@ let base_env : env =
              in
              VCon ("Ok", [VCon ("ProcessResult",
                [VInt code; VString (Buffer.contents buf); VString ""])])
-           with Unix.Unix_error (err, _, _) ->
-             VCon ("Err", [VString (Unix.error_message err)]))
+           with Unix.Unix_error (err, fn, _) ->
+             VCon ("Err", [VString (process_spawn_error cmd fn err)]))
         | _ -> eval_error "process_spawn_sync: expected (String, List(String))"))
   (* Run a command and return its whole stdout as one String.
      Returns Ok(stdout) on success or Err(msg) on OS error.  Both backends
@@ -3678,8 +3678,8 @@ let base_env : env =
              let out = In_channel.input_all ic in
              let _ = Unix.close_process (ic, oc) in
              VCon ("Ok", [VString out])
-           with Unix.Unix_error (err, _, _) ->
-             VCon ("Err", [VString (Unix.error_message err)]))
+           with Unix.Unix_error (err, fn, _) ->
+             VCon ("Err", [VString (process_spawn_error cmd fn err)]))
         | _ -> eval_error "process_spawn_lines: expected (String, List(String))"))
 
   (* Spawn a process asynchronously (non-blocking).
@@ -3714,8 +3714,8 @@ let base_env : env =
             incr live_proc_next_id;
             Hashtbl.add live_proc_tbl id (ic, oc, pid);
             VCon ("Ok", [VCon ("LiveProcess", [VInt pid; VInt id])])
-          with Unix.Unix_error (err, _, _) ->
-            VCon ("Err", [VString (Unix.error_message err)]))
+          with Unix.Unix_error (err, fn, _) ->
+            VCon ("Err", [VString (process_spawn_error cmd fn err)]))
         | _ -> eval_error "process_spawn_async: expected (String, List(String))"))
 
   (* Read one line from a LiveProcess's stdout.
