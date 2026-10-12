@@ -4,6 +4,7 @@ exit: 1
 I don't know a constructor called `LinearMapRep`. [unknown_constructor]
 Did you mean one of:
   • `LiveProcess` — from type `LiveProcess`
+  • `Limit.Rate` — from type `Limit`
 
 8 |     let m : LinearMap(Int, Int) = LinearMapRep(0, Map.int_cmp, Map.empty())
                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
