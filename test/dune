@@ -14042,3 +14042,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/file_path_builtins_leak_probe.expected native_file_path_builtins_leak_probe.out)))
+
+; ── Leak guard: an actor handler whose body matches on a tuple a call returned
+; (LinearMap.take_slot) leaked its old state record and the map it held on
+; every message: the match's panic arms released `state`, and the aggregate
+; scope-end drop then placed no drop on any path. Red before the fix: every
+; leg reads `flat: false`. The Keep leg is the shared-state control.
+; specs/progress/2026-10-12-actor-handler-tuple-match-state-leak.md
+(rule
+ (targets native_actor_tuple_match_state_leak_probe native_actor_tuple_match_state_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_tuple_match_state_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_tuple_match_state_leak_probe
+        native/actor_tuple_match_state_leak_probe.march)
+   (with-stdout-to native_actor_tuple_match_state_leak_probe.out
+        (system "./native_actor_tuple_match_state_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_tuple_match_state_leak_probe.expected native_actor_tuple_match_state_leak_probe.out)))

@@ -62,6 +62,8 @@ native_actor_stop_drains_mailbox: coverage audit (user + stdlib): 135 enforced, 
 native_actor_stop_drains_mailbox: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_tuple_match_state_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_actor_tuple_match_state_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_drop_erased_fields: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_drop_erased_fields: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_dupd_consume_drop: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

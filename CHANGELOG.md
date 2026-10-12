@@ -662,6 +662,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **An actor handler that matches on a tuple no longer leaks its old state
+  when compiled.** A handler whose body was a `match` on a tuple a call
+  returned (`match LinearMap.take_slot(state.sessions, id) do (None, slot) ->
+  .. end`) kept the old state record, and everything it held, on every
+  message.
 - **File and directory functions and `IO.warn` no longer leak their
   arguments when compiled.** `File.exists`, `File.read`, `File.write`,
   `File.append`, `File.delete`, `File.copy`, `File.rename`, `File.stat`,

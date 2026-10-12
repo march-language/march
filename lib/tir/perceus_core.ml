@@ -999,6 +999,24 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
   in
   let rec go bal (x : Tir.expr) : Tir.expr =
     match x with
+    (* [e1] releases [v] on SOME of its paths (a non-exhaustive match's panic
+       arms, say) and [v] is dead after it: [v]'s lifetime ends inside [e1],
+       so the drop goes on [e1]'s own paths, the releasing ones left alone by
+       the next arm.  (That arm must come second: [is_branching] looks only at
+       a let's BODY, so it took the whole let as non-branching.)  Returning [x] unchanged dropped it on NO path: an actor
+       handler whose body is a tuple match
+         let $result = match take_slot(state.sessions, id) do .. end in ..
+       leaked its old [state] cell (and the map it held) on every message,
+       because the match's panic arms released [state]
+       (specs/progress/2026-10-12-actor-handler-tuple-match-state-leak.md). *)
+    | Tir.ELet (w, e1, body)
+      when releases_var name e1 && is_branching e1
+           && not (Perceus_liveness.name_free_in name body) ->
+      Tir.ELet (w, go bal e1, body)
+    | Tir.ESeq (a, body)
+      when releases_var name a && is_branching a
+           && not (Perceus_liveness.name_free_in name body) ->
+      Tir.ESeq (go bal a, body)
     | _ when releases_var name x && not (is_branching x) -> x
     | Tir.ELet (_, e1, _) when releases_var name e1 -> x
     | Tir.ESeq (a, _) when releases_var name a -> x
