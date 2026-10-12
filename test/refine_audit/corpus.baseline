@@ -90,6 +90,8 @@ native_builtin_borrow_leak_probe: coverage audit (user + stdlib): 135 enforced, 
 native_builtin_borrow_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_builtin_link_backing: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_builtin_link_backing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_bytes_c_built_to_string: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_bytes_c_built_to_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_bytes_typeid_base64_sha: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_bytes_typeid_base64_sha: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_bytes_u8_bridge: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -320,6 +322,8 @@ native_live_process_registry: coverage audit (user + stdlib): 135 enforced, 0 in
 native_live_process_registry: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_local_colliding_type: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_local_colliding_type: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_local_fn_capture_not_generalized: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_local_fn_capture_not_generalized: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_local_named_like_builtin: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_local_named_like_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_logger_appenders_parity: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

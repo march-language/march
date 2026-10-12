@@ -745,6 +745,35 @@ git log is authoritative for exact commits.
   from C on two schedulers at once raced on a lazily filled cache. The cached
   value was always the same, so no wrong result was possible, but TSAN
   reported it. See `specs/progress/2026-10-12-tsan-type-id-memo-race.md`.
+- **Compiled `to_string` names a `Bytes` returned by the runtime.**
+  `to_string(Base64.decode(s))` printed `Ok(#<tag:0>)` compiled and
+  `Ok(Bytes("..."))` interpreted; the same held for Bytes from hashing,
+  compression and HTTP bodies. Both now print `Bytes("...")`.
+- **A local `fn` no longer makes the values it captures polymorphic.** A
+  named `fn` inside a function body was generalized over the types of what it
+  captured, so in stdlib `Set.union` the comparator's element type came apart
+  from the sets'. With a `let`-bound comparator
+  (`let lt = fn x -> fn y -> x < y`), compiled `Set.union` hashed Int
+  elements as Strings and crashed (SIGSEGV); user code with the same shape
+  printed or compared values at the wrong type. The interpreter was
+  unaffected.
+- **Ctrl+C and SIGTERM stop an interpreted program that is busy computing.**
+  `march file.march` ignored both (any number of times) unless it was running
+  actors or an HTTP server, so `timeout` and Ctrl+C could not stop a long
+  loop. It now exits with 143 (SIGTERM) or 130 (SIGINT), like a compiled
+  binary. Servers and apps still shut down gracefully on the first signal and
+  exit at once on a second.
+- **A stdlib module name with the wrong case is an error.** `Bigint.from_int`
+  (the module is `BigInt`) typechecked and ran compiled, while the interpreter
+  failed with `unbound variable`. It is now rejected with
+  ``Unknown module `Bigint`. Did you mean `BigInt`?``. The same applies to
+  `Uuid`, `Iolist`, `Datetime`, `Dataframe`, `Websocket` and the other modules
+  whose name is not the CamelCase of their file name.
+- **The interpreter finds an interface method implemented in a nested
+  module.** With `interface Speak` in `Top` and `impl Speak(Thing)` inside
+  `mod NA`, a bare `speak(NA.mk())` in `Top` died `unbound variable: speak`
+  interpreted while compiled code ran it. It now dispatches the same way in
+  both.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,

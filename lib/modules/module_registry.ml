@@ -168,13 +168,22 @@ let stdlib_index dir =
     _stdlib_index := Some t;
     t
 
+let declared_module_of_file path =
+  try top_level_mod_name_of_source (read_file path) with Sys_error _ -> None
+
 let find_stdlib_file mod_name =
   match find_stdlib_dir () with
   | None -> None
   | Some dir ->
     let fname = module_name_to_filename mod_name in
     let path = Filename.concat dir fname in
-    if Sys.file_exists path then Some path
+    (* The filename guess only counts when that file really declares
+       [mod_name]: `Bigint` guesses `bigint.march`, which declares `BigInt`,
+       and accepting it registered BigInt's exports under the misspelled
+       name — the typechecker passed `Bigint.from_int`, compiled code ran
+       it, and the interpreter died "unbound variable: Bigint.from_int". *)
+    if Sys.file_exists path && declared_module_of_file path = Some mod_name
+    then Some path
     else Hashtbl.find_opt (stdlib_index dir) mod_name
 
 (* ---- Extracting exports from parsed declarations ---- *)
