@@ -30,10 +30,8 @@ top-level `f` shadowed by `List.map`'s own callback parameter `f` after `Inline`
 through the parameter, so a value-printing variant prints `409` where the interpreter
 prints `309`. The fixture prints only a length, which hid it. Renaming the top-level function
 removes both the wrong value and the finding. Filed with the repro in
-`specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md`; not fixed here.
-
-The oracle (`test/test_oracle.ml`) lists the fixture in `known_divergence` with that pointer, which
-is the oracle's documented route for an open bug. Remove the entry with the fix.
+`specs/progress/2026-10-11-inline-capture-guard.md` and fixed in the same PR: `Inline` now has the capture guard
+`Single_use_inline` already had. The fixture compiles cleanly under the verifier at every level.
 
 ## Sweep
 

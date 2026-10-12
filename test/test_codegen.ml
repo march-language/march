@@ -16646,6 +16646,33 @@ let test_tir_verify_contract_local_call_is_indirect () =
   Alcotest.(check bool) "before Defun a local call is expected" false
     (tv_contract_has ~stage:"tir-mono" "called directly after Defun" m)
 
+(* Inline must not insert a callee's free reference to a top-level function
+   beneath a caller binder of the same name: the reference would then mean
+   the binder.  [g]'s body calls the top-level [f]; [h] has a parameter named
+   [f] and calls [g].  Inlining [g] into [h] as-is turns [f(x)] into a call
+   through [h]'s parameter (a compiled-only wrong value: a lambda calling a
+   top-level [f], inlined into List.map's clone whose callback parameter is
+   [f]; specs/progress/2026-10-11-inline-capture-guard.md).
+   The Defun contract reports exactly that shape, so it is the oracle here. *)
+let test_inline_does_not_capture_toplevel_name () =
+  let open March_tir.Tir in
+  let int_fn = TFn ([ TInt ], TInt) in
+  let m_ = TV.v "m" TInt and x = TV.v "x" TInt and y = TV.v "y" TInt in
+  let f_top = { (TV.fn "f" ~params:[ m_ ]
+                   (EApp (TV.v "+" (TFn ([ TInt; TInt ], TInt)), [ AVar m_; TV.int 1 ])))
+                with fn_ret_ty = TInt } in
+  let g = TV.fn "g" ~params:[ x ] (EApp (TV.v "f" int_fn, [ AVar x ])) in
+  let h = TV.fn "h" ~params:[ TV.v "f" int_fn; y ] (EApp (TV.v "g" int_fn, [ AVar y ])) in
+  let m = TV.modl [ f_top; g; h ] in
+  Alcotest.(check (list string)) "the input is clean" []
+    (List.filter (fun s -> Test_helpers.contains "[contract]" s)
+       (List.map snd (March_tir.Tir_verify.check ~stage:"tir-opt-1-inline" ~rc:false m)));
+  let changed = ref false in
+  let m' = March_tir.Inline.run ~changed m in
+  Alcotest.(check (list string)) "after Inline, no call through h's parameter f" []
+    (List.filter (fun s -> Test_helpers.contains "[contract]" s)
+       (List.map snd (March_tir.Tir_verify.check ~stage:"tir-opt-1-inline" ~rc:false m')))
+
 (* ── TIR verifier, check 3 (RC balance) ──────────────────────────────── *)
 
 let tv_rc ?(leaks = false) m =
@@ -16888,6 +16915,7 @@ let codegen_suites =
           Alcotest.test_case "types: named tvar after mono (RED)" `Quick test_tir_verify_types_named_tvar;
           Alcotest.test_case "contract: lambda survives Defun (RED)" `Quick test_tir_verify_contract_lambda_survives_defun;
           Alcotest.test_case "contract: local call must be indirect (RED)" `Quick test_tir_verify_contract_local_call_is_indirect;
+          Alcotest.test_case "Inline does not capture a top-level name (RED)" `Quick test_inline_does_not_capture_toplevel_name;
           Alcotest.test_case "rc: balanced owned param is clean" `Quick test_tir_verify_rc_balanced;
           Alcotest.test_case "rc: double release (RED)" `Quick test_tir_verify_rc_double_release;
           Alcotest.test_case "rc: use after release (RED)" `Quick test_tir_verify_rc_use_after_release;

@@ -75,8 +75,8 @@
 
     Reported with a [[contract]] tag.  The second one catches a name captured
     by a later pass: an inlined body that calls a top-level [f] landing in a
-    scope that binds its own [f]
-    (specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md).
+    scope that binds its own [f].  It found exactly that in [Inline], now
+    guarded (specs/progress/2026-10-11-inline-capture-guard.md).
     Post-mono "no polymorphic fn_def" is check 2's named-type-variable rule;
     "every [$jp] is defined once" is not an invariant (inlining the same body
     twice repeats the name in one function, and scoping makes that harmless),
