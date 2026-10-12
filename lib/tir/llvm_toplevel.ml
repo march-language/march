@@ -1221,6 +1221,105 @@ let build_ctor_info ctx (m : Tir.tir_module) =
         { Llvm_ctx.ce_tag = 0; ce_fields = field_tys; ce_type_id = 0 }
   ) m.Tir.tm_types
 
+(** TIR verifier check 4 (representation invariants), at emission: the
+    decisions codegen COMMITTED to, read back from the repr audit table and
+    [ctx.ctor_info] after the module is emitted (see the {1 Check 4} section
+    of {!Tir_verify}).  Returns [(type, message)] findings.
+
+    - A type's recorded encodings do not mix families (Boxed / Niche /
+      Newtype / Unboxed) for one payload, or through a site that had no
+      payload to go on: the MARCH_REPR_AUDIT conditions, now failures.
+    - A type in a collision group (one short name, several declaring
+      modules) is Boxed at every site: [Kind.repr_of] forces it, so a niche or
+      unboxed encoding means a site decided without the kind table.
+    - Its constructors carry tags from the collision range, and no two
+      constructors in the group share one: a match on the bare short name
+      tells the declaring modules apart only by tag. *)
+let repr_finding msg = "[llvm-emit] repr/" ^ msg
+
+(** Check 4a: the repr audit's flagged types ({!Llvm_ctx.repr_audit_flagged}). *)
+let repr_mix_findings flagged : (string * string) list =
+  List.map (fun (ty, families, kind, es) ->
+      (ty, repr_finding (Printf.sprintf "mixed: `%s` is encoded as %s (%s): %s" ty
+                           (String.concat " and " families) kind
+                           (String.concat "; " (List.map (fun (p, f, s) ->
+                                Printf.sprintf "%s payload=%s at %s" f p s) es)))))
+    flagged
+
+(** Check 4b: every recorded encoding of a type in a collision group is Boxed.
+    [recorded]: [(type, [(payload, family, site)])], the audit table's rows. *)
+let collision_repr_findings ~collision_set recorded : (string * string) list =
+  List.concat_map (fun (ty, entries) ->
+      if not (Collision_set.is_colliding collision_set ty) then []
+      else
+        List.filter_map (fun (p, f, s) ->
+            if f = "Boxed" then None
+            else Some (ty, repr_finding (Printf.sprintf
+                "collision: `%s` shares its short name with another module's \
+                 type, so it must be Boxed, but %s encodes it as %s (payload=%s)"
+                ty s f p)))
+          (List.sort_uniq compare entries))
+    recorded
+
+(** Check 4c: a collision group's constructor tags are in the collision range
+    and pairwise distinct.  [ctors name] is a variant's constructors,
+    [tag_of "Type.Ctor"] the tag codegen installed. *)
+let collision_tag_findings ~collision_set ~(ctors : string -> string list option)
+    ~(tag_of : string -> int option) : (string * string) list =
+  let findings = ref [] in
+  let report ty msg = findings := (ty, repr_finding msg) :: !findings in
+  Hashtbl.iter (fun short names ->
+      let seen = Hashtbl.create 16 in
+      List.iter (fun name ->
+          match ctors name with
+          | None -> ()
+          | Some cs ->
+            List.iter (fun ctor ->
+                let key = name ^ "." ^ ctor in
+                match tag_of key with
+                | None -> ()
+                | Some tag ->
+                  if tag < Llvm_builtins.collision_tag_base
+                  || tag >= Llvm_builtins.collision_tag_limit then
+                    report name (Printf.sprintf "collision: `%s` (short name `%s` is \
+                                                 declared by %s) has tag 0x%x, outside \
+                                                 the collision range" key short
+                                   (String.concat ", " (List.sort compare names)) tag);
+                  (match Hashtbl.find_opt seen tag with
+                   | Some other when other <> key ->
+                     report name (Printf.sprintf "collision: `%s` and `%s` share tag \
+                                                  0x%x, so a match on `%s` cannot \
+                                                  tell them apart" other key tag short)
+                   | _ -> Hashtbl.replace seen tag key))
+              cs)
+        (List.sort compare names))
+    collision_set;
+  !findings
+
+(** TIR verifier check 4 (representation invariants), at emission: the
+    decisions codegen COMMITTED to, read back from the repr audit table and
+    [ctx.ctor_info] after the module is emitted (the {1 Check 4} section of
+    {!Tir_verify}).  4a: no type mixes encoding families for one payload, or
+    through a site with no payload to go on.  4b: a type in a collision group
+    (one short name, several declaring modules) is Boxed at every site.  4c:
+    the group's constructor tags are in the collision range and distinct, the
+    only way a match on the bare short name tells the modules apart. *)
+let check4_findings ctx (m : Tir.tir_module) : (string * string) list =
+  let collision_set = ctx.Llvm_ctx.collision_set in
+  let variants = Hashtbl.create 16 in
+  List.iter (function
+      | Tir.TDVariant (n, cs) when not (Hashtbl.mem variants n) ->
+        Hashtbl.add variants n (List.map fst cs)
+      | _ -> ()) m.Tir.tm_types;
+  let recorded =
+    Hashtbl.fold (fun ty entries acc -> (ty, !entries) :: acc) Llvm_ctx._repr_audit [] in
+  List.sort_uniq compare
+    (repr_mix_findings (Llvm_ctx.repr_audit_flagged ())
+     @ collision_repr_findings ~collision_set recorded
+     @ collision_tag_findings ~collision_set ~ctors:(Hashtbl.find_opt variants)
+         ~tag_of:(fun key -> Option.map (fun e -> e.Llvm_ctx.ce_tag)
+                     (Hashtbl.find_opt ctx.Llvm_ctx.ctor_info key)))
+
 let emit_module ~emit_expr
     ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     ?(hot_reload=None) ?(impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
@@ -1235,6 +1334,8 @@ let emit_module ~emit_expr
   (* type defs are threaded via ctx.type_defs (set below); reset the
      repr-consistency audit per module emission. *)
   Hashtbl.reset Llvm_ctx._repr_audit;
+  (* Check 4 reads the recorded decisions back after emission. *)
+  Llvm_ctx.repr_audit_forced := Tir_verify.enabled ();
   dbg_reset ();
   (* Capability markers: start each module emission with a clean slate so
      symbols recorded by a previous emission in the same process (tests,
@@ -2096,6 +2197,10 @@ let emit_module ~emit_expr
           (List.length refs) (String.concat ", " refs)));
 
   Llvm_ctx.repr_audit_report ();
+  (if Tir_verify.enabled () then
+     match check4_findings ctx m with
+     | [] -> ()
+     | fs -> raise (Tir_verify.Failed ("llvm-emit", fs)));
   if !debug_info then begin
     Buffer.add_string out (dbg_module_block ());
     attach_call_dbg (Buffer.contents out)

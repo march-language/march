@@ -101,6 +101,11 @@ From `tir-defun` on it also checks Defun's contracts, tagged `[contract]`: no la
 creation site survives, and a call through a locally bound name is indirect. A
 `[contract]` finding on a name that is also a top-level function means a later pass
 captured it; the wrong value shows only compiled, at `--opt 0`/`--opt 2`.
+At emission it also runs check 4, tagged `repr/`: codegen's recorded encodings
+(the `MARCH_REPR_AUDIT` table, forced on) must not mix families for one payload,
+and a type whose short name several modules declare must be Boxed with
+constructor tags that are distinct and in the collision range. These report
+`after llvm-emit`; `march query verify` stops before emission and skips them.
 
 **RC balance:** after Perceus it also walks every path of every function. It
 reports an over-release or a use after release with the object, its binding and

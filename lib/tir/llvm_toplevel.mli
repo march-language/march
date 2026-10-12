@@ -106,6 +106,25 @@ val variant_ctor_tags :
 
 val build_ctor_info :
   Llvm_ctx.ctx -> Tir.tir_module -> unit
+
+(** TIR verifier check 4 (representation invariants), the pure parts that
+    [emit_module] runs on the decisions it committed to, under --verify-tir:
+    4a, a type's encodings do not mix families ({!Llvm_ctx.repr_audit_flagged});
+    4b, every recorded encoding of a type in a collision group is Boxed
+    ([(type, [(payload, family, site)])]); 4c, a collision group's constructor
+    tags are in the collision range and distinct.  Each returns
+    [(type, finding)]. *)
+val repr_mix_findings :
+  (string * string list * string * (string * string * string) list) list ->
+  (string * string) list
+val collision_repr_findings :
+  collision_set:(string, string list) Hashtbl.t ->
+  (string * (string * string * string) list) list -> (string * string) list
+val collision_tag_findings :
+  collision_set:(string, string list) Hashtbl.t ->
+  ctors:(string -> string list option) -> tag_of:(string -> int option) ->
+  (string * string) list
+
 val emit_module :
   emit_expr:(Llvm_ctx.ctx -> Tir.expr -> string * string) ->
   ?fast_math:bool ->

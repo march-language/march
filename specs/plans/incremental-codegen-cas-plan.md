@@ -233,7 +233,10 @@ bug-yield order, each its own PR:
 `specs/progress/2026-10-07-verify-rc-types-and-pass-bisect.md`). Check 3 ran behind its own
 switch until the three Perceus bugs it found were fixed; since 2026-10-08 it is part of
 `--verify-tir` (`specs/progress/2026-10-08-perceus-parent-released-before-field-use.md`).
-Checks 4 and 5 are open (`specs/todos/2026-10-08-verifier-a4-followups.md`).
+Check 5 (Defun's contracts) landed 2026-10-11 and check 4 (representation invariants, at emission)
+2026-10-12 (`specs/progress/2026-10-11-verifier-defun-contracts.md`,
+`specs/progress/2026-10-12-verifier-check4-repr.md`). Check 5's post-escape contract is open
+(`specs/todos/2026-10-08-verifier-a4-followups.md`).
 
 **Prove it red.** Each check lands with a test feeding it hand-broken TIR (for check 3: the
 pre-fix Perceus output of a fixed September leak, reconstructed) and asserting the error.
