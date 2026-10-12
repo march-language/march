@@ -848,7 +848,8 @@ let closure_drop_wants (m : Tir.tir_module) : (string * string) list =
     field 0 is the dispatch function's closure value, whose trampoline is
     paired with the actor's state release ([Drop.run]'s [$actordrop$]), which
     the actor's thread runs as it exits. *)
-let clo_drop_registration (m : Tir.tir_module) : string =
+let clo_drop_registration ?(rec_drops : (string * string * string) list = [])
+    (m : Tir.tir_module) : string =
   let defined = Hashtbl.create 1024 in
   List.iter (fun (fn : Tir.fn_def) -> Hashtbl.replace defined fn.Tir.fn_name ()) m.Tir.tm_fns;
   let pairs : (string, string option) Hashtbl.t = Hashtbl.create 64 in
@@ -865,8 +866,27 @@ let clo_drop_registration (m : Tir.tir_module) : string =
     |> List.sort compare
   in
   let n = List.length entries in
+  (* Record deep drops, one per shape tagged with one
+     ([Llvm_data.shape_drop_registrations]): (descriptor, id cache, drop), so
+     the runtime interns the shape and attaches the drop to it
+     (specs/progress/2026-10-12-erased-record-shallow-release.md). *)
+  let rec_drops = List.filter (fun (_, _, d) -> Hashtbl.mem defined d) rec_drops in
+  let nr = List.length rec_drops in
+  let rec_decl, rec_call =
+    if nr = 0 then ("", "")
+    else
+      let elems = String.concat ", " (List.concat_map (fun (dg, cg, drop) ->
+          [ "ptr " ^ dg; "ptr " ^ cg;
+            "ptr @" ^ Llvm_builtins.mangle_extern drop ]) rec_drops) in
+      (Printf.sprintf
+         "@march_rec_drop_triples = private constant [%d x ptr] [%s]\n\
+          declare void @march_record_register_drops(ptr, i64)\n" (3 * nr) elems,
+       Printf.sprintf
+         "  call void @march_record_register_drops(ptr @march_rec_drop_triples, i64 %d)\n" nr)
+  in
   if n = 0 then
-    "\ndefine internal void @march_clo_drops_register() {\nentry:\n  ret void\n}\n"
+    Printf.sprintf "\n%sdefine internal void @march_clo_drops_register() {\nentry:\n%s  ret void\n}\n"
+      rec_decl rec_call
   else
     let elems = String.concat ", " (List.concat_map (fun (apply, drop) ->
         [ "ptr @" ^ apply;
@@ -874,9 +894,11 @@ let clo_drop_registration (m : Tir.tir_module) : string =
     Printf.sprintf
       "\n@march_clo_drop_pairs = private constant [%d x ptr] [%s]\n\
        declare void @march_clo_register_drops(ptr, i64)\n\
+       %s\
        define internal void @march_clo_drops_register() {\nentry:\n\
       \  call void @march_clo_register_drops(ptr @march_clo_drop_pairs, i64 %d)\n\
-      \  ret void\n}\n" (2 * n) elems n
+       %s\
+      \  ret void\n}\n" (2 * n) elems rec_decl n rec_call
 
 (* emit_mutual_tco_group moved to [Llvm_tco] (Wave 3 Task 6, chunk 2).
    Its single call site (emit_module, below) passes emit_expr as a labeled
@@ -1871,7 +1893,8 @@ let emit_module ~emit_expr
        ) m.Tir.tm_tests;
        Buffer.add_string buf2 "  %rc = call i32 @march_test_report()\n";
        Buffer.add_string buf2 "  ret i32 %rc\n}\n";
-       Buffer.add_string buf2 (clo_drop_registration m);
+       Buffer.add_string buf2
+         (clo_drop_registration ~rec_drops:(Llvm_data.shape_drop_registrations ctx) m);
        Buffer.add_buffer out buf2
      end else begin
        (match main_fn_name with
@@ -1931,7 +1954,8 @@ let emit_module ~emit_expr
                ret i32 0\n}\n" (if !pin_main then "_pinned" else "")
                 thunk_def hr_setup stub_setup
                 (if !pin_main then "_pinned" else "") spawn_target);
-          Buffer.add_string out (clo_drop_registration m)
+          Buffer.add_string out
+            (clo_drop_registration ~rec_drops:(Llvm_data.shape_drop_registrations ctx) m)
         | None ->
           (* Library module with no user-defined main: emit a stub @main so
              clang can link a valid binary (forge build type-checks libraries). *)

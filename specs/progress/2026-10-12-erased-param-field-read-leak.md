@@ -34,7 +34,7 @@ and freed the record under it (an RC underflow on the first try).
 
 An erased record is released by a generic `dec_rc`, which frees one cell, so
 a heap field of a record the lambda frees still leaks; filed as
-`specs/todos/2026-10-12-erased-record-shallow-release.md`.
+`specs/progress/2026-10-12-erased-record-shallow-release.md` (fixed the same day).
 
 ## Verification
 

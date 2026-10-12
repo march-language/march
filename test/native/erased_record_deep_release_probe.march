@@ -1,0 +1,130 @@
+-- A record released through an ERASED type (here: the parameter of a lambda
+-- stored where its element type is hidden, so the lambda is never
+-- specialised) was freed SHALLOWLY: the release is a bare dec of a type
+-- variable, which names no layout, so the runtime freed the record's cell and
+-- leaked every heap field it held.
+--
+-- Measured before the fix, --compile --opt 2, objects per 200 iterations:
+--   - rows with a String name ...................... 600 (the names)
+--   - rows with a String and a List(String) field .. 1800 (names + tags)
+--   - nominal records with a String field .......... 600
+-- After: 0 on every leg.  The compiler now tags each record shape that owns a
+-- heap field with its deep drop and the runtime runs it from the erased
+-- release (specs/progress/2026-10-12-erased-record-shallow-release.md).
+--
+-- The rows of the `shared` leg are SHARED: walked by three predicates and a
+-- field-returning lambda, then read again, so a drop that released a
+-- reference it did not own is a use-after-free under ASAN or a wrong total.
+mod ErasedRecordDeep do
+  needs IO.Console
+  type Box = Bx(List(b))
+  type Person = { pid : Int, label : String }
+
+  fn count_keep(rows : List(a), pred, n : Int) : Int do
+    match rows do
+    Nil -> n
+    Cons(h, t) ->
+      if pred(h) == true do count_keep(t, pred, n + 1)
+      else count_keep(t, pred, n)
+      end
+    end
+  end
+
+  fn run(box, rows) do
+    match box do
+    Bx(preds) ->
+      match preds do
+      Cons(p, _) -> count_keep(rows, p, 0)
+      Nil        -> 0 - 1
+      end
+    end
+  end
+
+  fn names(box, rows, acc : Int) : Int do
+    match box do
+    Bx(fs) ->
+      match fs do
+      Cons(f, _) ->
+        match rows do
+        Nil -> acc
+        Cons(h, t) -> names(box, t, acc + string_length(f(h)))
+        end
+      Nil -> acc
+      end
+    end
+  end
+
+  fn rows(i : Int) do
+    Cons({ id: i, age: 30, name: "ann" ++ int_to_string(i) },
+    Cons({ id: i + 1, age: 25, name: "bob" ++ int_to_string(i) },
+    Cons({ id: i + 2, age: 35, name: "cy" ++ int_to_string(i) }, Nil)))
+  end
+
+  fn tagged(i : Int) do
+    Cons({ age: 30, name: "ann" ++ int_to_string(i), tags: Cons("x" ++ int_to_string(i), Nil) },
+    Cons({ age: 25, name: "bob" ++ int_to_string(i), tags: Cons("y" ++ int_to_string(i), Nil) },
+    Cons({ age: 35, name: "cy" ++ int_to_string(i), tags: Cons("z" ++ int_to_string(i), Nil) }, Nil)))
+  end
+
+  fn people(i : Int) : List(Person) do
+    Cons({ pid: i, label: "p" ++ int_to_string(i) },
+    Cons({ pid: i + 1, label: "q" ++ int_to_string(i) },
+    Cons({ pid: i + 2, label: "r" ++ int_to_string(i) }, Nil)))
+  end
+
+  fn fresh(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else fresh(i - 1, acc + run(Bx(Cons(fn r -> r.age > 28, Nil)), rows(i)))
+    end
+  end
+
+  fn fresh_tagged(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else fresh_tagged(i - 1, acc + run(Bx(Cons(fn r -> r.age > 28, Nil)), tagged(i)))
+    end
+  end
+
+  fn fresh_people(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else fresh_people(i - 1, acc + run(Bx(Cons(fn r -> r.pid > 0, Nil)), people(i)))
+    end
+  end
+
+  fn reread(rs, acc : Int) : Int do
+    match rs do
+    Nil -> acc
+    Cons(r, t) -> reread(t, acc + string_length(r.name) + List.length(r.tags))
+    end
+  end
+
+  fn shared(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else
+      let rs = tagged(i)
+      let a = run(Bx(Cons(fn r -> r.age > 28, Nil)), rs)
+      let b = run(Bx(Cons(fn r -> string_length(r.name) > 3, Nil)), rs)
+      let c = run(Bx(Cons(fn r -> List.length(r.tags) > 0, Nil)), rs)
+      let d = names(Bx(Cons(fn r -> r.name, Nil)), rs, 0)
+      let e = reread(rs, 0)
+      shared(i - 1, acc + a + b + c + d + e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let w = fresh(5, 0) + fresh_tagged(5, 0) + fresh_people(5, 0) + shared(5, 0)
+    let a0 = live_allocs()
+    let x = fresh(200, 0)
+    let a1 = live_allocs()
+    let y = fresh_tagged(200, 0)
+    let a2 = live_allocs()
+    let z = fresh_people(200, 0)
+    let a3 = live_allocs()
+    let v = shared(200, 0)
+    let a4 = live_allocs()
+    println("warmup " ++ int_to_string(w))
+    println("String field: total " ++ int_to_string(x) ++ ", growth " ++ int_to_string(a1 - a0))
+    println("String and List fields: total " ++ int_to_string(y) ++ ", growth " ++ int_to_string(a2 - a1))
+    println("nominal record: total " ++ int_to_string(z) ++ ", growth " ++ int_to_string(a3 - a2))
+    println("shared rows: total " ++ int_to_string(v) ++ ", growth " ++ int_to_string(a4 - a3))
+  end
+end

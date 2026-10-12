@@ -46,10 +46,20 @@ let rec free_vars : Tir.expr -> StringSet.t = function
   | Tir.ETuple atoms | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
     List.fold_left (fun s a -> StringSet.union s (free_atom a)) StringSet.empty atoms
   | Tir.ERecord fields ->
-    List.fold_left (fun s (_, a) -> StringSet.union s (free_atom a)) StringSet.empty fields
+    (* A record allocation keeps its deep-drop function alive: the LLVM
+       backend registers it with the runtime under the record's shape id, for
+       a release through an erased type (Tir_names.record_drop_fn_name). *)
+    let drop = Tir_names.record_drop_fn_name
+        (List.map (fun (n, a) -> (n, Tir_names.atom_ty a)) fields) in
+    List.fold_left (fun s (_, a) -> StringSet.union s (free_atom a))
+      (StringSet.singleton drop) fields
   | Tir.EField (a, _)        -> free_atom a
   | Tir.EUpdate (a, fields)  ->
-    List.fold_left (fun s (_, v) -> StringSet.union s (free_atom v)) (free_atom a) fields
+    let base = match a with
+      | Tir.AVar { Tir.v_ty = Tir.TRecord fs; _ } ->
+        StringSet.add (Tir_names.record_drop_fn_name fs) (free_atom a)
+      | _ -> free_atom a in
+    List.fold_left (fun s (_, v) -> StringSet.union s (free_atom v)) base fields
   | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
   | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> free_atom a
   | Tir.EReuse (a, Tir.TCon (clo, _), args) when Tir_names.is_clo_struct clo ->

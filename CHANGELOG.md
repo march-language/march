@@ -667,6 +667,10 @@ git log is authoritative for exact commits.
   returned (`match LinearMap.take_slot(state.sessions, id) do (None, slot) ->
   .. end`) kept the old state record, and everything it held, on every
   message.
+- **A record released through a generic value no longer leaks its fields
+  when compiled.** A record handed to a lambda whose parameter type stayed
+  generic (one stored in a container that hides its element type) was freed
+  without its String and List fields.
 - **File and directory functions and `IO.warn` no longer leak their
   arguments when compiled.** `File.exists`, `File.read`, `File.write`,
   `File.append`, `File.delete`, `File.copy`, `File.rename`, `File.stat`,
