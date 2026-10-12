@@ -17015,7 +17015,7 @@ end|}
 let test_tir_verify_rc_leak_sweep () =
   Alcotest.(check (list string)) "no leak finding in the sweep's shapes" []
     (rc_leak_findings rc_leak_sweep_src
-       [ "has"; "str_or"; "both" ])
+       [ "has"; "str_or"; "both"; "keeps_new" ])
 
 (* ── Dce.prune_unreachable ~roots (the remote shell's fragments) ─────────
 

@@ -478,6 +478,8 @@ native_owned_call_drop_fusion: coverage audit (user + stdlib): 135 enforced, 0 i
 native_owned_call_drop_fusion: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_owned_call_dup_arg: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_owned_call_dup_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_partial_release_aggregate_drop: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_partial_release_aggregate_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_peak_rss: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_peak_rss: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_peer_reader_loopback: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
