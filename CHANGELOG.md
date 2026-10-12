@@ -663,14 +663,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 - **Compiled code no longer leaks a record that one branch released and
-  another only read.** Two shapes kept the record, and every heap value in
+  another only read.** Three shapes kept the record, and every heap value in
   it, for good:
   - a parameter read in a `let`'s `if` value (`let lower = if st.me < n do
     st.me else n end`) while the rest of the function used another
     parameter;
+  - a let-bound record read by an `if` used as a statement, once per
+    message in a compiled actor handler;
   - a record destructured in a list-building recursive function that
     tail-recursion-modulo-cons compiles to a loop, once per element.
-  The TIR verifier's leak check found both in stdlib code
+  The TIR verifier's leak check found all three in stdlib code
   (`ClusterNode`, `SessionNode`, `Control`, `Plot`).
 - **`MARCH_VERIFY_TIR_LEAKS=1` no longer reports about 257 false leaks in
   every program.** The reference-count check counted a discarded unit
