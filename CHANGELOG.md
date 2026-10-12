@@ -662,6 +662,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A send to a full `BLOCK` mailbox waits again after it migrates schedulers.**
+  When a sender woke up on a different scheduler thread, its retry could check
+  the old scheduler's state. If that scheduler was idle, the message was
+  delivered past the mailbox limit instead of waiting. Found by a
+  `MARCH_SANITIZE=thread` sweep. See
+  `specs/progress/2026-10-12-send-block-guard-stale-tls.md`.
 - **`MARCH_SANITIZE=thread` builds no longer report a race on the
   socket-readiness poller.** The scheduler's background thread read the shared
   kqueue/epoll descriptor without a lock while the first socket wait created

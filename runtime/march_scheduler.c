@@ -2895,6 +2895,22 @@ void march_sched_set_mbox_limit(march_proc *p, int64_t limit,
     mbox_lock_release(p);
 }
 
+/* True when the caller runs on a scheduler's own OS-thread C stack but not
+ * inside a dispatched green thread (march_sched_send's BLOCK self-deadlock
+ * guard).  NOINLINE for the reason spelled out on
+ * mbox_block_register_and_park below: march_sched_send's retry loop calls
+ * this again after a BLOCK park, which can resume the sender on another OS
+ * thread.  Written inline in the loop, clang hoisted the tl_sched read out of
+ * it, and the post-migration iteration read the OLD scheduler's `current`
+ * while that scheduler was dispatching (TSAN, proc_reclaim_kill_respawn at 2
+ * and 14 schedulers: march_sched_send vs sched_loop's `current = p`/NULL).
+ * An idle old scheduler then made a green-thread sender skip its BLOCK wait. */
+__attribute__((noinline))
+static int on_sched_control_plane(void) {
+    march_scheduler *s = tl_sched;
+    return s && !s->current;
+}
+
 /* Register the CURRENT green thread as a MARCH_MBOX_BLOCK sender-waiter on
  * `target` (already locked by the caller; this releases the lock) and park
  * until woken. Returns MARCH_SEND_OK if the caller should retry the send
@@ -3157,7 +3173,7 @@ int march_sched_send(march_proc *target, void *msg) {
                  * entire point is "never drop, only wait" -- worse than a
                  * depth spike this thread cannot cause again until it is
                  * next dispatched to run more control-plane code. */
-                if (tl_sched && !tl_sched->current) {
+                if (on_sched_control_plane()) {
                     break;
                 }
 
