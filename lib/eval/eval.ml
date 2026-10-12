@@ -515,8 +515,16 @@ let handle_os_signal (osnum : int) : unit =
     | None ->
       (* Unwatched: Term/Int fall back to graceful shutdown.  Hup/Usr1/Usr2
          handlers are only installed while watched (removed on unwatch), so
-         this branch runs for Term/Int in practice. *)
-      if code = 0 || code = 1 then shutdown_requested := true
+         this branch runs for Term/Int in practice.  Graceful shutdown needs
+         a loop that polls the flag; with none running (plain compute in
+         `main`), or on a second delivery, exit the way the default action
+         does in compiled code — the flag alone left Ctrl+C and `timeout`
+         unable to stop an interpreted program. *)
+      if code = 0 || code = 1 then begin
+        if !Eval_prim.shutdown_consumers = 0 || !shutdown_requested then
+          exit (128 + if code = 0 then 15 else 2);
+        shutdown_requested := true
+      end
 
 (* ---- Logger global state ───────────────────────────────────────────
    Logger v2 keeps richer field values (Int, Float, Bool, Atom, String,
@@ -2593,7 +2601,7 @@ let busy_actors : (int, unit) Hashtbl.t = Hashtbl.create 8
     Each pass iterates over all live actors; for each with a non-empty mailbox
     it pops one message, finds the matching [on Msg] handler, and runs it.
     Repeats until a full pass produces no work (all mailboxes empty). *)
-let run_scheduler () =
+let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
   let changed = ref true in
   while !changed && not !shutdown_requested do
     changed := false;
@@ -4324,7 +4332,9 @@ let run_module (m : module_) : unit =
   Sys.set_signal Sys.sigint  (Sys.Signal_handle handle_os_signal);
   match List.assoc_opt "__app_init__" env with
   | Some init_fn ->
-    (* App entry point: evaluate app body to get { spec, on_start, on_stop } *)
+    (* App entry point: evaluate app body to get { spec, on_start, on_stop }.
+       The whole lifecycle consumes SIGTERM/SIGINT gracefully (step 4). *)
+    Eval_prim.with_shutdown_consumer (fun () ->
     let app_record = apply init_fn [] in
     let spec = match app_record with
       | VRecord fields ->
@@ -4351,7 +4361,7 @@ let run_module (m : module_) : unit =
     if not (List.is_empty !app_spawn_order) then
       graceful_shutdown ();
     (* 5. Call on_stop hook (after tree is down) *)
-    call_hook_opt on_stop_opt
+    call_hook_opt on_stop_opt)
   | None ->
     match List.assoc_opt "main" env with
     | None   -> ()

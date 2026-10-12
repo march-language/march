@@ -10559,6 +10559,65 @@ let test_hcr_entry_point_not_a_reloadable_slot () =
 
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
+(* An interpreted program stuck in plain computation must die on SIGTERM
+   (exit 143, like the compiled binary's default action).  The interpreter's
+   unwatched SIGTERM/SIGINT handler only set the graceful-shutdown flag, which
+   nothing polls outside the actor scheduler / HTTP loop, so `timeout` and
+   Ctrl+C could not stop `march spin.march`. *)
+let test_interp_sigterm_stops_compute_loop () =
+  let main_exe = find_main_exe () in
+  let project_root = march_project_root () in
+  let tmp = Filename.temp_file "march_sigterm" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "spin.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod Spin do\n\
+    \  needs IO.Console\n\
+    \  fn spin(n : Int) : Int do\n\
+    \    if n == 0 do 0 else spin(n + 1) end\n\
+    \  end\n\
+    \  fn main(_c : Cap(IO.Console)) do\n\
+    \    println(\"spinning\")\n\
+    \    println(int_to_string(spin(1)))\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let out_path = Filename.concat tmp "out.txt" in
+  let out_fd = Unix.openfile out_path [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o644 in
+  let null_fd = Unix.openfile "/dev/null" [Unix.O_RDWR] 0 in
+  let cwd = Sys.getcwd () in
+  Sys.chdir project_root;
+  let pid =
+    Fun.protect ~finally:(fun () -> Sys.chdir cwd) (fun () ->
+      Unix.create_process main_exe [| main_exe; src |] null_fd out_fd null_fd)
+  in
+  Unix.close out_fd;
+  Unix.close null_fd;
+  let read_out () = try read_file_contents out_path with Sys_error _ -> "" in
+  (* Wait (up to 60 s: stdlib load on a loaded box) for main to be running. *)
+  let deadline = Unix.gettimeofday () +. 60.0 in
+  while not (String.length (read_out ()) > 0) && Unix.gettimeofday () < deadline do
+    Unix.sleepf 0.1
+  done;
+  Unix.kill pid Sys.sigterm;
+  let rec wait_exit tries =
+    match Unix.waitpid [Unix.WNOHANG] pid with
+    | 0, _ when tries > 0 -> Unix.sleepf 0.1; wait_exit (tries - 1)
+    | 0, _ ->
+      (* Still alive after 10 s: the bug.  SIGHUP (unhandled, so fatal)
+         reaps it without leaving a spinning process behind. *)
+      Unix.kill pid Sys.sighup;
+      ignore (Unix.waitpid [] pid);
+      None
+    | _, st -> Some st
+  in
+  let status = wait_exit 100 in
+  Alcotest.(check string) "main started" "spinning\n" (read_out ());
+  Alcotest.(check bool) "SIGTERM ends the interpreted compute loop with 143" true
+    (status = Some (Unix.WEXITED 143))
+
 (* ── Guard-exhaustion fallthrough (B3) ─────────────────────────────────────
    A guarded match where every guard fails must panic, not silently return
    `LitInt 0` reinterpreted at the match's real (non-Int) type — see
@@ -17719,6 +17778,10 @@ let codegen_suites =
           Alcotest.test_case "leaf change: only leaf reload hash changes" `Quick test_hcr_leaf_change_only_changes_leaf_reload_hash;
           Alcotest.test_case "transitive CAS hash still propagates"       `Quick test_hcr_transitive_hash_still_propagates_for_cas;
           Alcotest.test_case "entry point excluded from reloadable slots" `Quick test_hcr_entry_point_not_a_reloadable_slot;
+        ] );
+      ( "interp_signal", [
+          Alcotest.test_case "SIGTERM stops an interpreted compute loop" `Quick
+            test_interp_sigterm_stops_compute_loop;
         ] );
       ( "guard_exhaustion_codegen", [
           Alcotest.test_case "compiled guard exhaustion panics (B3)" `Quick

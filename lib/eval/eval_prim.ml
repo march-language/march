@@ -20,6 +20,16 @@ let eval_error fmt = Printf.ksprintf (fun s -> raise (Eval_error s)) fmt
 (** Flag set when graceful shutdown has been requested (SIGTERM, App.stop). *)
 let shutdown_requested : bool ref = ref false
 
+(** How many loops that poll [shutdown_requested] are running (the actor
+    scheduler drain, the HTTP event loop, an app's lifecycle).  An unwatched
+    SIGTERM/SIGINT arriving while none is running has nobody to act on the
+    flag, so the signal handler exits instead (see [Eval.handle_os_signal]). *)
+let shutdown_consumers : int ref = ref 0
+
+let with_shutdown_consumer (f : unit -> 'a) : 'a =
+  incr shutdown_consumers;
+  Fun.protect ~finally:(fun () -> decr shutdown_consumers) f
+
 (* Hook refs — copied verbatim from eval.ml, including their placeholder
    bodies and the comments explaining who installs them. *)
 

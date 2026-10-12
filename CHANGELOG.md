@@ -662,6 +662,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Ctrl+C and SIGTERM stop an interpreted program that is busy computing.**
+  `march file.march` ignored both (any number of times) unless it was running
+  actors or an HTTP server, so `timeout` and Ctrl+C could not stop a long
+  loop. It now exits with 143 (SIGTERM) or 130 (SIGINT), like a compiled
+  binary. Servers and apps still shut down gracefully on the first signal and
+  exit at once on a second.
 - **A stdlib module name with the wrong case is an error.** `Bigint.from_int`
   (the module is `BigInt`) typechecked and ran compiled, while the interpreter
   failed with `unbound variable`. It is now rejected with

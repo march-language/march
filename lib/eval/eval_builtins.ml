@@ -2962,7 +2962,7 @@ let base_env : env =
         bind server_sock (ADDR_INET (inet_addr_any, port));
         listen server_sock 128;
         Printf.eprintf "march: HTTP server listening on port %d\n%!" port;
-        (try run_http_event_loop server_sock pipeline_fn
+        (try Eval_prim.with_shutdown_consumer (fun () -> run_http_event_loop server_sock pipeline_fn)
          with
          (* EINTR from accept/select that slipped past inner handlers —
             treat as a clean shutdown rather than re-raising as a fatal error *)
