@@ -243,10 +243,21 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
        outer Cons into a direct owned-local scrutinee whose alias cprop would
        otherwise propagate).  Keep the scrutinee un-substituted whenever an arm
        decrements the original scrutinee var. *)
+    (* The same holds for an arm that REUSES the scrutinee's cell
+       (`reuse X as ...`, or a TRMC hole with token X): [llvm_case.ml] finds
+       that reuse BY NAME ([Case_handoff.body_reuses_scrut]) to IncRC the
+       extracted fields when the cell turns out to be shared.  The reuse
+       token itself is never substituted (see the EReuse case), so
+       substituting the scrutinee alone would hide the reuse from that scan:
+       the fields of a SHARED cell then move into consuming callees with no
+       dup and are freed under the other owner (Set.union's inlined
+       node_fold over a set still held by the caller). *)
     let protect_scrut =
       match a with
       | Tir.AVar x ->
-        List.exists (fun b -> branch_leads_with_dec x.Tir.v_name b.Tir.br_body)
+        List.exists (fun b ->
+          branch_leads_with_dec x.Tir.v_name b.Tir.br_body
+          || Case_handoff.body_reuses_scrut x.Tir.v_name b.Tir.br_body)
           branches
       | _ -> false
     in
@@ -302,8 +313,16 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
   | Tir.ESetField (o, i, v) ->
     Tir.ESetField (o, i, subst_atom ~changed env avar v)
 
+  (* The reuse token is NOT substituted, exactly like EAllocHole's: it names
+     the cell whose storage is taken over, and [llvm_case.ml] pairs it with the
+     enclosing [case] scrutinee BY NAME to dup the fields extracted from a
+     shared cell.  Rewriting `reuse x` to `reuse y` under `case x` (x an alias
+     of y, the scrutinee kept because an arm leads with `dec_rc x`) broke that
+     pairing: the shared-path IncRC was skipped and a shared tree node's
+     children were freed under the caller (Set.union then Set.intersection
+     with one comparator, a compiled use-after-free). *)
   | Tir.EReuse (token, ty, args) ->
-    Tir.EReuse (subst_atom ~changed env avar token, ty, subst_atoms ~changed env avar args)
+    Tir.EReuse (token, ty, subst_atoms ~changed env avar args)
 
   (* RC operations must NOT have their argument substituted.  For literals:
      replacing a heap var with a literal in EDecRC would free a non-heap value.

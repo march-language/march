@@ -568,6 +568,8 @@ native_session_node_fan_loopback: coverage audit (user + stdlib): 135 enforced, 
 native_session_node_fan_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_session_party_released: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_session_party_released: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_set_ops_shared_comparator: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_set_ops_shared_comparator: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_sha256_hex_string: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_sha256_hex_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shadow_selfref_let: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

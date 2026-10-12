@@ -662,6 +662,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled set operations no longer free a set the caller still holds.**
+  Calling `Set.union(a, b, cmp)` and then `Set.intersection` or
+  `Set.difference` on the same sets crashed the compiled program at exit
+  (SIGSEGV, a use-after-free under ASAN): the union released tree nodes of `b`
+  that `b` still owned. The optimizer renamed the cell an inlined match reused,
+  which hid the reuse from the code that protects a shared cell's children.
+  The interpreter was unaffected.
 - **Compiled `to_string` names a `Bytes` returned by the runtime.**
   `to_string(Base64.decode(s))` printed `Ok(#<tag:0>)` compiled and
   `Ok(Bytes("..."))` interpreted; the same held for Bytes from hashing,
