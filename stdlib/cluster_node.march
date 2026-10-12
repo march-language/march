@@ -452,7 +452,9 @@ mod ClusterNode do
     revs : List(NodeCert.SignedRevocation), -- every operator-signed revocation known here
     cert_dead : Map(String, String),     -- peers dropped for their certificate -> why
     rotated : Bool,                      -- this node's certificate was replaced since start
-    reg_swept_at : Int                   -- when the registry's tombstones were last collected
+    reg_swept_at : Int,                  -- when the registry's tombstones were last collected
+    remembered : Int,                    -- peer member views that held THIS node stale (`self_stale`)
+    reg_synced : Bool                    -- a peer's registry merged here, or no seeds to wait for
   }
 
   -- What a watcher of a name sees. `Lost` goes to watchers on the node that
@@ -482,7 +484,7 @@ mod ClusterNode do
       pending: Nil, relays: Map.empty(), refused: Nil, seed_ids: Map.empty(), rejoining: Nil, stopped: false,
       reg: GlobalRegistry.empty(), regs: Map.empty(), vis: Map.empty(), certs: Map.empty(),
       revs: List.filter(cfg.revocations, fn r -> Result.is_ok(check_revocation(cfg, r))), cert_dead: Map.empty(),
-      rotated: false, reg_swept_at: 0 }
+      rotated: false, reg_swept_at: 0, remembered: 0, reg_synced: List.is_empty(cfg.seeds) }
   end
 
   -- ── revocation and expiry ──────────────────────────────────────────────
@@ -1185,7 +1187,9 @@ mod ClusterNode do
       end
     else if tag == 14 do
       match SwimDriver.decode_members_sync(frame) do
-        Ok(ms) -> (List.fold_left(ms, st, fn (s, m) -> queue(s, SwimDriver.GossipFrame(m))), Nil)
+        Ok(ms) ->
+          let st1 = if List.any(ms, fn m -> self_stale(st, m)) do { st with remembered: st.remembered + 1 } else st end
+          (List.fold_left(ms, st1, fn (s, m) -> queue(s, SwimDriver.GossipFrame(m))), Nil)
         Err(_) -> (st, Nil)
       end
     else if tag == 5 || tag == 6 do
@@ -1229,6 +1233,29 @@ mod ClusterNode do
       (st, Nil)
     end end end end end
   end
+
+  -- Does [m], from a peer's member view (the MEMBERS_SYNC a peer sends when a
+  -- link comes up), show THIS node as the peer last knew it before a
+  -- restart (an earlier creation) or as Dead at this creation (a restart
+  -- that kept its creation, or a heal after the peer declared us dead)?
+  -- Either way that peer reports our coming back as `NodeRejoined` and
+  -- treats us as settling (Topology), so we mirror it (`rejoined_at`).
+  pfn self_stale(st : CnState, m : Member) : Bool do
+    if m.node_id != st.me || m.creation <= 0 do false
+    else if m.creation < st.cfg.creation do true
+    else if m.creation == st.cfg.creation do
+      match m.status do
+        Dead -> true
+        _ -> false
+      end
+    else false end end end
+  end
+
+  doc "How many peer member views have shown this node as rejoining (`self_stale`); for tests of the core."
+  fn core_remembered(st : CnState) : Int do st.remembered end
+
+  doc "Has a peer's registry been merged here (or did this node start with no seeds to wait for)? For tests of the core."
+  fn core_reg_synced(st : CnState) : Bool do st.reg_synced end
 
   -- ── names ──────────────────────────────────────────────────────────────
 
@@ -1564,7 +1591,7 @@ mod ClusterNode do
         Err(_) -> (st, Nil)
         Ok((rh, leaves)) ->
           let merged = GlobalRegistry.diff_entries(st.reg, rh, stamp_leaves(st, from, leaves))
-          match retire_stale({ st with reg: merged }) do
+          match retire_stale({ st with reg: merged, reg_synced: true }) do
             (st2, retired) ->
               let mine = GlobalRegistry.root_hash(st2.reg)
               -- Answer with everything when the sender's state (its root) is
@@ -1999,6 +2026,13 @@ mod ClusterNode do
     let stale = List.length(List.filter(GlobalRegistry.all_entries(st.reg), fn kv ->
       match kv do (_n, e) -> e.present && e.node_id == st.me && e.creation != st.cfg.creation end))
     let _ = Vault.set(h.meta, "stale_bindings", stale)
+    let _ = Vault.set(h.meta, "reg_synced", if st.reg_synced do 1 else 0 end)
+    -- When a peer last showed this node as rejoining: stamped here, on the
+    -- step that counted it (the core has no clock).
+    let _ = if st.remembered > Vault.get_or(h.meta, "remembered", 0) do
+      Vault.set(h.meta, "remembered", st.remembered)
+      Vault.set(h.meta, "rejoined_at", unix_time_ms())
+    else () end
     let _ = List.map(Vault.keys(h.names), fn k ->
       if Map.contains_key(st.vis, k, Map.str_cmp) do () else Vault.drop(h.names, k) end)
     discard(List.map(Map.entries(st.vis), fn kv -> match kv do (k, p) -> Vault.set(h.names, k, p) end))
@@ -2578,6 +2612,8 @@ mod ClusterNode do
     replace_cert       : String -> String -> Result(NodeCert.Cert, String),
     on_security_event  : (SecurityEvent -> Unit) -> Int,
     off_security_event : Int -> (),
+    registry_synced    : () -> Bool,
+    rejoined_at        : () -> Option(Int),
     handshake          : Int -> String -> Int -> Result(NetKernel.Authed, String)
   }
 
@@ -2642,6 +2678,10 @@ mod ClusterNode do
       replace_cert: fn (_, _) -> unsupported("replace_cert"),
       on_security_event: fn _ -> unsupported("on_security_event"),
       off_security_event: fn _ -> unsupported("off_security_event"),
+      -- Not panics: Topology.place reads both, and a fake cluster is one
+      -- that has synced and that no peer remembers.
+      registry_synced: fn _ -> true,
+      rejoined_at: fn _ -> None,
       handshake: fn (_, _, _) -> Err("ClusterNode: handshake is not supported by this capability") }
   end
 
@@ -2687,6 +2727,8 @@ mod ClusterNode do
       replace_cert: fn (cert_text, key_hex) -> h_replace_cert(h, cert_text, key_hex),
       on_security_event: fn f -> h_on_security_event(h, f),
       off_security_event: fn id -> Vault.drop(h.sec, int_to_string(id)),
+      registry_synced: fn _ -> Vault.get_or(h.meta, "reg_synced", 0) != 0,
+      rejoined_at: fn _ -> Vault.get(h.meta, "rejoined_at"),
       handshake: fn (fd, role, timeout_ms) -> h_handshake(h, fd, role, timeout_ms) }
   end
 
@@ -3314,6 +3356,28 @@ mod ClusterNode do
   fn unwatch(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.unwatch(id)
+  end
+
+  doc """
+  Has this node merged a peer's registry replica yet (the sync a peer sends
+  when a link comes up)? Always true for a node started with no seeds: it
+  has no one to wait for. Until then this node's view of the names (and of
+  Topology's eligibility markers) is its own alone.
+  """
+  fn registry_synced(c : Cap(ClusterNode.Live)) : Bool do
+    let d = ops(c)
+    d.registry_synced(())
+  end
+
+  doc """
+  When (unix ms) a peer last showed this node as rejoining: its member view
+  held this node at an earlier creation (a restart) or Dead (a restart that
+  kept its creation, a heal). That peer reports the node's return as
+  `NodeRejoined` and lets it settle before counting it; None if no peer has.
+  """
+  fn rejoined_at(c : Cap(ClusterNode.Live)) : Option(Int) do
+    let d = ops(c)
+    d.rejoined_at(())
   end
 
   doc "How many present bindings of this node's from an earlier creation the replica holds (0 once retired)."

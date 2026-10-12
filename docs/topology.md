@@ -109,8 +109,12 @@ hosts = [{ host = "root@render-1", labels = ["gpu"] }, "root@render-2"]
   the same way and offers when it is in the top n. When a node is declared dead, the
   next one in the ranking takes the role over. A node that rejoins counts again only
   after `MARCH_PLACEMENT_SETTLE_MS` (default 15000), so a flapping node does not pull
-  roles back and forth. `count = 1` is not a lock: during a partition each side may
-  offer.
+  roles back and forth. The returning node applies the same period to itself: it
+  opens no `count` role before its first registry sync with its peers (waiting at
+  most the settle period, so a lone node still takes its roles), and while its peers
+  count it as rejoined it leaves a `count` role to the nodes already offering it
+  unless they cannot fill the count without it. `count = 1` is not a lock: during a
+  partition each side may offer.
 - **Both:** `count` ranks only the labelled nodes.
 
 ## `forge topology check`

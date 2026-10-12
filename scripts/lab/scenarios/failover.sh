@@ -16,13 +16,15 @@
 # Sessions that had the dead node as a party fail while it is being
 # detected; that number is reported, not asserted.
 #
-# Expected to fail: the returning host offers the role about a second after
-# it starts, while the other still holds it, until the settle period passes
-# on the other's side (the timeline is in LAB_DIR/logs/failover-timeline.txt).
-# Once the role is back on the restarted host, no initiator sees its offer,
-# so sessions stop finishing (the first todo's sibling, the second).
-LAB_XFAIL="specs/todos/2026-10-05-lab-rejoining-node-offers-count-role-at-once.md, 2026-10-05-lab-restarted-node-offers-invisible.md"
-LAB_XFAIL_AT="inside the 15s settle period|sessions finishing after"
+# The returning host used to offer the role about a second after it started,
+# while the other still held it, until the settle period passed on the
+# other's side (fixed 2026-10-12: specs/progress/2026-10-05-lab-rejoining-
+# node-offers-count-role-at-once.md; that check is expected to pass now, but
+# the fix was verified by test/two_node/topology_rejoin, not by a lab run).
+# Expected to fail still: once the role is back on the restarted host, no
+# initiator sees its offer, so sessions stop finishing.
+LAB_XFAIL="specs/todos/2026-10-05-lab-restarted-node-offers-invisible.md"
+LAB_XFAIL_AT="sessions finishing after"
 
 settle_s=15
 margin=${LAB_FAILOVER_MARGIN_S:-17}
