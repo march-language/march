@@ -9882,6 +9882,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (diff native/erased_float_slot_leak_probe.expected
         native_erased_float_slot_leak_probe.out)))
 
+; ── Leak guard: an erased-slot Float box in a cell the branch REUSES (FBIP):
+; `Some(f) -> N(f)` / `Some(f) -> Ok(f)` orphaned the box (one per Json number
+; parsed), and an Option(Float) token reused as another type leaked the whole
+; cell. The shared legs are the double-free witnesses. Found by the ASAN/LSan
+; sweep (scripts/native-sanitize-sweep.sh -l).
+(rule
+ (targets native_erased_float_reuse_leak_probe native_erased_float_reuse_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/erased_float_reuse_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_float_reuse_leak_probe
+        native/erased_float_reuse_leak_probe.march)
+   (with-stdout-to native_erased_float_reuse_leak_probe.out
+        (system "./native_erased_float_reuse_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_float_reuse_leak_probe.expected native_erased_float_reuse_leak_probe.out)))
+
 (rule
  (alias runtest)
  (deps native_erased_float_slot_leak_probe.live)

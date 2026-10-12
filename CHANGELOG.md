@@ -617,6 +617,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled code no longer leaks a `Float` when rebuilding a value from
+  `Some(f)`.** Matching `Some(f)` on an `Option(Float)` and building another
+  one-field value from it (`Some(f) -> Ok(f)`, `Some(f) -> Number(f)`) leaked
+  one small allocation per call, and rebuilding it as a different type could
+  leak the whole `Option` cell. `Json.parse` hit this once for every number it
+  read, so long-running programs that parse JSON grew without bound.
 - **A top-level function named like a stdlib callback parameter is called
   correctly when compiled.** Declaring your own `f` and calling it from a lambda
   passed to `List.map` (whose callback parameter is also `f`) called the

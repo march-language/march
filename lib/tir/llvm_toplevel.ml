@@ -345,6 +345,7 @@ let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.Llvm_ctx.local_names;
   Hashtbl.clear ctx.Llvm_ctx.var_slot;
   Hashtbl.clear ctx.Llvm_ctx.var_llvm_ty;
+  Hashtbl.clear ctx.Llvm_ctx.let_alias;
   ctx.Llvm_ctx.ret_ty <- fn.Tir.fn_ret_ty;
   ctx.Llvm_ctx.cur_emit_fn <- fn.Tir.fn_name;
   ctx.Llvm_ctx.hr_cur_module <- Llvm_ctx.module_of_name fn.Tir.fn_name;

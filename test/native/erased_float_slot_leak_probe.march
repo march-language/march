@@ -26,13 +26,11 @@
 --      for a Float parameter arriving through this same ABI), and the box is
 --      released on the march_decrc_freed UNIQUE path.
 --
--- FBIP WHOLE-CELL REUSE IS EXEMPT, on purpose. When the branch body reuses
--- the scrutinee's own storage (EReuse), the field keeps its old ptr binding:
--- binding a raw double there would make any reconstruction re-box (coerce
--- double->ptr allocates) and store a FRESH box into the reused cell,
--- orphaning the one already in the slot -- a new leak traded for the fixed
--- one. That path therefore keeps its pre-existing behaviour and is not
--- asserted here.
+-- FBIP WHOLE-CELL REUSE is not asserted here. When the branch body reuses
+-- the scrutinee's own storage (EReuse) the binder is still a copy, but the box
+-- is released by the reuse emitter instead, on the path where the cell is
+-- taken over or freed (2026-10-12); erased_float_reuse_leak_probe.march is
+-- that path's guard.
 --
 -- WHY THE RELEASE IS ON THE UNIQUE PATH AND NOWHERE ELSE. On the shared path
 -- (cell RC > 1 after the dec) the cell survives and still owns the box, and

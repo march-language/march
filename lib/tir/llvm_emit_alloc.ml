@@ -27,6 +27,51 @@ let get_record_fields = Llvm_data.get_record_fields
 let emit_set_shape = Llvm_data.emit_set_shape
 let mangle_ty_for_eq = Llvm_eq.mangle_ty_for_eq
 
+(* The erased-slot boxes a case branch copied out of [reuse_atom]'s cell (see
+   [Llvm_ctx.reuse_orphan_boxes]): owned by nobody once the cell is taken over
+   in place or freed, so each reuse emitter releases them on exactly those
+   paths, and never on the shared path, where the surviving cell still owns
+   them. *)
+let reuse_orphans ctx (reuse_atom : Tir.atom) : string list =
+  match reuse_atom with
+  | Tir.AVar v ->
+    Option.value ~default:[]
+      (Hashtbl.find_opt ctx.reuse_orphan_boxes (alias_root ctx v.Tir.v_name))
+  | _ -> []
+
+let release_orphans ctx (boxes : string list) =
+  List.iter (fun b -> emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" b)) boxes
+
+(* An Option-shaped reuse token is usually its own payload (niche-encoded: no
+   wrapper cell), which is why the reuse arms below skip FBIP for one.  But a
+   niche-UNSAFE payload (Option(Float): 0.0 would read as None) is encoded
+   BOXED, and then the token IS a heap cell that this reuse is its last use
+   of: skipping it leaked the cell and its Float box on every
+   [Some(f) -> KN(f)]-shaped rebuild.  Such a token takes the ordinary
+   RC-checked reuse path instead. *)
+let reuse_atom_is_boxed_cell ctx (reuse_atom : Tir.atom) : bool =
+  match reuse_atom with
+  | Tir.AVar { Tir.v_ty = (Tir.TCon (_, _ :: _) as ty); _ } ->
+    (match Kind.repr_of ctx.k_table ty with Kind.Boxed -> true | _ -> false)
+  | _ -> false
+
+(* [march_decrc rv], releasing the orphaned boxes when that freed the cell. *)
+let decrc_releasing_orphans ctx (rv : string) (boxes : string list) =
+  if boxes = [] then emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv)
+  else begin
+    let freed = fresh ctx "ro_freed" in
+    emit ctx (Printf.sprintf "%s = call i64 @march_decrc_freed(ptr %s)" freed rv);
+    let fb = fresh ctx "ro_freed_b" in
+    emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" fb freed);
+    let rel = fresh_block ctx "ro_release" in
+    let cont = fresh_block ctx "ro_cont" in
+    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" fb rel cont);
+    emit_label ctx rel;
+    release_orphans ctx boxes;
+    emit_term ctx (Printf.sprintf "br label %%%s" cont);
+    emit_label ctx cont
+  end
+
 (** Body of the capture-free-lambda arm: a static, immortal global closure
     instead of a heap allocation. *)
 let emit_static_closure ctx (tcon_name : string) (fn_ptr_atom : Tir.atom)
@@ -443,6 +488,7 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
        emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
                         uniq reuse_lbl fresh_lbl);
        emit_label ctx reuse_lbl;
+       release_orphans ctx (reuse_orphans ctx reuse_atom);
        emit_store_tag ctx rv entry.ce_tag entry.ce_type_id;
        store_slots rv;
        clear_hole rv;
@@ -530,7 +576,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
     (match Kind.repr_of ctx.k_table (Tir.TCon (reuse_type_name, [])) with
      | Kind.Newtype payload ->
        let (_, rv) = emit_atom ctx reuse_atom in
-       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
+       decrc_releasing_orphans ctx rv (reuse_orphans ctx reuse_atom);
        let (v_ty, v_val) = emit_atom ctx (List.hd args) in
        if Kind.payload_needs_tag ctx.k_table payload then begin
          let i64v = coerce ctx v_ty v_val "i64" in
@@ -542,7 +588,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
        (* Niche reuse: old value is itself a niche value (0, tagged-int, or ptr).
           march_decrc's IS_HEAP_PTR guard makes it a no-op on 0 and tagged ints. *)
        let (_, old_v) = emit_atom ctx reuse_atom in
-       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" old_v);
+       decrc_releasing_orphans ctx old_v (reuse_orphans ctx reuse_atom);
        let emit_niche_payload arg =
          let arg_tir_ty = match arg with
            | Tir.AVar v -> v.Tir.v_ty
@@ -635,6 +681,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
     in
     if reuse_atom_parent_type <> ""
        && Kind.is_niche_shaped ctx.k_table reuse_atom_parent_type
+       && not (reuse_atom_is_boxed_cell ctx reuse_atom)
     then begin
       let entry = ctor_entry ctx ctor (List.length args) in
       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
@@ -765,6 +812,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
        — safe to use as phi source labels.  Audit L6: phi instead of
        alloca/store/load slot. *)
     emit_label ctx reuse_lbl;
+    release_orphans ctx (reuse_orphans ctx reuse_atom);
     emit_store_tag ctx rv entry.ce_tag entry.ce_type_id;
     List.iteri (fun i (field_ty, v_coerced) ->
       emit_store_field ctx rv i field_ty v_coerced
@@ -832,6 +880,7 @@ let emit_reuse_uniform ~emit_atom ctx (reuse_atom : Tir.atom)
     in
     if reuse_atom_parent_type <> ""
        && Kind.is_niche_shaped ctx.k_table reuse_atom_parent_type
+       && not (reuse_atom_is_boxed_cell ctx reuse_atom)
     then begin
       let arg_vals = arg_vals_of () in
       let hp = emit_heap_alloc ctx 0 (List.length args) 0 in
@@ -853,6 +902,7 @@ let emit_reuse_uniform ~emit_atom ctx (reuse_atom : Tir.atom)
     emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
                      is_unique reuse_lbl fresh_lbl);
     emit_label ctx reuse_lbl;
+    release_orphans ctx (reuse_orphans ctx reuse_atom);
     (* Write tag=0 to match the fresh-branch allocation (emit_heap_alloc below
        passes tag_int=0).  Without this, the reused cell would carry whatever
        tag was previously stored — semantically inconsistent with the

@@ -1041,20 +1041,34 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     (* Fields that are physically a march_float_box in an ERASED slot — see the
        [is_boxed_float] comment at the binding site below. *)
     let boxed_float_field_vals = ref [] in
-    (* FBIP whole-cell reuse changes the answer for erased Float fields, so it
-       has to be known BEFORE the fields are bound.  When the body reuses the
-       scrutinee's own storage, binding the field as a raw double means any
-       reconstruction re-boxes (coerce double->ptr allocates) and stores a
-       FRESH box into the reused cell — orphaning the one already in the slot,
-       which is a new leak in exchange for the one this fixes.  Keep the
-       pre-existing ptr binding on that path instead: the reuse shape then
-       behaves exactly as it did before and keeps its own (pre-existing)
-       accounting.  The safe direction, and the same conservatism the reuse
-       counterpart of the leading-dec path already applies. *)
+    (* The same boxes when the body REUSES the cell: released by the reuse
+       emitter instead (see [Llvm_ctx.reuse_orphan_boxes]). *)
+    let reuse_orphan_vals = ref [] in
+    (* FBIP whole-cell reuse changes who releases an erased Float field's box,
+       so it has to be known BEFORE the fields are bound.  The binder is a
+       copy either way; when the body reuses the scrutinee's own storage the
+       box is not released here but by the reuse emitter, on the path where
+       the cell is taken over in place or freed (a reconstruction re-boxes
+       into the reused cell, so the old box in the slot has no owner left).
+       See [reuse_orphan_vals]. *)
     let body_reuses_scrut_here =
       match scrut_atom with
       | Tir.AVar v -> body_reuses_scrut v.Tir.v_name br.Tir.br_body
       | _ -> false
+    in
+    (* The same question for the erased-box release below, asked of every
+       [let] copy of the scrutinee too: after inlining the case is often on
+       [o] while the reuse token is the [$t] that [o] copies. *)
+    let orphan_key = match scrut_atom with
+      | Tir.AVar v -> Some (Llvm_ctx.alias_root ctx v.Tir.v_name) | _ -> None in
+    let body_reuses_scrut_or_alias = match orphan_key with
+      | None -> false
+      | Some root ->
+        body_reuses_scrut_here
+        || body_reuses_scrut root br.Tir.br_body
+        || Hashtbl.fold (fun k r acc ->
+             acc || (String.equal r root && body_reuses_scrut k br.Tir.br_body))
+             ctx.Llvm_ctx.let_alias false
     in
     if is_ptr_scrut then begin
       let entry = Llvm_data.ctor_entry ctx (qualified_br_key br.Tir.br_tag) (List.length br.Tir.br_vars) in
@@ -1109,7 +1123,6 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
            release of a genuinely unowned box rather than of a live one. *)
         let is_boxed_float =
           concrete_field_ty = "double" && field_ty = "ptr"
-          && not body_reuses_scrut_here
         in
         (* AN UNBOXED AGGREGATE IN AN ERASED SLOT — the Milestone-3 analogue of
            the Float case just above, and it needs the same treatment for the
@@ -1125,7 +1138,6 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         let is_boxed_agg =
           (not is_boxed_float) && field_ty = "ptr"
           && Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table concrete_field_ty <> None
-          && not body_reuses_scrut_here
         in
         let bind_ty =
           if is_boxed_float then "double"
@@ -1146,12 +1158,30 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot bind_ty;
         if concrete_field_ty = "ptr" && field_ty = "ptr" then
           heap_field_vals := fv :: !heap_field_vals
+        else if (is_boxed_float || is_boxed_agg) && body_reuses_scrut_or_alias then
+          reuse_orphan_vals := fv :: !reuse_orphan_vals
         else if is_boxed_float || is_boxed_agg then
           (* Both bind a copy, so both leave an unowned box behind — the list
              is "boxes the cell owns and the binder does not". *)
           boxed_float_field_vals := fv :: !boxed_float_field_vals
       ) br.Tir.br_vars
     end;
+    (* Hand the reuse emitters the boxes this branch's binders copied out of a
+       cell its body takes over (FBIP).  Binding a copy and releasing the box
+       when the cell is reused in place, or freed, is the reuse-path twin of
+       the march_decrc_freed release below.  Binding the BOX instead, as this
+       path did until 2026-10-12, leaked it whenever the body used the value
+       as a Float: [Some(f) -> Ok(f)] re-boxed [f] into the reused cell and
+       [Some(f) -> N(f)] stored the raw double, orphaning the old box either
+       way — one box per Json number parsed. *)
+    let reuse_key =
+      if !reuse_orphan_vals <> [] then orphan_key else None in
+    let prev_orphans = match reuse_key with
+      | Some k ->
+        let prev = Hashtbl.find_opt ctx.Llvm_ctx.reuse_orphan_boxes k in
+        Hashtbl.replace ctx.Llvm_ctx.reuse_orphan_boxes k (List.rev !reuse_orphan_vals);
+        prev
+      | None -> None in
     (* When this branch has heap fields AND the body starts with dec_rc(scrutinee),
        use march_decrc_freed to conditionally IncRC extracted child pointers.
        This is necessary for correctness when the scrutinee is shared (RC > 1):
@@ -1270,6 +1300,10 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
       | _ -> br.Tir.br_body
     in
     let (br_ty, br_val) = emit_expr ctx body_to_emit in
+    (match reuse_key, prev_orphans with
+     | Some k, Some prev -> Hashtbl.replace ctx.Llvm_ctx.reuse_orphan_boxes k prev
+     | Some k, None -> Hashtbl.remove ctx.Llvm_ctx.reuse_orphan_boxes k
+     | None, _ -> ());
     record_arm_ty body_to_emit br_ty;
     let stored = coerce_arm body_to_emit br_ty br_val in
     Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s" slot_ty stored result_slot);

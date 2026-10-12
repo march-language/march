@@ -166,6 +166,8 @@ type ctx = Llvm_ctx.ctx = {
   mutable norm_ret_pos  : bool;
   mutable tco_dup_bound : string list;
   mutable tco_defer_slot : string;
+  reuse_orphan_boxes : (string, string list) Hashtbl.t;
+  let_alias : (string, string) Hashtbl.t;
   mutable mutual_tco_group      : string list;
   mutable mutual_tco_tag_slot   : string;
   mutable mutual_tco_loop_label : string;
@@ -1112,6 +1114,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Let binding ───────────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
+    (match rhs with
+     | Tir.EAtom (Tir.AVar w) ->
+       Hashtbl.replace ctx.let_alias v.Tir.v_name (Llvm_ctx.alias_root ctx w.Tir.v_name)
+     | _ -> Hashtbl.remove ctx.let_alias v.Tir.v_name);
     (* The rhs is in non-tail position: a self-call here must be an ordinary
        call, not a TCO back-edge (else the let body would be dropped). *)
     let saved_tail = ctx.tco_in_tail in
