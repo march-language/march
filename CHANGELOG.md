@@ -781,6 +781,20 @@ git log is authoritative for exact commits.
   from C on two schedulers at once raced on a lazily filled cache. The cached
   value was always the same, so no wrong result was possible, but TSAN
   reported it. See `specs/progress/2026-10-12-tsan-type-id-memo-race.md`.
+- **A program whose module is named `List` or `String` compiles.** An entry
+  module named like a stdlib module that the rest of the stdlib uses failed
+  `--compile` with "body could not be specialized", though it ran
+  interpreted. The stdlib module now stays beside yours. Your module's own
+  `List.f` calls reach your `f`, and every other `List.f` reaches the
+  stdlib's. An entry module still replaces a same-named stdlib module when it
+  defines every member the rest of the stdlib calls.
+- **Compiled set operations no longer free a set the caller still holds.**
+  Calling `Set.union(a, b, cmp)` and then `Set.intersection` or
+  `Set.difference` on the same sets crashed the compiled program at exit
+  (SIGSEGV, a use-after-free under ASAN): the union released tree nodes of `b`
+  that `b` still owned. The optimizer renamed the cell an inlined match reused,
+  which hid the reuse from the code that protects a shared cell's children.
+  The interpreter was unaffected.
 - **Compiled `to_string` names a `Bytes` returned by the runtime.**
   `to_string(Base64.decode(s))` printed `Ok(#<tag:0>)` compiled and
   `Ok(Bytes("..."))` interpreted; the same held for Bytes from hashing,
