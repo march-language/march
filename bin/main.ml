@@ -2829,14 +2829,65 @@ let compile filename =
      the sole definition. *)
   let stdlib_decls = load_stdlib ~for_js:is_js_target () in
   let stdlib_decls_unshadowed_count = List.length stdlib_decls in
+  let entry_mod_name = desugared.March_ast.Ast.mod_name.March_ast.Ast.txt in
+  (* The ENTRY module's own name shadows a same-named stdlib module too: its
+     declarations live at the top level (not as a DMod in extra_decls), so
+     without this a project file like lib/crypto.march (`mod Crypto`)
+     coexists with the stdlib Crypto DMod and sibling modules resolve
+     `Crypto.foo` against the stdlib copy.
+
+     ...but only when the entry can actually STAND IN for the stdlib module:
+     every `M.f` the rest of the stdlib calls must be an `f` the entry
+     defines.  A single-file `mod List` or `mod String` cannot: Actor, Map,
+     Json and the prelude call `List.head_opt`, `String.last_index_of` and
+     the like.  Stripping the stdlib copy left those calls bound to a
+     shapes-only lazy load whose bodies never reach lowering, so `--compile`
+     died with "body could not be specialized" on a program the interpreter
+     runs (specs/lang/types/accept/t126, t127).  In that case keep the stdlib
+     module: the two stay distinct, since the entry's declarations are flat
+     (unqualified) and desugar's [strip_entry_self_qual] already sends the
+     entry's own `List.f` calls to its own `f`, while every other `List.f`
+     names the stdlib member. *)
+  let entry_shadows_stdlib =
+    let rec flatten ds =
+      List.concat_map (function
+        | March_ast.Ast.DMod (_, _, inner, _) -> flatten inner
+        | d -> [d]) ds
+    in
+    let prefix = entry_mod_name ^ "." in
+    let plen = String.length prefix in
+    let used = Hashtbl.create 16 in
+    List.iter (function
+      | March_ast.Ast.DFn (def, _) ->
+        List.iter (fun (c : March_ast.Ast.fn_clause) ->
+            let exprs =
+              c.March_ast.Ast.fc_body
+              :: (match c.March_ast.Ast.fc_guard with Some g -> [g] | None -> [])
+            in
+            List.iter (fun e ->
+                List.iter (fun n ->
+                    if String.length n > plen && String.sub n 0 plen = prefix then
+                      Hashtbl.replace used (String.sub n plen (String.length n - plen)) ())
+                  (March_typecheck.Typecheck_types.free_vars_expr [] e))
+              exprs)
+          def.March_ast.Ast.fn_clauses
+      | _ -> ())
+      (flatten (List.filter (function
+         | March_ast.Ast.DMod (nm, _, _, _) ->
+           not (String.equal nm.March_ast.Ast.txt entry_mod_name)
+         | _ -> true)
+         stdlib_decls));
+    let defined = Hashtbl.create 16 in
+    List.iter (function
+      | March_ast.Ast.DFn (def, _) ->
+        Hashtbl.replace defined def.March_ast.Ast.fn_name.March_ast.Ast.txt ()
+      | _ -> ())
+      desugared.March_ast.Ast.mod_decls;
+    Hashtbl.fold (fun f () ok -> ok && Hashtbl.mem defined f) used true
+  in
   let extern_mod_names =
-    (* The ENTRY module's own name must shadow a same-named stdlib module
-       too: its declarations live at the top level (not as a DMod in
-       extra_decls), so without this a project file like lib/crypto.march
-       (`mod Crypto`) coexists with the stdlib Crypto DMod and sibling
-       modules resolve `Crypto.foo` against the stdlib copy. *)
-    desugared.March_ast.Ast.mod_name.March_ast.Ast.txt
-    :: List.filter_map (function
+    (if entry_shadows_stdlib then [entry_mod_name] else [])
+    @ List.filter_map (function
       | March_ast.Ast.DMod (nm, _vis, _decls, _sp) ->
         Some nm.March_ast.Ast.txt
       | _ -> None

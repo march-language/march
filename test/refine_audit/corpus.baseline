@@ -156,6 +156,10 @@ native_dns_resolve_parity: coverage audit (user + stdlib): 135 enforced, 0 inert
 native_dns_resolve_parity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_dropped_closure_captures: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_dropped_closure_captures: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_entry_module_named_list: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_entry_module_named_list: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_entry_module_named_string: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_entry_module_named_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_option_read: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

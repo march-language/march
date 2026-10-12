@@ -1812,6 +1812,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/local_fn_capture_not_generalized.expected native_local_fn_capture_not_generalized.out)))
 
+; An entry module named `List` / `String` keeps the stdlib module of that
+; name beside it (the rest of the stdlib calls into it), so it compiles and
+; matches the interpreter; it used to fail with "body could not be
+; specialized".  Needs the stdlib.
+(rule
+ (targets native_entry_module_named_list native_entry_module_named_list.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/entry_module_named_list.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_entry_module_named_list native/entry_module_named_list.march)
+   (with-stdout-to native_entry_module_named_list.out (system "./native_entry_module_named_list")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/entry_module_named_list.expected native_entry_module_named_list.out)))
+
+(rule
+ (targets native_entry_module_named_string native_entry_module_named_string.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/entry_module_named_string.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_entry_module_named_string native/entry_module_named_string.march)
+   (with-stdout-to native_entry_module_named_string.out (system "./native_entry_module_named_string")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/entry_module_named_string.expected native_entry_module_named_string.out)))
+
 ; Set.union then Set.intersection / Set.difference over the same sets with
 ; one comparator: cprop rewrote node_fold's `reuse node` token to the alias
 ; while the `case` scrutinee kept the original name, so codegen skipped the
