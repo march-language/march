@@ -675,6 +675,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Inside a nested module, an actor's messages can be named above the
+  actor.** A function (or an earlier actor's handler) in `mod Outer do mod
+  Inner do ... end end` that wrote `send(p, Ping(1))` before `actor Pinger`
+  declared `on Ping(...)` failed with "I don't know a constructor called
+  `Ping`", though the same code was accepted in a top-level module and ran
+  fine. Message constructors are now in scope for the whole module, checked
+  against the handler's parameter types. This also clears the last hidden
+  type errors inside the standard library (`SessionNode`, `ClusterNode`).
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a
