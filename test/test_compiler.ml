@@ -4477,6 +4477,51 @@ let test_nested_actor_msg_ctor_qualified_from_parent () =
   Alcotest.(check bool) "the bare Set is still not exported to the parent" true
     (has_errors (typecheck (src "send(p, Set(1))")))
 
+(* Inside a NESTED module, an actor's message constructors are in scope for
+   the whole module, above the actor as well as below, as they always were in
+   the entry module (whose pass 1 registers every DActor).  Before 2026-10-12
+   the nested-module forward pass bound only fns, so a fn (or an earlier
+   actor's handler) naming a LATER actor's message was "I don't know a
+   constructor called `Zork`" -- the last four stdlib internal errors
+   (SessionNode's PeerGone/HostDown, ClusterNode's LocalDown), hidden because
+   stdlib diagnostics are dropped, while both backends resolved them. *)
+let test_nested_actor_msg_ctor_forward_reference () =
+  let src ~poke = Printf.sprintf {|mod Outer do
+    mod C do
+      type Rec = { ep : Pid({ n : Int }), k : Int }
+      fn poke_typed(p : Pid({ n : Int })) do
+        send(p, %s)
+      end
+      fn poke_rec(r : Rec) do
+        send(r.ep, Zork(r.k))
+      end
+      actor Early do
+        state { n : Int }
+        init { n: 0 }
+        on Go(k : Int) do
+          let _ = send(spawn(Pinger), Zork(k))
+          state
+        end
+      end
+      actor Pinger do
+        state { n : Int }
+        init { n: 0 }
+        on Zork(k : Int) do { n: state.n + k } end
+      end
+    end
+  end|} poke in
+  let ctx = typecheck (src ~poke:"Zork(1)") in
+  Alcotest.(check bool) "a message named above its actor resolves" false
+    (has_errors ctx);
+  (* It resolves to the HANDLER's signature, not to an unconstrained ctor. *)
+  Alcotest.(check bool) "a wrong payload type is still rejected" true
+    (has_error_with (typecheck (src ~poke:{|Zork("x")|})) "expected");
+  Alcotest.(check bool) "a wrong arity is still rejected" true
+    (has_error_with (typecheck (src ~poke:"Zork(1, 2)")) "expects 1 argument");
+  Alcotest.(check bool) "an undeclared message is still unknown" true
+    (has_error_with (typecheck (src ~poke:"Zonk(1)"))
+       "I don't know a constructor called `Zonk`")
+
 (* A nested actor spawned by its BARE name from OUTSIDE its declaring module:
    the referring key ("main") has no module prefix, so prefix-first resolution
    cannot reach "Sub.Weeble".  A bare ALIAS node forwards it — without that,
@@ -15697,10 +15742,12 @@ let assert_stdlib_file_typechecks_cleanly name =
    One todo per class is filed under specs/todos/2026-09-22-stdlib-*.md.  The
    ratchet is two-sided on purpose: fixing a file FAILS this test until its
    count comes down here, so the table cannot quietly describe a fixed tree. *)
-let stdlib_known_internal_errors = [
-  (* file, errors -- see specs/progress/2026-09-22-stdlib-internal-type-errors.md *)
-  "cluster_node.march", 1;
-  "session_node.march", 3;
+let stdlib_known_internal_errors : (string * int) list = [
+  (* file, errors -- see specs/progress/2026-09-22-stdlib-internal-type-errors.md.
+     Empty since 2026-10-12: the last four (actor message constructors named
+     above their actor in a nested module) are fixed, see
+     specs/progress/2026-09-22-stdlib-distributed-module-errors.md.  A new
+     row here is a regression to be fixed, not recorded. *)
 ]
 
 let test_stdlib_internal_errors_ratchet () =
@@ -18122,6 +18169,7 @@ let compiler_suites =
           Alcotest.test_case "same-named actors: spawned one still rejected" `Quick test_same_named_actors_spawned_one_still_rejected;
           Alcotest.test_case "nested actor bare spawn from entry: charged" `Quick test_nested_actor_bare_spawn_from_entry_is_charged;
           Alcotest.test_case "nested actor message ctor, qualified, from parent" `Quick test_nested_actor_msg_ctor_qualified_from_parent;
+          Alcotest.test_case "nested actor message ctor named above its actor" `Quick test_nested_actor_msg_ctor_forward_reference;
           (* item 1380: Cap(IO.NetListen) body-scan enforcement *)
           Alcotest.test_case "tcp_listen body, no needs: warns NetListen"   `Quick test_netlisten_body_missing_needs_warns;
           Alcotest.test_case "tcp_listen body, needs NetListen: no warning" `Quick test_netlisten_body_with_needs_no_warning;

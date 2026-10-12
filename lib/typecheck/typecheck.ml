@@ -5790,6 +5790,37 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
   in
   walk ~tail:[] ~dead:[] pdef.Ast.proto_steps
 
+(** Register actor [name] as a zero-arg constructor (so `spawn(Name)`
+    typechecks) and each `on Msg(...)` handler as a constructor of
+    "<Name>_Msg", owned by module [ci_module].  ALL params are included,
+    annotated or not, so constructor arity is always correct; an unannotated
+    one gets a unique TyVar placeholder ("$p<i>_<Msg>") that instantiates to a
+    fresh unification variable, so `send(pid, Msg(x))` typechecks even when
+    the handler omits the annotation.  Shared by [check_decl]'s DActor arm and
+    the nested-module forward pass in its DMod arm: the two must build
+    IDENTICAL entries so [add_ctor] dedups the second registration instead of
+    making every message constructor "defined by multiple types". *)
+let register_actor_ctors ~ci_module env (name : Ast.name) (actor : Ast.actor_def) =
+  let env = { env with ctors =
+    add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module; ci_vis = Ast.Public;
+                        ci_is_actor_msg = false }
+      env.ctors } in
+  List.fold_left (fun acc_env (h : Ast.actor_handler) ->
+      let arg_tys = List.mapi (fun i (p : Ast.param) ->
+          match p.param_ty with
+          | Some ty -> ty
+          | None ->
+            (* Unique name per (handler, position) so each instantiation
+               gets an independent fresh variable. *)
+            Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
+                        span = p.param_name.span }
+        ) h.ah_params in
+      let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+                 ci_arg_tys = arg_tys; ci_module; ci_vis = Ast.Public;
+                 ci_is_actor_msg = true } in
+      { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+    ) env actor.actor_handlers
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
@@ -6065,25 +6096,8 @@ let rec check_decl env (d : Ast.decl) : env =
        (named "$p<i>_<Msg>") that resolves to a fresh unification variable during
        instantiation; this ensures `send(pid, Msg(x))` typechecks correctly even
        when the handler omits a type annotation. *)
-    let env_with_actor_ctor = { env with ctors =
-      add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = env.current_module; ci_vis = Ast.Public;
-                          ci_is_actor_msg = false }
-        env.ctors } in
-    let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
-        let arg_tys = List.mapi (fun i (p : Ast.param) ->
-            match p.param_ty with
-            | Some ty -> ty
-            | None ->
-              (* Unique name per (handler, position) so each instantiation
-                 gets an independent fresh variable. *)
-              Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
-                          span = p.param_name.span }
-          ) h.ah_params in
-        let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                   ci_arg_tys = arg_tys; ci_module = env.current_module; ci_vis = Ast.Public;
-                   ci_is_actor_msg = true } in
-        { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
-      ) env_with_actor_ctor actor.actor_handlers in
+    let env_with_ctors =
+      register_actor_ctors ~ci_module:env.current_module env name actor in
     (* `init(env : T, …)` (D24): the parameters are in scope in the init
        expression (and in a supervise block's child `init` arguments, below),
        and their types are recorded for `spawn(A, …)` to check against.  They
@@ -6237,6 +6251,17 @@ let rec check_decl env (d : Ast.decl) : env =
           let e = bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e in
           { e with local_fns = StrMap.add def.fn_name.txt () e.local_fns;
                    fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) e.fn_arities }
+        | Ast.DActor (_, aname, actor, _) ->
+          (* An actor's message constructors are in scope for the WHOLE
+             module, as they are for the entry module (its pass 1 registers
+             every DActor up front).  Without this, a fn or actor declared
+             ABOVE the actor in a nested module could not name them:
+             `send(p.ep, PeerGone(...))` in SessionNode was "I don't know a
+             constructor called `PeerGone`" (hidden, being stdlib) while
+             codegen and the interpreter resolved it.  [ci_module] is this
+             module's name, what [check_decl]'s DActor arm uses here, so its
+             later registration dedups against this one. *)
+          register_actor_ctors ~ci_module:name.txt e aname actor
         | _ -> e
       ) { scope_env with local_fns = StrMap.empty; current_module = name.txt;
           cap_qual_prefix =
