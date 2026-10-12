@@ -214,6 +214,8 @@ native_fn_arities_shadow_poisoning: coverage audit (user + stdlib): 135 enforced
 native_fn_arities_shadow_poisoning: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_generic_fn_closure_unused_param_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_generic_fn_closure_unused_param_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_float_closure: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_float_closure: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_to_string_specialize: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

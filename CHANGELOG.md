@@ -617,6 +617,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A generic function passed as a callback no longer leaks the argument it
+  ignores.** `fn second(_a, b) do b end` handed to something expecting a
+  `Float -> Float -> Float` (or a `String -> String -> String`) leaked its
+  first argument on every call in compiled code.
 - **Compiled code no longer leaks a `Float` matched through a nested
   pattern.** `Some(Some(f))` on an `Option(Option(Float))`, or `Ok(Some(f))` on
   a `Result(Option(Float), e)`, leaked one small allocation every time it

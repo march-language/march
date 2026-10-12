@@ -9924,6 +9924,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_float_pattern_leak_probe.expected native_nested_float_pattern_leak_probe.out)))
 
+; ── Leak guard: a generic NAMED fn called through a closure that ignores a
+; parameter (`pfn ksnd(_p, x) do x end` as a Float -> Float -> Float, or over
+; Strings): the erased parameter is owned but nothing dropped it, so its
+; $clo_wrap's reference leaked once per call. The returned parameter is the
+; double-free witness.
+(rule
+ (targets native_generic_fn_closure_unused_param_leak_probe native_generic_fn_closure_unused_param_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/generic_fn_closure_unused_param_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_generic_fn_closure_unused_param_leak_probe
+        native/generic_fn_closure_unused_param_leak_probe.march)
+   (with-stdout-to native_generic_fn_closure_unused_param_leak_probe.out
+        (system "./native_generic_fn_closure_unused_param_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/generic_fn_closure_unused_param_leak_probe.expected native_generic_fn_closure_unused_param_leak_probe.out)))
+
 (rule
  (alias runtest)
  (deps native_erased_float_slot_leak_probe.live)
