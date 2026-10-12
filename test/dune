@@ -6140,6 +6140,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/supervisor_concurrent_child_crash.expected native_supervisor_concurrent_child_crash.out)))
 
+; ── A restarted child's registered names resolve only once it can take
+; messages (specs/progress/2026-10-12-respawn-names-before-activation.md).
+; Two clients crash-loop their own registered children while spinning on
+; whereis; at 14 schedulers the spin lands in the window between the name's
+; re-registration and the replacement's activation.  Under
+; MARCH_SANITIZE=thread (scripts/tsan-sweep.sh) it must report nothing.
+(rule
+ (targets native_supervisor_respawn_names_before_activation native_supervisor_respawn_names_before_activation.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (source_tree ../stdlib)
+       (file native/supervisor_respawn_names_before_activation.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_respawn_names_before_activation
+        native/supervisor_respawn_names_before_activation.march)
+   (with-stdout-to native_supervisor_respawn_names_before_activation.out
+        (system "MARCH_NUM_SCHEDULERS=14 ./native_supervisor_respawn_names_before_activation")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_respawn_names_before_activation.expected native_supervisor_respawn_names_before_activation.out)))
+
 ; ── pid_of_int on a dead pid whose record is freed (metas PR,
 ; specs/progress/2026-09-23-proc-struct-reclamation-metas.md "Survey additions").  The
 ; golden only pins the answer; the evidence is the ASAN run, where the base

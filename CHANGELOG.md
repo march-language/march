@@ -662,6 +662,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A send by name to a restarting child is no longer lost.** When a supervisor
+  restarted a registered child, `Actor.whereis` could return the replacement a
+  moment before it could take messages; a `send` in that moment returned `None`
+  and an `Actor.call` failed, though the child then ran normally. The names now
+  resolve only once the replacement can take messages (until then `whereis`
+  returns `None`, as it already did while the child was down), and a
+  replacement that crashes at once still hands them on to the next one. See
+  `specs/progress/2026-10-12-respawn-names-before-activation.md`.
 - **A supervisor no longer loses track of a child restarted while it is
   handling a message.** When a supervised child died while its supervisor was
   inside a handler (a handler that kills its own child, or any crash on another

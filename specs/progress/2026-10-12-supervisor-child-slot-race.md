@@ -98,4 +98,5 @@ strategy goldens and this fixture: 5/5 at 1, 2 and 14.
 
 The same publish-before-activation window exists for the replacement's **registered
 names**: `march_respawn_child` re-registers them before activation, so a send by name in
-that window is dropped. Filed as `specs/todos/2026-10-12-respawn-names-before-activation.md`.
+that window is dropped. Filed as `specs/todos/2026-10-12-respawn-names-before-activation.md`;
+since fixed, see `specs/progress/2026-10-12-respawn-names-before-activation.md`.

@@ -1,0 +1,144 @@
+-- A supervised child's registered names must not resolve to its replacement
+-- before the replacement can take messages
+-- (specs/progress/2026-10-12-respawn-names-before-activation.md).
+--
+-- A restart carries the crashed incarnation's names forward onto the
+-- replacement. It used to re-register them before starting the replacement's
+-- green thread, so in that window `whereis` already returned the new pid and
+-- `is_alive` said true, but a `send` found no green thread and was dropped
+-- (send returned None) and an `Actor.call` failed, to an actor that then
+-- lived on.
+--
+-- Two clients, each on its own task, each owning one registered child. A
+-- round: spin on `whereis` until the name resolves to a pid other than the
+-- one just crashed, send it three `Inc`, `Actor.call` it (the reply is how
+-- many it handled), then poison it. The client is the only sender, and it
+-- poisons only after the call returned, so no message of a round can be
+-- legitimately lost to a crash: every send must be accepted, every call
+-- answered with 3. The spin is what lands in the window: it polls the name
+-- while the restart runs on the crashed child's thread (14 schedulers, by
+-- the dune rule). Under MARCH_SANITIZE=thread it must report nothing.
+mod SupervisorRespawnNamesBeforeActivation do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs Actor.Introspect
+
+  type PingReq = PingReq
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+
+    -- PingReq routes here (first handler).
+    on Ping(reply_to) do
+      Actor.reply(reply_to, state.n)
+      state
+    end
+
+    on Inc() do
+      { n: state.n + 1 }
+    end
+
+    on Poison() do
+      panic("poisoned")
+    end
+  end
+
+  actor Sup do
+    state { a : Int, b : Int }
+    init  { a: 0, b: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 1000000 within 60
+      backoff base 1 cap 2 jitter 0%
+      Worker a
+      Worker b
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  -- Poll (no sleep: the point is to poll through the restart) until [name]
+  -- resolves to a pid other than [prev]. The yield keeps the poll from
+  -- starving the crashing child and the restart at 1 or 2 schedulers under
+  -- TSAN, which defers the preemption signal to its next intercepted call.
+  fn resolve(intro : Cap(Actor.Introspect), name, prev, deadline) do
+    let found = match Actor.whereis(intro, name) do
+      Some(p) -> if pid_to_int(p) != prev do Some(p) else None end
+      None    -> None
+    end
+    match found do
+      Some(p) -> Some(p)
+      None ->
+        if unix_time_ms() >= deadline do None
+        else
+          task_yield()
+          resolve(intro, name, prev, deadline)
+        end
+    end
+  end
+
+  fn accepted(r) do
+    match r do
+      Some(_) -> 1
+      None    -> 0
+    end
+  end
+
+  -- (rounds completed, sends refused, calls failed, calls answered short)
+  fn rounds(intro : Cap(Actor.Introspect), name, prev, i, total, refused, failed, short) do
+    if i == total do
+      (i, refused, failed, short)
+    else
+      match resolve(intro, name, prev, unix_time_ms() + 20000) do
+        None -> (i, refused, failed, short)
+        Some(p) ->
+          let ok = accepted(send(p, Inc())) + accepted(send(p, Inc())) + accepted(send(p, Inc()))
+          let r = Actor.call(p, PingReq, 20000)
+          let failed2 = match r do
+            Ok(_)  -> failed
+            Err(_) -> failed + 1
+          end
+          let short2 = match r do
+            Ok(n)  -> if n == 3 do short else short + 1 end
+            Err(_) -> short
+          end
+          let _ = send(p, Poison())
+          rounds(intro, name, pid_to_int(p), i + 1, total,
+                 refused + (3 - ok), failed2, short2)
+      end
+    end
+  end
+
+  fn report(name, total, t) do
+    match task_await(t) do
+      Ok((done, refused, failed, short)) ->
+        println(name ++ ": rounds " ++ bool_to_string(done == total)
+                ++ ", sends refused " ++ int_to_string(refused)
+                ++ ", calls failed " ++ int_to_string(failed)
+                ++ ", calls answered short " ++ int_to_string(short))
+      Err(e) -> println(name ++ ": client died: " ++ e)
+    end
+  end
+
+  fn main(io : Cap(IO), _clock : Cap(IO.Clock)) do
+    let intro = Actor.introspect(io)
+    let sup = spawn(Sup)
+    let a = Actor.pid_from_int(intro, child_int(sup, "a"))
+    let b = Actor.pid_from_int(intro, child_int(sup, "b"))
+    println("registered: " ++ bool_to_string(Actor.register(a, "worker_a")
+                                            && Actor.register(b, "worker_b")))
+    let total = 300
+    let ta = task_spawn(fn _ -> rounds(intro, "worker_a", -1, 0, total, 0, 0, 0))
+    let tb = task_spawn(fn _ -> rounds(intro, "worker_b", -1, 0, total, 0, 0, 0))
+    report("worker_a", total, ta)
+    report("worker_b", total, tb)
+  end
+end
