@@ -3528,6 +3528,9 @@ void *march_html_auto_escape(void *v) {
  * Their rows' field tokens describe the payload WORD, which the allocator
  * tags for a scalar payload (lib/tir/llvm_emit_alloc.ml), hence I and B.
  *
+ * U is a tuple cell: one C row (empty name) whose fields are the elements,
+ * read whatever the cell's tag, rendered "(a, b)".  Only ever an instance.
+ *
  * A kind followed by '*' is an INSTANCE of a generic type (`Box(Meters)`):
  * its rows are the declaration's with the type arguments substituted, so a
  * type-variable slot carries the argument's token instead of 'p'.  An
@@ -3566,7 +3569,8 @@ typedef struct {
     march_ctor_field *fields;
 } march_ctor_row;
 typedef struct {
-    char kind;                /* 'V' variant, 'R' record, 'N' newtype, 'X' niche */
+    char kind;                /* 'V' variant, 'R' record, 'N' newtype, 'X' niche,
+                                 'U' tuple */
     char inst;                /* 1: an instance row (kind written "V*" etc.) */
     char *name;
     int32_t nrows;
@@ -4055,6 +4059,17 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int re
                               depth, repr);
         }
         cb_putz(b, " }");
+        return;
+    }
+    if (t->kind == 'U') {
+        if (t->nrows < 1) { ctor_put_generic(b, v, 1, repr); return; }
+        march_ctor_row *r = &t->rows[0];
+        cb_putc(b, '(');
+        for (int32_t i = 0; i < r->nfields; i++) {
+            if (i) cb_putz(b, ", ");
+            ctor_render_field(b, ctor_slot(v, i), r->fields[i], depth + 1, repr);
+        }
+        cb_putc(b, ')');
         return;
     }
     march_ctor_row *row = ctor_row_for_tag(t, tag);

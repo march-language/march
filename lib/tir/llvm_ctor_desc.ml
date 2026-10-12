@@ -140,7 +140,7 @@ let rec field_token ctx (ty : Tir.ty) : string =
   match ty with
   | Tir.TInt -> "i"
   | Tir.TBool -> "b"
-  | Tir.TUnit -> "u"
+  | Tir.TUnit | Tir.TTuple [] | Tir.TCon ("Unit", []) -> "u"
   | Tir.TFloat -> "f"
   | Tir.TString -> "s"
   (* An Atom is a raw i64 hash in its slot and the runtime keeps no
@@ -148,8 +148,14 @@ let rec field_token ctx (ty : Tir.ty) : string =
      'p' (generic) is what it already got; making that worse is not this
      change's business. *)
   | Tir.TCon ("Atom", []) -> "p"
-  | Tir.TCon _ ->
+  | Tir.TCon _ | Tir.TRecord _ ->
     (match id_for_ty ctx ty with Some id -> Printf.sprintf "A%d" id | None -> "p")
+  (* A tuple in a field.  Only here, not at a top-level [id_for]: a top-level
+     tuple is rendered by its Show impl before this table is consulted. *)
+  | Tir.TTuple (_ :: _ as ts) ->
+    (match tuple_instance_id ctx ts with
+     | Some id -> Printf.sprintf "A%d" id
+     | None -> "p")
   | _ -> "p"
 
 (** Token for the payload of an ['N'] or ['X'] type.  Unlike a heap-cell slot
@@ -200,7 +206,75 @@ and id_for_ty ctx (ty : Tir.ty) : int option =
      | Some _ as r -> r
      | None -> Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_ids name)
   | Tir.TCon (name, _) -> Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_ids name
+  | Tir.TRecord fs ->
+    (match declared_record_id ctx fs with
+     | Some _ as r -> r
+     | None -> record_instance_id ctx fs)
   | _ -> None
+
+(* A `ptype` alias reaches call sites as a STRUCTURAL record, not as the
+   nominal [TCon] its declaration produced, so a name lookup misses it.  Match
+   it back to a declared record by its field names and slot kinds — the same
+   identity [Llvm_data.shape_desc] gives a record cell. *)
+and declared_record_id ctx (fs : (string * Tir.ty) list) : int option =
+  let key fields =
+    List.sort (fun (a, _) (b, _) -> String.compare a b) fields
+    |> List.map (fun (n, t) -> (n, Llvm_data.shape_kind_char t))
+  in
+  let want = key fs in
+  Hashtbl.fold (fun tname id acc ->
+      match acc with
+      | Some _ -> acc
+      | None ->
+        (match List.find_opt (function
+             | Tir.TDRecord (n, _) -> n = tname
+             | _ -> false) ctx.Llvm_ctx.type_defs with
+         | Some (Tir.TDRecord (_, fields)) when key fields = want -> Some id
+         | _ -> None))
+    ctx.Llvm_ctx.ctor_desc_ids None
+
+(* A record literal whose shape matches no declared record (`{ a: 1, b: "x" }`
+   with no `type R = { ... }`): describe the structural type itself.  The
+   field names and types are all in [fs], and a record row prints no type
+   name, so nothing is lost by having no declaration.  Without this the call
+   site fell back to the untyped renderer, which printed `#<tag:0>`. *)
+and record_instance_id ctx (fs : (string * Tir.ty) list) : int option =
+  let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
+  let key = Tir.show_ty (Tir.TRecord sorted) in
+  match Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_insts key with
+  | Some id -> Some id
+  | None when Hashtbl.length ctx.Llvm_ctx.ctor_desc_insts >= max_instances -> None
+  | None ->
+    let id = next_local_id ctx in
+    Hashtbl.replace ctx.Llvm_ctx.ctor_desc_insts key id;
+    let buf = Buffer.create 128 in
+    (* The name is for diagnostics only (an 'R' row prints none); it must not
+       contain a tab or newline. *)
+    Printf.bprintf buf "T\t%d\tR*\t{%s}\n" id
+      (String.concat "," (List.map fst sorted));
+    List.iter (fun (fname, fty) ->
+        Printf.bprintf buf "F\t%s\t%s\n" fname (field_token ctx fty))
+      sorted;
+    Buffer.add_buffer ctx.Llvm_ctx.ctor_desc_inst_rows buf;
+    Some id
+
+(* A tuple in a field of a described type.  A tuple cell has no declaration
+   to name it either, so it printed `#<tag:0>` (`T((1, "a"))`).  Kind 'U' has
+   one row, read whatever the cell's tag. *)
+and tuple_instance_id ctx (ts : Tir.ty list) : int option =
+  let key = Tir.show_ty (Tir.TTuple ts) in
+  match Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_insts key with
+  | Some id -> Some id
+  | None when Hashtbl.length ctx.Llvm_ctx.ctor_desc_insts >= max_instances -> None
+  | None ->
+    let id = next_local_id ctx in
+    Hashtbl.replace ctx.Llvm_ctx.ctor_desc_insts key id;
+    let toks = List.map (erased_token ctx) ts in
+    let buf = Buffer.create 64 in
+    Printf.bprintf buf "T\t%d\tU*\t$Tuple%d\n" id (List.length ts);
+    Printf.bprintf buf "C\t0\t\t%s\n" (String.concat "," toks);
+    Buffer.add_buffer ctx.Llvm_ctx.ctor_desc_inst_rows buf;
+    Some id
 
 and instance_id ctx (name : string) (args : Tir.ty list) : int option =
   let key = Tir.show_ty (Tir.TCon (name, args)) in
@@ -331,30 +405,7 @@ let id_for ctx (ty : Tir.ty) : int option =
   if not ctx.Llvm_ctx.shape_meta then None
   else
   match ty with
-  | Tir.TCon _ -> id_for_ty ctx ty
-  (* A `ptype` alias reaches call sites as a STRUCTURAL record, not as the
-     nominal [TCon] its declaration produced, so a name lookup misses it and a
-     record printed `#<tag:0>` where a variant printed its constructor.  Match
-     it back to a declared record by its field names and slot kinds — the same
-     identity [Llvm_data.shape_desc] gives a record cell — rather than adding a
-     second notion of record identity. *)
-  | Tir.TRecord fs ->
-    assign_ids ctx;
-    let key fields =
-      List.sort (fun (a, _) (b, _) -> String.compare a b) fields
-      |> List.map (fun (n, t) -> (n, Llvm_data.shape_kind_char t))
-    in
-    let want = key fs in
-    Hashtbl.fold (fun tname id acc ->
-        match acc with
-        | Some _ -> acc
-        | None ->
-          (match List.find_opt (function
-               | Tir.TDRecord (n, _) -> n = tname
-               | _ -> false) ctx.Llvm_ctx.type_defs with
-           | Some (Tir.TDRecord (_, fields)) when key fields = want -> Some id
-           | _ -> None))
-      ctx.Llvm_ctx.ctor_desc_ids None
+  | Tir.TCon _ | Tir.TRecord _ -> id_for_ty ctx ty
   | _ -> None
 
 (** Register this unit's descriptor (a cached load after the first call)

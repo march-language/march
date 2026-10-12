@@ -637,6 +637,13 @@ git log is authoritative for exact commits.
   They now print `Box(Meters(9))`, `Box(NoName)`, `Box(true)` and
   `Has(Meters(4))`, also in recursive generic types, in fields of other types,
   in lists, string interpolation, `inspect` and `~H`.
+- **Compiled `to_string` prints records with no declared type, and tuples
+  inside fields.** `to_string({ a: 1, b: "x" })` printed `#<tag:0>` compiled,
+  as did a tuple inside a constructor field (`T((1, "a"))` printed
+  `T(#<tag:0>)`), and a `()` field printed `0`. They now print
+  `{ a: 1, b: "x" }`, `T((1, "a"))` and `()`, also through interpolation,
+  `inspect` and `~H`. Compiled code prints record fields in name order; the
+  interpreter prints them in the order the literal wrote them.
 - **`Some(NoName)` is no longer `None` (compiled).** For a type shaped like
   `NoName | Named(String)`, compiled code stored `Some(NoName)` as the same
   value as `None`, so a match took the `None` branch. An `Option` over such a

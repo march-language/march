@@ -1,0 +1,13 @@
+{ a: 1, b: "x" }
+{ f: 1.5, m: Meters(2), n: NoName, t: (1, false), u: () }
+{ ok: true, s: Square(3) }
+{ inner: { deep: "d" }, xs: [1, 2] }
+T((1, "a"))
+U((true, 2.5, Meters(3), NoName, ()))
+Box((false, -1.5, Meters(4), Named("q"), ()))
+Box(((1, 2), { a: true }))
+Box({ a: Meters(1) })
+r={ x: Box(Meters(1)), y: [true] }
+{ x: Box(Meters(1)), y: [true] }
+{ a: "s" }
+<p>{ x: Box(Meters(1)), y: [true] } { s: &quot;&lt;b&gt;&quot; }</p>
