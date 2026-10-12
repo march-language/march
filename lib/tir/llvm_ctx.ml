@@ -260,6 +260,20 @@ type ctx = {
      commit eafbd71a).  Populated by [emit_fn] per function. *)
   mutable tco_dup_bound : string list;
   mutable tco_defer_slot : string;
+  (* Erased-slot boxes (a Float's march_alloc_float box, or an unboxed
+     aggregate's box) that a case branch copied out of its scrutinee's cell
+     while that branch's body REUSES the cell (FBIP).  Keyed by the
+     scrutinee's TIR name, valued by the SSA box pointers loaded at branch
+     entry.  The binder holds a copy, so once the cell is taken over in place
+     (or freed) nothing owns these boxes any more: the reuse emitters in
+     [Llvm_emit_alloc] release them on exactly those paths.  Set and cleared
+     by [Llvm_case.emit_case] around the branch body. *)
+  reuse_orphan_boxes : (string, string list) Hashtbl.t;
+  (* [let x = y] copies in the function being emitted: x -> the name it
+     ultimately copies (inlining leaves `let o = $t` and then matches on [o]
+     while Perceus reuses [$t]).  Lets [reuse_orphan_boxes] tie a reuse token
+     to the scrutinee it aliases.  Cleared per function. *)
+  let_alias : (string, string) Hashtbl.t;
   (* Mutual TCO state — set by emit_mutual_tco_group for the combined function.
      mutual_tco_group: names of all functions in the current mutual group (empty = not active).
      mutual_tco_tag_slot: alloca slot name for the dispatch tag.
@@ -430,6 +444,8 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   norm_ret_pos   = false;
   tco_stack_save = "";
   tco_dup_bound  = [];
+  reuse_orphan_boxes = Hashtbl.create 4;
+  let_alias = Hashtbl.create 16;
   tco_defer_slot = "";
   mutual_tco_group      = [];
   mutual_tco_tag_slot   = "";
@@ -558,6 +574,10 @@ let llvm_field_ty (ctx : ctx) (ty : Tir.ty) : string =
 let llvm_ret_ty (ctx : ctx) : Tir.ty -> string = function
   | Tir.TUnit -> "void"
   | t -> llvm_ty ctx t
+
+(** The name [n] is a [let] copy of, followed to the end ([n] itself if none). *)
+let alias_root ctx n =
+  match Hashtbl.find_opt ctx.let_alias n with Some r -> r | None -> n
 
 (** LLVM type string for a function *parameter*, augmented with alias-analysis
     attributes for pointer types.

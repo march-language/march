@@ -1036,6 +1036,7 @@ let value_to_string_pretty ?(width=80) ?(max_items=50) ?(max_depth=6) v =
       if String.length flat_v <= width - depth * 2 then flat_v
       else match v with
       | VRecord fields ->
+        let fields = sorted_record_fields fields in
         let pad = indent (depth * 2 + 2) in
         let close_pad = indent (depth * 2) in
         let strs = truncate_fields fields

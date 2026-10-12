@@ -111,6 +111,13 @@ let extern_borrow_table : (string * bool list) list = [
      march_actor_register_child links the two METAS and activates the child
      (whose own reference march_spawn_common already took), storing only
      [spawn_clo], which stays OWNED. None stores or releases a pid. *)
+  (* march_task_cancel_by_id reads the Task's pid word and stores the
+     cancelled sentinel into its result word; it never stores or releases the
+     Task. Owned until 2026-10-12, so `Task.await(t); task_cancel_by_id(t)`
+     leaked the Task cell on every call (proc_reclaim_kill_respawn, under
+     LSan: ~9,000 Tasks). *)
+  ("task_cancel_by_id", [true]);
+  ("march_task_cancel_by_id", [true]);
   ("pid_to_int",        [true]);
   ("pid_index_of",      [true]);
   ("march_pid_index_of", [true]);

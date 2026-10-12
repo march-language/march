@@ -32,5 +32,6 @@ type id carried by the closure). Both change how erased code is compiled, so
 this was not done as part of the printing fix.
 
 Also seen while filing: compiling a polymorphically recursive type
-(`type Nest(a) = Z(a) | S(Nest(List(a)))` with `S(S(Z([[Meters(1)]])))`)
-hangs before codegen; `--dump-tir` hangs too.
+(`type Nest(a) = Z(a) | S(Nest(List(a)))`) hung in deep-drop synthesis. That
+type is now rejected at its declaration; see
+`specs/progress/2026-10-12-nonregular-type-compiler-hang.md`.

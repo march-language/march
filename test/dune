@@ -2453,6 +2453,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/closure_capture_release_probe.expected native_closure_capture_release_probe.out)))
 
+; ── Leak/double-free guard: a closure capturing an unboxed aggregate releases
+; the box its 8-byte slot holds (a guarded or-pattern's join point, a factory
+; called / dropped uncalled / shared, heap+unboxed captures, a local lambda).
+; Red (every leg "flat: false") with Drop.unboxed_capture_fields returning [].
+(rule
+ (targets native_unboxed_capture_leak_probe native_unboxed_capture_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/unboxed_capture_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_unboxed_capture_leak_probe
+        native/unboxed_capture_leak_probe.march)
+   (with-stdout-to native_unboxed_capture_leak_probe.out
+        (system "./native_unboxed_capture_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/unboxed_capture_leak_probe.expected native_unboxed_capture_leak_probe.out)))
+
 ; ── Leak guard: a closure call consumes its arguments on both sides. A
 ; read-only apply-fn parameter was borrow-classified while every caller
 ; transferred a reference, leaking one fresh argument per call; also a lambda
@@ -9918,6 +9939,132 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (diff native/erased_float_slot_leak_probe.expected
         native_erased_float_slot_leak_probe.out)))
 
+; ── Leak guard: an erased-slot Float box in a cell the branch REUSES (FBIP):
+; `Some(f) -> N(f)` / `Some(f) -> Ok(f)` orphaned the box (one per Json number
+; parsed), and an Option(Float) token reused as another type leaked the whole
+; cell. The shared legs are the double-free witnesses. Found by the ASAN/LSan
+; sweep (scripts/native-sanitize-sweep.sh -l).
+(rule
+ (targets native_erased_float_reuse_leak_probe native_erased_float_reuse_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/erased_float_reuse_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_float_reuse_leak_probe
+        native/erased_float_reuse_leak_probe.march)
+   (with-stdout-to native_erased_float_reuse_leak_probe.out
+        (system "./native_erased_float_reuse_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_float_reuse_leak_probe.expected native_erased_float_reuse_leak_probe.out)))
+
+; ── Leak guard: a Float box behind a NESTED pattern (`Some(Some(f))`): the
+; inner case's qualified tag missed poly_ctors, so the box was bound as a plain
+; heap field and never released. The shared leg is the double-free witness.
+(rule
+ (targets native_nested_float_pattern_leak_probe native_nested_float_pattern_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/nested_float_pattern_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_nested_float_pattern_leak_probe
+        native/nested_float_pattern_leak_probe.march)
+   (with-stdout-to native_nested_float_pattern_leak_probe.out
+        (system "./native_nested_float_pattern_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_float_pattern_leak_probe.expected native_nested_float_pattern_leak_probe.out)))
+
+; ── Leak guard: a generic NAMED fn called through a closure that ignores a
+; parameter (`pfn ksnd(_p, x) do x end` as a Float -> Float -> Float, or over
+; Strings): the erased parameter is owned but nothing dropped it, so its
+; $clo_wrap's reference leaked once per call. The returned parameter is the
+; double-free witness.
+(rule
+ (targets native_generic_fn_closure_unused_param_leak_probe native_generic_fn_closure_unused_param_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/generic_fn_closure_unused_param_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_generic_fn_closure_unused_param_leak_probe
+        native/generic_fn_closure_unused_param_leak_probe.march)
+   (with-stdout-to native_generic_fn_closure_unused_param_leak_probe.out
+        (system "./native_generic_fn_closure_unused_param_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/generic_fn_closure_unused_param_leak_probe.expected native_generic_fn_closure_unused_param_leak_probe.out)))
+
+; ── A Task's result released by its awaiter before the Task dies: the Task
+; destructor read the (freed) result's tag to decide whether it owned a Float
+; box -- a heap-use-after-free ASAN saw in tcp_recv_eagain_after_park. The
+; Float leg pins that a Float result is still released (live_allocs flat).
+(rule
+ (targets native_task_result_released_before_task native_task_result_released_before_task.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/task_result_released_before_task.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_result_released_before_task
+        native/task_result_released_before_task.march)
+   (with-stdout-to native_task_result_released_before_task.out
+        (system "MARCH_NUM_SCHEDULERS=14 ./native_task_result_released_before_task")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_result_released_before_task.expected native_task_result_released_before_task.out)))
+
+; ── Leak guard: a Float KEY in a Map/Set. HEntry is declared by three stdlib
+; modules, so its bare TCon found no type_params entry (key box bound as a
+; plain heap field) and its synthesized drop's qualified branches missed the
+; boxed-Float slot table. The shared leg is the double-free witness.
+(rule
+ (targets native_map_float_key_leak_probe native_map_float_key_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/map_float_key_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_map_float_key_leak_probe
+        native/map_float_key_leak_probe.march)
+   (with-stdout-to native_map_float_key_leak_probe.out
+        (system "./native_map_float_key_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/map_float_key_leak_probe.expected native_map_float_key_leak_probe.out)))
+
+; ── Leak guard: task_cancel_by_id borrows its Task (it had no borrow-table
+; row, so a Task whose last use was a cancel leaked). The again leg cancels a
+; Task still awaited afterwards: the double-free witness.
+(rule
+ (targets native_task_cancel_by_id_leak_probe native_task_cancel_by_id_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/task_cancel_by_id_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_cancel_by_id_leak_probe
+        native/task_cancel_by_id_leak_probe.march)
+   (with-stdout-to native_task_cancel_by_id_leak_probe.out
+        (system "./native_task_cancel_by_id_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_cancel_by_id_leak_probe.expected native_task_cancel_by_id_leak_probe.out)))
+
 (rule
  (alias runtest)
  (deps native_erased_float_slot_leak_probe.live)
@@ -11606,6 +11753,107 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/to_string_structural.expected native_to_string_structural.interp.out)))
+
+; ── Compiled to_string of an undeclared record inside a List/Option/Result ──
+; `to_string([{ a: 1 }])` failed to compile with "ambiguous interface-method
+; call to `show`": the container's element `show` found no impl for the
+; structural record.  Interpreted AND compiled against the same .expected. ──
+(rule
+ (targets native_to_string_anon_record_container native_to_string_anon_record_container.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/to_string_anon_record_container.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_anon_record_container
+        native/to_string_anon_record_container.march)
+   (with-stdout-to native_to_string_anon_record_container.out
+        (system "./native_to_string_anon_record_container")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_anon_record_container.expected native_to_string_anon_record_container.out)))
+
+(rule
+ (targets native_to_string_anon_record_container.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/to_string_anon_record_container.march))
+ (action
+  (with-stdout-to native_to_string_anon_record_container.interp.out
+   (run %{exe:../bin/main.exe} native/to_string_anon_record_container.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_anon_record_container.expected native_to_string_anon_record_container.interp.out)))
+
+; ── Record fields print sorted by name in both backends ─────────────────
+; The interpreter printed a record in the order its literal wrote it; compiled
+; code prints fields sorted.  Literals written unsorted.  Interpreted AND
+; compiled against the same .expected. ──
+(rule
+ (targets native_to_string_record_order native_to_string_record_order.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/to_string_record_order.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_record_order
+        native/to_string_record_order.march)
+   (with-stdout-to native_to_string_record_order.out
+        (system "./native_to_string_record_order")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_record_order.expected native_to_string_record_order.out)))
+
+(rule
+ (targets native_to_string_record_order.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/to_string_record_order.march))
+ (action
+  (with-stdout-to native_to_string_record_order.interp.out
+   (run %{exe:../bin/main.exe} native/to_string_record_order.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_record_order.expected native_to_string_record_order.interp.out)))
+
+; ── A one-field record must not borrow another declared record's row ──
+; `{ n: true }` matched the stdlib's `{ n : Int }` by slot kind and printed
+; `{ n: 1 }`.  Interpreted AND compiled against the same .expected. ──
+(rule
+ (targets native_to_string_one_field_record native_to_string_one_field_record.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/to_string_one_field_record.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_one_field_record
+        native/to_string_one_field_record.march)
+   (with-stdout-to native_to_string_one_field_record.out
+        (system "./native_to_string_one_field_record")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_one_field_record.expected native_to_string_one_field_record.out)))
+
+(rule
+ (targets native_to_string_one_field_record.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/to_string_one_field_record.march))
+ (action
+  (with-stdout-to native_to_string_one_field_record.interp.out
+   (run %{exe:../bin/main.exe} native/to_string_one_field_record.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_one_field_record.expected native_to_string_one_field_record.interp.out)))
 
 ; ── An Option over a niche-shaped type must not be a niche itself ─────
 ; `Some(NoName)` was encoded as raw 0 and matched as `None`; a recursive

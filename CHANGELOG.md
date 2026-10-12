@@ -662,6 +662,33 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled `to_string` no longer prints a record's `Bool` field as a
+  number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
+  was matched to another declared record with the same field names (here a
+  stdlib `{ n : Int }`) and printed as that type. The same mix-up dropped
+  the quotes from a String field whenever a declared record with the same
+  field name held a different pointer type, such as a List. A record now prints by its own field types, the same
+  as the interpreter, at top level and inside a list or option.
+- **A type that refers to itself at a growing argument is now a compile
+  error, instead of hanging the compiler.** `type Nest(a) = Z(a) |
+  S(Nest(List(a)))` made `--compile` and `--dump-tir` run forever. It is now
+  rejected where it is declared, in both backends, with a `nonregular_type`
+  error that names the type. No function could walk such a value anyway,
+  because a recursive call at a different type is already a type error.
+  Recursive types that reuse their own parameters, swap them, or fix them
+  (`T(Int)`) are unaffected.
+- **`to_string` of a record with no declared type inside a list, option,
+  result or tuple now compiles.** `to_string([{ a: 1 }])` and
+  `println(Some({ a: 1 }))` used to fail to compile with "ambiguous
+  interface-method call to `show`". They now print `[{ a: 1 }]` and
+  `Some({ a: 1 })`, the same as the interpreter.
+- **The interpreter prints record fields sorted by name, the same as compiled
+  code.** `to_string({ z: 1, y: 2 })` printed `{ z: 1, y: 2 }` interpreted
+  and `{ y: 2, z: 1 }` compiled. Two values of one record type could also
+  print in different orders, depending on how each literal was written. Both
+  backends, `println`, string interpolation, `inspect` and the REPL now
+  print `{ y: 2, z: 1 }`. Only the display changed: fields are still
+  evaluated in the order you write them.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,
@@ -694,6 +721,41 @@ git log is authoritative for exact commits.
   patch. The comparison also became stricter in two places it was blind:
   adding a parameter to a type (`Box(a)` -> `Box(a, b)`) and making a type's
   constructors private (`opaque type`) now require a major bump.
+- **A closure that captures a small scalar-only value no longer leaks.** A
+  lambda (or a `match` with a guarded or-pattern) capturing a value of a type
+  like `type Pair = Pair(Int, Int)` leaked one small allocation each time the
+  closure was created, whether it was called, shared, or dropped uncalled.
+- **`blocking` extern calls work under AddressSanitizer.** A program built
+  with `MARCH_SANITIZE=1` crashed with a segfault on its first call to a
+  `blocking` extern. The runtime now starts the blocking-call worker threads
+  from a scheduler thread instead of from the calling green thread.
+  Builds without the sanitizer behave the same as before.
+- **`task_cancel_by_id` no longer leaks the task.** Cancelling a task as the
+  last thing done with it (as `Task.race` and `Task.any` do for the tasks that
+  lost) leaked the task object every time in compiled code.
+- **Compiled `Map` and `Set` with `Float` keys no longer leak.** Every
+  insert, removal and size query on a `Map(Float, v)` (and every `Set(Float)`
+  insert) leaked a small allocation per key it touched, and dropping such a map
+  leaked all of its keys.
+- **Fixed a rare memory-safety bug when a task finishes.** If you awaited a
+  task, finished with its result, and dropped the task before the task's own
+  thread had fully wound down, the runtime could read the freed result. It was
+  seen only under AddressSanitizer at 14 schedulers (about 1 run in 800), and
+  could in principle free memory twice.
+- **A generic function passed as a callback no longer leaks the argument it
+  ignores.** `fn second(_a, b) do b end` handed to something expecting a
+  `Float -> Float -> Float` (or a `String -> String -> String`) leaked its
+  first argument on every call in compiled code.
+- **Compiled code no longer leaks a `Float` matched through a nested
+  pattern.** `Some(Some(f))` on an `Option(Option(Float))`, or `Ok(Some(f))` on
+  a `Result(Option(Float), e)`, leaked one small allocation every time it
+  matched.
+- **Compiled code no longer leaks a `Float` when rebuilding a value from
+  `Some(f)`.** Matching `Some(f)` on an `Option(Float)` and building another
+  one-field value from it (`Some(f) -> Ok(f)`, `Some(f) -> Number(f)`) leaked
+  one small allocation per call, and rebuilding it as a different type could
+  leak the whole `Option` cell. `Json.parse` hit this once for every number it
+  read, so long-running programs that parse JSON grew without bound.
 - **A top-level function named like a stdlib callback parameter is called
   correctly when compiled.** Declaring your own `f` and calling it from a lambda
   passed to `List.map` (whose callback parameter is also `f`) called the
@@ -710,6 +772,14 @@ git log is authoritative for exact commits.
   `json_derive_name_collision`, naming both types and both `derive` sites.
   Rename one of the types, or derive Json for only one of them, which keeps
   working.
+- **A cached binary no longer carries another module's capability markers.**
+  The post-TIR artifact-cache key covered function bodies and types but not the
+  entry module's name or its `needs` declarations, both of which are written
+  into the binary as `__march_capfrom_*` / `__march_capdecl_*` markers. Two
+  programs that differed only in module name (or one `needs` line) shared one
+  cached binary, so `forge cap inspect`/`run`, `forge audit` and `march caps`
+  reported the first program's module and capabilities for the second. Both
+  are now part of the key.
 - **Drop functions keep the same symbol across unrelated edits.** The compiler
   named the drop function of a type with an unresolved type variable after the
   typechecker's internal variable number (`__drop$List_V_53272`), so it moved

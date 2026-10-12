@@ -1060,8 +1060,21 @@ and perceus_owned ~(owned_calls : bool) ?(repl : bool = false)
      process. *)
   Clo_flags.reset ();
   List.iter (fun fn ->
+    (* An ERASED (TVar) parameter is never borrowable, so it is owned -- but
+       outside an apply fn nothing drops an owned parameter the body never
+       mentions ([insert_dead_apply_param_drops] is apply-fn only).  A generic
+       named fn passed as a closure ([pfn ksnd(_p, x) do x end] as a
+       [Float -> Float -> Float]) then kept the reference its [$clo_wrap]
+       handed it, once per call.  Register such a parameter as borrowed for
+       the trampoline, which then releases it after the call. *)
+    let free = lazy (Dce.free_vars fn.Tir.fn_body) in
+    let unused_erased (p : Tir.var) =
+      (match p.Tir.v_ty with Tir.TVar _ -> true | _ -> false)
+      && not (Tir_names.is_apply_fn fn.Tir.fn_name)
+      && not (StringSet.mem p.Tir.v_name (Lazy.force free)) in
     Clo_flags.register fn.Tir.fn_name
-      (List.mapi (fun i _ -> Borrow.is_borrowed borrow_map fn.Tir.fn_name i)
+      (List.mapi (fun i p ->
+           Borrow.is_borrowed borrow_map fn.Tir.fn_name i || unused_erased p)
          fn.Tir.fn_params)
   ) m.Tir.tm_fns;
   (* A user extern passed as a value gets a [$clo_wrap] too, forwarding to

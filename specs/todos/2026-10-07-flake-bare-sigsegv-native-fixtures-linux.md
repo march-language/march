@@ -91,3 +91,11 @@ real lost-proc bug that TSAN's timing exposes, look at it again here.
 **Update 2026-10-11:** the wedge was not a lost proc. It was TSAN deadlocking in its own
 report path, re-entered through the preemption signal handler; fixed, see
 `specs/progress/2026-10-11-macos-tsan-scheduler-wedge.md`. It is unrelated to this crash.
+
+## 2026-10-12: did not reproduce under ASAN on Linux arm64
+
+30 runs at `MARCH_NUM_SCHEDULERS=14` under `MARCH_SANITIZE=1
+MARCH_DEBUG_RUNTIME=1` (`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`), Docker
+`march-ci-ubuntu-step6b` (arm64, glibc 2.39), concurrently with a 6-way ASAN
+sweep for load: 0 failures, no sanitizer report. Both fixtures named above (`branch_alias_tail_drop`, `run_until_idle_ping_pong`) were looped. Both are also clean in
+the full `scripts/native-sanitize-sweep.sh` error pass at 1 and 14 schedulers.

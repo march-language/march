@@ -159,12 +159,54 @@ let resolve_ctor_fields ctx scrut_tir_ty ctor_name n_args =
   match scrut_tir_ty with
   | Tir.TTuple ts -> ts   (* tuple patterns ($TupleN): the element types ARE the field types *)
   | Tir.TCon (type_name, ty_args) ->
-    (match Hashtbl.find_opt ctx.Llvm_ctx.type_params type_name,
-           Hashtbl.find_opt ctx.Llvm_ctx.poly_ctors (type_name, ctor_name) with
+    (* poly_ctors is keyed by the BARE ctor name, but a nested pattern's
+       sub-case carries the qualified tag ("Option.Some").  Looking that up
+       verbatim missed, fell back to the declared ['a] fields, and an
+       erased-slot Float box inside [Some(Some(f))] was then bound as a heap
+       pointer nobody released: one leaked box per match. *)
+    let generic =
+      match Hashtbl.find_opt ctx.Llvm_ctx.poly_ctors (type_name, ctor_name) with
+      | Some _ as hit -> hit
+      | None ->
+        (match String.rindex_opt ctor_name '.' with
+         | Some i ->
+           Hashtbl.find_opt ctx.Llvm_ctx.poly_ctors
+             (type_name, String.sub ctor_name (i + 1) (String.length ctor_name - i - 1))
+         | None -> None)
+    in
+    let bare_ctor = match String.rindex_opt ctor_name '.' with
+      | Some i -> String.sub ctor_name (i + 1) (String.length ctor_name - i - 1)
+      | None -> ctor_name in
+    let instantiate param_names generic_fields =
+      if List.length param_names = List.length ty_args then
+        Some (List.map (Llvm_eq.apply_ty_subst (List.combine param_names ty_args))
+                generic_fields)
+      else None in
+    (match Hashtbl.find_opt ctx.Llvm_ctx.type_params type_name, generic with
      | Some param_names, Some generic_fields
        when List.length param_names = List.length ty_args ->
        let subst = List.combine param_names ty_args in
        List.map (Llvm_eq.apply_ty_subst subst) generic_fields
+     | None, None ->
+       (* A short name several modules declare ([HEntry] in Map, HashMap and
+          Hamt) is registered only under its qualified spellings, so the bare
+          [TCon] a module's own code matches on finds neither table entry and
+          fell back to the declared fields: a [Map(Float, v)] leaf's Float key
+          box was then bound as an ordinary heap field and leaked on every
+          destructure.  Use the qualified candidates when they all instantiate
+          to the same fields; any disagreement keeps the fallback. *)
+       let suffix = "." ^ type_name in
+       let cands = Hashtbl.fold (fun q param_names acc ->
+           if String.ends_with ~suffix q then
+             match Hashtbl.find_opt ctx.Llvm_ctx.poly_ctors (q, bare_ctor) with
+             | Some gf -> instantiate param_names gf :: acc
+             | None -> acc
+           else acc) ctx.Llvm_ctx.type_params [] in
+       (match cands with
+        | Some first :: rest
+          when List.length first = n_args
+               && List.for_all (fun c -> c = Some first) rest -> first
+        | _ -> (ctor_entry ctx ctor_name n_args).Llvm_ctx.ce_fields)
      | _ ->
        (ctor_entry ctx ctor_name n_args).Llvm_ctx.ce_fields)
   | _ ->

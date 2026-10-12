@@ -1,0 +1,7 @@
+guarded or-pattern join point = 83401, flat: true
+factory closure called = 12517500, flat: true
+factory closure dropped uncalled = 5000, flat: true
+closure called while shared = 37582500, flat: true
+list of closures sharing one = 37767500, flat: true
+heap and unboxed captures = 25057786, flat: true
+local lambda = 125040000, flat: true

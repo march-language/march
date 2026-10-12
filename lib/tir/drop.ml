@@ -566,16 +566,29 @@ let boxed_float_slots (env : env) (ty : Tir.ty) (cname : string)
     (ftys : Tir.ty list) : int list =
   match ty with
   | Tir.TCon (name, _) ->
-    (match variant_ctors env name with
-     | Some ctors ->
-       (match List.assoc_opt cname ctors with
-        | Some decl when List.length decl = List.length ftys ->
-          List.concat (List.mapi (fun i (d, f) ->
-              match d, f with
-              | Tir.TVar _, Tir.TFloat -> [i]
-              | _ -> []) (List.combine decl ftys))
-        | _ -> [])
-     | None -> [])
+    (* The declared field types of [cname].  A colliding type's drop branches
+       come from [colliding_union], whose constructor names are QUALIFIED by
+       their candidate type ("Map.HEntry.HLeaf"); those are looked up in that
+       candidate, since a bare-name lookup in [name] misses them -- which left
+       the Float key box of every [Map(Float, v)] leaf unreleased. *)
+    let decl =
+      match Option.bind (variant_ctors env name) (List.assoc_opt cname) with
+      | Some _ as d -> d
+      | None ->
+        (match String.rindex_opt cname '.' with
+         | Some i ->
+           let q = String.sub cname 0 i in
+           let cn = String.sub cname (i + 1) (String.length cname - i - 1) in
+           Option.bind (Kind.find_variant env.k_table q) (List.assoc_opt cn)
+         | None -> None)
+    in
+    (match decl with
+     | Some decl when List.length decl = List.length ftys ->
+       List.concat (List.mapi (fun i (d, f) ->
+           match d, f with
+           | Tir.TVar _, Tir.TFloat -> [i]
+           | _ -> []) (List.combine decl ftys))
+     | _ -> [])
   | _ -> []
 
 (** For a value of payload-sharing representation (niche: [Some(x)] IS [x],
@@ -887,6 +900,23 @@ and tuple_boxed_float (ty : Tir.ty) (fty : Tir.ty) : bool =
 
 (* ── Closure environments ──────────────────────────────────────────────── *)
 
+(** The 1-based [$fvN] indices of the [Repr.Unboxed] aggregates among a
+    closure's capture types.  A closure slot is 8 bytes, so such a capture is
+    stored as a BOX ([Llvm_ctx.llvm_field_ty] -> ["ptr"]; [Llvm_ctx.coerce]
+    allocates it when the environment is built), a fresh rc=1 cell the
+    environment alone references.  [Kind.needs_rc_of] is false for the
+    aggregate, so nothing that filters captures by it ever released the box:
+    one cell leaked per environment
+    (specs/progress/2026-10-12-unboxed-aggregate-closure-capture-leak.md).
+    Same test as [llvm_field_ty], so the two cannot disagree on which slots
+    hold a box. *)
+let unboxed_capture_fields (env : env) (cap_tys : Tir.ty list) : int list =
+  List.filter_map Fun.id (List.mapi (fun i ty ->
+      match ty with
+      | Tir.TCon (n, _) when Kind.unboxed_of_type_name env.k_table n <> None ->
+        Some (i + 1)
+      | _ -> None) cap_tys)
+
 (** True for the RHS of one of the prefix bindings [Defun.lift_lambda] and
     Perceus leave at the head of an apply function: a capture read
     [$clo.$fvN], or the self-binding alias [$clo], either possibly wrapped in a
@@ -1072,18 +1102,20 @@ let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
     [$clo]-source bindings followed by [ESeq (EDecRC $clo, rest)].  Anything
     else means Perceus spliced no release here (a capture-free apply function,
     the REPL-only arm) and there is nothing to pair child releases with. *)
-let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env : env) (body : Tir.expr) : Tir.expr =
+let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
+    ?(heap = true) ?(boxes : int list = []) (env : env) (body : Tir.expr) : Tir.expr =
   let clo = Tir_names.clo_param_name in
   let clo_var =
     { Tir.v_name = clo; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
   let unit_expr = Tir.ETuple [] in
   (* Capture locals, in prefix order, that are worth releasing.  A capture read
      twice binds twice; only the first binding is kept, so the environment's
-     single reference is released once. *)
+     single reference is released once.  [heap = false] (an environment that
+     borrows its heap captures) keeps none: only the [boxes] are its own. *)
   let seen_fields = Hashtbl.create 4 in
   let captures = ref [] in
   let note_capture field (v : Tir.var) =
-    if Kind.needs_rc_of env.k_table v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
+    if heap && Kind.needs_rc_of env.k_table v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
     then begin
       Hashtbl.add seen_fields field ();
       captures := v :: !captures
@@ -1210,11 +1242,34 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
   let decrc_freed_fn =
     { Tir.v_name = "march_decrc_freed";
       v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TBool); v_lin = Tir.Unr } in
+  (* An unboxed-aggregate capture ([boxes], by [$fvN] index) lives in its
+     8-byte slot as a BOX [Llvm_ctx.coerce] built when the environment was
+     allocated: a fresh cell nothing but the environment references.  The
+     prefix copied the struct OUT of it (or never read it), so the box is dead
+     the moment the environment is: its raw slot word is loaded as a
+     [Ptr(Unit)] BEFORE the release (which may free the cell) and released
+     right after it, on the path where that release freed the environment.
+     Unlike a heap capture this needs no tail placement: nothing in the body
+     reads the box. *)
   let freed_release (target : Tir.var) (rest : Tir.expr) : Tir.expr =
     let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
                   v_lin = Tir.Unr } in
-    Tir.ELet (freed, Tir.EApp (decrc_freed_fn, [Tir.AVar target]),
-              push freed rest)
+    let box_vars = List.map (fun i ->
+        ({ Tir.v_name = fresh env "cub"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr },
+         Tir_names.fv_field i)) boxes in
+    let rest' = if !captures = [] then rest else push freed rest in
+    let after =
+      if box_vars = [] then rest'
+      else
+        Tir.ESeq (Tir.ECase (Tir.AVar freed,
+            [ { Tir.br_tag = "True"; br_vars = [];
+                br_body = chain (List.map (fun (v, _) -> Tir.EDecRC (Tir.AVar v)) box_vars) } ],
+            Some unit_expr), rest')
+    in
+    List.fold_right (fun (v, field) acc ->
+        Tir.ELet (v, Tir.EField (Tir.AVar target, field), acc))
+      box_vars
+      (Tir.ELet (freed, Tir.EApp (decrc_freed_fn, [Tir.AVar target]), after))
   in
   (* The SELF-BINDING ALIAS's release needs the same treatment, and in a
      self-recursive apply function it is the one that actually frees.
@@ -1252,7 +1307,7 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
        | None -> Hashtbl.replace aliases v.Tir.v_name ());
       Option.map (fun rest' -> Tir.ELet (v, e1, rest')) (walk rest)
     | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest) when String.equal v.Tir.v_name clo ->
-      if !captures = [] then None
+      if !captures = [] && boxes = [] then None
       else Some (freed_release clo_var (rewrite_alias_drops rest))
     | _ -> None
   in
@@ -1533,6 +1588,19 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
      [owning_apply_fns] for why this gate is load-bearing rather than an
      optimisation. *)
   let owning = owning_apply_fns m in
+  (* Apply fn -> the [$fvN] indices of its environment's unboxed-aggregate
+     captures.  Each is a box the environment alone owns, whether or not it
+     owns its heap captures ([rewrite_apply_clo_drop]'s [boxes]), so these are
+     released under every environment, not just the [owning] ones. *)
+  let clo_boxes = Hashtbl.create 16 in
+  List.iter (function
+      | Tir.TDClosure (clo, _ :: cap_tys) ->
+        (match apply_name_of_clo clo, unboxed_capture_fields env cap_tys with
+         | Some apply, (_ :: _ as idxs) -> Hashtbl.replace clo_boxes apply idxs
+         | _ -> ())
+      | _ -> ()) m.Tir.tm_types;
+  let boxes_of apply =
+    Option.value ~default:[] (Hashtbl.find_opt clo_boxes apply) in
   let module_fns = Hashtbl.create 256 in
   List.iter (fun f -> Hashtbl.replace module_fns f.Tir.fn_name ()) m.Tir.tm_fns;
   let fns = List.map (fun f ->
@@ -1542,8 +1610,10 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
          capture releases it inserts then go through that rewrite in turn, so a
          captured closure is itself deep-dropped. *)
       let body =
-        if f.Tir.fn_kind = Tir.FnApply && Hashtbl.mem owning f.Tir.fn_name
-        then rewrite_apply_clo_drop ~module_fns env f.Tir.fn_body
+        let heap = Hashtbl.mem owning f.Tir.fn_name in
+        let boxes = boxes_of f.Tir.fn_name in
+        if f.Tir.fn_kind = Tir.FnApply && (heap || boxes <> [])
+        then rewrite_apply_clo_drop ~module_fns ~heap ~boxes env f.Tir.fn_body
         else f.Tir.fn_body
       in
       Hashtbl.reset env.owned_locals;
@@ -1577,13 +1647,25 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
     List.filter_map (function
         | Tir.TDClosure (clo, _ :: cap_tys) ->
           (match apply_name_of_clo clo with
-           | Some apply when Hashtbl.mem owning apply ->
+           | Some apply when Hashtbl.mem owning apply || boxes_of apply <> [] ->
              let clo_var =
                { Tir.v_name = Tir_names.clo_param_name; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
-             let caps = List.filteri (fun _ (v, _) -> Kind.needs_rc_of env.k_table v.Tir.v_ty)
+             let heap = Hashtbl.mem owning apply in
+             let boxes = boxes_of apply in
+             (* Heap captures only when the environment owns them; an
+                unboxed-aggregate capture's box always (see [clo_boxes]),
+                loaded as its raw slot word so the release is a bare
+                [EDecRC] of the cell. *)
+             let caps = List.filter_map Fun.id
                  (List.mapi (fun i ty ->
-                      ({ Tir.v_name = Printf.sprintf "$cap%d" (i + 1); v_ty = ty; v_lin = Tir.Unr },
-                       Tir_names.fv_field (i + 1))) cap_tys) in
+                      let field = Tir_names.fv_field (i + 1) in
+                      if heap && Kind.needs_rc_of env.k_table ty then
+                        Some ({ Tir.v_name = Printf.sprintf "$cap%d" (i + 1); v_ty = ty; v_lin = Tir.Unr },
+                              field)
+                      else if List.mem (i + 1) boxes then
+                        Some ({ Tir.v_name = Printf.sprintf "$cub%d" (i + 1);
+                                v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr }, field)
+                      else None) cap_tys) in
              if caps = [] then None
              else begin
                let rec chain = function
