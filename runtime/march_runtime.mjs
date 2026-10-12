@@ -225,9 +225,10 @@ export function march_char_is_whitespace(c) { return /^\s$/.test(c); }
 /*
  * March Int is a 63-bit integer natively, but the JS target stores it in an
  * IEEE-754 double, which is exact only within ±(2^53 - 1). These helpers
- * implement the INTERPRETER's semantics (the reference backend — e.g. int_shr
- * is a LOGICAL shift of the 63-bit pattern, and int_popcount flips the sign
- * bit before counting, mirroring lib/eval/eval.ml) exactly within that range,
+ * implement the specified 63-bit semantics (specs/lang/type-system.md, "Int
+ * width and overflow": int_shr is an ARITHMETIC shift and int_popcount counts
+ * the 63-bit two's-complement pattern, as the interpreter and native code do)
+ * exactly within that range,
  * and THROW a RangeError rather than silently rounding when an argument or
  * result falls outside it. Fast paths cover int32 and non-negative
  * double-exact operands so hot code (e.g. stdlib Random's 32-bit sfc32 core)
@@ -303,21 +304,20 @@ export function march_int_shl(a, n) {
   return __int_result(BigInt.asIntN(63, BigInt(a) << BigInt(n)), "int_shl");
 }
 
-/** lsr: LOGICAL shift of the 63-bit pattern (zero fill), like the interpreter.
- * For a >= 0 the pattern's high bits are zero, so it's floor division. */
+/** asr: ARITHMETIC (sign-propagating) shift, like the interpreter and native
+ * code: int_shr(-8, 1) = -4. That is floor division by 2^n, exact for every
+ * safe-integer argument (dividing by a power of two is exact in a double). */
 export function march_int_shr(a, n) {
   if (n < 0 || n >= 63) throw new Error("int_shr: shift out of range");
   __int_check(a, "int_shr");
-  if (a >= 0) return Math.floor(a / 2 ** n);
-  return __int_result(BigInt.asUintN(63, BigInt(a)) >> BigInt(n), "int_shr");
+  return Math.floor(a / 2 ** n);
 }
 
-/** Mirrors eval.ml: negative inputs get the sign bit (bit 62) flipped off
- * before counting, so e.g. int_popcount(-1) = 62. */
+/** Population count of the 63-bit two's-complement pattern, like the
+ * interpreter and native code: int_popcount(-1) = 63. */
 export function march_int_popcount(a) {
   __int_check(a, "int_popcount");
   let b = BigInt.asUintN(63, BigInt(a));
-  if (a < 0) b ^= 1n << 62n;
   let c = 0;
   while (b) { b &= b - 1n; c++; }
   return c;

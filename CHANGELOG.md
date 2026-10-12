@@ -647,6 +647,10 @@ git log is authoritative for exact commits.
   passed to `List.map` (whose callback parameter is also `f`) called the
   callback instead at `--opt 0` and `--opt 2`, so the mapped values were wrong.
   The interpreter and `--no-opt` were always right.
+- **`--target js`: Int division truncates, and `int_shr`/`int_popcount` follow
+  the 63-bit rules.** `7 / 2` printed `3.5` in a JS build. `int_shr(-8, 1)`
+  threw a `RangeError` instead of returning `-4`, and `int_popcount(-1)` was
+  62 instead of 63. All three now match native builds.
 - **Two types with the same short name can no longer both `derive Json`.** With
   `A.Note` and `B.Note` both deriving Json, `from_json` decoded `A.Note` with
   `B.Note`'s codec when interpreted and failed as an ambiguous call when
@@ -3041,6 +3045,11 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **`Int` on `--target js` is documented as a subset.** An `Int` there is a JS
+  number, exact within ±(2^53 - 1), where every operation matches native
+  builds. Past that, `+`, `-` and `*` round instead of wrapping at 63 bits and
+  the `int_*` builtins throw a `RangeError`. See "Int on the JavaScript
+  target" in the type-system chapter.
 - **Agent debugging guidance.** A `march-debug` skill maps each symptom
   (compiled/interpreted divergence, crash, leak, slow compile, stale cache, red
   CI, "prove this refactor moved nothing") to the first command and how to read

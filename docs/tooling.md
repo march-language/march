@@ -145,6 +145,8 @@ node dist/app.mjs
 march --target js --no-copy-runtime -o dist/app.mjs src/app.march
 ```
 
+**`Int` is a subset on this target.** An `Int` is a JS number, exact only within ±(2^53 - 1). Inside that range arithmetic, division and the `int_*` bitwise builtins give the same answers as a native build. Past it, `+`, `-` and `*` round instead of wrapping at 63 bits, the `int_*` builtins throw a `RangeError`, and `int_max_value()`/`int_min_value()` do not compile. See [Int on the JavaScript target]({{ site.baseurl }}/docs/types/#int-on-the-javascript-target) for the full list.
+
 The JS backend auto-loads `dom.march` from stdlib, so `Js.Dom.*` functions are available without any extra imports in JS builds:
 
 ```march

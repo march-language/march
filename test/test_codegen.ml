@@ -13233,6 +13233,92 @@ let test_compiled_int_overflow_parity () =
                [true, true]"
     ()
 
+(** `--target js` runs the documented SUBSET of `Int` (owner decision
+    2026-10-11, specs/progress/2026-09-30-js-backend-int-63-bit-semantics.md;
+    specs/lang/type-system.md, "Int on the JavaScript target"): an `Int` is a
+    JS number, so values within +-(2^53 - 1) agree with the interpreter on
+    every operation, and the overflow edges that
+    [test_compiled_int_overflow_parity] pins are deliberately NOT compared
+    here. The first block must match the interpreter line for line (and pins
+    two JS fixes that came with the decision: Int `/` truncates, `7 / 2` used
+    to print 3.5, and `int_shr`/`int_popcount` follow the 63-bit rules,
+    `int_shr(-8, 1)` used to throw and `int_popcount(-1)` was 62). The tail
+    is JS-only: past 2^53 `+` rounds instead of wrapping, and the checked
+    builtins throw a RangeError instead of returning a wrong value.
+    Operands come out of a list so no constant folding (which uses 63-bit
+    arithmetic) can hide the JS behaviour. Skipped when node is absent. *)
+let test_js_int_subset_parity () =
+  let name = "march_js_int_subset" in
+  let src =
+    "mod JsIntSubset do\n\
+    \  needs IO.Console\n\
+    \  pfn at(xs : List(Int), i : Int) : Int do\n\
+    \    match xs do\n\
+    \      Nil -> 0\n\
+    \      Cons(h, t) -> if i == 0 do h else at(t, i - 1) end\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let arr = [9007199254740991, 1, 2, -7, 52, -8, 3]\n\
+    \    let big = at(arr, 0)\n\
+    \    let one = at(arr, 1)\n\
+    \    let two = at(arr, 2)\n\
+    \    let m7 = at(arr, 3)\n\
+    \    let s52 = at(arr, 4)\n\
+    \    let m8 = at(arr, 5)\n\
+    \    let three = at(arr, 6)\n\
+    \    println([big, big - one + one, 0 - big, big / three, big % three])\n\
+    \    println([7 / two, m7 / two, m7 % two, int_div(m7, two), int_mod_euclid(m7, three), int_div_euclid(m7, two)])\n\
+    \    println([int_and(big, 255), int_or(4294967296, one), int_xor(-1, 5), int_not(5), int_not(0 - big)])\n\
+    \    println([int_shl(one, s52), int_shr(big, one), int_shr(m8, one), int_shr(m7, two), int_popcount(255), int_popcount(-1), int_popcount(big)])\n\
+    \    println([big + two, int_pow(two, 53) + one])\n\
+    \    println(int_shl(big, two))\n\
+    \  end\n\
+     end\n" in
+  let subset =
+    "[9007199254740991, 9007199254740991, -9007199254740991, 3002399751580330, 1]\n\
+     [3, -3, -1, -3, 2, -4]\n\
+     [255, 4294967297, -6, -6, 9007199254740990]\n\
+     [4503599627370496, 4503599627370495, -4, -2, 8, 63, 53]\n" in
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  (* Interpreter: the reference. Its overflow lines wrap modulo 2^63 and are
+     asserted only to show what the JS tail below departs from. *)
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>/dev/null"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote src_path)) in
+  Alcotest.(check string) (name ^ ": interpreter output")
+    (subset ^ "[9007199254740993, 9007199254740993]\n36028797018963964")
+    interp_out;
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS Int subset parity)"
+  else begin
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1; echo EXIT:$?"
+        (Filename.quote mjs)) in
+    (* The subset: identical to the interpreter. *)
+    Alcotest.(check bool)
+      (name ^ ": JS output starts with the interpreter's in-range lines (got: "
+       ^ js_out ^ ")")
+      true (String.starts_with ~prefix:subset js_out);
+    let tail = String.sub js_out (String.length subset)
+        (String.length js_out - String.length subset) in
+    (* Outside the subset (the todo's overflow edges, skipped on purpose):
+       `+` past 2^53 rounds to the nearest double, and a checked builtin whose
+       result leaves +-(2^53 - 1) throws. *)
+    Alcotest.(check bool)
+      (name ^ ": JS rounds past 2^53 (got: " ^ tail ^ ")")
+      true (String.starts_with ~prefix:"[9007199254740992, 9007199254740992]\n" tail);
+    Alcotest.(check bool)
+      (name ^ ": JS int_shl past 2^53 throws a RangeError and exits 1 (got: "
+       ^ tail ^ ")")
+      true (ir_contains tail "RangeError: int_shl: result 36028797018963964 overflows"
+            && ir_contains tail "EXIT:1")
+  end
+
 (** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
     lists have been filled with freed cons cells.  march_alloc is a plain
     malloc (2026-10-02; it was a calloc), so a fresh hole cell's slot holds
@@ -17791,6 +17877,8 @@ let codegen_suites =
             test_compiled_int_mod_euclid_parity;
           Alcotest.test_case "compiled Int is 63-bit and wraps (overflow edge parity)" `Quick
             test_compiled_int_overflow_parity;
+          Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
+            test_js_int_subset_parity;
           Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
             test_compiled_int_overflow_lazy_norm_parity;
           Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick
