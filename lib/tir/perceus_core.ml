@@ -1029,6 +1029,17 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
     | Tir.EAtom (Tir.ALit _) as tail -> Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
     | (Tir.EApp _ | Tir.ECallPtr _) as tail when call_is_safe tail ->
       Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
+    (* A TRMC destination write ([$dst.1 <- x], the tail of a [$dps]
+       helper's non-recursive arm, e.g. its panic default) has no type to
+       bind; when neither side points into [v] the release goes in front of
+       it.  Refusing it abandoned the drop on EVERY path, so a record
+       destructured in a TRMC'd map leaked once per element (Plot's
+       render_legend, found by the TIR verifier's leak sweep). *)
+    | Tir.ESetField (o, _, value) as tail
+      when not (List.exists (function
+          | Tir.AVar w -> points_into w
+          | _ -> false) [ o; value ]) ->
+      Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
     | tail ->
       (match tir_expr_ty tail with
        | Some ty ->
