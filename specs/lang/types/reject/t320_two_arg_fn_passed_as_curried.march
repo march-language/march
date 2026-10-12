@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: `add` takes 2 arguments, but `ap2` calls its parameter `f` with 1 argument
+-- A two-argument function passed where the callee applies it one argument at
+-- a time (2026-10-12, specs/progress/2026-10-12-two-arg-fn-accepted-as-curried.md).
+-- `fn add(a, b)` and a curried `fn a -> fn b -> ...` share the type
+-- `Int -> Int -> Int`, but March has no partial application: `f(x)` on `add`
+-- was an arity panic interpreted and a SIGSEGV compiled. Accept twin: t321.
+mod Main do
+  needs IO.Console
+
+  pfn ap2(f, x, y) do
+    let g = f(x)
+    g(y)
+  end
+
+  pfn add(a : Int, b : Int) : Int do a + b end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(ap2(add, 1, 2)))
+  end
+end
