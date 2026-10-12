@@ -1,0 +1,73 @@
+-- The epoch-Cap builtins leaked the cap they were handed, compiled:
+-- send_checked, is_cap_valid and revoke_cap were classified as OWNING the
+-- cap, but the runtime only reads its (pid_index, epoch) words, so every
+-- call leaked one reference to the cap get_cap allocated.
+-- Each line checks that 200 rounds leave fewer than 5 objects behind (RED
+-- before: one leaked cap per round). The cap is SHARED: it is used three or
+-- four times after get_cap, so a release of a reference the callee does not
+-- own would be a use-after-free under ASAN or a wrong count here.
+mod ActorCapLeakProbe do
+  needs IO
+  needs IO.Console
+
+  actor W do
+    state { n : Int }
+    init  { n: 0 }
+    on Tick(k : Int) do { n: state.n + k } end
+  end
+
+  -- A live actor: send through the cap twice and check it.
+  pfn live_use(w : Pid({ n : Int }), i : Int) : Int do
+    match get_cap(w) do
+    None -> 0
+    Some(cap) ->
+      let a = send_checked(cap, Tick(i))
+      let b = send_checked(cap, Tick(1))
+      let v = is_cap_valid(cap)
+      (if a == :ok do 1 else 0 end) + (if b == :ok do 1 else 0 end)
+        + (if v do 1 else 0 end)
+    end
+  end
+
+  -- A fresh actor per round: check, revoke, check again, send refused.
+  pfn revoked(i : Int) : Int do
+    let w = spawn(W)
+    let r = match get_cap(w) do
+      None -> 0
+      Some(cap) ->
+        let before = is_cap_valid(cap)
+        let _ = revoke_cap(cap)
+        let after = is_cap_valid(cap)
+        let s = send_checked(cap, Tick(i))
+        (if before do 1 else 0 end) + (if after do 10 else 0 end)
+          + (if s == :error do 1 else 0 end)
+    end
+    kill(w)
+    r
+  end
+
+  pfn times(n : Int, f : (Int) -> Int, acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, f, acc + f(n)) end
+  end
+
+  pfn settle(a0 : Int, tries : Int) : Int do
+    sleep_ms(20)
+    let d = live_allocs() - a0
+    if d < 5 || tries <= 0 do d else settle(a0, tries - 1) end
+  end
+
+  pfn probe(name : String, f : (Int) -> Int) : () do
+    let _ = times(5, f, 0)
+    sleep_ms(50)
+    let a0 = live_allocs()
+    let total = times(200, f, 0)
+    println(name ++ ": total " ++ int_to_string(total) ++ ", released "
+            ++ bool_to_string(settle(a0, 250) < 5))
+  end
+
+  fn main(_io : Cap(IO)) : () do
+    let w = spawn(W)
+    probe("sent through and checked", fn i -> live_use(w, i))
+    probe("revoked and refused", fn i -> revoked(i))
+  end
+end

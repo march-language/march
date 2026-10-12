@@ -6,6 +6,8 @@ native_actor_call_late_reply: coverage audit (user + stdlib): 135 enforced, 0 in
 native_actor_call_late_reply: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_call_timeout: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_call_timeout: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_cap_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_actor_cap_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_counter: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_counter: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_crash_rc_restore: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

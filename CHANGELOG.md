@@ -662,6 +662,8 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`send_checked`, `is_cap_valid` and `revoke_cap` no longer leak the
+  capability when compiled.** Each call leaked the cap `get_cap` returned.
 - **Registering an actor by name no longer leaks memory when compiled.**
   Every `Actor.register` leaked the name string and the actor record (the
   registry kept the record after the actor died or was unregistered), and

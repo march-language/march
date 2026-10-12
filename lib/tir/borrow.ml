@@ -111,6 +111,14 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_mailbox_backlog", [true]);
   ("get_cap",           [true]);
   ("march_get_cap",     [true]);
+    (* The epoch-Cap plane only reads the cap: march_send_checked,
+       march_is_cap_valid and march_revoke_cap copy its (pid_index, epoch)
+       words and never store or free it.  send_checked's MESSAGE is consumed
+       (sent, or released on every refusal path).  Listed as owned until
+       2026-10-12, so every call leaked the cap get_cap had allocated. *)
+  ("send_checked",      [true; false]);
+  ("is_cap_valid",      [true]);
+  ("revoke_cap",        [true]);
   (* The rest of the read-only pid family, missed by the 2026-09-14 audit and
      left owned, so each call leaked one reference to its pid and a record
      ever passed to one was never freed
@@ -626,7 +634,6 @@ let extern_owned_builtins : string list = [
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps";
     "register_resource";
-    "send_checked"; "revoke_cap"; "is_cap_valid";
     "register_actor_on_stop";
     (* Observe plan R4: registration reads two static closures; the inspect
        request reads the pid (march_actor_inspect never consumes it).
