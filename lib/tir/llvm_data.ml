@@ -159,8 +159,22 @@ let resolve_ctor_fields ctx scrut_tir_ty ctor_name n_args =
   match scrut_tir_ty with
   | Tir.TTuple ts -> ts   (* tuple patterns ($TupleN): the element types ARE the field types *)
   | Tir.TCon (type_name, ty_args) ->
-    (match Hashtbl.find_opt ctx.Llvm_ctx.type_params type_name,
-           Hashtbl.find_opt ctx.Llvm_ctx.poly_ctors (type_name, ctor_name) with
+    (* poly_ctors is keyed by the BARE ctor name, but a nested pattern's
+       sub-case carries the qualified tag ("Option.Some").  Looking that up
+       verbatim missed, fell back to the declared ['a] fields, and an
+       erased-slot Float box inside [Some(Some(f))] was then bound as a heap
+       pointer nobody released: one leaked box per match. *)
+    let generic =
+      match Hashtbl.find_opt ctx.Llvm_ctx.poly_ctors (type_name, ctor_name) with
+      | Some _ as hit -> hit
+      | None ->
+        (match String.rindex_opt ctor_name '.' with
+         | Some i ->
+           Hashtbl.find_opt ctx.Llvm_ctx.poly_ctors
+             (type_name, String.sub ctor_name (i + 1) (String.length ctor_name - i - 1))
+         | None -> None)
+    in
+    (match Hashtbl.find_opt ctx.Llvm_ctx.type_params type_name, generic with
      | Some param_names, Some generic_fields
        when List.length param_names = List.length ty_args ->
        let subst = List.combine param_names ty_args in

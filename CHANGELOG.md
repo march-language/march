@@ -617,6 +617,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled code no longer leaks a `Float` matched through a nested
+  pattern.** `Some(Some(f))` on an `Option(Option(Float))`, or `Ok(Some(f))` on
+  a `Result(Option(Float), e)`, leaked one small allocation every time it
+  matched.
 - **Compiled code no longer leaks a `Float` when rebuilding a value from
   `Some(f)`.** Matching `Some(f)` on an `Option(Float)` and building another
   one-field value from it (`Some(f) -> Ok(f)`, `Some(f) -> Number(f)`) leaked
