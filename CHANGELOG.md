@@ -675,6 +675,15 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A restarted node no longer takes a `count = 1` role back the moment it
+  starts.** Its peers do not count a rejoining node for
+  `MARCH_PLACEMENT_SETTLE_MS`, but the node itself ranked first among the
+  markers it could see and offered the role at its first tick, so two nodes
+  offered a `count = 1` role for the whole settle period with no partition.
+  A node now opens no ranked role before its first registry sync (at most
+  the settle period), and while a peer counts it as rejoined it leaves the
+  role to the nodes already holding it. Takeover by a survivor is unchanged.
+  New `ClusterNode.registry_synced` and `ClusterNode.rejoined_at`.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a

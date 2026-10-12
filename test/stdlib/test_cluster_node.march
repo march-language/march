@@ -218,6 +218,61 @@ mod TestClusterNode do
 
   describe "rejoin reporting" do
 
+    -- The mirror of the test below, from the restarted node's side: the
+    -- member view a peer sends when the link comes up still holds the old
+    -- creation, so the restarted node knows that peer will report it
+    -- rejoined (and Topology lets it settle; todo
+    -- 2026-10-05-lab-rejoining-node-offers-count-role-at-once).
+    test "a restarted node learns from a peer's member view that the peer remembers it" do
+      let a = ClusterNode.node_id_of("a")
+      let b = ClusterNode.node_id_of("b")
+      -- b knew a at creation 1.
+      let b_st = ClusterNode.core_new(cfg("b", Nil), 1)
+      match ClusterNode.core_linked(b_st, a, "a", "127.0.0.1:7000", 1, 10, 11, a, 99) do
+        (b1, _) ->
+          match ClusterNode.core_tick(b1, 1000) do
+            (b2, _) ->
+              -- a restarts (creation 2) with b as its seed; b links it.
+              let a_st = ClusterNode.core_new(ClusterNode.config("a", 7000, "", ["127.0.0.1:7001"], "s", 2), 1)
+              assert (ClusterNode.core_reg_synced(a_st) == false)
+              match ClusterNode.core_linked(b2, a, "a", "127.0.0.1:7000", 2, 20, 21, a, 98) do
+                (_, effs) ->
+                  let frames = sends_to(effs, a)
+                  -- MEMBERS_SYNC first, then the registry sync, in that order.
+                  match frames do
+                    Cons(sync, Cons(regsync, _)) ->
+                      match ClusterNode.core_frame(a_st, b, 14, sync) do
+                        (a1, _) ->
+                          assert (ClusterNode.core_remembered(a1) == 1)
+                          match ClusterNode.core_frame(a1, b, 6, regsync) do
+                            (a2, _) -> assert (ClusterNode.core_reg_synced(a2))
+                          end
+                      end
+                    _ -> assert (List.length(frames) >= 2)
+                  end
+              end
+          end
+      end
+    end
+
+    test "a fresh node is not remembered, and a node with no seeds has nothing to sync" do
+      let a = ClusterNode.node_id_of("a")
+      let b = ClusterNode.node_id_of("b")
+      assert (ClusterNode.core_reg_synced(ClusterNode.core_new(cfg("a", Nil), 1)))
+      let b_st = ClusterNode.core_new(cfg("b", Nil), 1)
+      let a_st = ClusterNode.core_new(cfg("a", ["127.0.0.1:7001"]), 1)
+      match ClusterNode.core_linked(b_st, a, "a", "127.0.0.1:7000", 1, 10, 11, a, 99) do
+        (_, effs) ->
+          match sends_to(effs, a) do
+            Cons(sync, _) ->
+              match ClusterNode.core_frame(a_st, b, 14, sync) do
+                (a1, _) -> assert (ClusterNode.core_remembered(a1) == 0)
+              end
+            Nil -> assert (false)
+          end
+      end
+    end
+
     test "a restarted node first seen Suspect at its new creation is reported rejoined, not up" do
       match linked_ab() do
         (b, st, _) ->

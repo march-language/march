@@ -150,9 +150,10 @@ What the lab has found so far, each filed with its repro:
 - [`2026-10-05-lab-restarted-node-offers-invisible.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-restarted-node-offers-invisible.md):
   a restarted node's offers are open but no initiator sees them ("no access point is
   registered"). `restart_persist` is expected-fail on it, at its last step.
-- [`2026-10-05-lab-rejoining-node-offers-count-role-at-once.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-rejoining-node-offers-count-role-at-once.md):
-  a restarted node offers a `count = 1` role a second after it starts, so two nodes offer
-  it for the settle period. `failover` is expected-fail on it.
+- [`2026-10-05-lab-rejoining-node-offers-count-role-at-once.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-rejoining-node-offers-count-role-at-once.md)
+  (fixed 2026-10-12): a restarted node offered a `count = 1` role a second after it
+  started, so two nodes offered it for the settle period. `failover` no longer expects
+  that failure (it is still expected-fail on the restarted node's invisible offers).
 - [`2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md):
   a session whose two offered roles (Stock, Ledger) are on different hosts can hang for
   ever, nearly always in certificate mode and occasionally with a shared secret.
