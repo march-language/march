@@ -8788,6 +8788,114 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
          (March_caps.Cap_lattice.normalize attributed))
     user_fns
 
+(** Reject a non-regular ("nested") datatype: one whose recursive mention
+    of itself, directly or through other types of the same module, applies it
+    to a GROWING argument, as in [type Nest(a) = Z(a) | S(Nest(List(a)))].
+    Expanding such a type never reaches a fixed point — [Nest(Int)] needs
+    [Nest(List(Int))], which needs [Nest(List(List(Int)))], … — and every
+    compiled pass that synthesises per-instance code (deep drop, printing,
+    equality) walked that chain forever: the compiler hung instead of
+    reporting anything. Functions over such a type need polymorphic recursion,
+    which HM already rejects (specs/lang/core-march-types.md), so the type
+    could only be built, never traversed.
+
+    The test expands each variant/record type of one module scope from its
+    own parameters, substituting through constructor fields, and collects the
+    instances of same-scope types it reaches. A regular type reaches finitely
+    many instances whose nesting stays bounded; a non-regular one keeps
+    producing deeper ones, and is reported once it passes [depth_limit] (far
+    beyond anything a regular declaration reaches: an instance is at most
+    as deep as the deepest field type plus the starting parameters).
+    specs/progress/2026-10-12-nonregular-type-compiler-hang.md *)
+let check_nonregular_types (errors : Err.ctx) (decls : Ast.decl list) : unit =
+  let rec depth (t : Ast.ty) : int =
+    match t with
+    | Ast.TyCon (_, args) | Ast.TyTuple args ->
+      1 + List.fold_left (fun m a -> max m (depth a)) 0 args
+    | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> 1 + max (depth a) (depth b)
+    | Ast.TyRecord fs -> 1 + List.fold_left (fun m (_, a) -> max m (depth a)) 0 fs
+    | Ast.TyLinear (_, a) | Ast.TyRefine (a, _, _) -> depth a
+    | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> 1
+  in
+  let rec subst (s : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
+    match t with
+    | Ast.TyVar n -> (match List.assoc_opt n.Ast.txt s with Some r -> r | None -> t)
+    | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst s) args)
+    | Ast.TyTuple args -> Ast.TyTuple (List.map (subst s) args)
+    | Ast.TyArrow (a, b) -> Ast.TyArrow (subst s a, subst s b)
+    | Ast.TyRecord fs -> Ast.TyRecord (List.map (fun (n, a) -> (n, subst s a)) fs)
+    | Ast.TyLinear (l, a) -> Ast.TyLinear (l, subst s a)
+    | Ast.TyRefine (a, b, p) -> Ast.TyRefine (subst s a, b, p)
+    | Ast.TyNatOp (o, a, b) -> Ast.TyNatOp (o, subst s a, subst s b)
+    | Ast.TyNat _ | Ast.TyChan _ -> t
+  in
+  let rec check_scope (decls : Ast.decl list) =
+    let types : (string, string list * Ast.ty list) Hashtbl.t = Hashtbl.create 8 in
+    let order = ref [] in
+    List.iter (fun (d : Ast.decl) ->
+        match d with
+        | Ast.DType (_, name, params, td, _)
+        | Ast.DAlwaysLinearType (_, name, params, td, _) ->
+          let fields = match td with
+            | Ast.TDVariant vs -> List.concat_map (fun (v : Ast.variant) -> v.var_args) vs
+            | Ast.TDRecord fs -> List.map (fun (f : Ast.field) -> f.fld_ty) fs
+            | Ast.TDAlias _ -> []
+          in
+          (match td with
+           | Ast.TDAlias _ -> ()
+           | _ ->
+             Hashtbl.replace types name.Ast.txt
+               (List.map (fun (p : Ast.name) -> p.Ast.txt) params, fields);
+             order := (name, params) :: !order)
+        | Ast.DMod (_, _, inner, _) -> check_scope inner
+        | _ -> ()) decls;
+    let depth_limit = 32 and instance_limit = 512 in
+    List.iter (fun ((name : Ast.name), (params : Ast.name list)) ->
+        (* The instances of same-scope types reachable from [name(params)]. *)
+        let seen = Hashtbl.create 16 in
+        let grows = ref None in
+        let rec visit (t : Ast.ty) =
+          if !grows = None then
+            match t with
+            | Ast.TyCon (n, args) when Hashtbl.mem types n.Ast.txt ->
+              List.iter visit args;
+              let key = Ast.show_ty t in
+              if !grows = None && not (Hashtbl.mem seen key) then begin
+                if depth t > depth_limit || Hashtbl.length seen > instance_limit then
+                  grows := Some t
+                else begin
+                  Hashtbl.add seen key ();
+                  let (ps, fields) = Hashtbl.find types n.Ast.txt in
+                  if List.length ps = List.length args then
+                    List.iter (fun f -> visit (subst (List.combine ps args) f)) fields
+                end
+              end
+            | Ast.TyCon (_, args) | Ast.TyTuple args -> List.iter visit args
+            | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) -> visit a; visit b
+            | Ast.TyRecord fs -> List.iter (fun (_, a) -> visit a) fs
+            | Ast.TyLinear (_, a) | Ast.TyRefine (a, _, _) -> visit a
+            | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> ()
+        in
+        visit (Ast.TyCon (name, List.map (fun p -> Ast.TyVar p) params));
+        match !grows with
+        | None -> ()
+        | Some _ ->
+          Err.error ~code:Err.Code.nonregular_type errors ~span:name.Ast.span
+            (Printf.sprintf
+               "type `%s` refers to itself at a growing type argument, which \
+                is not supported\n\
+                Polymorphic recursion through a type (a nested datatype such \
+                as `type Nest(a) = Z(a) | S(Nest(List(a)))`) has no finite \
+                set of instances to compile, and no function could walk it: \
+                a recursive call at a different type is rejected. Make the \
+                recursive mention use `%s`'s own parameters, e.g. \
+                `%s`."
+               name.Ast.txt name.Ast.txt
+               (Ast.show_ty (Ast.TyCon (name, List.map (fun p -> Ast.TyVar p) params)))))
+      (List.rev !order)
+  in
+  check_scope decls
+
 (** Every `always_linear type` declared anywhere in [decls], as the bare name
     plus the module-qualified name, spelled exactly as [check_decl]'s
     [DAlwaysLinearType] arm spells them — a nested module qualifies with its
@@ -9206,6 +9314,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)
+  check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
   (errors, type_map, { final_env with record_names_snapshot = record_names_dump () })
 
@@ -9461,6 +9570,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   last_with_env_final := { final_env with record_names_snapshot = record_names_dump () };
   (* Pass 3: tail-call enforcement *)
+  check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
   (errors, type_map)
 

@@ -623,6 +623,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A type that refers to itself at a growing argument is now a compile
+  error, instead of hanging the compiler.** `type Nest(a) = Z(a) |
+  S(Nest(List(a)))` made `--compile` and `--dump-tir` run forever. It is now
+  rejected where it is declared, in both backends, with a `nonregular_type`
+  error that names the type. No function could walk such a value anyway,
+  because a recursive call at a different type is already a type error.
+  Recursive types that reuse their own parameters, swap them, or fix them
+  (`T(Int)`) are unaffected.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,

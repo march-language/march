@@ -95,6 +95,7 @@ let no_extern_violation = "no_extern_violation"
 let no_panic_violation = "no_panic_violation"
 let non_exhaustive_match = "non_exhaustive_match"
 let non_tail_recursion = "non_tail_recursion"
+let nonregular_type = "nonregular_type"
 let not_a_function = "not_a_function"
 let not_a_nat = "not_a_nat"
 let not_a_variant = "not_a_variant"
@@ -264,6 +265,7 @@ let all = [
   no_panic_violation;
   non_exhaustive_match;
   non_tail_recursion;
+  nonregular_type;
   not_a_function;
   not_a_nat;
   not_a_variant;
