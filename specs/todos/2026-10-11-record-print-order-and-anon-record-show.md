@@ -37,3 +37,18 @@ impl's element `show` has no impl for a structural record type, and the
 dispatch reports the ambiguity instead of falling back to `to_string`. This
 happens before codegen; the descriptor would print the element correctly
 once it is reached.
+
+**Fixed 2026-10-12.** The cause was in mono's interface dispatch
+(`lib/tir/mono.ml`, the `EApp` arm). For a `TRecord` argument it looks up a
+nominal name, and an undeclared record has none, so the type name was
+`None`. Six `Show` impls meant the single-impl fallback did not apply
+either, so the bare `show` reached codegen. Now, for `show`/`to_string`
+only, an unnamed record gets the sentinel type name `$Record`. No impl
+matches it, so the call takes the existing `show` → `to_string` fallback
+that a declared type without a `Show` impl already took, and the descriptor
+prints it. Other methods keep the single-impl fallback. Fixture:
+`test/native/to_string_anon_record_container.march` (interpreted and
+compiled against one `.expected`). While writing it, I found that a
+one-field `Bool` record prints its field as `1` when compiled, in any
+position. That is unrelated and filed as
+`specs/todos/2026-10-12-single-bool-field-record-prints-int.md`.

@@ -631,6 +631,11 @@ git log is authoritative for exact commits.
   because a recursive call at a different type is already a type error.
   Recursive types that reuse their own parameters, swap them, or fix them
   (`T(Int)`) are unaffected.
+- **`to_string` of a record with no declared type inside a list, option,
+  result or tuple now compiles.** `to_string([{ a: 1 }])` and
+  `println(Some({ a: 1 }))` used to fail to compile with "ambiguous
+  interface-method call to `show`". They now print `[{ a: 1 }]` and
+  `Some({ a: 1 })`, the same as the interpreter.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,

@@ -895,7 +895,20 @@ let rec rewrite_calls
                     don't cause missed lookups. *)
                  let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
                  let key = mangle_ty (Tir.TRecord sorted) in
-                 Hashtbl.find_opt record_to_typename key
+                 (match Hashtbl.find_opt record_to_typename key with
+                  | Some n -> Some n
+                  (* A record no declaration names (`[{ a: 1 }]`'s element,
+                     reaching the List/Option Show impl's inner `show`) is
+                     still a CONCRETE type: nothing implements `Show` for it,
+                     so `show` must take the `to_string` fallback below, which
+                     prints it through the record descriptor.  Left [None] it
+                     fell to the single-impl sentinel, found six impls, and
+                     the bare `show` reached codegen as an "ambiguous
+                     interface-method call".  Only for `show`: another
+                     method keeps the single-impl fallback it had. *)
+                  | None when method_suffix orig_name = "show"
+                           || orig_name = "to_string" -> Some "$Record"
+                  | None -> None)
                (* TIR primitive types are distinct constructors from TCon.
                   After subst_ty {K→TString}, arg_ty = TString, not TCon("String",[]).
                   Without these cases, iface dispatch (e.g. hash → march_hash_string)
