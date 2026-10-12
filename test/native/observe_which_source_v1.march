@@ -1,0 +1,56 @@
+-- Observe R10 (WHICH / SOURCE): the version a node starts with.  Billing is a
+-- nested module, so its functions are on the --hot-reload boundary (the entry
+-- module's own are not).  observe_which_source_v2.march changes `price` only;
+-- test/observe_which_source_check.ml builds both, deploys the second over the
+-- first and asks the node which code it runs and what that code's source is.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs Actor.Debug
+  needs Actor.Introspect
+
+  mod Billing do
+    -- The price of an order line.
+    fn price(qty : Int) : Int do
+      qty * 10
+    end
+
+    fn label(qty : Int) : String do
+      "qty " ++ int_to_string(qty)
+    end
+  end
+
+  -- Recon.source(dcap, ..) until $MARCH_DEBUG_POLICY lets it answer (the
+  -- checker edits the policy while this runs), then the text or the error.
+  fn wait_source(dcap : Cap(Actor.Debug), tries : Int) : String do
+    match Recon.source(dcap, "Billing.price") do
+      Ok(text) -> text
+      Err(e) ->
+        if tries <= 0 do
+          "error " ++ e
+        else
+          sleep_ms(500)
+          wait_source(dcap, tries - 1)
+        end
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let dcap = Actor.debug(io)
+    println(Billing.label(3) ++ " costs " ++ int_to_string(Billing.price(3)))
+    match Recon.which(intro, "Billing.price") do
+      Ok(v) -> println("which " ++ v.impl_hash ++ " patched=" ++ (if v.patched do "yes" else "no" end))
+      Err(e) -> println("which error " ++ e)
+    end
+    match Recon.which(intro, "Billing.nothing") do
+      Ok(_) -> println("which nothing: found")
+      Err(e) -> println("which nothing: " ++ e)
+    end
+    println("ready")
+    println("in-process source: " ++ wait_source(dcap, 120))
+    println("source done")
+    sleep_ms(120000)
+  end
+end

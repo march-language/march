@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: The type variable `a` in `bad`'s signature is not generic
+-- Annotation type variables are rigid (2026-10-11,
+-- specs/progress/2026-10-11-annotated-tyvars-rigid.md). `a` in `bad`'s
+-- signature promises "for all a", but the body fixes it to Int. Until
+-- 2026-09-22 this typechecked silently (callers saw `List(Int) -> List(Int)`);
+-- from then until 2026-10-11 it was the `annotated_tyvar_fixed` WARNING, exit
+-- 0. Nothing calls `bad` at another type, so only the definition can report it.
+mod M do
+  fn bad(xs : List(a)) : List(a) do
+    match xs do
+      _ -> [0 - 5]
+    end
+  end
+
+  fn main() : Int do
+    List.length(bad([1, 2]))
+  end
+end

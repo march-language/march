@@ -286,6 +286,11 @@ let top_row_line (r : Yojson.Safe.t) : string =
     (ji (jm "crashes" r) + ji (jm "child_crashes" r))
     (match jm "link" r with `String l -> l | _ -> "-") (clip 22 sup) policy
 
+(** The column header [top_row_line]'s rows sit under; [sort] names the ranked column. *)
+let top_header (sort : string) : string =
+  Printf.sprintf "%8s  %-20s %-18s %-9s %8s %9s %10s %7s  %-10s %-22s %s" "PID" "NAME" "TYPE" "STATUS" "MBOX"
+    "STACK" (String.uppercase_ascii sort) "CRASHES" "LINK" "SUPERVISOR" "POLICY (held/max in window)"
+
 (** One [forge top] frame from a [TOP] reply and a summary. *)
 let render_top ~(node : string) ~(sort : string) ~(window_ms : int option)
     (s : summary) (top : Yojson.Safe.t) : string =
@@ -293,8 +298,7 @@ let render_top ~(node : string) ~(sort : string) ~(window_ms : int option)
   Printf.bprintf b "%s  %s\n" node (summary_line s);
   Printf.bprintf b "sorted by %s%s\n\n" sort
     (match window_ms with Some w -> Printf.sprintf " over %d ms" w | None -> "");
-  Printf.bprintf b "%8s  %-20s %-18s %-9s %8s %9s %10s %7s  %-10s %-22s %s\n" "PID" "NAME" "TYPE" "STATUS" "MBOX"
-    "STACK" (String.uppercase_ascii sort) "CRASHES" "LINK" "SUPERVISOR" "POLICY (held/max in window)";
+  Printf.bprintf b "%s\n" (top_header sort);
   List.iter (fun r -> Printf.bprintf b "%s\n" (top_row_line r))
     (jl (jm "top" (Observe_client.data_of top)));
   Buffer.contents b

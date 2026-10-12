@@ -770,12 +770,17 @@ let update_baseline ~inferred path (updates : dep_caps list) =
     case the accepted sets are merged into forge.caps.lock, as a
     `forge audit --record` would, but without touching any other entry.
     [Error] means the caller must undo the add. *)
-let gate_dependency_change ~(accept : bool) ~(touched : string list)
-    (proj : Project.project) : (unit, string) result =
+let gate_dependency_change ?(for_deps = false) ~(accept : bool)
+    ~(touched : string list) (proj : Project.project) : (unit, string) result =
   if touched = [] then Ok ()
   else begin
     let path = baseline_path proj.Project.root in
-    if not (Sys.file_exists path) then begin
+    if not (Sys.file_exists path) && for_deps then
+      (* `forge deps` in a project that never recorded a baseline: it has not
+         adopted the audit, and a plain install should not start printing
+         capability reports. *)
+      Ok ()
+    else if not (Sys.file_exists path) then begin
       (* Declared mode: a parse, no `march caps` run, so an add in a project
          that never recorded a baseline costs nothing extra. *)
       match collect ~only:touched proj with
@@ -824,10 +829,17 @@ let gate_dependency_change ~(accept : bool) ~(touched : string list)
           else
             Error
               (Printf.sprintf
-                 "%s asks for capabilities forge.caps.lock does not grant it; \
-                  forge.toml and forge.lock were left as they were.\n\
-                  Review the change above, then re-run with --accept-caps to \
-                  add it and record the new set."
+                 (if for_deps then
+                    "%s asks for capabilities forge.caps.lock does not grant it; \
+                     forge.lock was left as it was (your forge.toml edit is \
+                     kept).\n\
+                     Review the change above, then re-run `forge deps \
+                     --accept-caps` to lock it and record the new set."
+                  else
+                    "%s asks for capabilities forge.caps.lock does not grant it; \
+                     forge.toml and forge.lock were left as they were.\n\
+                     Review the change above, then re-run with --accept-caps to \
+                     add it and record the new set.")
                  (String.concat ", "
                     (List.map
                        (function
@@ -838,6 +850,59 @@ let gate_dependency_change ~(accept : bool) ~(touched : string list)
         end
     end
   end
+
+(** `forge deps` under the same gate as `forge add`
+    (specs/todos/2026-08-04-dependency-cap-audit-followups.md, "forge deps
+    after a hand-edited version bump is not gated").
+
+    [resolve] is the install itself ([Cmd_deps.run]); it rewrites forge.lock.
+    The gate then checks exactly the entries that rewrite added or changed
+    ([touched_entries]), so the questions the todo left open answer
+    themselves:
+    - The offline/restore path (a fresh clone, CI, `--offline`) installs what
+      forge.lock already says. Nothing is touched, so nothing is analyzed and
+      nothing can be refused: restoring a locked tree never needs a flag.
+    - A hand-edited bump re-resolves, the bumped entry moves, and a widening
+      is refused exactly as `forge add` refuses one: the delta is printed and
+      forge.lock is written back byte-for-byte (removed if there was none).
+      forge.toml is the user's own edit and is kept; the next `forge deps`
+      will re-resolve and refuse again until the change is accepted.
+    - `--accept-caps` acknowledges it, the same flag `forge add` takes.
+    Without a forge.caps.lock this is a plain install (see [for_deps]).
+    The newly fetched code stays in the dependency cache, as after a refused
+    `forge add`; a registry or git dependency is built from the coordinate
+    forge.lock names, so the restored lock keeps the old version in use. *)
+let deps_with_gate ~(accept : bool) ~(resolve : unit -> (unit, string) result)
+    : (unit, string) result =
+  match Project.load () with
+  | Error e -> Error e
+  | Ok proj ->
+    let lock_path = Filename.concat proj.Project.root "forge.lock" in
+    let old_lock =
+      if Sys.file_exists lock_path then Some (Project.read_file lock_path) else None in
+    let entries () =
+      match Resolver_lockfile.read lock_path with
+      | Ok (es, _) -> es
+      | Error _ -> []
+    in
+    let before = entries () in
+    match resolve () with
+    | Error e -> Error e
+    | Ok () ->
+      let touched = touched_entries ~before ~after:(entries ()) in
+      (match
+         Result.bind (Project.load ())
+           (gate_dependency_change ~for_deps:true ~accept ~touched)
+       with
+       | Ok () -> Ok ()
+       | Error msg ->
+         (match old_lock with
+          | Some l ->
+            let oc = open_out_bin lock_path in
+            output_string oc l;
+            close_out oc
+          | None -> (try Sys.remove lock_path with Sys_error _ -> ()));
+         Error msg)
 
 (* ------------------------------------------------------------------ *)
 (*  Previewing an upgrade (`forge outdated`)                           *)

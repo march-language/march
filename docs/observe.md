@@ -117,6 +117,7 @@ Error codes:
 | `bad_args` | The arguments did not parse: an unknown sort or section, a number out of range, an extra word. |
 | `not_found` | `ACTOR <pid>` for a pid that was never spawned. A pid that lived and died is not an error; it answers with `alive: false`. |
 | `busy` | Eight connections are already open, or two windowed `TOP`s are already running. Retry. |
+| `bad_max`, `bad_interval`, `watch_busy`, `watch_needs_socket` | `WATCH` only; see [WATCH](#watch). |
 | `line_too_long` | The request line was over 4096 bytes. |
 | `windowed_in_process` | A windowed `SCHED` or `TOP` was asked in-process (through `Recon`/`observe_query`): the window would sleep a scheduler thread. `Recon` takes its windows differently; you only see this if you build the request yourself. |
 | `out_of_memory` | The node could not allocate the reply. |
@@ -142,6 +143,7 @@ Error codes:
 | `SCHED` | `[window_ms]` | scheduler threads, utilisation, scheduler counters |
 | `MEM` | | RSS, peak RSS, live heap objects, queued messages |
 | `EPOCHS` | | hot-reload epochs, pins, dispatch slots, reload counters |
+| `WHICH` | `<name>` | which version of a reloadable function runs: `impl_hash`, baseline, epoch, `activated_at_ms` |
 | `CRASHES` | `[n]` | the last `n` crashes, without messages |
 | `TOP` | `<attr> <n> [window_ms]` | the `n` actors highest on one attribute |
 | `SNAPSHOT` | `[sections]` | several of the above from one actor walk |
@@ -151,6 +153,8 @@ Error codes:
 | `TRACE_START` | `<sig> nonce:… boot:… not_after_ms:… (count:<n> \| rate:<n> per_s:<s>) fn:<a,b,…> [ring:<r>]` | debug tier: start a bounded trace of boundary calls ([below](#tracing-boundary-calls)) |
 | `TRACE_DRAIN` | `<sig> nonce:… boot:… not_after_ms:… session:<id> [max:<n>]` | debug tier: the events a trace session has recorded |
 | `TRACE_STOP` | `<sig> nonce:… boot:… not_after_ms:… session:<id>` | debug tier: stop and free a trace session |
+| `WATCH` | `<sections> <interval_ms> <max>` | a stream of `SNAPSHOT`s ([below](#watch)); socket only |
+| `SOURCE` | `<sig> nonce:… boot:… not_after_ms:… name:<fn>` | debug tier: the source text of the version of a function that runs now ([below](#which-code-is-running-which-and-source)) |
 
 The example replies below are real output from
 `test/native/observe_snapshot.march` (3 supervisors of 4 children each, 5 bare
@@ -399,12 +403,41 @@ Each section is that verb's data, with fixed arguments: `actors` is
 `ACTORS mbox 100`, `sched` is `SCHED 0` (lifetime only, never sleeps), `crashes`
 is `CRASHES 20`. This is what `forge diagnose` and `forge status` read.
 
+
+### WATCH
+
+`WATCH <sections> <interval_ms> <max>` turns the connection into a stream: the
+node sends `max` `SNAPSHOT <sections>` envelopes, one line each, `interval_ms`
+apart, then closes. `sections` is the `SNAPSHOT` comma list, or `all`. Each
+frame is an ordinary envelope plus two fields, `"seq"` (1-based) and `"of"`
+(`max`), so a client can tell a finished stream from a dropped one.
+
+```bash
+printf 'WATCH mem,sched 1000 5\n' | nc -U /run/myapp/observe.sock
+```
+
+The bounds are part of the contract:
+
+| | |
+|---|---|
+| `max` | mandatory, 1 to 3600 (`bad_max` otherwise): a forgotten watcher ends by itself |
+| `interval_ms` | 250 to 60000 (`bad_interval`); the floor between frame *starts*, so a slow frame is followed at once by the next, never by a burst to catch up |
+| slot | a stream holds one of the eight connection slots for its whole life, and at most **four** streams run at once (`watch_busy`), so watchers cannot lock everyone else out |
+| hang-up | the node polls the socket between frames and sends with a timeout: a client that closes, or stops reading, frees the slot within a poll wakeup, not at the end of `max` |
+
+Frames are produced exactly as `SNAPSHOT` is, on the connection's own thread:
+never on a scheduler thread, so a stream costs what the same `SNAPSHOT`s cost and
+does not slow the other verbs. A bad section ends the stream with the error as
+its only frame. Over `observe_query` (inside the program) `WATCH` answers
+`watch_needs_socket`: there is no connection to stream on.
+
 ---
 
 ## The debug tier: signed requests
 
-The verbs above show counts, never data. Two more show data: `STATE` (an
-actor's state) and `CRASHES_FULL` (crashes with their panic messages). A node
+The verbs above show counts, never data. Three more show data: `STATE` (an
+actor's state), `CRASHES_FULL` (crashes with their panic messages) and
+`SOURCE` (the text of a function's source). A node
 answers them only when all of these hold:
 
 1. **It was built with a deploy key**: `march --compile --hot-reload <Mod>
@@ -563,10 +596,72 @@ match Trace.start(debug, ["Billing.charge"], Trace.Count(10)) do
 end
 ```
 
-The in-process calls need no signature (holding `Cap(Actor.Debug)` is the
-authority, as for `Actor.inspect_state`). They share the same sessions and
-limits. Under the interpreter, and in a build without `--hot-reload`, they
+The in-process calls need no signature (holding `Cap(Actor.Debug)` stands in
+for it, as for `Actor.inspect_state`), but `$MARCH_DEBUG_POLICY` must still list
+`TRACE_START`, `TRACE_DRAIN` and `TRACE_STOP`: they answer `Unavailable(policy)`
+otherwise. They share the same sessions and limits. Under the interpreter, and in a build without `--hot-reload`, they
 answer `Unavailable("tracing_unavailable")` or `UnknownFunction`.
+## Which code is running: WHICH and SOURCE
+
+After a hot deploy, "which version of `Billing.price` is this node running?"
+has two answers, an identity and a body.
+
+**`WHICH <name>`** (observe tier) names the identity. `name` is a reload slot as
+`EPOCHS` lists it (`Billing.price`, or an actor's `Counter_dispatch`):
+
+```json
+{"name":"Billing.price","id":2,"impl_hash":"5e9d…","baseline_hash":"41c7…",
+ "patched":true,"epoch":3,"activated_at_ms":1791743066781}
+```
+
+`impl_hash` is the hash `forge deploy hot` diffs and `VERSIONS` prints.
+`baseline_hash` is the one the program was built with, and `patched` says
+whether they differ. `activated_at_ms` is 0 for the baseline. A name that is
+not a slot (a typo, a function the build does not make reloadable, a build
+without `--hot-reload`) answers `not_found`.
+
+**`SOURCE <sig> nonce:… boot:… not_after_ms:… name:<fn>`** (debug tier) returns the text
+of the version `WHICH` names: `{"name":…,"impl_hash":…,"epoch":…,"source":"fn
+price(qty : Int) : Int do\n  qty * 12 + 1\nend"}`. It is signed, fresh and
+policy-gated exactly like `STATE` (see the next section), and `forge observe`
+does not send it yet. `$MARCH_DEBUG_POLICY` must list `SOURCE`. Source is
+debug tier because it is the program's own text: comments, names, and
+whatever a developer left in a function.
+
+The text is the function's declaration, from its first token to where the next
+declaration starts (so a multi-clause function is whole and comments written
+before the next declaration come with this one). It is the text that was
+compiled into that exact `impl_hash`; nothing is read from disk when you ask.
+That is also the safety: the name has to be a registered slot, `SOURCE` looks the
+text up by that slot's current `impl_hash` alone, and a name containing a path
+(`../x`, `/etc/passwd`) is `bad_args` before any lookup.
+
+Where the text comes from:
+
+1. A `--hot-reload` build, node or `--compile-so` patch, stores each slot
+   function's text under its `impl_hash` in `.march/cas/sources/` and
+   `~/.march/cas/sources/` (each up to 256 KiB; a longer function has no
+   source).
+2. `forge deploy hot` uploads the text of every version it activates, and of
+   the version it replaces when this machine has it, to the node
+   (`CAS_PUT <impl_hash> <size> kind:source`, stored under the node's
+   `~/.march/cas/sources/`), **only when `$MARCH_DEBUG_POLICY` on the machine
+   running forge lists `SOURCE`**. With no such policy nothing is uploaded and
+   `SOURCE` answers `no_source` for that version.
+3. A node built on the machine it runs on already has its baseline's text.
+   A node built elsewhere has the baseline's text after the first deploy that
+   replaces it, or never (`no_source`).
+
+Sources are not garbage-collected, and a hash with the same text is never
+rewritten. A cluster release through the control API does not carry source yet.
+
+From inside the program (and in `forge shell`, where `intro` and `debug` are
+pre-bound), `Recon.which(intro, "Billing.price")` returns a `FnVersion`, and
+`Recon.source(debug, "Billing.price")` the text or an error code. In-process the
+caller's `Cap(Actor.Debug)` stands in for the signature, as it does for
+`Actor.inspect_state`, but `$MARCH_DEBUG_POLICY` must still list `SOURCE`
+(`Err("policy")` otherwise), and every attempt is audited with the signer
+`in-process`.
 
 ## The forge commands
 
@@ -581,17 +676,20 @@ All four take a target the same way:
 
 ```
 forge observe [REQUEST...] [--section S]... [--json] [--socket PATH] [--env NAME]
+forge observe [--tui] [--panel NAME] [--interval MS] [--sort ATTR] [--pid PID] [--socket PATH] [--env NAME]
+forge observe --dump FILE [--panel NAME] [--json]
 forge observe --state PID [--timeout-ms MS] | --crashes-full [-n N]   [--socket PATH] [--env NAME]
 forge observe --trace-start FNS (--max-events N | --rate N/SECS) | --trace-drain ID [-n MAX] | --trace-stop ID
 ```
 
-Sends one request and prints the reply envelope (indented, or one line per host
-with `--json`). The request is the positional words; the first is upper-cased,
-so `forge observe actors mbox 20` works. With no words it sends `SNAPSHOT`;
-`--section` (repeatable) narrows it.
+With a request, sends it and prints the reply envelope (indented, or one line per
+host with `--json`). The request is the positional words; the first is
+upper-cased, so `forge observe actors mbox 20` works. With no words it sends
+`SNAPSHOT`; `--section` (repeatable) narrows it.
 
 ```bash
-forge observe --socket /run/myapp/observe.sock                 # SNAPSHOT, every section
+forge observe --socket /run/myapp/observe.sock                 # a terminal: the interactive view; a pipe: SNAPSHOT
+forge observe --socket /run/myapp/observe.sock --json          # SNAPSHOT, every section, one line
 forge observe --socket /run/myapp/observe.sock actors mbox 10  # the 10 deepest mailboxes
 forge observe --socket /run/myapp/observe.sock ACTOR 42
 forge observe --env prod --section mem --section crashes       # every prod host, over ssh
@@ -600,6 +698,106 @@ forge observe --env prod TOP msgs_in 10 2000 --json
 
 Exit 0 when every target answered; 1 if any failed, including an error reply
 (`error: observe: unknown_verb`).
+
+**With no request, on a terminal** (or with `--tui`), `forge observe` opens the
+interactive view instead of printing JSON. Scripts that pipe its output are
+unaffected: without a terminal, or with `--json`, a request, or `--section`, it
+behaves as above.
+
+#### The interactive view
+
+One screen on one node, fed by a single [`WATCH`](#watch) stream (every
+`--interval` ms, default 1000, at least 250) plus, for the panel on screen, one
+short request on a second connection. For a remote host both go through one ssh
+tunnel, opened when the host is selected and closed when you move on; ssh's
+own messages are discarded so they cannot draw over the screen. When the stream
+ends (3600 frames) or the node restarts, the view reconnects.
+
+| Panel (key) | Reads | Shows |
+|---|---|---|
+| System (1) | `SNAPSHOT` | node, sample time, actors and queued messages, RSS, schedulers, code epoch, crashes in the last hour |
+| Load (2) | `SNAPSHOT` | per-scheduler busy bar and counters, a mean-busy sparkline over the frames received, run queue, drops, heap objects |
+| Actors (3) | `TOP <sort> 100` | the same table as `forge top`, supervision columns included; `s` cycles the ranking (mbox, stack, crashes, slices, msgs_in, msgs_out; counters are cumulative here) |
+| Actor (4) | `ACTOR <pid>` | one actor; Enter on a row of Actors, Supervision or Crashes opens it. State and mailbox need the debug tier: `forge observe --state PID` |
+| Supervision (5) | `SNAPSHOT` | the tree, crashes per node, kids; Enter opens the actor |
+| Names (6) | `SNAPSHOT` | registered names |
+| Epochs (7) | `SNAPSHOT` | current epoch, pins and drains, hot-reload slots with their impl hashes and ages, reload counters: the panel a deploy is watched from |
+| Cluster (8) | `CLUSTER` | members and SWIM state when the node publishes a cluster section; otherwise it says so (no `CLUSTER` verb exists yet: `specs/todos/2026-10-02-observe-r1-cluster-section.md`) |
+| Crashes (9) | `SNAPSHOT` | the crash ring, newest first; panic text only in a crash dump |
+
+Keys: `q` or Esc quit; `1`-`9` or Tab switch panel; Up/Down, `j`/`k`, PgUp/PgDn,
+Home/End move the selection; Enter opens the selected actor; `s` re-ranks Actors;
+`n` cycles the hosts of `--env` (several `[[hot-reload.env]]` entries); `r`
+refreshes the panel's own request. The Trace panel arrives with tracing (R8).
+
+`--panel NAME` prints one panel as text and exits (system, load, actors, actor,
+supervision, names, epochs, cluster, crashes), for logs and scripts:
+
+```
+$ forge observe --socket /run/myapp/observe.sock --panel supervision
+6 actors; trees below, supervisors first
+1 Boss [boss]   waiting  mbox 0  1 kids  crashes(1h) 3
+  +- 4 Fragile   waiting  mbox 0
+...
+```
+
+#### Crash dumps
+
+A node started with `MARCH_CRASH_DUMP=/var/crash/web-1.json` writes one JSON
+document there when it dies of an **unsupervised panic** or of one of the
+runtime's own **fatal errors** (reference-count underflow, an internal invariant,
+out of memory in the runtime). The file is written to `<path>.tmp` and renamed, so
+it is either absent or complete, with mode 0600:
+
+```json
+{"proto":"march.observe.dump/1","reason":"panic","at_ms":1791743698380,"pid":19089,
+ "snapshot": { ...the SNAPSHOT envelope, every section... },
+ "crashes_total":4,
+ "crashes_full":[{"seq":4,"kind":"panic","pid":null,"message":"cannot parse config", ...}, ...]}
+```
+
+`snapshot` is exactly what `SNAPSHOT` returned at that moment. `crashes_full`
+is the crash ring **with the panic text** that no live observe verb carries: the
+dump is operator-owned, not served on a socket, and the panic text can hold
+payloads, so treat the file like a log. `reason` is `panic`, or the name of the
+runtime function that aborted.
+
+Read it with:
+
+```bash
+forge observe --dump web-1.json                  # the panels, as text (a terminal: the interactive view)
+forge observe --dump web-1.json --panel crashes  # panic text included
+forge observe --dump web-1.json --json
+forge diagnose --from-dump web-1.json            # findings; exit 0/1/2 as for a live node
+```
+
+Panels that need a question asked of a live node (Actor, Cluster) are greyed.
+`forge diagnose --from-dump` has one snapshot, so the checks that compare two
+(`mailbox.growth`, `rc.climb`) find nothing; `crash.loop`, `mailbox.over_limit`,
+`sched.*` and `epoch.*` still do. (`forge diagnose --dump FILE`, which *writes* a
+before/after pair, is unchanged; reading a crash dump is `--from-dump`.)
+
+**What does not produce a dump, and why.** The dump builds JSON, which allocates,
+and takes the actor-table lock; neither is safe from a signal handler that may
+have interrupted the allocator or that lock. So no signal handler ever writes it:
+
+- a `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` (a miscompile, a stack overflow
+  past the guard page), `SIGKILL`, the kernel's out-of-memory kill, or `abort()`
+  from the C library or a linked library (glibc's heap checks, a sanitizer
+  report) leave **no dump**;
+- a fatal runtime error that happens inside a reclamation critical section or on
+  a signal stack skips it too (the data it would walk may be mid-update);
+- a panic inside a supervised actor is not fatal and does not dump (the
+  supervisor restarts it; it is in the crash ring of the next dump).
+
+Even where a dump is attempted, the dying thread does not write it: it hands the
+work to a helper thread created at startup and waits for it at most
+`MARCH_CRASH_DUMP_TIMEOUT_MS` (default 3000), then dies regardless. A helper
+stuck behind a lock the dying thread holds costs the dump, never the exit; a
+timed-out dump leaves at worst `<path>.tmp`, never a truncated `<path>`. A path
+that cannot be written (no such directory) also costs only the dump. An
+unwritten dump is not an error anywhere: if there is no file, the node died some
+other way.
 
 ### forge status
 
@@ -721,6 +919,16 @@ regression fixture.
 forge diagnose --env prod --json > diagnose.json; rc=$?
 [ "$rc" -ge 2 ] && page-someone < diagnose.json
 ```
+
+### On the host: the release launcher
+
+A bundle built with `forge release build` (see [tooling](tooling.md#release-bundles-forge-release-build))
+carries a `bin/<app>` launcher that sets `MARCH_HOT_RELOAD_SOCKET` (hot-reload
+builds) or `MARCH_OBSERVE_SOCKET` to `run/<app>.sock[.observe]` and speaks the
+protocol above itself: `bin/<app> ping` sends `PING`, `version` and `status`
+send `EPOCHS` and `MEM`. It needs `nc -U`, `socat` or `python3` on the host for
+that. `bin/<app> observe` and `diagnose` run `forge observe --socket` /
+`forge diagnose --socket` when `forge` is installed there.
 
 ---
 
@@ -885,6 +1093,8 @@ with `Actor.introspect(io)`; a module that names the capability declares
 | `Recon.node_stats(c)` | `NodeStats`: actors, queued, `rss_bytes`, `live_objects`, schedulers, `crashes_total` |
 | `Recon.crashes(c, n)` | `List(CrashReport)`: seq, kind, pid, type, supervisor, restart, at_ms |
 | `Recon.epochs(c)` | `EpochReport`: current epoch and (epoch, pins) pairs |
+| `Recon.which(c, name)` | `Result(FnVersion, String)`: `impl_hash`, `baseline_hash`, `patched`, `epoch`, `activated_at_ms` of a reloadable function (`Err("not_found")` if `name` is no slot) |
+| `Recon.source(d, name)` | `Result(String, String)`: the running version's source; needs `Cap(Actor.Debug)` and `SOURCE` in `$MARCH_DEBUG_POLICY` (`Err("policy")`, `Err("no_source")`) |
 | `Recon.scheduler_usage(c, window_ms)` | `List((Int, Float))`: (scheduler id, fraction busy) |
 | `Diagnose.run(c, window_ms)` | `List(Finding)`: the `forge diagnose` findings for this program |
 | `Diagnose.findings(before, after)` | the same over two `SNAPSHOT` envelopes you already have |
@@ -1341,6 +1551,12 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
   events (the introspection design's `Sent` and `Received`, which hook the send
   path) are not built: `specs/todos/2026-10-11-observe-trace-actor-events.md`.
 - **The Trace panel in the TUI** (R7's follow-up); the JSON shapes above are its input.
+- **Trace panel.** The interactive view has a place for it; it arrives with
+  tracing (R8).
+- **Dumps on fatal signals.** By design none (see [Crash dumps](#crash-dumps)); a
+  `SIGSEGV` leaves no file. Core dumps and the OS-level supervisor of the process
+  are the tools for that.
+- **Tracing (R8).** Message and call tracing with mandatory limits.
 
 The plan for all of these is `specs/plans/2026-09-28-observe-recon-shell-plan.md`.
 

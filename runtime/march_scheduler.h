@@ -771,6 +771,9 @@ void         march_sched_set_msg_dtor(void (*fn)(void *));
  * process. Relaxed atomic read — safe to call from any thread without
  * mbox_lock. Returns 0 if p is NULL. */
 int64_t      march_sched_mbox_count(march_proc *p);
+/* User messages an Actor.call on [p] holds off its mailbox right now (the
+ * proc's own `held`); not part of march_sched_mbox_count. */
+int64_t      march_sched_held_count(march_proc *p);
 
 /* ── Cross-file stat counters (indices 3-5 and 7 of march_sched_stat) ───
  * Reserved slots bumped from outside march_scheduler.c (march_runtime.c and

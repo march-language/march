@@ -939,7 +939,45 @@ forge version patch --tag
 forge release                # patch bump (default)
 forge release --bump minor
 forge release --bump major
+forge release tag --bump minor   # the same, spelled as the subcommand
 ```
+
+### Release bundles: `forge release build`
+
+`forge release build [--target T] [--profile release|debug] [--tar]` builds the app and lays out a self-contained directory, `.march/release/<app>-<version>-<target>/`, that you copy to a host and run with nothing but a POSIX shell:
+
+```text
+bin/<app>                 launcher (POSIX sh)
+lib/<app>                 the binary (the hot-reload baseline when [hot-reload] is set)
+lib/<app>.hcr_manifest    from a --compile-so build of the same source (hot-reload only)
+lib/<app>.schemas.json    its actor schemas (hot-reload only, when there are actors)
+lib/patches/              reserved for the host's patch stack
+etc/topology.json         the exported topology (when the project has a topology.toml)
+etc/policy, etc/debug_policy, etc/shell_policy   MARCH_DEPLOY_POLICY / MARCH_DEBUG_POLICY / MARCH_SHELL_POLICY
+etc/pubkey                the [hot-reload] public key
+etc/env                   NAME=VALUE defaults the launcher applies (never overriding the environment)
+RELEASE                   name, version, target, profile, cas_hash, hot_reload, compiler, built_at
+```
+
+`--target linux/amd64` (or `linux/arm64`) cross-builds like `forge build --target` (needs `zig` and the cross sysroot). The policy files start empty (nothing allowed); a project can ship its own in `release/etc/{policy,debug_policy,shell_policy,env}`, which the build copies in. `etc/env` also carries `MARCH_STOP_GRACE`, the topology's soft drain deadline in seconds.
+
+The launcher, `bin/<app> <verb>`:
+
+| Verb | Does |
+|---|---|
+| `start [args]` | run the node in the foreground (pidfile in `run/`) |
+| `daemon [args]` | start detached, wait until the observe socket answers; output in `log/` |
+| `stop` | SIGTERM, then SIGKILL after `MARCH_STOP_GRACE` seconds. A drained stop needs the deploy key: use `forge deploy --drain` |
+| `restart` | `stop`, then `daemon` |
+| `pid` | the node's pid (exit 1 if not running) |
+| `version` | the `RELEASE` file and, if running, the node's code epoch |
+| `ping`, `status` | ask the node's observe socket (`PING`; `EPOCHS` and `MEM`) |
+| `rpc`, `shell`, `observe`, `diagnose` | `exec forge <verb> --socket ...` when `forge` is on the host, else print what to run from an operator machine |
+| `eval` | not available yet (needs a fresh `march` process; says so) |
+
+The node's sockets are `run/<app>.sock` (reload; its shell socket is `.shell`) and `run/<app>.sock.observe`. Override the directories with `MARCH_RUN_DIR` / `MARCH_LOG_DIR` (a Unix socket path must stay under about 100 bytes). `start`, `daemon`, `stop` and `restart` refuse to run as a user other than the owner of the release directory (`MARCH_ALLOW_ANY_USER=1` overrides). The host needs POSIX `sh` and `awk`, plus, for `ping`/`status`/`version`'s epoch and the `daemon` readiness wait, one of `nc -U`, `socat` or `python3`.
+
+`forge topology gen systemd --release-dir /opt/app/current` points each unit's `ExecStart` at `/opt/app/current/bin/<app> start`.
 
 ### Publishing
 
@@ -1041,11 +1079,14 @@ forge audit                                      # exit 1 if a dependency gained
 forge audit --inferred                           # infer each set from the code (`march caps`), not `needs`
 forge audit --inferred --allow-unanalyzable      # gate on the deps that typecheck; list the rest
 forge add <name> ... --accept-caps               # keep a new dep that widens the baseline
+forge deps --accept-caps                         # keep a hand-edited upgrade that widens it
 ```
 
-`forge add` and `forge outdated` use the baseline too: an add that brings in
-new authority is refused unless `--accept-caps`, and `forge outdated` shows
-what each available upgrade would newly ask for.
+`forge add`, `forge deps` and `forge outdated` use the baseline too: an add, or
+a `forge deps` after a hand edit to `forge.toml`, that brings in new authority
+is refused unless `--accept-caps`, and `forge outdated` shows what each
+available upgrade would newly ask for. Installing what `forge.lock` already
+says is never gated.
 
 `--inferred` needs a toolchain whose `march` supports `caps` (0.3.0 or later)
 and stops with the toolchain's path and version if it does not. It caches

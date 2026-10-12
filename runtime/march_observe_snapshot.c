@@ -24,7 +24,10 @@
 #include "march_scheduler.h"
 #include "march_dispatch.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -730,6 +733,37 @@ static const char *verb_epochs(march_jw *w, const char *args) {
     return NULL;
 }
 
+/* ── WHICH <name> ─────────────────────────────────────────────────────── */
+
+/* Which version of a function this node is running (R10): the registered
+ * reload slot's identity.  A name that is not a slot (an unreloadable
+ * function, a typo, a build without --hot-reload) is not_found. */
+static const char *verb_which(march_jw *w, const char *args) {
+    char name[256];
+    const char *p = args;
+    if (!next_word(&p, name, sizeof name) || !only_spaces(p)) return "bad_args";
+    if (!march_observe_fn_name_ok(name)) return "bad_args";
+    uint32_t id;
+    if (!march_dispatch_name_to_id(name, &id)) return "not_found";
+    uint32_t v = march_dispatch_current(id);
+    const char *h = march_dispatch_impl_hash(id, v);
+    const char *base = march_dispatch_baseline_hash(id);
+    long long at = march_dispatch_activated_at(id);
+    march_jw_obj_begin(w);
+    march_jw_key(w, "name");  march_jw_str(w, name);
+    march_jw_key(w, "id");    march_jw_u64(w, id);
+    march_jw_key(w, "impl_hash");
+    if (h && h[0]) march_jw_str(w, h); else march_jw_null(w);
+    march_jw_key(w, "baseline_hash");
+    if (base && base[0]) march_jw_str(w, base); else march_jw_null(w);
+    march_jw_key(w, "patched");
+    march_jw_bool(w, h && h[0] && base && base[0] && strcmp(h, base) != 0);
+    march_jw_key(w, "epoch"); march_jw_u64(w, march_dispatch_epoch(id, v));
+    march_jw_key(w, "activated_at_ms"); march_jw_i64(w, at);
+    march_jw_obj_end(w);
+    return NULL;
+}
+
 /* ── SNAPSHOT [sections] ──────────────────────────────────────────────── */
 
 enum { SEC_ACTORS = 1, SEC_TREE = 2, SEC_NAMES = 4, SEC_SCHED = 8,
@@ -1085,6 +1119,189 @@ void *march_observe_query(void *line) {
     return r;
 }
 
+/* ── Crash dumps (MARCH_CRASH_DUMP, R7.4 of the observe plan) ─────────────
+ *
+ * MARCH_CRASH_DUMP=<path> makes a fatal exit leave one JSON document at
+ * <path>, written to <path>.tmp and renamed, so <path> is either absent or
+ * complete:
+ *
+ *   {"proto":"march.observe.dump/1","reason":"panic"|<runtime function>,
+ *    "at_ms":…,"pid":…,
+ *    "snapshot":<the SNAPSHOT envelope, every section>,
+ *    "crashes_full":[{seq,kind,pid,type,code_epoch,supervisor,restart,at_ms,message}…]}
+ *
+ * crashes_full carries the panic MESSAGE text, which no observe verb does
+ * (C7): the file is operator-owned (mode 0600), not served on a socket.
+ *
+ * What triggers it: an unsupervised panic (march_panic, before its exit(1))
+ * and the runtime's own abort() sites, which are march_abort(why) (see
+ * march_reclaim.h), and only when the caller is outside a reclamation critical
+ * section and not on a signal stack.  NO signal handler writes a dump: a
+ * SIGSEGV/SIGBUS/SIGILL/SIGFPE, an external SIGKILL, an OOM kill, or an
+ * abort() in the C library or a linked library (glibc's malloc checks, an
+ * ASAN report) produces none.  The JSON writer allocates, which is not
+ * async-signal-safe, and a handler can interrupt the very lock or allocator
+ * the writer would need.
+ *
+ * Even on the permitted paths the writer may need a lock the dying thread
+ * holds (the actor table's, the allocator's).  So the work is never done on
+ * the dying thread: it is handed, through a pipe, to a helper thread created
+ * at startup (from the main OS thread, never from a green thread), and the
+ * dying thread waits for it at most MARCH_CRASH_DUMP_TIMEOUT_MS (default
+ * 3000), then proceeds to die regardless.  A helper stuck behind a held
+ * lock therefore costs the dump, not the process's exit; a timed-out dump
+ * leaves at most a <path>.tmp, never a truncated <path>.  The helper builds
+ * the whole document in memory first, so the file write is the last step. */
+#define CRASH_DUMP_LIMIT ((size_t)64 << 20)
+
+static char          g_cd_path[1024];
+static char          g_cd_tmp[1024 + 8];
+static char          g_cd_why[128];
+static int           g_cd_pipe[2] = { -1, -1 };
+static int           g_cd_timeout_ms = 3000;
+static _Atomic int   g_cd_state;   /* 0 idle, 1 requested, 2 finished */
+
+static void cd_write_all(int fd, const char *p, size_t n) {
+    while (n > 0) {
+        ssize_t k = write(fd, p, n);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return;
+        p += k;
+        n -= (size_t)k;
+    }
+}
+
+static void cd_crash_entry(march_jw *w, const march_obs_crash *c) {
+    march_jw_obj_begin(w);
+    march_jw_key(w, "seq");        march_jw_u64(w, c->seq);
+    march_jw_key(w, "kind");       march_jw_str(w, crash_kind_name(c->kind));
+    march_jw_key(w, "pid");
+    if (c->pid >= 0) march_jw_i64(w, c->pid); else march_jw_null(w);
+    march_jw_key(w, "type");
+    if (c->type[0]) march_jw_str(w, c->type); else march_jw_null(w);
+    march_jw_key(w, "code_epoch"); march_jw_u64(w, c->code_epoch);
+    march_jw_key(w, "supervisor");
+    if (c->supervisor >= 0) march_jw_i64(w, c->supervisor); else march_jw_null(w);
+    march_jw_key(w, "restart");    march_jw_i64(w, c->restart);
+    march_jw_key(w, "at_ms");      march_jw_i64(w, c->at_ms);
+    march_jw_key(w, "message");    march_jw_strn(w, c->message, c->message_len);
+    march_jw_obj_end(w);
+}
+
+/* Build and publish the document.  Runs on the helper thread. */
+static void cd_write_dump(const char *why) {
+    march_jw snap, doc;
+    march_jw_init(&snap, ((size_t)16 << 20) + 4096);
+    march_observe_handle("SNAPSHOT", 8, &snap);
+
+    march_obs_crash *ring = (march_obs_crash *)malloc(MARCH_CRASH_RING * sizeof *ring);
+    int nring = 0;
+    uint64_t total = 0;
+    if (ring) nring = march_obs_crashes(ring, MARCH_CRASH_RING, &total);
+
+    march_jw_init(&doc, CRASH_DUMP_LIMIT);
+    march_jw_obj_begin(&doc);
+    march_jw_key(&doc, "proto");  march_jw_str(&doc, "march.observe.dump/1");
+    march_jw_key(&doc, "reason"); march_jw_str(&doc, why);
+    march_jw_key(&doc, "at_ms");  march_jw_i64(&doc, march_unix_time_ms());
+    march_jw_key(&doc, "pid");    march_jw_i64(&doc, (int64_t)getpid());
+    march_jw_key(&doc, "snapshot");
+    if (march_jw_ok(&snap)) march_jw_raw(&doc, march_jw_text(&snap), snap.len);
+    else march_jw_null(&doc);
+    march_jw_key(&doc, "crashes_total"); march_jw_u64(&doc, total);
+    march_jw_key(&doc, "crashes_full");
+    march_jw_arr_begin(&doc);
+    for (int i = 0; i < nring; i++) cd_crash_entry(&doc, &ring[i]);
+    march_jw_arr_end(&doc);
+    march_jw_obj_end(&doc);
+
+    if (march_jw_ok(&doc)) {
+        int fd = open(g_cd_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            cd_write_all(fd, march_jw_text(&doc), doc.len);
+            cd_write_all(fd, "\n", 1);
+            int synced = fsync(fd) == 0;
+            int closed = close(fd) == 0;
+            if (synced && closed && rename(g_cd_tmp, g_cd_path) != 0)
+                unlink(g_cd_tmp);
+        }
+    }
+    march_jw_free(&doc);
+    march_jw_free(&snap);
+    free(ring);
+}
+
+static _Thread_local int tl_cd_helper;   /* this thread is the dump writer */
+
+static void *cd_helper(void *arg) {
+    (void)arg;
+    tl_cd_helper = 1;
+    sigset_t all;
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, NULL);
+    char c;
+    for (;;) {
+        ssize_t k = read(g_cd_pipe[0], &c, 1);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return NULL;
+        break;
+    }
+    cd_write_dump(g_cd_why);
+    atomic_store_explicit(&g_cd_state, 2, memory_order_release);
+    return NULL;
+}
+
+/* The march_abort hook: ask the helper, wait a bounded time.  Only the
+ * first caller sends the request; every caller waits, so a second thread
+ * dying at the same moment cannot cut the first one's dump short. */
+static void cd_request(const char *why) {
+    /* The writer itself hit a fatal error: it cannot wait for itself. */
+    if (tl_cd_helper) return;
+    int idle = 0;
+    if (atomic_compare_exchange_strong(&g_cd_state, &idle, 1)) {
+        snprintf(g_cd_why, sizeof g_cd_why, "%s", why ? why : "fatal");
+        cd_write_all(g_cd_pipe[1], "x", 1);
+    }
+    for (int waited = 0;
+         atomic_load_explicit(&g_cd_state, memory_order_acquire) != 2
+             && waited < g_cd_timeout_ms;
+         waited++) {
+        struct timespec ms = { 0, 1000000 };
+        nanosleep(&ms, NULL);
+    }
+}
+
+static void crash_dump_init(void) {
+    const char *path = getenv("MARCH_CRASH_DUMP");
+    if (!path || !*path) return;
+    if (strlen(path) >= sizeof g_cd_path) {
+        fprintf(stderr, "march: MARCH_CRASH_DUMP path too long (max %zu bytes): crash dumps off\n",
+                sizeof g_cd_path - 1);
+        return;
+    }
+    const char *t = getenv("MARCH_CRASH_DUMP_TIMEOUT_MS");
+    if (t && *t && atoi(t) > 0) g_cd_timeout_ms = atoi(t);
+    snprintf(g_cd_path, sizeof g_cd_path, "%s", path);
+    snprintf(g_cd_tmp, sizeof g_cd_tmp, "%s.tmp", path);
+    if (pipe(g_cd_pipe) != 0) {
+        fprintf(stderr, "march: crash dump pipe: %s: crash dumps off\n", strerror(errno));
+        return;
+    }
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_t th;
+    int rc = pthread_create(&th, &at, cd_helper, NULL);
+    pthread_attr_destroy(&at);
+    if (rc != 0) {
+        fprintf(stderr, "march: crash dump thread: %s: crash dumps off\n", strerror(rc));
+        close(g_cd_pipe[0]); close(g_cd_pipe[1]);
+        g_cd_pipe[0] = g_cd_pipe[1] = -1;
+        return;
+    }
+    march_fatal_set_hook(cd_request);
+}
+
 /* ── Registration ─────────────────────────────────────────────────────── */
 
 static const march_observe_verb snapshot_verbs[] = {
@@ -1100,6 +1317,9 @@ static const march_observe_verb snapshot_verbs[] = {
       "scheduler threads, utilisation over window_ms (default 200, 0 = lifetime only), counters", verb_sched },
     { "MEM", "observe", "", "RSS, peak RSS, live heap objects, queued messages", verb_mem },
     { "EPOCHS", "observe", "", "hot-reload epochs, pins, slots and counters", verb_epochs },
+    { "WHICH", "observe", "<name>",
+      "the version of a reloadable function this node runs: impl_hash, baseline, epoch, activated_at_ms",
+      verb_which },
     { "CRASHES", "observe", "[n]",
       "the last n crashes, newest first (default 20, max 256): kind, pid, type, supervisor, restart; no message",
       verb_crashes },
@@ -1120,4 +1340,5 @@ void march_observe_snapshot_install(void) {
     (void)march_observe_add_verbs(snapshot_verbs,
                                   sizeof snapshot_verbs / sizeof snapshot_verbs[0]);
     march_observe_debug_install();
+    crash_dump_init();
 }

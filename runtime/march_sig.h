@@ -60,4 +60,17 @@ int  march_sig_debug_allowed(const char *verb);
 FILE *march_audit_open(void);
 void  march_audit_close(FILE *f);
 
+/* The node's CAS root: $HOME/.march/cas, or /tmp/.march_cas without $HOME.
+ * The reload server stores uploads under it; the observe socket's SOURCE
+ * verb (R10) reads function source text from <root>/sources/. */
+const char *march_cas_root(void);
+
+/* The largest source text a node stores or serves for one function. */
+#define MARCH_SOURCE_MAX_BYTES 262144
+
+/* Write "<root>/sources/<2 hex>/<62 hex>" for the 64-lowercase-hex [hash]
+ * into [out]; 0 (and [out] untouched) when [hash] is not exactly that, or
+ * [outsz] is too small. */
+int march_source_path(char *out, size_t outsz, const char *hash);
+
 #endif /* MARCH_SIG_H */

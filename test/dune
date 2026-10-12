@@ -1255,7 +1255,7 @@
 (test
  (name test_jit)
  (modules test_jit)
- (libraries march_jit alcotest unix)
+ (libraries march_jit alcotest unix str)
  ; The session tests spawn the real compiler binary and need the staged
  ; stdlib + runtime trees next to it (same dep shape as the bench_gate rule).
  ; MARCH_BIN serves the check_session and redefinition harnesses.
@@ -1792,6 +1792,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/tuple_eq.expected native_tuple_eq.out)))
 
+; An inlined body's free reference to a top-level function must not be
+; captured by a caller binder of the same name: a top-level `f` called from a
+; lambda, inlined into List.map's clone whose callback parameter is `f`, became
+; a call through the parameter (wrong value at --opt 0 and --opt 2).  Built at
+; the default and at --opt 2.
+(rule
+ (targets native_inline_capture_toplevel_name native_inline_capture_toplevel_name.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/inline_capture_toplevel_name.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_inline_capture_toplevel_name native/inline_capture_toplevel_name.march)
+   (with-stdout-to native_inline_capture_toplevel_name.out (system "./native_inline_capture_toplevel_name")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/inline_capture_toplevel_name.expected native_inline_capture_toplevel_name.out)))
+
+(rule
+ (targets native_inline_capture_toplevel_name_o2 native_inline_capture_toplevel_name_o2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/inline_capture_toplevel_name.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_inline_capture_toplevel_name_o2 native/inline_capture_toplevel_name.march)
+   (with-stdout-to native_inline_capture_toplevel_name_o2.out (system "./native_inline_capture_toplevel_name_o2")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/inline_capture_toplevel_name.expected native_inline_capture_toplevel_name_o2.out)))
+
 ; A field projected out of a record is a borrow of it; three shapes released
 ; the record before the field's last read (a string match's binder arm, a
 ; nested projection after the record was consumed, a record update from a
@@ -1810,6 +1845,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/field_use_after_parent_release.expected native_field_use_after_parent_release.out)))
+
+; Tuple `<`/`compare`: Ord when every component is, lexicographic; compiled
+; `<` on a tuple goes through the prelude's per-arity Ord impls (it was
+; always false via march_poly_compare), generic callers included.
+(rule
+ (targets native_tuple_ord native_tuple_ord.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/tuple_ord.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tuple_ord native/tuple_ord.march)
+   (with-stdout-to native_tuple_ord.out (system "./native_tuple_ord")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_ord.expected native_tuple_ord.out)))
 
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
@@ -2853,7 +2906,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action
   (progn
    (run %{exe:../bin/main.exe} --compile --hot-reload Main -o native_trace_boundary native/trace_boundary.march)
-   (with-stdout-to native_trace_boundary.out (system "./native_trace_boundary")))))
+   ; An in-process caller holds Cap(Actor.Debug) in place of a signature, but
+   ; the node's debug policy must still list the verb it uses.
+   (with-stdout-to native_trace_boundary.out
+    (system "printf 'TRACE_START\\nTRACE_DRAIN\\nTRACE_STOP\\n' > trace_policy.txt; MARCH_DEBUG_POLICY=$PWD/trace_policy.txt ./native_trace_boundary")))))
 
 (rule
  (alias runtest)
@@ -2922,6 +2978,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/diagnose_runaway.expected native_diagnose_runaway.out)))
+
+; MARCH_CRASH_DUMP (R7.4 of the observe plan): an unsupervised panic leaves a
+; dump that `forge diagnose --from-dump` and `forge observe --dump` read back:
+; the crash.loop of the supervisor whose child panicked three times, and the
+; panic message text, which no live observe verb carries.  Also: no dump
+; without the variable, and an unwritable path costs the dump, not the exit.
+(rule
+ (targets native_crash_dump native_crash_dump.out)
+ (deps (file %{exe:../bin/main.exe}) (file %{exe:../forge/bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/crash_dump.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_crash_dump native/crash_dump.march)
+   (with-stdout-to native_crash_dump.out
+    (system "rm -f cd.json cd.json.tmp cd2.json; MARCH_CRASH_DUMP=cd.json ./native_crash_dump > cd.prog 2>&1; echo \"program exit=$?\"; test -f cd.json && echo \"dump written\"; test -f cd.json.tmp || echo \"no .tmp left behind\"; %{exe:../forge/bin/main.exe} diagnose --from-dump cd.json --json > cd.diag; echo \"diagnose exit=$?\"; grep -o '\"id\":\"[^\"]*\",\"severity\":\"[^\"]*\"' cd.diag; grep -o '\"dump\":{\"reason\":\"[^\"]*\"' cd.diag; %{exe:../forge/bin/main.exe} observe --dump cd.json --panel crashes > cd.crashes; grep -c 'dump-main-panic-xyzzy' cd.crashes | sed 's/^/crash rows with the panic message: /'; grep -c 'dump-child-crash-xyzzy' cd.crashes | sed 's/^/crash rows with a child message: /'; %{exe:../forge/bin/main.exe} observe --dump cd.json --panel actor | grep -o 'live-only'; %{exe:../forge/bin/main.exe} observe --dump cd.json --json | grep -c '\"proto\": \"march.observe/1\"' | sed 's/^/snapshot envelopes: /'; ./native_crash_dump > cd2.prog 2>&1; echo \"unset exit=$?\"; test -f cd2.json || echo \"no dump without MARCH_CRASH_DUMP\"; MARCH_CRASH_DUMP=/nonexistent-dir/x.json ./native_crash_dump > cd3.prog 2>&1; echo \"unwritable path exit=$?\"; %{exe:../forge/bin/main.exe} diagnose --from-dump cd.prog > /dev/null 2>&1; echo \"not a dump exit=$?\"; rm -f cd.json cd.diag cd.crashes cd.prog cd2.prog cd3.prog; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/crash_dump.expected native_crash_dump.out)))
 ; ── Leak guard: compiled actors leaked every received message, every state
 ; record a handler returned and the Some(()) of a statement `send`; a nominal
 ; record read only through its fields leaked with every heap field. Red before
@@ -2982,6 +3059,20 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias   runtest)
  (deps    (file test_observe_runner))
  (action  (run ./test_observe_runner)))
+
+; The gate in front of the crash-dump writer (march_abort / march_fatal_dump,
+; runtime/march_reclaim.c): the hook runs on a clean abort and not inside a
+; reclamation critical section or on a signal stack, and the process aborts
+; either way.
+(rule
+ (targets test_fatal_hook_runner)
+ (deps    test_fatal_hook.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets} test_fatal_hook.c ../runtime/march_reclaim.c -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_fatal_hook_runner))
+ (action  (run ./test_fatal_hook_runner)))
 
 (rule
  (targets observe_client)
@@ -3093,6 +3184,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/observe_counters.expected native_observe_counters.out)))
+
+; mailbox_backlog counts the messages an Actor.call holds off the mailbox, and
+; Actor.top_by_mailbox / over_mailbox rank by it (mailbox_size reads 0 there).
+(rule
+ (targets native_mailbox_backlog_counts_held native_mailbox_backlog_counts_held.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/mailbox_backlog_counts_held.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_mailbox_backlog_counts_held native/mailbox_backlog_counts_held.march)
+   (with-stdout-to native_mailbox_backlog_counts_held.out
+        (system "./native_mailbox_backlog_counts_held")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mailbox_backlog_counts_held.expected native_mailbox_backlog_counts_held.out)))
 
 ; R2 scheduler utilisation: idle under 5%, four spinners on four schedulers
 ; over 90%.
@@ -10934,6 +11043,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/typed_array_builtin_borrow_leak_probe.expected typed_array_builtin_borrow_leak_probe.out)))
 
+; A dead TypedArray releases every element it holds (its own reserved tag,
+; MARCH_TYPED_ARR_TAG, and march_run_resource_dtor). Before 2026-10-07 each
+; leg leaked one String per element per iteration.
+(rule
+ (targets typed_array_elements_released_probe typed_array_elements_released_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/typed_array_elements_released_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o typed_array_elements_released_probe
+        native/typed_array_elements_released_probe.march)
+   (with-stdout-to typed_array_elements_released_probe.out
+        (system "./typed_array_elements_released_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/typed_array_elements_released_probe.expected typed_array_elements_released_probe.out)))
+
 (rule
  (targets nativearray_builtin_borrow_leak_probe nativearray_builtin_borrow_leak_probe.out)
  (deps (file %{exe:../bin/main.exe})
@@ -12919,6 +13048,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/qualified_newtype_repr.expected native_qualified_newtype_repr.out)))
+; ── A scalar-only aggregate declared in a nested module is unboxed like a
+; top-level one (2026-10-11); the .expected is the interpreter's output.
+(rule
+ (targets native_module_unboxed_aggregate native_module_unboxed_aggregate.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/module_unboxed_aggregate.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_module_unboxed_aggregate
+        native/module_unboxed_aggregate.march)
+   (with-stdout-to native_module_unboxed_aggregate.out
+        (system "./native_module_unboxed_aggregate")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/module_unboxed_aggregate.expected native_module_unboxed_aggregate.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),
@@ -13146,6 +13293,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_inspect_block.expected native_actor_inspect_block.out)))
+
+; ── WHICH / SOURCE across a hot deploy (observe R10) ───────────────────────
+; specs/progress/2026-10-11-observe-r10-which-source.md.
+; observe_which_source_check.exe builds the v1 fixture as a --hot-reload node
+; (fresh deploy key) and the v2 fixture as a --compile-so patch, starts the
+; node under a private HOME, and checks WHICH / SOURCE before and after
+; Cmd_deploy_hot.run (what `forge deploy hot` runs) switches it to the patch:
+; the hash, the body, the signature and policy gates, names that must not reach
+; a path, the CAS_PUT kind:source guards, and the audit log.
+(executable
+ (name observe_which_source_check)
+ (modules observe_which_source_check)
+ (libraries unix str yojson march_ed25519 march_forge))
+
+(rule
+ (targets native_observe_which_source.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_which_source_check.exe)
+       (file native/observe_which_source_v1.march)
+       (file native/observe_which_source_v2.march))
+ (action
+  (with-stdout-to native_observe_which_source.out
+   (system "./observe_which_source_check.exe %{exe:../bin/main.exe} native/observe_which_source_v1.march native/observe_which_source_v2.march; true"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_which_source.expected native_observe_which_source.out)))
 
 ; ── Signed debug verbs on the observe socket (observe R4b) ─────────────────
 ; specs/progress/2026-10-05-observe-r4b-signed-debug-verbs.md.

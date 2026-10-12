@@ -53,3 +53,29 @@ those types at once. Three things must be settled first:
 Module-declared types get their declared layout, with the C-built ones pinned
 and the wire format versioned, proven by the ASAN corpus sweep, the two-node
 suites and the benchmarks named in `specs/benchmarks.md`.
+
+## 2026-10-11: unboxed aggregates landed, newtype and niche still open
+
+Module-declared unboxed aggregates now get their layout
+([`progress/2026-10-11-module-unboxed-aggregates.md`](../progress/2026-10-11-module-unboxed-aggregates.md)).
+They were the safe slice: a struct value that enters a ptr slot is boxed into
+the same cell the Boxed layout uses, so the C runtime, the wire format and
+`migrate_msg` see no change. `Process.LiveProcess` is pinned Boxed
+(`Kind.c_boxed_types`).
+
+What is left is the 61 newtypes and 6 niches. Besides the three points above,
+one more blocker turned up: **compiled `to_string` cannot print a newtype or
+niche value** (`specs/todos/2026-10-11-compiled-to-string-newtype-niche.md`).
+The value has no cell, so the runtime printer shows the payload: an
+entry-module `Meters(7)` prints `7` compiled and `Meters(7)` interpreted, and
+a niche's nullary constructor prints `nil`. Switching module types to newtype
+or niche today would spread that to nearly every user type. Fix the printer
+(type-directed `to_string` at the call site, or keep a boxed form for
+printing) before widening the layouts.
+
+How the slice was done, for whoever takes the rest: `Kind.canonical_name`
+resolves a short name to its qualified declaration through an index built
+with the table (`k_unboxed_short`). Extending it to newtype/niche means
+indexing those declarations the same way, minus `c_boxed_types` (`Bytes`)
+and plus `declared_layout_types` (`CsvRow`). The `test_kind` "both spellings
+of a type get one answer" test lists the expected answer for each shape.

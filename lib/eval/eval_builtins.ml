@@ -339,6 +339,14 @@ let base_env : env =
            | Some inst -> VInt (Queue.length inst.ai_mailbox)
            | None      -> VInt 0)
         | _ -> eval_error "mailbox_size: expected pid"))
+  (* The interpreter's Actor.call holds nothing off the mailbox, so the
+     backlog is the queue length. *)
+  ; ("mailbox_backlog", VBuiltin ("mailbox_backlog", function
+        | [VPid pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst -> VInt (Queue.length inst.ai_mailbox)
+           | None      -> VInt 0)
+        | _ -> eval_error "mailbox_backlog: expected pid"))
   (* The observe socket's reply to one request line, built from the
      interpreter's actor table (lib/eval/eval_observe.ml). Stdlib-only: Recon. *)
   ; ("observe_count_send", VBuiltin ("observe_count_send", function
@@ -838,6 +846,13 @@ let base_env : env =
         | [VFloat a;  VFloat b]  -> VInt (Float.compare a b)
         | [VString a; VString b] -> VInt (String.compare a b)
         | [VBool a;   VBool b]   -> VInt (Bool.compare a b)
+        | [VTuple xs; VTuple ys] as args ->
+          (* Lexicographic, each component by its own order; OCaml's
+             structural [compare] ordered an ADT component by constructor
+             NAME and never consulted its Ord impl. *)
+          (match tuple_compare xs ys with
+           | Some n -> VInt n
+           | None -> (match args with [a; b] -> VInt (compare a b) | _ -> VInt 0))
         | [a; b] ->
           (match type_name_of_value a with
            | Some tname ->

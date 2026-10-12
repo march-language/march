@@ -48,7 +48,7 @@ Four fields, exactly as the paper describes:
 |---|---|
 | `state` | `pcdata` `rcdata` `tagname` `closetagname` `beforeattrname` `afterattrname` `beforeattrvalue` `attrvalue` `comment` |
 | `element` | `normal` `script` `style` `textarea` `title` |
-| `attr` | `normal` `url` `urlmid` `style` `stylevalue` `cssurl` `script` `jsstring` `jscomment` `jsregex` `jstemplate` `srcset` `htmldoc` |
+| `attr` | `normal` `url` `urlmid` `urlscheme` `urlschemehole` `urlschemeholemid` `style` `stylevalue` `cssurl` `script` `jsstring` `jscomment` `jsregex` `jstemplate` `srcset` `htmldoc` |
 | `delim` | `none` `single` `double` `unquoted` `doublesubst` |
 
 `element` tracks which element's content we are inside, because `<script>` and
@@ -94,12 +94,32 @@ unsafe direction.
 
 `srcset` and `htmldoc` are not positions but refusals; see "What is rejected".
 
-`urlmid` is `url` after at least one literal character of the value has been
-seen. The distinction is load-bearing: a hole at the *start* of a URL attribute
+`url` and `urlmid` split a URL attribute value at its first literal character.
+The distinction is load-bearing: a hole at the *start* of a URL attribute
 **is** the whole URL and needs a scheme allowlist (`href="${u}"` must not accept
 `javascript:`), while a hole after literal text is a *component* and needs
-percent-encoding (`href="/search?q=${q}"`). Rather than add a fifth context
-field, the table demotes `url` → `urlmid` on the first literal character.
+percent-encoding (`href="/search?q=${q}"`).
+
+Between them sits a small scheme sub-automaton, because the allowlist checks
+the scheme of ONE value and text after that value can still extend it. Until
+2026-10-11 the first literal character went straight to `urlmid`, so
+`href="${s}://${rest}"` with `s = "javascript"` passed the allowlist (no colon:
+a relative reference), and the template's own `:` then made it the scheme. The
+rendered `javascript://%0Aalert%281%29` executes. Now:
+
+| `attr` | Meaning |
+|---|---|
+| `url` | nothing written yet (leading whitespace does not count: the URL parser strips it) |
+| `urlscheme` | only literal, scheme-shaped text so far (`java`, `http`) |
+| `urlschemehole` | the scheme is still open and a whole-URL hole wrote into it |
+| `urlschemeholemid` | the scheme is still open, a hole wrote into it, and more text followed |
+| `urlmid` | the scheme is settled (`/`, `?`, `#`, `:` written by the template, or any non-scheme character) |
+
+In the two `…hole…` positions a literal `:` is a compile error, and so are
+`&#` and `&colon;`, which the HTML parser can decode into one. `&` and `;` keep
+the scheme open (they spell character references); tab, CR and LF keep it open
+(the URL parser deletes them). The tracking changes no escaper except one: a
+hole after nothing but leading whitespace now gets the whole-URL escaper.
 
 ### `doublesubst` — the substitution mechanism
 
@@ -180,8 +200,8 @@ row — one less thing to get out of sync:
 |---|---|
 | `pcdata`, `rcdata` in `textarea`/`title` | HTML entity-encode |
 | `attrvalue` with `attr = normal` | HTML entity-encode, plus backtick |
-| `attrvalue` with `attr = url` (start of value) | URL scheme allowlist |
-| `attrvalue` with `attr = urlmid` | percent-encode |
+| `attrvalue` with `attr = url` / `urlschemehole` (start of value, or right after a start hole) | URL scheme allowlist |
+| `attrvalue` with `attr = urlmid` / `urlscheme` / `urlschemeholemid` | percent-encode |
 | `attrvalue` with `attr = style`, or `rcdata` in `style` | CSS **declaration** escape |
 | `attrvalue` with `attr = stylevalue` | CSS **value** escape |
 | `attr = cssurl`, or `rcdata` in `style` inside `url(` | CSS **url** escape |
@@ -197,6 +217,7 @@ compile errors carrying the reason:
 |---|---|
 | element name, attribute name | nothing to escape — `onerror` has no special character |
 | inside an HTML comment | comment-ending sequences vary between parsers |
+| a literal `:` (or `&#`, `&colon;`) in a URL whose scheme a hole has written into | the hole's value would become the scheme without ever being checked as one: `${s}:` with `s = "javascript"`. Interpolate the whole URL as one hole |
 | inside a JS comment | the value is dead text until a newline or `*/` moves it into live code |
 | inside a JS regex literal | an unescaped `/` ends the literal and everything after it is code |
 | inside a JS template literal | a backtick ends it and `${` opens a substitution — arbitrary code |

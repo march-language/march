@@ -3713,8 +3713,10 @@ and infer_block env exprs =
     (* Vault handles are the ML [ref []] case: `let t = Vault.new("t")` is an
        application, and generalizing its element type would let each use pick a
        different one.  Skipped when the binding is annotated — writing the type
-       out is the explicit opt-out.  See [demote_vault_handle_vars]. *)
-    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
+       out is the explicit opt-out.  Inside a fn body the element type is pinned
+       for that fn (not the whole program) when a parameter type names it; see
+       [vault_pin_frames]. *)
+    if b.bind_ty = None then demote_block_vault_handle_vars rhs_ty;
     let gen_binding bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)
       | other          -> other
@@ -4229,14 +4231,16 @@ let rec ty_mentions_var t = match repr t with
   | TLin (_, t) | TRefine (t, _, _) -> ty_mentions_var t
   | TError | TNat _ | TChan _ -> false
 
-(** Warn, at its first mention in the signature, about each type variable
-    of [def] that its body did not leave generic
-    (specs/todos/2026-09-18-typecheck-annotated-tyvars-flexible.md, option
-    (b)).  Both a variable fixed to a concrete type and one made equal to
-    another of the signature's variables are reported: each is a signature
-    that promises callers a freedom the body does not give them, and each
-    would be an error were annotation variables rigid. *)
-let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
+(** Reject, at its first mention in the signature, each type variable of
+    [def] that its body did not leave generic: annotation type variables are
+    rigid (specs/progress/2026-10-11-annotated-tyvars-rigid.md; option (a) of
+    the 2026-09-18 todo, a Warning under option (b) from 2026-09-22).  Both a
+    variable fixed to a concrete type and one made equal to another of the
+    signature's variables are errors: each is a signature that promises
+    callers a freedom the body does not give them.  Checked after the body,
+    not by skolemising during it, so the error points at the signature and
+    names the type the body needed. *)
+let check_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
   List.iter (fun (v, span, fixing) ->
       let message, note = match fixing with
         | Tyvar_concrete t ->
@@ -4263,7 +4267,7 @@ let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
              same type, or make the body generic in each." other v
       in
       Err.report env.errors
-        { Err.severity = Err.Warning; span; message; labels = [];
+        { Err.severity = Err.Error; span; message; labels = [];
           notes = [ note ]; code = Err.Code.annotated_tyvar_fixed; fix = None })
     (annotated_tyvar_fixings def fn_tvars)
 
@@ -4287,6 +4291,9 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
   env.current_decl := qualify_ref_name env.current_module def.fn_name.txt;
   Fun.protect ~finally:(fun () -> env.current_decl := saved_caller) (fun () ->
   let env'    = enter_level env in
+  (* Block-`let` Vault handles in this body; settled against the parameter
+     types before generalization (see [vault_pin_frames]). *)
+  with_vault_pin_frame env'.level @@ fun settle_vault_pins ->
   (* Captured BEFORE the self-bind below (which unconditionally clears any
      [local_fns] entry for this name, per [bind_var]'s shadowing discipline)
      so we know whether to restore it afterward — this fn is only a genuine
@@ -4670,11 +4677,12 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          mismatch at the call.  Skipped when the body reported an error: its
          unifications are then unreliable evidence of what the author meant. *)
       if not (Err.error_since env.errors diag_mark) then
-        warn_annotated_tyvar_fixings env def !fn_tvars;
+        check_annotated_tyvar_fixings env def !fn_tvars;
 
       (* Generalize; attach bound constraints and any when-clause class constraints *)
       let all_constraints = bound_constraints @ class_constraints in
       mark_trusted_linear_vars env def ~fn_span ~fn_tvars:!fn_tvars trusted_vars;
+      settle_vault_pins param_tys;
       let base_sch = generalize env.level fn_ty in
       (match all_constraints with
        | [] -> base_sch
@@ -5035,6 +5043,10 @@ let interface_satisfied env iface target =
     | TVar _ | TError -> true
     | _ when depth >= 128 || not (within_size_budget target) -> false
     | TTuple ts when iface = "Eq" -> List.for_all (satisfies depth seen iface) ts
+    (* Ord only through 5-tuples: the prelude's per-arity impls are what
+       compiled `compare` and `<` dispatch to. *)
+    | TTuple ts when iface = "Ord" && List.length ts >= 2 && List.length ts <= 5 ->
+      List.for_all (satisfies depth seen iface) ts
     | _ ->
       let key = iface ^ ":" ^ pp_ty target in
       (* Expanding bounds need not repeat an obligation. A proof budget
@@ -5147,9 +5159,10 @@ let discharge_constraints env span =
         (match ty with
          | TVar _ -> ()   (* Still polymorphic — cannot check yet *)
          | _ ->
-           (* A tuple is Eq when every component is: both backends compare
-              tuples structurally, and no impl can be written for every
-              arity. A component that is still a type variable is
+           (* A tuple is Eq (Ord) when every component is: both backends
+              compare tuples structurally (Ord: lexicographically, via the
+              prelude's per-arity impls when compiled), and no impl can be
+              written for every arity. A component that is still a type variable is
               polymorphic, like the top-level case above. *)
            let satisfied = interface_satisfied env iface_name ty in
            if not satisfied then begin
@@ -5822,7 +5835,7 @@ let rec check_decl env (d : Ast.decl) : env =
             what (pp_ty t))
      | _ -> ());
     (* Same Vault value restriction as the block-[let] path above. *)
-    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
+    if b.bind_ty = None then demote_block_vault_handle_vars rhs_ty;
     (* Generalise simple variable bindings at module level *)
     let gen_bnd bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)

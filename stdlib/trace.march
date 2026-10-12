@@ -194,7 +194,7 @@ mod Trace do
   fn start(_c : Cap(Actor.Debug), names : List(String), limit : Limit) : Result(TraceId, TraceError) do
     if limit_negative(limit) do Err(LimitOutOfRange)
     else
-      match ask("TRACE_START " ++ limit_words(limit) ++ " fn:" ++ join_names(names)) do
+      match ask("TRACE_START local " ++ limit_words(limit) ++ " fn:" ++ join_names(names)) do
         Ok(d) -> Ok(TraceId(int_of(d, "session")))
         Err(code) -> Err(error_of(code))
       end
@@ -206,7 +206,7 @@ mod Trace do
   bound up to 4096), oldest first, and the session's state.
   """
   fn drain(_c : Cap(Actor.Debug), s : TraceId) : Result(Batch, TraceError) do
-    match ask("TRACE_DRAIN session:" ++ int_to_string(session_id(s))) do
+    match ask("TRACE_DRAIN local session:" ++ int_to_string(session_id(s))) do
       Ok(d) -> Ok(drained_of(d))
       Err(code) -> Err(error_of(code))
     end
@@ -214,7 +214,7 @@ mod Trace do
 
   doc "Like `drain`, taking at most `max` events (1..4096)."
   fn drain_max(_c : Cap(Actor.Debug), s : TraceId, max : Int) : Result(Batch, TraceError) do
-    match ask("TRACE_DRAIN session:" ++ int_to_string(session_id(s)) ++ " max:" ++ int_to_string(max)) do
+    match ask("TRACE_DRAIN local session:" ++ int_to_string(session_id(s)) ++ " max:" ++ int_to_string(max)) do
       Ok(d) -> Ok(drained_of(d))
       Err(code) -> Err(error_of(code))
     end
@@ -222,7 +222,7 @@ mod Trace do
 
   doc "Stop the session and free it; events not yet drained are discarded. The final state."
   fn stop(_c : Cap(Actor.Debug), s : TraceId) : Result(Batch, TraceError) do
-    match ask("TRACE_STOP session:" ++ int_to_string(session_id(s))) do
+    match ask("TRACE_STOP local session:" ++ int_to_string(session_id(s))) do
       Ok(d) -> Ok(drained_of(d))
       Err(code) -> Err(error_of(code))
     end

@@ -381,7 +381,8 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   match effective_repr with
   | Kind.Unboxed { ctor = _; fields } ->
     let sty = match scrut_tir_ty_init with
-      | Tir.TCon (name, _) -> Kind.unboxed_llvm_name name
+      | Tir.TCon (name, _) ->
+        Kind.unboxed_llvm_name (Kind.canonical_name ctx.Llvm_ctx.k_table name)
       | _ ->
         (* Unreachable: [Repr.repr_of_ty] only answers [Unboxed] for a TCon. *)
         failwith "emit_case: unboxed repr for a non-TCon scrutinee"
@@ -774,6 +775,19 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   (* Record an arm's pre-coercion type unless the arm diverges. *)
   let record_arm_ty (body : Tir.expr) (ty : string) =
     if not (arm_diverges body) then arm_result_tys := ty :: !arm_result_tys
+  in
+
+  (* An arm's value, coerced to the slot.  A diverging arm (a [panic] default
+     that a tuple match over an unboxed aggregate gets) yields the Unit
+     [i64 0], which has no coercion to an [%ub.*] struct: the arm never
+     reaches the merge, so its store is dead and [poison] is the honest
+     value.  Before this, [store %ub.P2 0] was invalid IR (clang: "integer
+     constant must have integer type"). *)
+  let coerce_arm (body : Tir.expr) (ty : string) (v : string) =
+    if arm_diverges body && ty <> slot_ty
+       && Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table slot_ty <> None
+    then "poison"
+    else Llvm_ctx.coerce ctx ty v slot_ty
   in
 
   (* Detect string-literal case: br_tag starts with '"' *)
@@ -1257,7 +1271,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     in
     let (br_ty, br_val) = emit_expr ctx body_to_emit in
     record_arm_ty body_to_emit br_ty;
-    let stored = Llvm_ctx.coerce ctx br_ty br_val slot_ty in
+    let stored = coerce_arm body_to_emit br_ty br_val in
     Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s" slot_ty stored result_slot);
     Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
     restore_var_slot snap
@@ -1307,7 +1321,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
    | Some d ->
      let (d_ty, d_val) = emit_expr ctx d in
      record_arm_ty d d_ty;
-     let stored = Llvm_ctx.coerce ctx d_ty d_val slot_ty in
+     let stored = coerce_arm d d_ty d_val in
      Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s" slot_ty stored result_slot);
      Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl));
   restore_var_slot snap_default;

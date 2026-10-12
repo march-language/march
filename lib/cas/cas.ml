@@ -357,6 +357,48 @@ let store_artifact (t : t) (ch : string) (path : string) : unit =
     write_through ~suffixes:[ "" ] t ch
   end
 
+(* ── Function source text (observe plan R10) ──────────────────────────────
+   A `--hot-reload` build keeps each boundary function's source text under
+   its reload identity, the non-transitive impl_hash a node's WHICH reports,
+   in <root>/sources/<2 hex>/<62 hex>.  The node serves it back through the
+   signed SOURCE verb; `forge deploy hot` uploads it with CAS_PUT kind:source.
+   Content addressed in the sense that the key is the code's identity: the same
+   hash is the same code, so an existing entry is never rewritten.  Not part
+   of an artifact entry (an artifact cache hit does not need it). *)
+let source_max_bytes = 262144
+
+let is_hash64 h =
+  String.length h = 64
+  && String.for_all (fun c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) h
+
+let source_path root h =
+  root ^ "/sources/" ^ String.sub h 0 2 ^ "/" ^ String.sub h 2 62
+
+let store_source_in root h text =
+  let path = source_path root h in
+  if not (Sys.file_exists path) then begin
+    let tmp = path ^ ".tmp" ^ string_of_int (Unix.getpid ()) in
+    (try write_file tmp text; Unix.rename tmp path
+     with Sys_error _ | Unix.Unix_error _ -> (try Sys.remove tmp with Sys_error _ -> ()))
+  end
+
+(** Keep [text] as the source of the function whose impl_hash is [h], in the
+    project store and the global one.  Ignores a malformed hash and text over
+    [source_max_bytes] (a function that long is not shown, not truncated). *)
+let store_source (t : t) (h : string) (text : string) : unit =
+  if is_hash64 h && String.length text <= source_max_bytes then begin
+    store_source_in t.local_root h text;
+    Option.iter (fun gr -> store_source_in gr h text) t.global_root
+  end
+
+(** The source kept for [h]: the project store, else the global one. *)
+let lookup_source (t : t) (h : string) : string option =
+  if not (is_hash64 h) then None
+  else
+    match read_file (source_path t.local_root h) with
+    | Some s -> Some s
+    | None -> Option.bind t.global_root (fun gr -> read_file (source_path gr h))
+
 (* Copy a cached artifact to [dest], returning false if the artifact file is
    gone or the copy fails — callers must treat that as a cache miss and
    recompile, instead of reporting "(cached)" with no output written.

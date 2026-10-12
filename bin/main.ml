@@ -1016,16 +1016,16 @@ let hr_config () =
       the inliner's `_i<n>`, case-arm vars) by order of first appearance,
       over symbol names that are structural since B1
       (specs/plans/incremental-codegen-cas-plan.md §14: `$lam0_Mod_f$apply$0_Mod_f`,
-      `$jp2_Mod_f`, `$fused_mf_Mod_f_0`), plus the two raw ids that remain
-      (a residual type variable's name, and the `V_<id>` in drop-glue names).  Before B1 those symbols came from
+      `$jp2_Mod_f`, `$fused_mf_Mod_f_0`, and drop glue's `__drop$List_V0`),
+      plus the one raw id that remains, a residual type variable's name,
+      renamed below.  Before B1 those symbols came from
       global counters (`$lam39788$apply$4781`), so a one-token edit anywhere
       renumbered every later one, and hashing them flagged every function that
       merely REFERENCES a lambda as changed (`Front.start`, `main`;
       specs/progress/2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md):
       an unslotted `main` "changing" made `forge deploy` plan a restart for
       any edit.  A regex over the pretty-printed text renumbered them by first
-      appearance as a stopgap; apart from drop glue's `V_<id>`, nothing
-      counter-shaped reaches a symbol now.  A renumbering of
+      appearance as a stopgap; nothing counter-shaped reaches a symbol now.  A renumbering of
       a local is invisible; a real change (a literal, a call, a type) is not.
 
    2. A slot's identity folds in the bare-named helpers only it reaches
@@ -1073,20 +1073,12 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
         { fd with March_tir.Tir.fn_params = List.map (March_tir.Mono.subst_var subst) fd.March_tir.Tir.fn_params;
                   fn_ret_ty = March_tir.Mono.subst_ty subst fd.March_tir.Tir.fn_ret_ty;
                   fn_body = March_tir.Mono.subst_expr subst fd.March_tir.Tir.fn_body } in
-    (* The one symbol shape still carrying a typechecker id: drop glue for a
-       type with a residual variable ([__drop$List_V_53272], keyed by
-       [Drop.mangle]; specs/todos/2026-10-07-drop-glue-name-carries-tvar-id.md).
-       Renumber its [V_<id>] by first appearance, as the retired regex did. *)
-    let bytes = Bytes.to_string (March_cas.Serialize.serialize_fn_def fd) in
-    let seen = Hashtbl.create 4 in
-    let bytes =
-      Str.global_substitute (Str.regexp "V_[0-9]+") (fun s ->
-          let tok = Str.matched_string s in
-          let k = match Hashtbl.find_opt seen tok with
-            | Some k -> k
-            | None -> let k = Hashtbl.length seen in Hashtbl.replace seen tok k; k in
-          Printf.sprintf "V_#%d" k) bytes in
-    March_cas.Blake3.hash_string bytes in
+    (* Drop glue for a type with a residual variable is named by the
+       variable's position since 2026-10-11 ([__drop$List_V0], [Drop.mangle];
+       specs/progress/2026-10-07-drop-glue-name-carries-tvar-id.md), so its
+       old [V_<id>] renumbering is gone. *)
+    March_cas.Blake3.hash_string
+      (Bytes.to_string (March_cas.Serialize.serialize_fn_def fd)) in
   let own = Hashtbl.create 1024 in
   let own_of n fd =
     match Hashtbl.find_opt own n with
@@ -1126,6 +1118,41 @@ let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
            else h)
       end)
     all_names
+(* R10: keep each boundary function's source text under its reload identity
+   ([hr_impl_hashes], after [hr_slot_hashes]) in the CAS, for the node's
+   WHICH / SOURCE verbs and `forge deploy hot`'s upload.  The text is the
+   declaration's, from where it starts to where the next one does (the same
+   regions the shell's identity table hashes), found by the function's
+   provenance span.  A function with no span of its own (derived, lifted),
+   or whose text is over the store's limit, simply has no source. *)
+let hr_store_sources ~(cfg : March_tir.Hot_reload.config) ~(store : March_cas.Cas.t)
+    ~(decls : March_ast.Ast.decl list) (hr_impl_hashes : (string, string) Hashtbl.t) : unit =
+  let module SI = March_jit.Shell_ident in
+  let regions = lazy (snd (SI.of_decls decls)) in
+  let ends_with s sfx =
+    let n = String.length s and k = String.length sfx in
+    n >= k && String.sub s (n - k) k = sfx in
+  (* An actor's dispatch fn has no span of its own: its source is the actor
+     declaration (its handlers), found by name when exactly one actor has it. *)
+  let actor_region n =
+    let sfx = "_dispatch" in
+    if not (ends_with n sfx) then None
+    else
+      let actor = String.sub n 0 (String.length n - String.length sfx) in
+      match List.filter (fun (r : SI.region) -> ends_with r.SI.r_key ("a:" ^ actor))
+              (Lazy.force regions) with
+      | [ r ] -> Some r
+      | _ -> None in
+  Hashtbl.iter (fun n h ->
+      if n <> "" && n.[0] <> '$' && March_tir.Hot_reload.is_slot_fn cfg n then begin
+        let region =
+          match March_tir.Provenance.span_of n with
+          | Some sp when sp.March_ast.Ast.start_line > 0 ->
+            SI.region_of (Lazy.force regions) sp
+          | _ -> actor_region n in
+        Option.iter (fun r -> March_cas.Cas.store_source store h (SI.region_text r)) region
+      end)
+    hr_impl_hashes
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
 (* The sanitizer MARCH_SANITIZE selects, or [None] when it is unset.
@@ -4024,7 +4051,9 @@ let compile filename =
         in
         (match hr_config () with
          | None -> ()
-         | Some cfg -> hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes);
+         | Some cfg ->
+           hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes;
+           hr_store_sources ~cfg ~store ~decls:desugared.March_ast.Ast.mod_decls hr_impl_hashes);
         (* Post-TIR cache: same key construction as the source-level early
            check above (build_cas_key), keyed on the module's per-SCC impl
            hashes instead of the source digest. *)

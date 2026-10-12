@@ -341,6 +341,10 @@ let verbs = [
   "TOP", top; "SNAPSHOT", snapshot;
   (* The signed debug verbs (runtime/march_observe_debug.c) need a deploy
      key compiled into the binary; an interpreted program never has one. *)
+  (* An interpreted program has no reload slots (R10): no function has a
+     version to report or a source kept under one. *)
+  "WHICH", (fun _ _ -> raise (Bad "not_found"));
+  "SOURCE", (fun _ _ -> raise (Bad "not_found"));
   "STATE", (fun _ _ -> raise (Bad "signing_not_configured"));
   "CRASHES_FULL", (fun _ _ -> raise (Bad "signing_not_configured"));
   "HELLO", (fun b _ -> obj b [ "boot", (fun b -> str b "interpreter"); "signing", (fun b -> bool b false) ]);

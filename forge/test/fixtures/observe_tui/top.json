@@ -1,0 +1,127 @@
+{
+ "proto": "march.observe/1",
+ "node": "web-1",
+ "at_ms": 1791743838496,
+ "took_us": 17,
+ "truncated": false,
+ "data": {
+  "attr": "mbox",
+  "window_ms": null,
+  "total": 6,
+  "top": [
+   {
+    "pid": 1,
+    "value": 0,
+    "type": "Boss",
+    "names": [
+     "boss"
+    ],
+    "status": "waiting",
+    "mbox": 0,
+    "stack_bytes": 16384,
+    "crashes": 0,
+    "child_crashes": 3,
+    "children": 1,
+    "link": "none",
+    "parent": null,
+    "parent_type": null,
+    "spawned_by": null,
+    "supervisor": {
+     "strategy": "one_for_one",
+     "max_restarts": 10,
+     "window_secs": 60,
+     "restarts_held": 3
+    }
+   },
+   {
+    "pid": 4,
+    "value": 0,
+    "type": "Fragile",
+    "names": [],
+    "status": "waiting",
+    "mbox": 0,
+    "stack_bytes": 16384,
+    "crashes": 0,
+    "child_crashes": 0,
+    "children": 0,
+    "link": "supervised",
+    "parent": 1,
+    "parent_type": "Boss",
+    "spawned_by": null,
+    "supervisor": null
+   },
+   {
+    "pid": 5,
+    "value": 0,
+    "type": "Loop",
+    "names": [
+     "loop"
+    ],
+    "status": "running",
+    "mbox": 0,
+    "stack_bytes": 16384,
+    "crashes": 0,
+    "child_crashes": 0,
+    "children": 0,
+    "link": "none",
+    "parent": null,
+    "parent_type": null,
+    "spawned_by": null,
+    "supervisor": null
+   },
+   {
+    "pid": 6,
+    "value": 0,
+    "type": "Maker",
+    "names": [
+     "maker"
+    ],
+    "status": "waiting",
+    "mbox": 0,
+    "stack_bytes": 16384,
+    "crashes": 0,
+    "child_crashes": 0,
+    "children": 0,
+    "link": "none",
+    "parent": null,
+    "parent_type": null,
+    "spawned_by": null,
+    "supervisor": null
+   },
+   {
+    "pid": 7,
+    "value": 0,
+    "type": "Twig",
+    "names": [],
+    "status": "waiting",
+    "mbox": 0,
+    "stack_bytes": 16384,
+    "crashes": 0,
+    "child_crashes": 0,
+    "children": 0,
+    "link": "spawned",
+    "parent": null,
+    "parent_type": null,
+    "spawned_by": 6,
+    "supervisor": null
+   },
+   {
+    "pid": 8,
+    "value": 0,
+    "type": "Twig",
+    "names": [],
+    "status": "waiting",
+    "mbox": 0,
+    "stack_bytes": 16384,
+    "crashes": 0,
+    "child_crashes": 0,
+    "children": 0,
+    "link": "spawned",
+    "parent": null,
+    "parent_type": null,
+    "spawned_by": 6,
+    "supervisor": null
+   }
+  ]
+ }
+}

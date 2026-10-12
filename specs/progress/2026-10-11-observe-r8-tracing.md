@@ -143,3 +143,21 @@ The only change on it is the one relaxed load and branch described above.
   the timers above bound it.
 - Debug tier: signature, `boot`, nonce/expiry, then `$MARCH_DEBUG_POLICY`,
   every attempt audited.
+
+## Merged with R10 (2026-10-11)
+
+R7, R9 and R10 landed before this PR, so `SOURCE` (R10) and the `boot:` field
+(this PR) met in `runtime/march_observe_debug.c`. Resolution:
+- every signed request, `SOURCE` included, carries `boot:`; R10's check
+  script (`test/observe_which_source_check.ml`) fetches the node's `HELLO`
+  boot id and signs it;
+- an in-process request now says `local` in the signature position, for the
+  verbs that opt in (`SOURCE` and the three trace verbs), as `Recon.source`
+  already did. `Trace` sends it too. On a socket the word is just a bad
+  signature;
+- an in-process caller is still checked against `$MARCH_DEBUG_POLICY`
+  (R10's stricter rule). This PR's first version skipped the policy for
+  in-process trace calls, as `Actor.inspect_state` does. The
+  `native_trace_boundary` fixture now runs with a policy listing the three
+  trace verbs, and without one its calls answer `Unavailable(policy)`;
+- `forge observe` carries both R7's panel/dump flags and this PR's trace flags.

@@ -800,7 +800,11 @@ the field-auto-satisfy path in (T-Discharge) above). **Tuples** are the one
 structural case: `Eq (τ₁, …, τₙ)` is discharged when every `Eq τᵢ` is (a
 component that is still a type variable is skipped, like a top-level one),
 because both backends compare tuples component-wise and no `impl` can cover
-every arity (2026-10-06). `Ord` has no tuple case.
+every arity (2026-10-06). `Ord (τ₁, …, τₙ)` is discharged the same way for
+2 ≤ n ≤ 5 (2026-10-07): the order is lexicographic. The prelude carries
+`impl Ord((a, b)) when Ord(a), Ord(b)` through 5-tuples for compiled
+`compare`, Mono routes compiled `<`/`<=`/`>`/`>=` on a tuple through them, and
+the interpreter orders `VTuple` directly.
 
 `builtin_interfaces` (`typecheck.ml:1127–1145`) is the companion table
 declaring `Eq`/`Ord`/`Show`/`Hash`'s single-method SHAPE (`eq : a → a → Bool`,

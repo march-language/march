@@ -178,6 +178,48 @@ let test_explain_debug_error () =
   Alcotest.(check string) "anything else unchanged" "observe: busy"
     (Observe_client.explain_debug_error "observe: busy")
 
+(* R10: `forge deploy hot` uploads function source only when the operator's
+   policy file lists SOURCE, and only text this machine kept. *)
+let with_env name value f =
+  let old = Sys.getenv_opt name in
+  Unix.putenv name value;
+  Fun.protect f ~finally:(fun () -> Unix.putenv name (Option.value old ~default:""))
+
+let tmp_file contents =
+  let p = Filename.temp_file "r10pol" ".txt" in
+  Out_channel.with_open_bin p (fun oc -> output_string oc contents);
+  p
+
+let test_debug_policy_allows () =
+  let allows text =
+    let p = tmp_file text in
+    Fun.protect ~finally:(fun () -> Sys.remove p) (fun () ->
+        with_env "MARCH_DEBUG_POLICY" p (fun () -> Cmd_deploy_hot.debug_policy_allows ())) in
+  Alcotest.(check bool) "SOURCE on a line" true (allows "STATE\nSOURCE\n");
+  Alcotest.(check bool) "indented, CRLF, trailing comment" true (allows "  SOURCE  # source text\r\n");
+  Alcotest.(check bool) "empty file" false (allows "");
+  Alcotest.(check bool) "only another verb" false (allows "STATE\nCRASHES_FULL\n");
+  Alcotest.(check bool) "commented out" false (allows "# SOURCE\n");
+  Alcotest.(check bool) "a longer word is not SOURCE" false (allows "SOURCE_ALL\nXSOURCE\n");
+  with_env "MARCH_DEBUG_POLICY" "/nonexistent/policy" (fun () ->
+      Alcotest.(check bool) "unreadable file" false (Cmd_deploy_hot.debug_policy_allows ()));
+  with_env "MARCH_DEBUG_POLICY" "" (fun () ->
+      Alcotest.(check bool) "unset" false (Cmd_deploy_hot.debug_policy_allows ()))
+
+let test_local_source () =
+  let root = Filename.temp_dir "r10src" "" in
+  let h = String.make 64 'c' in
+  let dir = root ^ "/.march/cas/sources/cc" in
+  ignore (Sys.command ("mkdir -p " ^ Filename.quote dir));
+  Out_channel.with_open_bin (dir ^ "/" ^ String.make 62 'c') (fun oc -> output_string oc "fn g() do 2 end");
+  Alcotest.(check (option string)) "found in the project store"
+    (Some "fn g() do 2 end") (Cmd_deploy_hot.local_source ~project_root:root h);
+  Alcotest.(check (option string)) "unknown hash" None
+    (Cmd_deploy_hot.local_source ~project_root:root (String.make 64 'd'));
+  Alcotest.(check (option string)) "a path is not a hash" None
+    (Cmd_deploy_hot.local_source ~project_root:root "../../etc/passwd");
+  ignore (Sys.command ("rm -rf " ^ Filename.quote root))
+
 let () =
   Random.self_init ();
   Alcotest.run "observe_client" [
@@ -193,6 +235,10 @@ let () =
       Alcotest.test_case "query_socket uses the path as given" `Quick test_query_socket;
       Alcotest.test_case "signed debug request" `Quick test_signed_request;
       Alcotest.test_case "debug refusals explained" `Quick test_explain_debug_error;
+    ];
+    "R10 source upload", [
+      Alcotest.test_case "debug policy allows SOURCE" `Quick test_debug_policy_allows;
+      Alcotest.test_case "local source lookup" `Quick test_local_source;
     ];
     "forge observe", [
       Alcotest.test_case "request line" `Quick test_request_of;

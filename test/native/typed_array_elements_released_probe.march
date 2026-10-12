@@ -1,0 +1,88 @@
+-- Leak guard: a dead TypedArray releases its elements
+-- (specs/progress/2026-10-07-typed-array-free-does-not-release-elements.md).
+--
+-- A TypedArray used to be a tag-0 cell that march_decrc freed shallowly, so
+-- every heap element it held leaked when the array died: each leg below
+-- grew live_allocs by about one String per element per iteration. Each leg
+-- builds arrays of FRESH Strings and drops them; flat means every element
+-- was released along with its array. The values are read back after the
+-- source list or array is gone, so an element released too early (a slot
+-- without its own reference) changes the output or crashes.
+mod Main do
+  needs IO.Console
+
+  pfn flat(label : String, before : Int, r : String) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 30))
+  end
+
+  pfn strs(n : Int) : List(String) do
+    Cons(int_to_string(n), Cons("x" ++ int_to_string(n), Cons("y" ++ int_to_string(n), Nil)))
+  end
+
+  pfn from_list_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      from_list_leg(n - 1, acc + string_length(typed_array_get(typed_array_from_list(strs(n)), 1)))
+    end
+  end
+
+  pfn set_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let b = typed_array_set(typed_array_from_list(strs(n)), 0, "s" ++ int_to_string(n))
+      set_leg(n - 1, acc + string_length(typed_array_get(b, 0)) + string_length(typed_array_get(b, 2)))
+    end
+  end
+
+  pfn create_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      create_leg(n - 1, acc + string_length(typed_array_get(typed_array_create(3, "c" ++ int_to_string(n)), 2)))
+    end
+  end
+
+  pfn map_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let m = typed_array_map(typed_array_from_list(strs(n)), fn s -> s ++ "!")
+      map_leg(n - 1, acc + string_length(typed_array_get(m, 0)))
+    end
+  end
+
+  pfn filter_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let mask = typed_array_from_list(Cons(false, Cons(true, Cons(true, Nil))))
+      let a = typed_array_filter(typed_array_from_list(strs(n)), mask)
+      filter_leg(n - 1, acc + typed_array_length(a) + string_length(typed_array_get(a, 0)))
+    end
+  end
+
+  pfn slice_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = typed_array_slice(typed_array_from_list(strs(n)), 1, 2)
+      slice_leg(n - 1, acc + string_length(typed_array_get(s, 1)))
+    end
+  end
+
+  pfn to_list_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let xs = typed_array_to_list(typed_array_from_list(strs(n)))
+      to_list_leg(n - 1, acc + List.fold_left(xs, 0, fn (t, x) -> t + string_length(x)))
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let n = 300
+    let a = live_allocs()
+    flat("from_list + get", a, int_to_string(from_list_leg(n, 0)))
+    let b = live_allocs()
+    flat("set", b, int_to_string(set_leg(n, 0)))
+    let c = live_allocs()
+    flat("create", c, int_to_string(create_leg(n, 0)))
+    let d = live_allocs()
+    flat("map", d, int_to_string(map_leg(n, 0)))
+    let e = live_allocs()
+    flat("filter", e, int_to_string(filter_leg(n, 0)))
+    let f = live_allocs()
+    flat("slice", f, int_to_string(slice_leg(n, 0)))
+    let g = live_allocs()
+    flat("to_list", g, int_to_string(to_list_leg(n, 0)))
+  end
+end

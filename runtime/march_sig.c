@@ -241,3 +241,29 @@ void march_audit_close(FILE *f) {
     fclose(f);
     pthread_mutex_unlock(&g_audit_mu);
 }
+
+/* ── CAS root and function sources (R10) ──────────────────────────────── */
+
+static char g_cas_root_buf[512];
+static pthread_once_t g_cas_root_once = PTHREAD_ONCE_INIT;
+
+static void cas_root_init(void) {
+    const char *home = getenv("HOME");
+    if (home) snprintf(g_cas_root_buf, sizeof g_cas_root_buf, "%s/.march/cas", home);
+    else snprintf(g_cas_root_buf, sizeof g_cas_root_buf, "/tmp/.march_cas");
+}
+
+const char *march_cas_root(void) {
+    pthread_once(&g_cas_root_once, cas_root_init);
+    return g_cas_root_buf;
+}
+
+int march_source_path(char *out, size_t outsz, const char *hash) {
+    if (!hash || strlen(hash) != 64) return 0;
+    for (int i = 0; i < 64; i++) {
+        char c = hash[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    int n = snprintf(out, outsz, "%s/sources/%.2s/%.62s", march_cas_root(), hash, hash + 2);
+    return n > 0 && (size_t)n < outsz;
+}

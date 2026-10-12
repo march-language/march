@@ -990,6 +990,56 @@ let test_repl_floats_jit () =
     check_float_session ~label:"JIT"
       (run_repl_session ~env_prefix:"" float_session)
 
+(* ── Local REPL fragment leaks (2026-10-11) ───────────────────────────
+   specs/progress/2026-10-08-repl-jit-fragment-leaks.md.  The local REPL's
+   fragments ran Perceus without [Drop.run], so a [dec_rc] of a list the
+   code did not take apart freed its top cell and orphaned the rest:
+   `string_length(to_string(List.range(1, 100)))` left ~200 objects per
+   input.  The remote shell had the same causes and was fixed first.
+
+   Each input runs once as a warm-up, then three times between two
+   `live_allocs()` readings; the readings must agree.  The inputs read
+   heap bindings ([xs], [k]) through the slot bridge and build capturing
+   closures, so the other two ported fixes run on the measured path too. *)
+let repl_leak_session =
+  [ "let k = 500";
+    "let xs = List.range(1, 1000)";
+    "string_length(to_string(List.range(1, 100)))";
+    "List.length(List.filter(xs, fn x -> x > k))";
+    "List.length(List.map(xs, fn x -> x + k))";
+    "live_allocs()";
+    "string_length(to_string(List.range(1, 100)))";
+    "string_length(to_string(List.range(1, 100)))";
+    "string_length(to_string(List.range(1, 100)))";
+    "List.length(List.filter(xs, fn x -> x > k))";
+    "List.length(List.filter(xs, fn x -> x > k))";
+    "List.length(List.filter(xs, fn x -> x > k))";
+    "List.length(List.map(xs, fn x -> x + k))";
+    "List.length(List.map(xs, fn x -> x + k))";
+    "List.length(List.map(xs, fn x -> x + k))";
+    "live_allocs()";
+    "List.length(xs)" ]
+
+let test_repl_fragment_leaks_jit () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else begin
+    let (out, code) = run_repl_session ~env_prefix:"" repl_leak_session in
+    Alcotest.(check int) (Printf.sprintf "REPL exit code (output: %s)" out) 0 code;
+    (* The two `live_allocs()` results are the "= N" answers of inputs 6
+       and 16 (the "march(N)> " prompt numbers the inputs). *)
+    let answer n =
+      let re = Str.regexp (Printf.sprintf "march(%d)> = \\([0-9]+\\)" n) in
+      (try ignore (Str.search_forward re out 0)
+       with Not_found -> Alcotest.failf "no answer for input %d in:\n%s" n out);
+      int_of_string (Str.matched_group 1 out) in
+    let before = answer 6 and after = answer 16 in
+    Alcotest.(check int)
+      (Printf.sprintf "live objects left by nine REPL inputs (%d -> %d)" before after)
+      0 (after - before);
+    if not (contains ~needle:"march(17)> = 999" out) then
+      Alcotest.failf "the binding read back after the inputs, got:\n%s" out
+  end
+
 (* Parity control: the interpreter was always right, so a failure here means
    the witness broke, not the JIT. *)
 let test_repl_floats_interp () =
@@ -1111,6 +1161,8 @@ let () =
         test_repl_stdlib_ctor_tags_interp;
       Alcotest.test_case "Floats print and survive the v slot (JIT)" `Slow
         test_repl_floats_jit;
+      Alcotest.test_case "REPL fragments leak nothing per input (JIT)" `Slow
+        test_repl_fragment_leaks_jit;
       Alcotest.test_case "Floats print and survive the v slot (interpreter)"
         `Quick test_repl_floats_interp;
       Alcotest.test_case "to_string of List/Option/tuple (JIT)" `Slow

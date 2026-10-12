@@ -1,0 +1,7 @@
+from_list + get = 1092, flat: true
+set = 2184, flat: true
+create = 1092, flat: true
+map = 1092, flat: true
+filter = 1692, flat: true
+slice = 1092, flat: true
+to_list = 2976, flat: true

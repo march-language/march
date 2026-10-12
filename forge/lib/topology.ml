@@ -1280,23 +1280,28 @@ module Gen = struct
   (** One pool's unit. [environment] is written as [Environment=] lines;
       [forge topology gen systemd] gives the pool-level ones, [forge host
       init] each host's own (node name, labels, ports, seeds, sockets). *)
-  let systemd_unit ?(generator = "forge topology gen systemd") ~project ~(topo : t) ~environment (p : pool) =
+  let systemd_unit ?(generator = "forge topology gen systemd") ?release_dir ~project ~(topo : t) ~environment (p : pool) =
     render Topology_tmpl_systemd.content [
       ("pool", p.pool_name);
       ("project", project);
       ("generator", generator);
       ("user", "march");
-      ("exec", Printf.sprintf "/opt/march/%s/%s" project (binary_name ~project p));
+      ("exec",
+       (* With a release directory (`forge release build`), the unit runs the
+          bundle's launcher: `<dir>/bin/<project> start`. *)
+       match release_dir with
+       | Some dir -> Printf.sprintf "%s/bin/%s start" dir project
+       | None -> Printf.sprintf "/opt/march/%s/%s" project (binary_name ~project p));
       ("environment", environment_lines environment);
       ("stop_sec", string_of_int (stop_sec topo));
       ("roles", if p.serves = [] then "(no roles; hook only)" else String.concat " " p.serves);
     ]
 
   (** One output file per pool: `march-<pool>.service`. *)
-  let systemd ~project (ex : export) : (string * string) list =
+  let systemd ?release_dir ~project (ex : export) : (string * string) list =
     List.map (fun p ->
         ( Printf.sprintf "march-%s.service" p.pool_name,
-          systemd_unit ~project ~topo:ex.topo
+          systemd_unit ?release_dir ~project ~topo:ex.topo
             ~environment:(pool_environment ~project p
                           @ [ ("MARCH_TOPOLOGY_STATUS", Printf.sprintf "/var/lib/march/%s/run/%s.status" project p.pool_name);
                               ("MARCH_HOT_RELOAD_SOCKET", Printf.sprintf "/var/lib/march/%s/run/%s.sock" project p.pool_name);
@@ -1434,9 +1439,9 @@ module Gen = struct
 
   let builtins = [ "systemd"; "ufw"; "do-firewall"; "compose" ]
 
-  let builtin ~project target ex =
+  let builtin ?release_dir ~project target ex =
     match target with
-    | "systemd" -> Some (systemd ~project ex)
+    | "systemd" -> Some (systemd ?release_dir ~project ex)
     | "ufw" -> Some (ufw ex)
     | "do-firewall" -> Some (do_firewall ex)
     | "compose" -> Some (compose ~project ex)
