@@ -131,5 +131,10 @@ mod Main do
     let table = String.split(Recon.format_top(rows), "\n")
     println("format_top: lines=" ++ int_to_string(List.length(table)))
     println("names: " ++ names_of(c, wp))
+    -- R10: this program is not a --hot-reload build, so no function has a version.
+    match Recon.which(c, "Main.names_of") do
+      Ok(_) -> println("which: found")
+      Err(e) -> println("which: " ++ e)
+    end
   end
 end

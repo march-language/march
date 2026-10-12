@@ -199,7 +199,16 @@ let should_skip path =
 
 let known_divergence =
   [
-    (* EMPTY as of 2026-07-24 — every previously-triaged entry has been
+    (* One open bug, 2026-10-11: the TIR verifier's Defun contract fails (exit 3)
+       because the optimiser lets a top-level `f` be shadowed by List.map's own
+       callback parameter `f` after inlining, and a value-printing variant of
+       this program prints 409 where the interpreter prints 309.  The fixture
+       itself prints only a length, which hides it.  Tracked in
+       specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md;
+       remove this entry with the fix. *)
+    "fn_arities_shadow_poisoning",
+    "specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md";
+    (* Otherwise EMPTY as of 2026-07-24 — every previously-triaged entry has been
        confirmed fixed and pruned.  An empty list is the intended steady
        state: it means the compiled backend agrees with the interpreter on
        the entire sweep corpus, so ANY divergence is an un-triaged failure

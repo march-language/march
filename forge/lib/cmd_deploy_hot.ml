@@ -1058,6 +1058,79 @@ let cas_put ?digest conn hash path =
   if not (String.length final >= 2 && String.sub final 0 2 = "OK") then
     failwith (Printf.sprintf "CAS_PUT failed: %s" final)
 
+(* ─── Function source text (observe R10) ─────────────────────────────────
+
+   A `--hot-reload` build keeps each boundary function's source under its
+   impl_hash in <cas>/sources/<2 hex>/<62 hex> (March_cas.Cas.store_source,
+   in the project's .march/cas and in $HOME/.march/cas).  A deploy puts the
+   text of every version it is about to switch to, and of the version it
+   switches from when this machine has it, on the node with
+   [CAS_PUT <impl_hash> <size> kind:source], so the debug-tier SOURCE verb can
+   answer for both.  Source is the debug tier: nothing is uploaded unless the
+   operator's $MARCH_DEBUG_POLICY lists SOURCE (the file the node reads for the
+   same decision), and never as part of a deploy that fails for want of it.
+   A node that predates the verb stores the bytes as an unused artifact. *)
+
+(** True iff the file $MARCH_DEBUG_POLICY names lists [verb] on a line of its
+    own ('#' starts a comment): the node's own rule
+    (runtime/march_sig.c [march_sig_debug_allowed]). *)
+let debug_policy_allows ?(verb = "SOURCE") () : bool =
+  match Sys.getenv_opt "MARCH_DEBUG_POLICY" with
+  | None | Some "" -> false
+  | Some path ->
+    (match In_channel.with_open_bin path In_channel.input_all with
+     | exception Sys_error _ -> false
+     | text ->
+       List.exists (fun line ->
+           let line = match String.index_opt line '#' with
+             | Some i -> String.sub line 0 i
+             | None -> line in
+           String.trim line = verb)
+         (String.split_on_char '\n' text))
+
+let is_hash64 h =
+  String.length h = 64
+  && String.for_all (fun c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) h
+
+(** The source text this machine kept for [impl_hash]: the project's store
+    ([project_root]/.march/cas), else $HOME/.march/cas. *)
+let local_source ?(project_root = Sys.getcwd ()) (impl_hash : string) : string option =
+  if not (is_hash64 impl_hash) then None
+  else
+    let rel = "/sources/" ^ String.sub impl_hash 0 2 ^ "/" ^ String.sub impl_hash 2 62 in
+    let roots =
+      (project_root ^ "/.march/cas")
+      :: (match Sys.getenv_opt "HOME" with Some h -> [ h ^ "/.march/cas" ] | None -> []) in
+    List.find_map (fun root ->
+        match In_channel.with_open_bin (root ^ rel) In_channel.input_all with
+        | s -> Some s
+        | exception Sys_error _ -> None) roots
+
+let source_put conn hash text =
+  let size = String.length text in
+  send_line conn (Printf.sprintf "CAS_PUT %s %d kind:source" hash size);
+  let resp = recv_line conn in
+  if resp <> "READY" then failwith (Printf.sprintf "CAS_PUT source: server not ready: %s" resp);
+  send_binary conn (Bytes.of_string text) 0 size;
+  let final = recv_line conn in
+  if not (String.length final >= 2 && String.sub final 0 2 = "OK") then
+    failwith (Printf.sprintf "CAS_PUT source failed: %s" final)
+
+(** Upload the source of every [hashes] this machine has.  Returns how many
+    went up.  A failure to upload is a warning, never a failed deploy: the
+    code is what matters, and SOURCE says no_source for what is missing. *)
+let upload_sources conn (hashes : string list) : int =
+  if not (debug_policy_allows ()) then 0
+  else
+    List.fold_left (fun n h ->
+        match local_source h with
+        | None -> n
+        | Some text ->
+          (try source_put conn h text; n + 1
+           with Failure m ->
+             Printf.eprintf "NOTE: source of %s not uploaded: %s\n%!" h m; n))
+      0 (List.sort_uniq String.compare hashes)
+
 (* ─── Signed TOPOLOGY push (distributed-deploys build step 10) ────────────
 
    A reconciler action like ACTIVATE (plan section 5, "Every reconciler
@@ -1450,6 +1523,19 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
             Printf.printf "Artifact uploaded.\n%!"
           end else
             Printf.printf "Artifact already on server (cache hit).\n%!";
+
+          (* Observe R10: the text of the versions this deploy moves between,
+             before the switch, so SOURCE never names a new hash it cannot
+             show.  Only when $MARCH_DEBUG_POLICY allows SOURCE. *)
+          let src_hashes =
+            List.concat_map (fun fm ->
+                fm.fn_impl_hash
+                :: (match Hashtbl.find_opt slot_map fm.fn_name with
+                    | Some sl -> [ sl.slot_impl_hash ]
+                    | None -> []))
+              to_activate in
+          let n_src = upload_sources conn src_hashes in
+          if n_src > 0 then Printf.printf "Uploaded source of %d function version(s).\n%!" n_src;
 
           (* Phase 5: load actor state schemas for compat checking and migrate_required flag *)
           let old_schemas =
@@ -1996,7 +2082,7 @@ let run_status ?(env="") () : (unit, string) result =
 
 (* ─── Build step ─────────────────────────────────────────────────────────── *)
 
-let build_so ~proj ~output : (string * string, string) result =
+let build_so_for ~(target : string option) ~proj ~output : (string * string, string) result =
   let so_path = output ^ ".so" in
   let manifest_path = output ^ ".so.hcr_manifest" in
   let lib_env = Cmd_build.lib_path_env proj in
@@ -2004,7 +2090,7 @@ let build_so ~proj ~output : (string * string, string) result =
   let target_flag, hcr_flags =
     match proj.Project.hot_reload with
     | Some hr ->
-      let target = match hr.Project.hr_target with
+      let target = match (match target with Some _ as t -> t | None -> hr.Project.hr_target) with
         | Some t -> " --target " ^ Filename.quote t | None -> "" in
       let hcr = match hr.Project.hr_module_prefix, hr.Project.hr_public_key with
         | Some p, Some k -> " --hot-reload " ^ Filename.quote p ^
@@ -2026,6 +2112,9 @@ let build_so ~proj ~output : (string * string, string) result =
     Error (Printf.sprintf "no manifest at %s — rebuild with a hot-reload enabled compiler" manifest_path)
   else
     Ok (so_path, manifest_path)
+
+(** [build_so_for] with the project's own target ([hr_target]). *)
+let build_so ~proj ~output = build_so_for ~target:None ~proj ~output
 
 (* ─── Entry point ────────────────────────────────────────────────────────── *)
 

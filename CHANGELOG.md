@@ -44,6 +44,45 @@ git log is authoritative for exact commits.
   change is printed, `forge.lock` is left as it was, and
   `forge deps --accept-caps` keeps it. Installing what `forge.lock` already
   says is never checked.
+- **`forge release build` lays out a deployable bundle with a `bin/<app>`
+  launcher.** `forge release build [--target T] [--profile P] [--tar]` writes
+  `.march/release/<app>-<version>-<target>/` (`bin/`, `lib/` with the binary,
+  hot-reload manifest and schemas, `etc/` with the topology, policies, public
+  key and `env`, and a `RELEASE` file). The launcher is generated POSIX `sh`:
+  `start`, `daemon`, `stop` (SIGTERM, then SIGKILL after the topology's soft
+  drain deadline), `restart`, `pid`, `version` (with the node's code epoch),
+  `ping` and `status` over the observe socket (needs `nc -U`, `socat` or
+  `python3`), and `rpc`/`shell`/`observe`/`diagnose`, which run `forge` when
+  it is on the host and otherwise print what to run. `forge release` is now a
+  group whose default is the old guarded tag flow (`forge release --bump`
+  still works; `forge release tag` is the same). `forge topology gen systemd
+  --release-dir DIR` points `ExecStart` at `DIR/bin/<app> start`.
+- **`WHICH` and `SOURCE` on the observe socket, `Recon.which` and `Recon.source`:
+  which code a node runs, and its text.** `WHICH <name>` (observe tier) answers a
+  reloadable function's `impl_hash`, its baseline, epoch and activation time;
+  `SOURCE` (debug tier: signed, fresh, `$MARCH_DEBUG_POLICY`, audited) returns the
+  source of that exact version. After a hot deploy, `WHICH` shows the new hash and
+  `SOURCE` the new body. A `--hot-reload` build keeps each boundary function's
+  text in the CAS under its `impl_hash`, and `forge deploy hot` uploads it when
+  the operator's `$MARCH_DEBUG_POLICY` lists `SOURCE`. See
+  [Which code is running](docs/observe.md#which-code-is-running-which-and-source).
+- **`forge observe` is an interactive view, with a `WATCH` stream and crash
+  dumps.** On a terminal, `forge observe` opens panels for System, Load,
+  Actors (the `forge top` table, re-rankable), Actor, Supervision, Names,
+  Epochs, Cluster and Crashes, fed by a new observe-socket verb `WATCH
+  <sections> <interval_ms> <max>` (at most 3600 frames, at least 250 ms apart,
+  four streams at once, freed the moment the client hangs up). `n` cycles the
+  hosts of `--env`; `--panel NAME` prints one panel as text for scripts. A node
+  started with `MARCH_CRASH_DUMP=<path>` now leaves a complete snapshot plus the
+  crash ring with panic text there when it dies of an unsupervised panic or a
+  fatal runtime error (never from a signal handler: a segfault leaves none);
+  read it with `forge observe --dump FILE` or `forge diagnose --from-dump FILE`.
+- **`--verify-tir` checks Defun's contracts.** From `tir-defun` on, a lambda
+  creation site that Defun should have replaced, or a call through a locally
+  bound name that should be indirect, is reported as a `[contract]` finding.
+  It caught a compiled-only wrong value: a top-level function named like a
+  stdlib callback parameter (`f`) is called through that parameter after
+  inlining (`specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md`).
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the

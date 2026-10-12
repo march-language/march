@@ -2139,11 +2139,19 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
     } else if (strncmp(line, "CAS_PUT ", 8) == 0) {
         char hash[65]; long long size_ll;
         char so[65] = "";
+        /* kind:source (R10): the text of a function, kept under its
+         * impl_hash for the debug-tier SOURCE verb.  Never mapped or run:
+         * it lives in sources/, not artifacts/, whatever its bytes say. */
+        int is_src = strstr(line + 8, " kind:source") != NULL;
         int has_so = hex_field(line, " so_blake3:", NULL, so);
         if (has_so > 0 && !HAVE_SIGNING_KEY) has_so = 0;   /* nothing activates here anyway */
         if (sscanf(line + 8, "%64s %lld", hash, &size_ll) != 2
             || !is_hex64(hash) || has_so < 0
-            || size_ll <= 0 || size_ll > CAS_MAX_ARTIFACT) {
+            || size_ll <= 0 || size_ll > (is_src ? MARCH_SOURCE_MAX_BYTES : CAS_MAX_ARTIFACT)) {
+            wresp(fd, "ERR bad_format\n"); return;
+        }
+        char src_path[640];
+        if (is_src && !march_source_path(src_path, sizeof src_path, hash)) {
             wresp(fd, "ERR bad_format\n"); return;
         }
         size_t sz = (size_t)size_ll;
@@ -2167,9 +2175,12 @@ static void handle_line(int fd, struct rl_session *S, char *line) {
             }
         }
         /* Write to CAS */
-        char path[640]; cas_artifact_path(path, sizeof(path), hash);
+        char path[640];
+        if (is_src) snprintf(path, sizeof(path), "%s", src_path);
+        else cas_artifact_path(path, sizeof(path), hash);
         /* Ensure parent directory exists */
-        char dir[640]; snprintf(dir, sizeof(dir), "%s/artifacts/%.2s", g_cas_root, hash);
+        char dir[640]; snprintf(dir, sizeof(dir), "%s/%s/%.2s", g_cas_root,
+                                is_src ? "sources" : "artifacts", hash);
         mkdir_p(dir);
         /* Write atomically via tmp file */
         char tmp[660]; snprintf(tmp, sizeof(tmp), "%s.tmp", path);
@@ -3133,11 +3144,7 @@ void march_reload_server_start(const char *socket_path) {
     g_socket_path[sizeof(g_socket_path) - 1] = '\0';
 
     /* Build CAS root path: ~/.march/cas */
-    const char *home = getenv("HOME");
-    if (home)
-        snprintf(g_cas_root, sizeof(g_cas_root), "%s/.march/cas", home);
-    else
-        snprintf(g_cas_root, sizeof(g_cas_root), "/tmp/.march_cas");
+    snprintf(g_cas_root, sizeof(g_cas_root), "%s", march_cas_root());
 
 #if HAVE_SIGNING_KEY
     load_pubkey_from_hex();

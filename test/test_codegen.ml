@@ -16598,6 +16598,54 @@ let test_tir_verify_types_named_tvar () =
     (List.exists (fun (_, s) -> Test_helpers.contains "named type variable" s)
        (March_tir.Tir_verify.check ~stage:"tir-lower" ~rc:false m))
 
+(* ── TIR verifier, check 5 (pass contracts): Defun's postconditions ───── *)
+
+let tv_contract_has ~stage needle m =
+  List.exists (fun s -> Test_helpers.contains needle s)
+    (List.map snd (March_tir.Tir_verify.check ~stage ~rc:false m))
+
+(* A lambda creation site is [letrec f = .. in f].  Defun replaces each with an
+   allocation of its closure struct, so one at or after tir-defun is a lambda
+   Defun missed. *)
+let test_tir_verify_contract_lambda_survives_defun () =
+  let open March_tir.Tir in
+  let lam = TV.fn "lam" ~params:[ TV.v "x" TInt ] (EAtom (AVar (TV.v "x" TInt))) in
+  let site = ELetRec ([ lam ], EAtom (AVar (TV.v "lam" (TFn ([ TInt ], TInt))))) in
+  let m = TV.modl [ TV.fn "f" site ] in
+  Alcotest.(check bool) "reported at tir-defun" true
+    (tv_contract_has ~stage:"tir-defun" "survived Defun as a letrec creation site" m);
+  Alcotest.(check bool) "... and at tir-perceus" true
+    (tv_contract_has ~stage:"tir-perceus" "survived Defun" m);
+  Alcotest.(check bool) "... but not before Defun, where lambdas are expected" false
+    (tv_contract_has ~stage:"tir-mono" "survived Defun" m);
+  (* a local function that is not a creation site (several functions, or a
+     body that is not the function itself) is not a lambda *)
+  let not_site = ELetRec ([ lam ], EAtom (TV.int 0)) in
+  Alcotest.(check bool) "a letrec whose body is not the function is not a creation site" false
+    (tv_contract_has ~stage:"tir-defun" "survived Defun"
+       (TV.modl [ TV.fn "g" not_site ]))
+
+(* A name bound locally (parameter, let, branch binder) that is called is a
+   closure pointer: Defun makes it an indirect call even when a top-level
+   function shares its name. *)
+let test_tir_verify_contract_local_call_is_indirect () =
+  let open March_tir.Tir in
+  let g = TV.v "g" (TFn ([ TInt ], TInt)) in
+  let m = TV.modl [
+      TV.fn "g" ~params:[ TV.v "n" TInt ] (EAtom (AVar (TV.v "n" TInt)));
+      (* the parameter [g] shadows the top-level [g]; calling it directly would
+         link to the top-level function *)
+      TV.fn "h" ~params:[ g ] (EApp (g, [ TV.int 1 ])) ] in
+  Alcotest.(check bool) "a direct call through a local binding is reported" true
+    (tv_contract_has ~stage:"tir-defun" "called directly after Defun" m);
+  let ok = TV.modl [
+      TV.fn "g" ~params:[ TV.v "n" TInt ] (EAtom (AVar (TV.v "n" TInt)));
+      TV.fn "h" ~params:[ g ] (ECallPtr (AVar g, [ TV.int 1 ])) ] in
+  Alcotest.(check bool) "the same call as ECallPtr is clean" false
+    (tv_contract_has ~stage:"tir-defun" "called directly after Defun" ok);
+  Alcotest.(check bool) "before Defun a local call is expected" false
+    (tv_contract_has ~stage:"tir-mono" "called directly after Defun" m)
+
 (* ── TIR verifier, check 3 (RC balance) ──────────────────────────────── *)
 
 let tv_rc ?(leaks = false) m =
@@ -16838,6 +16886,8 @@ let codegen_suites =
           Alcotest.test_case "types: case binder count (RED)" `Quick test_tir_verify_types_case_arity;
           Alcotest.test_case "types: missing field (RED)" `Quick test_tir_verify_types_field;
           Alcotest.test_case "types: named tvar after mono (RED)" `Quick test_tir_verify_types_named_tvar;
+          Alcotest.test_case "contract: lambda survives Defun (RED)" `Quick test_tir_verify_contract_lambda_survives_defun;
+          Alcotest.test_case "contract: local call must be indirect (RED)" `Quick test_tir_verify_contract_local_call_is_indirect;
           Alcotest.test_case "rc: balanced owned param is clean" `Quick test_tir_verify_rc_balanced;
           Alcotest.test_case "rc: double release (RED)" `Quick test_tir_verify_rc_double_release;
           Alcotest.test_case "rc: use after release (RED)" `Quick test_tir_verify_rc_use_after_release;
