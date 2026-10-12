@@ -160,9 +160,6 @@ What the lab has found so far, each filed with its repro:
   with no leader, every node grows by ~13k heap objects a second with no traffic at all.
 - [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-simultaneous-restart-memory-burst.md):
   nodes restarted together can each allocate ~1 GB in 30 s and be OOM-killed.
-- [`2026-10-04-lab-control-topology-step-races-report.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-04-lab-control-topology-step-races-report.md):
-  a release's topology step halts when the Agent checks the node's report before the
-  placement loop has re-read the topology.
 - [`2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md):
   a halted first `forge deploy` records nothing (the retry restarts every node again), and
   following a release gives up on `ERR no_leader`.

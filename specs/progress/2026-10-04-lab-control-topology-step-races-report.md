@@ -46,3 +46,43 @@ Seen again 2026-10-05 at load 5 (so not only under load): the first deploy's top
 release halted the same way, on work-lab-2. The lab's first deploy now goes `--via ssh`
 (see [2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md](2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md)
 for why retrying did not work either).
+
+## Fixed 2026-10-12
+
+**Cause.** As described above: `Control.agent_apply` relayed the step's lines and then
+read the node's report exactly once. A `TOPOLOGY` line is taken by the reload server
+synchronously (it stores and verifies `g_topology_digest`), but the report's `topology`
+stays `-` until the placement loop re-reads the pushed file on its next tick
+(`MARCH_PLACEMENT_TICK_MS`, after `march_hcr_on_topology`), because `reload_report` only
+reports the digest once `applied`. So "taken, not yet applied" was answered as not-ok,
+`leader_result` recorded it as the node's failed step, and the next pass halted the
+release.
+
+**Fix.** stdlib/control.march: after a fully accepted relay, a topology step polls the
+report (`await_state`) for a bounded time before answering not-ok:
+`agent_apply_within(ops, o, wait_ms, poll_ms)` does the work;
+`agent_apply_ticked(ops, o, tick_ms)` derives the bound from the placement tick
+(`topology_wait_ms(tick)` = ten ticks, at least 2 s, at most 60 s; poll every
+min(tick, 100) ms); `agent_apply(ops, o)` assumes the default tick (200 ms). Every other
+action still reads the report once after the relay, so non-topology steps are neither
+slower nor different. `agent_apply_recording` takes the tick, and the generated control
+wiring (lib/desugar/control_wiring.march) reads `MARCH_PLACEMENT_TICK_MS` once into its
+config (`cfg:placement_tick_ms`) at `ctl_start` and passes it. `Control` itself stays
+free of `Env` (reading the variable inside `Control` added `IO.Process` to its
+capability footprint). Polling inside the Agent was preferred over answering ok-pending:
+an ok answer leaves the order in flight until the next report, after which the executor
+would order the node again and relay lines the reload server had already taken.
+
+**Test.** test/stdlib/test_control.march, `describe "agent_apply"`:
+- "a topology step waits for the runner to apply the digest": a fake node whose report
+  shows the digest only from its third read (check, post-relay read, one tick later);
+  `agent_apply` must answer ok "applied".
+- "a topology step the runner never applies fails once the wait is over" (bounded).
+- "a non-topology step does not wait: one report after the relay" (exactly two report
+  reads for an activate step that changed nothing, even with a 60 s budget).
+
+RED (old stdlib/control.march, the first new test only, the other two need the new
+function): `./_build/default/test/test_stdlib_march.exe test control` exits 1 with
+`FAIL: "agent_apply a topology step waits for the runner to apply the digest"`,
+`Finished: 47 tests, 1 failure`. GREEN (this change): the same command exits 0,
+`Finished: 49 tests, 0 failures`.
