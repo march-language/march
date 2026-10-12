@@ -545,7 +545,7 @@ pfn ctl_apply_relayed(ops : Control.AgentOps, o : Control.StepOrder) : Control.S
     let _ = ctl_wait_for(ops, o, 60000)
     ()
   else () end
-  Control.agent_apply_recording(ops, ctl_memory(), o)
+  Control.agent_apply_recording(ops, ctl_memory(), o, ctl_cfg_int("placement_tick_ms", 200))
 end
 
 pfn ctl_agent_body(node : Cap(ClusterNode.Live), s : Cap(Session.Live), nc : Cap(IO.NetConnect), fr : Cap(IO.FileRead), mu : Cap(IO.Mut), ck : Cap(IO.Clock), st : Ctl_Agent.S_send_Hello) : Ctl_Agent.Yield do
@@ -1696,6 +1696,9 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   Vault.set(m, "cfg:poll_ms", Env.get("MARCH_CONTROL_POLL_MS", "500"))
   Vault.set(m, "cfg:session_polls", Env.get("MARCH_CONTROL_SESSION_POLLS", "1200"))
   Vault.set(m, "cfg:verified_file", Env.get("MARCH_TOPOLOGY_VERIFIED_FILE", ""))
+  -- How often the placement loop re-reads a pushed topology: a topology step
+  -- waits a few of these ticks for it (`Control.agent_apply_ticked`).
+  Vault.set(m, "cfg:placement_tick_ms", Env.get("MARCH_PLACEMENT_TICK_MS", "200"))
   Vault.set(m, "cfg:port", int_to_string(port))
   Vault.set(m, "cfg:port_offset", Env.get("MARCH_CONTROL_PORT_OFFSET", "0"))
   Vault.set(m, "cfg:pools", String.join(ctl_words(Env.get("MARCH_POOLS", "")), " "))

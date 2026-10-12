@@ -3,7 +3,8 @@
  *
  *   STATE        <sig> nonce:<hex> not_after_ms:<t> pid:<p> [timeout_ms:<t>]
  *   CRASHES_FULL <sig> nonce:<hex> not_after_ms:<t> [n:<n>]
- *   TRACE_START  <sig> ... (count:<n> | rate:<n> per_s:<s>) fn:<a,b,..> [ring:<r>]
+ *   TRACE_START  <sig> ... (count:<n> | rate:<n> per_s:<s>) [fn:<a,b,..>]
+ *                [events:<k,..> pids:<p,..>] [ring:<r>]
  *   TRACE_DRAIN  <sig> ... session:<id> [max:<n>]
  *   TRACE_STOP   <sig> ... session:<id>
  *   SOURCE       <sig> nonce:<hex> boot:<hex> not_after_ms:<t> name:<fn>
@@ -69,6 +70,8 @@ typedef struct {
     char    nonce[MARCH_SIG_NONCE_MAX + 2];
     char    boot[40];
     char    fn[1024];              /* TRACE_START's comma-separated names */
+    char    events[64];            /* TRACE_START's actor-event kinds */
+    char    pids[128];             /* TRACE_START's pid filter */
     char    name[256];             /* SOURCE's function name */
     int     local;                 /* in-process caller: the cap is the signature */
     int64_t not_after_ms;
@@ -135,6 +138,30 @@ static int valid_fn_list(const char *v) {
     return !prev_comma;
 }
 
+/* A list of lowercase words joined by single commas (TRACE_START events:). */
+static int valid_word_list(const char *v) {
+    if (!*v) return 0;
+    int prev_comma = 1;
+    for (const char *p = v; *p; p++) {
+        if (*p == ',') { if (prev_comma) return 0; prev_comma = 1; continue; }
+        if (!(*p >= 'a' && *p <= 'z')) return 0;
+        prev_comma = 0;
+    }
+    return !prev_comma;
+}
+
+/* A list of decimal numbers joined by single commas (TRACE_START pids:). */
+static int valid_num_list(const char *v) {
+    if (!*v) return 0;
+    int prev_comma = 1;
+    for (const char *p = v; *p; p++) {
+        if (*p == ',') { if (prev_comma) return 0; prev_comma = 1; continue; }
+        if (!isdigit((unsigned char)*p)) return 0;
+        prev_comma = 0;
+    }
+    return !prev_comma;
+}
+
 /* Parse "<sig> k:v k:v ..." for [verb], verify and admit it, check the
  * policy.  NULL when the request may run, else the error code.  [allowed]
  * lists the keys this verb takes besides nonce, boot and not_after_ms.
@@ -191,6 +218,18 @@ static const char *admit(const char *verb, const char *args, const char *allowed
         if (strcmp(k, "fn") == 0) {
             if (r->fn[0] || !valid_fn_list(v) || strlen(v) >= sizeof r->fn) return "bad_args";
             snprintf(r->fn, sizeof r->fn, "%s", v);
+            continue;
+        }
+        if (strcmp(k, "events") == 0) {
+            if (r->events[0] || !valid_word_list(v) || strlen(v) >= sizeof r->events)
+                return "bad_args";
+            snprintf(r->events, sizeof r->events, "%s", v);
+            continue;
+        }
+        if (strcmp(k, "pids") == 0) {
+            if (r->pids[0] || !valid_num_list(v) || strlen(v) >= sizeof r->pids)
+                return "bad_args";
+            snprintf(r->pids, sizeof r->pids, "%s", v);
             continue;
         }
         if (strcmp(k, "name") == 0) {
@@ -330,9 +369,32 @@ static void write_limit(march_jw *w, int kind, int64_t n, int64_t per_s) {
     march_jw_obj_end(w);
 }
 
+static const char *ev_kind_name(int k) {
+    switch (k) {
+    case MARCH_TRACE_EV_SENT:     return "sent";
+    case MARCH_TRACE_EV_RECEIVED: return "received";
+    case MARCH_TRACE_EV_SPAWNED:  return "spawned";
+    case MARCH_TRACE_EV_EXITED:   return "exited";
+    case MARCH_TRACE_EV_DROPPED:  return "dropped";
+    default:                      return "call";
+    }
+}
+
+/* A reason code, as the word a consumer reads: Exited 0/1/2, Dropped 0..3. */
+static const char *ev_reason_name(int kind, int reason) {
+    if (kind == MARCH_TRACE_EV_EXITED)
+        return reason == 0 ? "normal" : reason == 1 ? "killed" : "crash";
+    if (kind == MARCH_TRACE_EV_DROPPED)
+        return reason == MARCH_TRACE_DROP_DEAD ? "dead"
+             : reason == MARCH_TRACE_DROP_DRAINING ? "draining"
+             : reason == MARCH_TRACE_DROP_FULL ? "full" : "evicted";
+    return NULL;
+}
+
 static const char *verb_trace_start(march_jw *w, const char *args) {
     dbg_req r;
-    const char *err = admit("TRACE_START", args, "count rate per_s ring fn", &r, 1);
+    const char *err = admit("TRACE_START", args,
+                            "count rate per_s ring fn events pids", &r, 1);
     int has_count = r.v[K_COUNT] >= 0, has_rate = r.v[K_RATE] >= 0, has_per = r.v[K_PER_S] >= 0;
     char detail[160] = "";
     if (!err) {
@@ -340,15 +402,41 @@ static const char *verb_trace_start(march_jw *w, const char *args) {
         if (!has_count && !has_rate && !has_per) err = "limit_required";
         else if (has_count && (has_rate || has_per)) err = "bad_args";
         else if (has_rate != has_per) err = "bad_args";
-        else if (!r.fn[0]) err = "bad_args";
+        else if (!r.fn[0] && !r.events[0]) err = "bad_args";
     }
+    /* Actor events (march_trace.h): kinds by name, and a pid filter that is
+     * required with them and meaningless without. */
+    march_trace_actor_opts ev;
+    memset(&ev, 0, sizeof ev);
+    if (!err && r.events[0]) {
+        char *save = NULL;
+        for (char *t = strtok_r(r.events, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+            uint32_t k = strcmp(t, "sent") == 0 ? MARCH_TRACE_EVB(MARCH_TRACE_EV_SENT)
+                       : strcmp(t, "received") == 0 ? MARCH_TRACE_EVB(MARCH_TRACE_EV_RECEIVED)
+                       : strcmp(t, "spawned") == 0 ? MARCH_TRACE_EVB(MARCH_TRACE_EV_SPAWNED)
+                       : strcmp(t, "exited") == 0 ? MARCH_TRACE_EVB(MARCH_TRACE_EV_EXITED)
+                       : strcmp(t, "dropped") == 0 ? MARCH_TRACE_EVB(MARCH_TRACE_EV_DROPPED)
+                       : 0;
+            if (!k || (ev.kinds & k)) { err = "bad_args"; break; }
+            ev.kinds |= k;
+        }
+    }
+    if (!err && r.pids[0]) {
+        if (!ev.kinds) err = "bad_args";
+        char *save = NULL;
+        for (char *t = strtok_r(r.pids, ",", &save); !err && t; t = strtok_r(NULL, ",", &save)) {
+            if (ev.npids >= MARCH_TRACE_MAX_PIDS || strlen(t) > 15) { err = "bad_args"; break; }
+            ev.pids[ev.npids++] = strtoll(t, NULL, 10);
+        }
+    }
+    if (!err && ev.kinds && ev.npids == 0) err = "pids_required";
     const char *names[MARCH_TRACE_MAX_FNS + 1];
     int nn = 0;
     int64_t id = 0;
     int kind = has_count ? MARCH_TRACE_COUNT : MARCH_TRACE_RATE;
     int64_t a = has_count ? r.v[K_COUNT] : r.v[K_RATE];
     int64_t b = has_count ? 0 : r.v[K_PER_S];
-    if (!err) {
+    if (!err && r.fn[0]) {
         char *save = NULL;
         for (char *t = strtok_r(r.fn, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
             if (nn >= MARCH_TRACE_MAX_FNS) { err = "bad_args"; break; }
@@ -358,16 +446,19 @@ static const char *verb_trace_start(march_jw *w, const char *args) {
     }
     if (!err)
         err = march_trace_start((march_trace_kind)kind, a, b,
-                                r.v[K_RING] < 0 ? 0 : r.v[K_RING], names, nn, &id);
+                                r.v[K_RING] < 0 ? 0 : r.v[K_RING], names, nn,
+                                ev.kinds ? &ev : NULL, &id);
     if (err) {
-        snprintf(detail, sizeof detail, "limit=%lld/%lld",
+        snprintf(detail, sizeof detail, "limit=%lld/%lld events=%s pids=%d",
                  (long long)(has_count ? r.v[K_COUNT] : r.v[K_RATE]),
-                 (long long)(has_per ? r.v[K_PER_S] : 0));
+                 (long long)(has_per ? r.v[K_PER_S] : 0),
+                 ev.kinds ? "yes" : "none", ev.npids);
         audit("TRACE_START", &r, err, detail);
         return err;
     }
-    snprintf(detail, sizeof detail, "session=%lld %s=%lld fns=%d",
-             (long long)id, kind == MARCH_TRACE_COUNT ? "count" : "rate", (long long)a, nn);
+    snprintf(detail, sizeof detail, "session=%lld %s=%lld fns=%d events=%s pids=%d",
+             (long long)id, kind == MARCH_TRACE_COUNT ? "count" : "rate", (long long)a, nn,
+             ev.kinds ? "yes" : "none", ev.npids);
     audit("TRACE_START", &r, "ok", detail);
     int64_t cap = kind == MARCH_TRACE_COUNT ? a
                 : r.v[K_RING] > 0 ? r.v[K_RING] : MARCH_TRACE_RING_DEFAULT;
@@ -379,6 +470,17 @@ static const char *verb_trace_start(march_jw *w, const char *args) {
     march_jw_arr_begin(w);
     for (int i = 0; i < nn; i++) march_jw_str(w, names[i]);
     march_jw_arr_end(w);
+    if (ev.kinds) {
+        march_jw_key(w, "events");
+        march_jw_arr_begin(w);
+        for (int k = MARCH_TRACE_EV_SENT; k <= MARCH_TRACE_EV_LAST; k++)
+            if (ev.kinds & MARCH_TRACE_EVB(k)) march_jw_str(w, ev_kind_name(k));
+        march_jw_arr_end(w);
+        march_jw_key(w, "pids");
+        march_jw_arr_begin(w);
+        for (int i = 0; i < ev.npids; i++) march_jw_i64(w, ev.pids[i]);
+        march_jw_arr_end(w);
+    }
     march_jw_key(w, "lifetime_s"); march_jw_i64(w, MARCH_TRACE_LIFETIME_S);
     march_jw_key(w, "idle_s");     march_jw_i64(w, MARCH_TRACE_IDLE_S);
     march_jw_obj_end(w);
@@ -417,8 +519,29 @@ static const char *verb_trace_drain(march_jw *w, const char *args) {
     march_jw_key(w, "events");
     march_jw_arr_begin(w);
     for (int i = 0; i < k; i++) {
-        const char *nm = march_dispatch_id_to_name(ev[i].name_id);
         march_jw_obj_begin(w);
+        if (ev[i].kind != MARCH_TRACE_EV_CALL) {
+            /* An actor event: pids, a tag, a reason, a time.  No payload. */
+            const char *why = ev_reason_name(ev[i].kind, ev[i].reason);
+            march_jw_key(w, "kind");     march_jw_str(w, ev_kind_name(ev[i].kind));
+            march_jw_key(w, "pid");      march_jw_i64(w, ev[i].pid);
+            march_jw_key(w, "peer");
+            if (ev[i].peer == MARCH_TRACE_NONE) march_jw_null(w);
+            else march_jw_i64(w, ev[i].peer);
+            march_jw_key(w, "msg_tag");
+            if (ev[i].tag == MARCH_TRACE_NONE) march_jw_null(w);
+            else march_jw_i64(w, ev[i].tag);
+            march_jw_key(w, "reason");
+            if (why) march_jw_str(w, why); else march_jw_null(w);
+            march_jw_key(w, "epoch");    march_jw_u64(w, ev[i].epoch);
+            march_jw_key(w, "at_ns");    march_jw_u64(w, ev[i].at_ns);
+            march_jw_obj_end(w);
+            continue;
+        }
+        const char *nm = march_dispatch_id_to_name(ev[i].name_id);
+        /* A boundary call.  Only a session that also records actor events
+         * says "kind": a calls-only session's events are unchanged from R8. */
+        if (st.ev_kinds) { march_jw_key(w, "kind"); march_jw_str(w, "call"); }
         march_jw_key(w, "pid");     march_jw_i64(w, ev[i].pid);
         march_jw_key(w, "fn");
         if (nm) march_jw_str(w, nm); else march_jw_null(w);
@@ -515,7 +638,7 @@ static const march_observe_verb debug_verbs[] = {
     { "HELLO", "observe", "",
       "this process's boot id (name it in every signed request) and whether signing is configured",
       verb_hello },
-    { "TRACE_START", "debug", SIGNED " (count:<n> | rate:<n> per_s:<s>) fn:<a,b,..> [ring:<r>]",
+    { "TRACE_START", "debug", SIGNED " (count:<n> | rate:<n> per_s:<s>) [fn:<a,b,..>] [events:<k,..> pids:<p,..>] [ring:<r>]",
       "start a bounded trace of boundary calls; a limit is mandatory (signed; $MARCH_DEBUG_POLICY)",
       verb_trace_start },
     { "TRACE_DRAIN", "debug", SIGNED " session:<id> [max:<n>]",

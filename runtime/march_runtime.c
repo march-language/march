@@ -5267,6 +5267,13 @@ static void actor_green_thread(void *arg) {
             continue;
         }
 
+        /* Actor-event tracing (march_trace.h): this actor's own proc, one
+         * relaxed load per message, a never-taken branch while no session
+         * names it.  Before the dispatch, which consumes the message. */
+        if (__builtin_expect(self && atomic_load_explicit(&self->trace_mask,
+                                                          memory_order_relaxed) != 0, 0))
+            march_trace_ev_received(self, msg);
+
         uint32_t tbl_version = 0;
 
         /* NO RC CLOBBER HERE — deliberately, and load-bearing.
@@ -6509,6 +6516,16 @@ static void do_actor_death_kind(void *actor, march_death_reason reason,
     march_reclaim_exit();
     march_pid_entry *pe = meta ? meta->pe : NULL;
 
+    /* Actor-event tracing: Exited, with how it died.  Before the cleanups
+     * and the Down notifications, so it precedes anything they cause. */
+    if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                              memory_order_relaxed) != 0, 0)) {
+        march_reclaim_enter();
+        march_trace_ev_exited(meta ? meta_gt(meta) : NULL,
+                              meta ? pe_pid_or_0(pe) : -1, (int)reason);
+        march_reclaim_exit();
+    }
+
     /* Run cleanup callbacks in reverse acquisition order (cleanup_head was
      * most recently registered → already LIFO order). */
     if (cleanups) {
@@ -6899,6 +6916,10 @@ static void activate_actor_green_thread(march_actor_meta *meta) {
                     "messages; see Scheduler.stat(3)\n");
         return;
     }
+    /* The trace hooks name an actor by pid; record it before the proc is
+     * published (the CAS below) so no sender can see it without. */
+    atomic_store_explicit(&green_thread->actor_pid1,
+                          pe_pid_or_0(meta->pe) + 1, memory_order_relaxed);
     march_proc *expected = NULL;
     if (atomic_compare_exchange_strong_explicit(&meta->green_thread, &expected,
                                                 green_thread, memory_order_acq_rel,
@@ -6946,6 +6967,11 @@ static void *march_spawn_common(void *actor, int defer_activation) {
                           memory_order_relaxed);
     pid_entry_publish_locked(meta->pe);
     pthread_mutex_unlock(&g_tbl_mu);
+    /* Actor-event tracing: the spawner's proc selects the session, so a
+     * spawn by `main` (no pid) is seen only through a pid it names. */
+    if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                              memory_order_relaxed) != 0, 0))
+        march_trace_ev_spawned(spawner, spawned_by, pe_pid(meta->pe));
     /* Initialize scheduler lazily. */
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
@@ -7877,6 +7903,18 @@ void march_run_scheduler(void) {
     atomic_store_explicit(&g_sched_initialized, 0, memory_order_release);
 }
 
+/* Actor-event tracing (march_trace.h): a message march_send refused.  The
+ * armed word is the whole disarmed cost; the rest runs only while a session
+ * records Dropped events.  The target's proc is gone or going, so the hook
+ * gets its pid index (the tombstone resolves it) and matches by pid list.
+ * [msg] is still ours (not yet released) and is read only for its tag. */
+static inline void trace_drop_actor(void *actor, void *msg, int reason) {
+    if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                              memory_order_relaxed) != 0, 0))
+        march_trace_ev_dropped(march_sched_current(), NULL,
+                               march_pid_index_of(actor), msg, reason);
+}
+
 /* Send a message to an actor.
  *
  * RC contract: we do NOT call march_incrc on msg.  Perceus at the call site
@@ -7891,6 +7929,7 @@ void march_run_scheduler(void) {
 void *march_send(void *actor, void *msg) {
     if (!actor_alive_load(actor)) {
         /* Actor dead: release the reference we were given. */
+        trace_drop_actor(actor, msg, 0 /* dead */);
         march_decrc(msg);
         void *none = march_alloc(16);
         return none;
@@ -7917,6 +7956,7 @@ void *march_send(void *actor, void *msg) {
      * Option(Unit), so it reports this the way it reports a dead target:
      * None, i.e. "not accepted". */
     if (meta && atomic_load_explicit(&meta->draining, memory_order_acquire)) {
+        trace_drop_actor(actor, msg, 1 /* draining */);
         march_reclaim_exit();
         march_decrc(msg);
         void *none = march_alloc(16);
@@ -7924,6 +7964,7 @@ void *march_send(void *actor, void *msg) {
     }
     march_proc *gt = meta ? meta_gt(meta) : NULL;
     int send_rc = gt ? march_sched_send(gt, msg) : MARCH_SEND_DEAD;
+    if (send_rc == MARCH_SEND_DEAD) trace_drop_actor(actor, msg, 0 /* dead */);
     march_reclaim_exit();
     if (send_rc == MARCH_SEND_DEAD) {
         /* Actor died in the window between the checks above and the send;
@@ -10781,6 +10822,38 @@ int64_t march_pid_index_of(void *actor) {
     int64_t pid_index = pe_pid_or_0(pe);
     march_reclaim_exit();
     return pid_index;
+}
+
+/* The pid index of the actor [p] runs, or -1 when [p] is not an actor's proc
+ * (main, a task).  Stored on the proc at activation, before senders can find
+ * it, so a just-spawned actor that has not run yet (proc->actor is still
+ * NULL) resolves too, and nothing dereferences a meta that may be retired.
+ * The caller is in a critical section [p] was resolved in.  Used by
+ * march_trace.c. */
+int64_t march_trace_proc_pid(march_proc *p) {
+    return p ? atomic_load_explicit(&p->actor_pid1, memory_order_relaxed) - 1 : -1;
+}
+
+/* Set or clear [set]/[clear] session bits in the trace_mask of the live actor
+ * with pid index [pid_index].  0 when it has a running proc, -1 when there is
+ * none (unknown, dead, or not started).  Used by march_trace.c to flag the
+ * actors a session's pid filter names. */
+int march_trace_flag_pid(int64_t pid_index, uint32_t set, uint32_t clear) {
+    int rc = -1;
+    march_reclaim_enter();
+    /* Lock-free: the tombstone table is read with acquire loads, and a meta
+     * found through `live` cannot be freed before this section ends. */
+    march_pid_entry *pe = pid_entry(pid_index);
+    march_actor_meta *live = pe ? atomic_load_explicit(&pe->live, memory_order_acquire)
+                                : NULL;
+    march_proc *gt = live ? meta_gt(live) : NULL;
+    if (gt) {
+        if (clear) atomic_fetch_and_explicit(&gt->trace_mask, ~clear, memory_order_relaxed);
+        if (set)   atomic_fetch_or_explicit(&gt->trace_mask, set, memory_order_relaxed);
+        rc = 0;
+    }
+    march_reclaim_exit();
+    return rc;
 }
 
 /* monitor: establish a monitor link from watcher to target. If death already

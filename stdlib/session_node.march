@@ -594,9 +594,6 @@ mod SessionNode do
         Down.Down(_, _, reason) ->
           -- A hot-reload hard drain kills the host with Crash("draining"):
           -- pass that on, and the Endpoint ends the session as drained.
-          -- (One constructor reference on purpose: this actor is declared
-          -- before Endpoint, so each reference to Endpoint's constructors
-          -- counts in the stdlib internal-error ratchet.)
           let why = match reason do
             DownReason.Crash(w) -> w
             _ -> ""

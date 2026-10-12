@@ -298,6 +298,13 @@ typedef struct march_proc {
     _Atomic int                mbox_lock;    /* Spinlock for mailbox access              */
     _Atomic int                mbox_wait_mode; /* 0=not mailbox-waiting, 1=receive any,
                                                   2=actor dispatch waiting for user only. */
+    /* Trace sessions that watch this proc's actor (march_trace.h): bit i is
+     * set while session i's pid filter names this actor.  It fills the hole
+     * the three 4-byte fields above leave before the next pointer, on the
+     * line the send path locks anyway, so the struct does not grow.  Written
+     * only by the trace control plane; the hooks read it relaxed.  A bit can
+     * outlive its session (the producer that notices clears it). */
+    _Atomic uint32_t           trace_mask;
     struct march_proc         *mbox_send_waiters; /* Task 8 (MARCH_MBOX_BLOCK): intrusive
                                                  singly-linked list of sender procs parked
                                                  on THIS proc's full mailbox, threaded
@@ -512,6 +519,15 @@ typedef struct march_proc {
      * primitives append to this buffer instead of writing to stdout.  Only
      * the proc's own green thread sets, clears and writes it. */
     struct march_out_capture   *out_capture;
+    /* The pid index (+1; 0 = none) of the actor this proc runs, stored by
+     * activate_actor_green_thread BEFORE the proc is published to senders, so
+     * an actor that has not run yet already has one.  Read only by the trace
+     * hooks (march_trace.h); never dereferences the actor's meta, which can be
+     * retired while its proc still exists.  LAST, like the observe counters
+     * above: placed earlier it shifted every field after it, and the
+     * multi-producer send benchmark (4 senders into one mailbox) moved by
+     * about 10%: a cache-line layout effect, not instructions. */
+    _Atomic int64_t            actor_pid1;
 } march_proc;
 
 /* Bump a single-writer counter: relaxed load + store, the same instructions
@@ -740,6 +756,34 @@ int64_t      march_sched_total_spawned(void);
  * it outright; MARCH_SEND_DROPPED is only ever produced once a caller has
  * opted in via march_sched_set_mbox_limit. */
 int          march_sched_send(march_proc *target, void *msg);
+
+/* ── Actor-event tracing hooks (march_trace.h) ────────────────────────────
+ * g_introspect_armed: bit i set while trace session i records actor events
+ * (Sent, Received, Spawned, Exited, Dropped).  Zero (the common case) costs
+ * the send path one relaxed load of a line nothing writes and a never-taken
+ * branch.  The hooks are defined in march_trace.c; this file carries weak
+ * no-op defaults for builds without it (--compile-so, C harnesses), where
+ * the word is never set so they are never called.  Every hook runs on the
+ * caller's thread, lock-free, with no allocation, and never waits. */
+typedef struct {
+    _Atomic uint32_t word;
+    char             pad[124];     /* the rest of a 128-byte line (Apple silicon's) */
+} march_armed_line;
+extern march_armed_line g_introspect_armed_line;
+/* Alone on its line on purpose: every send loads it, and a neighbour that is
+ * written (a stat counter, a lock) would turn each load into a coherence miss. */
+#define g_introspect_armed (g_introspect_armed_line.word)
+/* [sender] is the sending proc (NULL off a green thread), [target] the
+ * receiving one (NULL: a message to nobody).  [msg] is only inspected for
+ * its constructor tag, never its fields. */
+void march_trace_ev_sent(march_proc *sender, march_proc *target, void *msg);
+void march_trace_ev_received(march_proc *self, void *msg);
+/* reason: MARCH_TRACE_DROP_*.  [target] may be NULL (a dead actor's proc is
+ * gone); [target_pid] is then the pid index, else -2 to derive it. */
+void march_trace_ev_dropped(march_proc *sender, march_proc *target,
+                            int64_t target_pid, void *msg, int reason);
+void march_trace_ev_spawned(march_proc *parent, int64_t parent_pid, int64_t child_pid);
+void march_trace_ev_exited(march_proc *gt, int64_t pid, int reason);
 /* Every entry point below that takes a `march_proc *` other than the caller's
  * own (send, send_control, wake, request_stop, set_mbox_limit, mbox_count)
  * requires the caller to hold it under the rule on march_proc: resolved in a

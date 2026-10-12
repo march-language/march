@@ -247,6 +247,39 @@ mod Topology do
     end
   end
 
+  doc "How many nodes [p] places on (n for a `count = n` role; 0 for an unranked one)."
+  fn count_of(p : TopoPlacement) : Int do
+    match p do
+      PlaceCount(n) -> n
+      PlaceCountOn(_, n) -> n
+      _ -> 0
+    end
+  end
+
+  doc """
+  Whether this node may OPEN ranked role [p] it now ranks for (it is not
+  offering it yet), at [now]: the settle rule its peers apply to it, applied
+  by the node itself. A node that started at [started] and has not yet
+  merged a peer's registry ([synced] false) knows no other node's marker, so
+  it opens nothing ranked until it has, or until [settle_ms] have passed
+  (seeds unreachable: a lone node still takes its roles). A node that a peer
+  last showed as rejoining at [rejoined_at] (`ClusterNode.rejoined_at`) is
+  not counted by those peers for [settle_ms], so for that long it opens the
+  role only if the [others] other non-dead nodes marked eligible cannot fill
+  its count without it. Never stops a node keeping an offer it holds.
+  """
+  fn may_open(p : TopoPlacement, others : Int, now : Int, started : Int, synced : Bool,
+              rejoined_at : Option(Int), settle_ms : Int) : Bool do
+    if not(ranked(p)) do true
+    else if not(synced) && now - started < settle_ms do false
+    else
+      match rejoined_at do
+        Some(t) -> if now - t < settle_ms do others < count_of(p) else true end
+        None -> true
+      end
+    end end
+  end
+
   doc "The name an eligible node registers for a ranked role."
   fn marker(role_name : String, node_id : String) : String do
     "topo:" ++ role_name ++ "/" ++ node_id
@@ -334,12 +367,20 @@ mod Topology do
   (default 200 ms) against the current membership, opening a role this node
   now ranks for and closing (draining) one it no longer does. Membership
   events are recorded as they arrive; a node that rejoins counts after the
-  settling period. Returns once the first evaluation has opened its offers.
+  settling period. This node applies that period to itself too (`may_open`):
+  it opens no ranked role before its first registry sync (bounded by
+  MARCH_PLACEMENT_SETTLE_MS), and while a peer counts it as rejoined it
+  leaves a ranked role to the nodes already offering it. Returns once the
+  first evaluation has opened the offers it may open now (a ranked one held
+  back opens on a later tick).
   """
   fn place(node : Cap(ClusterNode.Live), roles : List(TopoRole)) : () do
     let st = state_of(node)
     Vault.set(st.roles, "roles", roles)
     Vault.set(st.roles, "base", roles)
+    -- When placement began here: the bound on waiting for a first registry
+    -- sync (`may_open`).
+    if Vault.get(st.meta, "started") == None do Vault.set(st.meta, "started", unix_time_ms()) else () end
     -- A restarted node comes back on the topology last pushed to it (plan
     -- 6.5): the reload server restored and re-verified its signed copy
     -- before `main` ran.  Only that copy: the unsigned file is what the
@@ -391,6 +432,29 @@ mod Topology do
       id != ClusterNode.node_id(node) && List.member(alive, id) && settled(now, Vault.get(st.meta, "r:" ++ id), settle))
   end
 
+  -- The other nodes marked eligible for [r] that are not Dead here (one
+  -- not yet in the member table counts: its marker came from a peer that
+  -- knows it), settled or not: those a rejoining node defers to.
+  pfn marked_others(node : Cap(ClusterNode.Live), r : TopoRole) : Int do
+    let me = ClusterNode.node_id(node)
+    let dead = List.filter_map(ClusterNode.all_members(node), fn m ->
+      match m.status do
+        Membership.Dead -> Some(m.node_id)
+        _ -> None
+      end)
+    List.length(List.filter(marked(r.name, ClusterNode.names(node)), fn id ->
+      id != me && not(List.member(dead, id))))
+  end
+
+  -- `may_open` for [r] on [node] now.
+  pfn may_open_here(node : Cap(ClusterNode.Live), st : TopoState, now : Int, r : TopoRole) : Bool do
+    if not(ranked(r.place)) do true
+    else
+      may_open(r.place, marked_others(node, r), now, Vault.get_or(st.meta, "started", now),
+               ClusterNode.registry_synced(node), ClusterNode.rejoined_at(node), settle_ms())
+    end
+  end
+
   doc """
   Re-evaluate [node]'s placement now, as the next tick would. For tests that
   drive membership through a fake dictionary and should not wait for a tick
@@ -413,7 +477,19 @@ mod Topology do
     let want = wants(r.place, r.name, ClusterNode.node_id(node), labels, others)
     match Vault.get(st.offers, r.name) do
       None ->
-        if want do open_role(node, st, now, r) else clear_conflict(st, r.name) end
+        if want && may_open_here(node, st, now, r) do
+          Vault.drop(st.meta, "d:" ++ r.name)
+          open_role(node, st, now, r)
+        else if want do
+          -- Report a rejoining node's deferral once, not every tick (the
+          -- wait for a first sync is silent: it normally lasts a link's
+          -- handshake).
+          if ClusterNode.registry_synced(node) && Vault.get(st.meta, "d:" ++ r.name) == None do
+            Vault.set(st.meta, "d:" ++ r.name, 1)
+            report(r.name ++ ": " ++ label(node) ++ " ranks for it but a peer counts it as rejoined and it is settling;"
+                   ++ " leaving it to the nodes already counted")
+          else () end
+        else clear_conflict(st, r.name) end end
       Some(o) ->
         if not(want) do
           report(r.name ++ ": no longer placed on " ++ label(node) ++ "; draining its offer")
