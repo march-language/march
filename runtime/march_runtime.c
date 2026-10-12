@@ -4146,6 +4146,20 @@ static void meta_remove_name(march_actor_meta *m, const char *name) {
     }
 }
 
+/* [existing] is the table's current, dead holder of [name_str], about to be
+ * overwritten: drop the name from that stale actor's own reverse index, so its
+ * eventual retire cannot remove the new holder's entry.  Caller holds
+ * g_registry_mu. */
+static void registry_unindex_stale_locked(void *existing, void *name_str) {
+    march_reclaim_enter();   /* stale_m: resolved and used inside */
+    march_actor_meta *stale_m = find_meta(existing);
+    if (stale_m) {
+        char stale_scratch[MARCH_SSO_MAX + 1];
+        meta_remove_name(stale_m, march_str_data(name_str, stale_scratch));
+    }
+    march_reclaim_exit();
+}
+
 /* march_actor_register(name, actor) -> 1 on success, 0 if the name is held
  * by a LIVE actor, or if [actor] itself is dead. A stale entry left behind
  * by a dead actor is silently overwritten (that's what makes the name
@@ -4176,13 +4190,7 @@ int64_t march_actor_register(void *name_str, void *actor) {
          * entry. registry_retire_actor's compare-and-drop (braces) is the
          * other half of closing this race for any path that isn't this
          * one. */
-        march_reclaim_enter();   /* stale_m: resolved and used inside */
-        march_actor_meta *stale_m = find_meta(existing);
-        if (stale_m) {
-            char stale_scratch[MARCH_SSO_MAX + 1];
-            meta_remove_name(stale_m, march_str_data(name_str, stale_scratch));
-        }
-        march_reclaim_exit();
+        registry_unindex_stale_locked(existing, name_str);
         march_decrc(existing);
     }
 
@@ -4327,6 +4335,80 @@ void registry_retire_actor(void *actor) {
     march_actor_meta *m = find_meta(actor);
     if (m) registry_retire_meta(m, actor);
     march_reclaim_exit();
+}
+
+/* A restart carries the crashed incarnation's names onto its replacement in
+ * two steps, around the replacement's activation
+ * (specs/progress/2026-10-12-respawn-names-before-activation.md):
+ *
+ *   1. registry_reserve_name, BEFORE the activation: the name goes into the
+ *      replacement's reverse index only.  That is what a death reads
+ *      (stash_child_for_restart), so a replacement that dies at any point
+ *      from here on still hands the name to its own replacement.
+ *   2. registry_publish_names, AFTER the activation: the forward entry, the
+ *      one whereis reads.  Until then whereis keeps answering None, as it did
+ *      since the crash, instead of a pid whose green thread does not exist
+ *      yet (march_send would find none, MARCH_SEND_DEAD, and drop the
+ *      message to an actor that then lives on).
+ *
+ * Both take g_registry_mu, like every other mutation of the registry. */
+
+/* Step 1.  Returns 0 (and reserves nothing) if [actor] is dead or a LIVE
+ * actor holds [name_str]: the same "first live claim wins" rule as
+ * march_actor_register. */
+static int registry_reserve_name(void *name_str, void *actor,
+                                 march_actor_meta *m) {
+    pthread_mutex_lock(&g_registry_mu);
+    /* Under the lock: a death clears `alive` before its retire takes this
+     * lock, so a retired meta is never given a name it would never free
+     * from the table. */
+    int ok = actor_alive_load(actor);
+    if (ok) {
+        void *existing = march_vault_get(registry_tbl(), name_str);
+        if (existing != NULL) {
+            if (IS_HEAP_PTR(existing) && actor_alive_load(existing)) ok = 0;
+            march_decrc(existing);
+        }
+    }
+    if (ok) {
+        char scratch[MARCH_SSO_MAX + 1];
+        meta_add_name(m, march_str_data(name_str, scratch));
+    }
+    pthread_mutex_unlock(&g_registry_mu);
+    return ok;
+}
+
+/* Step 2, for every name step 1 reserved.  [m] is [actor]'s meta, held by
+ * the caller's critical section.  A name is published only while [actor] is
+ * alive and still holds it in its reverse index (a death retires the whole
+ * index; the replacement's own unregister removes it).  If a live actor
+ * claimed the name in between (march_actor_register saw no live holder),
+ * the claim stands and the reservation is dropped. */
+static void registry_publish_names(void *actor, march_actor_meta *m,
+                                   char **names, int n_names) {
+    pthread_mutex_lock(&g_registry_mu);
+    for (int i = 0; i < n_names && actor_alive_load(actor); i++) {
+        if (!names[i]) continue;
+        int held = 0;
+        for (int k = 0; k < m->reg_name_count; k++)
+            if (strcmp(m->reg_names[k], names[i]) == 0) { held = 1; break; }
+        if (!held) continue;
+        void *key = march_string_lit(names[i], (int64_t)strlen(names[i]));
+        void *existing = march_vault_get(registry_tbl(), key);
+        int publish = 1;
+        if (existing != NULL && existing != actor) {
+            if (IS_HEAP_PTR(existing) && actor_alive_load(existing)) {
+                meta_remove_name(m, names[i]);
+                publish = 0;
+            } else {
+                registry_unindex_stale_locked(existing, key);
+            }
+        }
+        if (existing != NULL) march_decrc(existing);
+        if (publish) march_vault_set(registry_tbl(), key, actor);
+        march_decrc(key);   /* release our own ref from march_string_lit */
+    }
+    pthread_mutex_unlock(&g_registry_mu);
 }
 
 /* Task 6: carry a supervised child's registered names, and its spawn-site
@@ -5792,7 +5874,7 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     child->pending_name_count = 0;
     pthread_mutex_unlock(&g_supervise_mu);
 
-    /* From here to the activation nothing switches (march_actor_register is
+    /* From here to the activation nothing switches (registry_reserve_name is
      * plain C under leaf locks), so one critical section covers new_meta.
      * The child is not activated yet, so nothing but a kill by pid can end
      * it meanwhile, and then the activation below simply finds it dead. */
@@ -5816,28 +5898,40 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     }
 
     /* Task 6: carry the crashed incarnation's registered names forward onto
-     * the replacement.  march_actor_register's normal get-then-set contract
-     * decides each name individually: if nothing else claimed it while this
+     * the replacement.  The registry's normal "first live claim wins" rule
+     * (march_actor_register's, applied by registry_reserve_name and again by
+     * registry_publish_names) decides each name individually: if nothing else claimed it while this
      * child was down, the replacement gets it, indistinguishable from the
      * crashed incarnation having held it the whole time; if some OTHER live
      * actor registered that exact name during the gap (a real race, however
-     * unlikely inside a restart window), register returns 0 and that name
+     * unlikely inside a restart window), the reservation fails and that name
      * is deliberately DROPPED here rather than stolen back — the name
      * legitimately belongs to whoever holds it now, the same "first live
      * claim wins" rule that governs every other registration. Not logged:
      * this is not an error, just the registry's normal contract playing out. */
+    /* Reserved here, published after the activation: see
+     * registry_reserve_name.  A name not reserved is NULLed out so the
+     * publish skips it. */
     for (int i = 0; i < n_names; i++) {
         void *key = march_string_lit(names[i], (int64_t)strlen(names[i]));
-        if (new_meta) march_actor_register(key, new_child);
+        if (!new_meta || !registry_reserve_name(key, new_child, new_meta)) {
+            free(names[i]);
+            names[i] = NULL;
+        }
         march_decrc(key);   /* release our own ref from march_string_lit */
-        free(names[i]);
     }
-    free(names);
 
     /* Publication above is complete before this proc can run and install its
      * supervised panic trap. */
     if (new_meta) activate_actor_green_thread(new_meta);
+
+    /* Only now can whereis resolve the names to the replacement: its green
+     * thread exists, so a send by name is delivered. */
+    if (new_meta && n_names > 0)
+        registry_publish_names(new_child, new_meta, names, n_names);
     march_reclaim_exit();
+    for (int i = 0; i < n_names; i++) free(names[i]);
+    free(names);
 
     /* Only now does the supervisor's state name the replacement.  Until the
      * activation above, a send to it found no green thread and was dropped
