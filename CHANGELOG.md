@@ -35,8 +35,32 @@ git log is authoritative for exact commits.
   `src`, `action` and every other URL attribute. A path hole whose value is
   nothing but dots is now replaced with an inert token. Query and fragment
   holes are unaffected (`?q=..` still renders `..`).
+- **`~H` no longer lets an interpolated value finish an escape the template
+  started.** `href="/users/.%${x}/edit"` with `x = "2e"` rendered
+  `/users/.%2e/edit`, which the browser reads as `/users/../edit`; and
+  `href="javascript&#${x}alert(1)"` with `x = "58"` rendered a link the HTML
+  parser decodes to `javascript:alert(1)`. A hole right after a literal `%`
+  (or `%` and one hex digit, `&#37;`, `&percnt;`) in a URL path, or right after
+  a character reference in a URL whose scheme is not settled yet, is now a
+  compile error. Complete escapes (`/a/%20${x}`) and `%` in a query are
+  unaffected.
+- **`~H` CSS `url()` follows the same scheme rule as `href`.**
+  `style="background:url(${s}:x)"` with `s = "javascript"` passed the URL check
+  and rendered `url(javascript:x)`. No current browser runs `javascript:` from
+  CSS, but a literal `:`, character reference or CSS escape (`\3a`) that would
+  let an interpolation choose a `url()` scheme is now a compile error, in a
+  `style` attribute and in a `<style>` body alike.
 
 ### Added
+- **`forge cap run` enforces the path scopes a program declares.** A binary
+  whose `needs` narrow a filesystem capability to a directory
+  (`needs IO.FileWrite("/var/lib/myapp")`) now carries those scopes, and
+  `forge cap run` confines it to them. On macOS, writes outside every
+  declared write scope are refused. On Linux (bubblewrap), writes are bound
+  to the write scopes, and reads to the read scopes. A scope only narrows a
+  capability the policy already grants, including under `--allow-only`.
+  Programs with no scopes, and binaries from older compilers, run exactly as
+  before.
 - **`Trace`: bounded tracing of boundary calls.** `Trace.start(debug, ["Billing.charge"], Trace.MaxEvents(10))`
   records which actor called which `--hot-reload` boundary function, with the code
   epoch and time, never the arguments. A limit is mandatory and bounded:
@@ -644,8 +668,21 @@ git log is authoritative for exact commits.
   compiled code printed `7` for `Meters(7)`, `x` for `Named("x")` and `nil`
   for `NoName`. They now print `Meters(7)`, `Named("x")` and `NoName`, also
   inside lists, options, tuples, constructor and record fields, string
-  interpolation, `inspect` and `~H`. Still wrong: such a value inside a field
-  of your own generic type (`Box(Meters(9))` prints `Box(9)`).
+  interpolation, `inspect` and `~H`.
+- **Compiled `to_string` prints values inside your own generic types like the
+  interpreter.** For `type Box(a) = Box(a)`, compiled code printed `Box(9)` for
+  `Box(Meters(9))`, `Box(nil)` for `Box(NoName)` and `Box(1)` for `Box(true)`,
+  and a generic option-like type (`Nada | Has(a)`) printed only its payload.
+  They now print `Box(Meters(9))`, `Box(NoName)`, `Box(true)` and
+  `Has(Meters(4))`, also in recursive generic types, in fields of other types,
+  in lists, string interpolation, `inspect` and `~H`.
+- **Compiled `to_string` prints records with no declared type, and tuples
+  inside fields.** `to_string({ a: 1, b: "x" })` printed `#<tag:0>` compiled,
+  as did a tuple inside a constructor field (`T((1, "a"))` printed
+  `T(#<tag:0>)`) or in a `~H` hole, and a `()` field printed `0`. They now print
+  `{ a: 1, b: "x" }`, `T((1, "a"))` and `()`, also through interpolation,
+  `inspect` and `~H`. Compiled code prints record fields in name order; the
+  interpreter prints them in the order the literal wrote them.
 - **`Some(NoName)` is no longer `None` (compiled).** For a type shaped like
   `NoName | Named(String)`, compiled code stored `Some(NoName)` as the same
   value as `None`, so a match took the `None` branch. An `Option` over such a
@@ -662,6 +699,17 @@ git log is authoritative for exact commits.
   passed to `List.map` (whose callback parameter is also `f`) called the
   callback instead at `--opt 0` and `--opt 2`, so the mapped values were wrong.
   The interpreter and `--no-opt` were always right.
+- **`--target js`: Int division truncates, and `int_shr`/`int_popcount` follow
+  the 63-bit rules.** `7 / 2` printed `3.5` in a JS build. `int_shr(-8, 1)`
+  threw a `RangeError` instead of returning `-4`, and `int_popcount(-1)` was
+  62 instead of 63. All three now match native builds.
+- **Two types with the same short name can no longer both `derive Json`.** With
+  `A.Note` and `B.Note` both deriving Json, `from_json` decoded `A.Note` with
+  `B.Note`'s codec when interpreted and failed as an ambiguous call when
+  compiled. The program is now rejected at compile time with
+  `json_derive_name_collision`, naming both types and both `derive` sites.
+  Rename one of the types, or derive Json for only one of them, which keeps
+  working.
 - **Drop functions keep the same symbol across unrelated edits.** The compiler
   named the drop function of a type with an unresolved type variable after the
   typechecker's internal variable number (`__drop$List_V_53272`), so it moved
@@ -3049,6 +3097,11 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **`Int` on `--target js` is documented as a subset.** An `Int` there is a JS
+  number, exact within ±(2^53 - 1), where every operation matches native
+  builds. Past that, `+`, `-` and `*` round instead of wrapping at 63 bits and
+  the `int_*` builtins throw a `RangeError`. See "Int on the JavaScript
+  target" in the type-system chapter.
 - **Agent debugging guidance.** A `march-debug` skill maps each symptom
   (compiled/interpreted divergence, crash, leak, slow compile, stale cache, red
   CI, "prove this refactor moved nothing") to the first command and how to read

@@ -367,6 +367,12 @@ derive Json, Eq for MyType
 derive Show for AppColor
 ```
 
+Two different types with the same short name (say `A.Note` and `B.Note` in two
+modules) cannot both `derive Json`: `from_json` picks its decoder by the result
+type's short name, so it cannot tell them apart. The program is rejected at
+compile time (`json_derive_name_collision`), naming both types and both `derive`
+sites. Rename one, or derive Json for only one of them (that case works).
+
 ---
 
 ## A Complete Example: Implementing a Container

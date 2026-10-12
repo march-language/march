@@ -62,6 +62,7 @@ let invalid_measure = "invalid_measure"
 let invalid_type_bound = "invalid_type_bound"
 let io_not_allowed = "io_not_allowed"
 let island_missing_fn = "island_missing_fn"
+let json_derive_name_collision = "json_derive_name_collision"
 let let_question_last = "let_question_last"
 let let_star_bad_flat_map = "let_star_bad_flat_map"
 let let_star_last = "let_star_last"
@@ -231,6 +232,7 @@ let all = [
   invalid_type_bound;
   io_not_allowed;
   island_missing_fn;
+  json_derive_name_collision;
   let_question_last;
   let_star_bad_flat_map;
   let_star_last;

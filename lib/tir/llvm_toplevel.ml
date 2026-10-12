@@ -1228,6 +1228,7 @@ let emit_module ~emit_expr
     ?(emit_main=true)
     ?(cap_attrib=([] : (string * string) list))
     ?(cap_decls=([] : (string * string) list))
+    ?(cap_manifest : string option)
     ?(k_table : Kind.table option)
     (m : Tir.tir_module) : string =
   (* type defs are threaded via ctx.type_defs (set below); reset the
@@ -1943,6 +1944,7 @@ let emit_module ~emit_expr
   emit_atom_show_table ctx;
   (* Append closure wrapper functions generated for top-level fn-as-value *)
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
+  Llvm_ctor_desc.flush ctx out;
 
   (* Capability markers (specs/2026-08-03-forge-cap-audit-design.md §4.3, C).
      Derived from the C symbols the emitted code actually resolved through
@@ -2034,28 +2036,63 @@ let emit_module ~emit_expr
           Buffer.add_string out
             (Printf.sprintf "@__march_capdecl_%s__%s = constant i8 1\n"
                (mangle_cap cap) owner))
-       decls_emitted;
-     let refs =
-       List.map
-         (fun cap -> Printf.sprintf "ptr @__march_cap_%s" (mangle_cap cap))
-         caps
-       @ List.map
-           (fun (cap, owner) ->
-              Printf.sprintf "ptr @__march_capfrom_%s__%s" (mangle_cap cap)
-                owner)
-           attrib
-       @ List.map
-           (fun (cap, owner) ->
-              Printf.sprintf "ptr @__march_capdecl_%s__%s" (mangle_cap cap)
-                owner)
-           decls_emitted
-     in
+       decls_emitted
+   end;
+   (* Declared path-scope manifest (specs/todos/2026-08-04-path-scope-
+      followups.md): MARCHCAP\x01 <u32 le length> <json>, the blob
+      forge/lib/cap_binary.ml scans for.  Only present when some filesystem
+      declaration carries a scope, so an unscoped program's IR is unchanged.
+      The symbol prefix "__march_capscope_" differs from the flat-marker
+      prefix "__march_cap_" at the 12th character, so the marker reader
+      cannot decode it as a capability named "manifest". *)
+   let manifest_ref =
+     match cap_manifest with
+     | None -> []
+     | Some json ->
+       let len = String.length json in
+       let blob =
+         "MARCHCAP\x01"
+         ^ String.init 4 (fun i -> Char.chr ((len lsr (8 * i)) land 0xff))
+         ^ json
+       in
+       let esc = Buffer.create (String.length blob * 2) in
+       String.iter
+         (fun c ->
+            let k = Char.code c in
+            if k >= 0x20 && k < 0x7f && c <> '"' && c <> '\\' then
+              Buffer.add_char esc c
+            else Buffer.add_string esc (Printf.sprintf "\\%02X" k))
+         blob;
+       Buffer.add_string out
+         (Printf.sprintf
+            "@__march_capscope_manifest = constant [%d x i8] c\"%s\"\n"
+            (String.length blob) (Buffer.contents esc));
+       [ "ptr @__march_capscope_manifest" ]
+   in
+   let refs =
+     (if caps = [] then []
+      else
+        List.map
+          (fun cap -> Printf.sprintf "ptr @__march_cap_%s" (mangle_cap cap))
+          caps
+        @ List.map
+            (fun (cap, owner) ->
+               Printf.sprintf "ptr @__march_capfrom_%s__%s" (mangle_cap cap)
+                 owner)
+            attrib
+        @ List.map
+            (fun (cap, owner) ->
+               Printf.sprintf "ptr @__march_capdecl_%s__%s" (mangle_cap cap)
+                 owner)
+            decls_emitted)
+     @ manifest_ref
+   in
+   if refs <> [] then
      Buffer.add_string out
        (Printf.sprintf
           "@llvm.used = appending global [%d x ptr] [%s], section \
            \"llvm.metadata\"\n"
-          (List.length refs) (String.concat ", " refs))
-   end);
+          (List.length refs) (String.concat ", " refs)));
 
   Llvm_ctx.repr_audit_report ();
   if !debug_info then begin

@@ -555,6 +555,22 @@ and emit_val_impl ctx expr =
          emit ctx "march_deep_eq(";
          emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")";
          if op = "!==" then emit ctx ")"
+       (* Int `/` truncates toward zero. The symbolic "/" reaches this inline
+          branch first, so the fallback's typed "/" arm below never ran and
+          `n / 2` emitted a plain JS `/` (7 / 2 printed 3.5). Either operand
+          being Int decides it: both sides have one type, and a negated
+          literal (`-7 / 2`) arrives as a temp whose recorded type may not be
+          TInt. `(a - a % b) / b` rather than `Math.trunc(a / b)`: the
+          remainder is exact, so the division is of an exact multiple and
+          exact everywhere within +-(2^53 - 1), where `a / b` can round up to
+          the next integer (march_int_div in march_runtime.mjs does the same).
+          Operands are atoms, so evaluating them twice is free. *)
+       | "/", [a; b]
+         when (match atom_ty a, atom_ty b with
+               | Tir.TInt, _ | _, Tir.TInt -> true | _ -> false) ->
+         emit ctx "(("; emit_atom ctx a; emit ctx " - ";
+         emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ") / ";
+         emit_atom ctx b; emit ctx ")"
        | _ ->
          emit ctx "(";
          emit_atom ctx (List.nth args 0);

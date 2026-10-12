@@ -177,6 +177,8 @@ type ctx = Llvm_ctx.ctx = {
   rec_shape_globals : (string, string * string) Hashtbl.t;
   mutable ctor_desc_globals : (string * string) option;
   ctor_desc_ids : (string, int) Hashtbl.t;
+  ctor_desc_insts : (string, int) Hashtbl.t;
+  ctor_desc_inst_rows : Buffer.t;
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
   compile_so : bool;
@@ -2677,11 +2679,11 @@ let emit_preamble = Llvm_toplevel.emit_preamble
 
 let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
     ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
-    ?k_table (m : Tir.tir_module) : string =
+    ?cap_manifest ?k_table (m : Tir.tir_module) : string =
   Llvm_toplevel.emit_module ~emit_expr
     ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
     ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
-    ?k_table m
+    ?cap_manifest ?k_table m
 
 
 type repl_slot_info = Llvm_repl.repl_slot_info = {

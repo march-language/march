@@ -3649,7 +3649,12 @@ let compile filename =
         exit 1
       end
     end;
-    cap_state := Some (cap_attrib, cap_decls)
+    (* Declared path scopes, embedded as a manifest so `forge cap run` can
+       narrow its external sandbox to them (None when nothing is scoped). *)
+    let cap_manifest =
+      March_caps.Cap_scope.manifest_json
+        (March_typecheck.Typecheck.declared_cap_scopes typecheck_env) in
+    cap_state := Some (cap_attrib, cap_decls, cap_manifest)
     in
     let contract_decls = March_tir.Alloc_contract.collect desugared in
     (* A program with no entry point of its own (no `main`, no tests, no
@@ -3753,7 +3758,7 @@ let compile filename =
     in
     let pre_opt_tir = pipe.March_tir.Contract_pipeline.pre_opt in
     let tir = pipe.March_tir.Contract_pipeline.final in
-    let (cap_attrib, cap_decls) =
+    let (cap_attrib, cap_decls, cap_manifest) =
       match !cap_state with Some s -> s | None -> assert false in
     (* @[vectorize] and @[no_alloc] diagnostics render through a fresh ctx
        (not the shared typecheck [errors], already drained and printed); a
@@ -3968,6 +3973,15 @@ let compile filename =
            hashing into the next stamp (llvm-emit, or nothing on a cache hit). *)
         stamp "cas-hash";
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
+        (* The scope manifest is embedded by emit_module but is not part of
+           the TIR, so two programs whose code is identical and whose `needs`
+           scopes differ hashed alike and shared one cached binary — a scoped
+           build could reuse an unscoped artifact (no manifest: silently
+           unrestricted) or the reverse.  Folded in only when present, so an
+           unscoped program's key is unchanged. *)
+        let mod_hash = match cap_manifest with
+          | None -> mod_hash
+          | Some j -> mod_hash ^ "|capscope:" ^ j in
         if !dump_impl_hashes then write_impl_hashes basename h_sccs;
         (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" = Some "2" then
            List.iter (fun sc ->
@@ -4108,7 +4122,7 @@ let compile filename =
              only this assignment in the else branch and run emission +
              clang on every cache hit too. *)
           let () = March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None in
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls ?cap_manifest
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           let ir = match !shell_ident_decls with
             | Some decls ->
@@ -5229,7 +5243,7 @@ let compile filename =
          | None -> ()
          | Some cfg -> hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes);
         March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None;
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls ?cap_manifest
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           let ir = finish_ir target ir in
         (* Same temp-then-rename as --compile, so a concurrent reader never

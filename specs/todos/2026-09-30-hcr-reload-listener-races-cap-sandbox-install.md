@@ -21,3 +21,12 @@ synchronously in `march_reload_server_start`, before the install, and hand
 the fd to the thread; or document that a sandboxed hot-reloadable program
 must grant `IO.NetListen`/`IO.FileWrite`, and make the compiler say so. In
 either case, add a test that runs the combination.
+
+## Decision (owner, 2026-10-11)
+
+Take the first option: `march_reload_server_start` creates, binds and
+listens on the reload socket SYNCHRONOUSLY, before `march_sandbox_install`
+runs, and hands the listening fd to the reload thread. Not implemented yet;
+the HCR session owns `runtime/march_reload.c` and will land it, with the
+`--hot-reload --cap-sandbox` test above. The reload thread's later state
+writes (`IO.FileWrite`) still need an answer when this is done.

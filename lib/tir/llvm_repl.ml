@@ -363,6 +363,7 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   Buffer.add_buffer out ctx.Llvm_ctx.buf;
   Llvm_toplevel.emit_atom_show_table ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
+  Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
 
 (* Emit a REPL let-binding as a .ll fragment.
@@ -419,6 +420,7 @@ let emit_repl_decl ~emit_expr ?(fast_math=false) ~(n : int) ~(name : string)
   Buffer.add_buffer out ctx.Llvm_ctx.buf;
   Llvm_toplevel.emit_atom_show_table ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
+  Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
 
 (** Emit a REPL function declaration as a .ll fragment.
@@ -452,6 +454,7 @@ let emit_repl_fn ~emit_expr ?(fast_math=false) ~(n : int)
   Buffer.add_buffer out ctx.Llvm_ctx.buf;
   Llvm_toplevel.emit_atom_show_table ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
+  Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
 
 (** Emit a REPL function declaration as a .ll fragment, and also store a
@@ -549,6 +552,7 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
      extra_fns entirely). *)
   Llvm_toplevel.emit_atom_show_table ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
+  Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
 
 (** Emit a collection of functions as a standalone LLVM IR module.
@@ -616,6 +620,7 @@ let emit_fns_fragment
   Buffer.add_buffer out ctx.Llvm_ctx.buf;
   Llvm_toplevel.emit_atom_show_table ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
+  Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
 
 (** Dead code, carried verbatim from [llvm_emit.ml] (Wave 3 Task 7 move):

@@ -101,8 +101,10 @@ beforeattrvalue,*,*,* | lit:"'"         |  | attrvalue,=,=,single     |
 # than being swallowed by the generic `any` (which would leave the context at
 # the START of the URL with one character already written).
 beforeattrvalue,*,url,* | interp                  | "\"" | attrvalue,=,urlschemehole,doublesubst |
-beforeattrvalue,*,url,* | lit:"&#"                |  | attrvalue,=,urlscheme,unquoted |
-beforeattrvalue,*,url,* | cls:[a-zA-Z0-9+.&;-]    |  | attrvalue,=,urlscheme,unquoted |
+beforeattrvalue,*,url,* | lit:"&#"                |  | attrvalue,=,urlschemeref,unquoted |
+beforeattrvalue,*,url,* | lit:"&"                 |  | attrvalue,=,urlschemeref,unquoted |
+beforeattrvalue,*,url,* | lit:"%"                 |  | attrvalue,=,urlpct,unquoted |
+beforeattrvalue,*,url,* | cls:[a-zA-Z0-9+.;-]     |  | attrvalue,=,urlscheme,unquoted |
 beforeattrvalue,*,url,* | lit:"?"                 |  | attrvalue,=,urlquery,unquoted |
 beforeattrvalue,*,url,* | lit:"#"                 |  | attrvalue,=,urlfragment,unquoted |
 beforeattrvalue,*,url,* | any                     |  | attrvalue,=,urlmid,unquoted   |
@@ -167,23 +169,45 @@ attrvalue,*,*,unquoted    | cls+:[ \t\r\n] |  | beforeattrname,=,normal,none |
 # escaper rather than the component one. Otherwise only the rejection is new.
 attrvalue,*,url,*              | interp                  |  | =,=,urlschemehole,=    |
 attrvalue,*,url,*              | cls+:[ \t\r\n]          |  | =,=,=,=                |
-attrvalue,*,url,*              | lit:"&#"                |  | =,=,urlscheme,=        |
-attrvalue,*,url,*              | cls:[a-zA-Z0-9+.&;-]    |  | =,=,urlscheme,=        |
+attrvalue,*,url,*              | lit:"&#"                |  | =,=,urlschemeref,=     |
+attrvalue,*,url,*              | lit:"&"                 |  | =,=,urlschemeref,=     |
+attrvalue,*,url,*              | lit:"%"                 |  | =,=,urlpct,=           |
+attrvalue,*,url,*              | cls:[a-zA-Z0-9+.;-]     |  | =,=,urlscheme,=        |
 attrvalue,*,url,*              | lit:"?"                 |  | =,=,urlquery,=         |
 attrvalue,*,url,*              | lit:"#"                 |  | =,=,urlfragment,=      |
 attrvalue,*,url,*              | any                     |  | =,=,urlmid,=           |
 attrvalue,*,urlscheme,*        | interp                  |  | =,=,urlschemeholemid,= |
-attrvalue,*,urlscheme,*        | lit:"&#"                |  | =,=,=,=                |
-attrvalue,*,urlscheme,*        | lit:"&"                 |  | =,=,=,=                |
+attrvalue,*,urlscheme,*        | lit:"&#"                |  | =,=,urlschemeref,=     |
+attrvalue,*,urlscheme,*        | lit:"&"                 |  | =,=,urlschemeref,=     |
+attrvalue,*,urlscheme,*        | lit:"%"                 |  | =,=,urlpct,=           |
 attrvalue,*,urlscheme,*        | cls+:[a-zA-Z0-9+.;\t\r\n-] |  | =,=,=,=            |
 attrvalue,*,urlscheme,*        | lit:"?"                 |  | =,=,urlquery,=         |
 attrvalue,*,urlscheme,*        | lit:"#"                 |  | =,=,urlfragment,=      |
 attrvalue,*,urlscheme,*        | any                     |  | =,=,urlmid,=           |
+# `urlschemeref` is `urlscheme` after the template has written a character
+# reference (any `&`) since the last hole. It differs only in rejecting a
+# hole: the HTML parser decodes a numeric reference with or without its `;`,
+# so `href="javascript&#${x}alert(1)"` with x = `58` rendered
+# `javascript&#58alert(1)` -- `javascript:` -- and `&#37;` before a hole lets
+# the hole finish a percent-escape. The table cannot decode a reference, so it
+# rejects the hole after ANY reference here; the scheme is still open, so the
+# over-strictness only costs templates that spell their scheme with
+# references.
+attrvalue,*,urlschemeref,*     | interp                  |  | =,=,=,=                | An interpolation right after a character reference, in a URL whose scheme is not settled yet, can finish that reference or the escape it starts: an unfinished numeric reference completed by the value with `58` decodes to `:` (so `javascript` followed by it becomes `javascript:`), and a reference for `%` lets the value finish a percent-escape such as `%2e`. The table cannot decode references, so a hole after any of them is rejected here. Write the character literally, or build the whole URL in one interpolation.
+attrvalue,*,urlschemeref,*     | lit:"&#"                |  | =,=,=,=                |
+attrvalue,*,urlschemeref,*     | lit:"&"                 |  | =,=,=,=                |
+attrvalue,*,urlschemeref,*     | lit:"%"                 |  | =,=,urlpct,=           |
+attrvalue,*,urlschemeref,*     | cls+:[a-zA-Z0-9+.;\t\r\n-] |  | =,=,=,=            |
+attrvalue,*,urlschemeref,*     | lit:"?"                 |  | =,=,urlquery,=         |
+attrvalue,*,urlschemeref,*     | lit:"#"                 |  | =,=,urlfragment,=      |
+attrvalue,*,urlschemeref,*     | any                     |  | =,=,urlmid,=           |
 attrvalue,*,urlschemehole,*    | lit:":"                 |  | =,=,=,=                | A literal `:` right after an interpolation at the start of a URL lets the interpolated value choose the URL's scheme: `${s}:` with s = `javascript` passes the scheme allowlist (it has no colon of its own) and then becomes `javascript:`. Build the whole URL first and interpolate it as ONE hole, so the allowlist sees its scheme, or write the scheme literally in the template.
 attrvalue,*,urlschemehole,*    | lit:"&#"                |  | =,=,=,=                | A numeric character reference right after an interpolation at the start of a URL can decode to `:` and let the interpolated value choose the URL's scheme. Write the character literally, or build the whole URL in one interpolation.
 attrvalue,*,urlschemehole,*    | ilit:"&colon;"          |  | =,=,=,=                | `&colon;` right after an interpolation at the start of a URL decodes to `:` and lets the interpolated value choose the URL's scheme. Build the whole URL in one interpolation so the scheme allowlist sees it.
+attrvalue,*,urlschemehole,*    | ilit:"&percnt;"         |  | =,=,=,=                | `&percnt;` right after an interpolation at the start of a URL decodes to `%`, and the next interpolation could finish the percent-escape it starts (`%2e` is a dot to the URL parser). Write `%` literally, or build the whole URL in one interpolation.
 attrvalue,*,urlschemehole,*    | interp                  |  | =,=,=,=                |
 attrvalue,*,urlschemehole,*    | cls+:[\t\r\n]           |  | =,=,=,=                |
+attrvalue,*,urlschemehole,*    | lit:"%"                 |  | =,=,urlpct,=           |
 attrvalue,*,urlschemehole,*    | cls:[a-zA-Z0-9+.&;-]    |  | =,=,urlschemeholemid,= |
 attrvalue,*,urlschemehole,*    | lit:"?"                 |  | =,=,urlquery,=         |
 attrvalue,*,urlschemehole,*    | lit:"#"                 |  | =,=,urlfragment,=      |
@@ -191,11 +215,13 @@ attrvalue,*,urlschemehole,*    | any                     |  | =,=,urlmid,=      
 attrvalue,*,urlschemeholemid,* | lit:":"                 |  | =,=,=,=                | A literal `:` after an interpolation that is still part of the URL's scheme lets the interpolated value choose the scheme: `java${s}:` with s = `script` renders `javascript:`. Build the whole URL in one interpolation so the scheme allowlist sees it, or write the scheme literally in the template.
 attrvalue,*,urlschemeholemid,* | lit:"&#"                |  | =,=,=,=                | A numeric character reference after an interpolation that is still part of the URL's scheme can decode to `:` and let the interpolated value choose the scheme. Write the character literally, or build the whole URL in one interpolation.
 attrvalue,*,urlschemeholemid,* | ilit:"&colon;"          |  | =,=,=,=                | `&colon;` after an interpolation that is still part of the URL's scheme decodes to `:` and lets the interpolated value choose the scheme. Build the whole URL in one interpolation so the scheme allowlist sees it.
+attrvalue,*,urlschemeholemid,* | ilit:"&percnt;"         |  | =,=,=,=                | `&percnt;` after an interpolation that is still part of the URL's scheme decodes to `%`, and the next interpolation could finish the percent-escape it starts (`%2e` is a dot to the URL parser). Write `%` literally, or build the whole URL in one interpolation.
 attrvalue,*,urlschemeholemid,* | interp                  |  | =,=,=,=                |
 # `&` is consumed ONE AT A TIME (here and in `urlscheme`), never inside a
 # greedy class: a greedy run would stop between `&` and `#`, and the `&#`
 # rows would never see the reference.
 attrvalue,*,urlschemeholemid,* | lit:"&"                 |  | =,=,=,=                |
+attrvalue,*,urlschemeholemid,* | lit:"%"                 |  | =,=,urlpct,=           |
 attrvalue,*,urlschemeholemid,* | cls+:[a-zA-Z0-9+.;\t\r\n-] |  | =,=,=,=            |
 attrvalue,*,urlschemeholemid,* | lit:"?"                 |  | =,=,urlquery,=         |
 attrvalue,*,urlschemeholemid,* | lit:"#"                 |  | =,=,urlfragment,=      |
@@ -225,22 +251,122 @@ attrvalue,*,urlschemeholemid,* | any                     |  | =,=,urlmid,=      
 # character reference is not a fragment delimiter. Without them
 # `href="/a/&#46;${x}/b"` would read as a fragment, give the hole the plain
 # component escaper, and render `/a/../b` for x = `.`.
-attrvalue,*,urlmid,*           | lit:"&#"                |  | =,=,=,=                |
+#
+# -- an escape the HOLE could finish (2026-10-11) --
+# The path escaper judges the value alone. When the TEMPLATE has already
+# started an escape, the value only has to finish it:
+#   href="/users/.%${x}/edit"   with x = `2e`
+# rendered `/users/.%2e/edit`, which the URL parser reads as `/users/../edit`.
+# So a hole is REJECTED right after a literal `%` or `%` plus one hex digit
+# (`urlpct`, `urlpct1`), and right after a numeric character reference
+# (`urlref`): `&#37;` decodes to the `%`, and a bare `&#` is finished by the
+# value itself (`&#${x}` with x = `46` is a dot). `&percnt;` is the one named
+# reference for `%`. Every open-scheme position above routes `%` here too: a
+# `%` cannot be part of a scheme, so it settles it. The over-approximations
+# all run in the strict direction: since the table cannot decode a numeric
+# reference, a hole right after ANY of them in a path is rejected.
+attrvalue,*,urlmid,*           | lit:"&#"                |  | =,=,urlref,=           |
+attrvalue,*,urlmid,*           | ilit:"&percnt;"         |  | =,=,urlpct,=           |
+attrvalue,*,urlmid,*           | lit:"%"                 |  | =,=,urlpct,=           |
 attrvalue,*,urlquery,*         | lit:"&#"                |  | =,=,=,=                |
 attrvalue,*,urlmid,*           | lit:"?"                 |  | =,=,urlquery,=         |
 attrvalue,*,urlmid,*           | lit:"#"                 |  | =,=,urlfragment,=      |
 attrvalue,*,urlquery,*         | lit:"#"                 |  | =,=,urlfragment,=      |
+attrvalue,*,urlpct,*           | interp                  |  | =,=,=,=                | An interpolation right after a literal `%` in a URL path can finish the percent-escape: `/users/.%${x}/edit` with x = `2e` renders `/users/.%2e/edit`, which the URL parser reads as `/users/../edit`. Percent-encode inside the value you interpolate, not around it, or write the whole escape in the template.
+attrvalue,*,urlpct,*           | cls:[0-9a-fA-F]         |  | =,=,urlpct1,=          |
+attrvalue,*,urlpct1,*          | interp                  |  | =,=,=,=                | An interpolation right after `%` and one hex digit in a URL path can finish the percent-escape: `/a/.%2${x}` with x = `e` renders `/a/.%2e`, which the URL parser reads as `/a/..`. Percent-encode inside the value you interpolate, not around it, or write the whole escape in the template.
+attrvalue,*,urlpct1,*          | cls:[0-9a-fA-F]         |  | =,=,urlmid,=           |
+attrvalue,*,urlref,*           | interp                  |  | =,=,=,=                | An interpolation right after a numeric character reference in a URL path can finish it or the escape it starts: an unfinished numeric reference completed by the value with `46` decodes to a second dot after `/a/.`, and a reference for `%` lets the value turn it into `%2e`. The table cannot decode references, so a hole after any of them is rejected here. Write the character literally, or put the whole segment in the interpolation.
+attrvalue,*,urlref,*           | cls+:[0-9a-fA-FxX;]     |  | =,=,=,=                |
+# Anything else after `%`, `%X` or a reference reads exactly as it would in
+# the path.
+attrvalue,*,urlpct,*           | lit:"&#"                |  | =,=,urlref,=           |
+attrvalue,*,urlpct1,*          | lit:"&#"                |  | =,=,urlref,=           |
+attrvalue,*,urlref,*           | lit:"&#"                |  | =,=,urlref,=           |
+attrvalue,*,urlpct,*           | ilit:"&percnt;"         |  | =,=,urlpct,=           |
+attrvalue,*,urlpct1,*          | ilit:"&percnt;"         |  | =,=,urlpct,=           |
+attrvalue,*,urlref,*           | ilit:"&percnt;"         |  | =,=,urlpct,=           |
+attrvalue,*,urlpct,*           | lit:"%"                 |  | =,=,urlpct,=           |
+attrvalue,*,urlpct1,*          | lit:"%"                 |  | =,=,urlpct,=           |
+attrvalue,*,urlref,*           | lit:"%"                 |  | =,=,urlpct,=           |
+attrvalue,*,urlpct,*           | lit:"?"                 |  | =,=,urlquery,=         |
+attrvalue,*,urlpct1,*          | lit:"?"                 |  | =,=,urlquery,=         |
+attrvalue,*,urlref,*           | lit:"?"                 |  | =,=,urlquery,=         |
+attrvalue,*,urlpct,*           | lit:"#"                 |  | =,=,urlfragment,=      |
+attrvalue,*,urlpct1,*          | lit:"#"                 |  | =,=,urlfragment,=      |
+attrvalue,*,urlref,*           | lit:"#"                 |  | =,=,urlfragment,=      |
+attrvalue,*,urlpct,*           | any                     |  | =,=,urlmid,=           |
+attrvalue,*,urlpct1,*          | any                     |  | =,=,urlmid,=           |
+attrvalue,*,urlref,*           | any                     |  | =,=,urlmid,=           |
 
 # -- CSS url() gets its own context --
 # A hole inside url(...) is a URL, not a CSS value. Escaping it as CSS mangles
 # the slashes and breaks the reference; escaping it as a plain URL would leave
 # `)` free to close the construct. `ilit` because `URL(` is valid CSS.
 # These MUST precede the generic style/stylevalue rows below.
+#
+# -- CSS url() scheme tracking (2026-10-11) --
+# The CSS url escaper checks the scheme of ONE value, exactly as the whole-URL
+# escaper does for `href`, so the same composition defeated it:
+#   style="background:url(${s}:x)"   with s = `javascript`
+# passed `javascript` (no colon: a relative reference) and the template's own
+# `:` made it the scheme. No current browser runs `javascript:` from CSS, but
+# the rule is the same as `href`'s (owner decision, 2026-10-11): a literal
+# `:` that would let a hole choose the scheme is a compile error. Positions,
+# all of which give a hole the CSS url escaper:
+#
+#   cssurl        nothing written yet but whitespace and an opening quote
+#   cssurlscheme  only literal, scheme-shaped text so far
+#   cssurlref     scheme still open, and the template wrote a character
+#                 reference or a CSS escape since the last hole -- a hole here
+#                 could FINISH it (`\` then `00003a` is the escape for `:`),
+#                 so a hole is rejected
+#   cssurlhole    scheme still open, and a hole wrote into it: a `:`, a
+#                 reference or a CSS escape (either can decode to `:`) is
+#                 rejected
+#   cssurlmid     the scheme is settled
+#
+# Every one of them leaves on `)`. CSS has two decoders between the template
+# and the URL -- HTML references in an attribute, CSS escapes in both
+# wrappers -- so both `&` and `\` are tracked; in a <style> body references
+# are not decoded, which only makes the body copy over-strict.
 attrvalue,*,style,*       | ilit:"url("    |  | =,=,cssurl,=             |
 attrvalue,*,stylevalue,*  | ilit:"url("    |  | =,=,cssurl,=             |
-attrvalue,*,cssurl,*      | lit:")"        |  | =,=,stylevalue,=         |
-attrvalue,*,cssurl,*      | interp         |  | =,=,=,=                  |
-attrvalue,*,cssurl,*      | any            |  | =,=,=,=                  |
+attrvalue,*,cssurl,*        | lit:")"                            |  | =,=,stylevalue,=        |
+attrvalue,*,cssurlscheme,*  | lit:")"                            |  | =,=,stylevalue,=        |
+attrvalue,*,cssurlref,*     | lit:")"                            |  | =,=,stylevalue,=        |
+attrvalue,*,cssurlhole,*    | lit:")"                            |  | =,=,stylevalue,=        |
+attrvalue,*,cssurlmid,*     | lit:")"                            |  | =,=,stylevalue,=        |
+attrvalue,*,cssurl,*        | interp                             |  | =,=,cssurlhole,=        |
+attrvalue,*,cssurl,*        | cls+:[ \t\r\n]                     |  | =,=,=,=                 |
+attrvalue,*,cssurl,*        | lit:"'"                            |  | =,=,=,=                 |
+attrvalue,*,cssurl,*        | lit:"\""                           |  | =,=,=,=                 |
+attrvalue,*,cssurl,*        | ilit:"&quot;"                      |  | =,=,=,=                 |
+attrvalue,*,cssurl,*        | ilit:"&apos;"                      |  | =,=,=,=                 |
+attrvalue,*,cssurl,*        | lit:"&#34;"                        |  | =,=,=,=                 |
+attrvalue,*,cssurl,*        | lit:"&#39;"                        |  | =,=,=,=                 |
+attrvalue,*,cssurl,*        | cls:[&\\]                          |  | =,=,cssurlref,=         |
+attrvalue,*,cssurl,*        | cls:[a-zA-Z0-9+.;-]                |  | =,=,cssurlscheme,=      |
+attrvalue,*,cssurl,*        | any                                |  | =,=,cssurlmid,=         |
+attrvalue,*,cssurlscheme,*  | interp                             |  | =,=,cssurlhole,=        |
+attrvalue,*,cssurlscheme,*  | cls:[&\\]                          |  | =,=,cssurlref,=         |
+attrvalue,*,cssurlscheme,*  | cls+:[a-zA-Z0-9+.;\t\r\n-]         |  | =,=,=,=                 |
+attrvalue,*,cssurlscheme,*  | any                                |  | =,=,cssurlmid,=         |
+attrvalue,*,cssurlref,*     | interp                             |  | =,=,=,=                 | An interpolation right after a character reference or CSS escape, in a CSS url() whose scheme is not settled yet, can finish it: `url(javascript\${x}...)` with x = `00003a` renders the CSS escape for `:`, and an unfinished numeric reference completed with `58` decodes to one too. Write the character literally, or build the whole URL in one interpolation.
+attrvalue,*,cssurlref,*     | cls+:[a-zA-Z0-9+.;&\\ \t\r\n-]     |  | =,=,=,=                 |
+attrvalue,*,cssurlref,*     | lit:"#"                            |  | =,=,=,=                 |
+attrvalue,*,cssurlref,*     | any                                |  | =,=,cssurlmid,=         |
+attrvalue,*,cssurlhole,*    | lit:":"                            |  | =,=,=,=                 | A literal `:` after an interpolation that may still be spelling the scheme of a CSS url() lets the interpolated value choose the scheme: `url(${s}:x)` with s = `javascript` passes the scheme allowlist (it has no colon of its own) and then becomes `javascript:`. Build the whole URL first and interpolate it as ONE hole, or write the scheme literally in the template.
+attrvalue,*,cssurlhole,*    | ilit:"&quot;"                      |  | =,=,cssurlmid,=         |
+attrvalue,*,cssurlhole,*    | ilit:"&apos;"                      |  | =,=,cssurlmid,=         |
+attrvalue,*,cssurlhole,*    | lit:"&#34;"                        |  | =,=,cssurlmid,=         |
+attrvalue,*,cssurlhole,*    | lit:"&#39;"                        |  | =,=,cssurlmid,=         |
+attrvalue,*,cssurlhole,*    | cls:[&\\]                          |  | =,=,=,=                 | A character reference or CSS escape after an interpolation that may still be spelling the scheme of a CSS url() can decode to `:` (a numeric reference, `&colon;`, or the CSS escape `\3a`) and let the interpolated value choose the scheme. Write the character literally, or build the whole URL in one interpolation.
+attrvalue,*,cssurlhole,*    | interp                             |  | =,=,=,=                 |
+attrvalue,*,cssurlhole,*    | cls+:[a-zA-Z0-9+.;\t\r\n-]         |  | =,=,=,=                 |
+attrvalue,*,cssurlhole,*    | any                                |  | =,=,cssurlmid,=         |
+attrvalue,*,cssurlmid,*     | interp                             |  | =,=,=,=                 |
+attrvalue,*,cssurlmid,*     | any                                |  | =,=,=,=                 |
 
 # -- CSS position tracking --
 # A style attribute alternates between DECLARATION and VALUE positions, and the
@@ -306,9 +432,9 @@ attrvalue,*,*,*           | any            |  | =,=,=,=                  |
 # script string must not be mistaken for the end of the script.
 # A url() inside a <style> body needs the same context as one in a style
 # attribute -- the language nesting is identical, only the outer wrapper differs.
+# The positions inside it are listed after the close-tag rows below, so that
+# `</style` still ends the element from inside a url().
 rcdata,style,*,*      | ilit:"url("       |  | =,=,cssurl,=            |
-rcdata,style,cssurl,* | lit:")"           |  | =,=,normal,=            |
-rcdata,style,cssurl,* | interp            |  | =,=,=,=                 |
 
 # `</script` ends the element from EVERY JS sub-position below, including from
 # inside a string literal -- the HTML tokenizer does not know JS exists. This
@@ -318,6 +444,44 @@ rcdata,script,*,*     | ilit:"</script"   |  | closetagname,normal,normal,none |
 rcdata,style,*,*      | ilit:"</style"    |  | closetagname,normal,=,= |
 rcdata,textarea,*,*   | ilit:"</textarea" |  | closetagname,normal,=,= |
 rcdata,title,*,*      | ilit:"</title"    |  | closetagname,normal,=,= |
+
+# CSS url() inside a <style> body: the same positions as in a style attribute
+# (see "CSS url() scheme tracking" above); only the exit differs.
+rcdata,style,cssurl,*       | lit:")"                            |  | =,=,normal,=            |
+rcdata,style,cssurlscheme,* | lit:")"                            |  | =,=,normal,=            |
+rcdata,style,cssurlref,*    | lit:")"                            |  | =,=,normal,=            |
+rcdata,style,cssurlhole,*   | lit:")"                            |  | =,=,normal,=            |
+rcdata,style,cssurlmid,*    | lit:")"                            |  | =,=,normal,=            |
+rcdata,style,cssurl,*       | interp                             |  | =,=,cssurlhole,=        |
+rcdata,style,cssurl,*       | cls+:[ \t\r\n]                     |  | =,=,=,=                 |
+rcdata,style,cssurl,*       | lit:"'"                            |  | =,=,=,=                 |
+rcdata,style,cssurl,*       | lit:"\""                           |  | =,=,=,=                 |
+rcdata,style,cssurl,*       | ilit:"&quot;"                      |  | =,=,=,=                 |
+rcdata,style,cssurl,*       | ilit:"&apos;"                      |  | =,=,=,=                 |
+rcdata,style,cssurl,*       | lit:"&#34;"                        |  | =,=,=,=                 |
+rcdata,style,cssurl,*       | lit:"&#39;"                        |  | =,=,=,=                 |
+rcdata,style,cssurl,*       | cls:[&\\]                          |  | =,=,cssurlref,=         |
+rcdata,style,cssurl,*       | cls:[a-zA-Z0-9+.;-]                |  | =,=,cssurlscheme,=      |
+rcdata,style,cssurl,*       | any                                |  | =,=,cssurlmid,=         |
+rcdata,style,cssurlscheme,* | interp                             |  | =,=,cssurlhole,=        |
+rcdata,style,cssurlscheme,* | cls:[&\\]                          |  | =,=,cssurlref,=         |
+rcdata,style,cssurlscheme,* | cls+:[a-zA-Z0-9+.;\t\r\n-]         |  | =,=,=,=                 |
+rcdata,style,cssurlscheme,* | any                                |  | =,=,cssurlmid,=         |
+rcdata,style,cssurlref,*    | interp                             |  | =,=,=,=                 | An interpolation right after a character reference or CSS escape, in a CSS url() whose scheme is not settled yet, can finish it: `url(javascript\${x}...)` with x = `00003a` renders the CSS escape for `:`, and an unfinished numeric reference completed with `58` decodes to one too. Write the character literally, or build the whole URL in one interpolation.
+rcdata,style,cssurlref,*    | cls+:[a-zA-Z0-9+.;&\\ \t\r\n-]     |  | =,=,=,=                 |
+rcdata,style,cssurlref,*    | lit:"#"                            |  | =,=,=,=                 |
+rcdata,style,cssurlref,*    | any                                |  | =,=,cssurlmid,=         |
+rcdata,style,cssurlhole,*   | lit:":"                            |  | =,=,=,=                 | A literal `:` after an interpolation that may still be spelling the scheme of a CSS url() lets the interpolated value choose the scheme: `url(${s}:x)` with s = `javascript` passes the scheme allowlist (it has no colon of its own) and then becomes `javascript:`. Build the whole URL first and interpolate it as ONE hole, or write the scheme literally in the template.
+rcdata,style,cssurlhole,*   | ilit:"&quot;"                      |  | =,=,cssurlmid,=         |
+rcdata,style,cssurlhole,*   | ilit:"&apos;"                      |  | =,=,cssurlmid,=         |
+rcdata,style,cssurlhole,*   | lit:"&#34;"                        |  | =,=,cssurlmid,=         |
+rcdata,style,cssurlhole,*   | lit:"&#39;"                        |  | =,=,cssurlmid,=         |
+rcdata,style,cssurlhole,*   | cls:[&\\]                          |  | =,=,=,=                 | A character reference or CSS escape after an interpolation that may still be spelling the scheme of a CSS url() can decode to `:` (a numeric reference, `&colon;`, or the CSS escape `\3a`) and let the interpolated value choose the scheme. Write the character literally, or build the whole URL in one interpolation.
+rcdata,style,cssurlhole,*   | interp                             |  | =,=,=,=                 |
+rcdata,style,cssurlhole,*   | cls+:[a-zA-Z0-9+.;\t\r\n-]         |  | =,=,=,=                 |
+rcdata,style,cssurlhole,*   | any                                |  | =,=,cssurlmid,=         |
+rcdata,style,cssurlmid,*    | interp                             |  | =,=,=,=                 |
+rcdata,style,cssurlmid,*    | any                                |  | =,=,=,=                 |
 
 # JS inside a <script> BODY -----------------------------------------------
 # The subsidiary automaton the paper calls for, expressed in the flat context

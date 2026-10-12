@@ -243,6 +243,7 @@ type env = {
   errors : Err.ctx;
   pending_constraints : constraint_ list ref;
   type_map : (Ast.span, ty) Hashtbl.t;
+  json_derive_sites : (string * Ast.span) list;
   record_names_snapshot : (string * string option) list;
   refs : ref_record list ref;
   current_decl : string ref;

@@ -23,6 +23,26 @@ are what is left, all narrow.
   (`cap_sandbox.ml`'s `bwrap_args`) is probably the right model to port from.
   Needs its own design doc before code — do not bundle with the NetListen fix.
 
+  **Owner decision 2026-10-11 (declaration surface): reuse `@[scope]` with a
+  read mode, no new annotation.** "`@[scope]`" here is the existing declared
+  path scope, `needs IO.FileX("/dir")` (stored by `DNeeds`, exposed as
+  `Typecheck.declared_cap_scopes`); it has no `@[...]` attribute spelling.
+  Its read mode needs no grammar change because the capability already
+  carries it. `needs IO.FileRead("/etc/myapp")` parses, is checked
+  statically, and since 2026-10-11 is embedded in the binary's scope
+  manifest, which `forge cap run` enforces on Linux through bwrap
+  (`specs/progress/2026-10-11-path-scope-forge-cap-run.md`).
+  `IO.FileSystem("/dir")` scopes reads and writes together. So the Landlock
+  ruleset should be built from `Cap_scope.effective_scopes ~decls
+  "IO.FileRead"`, the same function `forge cap run` uses, and passed to the
+  runtime the way `--cap-sandbox` passes write scopes today
+  (`MARCH_CAP_WRITE_SCOPES` in `bin/main.ml`, resolved by
+  `march_scope_resolve` in `runtime/march_runtime.c`). It would need a
+  `MARCH_CAP_READ_SCOPES` sibling. Nothing was implemented for this item:
+  no parser or grammar change was needed, and the remaining work (Landlock
+  syscalls, the kernel probe, the fail-closed-or-degrade decision) still
+  needs its own design doc.
+
 - [x] **Two SBPL baselines can drift** — CLOSED 2026-08-08 by
   `test/test_cap_sandbox_profile.ml` (normalized clause-set equality plus
   both polarities of the conditional grants); see

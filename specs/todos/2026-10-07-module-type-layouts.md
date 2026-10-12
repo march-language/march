@@ -85,9 +85,10 @@ of a type get one answer" test lists the expected answer for each shape.
 The printing blocker is gone
 ([`progress/2026-10-11-compiled-to-string-newtype-niche.md`](../progress/2026-10-11-compiled-to-string-newtype-niche.md)):
 compiled `to_string` renders newtype and niche values by their static type,
-top level and nested. One printing gap remains: a newtype or niche value in a
-type-variable slot of a user generic type, or under an erased `to_string`
-([`todos/2026-10-11-to-string-newtype-in-generic-slot.md`](2026-10-11-to-string-newtype-in-generic-slot.md)).
+top level and nested, including in a type-variable slot of a user generic
+type ([`progress/2026-10-11-to-string-newtype-in-generic-slot.md`](../progress/2026-10-11-to-string-newtype-in-generic-slot.md)).
+One printing gap remains: a newtype or niche value under an erased `to_string`
+([`todos/2026-10-11-to-string-erased-newtype.md`](2026-10-11-to-string-erased-newtype.md)).
 Widening would spread that gap to module types too.
 
 A nested-niche miscompile was fixed on the way
@@ -127,3 +128,11 @@ touch.
 `bench/tree_transform.march` and `bench/binary_trees.march` were run with
 the printing fix against the train compiler; no layout changed, so they
 measure only that the fix costs nothing (see the progress file).
+
+## Decision (owner, 2026-10-11)
+
+Add `WebSocket.WsSocket` and `HttpServer.Upgrade` to the C-boxed exclusion
+list (`Kind.c_boxed_types`), then proceed with newtype and niche layouts for
+module-declared types, **once the distributed session confirms** that the
+cluster wire format and `migrate_msg` are not affected (point 2 above). Not
+implemented yet: nothing is pinned or widened until that confirmation.

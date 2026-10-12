@@ -605,6 +605,11 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     (* derive Json: generate standalone to_json and from_json functions.
        to_json(x : T) : JsonValue   — structural encoding to JSON
        from_json(v : JsonValue) : Result(T, String) — decoding from JSON *)
+    (* The generated impls carry the derive site as their own decl span, like
+       every other derive ([impl_one]); the bodies stay on [dummy_span]. The
+       typechecker's same-short-name check
+       ([Typecheck.check_json_derive_collisions]) points at it. *)
+    let derive_sp = sp in
     let sp = dummy_span in
     (* Helper: encode a field value based on its type annotation *)
     let encoder_for_ty (ty : ty) (value_expr : expr) : expr =
@@ -918,7 +923,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         impl_assoc_types = [];
         impl_methods     = [(mk_name meth_name, fn_body)];
       } in
-      DImpl (idef, sp)
+      DImpl (idef, derive_sp)
     in
     (* ── from_json_events (Task 7 / Phase B) ───────────────────────────
        A second, event-consuming decoder, generated ONLY for TDRecord
