@@ -74,9 +74,7 @@ git log is authoritative for exact commits.
 - **`--verify-tir` checks Defun's contracts.** From `tir-defun` on, a lambda
   creation site that Defun should have replaced, or a call through a locally
   bound name that should be indirect, is reported as a `[contract]` finding.
-  It caught a compiled-only wrong value: a top-level function named like a
-  stdlib callback parameter (`f`) is called through that parameter after
-  inlining (`specs/todos/2026-10-11-inline-captures-toplevel-fn-named-like-callback-param.md`).
+  It caught the compiled-only wrong value fixed below.
 - Generated protocol chooser APIs include `may_choose_<label>()`, false for
   a held-back expand label and true otherwise. Deploy plans name the guard.
 - `forge cluster cert --control-agent` and `--control-candidate` add the
@@ -619,6 +617,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A top-level function named like a stdlib callback parameter is called
+  correctly when compiled.** Declaring your own `f` and calling it from a lambda
+  passed to `List.map` (whose callback parameter is also `f`) called the
+  callback instead at `--opt 0` and `--opt 2`, so the mapped values were wrong.
+  The interpreter and `--no-opt` were always right.
 - **Drop functions keep the same symbol across unrelated edits.** The compiler
   named the drop function of a type with an unresolved type variable after the
   typechecker's internal variable number (`__drop$List_V_53272`), so it moved

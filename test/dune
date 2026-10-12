@@ -1792,6 +1792,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/tuple_eq.expected native_tuple_eq.out)))
 
+; An inlined body's free reference to a top-level function must not be
+; captured by a caller binder of the same name: a top-level `f` called from a
+; lambda, inlined into List.map's clone whose callback parameter is `f`, became
+; a call through the parameter (wrong value at --opt 0 and --opt 2).  Built at
+; the default and at --opt 2.
+(rule
+ (targets native_inline_capture_toplevel_name native_inline_capture_toplevel_name.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/inline_capture_toplevel_name.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_inline_capture_toplevel_name native/inline_capture_toplevel_name.march)
+   (with-stdout-to native_inline_capture_toplevel_name.out (system "./native_inline_capture_toplevel_name")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/inline_capture_toplevel_name.expected native_inline_capture_toplevel_name.out)))
+
+(rule
+ (targets native_inline_capture_toplevel_name_o2 native_inline_capture_toplevel_name_o2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/inline_capture_toplevel_name.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_inline_capture_toplevel_name_o2 native/inline_capture_toplevel_name.march)
+   (with-stdout-to native_inline_capture_toplevel_name_o2.out (system "./native_inline_capture_toplevel_name_o2")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/inline_capture_toplevel_name.expected native_inline_capture_toplevel_name_o2.out)))
+
 ; A field projected out of a record is a borrow of it; three shapes released
 ; the record before the field's last read (a string match's binder arm, a
 ; nested projection after the record was consumed, a record update from a
