@@ -222,6 +222,8 @@ native_generic_fn_to_string_specialize: coverage audit (user + stdlib): 135 enfo
 native_generic_fn_to_string_specialize: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_get_actor_field_direct: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_get_actor_field_direct: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_getaddrinfo_green_thread: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_getaddrinfo_green_thread: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_h_css_url_context: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_h_css_url_context: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_h_escape_ctx_builtin: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

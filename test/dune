@@ -8790,6 +8790,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/tcp_connect_refused_after_park.expected native_tcp_connect_refused_after_park.out)))
 
+; ── tcp_connect resolves a hostname from green threads; the resolver helper
+; thread is created on the scheduler's native stack, not the green one ──
+(rule
+ (targets native_getaddrinfo_green_thread native_getaddrinfo_green_thread.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/getaddrinfo_green_thread.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_getaddrinfo_green_thread
+        native/getaddrinfo_green_thread.march)
+   (with-stdout-to native_getaddrinfo_green_thread.out
+        (system "./native_getaddrinfo_green_thread")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/getaddrinfo_green_thread.expected native_getaddrinfo_green_thread.out)))
+
 ; ── A stale readiness hint's EAGAIN stays a retry after the park resumed on
 ; another scheduler thread (glibc errno address reused across the park) ──
 (rule

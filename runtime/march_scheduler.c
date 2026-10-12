@@ -4634,6 +4634,31 @@ static void *resolve_thread(void *arg) {
     return NULL;
 }
 
+typedef struct {
+    resolve_req *q;
+    int          created;
+} resolve_spawn;
+
+/* Start the detached resolve_thread for s->q; s->created = 1 on success.
+ * Runs on the scheduler's NATIVE stack (march_sched_run_on_sched_stack),
+ * never on the calling green thread's.  Under ASAN, pthread_create runs with
+ * every signal blocked, so when glibc's allocate_stack (calloc in
+ * allocate_dtv) touched a green-stack page that had not been grown yet, the
+ * lazy-growth SIGSEGV could not be delivered and the kernel killed the
+ * process -- no report, exit 139 (test/test_scheduler_fdwait.c's resolver
+ * case under -fsanitize=address, Linux arm64; same failure as the blocking-FFI
+ * pool, specs/progress/2026-10-12-asan-getaddrinfo-helper-thread-spawn.md). */
+static void resolve_spawn_thread(void *arg) {
+    resolve_spawn *s = (resolve_spawn *)arg;
+    pthread_t t;
+    pthread_attr_t attr;
+    s->created = 0;
+    if (pthread_attr_init(&attr) != 0) return;
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    s->created = pthread_create(&t, &attr, resolve_thread, s->q) == 0;
+    pthread_attr_destroy(&attr);
+}
+
 int march_sched_getaddrinfo(const char *host, const char *port,
                             const struct addrinfo *hints, struct addrinfo **res) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
@@ -4641,13 +4666,12 @@ int march_sched_getaddrinfo(const char *host, const char *port,
         resolve_req q;
         q.host = host; q.port = port; q.hints = hints; q.res = NULL; q.rc = 0; q.proc = p;
         atomic_store(&q.done, 0); atomic_store(&q.woke, 0);
-        pthread_t t;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        int created = pthread_create(&t, &attr, resolve_thread, &q) == 0;
-        pthread_attr_destroy(&attr);
-        if (created) {
+        /* Both live on this green thread's stack, which stays put (and this
+         * proc unresumable) until the spawn has returned.  The helper may
+         * finish first: its wake lands as a permit the park below consumes. */
+        resolve_spawn s = { &q, 0 };
+        march_sched_run_on_sched_stack(resolve_spawn_thread, &s);
+        if (s.created) {
             /* Park until the result is in (the wake permit covers a wake that
              * lands before the park), then until the wake has been issued. */
             while (!atomic_load_explicit(&q.done, memory_order_acquire))

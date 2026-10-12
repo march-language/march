@@ -2386,6 +2386,25 @@ static void *pool_worker(void *arg) {
     return NULL;
 }
 
+/* Start the pool's initial g_pool.size workers.  Runs on the scheduler's
+   NATIVE stack (march_sched_run_on_sched_stack): march_http_server_listen,
+   the caller, is a green thread, and under ASAN pthread_create runs with
+   every signal blocked, so a lazy green-stack growth fault inside it is fatal
+   (silent exit 139; see march_sched_getaddrinfo's resolver spawn in
+   march_scheduler.c).  pool_grow_if_starved needs no such care: it runs on a
+   pool worker, an ordinary OS thread. */
+static void pool_spawn_initial(void *arg) {
+    (void)arg;
+    for (int i = 0; i < g_pool.size; i++) {
+        if (pthread_create(&g_pool.threads[i], NULL, pool_worker, NULL) != 0) {
+            fprintf(stderr, "march: pool worker[%d] create failed: %s\n",
+                    i, strerror(errno));
+            g_pool.size = i;   /* only join threads we actually started */
+            break;
+        }
+    }
+}
+
 void march_http_pool_start(int64_t pool_size, void *pipeline) {
     march_http_pool_start_max(pool_size, 0, pipeline);
 }
@@ -2431,14 +2450,7 @@ void march_http_pool_start_max(int64_t pool_size, int64_t max_conns,
         return;
     }
 
-    for (int i = 0; i < g_pool.size; i++) {
-        if (pthread_create(&g_pool.threads[i], NULL, pool_worker, NULL) != 0) {
-            fprintf(stderr, "march: pool worker[%d] create failed: %s\n",
-                    i, strerror(errno));
-            g_pool.size = i;   /* only join threads we actually started */
-            break;
-        }
-    }
+    march_sched_run_on_sched_stack(pool_spawn_initial, NULL);
     fprintf(stderr, "march: HTTP thread pool started "
                     "(%d workers, growing to %d as connections arrive)\n",
             g_pool.size, g_pool.max_size);
