@@ -694,6 +694,32 @@ git log is authoritative for exact commits.
   patch. The comparison also became stricter in two places it was blind:
   adding a parameter to a type (`Box(a)` -> `Box(a, b)`) and making a type's
   constructors private (`opaque type`) now require a major bump.
+- **`task_cancel_by_id` no longer leaks the task.** Cancelling a task as the
+  last thing done with it (as `Task.race` and `Task.any` do for the tasks that
+  lost) leaked the task object every time in compiled code.
+- **Compiled `Map` and `Set` with `Float` keys no longer leak.** Every
+  insert, removal and size query on a `Map(Float, v)` (and every `Set(Float)`
+  insert) leaked a small allocation per key it touched, and dropping such a map
+  leaked all of its keys.
+- **Fixed a rare memory-safety bug when a task finishes.** If you awaited a
+  task, finished with its result, and dropped the task before the task's own
+  thread had fully wound down, the runtime could read the freed result. It was
+  seen only under AddressSanitizer at 14 schedulers (about 1 run in 800), and
+  could in principle free memory twice.
+- **A generic function passed as a callback no longer leaks the argument it
+  ignores.** `fn second(_a, b) do b end` handed to something expecting a
+  `Float -> Float -> Float` (or a `String -> String -> String`) leaked its
+  first argument on every call in compiled code.
+- **Compiled code no longer leaks a `Float` matched through a nested
+  pattern.** `Some(Some(f))` on an `Option(Option(Float))`, or `Ok(Some(f))` on
+  a `Result(Option(Float), e)`, leaked one small allocation every time it
+  matched.
+- **Compiled code no longer leaks a `Float` when rebuilding a value from
+  `Some(f)`.** Matching `Some(f)` on an `Option(Float)` and building another
+  one-field value from it (`Some(f) -> Ok(f)`, `Some(f) -> Number(f)`) leaked
+  one small allocation per call, and rebuilding it as a different type could
+  leak the whole `Option` cell. `Json.parse` hit this once for every number it
+  read, so long-running programs that parse JSON grew without bound.
 - **A top-level function named like a stdlib callback parameter is called
   correctly when compiled.** Declaring your own `f` and calling it from a lambda
   passed to `List.map` (whose callback parameter is also `f`) called the

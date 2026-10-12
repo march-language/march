@@ -9918,6 +9918,132 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (diff native/erased_float_slot_leak_probe.expected
         native_erased_float_slot_leak_probe.out)))
 
+; ── Leak guard: an erased-slot Float box in a cell the branch REUSES (FBIP):
+; `Some(f) -> N(f)` / `Some(f) -> Ok(f)` orphaned the box (one per Json number
+; parsed), and an Option(Float) token reused as another type leaked the whole
+; cell. The shared legs are the double-free witnesses. Found by the ASAN/LSan
+; sweep (scripts/native-sanitize-sweep.sh -l).
+(rule
+ (targets native_erased_float_reuse_leak_probe native_erased_float_reuse_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/erased_float_reuse_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_float_reuse_leak_probe
+        native/erased_float_reuse_leak_probe.march)
+   (with-stdout-to native_erased_float_reuse_leak_probe.out
+        (system "./native_erased_float_reuse_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_float_reuse_leak_probe.expected native_erased_float_reuse_leak_probe.out)))
+
+; ── Leak guard: a Float box behind a NESTED pattern (`Some(Some(f))`): the
+; inner case's qualified tag missed poly_ctors, so the box was bound as a plain
+; heap field and never released. The shared leg is the double-free witness.
+(rule
+ (targets native_nested_float_pattern_leak_probe native_nested_float_pattern_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/nested_float_pattern_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_nested_float_pattern_leak_probe
+        native/nested_float_pattern_leak_probe.march)
+   (with-stdout-to native_nested_float_pattern_leak_probe.out
+        (system "./native_nested_float_pattern_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_float_pattern_leak_probe.expected native_nested_float_pattern_leak_probe.out)))
+
+; ── Leak guard: a generic NAMED fn called through a closure that ignores a
+; parameter (`pfn ksnd(_p, x) do x end` as a Float -> Float -> Float, or over
+; Strings): the erased parameter is owned but nothing dropped it, so its
+; $clo_wrap's reference leaked once per call. The returned parameter is the
+; double-free witness.
+(rule
+ (targets native_generic_fn_closure_unused_param_leak_probe native_generic_fn_closure_unused_param_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/generic_fn_closure_unused_param_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_generic_fn_closure_unused_param_leak_probe
+        native/generic_fn_closure_unused_param_leak_probe.march)
+   (with-stdout-to native_generic_fn_closure_unused_param_leak_probe.out
+        (system "./native_generic_fn_closure_unused_param_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/generic_fn_closure_unused_param_leak_probe.expected native_generic_fn_closure_unused_param_leak_probe.out)))
+
+; ── A Task's result released by its awaiter before the Task dies: the Task
+; destructor read the (freed) result's tag to decide whether it owned a Float
+; box -- a heap-use-after-free ASAN saw in tcp_recv_eagain_after_park. The
+; Float leg pins that a Float result is still released (live_allocs flat).
+(rule
+ (targets native_task_result_released_before_task native_task_result_released_before_task.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/task_result_released_before_task.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_result_released_before_task
+        native/task_result_released_before_task.march)
+   (with-stdout-to native_task_result_released_before_task.out
+        (system "MARCH_NUM_SCHEDULERS=14 ./native_task_result_released_before_task")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_result_released_before_task.expected native_task_result_released_before_task.out)))
+
+; ── Leak guard: a Float KEY in a Map/Set. HEntry is declared by three stdlib
+; modules, so its bare TCon found no type_params entry (key box bound as a
+; plain heap field) and its synthesized drop's qualified branches missed the
+; boxed-Float slot table. The shared leg is the double-free witness.
+(rule
+ (targets native_map_float_key_leak_probe native_map_float_key_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/map_float_key_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_map_float_key_leak_probe
+        native/map_float_key_leak_probe.march)
+   (with-stdout-to native_map_float_key_leak_probe.out
+        (system "./native_map_float_key_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/map_float_key_leak_probe.expected native_map_float_key_leak_probe.out)))
+
+; ── Leak guard: task_cancel_by_id borrows its Task (it had no borrow-table
+; row, so a Task whose last use was a cancel leaked). The again leg cancels a
+; Task still awaited afterwards: the double-free witness.
+(rule
+ (targets native_task_cancel_by_id_leak_probe native_task_cancel_by_id_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/task_cancel_by_id_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_cancel_by_id_leak_probe
+        native/task_cancel_by_id_leak_probe.march)
+   (with-stdout-to native_task_cancel_by_id_leak_probe.out
+        (system "./native_task_cancel_by_id_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_cancel_by_id_leak_probe.expected native_task_cancel_by_id_leak_probe.out)))
+
 (rule
  (alias runtest)
  (deps native_erased_float_slot_leak_probe.live)

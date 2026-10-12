@@ -154,6 +154,8 @@ native_dns_resolve_parity: coverage audit (user + stdlib): 135 enforced, 0 inert
 native_dns_resolve_parity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_dropped_closure_captures: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_dropped_closure_captures: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_erased_float_reuse_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_erased_float_reuse_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_option_read: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -212,6 +214,8 @@ native_fn_arities_shadow_poisoning: coverage audit (user + stdlib): 135 enforced
 native_fn_arities_shadow_poisoning: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_generic_fn_closure_unused_param_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_generic_fn_closure_unused_param_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_float_closure: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_float_closure: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_to_string_specialize: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -322,6 +326,8 @@ native_main_cap_io: coverage audit (user + stdlib): 135 enforced, 0 inert (warne
 native_main_cap_io: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mainless_prunes_stdlib: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_mainless_prunes_stdlib: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_map_float_key_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_map_float_key_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_march_prefixed_local: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_march_prefixed_local: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mixed_tail_aggregate_drop: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -408,6 +414,8 @@ native_nested_cons_ctor_heap: coverage audit (user + stdlib): 135 enforced, 0 in
 native_nested_cons_ctor_heap: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_derive_json: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_nested_derive_json: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nested_float_pattern_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_nested_float_pattern_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_mod_qualcall: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_nested_mod_qualcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_option_float_match: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -656,10 +664,14 @@ native_task_await_ptr: coverage audit (user + stdlib): 135 enforced, 0 inert (wa
 native_task_await_ptr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_task_burst_await: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_task_burst_await: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_cancel_by_id_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_task_cancel_by_id_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_task_lifetime_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_task_lifetime_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_task_race_cancel: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_task_race_cancel: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_result_released_before_task: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_task_result_released_before_task: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_task_spawn_float_thunk: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_task_spawn_float_thunk: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tco_fresh_arg_decrc: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

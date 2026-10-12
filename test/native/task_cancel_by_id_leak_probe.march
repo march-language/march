@@ -1,0 +1,58 @@
+-- Leak guard for task_cancel_by_id: it reads the Task and never keeps it.
+--
+-- Perceus treated the builtin's argument as OWNED (it had no row in
+-- lib/tir/borrow.ml's extern_borrow_table), so a Task whose last use was a
+-- cancel -- `Task.await(t)` then `task_cancel_by_id(t)`, the shape Task.race
+-- and Task.any use for the losers -- was handed to a C function that does not
+-- release it: one 48-byte Task leaked per cancel (found by the LSan pass of
+-- scripts/native-sanitize-sweep.sh: ~9,000 Tasks in
+-- proc_reclaim_kill_respawn). It is now borrowed, and the caller releases it.
+--
+-- The `again` leg cancels a Task that is still used afterwards (awaited a
+-- second time), the double-free witness for the borrow.
+--
+-- SIGNAL: live_allocs() deltas over 1,000 iterations; each must be 0.
+mod TaskCancelByIdLeakProbe do
+  needs IO.Console
+  needs IO.Spawn
+
+  pfn await_int(t : Task(Int)) : Int do
+    match Task.await(t) do
+      Ok(v) -> v
+      Err(_) -> 0
+    end
+  end
+
+  pfn cancel_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> n + 1)
+      let k = await_int(t)
+      task_cancel_by_id(t)
+      cancel_leg(n - 1, acc + k)
+    end
+  end
+
+  pfn again_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> n * 2)
+      let a = await_int(t)
+      task_cancel_by_id(t)
+      let b = await_int(t)
+      again_leg(n - 1, acc + a + b)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+    println("cancel=" ++ int_to_string(cancel_leg(4, 0)))
+    println("again=" ++ int_to_string(again_leg(4, 0)))
+    let b0 = live_allocs()
+    let a = cancel_leg(1000, 0)
+    let b1 = live_allocs()
+    let b = again_leg(1000, 0)
+    let b2 = live_allocs()
+    println("cancel1k=" ++ int_to_string(a) ++ " leaked=" ++ int_to_string(b1 - b0))
+    println("again1k=" ++ int_to_string(b) ++ " leaked=" ++ int_to_string(b2 - b1))
+  end
+end

@@ -1,0 +1,95 @@
+-- Leak guard for a Float KEY in a Map (a generic slot instantiated at Float).
+--
+-- `Map(Float, v)`'s leaves hold the key in an erased slot, i.e. as a
+-- march_alloc_float box the leaf owns. Two places lost track of it, both
+-- because `HEntry` is declared by three stdlib modules (Map, HashMap, Hamt)
+-- and so is registered only under its qualified names:
+--
+--   * lib/tir/llvm_data.ml resolve_ctor_fields: Map's own `case node of
+--     HLeaf(h, k, v)` is on the bare `HEntry(Float, String)`, found no
+--     type_params / poly_ctors entry, and fell back to the declared `k`, so
+--     the key box was bound as an ordinary heap field the Float binder never
+--     released (every Map.size, insert-over-a-leaf, remove ...);
+--   * lib/tir/drop.ml boxed_float_slots: the synthesized __drop$HEntry_...
+--     branches are the qualified union ("Map.HEntry.HLeaf"), which a bare-name
+--     lookup missed, so dropping a whole map never released its key boxes.
+--
+-- Found by the LSan pass of scripts/native-sanitize-sweep.sh
+-- (local_named_like_builtin). The shared leg inserts into the SAME map twice,
+-- so a release on a still-shared leaf would hand the second insert a freed
+-- key: its printed sum is the double-free witness.
+--
+-- SIGNAL: live_allocs() deltas over 1,000 iterations; each must be 0.
+mod MapFloatKeyLeakProbe do
+  needs IO.Console
+
+  pfn flt(a : Float) do fn (b : Float) -> a < b end
+
+  pfn build(x : Float) : Map(Float, String) do
+    Map.insert(Map.insert(Map.empty(), x, "a", flt), x +. 1.0, "b", flt)
+  end
+
+  pfn size_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else size_leg(n - 1, acc + Map.size(build(int_to_float(n)))) end
+  end
+
+  pfn replace_remove_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let x = int_to_float(n)
+      let m = Map.remove(Map.insert(build(x), x, "c", flt), x +. 1.0, flt)
+      replace_remove_leg(n - 1, acc + Map.size(m))
+    end
+  end
+
+  pfn drop_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let m = build(int_to_float(n))
+      drop_leg(n - 1, acc + (if Map.contains_key(m, 1.0, flt) do 1 else 0 end))
+    end
+  end
+
+  pfn shared_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let m = build(0.5)
+      let a = Map.insert(m, 0.5, "x", flt)
+      let b = Map.insert(m, 9.5, "y", flt)
+      shared_leg(n - 1, acc + Map.size(a) + Map.size(b) + Map.size(m))
+    end
+  end
+
+  pfn set_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let s = Set.insert(Set.insert(Set.empty(), int_to_float(n), flt), 0.25, flt)
+      set_leg(n - 1, acc + Set.size(s))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    println("size=" ++ int_to_string(size_leg(4, 0)))
+    println("replace_remove=" ++ int_to_string(replace_remove_leg(4, 0)))
+    println("drop=" ++ int_to_string(drop_leg(4, 0)))
+    println("shared=" ++ int_to_string(shared_leg(4, 0)))
+    println("set=" ++ int_to_string(set_leg(4, 0)))
+    let b0 = live_allocs()
+    let a = size_leg(1000, 0)
+    let b1 = live_allocs()
+    let b = replace_remove_leg(1000, 0)
+    let b2 = live_allocs()
+    let c = drop_leg(1000, 0)
+    let b3 = live_allocs()
+    let d = shared_leg(1000, 0)
+    let b4 = live_allocs()
+    let e = set_leg(1000, 0)
+    let b5 = live_allocs()
+    println("size1k=" ++ int_to_string(a) ++ " leaked=" ++ int_to_string(b1 - b0))
+    println("replace_remove1k=" ++ int_to_string(b) ++ " leaked=" ++ int_to_string(b2 - b1))
+    println("drop1k=" ++ int_to_string(c) ++ " leaked=" ++ int_to_string(b3 - b2))
+    println("shared1k=" ++ int_to_string(d) ++ " leaked=" ++ int_to_string(b4 - b3))
+    println("set1k=" ++ int_to_string(e) ++ " leaked=" ++ int_to_string(b5 - b4))
+  end
+end
