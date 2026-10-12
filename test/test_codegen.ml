@@ -16818,6 +16818,77 @@ let test_inline_does_not_capture_toplevel_name () =
     (List.filter (fun s -> Test_helpers.contains "[contract]" s)
        (List.map snd (March_tir.Tir_verify.check ~stage:"tir-opt-1-inline" ~rc:false m')))
 
+(* ── TIR verifier, check 4 (representation invariants, at emission) ──── *)
+
+let c4_has needle fs = List.exists (fun (_, s) -> Test_helpers.contains needle s) fs
+
+(* 4a: the repr audit's conditions.  Recording is forced on the way
+   emit_module forces it under --verify-tir. *)
+let test_check4_mixed_families () =
+  let module C = March_tir.Llvm_ctx in
+  let record ty payload family site = C.repr_audit_record ~ty ~payload ~family ~site in
+  let flagged entries =
+    Hashtbl.reset C._repr_audit;
+    let saved = !C.repr_audit_forced in
+    C.repr_audit_forced := true;
+    Fun.protect ~finally:(fun () -> C.repr_audit_forced := saved; Hashtbl.reset C._repr_audit)
+      (fun () -> List.iter (fun (t, p, f, s) -> record t p f s) entries;
+        March_tir.Llvm_toplevel.repr_mix_findings (C.repr_audit_flagged ())) in
+  Alcotest.(check bool) "one payload, two families: reported" true
+    (c4_has "repr/mixed: `Opt` is encoded as Boxed and Niche (same-payload conflict)"
+       (flagged [ ("Opt", "Int", "Niche", "alloc"); ("Opt", "Int", "Boxed", "case") ]));
+  Alcotest.(check bool) "a site with no payload disagreeing: reported" true
+    (c4_has "unknown-payload site disagrees"
+       (flagged [ ("Opt", "Int", "Niche", "alloc"); ("Opt", "?", "Boxed", "case") ]));
+  Alcotest.(check (list (pair string string))) "different payloads may differ (Option(Int) niche, Option(Float) boxed)" []
+    (flagged [ ("Opt", "Int", "Niche", "alloc"); ("Opt", "Float", "Boxed", "alloc") ]);
+  Alcotest.(check (list (pair string string))) "one family: clean" []
+    (flagged [ ("Opt", "Int", "Niche", "alloc"); ("Opt", "Int", "Niche", "case") ]);
+  (* not forced, no MARCH_REPR_AUDIT: nothing is recorded *)
+  Hashtbl.reset C._repr_audit;
+  C.repr_audit_forced := false;
+  if Sys.getenv_opt "MARCH_REPR_AUDIT" = None then begin
+    record "Opt" "Int" "Niche" "alloc"; record "Opt" "Int" "Boxed" "case";
+    Alcotest.(check int) "unforced recording is off" 0 (Hashtbl.length C._repr_audit)
+  end
+
+let c4_collision_set () =
+  let cs = Hashtbl.create 4 in
+  Hashtbl.replace cs "Color" [ "A.Color"; "B.Color" ];
+  cs
+
+(* 4b: a type in a collision group is Boxed at every site. *)
+let test_check4_collision_must_be_boxed () =
+  let collision_set = c4_collision_set () in
+  let f = March_tir.Llvm_toplevel.collision_repr_findings ~collision_set in
+  Alcotest.(check bool) "a colliding type encoded as a niche: reported" true
+    (c4_has "collision: `A.Color` shares its short name"
+       (f [ ("A.Color", [ ("?", "Niche", "alloc-some:A.Color.Some in main") ]) ]));
+  Alcotest.(check bool) "... also through its bare short name" true
+    (c4_has "collision: `Color`" (f [ ("Color", [ ("?", "Unboxed", "case in main") ]) ]));
+  Alcotest.(check (list (pair string string))) "a colliding type encoded Boxed: clean" []
+    (f [ ("A.Color", [ ("?", "Boxed", "alloc") ]) ]);
+  Alcotest.(check (list (pair string string))) "a non-colliding niche: clean" []
+    (f [ ("Shade", [ ("Int", "Niche", "alloc") ]) ])
+
+(* 4c: the group's constructor tags are in the collision range and distinct. *)
+let test_check4_collision_tags () =
+  let collision_set = c4_collision_set () in
+  let base = March_tir.Llvm_builtins.collision_tag_base in
+  let ctors = function
+    | "A.Color" -> Some [ "Red"; "Green" ] | "B.Color" -> Some [ "Red" ] | _ -> None in
+  let run tags =
+    March_tir.Llvm_toplevel.collision_tag_findings ~collision_set ~ctors
+      ~tag_of:(fun k -> List.assoc_opt k tags) in
+  Alcotest.(check (list (pair string string))) "distinct tags in range: clean" []
+    (run [ ("A.Color.Red", base); ("A.Color.Green", base + 1); ("B.Color.Red", base + 2) ]);
+  Alcotest.(check bool) "two modules' Red sharing a tag: reported" true
+    (c4_has "`A.Color.Red` and `B.Color.Red` share tag"
+       (run [ ("A.Color.Red", base); ("A.Color.Green", base + 1); ("B.Color.Red", base) ]));
+  Alcotest.(check bool) "an ordinary (index) tag in a collision group: reported" true
+    (c4_has "has tag 0x0, outside the collision range"
+       (run [ ("A.Color.Red", 0); ("A.Color.Green", base + 1); ("B.Color.Red", base + 2) ]))
+
 (* ── TIR verifier, check 3 (RC balance) ──────────────────────────────── *)
 
 let tv_rc ?(leaks = false) m =
@@ -17061,6 +17132,9 @@ let codegen_suites =
           Alcotest.test_case "contract: lambda survives Defun (RED)" `Quick test_tir_verify_contract_lambda_survives_defun;
           Alcotest.test_case "contract: local call must be indirect (RED)" `Quick test_tir_verify_contract_local_call_is_indirect;
           Alcotest.test_case "Inline does not capture a top-level name (RED)" `Quick test_inline_does_not_capture_toplevel_name;
+          Alcotest.test_case "check 4: mixed encoding families (RED)" `Quick test_check4_mixed_families;
+          Alcotest.test_case "check 4: colliding type must be Boxed (RED)" `Quick test_check4_collision_must_be_boxed;
+          Alcotest.test_case "check 4: collision tags (RED)" `Quick test_check4_collision_tags;
           Alcotest.test_case "rc: balanced owned param is clean" `Quick test_tir_verify_rc_balanced;
           Alcotest.test_case "rc: double release (RED)" `Quick test_tir_verify_rc_double_release;
           Alcotest.test_case "rc: use after release (RED)" `Quick test_tir_verify_rc_use_after_release;

@@ -52,6 +52,11 @@ git log is authoritative for exact commits.
   `style` attribute and in a `<style>` body alike.
 
 ### Added
+- **`--verify-tir` checks the representations codegen commits to.** At emission,
+  every allocation, match and equality site's encoding of a type (boxed, niche,
+  newtype or unboxed) must agree for the same payload, and a type whose short
+  name several modules declare must stay boxed with distinct constructor tags.
+  A disagreement is reported as a `repr/` finding after `llvm-emit`.
 - **`forge cap run` enforces the path scopes a program declares.** A binary
   whose `needs` narrow a filesystem capability to a directory
   (`needs IO.FileWrite("/var/lib/myapp")`) now carries those scopes, and
