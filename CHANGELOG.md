@@ -35,6 +35,21 @@ git log is authoritative for exact commits.
   `src`, `action` and every other URL attribute. A path hole whose value is
   nothing but dots is now replaced with an inert token. Query and fragment
   holes are unaffected (`?q=..` still renders `..`).
+- **`~H` no longer lets an interpolated value finish an escape the template
+  started.** `href="/users/.%${x}/edit"` with `x = "2e"` rendered
+  `/users/.%2e/edit`, which the browser reads as `/users/../edit`; and
+  `href="javascript&#${x}alert(1)"` with `x = "58"` rendered a link the HTML
+  parser decodes to `javascript:alert(1)`. A hole right after a literal `%`
+  (or `%` and one hex digit, `&#37;`, `&percnt;`) in a URL path, or right after
+  a character reference in a URL whose scheme is not settled yet, is now a
+  compile error. Complete escapes (`/a/%20${x}`) and `%` in a query are
+  unaffected.
+- **`~H` CSS `url()` follows the same scheme rule as `href`.**
+  `style="background:url(${s}:x)"` with `s = "javascript"` passed the URL check
+  and rendered `url(javascript:x)`. No current browser runs `javascript:` from
+  CSS, but a literal `:`, character reference or CSS escape (`\3a`) that would
+  let an interpolation choose a `url()` scheme is now a compile error, in a
+  `style` attribute and in a `<style>` body alike.
 
 ### Added
 - **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**
