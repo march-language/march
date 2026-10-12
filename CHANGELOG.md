@@ -675,6 +675,27 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **File and directory functions and `IO.warn` no longer leak their
+  arguments when compiled.** `File.exists`, `File.read`, `File.write`,
+  `File.append`, `File.delete`, `File.copy`, `File.rename`, `File.stat`,
+  `Dir.mkdir`, `Dir.mkdir_p`, `Dir.rmdir`, `Dir.rm_rf`, `Dir.list` and
+  `Dir.exists` leaked the path (and the data written) on every call, and
+  `IO.warn` and the stderr logger appender leaked every line they printed.
+- **A function that returns `a ++ b` built from a tuple or record's fields no
+  longer leaks the tuple or record when compiled.** `let (a, b) = pair` or
+  `r.x ++ r.y` as a function's result kept the pair (or record) and the
+  strings it held, once per call.
+- **`send_checked`, `is_cap_valid` and `revoke_cap` no longer leak the
+  capability when compiled.** Each call leaked the cap `get_cap` returned.
+- **Registering an actor by name no longer leaks memory when compiled.**
+  Every `Actor.register` leaked the name string and the actor record (the
+  registry kept the record after the actor died or was unregistered), and
+  every `Actor.unregister` and `Actor.whereis` leaked its name.
+- **A lambda that reads a field of its argument no longer leaks the
+  argument when compiled.** A lambda stored where its argument type stays
+  generic (in a list inside a variant whose element type is hidden) released
+  its argument only when it never used it; `fn r -> r.age > 28` leaked the
+  record on every call. The record is now released after the read.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a

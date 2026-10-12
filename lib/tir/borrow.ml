@@ -49,6 +49,32 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_println", [true]);
   ("print",         [true]);   (* TIR builtin name before LLVM mangling *)
   ("println",       [true]);
+    (* march_print_stderr writes the bytes and returns.  Listed as owned
+       until 2026-10-12, so every IO.warn (and every line of the stderr
+       logger appender) leaked the line it printed. *)
+  ("print_stderr",  [true]);
+    (* The path-taking file and directory builtins only read their String
+       arguments (fopen / stat / remove / rename / mkdir / opendir on the
+       bytes; an error copies the path into a new string).  Listed as owned
+       until 2026-10-12, so every call leaked each path it was given, and
+       file_write / file_append the data too.  The handle-taking ones
+       (file_close, file_read_line, file_read_chunk) take an Int and stay in
+       the owned list. *)
+  ("file_exists",   [true]);
+  ("dir_exists",    [true]);
+  ("file_open",     [true]);
+  ("file_read",     [true]);
+  ("file_write",    [true; true]);
+  ("file_append",   [true; true]);
+  ("file_delete",   [true]);
+  ("file_copy",     [true; true]);
+  ("file_rename",   [true; true]);
+  ("file_stat",     [true]);
+  ("dir_mkdir",     [true]);
+  ("dir_mkdir_p",   [true]);
+  ("dir_rmdir",     [true]);
+  ("dir_rm_rf",     [true]);
+  ("dir_list",      [true]);
   ("print_line",    [true]);
   ("dist_monitor_register", [false; true; false; false]);
   ("march_dist_monitor_register_pid", [false; true; false; false]);
@@ -87,6 +113,16 @@ let extern_borrow_table : (string * bool list) list = [
        actor records outlived their actors (two per cluster session party,
        ClusterNode's RegWatch watching each session endpoint). *)
   ("monitor",           [false; true]);
+    (* The named registry only reads its arguments: march_actor_register
+       copies the name into the table (and a strdup into the actor's reverse
+       index) and takes its own reference to the actor (march_vault_set's
+       incrc); unregister and whereis look the name up.  Listed as owned
+       until 2026-10-12, so every registration leaked the name string and a
+       reference to the actor record, and every unregister / whereis leaked
+       the name. *)
+  ("actor_register",    [true; true]);
+  ("actor_unregister",  [true]);
+  ("actor_whereis",     [true]);
   ("kill",              [true]);
   ("march_kill",        [true]);
   ("actor_stop",        [true; false]);
@@ -101,6 +137,14 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_mailbox_backlog", [true]);
   ("get_cap",           [true]);
   ("march_get_cap",     [true]);
+    (* The epoch-Cap plane only reads the cap: march_send_checked,
+       march_is_cap_valid and march_revoke_cap copy its (pid_index, epoch)
+       words and never store or free it.  send_checked's MESSAGE is consumed
+       (sent, or released on every refusal path).  Listed as owned until
+       2026-10-12, so every call leaked the cap get_cap had allocated. *)
+  ("send_checked",      [true; false]);
+  ("is_cap_valid",      [true]);
+  ("revoke_cap",        [true]);
   (* The rest of the read-only pid family, missed by the 2026-09-14 audit and
      left owned, so each call leaked one reference to its pid and a record
      ever passed to one was never freed
@@ -588,17 +632,14 @@ let extern_owned_builtins : string list = [
     (* actor_inspect_store keeps its String in the proc's inspect_out slot
        until the actor loop sends it as the reply (observe plan R4). *)
     "actor_inspect_store";
-    "panic_"; "unreachable_"; "todo_"; "print_stderr";
+    "panic_"; "unreachable_"; "todo_";
     "list_append"; "list_concat";
     "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
     "logger_add_context"; "logger_add_field"; "spawn";
     "spawn_supervised"; "actor_reply";
     "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
-    "file_exists"; "dir_exists"; "file_open"; "file_close"; "file_read";
-    "file_read_line"; "file_read_chunk"; "file_write"; "file_append";
-    "file_delete"; "file_copy"; "file_rename"; "file_stat"; "dir_mkdir";
-    "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
+    "file_close"; "file_read_line"; "file_read_chunk";
     "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
     (* typed_array_create STORES its default value in every slot: the
        transferred reference fills the first, each other slot takes its own
@@ -616,8 +657,6 @@ let extern_owned_builtins : string list = [
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps";
     "register_resource";
-    "actor_register"; "actor_unregister"; "actor_whereis";
-    "send_checked"; "revoke_cap"; "is_cap_valid";
     "register_actor_on_stop";
     (* Observe plan R4: registration reads two static closures; the inspect
        request reads the pid (march_actor_inspect never consumes it).

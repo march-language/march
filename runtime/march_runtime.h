@@ -1085,6 +1085,9 @@ void   *march_vault_keys(void *table);
 /* Collect the values [key]'s shard has stopped holding, as a List(v) the
  * caller owns; Vault's typed wrappers drop it (march_extras.c). */
 void   *march_vault_reap(void *table, void *key);
+/* Release [key]'s shard's buried values with a plain decrc each: for a
+ * runtime-owned table whose values need no typed drop (march_extras.c). */
+void    march_vault_release_dead(void *table, void *key);
 /* Unregister and empty a table, returning every value it held (march_extras.c). */
 void   *march_vault_close(void *table);
 /* Vault tables created and not yet freed (a leak gauge for tests). */

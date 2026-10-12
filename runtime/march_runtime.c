@@ -4090,6 +4090,8 @@ int64_t march_actor_register(void *name_str, void *actor) {
         return 0;
     }
     march_vault_set(registry_tbl(), name_str, actor);
+    /* An overwritten stale entry was buried, not released. */
+    march_vault_release_dead(registry_tbl(), name_str);
     char scratch[MARCH_SSO_MAX + 1];
     meta_add_name(m, march_str_data(name_str, scratch));
     march_reclaim_exit();
@@ -4125,6 +4127,7 @@ int64_t march_actor_unregister(void *name_str) {
     march_decrc(existing);   /* release our extra ref from march_vault_get */
 
     march_vault_drop(registry_tbl(), name_str);
+    march_vault_release_dead(registry_tbl(), name_str);
     pthread_mutex_unlock(&g_registry_mu);
     return 1;
 }
@@ -4192,7 +4195,10 @@ static void registry_retire_meta(march_actor_meta *m, void *actor) {
     for (int i = 0; i < m->reg_name_count; i++) {
         void *key = march_string_lit(m->reg_names[i], (int64_t)strlen(m->reg_names[i]));
         void *cur = march_vault_get(registry_tbl(), key);
-        if (cur == actor) march_vault_drop(registry_tbl(), key);
+        if (cur == actor) {
+            march_vault_drop(registry_tbl(), key);
+            march_vault_release_dead(registry_tbl(), key);
+        }
         if (cur != NULL) march_decrc(cur);
         march_decrc(key);   /* release our own ref from march_string_lit */
         free(m->reg_names[i]);

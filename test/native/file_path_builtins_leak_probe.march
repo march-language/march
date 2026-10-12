@@ -1,0 +1,90 @@
+-- The path-taking file and directory builtins, and print_stderr, leaked
+-- their String arguments, compiled: they were classified as OWNING them, but
+-- the runtime only reads the bytes. Every File.exists / File.read /
+-- File.write / File.append / File.delete / Dir.mkdir leaked the path (and the
+-- data), and every IO.warn the line it printed.
+-- Each line counts live allocations over 200 calls (0 = no growth; RED
+-- before: 200 / 400 / 200 / 200). The path is SHARED:
+-- it is built once per round and read again after every call, so a release
+-- of a reference the callee does not own would be a use-after-free under
+-- ASAN or a wrong total here. Stderr is discarded by the test rule.
+mod FilePathBuiltinsLeakProbe do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.FileWrite
+
+  pfn base() : String do "/tmp/march_file_path_builtins_leak_probe" end
+
+  pfn missing(i : Int) : Int do
+    let p = base() ++ "_missing_" ++ int_to_string(i)
+    let e = if File.exists(p) do 1 else 0 end
+    let r = match File.read(p) do
+      Ok(_) -> 100
+      Err(_) -> 1
+    end
+    e + r + string_length(p)
+  end
+
+  pfn round_trip(i : Int) : Int do
+    let p = base() ++ "_" ++ int_to_string(i % 4)
+    let data = "line " ++ int_to_string(i)
+    let w = match File.write(p, data) do
+      Ok(_) -> 1
+      Err(_) -> 0
+    end
+    let a = match File.append(p, data) do
+      Ok(_) -> 1
+      Err(_) -> 0
+    end
+    let n = match File.read(p) do
+      Ok(s) -> string_length(s)
+      Err(_) -> 0
+    end
+    let d = match File.delete(p) do
+      Ok(_) -> 1
+      Err(_) -> 0
+    end
+    w + a + n + d + string_length(p) + string_length(data)
+  end
+
+  pfn dirs(i : Int) : Int do
+    let p = base() ++ "_dir_" ++ int_to_string(i % 4)
+    let m = match Dir.mkdir_p(p) do
+      Ok(_) -> 1
+      Err(_) -> 0
+    end
+    let e = if Dir.exists(p) do 1 else 0 end
+    let r = match Dir.rm_rf(p) do
+      Ok(_) -> 1
+      Err(_) -> 0
+    end
+    m + e + r + string_length(p)
+  end
+
+  pfn warned(i : Int) : Int do
+    let s = "warn " ++ int_to_string(i)
+    IO.warn(s)
+    string_length(s)
+  end
+
+  pfn times(n : Int, f : (Int) -> Int, acc : Int) : Int do
+    if n <= 0 do acc else times(n - 1, f, acc + f(n)) end
+  end
+
+  pfn probe(name : String, f : (Int) -> Int) : () do
+    let _ = times(5, f, 0)
+    let a0 = live_allocs()
+    let total = times(200, f, 0)
+    let a1 = live_allocs()
+    println(name ++ ": total " ++ int_to_string(total) ++ ", growth "
+            ++ int_to_string(a1 - a0))
+  end
+
+  fn main(_io : Cap(IO), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) : () do
+    probe("missing file", fn i -> missing(i))
+    probe("write, append, read, delete", fn i -> round_trip(i))
+    probe("mkdir_p, exists, rm_rf", fn i -> dirs(i))
+    probe("IO.warn", fn i -> warned(i))
+  end
+end
