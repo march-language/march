@@ -494,6 +494,8 @@ native_observe_which_source_v2: coverage audit (user + stdlib): 135 enforced, 0 
 native_observe_which_source_v2: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_option_adt_eq: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_option_adt_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_option_float_box_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_option_float_box_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_option_niche: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_option_niche: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_or_pattern: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

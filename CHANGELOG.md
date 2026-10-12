@@ -1049,6 +1049,13 @@ git log is authoritative for exact commits.
   The handler is now report-free, and the runtime's other benign races (the record-shape
   memo, the scheduler signal-mask record) are relaxed atomics. Plain builds compile to
   the same instructions.
+- **A dropped `Option(Float)` (or `Result` field of it) no longer leaks its
+  boxed Float.** The compiler's drop synthesis classified `Option` as
+  niche-encoded from its declaration even at `Option(Float)`, whose payload
+  is niche-UNSAFE and therefore Boxed-encoded: the release freed the Some
+  cell shallowly and orphaned the `march_alloc_float` box it held. Records,
+  tuples and cross-function boundaries holding such a value leaked one box
+  per value.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.
