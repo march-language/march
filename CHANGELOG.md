@@ -617,6 +617,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A closure that captures a small scalar-only value no longer leaks.** A
+  lambda (or a `match` with a guarded or-pattern) capturing a value of a type
+  like `type Pair = Pair(Int, Int)` leaked one small allocation each time the
+  closure was created, whether it was called, shared, or dropped uncalled.
 - **`task_cancel_by_id` no longer leaks the task.** Cancelling a task as the
   last thing done with it (as `Task.race` and `Task.any` do for the tasks that
   lost) leaked the task object every time in compiled code.

@@ -2453,6 +2453,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/closure_capture_release_probe.expected native_closure_capture_release_probe.out)))
 
+; ── Leak/double-free guard: a closure capturing an unboxed aggregate releases
+; the box its 8-byte slot holds (a guarded or-pattern's join point, a factory
+; called / dropped uncalled / shared, heap+unboxed captures, a local lambda).
+; Red (every leg "flat: false") with Drop.unboxed_capture_fields returning [].
+(rule
+ (targets native_unboxed_capture_leak_probe native_unboxed_capture_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/unboxed_capture_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_unboxed_capture_leak_probe
+        native/unboxed_capture_leak_probe.march)
+   (with-stdout-to native_unboxed_capture_leak_probe.out
+        (system "./native_unboxed_capture_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/unboxed_capture_leak_probe.expected native_unboxed_capture_leak_probe.out)))
+
 ; ── Leak guard: a closure call consumes its arguments on both sides. A
 ; read-only apply-fn parameter was borrow-classified while every caller
 ; transferred a reference, leaking one fresh argument per call; also a lambda
