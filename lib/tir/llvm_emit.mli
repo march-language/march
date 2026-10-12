@@ -47,6 +47,7 @@ val emit_module :
   ?emit_main:bool ->
   ?cap_attrib:(String.t * string) list ->
   ?cap_decls:(string * string) list ->
+  ?cap_manifest:string ->
   ?k_table:Kind.table -> Tir.tir_module -> string
 
 val emit_preamble : ?target:target_config -> ?repl:bool -> Buffer.t -> unit

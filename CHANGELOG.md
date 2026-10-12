@@ -37,6 +37,15 @@ git log is authoritative for exact commits.
   holes are unaffected (`?q=..` still renders `..`).
 
 ### Added
+- **`forge cap run` enforces the path scopes a program declares.** A binary
+  whose `needs` narrow a filesystem capability to a directory
+  (`needs IO.FileWrite("/var/lib/myapp")`) now carries those scopes, and
+  `forge cap run` confines it to them. On macOS, writes outside every
+  declared write scope are refused. On Linux (bubblewrap), writes are bound
+  to the write scopes, and reads to the read scopes. A scope only narrows a
+  capability the policy already grants, including under `--allow-only`.
+  Programs with no scopes, and binaries from older compilers, run exactly as
+  before.
 - **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**
   Editing a dependency's version in `forge.toml` and running `forge deps` used
   to lock the new release whatever it asked for. Now a release that asks for

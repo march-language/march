@@ -56,3 +56,11 @@ val read : string -> (t, string) result
 (** [read path] inspects the binary at [path].  Errors on unreadable files and
     on a binary carrying MULTIPLE manifest blobs (a planted second blob must
     never shadow the real one — design §6). *)
+
+val scope_decls : t -> ((string * string option) list, string) result
+(** The program's DECLARED filesystem path scopes, [(cap, scope)] with
+    [None] meaning unscoped, from the manifest's ["scopes"] array (see
+    [March_caps.Cap_scope.manifest_json]). [Ok []] when the binary has no
+    manifest or its manifest has no ["scopes"] key: an old binary, or an
+    unscoped program, keeps its unscoped sandbox. [Error] on a malformed
+    array, so a broken claim is reported rather than silently widened. *)
