@@ -1,0 +1,94 @@
+-- A lambda whose parameter stays ERASED (the Box below hides the element
+-- type) and that reads a field of it was never released: its apply fn owns
+-- the argument, but Perceus drops a parameter read only through field
+-- projections at its tail only when the type is a record or tuple, and the
+-- unused-parameter drop does not fire because the parameter IS used. Every
+-- call leaked the record (and everything it held).
+--
+-- Each line counts live allocations over 200 iterations (0 = no growth).
+-- The fresh rows hold only scalars: an erased record is released by a
+-- generic (shallow) dec, so a heap field of a record the closure frees still
+-- leaks (specs/todos/2026-10-12-erased-record-shallow-release.md).
+-- The rows list is SHARED: it is walked by three predicates and then read
+-- again, so a drop that released a reference it did not own would show up as
+-- a use-after-free under ASAN or a wrong total here. The returned-field case
+-- hands the projected String out of the apply fn, so the record must outlive
+-- the read.
+mod ErasedParamFieldRead do
+  needs IO.Console
+  type Box = Bx(List(b))
+
+  fn count_keep(rows : List(a), pred, n : Int) : Int do
+    match rows do
+    Nil -> n
+    Cons(h, t) ->
+      if pred(h) == true do count_keep(t, pred, n + 1)
+      else count_keep(t, pred, n)
+      end
+    end
+  end
+
+  fn run(box, rows) do
+    match box do
+    Bx(preds) ->
+      match preds do
+      Cons(p, _) -> count_keep(rows, p, 0)
+      Nil        -> 0 - 1
+      end
+    end
+  end
+
+  fn names(box, rows, acc : Int) : Int do
+    match box do
+    Bx(fs) ->
+      match fs do
+      Cons(f, _) ->
+        match rows do
+        Nil -> acc
+        Cons(h, t) -> names(box, t, acc + string_length(f(h)))
+        end
+      Nil -> acc
+      end
+    end
+  end
+
+  fn rows(i : Int) do
+    Cons({ id: i, age: 30, name: "ann" ++ int_to_string(i) },
+    Cons({ id: i + 1, age: 25, name: "bob" ++ int_to_string(i) },
+    Cons({ id: i + 2, age: 35, name: "cy" ++ int_to_string(i) }, Nil)))
+  end
+
+  fn scalar_rows(i : Int) do
+    Cons({ id: i, age: 30 }, Cons({ id: i + 1, age: 25 }, Cons({ id: i + 2, age: 35 }, Nil)))
+  end
+
+  fn fresh(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else fresh(i - 1, acc + run(Bx(Cons(fn r -> r.age > 28, Nil)), scalar_rows(i)))
+    end
+  end
+
+  fn shared(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else
+      let rs = rows(i)
+      let a = run(Bx(Cons(fn r -> r.age > 28, Nil)), rs)
+      let b = run(Bx(Cons(fn r -> string_length(r.name) > 3, Nil)), rs)
+      let c = run(Bx(Cons(fn r -> r.id > 0, Nil)), rs)
+      let d = names(Bx(Cons(fn r -> r.name, Nil)), rs, 0)
+      shared(i - 1, acc + a + b + c + d + List.length(rs))
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let w = fresh(5, 0) + shared(5, 0)
+    let a0 = live_allocs()
+    let x = fresh(200, 0)
+    let a1 = live_allocs()
+    let y = shared(200, 0)
+    let a2 = live_allocs()
+    println("warmup " ++ int_to_string(w))
+    println("fresh rows: total " ++ int_to_string(x) ++ ", growth " ++ int_to_string(a1 - a0))
+    println("shared rows: total " ++ int_to_string(y) ++ ", growth " ++ int_to_string(a2 - a1))
+  end
+end

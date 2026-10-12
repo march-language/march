@@ -501,6 +501,7 @@ let builtin_op_result_ty (name : string) (args : Tir.atom list) : Tir.ty option 
     | Tir.AVar w -> Some w.Tir.v_ty
     | Tir.ALit (March_ast.Ast.LitInt _) -> Some Tir.TInt
     | Tir.ALit (March_ast.Ast.LitFloat _) -> Some Tir.TFloat
+    | Tir.ALit (March_ast.Ast.LitString _) -> Some Tir.TString
     | _ -> None
   in
   let all_are ty = args <> [] && List.for_all (fun a -> atom_ty a = Some ty) args in
@@ -509,6 +510,10 @@ let builtin_op_result_ty (name : string) (args : Tir.atom list) : Tir.ty option 
     if all_are Tir.TInt then Some Tir.TInt
     else if all_are Tir.TFloat then Some Tir.TFloat
     else None
+  (* String concatenation.  Untyped, a scope whose value is [a ++ b] refused
+     the aggregate scope-end drop, so [let (a, b) = (s, s) in a ++ b] leaked
+     the pair and the references it held, once per call. *)
+  | "++" -> if all_are Tir.TString then Some Tir.TString else None
   | "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "not" -> Some Tir.TBool
   | _ -> None
 

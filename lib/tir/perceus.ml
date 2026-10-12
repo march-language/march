@@ -576,12 +576,33 @@ let insert_apply_fn_clo_drop ~(repl : bool) (body : Tir.expr) : Tir.expr =
     consumed or released (in a binding's RHS, a statement, a closure capture,
     or as a case scrutinee), and only the rest are dropped before that tail.
     Anything ambiguous along the path counts as consumed: leak, never
-    double-free. *)
+    double-free.
+
+    An ERASED ([TVar]) parameter that the body projects a field out of is an
+    aggregate too: only a record or tuple has fields.  A lambda handed to a
+    container whose element type stayed generic ([Bx(Cons(fn r -> r.age > 28,
+    Nil))]) keeps its parameter erased, and without this it was released only
+    when the body never read it ([insert_dead_apply_param_drops]); reading one
+    field leaked the record once per call. *)
+let rec projects_field_of (name : string) (e : Tir.expr) : bool =
+  match e with
+  | Tir.EField (Tir.AVar w, _) -> String.equal w.Tir.v_name name
+  | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) ->
+    projects_field_of name e1 || projects_field_of name e2
+  | Tir.ECase (_, branches, default) ->
+    List.exists (fun br -> projects_field_of name br.Tir.br_body) branches
+    || (match default with Some d -> projects_field_of name d | None -> false)
+  | Tir.ELetRec (_, body) -> projects_field_of name body
+  | _ -> false
+
 let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
     (fn : Tir.fn_def) (body : Tir.expr) : Tir.expr =
   let candidates =
     List.filter (fun p ->
-        is_aggregate_ty env p.Tir.v_ty
+        (is_aggregate_ty env p.Tir.v_ty
+         || (match p.Tir.v_ty with
+             | Tir.TVar _ -> projects_field_of p.Tir.v_name body
+             | _ -> false))
         && p.Tir.v_lin = Tir.Unr
         && not (StringSet.mem p.Tir.v_name borrowed)
         && not (StringSet.mem p.Tir.v_name env.closure_fvs)
@@ -714,7 +735,17 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
          | [] -> tail
          | live when uses_candidate live aliases tail ->
            let tmp = fresh_rc_var ty in
-           Tir.ELet (tmp, tail, drop_ops live (Tir.EAtom (Tir.AVar tmp)))
+           (* A bare projection in tail position hands the field out of the
+              candidate the drop is about to release, so the result needs its
+              own reference.  [dup_field_results] already rewrote every
+              projection out of a TRecord into an [inc_rc]'d binding; an erased
+              (TVar) source is the one it cannot type, so dup here. *)
+           let dup = match tail with
+             | Tir.EField (Tir.AVar src, _)
+               when is_candidate_or_alias aliases src && needs_rc env ty ->
+               (fun e -> Tir.ESeq (incrc_for env tmp (Tir.AVar tmp), e))
+             | _ -> (fun e -> e) in
+           Tir.ELet (tmp, tail, dup (drop_ops live (Tir.EAtom (Tir.AVar tmp))))
          | live -> drop_ops live tail)
     in
     push fn.Tir.fn_ret_ty candidates StringSet.empty body

@@ -713,6 +713,27 @@ git log is authoritative for exact commits.
   fine. Message constructors are now in scope for the whole module, checked
   against the handler's parameter types. This also clears the last hidden
   type errors inside the standard library (`SessionNode`, `ClusterNode`).
+- **File and directory functions and `IO.warn` no longer leak their
+  arguments when compiled.** `File.exists`, `File.read`, `File.write`,
+  `File.append`, `File.delete`, `File.copy`, `File.rename`, `File.stat`,
+  `Dir.mkdir`, `Dir.mkdir_p`, `Dir.rmdir`, `Dir.rm_rf`, `Dir.list` and
+  `Dir.exists` leaked the path (and the data written) on every call, and
+  `IO.warn` and the stderr logger appender leaked every line they printed.
+- **A function that returns `a ++ b` built from a tuple or record's fields no
+  longer leaks the tuple or record when compiled.** `let (a, b) = pair` or
+  `r.x ++ r.y` as a function's result kept the pair (or record) and the
+  strings it held, once per call.
+- **`send_checked`, `is_cap_valid` and `revoke_cap` no longer leak the
+  capability when compiled.** Each call leaked the cap `get_cap` returned.
+- **Registering an actor by name no longer leaks memory when compiled.**
+  Every `Actor.register` leaked the name string and the actor record (the
+  registry kept the record after the actor died or was unregistered), and
+  every `Actor.unregister` and `Actor.whereis` leaked its name.
+- **A lambda that reads a field of its argument no longer leaks the
+  argument when compiled.** A lambda stored where its argument type stays
+  generic (in a list inside a variant whose element type is hidden) released
+  its argument only when it never used it; `fn r -> r.age > 28` leaked the
+  record on every call. The record is now released after the read.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a
@@ -740,6 +761,57 @@ git log is authoritative for exact commits.
   backends, `println`, string interpolation, `inspect` and the REPL now
   print `{ y: 2, z: 1 }`. Only the display changed: fields are still
   evaluated in the order you write them.
+- **`MARCH_SANITIZE=thread` builds no longer report a race on scheduler
+  statistics.** Reading per-scheduler dispatch and idle counts (for example
+  through `Recon.node_stats` or an observe snapshot) while the schedulers were
+  running raced with the schedulers' own updates. See
+  `specs/progress/2026-10-12-tsan-sched-thread-stat-race.md`.
+- **A send to a full `BLOCK` mailbox waits again after it migrates schedulers.**
+  When a sender woke up on a different scheduler thread, its retry could check
+  the old scheduler's state. If that scheduler was idle, the message was
+  delivered past the mailbox limit instead of waiting. Found by a
+  `MARCH_SANITIZE=thread` sweep. See
+  `specs/progress/2026-10-12-send-block-guard-stale-tls.md`.
+- **`MARCH_SANITIZE=thread` builds no longer report a race on the
+  socket-readiness poller.** The scheduler's background thread read the shared
+  kqueue/epoll descriptor without a lock while the first socket wait created
+  it. That happened in any program that connects, accepts or reads a socket.
+  Plain builds behaved correctly. See
+  `specs/progress/2026-10-12-tsan-fdwait-fd-race.md`.
+- **`MARCH_SANITIZE=thread` builds no longer report a race on the runtime's
+  cached type ids.** Calling `sha256`, or building lists, results or `IOList`s
+  from C on two schedulers at once raced on a lazily filled cache. The cached
+  value was always the same, so no wrong result was possible, but TSAN
+  reported it. See `specs/progress/2026-10-12-tsan-type-id-memo-race.md`.
+- **Compiled `to_string` names a `Bytes` returned by the runtime.**
+  `to_string(Base64.decode(s))` printed `Ok(#<tag:0>)` compiled and
+  `Ok(Bytes("..."))` interpreted; the same held for Bytes from hashing,
+  compression and HTTP bodies. Both now print `Bytes("...")`.
+- **A local `fn` no longer makes the values it captures polymorphic.** A
+  named `fn` inside a function body was generalized over the types of what it
+  captured, so in stdlib `Set.union` the comparator's element type came apart
+  from the sets'. With a `let`-bound comparator
+  (`let lt = fn x -> fn y -> x < y`), compiled `Set.union` hashed Int
+  elements as Strings and crashed (SIGSEGV); user code with the same shape
+  printed or compared values at the wrong type. The interpreter was
+  unaffected.
+- **Ctrl+C and SIGTERM stop an interpreted program that is busy computing.**
+  `march file.march` ignored both (any number of times) unless it was running
+  actors or an HTTP server, so `timeout` and Ctrl+C could not stop a long
+  loop. It now exits with 143 (SIGTERM) or 130 (SIGINT), like a compiled
+  binary. Servers and apps still shut down gracefully on the first signal and
+  exit at once on a second.
+- **A stdlib module name with the wrong case is an error.** `Bigint.from_int`
+  (the module is `BigInt`) typechecked and ran compiled, while the interpreter
+  failed with `unbound variable`. It is now rejected with
+  ``Unknown module `Bigint`. Did you mean `BigInt`?``. The same applies to
+  `Uuid`, `Iolist`, `Datetime`, `Dataframe`, `Websocket` and the other modules
+  whose name is not the CamelCase of their file name.
+- **The interpreter finds an interface method implemented in a nested
+  module.** With `interface Speak` in `Top` and `impl Speak(Thing)` inside
+  `mod NA`, a bare `speak(NA.mk())` in `Top` died `unbound variable: speak`
+  interpreted while compiled code ran it. It now dispatches the same way in
+  both.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,
