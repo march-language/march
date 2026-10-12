@@ -1153,6 +1153,13 @@ let hr_store_sources ~(cfg : March_tir.Hot_reload.config) ~(store : March_cas.Ca
         Option.iter (fun r -> March_cas.Cas.store_source store h (SI.region_text r)) region
       end)
     hr_impl_hashes
+(* Whether z3 can be found.  Without it every refinement obligation comes
+   back unverified, which changes the verdict (an obligation that would be
+   refuted is not), so a z3-less run must not share a cache entry with one
+   that has z3.  Only the absence is tagged, so a normal key is unchanged. *)
+let z3_cas_tag () =
+  if March_refine.Solver.find_z3 () = None then [ "noz3" ] else []
+
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
 (* The sanitizer MARCH_SANITIZE selects, or [None] when it is unset.
@@ -1602,9 +1609,13 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            must never satisfy the plain spelling (measured: it did, and the
            gate's own driver test went silent on a warm CAS). *)
         @ (if !stdlib_source then ["stdlib-source"] else [])
-        (* --verify-tir / MARCH_VERIFY_TIR changes no output, but a cache hit
-           skips the TIR pipeline and so the check; keying on it means a
-           verified compile is never satisfied by an unverified cached one. *)
+        @ z3_cas_tag ()
+        (* --verify-tir / MARCH_VERIFY_TIR changes no output.  A verified
+           compile skips the source-level lookup ([source_cache_bypass]) so
+           the verifier always runs; it does reach the post-TIR lookup, but
+           only after the whole TIR pipeline, and so the verifier, has run.
+           The tag stays so a verified build never stores over or serves
+           the plain build's entry. *)
         @ (if March_tir.Tir_verify.enabled () then ["verify-tir"] else [])
         @ cross_sysroot_tag
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
@@ -2433,6 +2444,69 @@ let valid_loadset ~path ~entry_real ~src ~walked : string list option =
        end
      | _ -> None)
 
+(* ------------------------------------------------------------------ *)
+(* Cache bypass for checks and reports                                 *)
+(* ------------------------------------------------------------------ *)
+
+(* A switch whose whole effect is a check, a report or a side file produced
+   WHILE the compiler runs has nothing to put in the cache key: the binary is
+   the same with or without it.  But a cache hit skips the code that runs the
+   check or prints the report, so a warm cache silently answers "nothing
+   found" — the TIR verifier's first MARCH_VERIFY_TIR_LEAKS=1 sweep reported
+   leaks for 11 programs instead of 485 because a plain --verify-tir sweep
+   had already cached the rest.  Such a run must skip the lookup: the person
+   who asked for the check wants it to run.  (A switch that changes the
+   emitted program belongs in [codegen_cas_tags]/[build_cas_key] instead.)
+
+   Two cache layers, two lists.  [source_cache_bypass] covers everything:
+   the source-level lookup runs before parsing, so a hit there skips the
+   typechecker, the refinement passes, the TIR pipeline (where the verifier
+   runs) and emission.  [post_tir_cache_bypass] covers only what happens
+   AFTER the post-TIR lookup — LLVM emission and clang; everything before it
+   has already run by then.
+
+   Each returns the switch that forced the bypass (for MARCH_DEBUG_CASFLAGS)
+   or [None].  An env var counts when it is set at all: bypassing on a
+   spelling the reader would treat as off costs one uncached compile, never
+   a wrong answer.
+
+   Deliberately absent:
+   - --timings: timing a cache hit is a real measurement (and how a hit's
+     layer is told apart), not a missing report.
+   - MARCH_ECHO_CC: a hit runs no clang, so echoing nothing is accurate.
+   - MARCH_DEBUG_CASFLAGS: it reports the key and the lookup itself.
+   - MARCH_VERIFY_TIR_LEAKS alone: it only refines a verifier that is off
+     without MARCH_VERIFY_TIR / --verify-tir (the switch below). *)
+let env_set name = Sys.getenv_opt name <> None
+
+let source_cache_bypass () : string option =
+  let flags = [
+    (* --verify-tir, --verify-tir-rc, MARCH_VERIFY_TIR(_RC); with it on,
+       MARCH_VERIFY_TIR_LEAKS adds leak findings. *)
+    "--verify-tir", March_tir.Tir_verify.enabled ();
+    "--emit-llvm", !emit_llvm;
+    "--dump-tir", !dump_tir;
+    "--dump-phases", !dump_phases;
+    "--dump-provenance", !dump_provenance;
+    "--dump-impl-hashes", !dump_impl_hashes;
+  ] in
+  let envs = [
+    "MARCH_DUMP_TXT"; "MARCH_DUMP_CAP_PASSING"; "MARCH_DUMP_CAP_PASSING_FN";
+    "MARCH_DUMP_CAP_ROWS"; "MARCH_DUMP_TOPOLOGY_MAIN";
+    "MARCH_TRMC_REPORT"; "MARCH_MONO_REPR_REPORT";
+    "MARCH_ALIAS_AUDIT"; "MARCH_REPR_AUDIT";
+    "MARCH_DEBUG_PERCEUS"; "MARCH_DEBUG_BORROW"; "MARCH_DEBUG_HANDLER_OWNER";
+    "MARCH_DEBUG_TC"; "MARCH_DEBUG_ORDER";
+    "MARCH_REFINE_Z3_LOG"; "MARCH_REFINE_Z3_ERRORS";
+  ] in
+  match List.find_opt snd flags with
+  | Some (name, _) -> Some name
+  | None -> List.find_opt env_set envs
+
+let post_tir_cache_bypass () : string option =
+  if !emit_llvm then Some "--emit-llvm"
+  else List.find_opt env_set [ "MARCH_REPR_AUDIT" ]
+
 (* Set by the early cache lookup in [compile]: given a successful run's
    [user_files], also store [artifact] (and its diagnostics) under the
    depend-mode key and record the load set for the next run. *)
@@ -2482,6 +2556,14 @@ let compile filename =
       || !emit_protocols_dir <> None
     then None
     else if not !do_compile && not !do_check then None
+    (* A verifier, dump or audit switch: see [source_cache_bypass]. *)
+    else if (match source_cache_bypass () with
+        | Some why ->
+          if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
+            Printf.eprintf "MARCH_CASFLAGS: source cache bypassed (%s)\n%!" why;
+          true
+        | None -> false)
+    then None
     else try
       let stdlib_hash = match stdlib_source_hash ~for_js:is_js_target () with
         | Some (_, h, _) -> h
@@ -2615,6 +2697,7 @@ let compile filename =
              without it (forge's test_topology_run found it, 2026-09-28). *)
         let flags =
           (if !stdlib_source then ["stdlib-source"] else [])
+          @ z3_cas_tag ()
           @ (if !cap_strict then ["capstrict"] else [])
           @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
           @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
@@ -4119,6 +4202,13 @@ let compile filename =
            exit 2
          | _ -> ());
         let cached_ok =
+          (* --emit-llvm and emit-time audits: see [post_tir_cache_bypass]. *)
+          match post_tir_cache_bypass () with
+          | Some why ->
+            if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
+              Printf.eprintf "MARCH_CASFLAGS: post-TIR cache bypassed (%s)\n%!" why;
+            false
+          | None ->
           match March_cas.Cas.lookup_artifact store ch with
           | Some cached_bin ->
             March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin

@@ -675,6 +675,16 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Checks and reports now run even when the build is cached.** A compile
+  with `--verify-tir` plus `MARCH_VERIFY_TIR_LEAKS=1`, `--emit-llvm`,
+  `--dump-tir`/`--dump-phases`/`--dump-provenance`/`--dump-impl-hashes`, or one
+  of the compiler's dump/audit env vars (`MARCH_TRMC_REPORT`,
+  `MARCH_REPR_AUDIT`, `MARCH_DUMP_TXT`, ...) used to be answered from the build
+  cache when an earlier plain build of the same source existed, so it checked
+  nothing, printed nothing, or wrote no `.ll`. Those runs now skip the cache.
+  Separately, whether z3 can be found is now part of the cache key: a build
+  without z3 accepts (with a hint) a refinement z3 refutes, and that result was
+  being reused by the next build that had z3.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a
