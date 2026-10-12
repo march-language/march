@@ -49,6 +49,32 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_println", [true]);
   ("print",         [true]);   (* TIR builtin name before LLVM mangling *)
   ("println",       [true]);
+    (* march_print_stderr writes the bytes and returns.  Listed as owned
+       until 2026-10-12, so every IO.warn (and every line of the stderr
+       logger appender) leaked the line it printed. *)
+  ("print_stderr",  [true]);
+    (* The path-taking file and directory builtins only read their String
+       arguments (fopen / stat / remove / rename / mkdir / opendir on the
+       bytes; an error copies the path into a new string).  Listed as owned
+       until 2026-10-12, so every call leaked each path it was given, and
+       file_write / file_append the data too.  The handle-taking ones
+       (file_close, file_read_line, file_read_chunk) take an Int and stay in
+       the owned list. *)
+  ("file_exists",   [true]);
+  ("dir_exists",    [true]);
+  ("file_open",     [true]);
+  ("file_read",     [true]);
+  ("file_write",    [true; true]);
+  ("file_append",   [true; true]);
+  ("file_delete",   [true]);
+  ("file_copy",     [true; true]);
+  ("file_rename",   [true; true]);
+  ("file_stat",     [true]);
+  ("dir_mkdir",     [true]);
+  ("dir_mkdir_p",   [true]);
+  ("dir_rmdir",     [true]);
+  ("dir_rm_rf",     [true]);
+  ("dir_list",      [true]);
   ("print_line",    [true]);
   ("dist_monitor_register", [false; true; false; false]);
   ("march_dist_monitor_register_pid", [false; true; false; false]);
@@ -606,17 +632,14 @@ let extern_owned_builtins : string list = [
     (* actor_inspect_store keeps its String in the proc's inspect_out slot
        until the actor loop sends it as the reply (observe plan R4). *)
     "actor_inspect_store";
-    "panic_"; "unreachable_"; "todo_"; "print_stderr";
+    "panic_"; "unreachable_"; "todo_";
     "list_append"; "list_concat";
     "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
     "logger_add_context"; "logger_add_field"; "spawn";
     "spawn_supervised"; "actor_reply";
     "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
-    "file_exists"; "dir_exists"; "file_open"; "file_close"; "file_read";
-    "file_read_line"; "file_read_chunk"; "file_write"; "file_append";
-    "file_delete"; "file_copy"; "file_rename"; "file_stat"; "dir_mkdir";
-    "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
+    "file_close"; "file_read_line"; "file_read_chunk";
     "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
     (* typed_array_create STORES its default value in every slot: the
        transferred reference fills the first, each other slot takes its own

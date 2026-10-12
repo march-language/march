@@ -662,6 +662,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **File and directory functions and `IO.warn` no longer leak their
+  arguments when compiled.** `File.exists`, `File.read`, `File.write`,
+  `File.append`, `File.delete`, `File.copy`, `File.rename`, `File.stat`,
+  `Dir.mkdir`, `Dir.mkdir_p`, `Dir.rmdir`, `Dir.rm_rf`, `Dir.list` and
+  `Dir.exists` leaked the path (and the data written) on every call, and
+  `IO.warn` and the stderr logger appender leaked every line they printed.
 - **A function that returns `a ++ b` built from a tuple or record's fields no
   longer leaks the tuple or record when compiled.** `let (a, b) = pair` or
   `r.x ++ r.y` as a function's result kept the pair (or record) and the
