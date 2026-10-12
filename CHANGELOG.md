@@ -621,6 +621,11 @@ git log is authoritative for exact commits.
   lambda (or a `match` with a guarded or-pattern) capturing a value of a type
   like `type Pair = Pair(Int, Int)` leaked one small allocation each time the
   closure was created, whether it was called, shared, or dropped uncalled.
+- **`blocking` extern calls work under AddressSanitizer.** A program built
+  with `MARCH_SANITIZE=1` crashed with a segfault on its first call to a
+  `blocking` extern. The runtime now starts the blocking-call worker threads
+  from a scheduler thread instead of from the calling green thread.
+  Builds without the sanitizer behave the same as before.
 - **`task_cancel_by_id` no longer leaks the task.** Cancelling a task as the
   last thing done with it (as `Task.race` and `Task.any` do for the tasks that
   lost) leaked the task object every time in compiled code.

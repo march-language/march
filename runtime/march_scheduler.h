@@ -577,6 +577,12 @@ typedef struct march_scheduler {
                                    * handler.  How the handler tells OUR tick
                                    * from a host's delivery of the same signal
                                    * (which it chains to the host's handler). */
+    /* One deferred call to run on THIS scheduler's native OS-thread stack,
+     * set by march_sched_run_on_sched_stack just before its green thread
+     * switches back here, and run (then cleared) by sched_loop right after
+     * the switch returns, before the proc is re-queued.  Owner thread only. */
+    void          (*after_switch_fn)(void *);
+    void           *after_switch_arg;
     _Atomic int     tls_live;     /* 1 only while this thread is inside
                                    * sched_loop, with its TLS materialised.
                                    * The preempt handler writes TLS only when
@@ -677,6 +683,15 @@ march_proc  *march_sched_spawn_daemon(void (*fn)(void *), void *arg);
 
 /* Cooperatively yield the CPU back to the scheduler. */
 void         march_sched_yield(void);
+
+/* Run fn(arg) on a native OS-thread stack, never on a green thread's.
+ * From a green thread: yields, the scheduler runs fn(arg) on its own stack
+ * right after the switch (before re-queueing the caller), and the call
+ * returns once the caller is resumed, so fn has finished by then.  Anywhere
+ * else: calls fn(arg) directly.  For work that must not run on a green
+ * stack: under ASAN, pthread_create from a green thread is a silent SIGSEGV
+ * (specs/progress/2026-10-12-asan-ffi-blocking-worker-spawn-sigsegv.md). */
+void         march_sched_run_on_sched_stack(void (*fn)(void *), void *arg);
 
 /* Cooperatively yield until no OTHER process is runnable or mid-work
  * (RUNNABLE, RUNNING, PARKED, or WAITING with a non-empty mailbox).  This is

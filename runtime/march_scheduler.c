@@ -2162,6 +2162,14 @@ static void sched_loop(march_scheduler *sched) {
         swapcontext(&sched->sched_ctx, p->ctx);
         atomic_store_explicit(&sched->busy, 0, memory_order_relaxed);
         MARCH_ASAN_SWITCH_DONE(sched);
+        /* march_sched_run_on_sched_stack: p asked for fn to run on this
+         * native stack.  Before the status handling below, so p is not
+         * re-queued (and cannot be resumed anywhere) until fn has returned. */
+        if (__builtin_expect(sched->after_switch_fn != NULL, 0)) {
+            void (*fn)(void *) = sched->after_switch_fn;
+            sched->after_switch_fn = NULL;
+            fn(sched->after_switch_arg);
+        }
         dbg_mark_undispatched(p);
 
         sched->current = NULL;
@@ -2613,6 +2621,19 @@ void march_sched_yield(void) {
     MARCH_ASAN_SWITCH_DONE(p);
     /* Execution resumes here after the scheduler re-schedules us — possibly
      * on a different OS thread than the one that called this function. */
+}
+
+/* march_sched_yield, with fn(arg) handed to the scheduler to run on its own
+ * stack after the switch (sched_loop's after_switch_fn).  The proc is still
+ * RUNNABLE-but-unqueued while it runs, so nothing can resume the caller
+ * before fn returns.  Same TLS discipline as march_sched_yield: tl_sched is
+ * read only before the switch. */
+__attribute__((noinline))
+void march_sched_run_on_sched_stack(void (*fn)(void *), void *arg) {
+    if (!tl_sched || !tl_sched->current) { fn(arg); return; }
+    tl_sched->after_switch_fn  = fn;
+    tl_sched->after_switch_arg = arg;
+    march_sched_yield();
 }
 
 /* Grace iterations before march_sched_wait_idle backs off to a 1ms poll, so a
