@@ -662,6 +662,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A lambda that reads a field of its argument no longer leaks the
+  argument when compiled.** A lambda stored where its argument type stays
+  generic (in a list inside a variant whose element type is hidden) released
+  its argument only when it never used it; `fn r -> r.age > 28` leaked the
+  record on every call. The record is now released after the read.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a

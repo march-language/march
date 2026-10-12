@@ -160,6 +160,8 @@ native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 135 enforce
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_option_read: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_erased_option_read: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_erased_param_field_read_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_erased_param_field_read_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_render_show: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_erased_render_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

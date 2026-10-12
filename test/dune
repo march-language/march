@@ -4006,7 +4006,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_call_late_reply.expected native_actor_call_late_reply.out)))
 
-; ; ── Regression: bare `sha256` returns a hex String on BOTH backends ──
+; ── Regression: bare `sha256` returns a hex String on BOTH backends ──
 ; typecheck_builtins.ml said `sha256 : Bytes -> Bytes` while both backends
 ; returned a hex String, so a Bytes-typed use of the digest crashed (match
 ; failure interpreted, SIGBUS compiled); and even a String-typed use crashed
@@ -13942,3 +13942,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/nested_pattern_ctor_name_collision.expected nested_pattern_ctor_name_collision.out)))
+
+; ── A lambda whose parameter stays erased and that reads a field of it
+; released the record (live_allocs flat over 200 calls); the shared rows list
+; is walked again afterwards as the double-free witness.
+(rule
+ (targets native_erased_param_field_read_leak_probe native_erased_param_field_read_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/erased_param_field_read_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_param_field_read_leak_probe
+        native/erased_param_field_read_leak_probe.march)
+   (with-stdout-to native_erased_param_field_read_leak_probe.out
+        (system "./native_erased_param_field_read_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_param_field_read_leak_probe.expected native_erased_param_field_read_leak_probe.out)))
