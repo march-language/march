@@ -1102,9 +1102,41 @@ mod Control do
   RolloutApply one order on this node. Idempotent: a node that already reports the
   order's end state answers ok without touching the reload server, so an
   order a new leader sends again is harmless. Missing artifacts or a refused
-  line answer not-ok with the reason, which halts the release.
+  line answer not-ok with the reason, which halts the release. A topology
+  step the reload server took is given a few placement ticks for the node to
+  report it (`agent_apply_within`).
   """
-  fn agent_apply(ops : AgentOps, o : StepOrder) : StepResult do
+  fn agent_apply(ops : AgentOps, o : StepOrder) : StepResult do agent_apply_ticked(ops, o, 200) end
+
+  doc """
+  `agent_apply` on a node whose placement loop ticks every [tick_ms]
+  (`MARCH_PLACEMENT_TICK_MS`; `agent_apply` assumes its default, 200): a
+  topology step waits `topology_wait_ms(tick_ms)` for the node to report it.
+  """
+  fn agent_apply_ticked(ops : AgentOps, o : StepOrder, tick_ms : Int) : StepResult do
+    let tick = if tick_ms < 1 do 1 else tick_ms end
+    agent_apply_within(ops, o, topology_wait_ms(tick), if tick < 100 do tick else 100 end)
+  end
+
+  doc """
+  How long a topology step waits for the node's placement loop to apply a
+  digest the reload server already took, given the loop's tick [tick_ms]:
+  ten ticks, at least two seconds (a loaded host delays a tick), at most a
+  minute.
+  """
+  fn topology_wait_ms(tick_ms : Int) : Int do
+    let w = tick_ms * 10
+    if w < 2000 do 2000 else if w > 60000 do 60000 else w end end
+  end
+
+  doc """
+  `agent_apply`, waiting at most [wait_ms] (polling every [poll_ms]) for a
+  topology step's end state. The reload server takes a `TOPOLOGY` line at
+  once, but the node reports the digest only once its placement loop has
+  re-read the file, on its next tick (`MARCH_PLACEMENT_TICK_MS`): until then
+  the step is pending, not failed. Every other step is checked once.
+  """
+  fn agent_apply_within(ops : AgentOps, o : StepOrder, wait_ms : Int, poll_ms : Int) : StepResult do
     if reports_state(ops.report(), o.action, o.want) do result_of(o, true, "already applied")
     else
       let ms = missing(ops, o)
@@ -1112,10 +1144,21 @@ mod Control do
       else match relay(ops, order_lines(o)) do
         Some(err) -> result_of(o, false, err)
         None ->
-          if reports_state(ops.report(), o.action, o.want) do result_of(o, true, "applied")
+          let left = if o.action == "topology" do wait_ms else 0 end
+          if await_state(ops, o, left, if poll_ms < 1 do 1 else poll_ms end) do result_of(o, true, "applied")
           else result_of(o, false, "the node accepted every line but does not report " ++ o.action ++ " at " ++ o.want) end
       end end
     end
+  end
+
+  -- Does the node report [o]'s end state now, or within [left_ms]?
+  pfn await_state(ops : AgentOps, o : StepOrder, left_ms : Int, poll_ms : Int) : Bool do
+    if reports_state(ops.report(), o.action, o.want) do true
+    else if left_ms <= 0 do false
+    else
+      sleep_ms(poll_ms)
+      await_state(ops, o, left_ms - poll_ms, poll_ms)
+    end end
   end
 
   -- ── the real Agent (design section 6) ────────────────────────────────────
@@ -1213,13 +1256,14 @@ mod Control do
   end
 
   doc """
-  `agent_apply`, remembering a failure in [memory] so the node's next report carries it
+  `agent_apply_ticked` (on a node whose placement loop ticks every [tick_ms]),
+  remembering a failure in [memory] so the node's next report carries it
   (a new leader re-derives the halt from it) and forgetting it once a later order succeeds.
   A batch left half-staged by an earlier failed step is rolled back first.
   """
-  fn agent_apply_recording(ops : AgentOps, memory : Vault(String), o : StepOrder) : StepResult do
+  fn agent_apply_recording(ops : AgentOps, memory : Vault(String), o : StepOrder, tick_ms : Int) : StepResult do
     let _ = ops.request("ROLLBACK_BATCH")
-    remember(memory, agent_apply(ops, o))
+    remember(memory, agent_apply_ticked(ops, o, tick_ms))
   end
 
   -- Record [res] in [memory]: a failure until a later order succeeds.

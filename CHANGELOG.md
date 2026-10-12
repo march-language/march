@@ -680,6 +680,15 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A release's topology step no longer halts because the node had not
+  re-read the topology yet.** The control plane's Agent relayed the step's
+  signed `TOPOLOGY` line and checked the node's report once, straight away; the
+  node reports the new digest only after its placement loop re-reads the file
+  on its next tick (`MARCH_PLACEMENT_TICK_MS`), so on a busy host the first
+  `forge deploy` to a cluster often stopped with "the node accepted every line
+  but does not report topology". A topology step now waits up to ten placement
+  ticks (at least 2 s, at most a minute) for the node to report it before
+  calling the step failed. Other steps are checked once, as before.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a
