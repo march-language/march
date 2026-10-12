@@ -118,12 +118,18 @@ done
 # ── revocation ──────────────────────────────────────────────────────────────
 # Every certificate of c, revoked through a release. b reporting it also
 # shows b still talks to the leader past its short certificate's expiry.
+# Once revoked, c is cut off and declares a and b dead by suspect timeout
+# ("app c: b dead: suspect timeout"), so only c's lines from before the
+# revocation say anything about b's health.
+c_lines_before_revoke=$(wc -l < "$work/c.out")
 "$forge" cluster revoke --node c --trust-domain test.local --pool main --operator-key "$PKI/operator.key" "${deliver[@]}" \
   > "$work/revoke.out" 2>&1 || { cat "$work/revoke.out" >&2; fail "delivering c's revocation failed"; }
 grep -q "complete" "$work/revoke.out" || fail "the revocation release did not complete: $(cat "$work/revoke.out")"
 wait_line a "app a: c dead: certificate revoked"
 wait_line b "app b: c dead: certificate revoked"
-grep -q "app a: b dead\|app c: b dead" "$work/a.out" "$work/c.out" && fail "b died"
+grep -q "app a: b dead" "$work/a.out" && fail "a saw b die: $(grep "b dead" "$work/a.out")"
+head -n "$c_lines_before_revoke" "$work/c.out" | grep -q "app c: b dead" \
+  && fail "c saw b die before the revocation: $(head -n "$c_lines_before_revoke" "$work/c.out" | grep "b dead")"
 
 # The candidates' own copies went over the certificate handshake (both carry
 # Ctl.Control:offer): the standby holds the releases and the leader's audit
