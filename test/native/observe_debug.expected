@@ -45,8 +45,34 @@ ok: Rate(2,1): 2 to 6 events over 2.5 s, the excess counted as rate_dropped, sti
 ok: four sessions start
 ok: a fifth session: too_many_sessions
 ok: room again after stopping them
+ok: the program printed Beat's pid
+ok: events without pids: pids_required
+ok: an unknown kind: bad_args
+ok: a repeated kind: bad_args
+ok: an upper-case kind: bad_args
+ok: pids without events: bad_args
+ok: nine pids: bad_args
+ok: a pid that is not an actor: unknown_pid
+ok: a malformed pid list: bad_args
+ok: a negative pid: bad_args
+ok: events with limit 0: limit_out_of_range
+ok: events with no limit: limit_required
+ok: nothing to watch: bad_args
+ok: TRACE_START with events: the kinds and the pid filter echoed
+ok: Count(6) over actor events stopped itself after exactly 6
+ok: both kinds appear, no others
+ok: an actor event is pids, a tag, a reason slot and times: nothing else
+ok: Sent: from main (-1) to Beat, with a message tag
+ok: Received: by Beat, no peer, the same tag as the Sent
+ok: TRACE_START with calls and events
+ok: a mixed session: calls carry kind call and fn, actor events kind received
+ok: TRACE_START rate with events
+ok: Rate(2,1) over Received: 2 to 6 events in 2.5 s, the excess counted, still running
+ok: four event sessions start
+ok: a fifth: too_many_sessions
 ok: CRASHES_FULL once the policy drops it: policy
 ok: TRACE_START once the policy drops it: policy
 ok: every attempt is audited, in order
 ok: trace attempts are audited, with the session in the detail
+ok: actor-event starts are audited with their kinds' presence and pid count; refusals too
 ok: audit lines name the node's key

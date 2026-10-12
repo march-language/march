@@ -3102,6 +3102,28 @@ static int mbox_block_register_and_park(march_proc *target) {
     return MARCH_SEND_OK;   /* caller retries unconditionally */
 }
 
+/* Actor-event tracing (march_trace.h).  The armed word lives here so every
+ * build that has a scheduler has it; the hooks are strong in march_trace.c and
+ * these weak no-ops stand in where that file is not linked. */
+march_armed_line g_introspect_armed_line __attribute__((aligned(128)));
+__attribute__((weak)) void march_trace_ev_sent(march_proc *sender, march_proc *target, void *msg) {
+    (void)sender; (void)target; (void)msg;
+}
+__attribute__((weak)) void march_trace_ev_received(march_proc *self, void *msg) {
+    (void)self; (void)msg;
+}
+__attribute__((weak)) void march_trace_ev_dropped(march_proc *sender, march_proc *target,
+                                                  int64_t target_pid, void *msg, int reason) {
+    (void)sender; (void)target; (void)target_pid; (void)msg; (void)reason;
+}
+__attribute__((weak)) void march_trace_ev_spawned(march_proc *parent, int64_t parent_pid,
+                                                  int64_t child_pid) {
+    (void)parent; (void)parent_pid; (void)child_pid;
+}
+__attribute__((weak)) void march_trace_ev_exited(march_proc *gt, int64_t pid, int reason) {
+    (void)gt; (void)pid; (void)reason;
+}
+
 int march_sched_send(march_proc *target, void *msg) {
     /* Allocate the mailbox node ONCE before the retry loop and lock
      * acquisition, off the spinlock hot path. The node is freed on every
@@ -3134,6 +3156,15 @@ int march_sched_send(march_proc *target, void *msg) {
      * BLOCK park.  The proc pointer stays valid across the park (it is the
      * caller's own); only tl_sched may change.  NULL off a green thread. */
     march_proc *const sender = tl_sched ? tl_sched->current : NULL;
+    /* Actor-event tracing: the one cost of the feature on this path while no
+     * session records actor events is this relaxed load and never-taken
+     * branch.  Sent is recorded before the enqueue, while the message is
+     * still this thread's alone (its tag is read here, never after the push:
+     * the receiver may have consumed it by then); a refusal below follows as
+     * a Dropped event. */
+    if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                              memory_order_relaxed) != 0, 0))
+        march_trace_ev_sent(sender, target, msg);
     for (;;) {
         if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD) {
             free(node);
@@ -3145,6 +3176,9 @@ int march_sched_send(march_proc *target, void *msg) {
             switch (target->mbox_policy) {
             case MARCH_MBOX_DROP_NEW:
                 mbox_lock_release(target);
+                if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                                          memory_order_relaxed) != 0, 0))
+                    march_trace_ev_dropped(sender, target, -2, msg, 2 /* full */);
                 atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
                                           1, memory_order_relaxed);
                 march_mbox_dispose(msg);          /* disposed via the registered dtor (see march_sched_set_msg_dtor's contract) */
@@ -3261,6 +3295,9 @@ int march_sched_send(march_proc *target, void *msg) {
              * the caller disposes msg on that return, same as the
              * top-of-loop DEAD return above. */
             if (evicted_old) {
+                if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                                          memory_order_relaxed) != 0, 0))
+                    march_trace_ev_dropped(sender, target, -2, evicted_old, 3 /* evicted */);
                 march_mbox_dispose(evicted_old);
             }
             return MARCH_SEND_DEAD;
@@ -3275,6 +3312,9 @@ int march_sched_send(march_proc *target, void *msg) {
          * lock is released and the wake has fired, per the re-entrancy
          * contract on march_sched_set_msg_dtor. */
         if (evicted_old) {
+            if (__builtin_expect(atomic_load_explicit(&g_introspect_armed,
+                                                      memory_order_relaxed) != 0, 0))
+                march_trace_ev_dropped(sender, target, -2, evicted_old, 3 /* evicted */);
             march_mbox_dispose(evicted_old);
         }
         if (sender) march_proc_bump(sender->msgs_out);

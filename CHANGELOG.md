@@ -76,6 +76,17 @@ git log is authoritative for exact commits.
   FNS (--max-events N | --rate N/S)`, `--trace-drain ID`, `--trace-stop ID`.
   While nothing is traced, a boundary call costs one extra relaxed load and
   branch. See [Observing a running node](docs/observe.md).
+- **`Trace` records actor events: `Sent`, `Received`, `Spawned`, `Exited`, `Dropped`.**
+  `Trace.start_with(debug, Trace.actors([Trace.Sent, Trace.Received], [pid_to_int(a)]), Trace.MaxEvents(100))`
+  records who sent what to the actors you name, when they took a message, spawned,
+  died (`normal`, `killed` or `crash`) or lost a message (`dead`, `draining`,
+  `full`, `evicted`). Events hold pids, the message's constructor tag, a reason
+  and the time, never a message's contents. The pid filter is mandatory (one to
+  eight live actors; there is no all-actors form) and the same `MaxEvents`/`Rate`
+  limit bounds the session. Over the socket: `TRACE_START ... events:sent,received
+  pids:12,40`; `forge observe --trace-start - --events sent,received --pids 12,40
+  --rate 200/1`. While no session records actor events, a send pays one relaxed
+  load and a never-taken branch. See [Observing a running node](docs/observe.md).
 - **Signed observe requests now name the node process (`boot:`).** `STATE`,
   `CRASHES_FULL` and the trace verbs need the 32-hex id the new unsigned
   `HELLO` verb returns, so a captured request cannot be replayed after the node

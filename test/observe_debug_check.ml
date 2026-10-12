@@ -52,6 +52,15 @@ let write_file f s =
   output_string oc s;
   close_out oc
 
+(* The program's "beat <pid>" line (an actor main messages every 20 ms). *)
+let beat_pid file =
+  let s = try read_file file with Sys_error _ -> "" in
+  List.find_map (fun l ->
+      match String.split_on_char ' ' l with
+      | [ "beat"; p ] -> int_of_string_opt p
+      | _ -> None) (String.split_on_char '\n' s)
+  |> Option.value ~default:(-1)
+
 (* The program's "counter <pid>" line, once it has printed "ready". *)
 let wait_ready file =
   let deadline = Unix.gettimeofday () +. 60. in
@@ -103,7 +112,7 @@ let audit_lines log =
 
 (* ── TRACE_START / TRACE_DRAIN / TRACE_STOP (R8) ─────────────────────────
    The program calls the boundary function `tick` every 20 ms from main. *)
-let trace_checks sock sk policy =
+let trace_checks sock sk policy beat =
   write_file policy "STATE\nCRASHES_FULL\nTRACE_START\nTRACE_DRAIN\nTRACE_STOP\n";
   let req verb fields = query sock (sign sk verb fields) in
   let err name verb fields code =
@@ -200,7 +209,110 @@ let trace_checks sock sk policy =
   List.iter stop ids;
   let again = req "TRACE_START" [ "count:5"; "fn:tick" ] in
   check "room again after stopping them" (error again = None) (Yojson.Safe.to_string again);
-  stop (session again)
+  stop (session again);
+
+  (* ── Actor events.  main sends Beat a message every 20 ms. ─────────────── *)
+  let b = Printf.sprintf "pids:%d" beat in
+  check "the program printed Beat's pid" (beat > 0) (string_of_int beat);
+  err "events without pids: pids_required" "TRACE_START" [ "count:5"; "events:sent" ] "pids_required";
+  err "an unknown kind: bad_args" "TRACE_START" [ "count:5"; "events:sent,bogus"; b ] "bad_args";
+  err "a repeated kind: bad_args" "TRACE_START" [ "count:5"; "events:sent,sent"; b ] "bad_args";
+  err "an upper-case kind: bad_args" "TRACE_START" [ "count:5"; "events:SENT"; b ] "bad_args";
+  err "pids without events: bad_args" "TRACE_START" [ "count:5"; "fn:tick"; b ] "bad_args";
+  err "nine pids: bad_args" "TRACE_START" [ "count:5"; "events:sent"; "pids:1,2,3,4,5,6,7,8,9" ] "bad_args";
+  err "a pid that is not an actor: unknown_pid" "TRACE_START" [ "count:5"; "events:sent"; "pids:999999" ] "unknown_pid";
+  err "a malformed pid list: bad_args" "TRACE_START" [ "count:5"; "events:sent"; "pids:1,,2" ] "bad_args";
+  err "a negative pid: bad_args" "TRACE_START" [ "count:5"; "events:sent"; "pids:-1" ] "bad_args";
+  err "events with limit 0: limit_out_of_range" "TRACE_START" [ "count:0"; "events:sent"; b ] "limit_out_of_range";
+  err "events with no limit: limit_required" "TRACE_START" [ "events:sent"; b ] "limit_required";
+  err "nothing to watch: bad_args" "TRACE_START" [ "count:5" ] "bad_args";
+
+  (* Count(6) over Sent and Received of Beat: exactly six events, then done. *)
+  let sr = req "TRACE_START" [ "count:6"; "events:sent,received"; b ] in
+  let srid = session sr in
+  check "TRACE_START with events: the kinds and the pid filter echoed"
+    (error sr = None && srid > 0
+     && data sr |> member "events" = `List [ `String "sent"; `String "received" ]
+     && data sr |> member "pids" = `List [ `Int beat ])
+    (Yojson.Safe.to_string sr);
+  let evs = ref [] and lastd = ref `Null in
+  let deadline = Unix.gettimeofday () +. 20. in
+  let rec poll2 () =
+    let d = req "TRACE_DRAIN" [ sess srid ] in
+    lastd := d;
+    (try evs := !evs @ (data d |> member "events" |> to_list) with _ -> ());
+    if (try data d |> member "done" = `Bool true with _ -> false) then ()
+    else if Unix.gettimeofday () > deadline then ()
+    else (Unix.sleepf 0.1; poll2 ()) in
+  poll2 ();
+  check "Count(6) over actor events stopped itself after exactly 6"
+    (List.length !evs = 6
+     && data !lastd |> member "recorded" = `Int 6
+     && data !lastd |> member "why" = `String "count")
+    (Yojson.Safe.to_string !lastd);
+  let kind e = try member "kind" e |> to_string with _ -> "?" in
+  let sents = List.filter (fun e -> kind e = "sent") !evs
+  and recvs = List.filter (fun e -> kind e = "received") !evs in
+  check "both kinds appear, no others"
+    (sents <> [] && recvs <> [] && List.length sents + List.length recvs = 6)
+    (String.concat " " (List.map Yojson.Safe.to_string !evs));
+  check "an actor event is pids, a tag, a reason slot and times: nothing else"
+    (List.for_all (fun e ->
+         List.sort compare (List.map fst (to_assoc e))
+         = [ "at_ns"; "epoch"; "kind"; "msg_tag"; "peer"; "pid"; "reason" ]) !evs)
+    (String.concat " " (List.map Yojson.Safe.to_string !evs));
+  check "Sent: from main (-1) to Beat, with a message tag"
+    (List.for_all (fun e ->
+         member "pid" e = `Int (-1) && member "peer" e = `Int beat
+         && (match member "msg_tag" e with `Int _ -> true | _ -> false)) sents)
+    (String.concat " " (List.map Yojson.Safe.to_string sents));
+  check "Received: by Beat, no peer, the same tag as the Sent"
+    (List.for_all (fun e ->
+         member "pid" e = `Int beat && member "peer" e = `Null
+         && (match sents with s :: _ -> member "msg_tag" e = member "msg_tag" s | [] -> false)) recvs)
+    (String.concat " " (List.map Yojson.Safe.to_string recvs));
+  stop srid;
+
+  (* Events and boundary calls in one session: calls say what they are. *)
+  let mx = req "TRACE_START" [ "count:8"; "events:received"; b; "fn:tick" ] in
+  let mxid = session mx in
+  check "TRACE_START with calls and events" (error mx = None && mxid > 0) (Yojson.Safe.to_string mx);
+  let rec poll3 n =
+    let d = req "TRACE_DRAIN" [ sess mxid ] in
+    if (try data d |> member "done" = `Bool true with _ -> false) || n = 0 then d
+    else (Unix.sleepf 0.1; poll3 (n - 1)) in
+  let md = poll3 200 in
+  let mevs = try data md |> member "events" |> to_list with _ -> [] in
+  check "a mixed session: calls carry kind call and fn, actor events kind received"
+    (mevs <> []
+     && List.for_all (fun e ->
+         match member "kind" e with
+         | `String "call" -> member "fn" e = `String "tick"
+         | `String "received" -> member "pid" e = `Int beat
+         | _ -> false) mevs
+     && List.exists (fun e -> member "kind" e = `String "call") mevs
+     && List.exists (fun e -> member "kind" e = `String "received") mevs)
+    (String.concat " " (List.map Yojson.Safe.to_string mevs));
+  stop mxid;
+
+  (* Rate(2, 1s) bounds an event session too, and counts the excess. *)
+  let er = req "TRACE_START" [ "rate:2"; "per_s:1"; "events:received"; b ] in
+  let erid = session er in
+  check "TRACE_START rate with events" (error er = None && erid > 0) (Yojson.Safe.to_string er);
+  Unix.sleepf 2.5;
+  let ed = req "TRACE_DRAIN" [ sess erid ] in
+  let erec = try data ed |> member "recorded" |> to_int with _ -> -1 in
+  let erd = try data ed |> member "rate_dropped" |> to_int with _ -> -1 in
+  check "Rate(2,1) over Received: 2 to 6 events in 2.5 s, the excess counted, still running"
+    (erec >= 2 && erec <= 6 && erd > 20 && data ed |> member "done" = `Bool false)
+    (Yojson.Safe.to_string ed);
+  stop erid;
+
+  (* A session is a session: four at most, event sessions included. *)
+  let eids = List.init 4 (fun _ -> session (req "TRACE_START" [ "count:5"; "events:sent"; b ])) in
+  check "four event sessions start" (List.for_all (fun i -> i > 0) eids) (String.concat "," (List.map string_of_int eids));
+  err "a fifth: too_many_sessions" "TRACE_START" [ "count:5"; "events:sent"; b ] "too_many_sessions";
+  List.iter stop eids
 
 let signed sock prog sk_file policy log =
   let sk = Bytes.of_string (read_file sk_file) in
@@ -280,7 +392,7 @@ let signed sock prog sk_file policy log =
   check "CRASHES (observe tier) still does not"
     (not (contains (Yojson.Safe.to_string plain) "plugh")) "message leaked";
 
-  trace_checks sock sk policy;
+  trace_checks sock sk policy (beat_pid prog);
 
   write_file policy "STATE\n";
   expect_error "CRASHES_FULL once the policy drops it: policy" (sign sk "CRASHES_FULL" []) "policy";
@@ -304,6 +416,14 @@ let signed sock prog sk_file policy log =
      && List.exists (fun j -> member "result" j = `String "limit_required") trace_audit
      && List.exists (fun j -> member "result" j = `String "policy") trace_audit)
     (string_of_int (List.length trace_audit));
+  check "actor-event starts are audited with their kinds' presence and pid count; refusals too"
+    (List.exists (fun j -> match member "detail" j with
+         | `String d -> contains d "session=" && contains d "events=yes pids=1" | _ -> false) trace_audit
+     && List.exists (fun j -> member "result" j = `String "pids_required"
+                              && (match member "detail" j with
+                                  | `String d -> contains d "events=yes pids=0" | _ -> false)) trace_audit
+     && List.exists (fun j -> member "result" j = `String "unknown_pid") trace_audit)
+    (String.concat "\n" (List.map Yojson.Safe.to_string trace_audit));
   let signers = audit_lines log |> List.map (fun j -> member "signer" j |> to_string) in
   check "audit lines name the node's key"
     (List.for_all (fun s -> String.length s = 64) signers) (String.concat "," signers);

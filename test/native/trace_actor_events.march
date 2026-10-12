@@ -1,0 +1,390 @@
+-- Trace actor events (stdlib/trace.march, the Sent / Received / Spawned /
+-- Exited / Dropped part of observe R8: specs/progress/2026-10-12-observe-trace-actor-events.md)
+-- against a --hot-reload build.
+--
+-- Every assertion is about counts, pids and kinds, never about the order of
+-- events from different scheduler threads or their times, so the golden holds
+-- on any number of schedulers.  `trace_boundary` pins the boundary-call half.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  -- Self-recursive on a branch that never runs, so the inliner leaves it
+  -- alone and it keeps its dispatch slot (as in trace_boundary).
+  fn step(n : Int) : Int do if n > 1000000 do step(n - 1) else n + 1 end end
+
+  actor Kid do
+    state { n : Int }
+    init  { n: 0 }
+    on Hit(k : Int) do
+      { n: state.n + step(k) }
+    end
+  end
+
+  -- Spawns a child and sends it a message: a Spawned and two Sents per Make.
+  actor Parent do
+    state { n : Int }
+    init  { n: 0 }
+    on Make(k : Int) do
+      let c = spawn(Kid)
+      send(c, Hit(k))
+      { n: state.n + 1 }
+    end
+  end
+
+  -- A first handler that takes a while, so messages pile up behind it.
+  actor Slow do
+    state { n : Int }
+    init  { n: 0 }
+    on Work(k : Int) do
+      { n: spin(60000000) + k }
+    end
+  end
+
+  actor Fragile do
+    state { n : Int }
+    init  { n: 0 }
+    on Poison() do
+      panic("poisoned")
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Fragile child
+    end
+  end
+
+  fn spin(n : Int) : Int do
+    if n > 0 do spin(n - 1) else 0 end
+  end
+
+  fn err_name(e : Trace.TraceError) : String do
+    match e do
+      Trace.LimitOutOfRange -> "LimitOutOfRange"
+      Trace.UnknownFunction -> "UnknownFunction"
+      Trace.TooManySessions -> "TooManySessions"
+      Trace.NoSuchSession -> "NoSuchSession"
+      Trace.BadRequest -> "BadRequest"
+      Trace.PidsRequired -> "PidsRequired"
+      Trace.UnknownPid -> "UnknownPid"
+      Trace.Unavailable(w) -> "Unavailable(" ++ w ++ ")"
+    end
+  end
+
+  fn bool_str(b : Bool) : String do if b do "true" else "false" end end
+
+  fn why_str(w : Option(String)) : String do
+    match w do
+      Some(s) -> s
+      None -> "-"
+    end
+  end
+
+  fn kind_str(k : Trace.EventKind) : String do
+    match k do
+      Trace.Sent -> "sent"
+      Trace.Received -> "received"
+      Trace.Spawned -> "spawned"
+      Trace.Exited -> "exited"
+      Trace.Dropped -> "dropped"
+    end
+  end
+
+  fn of_kind(evs : List(Trace.ActorEvent), name : String) : List(Trace.ActorEvent) do
+    List.filter(evs, fn e -> kind_str(e.kind) == name)
+  end
+
+  fn count(evs : List(Trace.ActorEvent), name : String) : Int do
+    List.length(of_kind(evs, name))
+  end
+
+  fn first_peer(evs : List(Trace.ActorEvent)) : Int do
+    match evs do
+      Nil -> 0 - 99
+      Cons(e, _) ->
+        match e.peer do
+          Some(p) -> p
+          None -> 0 - 98
+        end
+    end
+  end
+
+  fn first_pid(evs : List(Trace.ActorEvent)) : Int do
+    match evs do
+      Nil -> 0 - 99
+      Cons(e, _) -> e.pid
+    end
+  end
+
+  fn first_tag(evs : List(Trace.ActorEvent)) : Int do
+    match evs do
+      Nil -> 0 - 99
+      Cons(e, _) ->
+        match e.msg_tag do
+          Some(t) -> t
+          None -> 0 - 98
+        end
+    end
+  end
+
+  fn first_reason(evs : List(Trace.ActorEvent)) : String do
+    match evs do
+      Nil -> "no event"
+      Cons(e, _) -> why_str(e.reason)
+    end
+  end
+
+  fn accepted(r : Option(Unit)) : String do
+    match r do
+      None -> "refused"
+      Some(_) -> "accepted"
+    end
+  end
+
+  fn refuse(d, label : String, o : Trace.Options, limit : Trace.Limit) : Unit do
+    match Trace.start_with(d, o, limit) do
+      Ok(_) -> println(label ++ ": STARTED (should be refused)")
+      Err(e) -> println(label ++ ": " ++ err_name(e))
+    end
+  end
+
+  fn summary(label : String, r : Result(Trace.Batch, Trace.TraceError)) : Unit do
+    match r do
+      Ok(x) ->
+        println(label ++ ": actor_events=" ++ int_to_string(List.length(x.actor_events))
+          ++ " calls=" ++ int_to_string(List.length(x.events))
+          ++ " recorded=" ++ int_to_string(x.recorded)
+          ++ " dropped=" ++ int_to_string(x.dropped)
+          ++ " rate_dropped=" ++ int_to_string(x.rate_dropped)
+          ++ " done=" ++ bool_str(x.done) ++ " why=" ++ why_str(x.why))
+      Err(e) -> println(label ++ ": " ++ err_name(e))
+    end
+  end
+
+  fn all_kinds() : List(Trace.EventKind) do
+    [Trace.Sent, Trace.Received, Trace.Spawned, Trace.Exited, Trace.Dropped]
+  end
+
+  fn drain_events(d, s : Trace.TraceId) : List(Trace.ActorEvent) do
+    match Trace.drain(d, s) do
+      Ok(x) -> x.actor_events
+      Err(e) -> do
+        println("drain: " ++ err_name(e))
+        Nil
+      end
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let d = Actor.debug(io)
+    let intro = Actor.introspect(io)
+    let p = spawn(Parent)
+    let pi = pid_to_int(p)
+
+    -- The pid filter is mandatory, and bounded.
+    refuse(d, "events without pids", Trace.actors(all_kinds(), Nil), Trace.MaxEvents(10))
+    refuse(d, "nine pids", Trace.actors(all_kinds(), [1, 2, 3, 4, 5, 6, 7, 8, 9]), Trace.MaxEvents(10))
+    refuse(d, "pid that is not an actor", Trace.actors(all_kinds(), [999999]), Trace.MaxEvents(10))
+    refuse(d, "negative pid", Trace.actors(all_kinds(), [0 - 1]), Trace.MaxEvents(10))
+    refuse(d, "pids without events", { fns: ["main"], events: Nil, pids: [pi] }, Trace.MaxEvents(10))
+    refuse(d, "nothing to watch", Trace.calls(Nil), Trace.MaxEvents(10))
+    refuse(d, "events, limit 0", Trace.actors(all_kinds(), [pi]), Trace.MaxEvents(0))
+    refuse(d, "events, rate secs 0", Trace.actors(all_kinds(), [pi]), Trace.Rate(5, 0))
+
+    -- One Make: main -> p (Sent, Received), p spawns a child (Spawned) and
+    -- sends it a message (Sent).  The child is not named, so it is seen only
+    -- as the peer of its parent's events.
+    match Trace.start_with(d, Trace.actors(all_kinds(), [pi]), Trace.MaxEvents(100)) do
+      Err(e) -> println("flow start: " ++ err_name(e))
+      Ok(s) ->
+        send(p, Make(5))
+        run_until_idle()
+        let evs = drain_events(d, s)
+        println("flow: sent=" ++ int_to_string(count(evs, "sent"))
+          ++ " received=" ++ int_to_string(count(evs, "received"))
+          ++ " spawned=" ++ int_to_string(count(evs, "spawned"))
+          ++ " exited=" ++ int_to_string(count(evs, "exited"))
+          ++ " dropped=" ++ int_to_string(count(evs, "dropped")))
+        let sents = of_kind(evs, "sent")
+        let to_p = List.filter(sents, fn e -> e.peer == Some(pi))
+        let from_p = List.filter(sents, fn e -> e.pid == pi)
+        println("main sent to p: pid=" ++ int_to_string(first_pid(to_p)) ++ " peer is p: " ++ bool_str(first_peer(to_p) == pi))
+        let recv = of_kind(evs, "received")
+        println("p received: pid is p: " ++ bool_str(first_pid(recv) == pi))
+        println("sent and received carry the same tag: " ++ bool_str(first_tag(to_p) == first_tag(recv)))
+        let sp = of_kind(evs, "spawned")
+        println("spawned: parent is p: " ++ bool_str(first_pid(sp) == pi))
+        println("p sent to the child it spawned: " ++ bool_str(first_peer(from_p) == first_peer(sp)))
+        println("child is not p: " ++ bool_str(first_peer(sp) != pi))
+        println("every event has a time: " ++ bool_str(List.all(evs, fn e -> e.at_ns >= 0)))
+        let _ = Trace.stop(d, s)
+    end
+
+    -- Kind filter: only Received.  Events of other kinds are not recorded.
+    match Trace.start_with(d, Trace.actors([Trace.Received], [pi]), Trace.MaxEvents(100)) do
+      Err(e) -> println("kind start: " ++ err_name(e))
+      Ok(s) ->
+        send(p, Make(1))
+        run_until_idle()
+        let evs = drain_events(d, s)
+        println("kind filter: total=" ++ int_to_string(List.length(evs))
+          ++ " received=" ++ int_to_string(count(evs, "received")))
+        let _ = Trace.stop(d, s)
+    end
+
+    -- Pid filter: a session on a different actor sees nothing of p's traffic.
+    let l = spawn(Kid)
+    let li = pid_to_int(l)
+    match Trace.start_with(d, Trace.actors(all_kinds(), [li]), Trace.MaxEvents(100)) do
+      Err(e) -> println("pid start: " ++ err_name(e))
+      Ok(s) ->
+        send(p, Make(1))
+        run_until_idle()
+        println("traffic of another actor: events=" ++ int_to_string(List.length(drain_events(d, s))))
+        -- A counterpart match: main (no pid) sends to the named actor.
+        send(l, Hit(1))
+        run_until_idle()
+        let evs = drain_events(d, s)
+        println("send to the named actor: sent=" ++ int_to_string(count(evs, "sent"))
+          ++ " received=" ++ int_to_string(count(evs, "received")))
+        println("main is -1: " ++ bool_str(first_pid(of_kind(evs, "sent")) == 0 - 1))
+        let _ = Trace.stop(d, s)
+    end
+
+    -- An existing boundary-call session is unchanged: no actor events leak in.
+    match Trace.start_with(d, Trace.calls(["step"]), Trace.MaxEvents(5)) do
+      Err(e) -> println("calls start: " ++ err_name(e))
+      Ok(s) ->
+        send(p, Make(1))
+        run_until_idle()
+        match Trace.drain(d, s) do
+          Ok(x) -> println("calls-only session: actor_events=" ++ int_to_string(List.length(x.actor_events))
+            ++ " calls=" ++ int_to_string(List.length(x.events)))
+          Err(e) -> println("calls drain: " ++ err_name(e))
+        end
+        let _ = Trace.stop(d, s)
+    end
+
+    -- Count bounds an event session exactly: 3 Makes make more than 2 events.
+    match Trace.start_with(d, Trace.actors(all_kinds(), [pi]), Trace.MaxEvents(2)) do
+      Err(e) -> println("count start: " ++ err_name(e))
+      Ok(s) ->
+        send(p, Make(1))
+        send(p, Make(1))
+        send(p, Make(1))
+        run_until_idle()
+        summary("count(2)", Trace.drain(d, s))
+        send(p, Make(1))
+        run_until_idle()
+        summary("count(2) after more traffic", Trace.drain(d, s))
+        let _ = Trace.stop(d, s)
+    end
+
+    -- Rate bounds it per window and counts the excess.
+    match Trace.start_with(d, Trace.actors(all_kinds(), [pi]), Trace.Rate(3, 60)) do
+      Err(e) -> println("rate start: " ++ err_name(e))
+      Ok(s) ->
+        send(p, Make(1))
+        send(p, Make(1))
+        send(p, Make(1))
+        run_until_idle()
+        match Trace.drain(d, s) do
+          Ok(x) -> do
+            println("rate(3,60): kept=" ++ int_to_string(List.length(x.actor_events))
+              ++ " recorded=" ++ int_to_string(x.recorded)
+              ++ " over budget counted=" ++ bool_str(x.rate_dropped > 0)
+              ++ " done=" ++ bool_str(x.done))
+          end
+          Err(e) -> println("rate drain: " ++ err_name(e))
+        end
+        let _ = Trace.stop(d, s)
+    end
+
+    -- Exited, with how: killed, normal (a graceful stop) and crash (a
+    -- supervised child that panics).
+    let x = spawn(Kid)
+    let y = spawn(Kid)
+    let boss = spawn(Boss)
+    let child = match get_actor_field(boss, "child") do
+      None -> 0 - 1
+      Some(n) -> n
+    end
+    let child_pid = Actor.pid_from_int(intro, child)
+    match Trace.start_with(d, Trace.actors([Trace.Exited], [pid_to_int(x), pid_to_int(y), child]), Trace.MaxEvents(20)) do
+      Err(e) -> println("exit start: " ++ err_name(e))
+      Ok(s) ->
+        kill(x)
+        let _ = Actor.stop(y, 5000)
+        send(child_pid, Poison())
+        run_until_idle()
+        let evs = drain_events(d, s)
+        println("exited: total=" ++ int_to_string(List.length(evs)))
+        let for_pid = fn pid -> List.filter(evs, fn e -> e.pid == pid)
+        println("killed: " ++ first_reason(for_pid(pid_to_int(x))))
+        println("stopped: " ++ first_reason(for_pid(pid_to_int(y))))
+        println("crashed: " ++ first_reason(for_pid(child)))
+        let _ = Trace.stop(d, s)
+    end
+
+    -- Dropped: a send to a dead actor named by the session, and a full mailbox.
+    let z = spawn(Kid)
+    match Trace.start_with(d, Trace.actors([Trace.Dropped], [pid_to_int(z)]), Trace.MaxEvents(100)) do
+      Err(e) -> println("drop start: " ++ err_name(e))
+      Ok(s) ->
+        kill(z)
+        let r = send(z, Hit(1))
+        println("send to dead: " ++ accepted(r))
+        let evs = drain_events(d, s)
+        println("dropped: n=" ++ int_to_string(List.length(evs))
+          ++ " reason=" ++ first_reason(evs)
+          ++ " recipient is z: " ++ bool_str(first_pid(evs) == pid_to_int(z))
+          ++ " sender is main: " ++ bool_str(first_peer(evs) == 0 - 1))
+        let _ = Trace.stop(d, s)
+    end
+
+    let slow = spawn(Slow)
+    Actor.set_queue_limit(slow, 1, 1)
+    match Trace.start_with(d, Trace.actors([Trace.Dropped], [pid_to_int(slow)]), Trace.MaxEvents(200)) do
+      Err(e) -> println("full start: " ++ err_name(e))
+      Ok(s) ->
+        let go = fn i -> send(slow, Work(i))
+        go(1)
+        go(2)
+        go(3)
+        go(4)
+        go(5)
+        go(6)
+        go(7)
+        go(8)
+        run_until_idle()
+        let evs = drain_events(d, s)
+        println("full mailbox: dropped events >= 4: " ++ bool_str(List.length(evs) >= 4)
+          ++ " reason=" ++ first_reason(evs))
+        let _ = Trace.stop(d, s)
+    end
+
+    -- Sessions free their bits: after stop, traffic costs and records nothing,
+    -- and a new session on the same actor starts clean.
+    match Trace.start_with(d, Trace.actors(all_kinds(), [pi]), Trace.MaxEvents(100)) do
+      Err(e) -> println("again start: " ++ err_name(e))
+      Ok(s) ->
+        let _ = Trace.stop(d, s)
+        send(p, Make(1))
+        run_until_idle()
+        match Trace.start_with(d, Trace.actors([Trace.Received], [pi]), Trace.MaxEvents(100)) do
+          Err(e) -> println("again start 2: " ++ err_name(e))
+          Ok(s2) ->
+            send(p, Make(1))
+            run_until_idle()
+            println("fresh session after stop: " ++ int_to_string(List.length(drain_events(d, s2))))
+            let _ = Trace.stop(d, s2)
+        end
+    end
+    println("done")
+  end
+end
