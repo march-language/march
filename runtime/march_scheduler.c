@@ -426,14 +426,25 @@ uint64_t march_sched_started_ns(int sched_id) {
     return atomic_load_explicit(&g_scheds[sched_id].started_ns, memory_order_relaxed);
 }
 
+/* Owner-thread increment of a per-scheduler statistic that other threads
+ * read (march_sched_thread_stat).  Only the owner writes, so a relaxed load +
+ * relaxed store (not an atomic RMW) is exact and compiles to the same
+ * ldr/add/str as `x++`; it only makes the cross-thread read a non-race. */
+#define MARCH_SCHED_STAT_BUMP(field) \
+    __atomic_store_n(&(field), __atomic_load_n(&(field), __ATOMIC_RELAXED) + 1, \
+                     __ATOMIC_RELAXED)
+
 int64_t march_sched_thread_stat(int sched_id, int which) {
     if (sched_id < 0 || sched_id >= g_num_scheds) return -1;
     const march_scheduler *s = &g_scheds[sched_id];
+    /* Relaxed loads: the owner thread writes these with relaxed stores
+     * (MARCH_SCHED_STAT_BUMP) while an observe snapshot reads them from
+     * another thread.  A racy-but-defined snapshot; plain ldr on arm64. */
     switch (which) {
-    case MARCH_THREAD_STAT_STARTED:    return s->started;
-    case MARCH_THREAD_STAT_ENTERED:    return s->entered;
-    case MARCH_THREAD_STAT_DISPATCHES: return s->stat_dispatches;
-    case MARCH_THREAD_STAT_IDLE_POLLS: return s->stat_idle_polls;
+    case MARCH_THREAD_STAT_STARTED:    return __atomic_load_n(&s->started, __ATOMIC_RELAXED);
+    case MARCH_THREAD_STAT_ENTERED:    return __atomic_load_n(&s->entered, __ATOMIC_RELAXED);
+    case MARCH_THREAD_STAT_DISPATCHES: return __atomic_load_n(&s->stat_dispatches, __ATOMIC_RELAXED);
+    case MARCH_THREAD_STAT_IDLE_POLLS: return __atomic_load_n(&s->stat_idle_polls, __ATOMIC_RELAXED);
     default: return -1;
     }
 }
@@ -1961,7 +1972,7 @@ static void sched_loop(march_scheduler *sched) {
     /* This thread is now a quiescent-state reader for march_reclaim: online,
      * with a quiescent state announced at the top of every iteration below. */
     march_reclaim_sched_attach();
-    sched->entered = 1;
+    __atomic_store_n(&sched->entered, 1, __ATOMIC_RELAXED);
     atomic_store_explicit(&sched->started_ns, march_mono_ns(), memory_order_relaxed);
     atomic_store_explicit(&sched->running, 1, memory_order_release);
     unsigned int steal_seed = (unsigned int)sched->id;
@@ -2069,7 +2080,7 @@ static void sched_loop(march_scheduler *sched) {
                     && wake_idle_daemons() > 0)
                 continue;  /* woken procs are in the global runq — next
                             * iteration's global_runq_pop picks them up */
-            sched->stat_idle_polls++;
+            MARCH_SCHED_STAT_BUMP(sched->stat_idle_polls);
             /* No runnable process: sleep 1ms to avoid burning CPU at idle.
              * sched_yield() alone causes ~99% CPU on a waiting server. */
             struct timespec idle_sleep = { 0, 1000000 }; /* 1ms */
@@ -2142,7 +2153,7 @@ static void sched_loop(march_scheduler *sched) {
         /* Atomic store: read by the observe walk (march_obs_actors). */
         __atomic_store_n(&p->owner_sched, sched, __ATOMIC_RELAXED);
         sched->current  = p;
-        sched->stat_dispatches++;
+        MARCH_SCHED_STAT_BUMP(sched->stat_dispatches);
         /* Observe counters (march_proc): this scheduler owns p now. */
         int64_t run_ms = atomic_load_explicit(&g_coarse_ms, memory_order_relaxed);
         if (run_ms == 0) {   /* no preemption daemon: the scheduler's own clock */
@@ -2499,7 +2510,7 @@ void march_sched_run(void) {
      * sibling merely ran on another OS thread (parallelism, not preemption). */
     if (g_num_scheds <= 1) {
         g_scheds[0].thread = pthread_self();
-        g_scheds[0].started = 1;
+        __atomic_store_n(&g_scheds[0].started, 1, __ATOMIC_RELAXED);
         march_sched_preempt_start();
         sched_loop(&g_scheds[0]);
         /* Final drain: a Signal.watch delivery that landed just before shutdown
@@ -2514,7 +2525,7 @@ void march_sched_run(void) {
     /* Scheduler 0 runs on the calling thread — record its pthread_t so the
      * preemption daemon can send SIGUSR1 to it like any other worker. */
     g_scheds[0].thread = pthread_self();
-    g_scheds[0].started = 1;
+    __atomic_store_n(&g_scheds[0].started, 1, __ATOMIC_RELAXED);
 
     /* Spawn N-1 worker threads; scheduler 0 runs on the calling thread.
      *
@@ -2537,7 +2548,7 @@ void march_sched_run(void) {
                     i + 1, g_num_scheds, strerror(rc));
             continue;
         }
-        g_scheds[i].started = 1;
+        __atomic_store_n(&g_scheds[i].started, 1, __ATOMIC_RELAXED);
         n_started++;
     }
     if (n_started < g_num_scheds)

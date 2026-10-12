@@ -662,6 +662,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`MARCH_SANITIZE=thread` builds no longer report a race on scheduler
+  statistics.** Reading per-scheduler dispatch and idle counts (for example
+  through `Recon.node_stats` or an observe snapshot) while the schedulers were
+  running raced with the schedulers' own updates. See
+  `specs/progress/2026-10-12-tsan-sched-thread-stat-race.md`.
 - **A send to a full `BLOCK` mailbox waits again after it migrates schedulers.**
   When a sender woke up on a different scheduler thread, its retry could check
   the old scheduler's state. If that scheduler was idle, the message was
