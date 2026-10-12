@@ -662,6 +662,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled `to_string` names a `Bytes` returned by the runtime.**
+  `to_string(Base64.decode(s))` printed `Ok(#<tag:0>)` compiled and
+  `Ok(Bytes("..."))` interpreted; the same held for Bytes from hashing,
+  compression and HTTP bodies. Both now print `Bytes("...")`.
 - **A local `fn` no longer makes the values it captures polymorphic.** A
   named `fn` inside a function body was generalized over the types of what it
   captured, so in stdlib `Set.union` the comparator's element type came apart

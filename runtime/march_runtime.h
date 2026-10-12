@@ -71,6 +71,21 @@ static inline int32_t march_hdr_type_id(const void *p) {
 }
 /* The id the compiler stamps for a type named [name] (march_extras.c). */
 int32_t march_type_id_of_name(const char *name);
+/* The id of stdlib `Bytes` (`type Bytes = Bytes(String)` in `mod Bytes`, so
+ * lowered as "Bytes.Bytes"), for the C sites that build a Bytes cell
+ * themselves.  Same hash as march_type_id_of_name, inlined so a TU that does
+ * not link march_extras.c (bench/bench_http_simd.sh builds march_http.c
+ * alone) can still stamp it.  An unstamped C-built Bytes printed "#<tag:0>"
+ * compiled (`to_string(Base64.decode(s))`) where the interpreter printed
+ * `Bytes("...")`. */
+static inline int32_t march_bytes_type_id(void) {
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)"Bytes.Bytes"; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    return -(int32_t)(1u + (h & 0x3FFFFFFFu));
+}
 /* `~H` hole on an ERASED value: flattens iff the header id says IOList,
  * otherwise renders by name and escapes (march_extras.c). */
 void   *march_html_auto_escape_dyn(void *v);

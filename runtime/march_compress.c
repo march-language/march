@@ -42,6 +42,7 @@ static void *compress_bytes_from_raw(const uint8_t *data, size_t len) {
     void *s = march_string_lit((const char *)data, (int64_t)len);
     void *b = march_alloc(16 + 8);
     /* tag = 0 = Bytes ctor */
+    ((march_hdr *)b)->pad = march_bytes_type_id();
     *(void **)((char *)b + 16) = s;
     return b;
 }

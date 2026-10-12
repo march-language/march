@@ -1812,6 +1812,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/local_fn_capture_not_generalized.expected native_local_fn_capture_not_generalized.out)))
 
+; A Bytes cell the C runtime builds (Base64.decode) carries the `Bytes.Bytes`
+; header type id, so compiled `to_string` names it like the interpreter
+; (it printed `#<tag:0>`).  Needs the stdlib (Bytes, Base64).
+(rule
+ (targets native_bytes_c_built_to_string native_bytes_c_built_to_string.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/bytes_c_built_to_string.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_bytes_c_built_to_string native/bytes_c_built_to_string.march)
+   (with-stdout-to native_bytes_c_built_to_string.out (system "./native_bytes_c_built_to_string")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_c_built_to_string.expected native_bytes_c_built_to_string.out)))
+
 ; An inlined body's free reference to a top-level function must not be
 ; captured by a caller binder of the same name: a top-level `f` called from a
 ; lambda, inlined into List.map's clone whose callback parameter is `f`, became

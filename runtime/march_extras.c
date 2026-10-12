@@ -235,6 +235,7 @@ static void b64_decode_init(void) {
 static void *bytes_wrap(void *payload) {
     void *b = march_alloc(16 + 8);       /* hdr(16) + ptr(8) */
     /* tag stays 0 = Bytes ctor */
+    ((march_hdr *)b)->pad = march_bytes_type_id();
     *(void **)((char *)b + 16) = payload;
     return b;
 }
