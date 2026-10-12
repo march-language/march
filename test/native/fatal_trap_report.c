@@ -8,7 +8,7 @@
  * (march_fatal_trap_handler, runtime/march_scheduler.c) were present:
  *   1  "march: fatal SIGILL si_code=..."      (the fault line)
  *   2  "march: fatal SIGILL static pc=..."    (pc / lr, image-relative)
- *   4  "march: fatal trap frames (static): A B ..." with at least two frames
+ *   4  "march: fatal trap frames (static): A B ..." with at least two frames (one on x86_64)
  * Forking keeps the trap out of the test process, so the fixture itself exits
  * 0 (and the sanitizer sweep, which runs every fixture, sees a clean run). The
  * child inherits the handler (sigaction is per process) and only runs the
@@ -67,7 +67,16 @@ int64_t fatal_trap_report_probe(int64_t unused) {
         int frames = 0;
         for (const char *q = fr; *q && *q != '\n'; q++)
             if (q[0] == ' ' && q[1] == '0' && q[2] == 'x') frames++;
-        if (frames >= 2) flags |= 4;
+        /* arm64 (AAPCS64) always keeps the frame-pointer chain, so the walk
+         * must reach past the trapping frame.  x86_64 code built at -O2
+         * omits frame pointers, so the walk can honestly stop after the
+         * trapping frame there (Linux x86_64 CI printed one frame). */
+#if defined(__x86_64__)
+        const int need = 1;
+#else
+        const int need = 2;
+#endif
+        if (frames >= need) flags |= 4;
     }
     return status * 16 + flags;
 }
