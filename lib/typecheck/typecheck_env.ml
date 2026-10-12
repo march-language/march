@@ -300,6 +300,17 @@ type env = {
       [fn_arities] and its own [qual_fn_arities] (nested modules).  Never
       cleared by [bind_var]: a qualified name cannot be shadowed by a local.
       Registry-loaded [ExFn] exports carry no arity and are not in it. *)
+  param_call_arities : (Ast.span * (string * int option) list) StrMap.t;
+  (** Callback call-arity of each parameter of a known function, for the
+      check that a function VALUE passed as an argument takes as many
+      arguments as the callee applies that parameter to (see
+      [Typecheck_callarity]).  Keyed like [fn_arities] (bare, this module's
+      own fns) and [qual_fn_arities] (qualified exports); the span is the
+      definition's name span, and an entry is only consulted when the
+      matching [fn_arities]/[qual_fn_arities] entry has the same span, so a
+      shadowing local fn never inherits a stale entry.  [Some m]: every call
+      of the parameter in the body (direct, or by passing it on to another
+      known function's parameter) supplies [m] arguments. *)
   qual_fn_names : unit StrMap.t;
   (** Qualified ("Mod.name") keys in [vars] that denote a genuine top-level
       function — i.e. a [DFn], an interface method, or a registry [ExFn]
@@ -728,6 +739,7 @@ let make_env errors type_map = {
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
   qual_fn_arities = StrMap.empty;
+  param_call_arities = StrMap.empty;
   qual_fn_names = StrMap.empty;
   plain_let_names = StringSet.empty;
   binder_spans = StrMap.empty;

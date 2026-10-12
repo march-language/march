@@ -166,6 +166,7 @@ type env = {
   local_fns : unit StrMap.t;
   fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
   qual_fn_arities : (int * Typecheck_types.Ast.span) StrMap.t;
+  param_call_arities : (Typecheck_types.Ast.span * (string * int option) list) StrMap.t;
   qual_fn_names : unit StrMap.t;
   binder_spans : Typecheck_types.Ast.span StrMap.t;
   pat_spans : (string, Typecheck_types.Ast.span) Hashtbl.t;

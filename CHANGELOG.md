@@ -454,6 +454,19 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Breaking: passing a function that takes a different number of arguments
+  than the callee applies it to is an error.** `fn add(a, b)` and a curried
+  `fn a -> fn b -> a + b` have the same type, but March has no partial
+  application, so `ap2(add, 1, 2)` (where `ap2` does `let g = f(x)` then
+  `g(y)`), or a two-argument `lt` passed to `Map.insert` as its comparator,
+  typechecked and then panicked interpreted and crashed with SIGSEGV compiled.
+  A named function, let-bound lambda or lambda literal passed to such a
+  parameter now fails with `callback_arity_mismatch`, which suggests the
+  curried wrapper (`fn a -> fn b -> add(a, b)`). The reverse (a curried lambda
+  where the callee calls `f(x, y)`) is caught too. No stdlib code was
+  affected; one typing-corpus fixture passed a two-argument comparator to
+  `Map.insert` and now uses a curried one. Function values passed through records or lists are
+  not checked yet (`specs/todos/2026-10-12-function-arity-not-in-types.md`).
 - **Breaking: a type variable in a function signature is rigid: a body that fixes it is
   an error.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end`, and a body that
   makes two signature variables the same type (`fn second(x : a, y : b) : a do

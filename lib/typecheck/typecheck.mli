@@ -261,6 +261,7 @@ type env = {
   local_fns : unit StrMap.t;
   fn_arities : (int * Ast.span) StrMap.t;
   qual_fn_arities : (int * Ast.span) StrMap.t;
+  param_call_arities : (Ast.span * (string * int option) list) StrMap.t;
   qual_fn_names : unit StrMap.t;
   binder_spans : Ast.span StrMap.t;
   pat_spans : (string, Ast.span) Hashtbl.t;

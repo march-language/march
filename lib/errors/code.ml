@@ -38,6 +38,7 @@ let cap_needs = "cap_needs"
 let cap_root_broad = "cap_root_broad"
 let cap_scope_violation = "cap_scope_violation"
 let cap_widen = "cap_widen"
+let callback_arity_mismatch = "callback_arity_mismatch"
 let codec_missing = "codec_missing"
 let constructor_arity = "constructor_arity"
 let curried_lambda_over_tuple = "curried_lambda_over_tuple"
@@ -207,6 +208,7 @@ let all = [
   cap_root_broad;
   cap_scope_violation;
   cap_widen;
+  callback_arity_mismatch;
   codec_missing;
   constructor_arity;
   curried_lambda_over_tuple;
