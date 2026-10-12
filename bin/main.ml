@@ -3982,6 +3982,29 @@ let compile filename =
         let mod_hash = match cap_manifest with
           | None -> mod_hash
           | Some j -> mod_hash ^ "|capscope:" ^ j in
+        (* Same hole, other emitted strings.  The per-SCC impl hashes cover
+           function bodies and type layouts but not the module NAME — the
+           entry module's own functions are unprefixed in TIR — nor the
+           capability-attribution inputs.  Yet emit_module writes both into
+           the binary: one [__march_capfrom_CAP__OWNER] /
+           [__march_capdecl_CAP__OWNER] marker per (cap, owner) row, with the
+           entry module's rows owned by [tm_name] (and a WASM island's
+           exports are found through [tm_name] too).  Two programs differing
+           only in module name, or only in a `needs` line, hashed alike, and
+           the second was served the first one's binary carrying the FIRST
+           module's markers — so `forge cap inspect/run`, `forge audit` and
+           `march caps` reported another module's capabilities.  The marker
+           rows emit_module filters from these lists are a pure function of
+           them plus the (already-keyed) code, so keying the lists covers
+           exactly what is emitted. *)
+        let mod_hash =
+          let rows tag l =
+            String.concat ","
+              (List.map (fun (cap, owner) -> tag ^ cap ^ "__" ^ owner)
+                 (List.sort_uniq compare l)) in
+          String.concat "|"
+            [ mod_hash; "module:" ^ tir.March_tir.Tir.tm_name;
+              rows "capfrom:" cap_attrib; rows "capdecl:" cap_decls ] in
         if !dump_impl_hashes then write_impl_hashes basename h_sccs;
         (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" = Some "2" then
            List.iter (fun sc ->
