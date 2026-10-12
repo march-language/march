@@ -1922,6 +1922,43 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/aggregate_dupd_consume_drop.expected native_aggregate_dupd_consume_drop.out)))
 
+; An owned record released by one path of a branching let value or statement
+; and only read by another is released on the reading path too (the TIR
+; verifier's 2026-10-12 leak sweep); default opt and --opt 2.
+(rule
+ (targets native_partial_release_aggregate_drop native_partial_release_aggregate_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/partial_release_aggregate_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_partial_release_aggregate_drop
+        native/partial_release_aggregate_drop.march)
+   (with-stdout-to native_partial_release_aggregate_drop.out
+        (system "./native_partial_release_aggregate_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/partial_release_aggregate_drop.expected native_partial_release_aggregate_drop.out)))
+
+(rule
+ (targets native_partial_release_aggregate_drop_o2 native_partial_release_aggregate_drop_o2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/partial_release_aggregate_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_partial_release_aggregate_drop_o2
+        native/partial_release_aggregate_drop.march)
+   (with-stdout-to native_partial_release_aggregate_drop_o2.out
+        (system "./native_partial_release_aggregate_drop_o2")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/partial_release_aggregate_drop.expected native_partial_release_aggregate_drop_o2.out)))
+
 (rule
  (targets native_aggregate_param_field_alias native_aggregate_param_field_alias.out)
  (deps (file %{exe:../bin/main.exe})

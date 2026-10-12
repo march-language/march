@@ -697,7 +697,26 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
              in the first arm and leaked it in the second. *)
           Tir.ELet (v, push v.Tir.v_ty live aliases e1, e2)
         else
-          Tir.ELet (v, e1, push_same live_e2 aliases' e2)
+          (* The same, when [e2] still mentions OTHER candidates: the ones
+             [e1] takes on some path and [e2] never names are dropped inside
+             [e1], and the rest go on to [e2].  Asking "does [e2] mention any
+             candidate" of the whole list stood the drop down: [let lower =
+             if st.me < l.id do st.me else l.id end in l.d == lower] released
+             [st] in the else arm and leaked it in the then arm, because [e2]
+             reads [l] (ClusterNode.keeps_new, found by the TIR verifier's
+             leak sweep). *)
+          let push_set =
+            List.filter (fun p ->
+                not (List.memq p live_e2)
+                && not (Perceus_liveness.name_free_in p.Tir.v_name e2))
+              live in
+          if push_set <> []
+             && not (StringSet.exists
+                       (fun a -> Perceus_liveness.name_free_in a e2) aliases') then
+            Tir.ELet (v, push v.Tir.v_ty push_set aliases e1,
+                      push_same live_e2 aliases' e2)
+          else
+            Tir.ELet (v, e1, push_same live_e2 aliases' e2)
       | Tir.ESeq ((Tir.EIncRC (Tir.AVar w) | Tir.EAtomicIncRC (Tir.AVar w)
                    as e1), e2) ->
         Tir.ESeq (e1, push_same live (StringSet.remove w.Tir.v_name aliases) e2)
