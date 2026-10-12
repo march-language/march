@@ -745,6 +745,14 @@ git log is authoritative for exact commits.
   `json_derive_name_collision`, naming both types and both `derive` sites.
   Rename one of the types, or derive Json for only one of them, which keeps
   working.
+- **A cached binary no longer carries another module's capability markers.**
+  The post-TIR artifact-cache key covered function bodies and types but not the
+  entry module's name or its `needs` declarations, both of which are written
+  into the binary as `__march_capfrom_*` / `__march_capdecl_*` markers. Two
+  programs that differed only in module name (or one `needs` line) shared one
+  cached binary, so `forge cap inspect`/`run`, `forge audit` and `march caps`
+  reported the first program's module and capabilities for the second. Both
+  are now part of the key.
 - **Drop functions keep the same symbol across unrelated edits.** The compiler
   named the drop function of a type with an unresolved type variable after the
   typechecker's internal variable number (`__drop$List_V_53272`), so it moved
