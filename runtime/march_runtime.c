@@ -2041,17 +2041,25 @@ static void do_actor_death(void *actor, march_death_reason reason,
  * __try_call / __try_call_val prepend this when building their Err.  Set
  * immediately before the longjmp by the SAME thread that runs the catching
  * setjmp, like march_test_fail_buf itself; the catchers clear it on entry
- * and restore the outer value on exit. */
+ * and restore the outer value on exit.
+ *
+ * Every access is a relaxed atomic: concurrent panics in supervised actors
+ * (each caught by its own green thread's crash trap, which never reads this)
+ * all write it.  Only __try_call / __try_call_val read it, and only between
+ * a panic and its catch on one thread, so relaxed ordering is all it needs;
+ * the atomics just keep those unrelated writes from being a data race. */
 static const char *march_panic_prefix = NULL;
+#define PANIC_PREFIX_SET(v) __atomic_store_n(&march_panic_prefix, (v), __ATOMIC_RELAXED)
+#define PANIC_PREFIX_GET()  __atomic_load_n(&march_panic_prefix, __ATOMIC_RELAXED)
 
 void *march_panic_ext(void *s) {
-    march_panic_prefix = "panic: ";
+    PANIC_PREFIX_SET("panic: ");
     march_panic(s);
     return NULL;
 }
 
 void *march_todo_ext(void *s) {
-    march_panic_prefix = "todo: ";
+    PANIC_PREFIX_SET("todo: ");
     march_panic(s);
     return NULL;
 }
@@ -2059,14 +2067,14 @@ void *march_todo_ext(void *s) {
 /* The `panic` builtin (lib/tir/llvm_builtins.ml): user `panic(msg)` and the
  * compiler's own assert / non-exhaustive panics. */
 void march_panic_user(void *s) {
-    march_panic_prefix = "panic: ";
+    PANIC_PREFIX_SET("panic: ");
     march_panic(s);
 }
 
 /* unreachable_ takes no argument; the message is the interpreter's
  * (eval_builtins.ml's unreachable_), with no further prefix. */
 void *march_unreachable_ext(void) {
-    march_panic_prefix = NULL;
+    PANIC_PREFIX_SET(NULL);
     march_panic(march_string_lit("unreachable: reached unreachable code", 37));
     return NULL;
 }
@@ -2075,7 +2083,8 @@ void *march_unreachable_ext(void) {
  * march_todo_ext recorded, then the fail buffer (or [fallback] when empty). */
 static void *march_caught_panic_message(const char *fallback) {
     const char *msg = march_test_fail_buf[0] ? march_test_fail_buf : fallback;
-    const char *pre = march_panic_prefix ? march_panic_prefix : "";
+    const char *pre = PANIC_PREFIX_GET();
+    if (!pre) pre = "";
     size_t pl = strlen(pre), ml = strlen(msg);
     char *buf = (char *)malloc(pl + ml + 1);
     if (!buf) { fputs("march: out of memory\n", stderr); exit(1); }
@@ -2458,10 +2467,10 @@ void *march_try_call(void *thunk) {
     memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
-    const char *saved_prefix = march_panic_prefix;
+    const char *saved_prefix = PANIC_PREFIX_GET();
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
-    march_panic_prefix     = NULL;
+    PANIC_PREFIX_SET(NULL);
 
     int64_t ok_result = 0;
     int     panicked  = 0;
@@ -2482,7 +2491,7 @@ void *march_try_call(void *thunk) {
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
-    march_panic_prefix = saved_prefix;
+    PANIC_PREFIX_SET(saved_prefix);
 
     /* No march_decrc(thunk) here. Like the task_spawn trampoline (see its
      * comment), a CAPTURING thunk's own apply function now releases its one
@@ -2552,10 +2561,10 @@ void *march_try_call_val(void *thunk) {
     memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
-    const char *saved_prefix = march_panic_prefix;
+    const char *saved_prefix = PANIC_PREFIX_GET();
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
-    march_panic_prefix     = NULL;
+    PANIC_PREFIX_SET(NULL);
 
     int64_t ok_result = 0;
     int     panicked  = 0;
@@ -2572,7 +2581,7 @@ void *march_try_call_val(void *thunk) {
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
-    march_panic_prefix = saved_prefix;
+    PANIC_PREFIX_SET(saved_prefix);
 
     /* No march_decrc(thunk) — see the identical comment in __try_call above. */
 
@@ -2759,6 +2768,16 @@ typedef struct {
                                   state fields, possibly tagged with
                                   MARCH_SUP_SLOT_IN_STATE; this child's Int-encoded
                                   pid lives at *sup_child_slot(supervisor, word_idx) */
+    /* This slot's current child, as a pid index: the RUNTIME's copy, and the
+     * one every C reader uses (restarts, the batch strategies' sweeps, a
+     * stop's teardown).  Set at registration and by each respawn, with
+     * __atomic stores, before the replacement is activated.  The state word
+     * at sup_child_slot is only the March-visible mirror of it: the
+     * supervisor's own compiled handlers load and write back that word, so
+     * the runtime may write it only while the supervisor is between messages
+     * (sup_slot_publish).  See
+     * specs/progress/2026-10-12-supervisor-child-slot-race.md. */
+    int64_t cur_pid;
     /* Task 16: exponential restart backoff. Zeroed at registration
      * (march_actor_register_child — sup_children grows via realloc, which
      * does NOT zero new memory, so these two fields are set explicitly
@@ -3053,6 +3072,28 @@ typedef struct march_actor_meta {
      * delayed_batch_pending and batch_restart_in_flight are 0; zeroed by
      * calloc. */
     int64_t                      pending_drop_count;
+    /* A supervisor's child-pid state words (sup_child_slot) and when the
+     * runtime may write them.  A compiled handler loads every state field on
+     * entry and stores them all back on exit, so a restart that wrote a word
+     * in between (from the crashed child's thread, or from this supervisor's
+     * own thread when a handler kills a child) was overwritten with the dead
+     * child's pid.  sup_slot_busy is 1 from the moment the supervisor's loop
+     * takes a message until it next waits for one (sup_slots_go_busy /
+     * sup_slots_go_idle), which covers every handler, inspect request and
+     * hot-reload state migration.  A restart that finds it 1 sets
+     * sup_slot_dirty instead of writing, and the loop copies every child's
+     * cur_pid into the state before it next waits.  At any other time
+     * (including before the supervisor's thread first runs, which touches no
+     * state word) a restart writes the word directly, so a supervisor that is
+     * not handling a message shows the replacement as soon as the restart
+     * returns (`kill(child)` then Actor.get_field, at any scheduler count),
+     * as before.  Zeroed by calloc.  All three, and the sup_children array itself
+     * (registration reallocs it), are guarded by sup_slot_lock: a spin lock
+     * held only for a few plain stores, never across a switch or a call into
+     * March code. */
+    int                          sup_slot_lock;
+    int                          sup_slot_busy;
+    int                          sup_slot_dirty;
     /* Named-registry reverse index (Task 3): every name currently registered
      * to THIS actor, as plain strdup'd C strings — NOT a March List(String),
      * see the design comment above registry_init_once for why. Grown one at
@@ -3067,6 +3108,75 @@ typedef struct march_actor_meta {
      * never updated; read by the observe walk (observe plan R2.6). */
     int64_t                      spawned_by;
 } march_actor_meta;
+
+/* ── Supervisor child-pid state words (see sup_slot_lock above) ─────── */
+
+static inline void sup_slot_lock(march_actor_meta *m) {
+    while (__atomic_exchange_n(&m->sup_slot_lock, 1, __ATOMIC_ACQUIRE)) {
+        while (__atomic_load_n(&m->sup_slot_lock, __ATOMIC_RELAXED)) {
+#if defined(__aarch64__)
+            __asm__ __volatile__("yield");
+#elif defined(__x86_64__)
+            __asm__ __volatile__("pause");
+#endif
+        }
+    }
+}
+
+static inline void sup_slot_unlock(march_actor_meta *m) {
+    __atomic_store_n(&m->sup_slot_lock, 0, __ATOMIC_RELEASE);
+}
+
+/* The current child of [m]'s slot [idx], as a pid index (0 = none). */
+static inline int64_t sup_child_pid(march_actor_meta *m, int idx) {
+    return __atomic_load_n(&m->sup_children[idx].cur_pid, __ATOMIC_ACQUIRE);
+}
+
+/* Mirror every child's cur_pid into the supervisor's state.  Caller holds
+ * sup_slot_lock and the supervisor is not running a handler.  The stores are
+ * relaxed atomics because Actor.get_field reads these words from other
+ * threads (march_get_actor_field). */
+static void sup_slots_store_all_locked(void *supervisor, march_actor_meta *m) {
+    for (int i = 0; i < m->sup_num_children; i++)
+        __atomic_store_n(sup_child_slot(supervisor, m->sup_children[i].word_idx),
+                         sup_child_pid(m, i), __ATOMIC_RELAXED);
+}
+
+/* Make slot [idx]'s state word name its current child: now, if the
+ * supervisor is waiting for a message, or else when its handler returns.
+ * Writes cur_pid as read under the lock, not a value the caller computed,
+ * so two restarts of one slot publishing out of order still leave the
+ * newest child in place. */
+static void sup_slot_publish(void *supervisor, march_actor_meta *m, int idx) {
+    sup_slot_lock(m);
+    if (!m->sup_slot_busy)
+        __atomic_store_n(sup_child_slot(supervisor, m->sup_children[idx].word_idx),
+                         sup_child_pid(m, idx), __ATOMIC_RELAXED);
+    else
+        m->sup_slot_dirty = 1;
+    sup_slot_unlock(m);
+}
+
+/* The supervisor's own loop, about to wait for its next message: apply any
+ * write a restart held back, and let later restarts write directly. */
+static inline void sup_slots_go_idle(void *supervisor, march_actor_meta *m) {
+    if (__atomic_load_n(&m->sup_num_children, __ATOMIC_RELAXED) == 0) return;
+    sup_slot_lock(m);
+    if (m->sup_slot_dirty) {
+        sup_slots_store_all_locked(supervisor, m);
+        m->sup_slot_dirty = 0;
+    }
+    m->sup_slot_busy = 0;
+    sup_slot_unlock(m);
+}
+
+/* ...and holding a message it is about to handle. */
+static inline void sup_slots_go_busy(march_actor_meta *m) {
+    if (__atomic_load_n(&m->sup_num_children, __ATOMIC_RELAXED) == 0) return;
+    sup_slot_lock(m);
+    m->sup_slot_busy = 1;
+    sup_slot_unlock(m);
+}
 
 static void activate_actor_green_thread(march_actor_meta *meta);
 
@@ -5202,7 +5312,11 @@ static void actor_green_thread(void *arg) {
         int is_marker = 0;
         int64_t msg_conn = 0, msg_seq = 0;   /* delivery origin (follow-up 1) */
         if (!(self && hcr_take_deferred(meta, self, &msg, &msg_epoch, &msg_conn, &msg_seq))) {
+            /* A supervisor's child-pid words may be written by a restart on
+             * another thread only while it waits here (sup_slot_busy). */
+            sup_slots_go_idle(actor, meta);
             msg = march_sched_recv_actor_ex(&msg_epoch, &is_marker, &msg_conn, &msg_seq);
+            sup_slots_go_busy(meta);
             if (msg == MARCH_RECV_NO_MSG) break;  /* woken without message (killed) */
         }
 
@@ -5626,7 +5740,7 @@ static march_death_reason march_meta_death_reason(march_actor_meta *meta) {
  * below is March code, so this can switch threads and wait. */
 static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
     march_sup_child *child = &sup_meta->sup_children[child_idx];
-    int64_t old_pid_index = *sup_child_slot(supervisor, child->word_idx);
+    int64_t old_pid_index = sup_child_pid(sup_meta, child_idx);
     /* The dead incarnation's TOMBSTONE, not its meta (which is freed once its
      * death is processed): the epoch is all the replacement needs from it,
      * and the tombstone is never freed.  Only THIS supervisor's restarts
@@ -5688,8 +5802,8 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
         if (cap)
             atomic_store_explicit(&new_meta->spawn_cap, cap, memory_order_release);
         pthread_mutex_unlock(&g_tbl_mu);
-        *sup_child_slot(supervisor, child->word_idx) =
-            pe_pid_or_0(new_meta->pe);
+        __atomic_store_n(&child->cur_pid, pe_pid_or_0(new_meta->pe),
+                         __ATOMIC_RELEASE);
     }
 
     /* Task 6: carry the crashed incarnation's registered names forward onto
@@ -5715,6 +5829,13 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
      * supervised panic trap. */
     if (new_meta) activate_actor_green_thread(new_meta);
     march_reclaim_exit();
+
+    /* Only now does the supervisor's state name the replacement.  Until the
+     * activation above, a send to it found no green thread and was dropped
+     * (march_send's MARCH_SEND_DEAD), so a reader of the state word (the
+     * supervisor's handlers, Actor.get_field) could see a live pid whose
+     * mailbox silently ate its messages. */
+    if (new_meta) sup_slot_publish(supervisor, sup_meta, child_idx);
 
     return new_child;
 }
@@ -5747,7 +5868,7 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
     if (n == 0) return;
     meta_pin live_children[n];
     for (int i = 0; i < n; i++) {
-        int64_t stored_pid_index = *sup_child_slot(supervisor, sup_meta->sup_children[i].word_idx);
+        int64_t stored_pid_index = sup_child_pid(sup_meta, i);
         /* Pinned by pid: a live child's meta and a counted reference to its
          * record, so neither can be freed across the kills below.  The
          * originally-crashed child is already dead at this point (Task 4's
@@ -5801,7 +5922,7 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
     meta_pin live_children[n];
     for (int i = 0; i < n; i++) live_children[i] = (meta_pin){ NULL, NULL };
     for (int i = child_idx + 1; i < n; i++) {
-        int64_t stored_pid_index = *sup_child_slot(supervisor, sup_meta->sup_children[i].word_idx);
+        int64_t stored_pid_index = sup_child_pid(sup_meta, i);
         live_children[i] = meta_pin_pe(pid_entry(stored_pid_index));
         if (live_children[i].m) {
             /* See march_one_for_all_restart's identical comment — same
@@ -6726,8 +6847,7 @@ static int64_t march_actor_stop_pinned(void *actor, march_actor_meta *meta,
      * order. */
     if (meta->sup_num_children > 0) {
         for (int i = meta->sup_num_children - 1; i >= 0; i--) {
-            int64_t stored_pid_index =
-                *sup_child_slot(actor, meta->sup_children[i].word_idx);
+            int64_t stored_pid_index = sup_child_pid(meta, i);
             /* A live child, pinned (its meta and a counted reference to its
              * record) across the stop and the wait. */
             meta_pin child = meta_pin_pe(pid_entry(stored_pid_index));
@@ -10739,9 +10859,16 @@ void march_actor_register_child(void *supervisor, void *child,
                      __ATOMIC_RELAXED);
     __atomic_store_n(&child_meta->sup_pe, sup_meta->pe, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_tbl_mu);
+    /* sup_slot_lock: the supervisor's loop may already be reading this
+     * array (sup_slots_go_idle) while the realloc below moves it. */
+    sup_slot_lock(sup_meta);
     int idx = sup_meta->sup_num_children;
     sup_meta->sup_children = realloc(sup_meta->sup_children,
                                       (size_t)(idx + 1) * sizeof(march_sup_child));
+    /* The pid the spawn glue just stored in the supervisor's state word
+     * (pid_index_of on this same child). */
+    __atomic_store_n(&sup_meta->sup_children[idx].cur_pid,
+                     pe_pid_or_0(child_meta->pe), __ATOMIC_RELEASE);
     sup_meta->sup_children[idx].spawn_clo = spawn_clo;
     sup_meta->sup_children[idx].word_idx = word_idx;
     sup_meta->sup_children[idx].restart_type = (int32_t)restart_type;
@@ -10752,6 +10879,7 @@ void march_actor_register_child(void *supervisor, void *child,
     sup_meta->sup_children[idx].pending_name_count = 0;
     sup_meta->sup_children[idx].pending_spawn_cap = NULL;
     __atomic_store_n(&sup_meta->sup_num_children, idx + 1, __ATOMIC_RELAXED);
+    sup_slot_unlock(sup_meta);
     activate_actor_green_thread(child_meta);
     march_reclaim_exit();
 }

@@ -626,6 +626,8 @@ native_string_search_edge_cases: coverage audit (user + stdlib): 135 enforced, 0
 native_string_search_edge_cases: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_to_float_option: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_string_to_float_option: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_concurrent_child_crash: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_concurrent_child_crash: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_deflected_crash_absorbed: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_deflected_crash_absorbed: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_init_arg_restart: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

@@ -662,6 +662,17 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A supervisor no longer loses track of a child restarted while it is
+  handling a message.** When a supervised child died while its supervisor was
+  inside a handler (a handler that kills its own child, or any crash on another
+  scheduler), the handler's state write-back put the dead child's pid back, so
+  the supervisor's field (and `Actor.get_field`) went on naming the dead child.
+  The field now shows the replacement once the handler returns. A restarted
+  child's pid also no longer appears in the supervisor's state before the child
+  can take messages, which made a send to it vanish. Restart decisions are
+  unchanged. `MARCH_SANITIZE=thread` builds no longer report a race on this
+  field, or on concurrent panics in supervised actors. See
+  `specs/progress/2026-10-12-supervisor-child-slot-race.md`.
 - **`MARCH_SANITIZE=thread` builds no longer report a race on scheduler
   statistics.** Reading per-scheduler dispatch and idle counts (for example
   through `Recon.node_stats` or an observe snapshot) while the schedulers were
