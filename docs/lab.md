@@ -131,8 +131,8 @@ the scenario is a `FAIL`. If it passes, `run.sh` reports `XPASS` and fails, so t
 the bug is fixed. A scenario that cannot run in this lab's configuration (one that
 needs certificates, with a shared secret) is reported `SKIP`.
 
-Every node grows by about 1 MB a second on its own today, and more with each session, and
-the hosts are capped at `LAB_HOST_MEMORY`. So each scenario after `deploy` starts by
+Every node grew by about 1 MB a second on its own until that leak was fixed (see the
+findings), still grows with each session, and the hosts are capped at `LAB_HOST_MEMORY`. So each scenario after `deploy` starts by
 deploying the lab again from nothing when any node is no longer running or uses more than
 `LAB_RESET_MB` (default 500), or sessions have stopped finishing, and says so in the notes. (Restarting the nodes instead does
 not work today: see the findings.) Traffic is one session every two seconds outside
@@ -156,8 +156,9 @@ What the lab has found so far, each filed with its repro:
 - [`2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md):
   a session whose two offered roles (Stock, Ledger) are on different hosts can hang for
   ever, nearly always in certificate mode and occasionally with a shared secret.
-- [`2026-10-05-lab-leaderless-agents-leak.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-leaderless-agents-leak.md):
-  with no leader, every node grows by ~13k heap objects a second with no traffic at all.
+- [`2026-10-05-lab-leaderless-agents-leak.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-leaderless-agents-leak.md)
+  (fixed): with no leader, every node grew by ~13k heap objects a second with no traffic
+  at all.
 - [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-simultaneous-restart-memory-burst.md):
   nodes restarted together can each allocate ~1 GB in 30 s and be OOM-killed.
 - [`2026-10-04-lab-control-topology-step-races-report.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-04-lab-control-topology-step-races-report.md):

@@ -18,7 +18,7 @@ t=60 lab-1=19229051/1067084 lab-2=17078845/949856 lab-3=1497781/155360
 
 Three of the four allocated 8-30 million objects (0.5-1.5 GB) in their first 30 s and
 then went on at the usual ~11k objects/s
-([2026-10-05-lab-leaderless-agents-leak.md](2026-10-05-lab-leaderless-agents-leak.md));
+([2026-10-05-lab-leaderless-agents-leak.md](../progress/2026-10-05-lab-leaderless-agents-leak.md), since fixed);
 lab-4 hit the cap and the kernel killed it. Which nodes burst differs between runs (the
 same restart with traffic at one session a second: lab-1 and lab-2 burst, ~400k
 objects/s, both killed within 75 s). Restarting ONE node alone (lab-3, the others up) shows

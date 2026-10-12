@@ -210,9 +210,9 @@ lab_live() { lab_exec "$1" "sed -n 's/^live //p' $LAB_STATE/lab-probe 2>/dev/nul
 # LAB_RESET_MB (default 500) of memory, deploy the lab again from nothing
 # (the `deploy` scenario, inline), and say so in the notes.
 #
-# A workaround for three findings: every node grows by ~1 MB/s on its own
-# (specs/todos/2026-10-05-lab-leaderless-agents-leak.md) and more with every
-# session, so a node reaches the LAB_HOST_MEMORY cap within minutes;
+# A workaround for three findings: every node grew by ~1 MB/s on its own
+# (specs/progress/2026-10-05-lab-leaderless-agents-leak.md, fixed) and grows
+# with every session, so a node reached the LAB_HOST_MEMORY cap within minutes;
 # restarting nodes together can cost each ~1 GB at once
 # (2026-10-05-lab-simultaneous-restart-memory-burst.md); and nodes restarted
 # one at a time came back with offers no initiator could see

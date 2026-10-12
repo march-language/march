@@ -3195,6 +3195,29 @@ mod SessionNode do
                        roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
                        peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
       : Result(Session.Outcome, RunError) do
+    -- The first role to fill has no offer registered anywhere: `fill_roles`
+    -- would fail on it at once with this same error, so say it before
+    -- minting a session. A caller that retries until an offer appears (the
+    -- control plane's Agent with no leader, every 5 s) otherwise spawned an
+    -- inbox actor and two tables per attempt, and a killed actor's state
+    -- record is not released in a --hot-reload build: one object per try.
+    match others do
+      Cons(r, _) ->
+        if no_offer_named(node, proto, r) do Err(NoOffer(r, "no access point is registered"))
+        else initiate_forming(io, node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body) end
+      Nil -> initiate_forming(io, node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body)
+    end
+  end
+
+  pfn no_offer_named(node : Cap(ClusterNode.Live), proto : String, r : Int) : Bool do
+    let prefix = ap_prefix(proto, r)
+    not(List.any(ClusterNode.names(node), fn name -> String.starts_with(name, prefix)))
+  end
+
+  pfn initiate_forming(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+                       roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
+                       peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
+      : Result(Session.Outcome, RunError) do
     let n = ClusterNode.next_id(node, "ap_sessions")
     let sid = ClusterNode.node_id(node) ++ "." ++ int_to_string(ClusterNode.creation(node)) ++ "." ++ int_to_string(n)
     let inbox = spawn(ApInbox)
