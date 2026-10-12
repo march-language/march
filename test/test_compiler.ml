@@ -6554,6 +6554,43 @@ let has_message_containing ctx needle =
     scan 0)
     ctx.March_errors.Errors.diagnostics
 
+(* A non-regular ("nested") datatype is rejected at its declaration.  It used
+   to typecheck and run interpreted, but every compiled pass that synthesises
+   per-instance code (deep drop first) expanded Nest(Int) -> Nest(List(Int))
+   -> ... forever, so `--compile` and `--dump-tir` hung with no diagnostic.
+   Regular recursion -- own params, swapped params, a fixed argument, a
+   container of itself -- stays accepted.
+   specs/progress/2026-10-12-nonregular-type-compiler-hang.md *)
+let test_nonregular_type_rejected () =
+  let ctx = typecheck {|mod Main do
+    type Nest(a) = Z(a) | S(Nest(List(a)))
+    fn main() : Int do
+      match S(S(Z([[1]]))) do
+        Z(_) -> 0
+        S(_) -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested datatype is rejected" true (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names the type and the cause" true
+    (has_message_containing ctx
+       "type `Nest` refers to itself at a growing type argument");
+  let mutual = typecheck {|mod Main do
+    type A(a) = A1(a) | A2(B(List(a)))
+    type B(a) = B1(A(a))
+    fn main() : Int do 0 end
+  end|} in
+  Alcotest.(check bool) "growth through a second type is rejected" true
+    (has_message_containing mutual "type `A` refers to itself at a growing");
+  let regular = typecheck {|mod Main do
+    type T(a) = Leaf(a) | TNode(T(Int))
+    type Rose(a) = Rose(a, List(Rose(a)))
+    type Swap(a, b) = Nil2 | Cons2(a, Swap(b, a))
+    fn main() : Int do 0 end
+  end|} in
+  Alcotest.(check bool) "regular recursive types are accepted" false
+    (has_errors regular)
+
 let test_cross_module_private_fn_rejected () =
   let ctx = typecheck {|mod Main do
     fn main() : Int do
@@ -17856,6 +17893,7 @@ let compiler_suites =
           Alcotest.test_case "qualified Show.show call"      `Quick test_qualified_show_call;
           (* Modules widening slice 2, Task 1: cross-module visibility gate *)
           Alcotest.test_case "cross-module private pfn rejected" `Quick test_cross_module_private_fn_rejected;
+          Alcotest.test_case "non-regular (nested) datatype rejected" `Quick test_nonregular_type_rejected;
           Alcotest.test_case "cross-module public fn accepted"   `Quick test_cross_module_public_fn_accepted;
           (* Regression: qualified type path `Mod.Type` ≡ bare `Type` *)
           Alcotest.test_case "qualified opaque type unifies with bare" `Quick test_qualified_opaque_type_unifies_bare;

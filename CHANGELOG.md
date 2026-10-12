@@ -662,6 +662,26 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A type that refers to itself at a growing argument is now a compile
+  error, instead of hanging the compiler.** `type Nest(a) = Z(a) |
+  S(Nest(List(a)))` made `--compile` and `--dump-tir` run forever. It is now
+  rejected where it is declared, in both backends, with a `nonregular_type`
+  error that names the type. No function could walk such a value anyway,
+  because a recursive call at a different type is already a type error.
+  Recursive types that reuse their own parameters, swap them, or fix them
+  (`T(Int)`) are unaffected.
+- **`to_string` of a record with no declared type inside a list, option,
+  result or tuple now compiles.** `to_string([{ a: 1 }])` and
+  `println(Some({ a: 1 }))` used to fail to compile with "ambiguous
+  interface-method call to `show`". They now print `[{ a: 1 }]` and
+  `Some({ a: 1 })`, the same as the interpreter.
+- **The interpreter prints record fields sorted by name, the same as compiled
+  code.** `to_string({ z: 1, y: 2 })` printed `{ z: 1, y: 2 }` interpreted
+  and `{ y: 2, z: 1 }` compiled. Two values of one record type could also
+  print in different orders, depending on how each literal was written. Both
+  backends, `println`, string interpolation, `inspect` and the REPL now
+  print `{ y: 2, z: 1 }`. Only the display changed: fields are still
+  evaluated in the order you write them.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,
