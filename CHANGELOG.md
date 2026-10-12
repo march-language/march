@@ -647,6 +647,13 @@ git log is authoritative for exact commits.
   passed to `List.map` (whose callback parameter is also `f`) called the
   callback instead at `--opt 0` and `--opt 2`, so the mapped values were wrong.
   The interpreter and `--no-opt` were always right.
+- **Two types with the same short name can no longer both `derive Json`.** With
+  `A.Note` and `B.Note` both deriving Json, `from_json` decoded `A.Note` with
+  `B.Note`'s codec when interpreted and failed as an ambiguous call when
+  compiled. The program is now rejected at compile time with
+  `json_derive_name_collision`, naming both types and both `derive` sites.
+  Rename one of the types, or derive Json for only one of them, which keeps
+  working.
 - **Drop functions keep the same symbol across unrelated edits.** The compiler
   named the drop function of a type with an unresolved type variable after the
   typechecker's internal variable number (`__drop$List_V_53272`), so it moved

@@ -1224,7 +1224,9 @@ node's (SWIM) and the heartbeat settings do not apply.
 - A protocol's name must be unique in the whole program, the standard library included,
   and so must the name of each payload type that derives `Json`. A derived codec is
   found by the type's short name, so two `P_Message` types (or two `Note`s) declared in
-  different modules conflict.
+  different modules conflict. The conflict is a compile error
+  (`json_derive_name_collision`) that names both types and points at both `derive`
+  sites.
 - After a hot deploy, `Topology.reoffer` reopens a role under its new fingerprint only if
   the role's body is on the hot-reload boundary. Functions declared at the top level of
   the entry file are not (the entry file's nested modules and actor handlers are), so a

@@ -138,6 +138,7 @@ type env = {
     (Typecheck_types.Ast.span,
      Typecheck_types.ty)
     Hashtbl.t;
+  json_derive_sites : (string * Typecheck_types.Ast.span) list;
   record_names_snapshot : (string * string option) list;
   refs : ref_record list ref;
   current_decl : string ref;

@@ -1,4 +1,4 @@
-# `[P2]` Two types with the same short name that both `derive Json` break both backends
+# `[P2]` Nested-module types need their own identity in the typechecker (so two same-short-name types can both `derive Json`)
 
 Filed 2026-10-03, found while fixing
 [../progress/2026-10-03-endpoints-protocol-in-nested-module.md](../progress/2026-10-03-endpoints-protocol-in-nested-module.md).
@@ -104,3 +104,46 @@ cannot tell them apart. Not fixed in the group-b typecheck batch: per the note
 above, the only sound fix is nominal identity for nested-module types, which
 needs its own design pass (the lexical-module heuristic stays rejected as
 unsound). The acceptance criterion is unchanged.
+
+## 2026-10-11: owner decision: a compile error now, the full fix later
+
+**Decision (owner, 2026-10-11).** Reject the program at compile time until
+nested-module types have their own identity; the silent wrong decode is worse
+than a loud error.
+
+**Landed.** Two DIFFERENT types with the same short name that both `derive
+Json` are now a compile error, `json_derive_name_collision`, on every path
+(`--check`, interpreted, compiled). The message names both types by their
+declaring-module path (`B.Note` / `A.Note`) and points at both `derive` sites
+(the primary span at the second, a label at the first).
+`Typecheck.check_json_derive_collisions` walks the module's `JsonFrom` impls
+(`collect_json_derive_sites`, resolving each bare type name to the innermost
+enclosing level that declares it, as the derive expansion does) at the start
+of `check_module_core`; the sites ride on `env.json_derive_sites` so a check
+seeded from the cached stdlib env still sees the stdlib's derives (the stdlib
+derives Json for no type today). To point at the derive, a derived Json
+`DImpl` now carries the derive site as its decl span, as every other derive
+already did (`lib/desugar/desugar_derive.ml`); this re-salts the derived Json
+code's synthetic spans, which is why `test/errors/overlapping_impl_1` moved.
+
+Pinned by `specs/lang/types/reject/t318_derive_json_same_short_name.march`
+and the golden twin `test/errors/json_derive_name_collision_1`. Only ONE of
+the two deriving Json was already fine on both backends (`A 3` / `B 3`) and
+stays accepted: `test/stdlib/test_json_collision.march` now pins that shape
+(it used to pin the interpreter's `to_json` routing with both deriving, a
+program that is now rejected). The `@[endpoints]` case in the description
+(a user type named like a generated `P_Message`) reports the new error ahead
+of the existing `overlapping_impl` ones.
+
+**What stays open (the real fix).** Nominal identity for nested-module types
+in the typechecker: `surface_ty` (`lib/typecheck/typecheck_unify.ml`,
+`canon_name`) must stop canonicalizing `A.Note` and `B.Note` to one bare
+`TCon "Note"`, so they stop unifying and `Json_dispatch.record` can name the
+qualified type. Every `canon_type_name` / `ci_type` / bare-name lookup site is
+involved; it needs its own design pass. When it lands, drop
+`check_json_derive_collisions` (and its code) and turn t318 into an accept
+program that round-trips `A 3` / `B 3` on both backends.
+
+**Acceptance (narrowed).** With nominal identity in place, the original
+repro (both `Note`s deriving Json) compiles and prints `A 3` / `B 3` on both
+backends, and a user protocol with a stdlib protocol's name compiles.

@@ -8814,6 +8814,83 @@ let rec always_linear_names ~(modname : string) (decls : Ast.decl list) : string
        | _ -> [])
     decls
 
+(** Every derived Json decoder in [decls] (the [JsonFrom] impl [derive Json]
+    expands to), as (declaring-module-qualified type name, derive site).
+    The qualified name resolves the derive's bare type name the way the
+    desugarer's derive expansion does: the innermost enclosing level that
+    declares it.  The entry module's own top level is the empty path, so its
+    types keep their bare name. *)
+let collect_json_derive_sites (decls : Ast.decl list) : (string * Ast.span) list =
+  let acc = ref [] in
+  let rec walk path scopes decls =
+    let here = List.filter_map (function
+        | Ast.DType (_, n, _, _, _) -> Some n.Ast.txt
+        | _ -> None) decls in
+    let scopes = (path, here) :: scopes in
+    List.iter (function
+        | Ast.DImpl (idef, sp) when idef.Ast.impl_iface.txt = "JsonFrom" ->
+          (match idef.Ast.impl_ty with
+           | Ast.TyCon (n, _) ->
+             let name = n.Ast.txt in
+             let qual =
+               if String.contains name '.' then name
+               else match List.find_opt (fun (_, ts) -> List.mem name ts) scopes with
+                 | Some (p, _) when p <> "" -> p ^ "." ^ name
+                 | _ -> name
+             in
+             acc := (qual, sp) :: !acc
+           | _ -> ())
+        | Ast.DMod (n, _, inner, _) ->
+          walk (if path = "" then n.Ast.txt else path ^ "." ^ n.Ast.txt) scopes inner
+        | _ -> ()) decls
+  in
+  walk "" [] decls;
+  List.rev !acc
+
+(** Reject two DIFFERENT types with the same short name that both
+    [derive Json] (owner decision 2026-10-11,
+    specs/todos/2026-10-03-derive-json-same-short-name-two-modules.md).
+
+    The typechecker canonicalizes a nested-module type to its bare name, so
+    [from_json]'s result-type dispatch cannot tell [A.Note] from [B.Note]: the
+    interpreter decoded with the wrong codec and the compiled backend failed as
+    an ambiguous interface call.  Until nested-module types get their own
+    identity, the program is a compile error naming both types and both
+    derive sites.  Only one of the two deriving Json is fine: there is then
+    only one codec to find.
+
+    [seed] holds the sites a seeding env (the stdlib) already saw; a collision
+    entirely inside the seed was that check's to report, so only a pair with
+    at least one [own] site is reported here, at the [own] site. *)
+let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
+    ~(own : (string * Ast.span) list) : unit =
+  let short q =
+    match String.rindex_opt q '.' with
+    | Some i -> String.sub q (i + 1) (String.length q - i - 1)
+    | None -> q
+  in
+  let seen = ref seed in
+  List.iter (fun ((q, sp) as site) ->
+      (match List.find_opt (fun (q', _) -> q' <> q && short q' = short q) !seen with
+       | Some (q', sp') ->
+         Err.report errors
+           { Err.severity = Err.Error; span = sp;
+             message = Printf.sprintf
+                 "Two different types named `%s` both derive Json: `%s` (here) \
+                  and `%s` (at %s:%d:%d).\n\
+                  `from_json` picks its decoder by the result type's short name, \
+                  so it cannot tell these two apart and would decode with the \
+                  wrong one. Rename one of the types, or derive Json for only \
+                  one of them."
+                 (short q) q q' sp'.Ast.file sp'.Ast.start_line sp'.Ast.start_col;
+             labels = [{ Err.lbl_span = sp';
+                         Err.lbl_message =
+                           Printf.sprintf "`%s` derives Json here" q' }];
+             notes = [];
+             code = Err.Code.json_derive_name_collision; fix = None }
+       | None -> ());
+      seen := !seen @ [site]) own
+
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   (* `from_json` return-type dispatch is recorded per call-site span by
@@ -8831,6 +8908,14 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   record_names_load (match seed_env with
     | Some (se : env) -> se.record_names_snapshot
     | None -> []);
+  let json_derive_sites =
+    let seed = match seed_env with
+      | Some (se : env) -> se.json_derive_sites
+      | None -> [] in
+    let own = collect_json_derive_sites m.Ast.mod_decls in
+    check_json_derive_collisions errors ~seed ~own;
+    seed @ own
+  in
   let type_map = match seed_env with
     | Some (se : env) -> se.type_map
     | None -> Hashtbl.create 256
@@ -9207,7 +9292,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
-  (errors, type_map, { final_env with record_names_snapshot = record_names_dump () })
+  (errors, type_map, { final_env with record_names_snapshot = record_names_dump ();
+                                      json_derive_sites })
 
 let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let (errs, type_map, _env) = check_module_core ?errors m in
