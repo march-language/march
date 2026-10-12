@@ -662,6 +662,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A function that returns `a ++ b` built from a tuple or record's fields no
+  longer leaks the tuple or record when compiled.** `let (a, b) = pair` or
+  `r.x ++ r.y` as a function's result kept the pair (or record) and the
+  strings it held, once per call.
 - **`send_checked`, `is_cap_valid` and `revoke_cap` no longer leak the
   capability when compiled.** Each call leaked the cap `get_cap` returned.
 - **Registering an actor by name no longer leaks memory when compiled.**

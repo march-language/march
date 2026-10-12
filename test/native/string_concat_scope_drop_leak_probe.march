@@ -1,0 +1,59 @@
+-- A scope whose value is a string concatenation of two fields of a tuple
+-- (or record) it destructures kept the tuple: the aggregate scope-end drop
+-- binds the scope's value to a temporary before releasing the tuple, and it
+-- could not type `a ++ b` (`++` carries no function type), so it gave up and
+-- the pair cell leaked with the references it held, once per call.
+-- Each line counts live allocations over 200 calls (RED before: 400 / 400 /
+-- 600). The second leg keeps the String it pairs with itself alive and reads
+-- it again after the call, so releasing a reference the tuple does not own
+-- would be a use-after-free under ASAN or a wrong length here.
+mod StringConcatScopeDrop do
+  needs IO.Console
+
+  fn dup_pair(s : String) : String do
+    let t = (s, s)
+    let (a, b) = t
+    a ++ b
+  end
+
+  fn rec_pair(s : String) : String do
+    let r = { left: s, right: "-" ++ s }
+    r.left ++ r.right
+  end
+
+  fn fresh(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else fresh(i - 1, acc + string_length(dup_pair("hi" ++ int_to_string(i))))
+    end
+  end
+
+  fn kept(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else
+      let s = "k" ++ int_to_string(i)
+      let d = dup_pair(s)
+      kept(i - 1, acc + string_length(d) + string_length(s))
+    end
+  end
+
+  fn records(i : Int, acc : Int) : Int do
+    if i <= 0 do acc
+    else records(i - 1, acc + string_length(rec_pair("r" ++ int_to_string(i))))
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let w = fresh(3, 0) + kept(3, 0) + records(3, 0)
+    let a0 = live_allocs()
+    let x = fresh(200, 0)
+    let a1 = live_allocs()
+    let y = kept(200, 0)
+    let a2 = live_allocs()
+    let z = records(200, 0)
+    let a3 = live_allocs()
+    println("warmup " ++ int_to_string(w) ++ " " ++ dup_pair("ab"))
+    println("fresh: total " ++ int_to_string(x) ++ ", growth " ++ int_to_string(a1 - a0))
+    println("kept: total " ++ int_to_string(y) ++ ", growth " ++ int_to_string(a2 - a1))
+    println("record: total " ++ int_to_string(z) ++ ", growth " ++ int_to_string(a3 - a2))
+  end
+end
