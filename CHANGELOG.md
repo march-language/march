@@ -662,6 +662,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A local `fn` no longer makes the values it captures polymorphic.** A
+  named `fn` inside a function body was generalized over the types of what it
+  captured, so in stdlib `Set.union` the comparator's element type came apart
+  from the sets'. With a `let`-bound comparator
+  (`let lt = fn x -> fn y -> x < y`), compiled `Set.union` hashed Int
+  elements as Strings and crashed (SIGSEGV); user code with the same shape
+  printed or compared values at the wrong type. The interpreter was
+  unaffected.
 - **Ctrl+C and SIGTERM stop an interpreted program that is busy computing.**
   `march file.march` ignored both (any number of times) unless it was running
   actors or an HTTP server, so `timeout` and Ctrl+C could not stop a long

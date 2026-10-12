@@ -3895,6 +3895,16 @@ and infer_block env exprs =
     result_ty
   (* Local named recursive function: fn go(params) : ret_ty do body end *)
   | Ast.ELetFn (name, params, ret_ann, body, sp) :: rest ->
+    (* Check the local fn one level deeper, as [ELet] does for its RHS, and
+       generalize back at the enclosing level.  Its own params and return
+       were created at the ENCLOSING level before, so `generalize (level - 1)`
+       below also quantified the type variables of everything it captures:
+       in `fn union(a, b, cmp) do fn go(acc, x) do insert(acc, x, cmp) end
+       … end` the element type of `cmp` became go's own parameter, came
+       apart from `a`'s, and compiled code specialised `Set.union` at the
+       wrong element type (String hashing applied to Int keys, SIGSEGV). *)
+    let outer_level = env.level in
+    let env = enter_level env in
     (* Introduce a fresh type for the function, check recursively *)
     let fn_ty = fresh_var env.level in
     let env_with_self = bind_var name.txt (Mono fn_ty) env in
@@ -3962,7 +3972,8 @@ and infer_block env exprs =
        already cleared any stale entry under this name (shadow semantics),
        so this is a plain (re-)add, not a merge. *)
     let env' =
-      { env' with fn_arities =
+      { env' with level = outer_level;
+                  fn_arities =
           StrMap.add name.txt (List.length params, name.span) env'.fn_arities } in
     infer_block env' rest
   | e :: rest ->
