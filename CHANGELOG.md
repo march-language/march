@@ -662,6 +662,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`MARCH_SANITIZE=thread` builds no longer report a race on the
+  socket-readiness poller.** The scheduler's background thread read the shared
+  kqueue/epoll descriptor without a lock while the first socket wait created
+  it. That happened in any program that connects, accepts or reads a socket.
+  Plain builds behaved correctly. See
+  `specs/progress/2026-10-12-tsan-fdwait-fd-race.md`.
 - **`MARCH_SANITIZE=thread` builds no longer report a race on the runtime's
   cached type ids.** Calling `sha256`, or building lists, results or `IOList`s
   from C on two schedulers at once raced on a lazily filled cache. The cached

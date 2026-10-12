@@ -4354,17 +4354,23 @@ static fdwait_ent      *g_fdwait_head = NULL;
 static int              g_fdwait_fd   = -1;    /* kqueue()/epoll_create1(), lazily */
 
 /* Under g_fdwait_mu. */
+/* Under g_fdwait_mu.  The store is atomic because fdwait_service reads
+ * g_fdwait_fd from the preempt daemon WITHOUT the mutex (a plain racy int,
+ * reported by TSAN); every other access holds g_fdwait_mu. */
 static int fdwait_open(void) {
     if (g_fdwait_fd >= 0) return 0;
+    int fd;
 #if defined(MARCH_FDWAIT_KQUEUE)
-    g_fdwait_fd = kqueue();
+    fd = kqueue();
 #elif defined(MARCH_FDWAIT_EPOLL)
-    g_fdwait_fd = epoll_create1(EPOLL_CLOEXEC);
+    fd = epoll_create1(EPOLL_CLOEXEC);
 #else
     errno = ENOSYS;
     return -1;
 #endif
-    return g_fdwait_fd >= 0 ? 0 : -1;
+    if (fd < 0) return -1;
+    __atomic_store_n(&g_fdwait_fd, fd, __ATOMIC_RELEASE);
+    return 0;
 }
 
 /* Under g_fdwait_mu.  Arm [fd] one-shot for the direction asked. */
@@ -4414,13 +4420,15 @@ static void fdwait_remove(fdwait_ent *ent) {
 /* Called from the preempt daemon every quantum: drain whatever fired and
  * wake its waiters (rule 1 above: the wake happens under the mutex). */
 static void fdwait_service(void) {
-    if (g_fdwait_fd < 0) return;
+    /* Unlocked read (see fdwait_open): -1 until the first wait_fd. */
+    const int pfd = __atomic_load_n(&g_fdwait_fd, __ATOMIC_ACQUIRE);
+    if (pfd < 0) return;
     for (;;) {
         int fds[64], writes[64], n = 0;
 #if defined(MARCH_FDWAIT_KQUEUE)
         struct kevent evs[64];
         struct timespec zero = { 0, 0 };
-        int got = kevent(g_fdwait_fd, NULL, 0, evs, 64, &zero);
+        int got = kevent(pfd, NULL, 0, evs, 64, &zero);
         if (got < 0 && errno == EINTR) continue;
         if (got <= 0) return;
         for (int i = 0; i < got; i++) {
@@ -4430,7 +4438,7 @@ static void fdwait_service(void) {
         }
 #elif defined(MARCH_FDWAIT_EPOLL)
         struct epoll_event evs[64];
-        int got = epoll_wait(g_fdwait_fd, evs, 64, 0);
+        int got = epoll_wait(pfd, evs, 64, 0);
         if (got < 0 && errno == EINTR) continue;
         if (got <= 0) return;
         for (int i = 0; i < got; i++) {
