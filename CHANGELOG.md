@@ -617,6 +617,9 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`task_cancel_by_id` no longer leaks the task.** Cancelling a task as the
+  last thing done with it (as `Task.race` and `Task.any` do for the tasks that
+  lost) leaked the task object every time in compiled code.
 - **Compiled `Map` and `Set` with `Float` keys no longer leak.** Every
   insert, removal and size query on a `Map(Float, v)` (and every `Set(Float)`
   insert) leaked a small allocation per key it touched, and dropping such a map

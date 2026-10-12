@@ -662,6 +662,8 @@ native_task_await_ptr: coverage audit (user + stdlib): 135 enforced, 0 inert (wa
 native_task_await_ptr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_task_burst_await: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_task_burst_await: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_cancel_by_id_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_task_cancel_by_id_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_task_lifetime_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_task_lifetime_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_task_race_cancel: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

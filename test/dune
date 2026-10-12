@@ -9988,6 +9988,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/map_float_key_leak_probe.expected native_map_float_key_leak_probe.out)))
 
+; ── Leak guard: task_cancel_by_id borrows its Task (it had no borrow-table
+; row, so a Task whose last use was a cancel leaked). The again leg cancels a
+; Task still awaited afterwards: the double-free witness.
+(rule
+ (targets native_task_cancel_by_id_leak_probe native_task_cancel_by_id_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/task_cancel_by_id_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_cancel_by_id_leak_probe
+        native/task_cancel_by_id_leak_probe.march)
+   (with-stdout-to native_task_cancel_by_id_leak_probe.out
+        (system "./native_task_cancel_by_id_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_cancel_by_id_leak_probe.expected native_task_cancel_by_id_leak_probe.out)))
+
 (rule
  (alias runtest)
  (deps native_erased_float_slot_leak_probe.live)
