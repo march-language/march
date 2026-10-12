@@ -1918,6 +1918,31 @@ void * march_vault_reap(void *handle, void *key_val) {
     return r;
 }
 
+/* Release the values [key]'s shard has stopped holding with a plain
+ * [march_decrc] each.  Only for a table the RUNTIME owns whose values need
+ * no typed drop: the actor registry, whose values are actor records (the
+ * actor's own death releases its state, so one decrc is the whole release).
+ * Nothing reaps such a table from March, so every buried value used to stay
+ * in the graveyard for the life of the process: one actor record per
+ * registration that was dropped, unregistered or overwritten. */
+void march_vault_release_dead(void *handle, void *key_val) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return; }
+    char *key = vault_key_cstr(key_val);
+    uint32_t h = vault_hash(key);
+    free(key);
+    vault_shard *sh = vault_shard_for(vd, h);
+    if (atomic_load_explicit(&sh->ndead, memory_order_relaxed) != 0) {
+        int64_t n;
+        vault_wr_lock(&sh->lock);
+        void **d = vault_take_dead(sh, &n);
+        vault_wr_unlock(&sh->lock);
+        for (int64_t i = 0; i < n; i++) march_decrc(d[i]);
+        free(d);
+    }
+    vault_leave(handle, st);
+}
+
 int64_t march_vault_size(void *handle) {
     unsigned st; vault_data *vd = vault_enter(handle, &st);
     if (vd == VAULT_CLOSED) { vault_leave(handle, st); return 0; }

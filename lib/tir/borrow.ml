@@ -87,6 +87,16 @@ let extern_borrow_table : (string * bool list) list = [
        actor records outlived their actors (two per cluster session party,
        ClusterNode's RegWatch watching each session endpoint). *)
   ("monitor",           [false; true]);
+    (* The named registry only reads its arguments: march_actor_register
+       copies the name into the table (and a strdup into the actor's reverse
+       index) and takes its own reference to the actor (march_vault_set's
+       incrc); unregister and whereis look the name up.  Listed as owned
+       until 2026-10-12, so every registration leaked the name string and a
+       reference to the actor record, and every unregister / whereis leaked
+       the name. *)
+  ("actor_register",    [true; true]);
+  ("actor_unregister",  [true]);
+  ("actor_whereis",     [true]);
   ("kill",              [true]);
   ("march_kill",        [true]);
   ("actor_stop",        [true; false]);
@@ -616,7 +626,6 @@ let extern_owned_builtins : string list = [
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps";
     "register_resource";
-    "actor_register"; "actor_unregister"; "actor_whereis";
     "send_checked"; "revoke_cap"; "is_cap_valid";
     "register_actor_on_stop";
     (* Observe plan R4: registration reads two static closures; the inspect

@@ -662,6 +662,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Registering an actor by name no longer leaks memory when compiled.**
+  Every `Actor.register` leaked the name string and the actor record (the
+  registry kept the record after the actor died or was unregistered), and
+  every `Actor.unregister` and `Actor.whereis` leaked its name.
 - **A lambda that reads a field of its argument no longer leaks the
   argument when compiled.** A lambda stored where its argument type stays
   generic (in a list inside a variant whose element type is hidden) released

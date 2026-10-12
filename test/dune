@@ -13962,3 +13962,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/erased_param_field_read_leak_probe.expected native_erased_param_field_read_leak_probe.out)))
+
+; ── The named actor registry releases what it is handed: a registration,
+; lookup, unregister and stale overwrite leave live_allocs flat over 200 rounds;
+; the name is read again after each call as the double-free witness.
+(rule
+ (targets native_actor_registry_leak_probe native_actor_registry_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_registry_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_registry_leak_probe
+        native/actor_registry_leak_probe.march)
+   (with-stdout-to native_actor_registry_leak_probe.out
+        (system "./native_actor_registry_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_leak_probe.expected native_actor_registry_leak_probe.out)))
