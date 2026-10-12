@@ -1,0 +1,29 @@
+Box(Meters(9))
+Box(Named("x"))
+Box(NoName)
+Box(Box(Meters(3)))
+Box(true)
+Box(2.5)
+Box(())
+Box(Square(4))
+Pair(Meters(1), Named("y"))
+Pair(Flag(false), 2.5)
+Pair(4, "s")
+Empty
+Node(Leaf, Meters(5), Node(Leaf, Meters(6), Leaf))
+Has(4)
+Has(Meters(4))
+Has(true)
+Nada
+Has("s")
+Has(1.5)
+Tagged(1, Flag(true))
+Bag([Meters(1), Meters(2)], Has(Flag(true)))
+{ b: Box(Meters(7)), p: Pair(false, NoName) }
+[Box(Meters(2))]
+Some(Box(NoName))
+[Has(Meters(1)), Nada]
+b=Box(Meters(11)) t=Tagged(2, Named("<b>"))
+Box(Meters(11))
+Has(Flag(false))
+<p>Box(Meters(11)) Tagged(2, Named(&quot;&lt;b&gt;&quot;))</p>

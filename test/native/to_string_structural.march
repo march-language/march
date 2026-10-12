@@ -1,0 +1,44 @@
+-- Regression: compiled `to_string` printed a record literal with no declared
+-- type as `#<tag:0>`, and a tuple inside a field of a user type the same way
+-- (`T((1, "a"))` printed `T(#<tag:0>)`).  The constructor-name descriptor
+-- only had rows for declared types.
+--
+-- The descriptor (lib/tir/llvm_ctor_desc.ml) now adds a row for a structural
+-- record type (field names and types come from the static type) and for a
+-- tuple in a field.  Fields are written in name order: compiled records are
+-- laid out sorted, and the interpreter prints a record in the order its
+-- literal was written, so the literals below are written sorted.
+--
+-- Run interpreted AND compiled against the SAME .expected.
+mod Main do
+  needs IO.Console
+
+  type Meters = Meters(Int)
+  type MaybeName = NoName | Named(String)
+  type Shape = Circle(Int) | Square(Int)
+  type T = T((Int, String))
+  type U = U((Bool, Float, Meters, MaybeName, ()))
+  type Box(a) = Box(a)
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    -- undeclared records, top level
+    println(to_string({ a: 1, b: "x" }))
+    println(to_string({ f: 1.5, m: Meters(2), n: MaybeName.NoName, t: (1, false), u: () }))
+    println(to_string({ ok: true, s: Square(3) }))
+    println(to_string({ inner: { deep: "d" }, xs: [1, 2] }))
+    -- tuples in fields
+    println(to_string(T((1, "a"))))
+    println(to_string(U((true, 2.5, Meters(3), MaybeName.NoName, ()))))
+    println(to_string(Box((false, -1.5, Meters(4), MaybeName.Named("q"), ()))))
+    println(to_string(Box(((1, 2), { a: true }))))
+    -- a record in a field
+    println(to_string(Box({ a: Meters(1) })))
+    -- interpolation, inspect, ~H
+    let r = { x: Box(Meters(1)), y: [true] }
+    println("r=${r}")
+    println(inspect(r))
+    println(inspect({ a: "s" }))
+    let h = { s: "<b>" }
+    println(IOList.to_string(~H"<p>${r} ${h}</p>"))
+  end
+end

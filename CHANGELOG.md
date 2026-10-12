@@ -653,8 +653,21 @@ git log is authoritative for exact commits.
   compiled code printed `7` for `Meters(7)`, `x` for `Named("x")` and `nil`
   for `NoName`. They now print `Meters(7)`, `Named("x")` and `NoName`, also
   inside lists, options, tuples, constructor and record fields, string
-  interpolation, `inspect` and `~H`. Still wrong: such a value inside a field
-  of your own generic type (`Box(Meters(9))` prints `Box(9)`).
+  interpolation, `inspect` and `~H`.
+- **Compiled `to_string` prints values inside your own generic types like the
+  interpreter.** For `type Box(a) = Box(a)`, compiled code printed `Box(9)` for
+  `Box(Meters(9))`, `Box(nil)` for `Box(NoName)` and `Box(1)` for `Box(true)`,
+  and a generic option-like type (`Nada | Has(a)`) printed only its payload.
+  They now print `Box(Meters(9))`, `Box(NoName)`, `Box(true)` and
+  `Has(Meters(4))`, also in recursive generic types, in fields of other types,
+  in lists, string interpolation, `inspect` and `~H`.
+- **Compiled `to_string` prints records with no declared type, and tuples
+  inside fields.** `to_string({ a: 1, b: "x" })` printed `#<tag:0>` compiled,
+  as did a tuple inside a constructor field (`T((1, "a"))` printed
+  `T(#<tag:0>)`) or in a `~H` hole, and a `()` field printed `0`. They now print
+  `{ a: 1, b: "x" }`, `T((1, "a"))` and `()`, also through interpolation,
+  `inspect` and `~H`. Compiled code prints record fields in name order; the
+  interpreter prints them in the order the literal wrote them.
 - **`Some(NoName)` is no longer `None` (compiled).** For a type shaped like
   `NoName | Named(String)`, compiled code stored `Some(NoName)` as the same
   value as `None`, so a match took the `None` branch. An `Option` over such a
