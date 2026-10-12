@@ -87,3 +87,20 @@ The sound fix is nominal identity for nested-module types in the typechecker
 `B.Note` stop unifying. That is a typechecker-wide change: every
 `canon_type_name` / `ci_type` / bare-name lookup site is involved. It needs its
 own design pass before anyone implements it.
+
+## 2026-10-11: re-verified on main (`7700714fd`), still open, still blocked on the design call
+
+The repro above (with B's `roundtrip` written out over `NC`/`ND`) gives:
+
+- **interpreted:** `A err` / `B 3`. `to_json` is right on both sides (#880);
+  `A.roundtrip`'s `from_json` decodes with B's codec and fails.
+- **compiled:** rejected at compile time, `ambiguous interface-method call to
+  JsonFrom$Note.from_json: 2 implementations are in scope
+  (JsonFrom$B.Note.from_json, JsonFrom$A.Note.from_json)`.
+
+Nothing since 2026-10-07 has changed the cause: `surface_ty` still
+canonicalizes both nested types to `TCon "Note"`, so the result-type dispatch
+cannot tell them apart. Not fixed in the group-b typecheck batch: per the note
+above, the only sound fix is nominal identity for nested-module types, which
+needs its own design pass (the lexical-module heuristic stays rejected as
+unsound). The acceptance criterion is unchanged.

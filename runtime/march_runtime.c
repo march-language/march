@@ -609,6 +609,12 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
         void *native = *(void **)((char *)p + 16);
         if (dtor) dtor(native);
+    } else if (tag == MARCH_TYPED_ARR_TAG) {
+        /* Every slot owns one reference (each typed_array_ producer takes its
+         * own); march_decrc ignores a tagged immediate. */
+        int64_t len = *(int64_t *)((char *)p + 16);
+        void **slots = (void **)((char *)p + 32);   /* TYPED_ARRAY_HDR_SIZE */
+        for (int64_t i = 0; i < len; i++) march_decrc(slots[i]);
     } else if (tag == MARCH_TASK_TAG) {
         /* A Task owns the box of a Float result. The trampoline stores
          * task[3] = (raw << 1) | 1; for a Float task raw is the
@@ -740,7 +746,7 @@ void march_decrc(void *p) {
          * rather than silently double-freeing and corrupting the heap. */
         fprintf(stderr, "march: RC underflow (rc was %lld) at %p — aborting\n",
                 (long long)prev, p);
-        abort();
+        march_abort(__func__);
     }
 }
 
@@ -862,7 +868,7 @@ void march_clo_release(void *p) {
     } else if (prev < 1) {
         fprintf(stderr, "march: RC underflow in march_clo_release (rc was %lld) at %p — aborting\n",
                 (long long)prev, p);
-        abort();
+        march_abort(__func__);
     }
 }
 
@@ -888,7 +894,7 @@ int64_t march_decrc_freed(void *p) {
         fprintf(stderr,
                 "march: RC underflow in march_decrc_freed (rc was %lld) at %p — aborting\n",
                 (long long)prev, p);
-        abort();
+        march_abort(__func__);
     }
     return 0;
 }
@@ -927,7 +933,7 @@ void march_free(void *p) {
                 gc_trace_on()
                   ? "  History: scripts/gc-trace-report.py --addr <addr> trace/gc"
                   : "  Rebuild with --rc-trace and run under MARCH_TRACE_GC=1 for its history.");
-        abort();
+        march_abort(__func__);
     }
 #endif
     if (gc_trace_on() && IS_HEAP_PTR(p))
@@ -957,7 +963,7 @@ void march_hole_fill_check(void *cell, int64_t field, void *prev) {
     fprintf(stderr,
             "march: TRMC hole fill into cell %p field %lld found %p, not null — aborting\n",
             cell, (long long)field, prev);
-    abort();
+    march_abort(__func__);
 }
 #endif
 
@@ -984,7 +990,7 @@ void *march_tco_defer_push(void *buf, void (*release)(void *), void *v) {
             b, sizeof(march_tco_defer_buf) + (size_t)cap * sizeof(march_tco_defer_item));
         if (nb == NULL) {
             fprintf(stderr, "march: out of memory growing a tail-call pending-drop list\n");
-            abort();
+            march_abort(__func__);
         }
         if (b == NULL) nb->len = 0;
         nb->cap = cap;
@@ -1076,7 +1082,7 @@ void march_decrc_local(void *p) {
     if (h->rc <= 0) {
         if (h->rc < 0) {
             fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
-            abort();
+            march_abort(__func__);
         }
         march_run_resource_dtor(p);
         MARCH_FREE_BUMP();
@@ -1119,7 +1125,7 @@ int64_t march_decrc_local_freed(void *p) {
     if (h->rc <= 0) {
         if (h->rc < 0) {
             fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
-            abort();
+            march_abort(__func__);
         }
         march_run_resource_dtor(p);
         MARCH_FREE_BUMP();
@@ -1143,7 +1149,7 @@ static void march_rc_last_underflow(void *p, int64_t prev, int local) {
     else
         fprintf(stderr, "march: RC underflow (rc was %lld) at %p — aborting\n",
                 (long long)prev, p);
-    abort();
+    march_abort(__func__);
 }
 
 /* The out-of-line remainder of a last-reference free: a negative-tag cell
@@ -2134,6 +2140,9 @@ void march_panic(void *s) {
     fputc('\n', stderr);
     march_print_backtrace();
     fflush(stderr);
+    /* MARCH_CRASH_DUMP: the unsupervised panic leaves a dump (see
+     * march_observe_snapshot.c; a no-op when unset). */
+    (void)march_fatal_dump("panic");
     exit(1);
 }
 
@@ -3740,7 +3749,7 @@ static void meta_put(march_actor_meta *m) {
     else if (prev <= 0) {
         fprintf(stderr, "march: actor meta reference underflow (%lld)\n",
                 (long long)prev);
-        abort();
+        march_abort(__func__);
     }
 }
 
@@ -8102,7 +8111,7 @@ static void call_held_push(call_held *h, void *msg, uint64_t seq) {
         uint64_t *seqs = realloc(h->seqs, (size_t)cap * sizeof *seqs);
         if (!msgs || !seqs) {
             fputs("march: OOM (actor_call held messages)\n", stderr);
-            abort();
+            march_abort(__func__);
         }
         h->msgs = msgs;
         h->seqs = seqs;
@@ -10835,6 +10844,23 @@ int64_t march_mailbox_size(void *pid) {
     return depth;
 }
 
+/* mailbox_backlog: the work waiting for this actor, which is its mailbox
+ * depth (as mailbox_size) plus the user messages an Actor.call it is blocked
+ * in has taken off the mailbox to put back after the reply (the proc's
+ * `held`). An actor stuck in a slow call with work piling up reads 0 by
+ * mailbox_size; this is the count Actor.top_by_mailbox / over_mailbox rank
+ * by, as the observe socket's ACTORS mbox / TOP mbox already do. */
+int64_t march_mailbox_backlog(void *pid) {
+    if (!IS_HEAP_PTR(pid)) return 0;
+    int64_t depth = 0;
+    march_reclaim_enter();   /* meta and gt: resolved and used inside */
+    march_actor_meta *meta = find_meta(pid);
+    march_proc *gt = meta ? meta_gt(meta) : NULL;
+    if (gt) depth = march_sched_mbox_count(gt) + march_sched_held_count(gt);
+    march_reclaim_exit();
+    return depth;
+}
+
 /* actor_set_mailbox_limit: bind a mailbox capacity + overflow policy to the
    green thread backing this actor. limit <= 0 means unbounded; policy is a
    march_mbox_policy value (0 unbounded, 1 drop_new, 2 drop_old, 3 block).
@@ -11616,6 +11642,9 @@ static void *typed_array_alloc(int64_t len) {
     }
     size_t sz = (size_t)(TYPED_ARRAY_HDR_SIZE + body);
     void *arr = march_alloc((int64_t)sz);
+    /* Its own tag, so a free releases the elements (march_run_resource_dtor).
+     * Every caller fills all [len] slots before the array is published. */
+    ((march_hdr *)arr)->tag = MARCH_TYPED_ARR_TAG;
     *(int64_t *)((char *)arr + 16) = len;   /* len field */
     *(int64_t *)((char *)arr + 24) = len;   /* cap field */
     return arr;

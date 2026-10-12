@@ -439,6 +439,57 @@ let test_unboxed_aggregate_rc_predicates () =
    box would be a fresh rc=1 cell no one owns — [needs_rc] is false for the
    aggregate, so Perceus emits no caller-side drop.  Keeping the type boxed end
    to end removes the question. *)
+(* A scalar-only single-constructor type declared in a NESTED module gets the
+   unboxed layout too (specs/progress/2026-10-11-module-unboxed-aggregates.md).
+   Lowering registers it as [Geo.Vec3] and builds it under the short key
+   [Vec3.Vec3]; the kind table used to answer the short spelling Boxed, so
+   every module-declared aggregate was a heap cell.  The RED control is the
+   same program compiled with unboxing off, as in
+   [test_unboxed_aggregate_boxed_control]. *)
+let module_vec3_src = {|mod UB do
+  needs IO.Console
+  mod Geo do
+    type Vec3 = Vec3(Float, Float, Float)
+    fn forward(yaw : Float, pitch : Float) : Vec3 do
+      Vec3(0.0 -. yaw, pitch, yaw *. pitch)
+    end
+    fn vx(v : Vec3) : Float do
+      match v do
+        Vec3(x, _, _) -> x
+      end
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(Geo.vx(Geo.forward(1.0, 2.0))))
+  end
+end|}
+
+let test_module_unboxed_aggregate () =
+  let ir = emit_tco_opt_ir module_vec3_src in
+  Alcotest.(check bool) "the struct type is declared under the qualified name" true
+    (ir_contains ir "%ub.Geo_Vec3 = type { double, double, double }");
+  Alcotest.(check bool) "constructed with insertvalue" true
+    (ir_contains ir "insertvalue %ub.Geo_Vec3");
+  Alcotest.(check bool) "destructured with extractvalue" true
+    (ir_contains ir "extractvalue %ub.Geo_Vec3");
+  Alcotest.(check int) "no march_alloc call anywhere in the module" 0
+    (ir_count ir "call ptr @march_alloc(")
+
+(* A C-built module type keeps its boxed layout under both spellings even
+   though its shape is unboxable: [process_spawn_async] builds
+   [Process.LiveProcess] as a tag-0 cell with two int64 fields. *)
+let test_module_unboxed_c_built_stays_boxed () =
+  let open March_tir in
+  let defs = [ Tir.TDVariant ("Process.LiveProcess", [ ("LiveProcess", [Tir.TInt; Tir.TInt]) ]);
+               Tir.TDVariant ("Geo.P2", [ ("P2", [Tir.TInt; Tir.TInt]) ]) ] in
+  let t = Kind.build ~collision_set:(Collision_set.compute defs) defs in
+  let is_unboxed n = match (Kind.of_ty t (Tir.TCon (n, []))).Kind.repr with
+    | Kind.Unboxed _ -> true | _ -> false in
+  Alcotest.(check bool) "LiveProcess Boxed (short)" false (is_unboxed "LiveProcess");
+  Alcotest.(check bool) "LiveProcess Boxed (qualified)" false (is_unboxed "Process.LiveProcess");
+  Alcotest.(check bool) "P2 Unboxed (short)" true (is_unboxed "P2");
+  Alcotest.(check bool) "P2 Unboxed (qualified)" true (is_unboxed "Geo.P2")
+
 let test_unboxed_aggregate_ffi_type_stays_boxed () =
   let open March_tir.Tir in
   let td = TDVariant ("Vec3", [("Vec3", [TFloat; TFloat; TFloat])]) in
@@ -1545,6 +1596,62 @@ let test_deep_drop_of_borrowed_container () =
   Alcotest.(check bool)
     "deep drop: walks the spine as a TCO loop, not C-stack recursion (a 150K-element list must not overflow)"
     true (ir_contains drop_ir "br label %tco_loop")
+
+(** Drop glue for a type with a residual type variable is named by the
+    variable's POSITION ([__drop$List_V0]), not by its typechecker id
+    ([__drop$List_V_53272]).  The id comes from a global fresh-variable
+    counter, so the symbol moved whenever more (or less) was inferred before,
+    exactly the cascade B1 removed for every other minted name
+    (specs/progress/2026-10-07-drop-glue-name-carries-tvar-id.md).  Compiling
+    the same program twice in one process advances that counter, which is the
+    "unrelated edit" here: the two drop-glue symbol sets must be identical. *)
+let test_drop_glue_name_is_structural () =
+  let src = {|mod Test do
+  needs IO.Console
+  pfn outer(n : Int) : List(Int) do
+    fn ascend(nd, stk) do
+      match stk do
+      Nil -> nd
+      Cons(frame, rest) -> do
+        let (c, s) = frame
+        ascend(Cons(s, c), rest)
+      end
+      end
+    end
+    fn descend(k, path) do
+      if k == 0 do ascend(Nil, path)
+      else descend(k - 1, Cons(([k, k], k), path)) end
+    end
+    descend(n, Nil)
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(int_to_string(List.length(outer(5))))
+  end
+end|} in
+  let drop_syms ir =
+    let re = Str.regexp "@__drop\\$[A-Za-z0-9_$]+" in
+    let rec go i acc =
+      match Str.search_forward re ir i with
+      | j -> let m = Str.matched_string ir in
+        go (j + String.length m)
+          (if List.mem m acc then acc else m :: acc)
+      | exception Not_found -> List.sort compare acc in
+    go 0 [] in
+  let first = drop_syms (emit_tco_opt_ir src) in
+  let second = drop_syms (emit_tco_opt_ir src) in
+  let tvar_named =
+    List.filter (fun m ->
+        try ignore (Str.search_forward (Str.regexp "V_[0-9]") m 0); true
+        with Not_found -> false) first in
+  Alcotest.(check bool)
+    "drop glue: the program has drop glue for a residual-type-variable type"
+    true (List.exists (fun m -> ir_contains m "_V") first);
+  Alcotest.(check (list string))
+    "drop glue: the same program gets the same drop symbols on a second compile"
+    first second;
+  Alcotest.(check (list string))
+    "drop glue: no symbol spells a type variable by its typechecker id"
+    [] tvar_named
 
 (** Final-review regression: [has_non_tail_group_call]'s dec-chain-wrapper
     arm used to recognise [ELet (tmp, EApp (f, _), dec-chain-returning-tmp)]
@@ -14837,6 +14944,7 @@ declare i64  @march_dist_monitor_forget_node_str(ptr %node)
 declare void @march_dist_monitor_ack_pid(i64 %target_pid, i64 %watcher_pid)
 declare void @march_dist_monitor_register_pid(i64 %target_pid, ptr %node, i64 %watcher_pid, i64 %fd)
 declare i64  @march_mailbox_size(ptr %pid)
+declare i64  @march_mailbox_backlog(ptr %pid)
 declare i64  @march_sched_stat(i64 %which)
 declare ptr  @march_observe_query(ptr %line)
 declare void @march_observe_count_send()
@@ -16862,6 +16970,8 @@ let codegen_suites =
           Alcotest.test_case "compiled branch-built aggregate loop does not leak" `Slow
             test_unboxed_aggregate_branch_join_no_leak_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
+          Alcotest.test_case "module-declared aggregate is unboxed" `Quick test_module_unboxed_aggregate;
+          Alcotest.test_case "C-built module aggregate stays boxed" `Quick test_module_unboxed_c_built_stays_boxed;
         ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
@@ -16902,6 +17012,8 @@ let codegen_suites =
             `Quick test_tco_self_dup_arg_decref_on_live_path;
           Alcotest.test_case "deep drop: never-destructured container releases its children"
             `Quick test_deep_drop_of_borrowed_container;
+          Alcotest.test_case "drop glue: name spells a residual type variable by position"
+            `Quick test_drop_glue_name_is_structural;
           Alcotest.test_case "final-review: non-tail dec-chain-wrapped group call rejected"
             `Quick test_mutual_tco_non_tail_dec_chain_wrapped_no_loop;
           Alcotest.test_case "B8: reduction check present in mutual loop"

@@ -1063,6 +1063,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_dist_monitor_register_pid(i64 %target_pid, ptr %node, i64 %watcher_pid, i64 %fd)" };
   { march_name = "mailbox_size"; c_name = Some "march_mailbox_size"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_mailbox_size(ptr %pid)" };
+  { march_name = "mailbox_backlog"; c_name = Some "march_mailbox_backlog"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_mailbox_backlog(ptr %pid)" };
   { march_name = "sched_stat"; c_name = Some "march_sched_stat"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_sched_stat(i64 %which)" };
   { march_name = "observe_query"; c_name = Some "march_observe_query"; ret_ty = Some Tir.TString;
@@ -1917,6 +1919,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_dist_monitor_ack_pid";
   PDeclare "march_dist_monitor_register_pid";
   PDeclare "march_mailbox_size";
+  PDeclare "march_mailbox_backlog";
   PDeclare "march_sched_stat";
   PDeclare "march_observe_query";
   PDeclare "march_observe_count_send";

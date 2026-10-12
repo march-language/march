@@ -527,8 +527,18 @@ let deps_update_cmd =
     Term.(const run $ name)
 
 let deps_cmd =
+  let accept_caps =
+    Arg.(value & flag & info ["accept-caps"]
+           ~doc:"Keep a dependency change that asks for capabilities \
+                 forge.caps.lock does not grant, and record the new set. \
+                 Without it, such a change (a version edited in forge.toml, \
+                 say) is refused and forge.lock is left as it was. Installing \
+                 what forge.lock already says is never gated.")
+  in
   let install_term =
-    Term.(const (fun () -> handle (Cmd_deps.run ())) $ const ())
+    Term.(const (fun ac ->
+        handle (Cmd_audit.deps_with_gate ~accept:ac ~resolve:Cmd_deps.run))
+          $ accept_caps)
   in
   Cmd.group ~default:install_term
     (Cmd.info "deps" ~doc:"Install and manage project dependencies")
@@ -886,9 +896,41 @@ let release_cmd =
     Arg.(value & opt string "patch" &
          info ["bump"] ~docv:"KIND" ~doc:"Version bump for the release: patch|minor|major.")
   in
-  let run b = handle (Cmd_release.run ~bump:b ()) in
-  Cmd.v (Cmd.info "release" ~doc:"Guarded release: clean tree -> build -> test -> bump + tag")
-    Term.(const run $ bump)
+  let tag_run b = handle (Cmd_release.run ~bump:b ()) in
+  let tag_doc = "Guarded release: clean tree -> build -> test -> bump + tag" in
+  let tag_term = Term.(const tag_run $ bump) in
+  let tag_cmd = Cmd.v (Cmd.info "tag" ~doc:tag_doc) tag_term in
+  let build_cmd =
+    let target =
+      Arg.(value & opt (some string) None &
+           info ["target"] ~docv:"T"
+             ~doc:"Cross target (linux/amd64, linux/arm64; needs zig), as $(b,forge build --target). \
+                   Default: this machine.")
+    in
+    let profile =
+      Arg.(value & opt string "release" &
+           info ["profile"] ~docv:"P"
+             ~doc:"$(b,release) (default, $(b,--opt 2)) or $(b,debug).")
+    in
+    let tar = Arg.(value & flag & info ["tar"] ~doc:"Also write the tarball next to the directory.") in
+    let run target profile tar =
+      match Cmd_release_build.build ?target ~profile ~tar () with
+      | Ok (dir, tarball) ->
+        Printf.printf "release: %s\n%!" dir;
+        Option.iter (Printf.printf "release: %s\n%!") tarball
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    in
+    Cmd.v (Cmd.info "build"
+             ~doc:"Build the app and lay out a self-contained release directory \
+                   .march/release/APP-VERSION-TARGET/ with a bin/APP launcher (start, daemon, \
+                   stop, restart, pid, version, ping, status, rpc, shell, observe, diagnose)")
+      Term.(const run $ target $ profile $ tar)
+  in
+  Cmd.group ~default:tag_term
+    (Cmd.info "release"
+       ~doc:"Release: $(b,forge release build) lays out a deployable bundle; \
+             $(b,forge release) [--bump] (or $(b,tag)) is the guarded clean-tree -> build -> test -> bump + tag")
+    [build_cmd; tag_cmd]
 
 (* ------------------------------------------------------------- forge bench *)
 
@@ -1553,21 +1595,66 @@ let observe_cmd =
            ~doc:"With $(b,--state): how long the actor has to answer (default 1000, max 8000; \
                  forge waits at most 10 s for the reply).")
   in
-  let run words sections json socket env state crashes_full n timeout_ms =
+  let dump =
+    Arg.(value & opt (some string) None & info ["dump"; "from-dump"] ~docv:"FILE"
+           ~doc:"Read a crash dump (written by a node started with MARCH_CRASH_DUMP=FILE when it \
+                 panicked) instead of asking a node: the same panels, with the live-only ones \
+                 greyed. On a terminal the interactive view; with $(b,--panel) one panel as \
+                 text, with $(b,--json) the dump's snapshot, otherwise every panel as text.")
+  in
+  let panel =
+    Arg.(value & opt (some string) None & info ["panel"] ~docv:"NAME"
+           ~doc:"Print one panel as text and exit (system, load, actors, actor, supervision, \
+                 names, epochs, cluster, crashes); for a live node and for $(b,--dump).")
+  in
+  let sort =
+    Arg.(value & opt string "mbox" & info ["sort"] ~docv:"ATTR"
+           ~doc:"With $(b,--panel actors): rank by mbox (default), stack, crashes, slices, \
+                 msgs_in or msgs_out.")
+  in
+  let pid =
+    Arg.(value & opt (some int) None & info ["pid"] ~docv:"PID"
+           ~doc:"With $(b,--panel actor): the actor to show.")
+  in
+  let tui =
+    Arg.(value & flag & info ["tui"]
+           ~doc:"Open the interactive view (the default when stdout is a terminal and no request \
+                 or $(b,--json) is given): panels for System, Load, Actors, Actor, Supervision, \
+                 Names, Epochs, Cluster and Crashes, fed by a $(b,WATCH) stream. Keys: q quit, \
+                 1-9 or Tab switch panel, arrows and PgUp/PgDn select, Enter open the actor, \
+                 s sort, n next node, r refresh.")
+  in
+  let interval =
+    Arg.(value & opt int 1000 & info ["interval"] ~docv:"MS"
+           ~doc:"The interactive view's refresh period (default 1000, at least 250).")
+  in
+  let run words sections json socket env state crashes_full n timeout_ms dump panel sort pid tui interval =
     let debug = match state, crashes_full with
       | Some _, true -> None
       | Some pid, false -> Some (Cmd_observe.State { pid; timeout_ms })
       | None, true -> Some (Cmd_observe.Crashes_full n)
       | None, false -> Some Cmd_observe.No_debug in
+    let plain = words = [] && sections = [] && state = None && not crashes_full in
     match debug with
     | None -> handle (Error "observe: give --state or --crashes-full, not both")
-    | Some debug -> handle (Cmd_observe.run ~debug ~socket ~env ~json ~words ~sections ())
+    | Some debug ->
+      match dump, panel with
+      | Some file, _ when plain -> handle (Cmd_observe_view.run_dump ~file ~panel ~sort ~json)
+      | Some _, _ -> handle (Error "observe: --dump reads a file: give it alone, or with --panel/--json")
+      | None, Some name when plain && not json ->
+        handle (Cmd_observe_view.run_panel ~socket ~env ~panel:name ~sort ~pid)
+      | None, _ when plain && not json && (tui || Observe_tui_live.interactive ()) ->
+        handle (Cmd_observe_view.run_live ~socket ~env ~interval_ms:interval
+                  ~panel:(Option.value panel ~default:"system"))
+      | None, _ -> handle (Cmd_observe.run ~debug ~socket ~env ~json ~words ~sections ())
   in
   Cmd.v (Cmd.info "observe"
            ~doc:"Ask a running node what it is doing: its actors, supervision tree, names, \
-                 schedulers, memory and code epochs, from the node's read-only observe socket; \
-                 with $(b,--state) or $(b,--crashes-full), a signed debug request")
-    Term.(const run $ words $ sections $ json $ socket $ env_name $ state $ crashes_full $ n $ timeout_ms)
+                 schedulers, memory and code epochs, from the node's read-only observe socket \
+                 (an interactive view on a terminal, JSON otherwise); read a crash dump with \
+                 $(b,--dump); with $(b,--state) or $(b,--crashes-full), a signed debug request")
+    Term.(const run $ words $ sections $ json $ socket $ env_name $ state $ crashes_full $ n $ timeout_ms
+          $ dump $ panel $ sort $ pid $ tui $ interval)
 
 let top_cmd =
   let sort =
@@ -1640,15 +1727,24 @@ let diagnose_cmd =
     Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
            ~doc:"Only the [[hot-reload.env]] entries named NAME.")
   in
-  let run window dump json socket env_name =
-    exit (Cmd_observe.run_diagnose ~socket ~env:env_name ~json ~window_ms:window ~dump ())
+  let from_dump =
+    Arg.(value & opt (some string) None & info ["from-dump"] ~docv:"FILE"
+           ~doc:"Check a crash dump (MARCH_CRASH_DUMP=FILE) instead of a live node: one snapshot, \
+                 so the checks that compare two (growth, climb) find nothing; crash loops, \
+                 over-limit mailboxes, saturated schedulers and stuck epochs are still found. \
+                 (A different thing from $(b,--dump), which writes snapshots out.)")
+  in
+  let run window dump json socket env_name from_dump =
+    match from_dump with
+    | Some file -> exit (Cmd_observe_view.run_diagnose_dump ~file ~json)
+    | None -> exit (Cmd_observe.run_diagnose ~socket ~env:env_name ~json ~window_ms:window ~dump ())
   in
   Cmd.v (Cmd.info "diagnose"
            ~doc:"Check a running node for known trouble (growing mailboxes, saturated schedulers, \
                  crash loops, heap climbing, stuck epochs) over a window; exit 0 nothing found, \
                  1 warnings, 2 critical, 3 unreachable"
            ~exits:Cmd.Exit.defaults)
-    Term.(const run $ window $ dump $ json $ socket $ env_name)
+    Term.(const run $ window $ dump $ json $ socket $ env_name $ from_dump)
 
 (* -------------------------------------------------------- forge hot-reload *)
 
@@ -1892,7 +1988,14 @@ let topology_gen_cmd =
            ~doc:"Write the generated files under DIR instead of printing them \
                  (built-in generators only).")
   in
-  let run env target out =
+  let release_dir =
+    Arg.(value & opt (some string) None &
+         info ["release-dir"] ~docv:"DIR"
+           ~doc:"systemd only: the unit runs $(b,DIR/bin/APP start), the launcher of a \
+                 $(b,forge release build) bundle installed at DIR on the host, instead of \
+                 /opt/march/APP/APP.")
+  in
+  let run env target out release_dir =
     match topology_load_checked env with
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
     | Ok (proj, t, index, _) ->
@@ -1900,7 +2003,7 @@ let topology_gen_cmd =
       match Topology.export_of_json json with
       | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
       | Ok ex ->
-        match Topology.Gen.builtin ~project:proj.Project.name target ex with
+        match Topology.Gen.builtin ?release_dir ~project:proj.Project.name target ex with
         | Some files -> Topology.Gen.emit ?out files
         | None ->
           match Cli_ext.external_subcommand ~known:Topology.Gen.builtins
@@ -1916,7 +2019,7 @@ let topology_gen_cmd =
   Cmd.v (Cmd.info "gen"
            ~doc:"Generate deployment files from the topology: a built-in target or \
                  a forge-topology-<target> plugin")
-    Term.(const run $ topology_env $ target $ out)
+    Term.(const run $ topology_env $ target $ out $ release_dir)
 
 let topology_status_cmd =
   let run env =

@@ -35,11 +35,20 @@ closes its declared-set gap). `march caps` is the underlying extractor. Design c
   (refuse + restore forge.toml/forge.lock, or `--accept-caps`), analyzing only
   those; `forge outdated` previews each upgrade's new capabilities.
 
-- [ ] **`forge deps` after a hand-edited version bump is not gated.** Changing
+- [x] **`forge deps` after a hand-edited version bump is not gated.** Changing
   a version in forge.toml and running `forge deps` upgrades without the
   `forge add` check (`forge audit` in CI still fails on it). Gating it means
   deciding what an unacknowledged widening does to a `forge deps` that is also
-  the offline/restore path, and which flag acknowledges it there.
+  the offline/restore path, and which flag acknowledges it there. Done
+  2026-10-11, see [../progress/2026-10-11-forge-deps-cap-gate.md](../progress/2026-10-11-forge-deps-cap-gate.md):
+  only entries the re-resolve moves are gated, so the restore path is never
+  gated; a refusal restores forge.lock and keeps the forge.toml edit; the flag
+  is `forge deps --accept-caps`. `forge deps update` (git branch deps) does not
+  rewrite forge.lock and is not gated.
+
+- **Still open: the registry cross-check below.** It is blocked on
+  `specs/todos/2026-08-03-registry-capability-notarization.md` (the registry
+  does not store capability sets yet), so nothing here can land first.
 
 - [ ] **Registry cross-check.** Once the registry stores capability sets
   (`specs/todos/2026-08-03-registry-capability-notarization.md`), compare the

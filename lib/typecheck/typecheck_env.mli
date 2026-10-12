@@ -263,6 +263,9 @@ val offer_catchall_depth : int ref
 val offer_unrefined_message : string -> string
 val demote_to_monomorphic : Typecheck_types.ty -> unit
 val demote_vault_handle_vars : Typecheck_types.ty -> unit
+val demote_block_vault_handle_vars : Typecheck_types.ty -> unit
+val with_vault_pin_frame :
+  int -> ((Typecheck_types.ty list -> unit) -> 'a) -> 'a
 val tag_cap_producer_result :
   env ->
   Typecheck_types.ty ->

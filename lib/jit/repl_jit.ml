@@ -561,9 +561,30 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      unboxing off, handed to every pass this fragment runs (and matching the
      [~repl:true] ctx the emitter builds), replaces the old process-wide
      [force_disable] latch. *)
+  (* A fragment runs the native pipeline's RC passes around Perceus
+     (Contract_pipeline), as the remote shell's fragments do
+     ([shell_compile]; specs/progress/2026-10-08-shell-slot-and-drop-leaks.md):
+     - [Known_call] first: a local closure only ever called (`List.filter`'s
+       `go`) becomes a direct call of its apply function, the shape
+       [Drop.run] recognises as owning its captures.  Without it nothing
+       released the predicate it captured: one closure per call.
+     - [Drop.run] after: without it a [dec_rc] of a list, record or variant
+       the code does not take apart freed its top cell and orphaned the rest.
+     The stdlib precompile ([~fragment:false]) runs them too: every
+     fragment calls the prelude's compiled stdlib, so a shallow release there
+     (Show$List.show's intermediate lists) leaked on every input whatever the
+     fragment itself did.  The prelude registers no closure releases, so a
+     stdlib closure released through its function type stays shallow. *)
+  let tir =
+    if March_tir.Pass_switch.on "known-call-pre"
+    then verify_repl ~repl_vars "tir-known-call"
+        (March_tir.Known_call.run ~changed:(ref false) tir)
+    else tir in
   let k_table = March_tir.Kind.of_module ~unboxing:false tir in
+  let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
   let tir = verify_repl ~repl_vars "tir-perceus"
-      (March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir) in
+      (March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table ~borrow_map tir) in
+  let tir = verify_repl ~repl_vars "tir-drop" (March_tir.Drop.run ~k_table ~borrow_map tir) in
   verify_repl ~repl_vars "tir-escape" (March_tir.Escape.escape_analysis ~k_table tir)
 
 (* ── Heap pretty-printer ───────────────────────────────────────────── *)
@@ -1330,6 +1351,14 @@ let run_expr ctx ~tc_env m =
       ~fns:new_fns
       ~extern_fns
       ~store_as_slot:(Some v_slot)
+      (* As the shell's fragments
+         (specs/progress/2026-10-08-shell-slot-and-drop-leaks.md): no slot
+         increment, since Perceus treats a slot variable as borrowed in
+         [main] and never releases one, so every input used to add a count
+         to every heap binding; and the fragment's closure releases
+         registered, so a capturing closure releases its captures. *)
+      ~borrow_slots:true
+      ~register_drops:true
       ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body) in
@@ -1569,6 +1598,8 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
       ~prev_slots:(prev_slots_of ctx)
       ~fns:user_fns
       ~extern_fns
+      ~borrow_slots:true      (* as [run_expr] *)
+      ~register_drops:true
       ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body in

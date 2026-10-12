@@ -551,6 +551,20 @@ let with_export f =
       | Ok ex -> f ex)
 
 let test_gen_systemd () = with_export (fun ex -> check_golden ~name:"systemd" (Topology.Gen.systemd ~project:"shop" ex))
+(* R9: with a release directory the unit runs the bundle's launcher. *)
+let test_gen_systemd_release_dir () =
+  with_export (fun ex ->
+      let files = Topology.Gen.systemd ~release_dir:"/opt/shop/current" ~project:"shop" ex in
+      Alcotest.(check bool) "has units" true (files <> []);
+      List.iter (fun (name, unit_text) ->
+          let has sub =
+            try ignore (Str.search_forward (Str.regexp_string sub) unit_text 0); true
+            with Not_found -> false in
+          Alcotest.(check bool) (name ^ " ExecStart is the launcher") true
+            (has "\nExecStart=/opt/shop/current/bin/shop start\n");
+          Alcotest.(check bool) (name ^ " no /opt/march ExecStart") false (has "ExecStart=/opt/march/"))
+        files)
+
 let test_gen_ufw () = with_export (fun ex -> check_golden ~name:"ufw" (Topology.Gen.ufw ex))
 let test_gen_do_firewall () = with_export (fun ex -> check_golden ~name:"do-firewall" (Topology.Gen.do_firewall ex))
 let test_gen_compose () = with_export (fun ex -> check_golden ~name:"compose" (Topology.Gen.compose ~project:"shop" ex))
@@ -719,6 +733,7 @@ let tests = [
     Alcotest.test_case "unresolved_names (the compiler's --topology check)" `Quick test_unresolved_names_for_the_compiler;
     Alcotest.test_case "the build/run/deploy gate" `Quick test_gate;
     Alcotest.test_case "gen systemd golden" `Quick test_gen_systemd;
+    Alcotest.test_case "gen systemd --release-dir" `Quick test_gen_systemd_release_dir;
     Alcotest.test_case "gen ufw golden" `Quick test_gen_ufw;
     Alcotest.test_case "gen do-firewall golden" `Quick test_gen_do_firewall;
     Alcotest.test_case "gen compose golden" `Quick test_gen_compose;

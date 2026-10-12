@@ -164,34 +164,59 @@ let rec apply_subst (subst : (string * Tir.ty) list) (ty : Tir.ty) : Tir.ty =
   | _ -> ty
 
 (* A name-safe key for a monomorphic type.  Only needs to be injective over
-   the types that reach it, and stable within one compilation. *)
-let rec mangle (ty : Tir.ty) : string =
-  match ty with
-  | Tir.TInt -> "Int" | Tir.TFloat -> "Float" | Tir.TBool -> "Bool"
-  | Tir.TString -> "String" | Tir.TUnit -> "Unit"
-  | Tir.TTuple ts -> "T" ^ string_of_int (List.length ts)
-                     ^ "_" ^ String.concat "_" (List.map mangle ts)
-  | Tir.TRecord fs ->
-    (* Field names AND types, sorted, not merely the arity.  This key is the
-       memo key in [env.names] and the suffix of the synthesized function's
-       name, so a bare "R<n>" made every n-field record collide: the first
-       2-field record to be asked about decided the answer for all of them, and
-       a memoized negative (no heap children) then suppressed the drop for a
-       later { n : Int, s : String }, silently leaking its string.  Harmless
-       while aggregates never got drop functions; a correctness bug now.
-       Names are part of the identity because the drop projects fields by name
-       and TRecord's layout is name-sorted. *)
-    let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
-    "R" ^ string_of_int (List.length fs)
-    ^ "_" ^ String.concat "_"
-              (List.map (fun (n, t) -> n ^ "$" ^ mangle t) sorted)
-  | Tir.TCon (n, []) -> String.map (fun c -> if c = '.' then '_' else c) n
-  | Tir.TCon (n, args) ->
-    String.map (fun c -> if c = '.' then '_' else c) n
-    ^ "_" ^ String.concat "_" (List.map mangle args)
-  | Tir.TFn _ -> "Fn"
-  | Tir.TPtr _ -> "Ptr"
-  | Tir.TVar n -> "V" ^ n
+   the types that reach it, up to renaming a residual type variable, and the
+   same in every build of the same program.
+
+   A residual type variable is spelled by its POSITION, first appearance
+   first ([List(a)] -> [List_V0], [(b, a, b)] -> [T3_V0_V1_V0]), never by its
+   name.  Its name is a typechecker fresh-variable id ([_53272]) that depends
+   on how much was inferred before, so spelling it moved the drop glue's
+   symbol ([__drop$List_V_53272] vs [__drop$List_V_53278]) after an unrelated
+   edit (specs/progress/2026-10-07-drop-glue-name-carries-tvar-id.md).  Types
+   that differ only by such a renaming now share one key, so their drop
+   functions merge.  Lowering's placeholder [TVar "_"] keeps its own
+   spelling ([V_]); see the arm below.  That is sound: this pass treats every [TVar] alike (an
+   erased slot, released by a bare [EDecRC]), so two alpha-equivalent types
+   get alpha-equivalent drop functions. *)
+let mangle (ty : Tir.ty) : string =
+  let seen : (string, int) Hashtbl.t = Hashtbl.create 4 in
+  let var n =
+    match Hashtbl.find_opt seen n with
+    | Some k -> k
+    | None -> let k = Hashtbl.length seen in Hashtbl.replace seen n k; k in
+  let rec mangle (ty : Tir.ty) : string =
+    match ty with
+    | Tir.TInt -> "Int" | Tir.TFloat -> "Float" | Tir.TBool -> "Bool"
+    | Tir.TString -> "String" | Tir.TUnit -> "Unit"
+    | Tir.TTuple ts -> "T" ^ string_of_int (List.length ts)
+                       ^ "_" ^ String.concat "_" (List.map mangle ts)
+    | Tir.TRecord fs ->
+      (* Field names AND types, sorted, not merely the arity.  This key is the
+         memo key in [env.names] and the suffix of the synthesized function's
+         name, so a bare "R<n>" made every n-field record collide: the first
+         2-field record to be asked about decided the answer for all of them,
+         and a memoized negative (no heap children) then suppressed the drop
+         for a later { n : Int, s : String }, silently leaking its string.
+         Names are part of the identity because the drop projects fields by
+         name and TRecord's layout is name-sorted. *)
+      let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
+      "R" ^ string_of_int (List.length fs)
+      ^ "_" ^ String.concat "_"
+                (List.map (fun (n, t) -> n ^ "$" ^ mangle t) sorted)
+    | Tir.TCon (n, []) -> String.map (fun c -> if c = '.' then '_' else c) n
+    | Tir.TCon (n, args) ->
+      String.map (fun c -> if c = '.' then '_' else c) n
+      ^ "_" ^ String.concat "_" (List.map mangle args)
+    | Tir.TFn _ -> "Fn"
+    | Tir.TPtr _ -> "Ptr"
+    (* Lowering's placeholder [TVar "_"] is not a residual variable: it is
+       one fixed name, and [Kind] classifies it apart from the others
+       ([borrowable_of]).  Spelled as before, so it never shares a key (and
+       a memoized answer) with a real variable. *)
+    | Tir.TVar "_" -> "V_"
+    | Tir.TVar n -> "V" ^ string_of_int (var n)
+  in
+  mangle ty
 
 type env = {
   type_defs     : Tir.type_def list;
