@@ -235,6 +235,7 @@ static void b64_decode_init(void) {
 static void *bytes_wrap(void *payload) {
     void *b = march_alloc(16 + 8);       /* hdr(16) + ptr(8) */
     /* tag stays 0 = Bytes ctor */
+    ((march_hdr *)b)->pad = march_bytes_type_id();
     *(void **)((char *)b + 16) = payload;
     return b;
 }
@@ -473,10 +474,10 @@ void *march_sha1_bytes(void *b) {
  * one of those negative ids (impossible: len >= 0). */
 static int is_bytes_value(void *v) {
     static int32_t id_q = 0, id_bare = 0;
-    if (id_q == 0) id_q = march_type_id_of_name("Bytes.Bytes");
-    if (id_bare == 0) id_bare = march_type_id_of_name("Bytes");
     const march_hdr *h = (const march_hdr *)v;
-    return h->tag == 0 && (h->pad == 0 || h->pad == id_q || h->pad == id_bare);
+    return h->tag == 0 && (h->pad == 0
+                           || h->pad == march_type_id_memo(&id_q, "Bytes.Bytes")
+                           || h->pad == march_type_id_memo(&id_bare, "Bytes"));
 }
 
 /* Raw bytes of a String or a Bytes value (malloc'd; caller frees). */
@@ -1916,6 +1917,31 @@ void * march_vault_reap(void *handle, void *key_val) {
     void * r = vault_reap_in(vd, key_val);
     vault_leave(handle, st);
     return r;
+}
+
+/* Release the values [key]'s shard has stopped holding with a plain
+ * [march_decrc] each.  Only for a table the RUNTIME owns whose values need
+ * no typed drop: the actor registry, whose values are actor records (the
+ * actor's own death releases its state, so one decrc is the whole release).
+ * Nothing reaps such a table from March, so every buried value used to stay
+ * in the graveyard for the life of the process: one actor record per
+ * registration that was dropped, unregistered or overwritten. */
+void march_vault_release_dead(void *handle, void *key_val) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return; }
+    char *key = vault_key_cstr(key_val);
+    uint32_t h = vault_hash(key);
+    free(key);
+    vault_shard *sh = vault_shard_for(vd, h);
+    if (atomic_load_explicit(&sh->ndead, memory_order_relaxed) != 0) {
+        int64_t n;
+        vault_wr_lock(&sh->lock);
+        void **d = vault_take_dead(sh, &n);
+        vault_wr_unlock(&sh->lock);
+        for (int64_t i = 0; i < n; i++) march_decrc(d[i]);
+        free(d);
+    }
+    vault_leave(handle, st);
 }
 
 int64_t march_vault_size(void *handle) {
@@ -3663,13 +3689,11 @@ static int32_t ctor_type_index_for_hdr(void *v) {
  * is itself the entry module; the emitter hashes whichever it has. */
 static int32_t iolist_type_id(void) {
     static int32_t id = 0;
-    if (id == 0) id = march_type_id_of_name("IOList.IOList");
-    return id;
+    return march_type_id_memo(&id, "IOList.IOList");
 }
 static int32_t iolist_type_id_bare(void) {
     static int32_t id = 0;
-    if (id == 0) id = march_type_id_of_name("IOList");
-    return id;
+    return march_type_id_memo(&id, "IOList");
 }
 static int is_iolist_type_id(int32_t tid) {
     return tid == iolist_type_id() || tid == iolist_type_id_bare();

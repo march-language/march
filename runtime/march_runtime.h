@@ -71,6 +71,33 @@ static inline int32_t march_hdr_type_id(const void *p) {
 }
 /* The id the compiler stamps for a type named [name] (march_extras.c). */
 int32_t march_type_id_of_name(const char *name);
+/* Lazily memoised march_type_id_of_name for a `static int32_t` slot (0 = not
+ * yet computed).  Every scheduler thread may fill the slot at once; they all
+ * store the same pure hash, so relaxed atomics are enough -- they only make
+ * the access a non-race for C11/TSAN (a plain ldr/str on arm64). */
+static inline int32_t march_type_id_memo(int32_t *slot, const char *name) {
+    int32_t id = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    if (id == 0) {
+        id = march_type_id_of_name(name);
+        __atomic_store_n(slot, id, __ATOMIC_RELAXED);
+    }
+    return id;
+}
+/* The id of stdlib `Bytes` (`type Bytes = Bytes(String)` in `mod Bytes`, so
+ * lowered as "Bytes.Bytes"), for the C sites that build a Bytes cell
+ * themselves.  Same hash as march_type_id_of_name, inlined so a TU that does
+ * not link march_extras.c (bench/bench_http_simd.sh builds march_http.c
+ * alone) can still stamp it.  An unstamped C-built Bytes printed "#<tag:0>"
+ * compiled (`to_string(Base64.decode(s))`) where the interpreter printed
+ * `Bytes("...")`. */
+static inline int32_t march_bytes_type_id(void) {
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)"Bytes.Bytes"; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    return -(int32_t)(1u + (h & 0x3FFFFFFFu));
+}
 /* `~H` hole on an ERASED value: flattens iff the header id says IOList,
  * otherwise renders by name and escapes (march_extras.c). */
 void   *march_html_auto_escape_dyn(void *v);
@@ -1073,6 +1100,9 @@ void   *march_vault_keys(void *table);
 /* Collect the values [key]'s shard has stopped holding, as a List(v) the
  * caller owns; Vault's typed wrappers drop it (march_extras.c). */
 void   *march_vault_reap(void *table, void *key);
+/* Release [key]'s shard's buried values with a plain decrc each: for a
+ * runtime-owned table whose values need no typed drop (march_extras.c). */
+void    march_vault_release_dead(void *table, void *key);
 /* Unregister and empty a table, returning every value it held (march_extras.c). */
 void   *march_vault_close(void *table);
 /* Vault tables created and not yet freed (a leak gauge for tests). */

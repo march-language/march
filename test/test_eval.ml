@@ -1853,8 +1853,9 @@ let test_interp_colliding_general_iface_dispatch () =
      a nested module's DImpl-bound interface dispatcher never gets exposed
      under a "NA.speak" qualified key (`eval_decl`'s DMod arm only exports
      names `declared_names` collects, which walks DFn/DLet/DMod/DExtern, not
-     DImpl) — calling bare `speak` from a SIBLING or outer module is a
-     separate, out-of-scope limitation. Dispatch itself is keyed purely by
+     DImpl) — calling bare `speak` from a SIBLING or outer module was a
+     separate limitation, closed 2026-10-12 (see
+     [test_interp_nested_impl_method_visible_outside]). Dispatch itself is keyed purely by
      the argument's own runtime type via the GLOBAL iface_method_tbl/
      ctor_qualified_type_tbl, so calling through NA's or NB's own local
      `speak` binding still exercises the real fix. *)
@@ -1883,6 +1884,42 @@ let test_interp_colliding_general_iface_dispatch () =
     "from-A" (vstr (call_fn env "NA.say" []));
   Alcotest.(check string) "NB.say() dispatches to NB.Thing's Speak impl"
     "from-B" (vstr (call_fn env "NB.say" []))
+
+(* The gap the two tests around this one sidestep: a general-interface
+   dispatcher bound by an `impl` inside a nested module must be callable BARE
+   from the enclosing module (and a later sibling), as compiled code allows.
+   test/native/iface_collision_ambiguous_call.march is the compiled twin; the
+   interpreter used to die "unbound variable: speak" on it. *)
+let test_interp_nested_impl_method_visible_outside () =
+  let src = {|mod Top do
+    interface Speak(a) do
+      fn speak : a -> String
+    end
+    mod NA do
+      type Thing = TA
+      impl Speak(Thing) do
+        fn speak(_self) do "from-A" end
+      end
+      fn mk() do TA end
+    end
+    mod NB do
+      type Thing = TB
+      impl Speak(Thing) do
+        fn speak(_self) do "from-B" end
+      end
+      fn mk() do TB end
+    end
+    mod NC do
+      fn say_a() do speak(NA.mk()) end
+    end
+    fn both() do speak(NA.mk()) ++ "," ++ speak(NB.mk()) end
+  end|} in
+  let env = eval_module src in
+  let vstr v = match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString" in
+  Alcotest.(check string) "outer module dispatches to each nested impl"
+    "from-A,from-B" (vstr (call_fn env "both" []));
+  Alcotest.(check string) "a later sibling module sees the nested impl"
+    "from-A" (vstr (call_fn env "NC.say_a" []))
 
 (** Task 5 (constructor module-qualified identity plan) — interpreter side.
     Layer 1b's [test_interp_colliding_general_iface_dispatch] above only
@@ -5759,6 +5796,7 @@ let eval_suites =
           Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
           Alcotest.test_case "general iface multi-impl dispatch" `Quick test_general_iface_multi_impl_dispatch;
           Alcotest.test_case "interp colliding general iface dispatch (Layer 1b)" `Quick test_interp_colliding_general_iface_dispatch;
+          Alcotest.test_case "interp nested impl method visible outside" `Quick test_interp_nested_impl_method_visible_outside;
           Alcotest.test_case "interp colliding double-collision ctor construction+match" `Quick test_interp_colliding_double_collision_ctor_construction_and_match;
           Alcotest.test_case "interp colliding double-collision ctor impl-construction+module-match" `Quick test_interp_colliding_double_collision_ctor_impl_construction_and_module_match;
           Alcotest.test_case "default method user type"`Quick test_default_method_user_type;

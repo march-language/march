@@ -1,0 +1,18 @@
+-- Regression (2026-10-12): a `Bytes` value built by the C runtime
+-- (Base64.decode -> march_base64_decode -> bytes_wrap) carried no header type
+-- id, so compiled `to_string` printed `#<tag:0>` where the interpreter printed
+-- `Bytes("hello")`.  The C sites that build a Bytes cell now stamp the id the
+-- compiler stamps for `Bytes.Bytes`.
+mod BytesCBuiltToString do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do
+    let made = Bytes.from_string("hi")
+    let r : Result(Bytes, String) = Ok(made)
+    println(to_string(r))
+    println(to_string(Base64.decode("aGVsbG8=")))
+    match Base64.decode("aGVsbG8=") do
+      Ok(d) -> println(to_string(d) ++ " " ++ to_string([d]))
+      Err(_) -> println("decode failed")
+    end
+  end
+end

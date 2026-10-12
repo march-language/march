@@ -554,9 +554,10 @@ typedef struct march_scheduler {
     pthread_t       thread;       /* OS thread handle (for schedulers 1..N-1)    */
     /* What this scheduler thread has done since the last march_sched_init;
      * see march_sched_thread_stat.  `started` is written by march_sched_run
-     * before the thread exists; the rest only by the owning thread, so they
-     * are plain fields, exact once march_sched_run has returned and a racy
-     * snapshot before that. */
+     * before the thread exists; the rest only by the owning thread.  Every
+     * access is a relaxed __atomic load/store (MARCH_SCHED_STAT_BUMP), so a
+     * read from another thread is a defined but approximate snapshot, exact
+     * once march_sched_run has returned. */
     int             started;      /* thread exists (scheduler 0: always)         */
     int             entered;      /* sched_loop was reached                      */
     int64_t         stat_dispatches;  /* green-thread dispatches                 */

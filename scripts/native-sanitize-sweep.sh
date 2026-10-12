@@ -4,9 +4,11 @@
 # CrowdStrike Falcon (see specs/lang/golden/sanitize.sh), so run this inside the
 # CI image (ci/Dockerfile.ubuntu).
 #
-#   scripts/native-sanitize-sweep.sh [-l] [-s "1 14"] [-j N] [-t SECS] [-o DIR] [NAME...]
+#   scripts/native-sanitize-sweep.sh [-l] [-S] [-s "1 14"] [-j N] [-t SECS] [-o DIR] [NAME...]
 #
-#   -l        leak pass: ASAN_OPTIONS=detect_leaks=1 (default detect_leaks=0)
+#   -l        leak pass: ASAN_OPTIONS=detect_leaks=1 (default detect_leaks=0),
+#             with the suppressions in scripts/lsan-suppressions.txt
+#   -S        leak pass without the suppressions file
 #   -s LIST   scheduler counts to run each program at (default "1 14")
 #   -j N      parallel jobs (default: nproc / 2)
 #   -t SECS   per-run timeout (default 60)
@@ -38,11 +40,11 @@
 set -u
 root="$(cd "$(dirname "$0")/.." && pwd)"
 bin="${MARCH_BIN:-$root/_build/default/bin/main.exe}"
-leak=0; scheds="1 14"; jobs=$(( $(nproc 2>/dev/null || echo 4) / 2 )); tmo=60; out=""
-while getopts "ls:j:t:o:" o; do
+leak=0; nosupp=0; scheds="1 14"; jobs=$(( $(nproc 2>/dev/null || echo 4) / 2 )); tmo=60; out=""
+while getopts "lSs:j:t:o:" o; do
   case $o in
-    l) leak=1 ;; s) scheds="$OPTARG" ;; j) jobs="$OPTARG" ;; t) tmo="$OPTARG" ;;
-    o) out="$OPTARG" ;; *) sed -n '2,20p' "$0"; exit 2 ;;
+    l) leak=1 ;; S) nosupp=1 ;; s) scheds="$OPTARG" ;; j) jobs="$OPTARG" ;; t) tmo="$OPTARG" ;;
+    o) out="$OPTARG" ;; *) sed -n '2,22p' "$0"; exit 2 ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -55,6 +57,11 @@ export MARCH_STDLIB="${MARCH_STDLIB:-$root/stdlib}"
 export MARCH_RUNTIME_DIR="${MARCH_RUNTIME_DIR:-$root/runtime}"
 export MARCH_SANITIZE=1 MARCH_DEBUG_RUNTIME=1
 export ASAN_OPTIONS="detect_leaks=$leak:halt_on_error=1"
+# The leak pass ignores what is not a leak (process-lifetime runtime caches,
+# frames abandoned by design): scripts/lsan-suppressions.txt. -S turns it off.
+if [ "$leak" = 1 ] && [ "$nosupp" = 0 ]; then
+  export LSAN_OPTIONS="${LSAN_OPTIONS:+$LSAN_OPTIONS:}suppressions=$root/scripts/lsan-suppressions.txt:print_suppressions=0"
+fi
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}"
 
 # name \t compile-args \t run-env, one line per runnable fixture.

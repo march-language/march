@@ -6,6 +6,8 @@ native_actor_call_late_reply: coverage audit (user + stdlib): 135 enforced, 0 in
 native_actor_call_late_reply: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_call_timeout: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_call_timeout: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_cap_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_actor_cap_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_counter: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_counter: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_crash_rc_restore: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -38,6 +40,8 @@ native_actor_on_stop_tree: coverage audit (user + stdlib): 135 enforced, 0 inert
 native_actor_on_stop_tree: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_basic: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_basic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_restart: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_restart_batch: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -86,6 +90,8 @@ native_builtin_borrow_leak_probe: coverage audit (user + stdlib): 135 enforced, 
 native_builtin_borrow_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_builtin_link_backing: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_builtin_link_backing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_bytes_c_built_to_string: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_bytes_c_built_to_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_bytes_typeid_base64_sha: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_bytes_typeid_base64_sha: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_bytes_u8_bridge: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -160,6 +166,8 @@ native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 135 enforce
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_option_read: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_erased_option_read: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_erased_param_field_read_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_erased_param_field_read_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_render_show: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_erased_render_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -202,6 +210,8 @@ native_field_use_after_parent_release: coverage audit (user + stdlib): 135 enfor
 native_field_use_after_parent_release: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_file_error_ctor_match: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_file_error_ctor_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_file_path_builtins_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_file_path_builtins_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_float_arr_list_boxing: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_float_arr_list_boxing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_float_boxing: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -312,6 +322,8 @@ native_live_process_registry: coverage audit (user + stdlib): 135 enforced, 0 in
 native_live_process_registry: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_local_colliding_type: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_local_colliding_type: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_local_fn_capture_not_generalized: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_local_fn_capture_not_generalized: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_local_named_like_builtin: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_local_named_like_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_logger_appenders_parity: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -630,6 +642,8 @@ native_static_nullary_ctor: coverage audit (user + stdlib): 135 enforced, 0 iner
 native_static_nullary_ctor: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_concat_n: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_string_concat_n: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_string_concat_scope_drop_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_string_concat_scope_drop_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_pattern_literal_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_string_pattern_literal_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_search_edge_cases: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
