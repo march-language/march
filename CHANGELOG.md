@@ -662,6 +662,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`MARCH_SANITIZE=thread` builds no longer report a race on the runtime's
+  cached type ids.** Calling `sha256`, or building lists, results or `IOList`s
+  from C on two schedulers at once raced on a lazily filled cache. The cached
+  value was always the same, so no wrong result was possible, but TSAN
+  reported it. See `specs/progress/2026-10-12-tsan-type-id-memo-race.md`.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,
