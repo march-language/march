@@ -15,3 +15,11 @@ inlined across a green-thread switch, which reads the old thread's scheduler aft
 migrated (the fix is `noinline`). Check any helper Observe R2 added on the dispatch or
 park path for that first. Next step: a loop of this binary on an amd64 machine (or
 `--platform linux/amd64` emulation), with a core dump to get the faulting pc.
+
+## 2026-10-12: did not reproduce under ASAN on Linux arm64
+
+30 runs at `MARCH_NUM_SCHEDULERS=14` under `MARCH_SANITIZE=1
+MARCH_DEBUG_RUNTIME=1` (`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`), Docker
+`march-ci-ubuntu-step6b` (arm64, glibc 2.39), concurrently with a 6-way ASAN
+sweep for load: 0 failures, no sanitizer report. The fixture is also clean in
+the full `scripts/native-sanitize-sweep.sh` error pass at 1 and 14 schedulers.
