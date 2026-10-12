@@ -28,3 +28,7 @@ do, though:
 To close: extend the sweep with a TSAN-mode variant of those dune actions (the same
 `system` strings, with the program compiled under `MARCH_SANITIZE=thread`). Run them
 at 2 and 14 schedulers.
+
+Update 2026-10-12: the sweep is now `scripts/tsan-sweep.sh`. It skips these fixtures with
+a printed reason, so closing this item means replacing those skips with TSAN-mode runs of
+the dune actions.

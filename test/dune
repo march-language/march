@@ -6267,6 +6267,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/proc_reclaim_kill_respawn.expected native_proc_reclaim_kill_respawn.out)))
 
+; ── A supervisor's child-pid state words under concurrent restarts
+; (specs/progress/2026-10-12-supervisor-child-slot-race.md): four children
+; crashing at once restart on four scheduler threads, and a restart that lands
+; while the supervisor is inside a handler must survive the handler's state
+; write-back.  Run at 14 schedulers; under MARCH_SANITIZE=thread it must
+; report nothing.
+(rule
+ (targets native_supervisor_concurrent_child_crash native_supervisor_concurrent_child_crash.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (source_tree ../stdlib)
+       (file native/supervisor_concurrent_child_crash.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_concurrent_child_crash
+        native/supervisor_concurrent_child_crash.march)
+   (with-stdout-to native_supervisor_concurrent_child_crash.out
+        (system "MARCH_NUM_SCHEDULERS=14 ./native_supervisor_concurrent_child_crash")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_concurrent_child_crash.expected native_supervisor_concurrent_child_crash.out)))
+
 ; ── pid_of_int on a dead pid whose record is freed (metas PR,
 ; specs/progress/2026-09-23-proc-struct-reclamation-metas.md "Survey additions").  The
 ; golden only pins the answer; the evidence is the ASAN run, where the base

@@ -3320,7 +3320,12 @@ void *march_get_actor_field(void *pid, void *name) {
      * None: handing its raw bits back as a value was an unchecked cast (and
      * an unowned reference). */
     if (s->kinds[i] != 'i') return NULL;
-    int64_t raw = rec_field_raw(pid, i);
+    /* A relaxed atomic load (the same `ldr` as a plain one): this reads
+     * another actor's live state from outside it, and a supervisor's
+     * child-pid word is stored by the runtime from whichever thread ran
+     * the restart (march_runtime.c, sup_slot_publish). */
+    int64_t raw = __atomic_load_n((int64_t *)((char *)pid + 16 + (size_t)i * 8),
+                                  __ATOMIC_RELAXED);
     return (void *)(intptr_t)((raw << 1) | 1);
 }
 
