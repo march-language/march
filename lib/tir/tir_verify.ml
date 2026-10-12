@@ -82,7 +82,25 @@
     twice repeats the name in one function, and scoping makes that harmless),
     and "stack allocations do not escape" needs the escape analysis itself.
 
-    Check 4 (repr invariants) is not built. *)
+    {1 Check 4: representation invariants (at emission)}
+
+    The one check that runs after the TIR pipeline, inside [emit_module]
+    ({!Llvm_toplevel.check4_findings}), because what it checks is what codegen
+    committed to: under the verifier, the [MARCH_REPR_AUDIT] recorder is
+    forced on, and its record of every allocation, reuse, match and equality
+    site's encoding is read back, with the constructor tags codegen installed.
+    A finding raises {!Failed} at stage [llvm-emit], tagged [repr/]:
+
+    - [mixed]: a type's sites mix encoding families (Boxed, Niche, Newtype,
+      Unboxed) for one payload, or a site with no payload to go on disagrees
+      with one that had it (the [Option(Option(_))] null-vs-boxed bug shape);
+    - [collision]: a type in a collision group (one short name, several
+      declaring modules) is encoded as anything but Boxed, or the group's
+      constructor tags leave the collision range or repeat, so a match on
+      the bare short name could not tell the modules apart.
+
+    [march query verify] stops before emission, so it does not run check 4;
+    [--verify-tir] and [MARCH_VERIFY_TIR=1] builds do. *)
 
 module StringSet = Set.Make (String)
 

@@ -5279,6 +5279,11 @@ let compile filename =
    with
    | March_errors.Errors.ParseError _ as exn -> raise exn
    | March_tir.Js_emit.Js_emit_error _ as exn -> raise exn
+   | March_tir.Tir_verify.Failed (stage, findings) ->
+     (* Check 4 runs at emission (llvm-emit), after the TIR pipeline's own
+        handler; a finding is a compiler bug, as for the earlier checks. *)
+     prerr_endline (March_tir.Tir_verify.render ~stage findings);
+     exit 3
    | March_tir.Llvm_calls.Ambiguous_iface_call msg ->
      (* A user-program error (an interface-method call whose dispatch
         position is not concrete at the call site — e.g. bare `from_json`

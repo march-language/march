@@ -1124,13 +1124,17 @@ let wrap_emit_kind ctx (wrap_name : string) : [ `Skip | `Define | `Declare ] =
    llvm_emit.ml) still resets the table per module and prints the report;
    both are re-exported bare there, same pattern as the ctx primitives
    above. *)
-let repr_audit_on = lazy (Sys.getenv_opt "MARCH_REPR_AUDIT" <> None)
+let repr_audit_env = lazy (Sys.getenv_opt "MARCH_REPR_AUDIT" <> None)
+(* Set by [emit_module] when the TIR verifier is on: check 4 turns the report
+   into findings (Tir_verify, "llvm-emit" stage), so the recording must run. *)
+let repr_audit_forced = ref false
+let repr_audit_on_now () = Lazy.force repr_audit_env || !repr_audit_forced
 (* type_name -> (payload_key, family, site) list, deduped *)
 let _repr_audit : (string, (string * string * string) list ref) Hashtbl.t =
   Hashtbl.create 64
 let repr_audit_record ~(ty : string) ~(payload : string) ~(family : string)
     ~(site : string) : unit =
-  if Lazy.force repr_audit_on then begin
+  if repr_audit_on_now () then begin
     let l = match Hashtbl.find_opt _repr_audit ty with
       | Some l -> l
       | None -> let l = ref [] in Hashtbl.add _repr_audit ty l; l
@@ -1138,13 +1142,14 @@ let repr_audit_record ~(ty : string) ~(payload : string) ~(family : string)
     let entry = (payload, family, site) in
     if not (List.mem entry !l) then l := entry :: !l
   end
-let repr_audit_report () =
-  if Lazy.force repr_audit_on then begin
-    let flagged = ref 0 in
-    Hashtbl.iter (fun ty entries ->
+(* The flagged types: [(type, families, conflict kind, entries)], sorted by
+   type so a report or a finding list is deterministic. *)
+let repr_audit_flagged () =
+  Hashtbl.fold (fun ty entries acc ->
       let es = !entries in
       let families = List.sort_uniq compare (List.map (fun (_, f, _) -> f) es) in
-      if List.length families > 1 then begin
+      if List.length families <= 1 then acc
+      else
         (* Mixed families for this type: definite if within one concrete
            payload key; suspicious if via a "?" site. Legitimate when two
            DIFFERENT concrete payloads pick different reprs (Option(Int) niche
@@ -1154,18 +1159,25 @@ let repr_audit_report () =
             List.exists (fun (p2, f2, _) -> p1 = p2 && f1 <> f2) es) es in
         let unknown_conflict =
           List.exists (fun (p, _, _) -> p = "?") es in
-        if same_key_conflict || unknown_conflict then begin
-          incr flagged;
-          Printf.eprintf "[repr-audit] %s: MIXED %s%s\n" ty
-            (String.concat "/" families)
-            (if same_key_conflict then " (same-payload conflict)"
-             else " (unknown-payload site disagrees)");
-          List.iter (fun (p, f, s) ->
-            Printf.eprintf "    %-8s payload=%-24s %s\n" f p s) es
-        end
-      end
-    ) _repr_audit;
-    Printf.eprintf "[repr-audit] %d type(s) flagged\n%!" !flagged
+        if same_key_conflict || unknown_conflict then
+          (ty, families,
+           (if same_key_conflict then "same-payload conflict"
+            else "unknown-payload site disagrees"),
+           List.sort compare es) :: acc
+        else acc)
+    _repr_audit []
+  |> List.sort compare
+
+let repr_audit_report () =
+  if Lazy.force repr_audit_env then begin
+    let flagged = repr_audit_flagged () in
+    List.iter (fun (ty, families, kind, es) ->
+        Printf.eprintf "[repr-audit] %s: MIXED %s (%s)\n" ty
+          (String.concat "/" families) kind;
+        List.iter (fun (p, f, s) ->
+            Printf.eprintf "    %-8s payload=%-24s %s\n" f p s) es)
+      flagged;
+    Printf.eprintf "[repr-audit] %d type(s) flagged\n%!" (List.length flagged)
   end
 
 (* ── Reduction-check helper ───────────────────────────────────────────── *)
