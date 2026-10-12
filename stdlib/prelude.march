@@ -233,6 +233,71 @@ mod Prelude do
     end
   end
 
+  -- Tuple Ord, per arity (2..5): lexicographic, the first component pair
+  -- that differs decides, each by its own Ord impl. Keyed by arity like the
+  -- Show impls above. `<`/`<=`/`>`/`>=` on a tuple lower to `compare` (the
+  -- interpreter applies the same rule directly).
+  impl Ord((a, b)) when Ord(a), Ord(b) do
+    fn compare(s, t) do
+      let (s1, s2) = s
+      let (t1, t2) = t
+      let c = compare(s1, t1)
+      if c != 0 do c else compare(s2, t2) end
+    end
+  end
+
+  impl Ord((a, b, c)) when Ord(a), Ord(b), Ord(c) do
+    fn compare(s, t) do
+      let (s1, s2, s3) = s
+      let (t1, t2, t3) = t
+      let c1 = compare(s1, t1)
+      if c1 != 0 do c1 else
+        let c2 = compare(s2, t2)
+        if c2 != 0 do c2 else compare(s3, t3) end
+      end
+    end
+  end
+
+  impl Ord((a, b, c, d)) when Ord(a), Ord(b), Ord(c), Ord(d) do
+    fn compare(s, t) do
+      let (s1, s2, s3, s4) = s
+      let (t1, t2, t3, t4) = t
+      let c1 = compare(s1, t1)
+      if c1 != 0 do c1 else
+        let c2 = compare(s2, t2)
+        if c2 != 0 do c2 else
+          let c3 = compare(s3, t3)
+          if c3 != 0 do c3 else compare(s4, t4) end
+        end
+      end
+    end
+  end
+
+  impl Ord((a, b, c, d, e)) when Ord(a), Ord(b), Ord(c), Ord(d), Ord(e) do
+    fn compare(s, t) do
+      let (s1, s2, s3, s4, s5) = s
+      let (t1, t2, t3, t4, t5) = t
+      let c1 = compare(s1, t1)
+      if c1 != 0 do c1 else
+        let c2 = compare(s2, t2)
+        if c2 != 0 do c2 else
+          let c3 = compare(s3, t3)
+          if c3 != 0 do c3 else
+            let c4 = compare(s4, t4)
+            if c4 != 0 do c4 else compare(s5, t5) end
+          end
+        end
+      end
+    end
+  end
+
+  -- What compiled `<`, `<=`, `>`, `>=` on a tuple lower to (Lower_expr):
+  -- the Ord impls above decide. Not for direct use.
+  pfn __tuple_lt(a, b) do compare(a, b) < 0 end
+  pfn __tuple_le(a, b) do compare(a, b) <= 0 end
+  pfn __tuple_gt(a, b) do compare(a, b) > 0 end
+  pfn __tuple_ge(a, b) do compare(a, b) >= 0 end
+
   -- ---- Polymorphic println and string conversion ----
 
   doc """

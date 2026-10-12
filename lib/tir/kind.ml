@@ -31,6 +31,9 @@ type table = {
   k_unboxed         : (string, string * Tir.ty list) Hashtbl.t;
   (* LLVM struct type name ("%ub.Vec3") → March type name *)
   k_unboxed_by_llvm : (string, string) Hashtbl.t;
+  (* SHORT name -> qualified [k_unboxed] key, for a module-declared unboxed
+     aggregate the short spelling resolves to; see [canonical_name]. *)
+  k_unboxed_short   : (string, string) Hashtbl.t;
   k_memo            : (Tir.ty, kind) Hashtbl.t;
   (* Names of the module's nominal record types ([TDRecord]), actor structs
      excluded; see [is_record_type]. *)
@@ -64,6 +67,29 @@ let is_scalar_field : Tir.ty -> bool = function
     a mangled March symbol, which [Llvm_ctx.llvm_name] never prefixes. *)
 let unboxed_llvm_name (type_name : string) : string =
   "%ub." ^ String.map (fun c -> if c = '.' then '_' else c) type_name
+
+(* The C runtime builds these module-declared types as boxed heap cells, so
+   their short spelling must never resolve to an unboxed declaration:
+   [Process.LiveProcess] ([process_spawn_async]: "tag=0, 2 int64 fields") and
+   [Bytes] ([compress_bytes_from_raw]; a newtype, listed for the record). *)
+let c_boxed_types = [ "Bytes"; "LiveProcess" ]
+
+(* Index every QUALIFIED unboxed key by its short name.  A short name two
+   unboxed keys share is left out (ambiguous; the collision set forces those
+   Boxed anyway), as is a C-built type. *)
+let unboxed_short_index (k_unboxed : (string, string * Tir.ty list) Hashtbl.t)
+  : (string, string) Hashtbl.t =
+  let h = Hashtbl.create 16 in
+  let dup = Hashtbl.create 4 in
+  Hashtbl.iter (fun q _ ->
+      if String.contains q '.' then begin
+        let sn = Collision_set.short_name q in
+        if List.mem sn c_boxed_types then ()
+        else if Hashtbl.mem h sn then Hashtbl.replace dup sn ()
+        else Hashtbl.replace h sn q
+      end) k_unboxed;
+  Hashtbl.iter (fun sn () -> Hashtbl.remove h sn) dup;
+  h
 
 (** Exclusions, each mirroring one that existed before this table:
     - types crossing an [extern] signature ([externs]): the C side sees the
@@ -99,13 +125,15 @@ let build ?(externs : Tir.extern_decl list = []) ?(unboxing = true)
             && not (Hashtbl.mem ffi name)
             && not (Migrate_msg_pins.has_actor_msg_repr name)
             && not (Tir_names.is_clo_struct name)
+            && not (List.mem (Collision_set.short_name name) c_boxed_types)
             && not (Collision_set.is_colliding collision_set name) ->
           Hashtbl.replace k_unboxed name (ctor, fields);
           Hashtbl.replace k_unboxed_by_llvm (unboxed_llvm_name name) name
         | _ -> ()) type_defs
   end;
   { k_type_defs = type_defs; k_collision = collision_set;
-    k_unboxed; k_unboxed_by_llvm; k_memo = Hashtbl.create 64;
+    k_unboxed; k_unboxed_by_llvm; k_unboxed_short = unboxed_short_index k_unboxed;
+    k_memo = Hashtbl.create 64;
     k_records = record_names type_defs }
 
 let rebind ?collision_set (t : table) (type_defs : Tir.type_def list) : table =
@@ -152,6 +180,17 @@ let of_module ?(unboxing = true) (m : Tir.tir_module) : table =
    which is exactly the short-name answer. *)
 let declared_layout_types = [ "CsvRow" ]
 
+(* Milestone-3 unboxed aggregates are the second resolution to the
+   declaration (specs/todos/2026-10-07-module-type-layouts.md, first slice):
+   a module-declared scalar-only single-constructor type ([mod Geo do type
+   P2 = P2(Int, Int) end]) answers Unboxed under BOTH spellings, so the short
+   key a construction site holds builds the same LLVM struct the qualified
+   declaration names.  This is safe where newtype and niche are not: an
+   unboxed value that enters a ptr slot (a list element, an actor message, a
+   generic [to_string]) is boxed by [Llvm_ctx.coerce] into the same tagged
+   cell a Boxed value is, so every runtime walker sees what it saw before.
+   Extern-crossing, actor-message and colliding types were already excluded
+   by [build]; C-built ones are excluded by [c_boxed_types]. *)
 let canonical_name (t : table) (name : string) : string =
   let s = Collision_set.short_name name in
   if List.mem s declared_layout_types then
@@ -160,7 +199,10 @@ let canonical_name (t : table) (name : string) : string =
         | _ -> None) t.k_type_defs with
     | [ q ] -> q
     | _ -> name
-  else s
+  else
+    match Hashtbl.find_opt t.k_unboxed_short s with
+    | Some q when not (Collision_set.is_colliding t.k_collision s) -> q
+    | _ -> s
 
 (** The DECLARATION a name refers to, for SHAPE questions ("what does a value
     of this type contain?"), which do not depend on the layout it is built

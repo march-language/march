@@ -18,7 +18,26 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Security
+
+- **`~H` no longer lets an interpolated value choose a link's scheme.** In
+  `href="${s}://${rest}"`, a value of `javascript` passed the URL check because
+  it has no colon of its own; the template's `:` then made it the scheme, and
+  the rendered link ran script. A literal `:` (or `&#58;`, `&colon;`) that
+  would complete a scheme an interpolation helped write is now a compile error
+  telling you to interpolate the whole URL as one value. Templates that write
+  the scheme literally (`href="https://${host}/"`) are unaffected.
+  Any app that renders links from `~H` templates with an interpolated scheme
+  should be rebuilt; a template the check now rejects was exploitable.
+
 ### Added
+- **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**
+  Editing a dependency's version in `forge.toml` and running `forge deps` used
+  to lock the new release whatever it asked for. Now a release that asks for
+  capabilities the baseline does not grant is refused like `forge add`: the
+  change is printed, `forge.lock` is left as it was, and
+  `forge deps --accept-caps` keeps it. Installing what `forge.lock` already
+  says is never checked.
 - **`forge release build` lays out a deployable bundle with a `bin/<app>`
   launcher.** `forge release build [--target T] [--profile P] [--tar]` writes
   `.march/release/<app>-<version>-<target>/` (`bin/`, `lib/` with the binary,
@@ -174,6 +193,11 @@ git log is authoritative for exact commits.
   per-message rule. The golden error corpus now re-checks every program with
   its fixes applied (`after fix: exit N`), so a fix that leaves a broken
   program is visible in review.
+- **Tuples are ordered.** `(1, 2) < (1, 3)`, `<=`, `>`, `>=` and `compare`
+  work on tuples of 2 to 5 components whose components are all `Ord`. The order
+  is lexicographic: the first pair of components that differs decides. Before,
+  the typechecker rejected them; and where they got through (inside generic
+  code), compiled `<` on a tuple was always `false`.
 - **Every diagnostic has a code, and `march --explain <code>`.** Each error,
   warning and hint ends its first line with its code in brackets
   (``expected `Int` but got `String`. [type_mismatch]``), `--check-json` always
@@ -432,6 +456,19 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Breaking: a type variable in a function signature is rigid: a body that fixes it is
+  an error.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end`, and a body that
+  makes two signature variables the same type (`fn second(x : a, y : b) : a do
+  y end`), now fail with `annotated_tyvar_fixed` at the signature. It was a
+  warning since 2026-09-22. No stdlib or in-repo test program was affected; a
+  library that relied on it should write the concrete type (the hint names it)
+  or make the body generic.
+- **Small scalar types declared inside a module are now unboxed when
+  compiled.** A single-constructor type of two to four `Int`/`Float`/`Bool`
+  fields (`mod Geo do type P2 = P2(Int, Int) end`) is passed and returned as
+  a struct value with no heap cell, as it already was when declared directly
+  in the entry module. This also applies to the stdlib's `DateTime.Date`,
+  `DateTime.Time`, `Decimal` and `JsonStream` limits. Output is unchanged.
 - **The remote shell's build-identity table is smaller, and a session fetches
   only what differs.** A `--hot-reload` binary embeds the table in a compact
   format (module prefixes written once, 48-bit hashes): 105 KB instead of
@@ -582,6 +619,36 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Drop functions keep the same symbol across unrelated edits.** The compiler
+  named the drop function of a type with an unresolved type variable after the
+  typechecker's internal variable number (`__drop$List_V_53272`), so it moved
+  whenever anything earlier changed. It is now named by position
+  (`__drop$List_V0`), and identical drop functions are emitted once.
+- **The JIT REPL no longer leaks on every input.** Fragments and the precompiled
+  stdlib now release whole lists, records and variants instead of their top
+  cell, so `to_string(List.range(1, 100))` at the prompt no longer leaves about
+  200 objects behind per input. Fragments also stop adding a reference to every
+  heap binding on each input, and register their closures' capture releases.
+- **A dead TypedArray releases its elements (compiled).** An array of Strings
+  (or any heap values) leaked every element when the array was freed. It now
+  releases them.
+- **A function that keeps a parameter's value in a `Vault` stays generic.**
+  `fn keep(mk : () -> Pid(a)) do let t = Vault.new("x") ... Vault.set(t, "h",
+  mk()) end` was polymorphic in `a` only until its first caller: the Vault
+  value restriction pinned the handle's element type for the whole program, so
+  a second call with another type (for example two `Topology.offer_actor_role`
+  roles over actors of different state types) was a type error. The handle is
+  now pinned for one call of the function; an element type no parameter names
+  is still pinned program-wide.
+- A compiled `match` over a tuple that returns a small unboxed type
+  (`match (a, b) do (P2(x1, y1), P2(x2, y2)) -> P2(...) end`) no longer
+  fails in clang with "integer constant must have integer type".
+- **`Actor.top_by_mailbox` and `Actor.over_mailbox` see an actor stuck in
+  `Actor.call`.** While an actor waits for a reply, the messages that arrive are
+  set aside until the reply comes. Those actors used to show a depth of 0, so
+  the actor stuck in a slow call with work piling up was missed. Both functions
+  now count those messages, through the new `mailbox_backlog(pid)`.
+  `mailbox_size` still reports only the queued messages.
 - Conditional interface implementations now check their specialised `when`
   bounds at use sites, rejecting types whose nested payload lacks the required
   interface instead of accepting the implementation's head alone.

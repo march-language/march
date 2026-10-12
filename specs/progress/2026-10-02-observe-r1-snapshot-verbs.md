@@ -180,7 +180,7 @@ section). At millions of actors that should become a bounded top-N walk; R3's
 - [`todos/2026-10-02-supervise-block-fails-to-compile-with-hot-reload.md`](../todos/2026-10-02-supervise-block-fails-to-compile-with-hot-reload.md):
   any `supervise` block fails in clang under `--hot-reload` (pre-existing; the
   reason the supervisor fixture is not also a hot-reload build).
-- [`todos/2026-10-02-actor-call-held-messages-invisible-to-mailbox-count.md`](../todos/2026-10-02-actor-call-held-messages-invisible-to-mailbox-count.md):
+- [`progress/2026-10-11-actor-call-held-messages-invisible-to-mailbox-count.md`](2026-10-11-actor-call-held-messages-invisible-to-mailbox-count.md):
   an actor blocked in `Actor.call` holds the messages that arrive meanwhile
   outside every mailbox count, so it looks idle to `mailbox_size`, `top_by_mailbox`
   and `ACTORS`.

@@ -1,5 +1,5 @@
 exit: 1
--- WARNING ----------- errors/annotated_tyvar_fixed_1.march
+-- ERROR ----------- errors/annotated_tyvar_fixed_1.march
 
 The type variables `a` and `b` in `launder`'s signature are not independent: the body makes `b` the same type as `a`. [annotated_tyvar_fixed]
 

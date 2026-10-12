@@ -1,0 +1,28 @@
+-- Two actor-bound topology roles of different state types (2026-10-11).
+-- Topology.offer_actor_role keeps the Pid(a) it spawns in a Vault bound by an
+-- unannotated let; that pinned `a` for the whole program, so the second role
+-- was "expected `{ n : Int }` but got `{ s : String }`". See accept/t314.
+mod M do
+  needs IO.Console, IO.Mut
+
+  actor A do
+    state { n : Int }
+    init { n: 0 }
+    on Ping() do state end
+  end
+
+  actor B do
+    state { s : String }
+    init { s: "" }
+    on Ping() do state end
+  end
+
+  fn roles() : List(Topology.TopoRole) do
+    [Topology.offer_actor_role("a", Topology.everywhere(), 1, fn () -> spawn(A), fn (_, _) -> Err(SessionNode.HostGone(0))),
+     Topology.offer_actor_role("b", Topology.everywhere(), 1, fn () -> spawn(B), fn (_, _) -> Err(SessionNode.HostGone(0)))]
+  end
+
+  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
+    println(int_to_string(List.length(roles())))
+  end
+end

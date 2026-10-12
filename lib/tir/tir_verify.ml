@@ -322,7 +322,7 @@ let check_types ~report ~(k_table : Kind.table option) (m : Tir.tir_module) =
     | _ -> ()
   in
   List.iter (fun (fd : Tir.fn_def) ->
-      (* Drop glue ([__drop$List_Va]) is synthesised per type, erased
+      (* Drop glue ([__drop$List_V0]) is synthesised per type, erased
          element included; it is not a specialisation mono failed to finish. *)
       if fd.Tir.fn_kind = Tir.FnNormal
          && not (String.starts_with ~prefix:Tir_names.drop_fn_prefix fd.Tir.fn_name)

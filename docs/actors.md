@@ -1059,8 +1059,12 @@ The interpreted backend reports the subset that's meaningful without the C sched
 
 `Scheduler` answers "is the system behind?". "*Which* actor is behind?" is
 `Actor.top_by_mailbox(c, n)` and `Actor.over_mailbox(c, threshold)`, built on
-`Actor.list(c)` and `mailbox_size` (`c` from `Actor.introspect`, see
-[Introspection is a capability](#introspection-is-a-capability)): both are snapshots (an actor can die or drain between the walk and
+`Actor.list(c)` and `mailbox_backlog` (`c` from `Actor.introspect`, see
+[Introspection is a capability](#introspection-is-a-capability)). The depth they rank by
+is the actor's waiting work: `mailbox_backlog(pid)` is `mailbox_size(pid)` plus the
+messages an `Actor.call` the actor is blocked in has set aside until its reply. An actor
+stuck in a slow call with work piling up reads `0` by `mailbox_size`, and it is the one
+these should find. Both are snapshots (an actor can die or drain between the walk and
 your reaction) and cost one pass over every live actor, so poll them from a timer, not a
 hot path. There is no push-style alarm that fires when a queue crosses a threshold, and no
 tracing; see `specs/todos/2026-08-12-per-actor-introspection-and-alarms.md`.

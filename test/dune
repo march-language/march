@@ -1255,7 +1255,7 @@
 (test
  (name test_jit)
  (modules test_jit)
- (libraries march_jit alcotest unix)
+ (libraries march_jit alcotest unix str)
  ; The session tests spawn the real compiler binary and need the staged
  ; stdlib + runtime trees next to it (same dep shape as the bench_gate rule).
  ; MARCH_BIN serves the check_session and redefinition harnesses.
@@ -1810,6 +1810,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/field_use_after_parent_release.expected native_field_use_after_parent_release.out)))
+
+; Tuple `<`/`compare`: Ord when every component is, lexicographic; compiled
+; `<` on a tuple goes through the prelude's per-arity Ord impls (it was
+; always false via march_poly_compare), generic callers included.
+(rule
+ (targets native_tuple_ord native_tuple_ord.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/tuple_ord.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tuple_ord native/tuple_ord.march)
+   (with-stdout-to native_tuple_ord.out (system "./native_tuple_ord")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_ord.expected native_tuple_ord.out)))
 
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
@@ -3095,6 +3113,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/observe_counters.expected native_observe_counters.out)))
+
+; mailbox_backlog counts the messages an Actor.call holds off the mailbox, and
+; Actor.top_by_mailbox / over_mailbox rank by it (mailbox_size reads 0 there).
+(rule
+ (targets native_mailbox_backlog_counts_held native_mailbox_backlog_counts_held.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/mailbox_backlog_counts_held.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_mailbox_backlog_counts_held native/mailbox_backlog_counts_held.march)
+   (with-stdout-to native_mailbox_backlog_counts_held.out
+        (system "./native_mailbox_backlog_counts_held")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mailbox_backlog_counts_held.expected native_mailbox_backlog_counts_held.out)))
 
 ; R2 scheduler utilisation: idle under 5%, four spinners on four schedulers
 ; over 90%.
@@ -10936,6 +10972,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/typed_array_builtin_borrow_leak_probe.expected typed_array_builtin_borrow_leak_probe.out)))
 
+; A dead TypedArray releases every element it holds (its own reserved tag,
+; MARCH_TYPED_ARR_TAG, and march_run_resource_dtor). Before 2026-10-07 each
+; leg leaked one String per element per iteration.
+(rule
+ (targets typed_array_elements_released_probe typed_array_elements_released_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/typed_array_elements_released_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o typed_array_elements_released_probe
+        native/typed_array_elements_released_probe.march)
+   (with-stdout-to typed_array_elements_released_probe.out
+        (system "./typed_array_elements_released_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/typed_array_elements_released_probe.expected typed_array_elements_released_probe.out)))
+
 (rule
  (targets nativearray_builtin_borrow_leak_probe nativearray_builtin_borrow_leak_probe.out)
  (deps (file %{exe:../bin/main.exe})
@@ -12921,6 +12977,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/qualified_newtype_repr.expected native_qualified_newtype_repr.out)))
+; ── A scalar-only aggregate declared in a nested module is unboxed like a
+; top-level one (2026-10-11); the .expected is the interpreter's output.
+(rule
+ (targets native_module_unboxed_aggregate native_module_unboxed_aggregate.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/module_unboxed_aggregate.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_module_unboxed_aggregate
+        native/module_unboxed_aggregate.march)
+   (with-stdout-to native_module_unboxed_aggregate.out
+        (system "./native_module_unboxed_aggregate")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/module_unboxed_aggregate.expected native_module_unboxed_aggregate.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),

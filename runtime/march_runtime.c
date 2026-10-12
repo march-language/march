@@ -609,6 +609,12 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
         void *native = *(void **)((char *)p + 16);
         if (dtor) dtor(native);
+    } else if (tag == MARCH_TYPED_ARR_TAG) {
+        /* Every slot owns one reference (each typed_array_ producer takes its
+         * own); march_decrc ignores a tagged immediate. */
+        int64_t len = *(int64_t *)((char *)p + 16);
+        void **slots = (void **)((char *)p + 32);   /* TYPED_ARRAY_HDR_SIZE */
+        for (int64_t i = 0; i < len; i++) march_decrc(slots[i]);
     } else if (tag == MARCH_TASK_TAG) {
         /* A Task owns the box of a Float result. The trampoline stores
          * task[3] = (raw << 1) | 1; for a Float task raw is the
@@ -10838,6 +10844,23 @@ int64_t march_mailbox_size(void *pid) {
     return depth;
 }
 
+/* mailbox_backlog: the work waiting for this actor, which is its mailbox
+ * depth (as mailbox_size) plus the user messages an Actor.call it is blocked
+ * in has taken off the mailbox to put back after the reply (the proc's
+ * `held`). An actor stuck in a slow call with work piling up reads 0 by
+ * mailbox_size; this is the count Actor.top_by_mailbox / over_mailbox rank
+ * by, as the observe socket's ACTORS mbox / TOP mbox already do. */
+int64_t march_mailbox_backlog(void *pid) {
+    if (!IS_HEAP_PTR(pid)) return 0;
+    int64_t depth = 0;
+    march_reclaim_enter();   /* meta and gt: resolved and used inside */
+    march_actor_meta *meta = find_meta(pid);
+    march_proc *gt = meta ? meta_gt(meta) : NULL;
+    if (gt) depth = march_sched_mbox_count(gt) + march_sched_held_count(gt);
+    march_reclaim_exit();
+    return depth;
+}
+
 /* actor_set_mailbox_limit: bind a mailbox capacity + overflow policy to the
    green thread backing this actor. limit <= 0 means unbounded; policy is a
    march_mbox_policy value (0 unbounded, 1 drop_new, 2 drop_old, 3 block).
@@ -11619,6 +11642,9 @@ static void *typed_array_alloc(int64_t len) {
     }
     size_t sz = (size_t)(TYPED_ARRAY_HDR_SIZE + body);
     void *arr = march_alloc((int64_t)sz);
+    /* Its own tag, so a free releases the elements (march_run_resource_dtor).
+     * Every caller fills all [len] slots before the array is published. */
+    ((march_hdr *)arr)->tag = MARCH_TYPED_ARR_TAG;
     *(int64_t *)((char *)arr + 16) = len;   /* len field */
     *(int64_t *)((char *)arr + 24) = len;   /* cap field */
     return arr;
