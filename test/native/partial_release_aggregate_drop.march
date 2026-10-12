@@ -7,6 +7,8 @@
 --   - a parameter read in a `let`'s if-value, released by the other arm,
 --     while the rest of the body reads ANOTHER parameter
 --     (ClusterNode.keeps_new);
+--   - a let-bound record read by an if used as a statement
+--     (ClusterNode's CtlWriter handlers, once per message);
 --   - a record destructured in a TRMC'd map, whose panic default made the
 --     drop give up on every path (Plot's render_legend).
 -- Each leg prints the value it computed, so a use-after-free that changes a
@@ -16,6 +18,7 @@ mod Main do
 
   type St = { me : String, tag : String }
   type Ln = { node_id : String, dialer : String }
+  type Rec = { fd : Int, name : String }
   type S = { label : Option(String), style : String }
 
   pfn keeps_new(st : St, l : Ln) : Bool do
@@ -31,6 +34,18 @@ mod Main do
       let k = if keeps_new(mk_st(n), mk_ln(n)) do 1 else 0 end
       param_leg(n - 1, acc + k)
     end
+  end
+
+  pfn touch(n : Int) : Int do n + 1 end
+
+  pfn stmt_case(n : Int) : Int do
+    let r = { fd: n % 3 - 1, name: int_to_string(n) }
+    if r.fd >= 0 do touch(r.fd) else 0 end
+    n * 2
+  end
+
+  pfn stmt_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else stmt_leg(n - 1, acc + stmt_case(n)) end
   end
 
   pfn labels(lst : List(S)) : List(String) do
@@ -73,6 +88,8 @@ mod Main do
   fn main(_c : Cap(IO.Console)) do
     let a = live_allocs()
     flat("parameter read in a let's if-value", a, int_to_string(param_leg(3000, 0)))
+    let b = live_allocs()
+    flat("record read by an if statement", b, int_to_string(stmt_leg(3000, 0)))
     let c = live_allocs()
     flat("record destructured in a TRMC map", c, int_to_string(trmc_leg(300, 0)))
   end
