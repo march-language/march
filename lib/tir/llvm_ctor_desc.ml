@@ -24,27 +24,6 @@
     slot representations, so a divergence is a MISREAD field rather than a
     missing name. *)
 
-(** Field token for a constructor/record slot of type [ty].  [id_of] resolves
-    a type name to its local descriptor id, or [None] if that type is not
-    described (a generic niche, or not declared here) — in which
-    case the slot falls back to the generic 'p' renderer, which is exactly
-    today's behaviour for it. *)
-let field_token ~(id_of : string -> int option) (ty : Tir.ty) : string =
-  match ty with
-  | Tir.TInt -> "i"
-  | Tir.TBool -> "b"
-  | Tir.TUnit -> "u"
-  | Tir.TFloat -> "f"
-  | Tir.TString -> "s"
-  (* An Atom is a raw i64 hash in its slot and the runtime keeps no
-     hash -> name registry, so its name is simply not recoverable at run time.
-     'p' (generic) is what it already got; making that worse is not this
-     change's business. *)
-  | Tir.TCon ("Atom", []) -> "p"
-  | Tir.TCon (name, _) ->
-    (match id_of name with Some id -> Printf.sprintf "A%d" id | None -> "p")
-  | _ -> "p"
-
 (** How the renderer must read a value of type [name], or [None] if the table
     cannot describe it (the value then keeps the generic renderer).
 
@@ -90,19 +69,6 @@ let desc_kind ctx (name : string) : char option =
 
 let describable ctx (name : string) : bool = desc_kind ctx name <> None
 
-(** Token for the payload of an ['N'] or ['X'] type.  Unlike a heap-cell slot
-    ([field_token]), the payload word is what the allocator handed out for
-    the WRAPPER: a scalar payload is TAGGED [(v<<1)|1]
-    ([Kind.payload_needs_tag], [Llvm_emit_alloc]'s newtype and niche arms),
-    so Int and Bool get their own tagged tokens ['I'] / ['B'].  A payload
-    whose type is itself an ['N'] newtype over a scalar carries the same
-    tagged word, which that type's own row reads. *)
-let payload_token ~(id_of : string -> int option) (ty : Tir.ty) : string =
-  match ty with
-  | Tir.TInt -> "I"
-  | Tir.TBool -> "B"
-  | _ -> field_token ~id_of ty
-
 (** Assign local ids to every describable variant/record type, first-wins on
     the short name — the same rule [Llvm_toplevel.build_ctor_info] uses to
     populate [ctor_info], so an id and the tags it is looked up with always
@@ -125,36 +91,180 @@ let assign_ids ctx : unit =
     ctx.Llvm_ctx.type_defs
   end
 
-(** Build the descriptor string for the ids [assign_ids] handed out.  Tags
-    come from [ctor_info], never from the declaration index: actor-message and
-    colliding-short-name types are given globally-unique tags, and a table
-    keyed on the index would misname every one of their constructors. *)
+(** The next free local id: base ids are 1..n, instances follow. *)
+let next_local_id ctx : int =
+  Hashtbl.length ctx.Llvm_ctx.ctor_desc_ids
+  + Hashtbl.length ctx.Llvm_ctx.ctor_desc_insts + 1
+
+(** Bound on instance rows per unit.  A polymorphically recursive type
+    ([type N(a) = Z | S(N(List(a)))]) names a new instance at every level, so
+    without a bound the walk would not terminate; past it a slot keeps the
+    declaration's own row, which is the pre-instance output. *)
+let max_instances = 512
+
+let rec ty_is_ground : Tir.ty -> bool = function
+  | Tir.TVar _ -> false
+  | Tir.TCon (_, ts) | Tir.TTuple ts -> List.for_all ty_is_ground ts
+  | Tir.TRecord fs -> List.for_all (fun (_, t) -> ty_is_ground t) fs
+  | Tir.TFn (ps, r) -> List.for_all ty_is_ground ps && ty_is_ground r
+  | Tir.TPtr t -> ty_is_ground t
+  | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TString | Tir.TUnit -> true
+
+let find_variant_decl ctx (name : string) =
+  List.find_map (function
+      | Tir.TDVariant (n, ctors) when n = name -> Some ctors
+      | _ -> None)
+    ctx.Llvm_ctx.type_defs
+
+(** Write one [C] row per constructor of [name].  Tags come from [ctor_info],
+    never from the declaration index: actor-message and colliding-short-name
+    types are given globally-unique tags, and a table keyed on the index would
+    misname every one of their constructors. *)
+let add_ctor_rows ctx buf (name : string) ctors (token : Tir.ty -> string) : unit =
+  List.iteri (fun idx (cname, field_tys) ->
+      let tag =
+        match Hashtbl.find_opt ctx.Llvm_ctx.ctor_info (name ^ "." ^ cname) with
+        | Some e -> e.Llvm_ctx.ce_tag
+        | None -> idx
+      in
+      Printf.bprintf buf "C\t%d\t%s\t%s\n" tag cname
+        (String.concat "," (List.map token field_tys)))
+    ctors
+
+(** Field token for a constructor/record slot of type [ty].  A named type
+    resolves through [id_for_ty] to its local descriptor id; one the table
+    does not describe (a generic niche reached without arguments, or a type
+    not declared here) falls back to the generic 'p' renderer, which is
+    exactly the untyped behaviour for it. *)
+let rec field_token ctx (ty : Tir.ty) : string =
+  match ty with
+  | Tir.TInt -> "i"
+  | Tir.TBool -> "b"
+  | Tir.TUnit -> "u"
+  | Tir.TFloat -> "f"
+  | Tir.TString -> "s"
+  (* An Atom is a raw i64 hash in its slot and the runtime keeps no
+     hash -> name registry, so its name is simply not recoverable at run time.
+     'p' (generic) is what it already got; making that worse is not this
+     change's business. *)
+  | Tir.TCon ("Atom", []) -> "p"
+  | Tir.TCon _ ->
+    (match id_for_ty ctx ty with Some id -> Printf.sprintf "A%d" id | None -> "p")
+  | _ -> "p"
+
+(** Token for the payload of an ['N'] or ['X'] type.  Unlike a heap-cell slot
+    ([field_token]), the payload word is what the allocator handed out for
+    the WRAPPER: a scalar payload is TAGGED [(v<<1)|1]
+    ([Kind.payload_needs_tag], [Llvm_emit_alloc]'s newtype and niche arms),
+    so Int and Bool get their own tagged tokens ['I'] / ['B'].  A payload
+    whose type is itself an ['N'] newtype over a scalar carries the same
+    tagged word, which that type's own row reads. *)
+and payload_token ctx (ty : Tir.ty) : string =
+  match ty with
+  | Tir.TInt -> "I"
+  | Tir.TBool -> "B"
+  | _ -> field_token ctx ty
+
+(** Token for a slot whose DECLARED type is a type variable, holding a value
+    of the instance's type [ty].  Such a slot holds the erased word: a scalar
+    is tagged (Int, Bool: the same 'I'/'B' as a wrapper payload), a Float is
+    a boxed cell the generic renderer recognises, and Unit needs no read at
+    all.  Anything else is the value's own word, read by its own row. *)
+and erased_token ctx (ty : Tir.ty) : string =
+  match ty with
+  | Tir.TInt -> "I"
+  | Tir.TBool -> "B"
+  | Tir.TFloat -> "p"
+  (* Unit reaches here under all three spellings the typechecker and lowering
+     use for it. *)
+  | Tir.TUnit | Tir.TTuple [] | Tir.TCon ("Unit", []) -> "u"
+  | _ -> field_token ctx ty
+
+(** The local id for a value of static type [ty], or [None] when the table
+    does not describe it.
+
+    A generic type applied to GROUND arguments gets an instance entry of its
+    own, its rows written with the arguments substituted.  The declaration's
+    row can only say 'p' for a type-variable slot, and the generic renderer
+    has nothing to go on for a value with no cell (a newtype's payload, a
+    niche's word) or for a tagged Bool, which reads as an Int.  That is how
+    [Box(Meters(9))] printed [Box(9)].  [List]/[Option]/[Result] never needed
+    this at the top level because their Show impls monomorphise to an element
+    `to_string` with the element's static type; a user generic type has no
+    such impl. *)
+and id_for_ty ctx (ty : Tir.ty) : int option =
+  assign_ids ctx;
+  match ty with
+  | Tir.TCon (name, (_ :: _ as args)) when List.for_all ty_is_ground args ->
+    (match instance_id ctx name args with
+     | Some _ as r -> r
+     | None -> Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_ids name)
+  | Tir.TCon (name, _) -> Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_ids name
+  | _ -> None
+
+and instance_id ctx (name : string) (args : Tir.ty list) : int option =
+  let key = Tir.show_ty (Tir.TCon (name, args)) in
+  match Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_insts key with
+  | Some id -> Some id
+  | None ->
+    let tbl = ctx.Llvm_ctx.k_table in
+    match find_variant_decl ctx name,
+          Hashtbl.find_opt ctx.Llvm_ctx.type_params name with
+    | Some ctors, Some params
+      when List.length params = List.length args
+        && Hashtbl.length ctx.Llvm_ctx.ctor_desc_insts < max_instances ->
+      (* The instance's representation.  A niche-shaped type is a niche or a
+         boxed cell depending on its argument, and [Kind.repr_of] WITH the
+         arguments is the predicate the allocator keys on; anything else is
+         decided by its declaration, as for the base row. *)
+      let kind =
+        if Kind.is_niche_shaped tbl name then
+          (match Kind.repr_of tbl (Tir.TCon (name, args)) with
+           | Kind.Niche _ -> Some 'X'
+           | _ -> Some 'V')
+        else desc_kind ctx name
+      in
+      (match kind with
+       | None -> None
+       | Some kind ->
+         let id = next_local_id ctx in
+         (* Registered before the rows are built: a recursive type's row names
+            this same instance ([Tree(Meters)] inside [Node]). *)
+         Hashtbl.replace ctx.Llvm_ctx.ctor_desc_insts key id;
+         let subst = List.combine params args in
+         let token gf =
+           let t = Llvm_eq.apply_ty_subst subst gf in
+           match gf with
+           | Tir.TVar _ -> erased_token ctx t
+           | _ -> if kind = 'V' then field_token ctx t else payload_token ctx t
+         in
+         let buf = Buffer.create 128 in
+         (* '*' marks an instance: the runtime must not register it under the
+            type's header id, which names the declaration, not this instance. *)
+         Printf.bprintf buf "T\t%d\t%c*\t%s\n" id kind name;
+         add_ctor_rows ctx buf name ctors token;
+         Buffer.add_buffer ctx.Llvm_ctx.ctor_desc_inst_rows buf;
+         Some id)
+    | _ -> None
+
+(** Build the descriptor rows for the ids [assign_ids] handed out. *)
 let build_desc ctx : string =
-  let id_of n = Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_ids n in
   let buf = Buffer.create 1024 in
   let emitted = Hashtbl.create 64 in
   List.iter (fun td ->
       match td with
       | Tir.TDVariant (name, ctors) when not (Hashtbl.mem emitted name) ->
-        (match id_of name with
+        (match Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_ids name with
          | None -> ()
          | Some id ->
            Hashtbl.replace emitted name ();
            let kind = match desc_kind ctx name with Some k -> k | None -> 'V' in
-           let token = if kind = 'V' then field_token ~id_of
-             else payload_token ~id_of in
+           let token = if kind = 'V' then field_token ctx
+             else payload_token ctx in
            Printf.bprintf buf "T\t%d\t%c\t%s\n" id kind name;
-           List.iteri (fun idx (cname, field_tys) ->
-               let tag =
-                 match Hashtbl.find_opt ctx.Llvm_ctx.ctor_info (name ^ "." ^ cname) with
-                 | Some e -> e.Llvm_ctx.ce_tag
-                 | None -> idx
-               in
-               Printf.bprintf buf "C\t%d\t%s\t%s\n" tag cname
-                 (String.concat "," (List.map token field_tys)))
-             ctors)
+           add_ctor_rows ctx buf name ctors token)
       | Tir.TDRecord (name, fields) when not (Hashtbl.mem emitted name) ->
-        (match id_of name with
+        (match Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_ids name with
          | None -> ()
          | Some id ->
            Hashtbl.replace emitted name ();
@@ -164,26 +274,46 @@ let build_desc ctx : string =
               it must use that order and not the declaration order. *)
            let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
            List.iter (fun (fname, fty) ->
-               Printf.bprintf buf "F\t%s\t%s\n" fname (field_token ~id_of fty))
+               Printf.bprintf buf "F\t%s\t%s\n" fname (field_token ctx fty))
              sorted)
       | _ -> ())
     ctx.Llvm_ctx.type_defs;
   Buffer.contents buf
 
-(** Emit the descriptor and base-cache globals if this is the first call site
-    to need them, and return them. *)
+(** Reserve the descriptor and base-cache globals if this is the first call
+    site to need them, and return them.  The cache global is defined now; the
+    descriptor STRING is only named here and is defined by [flush] once the
+    whole unit has been emitted, because a later call site can still add
+    instance rows ([instance_id]) and all of them must be in the one string. *)
 let ensure_globals ctx : string * string =
   match ctx.Llvm_ctx.ctor_desc_globals with
   | Some pair -> pair
   | None ->
     assign_ids ctx;
-    let dg = Llvm_ctx.intern_string ctx (build_desc ctx) in
+    ctx.Llvm_ctx.str_ctr <- ctx.Llvm_ctx.str_ctr + 1;
+    let dg = Printf.sprintf "@.ctordescstr%d" ctx.Llvm_ctx.str_ctr in
     ctx.Llvm_ctx.str_ctr <- ctx.Llvm_ctx.str_ctr + 1;
     let cg = Printf.sprintf "@.ctordesc%d" ctx.Llvm_ctx.str_ctr in
     Buffer.add_string ctx.Llvm_ctx.preamble
       (Printf.sprintf "%s = internal global i32 0\n" cg);
     ctx.Llvm_ctx.ctor_desc_globals <- Some (dg, cg);
     (dg, cg)
+
+(** Define the descriptor string [ensure_globals] named, if any site asked
+    for it.  Every module finaliser calls this after the last function body
+    has been emitted ([Llvm_toplevel.emit_module] and the [Llvm_repl]
+    fragment finalisers); LLVM IR lets a global be defined after its uses. *)
+let flush ctx (out : Buffer.t) : unit =
+  match ctx.Llvm_ctx.ctor_desc_globals with
+  | None -> ()
+  | Some (dg, _) ->
+    (* Base rows first: building them can still add instances (a declared
+       field of type [List(Meters)]), which land in the instance buffer. *)
+    let base = build_desc ctx in
+    let s = base ^ Buffer.contents ctx.Llvm_ctx.ctor_desc_inst_rows in
+    Printf.bprintf out
+      "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+      dg (String.length s + 1) (Llvm_ctx.llvm_escape_string s)
 
 (** The local descriptor id for [ty], or [None] if it is not a type this table
     describes.  Deliberately EMITS NOTHING: it is called as a match guard at
@@ -201,9 +331,7 @@ let id_for ctx (ty : Tir.ty) : int option =
   if not ctx.Llvm_ctx.shape_meta then None
   else
   match ty with
-  | Tir.TCon (name, _) ->
-    assign_ids ctx;
-    Hashtbl.find_opt ctx.Llvm_ctx.ctor_desc_ids name
+  | Tir.TCon _ -> id_for_ty ctx ty
   (* A `ptype` alias reaches call sites as a STRUCTURAL record, not as the
      nominal [TCon] its declaration produced, so a name lookup misses it and a
      record printed `#<tag:0>` where a variant printed its constructor.  Match

@@ -294,6 +294,13 @@ type ctx = {
      is emitted into the module at all. *)
   mutable ctor_desc_globals : (string * string) option;
   ctor_desc_ids : (string, int) Hashtbl.t;
+  (* Instances of generic types the descriptor describes with their type
+     arguments substituted (`Box(Meters)`): [Tir.show_ty] key -> LOCAL id, and
+     the descriptor rows written for them so far.  Filled on demand by
+     [Llvm_ctor_desc.id_for_ty]; written out with the base rows by
+     [Llvm_ctor_desc.flush] once the whole unit has been emitted. *)
+  ctor_desc_insts : (string, int) Hashtbl.t;
+  ctor_desc_inst_rows : Buffer.t;
   (* Distributed OTP L4: CAS-derived hash maps for remote_ref_hashes constant folding.
      Maps qualified fn name ("Math.add") → hex hash string. *)
   remote_impl_hashes : (string, string) Hashtbl.t;
@@ -435,6 +442,8 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   rec_shape_globals = Hashtbl.create 16;
   ctor_desc_globals = None;
   ctor_desc_ids = Hashtbl.create 64;
+  ctor_desc_insts = Hashtbl.create 16;
+  ctor_desc_inst_rows = Buffer.create 256;
   remote_impl_hashes = Hashtbl.create 0;
   remote_sig_hashes  = Hashtbl.create 0;
   compile_so = false;

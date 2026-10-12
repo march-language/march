@@ -1943,6 +1943,7 @@ let emit_module ~emit_expr
   emit_atom_show_table ctx;
   (* Append closure wrapper functions generated for top-level fn-as-value *)
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
+  Llvm_ctor_desc.flush ctx out;
 
   (* Capability markers (specs/2026-08-03-forge-cap-audit-design.md §4.3, C).
      Derived from the C symbols the emitted code actually resolved through

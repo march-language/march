@@ -30,4 +30,5 @@ which has no field names for the cell.
 Give structural records their own descriptor entries (field names are in the
 static type). The descriptor is built at the first call site that needs it,
 so this needs the same "collect first, or emit at the end of the module"
-change as `specs/todos/2026-10-11-to-string-newtype-in-generic-slot.md`.
+change as `specs/progress/2026-10-11-to-string-newtype-in-generic-slot.md`
+(which made it: the descriptor is now defined at the end of the module).

@@ -177,6 +177,8 @@ type ctx = Llvm_ctx.ctx = {
   rec_shape_globals : (string, string * string) Hashtbl.t;
   mutable ctor_desc_globals : (string * string) option;
   ctor_desc_ids : (string, int) Hashtbl.t;
+  ctor_desc_insts : (string, int) Hashtbl.t;
+  ctor_desc_inst_rows : Buffer.t;
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
   compile_so : bool;

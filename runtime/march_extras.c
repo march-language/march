@@ -3518,7 +3518,7 @@ void *march_html_auto_escape(void *v) {
  *
  * Descriptor grammar (tab-separated, newline-terminated lines):
  *
- *   T \t <local id> \t <V|R|N|X> \t <TypeName>   start a type
+ *   T \t <local id> \t <V|R|N|X>[*] \t <TypeName>   start a type
  *   C \t <tag> \t <CtorName> \t <f1,f2,...>      a variant constructor
  *   F \t <FieldName> \t <f>                      a record field, slot order
  *
@@ -3527,6 +3527,11 @@ void *march_html_auto_escape(void *v) {
  * value is raw 0 for its nullary constructor and the payload for the other.
  * Their rows' field tokens describe the payload WORD, which the allocator
  * tags for a scalar payload (lib/tir/llvm_emit_alloc.ml), hence I and B.
+ *
+ * A kind followed by '*' is an INSTANCE of a generic type (`Box(Meters)`):
+ * its rows are the declaration's with the type arguments substituted, so a
+ * type-variable slot carries the argument's token instead of 'p'.  An
+ * instance is reached only through its local id, never through a header id.
  *
  * A field token is one character, optionally followed by a decimal id:
  *   i  raw i64 Int          b  raw i64 Bool        u  Unit
@@ -3561,7 +3566,8 @@ typedef struct {
     march_ctor_field *fields;
 } march_ctor_row;
 typedef struct {
-    char kind;                /* 'V' variant, 'R' record */
+    char kind;                /* 'V' variant, 'R' record, 'N' newtype, 'X' niche */
+    char inst;                /* 1: an instance row (kind written "V*" etc.) */
     char *name;
     int32_t nrows;
     march_ctor_row *rows;
@@ -3744,11 +3750,15 @@ int32_t march_ctor_table_ensure(const char *desc, int32_t *cache) {
             if (local < 1 || local > ntypes) { cur = NULL; p = eol + 1; continue; }
             cur = &ctor_types[base + local - 1];
             cur->kind = *f2;
+            cur->inst = f2[1] == '*';
             cur->name = ctor_strndup(f3, (size_t)(eol - f3));
             /* Only a cell can carry a header id; registering a cell-less
              * N/X type would let a stamped cell of a same-named type from
-             * another unit resolve to rows that do not read cells. */
-            if (cur->kind == 'V' || cur->kind == 'R')
+             * another unit resolve to rows that do not read cells.  An
+             * instance row is never registered: the header id names the
+             * declaration, and an instance's substituted tokens would misread
+             * a cell of any other instance. */
+            if ((cur->kind == 'V' || cur->kind == 'R') && !cur->inst)
                 ctor_id_put(march_type_id_of_name(cur->name), base + local, cur->name);
             int32_t nrows = 0;
             for (const char *q = eol + 1; *q && *q != 'T'; ) {
@@ -4016,7 +4026,12 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int re
      * flow the static type did not see) trust the cell. */
     {
         int32_t hdr = ctor_type_index_for_hdr(v);
-        if (hdr > 0 && hdr != type_id) type_id = hdr;
+        /* ...except that an INSTANCE row of the cell's own type is the more
+         * precise answer: the header names only the declaration. */
+        if (hdr > 0 && hdr != type_id
+            && !(ctor_types[type_id - 1].inst && ctor_types[type_id - 1].name
+                 && strcmp(ctor_types[type_id - 1].name, ctor_types[hdr - 1].name) == 0))
+            type_id = hdr;
     }
     march_ctor_type *t = &ctor_types[type_id - 1];
     if (!t->name) { ctor_put_generic(b, v, 1, repr); return; }

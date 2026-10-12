@@ -85,9 +85,10 @@ of a type get one answer" test lists the expected answer for each shape.
 The printing blocker is gone
 ([`progress/2026-10-11-compiled-to-string-newtype-niche.md`](../progress/2026-10-11-compiled-to-string-newtype-niche.md)):
 compiled `to_string` renders newtype and niche values by their static type,
-top level and nested. One printing gap remains: a newtype or niche value in a
-type-variable slot of a user generic type, or under an erased `to_string`
-([`todos/2026-10-11-to-string-newtype-in-generic-slot.md`](2026-10-11-to-string-newtype-in-generic-slot.md)).
+top level and nested, including in a type-variable slot of a user generic
+type ([`progress/2026-10-11-to-string-newtype-in-generic-slot.md`](../progress/2026-10-11-to-string-newtype-in-generic-slot.md)).
+One printing gap remains: a newtype or niche value under an erased `to_string`
+([`todos/2026-10-11-to-string-erased-newtype.md`](2026-10-11-to-string-erased-newtype.md)).
 Widening would spread that gap to module types too.
 
 A nested-niche miscompile was fixed on the way

@@ -67,7 +67,9 @@ a boxed niche-shaped type, interpolation, `inspect`, `~H`).
 
 ## Left open
 
-`specs/todos/2026-10-11-to-string-newtype-in-generic-slot.md`: a newtype or
+`specs/progress/2026-10-11-to-string-newtype-in-generic-slot.md` (fixed the
+same day; the erased residual is
+`specs/todos/2026-10-11-to-string-erased-newtype.md`): a newtype or
 niche value in a type-variable slot of a user generic type (`Box(Meters(9))`
 prints `Box(9)`), or reaching `to_string` with an erased type, still prints
 its payload. The descriptor is per declaration, not per instance, so such a
