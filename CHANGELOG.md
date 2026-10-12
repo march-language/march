@@ -499,6 +499,18 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Breaking: a command that cannot be executed is an `Err` from
+  `Process.run`, `Process.run_stream`, `Process.spawn_async` and
+  `System.cmd`.** A missing or non-executable program now returns
+  `Err("cannot execute <cmd>: <reason>")` on both backends; compiled code used
+  to return `Ok` with exit code 127. Compiled programs now start children with
+  `posix_spawn` instead of `fork` + `execvp`: spawning is faster, a
+  `MARCH_SANITIZE=thread` build no longer spends ~0.4 s per spawn or deadlocks
+  in TSAN's fork interceptor on macOS, and the child starts with no signals
+  blocked and every signal at its default action (it used to inherit the
+  spawning thread's mask and any ignored signal). On macOS a child now
+  inherits only its stdin, stdout and stderr. Code that checked for exit
+  code 127 should match `Err` instead; the in-repo callers already did.
 - **Breaking: a type variable in a function signature is rigid: a body that fixes it is
   an error.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end`, and a body that
   makes two signature variables the same type (`fn second(x : a, y : b) : a do

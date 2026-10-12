@@ -360,6 +360,18 @@ let live_proc_tbl : (int, in_channel * out_channel * int) Hashtbl.t = Hashtbl.cr
 
 let live_proc_next_id : int ref = ref 0
 
+(** The Err message of a Process.* spawn builtin for a [Unix_error] raised
+    by function [fn].  A command that cannot be executed (not found, not
+    executable) is "cannot execute <cmd>: <strerror>", the same text the
+    compiled runtime builds from posix_spawnp's return value; any other OS
+    error (a failed pipe) is its bare message. *)
+let process_spawn_error (cmd : string) (fn : string) (err : Unix.error) : string =
+  match fn with
+  | "create_process" | "open_process_args" | "open_process_args_in"
+  | "execv" | "execvp" | "execve" | "execvpe" ->
+    "cannot execute " ^ cmd ^ ": " ^ Unix.error_message err
+  | _ -> Unix.error_message err
+
 (** Monotonic start time for sys_uptime_ms calculations. *)
 let process_start_time : float = Unix.gettimeofday ()
 

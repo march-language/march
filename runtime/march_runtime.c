@@ -10271,52 +10271,233 @@ void *march_dns_resolve(void *host_ptr) {
     return mk_ok(list);
 }
 
-/* process_spawn_sync(command, args) → Result(ProcessResult, String)
-   ProcessResult = ProcessResult(Int, String, String) (exit_code, stdout, stderr) */
-void *march_process_spawn_sync(void *cmd_obj, void *args_list) {
-    march_string *cmd_s = (march_string *)cmd_obj;
-    /* Count args */
+/* ── Child-process spawning (posix_spawnp) ──────────────────────────────
+
+   Every Process.* builtin that starts a child goes through spawn_child.
+   It used to fork() and then close/dup2/execvp in the child.  In a
+   multi-threaded process only async-signal-safe calls are allowed between
+   fork and exec (execvp's PATH search is not one of them), and under TSAN on
+   Darwin each fork cost ~0.4 s and could deadlock in TSAN's fork interceptor
+   against a thread inside snprintf.  posix_spawnp has none of those
+   problems and is faster in every build.
+
+   It also changes what a missing or unexecutable program looks like: the
+   exec failure comes back as posix_spawnp's return value, and the builtin
+   returns Err("cannot execute <cmd>: <strerror>").  Before, the fork
+   succeeded and the caller got Ok with exit code 127.  The interpreter
+   (lib/eval/eval_builtins.ml) reports the same Err.
+
+   The child gets a clean signal state: an empty signal mask and every
+   signal at its default disposition.  The runtime uses SIGUSR1 for
+   preemption and some threads block it; a forked child inherited the
+   calling thread's mask and any SIG_IGN, which exec keeps.
+
+   The child inherits the parent's working directory and current environ
+   (Process.set_env is visible to it), as it did under fork.  The Process API
+   has no per-child cwd or environment, so no chdir file action is needed.
+   On Darwin a child inherits only its stdin/stdout/stderr; a descriptor
+   the parent opened without close-on-exec no longer leaks into it.
+   specs/progress/2026-10-12-process-spawn-posix-spawn.md */
+#include <spawn.h>
+#ifdef __APPLE__
+#include <crt_externs.h>
+#define MARCH_ENVIRON (*_NSGetEnviron())
+#else
+extern char **environ;
+#define MARCH_ENVIRON environ
+#endif
+
+#if defined(__linux__)
+/* glibc declares pipe2 only under _GNU_SOURCE, which the runtime does not
+   define; glibc (>= 2.9) and musl both provide it. */
+extern int pipe2(int pipefd[2], int flags);
+#endif
+
+/* Move [fd] to a descriptor >= 3 (close-on-exec), so a dup2 file action
+   onto 0/1/2 is never a same-fd no-op that would leave FD_CLOEXEC set. */
+static int spawn_fd_above_stdio(int fd) {
+    if (fd > STDERR_FILENO) return fd;
+    int nfd = fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+    if (nfd < 0) return -1;
+    close(fd);
+    return nfd;
+}
+
+/* pipe() whose two ends are close-on-exec and above stdio.  0 or -1.
+   On Linux pipe2 sets the flag atomically, so a child another thread spawns
+   meanwhile never inherits these ends (a child holding another child's
+   stdin write end keeps it from ever seeing EOF).  Darwin has no pipe2;
+   there spawn_child uses POSIX_SPAWN_CLOEXEC_DEFAULT, so the window between
+   pipe() and the fcntl leaks nothing into our children either. */
+static int spawn_pipe_cloexec(int p[2]) {
+    int rc;
+#if defined(__linux__)
+    rc = pipe2(p, O_CLOEXEC);
+#else
+    rc = pipe(p);
+    if (rc == 0) {
+        fcntl(p[0], F_SETFD, FD_CLOEXEC);
+        fcntl(p[1], F_SETFD, FD_CLOEXEC);
+    }
+#endif
+    if (rc != 0) return -1;
+    int a = spawn_fd_above_stdio(p[0]);
+    int b = spawn_fd_above_stdio(p[1]);
+    if (a < 0 || b < 0) {
+        if (a >= 0) close(a); else close(p[0]);
+        if (b >= 0) close(b); else close(p[1]);
+        return -1;
+    }
+    p[0] = a; p[1] = b;
+    return 0;
+}
+
+/* argv for [cmd] + the March List(String) [args]; free with spawn_argv_free. */
+static char **spawn_argv_build(march_string *cmd_s, void *args_list) {
     int extra = 0;
     void *tmp = args_list;
     while (((march_hdr *)tmp)->tag == 1) { extra++; tmp = MARCH_FIELD_PTR(tmp, 1); }
-    int argc = 1 + extra;
-    char **argv = (char **)malloc((size_t)(argc + 1) * sizeof(char *));
-    /* argv[0] = command */
-    argv[0] = (char *)malloc((size_t)(cmd_s->len + 1));
+    char **argv = (char **)calloc((size_t)extra + 2, sizeof(char *));
+    argv[0] = (char *)malloc((size_t)cmd_s->len + 1);
     memcpy(argv[0], cmd_s->data, (size_t)cmd_s->len);
     argv[0][cmd_s->len] = '\0';
-    /* argv[1..] = args */
     int i = 1;
     tmp = args_list;
     while (((march_hdr *)tmp)->tag == 1) {
         march_string *a = (march_string *)MARCH_FIELD_PTR(tmp, 0);
-        argv[i] = (char *)malloc((size_t)(a->len + 1));
+        argv[i] = (char *)malloc((size_t)a->len + 1);
         memcpy(argv[i], a->data, (size_t)a->len);
         argv[i][a->len] = '\0';
         i++;
         tmp = MARCH_FIELD_PTR(tmp, 1);
     }
-    argv[argc] = NULL;
-    /* Execute via fork+exec */
+    argv[i] = NULL;
+    return argv;
+}
+
+static void spawn_argv_free(char **argv) {
+    for (int j = 0; argv[j]; j++) free(argv[j]);
+    free(argv);
+}
+
+/* The PATH entry [cmd] would run from (malloc'd), or NULL when [cmd] has no
+   '/' and no PATH directory holds an executable regular file of that name.
+   A [cmd] containing '/' is returned as is.  Searching here instead of
+   letting posix_spawnp do it matters on Darwin: libc's posix_spawnp makes
+   one posix_spawn SYSCALL per PATH entry until one succeeds, a whole failed
+   process creation each (measured with a 28-entry PATH, /usr/bin 15th: 300
+   spawns of `true` took 11-13 s against fork+execvp's 6-8 s under the same
+   load); access() per entry is a stat. */
+static char *spawn_resolve_path(const char *cmd) {
+    if (strchr(cmd, '/')) return strdup(cmd);
+    if (cmd[0] == '\0') return NULL;
+    const char *path = getenv("PATH");
+    if (!path || !*path) path = "/usr/bin:/bin";
+    size_t clen = strlen(cmd);
+    const char *p = path;
+    for (;;) {
+        const char *end = strchr(p, ':');
+        size_t dlen = end ? (size_t)(end - p) : strlen(p);
+        /* An empty entry means the current directory. */
+        char *cand = (char *)malloc(dlen + clen + 3);
+        if (!cand) return NULL;
+        if (dlen == 0) { cand[0] = '.'; dlen = 1; }
+        else memcpy(cand, p, dlen);
+        cand[dlen] = '/';
+        memcpy(cand + dlen + 1, cmd, clen + 1);
+        struct stat st;
+        if (stat(cand, &st) == 0 && S_ISREG(st.st_mode)
+            && access(cand, X_OK) == 0)
+            return cand;
+        free(cand);
+        if (!end) return NULL;
+        p = end + 1;
+    }
+}
+
+/* Start argv[0] (searched in PATH) with [in_fd]/[out_fd]/[err_fd] as its
+   stdin/stdout/stderr (-1 = inherit the parent's).  The given fds are all
+   close-on-exec and above stdio (spawn_pipe_cloexec), so the dup2 actions
+   are the only way they reach the child and every other pipe end is closed
+   by exec.  On Darwin, POSIX_SPAWN_CLOEXEC_DEFAULT closes every descriptor
+   the file actions do not name, so the stdio a child keeps from the parent
+   is named with addinherit_np.  (A first version serialised pipe creation
+   against spawns with a pthread_rwlock instead; with 8 tasks spawning at 14
+   schedulers it deadlocked in 17 of 20 runs, all spawners stuck before
+   posix_spawnp returned.)  Returns 0 and sets *pid, or an errno value. */
+static int spawn_child(char **argv, int in_fd, int out_fd, int err_fd,
+                       pid_t *pid) {
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t attr;
+    int rc = posix_spawn_file_actions_init(&fa);
+    if (rc != 0) return rc;
+    rc = posix_spawnattr_init(&attr);
+    if (rc != 0) { posix_spawn_file_actions_destroy(&fa); return rc; }
+    if (in_fd  >= 0 && rc == 0) rc = posix_spawn_file_actions_adddup2(&fa, in_fd,  STDIN_FILENO);
+    if (out_fd >= 0 && rc == 0) rc = posix_spawn_file_actions_adddup2(&fa, out_fd, STDOUT_FILENO);
+    if (err_fd >= 0 && rc == 0) rc = posix_spawn_file_actions_adddup2(&fa, err_fd, STDERR_FILENO);
+    short flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+    flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+    const int stdio_fd[3] = { in_fd, out_fd, err_fd };
+    for (int k = 0; k < 3 && rc == 0; k++)
+        if (stdio_fd[k] < 0 && fcntl(k, F_GETFD) != -1)
+            rc = posix_spawn_file_actions_addinherit_np(&fa, k);
+#endif
+    sigset_t none, all;
+    sigemptyset(&none);
+    sigfillset(&all);
+    if (rc == 0) rc = posix_spawnattr_setsigmask(&attr, &none);
+    if (rc == 0) rc = posix_spawnattr_setsigdefault(&attr, &all);
+    if (rc == 0) rc = posix_spawnattr_setflags(&attr, flags);
+    if (rc == 0) {
+        char *path = spawn_resolve_path(argv[0]);
+        if (path) {
+            rc = posix_spawn(pid, path, &fa, &attr, argv, MARCH_ENVIRON);
+            free(path);
+        } else {
+            /* Nothing executable found: posix_spawnp reports the errno
+               execvp would have (ENOENT, EACCES, ...). */
+            rc = posix_spawnp(pid, argv[0], &fa, &attr, argv, MARCH_ENVIRON);
+        }
+    }
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&fa);
+    return rc;
+}
+
+/* Err("cannot execute <cmd>: <strerror(err)>") */
+static void *spawn_err(const char *cmd, int err) {
+    char msg[1200];
+    snprintf(msg, sizeof(msg), "cannot execute %s: %s", cmd, strerror(err));
+    return mk_err_cstr(msg);
+}
+
+/* process_spawn_sync(command, args) → Result(ProcessResult, String)
+   ProcessResult = ProcessResult(Int, String, String) (exit_code, stdout, stderr)
+   Err when the pipes cannot be made or the command cannot be executed. */
+void *march_process_spawn_sync(void *cmd_obj, void *args_list) {
+    char **argv = spawn_argv_build((march_string *)cmd_obj, args_list);
     int stdout_pipe[2], stderr_pipe[2];
-    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
-        for (int j = 0; j < argc; j++) free(argv[j]);
-        free(argv);
+    if (spawn_pipe_cloexec(stdout_pipe) != 0) {
+        spawn_argv_free(argv);
         return mk_err_cstr("pipe failed");
     }
-    pid_t pid = fork();
-    if (pid == 0) {
-        close(stdout_pipe[0]); close(stderr_pipe[0]);
-        dup2(stdout_pipe[1], STDOUT_FILENO);
-        dup2(stderr_pipe[1], STDERR_FILENO);
-        close(stdout_pipe[1]); close(stderr_pipe[1]);
-        execvp(argv[0], argv);
-        _exit(127);
+    if (spawn_pipe_cloexec(stderr_pipe) != 0) {
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        spawn_argv_free(argv);
+        return mk_err_cstr("pipe failed");
     }
+    pid_t pid = -1;
+    int rc = spawn_child(argv, -1, stdout_pipe[1], stderr_pipe[1], &pid);
     close(stdout_pipe[1]); close(stderr_pipe[1]);
-    for (int j = 0; j < argc; j++) free(argv[j]);
-    free(argv);
-    if (pid < 0) return mk_err_cstr("fork failed");
+    if (rc != 0) {
+        close(stdout_pipe[0]); close(stderr_pipe[0]);
+        void *err = spawn_err(argv[0], rc);
+        spawn_argv_free(argv);
+        return err;
+    }
+    spawn_argv_free(argv);
     /* Read stdout and stderr */
     char out_buf[65536]; size_t out_len = 0;
     char err_buf[16384]; size_t err_len = 0;
@@ -10458,56 +10639,36 @@ static int64_t live_proc_register(pid_t pid, FILE *fp, FILE *write_fp) {
     return handle;
 }
 
-/* process_spawn_async(command, args) → Result(LiveProcess(pid,id), String) */
+/* process_spawn_async(command, args) → Result(LiveProcess(pid,id), String)
+   Err when the pipes cannot be made or the command cannot be executed. */
 void *march_process_spawn_async(void *cmd_obj, void *args_list) {
-    march_string *cmd_s = (march_string *)cmd_obj;
-    /* Build argv */
-    int extra = 0;
-    void *tmp = args_list;
-    while (((march_hdr *)tmp)->tag == 1) { extra++; tmp = MARCH_FIELD_PTR(tmp, 1); }
-    int argc = 1 + extra;
-    char **argv = (char **)malloc((size_t)(argc + 1) * sizeof(char *));
-    argv[0] = (char *)malloc((size_t)(cmd_s->len + 1));
-    memcpy(argv[0], cmd_s->data, (size_t)cmd_s->len); argv[0][cmd_s->len] = '\0';
-    int i = 1; tmp = args_list;
-    while (((march_hdr *)tmp)->tag == 1) {
-        march_string *a = (march_string *)MARCH_FIELD_PTR(tmp, 0);
-        argv[i] = (char *)malloc((size_t)(a->len + 1));
-        memcpy(argv[i], a->data, (size_t)a->len); argv[i][a->len] = '\0';
-        i++; tmp = MARCH_FIELD_PTR(tmp, 1);
-    }
-    argv[argc] = NULL;
-    /* Pipes for stdin (write) and stdout (read) */
+    char **argv = spawn_argv_build((march_string *)cmd_obj, args_list);
+    /* Pipes for stdin (write) and stdout (read).  Both ends are
+       close-on-exec from creation: the parent's ends must not leak into
+       later children (a child that inherits another child's stdin write end
+       keeps that child from ever seeing EOF); the child's ends reach it only
+       through spawn_child's dup2 onto 0/1. */
     int stdin_pfd[2], stdout_pfd[2];
-    if (pipe(stdin_pfd) != 0) {
-        for (int j = 0; j < argc; j++) free(argv[j]); free(argv);
+    if (spawn_pipe_cloexec(stdin_pfd) != 0) {
+        spawn_argv_free(argv);
         return mk_err_cstr("pipe failed (stdin)");
     }
-    if (pipe(stdout_pfd) != 0) {
+    if (spawn_pipe_cloexec(stdout_pfd) != 0) {
         close(stdin_pfd[0]); close(stdin_pfd[1]);
-        for (int j = 0; j < argc; j++) free(argv[j]); free(argv);
+        spawn_argv_free(argv);
         return mk_err_cstr("pipe failed (stdout)");
     }
-    pid_t pid = fork();
-    if (pid == 0) {
-        close(stdin_pfd[1]);   /* child closes write end of stdin pipe */
-        close(stdout_pfd[0]);  /* child closes read end of stdout pipe */
-        dup2(stdin_pfd[0],  STDIN_FILENO);  close(stdin_pfd[0]);
-        dup2(stdout_pfd[1], STDOUT_FILENO); close(stdout_pfd[1]);
-        execvp(argv[0], argv); _exit(127);
-    }
+    pid_t pid = -1;
+    int rc = spawn_child(argv, stdin_pfd[0], stdout_pfd[1], -1, &pid);
     close(stdin_pfd[0]);   /* parent closes read end of stdin pipe */
     close(stdout_pfd[1]);  /* parent closes write end of stdout pipe */
-    for (int j = 0; j < argc; j++) free(argv[j]); free(argv);
-    if (pid < 0) {
+    if (rc != 0) {
         close(stdin_pfd[1]); close(stdout_pfd[0]);
-        return mk_err_cstr("fork failed");
+        void *err = spawn_err(argv[0], rc);
+        spawn_argv_free(argv);
+        return err;
     }
-    /* The parent's ends must not leak into later children: a child that
-       inherits another child's stdin write end keeps that child from ever
-       seeing EOF. */
-    fcntl(stdin_pfd[1],  F_SETFD, FD_CLOEXEC);
-    fcntl(stdout_pfd[0], F_SETFD, FD_CLOEXEC);
+    spawn_argv_free(argv);
     FILE *rfp = fdopen(stdout_pfd[0], "r");
     FILE *wfp = fdopen(stdin_pfd[1],  "w");
     int64_t handle = (rfp && wfp) ? live_proc_register(pid, rfp, wfp) : -1;
