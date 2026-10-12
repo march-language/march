@@ -1257,6 +1257,14 @@ mod SessionNode do
       close: fn ep -> do
         on_close(ep)
         Vault.set(meta, "closed", 1)
+        -- Every peer's reader has to learn this endpoint is done. Queued
+        -- BEFORE "done" is set: a hosted endpoint closes in the host
+        -- actor's turn while the runner, once every peer has ended, tears
+        -- the party down as soon as it sees "done" (`await_hosted_end`);
+        -- a Bye queued after that went out without its session id (the
+        -- tables were closed) and was refused, and the peers waited on it
+        -- for ever.
+        let _ = List.map(links, fn l -> send_frame(party, l, "SessionNode.Bye", bye_payload(party)))
         Vault.set(meta, "done", 1)
         -- Hosted: `finish` runs this in the host's turn; release its hold.
         -- (A cancelled hosted endpoint releases in the generated `cancel`.)
@@ -1264,8 +1272,6 @@ mod SessionNode do
           None -> ()
           Some(_) -> epoch_release()
         end
-        -- Every peer's reader has to learn this endpoint is done.
-        let _ = List.map(links, fn l -> send_frame(party, l, "SessionNode.Bye", bye_payload(party)))
         ()
       end,
       fail: fn (ep, why) -> protocol_failed(party, ep, why),
@@ -1517,7 +1523,9 @@ mod SessionNode do
     end))
     let _ = await_outcome(p)
     -- Every connection has ended. An endpoint still waiting now waits on
-    -- nobody: that is a cancellation too.
+    -- nobody: that is a cancellation too (a hosted one gets its host's turn
+    -- first, `await_hosted_end`).
+    await_hosted_end(p, connect_ms())
     if ep_done(p) do () else
       match Vault.get(p.meta, "ep") do
         Some(ep) -> cancel_endpoint(p, ep, 0, "every peer is gone", "every peer is gone", kind_cancelled())
@@ -2249,20 +2257,21 @@ mod SessionNode do
 
   -- Each peer role's endpoint, by name; waits up to [left] ms for all of them,
   -- or until [abandoned] says the session was withdrawn (an access point's
-  -- session whose initiator gave up on it): Err(0) then.
+  -- session whose initiator gave up on it): Err((0, found)) then, else
+  -- Err((a missing role, found)), [found] being the peers found so far.
   pfn find_peers(node : Cap(ClusterNode.Live), session : String, peers : List(Int), left : Int,
-                 abandoned : Int -> Bool) : Result(List((Int, GlobalPid.Pid)), Int) do
+                 abandoned : Int -> Bool) : Result(List((Int, GlobalPid.Pid)), (Int, List((Int, GlobalPid.Pid)))) do
     let found = List.map(peers, fn r -> (r, ClusterNode.lookup(node, role_name(session, r))))
+    let some = List.filter_map(found, fn rp ->
+      match rp do
+        (r, Some(g)) -> Some((r, g))
+        (_, None) -> None
+      end)
     match List.find(found, fn rp -> match rp do (_r, o) -> Option.is_none(o) end) do
-      None ->
-        Ok(List.filter_map(found, fn rp ->
-          match rp do
-            (r, Some(g)) -> Some((r, g))
-            (_, None) -> None
-          end))
+      None -> Ok(some)
       Some((missing, _)) ->
-        if abandoned(0) do Err(0)
-        else if left <= 0 do Err(missing) else
+        if abandoned(0) do Err((0, some))
+        else if left <= 0 do Err((missing, some)) else
           sleep_ms(50)
           find_peers(node, session, peers, left - 50, abandoned)
         end end
@@ -2289,6 +2298,29 @@ mod SessionNode do
           cluster_links(node, found, left - 50)
         end
     end
+  end
+
+  -- This party gives up before it formed (a peer never registered, a
+  -- holder failed its check, or a peer's node never linked) after
+  -- registering its endpoint, so the peers in [found] may have found it and
+  -- formed: send each one this node has a link to a Cancel for our role, as
+  -- `cancel_endpoint` would once formed. It reaches the peer's endpoint like
+  -- any frame (held until that party is ready), so a peer that waits on
+  -- this role fails rather than waiting for ever. A peer on a node this one
+  -- has no link to yet is not told; it fails when its own setup gives up
+  -- (it cannot find this role's name once it is unregistered), and tells
+  -- ITS found peers in turn.
+  pfn abandon_found(node : Cap(ClusterNode.Live), p0 : Party, found : List((Int, GlobalPid.Pid)), cause : String) : () do
+    List.each(found, fn rg -> match rg do
+      (_r, g) ->
+        match ClusterNode.session_queue_for(node, g.node_id) do
+          Some(q) ->
+            let _ = NodeQueue.cast(q, next_seq(p0.meta), g, wire_tag(p0, "SessionNode.Cancel"),
+                                   encode_cancel(p0.my_role, cause), NodeQueue.Unbounded)
+            ()
+          None -> ()
+        end
+    end)
   end
 
   -- No check on who holds a role's name: `run_cluster` (the caller chose
@@ -2318,10 +2350,34 @@ mod SessionNode do
   pfn serve_cluster_outcome(p : Party) : () do
     let _ = send(p.ep, Expect(List.length(p.links)))
     let _ = await_outcome(p)
+    await_hosted_end(p, connect_ms())
     if ep_done(p) do () else
       match Vault.get(p.meta, "ep") do
         Some(ep) -> cancel_endpoint(p, ep, 0, "every peer is gone", "every peer is gone", kind_cancelled())
         None -> Vault.set(p.meta, "done", 1)
+      end
+    end
+  end
+
+  -- Every peer has ended, but a HOSTED endpoint's last step runs in its
+  -- host actor's turn, not the endpoint actor's: the delivery that lets it
+  -- finish (Ledger's last `skip`, say) can be forwarded to the host just
+  -- before the peers' Byes end their links here. Give the host up to
+  -- [left] ms to close (or to suspend on a role that is gone, which
+  -- cancels it in the endpoint actor's turn) before the runner cancels it
+  -- itself and tears the party down: torn down first, the host's own Byes
+  -- found the session's tables closed, went out untagged and were refused,
+  -- and a peer still waiting on them hung (cert_order, round 2). A
+  -- callback-API party needs no wait: its continuations run in the
+  -- endpoint actor, ahead of the `LinkEnded` that settled the outcome.
+  pfn await_hosted_end(p : Party, left : Int) : () do
+    if ep_done(p) || left <= 0 do ()
+    else
+      match Vault.get(p.forward, "f") do
+        None -> ()
+        Some(_) ->
+          sleep_ms(10)
+          await_hosted_end(p, left - 10)
       end
     end
   end
@@ -2444,7 +2500,11 @@ mod SessionNode do
         Err(Listen(my_role, "session " ++ session ++ ": role " ++ int_to_string(my_role) ++ " is already registered"))
       Ok(_) ->
         match find_peers(node, session, peers, 30000, abandoned) do
-          Err(missing) ->
+          Err((missing, found_some)) ->
+            -- The peers found so far may have found us too, and formed.
+            abandon_found(node, p0, found_some,
+                          "session " ++ session ++ ": " ++ (if missing == 0 do "withdrawn by its initiator"
+                                                            else "no endpoint registered for role " ++ int_to_string(missing) end))
             ClusterNode.unroute(node, route_key)
             ClusterNode.unregister(node, me)
             end_party(p0)
@@ -2454,17 +2514,28 @@ mod SessionNode do
           Ok(found0) ->
             -- A role's endpoint is found by a registry name any member can
             -- write: an access point's session checks the certificate of
-            -- the node holding each one (step 11b; `holder_ok`).
-            let linked = match check_holders(found0, holder_ok) do
-              Err(e) -> Err(e)
-              Ok(_) ->
-                match cluster_links(node, found0, 30000) do
-                  Ok(ls) -> Ok(ls)
-                  Err(missing) -> Err((missing, "no link to role " ++ int_to_string(missing) ++ "'s node"))
+            -- the node holding each one (step 11b; `holder_ok`). Only once
+            -- every holder's node is LINKED: a peer's certificate is known
+            -- from its link's handshake, and a peer found through the
+            -- registry (gossip, via a third node) may not be linked yet.
+            -- Checked first, it failed as "presented no certificate" while
+            -- the peers that had already found this endpoint formed and
+            -- waited on it for ever (specs/progress/2026-10-12-cert-mode-
+            -- offer-to-offer-session-hang.md).
+            let linked = match cluster_links(node, found0, 30000) do
+              Err(missing) -> Err((missing, "no link to role " ++ int_to_string(missing) ++ "'s node"))
+              Ok(ls) ->
+                match check_holders(found0, holder_ok) do
+                  Err(e) -> Err(e)
+                  Ok(_) -> Ok(ls)
                 end
             end
             match linked do
               Err((missing, why)) ->
+                -- The peers found us and may have formed: tell each it can
+                -- reach that this role is cancelled, or one waiting on it
+                -- would wait for ever.
+                abandon_found(node, p0, found0, "session " ++ session ++ ": " ++ why)
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
                 end_party(p0)
@@ -2903,13 +2974,29 @@ mod SessionNode do
     on Nop() do state end
   end
 
+  -- Every initiation's answers, in ONE table shared by the process (keys
+  -- "<sid>/<node id>", `answer_key`) that is never closed. A table per
+  -- initiation, closed once its route was dropped, was freed under a data
+  -- reader still running this route for a late Answer (one that reached
+  -- the reader before the unroute): a use-after-free in `Vault.set` that the
+  -- ASan gate caught in cert_order. The keys go when the initiation ends
+  -- (`forget_answers`); one a late Answer writes after that is never read.
+  pfn answers_table() : Vault(String) do Vault.open("session_ap_answers") end
+
+  pfn answer_key(sid : String, nid : String) : String do sid ++ "/" ++ nid end
+
+  pfn forget_answers(answers : Vault(String), sid : String) : () do
+    let prefix = sid ++ "/"
+    List.each(Vault.keys(answers), fn k -> if String.starts_with(k, prefix) do Vault.delete(answers, k) else () end)
+  end
+
   pfn inbox_frame(answers : Vault(String), sid : String, d : NodeSend.Delivery) : Result((), String) do
     if d.type_tag != "SessionAP.Answer" do Err("session_ap: unexpected type " ++ d.type_tag)
     else
       match Msgpack.decode(d.payload) do
         Ok(Msgpack.Array(Cons(Msgpack.Str(asid), Cons(Msgpack.Str(nid), Cons(Msgpack.Str(verdict), Nil))))) ->
           if asid == sid do
-            Vault.set(answers, nid, verdict)
+            Vault.set(answers, answer_key(sid, nid), verdict)
             Ok(())
           else Ok(()) end
         _ -> Err("session_ap: bad Answer payload")
@@ -3014,16 +3101,16 @@ mod SessionNode do
   -- its DELIVERY_FAILED is not tied to this wait); NoAnswer once the setup
   -- time runs out. [budget] holds the setup time left, shared by every
   -- invitation.
-  pfn await_answer(node : Cap(ClusterNode.Live), answers : Vault(String), g : GlobalPid.Pid, name : String,
+  pfn await_answer(node : Cap(ClusterNode.Live), answers : Vault(String), sid : String, g : GlobalPid.Pid, name : String,
                    budget : Vault(Int)) : ApWait do
-    match Vault.get(answers, g.node_id) do
+    match Vault.get(answers, answer_key(sid, g.node_id)) do
       Some(v) -> Answered(v)
       None ->
         if still_bound(node, name, g) == false do OfferGone
         else if Vault.get_or(budget, "left", 0) <= 0 do NoAnswer else
           sleep_ms(20)
           let _ = Vault.incr(budget, "left", -20)
-          await_answer(node, answers, g, name, budget)
+          await_answer(node, answers, sid, g, name, budget)
         end end
     end
   end
@@ -3087,7 +3174,7 @@ mod SessionNode do
           let outcome = match ClusterNode.send_msg(node, g, "SessionAP.Invite", encode_invite(sid, fp, reply, irole, vouch), NodeQueue.Unbounded) do
             Err(_) -> Some(node_label(node, g.node_id) ++ " is unreachable")
             Ok(_) ->
-              match await_answer(node, answers, g, offer_name(prefix, ofp, g.node_id), budget) do
+              match await_answer(node, answers, sid, g, offer_name(prefix, ofp, g.node_id), budget) do
                 Answered(v) ->
                   if v == "" do None
                   else Some(node_label(node, g.node_id) ++ " refused: " ++ v) end
@@ -3198,7 +3285,7 @@ mod SessionNode do
     let n = ClusterNode.next_id(node, "ap_sessions")
     let sid = ClusterNode.node_id(node) ++ "." ++ int_to_string(ClusterNode.creation(node)) ++ "." ++ int_to_string(n)
     let inbox = spawn(ApInbox)
-    let answers = Vault.new("session_ap_answers_" ++ sid)
+    let answers = answers_table()
     let budget = Vault.new("session_ap_budget_" ++ sid)
     let t = connect_ms()
     Vault.set(budget, "left", if t > 0 do t else 3600000 end)
@@ -3210,9 +3297,10 @@ mod SessionNode do
     -- The inbox has answered its one purpose; left alive it was one actor
     -- leaked per initiated session.
     kill(inbox)
-    -- So have the answers' tables, which nothing reaches once the route is
-    -- gone; never closed, they were two more per initiated session.
-    Vault.close(answers)
+    -- So has the budget's table, which only this task reads; never closed,
+    -- it was one more per initiated session. The answers live in the shared
+    -- table, which a late Answer may still be writing (`answers_table`).
+    forget_answers(answers, sid)
     Vault.close(budget)
     match filled do
       Err((role, why, accepted)) ->

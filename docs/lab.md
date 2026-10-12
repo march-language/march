@@ -153,9 +153,11 @@ What the lab has found so far, each filed with its repro:
 - [`2026-10-05-lab-rejoining-node-offers-count-role-at-once.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-rejoining-node-offers-count-role-at-once.md):
   a restarted node offers a `count = 1` role a second after it starts, so two nodes offer
   it for the settle period. `failover` is expected-fail on it.
-- [`2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md):
-  a session whose two offered roles (Stock, Ledger) are on different hosts can hang for
-  ever, nearly always in certificate mode and occasionally with a shared secret.
+- [`2026-10-12-lab-shared-secret-session-stall.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-12-lab-shared-secret-session-stall.md):
+  a few sessions stalled once, after ~90, with a shared secret (likely a node pair
+  redialled under a live session; `session_churn` hangs the same way under ASan). The certificate-mode
+  hang of sessions whose Stock and Ledger run on different hosts is fixed
+  ([progress note](https://github.com/march-language/march/blob/main/specs/progress/2026-10-12-cert-mode-offer-to-offer-session-hang.md)).
 - [`2026-10-05-lab-leaderless-agents-leak.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-leaderless-agents-leak.md):
   with no leader, every node grows by ~13k heap objects a second with no traffic at all.
 - [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-simultaneous-restart-memory-burst.md):

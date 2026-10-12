@@ -22,10 +22,11 @@ lab_forge_ok hot-reload keygen
 # How the nodes authenticate each other. LAB_AUTH=secret (the default for
 # now): one shared cluster secret. LAB_AUTH=certs: an operator key first, so
 # `forge host init` issues every node a certificate naming its pool's roles
-# (what cert_rotate needs). In certificate mode a session whose Stock and
-# Ledger run on different hosts hangs for ever
-# (specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md), so
-# the lab defaults to the secret until that is fixed.
+# (what cert_rotate needs). Certificate mode used to hang every session whose
+# Stock and Ledger ran on different hosts, which is why the lab defaults to the
+# secret. That hang is fixed
+# (specs/progress/2026-10-12-cert-mode-offer-to-offer-session-hang.md), but the
+# lab has not been re-run in certificate mode since.
 auth=${LAB_AUTH:-secret}
 echo "$auth" > "$LAB_DIR/auth"
 if [ "$auth" = certs ]; then lab_forge_ok cluster keygen; fi
@@ -81,15 +82,14 @@ lab_until 30 "a Ledger total from $ledger" lab_stat_ge "booked@$(lab_node "$ledg
 [ "$(lab_stat bad_reply)" = 0 ] || fail "a reply did not parse"
 
 # Every started session should end (finish, or be refused or fail within the
-# session setup time). Some never do, intermittently with a shared secret
-# (specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md):
-# reported, not asserted, since every later scenario starts from this one.
-# With LAB_AUTH=certs they nearly all hang and the checks above fail first.
+# session setup time). Some never did, once, with a shared secret
+# (specs/todos/2026-10-12-lab-shared-secret-session-stall.md): reported, not
+# asserted, since every later scenario starts from this one.
 lab_traffic 0
 ended_all() { [ "$(lab_unended)" = 0 ]; }
 end=$((SECONDS + 60))
 until ended_all || [ $SECONDS -ge $end ]; do sleep 1; done
-n=$(lab_unended); [ "$n" = 0 ] || lab_note "FINDING: $n of $(lab_stat started) sessions never ended (specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md)"
+n=$(lab_unended); [ "$n" = 0 ] || lab_note "FINDING: $n of $(lab_stat started) sessions never ended (specs/todos/2026-10-12-lab-shared-secret-session-stall.md)"
 lab_traffic 1000 16
 
 lab_forge_ok topology status --env lab

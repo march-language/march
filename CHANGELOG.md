@@ -675,6 +675,19 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Cluster sessions with two offered roles on different nodes no longer hang
+  in certificate mode.** A session could stall for good, with no error or
+  cancellation, when a party checked another node's certificate before its
+  node had connected to that node. The check failed, that party left
+  silently, and the parties that had already found it waited for ever. This
+  was most likely just as nodes joined, and it was the intermittent
+  `cert_order` stall in the ASan CI gate. The check now waits for the
+  connection. A party that gives up while its session forms now cancels the
+  session for the others, so they fail instead of hanging. A second, rarer
+  hang is also fixed: an actor-hosted role's final close message could be
+  dropped when its last peers closed first, leaving the other roles waiting
+  for it. An initiating node no longer risks a use-after-free when an offer's
+  answer arrives late, after the initiator has stopped waiting for it.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a
