@@ -1,0 +1,10 @@
+size=8
+replace_remove=4
+drop=1
+shared=28
+set=8
+size1k=2000 leaked=0
+replace_remove1k=1000 leaked=0
+drop1k=1 leaked=0
+shared1k=7000 leaked=0
+set1k=2000 leaked=0

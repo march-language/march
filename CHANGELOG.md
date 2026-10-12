@@ -617,6 +617,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled `Map` and `Set` with `Float` keys no longer leak.** Every
+  insert, removal and size query on a `Map(Float, v)` (and every `Set(Float)`
+  insert) leaked a small allocation per key it touched, and dropping such a map
+  leaked all of its keys.
 - **Fixed a rare memory-safety bug when a task finishes.** If you awaited a
   task, finished with its result, and dropped the task before the task's own
   thread had fully wound down, the runtime could read the freed result. It was

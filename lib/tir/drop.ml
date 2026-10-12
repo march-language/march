@@ -566,16 +566,29 @@ let boxed_float_slots (env : env) (ty : Tir.ty) (cname : string)
     (ftys : Tir.ty list) : int list =
   match ty with
   | Tir.TCon (name, _) ->
-    (match variant_ctors env name with
-     | Some ctors ->
-       (match List.assoc_opt cname ctors with
-        | Some decl when List.length decl = List.length ftys ->
-          List.concat (List.mapi (fun i (d, f) ->
-              match d, f with
-              | Tir.TVar _, Tir.TFloat -> [i]
-              | _ -> []) (List.combine decl ftys))
-        | _ -> [])
-     | None -> [])
+    (* The declared field types of [cname].  A colliding type's drop branches
+       come from [colliding_union], whose constructor names are QUALIFIED by
+       their candidate type ("Map.HEntry.HLeaf"); those are looked up in that
+       candidate, since a bare-name lookup in [name] misses them -- which left
+       the Float key box of every [Map(Float, v)] leaf unreleased. *)
+    let decl =
+      match Option.bind (variant_ctors env name) (List.assoc_opt cname) with
+      | Some _ as d -> d
+      | None ->
+        (match String.rindex_opt cname '.' with
+         | Some i ->
+           let q = String.sub cname 0 i in
+           let cn = String.sub cname (i + 1) (String.length cname - i - 1) in
+           Option.bind (Kind.find_variant env.k_table q) (List.assoc_opt cn)
+         | None -> None)
+    in
+    (match decl with
+     | Some decl when List.length decl = List.length ftys ->
+       List.concat (List.mapi (fun i (d, f) ->
+           match d, f with
+           | Tir.TVar _, Tir.TFloat -> [i]
+           | _ -> []) (List.combine decl ftys))
+     | _ -> [])
   | _ -> []
 
 (** For a value of payload-sharing representation (niche: [Some(x)] IS [x],
