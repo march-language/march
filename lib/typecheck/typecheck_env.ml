@@ -1550,10 +1550,20 @@ let suggest_module_name (name : string) : string option =
        Array.iter (fun entry ->
          if Filename.check_suffix entry ".march" then begin
            let base = Filename.chop_suffix entry ".march" in
-           let parts = String.split_on_char '_' base in
-           let mod_name = String.concat "" (List.map String.capitalize_ascii parts) in
+           (* Suggest the name the file DECLARES (`BigInt` for bigint.march),
+              falling back to the CamelCase of its filename. *)
+           let mod_name =
+             match March_modules.Module_registry.declared_module_of_file
+                     (Filename.concat dir entry) with
+             | Some m -> m
+             | None ->
+               let parts = String.split_on_char '_' base in
+               String.concat "" (List.map String.capitalize_ascii parts)
+           in
            let d = edit_distance (String.lowercase_ascii name) (String.lowercase_ascii mod_name) in
-           if d > 0 && d < !best_dist && d <= 2 then begin
+           (* d = 0 is a case-only difference (`Bigint` vs `BigInt`): the
+              best suggestion there is, not a reason to skip. *)
+           if mod_name <> name && d < !best_dist && d <= 2 then begin
              best := Some mod_name;
              best_dist := d
            end

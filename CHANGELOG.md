@@ -662,6 +662,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A stdlib module name with the wrong case is an error.** `Bigint.from_int`
+  (the module is `BigInt`) typechecked and ran compiled, while the interpreter
+  failed with `unbound variable`. It is now rejected with
+  ``Unknown module `Bigint`. Did you mean `BigInt`?``. The same applies to
+  `Uuid`, `Iolist`, `Datetime`, `Dataframe`, `Websocket` and the other modules
+  whose name is not the CamelCase of their file name.
 - **The interpreter finds an interface method implemented in a nested
   module.** With `interface Speak` in `Top` and `impl Speak(Thing)` inside
   `mod NA`, a bare `speak(NA.mk())` in `Top` died `unbound variable: speak`

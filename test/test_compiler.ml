@@ -1013,6 +1013,29 @@ let test_tc_private_nested_member_diagnostic () =
   Alcotest.(check bool)
     "diagnostic names the private member, not 'Unknown module'" true says_private
 
+let test_tc_stdlib_module_name_wrong_case () =
+  (* `Bigint` is not a module (it is `BigInt`), but the stdlib loader's
+     filename guess `bigint.march` found BigInt's file and registered its
+     exports under the misspelling: the program typechecked, compiled code
+     ran it, and the interpreter died "unbound variable: Bigint.from_int". *)
+  let ctx = typecheck {|mod Main do
+    fn main() : String do BigInt.to_string(Bigint.from_int(3)) end
+  end|} in
+  Alcotest.(check bool) "misspelled-case stdlib module: rejected" true (has_errors ctx);
+  let suggests =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      try ignore (Str.search_forward
+                    (Str.regexp_string "Unknown module `Bigint`. Did you mean `BigInt`?")
+                    d.message 0); true
+      with Not_found -> false)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "diagnostic suggests the declared name" true suggests;
+  let ok = typecheck {|mod Main do
+    fn main() : String do BigInt.to_string(BigInt.from_int(3)) end
+  end|} in
+  Alcotest.(check bool) "correct spelling still typechecks" false (has_errors ok)
+
 let test_tc_private_nested_member_name_collides_with_builtin () =
   (* Same bug as [test_tc_private_nested_member_diagnostic], but the private
      member's bare name ("hash") coincides with a globally-bound identifier
@@ -17778,6 +17801,7 @@ let compiler_suites =
           Alcotest.test_case "add fn"              `Quick test_tc_fn_add;
           Alcotest.test_case "dotted sibling module order" `Quick test_tc_dotted_sibling_module_order;
           Alcotest.test_case "private nested member diagnostic" `Quick test_tc_private_nested_member_diagnostic;
+          Alcotest.test_case "stdlib module name wrong case" `Quick test_tc_stdlib_module_name_wrong_case;
           Alcotest.test_case "private nested member name collides with builtin" `Quick test_tc_private_nested_member_name_collides_with_builtin;
           Alcotest.test_case "bad if condition"    `Quick test_tc_if_bad_cond;
           Alcotest.test_case "annotated return"    `Quick test_tc_annotated_fn;
