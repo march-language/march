@@ -394,7 +394,9 @@ end
   closes or is cancelled, or when its node's connection ends: the node declared it dead
   (`node node-b dead: suspect timeout`, `... connection refused`), or the connection was
   lost. The drain rule still holds: the node reports the death only after the last message
-  that arrived from that peer.
+  that arrived from that peer. A peer is also gone when its node refuses one of this
+  session's frames (`frame refused by node <id>: no route to pid ...`: its endpoint has
+  already ended), since that frame is lost.
 - Roles may share a node, even two roles of one session: frames between parties on the
   same node go over the node's loopback link (`ClusterNode.queue_for(node, own_id)`),
   in order and without flow control.
@@ -1218,7 +1220,9 @@ node's (SWIM) and the heartbeat settings do not apply.
 - Over a cluster node (`cluster_<Role>` and the access points), a connection lost for any
   reason cancels the sessions using it, even if the peer node
   reconnects at once. Frames in flight on the old connection may be gone, so the session
-  cannot safely continue.
+  cannot safely continue. The other end may not have seen that connection end (two nodes
+  that dialled each other at once keep only one of the two pairs), so the party that saw it
+  sends its Cancel over the next pair to that node, once there is one.
 - Messages are encoded as JSON, so every payload type needs a JSON codec. Built-in types
   have one; for your own types, add `derive Json for YourType`.
 - A protocol's name must be unique in the whole program, the standard library included,

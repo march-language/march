@@ -792,6 +792,31 @@ git log is authoritative for exact commits.
   scenario, `control_restart_together`, starts and then restarts three nodes
   together under session traffic and fails if any node's heap passes 400,000
   objects.
+- **A cluster session no longer hangs when its two nodes reconnect while it
+  runs.** If the connection between two nodes dropped and was redialled while
+  a session was forming, one party could end with the old connection while
+  the other formed on the new one and then waited for a reply that could
+  never come, with no error. Two things now make that session fail promptly
+  on both sides. A party whose connection ends sends its cancellation over
+  the new connection to the peer's node once there is one. A frame the peer's
+  node refuses (`DELIVERY_FAILED`, for example because the peer's endpoint
+  has already ended) now fails the session that sent it, where before it was
+  silently ignored. Those refusals now go to the session itself, not to
+  `ClusterNode.on_delivery_failed`'s handler. This was the intermittent
+  `session_churn` hang in the ASan CI gate.
+- **Cluster sessions with two offered roles on different nodes no longer hang
+  in certificate mode.** A session could stall for good, with no error or
+  cancellation, when a party checked another node's certificate before its
+  node had connected to that node. The check failed, that party left
+  silently, and the parties that had already found it waited for ever. This
+  was most likely just as nodes joined, and it was the intermittent
+  `cert_order` stall in the ASan CI gate. The check now waits for the
+  connection. A party that gives up while its session forms now cancels the
+  session for the others, so they fail instead of hanging. A second, rarer
+  hang is also fixed: an actor-hosted role's final close message could be
+  dropped when its last peers closed first, leaving the other roles waiting
+  for it. An initiating node no longer risks a use-after-free when an offer's
+  answer arrives late, after the initiator has stopped waiting for it.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a

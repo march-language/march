@@ -139,7 +139,8 @@ let _ = ClusterNode.monitor_remote(node, gpid, fn reason -> send(me, WorkerDown(
 
 `on_peer_closed(node, f)` tells you when a peer's data connection ends, after its last
 delivery, and says why (`"node b dead: suspect timeout"`, `"connection lost"`).
-`on_delivery_failed` reports messages the peer refused. Use `send_msg` or `Node.enqueue`,
+`on_delivery_failed` reports messages the peer refused (a cluster session's own frames
+excepted: their refusals go to the session that sent them, which ends). Use `send_msg` or `Node.enqueue`,
 never `Node.send(peer, ...)`, on a node's connections: `Node.send` writes the socket directly
 and would interleave with the queue.
 
