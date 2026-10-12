@@ -9,12 +9,12 @@ mod Main do
 
   fn main(io : Cap(IO)) do
     let d = Actor.debug(io)
-    match Trace.start(d, ["step"], Trace.Count(0 - 3)) do
+    match Trace.start(d, ["step"], Trace.MaxEvents(0 - 3)) do
       Ok(_) -> println("started (wrong)")
       Err(Trace.LimitOutOfRange) -> println("negative: LimitOutOfRange")
       Err(_) -> println("negative: other")
     end
-    match Trace.start(d, ["step"], Trace.Count(10)) do
+    match Trace.start(d, ["step"], Trace.MaxEvents(10)) do
       Ok(_) -> println("started (wrong)")
       Err(Trace.Unavailable(w)) -> println("unavailable: " ++ w)
       Err(_) -> println("other error")

@@ -74,19 +74,19 @@ mod Main do
     let d = Actor.debug(io)
 
     -- Limits are mandatory and bounded; there is no spelling without one.
-    refuse(d, "count 0", ["step"], Trace.Count(0))
-    refuse(d, "count -1", ["step"], Trace.Count(0 - 1))
-    refuse(d, "count 65537", ["step"], Trace.Count(65537))
+    refuse(d, "count 0", ["step"], Trace.MaxEvents(0))
+    refuse(d, "count -1", ["step"], Trace.MaxEvents(0 - 1))
+    refuse(d, "count 65537", ["step"], Trace.MaxEvents(65537))
     refuse(d, "rate n 0", ["step"], Trace.Rate(0, 1))
     refuse(d, "rate secs 0", ["step"], Trace.Rate(5, 0))
     refuse(d, "rate secs 3601", ["step"], Trace.Rate(5, 3601))
     refuse(d, "rate n 100001", ["step"], Trace.Rate(100001, 1))
-    refuse(d, "no function", Nil, Trace.Count(5))
-    refuse(d, "unknown function", ["nope"], Trace.Count(5))
-    refuse(d, "stdlib function", ["List.map"], Trace.Count(5))
+    refuse(d, "no function", Nil, Trace.MaxEvents(5))
+    refuse(d, "unknown function", ["nope"], Trace.MaxEvents(5))
+    refuse(d, "stdlib function", ["List.map"], Trace.MaxEvents(5))
 
-    -- Count(10): exactly ten events out of 25 calls, then it stops itself.
-    match Trace.start(d, ["step"], Trace.Count(10)) do
+    -- MaxEvents(10): exactly ten events out of 25 calls, then it stops itself.
+    match Trace.start(d, ["step"], Trace.MaxEvents(10)) do
       Err(e) -> println("count start: " ++ err_name(e))
       Ok(s) ->
         calls(25)
@@ -117,7 +117,7 @@ mod Main do
     end
 
     -- Only the named function is watched.
-    match Trace.start(d, ["other"], Trace.Count(4)) do
+    match Trace.start(d, ["other"], Trace.MaxEvents(4)) do
       Err(e) -> println("other start: " ++ err_name(e))
       Ok(s) ->
         calls(6)
@@ -128,7 +128,7 @@ mod Main do
     end
 
     -- A call made by an actor carries the actor's pid.
-    match Trace.start(d, ["step"], Trace.Count(2)) do
+    match Trace.start(d, ["step"], Trace.MaxEvents(2)) do
       Err(e) -> println("actor start: " ++ err_name(e))
       Ok(s) ->
         let a = spawn(Caller)
@@ -146,15 +146,15 @@ mod Main do
     end
 
     -- At most four sessions at once.
-    let mk = fn _ -> Trace.start(d, ["step"], Trace.Count(1))
+    let mk = fn _ -> Trace.start(d, ["step"], Trace.MaxEvents(1))
     match (mk(0), mk(0), mk(0), mk(0)) do
       (Ok(s1), Ok(s2), Ok(s3), Ok(s4)) ->
-        refuse(d, "fifth session", ["step"], Trace.Count(1))
+        refuse(d, "fifth session", ["step"], Trace.MaxEvents(1))
         let _ = Trace.stop(d, s1)
         let _ = Trace.stop(d, s2)
         let _ = Trace.stop(d, s3)
         let _ = Trace.stop(d, s4)
-        match Trace.start(d, ["step"], Trace.Count(1)) do
+        match Trace.start(d, ["step"], Trace.MaxEvents(1)) do
           Ok(s5) ->
             println("room again after stop")
             let _ = Trace.stop(d, s5)

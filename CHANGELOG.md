@@ -37,7 +37,7 @@ git log is authoritative for exact commits.
   holes are unaffected (`?q=..` still renders `..`).
 
 ### Added
-- **`Trace`: bounded tracing of boundary calls.** `Trace.start(debug, ["Billing.charge"], Trace.Count(10))`
+- **`Trace`: bounded tracing of boundary calls.** `Trace.start(debug, ["Billing.charge"], Trace.MaxEvents(10))`
   records which actor called which `--hot-reload` boundary function, with the code
   epoch and time, never the arguments. A limit is mandatory and bounded:
   `Count(n)` (1..65536) stops itself after exactly `n` events; `Rate(n, secs)`

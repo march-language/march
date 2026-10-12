@@ -10,7 +10,7 @@
 -- Every session has a limit, and `start` takes it as an argument so there is no
 -- way to call it without one:
 --
---   Count(n)       stops itself after exactly n events (1..65536);
+--   MaxEvents(n)       stops itself after exactly n events (1..65536);
 --   Rate(n, secs)  keeps at most n events per `secs`-second window (n in
 --                  1..100000, secs in 1..3600) and counts the rest as dropped.
 --
@@ -36,7 +36,7 @@ mod Trace do
   needs Actor.Debug
 
   -- How a session ends by itself. There is no other kind of limit.
-  type Limit = Count(Int) | Rate(Int, Int)
+  type Limit = MaxEvents(Int) | Rate(Int, Int)
 
   -- A started session's id. Holding it is the authority to drain and stop it.
   type TraceId = TraceId(Int)
@@ -65,7 +65,7 @@ mod Trace do
   }
 
   -- Why a call failed:
-  --   LimitOutOfRange: Count(n) with n outside 1..65536, Rate with n outside
+  --   LimitOutOfRange: MaxEvents(n) with n outside 1..65536, Rate with n outside
   --     1..100000 or secs outside 1..3600;
   --   UnknownFunction: a name is not a boundary function of this build;
   --   TooManySessions: four are already running;
@@ -127,14 +127,14 @@ mod Trace do
 
   pfn limit_words(limit : Limit) : String do
     match limit do
-      Count(n) -> "count:" ++ int_to_string(n)
+      MaxEvents(n) -> "count:" ++ int_to_string(n)
       Rate(n, secs) -> "rate:" ++ int_to_string(n) ++ " per_s:" ++ int_to_string(secs)
     end
   end
 
   pfn limit_negative(limit : Limit) : Bool do
     match limit do
-      Count(n) -> n < 0
+      MaxEvents(n) -> n < 0
       Rate(n, secs) -> n < 0 || secs < 0
     end
   end
@@ -185,7 +185,7 @@ mod Trace do
   and `forge deploy hot` print them) under `limit`. At most 32 names and 4
   sessions.
 
-      match Trace.start(d, ["Billing.charge"], Trace.Count(10)) do
+      match Trace.start(d, ["Billing.charge"], Trace.MaxEvents(10)) do
         Ok(s) -> ...
         Err(Trace.UnknownFunction) -> println("not a boundary function")
         Err(e) -> println("cannot trace")

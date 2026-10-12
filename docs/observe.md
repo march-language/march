@@ -526,7 +526,7 @@ and `Trace.start` takes it as an argument:
 
 | Limit | Meaning | Allowed |
 |---|---|---|
-| `count:<n>` / `Count(n)` | the session records **exactly `n` events**, then stops itself | `n` in 1..65536 |
+| `count:<n>` / `MaxEvents(n)` | the session records **exactly `n` events**, then stops itself | `n` in 1..65536 |
 | `rate:<n> per_s:<s>` / `Rate(n, s)` | at most `n` events per window of `s` seconds; the rest are counted in `rate_dropped` | `n` in 1..100000, `s` in 1..3600 |
 
 Anything else is refused: no limit gives `limit_required`; zero, a negative
@@ -536,13 +536,13 @@ silently.
 More bounds, whatever the limit:
 
 - **4 sessions** at most (`too_many_sessions`), **32 functions** per session.
-- A session's ring holds `n` events for a `Count`, and `ring:<r>` (default 1024,
+- A session's ring holds `n` events for a `MaxEvents`, and `ring:<r>` (default 1024,
   at most 16384) for a `Rate`. A full ring drops the event and counts it
   (`dropped`); the traced program never waits for the tracer.
 - A drain returns at most 4096 events (`max:`, default 1024).
 - **A session does not belong to your connection.** The observe socket answers
   one request per connection, so there is no connection to tie it to. It lives
-  until `TRACE_STOP`, until a `Count` is reached, **10 minutes** after it
+  until `TRACE_STOP`, until a `MaxEvents` limit is reached, **10 minutes** after it
   started, or **60 seconds** without a `TRACE_DRAIN`. Recording stops at the
   first of those; the node frees the session when it needs the slot (or at
   `TRACE_STOP`). A node restart ends every session.
@@ -584,7 +584,7 @@ From March code, with the debug capability (`Actor.debug(io)`, or `debug` in the
 remote shell):
 
 ```march
-match Trace.start(debug, ["Billing.charge"], Trace.Count(10)) do
+match Trace.start(debug, ["Billing.charge"], Trace.MaxEvents(10)) do
   Ok(s) ->
     -- ... let the program run ...
     match Trace.drain(debug, s) do
