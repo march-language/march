@@ -1,0 +1,24 @@
+-- Trace under the interpreter (R8): there is no dispatch table to watch, so
+-- every call answers Unavailable.  The limit checks still run first, in the
+-- stdlib, so a bad limit is LimitOutOfRange on both backends.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  fn step(n : Int) : Int do n + 1 end
+
+  fn main(io : Cap(IO)) do
+    let d = Actor.debug(io)
+    match Trace.start(d, ["step"], Trace.MaxEvents(0 - 3)) do
+      Ok(_) -> println("started (wrong)")
+      Err(Trace.LimitOutOfRange) -> println("negative: LimitOutOfRange")
+      Err(_) -> println("negative: other")
+    end
+    match Trace.start(d, ["step"], Trace.MaxEvents(10)) do
+      Ok(_) -> println("started (wrong)")
+      Err(Trace.Unavailable(w)) -> println("unavailable: " ++ w)
+      Err(_) -> println("other error")
+    end
+    println(int_to_string(step(1)))
+  end
+end

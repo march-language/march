@@ -147,10 +147,14 @@ Error codes:
 | `CRASHES` | `[n]` | the last `n` crashes, without messages |
 | `TOP` | `<attr> <n> [window_ms]` | the `n` actors highest on one attribute |
 | `SNAPSHOT` | `[sections]` | several of the above from one actor walk |
+| `HELLO` | | this process's `boot` id and whether `signing` is configured; what a client needs before it signs |
+| `STATE` | `<sig> nonce:… boot:… not_after_ms:… pid:<p> [timeout_ms:<t>]` | debug tier: one actor's state ([below](#the-debug-tier-signed-requests)) |
+| `CRASHES_FULL` | `<sig> nonce:… boot:… not_after_ms:… [n:<n>]` | debug tier: `CRASHES` with each crash's message |
+| `TRACE_START` | `<sig> nonce:… boot:… not_after_ms:… (count:<n> \| rate:<n> per_s:<s>) fn:<a,b,…> [ring:<r>]` | debug tier: start a bounded trace of boundary calls ([below](#tracing-boundary-calls)) |
+| `TRACE_DRAIN` | `<sig> nonce:… boot:… not_after_ms:… session:<id> [max:<n>]` | debug tier: the events a trace session has recorded |
+| `TRACE_STOP` | `<sig> nonce:… boot:… not_after_ms:… session:<id>` | debug tier: stop and free a trace session |
 | `WATCH` | `<sections> <interval_ms> <max>` | a stream of `SNAPSHOT`s ([below](#watch)); socket only |
-| `STATE` | `<sig> nonce:… not_after_ms:… pid:<p> [timeout_ms:<t>]` | debug tier: one actor's state ([below](#the-debug-tier-signed-requests)) |
-| `SOURCE` | `<sig> nonce:… not_after_ms:… name:<fn>` | debug tier: the source text of the version of a function that runs now ([below](#which-code-is-running-which-and-source)) |
-| `CRASHES_FULL` | `<sig> nonce:… not_after_ms:… [n:<n>]` | debug tier: `CRASHES` with each crash's message |
+| `SOURCE` | `<sig> nonce:… boot:… not_after_ms:… name:<fn>` | debug tier: the source text of the version of a function that runs now ([below](#which-code-is-running-which-and-source)) |
 
 The example replies below are real output from
 `test/native/observe_snapshot.march` (3 supervisors of 4 children each, 5 bare
@@ -439,9 +443,16 @@ answers them only when all of these hold:
 1. **It was built with a deploy key**: `march --compile --hot-reload <Mod>
    --signing-pubkey <base64>`, the same key `forge deploy hot` signs patches
    with. Any other build answers `signing_not_configured`.
-2. **The request is signed by that key.** The signature covers the whole line
-   except the signature itself, so changing the pid or the expiry after signing
-   gives `bad_signature`.
+2. **The request is signed by that key, for this process.** The signature covers
+   the whole line except the signature itself, so changing the pid or the expiry
+   after signing gives `bad_signature`. Every signed request also names
+   `boot:<hex>`, the 32-hex id the node's unsigned `HELLO` returns (drawn at
+   random when the process starts). A request signed for another process or node
+   gets `wrong_boot`, before its nonce is spent. So a captured line is useless
+   after the node restarts and on any other node that holds the same key. (The
+   observe socket serves one request per connection, so the challenge is per
+   process, not per connection as in the remote shell's `HELLO`; within one
+   process the nonce ring stops a replay.)
 3. **It is fresh.** Each request carries a random `nonce` (16-64 hex digits) and
    a `not_after_ms` wall-clock expiry at most 60 s ahead. A node refuses an
    expired request (`expired`), one that expires too far ahead
@@ -453,14 +464,20 @@ answers them only when all of these hold:
    file, nothing is allowed (`policy`). The file is read on every request, so
    editing it takes effect at once.
 
-The checks run in that order: an unsigned client learns nothing about the
-policy. Every attempt, allowed or not, appends a line to the audit log the
+The checks run in that order (`signing_not_configured`, `bad_args`,
+`bad_signature`, `wrong_boot`, freshness, `policy`): an unsigned client learns
+nothing about the policy. Every attempt, allowed or not, appends a line to the audit log the
 reload server writes (`$MARCH_AUDIT_LOG`, default
 `~/.local/share/march/audit.jsonl`):
 
 ```json
 {"ts":1791223456789,"type":"debug","verb":"STATE","pid":42,"nonce":"9f3c…","signer":"<pubkey hex>","result":"ok"}
+{"ts":1791223457001,"type":"debug","verb":"TRACE_START","pid":null,"nonce":"c01d…","signer":"<pubkey hex>","result":"ok","detail":"session=3 count=10 fns=2"}
 ```
+
+`detail` appears on the trace verbs (the session, the limit, how many
+functions). An in-process caller (`Trace` from March code) is audited with
+`"signer":"in-process"`.
 
 `forge observe` builds and signs these requests for you:
 
@@ -469,6 +486,9 @@ forge observe --socket /run/myapp/observe.sock --state 42          # STATE, 1 s 
 forge observe --env prod --state 42 --timeout-ms 5000
 forge observe --env prod --crashes-full --count 50
 ```
+
+`forge` fetches the node's `HELLO` first and signs its `boot` id into the
+request, once per target.
 
 It signs with `~/.march/ed25519_secret.key` and makes each request valid for
 30 s, so a node whose clock differs by more than 30 s refuses it. forge then
@@ -492,6 +512,95 @@ field that holds functions. When the actor cannot answer, `state` is `null` and
 
 The request skips the actor's mailbox limit, so a full mailbox still answers.
 
+## Tracing boundary calls
+
+`TRACE_START`, `TRACE_DRAIN` and `TRACE_STOP` (and, from inside the program,
+the `Trace` module) watch which **boundary functions** run, and for which
+actor. Boundary functions are the ones `forge deploy hot` can replace: your
+app's, in a `--hot-reload` build (stdlib functions are not on the boundary and
+cannot be traced). Arguments are never recorded. Only `{pid, function, epoch,
+time}`, because arguments can hold anything the program holds.
+
+**A limit is mandatory.** There is no spelling of `TRACE_START` without one,
+and `Trace.start` takes it as an argument:
+
+| Limit | Meaning | Allowed |
+|---|---|---|
+| `count:<n>` / `MaxEvents(n)` | the session records **exactly `n` events**, then stops itself | `n` in 1..65536 |
+| `rate:<n> per_s:<s>` / `Rate(n, s)` | at most `n` events per window of `s` seconds; the rest are counted in `rate_dropped` | `n` in 1..100000, `s` in 1..3600 |
+
+Anything else is refused: no limit gives `limit_required`; zero, a negative
+number or a value over the cap gives `limit_out_of_range`. Nothing is clamped
+silently.
+
+More bounds, whatever the limit:
+
+- **4 sessions** at most (`too_many_sessions`), **32 functions** per session.
+- A session's ring holds `n` events for a `MaxEvents`, and `ring:<r>` (default 1024,
+  at most 16384) for a `Rate`. A full ring drops the event and counts it
+  (`dropped`); the traced program never waits for the tracer.
+- A drain returns at most 4096 events (`max:`, default 1024).
+- **A session does not belong to your connection.** The observe socket answers
+  one request per connection, so there is no connection to tie it to. It lives
+  until `TRACE_STOP`, until a `MaxEvents` limit is reached, **10 minutes** after it
+  started, or **60 seconds** without a `TRACE_DRAIN`. Recording stops at the
+  first of those; the node frees the session when it needs the slot (or at
+  `TRACE_STOP`). A node restart ends every session.
+- While no session watches a function, calling it costs one relaxed load of a
+  word on a cache line it already reads, and a never-taken branch.
+
+```
+forge observe --env prod --trace-start Billing.charge,Billing.refund --max-events 200
+forge observe --env prod --trace-drain 3
+forge observe --env prod --trace-stop 3
+```
+
+Replies (the `data` of the envelope):
+
+```json
+TRACE_START -> {"session":3,"limit":{"kind":"count","n":200},"ring":200,
+                "functions":["Billing.charge","Billing.refund"],"lifetime_s":600,"idle_s":60}
+              (a rate limit: "limit":{"kind":"rate","n":50,"per_s":1})
+TRACE_DRAIN -> {"session":3,
+                "events":[{"pid":42,"fn":"Billing.charge","name_id":17,"epoch":2,"at_ns":183000}],
+                "recorded":1,"dropped":0,"rate_dropped":0,"pending":0,
+                "done":false,"why":null,"now_ns":921000}
+TRACE_STOP  -> the same without "events": the final counters
+```
+
+- `pid` is the calling actor's pid index (what `Recon` and `STATE` use), or
+  `-1` when the caller is not an actor (`main`, a task).
+- `epoch` is the code epoch of the version that ran.
+- `at_ns` and `now_ns` are nanoseconds since the session started.
+- `recorded` is the total accepted; `pending` is how many are not drained yet.
+- `done` is true once recording has stopped, and `why` says so: `"count"`,
+  `"expired"` (10 minutes), `"idle"` (60 s without a drain) or `"stopped"`.
+  You can still drain what is left of a finished session until it is freed.
+- Errors: `limit_required`, `limit_out_of_range`, `unknown_function` (not a
+  boundary function of this build), `too_many_sessions`, `not_found` (no such
+  session), plus the signed-request errors above.
+
+From March code, with the debug capability (`Actor.debug(io)`, or `debug` in the
+remote shell):
+
+```march
+match Trace.start(debug, ["Billing.charge"], Trace.MaxEvents(10)) do
+  Ok(s) ->
+    -- ... let the program run ...
+    match Trace.drain(debug, s) do
+      Ok(b) -> println(Trace.format(b.events))
+      Err(_) -> ()
+    end
+    let _ = Trace.stop(debug, s)
+  Err(e) -> println("cannot trace")
+end
+```
+
+The in-process calls need no signature (holding `Cap(Actor.Debug)` stands in
+for it, as for `Actor.inspect_state`), but `$MARCH_DEBUG_POLICY` must still list
+`TRACE_START`, `TRACE_DRAIN` and `TRACE_STOP`: they answer `Unavailable(policy)`
+otherwise. They share the same sessions and limits. Under the interpreter, and in a build without `--hot-reload`, they
+answer `Unavailable("tracing_unavailable")` or `UnknownFunction`.
 ## Which code is running: WHICH and SOURCE
 
 After a hot deploy, "which version of `Billing.price` is this node running?"
@@ -511,7 +620,7 @@ whether they differ. `activated_at_ms` is 0 for the baseline. A name that is
 not a slot (a typo, a function the build does not make reloadable, a build
 without `--hot-reload`) answers `not_found`.
 
-**`SOURCE <sig> nonce:… not_after_ms:… name:<fn>`** (debug tier) returns the text
+**`SOURCE <sig> nonce:… boot:… not_after_ms:… name:<fn>`** (debug tier) returns the text
 of the version `WHICH` names: `{"name":…,"impl_hash":…,"epoch":…,"source":"fn
 price(qty : Int) : Int do\n  qty * 12 + 1\nend"}`. It is signed, fresh and
 policy-gated exactly like `STATE` (see the next section), and `forge observe`
@@ -570,6 +679,7 @@ forge observe [REQUEST...] [--section S]... [--json] [--socket PATH] [--env NAME
 forge observe [--tui] [--panel NAME] [--interval MS] [--sort ATTR] [--pid PID] [--socket PATH] [--env NAME]
 forge observe --dump FILE [--panel NAME] [--json]
 forge observe --state PID [--timeout-ms MS] | --crashes-full [-n N]   [--socket PATH] [--env NAME]
+forge observe --trace-start FNS (--max-events N | --rate N/SECS) | --trace-drain ID [-n MAX] | --trace-stop ID
 ```
 
 With a request, sends it and prints the reply envelope (indented, or one line per
@@ -1435,6 +1545,12 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
   them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
 - **The rest of the remote shell.** It works (see above), but:
   - it has not had its security review yet (plan R5).
+- **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;
+  today `forge top` is the live view.
+- **Message tracing.** Tracing covers boundary calls. Sent/received/spawned/exited
+  events (the introspection design's `Sent` and `Received`, which hook the send
+  path) are not built: `specs/todos/2026-10-11-observe-trace-actor-events.md`.
+- **The Trace panel in the TUI** (R7's follow-up); the JSON shapes above are its input.
 - **Trace panel.** The interactive view has a place for it; it arrives with
   tracing (R8).
 - **Dumps on fatal signals.** By design none (see [Crash dumps](#crash-dumps)); a

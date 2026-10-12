@@ -2892,6 +2892,42 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/recon_basic.expected interp_recon_basic.out)))
 
+; Trace (stdlib/trace.march, R8 of the observe plan): bounded sessions over a
+; --hot-reload build's boundary functions.  The compiled leg pins the limits
+; (Count(10) stops after exactly ten events, Rate drops and counts, every
+; out-of-range or missing limit is refused, four sessions at most); the
+; interpreter leg pins `Unavailable`, since it has no dispatch table.
+(rule
+ (targets native_trace_boundary native_trace_boundary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/trace_boundary.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --hot-reload Main -o native_trace_boundary native/trace_boundary.march)
+   ; An in-process caller holds Cap(Actor.Debug) in place of a signature, but
+   ; the node's debug policy must still list the verb it uses.
+   (with-stdout-to native_trace_boundary.out
+    (system "printf 'TRACE_START\\nTRACE_DRAIN\\nTRACE_STOP\\n' > trace_policy.txt; MARCH_DEBUG_POLICY=$PWD/trace_policy.txt ./native_trace_boundary")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/trace_boundary.expected native_trace_boundary.out)))
+
+(rule
+ (targets interp_trace_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/trace_interp.march))
+ (action
+  (with-stdout-to interp_trace_interp.out
+    (run %{exe:../bin/main.exe} native/trace_interp.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/trace_interp.expected interp_trace_interp.out)))
+
 ; stdlib/diagnose.march against the shared fixtures, compiled and
 ; interpreted: the output must equal forge/test/fixtures/diagnose/expected.txt,
 ; the file forge's OCaml findings (forge/test/test_diagnose.ml) are held to.

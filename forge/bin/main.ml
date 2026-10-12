@@ -1595,6 +1595,31 @@ let observe_cmd =
            ~doc:"With $(b,--state): how long the actor has to answer (default 1000, max 8000; \
                  forge waits at most 10 s for the reply).")
   in
+  let trace_start =
+    Arg.(value & opt (some string) None & info ["trace-start"] ~docv:"FNS"
+           ~doc:"Start a bounded trace of boundary calls (R8): the comma-separated boundary \
+                 function names FNS of a $(b,--hot-reload) build. A limit is required: \
+                 $(b,--max-events) N (stops itself after exactly N events) or $(b,--rate) \
+                 N/SECS. Events carry the caller's pid, the function, the code epoch and the \
+                 time, never arguments. The signed debug verb $(b,TRACE_START); the session \
+                 ends by itself after 10 minutes, or 1 minute without a drain.")
+  in
+  let max_events =
+    Arg.(value & opt (some int) None & info ["max-events"] ~docv:"N"
+           ~doc:"With $(b,--trace-start): stop after exactly N events (1..65536).")
+  in
+  let rate =
+    Arg.(value & opt (some string) None & info ["rate"] ~docv:"N/SECS"
+           ~doc:"With $(b,--trace-start): keep at most N events per SECS seconds and count the rest as dropped.")
+  in
+  let trace_drain =
+    Arg.(value & opt (some int) None & info ["trace-drain"] ~docv:"SESSION"
+           ~doc:"Take the events a trace session has recorded so far ($(b,TRACE_DRAIN)).")
+  in
+  let trace_stop =
+    Arg.(value & opt (some int) None & info ["trace-stop"] ~docv:"SESSION"
+           ~doc:"Stop and free a trace session ($(b,TRACE_STOP)).")
+  in
   let dump =
     Arg.(value & opt (some string) None & info ["dump"; "from-dump"] ~docv:"FILE"
            ~doc:"Read a crash dump (written by a node started with MARCH_CRASH_DUMP=FILE when it \
@@ -1628,16 +1653,38 @@ let observe_cmd =
     Arg.(value & opt int 1000 & info ["interval"] ~docv:"MS"
            ~doc:"The interactive view's refresh period (default 1000, at least 250).")
   in
-  let run words sections json socket env state crashes_full n timeout_ms dump panel sort pid tui interval =
-    let debug = match state, crashes_full with
-      | Some _, true -> None
-      | Some pid, false -> Some (Cmd_observe.State { pid; timeout_ms })
-      | None, true -> Some (Cmd_observe.Crashes_full n)
-      | None, false -> Some Cmd_observe.No_debug in
-    let plain = words = [] && sections = [] && state = None && not crashes_full in
+  let run words sections json socket env state crashes_full n timeout_ms
+      trace_start max_events rate trace_drain trace_stop
+      dump panel sort pid tui interval =
+    let limit = match max_events, rate with
+      | Some n, None -> Ok (Some (Cmd_observe.Max_events n))
+      | None, Some r ->
+        (match String.split_on_char '/' r with
+         | [ a; b ] ->
+           (match int_of_string_opt a, int_of_string_opt b with
+            | Some a, Some b -> Ok (Some (Cmd_observe.Rate (a, b)))
+            | _ -> Error "observe: --rate wants N/SECS, e.g. 100/1")
+         | _ -> Error "observe: --rate wants N/SECS, e.g. 100/1")
+      | None, None -> Ok None
+      | Some _, Some _ -> Error "observe: give --max-events or --rate, not both" in
+    let picked = List.filter_map Fun.id [
+        Option.map (fun pid -> Cmd_observe.State { pid; timeout_ms }) state;
+        (if crashes_full then Some (Cmd_observe.Crashes_full n) else None);
+        (match trace_start, limit with
+         | Some fns, Ok (Some limit) -> Some (Cmd_observe.Trace_start { fns; limit; ring = None })
+         | _ -> None);
+        Option.map (fun session -> Cmd_observe.Trace_drain { session; max = n }) trace_drain;
+        Option.map (fun s -> Cmd_observe.Trace_stop s) trace_stop ] in
+    let debug = match picked, trace_start, limit with
+      | _, _, Error m -> Error m
+      | _, Some _, Ok None -> Error "observe: --trace-start needs a limit: --max-events N or --rate N/SECS"
+      | [], _, _ -> Ok Cmd_observe.No_debug
+      | [ d ], _, _ -> Ok d
+      | _ -> Error "observe: give one of --state, --crashes-full, --trace-start, --trace-drain, --trace-stop" in
+    let plain = words = [] && sections = [] && picked = [] && trace_start = None in
     match debug with
-    | None -> handle (Error "observe: give --state or --crashes-full, not both")
-    | Some debug ->
+    | Error m -> handle (Error m)
+    | Ok debug ->
       match dump, panel with
       | Some file, _ when plain -> handle (Cmd_observe_view.run_dump ~file ~panel ~sort ~json)
       | Some _, _ -> handle (Error "observe: --dump reads a file: give it alone, or with --panel/--json")
@@ -1652,8 +1699,10 @@ let observe_cmd =
            ~doc:"Ask a running node what it is doing: its actors, supervision tree, names, \
                  schedulers, memory and code epochs, from the node's read-only observe socket \
                  (an interactive view on a terminal, JSON otherwise); read a crash dump with \
-                 $(b,--dump); with $(b,--state) or $(b,--crashes-full), a signed debug request")
+                 $(b,--dump); with $(b,--state), $(b,--crashes-full) or $(b,--trace-start), a \
+                 signed debug request")
     Term.(const run $ words $ sections $ json $ socket $ env_name $ state $ crashes_full $ n $ timeout_ms
+          $ trace_start $ max_events $ rate $ trace_drain $ trace_stop
           $ dump $ panel $ sort $ pid $ tui $ interval)
 
 let top_cmd =

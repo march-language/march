@@ -246,8 +246,8 @@ let tree sock =
           |> List.map (fun v -> member "name" v |> to_string) in
   check "HELP lists every verb"
     (h = ["HELP"; "PING"; "WATCH"; "SNAPSHOT"; "ACTORS"; "ACTOR"; "TREE"; "NAMES";
-          "SCHED"; "MEM"; "EPOCHS"; "WHICH"; "CRASHES"; "TOP"; "STATE"; "SOURCE";
-          "CRASHES_FULL"])
+          "SCHED"; "MEM"; "EPOCHS"; "WHICH"; "CRASHES"; "TOP"; "HELLO"; "TRACE_START";
+          "TRACE_DRAIN"; "TRACE_STOP"; "STATE"; "SOURCE"; "CRASHES_FULL"])
     (String.concat "," h)
 
 let types sock =

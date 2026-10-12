@@ -1,0 +1,28 @@
+count 0: LimitOutOfRange
+count -1: LimitOutOfRange
+count 65537: LimitOutOfRange
+rate n 0: LimitOutOfRange
+rate secs 0: LimitOutOfRange
+rate secs 3601: LimitOutOfRange
+rate n 100001: LimitOutOfRange
+no function: BadRequest
+unknown function: UnknownFunction
+stdlib function: UnknownFunction
+count(10) drained: events=10 recorded=10 dropped=0 rate_dropped=0 done=true why=count
+all events are step: true
+count(10) again: events=0 recorded=10 dropped=0 rate_dropped=0 done=true why=count
+count(10) after more calls: events=0 recorded=10 dropped=0 rate_dropped=0 done=true why=count
+count(10) stop: events=0 recorded=10 dropped=0 rate_dropped=0 done=true why=count
+count(10) after stop: NoSuchSession
+rate(3,60) drained: events=3 recorded=3 dropped=0 rate_dropped=7 done=false why=-
+rate(3,60) stop: events=0 recorded=3 dropped=0 rate_dropped=7 done=false why=-
+other (never called): events=0 recorded=0 dropped=0 rate_dropped=0 done=false why=-
+other(1) = 3
+other (called once): events=1 recorded=1 dropped=0 rate_dropped=0 done=false why=-
+other stop: events=0 recorded=1 dropped=0 rate_dropped=0 done=false why=-
+actor pid seen: true
+events=1
+pids 0 actor 0
+fifth session: TooManySessions
+room again after stop
+done

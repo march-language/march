@@ -1,8 +1,12 @@
+ok: HELLO: a 32-hex boot id and signing configured
+ok: HELLO: the boot id is stable within a process
 ok: HELP lists STATE in the debug tier
 ok: a request signed by another key: bad_signature
 ok: a garbage signature: bad_signature
 ok: a request with its pid changed after signing: bad_signature
 ok: no policy entry: policy
+ok: a request signed for another boot id: wrong_boot
+ok: a request with no boot id: bad_args
 ok: a valid STATE: the actor's rendered state
 ok: the same request again: replay
 ok: an expired request: expired
@@ -12,6 +16,37 @@ ok: an unknown argument: bad_args
 ok: STATE of a pid that is not running: dead
 ok: CRASHES_FULL carries the crash message
 ok: CRASHES (observe tier) still does not
+ok: TRACE_START with no limit: limit_required
+ok: TRACE_START count:0: limit_out_of_range
+ok: TRACE_START count:65537: limit_out_of_range
+ok: TRACE_START count:99999999999: limit_out_of_range
+ok: TRACE_START rate:0 per_s:1: limit_out_of_range
+ok: TRACE_START rate:5 per_s:0: limit_out_of_range
+ok: TRACE_START rate:5 per_s:3601: limit_out_of_range
+ok: TRACE_START rate:100001 per_s:1: limit_out_of_range
+ok: TRACE_START rate without per_s: bad_args
+ok: TRACE_START count and rate: bad_args
+ok: TRACE_START without fn: bad_args
+ok: TRACE_START of an unknown function: unknown_function
+ok: TRACE_START of a stdlib function: unknown_function
+ok: TRACE_START with a hostile name: bad_args
+ok: TRACE_DRAIN of no session: not_found
+ok: TRACE_START count:10: a session, the limit echoed
+ok: the same TRACE_START again: replay
+ok: Count(10) stopped itself after exactly 10 events
+ok: events are boundary calls: function name, pid, epoch, time; no arguments
+ok: event times are non-decreasing
+ok: after it stopped: no more events, still 10 recorded
+ok: TRACE_STOP frees it
+ok: TRACE_DRAIN after stop: not_found
+ok: TRACE_STOP twice: not_found
+ok: TRACE_START rate:2 per_s:1
+ok: Rate(2,1): 2 to 6 events over 2.5 s, the excess counted as rate_dropped, still running
+ok: four sessions start
+ok: a fifth session: too_many_sessions
+ok: room again after stopping them
 ok: CRASHES_FULL once the policy drops it: policy
+ok: TRACE_START once the policy drops it: policy
 ok: every attempt is audited, in order
+ok: trace attempts are audited, with the session in the detail
 ok: audit lines name the node's key

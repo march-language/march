@@ -4314,6 +4314,7 @@ let compile filename =
                   (opt_file2 compress_c2) (opt_file2 base64_c2) (opt_file2 sha1_c2))
               ^ (opt_file2 ffi_c2)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_trace.c") else "")  (* R8 trace sessions *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_shell.c")     else "")  (* shell listener: signed EVAL of fragments *)
               ^ (if not !compile_so then

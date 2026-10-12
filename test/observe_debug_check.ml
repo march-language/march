@@ -75,10 +75,16 @@ let fresh_nonce () =
   incr nonce_counter;
   Printf.sprintf "%016x%016x" (now_ms ()) !nonce_counter
 
-let sign sk verb ?(not_after = now_ms () + 30_000) ?nonce fields =
+(* This process's boot id, from HELLO: every signed request names it, so a
+   captured line cannot be replayed after a restart or against another node. *)
+let boot = ref "x"
+
+let sign sk verb ?(not_after = now_ms () + 30_000) ?nonce ?boot_id fields =
   let nonce = match nonce with Some n -> n | None -> fresh_nonce () in
+  let boot_id = match boot_id with Some b -> b | None -> !boot in
   let body = String.concat " "
-      (Printf.sprintf "nonce:%s" nonce :: Printf.sprintf "not_after_ms:%d" not_after :: fields) in
+      (Printf.sprintf "nonce:%s" nonce :: Printf.sprintf "boot:%s" boot_id
+       :: Printf.sprintf "not_after_ms:%d" not_after :: fields) in
   let s = March_ed25519.Ed25519.(sig_to_base64 (sign_str (verb ^ " " ^ body) sk)) in
   Printf.sprintf "%s %s %s" verb s body
 
@@ -94,6 +100,108 @@ let audit_lines log =
   |> List.map Yojson.Safe.from_string
   |> List.filter (fun j -> member "type" j = `String "debug")
 
+
+(* ── TRACE_START / TRACE_DRAIN / TRACE_STOP (R8) ─────────────────────────
+   The program calls the boundary function `tick` every 20 ms from main. *)
+let trace_checks sock sk policy =
+  write_file policy "STATE\nCRASHES_FULL\nTRACE_START\nTRACE_DRAIN\nTRACE_STOP\n";
+  let req verb fields = query sock (sign sk verb fields) in
+  let err name verb fields code =
+    let r = req verb fields in
+    check name (error r = Some code) (Yojson.Safe.to_string r) in
+  let session r = try data r |> member "session" |> to_int with _ -> -1 in
+  let sess id = Printf.sprintf "session:%d" id in
+  let stop id = ignore (req "TRACE_STOP" [ sess id ]) in
+
+  (* There is no spelling of TRACE_START without a limit, and the limits are bounded. *)
+  err "TRACE_START with no limit: limit_required" "TRACE_START" [ "fn:tick" ] "limit_required";
+  err "TRACE_START count:0: limit_out_of_range" "TRACE_START" [ "count:0"; "fn:tick" ] "limit_out_of_range";
+  err "TRACE_START count:65537: limit_out_of_range" "TRACE_START" [ "count:65537"; "fn:tick" ] "limit_out_of_range";
+  err "TRACE_START count:99999999999: limit_out_of_range" "TRACE_START" [ "count:99999999999"; "fn:tick" ] "limit_out_of_range";
+  err "TRACE_START rate:0 per_s:1: limit_out_of_range" "TRACE_START" [ "rate:0"; "per_s:1"; "fn:tick" ] "limit_out_of_range";
+  err "TRACE_START rate:5 per_s:0: limit_out_of_range" "TRACE_START" [ "rate:5"; "per_s:0"; "fn:tick" ] "limit_out_of_range";
+  err "TRACE_START rate:5 per_s:3601: limit_out_of_range" "TRACE_START" [ "rate:5"; "per_s:3601"; "fn:tick" ] "limit_out_of_range";
+  err "TRACE_START rate:100001 per_s:1: limit_out_of_range" "TRACE_START" [ "rate:100001"; "per_s:1"; "fn:tick" ] "limit_out_of_range";
+  err "TRACE_START rate without per_s: bad_args" "TRACE_START" [ "rate:5"; "fn:tick" ] "bad_args";
+  err "TRACE_START count and rate: bad_args" "TRACE_START" [ "count:5"; "rate:5"; "per_s:1"; "fn:tick" ] "bad_args";
+  err "TRACE_START without fn: bad_args" "TRACE_START" [ "count:5" ] "bad_args";
+  err "TRACE_START of an unknown function: unknown_function" "TRACE_START" [ "count:5"; "fn:no_such_fn" ] "unknown_function";
+  err "TRACE_START of a stdlib function: unknown_function" "TRACE_START" [ "count:5"; "fn:List.map" ] "unknown_function";
+  err "TRACE_START with a hostile name: bad_args" "TRACE_START" [ "count:5"; "fn:tick\"x" ] "bad_args";
+  err "TRACE_DRAIN of no session: not_found" "TRACE_DRAIN" [ "session:424242" ] "not_found";
+
+  (* A signed start, replayed, is refused and starts nothing. *)
+  let line = sign sk "TRACE_START" [ "count:10"; "fn:tick" ] in
+  let r = query sock line in
+  let id = session r in
+  check "TRACE_START count:10: a session, the limit echoed"
+    (error r = None && id > 0
+     && data r |> member "limit" |> member "kind" = `String "count"
+     && data r |> member "limit" |> member "n" = `Int 10
+     && data r |> member "ring" = `Int 10)
+    (Yojson.Safe.to_string r);
+  let r2 = query sock line in
+  check "the same TRACE_START again: replay" (error r2 = Some "replay") (Yojson.Safe.to_string r2);
+
+  (* Count(10): exactly ten events, then it stops itself.  Poll until done. *)
+  let events = ref [] and last = ref `Null in
+  let deadline = Unix.gettimeofday () +. 20. in
+  let rec poll () =
+    let d = req "TRACE_DRAIN" [ sess id ] in
+    last := d;
+    (try events := !events @ (data d |> member "events" |> to_list) with _ -> ());
+    if (try data d |> member "done" = `Bool true with _ -> false) then ()
+    else if Unix.gettimeofday () > deadline then ()
+    else (Unix.sleepf 0.1; poll ()) in
+  poll ();
+  check "Count(10) stopped itself after exactly 10 events"
+    (List.length !events = 10
+     && data !last |> member "recorded" = `Int 10
+     && data !last |> member "why" = `String "count")
+    (Yojson.Safe.to_string !last);
+  check "events are boundary calls: function name, pid, epoch, time; no arguments"
+    (List.for_all (fun e ->
+         member "fn" e = `String "tick"
+         && (match member "pid" e with `Int _ -> true | _ -> false)
+         && (match member "epoch" e with `Int _ -> true | _ -> false)
+         && (match member "at_ns" e with `Int _ -> true | _ -> false)
+         && List.sort compare (List.map fst (to_assoc e))
+            = [ "at_ns"; "epoch"; "fn"; "name_id"; "pid" ]) !events)
+    (String.concat " " (List.map Yojson.Safe.to_string !events));
+  let times = List.map (fun e -> member "at_ns" e |> to_int) !events in
+  check "event times are non-decreasing" (List.sort compare times = times) "";
+  Unix.sleepf 0.3;
+  let after = req "TRACE_DRAIN" [ sess id ] in
+  check "after it stopped: no more events, still 10 recorded"
+    (data after |> member "events" |> to_list = [] && data after |> member "recorded" = `Int 10)
+    (Yojson.Safe.to_string after);
+  let st = req "TRACE_STOP" [ sess id ] in
+  check "TRACE_STOP frees it" (error st = None) (Yojson.Safe.to_string st);
+  err "TRACE_DRAIN after stop: not_found" "TRACE_DRAIN" [ sess id ] "not_found";
+  err "TRACE_STOP twice: not_found" "TRACE_STOP" [ sess id ] "not_found";
+
+  (* Rate(2, 1s): at most 2 events per second; the rest are counted. *)
+  let rr = req "TRACE_START" [ "rate:2"; "per_s:1"; "fn:tick" ] in
+  let rid = session rr in
+  check "TRACE_START rate:2 per_s:1" (error rr = None && rid > 0) (Yojson.Safe.to_string rr);
+  Unix.sleepf 2.5;
+  let rd = req "TRACE_DRAIN" [ sess rid ] in
+  let recorded = try data rd |> member "recorded" |> to_int with _ -> -1 in
+  let rate_dropped = try data rd |> member "rate_dropped" |> to_int with _ -> -1 in
+  check "Rate(2,1): 2 to 6 events over 2.5 s, the excess counted as rate_dropped, still running"
+    (recorded >= 2 && recorded <= 6 && rate_dropped > 20 && data rd |> member "done" = `Bool false)
+    (Yojson.Safe.to_string rd);
+  stop rid;
+
+  (* At most 4 sessions. *)
+  let ids = List.init 4 (fun _ -> session (req "TRACE_START" [ "count:5"; "fn:tick" ])) in
+  check "four sessions start" (List.for_all (fun i -> i > 0) ids) (String.concat "," (List.map string_of_int ids));
+  err "a fifth session: too_many_sessions" "TRACE_START" [ "count:5"; "fn:tick" ] "too_many_sessions";
+  List.iter stop ids;
+  let again = req "TRACE_START" [ "count:5"; "fn:tick" ] in
+  check "room again after stopping them" (error again = None) (Yojson.Safe.to_string again);
+  stop (session again)
+
 let signed sock prog sk_file policy log =
   let sk = Bytes.of_string (read_file sk_file) in
   let pid = wait_ready prog in
@@ -104,6 +212,15 @@ let signed sock prog sk_file policy log =
     check name (error r = Some code)
       (Printf.sprintf "error %s" (Option.value ~default:"none" (error r)))
   in
+
+  let hello = query sock "HELLO" in
+  boot := (try data hello |> member "boot" |> to_string with _ -> "");
+  check "HELLO: a 32-hex boot id and signing configured"
+    (String.length !boot = 32 && data hello |> member "signing" = `Bool true)
+    (Yojson.Safe.to_string hello);
+  let hello2 = query sock "HELLO" in
+  check "HELLO: the boot id is stable within a process"
+    (data hello2 |> member "boot" = `String !boot) (Yojson.Safe.to_string hello2);
 
   let help = query sock "HELP" in
   let tiers = data help |> member "verbs" |> to_list
@@ -117,7 +234,7 @@ let signed sock prog sk_file policy log =
   expect_error "a request signed by another key: bad_signature"
     (sign other "STATE" [ Printf.sprintf "pid:%d" pid ]) "bad_signature";
   expect_error "a garbage signature: bad_signature"
-    (Printf.sprintf "STATE AAAA nonce:%s not_after_ms:%d pid:%d" (fresh_nonce ()) (now_ms () + 30_000) pid)
+    (Printf.sprintf "STATE AAAA nonce:%s boot:%s not_after_ms:%d pid:%d" (fresh_nonce ()) !boot (now_ms () + 30_000) pid)
     "bad_signature";
   (* Altering a signed field breaks the signature. *)
   let good = state_req () in
@@ -126,6 +243,15 @@ let signed sock prog sk_file policy log =
                          (String.split_on_char ' ' good)) in
   expect_error "a request with its pid changed after signing: bad_signature" tampered "bad_signature";
   expect_error "no policy entry: policy" (state_req ()) "policy";
+  (* Signed for another process or node: refused, before the nonce is spent. *)
+  expect_error "a request signed for another boot id: wrong_boot"
+    (sign sk "STATE" ~boot_id:"00000000000000000000000000000000" [ Printf.sprintf "pid:%d" pid ])
+    "wrong_boot";
+  expect_error "a request with no boot id: bad_args"
+    (let body = Printf.sprintf "nonce:%s not_after_ms:%d pid:%d" (fresh_nonce ()) (now_ms () + 30_000) pid in
+     Printf.sprintf "STATE %s %s"
+       March_ed25519.Ed25519.(sig_to_base64 (sign_str ("STATE " ^ body) sk)) body)
+    "bad_args";
 
   write_file policy "# debug verbs this node allows\nSTATE\nCRASHES_FULL\n";
   let line = state_req () in
@@ -154,13 +280,30 @@ let signed sock prog sk_file policy log =
   check "CRASHES (observe tier) still does not"
     (not (contains (Yojson.Safe.to_string plain) "plugh")) "message leaked";
 
+  trace_checks sock sk policy;
+
   write_file policy "STATE\n";
   expect_error "CRASHES_FULL once the policy drops it: policy" (sign sk "CRASHES_FULL" []) "policy";
+  expect_error "TRACE_START once the policy drops it: policy"
+    (sign sk "TRACE_START" [ "count:3"; "fn:tick" ]) "policy";
 
-  let results = audit_lines log |> List.map (fun j -> member "result" j |> to_string) in
-  let expected = [ "bad_signature"; "bad_signature"; "bad_signature"; "policy"; "ok"; "replay";
-                   "expired"; "not_after_too_far"; "bad_nonce"; "bad_args"; "ok"; "ok"; "policy" ] in
+  let old_verbs j = match member "verb" j with
+    | `String ("STATE" | "CRASHES_FULL") -> true | _ -> false in
+  let results = audit_lines log |> List.filter old_verbs
+                |> List.map (fun j -> member "result" j |> to_string) in
+  let expected = [ "bad_signature"; "bad_signature"; "bad_signature"; "policy"; "wrong_boot"; "bad_args";
+                   "ok"; "replay"; "expired"; "not_after_too_far"; "bad_nonce"; "bad_args"; "ok"; "ok";
+                   "policy" ] in
   check "every attempt is audited, in order" (results = expected) (String.concat "," results);
+  let trace_audit = audit_lines log
+                    |> List.filter (fun j -> match member "verb" j with
+                        | `String s -> String.length s > 6 && String.sub s 0 6 = "TRACE_" | _ -> false) in
+  check "trace attempts are audited, with the session in the detail"
+    (List.exists (fun j -> match member "detail" j with
+         | `String d -> contains d "session=" | _ -> false) trace_audit
+     && List.exists (fun j -> member "result" j = `String "limit_required") trace_audit
+     && List.exists (fun j -> member "result" j = `String "policy") trace_audit)
+    (string_of_int (List.length trace_audit));
   let signers = audit_lines log |> List.map (fun j -> member "signer" j |> to_string) in
   check "audit lines name the node's key"
     (List.for_all (fun s -> String.length s = 64) signers) (String.concat "," signers);

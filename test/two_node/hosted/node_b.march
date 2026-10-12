@@ -6,6 +6,7 @@ mod HostedNodeB do
   needs IO
   needs IO.Console
   needs IO.Mut
+  needs IO.Clock
   needs IO.NetConnect
   needs IO.NetListen
   needs IO.Spawn
@@ -46,15 +47,29 @@ mod HostedNodeB do
           else
             let st2 = Stream_Cons.choose_done(s, st, true)
             let parked = Stream_Cons.finish(s, st2)
-            println("Cons holds after finish: " ++ int_to_string(Session.epoch_holds_here()))
+            -- Recorded, not printed: `finish` closes the session, so main's
+            -- host_Cons can return and print "closed" before this handler gets
+            -- here.  main prints it after, keeping the output in one order.
+            Vault.set(Vault.open("hosted_holds"), "n", Session.epoch_holds_here())
             { state with parked: parked }
           end
       end
     end
   end
 
+  -- ConsActor's holds count after it finished, once recorded (-1 until then).
+  pfn holds_after_finish(left : Int) : Int do
+    let n = Vault.get_or(Vault.open("hosted_holds"), "n", -1)
+    if n >= 0 do n
+    else if left <= 0 do panic("ConsActor never recorded its holds") else
+      sleep_ms(20)
+      holds_after_finish(left - 20)
+    end end
+  end
+
   fn main(c : Cap(IO)) do
     println("node-b: up")
+    let _ = Vault.new("hosted_holds")
     let pc = spawn(ConsActor)
     let start = fn s ->
       let _ = send(pc, StartC(s))
@@ -63,7 +78,9 @@ mod HostedNodeB do
       let _ = send(pc, DeliverC(s, from, msg, ep))
       ()
     match Stream_Run.host_Cons(c, "node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
-      Ok(_) -> println("Cons: closed")
+      Ok(_) ->
+        println("Cons holds after finish: " ++ int_to_string(holds_after_finish(10000)))
+        println("Cons: closed")
       Err(e) -> panic(SessionNode.run_error_message(e))
     end
   end
