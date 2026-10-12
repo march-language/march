@@ -702,6 +702,28 @@ git log is authoritative for exact commits.
   backends, `println`, string interpolation, `inspect` and the REPL now
   print `{ y: 2, z: 1 }`. Only the display changed: fields are still
   evaluated in the order you write them.
+- **`MARCH_SANITIZE=thread` builds no longer report a race on scheduler
+  statistics.** Reading per-scheduler dispatch and idle counts (for example
+  through `Recon.node_stats` or an observe snapshot) while the schedulers were
+  running raced with the schedulers' own updates. See
+  `specs/progress/2026-10-12-tsan-sched-thread-stat-race.md`.
+- **A send to a full `BLOCK` mailbox waits again after it migrates schedulers.**
+  When a sender woke up on a different scheduler thread, its retry could check
+  the old scheduler's state. If that scheduler was idle, the message was
+  delivered past the mailbox limit instead of waiting. Found by a
+  `MARCH_SANITIZE=thread` sweep. See
+  `specs/progress/2026-10-12-send-block-guard-stale-tls.md`.
+- **`MARCH_SANITIZE=thread` builds no longer report a race on the
+  socket-readiness poller.** The scheduler's background thread read the shared
+  kqueue/epoll descriptor without a lock while the first socket wait created
+  it. That happened in any program that connects, accepts or reads a socket.
+  Plain builds behaved correctly. See
+  `specs/progress/2026-10-12-tsan-fdwait-fd-race.md`.
+- **`MARCH_SANITIZE=thread` builds no longer report a race on the runtime's
+  cached type ids.** Calling `sha256`, or building lists, results or `IOList`s
+  from C on two schedulers at once raced on a lazily filled cache. The cached
+  value was always the same, so no wrong result was possible, but TSAN
+  reported it. See `specs/progress/2026-10-12-tsan-type-id-memo-race.md`.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,

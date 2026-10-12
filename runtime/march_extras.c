@@ -473,10 +473,10 @@ void *march_sha1_bytes(void *b) {
  * one of those negative ids (impossible: len >= 0). */
 static int is_bytes_value(void *v) {
     static int32_t id_q = 0, id_bare = 0;
-    if (id_q == 0) id_q = march_type_id_of_name("Bytes.Bytes");
-    if (id_bare == 0) id_bare = march_type_id_of_name("Bytes");
     const march_hdr *h = (const march_hdr *)v;
-    return h->tag == 0 && (h->pad == 0 || h->pad == id_q || h->pad == id_bare);
+    return h->tag == 0 && (h->pad == 0
+                           || h->pad == march_type_id_memo(&id_q, "Bytes.Bytes")
+                           || h->pad == march_type_id_memo(&id_bare, "Bytes"));
 }
 
 /* Raw bytes of a String or a Bytes value (malloc'd; caller frees). */
@@ -3663,13 +3663,11 @@ static int32_t ctor_type_index_for_hdr(void *v) {
  * is itself the entry module; the emitter hashes whichever it has. */
 static int32_t iolist_type_id(void) {
     static int32_t id = 0;
-    if (id == 0) id = march_type_id_of_name("IOList.IOList");
-    return id;
+    return march_type_id_memo(&id, "IOList.IOList");
 }
 static int32_t iolist_type_id_bare(void) {
     static int32_t id = 0;
-    if (id == 0) id = march_type_id_of_name("IOList");
-    return id;
+    return march_type_id_memo(&id, "IOList");
 }
 static int is_iolist_type_id(int32_t tid) {
     return tid == iolist_type_id() || tid == iolist_type_id_bare();

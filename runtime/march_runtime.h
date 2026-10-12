@@ -71,6 +71,18 @@ static inline int32_t march_hdr_type_id(const void *p) {
 }
 /* The id the compiler stamps for a type named [name] (march_extras.c). */
 int32_t march_type_id_of_name(const char *name);
+/* Lazily memoised march_type_id_of_name for a `static int32_t` slot (0 = not
+ * yet computed).  Every scheduler thread may fill the slot at once; they all
+ * store the same pure hash, so relaxed atomics are enough -- they only make
+ * the access a non-race for C11/TSAN (a plain ldr/str on arm64). */
+static inline int32_t march_type_id_memo(int32_t *slot, const char *name) {
+    int32_t id = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    if (id == 0) {
+        id = march_type_id_of_name(name);
+        __atomic_store_n(slot, id, __ATOMIC_RELAXED);
+    }
+    return id;
+}
 /* `~H` hole on an ERASED value: flattens iff the header id says IOList,
  * otherwise renders by name and escapes (march_extras.c). */
 void   *march_html_auto_escape_dyn(void *v);

@@ -8732,13 +8732,11 @@ double march_math_pow(double b, double e) { return pow(b, e); }
  * constructor, which is strictly worse than the "#<tag:N>" being fixed. */
 static int32_t list_type_id(void) {
     static int32_t id = 0;
-    if (id == 0) id = march_type_id_of_name("List");
-    return id;
+    return march_type_id_memo(&id, "List");
 }
 static int32_t result_type_id(void) {
     static int32_t id = 0;
-    if (id == 0) id = march_type_id_of_name("Result");
-    return id;
+    return march_type_id_memo(&id, "Result");
 }
 
 static void *make_none(void) {
@@ -9672,8 +9670,7 @@ static void *mk_err_errno(void) {
  * cell. */
 static int32_t file_error_type_id(void) {
     static int32_t id = 0;
-    if (id == 0) id = march_type_id_of_name("File.FileError");
-    return id;
+    return march_type_id_memo(&id, "File.FileError");
 }
 static void *mk_file_error(int tag, void *payload_str) {
     void *cell = march_alloc(24); /* header(16) + 1 field(8) */
