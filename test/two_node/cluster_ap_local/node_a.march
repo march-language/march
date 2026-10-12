@@ -68,7 +68,11 @@ mod ClusterApLocal do
             Got_Ping(n, st) ->
               println("PingServer: got " ++ int_to_string(n))
               Hosted_Server.take_closed(Hosted_Server.finish(s, Hosted_Server.send_Pong(s, st, n + 1)))
-              println("PingServer holds after finish: " ++ int_to_string(Session.epoch_holds_here()))
+              -- Recorded, not printed: the pong is already sent, so the
+              -- Client may print "pong" before this handler gets here (it
+              -- did under the sanitizer build).  main prints it once the
+              -- hosted session is done, keeping the output in one order.
+              Vault.set(Vault.open("ap_local_holds"), "n", Session.epoch_holds_here())
               { sessions: LinearMap.vacate(slot) }
           end
       end
@@ -90,6 +94,17 @@ mod ClusterApLocal do
     else if left <= 0 do panic("the offer never became visible") else
       sleep_ms(20)
       visible(h, o, left - 20)
+    end end
+  end
+
+  -- PingServer's holds count after its session finished, once its handler
+  -- has recorded it (-1 until then).
+  pfn holds_after_finish(left : Int) : Int do
+    let n = Vault.get_or(Vault.open("ap_local_holds"), "n", -1)
+    if n >= 0 do n
+    else if left <= 0 do panic("PingServer never recorded its holds") else
+      sleep_ms(20)
+      holds_after_finish(left - 20)
     end end
   end
 
@@ -127,6 +142,7 @@ mod ClusterApLocal do
             retired("offered sessions", before)
             SessionNode.close_offer(o)
         end
+        let _ = Vault.new("ap_local_holds")
         let srv = spawn(PingServer)
         match Hosted_Run.offer_hosted_Server(c, h, 4, srv,
                 fn (sid, s) -> do
@@ -153,6 +169,7 @@ mod ClusterApLocal do
               Ok(_) -> println("Client: hosted session done")
               Err(e) -> println("Client: " ++ Hosted_Run.error_message(e))
             end
+            println("PingServer holds after finish: " ++ int_to_string(holds_after_finish(10000)))
             SessionNode.close_offer(o)
         end
         -- The one-session runner too: both roles under one agreed session
