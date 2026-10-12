@@ -675,6 +675,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`MARCH_VERIFY_TIR_LEAKS=1` no longer reports about 257 false leaks in
+  every program.** The reference-count check counted a discarded unit
+  result, the `None` arm of a niche `Option`, and `Some(i)` of an
+  `Option(Int)` as held references. What remains is listed in
+  `specs/todos/2026-10-08-verifier-a4-followups.md`.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a
