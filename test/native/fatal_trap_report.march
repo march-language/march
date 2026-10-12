@@ -1,0 +1,23 @@
+-- An illegal instruction in a compiled program is reported, not a silent
+-- death (specs/todos/2026-10-07-flake-actor-state-released-macos-exit.md:
+-- native_actor_state_released died of SIGILL on macOS CI with nothing on
+-- stderr but the shell's exit status). The shim forks; the child runs an
+-- illegal instruction on this green thread and the runtime's SIGILL handler
+-- writes the fault line, the image-relative pc/lr line and a frame walk, then
+-- exits 128 + SIGILL. RED before: status 132 with no report lines (flags 0).
+mod Main do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "c" : Cap(Ffi) do
+    fn probe(unused: Int): Int = "fatal_trap_report_probe"
+  end
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+    let r = probe(0)
+    let flags = r - (r / 16) * 16
+    println("child exit status: " ++ int_to_string(r / 16))
+    println("fault line: " ++ bool_to_string(flags - (flags / 2) * 2 == 1))
+    println("static pc line: " ++ bool_to_string((flags / 2) - (flags / 4) * 2 == 1))
+    println("frame walk: " ++ bool_to_string(flags / 4 == 1))
+  end
+end

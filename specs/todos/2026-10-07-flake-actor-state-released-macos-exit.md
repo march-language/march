@@ -113,3 +113,52 @@ MARCH_DEBUG_RUNTIME=1` (`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`), Docker
 `march-ci-ubuntu-step6b` (arm64, glibc 2.39), concurrently with a 6-way ASAN
 sweep for load: 0 failures, no sanitizer report. The fixture is also clean in
 the full `scripts/native-sanitize-sweep.sh` error pass at 1 and 14 schedulers.
+
+## 2026-10-12: fifth sighting, and SIGILL is not a `brk`
+
+Main's CI run 38226974123, job `test (macos-15, all)` (114736773585), on
+0c50b9a4c: `Illegal instruction: 4`, `exit status 132`, after 19 of the 20
+`on_stop blew up` lines. So the trap point moves: 13, 20, 19 lines across
+sightings (whether the last stdout line was written is never shown, since
+stdout goes to the `.out` file).
+
+**SIGILL rules out every trap the earlier notes listed.** On arm64 macOS a
+`brk` (`__builtin_trap`, `llvm.trap`, an `unreachable` lowered as a trap, a
+UBSAN trap) raises SIGTRAP, exit 133, not SIGILL; measured with a two-line C
+program: `__builtin_trap()` exits 133, executing `.inst 0x00000000` exits 132.
+SIGILL means the CPU fetched a word that is not an instruction: control
+reached a bad address that is executable (zero padding, `__TEXT,__const` such
+as mimalloc's all-zero `_mi_page_empty`, `__TEXT,__cstring`), or an
+instruction M1 (CI) lacks and M3 (local) has. Neither has been shown. Also:
+
+- The fixture's IR has 5 `unreachable`s, all `switch` defaults (in `pushed`,
+  `__drop$List_Int`, `__drop$List_String`, `__drop$Option_T0_`,
+  `__drop$Result_V0_String`); clang folds them, and the local binary contains
+  no `brk` at all (`otool -tV`), and in any case they would be SIGTRAP.
+- No `-mcpu` is passed by default (`--target-cpu` unset), so codegen targets
+  the arm64-apple-macosx baseline (apple-m1).
+- mimalloc's `MI_TLS_SLOT=89` (#877): libpthread's `tsd_private.h` assigns
+  keys 80-89 to CoreData, which this program does not load. Not ruled out on
+  macOS 15, but no consumer is known.
+- Darwin's `setjmp`/`longjmp` (libsystem_platform, disassembled): the munge
+  token is TSD slot 7, process-wide; `longjmp` restores the setjmp thread's
+  signal mask and resets the alt-stack flag on the CURRENT thread. Nothing in
+  it depends on staying on one OS thread.
+
+## 2026-10-12: still does not reproduce; the next sighting will name the site
+
+- 1,800 runs of the `--opt 2` binary (300 each, two loops at once at 1, 4 and
+  14 schedulers, machine load average 55-75 from other sessions), 1,200 with
+  `MARCH_DEBUG_RUNTIME=1`, 1,200 at `--opt 0`: all exit 0 (M3 Max, macOS 26,
+  Apple clang 17).
+- 180 runs under ASAN+UBSAN (`MARCH_SANITIZE=1 MARCH_DEBUG_RUNTIME=1`,
+  `halt_on_error=1`) on Linux arm64 (`march-ci-ubuntu-step6b`) at 1, 4 and 14
+  schedulers, concurrently: all exit 0, no report.
+
+The runtime now handles SIGILL and SIGTRAP (specs/progress/2026-10-12-fatal-trap-report.md):
+it prints the fault line, `static pc=... lr=... insn=...` and a frame-pointer
+walk, and this fixture's rule sets `MARCH_FATAL_BACKTRACE=1`, so the next CI
+sighting prints symbol names for the trapping pc and its callers (the CI binary
+is not kept, so names are what matter). Read the frames and the `insn=` word
+first: a zero word or ASCII bytes means a wild jump (look at who called
+through a pointer); a real encoding means an instruction M1 lacks.
