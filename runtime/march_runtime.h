@@ -295,6 +295,9 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * task[3] (task_await_unwrap unboxes without consuming, since a task may be
  * awaited twice); march_run_resource_dtor releases it when the Task dies. */
 #define MARCH_TASK_TAG ((int32_t)-7)
+/* A Task's header pad: set by the task trampoline when the result it stored
+ * is a Float box the Task owns (released when the Task dies). */
+#define MARCH_TASK_OWNS_FLOAT_BOX ((int32_t)1)
 /* A TypedArray (typed_array_alloc in march_runtime.c): [hdr][len@16][cap@24]
  * then len 8-byte element slots, each holding a tagged immediate or ONE
  * owned reference to a heap value (a Float is a march_alloc_float box). Tag 0

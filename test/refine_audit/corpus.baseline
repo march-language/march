@@ -664,6 +664,8 @@ native_task_lifetime_leak_probe: coverage audit (user + stdlib): 135 enforced, 0
 native_task_lifetime_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_task_race_cancel: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_task_race_cancel: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_result_released_before_task: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_task_result_released_before_task: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_task_spawn_float_thunk: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_task_spawn_float_thunk: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tco_fresh_arg_decrc: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

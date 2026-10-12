@@ -623,16 +623,19 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
          * legal), so until now the box outlived the Task: one leaked box per
          * awaited Float task.
          *
-         * Release only that case. An untagged task[3] (0 = never finished, or
-         * the cancel path's Err cell) is skipped; a tagged scalar untags to an
-         * odd value and fails IS_HEAP_PTR; a heap result of any other tag is
-         * handed to the caller by the await paths, which account for it, so it
-         * is not ours to release. */
-        int64_t slot = ((int64_t *)p)[3];
-        if (slot & 1) {
-            void *raw = (void *)(intptr_t)(slot >> 1);
-            if (IS_HEAP_PTR(raw) && ((march_hdr *)raw)->tag == MARCH_FLOAT_TAG)
-                march_decrc(raw);
+         * Release only that case. A heap result of any other tag is handed to
+         * the caller by the await paths, which account for it, so it is not
+         * ours to release -- and by the time the Task dies it may already be
+         * FREED, so its tag must not be read here. The trampoline therefore
+         * decides "Float box" while it still owns the result and records it
+         * in the header pad (MARCH_TASK_OWNS_FLOAT_BOX); reading the result's
+         * tag at this point was a heap-use-after-free whenever the awaiter
+         * released a non-Float result and dropped its Task handle before the
+         * trampoline's own reference went (ASAN, tcp_recv_eagain_after_park
+         * at 14 schedulers under load, 2026-10-12). */
+        if (((march_hdr *)p)->pad == MARCH_TASK_OWNS_FLOAT_BOX) {
+            int64_t slot = ((int64_t *)p)[3];
+            if (slot & 1) march_decrc((void *)(intptr_t)(slot >> 1));
         }
     }
 }
@@ -7579,6 +7582,11 @@ static void march_thunk_trampoline(void *arg) {
         if (!cancelled) {
             int64_t raw = (int64_t)(uintptr_t)result;
             task[3] = (raw << 1) | (int64_t)1; /* tagged result at offset 24 */
+            /* A Float box result stays the Task's (see the MARCH_TASK_TAG
+             * case of march_run_resource_dtor_slow). Decided now, while the
+             * result is still ours: published by the done store below. */
+            if (IS_HEAP_PTR(result) && ((march_hdr *)result)->tag == MARCH_FLOAT_TAG)
+                ((march_hdr *)task)->pad = MARCH_TASK_OWNS_FLOAT_BOX;
         }
         /* SEQ_CST store + SEQ_CST load: this store(task[4])-then-load(task[5])
          * is one half of a Dekker / store-buffering pair with task_wait_done's

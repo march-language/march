@@ -9946,6 +9946,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/generic_fn_closure_unused_param_leak_probe.expected native_generic_fn_closure_unused_param_leak_probe.out)))
 
+; ── A Task's result released by its awaiter before the Task dies: the Task
+; destructor read the (freed) result's tag to decide whether it owned a Float
+; box -- a heap-use-after-free ASAN saw in tcp_recv_eagain_after_park. The
+; Float leg pins that a Float result is still released (live_allocs flat).
+(rule
+ (targets native_task_result_released_before_task native_task_result_released_before_task.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/task_result_released_before_task.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_result_released_before_task
+        native/task_result_released_before_task.march)
+   (with-stdout-to native_task_result_released_before_task.out
+        (system "MARCH_NUM_SCHEDULERS=14 ./native_task_result_released_before_task")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_result_released_before_task.expected native_task_result_released_before_task.out)))
+
 (rule
  (alias runtest)
  (deps native_erased_float_slot_leak_probe.live)

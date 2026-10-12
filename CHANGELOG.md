@@ -617,6 +617,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Fixed a rare memory-safety bug when a task finishes.** If you awaited a
+  task, finished with its result, and dropped the task before the task's own
+  thread had fully wound down, the runtime could read the freed result. It was
+  seen only under AddressSanitizer at 14 schedulers (about 1 run in 800), and
+  could in principle free memory twice.
 - **A generic function passed as a callback no longer leaks the argument it
   ignores.** `fn second(_a, b) do b end` handed to something expecting a
   `Float -> Float -> Float` (or a `String -> String -> String`) leaked its
