@@ -1,0 +1,130 @@
+-- Leak and double-free guard: a closure that captures an unboxed aggregate
+-- (a small scalar-only single-constructor type, Repr.Unboxed) releases the box
+-- that holds it.
+--
+-- A closure slot is 8 bytes, so the captured struct is stored there as a fresh
+-- heap BOX built when the environment is allocated. The apply fn copies the
+-- struct out of it, and both of the environment's releases (the apply fn's own
+-- and the closure-drop fn run by march_clo_release) filtered captures by
+-- needs_rc, which is false for the aggregate: one box leaked per environment,
+-- in every closure kind (a guarded or-pattern's join-point closure, a factory,
+-- a local lambda) (specs/progress/2026-10-12-unboxed-aggregate-closure-capture-leak.md).
+--
+-- Every leg prints its computed value as well as whether live allocations
+-- stayed flat: releasing the box while the closure is still shared would
+-- read freed memory on the next call and print a wrong value (or die under
+-- ASAN), which the "shared" and "list of closures" legs exercise.
+mod Main do
+  needs IO.Console
+
+  type Pair = Pair(Int, Int)
+  type V2 = V2(Float, Float)
+
+  pfn classify_guarded(p : Pair) : Int do
+    match p do
+      Pair(x, 1 | 2) when x > 0 -> x + 100
+      Pair(x, _)                -> x
+    end
+  end
+
+  fn adder(p : Pair) : (Int) -> Int do
+    fn x -> match p do Pair(a, b) -> a + b + x end
+  end
+
+  fn scaler(v : V2) : (Int) -> Int do
+    fn x -> match v do V2(a, b) -> float_to_int((a + b) * 2.0) + x end
+  end
+
+  fn mixed(p : Pair, s : String) : (Int) -> Int do
+    fn x -> match p do Pair(a, _) -> a + string_length(s) + x end
+  end
+
+  pfn leg_or_pattern(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else leg_or_pattern(n - 1, acc + classify_guarded(Pair(n % 3 - 1, n % 4))) end
+  end
+
+  pfn leg_called(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let f = adder(Pair(n, 1))
+      leg_called(n - 1, acc + f(2))
+    end
+  end
+
+  pfn leg_dropped_uncalled(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let f = adder(Pair(n, 1))
+      let g = scaler(V2(1.5, 0.5))
+      let _ = f
+      let _ = g
+      leg_dropped_uncalled(n - 1, acc + 1)
+    end
+  end
+
+  pfn leg_shared(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let f = adder(Pair(n, 3))
+      let a = f(1)
+      let b = f(2)
+      let c = f(3)
+      leg_shared(n - 1, acc + a + b + c)
+    end
+  end
+
+  pfn leg_list_of_closures(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let f = adder(Pair(n, 2))
+      let fs = [f, f, scaler(V2(1.0, 2.0)), f]
+      let total = List.fold_left(fs, 0, fn (s, g) -> s + g(10))
+      leg_list_of_closures(n - 1, acc + total)
+    end
+  end
+
+  pfn leg_mixed(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let f = mixed(Pair(n, 0), int_to_string(n))
+      let a = f(1)
+      let b = f(2)
+      leg_mixed(n - 1, acc + a + b)
+    end
+  end
+
+  pfn leg_local_lambda(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let p = Pair(n, 5)
+      let g = fn x -> match p do Pair(a, b) -> a * b + x end
+      let r = g(1) + g(2)
+      leg_local_lambda(n - 1, acc + r)
+    end
+  end
+
+  pfn flat(label : String, before : Int, r : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 200))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 5000
+    let a = live_allocs()
+    let r1 = leg_or_pattern(n, 0)
+    flat("guarded or-pattern join point", a, r1)
+    let b = live_allocs()
+    let r2 = leg_called(n, 0)
+    flat("factory closure called", b, r2)
+    let c = live_allocs()
+    let r3 = leg_dropped_uncalled(n, 0)
+    flat("factory closure dropped uncalled", c, r3)
+    let d = live_allocs()
+    let r4 = leg_shared(n, 0)
+    flat("closure called while shared", d, r4)
+    let e = live_allocs()
+    let r5 = leg_list_of_closures(n, 0)
+    flat("list of closures sharing one", e, r5)
+    let f = live_allocs()
+    let r6 = leg_mixed(n, 0)
+    flat("heap and unboxed captures", f, r6)
+    let g = live_allocs()
+    let r7 = leg_local_lambda(n, 0)
+    flat("local lambda", g, r7)
+  end
+end

@@ -52,3 +52,36 @@ ASAN builds only: no non-sanitized run has ever shown it. But it makes every
 program that calls a `blocking` extern unsanitizable, so the sanitize gate
 cannot cover that path at all (it is not in `specs/lang/golden/sanitize.sh`'s
 curated list today).
+
+## Fixed (2026-10-12)
+
+No pool redesign was needed: the elasticity contract stays exactly as it is
+(spawn iff `g_blk_queued > g_blk_waiting`, at submission time). Only WHERE the
+`pthread_create` runs changed.
+
+- `runtime/march_scheduler.{h,c}`: `march_sched_run_on_sched_stack(fn, arg)`.
+  From a green thread it stores `fn`/`arg` in two new owner-only scheduler
+  fields (`after_switch_fn`/`after_switch_arg`) and yields; `sched_loop` runs
+  the call on its native OS-thread stack right after the switch returns,
+  BEFORE the status handling that re-queues the proc, so the caller cannot be
+  resumed (anywhere) until `fn` has returned. Outside a green thread it calls
+  `fn(arg)` directly. Cost on the dispatch loop: one predicted-not-taken load
+  and branch per switch.
+- `runtime/march_ffi.c`: `march_run_blocking` spawns its worker through it
+  (`march_blk_spawn_worker`); the result flag lives on the caller's stack,
+  which is suspended while the scheduler writes it. The spawn-failure fallback
+  (run the call inline) is unchanged.
+
+Plain builds take the same path (one extra yield per spawn, which is already
+followed by a yield loop); the pool still reuses its workers
+(`run_codegen` "pool reuses worker threads across calls").
+
+Verification (Docker `march-ci-ubuntu-step6b`, arm64, glibc 2.39, sweep
+script, `-l`, schedulers 1 and 14): `ffi_blocking` OK at both. Control, same
+container, base `march_ffi.c`/`march_scheduler.{c,h}` via `MARCH_RUNTIME_DIR`:
+`SIGNAL 139` at both.
+
+Not changed, same failure class: `march_sched_getaddrinfo`
+(`runtime/march_scheduler.c`) still `pthread_create`s its resolver thread from
+the calling green thread when preemption is active. It could use the same hook;
+no sanitizer run has hit it yet.

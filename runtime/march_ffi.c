@@ -12,6 +12,8 @@
 /* From the scheduler: cooperatively yield the green thread (no-op outside a
  * scheduler context).  Declared here to avoid pulling the whole scheduler API. */
 void march_sched_yield(void);
+/* Run fn(arg) on a native OS-thread stack (march_scheduler.h). */
+void march_sched_run_on_sched_stack(void (*fn)(void *), void *arg);
 
 int32_t march_ffi_abi_version(void) { return MARCH_FFI_ABI_VERSION; }
 
@@ -355,6 +357,25 @@ static void *march_blk_worker(void *unused) {
     return NULL;
 }
 
+/* Spawn one detached pool worker; *(int *)arg = 1 on success.  Runs on a
+ * NATIVE stack (march_sched_run_on_sched_stack), never on the calling green
+ * thread's: under ASAN, pthread_create from a green thread killed the process
+ * with a silent SIGSEGV inside glibc's allocate_stack (the first `blocking`
+ * call of test/native/ffi_blocking.march, Linux arm64;
+ * specs/progress/2026-10-12-asan-ffi-blocking-worker-spawn-sigsegv.md), the
+ * same failure class march_observe.c's header documents for its threads. */
+static void march_blk_spawn_worker(void *arg) {
+    int *spawned = (int *)arg;
+    pthread_t t;
+    pthread_attr_t attr;
+    *spawned = 0;
+    if (pthread_attr_init(&attr) == 0) {
+        (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        *spawned = (pthread_create(&t, &attr, march_blk_worker, NULL) == 0);
+        (void)pthread_attr_destroy(&attr);
+    }
+}
+
 static void march_run_blocking(march_blk_call *b) {
     int need_worker;
     b->next = NULL;
@@ -372,14 +393,10 @@ static void march_run_blocking(march_blk_call *b) {
     pthread_mutex_unlock(&g_blk_mu);
 
     if (need_worker) {
-        pthread_t t;
-        pthread_attr_t attr;
+        /* On this green thread's stack, which stays put while the scheduler
+         * runs the spawn: the caller is suspended until it has returned. */
         int spawned = 0;
-        if (pthread_attr_init(&attr) == 0) {
-            (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-            spawned = (pthread_create(&t, &attr, march_blk_worker, NULL) == 0);
-            (void)pthread_attr_destroy(&attr);
-        }
+        march_sched_run_on_sched_stack(march_blk_spawn_worker, &spawned);
         if (spawned) {
             atomic_fetch_add_explicit(&g_blk_threads_spawned, 1,
                                       memory_order_relaxed);
