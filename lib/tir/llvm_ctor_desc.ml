@@ -406,6 +406,9 @@ let id_for ctx (ty : Tir.ty) : int option =
   else
   match ty with
   | Tir.TCon _ | Tir.TRecord _ -> id_for_ty ctx ty
+  (* A `to_string` of a tuple goes through its Show impl and never gets here;
+     a `~H` hole does, and printed `#<tag:0>`. *)
+  | Tir.TTuple (_ :: _ as ts) -> assign_ids ctx; tuple_instance_id ctx ts
   | _ -> None
 
 (** Register this unit's descriptor (a cached load after the first call)

@@ -37,8 +37,9 @@ moved the descriptor's definition to the end of the module.
 - `tuple_instance_id`: a tuple in a field gets a `U*` row, one `C` row whose
   fields are the elements. A tuple cell holds its elements in the erased
   convention (a tagged Int read as `3` for `1` with the raw token), so the
-  element tokens are `erased_token`'s. Top-level tuples are untouched: they
-  are rendered by their Show impl before the table is consulted.
+  element tokens are `erased_token`'s. A top-level `to_string` of a tuple
+  goes through its Show impl and never reaches the table; a top-level `~H`
+  hole does (`Llvm_ctor_desc.id_for`), and printed `#<tag:0>` too.
 - `runtime/march_extras.c`: `ctor_render` renders a `U` type as `(a, b)`,
   reading its one row whatever the cell's tag.
 - Unit as a field (`u: ()`) printed `0`: `field_token` now answers `u` for
@@ -50,6 +51,11 @@ moved the descriptor's definition to the end of the module.
 against one `.expected` (13 lines: undeclared records with scalar, newtype,
 niche, ADT, tuple, Unit, nested-record and list fields; tuples in declared
 and generic fields; interpolation, `inspect`, `~H`).
+
+`test/native/h_sigil_adt_interp.expected` pinned four of these residuals
+(`some`/`none` of an `Option(String)`, now an `X*` instance; the undeclared
+record; the tuple). They now match the interpreter; the record literal there
+is written in field-name order.
 
 ## Left open
 

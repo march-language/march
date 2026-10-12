@@ -640,7 +640,7 @@ git log is authoritative for exact commits.
 - **Compiled `to_string` prints records with no declared type, and tuples
   inside fields.** `to_string({ a: 1, b: "x" })` printed `#<tag:0>` compiled,
   as did a tuple inside a constructor field (`T((1, "a"))` printed
-  `T(#<tag:0>)`), and a `()` field printed `0`. They now print
+  `T(#<tag:0>)`) or in a `~H` hole, and a `()` field printed `0`. They now print
   `{ a: 1, b: "x" }`, `T((1, "a"))` and `()`, also through interpolation,
   `inspect` and `~H`. Compiled code prints record fields in name order; the
   interpreter prints them in the order the literal wrote them.
