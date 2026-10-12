@@ -16,10 +16,10 @@ Items, each its own PR; tick as they land and add a dated
 - [x] R4 debug tier: `Actor.Debug`, `inspect_state`, signed `STATE`/`CRASHES_FULL`, nonces, policy, audit ([R4a](../progress/2026-10-05-observe-r4a-inspect-state.md), [R4b](../progress/2026-10-05-observe-r4b-signed-debug-verbs.md); `MESSAGES` split out to [its own todo](2026-10-05-observe-messages-verb.md))
 - [x] R5 shell groundwork, adapted to self-contained fragments (2026-10-06/08): the cap manifest ([progress](../progress/2026-10-06-shell-cap-manifest-library-caps.md)), build identity by source hash ([progress](../progress/2026-10-07-shell-build-identity.md)), fragments calling the node's own functions ([progress](../progress/2026-10-07-shell-calls-node-functions.md)), limit-aware rendering ([progress](../progress/2026-10-07-shell-render.md)). Not built: pinned NAME_IDs (fragments call nothing through dispatch). The security review is still to do: [packet](../reviews/2026-10-07-shell-r5-review-packet.md)
 - [x] R6 `forge rpc` / `forge shell` (2026-10-06/08): [node listener](../progress/2026-10-06-shell-node-listener.md), [client](../progress/2026-10-06-shell-client-march-shell.md), [program lowered once](../progress/2026-10-06-shell-program-lowered-once.md), [Linux latency gate met](../progress/2026-10-07-shell-latency-linux-gate.md) (p50 110 ms, gate 300), [spawning actors](../progress/2026-10-07-shell-spawn-actors.md), [`--force`](../progress/2026-10-07-shell-force.md), [line editing](../progress/2026-10-08-shell-line-editing.md), [review fixes F1-F4](../progress/2026-10-08-shell-review-findings-f1-f4.md). `forge eval` is not built
-- [ ] R7 `forge observe` TUI, `WATCH`, crash dumps
-- [ ] R8 tracing with mandatory limits + boundary call tracing
-- [ ] R9 `forge release build` + `bin/<app>`
-- [ ] R10 `Recon.which` / `Recon.source`
+- [x] R7 `forge observe` TUI, `WATCH`, crash dumps (2026-10-11) ([progress](../progress/2026-10-11-observe-r7-tui-watch-dumps.md)); `STATE`/`MESSAGES` and the Trace panel are not in the TUI yet ([todo](2026-10-11-observe-tui-debug-tier-and-trace-panels.md))
+- [ ] R8 tracing with mandatory limits + boundary call tracing: built as a narrowed slice (boundary-call tracing and the boot-bound signed requests; the design's actor events are deferred), in review as #939. Tick when it merges
+- [x] R9 `forge release build` + `bin/<app>` (2026-10-11) ([progress](../progress/2026-10-11-observe-r9-release-build.md)); the launcher's `eval` verb is a stub until `forge eval` exists
+- [x] R10 `Recon.which` / `Recon.source` (2026-10-11) ([progress](../progress/2026-10-11-observe-r10-which-source.md)); follow-ups in [observe-source-followups](2026-10-11-observe-source-followups.md)
 
 Move this file to `specs/progress/` when R10 lands; the R11 items (transcripts,
 `--env` fan-out, notebook attach, `Observe.serve_http`) get their own todos then.
