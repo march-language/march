@@ -675,6 +675,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A `forge deploy` on the cluster backend that stops part way is now retried
+  from where it stopped, and it waits through a change of leader.** Each part
+  that finishes (a pool restarted over ssh, a release) records its builds as
+  deployed at once, so when a later release halts, the retry sends only that
+  release and does not restart every node again. Following a release no longer
+  fails with `ERR no_leader` while leadership moves: forge says leadership is
+  moving, keeps polling for up to 120 s, and names the new leader.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a
