@@ -214,12 +214,36 @@ and id_for_ty ctx (ty : Tir.ty) : int option =
 
 (* A `ptype` alias reaches call sites as a STRUCTURAL record, not as the
    nominal [TCon] its declaration produced, so a name lookup misses it.  Match
-   it back to a declared record by its field names and slot kinds — the same
-   identity [Llvm_data.shape_desc] gives a record cell. *)
+   it back to a declared record by its field names and field TYPES.
+
+   Not by slot kind ([Llvm_data.shape_kind_char], the identity a record cell's
+   shape uses): that maps Int, Bool, Unit and Atom all to 'i', so the literal
+   `{ n: true }` matched the stdlib's `{ n : Int }` record and printed its
+   field through that record's 'i' token as `{ n: 1 }`.  Any declared record
+   with the same field names and kinds but different field types steals the
+   literal the same way, so the field types themselves must agree. *)
 and declared_record_id ctx (fs : (string * Tir.ty) list) : int option =
+  (* The typechecker and lowering spell the scalars two ways each. *)
+  let rec norm (t : Tir.ty) : Tir.ty =
+    match t with
+    | Tir.TCon ("Int", []) -> Tir.TInt
+    | Tir.TCon ("Float", []) -> Tir.TFloat
+    | Tir.TCon ("Bool", []) -> Tir.TBool
+    | Tir.TCon ("String", []) -> Tir.TString
+    | Tir.TCon ("Unit", []) | Tir.TTuple [] -> Tir.TUnit
+    | Tir.TCon (n, args) -> Tir.TCon (n, List.map norm args)
+    | Tir.TTuple ts -> Tir.TTuple (List.map norm ts)
+    | Tir.TRecord rs ->
+      Tir.TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b)
+                     (List.map (fun (n, t) -> (n, norm t)) rs))
+    | Tir.TFn (ps, r) -> Tir.TFn (List.map norm ps, norm r)
+    | Tir.TPtr t -> Tir.TPtr (norm t)
+    | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TString | Tir.TUnit
+    | Tir.TVar _ -> t
+  in
   let key fields =
     List.sort (fun (a, _) (b, _) -> String.compare a b) fields
-    |> List.map (fun (n, t) -> (n, Llvm_data.shape_kind_char t))
+    |> List.map (fun (n, t) -> (n, norm t))
   in
   let want = key fs in
   Hashtbl.fold (fun tname id acc ->

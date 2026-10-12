@@ -662,6 +662,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled `to_string` no longer prints a record's `Bool` field as a
+  number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
+  was matched to another declared record with the same field names (here a
+  stdlib `{ n : Int }`) and printed as that type. The same mix-up dropped
+  the quotes from a String field whenever a declared record with the same
+  field name held a different pointer type, such as a List. A record now prints by its own field types, the same
+  as the interpreter, at top level and inside a list or option.
 - **A type that refers to itself at a growing argument is now a compile
   error, instead of hanging the compiler.** `type Nest(a) = Z(a) |
   S(Nest(List(a)))` made `--compile` and `--dump-tir` run forever. It is now
