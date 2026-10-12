@@ -6,9 +6,9 @@
 -- call leaked the record (and everything it held).
 --
 -- Each line counts live allocations over 200 iterations (0 = no growth).
--- The fresh rows hold only scalars: an erased record is released by a
--- generic (shallow) dec, so a heap field of a record the closure frees still
--- leaks (specs/todos/2026-10-12-erased-record-shallow-release.md).
+-- The fresh rows hold only scalars; records with heap fields released through
+-- an erased type are covered by erased_record_deep_release_probe.march
+-- (specs/progress/2026-10-12-erased-record-shallow-release.md).
 -- The rows list is SHARED: it is walked by three predicates and then read
 -- again, so a drop that released a reference it did not own would show up as
 -- a use-after-free under ASAN or a wrong total here. The returned-field case

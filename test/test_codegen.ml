@@ -9496,7 +9496,7 @@ let test_compile_local_shadows_builtin_still_gets_rc_ops () =
   Alcotest.(check bool) "at least one SSA temp loads %kill.addr" true
     (ssa_temps_loading_kill_addr <> []);
   let rc_call_re =
-    Str.regexp "call void @march_\\(decrc_local\\|incrc_local\\|free\\|incrc\\|decrc\\)(ptr %\\([A-Za-z0-9_$]+\\))"
+    Str.regexp "call void @march_\\(decrc_local\\|decrc_erased_local\\|decrc_erased\\|incrc_local\\|free\\|incrc\\|decrc\\)(ptr %\\([A-Za-z0-9_$]+\\))"
   in
   let rc_call_args =
     let rec go i acc =
@@ -14620,6 +14620,8 @@ declare void @march_decrc_local(ptr %p)
 declare i64  @march_decrc_local_freed(ptr %p)
 declare void @march_clo_param_own(ptr %p)
 declare void @march_clo_release(ptr %p)
+declare void @march_decrc_erased(ptr %p)
+declare void @march_decrc_erased_local(ptr %p)
 declare ptr  @march_clo_float_arg(ptr %p)
 declare void @march_free(ptr %p)
 declare ptr  @march_tco_defer_push(ptr %buf, ptr %release, ptr %v)

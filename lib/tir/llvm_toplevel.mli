@@ -76,7 +76,8 @@ val closure_drop_wants : Tir.tir_module -> (string * string) list
 
 (** [define internal void @march_clo_drops_register()], registering the
     module's closure and actor releases with the runtime. *)
-val clo_drop_registration : Tir.tir_module -> string
+val clo_drop_registration :
+  ?rec_drops:(string * string * string) list -> Tir.tir_module -> string
 
 (** Stable actor-message constructor tags, ["<Actor>_Msg.<Ctor>" -> tag]
     (see the implementation's comment); [pins] as for {!variant_ctor_tags}. *)

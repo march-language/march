@@ -9888,29 +9888,135 @@ void *march_file_stat(void *path_ptr) {
     return mk_ok(fs);
 }
 
-/* File handle: heap object with tag=0, field[0] = FILE* as int64_t */
+/* ── File and CSV handles ─────────────────────────────────────────────
+ * file_open / csv_open hand the program an `Int`, so nothing in compiled code
+ * counts or releases it.  The handle used to be a heap cell (field 0 the
+ * FILE*) passed around as that Int, and no one could free it: the close
+ * builtins zero field 0 so that a second close is a no-op, which means the
+ * cell must outlive every close.  Every open leaked one cell (24 bytes for a
+ * file, 40 for a CSV reader; LSan, close_returns_ok_atom and csv_niche_row).
+ *
+ * A handle is now an index into this table plus a generation, so close frees
+ * the slot and bumps its generation, and a stale handle (closed, or closed
+ * and its slot reused) finds nothing: a second close is still a no-op, a read
+ * after close still reads as end of stream, and nothing is left to leak.
+ * The encoding is a NEGATIVE EVEN number: even, so the compiled conditional
+ * untag of a generic slot (ashr iff odd) leaves it alone whichever slot
+ * convention the Ok payload is read with, exactly as it left the old raw
+ * pointer alone; negative, so IS_HEAP_PTR rejects it and no RC op can ever
+ * mistake it for a cell.  Magnitude < 2^56, well inside a 63-bit Int.
+ * specs/progress/2026-10-12-file-csv-handle-cell-leak.md */
+typedef struct {
+    FILE    *f;          /* NULL: free, or closed */
+    char     delim;      /* CSV only */
+    int      rfc4180;    /* CSV only */
+    uint32_t gen;        /* bumped on every close */
+    int32_t  next_free;  /* free list link, -1 = end */
+} march_fh_slot;
+
+#define MARCH_FH_SLOT_BITS 24
+#define MARCH_FH_GEN_MASK  0x3FFFFFFFu
+
+static march_fh_slot *fh_tab = NULL;
+static int32_t fh_len = 0, fh_cap = 0, fh_free = -1;
+static pthread_mutex_t fh_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int64_t fh_encode(int32_t slot, uint32_t gen) {
+    int64_t u = (int64_t)slot | ((int64_t)(gen & MARCH_FH_GEN_MASK) << MARCH_FH_SLOT_BITS);
+    return -2 * (u + 1);
+}
+
+/* Register an open stream; returns its handle, or 0 when the table is full. */
+static int64_t fh_open(FILE *f, char delim, int rfc4180) {
+    pthread_mutex_lock(&fh_mu);
+    int32_t slot;
+    if (fh_free >= 0) {
+        slot = fh_free;
+        fh_free = fh_tab[slot].next_free;
+    } else {
+        if (fh_len == fh_cap) {
+            int32_t cap = fh_cap ? fh_cap * 2 : 16;
+            if (cap > (1 << MARCH_FH_SLOT_BITS)) { pthread_mutex_unlock(&fh_mu); return 0; }
+            march_fh_slot *t = realloc(fh_tab, (size_t)cap * sizeof *t);
+            if (!t) { pthread_mutex_unlock(&fh_mu); return 0; }
+            fh_tab = t;
+            fh_cap = cap;
+        }
+        slot = fh_len++;
+        fh_tab[slot].gen = 0;
+    }
+    fh_tab[slot].f = f;
+    fh_tab[slot].delim = delim;
+    fh_tab[slot].rfc4180 = rfc4180;
+    fh_tab[slot].next_free = -1;
+    int64_t h = fh_encode(slot, fh_tab[slot].gen);
+    pthread_mutex_unlock(&fh_mu);
+    return h;
+}
+
+/* The slot a live handle names, or -1.  Caller holds fh_mu. */
+static int32_t fh_slot_locked(void *handle_ptr) {
+    int64_t h = (int64_t)(intptr_t)handle_ptr;
+    if (h >= 0 || (h & 1)) return -1;
+    int64_t u = -(h / 2) - 1;
+    int32_t slot = (int32_t)(u & ((1 << MARCH_FH_SLOT_BITS) - 1));
+    uint32_t gen = (uint32_t)(u >> MARCH_FH_SLOT_BITS);
+    if (slot >= fh_len || fh_tab[slot].f == NULL || fh_tab[slot].gen != gen) return -1;
+    return slot;
+}
+
+/* The stream a handle names (and its CSV settings), or NULL when the handle
+ * is closed, stale or not a handle at all. */
+static FILE *fh_lookup(void *handle_ptr, char *delim, int *rfc4180) {
+    pthread_mutex_lock(&fh_mu);
+    FILE *f = NULL;
+    int32_t slot = fh_slot_locked(handle_ptr);
+    if (slot >= 0) {
+        f = fh_tab[slot].f;
+        if (delim) *delim = fh_tab[slot].delim;
+        if (rfc4180) *rfc4180 = fh_tab[slot].rfc4180;
+    }
+    pthread_mutex_unlock(&fh_mu);
+    return f;
+}
+
+/* Close the stream a live handle names and free its slot; a closed or stale
+ * handle is a no-op. */
+static void fh_close(void *handle_ptr) {
+    pthread_mutex_lock(&fh_mu);
+    FILE *f = NULL;
+    int32_t slot = fh_slot_locked(handle_ptr);
+    if (slot >= 0) {
+        f = fh_tab[slot].f;
+        fh_tab[slot].f = NULL;
+        fh_tab[slot].gen = (fh_tab[slot].gen + 1) & MARCH_FH_GEN_MASK;
+        fh_tab[slot].next_free = fh_free;
+        fh_free = slot;
+    }
+    pthread_mutex_unlock(&fh_mu);
+    if (f) fclose(f);
+}
+
 void *march_file_open(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
     FILE *f = fopen(ps->data, "rb");
     if (!f) return mk_err_errno_file(ps->data);
-    void *handle = march_alloc(24);
-    MARCH_FIELD(handle, 0) = (int64_t)(uintptr_t)f;
-    return mk_ok(handle);
+    int64_t h = fh_open(f, 0, 0);
+    if (h == 0) { fclose(f); errno = EMFILE; return mk_err_errno_file(ps->data); }
+    return mk_ok((void *)(intptr_t)h);
 }
 
 /* file_close / csv_close return the `:ok` atom (an i64), matching the
  * typechecker's `Int -> Atom` and the interpreter.  They used to return a
  * heap `Ok(())` Result cell, so a compiled `csv_close(h) == :ok` compared a
  * pointer against an atom (false) and rendered as `:<atom>`.  The "Int"
- * handle is really the heap cell file_open / csv_open built (field 0 is the
- * FILE*); it is an opaque pointer at the March level.  file_close now zeroes
- * field 0 as csv_close always did, so a second close is a no-op, not a
- * double fclose. */
+ * handle is a handle-table entry (fh_open above); closing frees the entry, and
+ * a second close finds a stale generation and is a no-op, not a double
+ * fclose. */
 static int64_t march_atom_of_name(const char *name);
 
 int64_t march_file_close(void *handle_ptr) {
-    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
-    if (f) { fclose(f); MARCH_FIELD(handle_ptr, 0) = 0; }
+    fh_close(handle_ptr);
     return march_atom_of_name("ok");
 }
 
@@ -9930,7 +10036,7 @@ int64_t march_file_close(void *handle_ptr) {
  * (end of stream), mirroring the interpreter's End_of_file handling — the
  * Option type has no error channel. */
 void *march_file_read_line(void *handle_ptr) {
-    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
+    FILE *f = fh_lookup(handle_ptr, NULL, NULL);
     if (!f) return NULL;                                   /* None */
     char buf[4096];
     if (!fgets(buf, sizeof(buf), f)) return NULL;          /* None: EOF/error */
@@ -9942,7 +10048,7 @@ void *march_file_read_line(void *handle_ptr) {
 }
 
 void *march_file_read_chunk(void *handle_ptr, int64_t size) {
-    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
+    FILE *f = fh_lookup(handle_ptr, NULL, NULL);
     if (!f || size <= 0) return NULL;                      /* None */
     char *buf = (char *)malloc((size_t)size);
     if (!buf) return NULL;                                 /* None */
@@ -10562,25 +10668,22 @@ void *march_csv_open(void *path_ptr, void *delim_ptr, void *mode_ptr) {
     FILE *f = fopen(ps->data, "rb");
     if (!f) return mk_err_errno();
     char delim = (ds->len > 0) ? ds->data[0] : ',';
-    /* handle: 3 fields: FILE*, delim, mode */
-    void *h = march_alloc(40);
-    MARCH_FIELD(h, 0) = (int64_t)(uintptr_t)f;
-    MARCH_FIELD(h, 1) = (int64_t)(uint8_t)delim;
-    MARCH_FIELD(h, 2) = 1; /* rfc4180 */
-    return mk_ok(h);
+    /* A table handle (see fh_open): FILE*, delimiter, rfc4180 mode. */
+    int64_t h = fh_open(f, delim, 1);
+    if (h == 0) { fclose(f); errno = EMFILE; return mk_err_errno(); }
+    return mk_ok((void *)(intptr_t)h);
 }
 
 int64_t march_csv_close(void *handle_ptr) {
-    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
-    if (f) { fclose(f); MARCH_FIELD(handle_ptr, 0) = 0; }
+    fh_close(handle_ptr);
     return march_atom_of_name("ok");
 }
 
 /* Returns Row(List(String)) or :eof (null) */
 void *march_csv_next_row(void *handle_ptr) {
-    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
-    char delim = (char)(uint8_t)MARCH_FIELD(handle_ptr, 1);
-    int rfc4180 = (int)MARCH_FIELD(handle_ptr, 2);
+    char delim = ',';
+    int rfc4180 = 1;
+    FILE *f = fh_lookup(handle_ptr, &delim, &rfc4180);
     if (!f) return NULL; /* eof = null = atom */
     int n = 0;
     void **fields = csv_parse_row_fields(f, delim, rfc4180, &n);

@@ -1017,9 +1017,16 @@ let builtin_group : Builtin_name.t -> builtin_group = function
    [march_clo_release], which releases its captures when the release frees it
    (specs/progress/2026-10-05-dropped-closure-captures.md); anything else
    through [default]. *)
-let decrc_fn_for (atom : Tir.atom) (default : string) : string =
+let decrc_fn_for ctx (atom : Tir.atom) (default : string) : string =
   match atom with
   | Tir.AVar { Tir.v_ty = Tir.TFn _; _ } -> "march_clo_release"
+  (* An erased value may be a record whose shape carries a registered deep
+     drop ([Llvm_data.shape_desc_with_drop]); [march_decrc_erased] runs it, and
+     releases anything else as [default] would
+     (specs/progress/2026-10-12-erased-record-shallow-release.md). *)
+  | Tir.AVar { Tir.v_ty = Tir.TVar _; _ } when ctx.shape_meta ->
+    if String.equal default "march_decrc" then "march_decrc_erased"
+    else "march_decrc_erased_local"
   | _ -> default
 
 let rec emit_expr ctx (e : Tir.expr) : string * string =
@@ -2579,7 +2586,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
     if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for atom "march_decrc_local") v);
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for ctx atom "march_decrc_local") v);
     ("i64", "0")
 
   | Tir.EAtomicIncRC atom
@@ -2601,7 +2608,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EAtomicDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
     if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for atom "march_decrc") v);
+      emit ctx (Printf.sprintf "call void @%s(ptr %s)" (decrc_fn_for ctx atom "march_decrc") v);
     ("i64", "0")
 
   | Tir.EFree atom

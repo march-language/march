@@ -999,6 +999,9 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
   in
   let rec go bal (x : Tir.expr) : Tir.expr =
     match x with
+    (* This rule also covers the actor-handler tuple-match leak (the match's panic
+       arms release [state]; specs/progress/2026-10-12-actor-handler-tuple-match-state-leak.md),
+       which a parallel branch fixed with the narrower is_branching-only form. *)
     (* A statement or let value that releases [v] (on some path, maybe not
        all), with [v] dead after it: [v]'s lifetime ends inside it, so each of
        its paths settles [v] for itself, and the paths that release it are

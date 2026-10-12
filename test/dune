@@ -14136,3 +14136,69 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/file_path_builtins_leak_probe.expected native_file_path_builtins_leak_probe.out)))
+
+; ── Leak guard: an actor handler whose body matches on a tuple a call returned
+; (LinearMap.take_slot) leaked its old state record and the map it held on
+; every message: the match's panic arms released `state`, and the aggregate
+; scope-end drop then placed no drop on any path. Red before the fix: every
+; leg reads `flat: false`. The Keep leg is the shared-state control.
+; specs/progress/2026-10-12-actor-handler-tuple-match-state-leak.md
+(rule
+ (targets native_actor_tuple_match_state_leak_probe native_actor_tuple_match_state_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_tuple_match_state_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_tuple_match_state_leak_probe
+        native/actor_tuple_match_state_leak_probe.march)
+   (with-stdout-to native_actor_tuple_match_state_leak_probe.out
+        (system "./native_actor_tuple_match_state_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_tuple_match_state_leak_probe.expected native_actor_tuple_match_state_leak_probe.out)))
+
+; ── Leak guard: a record released through an ERASED type (a lambda's
+; unspecialised parameter) was freed shallowly, leaking its String and List
+; fields. Red before the fix: every fresh leg reports a nonzero growth.
+; specs/progress/2026-10-12-erased-record-shallow-release.md
+(rule
+ (targets native_erased_record_deep_release_probe native_erased_record_deep_release_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/erased_record_deep_release_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_record_deep_release_probe
+        native/erased_record_deep_release_probe.march)
+   (with-stdout-to native_erased_record_deep_release_probe.out
+        (system "./native_erased_record_deep_release_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_record_deep_release_probe.expected native_erased_record_deep_release_probe.out)))
+
+; ── Leak guard: file_open / csv_open handles were heap cells passed around as
+; Ints, never freed (a second close must stay a no-op). Handles are now
+; runtime table entries freed on close. Red before the fix: both open/close
+; legs read `flat: false`; the stale-handle lines are unchanged.
+; specs/progress/2026-10-12-file-csv-handle-cell-leak.md
+(rule
+ (targets native_file_handle_leak_probe native_file_handle_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/file_handle_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_file_handle_leak_probe
+        native/file_handle_leak_probe.march)
+   (with-stdout-to native_file_handle_leak_probe.out
+        (system "./native_file_handle_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_handle_leak_probe.expected native_file_handle_leak_probe.out)))

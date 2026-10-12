@@ -680,6 +680,20 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **An actor handler that matches on a tuple no longer leaks its old state
+  when compiled.** A handler whose body was a `match` on a tuple a call
+  returned (`match LinearMap.take_slot(state.sessions, id) do (None, slot) ->
+  .. end`) kept the old state record, and everything it held, on every
+  message.
+- **A record released through a generic value no longer leaks its fields
+  when compiled.** A record handed to a lambda whose parameter type stayed
+  generic (one stored in a container that hides its element type) was freed
+  without its String and List fields.
+- **Opening a file or CSV reader no longer leaks memory when compiled.**
+  Every `file_open` and `csv_open` (and so every `Csv.read_all`,
+  `Csv.each_row` and line-reading helper) leaked a small handle cell even after
+  the handle was closed. Closing twice is still a no-op, and reading a closed
+  handle is still end of stream.
 - **File and directory functions and `IO.warn` no longer leak their
   arguments when compiled.** `File.exists`, `File.read`, `File.write`,
   `File.append`, `File.delete`, `File.copy`, `File.rename`, `File.stat`,

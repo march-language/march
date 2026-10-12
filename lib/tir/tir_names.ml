@@ -749,6 +749,74 @@ let has_runtime_prefix (name : string) : bool =
     identifier (the lexer's [ident] rule admits no [$]). *)
 let drop_fn_prefix = "__drop$"
 
+(** The key [Drop] names a type's deep-drop function by
+    ([drop_fn_prefix ^ drop_type_key ty]); moved here from [Drop.mangle] so
+    [Dce] and the LLVM backend can name a record's drop function without
+    depending on [Drop]. *)
+let drop_type_key (ty : Tir.ty) : string =
+  let seen : (string, int) Hashtbl.t = Hashtbl.create 4 in
+  let var n =
+    match Hashtbl.find_opt seen n with
+    | Some k -> k
+    | None -> let k = Hashtbl.length seen in Hashtbl.replace seen n k; k in
+  let rec mangle (ty : Tir.ty) : string =
+    match ty with
+    | Tir.TInt -> "Int" | Tir.TFloat -> "Float" | Tir.TBool -> "Bool"
+    | Tir.TString -> "String" | Tir.TUnit -> "Unit"
+    | Tir.TTuple ts -> "T" ^ string_of_int (List.length ts)
+                       ^ "_" ^ String.concat "_" (List.map mangle ts)
+    | Tir.TRecord fs ->
+      (* Field names AND types, sorted, not merely the arity.  This key is the
+         memo key in [env.names] and the suffix of the synthesized function's
+         name, so a bare "R<n>" made every n-field record collide: the first
+         2-field record to be asked about decided the answer for all of them,
+         and a memoized negative (no heap children) then suppressed the drop
+         for a later { n : Int, s : String }, silently leaking its string.
+         Names are part of the identity because the drop projects fields by
+         name and TRecord's layout is name-sorted. *)
+      let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
+      "R" ^ string_of_int (List.length fs)
+      ^ "_" ^ String.concat "_"
+                (List.map (fun (n, t) -> n ^ "$" ^ mangle t) sorted)
+    | Tir.TCon (n, []) -> String.map (fun c -> if c = '.' then '_' else c) n
+    | Tir.TCon (n, args) ->
+      String.map (fun c -> if c = '.' then '_' else c) n
+      ^ "_" ^ String.concat "_" (List.map mangle args)
+    | Tir.TFn _ -> "Fn"
+    | Tir.TPtr _ -> "Ptr"
+    (* Lowering's placeholder [TVar "_"] is not a residual variable: it is
+       one fixed name, and [Kind] classifies it apart from the others
+       ([borrowable_of]).  Spelled as before, so it never shares a key (and
+       a memoized answer) with a real variable. *)
+    | Tir.TVar "_" -> "V_"
+    | Tir.TVar n -> "V" ^ string_of_int (var n)
+  in
+  mangle ty
+
+(** The TIR type of an atom as the LLVM backend reads it
+    ([Llvm_data.atom_tir_ty] is this function).  A record allocation's drop
+    key is computed from these types in [Drop], [Dce] and [Llvm_data], so they
+    must agree. *)
+let atom_ty : Tir.atom -> Tir.ty = function
+  | Tir.AVar v -> v.Tir.v_ty
+  | Tir.ALit (March_ast.Ast.LitInt _)    -> Tir.TInt
+  | Tir.ALit (March_ast.Ast.LitFloat _)  -> Tir.TFloat
+  | Tir.ALit (March_ast.Ast.LitBool _)   -> Tir.TBool
+  | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+  | Tir.ALit (March_ast.Ast.LitAtom _)   -> Tir.TCon ("Atom", [])
+  | Tir.ADefRef _ -> Tir.TVar "_"
+
+(** The deep-drop function of a record allocated with [fields] (name, type),
+    in any order: [Drop.run] synthesizes it for every record a function
+    allocates that owns a heap field, [Dce] keeps it alive through the
+    allocation, and the LLVM backend registers it with the runtime under the
+    record's shape id, so a release of the record through an ERASED type
+    ([march_decrc_erased]) is deep
+    (specs/progress/2026-10-12-erased-record-shallow-release.md). *)
+let record_drop_fn_name (fields : (string * Tir.ty) list) : string =
+  let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
+  drop_fn_prefix ^ drop_type_key (Tir.TRecord sorted)
+
 (** True if [name] is a synthesized deep-drop function.
 
     These calls REPLACE a bare [EDecRC] and are, like it, evaluated purely for

@@ -1,0 +1,8 @@
+warmup 35
+file open/close: total 1500, flat: true
+csv open/close: total 600, flat: true
+second close == :ok: true
+read after close: <eof>
+stale handle reads: <eof>
+fresh handle reads: a,b,c
+fresh after stale close: 1,2,3

@@ -62,6 +62,8 @@ native_actor_stop_drains_mailbox: coverage audit (user + stdlib): 135 enforced, 
 native_actor_stop_drains_mailbox: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_tuple_match_state_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_actor_tuple_match_state_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_drop_erased_fields: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_drop_erased_fields: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_dupd_consume_drop: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -168,6 +170,8 @@ native_erased_option_read: coverage audit (user + stdlib): 135 enforced, 0 inert
 native_erased_option_read: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_param_field_read_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_erased_param_field_read_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_erased_record_deep_release_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_erased_record_deep_release_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_render_show: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_erased_render_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -210,6 +214,8 @@ native_field_use_after_parent_release: coverage audit (user + stdlib): 135 enfor
 native_field_use_after_parent_release: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_file_error_ctor_match: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_file_error_ctor_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_file_handle_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_file_handle_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_file_path_builtins_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_file_path_builtins_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_float_arr_list_boxing: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
