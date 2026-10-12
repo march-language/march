@@ -14086,3 +14086,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/erased_record_deep_release_probe.expected native_erased_record_deep_release_probe.out)))
+
+; ── Leak guard: file_open / csv_open handles were heap cells passed around as
+; Ints, never freed (a second close must stay a no-op). Handles are now
+; runtime table entries freed on close. Red before the fix: both open/close
+; legs read `flat: false`; the stale-handle lines are unchanged.
+; specs/progress/2026-10-12-file-csv-handle-cell-leak.md
+(rule
+ (targets native_file_handle_leak_probe native_file_handle_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/file_handle_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_file_handle_leak_probe
+        native/file_handle_leak_probe.march)
+   (with-stdout-to native_file_handle_leak_probe.out
+        (system "./native_file_handle_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_handle_leak_probe.expected native_file_handle_leak_probe.out)))

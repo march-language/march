@@ -671,6 +671,11 @@ git log is authoritative for exact commits.
   when compiled.** A record handed to a lambda whose parameter type stayed
   generic (one stored in a container that hides its element type) was freed
   without its String and List fields.
+- **Opening a file or CSV reader no longer leaks memory when compiled.**
+  Every `file_open` and `csv_open` (and so every `Csv.read_all`,
+  `Csv.each_row` and line-reading helper) leaked a small handle cell even after
+  the handle was closed. Closing twice is still a no-op, and reading a closed
+  handle is still end of stream.
 - **File and directory functions and `IO.warn` no longer leak their
   arguments when compiled.** `File.exists`, `File.read`, `File.write`,
   `File.append`, `File.delete`, `File.copy`, `File.rename`, `File.stat`,
