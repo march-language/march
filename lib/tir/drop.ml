@@ -878,7 +878,25 @@ and drop_op (env : env) (v : Tir.var) : Tir.expr =
      | Some (`Newtype pty) ->
        let p = { Tir.v_name = fresh env "dp"; v_ty = pty; v_lin = Tir.Unr } in
        Tir.ELet (p, Tir.EAtom (Tir.AVar v), drop_op env p)
-     | None -> Tir.EDecRC (Tir.AVar v))
+     | None ->
+       (* A niche-CAPABLE declaration whose CONCRETE instantiation is Boxed:
+          [Option(Float)] -- 0.0 bitcasts to the None niche, so the Some side
+          is encoded as a BOXED cell holding a march_alloc_float box
+          ([Kind.repr_of] says Boxed) while [may_be_non_heap], decided from
+          the declaration's [TVar] payload, says niche.  A bare [EDecRC] here
+          was shallow: it freed the Some cell and orphaned its float box (a
+          record member [{ o : Option(Float) }] leaked one box per drop).
+          Route [Option(Float)] through the synthesized Boxed-convention drop
+          ([__drop$Option_Float]).  ONLY Option(Float): [Option(Unit)] is a
+          genuine niche whose None is the raw word 0 (built on the C side in
+          test/native/ffi_codec2), and a deep drop would dereference it. *)
+       (match ty, (match ty with Tir.TCon (_, [Tir.TFloat]) -> drop_fn_for env ty | _ -> None) with
+        | _, Some callee ->
+          let f = { Tir.v_name = callee;
+                    v_ty = Tir.TFn ([ty], Tir.TUnit);
+                    v_lin = Tir.Unr } in
+          Tir.EApp (f, [Tir.AVar v])
+        | _, None -> Tir.EDecRC (Tir.AVar v)))
   | ty ->
     (match drop_fn_for env ty with
      | Some callee ->
