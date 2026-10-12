@@ -150,7 +150,7 @@ Error codes:
 | `HELLO` | | this process's `boot` id and whether `signing` is configured; what a client needs before it signs |
 | `STATE` | `<sig> nonce:… boot:… not_after_ms:… pid:<p> [timeout_ms:<t>]` | debug tier: one actor's state ([below](#the-debug-tier-signed-requests)) |
 | `CRASHES_FULL` | `<sig> nonce:… boot:… not_after_ms:… [n:<n>]` | debug tier: `CRASHES` with each crash's message |
-| `TRACE_START` | `<sig> nonce:… boot:… not_after_ms:… (count:<n> \| rate:<n> per_s:<s>) fn:<a,b,…> [ring:<r>]` | debug tier: start a bounded trace of boundary calls ([below](#tracing-boundary-calls)) |
+| `TRACE_START` | `<sig> nonce:… boot:… not_after_ms:… (count:<n> \| rate:<n> per_s:<s>) [fn:<a,b,…>] [events:<k,…> pids:<p,…>] [ring:<r>]` | debug tier: start a bounded trace of boundary calls and/or actor events ([below](#tracing-boundary-calls)) |
 | `TRACE_DRAIN` | `<sig> nonce:… boot:… not_after_ms:… session:<id> [max:<n>]` | debug tier: the events a trace session has recorded |
 | `TRACE_STOP` | `<sig> nonce:… boot:… not_after_ms:… session:<id>` | debug tier: stop and free a trace session |
 | `WATCH` | `<sections> <interval_ms> <max>` | a stream of `SNAPSHOT`s ([below](#watch)); socket only |
@@ -476,7 +476,8 @@ reload server writes (`$MARCH_AUDIT_LOG`, default
 ```
 
 `detail` appears on the trace verbs (the session, the limit, how many
-functions). An in-process caller (`Trace` from March code) is audited with
+functions, whether actor events were asked for and how many pids; a refused
+start says the same). An in-process caller (`Trace` from March code) is audited with
 `"signer":"in-process"`.
 
 `forge observe` builds and signs these requests for you:
@@ -535,7 +536,9 @@ silently.
 
 More bounds, whatever the limit:
 
-- **4 sessions** at most (`too_many_sessions`), **32 functions** per session.
+- **4 sessions** at most (`too_many_sessions`), **32 functions** and **8 pids**
+  per session, **5 event kinds**; `events:` is at most 63 characters and
+  `pids:` at most 127 (longer is `bad_args`).
 - A session's ring holds `n` events for a `MaxEvents`, and `ring:<r>` (default 1024,
   at most 16384) for a `Rate`. A full ring drops the event and counts it
   (`dropped`); the traced program never waits for the tracer.
@@ -577,8 +580,78 @@ TRACE_STOP  -> the same without "events": the final counters
   `"expired"` (10 minutes), `"idle"` (60 s without a drain) or `"stopped"`.
   You can still drain what is left of a finished session until it is freed.
 - Errors: `limit_required`, `limit_out_of_range`, `unknown_function` (not a
-  boundary function of this build), `too_many_sessions`, `not_found` (no such
-  session), plus the signed-request errors above.
+  boundary function of this build), `pids_required`, `unknown_pid`,
+  `too_many_sessions`, `not_found` (no such session), plus the signed-request
+  errors above.
+
+### Actor events: Sent, Received, Spawned, Exited, Dropped
+
+A session can also record what **named actors** do. Add `events:<kinds>` and
+`pids:<pids>` to `TRACE_START` (`--events` and `--pids` in `forge observe`;
+`Trace.actors`/`Trace.start_with` in March). Kinds are `sent`, `received`,
+`spawned`, `exited`, `dropped`, each at most once. `fn:` becomes optional, so a
+session can watch boundary calls, actor events, or both under the one limit
+(`count` or `rate` counts both kinds together).
+
+```
+forge observe --env prod --trace-start - --events sent,received,dropped --pids 12,40 --rate 200/1
+```
+
+(`-` stands for "no functions".)
+
+| Kind | `pid` | `peer` | `msg_tag` | `reason` | Recorded |
+|---|---|---|---|---|---|
+| `sent` | the sender (`-1` for `main` or a task) | the receiver | tag of the message | `null` | when the message is handed to the receiver's mailbox, by `send`, `Actor.call`, or a timer firing; a refusal follows as a `dropped` |
+| `received` | the receiver | `null` | tag of the message | `null` | when the actor takes a message off its mailbox to run its handler (not for epoch markers or inspection requests) |
+| `spawned` | the parent | the child | `null` | `null` | at `spawn`, before the child first runs; only for a parent that is an actor |
+| `exited` | the actor that died | `null` | `null` | `normal`, `killed`, `crash` | when it dies, before its cleanups and `Down` messages run |
+| `dropped` | the recipient that did not get it | the sender (`-1` for `main`) | tag of the message | `dead`, `draining`, `full`, `evicted` | `send` to a dead or shutting-down actor; a `DROP_NEW` mailbox refusing a message (`full`); a `DROP_OLD` mailbox discarding its oldest (`evicted`; the tag is the evicted message's) |
+
+**The pid filter is mandatory.** An event is kept when its `pid` or its `peer`
+is one of the listed pids. Actor events with no `pids:` are `pids_required`;
+`pids:` without `events:` is `bad_args`; more than 8 pids is `bad_args`; a pid
+that is not a live actor at start is `unknown_pid`. There is no "all actors"
+form, on purpose: an unfiltered stream of a busy node would put the tracer on
+every send of every actor, whatever its limit. With a filter, an actor that
+nobody named costs a hook only a load of a word it already has in cache. The
+`count`/`rate` limit still bounds the *session*; the filter bounds how many
+actors can feed it. Boundary-call events are not filtered by pid.
+
+**What an event holds.** `pid`, `peer`, the message's constructor `msg_tag`
+(read from the header word of a heap message, never its fields; `null` for a
+message that is not a heap value, such as a bare constant), a `reason`, the
+code `epoch` of the subject, and `at_ns`. There is no way to ask for message
+contents or arguments: rendering a payload would need its own review and is not
+part of this verb. Tags tell you *which constructor* was sent, nothing of what
+it carried.
+
+`TRACE_START` echoes the kinds and pids (`"events":["sent","received"],"pids":[12,40]`)
+and `TRACE_DRAIN` returns each actor event as
+
+```json
+{"kind":"sent","pid":-1,"peer":12,"msg_tag":16777234,"reason":null,"epoch":2,"at_ns":183000}
+{"kind":"received","pid":12,"peer":null,"msg_tag":16777234,"reason":null,"epoch":2,"at_ns":191000}
+{"kind":"exited","pid":12,"peer":null,"msg_tag":null,"reason":"crash","epoch":2,"at_ns":2200000}
+```
+
+In a session that asked for actor events, boundary-call events say
+`"kind":"call"` too; in a calls-only session they are unchanged (no `kind`).
+
+**Cost.** While no session records actor events, `send` pays one relaxed load of
+a global word nothing writes and a never-taken branch, an actor pays one relaxed
+load of its own `trace_mask` per received message, and spawn, exit and the drop
+sites test the same global word. While a session is running, every send also
+reads the mask of the two actors it already holds and does nothing more unless
+one is named. A named actor's event costs a clock read, a few atomic
+operations and one ring slot, with no allocation, no lock and no wait; a full
+ring or a spent `rate` budget costs less (a counter increment), so a message
+storm to a traced actor cannot make the sender wait for the tracer.
+
+**What it does not see.** `Dropped` is raised by `send` and by a full mailbox
+(any path through `march_sched_send`); a call to a dead actor from `Actor.call`
+is not reported. `Sent` carries the sender's pid only for a sender that is an
+actor. Nothing is recorded on the interpreter, which has no hooks yet
+(`tracing_unavailable`).
 
 From March code, with the debug capability (`Actor.debug(io)`, or `debug` in the
 remote shell):
@@ -595,6 +668,28 @@ match Trace.start(debug, ["Billing.charge"], Trace.MaxEvents(10)) do
   Err(e) -> println("cannot trace")
 end
 ```
+
+```march
+-- who sends to, and what reaches, actor `a`; at most 100 events
+match Trace.start_with(debug,
+        Trace.actors([Trace.Sent, Trace.Received, Trace.Dropped], [pid_to_int(a)]),
+        Trace.MaxEvents(100)) do
+  Ok(s) ->
+    -- ...
+    match Trace.drain(debug, s) do
+      Ok(b) -> println(Trace.format_actor(b.actor_events))
+      Err(_) -> ()
+    end
+    let _ = Trace.stop(debug, s)
+  Err(Trace.PidsRequired) -> println("name the actors to watch")
+  Err(e) -> println("cannot trace")
+end
+```
+
+`Trace.calls(names)` and `Trace.with_calls(options, names)` build the boundary
+half of the options; `Trace.start(debug, names, limit)` is
+`Trace.start_with(debug, Trace.calls(names), limit)`. A drain's `events` are the
+boundary calls and `actor_events` the rest.
 
 The in-process calls need no signature (holding `Cap(Actor.Debug)` stands in
 for it, as for `Actor.inspect_state`), but `$MARCH_DEBUG_POLICY` must still list

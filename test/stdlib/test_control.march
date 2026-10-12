@@ -650,6 +650,49 @@ mod TestControl do
       assert (res.ok && res.detail == "applied")
     end
 
+    -- specs/progress/2026-10-04-lab-control-topology-step-races-report.md:
+    -- the reload server takes a TOPOLOGY line synchronously, but the node
+    -- reports the digest only once its placement loop has re-read the file
+    -- (next MARCH_PLACEMENT_TICK_MS). A topology step waits for that.
+    test "a topology step waits for the runner to apply the digest" do
+      let r = rel()
+      let o = Control.order(r, step_n(3), "r1")
+      let rep = report(find_node(cluster(), "r1"))
+      let v = Vault.new("test_control_topo_lag")
+      Vault.set(v, "reports", 0)
+      -- The node reports the topology from its third report on: the check
+      -- before relaying, the first after it, and then the runner's tick.
+      let ops = { report: fn ->
+          let k = Vault.get_or(v, "reports", 0) + 1
+          let _ = Vault.set(v, "reports", k)
+          if k >= 3 do { rep with topology: "t42" } else { rep with topology: "-" } end,
+        has: fn _ -> true, request: fn _ -> "OK topology" }
+      let res = Control.agent_apply(ops, o)
+      assert (res.ok && res.detail == "applied")
+    end
+
+    test "a topology step the runner never applies fails once the wait is over" do
+      let r = rel()
+      let o = Control.order(r, step_n(3), "r1")
+      let rep = { report(find_node(cluster(), "r1")) with topology: "-" }
+      let res = Control.agent_apply_within(ops_for(rep, "OK topology"), o, 120, 40)
+      assert (not(res.ok) && String.starts_with(res.detail, "the node accepted every line"))
+    end
+
+    test "a non-topology step does not wait: one report after the relay" do
+      let r = rel()
+      let o = Control.order(r, head(r.steps), "r1")
+      let rep = report(find_node(cluster(), "r1"))
+      let v = Vault.new("test_control_no_wait")
+      Vault.set(v, "reports", 0)
+      let ops = { report: fn ->
+          let _ = Vault.set(v, "reports", Vault.get_or(v, "reports", 0) + 1)
+          rep,
+        has: fn _ -> true, request: fn _ -> "OK" }
+      let res = Control.agent_apply_within(ops, o, 60000, 1000)
+      assert (not(res.ok) && Vault.get_or(v, "reports", 0) == 2)
+    end
+
     test "orders carry hashes and the step's signed lines, not bytes" do
       let r = rel()
       let o = Control.order(r, head(tail(tail(r.steps))), "w1")

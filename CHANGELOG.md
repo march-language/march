@@ -76,6 +76,17 @@ git log is authoritative for exact commits.
   FNS (--max-events N | --rate N/S)`, `--trace-drain ID`, `--trace-stop ID`.
   While nothing is traced, a boundary call costs one extra relaxed load and
   branch. See [Observing a running node](docs/observe.md).
+- **`Trace` records actor events: `Sent`, `Received`, `Spawned`, `Exited`, `Dropped`.**
+  `Trace.start_with(debug, Trace.actors([Trace.Sent, Trace.Received], [pid_to_int(a)]), Trace.MaxEvents(100))`
+  records who sent what to the actors you name, when they took a message, spawned,
+  died (`normal`, `killed` or `crash`) or lost a message (`dead`, `draining`,
+  `full`, `evicted`). Events hold pids, the message's constructor tag, a reason
+  and the time, never a message's contents. The pid filter is mandatory (one to
+  eight live actors; there is no all-actors form) and the same `MaxEvents`/`Rate`
+  limit bounds the session. Over the socket: `TRACE_START ... events:sent,received
+  pids:12,40`; `forge observe --trace-start - --events sent,received --pids 12,40
+  --rate 200/1`. While no session records actor events, a send pays one relaxed
+  load and a never-taken branch. See [Observing a running node](docs/observe.md).
 - **Signed observe requests now name the node process (`boot:`).** `STATE`,
   `CRASHES_FULL` and the trace verbs need the 32-hex id the new unsigned
   `HELLO` verb returns, so a captured request cannot be replayed after the node
@@ -694,6 +705,39 @@ git log is authoritative for exact commits.
   `Csv.each_row` and line-reading helper) leaked a small handle cell even after
   the handle was closed. Closing twice is still a no-op, and reading a closed
   handle is still end of stream.
+- **A release's topology step no longer halts because the node had not
+  re-read the topology yet.** The control plane's Agent relayed the step's
+  signed `TOPOLOGY` line and checked the node's report once, straight away; the
+  node reports the new digest only after its placement loop re-reads the file
+  on its next tick (`MARCH_PLACEMENT_TICK_MS`), so on a busy host the first
+  `forge deploy` to a cluster often stopped with "the node accepted every line
+  but does not report topology". A topology step now waits up to ten placement
+  ticks (at least 2 s, at most a minute) for the node to report it before
+  calling the step failed. Other steps are checked once, as before.
+- **A `forge deploy` on the cluster backend that stops part way is now retried
+  from where it stopped, and it waits through a change of leader.** Each part
+  that finishes (a pool restarted over ssh, a release) records its builds as
+  deployed at once, so when a later release halts, the retry sends only that
+  release and does not restart every node again. Following a release no longer
+  fails with `ERR no_leader` while leadership moves: forge says leadership is
+  moving, keeps polling for up to 120 s, and names the new leader.
+- **A restarted node no longer takes a `count = 1` role back the moment it
+  starts.** Its peers do not count a rejoining node for
+  `MARCH_PLACEMENT_SETTLE_MS`, but the node itself ranked first among the
+  markers it could see and offered the role at its first tick, so two nodes
+  offered a `count = 1` role for the whole settle period with no partition.
+  A node now opens no ranked role before its first registry sync (at most
+  the settle period), and while a peer counts it as rejoined it leaves the
+  role to the nodes already holding it. Takeover by a survivor is unchanged.
+  New `ClusterNode.registry_synced` and `ClusterNode.rejoined_at`.
+- **Inside a nested module, an actor's messages can be named above the
+  actor.** A function (or an earlier actor's handler) in `mod Outer do mod
+  Inner do ... end end` that wrote `send(p, Ping(1))` before `actor Pinger`
+  declared `on Ping(...)` failed with "I don't know a constructor called
+  `Ping`", though the same code was accepted in a top-level module and ran
+  fine. Message constructors are now in scope for the whole module, checked
+  against the handler's parameter types. This also clears the last hidden
+  type errors inside the standard library (`SessionNode`, `ClusterNode`).
 - **File and directory functions and `IO.warn` no longer leak their
   arguments when compiled.** `File.exists`, `File.read`, `File.write`,
   `File.append`, `File.delete`, `File.copy`, `File.rename`, `File.stat`,

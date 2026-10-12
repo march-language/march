@@ -1597,8 +1597,9 @@ let observe_cmd =
   in
   let trace_start =
     Arg.(value & opt (some string) None & info ["trace-start"] ~docv:"FNS"
-           ~doc:"Start a bounded trace of boundary calls (R8): the comma-separated boundary \
-                 function names FNS of a $(b,--hot-reload) build. A limit is required: \
+           ~doc:"Start a bounded trace (R8): the comma-separated boundary \
+                 function names FNS of a $(b,--hot-reload) build ($(b,-) for none, with \
+                 $(b,--events)). A limit is required: \
                  $(b,--max-events) N (stops itself after exactly N events) or $(b,--rate) \
                  N/SECS. Events carry the caller's pid, the function, the code epoch and the \
                  time, never arguments. The signed debug verb $(b,TRACE_START); the session \
@@ -1611,6 +1612,20 @@ let observe_cmd =
   let rate =
     Arg.(value & opt (some string) None & info ["rate"] ~docv:"N/SECS"
            ~doc:"With $(b,--trace-start): keep at most N events per SECS seconds and count the rest as dropped.")
+  in
+  let trace_events =
+    Arg.(value & opt (some string) None & info ["events"] ~docv:"KINDS"
+           ~doc:"With $(b,--trace-start): also record actor events of these kinds (comma-separated: \
+                 sent, received, spawned, exited, dropped) for the actors named by $(b,--pids), which \
+                 is required with it. Events carry pids, a message's constructor tag, a reason and \
+                 the time, never a message's contents. Boundary functions are then optional: give \
+                 $(b,-) as FNS for none.")
+  in
+  let trace_pids =
+    Arg.(value & opt (some string) None & info ["pids"] ~docv:"PIDS"
+           ~doc:"With $(b,--events): the one to eight live actors to watch, as comma-separated pid \
+                 numbers (what $(b,forge observe) panels and $(b,pid_to_int) show). An event is \
+                 kept when its pid or its peer is one of them. There is no all-actors form.")
   in
   let trace_drain =
     Arg.(value & opt (some int) None & info ["trace-drain"] ~docv:"SESSION"
@@ -1654,7 +1669,7 @@ let observe_cmd =
            ~doc:"The interactive view's refresh period (default 1000, at least 250).")
   in
   let run words sections json socket env state crashes_full n timeout_ms
-      trace_start max_events rate trace_drain trace_stop
+      trace_start max_events rate trace_events trace_pids trace_drain trace_stop
       dump panel sort pid tui interval =
     let limit = match max_events, rate with
       | Some n, None -> Ok (Some (Cmd_observe.Max_events n))
@@ -1667,11 +1682,27 @@ let observe_cmd =
          | _ -> Error "observe: --rate wants N/SECS, e.g. 100/1")
       | None, None -> Ok None
       | Some _, Some _ -> Error "observe: give --max-events or --rate, not both" in
+    let events = match trace_events with
+      | None -> [] | Some e -> List.filter (fun k -> k <> "") (String.split_on_char ',' e) in
+    let pids_parsed = match trace_pids with
+      | None -> Ok []
+      | Some p ->
+        let parts = List.filter (fun k -> k <> "") (String.split_on_char ',' p) in
+        let ns = List.filter_map int_of_string_opt parts in
+        if List.length ns <> List.length parts || parts = [] then
+          Error "observe: --pids wants comma-separated pid numbers, e.g. 12,40"
+        else Ok ns in
+    let pids = match pids_parsed with Ok ns -> ns | Error _ -> [] in
+    let limit = match limit, pids_parsed with
+      | Error m, _ | _, Error m -> Error m
+      | Ok _, Ok _ when trace_start = None && (trace_events <> None || trace_pids <> None) ->
+        Error "observe: --events and --pids go with --trace-start"
+      | l, Ok _ -> l in
     let picked = List.filter_map Fun.id [
         Option.map (fun pid -> Cmd_observe.State { pid; timeout_ms }) state;
         (if crashes_full then Some (Cmd_observe.Crashes_full n) else None);
         (match trace_start, limit with
-         | Some fns, Ok (Some limit) -> Some (Cmd_observe.Trace_start { fns; limit; ring = None })
+         | Some fns, Ok (Some limit) -> Some (Cmd_observe.Trace_start { fns; limit; ring = None; events; pids })
          | _ -> None);
         Option.map (fun session -> Cmd_observe.Trace_drain { session; max = n }) trace_drain;
         Option.map (fun s -> Cmd_observe.Trace_stop s) trace_stop ] in
@@ -1702,7 +1733,7 @@ let observe_cmd =
                  $(b,--dump); with $(b,--state), $(b,--crashes-full) or $(b,--trace-start), a \
                  signed debug request")
     Term.(const run $ words $ sections $ json $ socket $ env_name $ state $ crashes_full $ n $ timeout_ms
-          $ trace_start $ max_events $ rate $ trace_drain $ trace_stop
+          $ trace_start $ max_events $ rate $ trace_events $ trace_pids $ trace_drain $ trace_stop
           $ dump $ panel $ sort $ pid $ tui $ interval)
 
 let top_cmd =

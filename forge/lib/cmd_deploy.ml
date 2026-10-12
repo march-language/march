@@ -90,8 +90,10 @@ let setup ?(transport = Remote.ssh) ?(service_ctl = "systemctl") ?(layout_prefix
 
 let dir c = Reconcile.deploy_dir ~root:c.root c.env
 let manifest_file c build = Reconcile.deployed_manifest_file ~root:c.root c.env build
-let schemas_file c build = Filename.concat (dir c) (build ^ ".schemas.json")
-let base_file c build = Filename.concat (dir c) (build ^ ".base.json")
+let schemas_in dir build = Filename.concat dir (build ^ ".schemas.json")
+let base_in dir build = Filename.concat dir (build ^ ".base.json")
+let schemas_file c build = schemas_in (dir c) build
+let base_file c build = base_in (dir c) build
 let derived_file c = Filename.concat (dir c) "derived.json"
 let protocols_dir c = Filename.concat (dir c) "protocols"
 let split_file c = Filename.concat (dir c) "pending_split.json"
@@ -565,27 +567,35 @@ let on_nodes c ~(opts : opts) ~canary (nodes : Reconcile.ssh_node list) (step : 
   else if hr_strategy c = "simultaneous" then finish (c.backend.run_on ~strategy:`All hosts hstep)
   else finish (c.backend.run_on ~strategy:(`Rolling (health c ~opts)) hosts hstep)
 
-(** Everything deployed is now the baseline of the next plan; a protocol
-    this deploy expanded keeps its deploy baseline until its contract. *)
-let record c ~(artifacts : artifact list) ~(restarted : string list) ~(derived : Deploy_plan.derived option)
-    ~(expanding : string list) =
-  Reconcile.mkdir_p (dir c);
+(** The builds [builds] are deployed: each one's manifest, schemas and (when
+    it restarted, or none is recorded) base-image identity, under the deploy
+    directory [dir] (Reconcile.deploy_dir), become the next plan's baseline
+    for it. *)
+let record_builds ~dir ~(artifacts : artifact list) ~(restarted : string list) (builds : string list) =
+  Reconcile.mkdir_p dir;
   let seen = Hashtbl.create 4 in
   List.iter (fun a ->
-      if not (Hashtbl.mem seen a.a_build) then begin
+      if List.mem a.a_build builds && not (Hashtbl.mem seen a.a_build) then begin
         Hashtbl.replace seen a.a_build ();
-        copy_file a.a_manifest_path (manifest_file c a.a_build);
-        if Sys.file_exists a.a_schemas then copy_file a.a_schemas (schemas_file c a.a_build)
-        else (try Sys.remove (schemas_file c a.a_build) with Sys_error _ -> ());
-        if List.mem a.a_build restarted || not (Sys.file_exists (base_file c a.a_build)) then
-          Yojson.Safe.to_file (base_file c a.a_build)
+        (* Reconcile.deployed_manifest_file *)
+        copy_file a.a_manifest_path (Filename.concat dir (a.a_build ^ ".hcr_manifest"));
+        if Sys.file_exists a.a_schemas then copy_file a.a_schemas (schemas_in dir a.a_build)
+        else (try Sys.remove (schemas_in dir a.a_build) with Sys_error _ -> ());
+        if List.mem a.a_build restarted || not (Sys.file_exists (base_in dir a.a_build)) then
+          Yojson.Safe.to_file (base_in dir a.a_build)
             (`Assoc [ ("runtime", (match runtime_identity () with Some r -> `String r | None -> `Null));
                       ("target", `String a.a_target);
                       ("hcr_abi", (match a.a_manifest.hcr_abi with Some x -> `String x | None -> `Null));
                       ("cas_hash", `String a.a_manifest.cas_hash);
                       ("at", `Float (Unix.gettimeofday ())) ])
       end)
-    artifacts;
+    artifacts
+
+(** Everything deployed is now the baseline of the next plan; a protocol
+    this deploy expanded keeps its deploy baseline until its contract. *)
+let record c ~(artifacts : artifact list) ~(restarted : string list) ~(derived : Deploy_plan.derived option)
+    ~(expanding : string list) =
+  record_builds ~dir:(dir c) ~artifacts ~restarted (List.map (fun a -> a.a_build) artifacts);
   Option.iter (fun d -> Yojson.Safe.to_file (derived_file c) (derived_json d)) derived;
   Reconcile.record_deployed_topology ~root:c.root c.env c.t;
   advance_baselines ~deployed:(protocols_dir c) ~now:(new_protocols_dir c) ~expanding
@@ -762,6 +772,36 @@ let segments (plan : Deploy_plan.plan) : segment list =
   in
   go [] [] plan.pools
 
+(** The builds a segment deploys. *)
+let segment_builds = function
+  | Process (pp, _) -> [ pp.Deploy_plan.pp_build ]
+  | Release { pools; _ } -> List.map (fun (pp : Deploy_plan.pool_plan) -> pp.pp_build) pools
+
+(** Carry out [segs] in order ([step i total seg]), stopping at the first
+    that fails. After each one that succeeds, [settle] gets the builds it
+    finished: those of its pools no later segment touches. The caller
+    records them, so a deploy that stops later (a halted release after its
+    restarts) is retried from what is left, not planned as a first deploy
+    again (the restarts already ran, with traffic on the nodes). *)
+let run_segments ~(step : int -> int -> segment -> (unit, string) result) ~(settle : string list -> unit)
+    (segs : segment list) : (unit, string) result =
+  let total = List.length segs in
+  let rec go i = function
+    | [] -> Ok ()
+    | seg :: rest ->
+      match step i total seg with
+      | Ok () ->
+        let later = List.concat_map segment_builds rest in
+        (match List.sort_uniq String.compare (List.filter (fun b -> not (List.mem b later)) (segment_builds seg)) with
+         | [] -> ()
+         | done_ -> settle done_);
+        go (i + 1) rest
+      | Error m ->
+        Error (Printf.sprintf "%s\n(%d of %d; %s)" m i total
+                 (if rest = [] then "this was the last part" else "the later parts were not started"))
+  in
+  go 1 segs
+
 (** A release's scratch directory: short, because the recorder listens on a
     Unix socket in it, and a socket path under a project's [.forge/] easily
     passes the 104-byte [sun_path] limit (macOS). *)
@@ -884,33 +924,27 @@ let run_cluster c ~(opts : opts) : (string, string) result =
     Error "not deployed"
   else begin
     let restarted = ref [] in
-    let total = List.length segs in
-    let rec run_segs i = function
-      | [] -> Ok ()
-      | seg :: rest ->
-        let r =
-          match seg with
-          | Process (pp, why) ->
-            Printf.printf "\n==> %d of %d: pool %s over ssh (restart-class steps go through the process backend)\n%!" i total pp.pp_pool;
-            restart_pool c ~opts ~plan ~pflags ~artifacts ~derived ~restarted ~why pp
-          | Release { pools; topology } ->
-            Printf.printf "\n==> %d of %d: a release through the control plane\n%!" i total;
-            let* sp = release_spec c ~opts ~eps ~artifacts ~n:i pools ~topology in
-            Fun.protect ~finally:(fun () -> remove_scratch i) (fun () ->
-                let* (_, release) = Cluster_deploy.prepare sp in
-                List.iter (fun st -> Printf.printf "  %s\n%!" (Control_release.show_step st)) release.Control_release.steps;
-                let* () = Cluster_deploy.upload_artifacts sp release in
-                let* report = Cluster_deploy.send_and_follow sp release in
-                print_string report;
-                Ok ())
-        in
-        match r with
-        | Ok () -> run_segs (i + 1) rest
-        | Error m ->
-          Error (Printf.sprintf "%s\n(%d of %d; %s)" m i total
-                   (if rest = [] then "this was the last part" else "the later parts were not started"))
+    let step i total seg =
+      match seg with
+      | Process (pp, why) ->
+        Printf.printf "\n==> %d of %d: pool %s over ssh (restart-class steps go through the process backend)\n%!" i total pp.pp_pool;
+        restart_pool c ~opts ~plan ~pflags ~artifacts ~derived ~restarted ~why pp
+      | Release { pools; topology } ->
+        Printf.printf "\n==> %d of %d: a release through the control plane\n%!" i total;
+        let* sp = release_spec c ~opts ~eps ~artifacts ~n:i pools ~topology in
+        Fun.protect ~finally:(fun () -> remove_scratch i) (fun () ->
+            let* (_, release) = Cluster_deploy.prepare sp in
+            List.iter (fun st -> Printf.printf "  %s\n%!" (Control_release.show_step st)) release.Control_release.steps;
+            let* () = Cluster_deploy.upload_artifacts sp release in
+            let* report = Cluster_deploy.send_and_follow sp release in
+            print_string report;
+            Ok ())
     in
-    let* () = run_segs 1 segs in
+    let settle builds =
+      record_builds ~dir:(dir c) ~artifacts ~restarted:!restarted builds;
+      Printf.printf "  recorded build(s) %s as deployed\n%!" (String.concat ", " builds)
+    in
+    let* () = run_segments ~step ~settle segs in
     let expanding = List.filter_map (fun (sp : Deploy_plan.split) ->
         if sp.sp_phase = `Expand then Some sp.sp_protocol else None) plan.splits in
     record c ~artifacts ~restarted:!restarted ~derived ~expanding;

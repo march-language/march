@@ -1,0 +1,101 @@
+-- Two-node scenario "topology_rejoin", node-b: ranks first for the count = 1
+-- Ledger.Server. Creation 1 offers it and is SIGKILLed (node-a takes it
+-- over). Creation 2 places it at once, before it has even linked (as a
+-- node restarted at boot does), then samples whether it offers the role
+-- until MARCH_PLACEMENT_SETTLE_MS after a peer showed it as rejoining
+-- (`ClusterNode.rejoined_at`, the moment node-a starts counting its settle
+-- period too): it must not, though it ranks first. Then it must take the
+-- role back. See node_a.march and scenario.sh.
+mod TopologyRejoinB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Ledger do
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Ledger_Server.Entry) : Ledger_Server.Yield do
+    Ledger_Server.recv_Ask(s, st, fn (n, st1) -> Ledger_Server.close(s, Ledger_Server.send_Answer(s, st1, n)))
+  end
+
+  pfn offering(h : Cap(ClusterNode.Live)) : Bool do Topology.offered(h) == ["Ledger.Server"] end
+
+  -- Wait until this node offers the role, up to [left] ms.
+  pfn until_offering(h : Cap(ClusterNode.Live), left : Int) : Bool do
+    if offering(h) do true
+    else if left <= 0 do false
+    else
+      sleep_ms(50)
+      until_offering(h, left - 50)
+    end end
+  end
+
+  -- Sample every 50 ms until [settle] ms after a peer showed this node as
+  -- rejoining (at most [left] ms in all, the rejoin included): did it offer
+  -- the role at any sample before that? A short margin under the period
+  -- leaves room for one placement tick of clock skew between the sides.
+  pfn early(h : Cap(ClusterNode.Live), settle : Int, left : Int, seen : Bool) : (Bool, Bool) do
+    let seen2 = seen || offering(h)
+    let done = match ClusterNode.rejoined_at(h) do
+      Some(t) -> unix_time_ms() >= t + settle - 300
+      None -> false
+    end
+    if done || left <= 0 do (seen2, ClusterNode.rejoined_at(h) != None)
+    else
+      sleep_ms(50)
+      early(h, settle, left - 50, seen2)
+    end
+  end
+
+  pfn park(stop : String) : () do
+    if File.exists(stop) do () else
+      sleep_ms(100)
+      park(stop)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let me = "node-b"
+    let creation = Env.require_int("MARCH_NODE_CREATION")
+    let seeds = Cons("127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")), Nil)
+    let port = Env.require_int("MARCH_PORT_B")
+    let settle = Env.get_int("MARCH_PLACEMENT_SETTLE_MS", 15000)
+    match ClusterNode.start(c, ClusterNode.config(me, port, "", seeds, "topo-rejoin-secret", creation)) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println(me ++ ": up, creation " ++ int_to_string(creation))
+        let place = fn () -> Topology.place(h, [ Topology.role("Ledger.Server", Topology.count(1),
+                              fn () -> Ledger_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st))) ])
+        if creation == 1 do
+          if ClusterNode.await_members(h, 1, 120000) do () else panic(me ++ ": never joined") end
+          place()
+          if until_offering(h, 60000) do println(me ++ ": offering Ledger.Server") else println(me ++ ": never offered Ledger.Server") end
+          -- SIGKILLed from here.
+          park(Env.require("TOPOLOGY_STOP_FILE"))
+        else
+          place()
+          match early(h, settle, settle * 4, false) do
+            (was_early, rejoined) ->
+              println(me ++ ": " ++ (if rejoined do "a peer showed it as rejoining" else "no peer showed it as rejoining" end))
+              println(me ++ ": " ++ (if was_early do "offered Ledger.Server inside the settle period"
+                                     else "held Ledger.Server back for the settle period" end))
+          end
+          if until_offering(h, settle * 4) do println(me ++ ": took Ledger.Server back after settling")
+          else println(me ++ ": never took Ledger.Server back") end
+          park(Env.require("TOPOLOGY_STOP_FILE"))
+          println(me ++ ": stopping")
+          Topology.stop(h)
+        end
+    end
+  end
+end

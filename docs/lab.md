@@ -150,9 +150,10 @@ What the lab has found so far, each filed with its repro:
 - [`2026-10-05-lab-restarted-node-offers-invisible.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-restarted-node-offers-invisible.md):
   a restarted node's offers are open but no initiator sees them ("no access point is
   registered"). `restart_persist` is expected-fail on it, at its last step.
-- [`2026-10-05-lab-rejoining-node-offers-count-role-at-once.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-rejoining-node-offers-count-role-at-once.md):
-  a restarted node offers a `count = 1` role a second after it starts, so two nodes offer
-  it for the settle period. `failover` is expected-fail on it.
+- [`2026-10-05-lab-rejoining-node-offers-count-role-at-once.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-rejoining-node-offers-count-role-at-once.md)
+  (fixed 2026-10-12): a restarted node offered a `count = 1` role a second after it
+  started, so two nodes offered it for the settle period. `failover` no longer expects
+  that failure (it is still expected-fail on the restarted node's invisible offers).
 - [`2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md):
   a session whose two offered roles (Stock, Ledger) are on different hosts can hang for
   ever, nearly always in certificate mode and occasionally with a shared secret.
@@ -161,12 +162,10 @@ What the lab has found so far, each filed with its repro:
 - [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-simultaneous-restart-memory-burst.md)
   (fixed): nodes restarted together could each allocate ~1 GB in 30 s and be OOM-killed,
   a leak on every cluster message; the two-node scenario `control_restart_together` guards it.
-- [`2026-10-04-lab-control-topology-step-races-report.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-04-lab-control-topology-step-races-report.md):
-  a release's topology step halts when the Agent checks the node's report before the
-  placement loop has re-read the topology.
-- [`2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md):
-  a halted first `forge deploy` records nothing (the retry restarts every node again), and
-  following a release gives up on `ERR no_leader`.
+- [`2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md)
+  (fixed 2026-10-12): a halted first `forge deploy` recorded nothing (the retry restarted
+  every node again), and following a release gave up on `ERR no_leader`. A retry now
+  sends only what is left, and a leader change is waited out.
 - [`2026-10-04-lab-control-wiring-none-ctor-ambiguous.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-04-lab-control-wiring-none-ctor-ambiguous.md):
   a protocol branch labelled `none` breaks the control-plane wiring of a `[control]` app;
   the lab's branch is called `out`.

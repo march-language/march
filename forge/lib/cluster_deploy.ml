@@ -451,10 +451,21 @@ let step_of_decision (d : string) : int option =
     leader's decision as it changes, each under the step it is about when
     [steps] describes them (a step's [Control_release.show_step]). A halted
     release is an error naming the step, the node and why; nothing is rolled
-    back (a rollback is a new release). *)
-let follow ?(steps : Control_release.step list = []) (eps : endpoint list) ~(seq : int) ~(timeout_s : float)
+    back (a rollback is a new release).
+
+    No answer from any candidate (each [ERR no_leader], or a closed
+    connection) is a handover, not a failure: the new leader loads the
+    newest release from disk and carries on. [follow] says leadership moved
+    and keeps polling for up to [leader_wait_s] seconds of such a gap (as
+    [prepare] waits for a leader), and says who leads when one answers.
+    [poll], [sleep] and [now] are STATUS, [Unix.sleepf] and the clock (a
+    test passes its own). *)
+let follow ?(steps : Control_release.step list = []) ?(leader_wait_s = 120.) ?poll ?(sleep = Unix.sleepf)
+    ?(now = Unix.gettimeofday) (eps : endpoint list) ~(seq : int) ~(timeout_s : float)
   : (string, string) result =
-  let t0 = Unix.gettimeofday () in
+  let poll = match poll with Some f -> f | None -> fun () -> status eps in
+  let t0 = now () in
+  let leader = ref "" in
   let last = ref "" and last_step = ref 0 in
   let total = List.length steps in
   (* Every step up to [n] gets its line once, in order, including the ones
@@ -469,13 +480,24 @@ let follow ?(steps : Control_release.step list = []) (eps : endpoint list) ~(seq
       | None -> ()
     done
   in
-  let rec go misses =
-    if Unix.gettimeofday () -. t0 > timeout_s then Error (Printf.sprintf "release %d did not finish within %.0f s (the leader keeps working on it: `forge deploy --status` follows it)" seq timeout_s)
-    else match status eps with
+  (* [gap]: when the candidates stopped answering, if they have. *)
+  let rec go gap =
+    if now () -. t0 > timeout_s then Error (Printf.sprintf "release %d did not finish within %.0f s (the leader keeps working on it: `forge deploy --status` follows it)" seq timeout_s)
+    else match poll () with
       | Error m ->
-        (* A leader change is a gap in the answers, not a failure. *)
-        if misses > 30 then Error m else (Unix.sleepf 1.0; go (misses + 1))
+        let since = match gap with Some g -> g | None -> now () in
+        if gap = None then
+          Printf.printf "    no control node answered (%s): leadership is moving; waiting up to %.0f s for a leader\n%!"
+            m leader_wait_s;
+        if now () -. since > leader_wait_s then
+          Error (Printf.sprintf "%s (no leader for %.0f s; the release may still finish: `forge deploy --status` follows it)"
+                   m leader_wait_s)
+        else (sleep 1.0; go (Some since))
       | Ok s ->
+        if s.leader <> "" && s.leader <> !leader then begin
+          if !leader <> "" then Printf.printf "    leadership moved: %s leads now\n%!" s.leader;
+          leader := s.leader
+        end;
         if s.head_seq = seq then begin
           if s.decision <> !last then begin
             last := s.decision;
@@ -487,12 +509,12 @@ let follow ?(steps : Control_release.step list = []) (eps : endpoint list) ~(seq
           end;
           if s.state = "complete" then Ok (render_status s)
           else if s.state = "halted" then Error (Printf.sprintf "the release halted: %s\n%s" s.decision (render_status s))
-          else (Unix.sleepf 1.0; go 0)
+          else (sleep 1.0; go None)
         end else if s.head_seq > seq then
           Error (Printf.sprintf "a newer release (%d) superseded this one before it finished" s.head_seq)
-        else (Unix.sleepf 1.0; go 0)
+        else (sleep 1.0; go None)
   in
-  go 0
+  go None
 
 (** The release for [sp] over the leader's current head, and that head. *)
 let prepare (sp : spec) : (status * Control_release.t, string) result =

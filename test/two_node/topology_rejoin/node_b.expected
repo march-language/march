@@ -1,0 +1,8 @@
+node-b: a peer showed it as rejoining
+node-b: held Ledger.Server back for the settle period
+node-b: offering Ledger.Server
+node-b: stopping
+node-b: took Ledger.Server back after settling
+node-b: up, creation 1
+node-b: up, creation 2
+topology: Ledger.Server: node-b ranks for it but a peer counts it as rejoined and it is settling; leaving it to the nodes already counted
