@@ -3601,7 +3601,30 @@ let rec eval_decl (env : env) (d : decl) : env =
        qualified lookups (EField) can find these bindings at call time
        even if the referencing module was evaluated before this one. *)
     List.iter (fun (k, v) -> Hashtbl.replace module_registry k v) prefixed;
-    prefixed @ env
+    (* A general-interface method dispatcher bound by an `impl` inside this
+       module (see the DImpl arm) is also exposed BARE to the enclosing
+       scope: interface methods are resolved by the argument's type, not by
+       the module the impl sits in, so `speak(NA.mk())` in the parent must
+       reach `impl Speak(NA.Thing)`.  Compiled code already resolves it that
+       way; without this the interpreter died "unbound variable: speak".
+       Never displaces a different outer binding of the same name. *)
+    let is_dispatcher_tag n =
+      String.length n > 10 && String.sub n 0 10 = "$dispatch$"
+    in
+    let bare_dispatchers = List.filter_map (fun (k, v) ->
+        match v with
+        | VBuiltin (tag, _) when is_dispatcher_tag tag && not (String.contains k '.') ->
+          (match List.assoc_opt k env with
+           | None -> Some (k, v)
+           | Some _ -> None)
+        | _ -> None) mod_env
+    in
+    let seen_bare = Hashtbl.create 4 in
+    let bare_dispatchers = List.filter (fun (k, _) ->
+        if Hashtbl.mem seen_bare k then false
+        else (Hashtbl.replace seen_bare k (); true)) bare_dispatchers
+    in
+    prefixed @ bare_dispatchers @ env
 
   | DImpl (idef, sp) ->
     (* Evaluate each impl method so they become callable at runtime.

@@ -662,6 +662,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **The interpreter finds an interface method implemented in a nested
+  module.** With `interface Speak` in `Top` and `impl Speak(Thing)` inside
+  `mod NA`, a bare `speak(NA.mk())` in `Top` died `unbound variable: speak`
+  interpreted while compiled code ran it. It now dispatches the same way in
+  both.
 - **Compiled `to_string` prints single-constructor and option-like types like
   the interpreter.** For `type Meters = Meters(Int)` and
   `type MaybeName = NoName | Named(String)` declared in the entry module,
