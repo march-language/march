@@ -1,0 +1,38 @@
+-- EXPECT-ERROR: Two different types named `Note` both derive Json
+mod Main do
+  needs IO.Console
+  -- Two different types with the same short name, `A.Note` and `B.Note`,
+  -- both `derive Json` (owner decision 2026-10-11,
+  -- specs/todos/2026-10-03-derive-json-same-short-name-two-modules.md).
+  -- `from_json` picks its decoder by the RESULT type's short name, and the
+  -- typechecker canonicalizes a nested-module type to its bare name, so it
+  -- cannot tell the two apart. Before this was an error, `A.roundtrip`
+  -- decoded with B's codec when interpreted (printed `A err`) and the
+  -- compiled backend failed as an ambiguous interface-method call. Now a
+  -- compile error naming both types, at the second derive, with a label on
+  -- the first. Only one of the two deriving Json stays accepted
+  -- (test/stdlib/test_json_collision.march).
+  mod A do
+    type Note = NA(Int) | NB(String)
+    derive Json for Note
+    fn roundtrip(n : Note) : String do
+      match Json.parse(Json.to_string(to_json(n))) do
+        Ok(j) ->
+          let r : Result(Note, Json.DecodeError) = from_json(j)
+          match r do
+            Ok(NA(k)) -> "A " ++ int_to_string(k)
+            Ok(NB(s)) -> "A " ++ s
+            Err(_) -> "A err"
+          end
+        Err(_) -> "A parse"
+      end
+    end
+  end
+  mod B do
+    type Note = NC(Bool) | ND(Int, Int)
+    derive Json for Note
+  end
+  fn main(c : Cap(IO.Console)) do
+    print_line(A.roundtrip(A.NA(3)))
+  end
+end

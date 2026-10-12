@@ -72,8 +72,35 @@ call into the runtime, a store into a list or array, printing), so a value
 reads back the same whether it travelled through a register or a list.
 Use `Float` (or a bignum library) for wider arithmetic.
 
-> The JavaScript backend (`--target js`) represents `Int` as a JS number and
-> does not follow these rules yet.
+#### Int on the JavaScript target
+
+`--target js` implements a **subset** of the rules above. There an `Int` is a
+JS number (an IEEE-754 double), which holds integers exactly only within
+**±(2^53 - 1)** (`-9007199254740991` to `9007199254740991`). Inside that
+range every operation listed above gives the same answer as the interpreter
+and native code, including division (truncating), `int_shr` (arithmetic) and
+`int_popcount` (of the 63-bit pattern). Outside it, the JS target departs
+from the 63-bit rules instead of wrapping:
+
+- **`+`, `-`, `*`, unary `-` and `int_pow` round** to the nearest double:
+  `9007199254740991 + 2` gives `9007199254740992`, not `9007199254740993`.
+  Nothing wraps modulo 2^63 and nothing traps.
+- **The bitwise and checked builtins throw.** `int_and`, `int_or`,
+  `int_xor`, `int_not`, `int_shl`, `int_shr`, `int_popcount`, `int_div`,
+  `int_mod`, `int_div_euclid` and `int_mod_euclid` raise a JS `RangeError`
+  when an argument or the result lies outside ±(2^53 - 1), rather than
+  return a rounded value. Within the range they are exact on every bit, not
+  only the low 32 that JS's own `&`, `|` and `>>` see.
+- **`/` and `%` by zero give `NaN`** instead of panicking (`int_div` and
+  `int_mod` still panic).
+- **`int_max_value()` and `int_min_value()` do not compile** for the JS
+  target: ±2^62 has no exact JS number.
+
+Code that must agree with native builds keeps its `Int` values within
+±(2^53 - 1) (stdlib `Random` uses a 32-bit core for this reason), or builds
+a native or wasm target. The decision to treat the JS target as a subset
+rather than emulate 63 bits with `BigInt` is recorded in
+`specs/progress/2026-09-30-js-backend-int-63-bit-semantics.md`.
 
 ---
 

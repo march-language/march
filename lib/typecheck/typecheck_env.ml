@@ -207,6 +207,12 @@ type env = {
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
   type_map : (Ast.span, ty) Hashtbl.t;
+  json_derive_sites : (string * Ast.span) list;
+  (** Every `derive Json` this env's check has seen, as (declaring-module-
+      qualified type name, derive site).  Carried forward like
+      [record_names_snapshot] so a check seeded from the stdlib env still sees
+      stdlib's derives when it looks for a short-name collision
+      ([check_json_derive_collisions] in typecheck.ml). *)
   record_names_snapshot : (string * string option) list;
   (** The display-only record-name index ([Typecheck_types._record_names]) as
       it stood when this env was produced by a check. A check seeded from this
@@ -716,7 +722,7 @@ let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   ty_aliases = StrMap.empty;
   level = 0; lin = [];
-  errors; pending_constraints = ref []; type_map; record_names_snapshot = [];
+  errors; pending_constraints = ref []; type_map; record_names_snapshot = []; json_derive_sites = [];
   refs = ref []; current_decl = ref "";
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;

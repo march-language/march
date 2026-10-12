@@ -56,4 +56,4 @@ accumulator TRE. Follow-up: `specs/todos/2026-10-01-int63-wrap-blocks-accumulato
 
 ## Not covered
 
-The JS backend: `specs/todos/2026-09-30-js-backend-int-63-bit-semantics.md`.
+The JS backend: `specs/progress/2026-09-30-js-backend-int-63-bit-semantics.md` (documented as a subset, 2026-10-11).

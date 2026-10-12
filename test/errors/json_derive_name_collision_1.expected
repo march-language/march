@@ -1,0 +1,16 @@
+exit: 1
+-- ERROR ------ errors/json_derive_name_collision_1.march
+
+Two different types named `Note` both derive Json: `B.Note` (here) and `A.Note` (at errors/json_derive_name_collision_1.march:17:4). [json_derive_name_collision]
+`from_json` picks its decoder by the result type's short name, so it cannot tell these two apart and would decode with the wrong one. Rename one of the types, or derive Json for only one of them.
+
+33 |     derive Json for Note
+         ^^^^^^^^^^^^^^^^^^^^
+
+
+    `A.Note` derives Json here:
+
+17 |     derive Json for Note
+         ^^^^^^^^^^^^^^^^^^^^
+
+
