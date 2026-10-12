@@ -347,6 +347,12 @@ let verbs = [
   "SOURCE", (fun _ _ -> raise (Bad "not_found"));
   "STATE", (fun _ _ -> raise (Bad "signing_not_configured"));
   "CRASHES_FULL", (fun _ _ -> raise (Bad "signing_not_configured"));
+  "HELLO", (fun b _ -> obj b [ "boot", (fun b -> str b "interpreter"); "signing", (fun b -> bool b false) ]);
+  (* Trace sessions watch hot-reload dispatch slots, which only a compiled
+     --hot-reload program has; the interpreter has no boundary to trace. *)
+  "TRACE_START", (fun _ _ -> raise (Bad "tracing_unavailable"));
+  "TRACE_DRAIN", (fun _ _ -> raise (Bad "tracing_unavailable"));
+  "TRACE_STOP", (fun _ _ -> raise (Bad "tracing_unavailable"));
 ]
 
 (** The reply envelope for one request line, as a JSON string. *)

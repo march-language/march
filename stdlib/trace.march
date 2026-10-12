@@ -1,0 +1,237 @@
+-- Trace: watch which boundary functions run, and on whose behalf, with a
+-- limit you cannot leave out.
+--
+-- A session watches named functions of a `--hot-reload` build (the ones
+-- `forge deploy hot` can replace: your app's, not the stdlib's). Each call into
+-- one writes an event into the session's ring: the calling actor's pid, the
+-- function, the code epoch it ran at, and when. NEVER ITS ARGUMENTS: they can
+-- hold anything the program holds, passwords and tokens included.
+--
+-- Every session has a limit, and `start` takes it as an argument so there is no
+-- way to call it without one:
+--
+--   MaxEvents(n)       stops itself after exactly n events (1..65536);
+--   Rate(n, secs)  keeps at most n events per `secs`-second window (n in
+--                  1..100000, secs in 1..3600) and counts the rest as dropped.
+--
+-- Anything else (0, negative, over the caps) is refused with LimitOutOfRange.
+-- A session also ends by itself after 600 seconds, or 60 seconds without a
+-- `drain`, and at most 4 exist at once. A session belongs to the process, not
+-- to your connection: `stop` frees it early; a forgotten one frees itself.
+--
+-- You pull events with `drain`; the tracer is never waited for. A full ring
+-- drops the event and counts it (`dropped`), so a slow reader costs
+-- completeness, never the traced program's speed.
+--
+-- Backends. Compiled with `--hot-reload` only: other builds, and the
+-- interpreter, have no dispatch table to watch and answer `Unavailable`.
+-- Over the observe socket the same operations are the signed debug verbs
+-- TRACE_START, TRACE_DRAIN and TRACE_STOP (docs/observe.md).
+--
+-- Debug tier: every function takes `Cap(Actor.Debug)` (mint it with
+-- `Actor.debug(io)` in `main`; the remote shell has it pre-bound as `debug`).
+--
+-- R8 of specs/plans/2026-09-28-observe-recon-shell-plan.md.
+mod Trace do
+  needs Actor.Debug
+
+  -- How a session ends by itself. There is no other kind of limit.
+  type Limit = MaxEvents(Int) | Rate(Int, Int)
+
+  -- A started session's id. Holding it is the authority to drain and stop it.
+  type TraceId = TraceId(Int)
+
+  -- One boundary call. `at_ns` counts from the session's start.
+  type CallEvent = {
+    caller : Int,
+    fn_name : String,
+    epoch : Int,
+    at_ns : Int
+  }
+
+  -- What a drain returns: the new events, and where the session stands.
+  -- `recorded` is the total accepted so far; `dropped` counts events lost to
+  -- a full ring and `rate_dropped` those over a Rate budget. `done` is true once
+  -- the session has stopped recording, and `why` says so: "count", "expired",
+  -- "idle" or "stopped".
+  type Batch = {
+    events : List(CallEvent),
+    recorded : Int,
+    dropped : Int,
+    rate_dropped : Int,
+    queued : Int,
+    done : Bool,
+    why : Option(String)
+  }
+
+  -- Why a call failed:
+  --   LimitOutOfRange: MaxEvents(n) with n outside 1..65536, Rate with n outside
+  --     1..100000 or secs outside 1..3600;
+  --   UnknownFunction: a name is not a boundary function of this build;
+  --   TooManySessions: four are already running;
+  --   NoSuchSession: stopped, expired or never started;
+  --   BadRequest: no functions, more than 32, or an odd name;
+  --   Unavailable(why): this build or backend cannot trace.
+  type TraceError =
+    LimitOutOfRange
+    | UnknownFunction
+    | TooManySessions
+    | NoSuchSession
+    | BadRequest
+    | Unavailable(String)
+
+  pfn ask(line : String) : Result(Json.JsonValue, String) do
+    match Json.parse(observe_query(line)) do
+      Ok(env) ->
+        match Json.get(env, "data") do
+          Some(d) -> Ok(d)
+          None ->
+            match Json.get(env, "error") do
+              Some(Json.Str(code)) -> Err(code)
+              _ -> Err("malformed_reply")
+            end
+        end
+      Err(_) -> Err("malformed_reply")
+    end
+  end
+
+  pfn error_of(code : String) : TraceError do
+    if code == "limit_out_of_range" do LimitOutOfRange
+    else if code == "unknown_function" do UnknownFunction
+    else if code == "too_many_sessions" do TooManySessions
+    else if code == "not_found" do NoSuchSession
+    else if code == "bad_args" do BadRequest
+    else Unavailable(code) end end end end end
+  end
+
+  pfn int_of(j : Json.JsonValue, key : String) : Int do
+    match Json.get(j, key) do
+      Some(Json.Number(f)) -> float_to_int(f)
+      _ -> 0
+    end
+  end
+
+  pfn str_of(j : Json.JsonValue, key : String) : String do
+    match Json.get(j, key) do
+      Some(Json.Str(s)) -> s
+      _ -> ""
+    end
+  end
+
+  pfn list_of(j : Json.JsonValue, key : String) : List(Json.JsonValue) do
+    match Json.get(j, key) do
+      Some(Json.Array(xs)) -> xs
+      _ -> Nil
+    end
+  end
+
+  pfn limit_words(limit : Limit) : String do
+    match limit do
+      MaxEvents(n) -> "count:" ++ int_to_string(n)
+      Rate(n, secs) -> "rate:" ++ int_to_string(n) ++ " per_s:" ++ int_to_string(secs)
+    end
+  end
+
+  pfn limit_negative(limit : Limit) : Bool do
+    match limit do
+      MaxEvents(n) -> n < 0
+      Rate(n, secs) -> n < 0 || secs < 0
+    end
+  end
+
+  pfn join_names(names : List(String)) : String do
+    String.join(names, ",")
+  end
+
+  pfn session_id(s : TraceId) : Int do
+    match s do
+      TraceId(id) -> id
+    end
+  end
+
+  pfn event_of(e : Json.JsonValue) : CallEvent do
+    { caller: int_of(e, "pid"), fn_name: str_of(e, "fn"), epoch: int_of(e, "epoch"),
+      at_ns: int_of(e, "at_ns") }
+  end
+
+  pfn opt_str(j : Json.JsonValue, key : String) : Option(String) do
+    match Json.get(j, key) do
+      Some(Json.Str(w)) -> Some(w)
+      _ -> None
+    end
+  end
+
+  pfn bool_of(j : Json.JsonValue, key : String) : Bool do
+    match Json.get(j, key) do
+      Some(Json.Bool(b)) -> b
+      _ -> false
+    end
+  end
+
+  pfn drained_of(d : Json.JsonValue) : Batch do
+    {
+      events: List.map(list_of(d, "events"), event_of),
+      recorded: int_of(d, "recorded"),
+      dropped: int_of(d, "dropped"),
+      rate_dropped: int_of(d, "rate_dropped"),
+      queued: int_of(d, "pending"),
+      done: bool_of(d, "done"),
+      why: opt_str(d, "why")
+    }
+  end
+
+  doc """
+  Start watching the boundary functions `names` (exact names, as `Recon`'s
+  and `forge deploy hot` print them) under `limit`. At most 32 names and 4
+  sessions.
+
+      match Trace.start(d, ["Billing.charge"], Trace.MaxEvents(10)) do
+        Ok(s) -> ...
+        Err(Trace.UnknownFunction) -> println("not a boundary function")
+        Err(e) -> println("cannot trace")
+      end
+  """
+  fn start(_c : Cap(Actor.Debug), names : List(String), limit : Limit) : Result(TraceId, TraceError) do
+    if limit_negative(limit) do Err(LimitOutOfRange)
+    else
+      match ask("TRACE_START local " ++ limit_words(limit) ++ " fn:" ++ join_names(names)) do
+        Ok(d) -> Ok(TraceId(int_of(d, "session")))
+        Err(code) -> Err(error_of(code))
+      end
+    end
+  end
+
+  doc """
+  The events recorded since the last drain (at most 1024; `drain_max` takes a
+  bound up to 4096), oldest first, and the session's state.
+  """
+  fn drain(_c : Cap(Actor.Debug), s : TraceId) : Result(Batch, TraceError) do
+    match ask("TRACE_DRAIN local session:" ++ int_to_string(session_id(s))) do
+      Ok(d) -> Ok(drained_of(d))
+      Err(code) -> Err(error_of(code))
+    end
+  end
+
+  doc "Like `drain`, taking at most `max` events (1..4096)."
+  fn drain_max(_c : Cap(Actor.Debug), s : TraceId, max : Int) : Result(Batch, TraceError) do
+    match ask("TRACE_DRAIN local session:" ++ int_to_string(session_id(s)) ++ " max:" ++ int_to_string(max)) do
+      Ok(d) -> Ok(drained_of(d))
+      Err(code) -> Err(error_of(code))
+    end
+  end
+
+  doc "Stop the session and free it; events not yet drained are discarded. The final state."
+  fn stop(_c : Cap(Actor.Debug), s : TraceId) : Result(Batch, TraceError) do
+    match ask("TRACE_STOP local session:" ++ int_to_string(session_id(s))) do
+      Ok(d) -> Ok(drained_of(d))
+      Err(code) -> Err(error_of(code))
+    end
+  end
+
+  doc "One line per event: `<at_ns>ns pid <pid> <function> epoch <epoch>`."
+  fn format(events : List(CallEvent)) : String do
+    String.join(List.map(events, fn e ->
+      int_to_string(e.at_ns) ++ "ns pid " ++ int_to_string(e.caller) ++ " " ++ e.fn_name
+        ++ " epoch " ++ int_to_string(e.epoch)), "\n")
+  end
+end

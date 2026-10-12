@@ -35,6 +35,7 @@ march_http_io.c              http            -
 march_http_evloop.c          http            -
 march_tls.c                  http            -
 march_dispatch.c             hcr             jit
+march_trace.c                hcr             jit
 march_reload.c               hcr             jit
 march_shell.c                hcr             -
 march_blake3.c               hcr             -

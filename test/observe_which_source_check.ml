@@ -92,10 +92,16 @@ let fresh_nonce () =
   incr nonce_counter;
   Printf.sprintf "%016x%016x" (now_ms ()) !nonce_counter
 
+(* This process's boot id, from HELLO: every signed request names it
+   (runtime/march_observe_debug.c), so a captured line runs on no other
+   process or node. *)
+let boot = ref ""
+
 let sign sk verb fields =
   let nonce = fresh_nonce () in
   let body = String.concat " "
-      (Printf.sprintf "nonce:%s" nonce :: Printf.sprintf "not_after_ms:%d" (now_ms () + 30_000) :: fields) in
+      (Printf.sprintf "nonce:%s" nonce :: Printf.sprintf "boot:%s" !boot
+       :: Printf.sprintf "not_after_ms:%d" (now_ms () + 30_000) :: fields) in
   let s = March_ed25519.Ed25519.(sig_to_base64 (sign_str (verb ^ " " ^ body) sk)) in
   Printf.sprintf "%s %s %s" verb s body
 
@@ -161,6 +167,7 @@ let () =
       ignore (sh "rm -rf %s" tmp);
       if !failures > 0 then exit 1 in
     let banner = wait_line out "ready" in
+    boot := (try data (query sock "HELLO") |> member "boot" |> to_string with _ -> "");
 
     let price = "Billing.price" and label = "Billing.label" in
     let which n = query sock ("WHICH " ^ n) in
@@ -204,7 +211,7 @@ let () =
     let _, other = March_ed25519.Ed25519.keygen () in
     let r = query sock (sign other "SOURCE" [ "name:" ^ price ]) in
     check "SOURCE signed by another key: bad_signature" (error r = Some "bad_signature") (Yojson.Safe.to_string r);
-    let r = query sock ("SOURCE AAAA nonce:" ^ fresh_nonce () ^ " not_after_ms:" ^ string_of_int (now_ms () + 30000)
+    let r = query sock ("SOURCE AAAA nonce:" ^ fresh_nonce () ^ " boot:" ^ !boot ^ " not_after_ms:" ^ string_of_int (now_ms () + 30000)
                         ^ " name:" ^ price) in
     check "SOURCE with a garbage signature: bad_signature" (error r = Some "bad_signature") (Yojson.Safe.to_string r);
     let r = query sock ("SOURCE local name:" ^ price) in

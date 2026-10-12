@@ -37,6 +37,21 @@ git log is authoritative for exact commits.
   holes are unaffected (`?q=..` still renders `..`).
 
 ### Added
+- **`Trace`: bounded tracing of boundary calls.** `Trace.start(debug, ["Billing.charge"], Trace.MaxEvents(10))`
+  records which actor called which `--hot-reload` boundary function, with the code
+  epoch and time, never the arguments. A limit is mandatory and bounded:
+  `Count(n)` (1..65536) stops itself after exactly `n` events; `Rate(n, secs)`
+  keeps at most `n` per window. At most 4 sessions, which end by themselves after
+  10 minutes or 60 s without a drain. The same operations are the signed observe
+  verbs `TRACE_START`/`TRACE_DRAIN`/`TRACE_STOP` and `forge observe --trace-start
+  FNS (--max-events N | --rate N/S)`, `--trace-drain ID`, `--trace-stop ID`.
+  While nothing is traced, a boundary call costs one extra relaxed load and
+  branch. See [Observing a running node](docs/observe.md).
+- **Signed observe requests now name the node process (`boot:`).** `STATE`,
+  `CRASHES_FULL` and the trace verbs need the 32-hex id the new unsigned
+  `HELLO` verb returns, so a captured request cannot be replayed after the node
+  restarts or against another node with the same key (`wrong_boot`). `forge
+  observe` does this for you; a client that signs its own lines must add `boot:`.
 - **`forge deps` checks a hand-edited upgrade against `forge.caps.lock`.**
   Editing a dependency's version in `forge.toml` and running `forge deps` used
   to lock the new release whatever it asked for. Now a release that asks for
