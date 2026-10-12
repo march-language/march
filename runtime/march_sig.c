@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
 #include <sys/stat.h>
 
 /* ── Key ──────────────────────────────────────────────────────────────── */
@@ -50,6 +53,34 @@ void march_sig_load_key(void) { pthread_once(&g_key_once, load_key_once); }
 int march_sig_key_loaded(void) { march_sig_load_key(); return g_key_ok; }
 
 const unsigned char *march_sig_pubkey(void) { march_sig_load_key(); return g_key; }
+
+/* The boot id.  /dev/urandom; if it cannot be read (a chroot without it),
+ * a mix of the clock and pids, which still differs between two processes. */
+static char g_boot_id[33];
+static pthread_once_t g_boot_once = PTHREAD_ONCE_INIT;
+
+static void boot_id_init(void) {
+    char *id = g_boot_id;
+    {
+        unsigned char b[16];
+        FILE *f = fopen("/dev/urandom", "rb");
+        size_t got = f ? fread(b, 1, sizeof b, f) : 0;
+        if (f) fclose(f);
+        if (got != sizeof b) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            uint64_t x = (uint64_t)ts.tv_nsec * 0x9E3779B97F4A7C15ull
+                       ^ (uint64_t)ts.tv_sec ^ ((uint64_t)getpid() << 32);
+            for (int i = 0; i < 16; i++) { x = x * 6364136223846793005ull + 1442695040888963407ull; b[i] = (unsigned char)(x >> 56); }
+        }
+        for (int i = 0; i < 16; i++) snprintf(id + 2 * i, 3, "%02x", b[i]);
+    }
+}
+
+const char *march_sig_boot_id(void) {
+    pthread_once(&g_boot_once, boot_id_init);
+    return g_boot_id;
+}
 
 void march_sig_pubkey_hex(char out[65]) {
     out[0] = '\0';

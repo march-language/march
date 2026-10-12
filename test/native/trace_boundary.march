@@ -1,0 +1,167 @@
+-- Trace (stdlib/trace.march, R8 of specs/plans/2026-09-28-observe-recon-shell-plan.md)
+-- against a --hot-reload build: sessions over boundary functions, with the
+-- mandatory limits.  Compiled only; test/native/trace_interp.march pins the
+-- interpreter's `Unavailable`.
+--
+-- Boundary calls resolve at run time: the entry file's top-level functions
+-- (`step`, `other`) are slots in the dispatch table.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  -- Self-recursive on a branch that never runs, so the inliner leaves them
+  -- alone and they keep their dispatch slots.
+  fn step(n : Int) : Int do if n > 1000000 do step(n - 1) else n + 1 end end
+  fn other(n : Int) : Int do if n > 1000000 do other(n - 1) else n + 2 end end
+
+  actor Caller do
+    state { n : Int }
+    init  { n: 0 }
+    on Go(k : Int) do
+      { n: state.n + step(k) }
+    end
+  end
+
+  fn err_name(e : Trace.TraceError) : String do
+    match e do
+      Trace.LimitOutOfRange -> "LimitOutOfRange"
+      Trace.UnknownFunction -> "UnknownFunction"
+      Trace.TooManySessions -> "TooManySessions"
+      Trace.NoSuchSession -> "NoSuchSession"
+      Trace.BadRequest -> "BadRequest"
+      Trace.Unavailable(w) -> "Unavailable(" ++ w ++ ")"
+    end
+  end
+
+  fn refuse(d, label : String, names : List(String), limit : Trace.Limit) : Unit do
+    match Trace.start(d, names, limit) do
+      Ok(_) -> println(label ++ ": STARTED (should be refused)")
+      Err(e) -> println(label ++ ": " ++ err_name(e))
+    end
+  end
+
+  -- Sums the results so the calls are not dead code.
+  fn sum_steps(n : Int, acc : Int) : Int do
+    if n > 0 do sum_steps(n - 1, acc + step(n)) else acc end
+  end
+
+  fn calls(n : Int) : Unit do
+    if sum_steps(n, 0) < 0 do println("impossible") else () end
+  end
+
+  fn why_str(w : Option(String)) : String do
+    match w do
+      Some(s) -> s
+      None -> "-"
+    end
+  end
+
+  fn bool_str(b : Bool) : String do if b do "true" else "false" end end
+
+  fn report(label : String, r : Result(Trace.Batch, Trace.TraceError)) : Unit do
+    match r do
+      Ok(x) ->
+        println(label ++ ": events=" ++ int_to_string(List.length(x.events))
+          ++ " recorded=" ++ int_to_string(x.recorded)
+          ++ " dropped=" ++ int_to_string(x.dropped)
+          ++ " rate_dropped=" ++ int_to_string(x.rate_dropped)
+          ++ " done=" ++ bool_str(x.done) ++ " why=" ++ why_str(x.why))
+      Err(e) -> println(label ++ ": " ++ err_name(e))
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let d = Actor.debug(io)
+
+    -- Limits are mandatory and bounded; there is no spelling without one.
+    refuse(d, "count 0", ["step"], Trace.Count(0))
+    refuse(d, "count -1", ["step"], Trace.Count(0 - 1))
+    refuse(d, "count 65537", ["step"], Trace.Count(65537))
+    refuse(d, "rate n 0", ["step"], Trace.Rate(0, 1))
+    refuse(d, "rate secs 0", ["step"], Trace.Rate(5, 0))
+    refuse(d, "rate secs 3601", ["step"], Trace.Rate(5, 3601))
+    refuse(d, "rate n 100001", ["step"], Trace.Rate(100001, 1))
+    refuse(d, "no function", Nil, Trace.Count(5))
+    refuse(d, "unknown function", ["nope"], Trace.Count(5))
+    refuse(d, "stdlib function", ["List.map"], Trace.Count(5))
+
+    -- Count(10): exactly ten events out of 25 calls, then it stops itself.
+    match Trace.start(d, ["step"], Trace.Count(10)) do
+      Err(e) -> println("count start: " ++ err_name(e))
+      Ok(s) ->
+        calls(25)
+        match Trace.drain(d, s) do
+          Ok(x) ->
+            report("count(10) drained", Ok(x))
+            let only_step = List.all(x.events, fn e -> e.fn_name == "step")
+            println("all events are step: " ++ bool_str(only_step))
+            -- a second drain finds nothing new, the session still reporting done
+            report("count(10) again", Trace.drain(d, s))
+          Err(e) -> println("count drain: " ++ err_name(e))
+        end
+        -- Once done, further calls are not recorded.
+        calls(5)
+        report("count(10) after more calls", Trace.drain(d, s))
+        report("count(10) stop", Trace.stop(d, s))
+        report("count(10) after stop", Trace.drain(d, s))
+    end
+
+    -- Rate(3, 60): the first three calls in the window are kept, the other
+    -- seven counted as rate_dropped.
+    match Trace.start(d, ["step"], Trace.Rate(3, 60)) do
+      Err(e) -> println("rate start: " ++ err_name(e))
+      Ok(s) ->
+        calls(10)
+        report("rate(3,60) drained", Trace.drain(d, s))
+        report("rate(3,60) stop", Trace.stop(d, s))
+    end
+
+    -- Only the named function is watched.
+    match Trace.start(d, ["other"], Trace.Count(4)) do
+      Err(e) -> println("other start: " ++ err_name(e))
+      Ok(s) ->
+        calls(6)
+        report("other (never called)", Trace.drain(d, s))
+        println("other(1) = " ++ int_to_string(other(1)))
+        report("other (called once)", Trace.drain(d, s))
+        report("other stop", Trace.stop(d, s))
+    end
+
+    -- A call made by an actor carries the actor's pid.
+    match Trace.start(d, ["step"], Trace.Count(2)) do
+      Err(e) -> println("actor start: " ++ err_name(e))
+      Ok(s) ->
+        let a = spawn(Caller)
+        let _ = send(a, Go(7))
+        run_until_idle()
+        match Trace.drain(d, s) do
+          Ok(x) ->
+            let pids = List.map(x.events, fn e -> e.caller)
+            println("actor pid seen: " ++ bool_str(List.member(pids, pid_to_int(a))))
+            println("events=" ++ int_to_string(List.length(x.events)))
+            println("pids " ++ String.join(List.map(pids, fn p -> int_to_string(p)), ",") ++ " actor " ++ int_to_string(pid_to_int(a)))
+          Err(e) -> println("actor drain: " ++ err_name(e))
+        end
+        let _ = Trace.stop(d, s)
+    end
+
+    -- At most four sessions at once.
+    let mk = fn _ -> Trace.start(d, ["step"], Trace.Count(1))
+    match (mk(0), mk(0), mk(0), mk(0)) do
+      (Ok(s1), Ok(s2), Ok(s3), Ok(s4)) ->
+        refuse(d, "fifth session", ["step"], Trace.Count(1))
+        let _ = Trace.stop(d, s1)
+        let _ = Trace.stop(d, s2)
+        let _ = Trace.stop(d, s3)
+        let _ = Trace.stop(d, s4)
+        match Trace.start(d, ["step"], Trace.Count(1)) do
+          Ok(s5) ->
+            println("room again after stop")
+            let _ = Trace.stop(d, s5)
+          Err(e) -> println("after stop: " ++ err_name(e))
+        end
+      _ -> println("four sessions did not all start")
+    end
+    println("done")
+  end
+end

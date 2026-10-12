@@ -1,6 +1,7 @@
 /* march_dispatch.c — Hot Code Reload versioned dispatch table (HCR Phase 2/4).
  * See march_dispatch.h and specs/hot-code-reload.md Part 3. */
 #include "march_dispatch.h"
+#include "march_trace.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +60,12 @@ typedef struct {
 
 typedef struct {
     _Atomic(uint32_t) current;                        /* live ring index */
+    _Atomic(uint32_t) traced;                         /* R8: bit i set = trace session i watches
+                                                         this slot.  Shares a cache line with
+                                                         `current` (it fills what was padding),
+                                                         so the check costs no extra load of a
+                                                         new line.  Written by march_trace.c
+                                                         only. */
     MarchFnVersion    ring[MARCH_MAX_LIVE_VERSIONS];
     char              baseline_impl_hash[65];          /* Phase 4: set on first publish, never changed */
     long long         activated_at_ms;                 /* Phase 7: Unix ms of last ACTIVATE */
@@ -403,6 +410,23 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
     return publish_impl(name_id, fn_ptr, impl_hash, sig_hash, kind, NULL);
 }
 
+/* Trace hook (R8).  WEAK so a C harness that links only this file (test_dispatch)
+ * still builds; the driver links march_trace.c, whose definition wins. */
+__attribute__((weak)) void march_trace_hit(uint32_t name_id, uint32_t mask, uint32_t epoch) {
+    (void)name_id; (void)mask; (void)epoch;
+}
+
+/* Set the session bits in [set] and clear those in [clear] on slot
+ * [name_id]'s trace mask.  The new mask, or -1 for a slot that does not
+ * exist.  Only march_trace.c calls this. */
+int march_dispatch_trace_mask(uint32_t name_id, uint32_t set, uint32_t clear) {
+    if (name_id >= atomic_load_explicit(&g_n_slots, memory_order_acquire)) return -1;
+    MarchDispatchSlot *s = &atomic_load_explicit(&g_slots, memory_order_acquire)[name_id];
+    if (set) atomic_fetch_or_explicit(&s->traced, set, memory_order_seq_cst);
+    if (clear) atomic_fetch_and_explicit(&s->traced, ~clear, memory_order_seq_cst);
+    return (int)atomic_load_explicit(&s->traced, memory_order_relaxed);
+}
+
 void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version) {
     /* Acquire-load the gate: a non-zero count synchronises-with the release
        store in march_dispatch_init, so g_slots below is guaranteed published. */
@@ -437,6 +461,12 @@ void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version) {
         atomic_fetch_sub_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
         if (out_version) *out_version = 0;
         return NULL;
+    }
+    { /* R8: see march_dispatch_enter_gen. */
+        uint32_t tm = atomic_load_explicit(&s->traced, memory_order_relaxed);
+        if (__builtin_expect(tm != 0, 0))
+            march_trace_hit(name_id, tm,
+                            atomic_load_explicit(&s->ring[v].epoch, memory_order_relaxed));
     }
     if (out_version) *out_version = v;
     return s->ring[v].fn_ptr;
@@ -614,6 +644,11 @@ void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
         atomic_fetch_sub_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
         if (out_version) *out_version = 0;
         return NULL;
+    }
+    { /* R8: one relaxed load of a word on the line `current` is on, and a
+         never-taken branch while no trace session watches this slot. */
+        uint32_t tm = atomic_load_explicit(&s->traced, memory_order_relaxed);
+        if (__builtin_expect(tm != 0, 0)) march_trace_hit(name_id, tm, best_ep);
     }
     if (out_version) *out_version = v;
     return s->ring[v].fn_ptr;
