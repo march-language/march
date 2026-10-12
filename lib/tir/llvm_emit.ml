@@ -2677,11 +2677,11 @@ let emit_preamble = Llvm_toplevel.emit_preamble
 
 let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
     ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
-    ?k_table (m : Tir.tir_module) : string =
+    ?cap_manifest ?k_table (m : Tir.tir_module) : string =
   Llvm_toplevel.emit_module ~emit_expr
     ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
     ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
-    ?k_table m
+    ?cap_manifest ?k_table m
 
 
 type repl_slot_info = Llvm_repl.repl_slot_info = {
