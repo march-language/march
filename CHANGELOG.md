@@ -3452,6 +3452,12 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+
+- **Choreography chapter restructured.** `docs/choreography/` now opens with when to
+  use a choreography and what to reach for instead, an index of every section, and
+  a table of how it builds on session types, actors, capabilities, clustering and
+  hot code reload, followed by a six-step walkthrough and then the reference. No
+  content was removed; the anchors other chapters link to are unchanged.
 - **`Int` on `--target js` is documented as a subset.** An `Int` there is a JS
   number, exact within ±(2^53 - 1), where every operation matches native
   builds. Past that, `+`, `-` and `*` round instead of wrapping at 63 bits and
