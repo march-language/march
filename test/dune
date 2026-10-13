@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_b7 test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line)
+ (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_report_bypass test_cas_b7 test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint march_jit yojson alcotest str unix threads.posix))
 
 (library
@@ -3188,6 +3188,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_message_record_leak_probe.expected native_actor_message_record_leak_probe.out)))
+
+; ── Leak guard: an actor handler with a nested match leaked its old state
+; record on every message (Perceus's aggregate scope-end drop stopped at a
+; release on ONE path, the nested pattern's non-exhaustive arm), and every
+; hmac_sha256_bytes call leaked its message (an indirect call: the builtin was
+; missing from Defun.builtin_names). Red before the fix: every leg but the
+; last line reads `flat: false`.
+; specs/progress/2026-10-05-lab-leaderless-agents-leak.md
+(rule
+ (targets native_actor_nested_match_state_leak_probe native_actor_nested_match_state_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_nested_match_state_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_nested_match_state_leak_probe
+        native/actor_nested_match_state_leak_probe.march)
+   (with-stdout-to native_actor_nested_match_state_leak_probe.out
+        (system "./native_actor_nested_match_state_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_nested_match_state_leak_probe.expected native_actor_nested_match_state_leak_probe.out)))
 
 ; ── Leak guard: a --hot-reload build has no static closures, so a
 ; capture-free lambda is a heap closure that its apply fn must release
@@ -8839,6 +8863,58 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/live_process_registry.expected interp_live_process_registry.out)))
+
+; ── Process spawning via posix_spawnp: an unexecutable command is an Err on
+; ── both backends; capture, stdin, cwd/env and signal state are unchanged ──
+; specs/progress/2026-10-12-process-spawn-posix-spawn.md
+(rule
+ (targets native_process_spawn_errors native_process_spawn_errors.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/process_spawn_errors.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_process_spawn_errors
+        native/process_spawn_errors.march)
+   (with-stdout-to native_process_spawn_errors.out
+        (system "./native_process_spawn_errors")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_spawn_errors.expected native_process_spawn_errors.out)))
+
+(rule
+ (targets interp_process_spawn_errors.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/process_spawn_errors.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_process_spawn_errors.out
+   (run %{exe:../bin/main.exe} native/process_spawn_errors.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_spawn_errors.expected interp_process_spawn_errors.out)))
+
+; Compiled only: started with SIGUSR1 blocked and SIGPIPE ignored, so the
+; children die only because spawn_child resets the mask and dispositions.
+(rule
+ (targets native_process_spawn_sigmask native_process_spawn_sigmask.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/process_spawn_sigmask.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_process_spawn_sigmask
+        native/process_spawn_sigmask.march)
+   (with-stdout-to native_process_spawn_sigmask.out
+        (system "perl -e 'use POSIX; sigprocmask(SIG_BLOCK, POSIX::SigSet->new(SIGUSR1)); $SIG{PIPE}=\"IGNORE\"; exec @ARGV' ./native_process_spawn_sigmask")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_spawn_sigmask.expected native_process_spawn_sigmask.out)))
 
 ; ── __try_call / __try_call_val Err message: "panic: <msg>" on both backends ──
 (rule

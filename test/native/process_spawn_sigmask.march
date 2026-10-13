@@ -1,0 +1,38 @@
+-- A child started by Process.* gets a clean signal state: an empty mask and
+-- every signal at its default disposition (runtime/march_runtime.c,
+-- spawn_child: POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF).  SIGUSR1 is
+-- the runtime's preemption signal; a child that inherited it blocked, or a
+-- signal the parent ignores (exec keeps SIG_IGN), would survive `kill`.
+-- The dune rule starts this binary with SIGUSR1 blocked and SIGPIPE ignored
+-- (a perl wrapper), so the inherited state is NOT clean and only the spawn
+-- attributes make the children die.  Compiled only: the interpreter has no
+-- preemption signal and OCaml's Unix.create_process has no spawn attributes.
+-- specs/progress/2026-10-12-process-spawn-posix-spawn.md
+mod ProcessSpawnSigmask do
+  needs IO.Console
+  needs IO.Process
+
+  pfn probe(signame : String) : () do
+    match Process.run("sh", ["-c", "kill -" ++ signame ++ " $$; printf survived"]) do
+      Ok(res) ->
+        println(signame ++ ": ok=" ++ to_string(Process.ok(res))
+                ++ " out=[" ++ Process.stdout(res) ++ "]")
+      Err(e) -> println(signame ++ ": Err " ++ e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    probe("USR1")
+    probe("PIPE")
+    match Process.spawn_async("sh", ["-c", "kill -USR1 $$; echo survived"]) do
+      Ok(p) ->
+        let line = Process.read_line(p)
+        let _ = Process.wait_proc(p)
+        match line do
+          Some(s) -> println("async USR1: " ++ s)
+          None -> println("async USR1: <none>")
+        end
+      Err(e) -> println("async USR1: Err " ++ e)
+    end
+  end
+end

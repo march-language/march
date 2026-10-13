@@ -528,6 +528,18 @@ git log is authoritative for exact commits.
   affected; one typing-corpus fixture passed a two-argument comparator to
   `Map.insert` and now uses a curried one. Function values passed through records or lists are
   not checked yet (`specs/todos/2026-10-12-function-arity-not-in-types.md`).
+- **Breaking: a command that cannot be executed is an `Err` from
+  `Process.run`, `Process.run_stream`, `Process.spawn_async` and
+  `System.cmd`.** A missing or non-executable program now returns
+  `Err("cannot execute <cmd>: <reason>")` on both backends; compiled code used
+  to return `Ok` with exit code 127. Compiled programs now start children with
+  `posix_spawn` instead of `fork` + `execvp`: spawning is faster, a
+  `MARCH_SANITIZE=thread` build no longer spends ~0.4 s per spawn or deadlocks
+  in TSAN's fork interceptor on macOS, and the child starts with no signals
+  blocked and every signal at its default action (it used to inherit the
+  spawning thread's mask and any ignored signal). On macOS a child now
+  inherits only its stdin, stdout and stderr. Code that checked for exit
+  code 127 should match `Err` instead; the in-repo callers already did.
 - **Breaking: a type variable in a function signature is rigid: a body that fixes it is
   an error.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end`, and a body that
   makes two signature variables the same type (`fn second(x : a, y : b) : a do
@@ -792,6 +804,51 @@ git log is authoritative for exact commits.
   scenario, `control_restart_together`, starts and then restarts three nodes
   together under session traffic and fails if any node's heap passes 400,000
   objects.
+- **A cluster session no longer hangs when its two nodes reconnect while it
+  runs.** If the connection between two nodes dropped and was redialled while
+  a session was forming, one party could end with the old connection while
+  the other formed on the new one and then waited for a reply that could
+  never come, with no error. Two things now make that session fail promptly
+  on both sides. A party whose connection ends sends its cancellation over
+  the new connection to the peer's node once there is one. A frame the peer's
+  node refuses (`DELIVERY_FAILED`, for example because the peer's endpoint
+  has already ended) now fails the session that sent it, where before it was
+  silently ignored. Those refusals now go to the session itself, not to
+  `ClusterNode.on_delivery_failed`'s handler. This was the intermittent
+  `session_churn` hang in the ASan CI gate.
+- **Cluster sessions with two offered roles on different nodes no longer hang
+  in certificate mode.** A session could stall for good, with no error or
+  cancellation, when a party checked another node's certificate before its
+  node had connected to that node. The check failed, that party left
+  silently, and the parties that had already found it waited for ever. This
+  was most likely just as nodes joined, and it was the intermittent
+  `cert_order` stall in the ASan CI gate. The check now waits for the
+  connection. A party that gives up while its session forms now cancels the
+  session for the others, so they fail instead of hanging. A second, rarer
+  hang is also fixed: an actor-hosted role's final close message could be
+  dropped when its last peers closed first, leaving the other roles waiting
+  for it. An initiating node no longer risks a use-after-free when an offer's
+  answer arrives late, after the initiator has stopped waiting for it.
+- **A cluster node with no control-plane leader no longer grows.** Two leaks
+  were left on every node's hot path: a compiled actor handler with a nested
+  pattern match (`Ok((x, y)) -> ...`) kept its old state on every message
+  (ClusterNode's frame handler; fixed by the partial-release drop above), and
+  every `hmac_sha256_bytes` call kept its input, so every sealed cluster frame
+  leaked two objects (`md5` and `stdlib_hmac_sha256` had the same bug). The
+  control plane's Agent also no longer sets up a session for each retry when
+  no leader offers one. A leaderless node that grew ~65 objects a second on
+  the previous main (~13,000 a second in the multi-host lab before the leak
+  fixes of the last week) is now flat.
+- **Checks and reports now run even when the build is cached.** A compile
+  with `--verify-tir` plus `MARCH_VERIFY_TIR_LEAKS=1`, `--emit-llvm`,
+  `--dump-tir`/`--dump-phases`/`--dump-provenance`/`--dump-impl-hashes`, or one
+  of the compiler's dump/audit env vars (`MARCH_TRMC_REPORT`,
+  `MARCH_REPR_AUDIT`, `MARCH_DUMP_TXT`, ...) used to be answered from the build
+  cache when an earlier plain build of the same source existed, so it checked
+  nothing, printed nothing, or wrote no `.ll`. Those runs now skip the cache.
+  Separately, whether z3 can be found is now part of the cache key: a build
+  without z3 accepts (with a hint) a refinement z3 refutes, and that result was
+  being reused by the next build that had z3.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a

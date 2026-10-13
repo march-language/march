@@ -36,11 +36,6 @@ march=./_build/default/bin/main.exe
 # associative array: macOS ships bash 3.2.
 skip_reason() {
   case "$1" in
-    live_process_registry|process_handle_leak_probe)
-      # specs/progress/2026-10-12-tsan-process-spawn-fixtures-hang.md
-      if [ "$(uname)" = Darwin ]; then
-        echo "Darwin TSAN limitation: fork() deadlocks inside TSAN's fork interceptor when another thread holds a libc lock, and each fork+exec costs ~0.4 s"
-      fi ;;
     ffi_codec|ffi_codec2|ffi_interp_shim|ffi_optres)
       echo "needs the C objects its dune rule links" ;;
     js_*)

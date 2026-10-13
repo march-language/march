@@ -1,0 +1,71 @@
+-- Two-node harness, scenario "session_redial": node-b runs role B. Once it
+-- sees A's endpoint of session "redial-1" and node-a is frozen, it forms
+-- against it; node-b then declares node-a dead and drops their pair, which
+-- must end B's session. Its second session runs over the redialled pair.
+-- See node_a.march.
+mod SessionRedialB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn await_name(h : Cap(ClusterNode.Live), name : String, left : Int) : Bool do
+    if Option.is_some(ClusterNode.lookup(h, name)) do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      await_name(h, name, left - 50)
+    end end
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Echo_B.S_recv_Msg_A_B_1, say : Bool) : Echo_B.Yield do
+    if say do println("B: formed against the frozen A") else () end
+    Echo_B.recv_Msg_A_B_1(s, st, fn (n, st1) -> Echo_B.close(s, Echo_B.send_Msg_B_A_1(s, st1, n * 2)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let base = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "redial-secret", 1)
+    let suspect_ms = Env.get_int("REDIAL_SUSPECT_MS", 0)
+    let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-b: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        if await_name(h, "session:redial-1/1", 120000) do () else panic("node-b: A never registered") end
+        println("B: sees A")
+        wait_file(Env.require("REDIAL_FROZEN_FILE"))
+        match Echo_Run.cluster_B(c, h, "redial-1", fn (s, st) -> role_b(s, st, true)) do
+          Ok(_) -> println("B: cut-off session failed: false (it finished)")
+          Err(e) ->
+            IO.warn("B: redial-1: " ++ Echo_Run.error_message(e))
+            println("B: cut-off session failed: true")
+        end
+        wait_file(Env.require("REDIAL_NEXT_FILE"))
+        match Echo_Run.cluster_B(c, h, "redial-2", fn (s, st) -> role_b(s, st, false)) do
+          Ok(_) -> println("B: next session finished")
+          Err(e) -> println("B: next session failed: " ++ Echo_Run.error_message(e))
+        end
+        ClusterNode.stop(h)
+    end
+  end
+end
