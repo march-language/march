@@ -2145,6 +2145,36 @@ let run_argv (argv : string array) ~(log : string) : int =
     wait ()
   with _ -> 127
 
+(** The clang flags that select the NODE's platform ([triple], from its
+    HELLO), as [(target_is_mac, flags)].  Compiling for another platform is
+    often necessary: a Linux node cannot load a Mach-O.  From macOS to
+    Linux the system clang cross-compiles with lld; a fragment links
+    against nothing (every runtime symbol binds at the node's dlopen), so
+    no target libc or sysroot is needed.
+
+    The triple is NOT trusted: HELLO is unauthenticated and these flags go
+    on a [Sys.command] line.  A triple [Jit_emit.triple_ok] rejects is a
+    [Failure] here, before any command runs, and the value is quoted as
+    well, so the command builder is safe whatever the caller checked. *)
+let shell_target_flags ~(triple : string option) : bool * string =
+  (match triple with
+   | Some t when t <> "" && t <> "unknown" && not (Jit_emit.triple_ok t) ->
+     failwith (Printf.sprintf
+                 "shell: the node's target triple is not a valid triple (%S); refusing to compile"
+                 t)
+   | _ -> ());
+  let target_is_mac = match triple with
+    | Some t -> contains_sub t "apple" || contains_sub t "darwin"
+    | None -> is_macos () in
+  if target_is_mac && not (is_macos ()) then
+    failwith "shell: this node runs macOS; its fragments must be compiled on macOS";
+  let flags = match triple with
+    | Some t when t <> "" && t <> "unknown" ->
+      Printf.sprintf " --target=%s%s" (Filename.quote t)
+        (if (not target_is_mac) && is_macos () then " -fuse-ld=lld -nostdlib" else "")
+    | _ -> "" in
+  (target_is_mac, flags)
+
 let shell_compile ?triple ?ident ?(force = false) ctx ~tc_env ~(program_name : string)
     ~(program_decls : March_ast.Ast.decl list)
     ~(program_type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t)
@@ -2504,21 +2534,9 @@ let shell_compile ?triple ?ident ?(force = false) ctx ~tc_env ~(program_name : s
   let oc = open_out ll in
   output_string oc ir;
   close_out oc;
-  (* Compile for the NODE's platform ([triple], from its HELLO), which is
-     often not this machine's: a Linux node cannot load a Mach-O.  From macOS
-     to Linux, the system clang cross-compiles with lld; a fragment links
-     against nothing (every runtime symbol binds at the node's dlopen), so no
-     target libc or sysroot is needed. *)
-  let target_is_mac = match triple with
-    | Some t -> contains_sub t "apple" || contains_sub t "darwin"
-    | None -> is_macos () in
-  if target_is_mac && not (is_macos ()) then
-    failwith "shell: this node runs macOS; its fragments must be compiled on macOS";
-  let target_flags = match triple with
-    | Some t when t <> "" && t <> "unknown" ->
-      Printf.sprintf " --target=%s%s" t
-        (if (not target_is_mac) && is_macos () then " -fuse-ld=lld -nostdlib" else "")
-    | _ -> "" in
+  (* Compile for the NODE's platform ([triple], from its HELLO); see
+     [shell_target_flags]. *)
+  let target_is_mac, target_flags = shell_target_flags ~triple in
   (* Export the entry only: every other symbol is local, so references inside
      the fragment bind to the fragment's own copies. *)
   let export_flags ~entry ~map =

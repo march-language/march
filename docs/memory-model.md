@@ -9,29 +9,74 @@ permalink: /docs/memory-model/
 
 # Memory Model: How FBIP Works
 
-March's headline promise is **functional code that runs in place**: you write
-pure transformations over immutable data (the style where you never mutate
-anything, you just build new values from old ones), and the compiler turns them
-into ordinary in-place mutation wherever it can prove no one will notice the
-difference. There is no tracing garbage collector, no stop-the-world collection,
-and, in the common "transform and return" case, no allocation at all. This page
-explains the mechanism end to end, from first principles, so you don't need a
-compilers background to follow it.
+March compiles pure transformations over immutable data into in-place mutation
+wherever it can prove that no one could observe the difference. There is no tracing
+garbage collector and no stop-the-world pause. In the common "transform and return"
+case there is no allocation at all: the cell you matched on becomes the cell you
+return. This page explains that mechanism end to end.
 
-The claim to hold onto is **deterministic, not pauseless**. No collector scans
-your heap and no pause stops your program at a time it picks. But freeing is real work
-that happens *inline*, and releasing a large structure costs time proportional
-to its size; see [drop cascades](#drop-cascades-freeing-is-work-you-scheduled)
-below. The difference from a tracing GC is not that the work disappears; it is
-that you choose when it happens, and it is the same every run.
+Two ingredients do the work. **Perceus** is deterministic reference counting: the
+compiler inserts increments and decrements only where ownership changes, so a value
+is freed at its last use, at a program point you can see. **FBIP** ("functional but
+in-place") is the reuse rule built on top of it: when a dying value's count is one and
+a new value of the same shape is being built, the new value takes the old cell.
 
-The two ingredients are **[Perceus](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/)
-reference counting** (deterministic, compiled in; the technique comes from the
-2021 paper *"Perceus: Garbage Free Reference Counting with Reuse"* by Reinking,
-Xie, de Moura, and Leijen, if you want the formal treatment) and **FBIP,
-Functional But In-Place** (the reuse optimization that builds on top of it). The
-same uniqueness property that makes FBIP work also makes *parallel* FBIP
-lock-free: no thread coordination needed.
+The promise is **deterministic, not pauseless**. Freeing is real work that happens
+inline, and releasing a large structure costs time proportional to its size. The
+difference from a tracing collector is not that the work disappears; it is that you
+choose when it happens, and it is the same every run.
+
+## On this page
+
+**Start here**
+
+- [When this matters](#when-this-matters)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [Perceus: deterministic reference counting](#perceus-deterministic-reference-counting)
+- [Uniqueness = RC 1](#uniqueness--rc-1)
+- [FBIP: a worked before/after](#fbip-a-worked-beforeafter)
+- [When reuse fires vs. falls back](#when-reuse-fires-vs-falls-back)
+
+**Writing for it**
+
+- [Writing allocation-free code](#writing-allocation-free-code) and [small scalar aggregates](#small-scalar-aggregates-never-reach-the-heap-at-all)
+- [Parallel FBIP needs no locks](#parallel-fbip-needs-no-locks)
+- [Mutable builtins: the rule](#mutable-builtins-the-rule)
+
+**The costs and the edges**
+
+- [Where this sits in the bigger picture](#where-this-sits-in-the-bigger-picture)
+- [Drop cascades: freeing is work you scheduled](#drop-cascades-freeing-is-work-you-scheduled)
+- [Cycles: not collected, and not reachable from ordinary code](#cycles-not-collected-and-not-reachable-from-ordinary-code)
+- [Conformance status](#conformance-status)
+- [See also](#see-also)
+
+## When this matters
+
+You never write reuse directives; the compiler chooses. This page matters when you are
+tuning a hot path, reading the editor's performance hints, pinning a function with
+`@[no_alloc]`, or wondering why a p99 is worse than a p50.
+
+| You want to | Do |
+|---|---|
+| See whether a hot function allocates | Turn on the LSP's performance hints: `♻ in-place`, `⧉ copied`, `⚡ stack-allocated` |
+| Make a `⧉ copied` go away | Consume the value you transform; do not read the old binding after the rebuild |
+| Keep a function allocation-free for good | `@[no_alloc]`, or `@[no_alloc(transient)]` when it allocates but retains nothing |
+| Keep a whole module allocation-free | `cap no_alloc`; see [Capabilities]({{ site.baseurl }}/docs/capabilities/#cap-no_alloc-no-heap-allocation) |
+| Keep a small vector of scalars out of the heap | One constructor, two to four `Int`/`Float`/`Bool` fields |
+| Move a big free out of a latency-critical section | Drop it earlier, or hand it to a task with a loose deadline |
+| Guarantee a value has one owner | Make it `linear`; see [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
+
+## How it fits with the rest of March
+
+| Concept | Where the memory model meets it | Chapter |
+|---|---|---|
+| **Linear types** | A `linear` value is the strongest FBIP case: one owner by the type, not by inference. | [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
+| **Capabilities** | `cap no_alloc` and `@[no_alloc]` are judged on the compiled form, after reuse and stack promotion. | [Capabilities]({{ site.baseurl }}/docs/capabilities/#cap-no_alloc-no-heap-allocation) |
+| **Actors and parallelism** | Disjoint subtrees of a uniquely owned value can be rewritten on different cores with no lock; a `send` of a linear value is a move. | [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/), [Actors]({{ site.baseurl }}/docs/actors/) |
+| **Editor** | The inlay hints and code lenses that show each reuse decision. | [LSP & Editors]({{ site.baseurl }}/docs/lsp/) |
+| **Compiler internals** | Object headers, tagged scalars, the inline-aggregate class, and the RC contract. | [Value Representation]({{ site.baseurl }}/docs/value-representation/) |
+| **Observing a running node** | `MEM`'s `live_objects` and the `rc.climb` finding are this model seen from outside. | [Observe]({{ site.baseurl }}/docs/observe/) |
 
 ---
 
@@ -86,13 +131,13 @@ entirely and **reuses the dying value's memory for the new one**. One uniqueness
 check replaces an allocator round-trip, and the new value lands at the same
 address, so it stays hot in cache.
 
-This is the whole trick. FBIP is just this rule applied to constructor rewrites.
+FBIP is this rule applied to constructor rewrites.
 
 ---
 
 ## FBIP: a worked before/after
 
-Here is the canonical example, incrementing every leaf of a binary tree:
+The canonical example increments every leaf of a binary tree:
 
 ```march
 mod TreeDemo do
@@ -198,7 +243,7 @@ that site, and the compiler does the safe thing with no visible sign.
 
 ## Writing allocation-free code
 
-You don't write reuse directives; the compiler chooses. But you can *see* its
+You do not write reuse directives; the compiler chooses. But you can *see* its
 decisions and steer them. The [LSP]({{ site.baseurl }}/docs/lsp/) reports, as
 inlay hints and per-function code lenses:
 
@@ -527,7 +572,7 @@ to construct rather than cleaning them up afterwards:
   raw pointers into another actor's heap, so there is no material a cross-actor
   cycle could be made of.
 
-Two candid caveats. First, this is a *design argument*, not a mechanized proof:
+Two caveats. First, this is a *design argument*, not a mechanized proof:
 no part of March is mechanically verified today (a Lean 4 metatheory effort is
 planned, not started; see `specs/lean4-metatheory-plan.md`), and there is no
 runtime detector that would tell you if it were wrong. Second, the argument covers user-level
@@ -563,7 +608,9 @@ does not sketch) are explicitly OUT of scope for now: reuse needs a "preserves
 semantics" proof beyond today's arity check, and atomic RC mode-selection
 (`specs/atomic-rc-design.md`) remains an undesigned draft, not implemented.
 
-## Next Steps
+---
+
+## See also
 
 - [Linear Types]({{ site.baseurl }}/docs/linear-types/): ownership that
   guarantees RC == 1, and zero-copy actor sends.
@@ -573,3 +620,5 @@ semantics" proof beyond today's arity check, and atomic RC mode-selection
   disjoint, uniquely-owned subtrees across cores.
 - [LSP & Editors]({{ site.baseurl }}/docs/lsp/): turning on the `♻ / ⧉ / ⚡`
   performance hints.
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/#cap-no_alloc-no-heap-allocation): `cap no_alloc` for a whole module.
+- [Value Representation]({{ site.baseurl }}/docs/value-representation/): the compiler-internals view of headers, tags and the inline-aggregate class.

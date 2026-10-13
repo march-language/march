@@ -9,6 +9,19 @@ external available_c : string -> bool = "march_emit_available"
 external emit_object_c : string -> string -> string -> string -> string
   = "march_emit_object"
 
+(** A target triple the shell client may put on a clang command line.  The
+    node sends its triple in HELLO, unauthenticated, and the client once
+    spliced it into a [Sys.command] string unquoted; a hostile node could
+    run commands on the operator's machine.  Only the characters a real
+    triple uses are allowed (`arm64-apple-darwin25.6.0`,
+    `x86_64-unknown-linux-gnu`); the empty string is refused so a missing
+    field is handled by the caller, not here. *)
+let triple_ok (triple : string) : bool =
+  triple <> ""
+  && String.for_all (fun c ->
+         (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+         || c = '.' || c = '_' || c = '-') triple
+
 (** The LLVM backend name and the CPU clang would pick for [triple]
     (`clang --target=<triple> -###` shows `-target-cpu`), or [None] for a
     triple this path does not handle (clang then compiles it). *)

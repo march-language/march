@@ -728,6 +728,29 @@ mod TestClusterNode do
       end
     end
 
+    -- refresh_names walks the union of the old and new visible names. It once
+    -- built that union with List.dedup over two appended key lists, which only
+    -- drops ADJACENT duplicates: with two names ["ap","zz","ap","zz"] each name
+    -- was visited twice, and a rebound name reported its change twice.
+    test "a name rebound to another pid is reported once" do
+      match linked_ab() do
+        (b, st, _) ->
+          let c1 = VectorClock.increment(VectorClock.new(), b)
+          let r1 = GlobalRegistry.register_at(GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, c1), "zz", b, 1, 8, c1)
+          match ClusterNode.core_frame(st, b, 6, NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(r1), GlobalRegistry.all_entries(r1))) do
+            (st2, _) ->
+              assert (lookup_pid(st2, "ap") == 7)
+              let r2 = GlobalRegistry.register_at(r1, "ap", b, 1, 9, VectorClock.increment(c1, b))
+              match ClusterNode.core_frame(st2, b, 6, NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(r2), GlobalRegistry.all_entries(r2))) do
+                (st3, effs) ->
+                  assert (lookup_pid(st3, "ap") == 9)
+                  assert (List.length(List.filter(name_events(effs), fn t -> t == "ap bound to " ++ b)) == 1)
+                  assert (not(List.any(name_events(effs), fn t -> String.starts_with(t, "zz"))))
+              end
+          end
+      end
+    end
+
     test "unregister leaves another holder's binding alone" do
       match linked_ab() do
         (b, st, _) ->

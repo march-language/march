@@ -20,6 +20,14 @@ git log is authoritative for exact commits.
 
 ### Security
 
+- **`march --shell` / `forge shell` no longer let a node run commands on the operator's
+  machine.** The client put the target triple from the node's unauthenticated `HELLO`
+  reply on a `/bin/sh` command line unquoted, so a compromised node (or anything able to
+  serve its `.shell` socket, including through `forge shell`'s ssh tunnel) could execute
+  commands as the operator on the first evaluated input. The triple is now allowlisted
+  (`[A-Za-z0-9._-]+`) when `HELLO` is read, the session is refused otherwise, and the
+  clang command builder refuses and quotes it independently. A real node's triple is
+  unaffected.
 - **`~H` no longer lets an interpolated value choose a link's scheme.** In
   `href="${s}://${rest}"`, a value of `javascript` passed the URL check because
   it has no colon of its own; the template's `:` then made it the scheme, and
@@ -776,6 +784,12 @@ git log is authoritative for exact commits.
   the periodic anti-entropy still repair any divergence), and the idle tick no
   longer hashes the whole registry. 400 sessions: 23 s and ~40 MB per node on
   Linux (was 326 s, 3 failed), 22 s and ~10 MB on macOS.
+- **A cluster name rebound to another process is reported to its watchers
+  once.** When a globally registered name moved from one pid to another and
+  the node could see at least one other name, every watcher of the name got
+  the change twice (two `Bound`s; a local registration that lost the name
+  heard `Lost` and then a stray `Bound`). The visible-name walk deduplicated
+  with `List.dedup`, which only drops adjacent duplicates.
 - **An actor handler that matches on a tuple no longer leaks its old state
   when compiled.** A handler whose body was a `match` on a tuple a call
   returned (`match LinearMap.take_slot(state.sessions, id) do (None, slot) ->
@@ -3526,6 +3540,13 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Seven more chapters restructured.** Session types, linear types, memory
+  model, interfaces, pattern matching, parallel collections and the tooling
+  page each open with a plain summary, a when-to-use table, how the topic meets
+  the rest of the language, and an index of every section. Session types'
+  interpreted-vs-compiled status moves out of the intro; pattern matching loses
+  three "resolved" notes about a parser limitation that no longer exists; the
+  tooling page is regrouped by task. Section bodies are unchanged.
 - **Clustering chapter restructured.** `docs/clustering/` now opens with what a
   cluster is in actor terms, a goal-to-API table, an index of every section,
   and how the cluster meets actors, capabilities, choreography, hot code reload

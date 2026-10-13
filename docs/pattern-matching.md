@@ -9,7 +9,72 @@ permalink: /docs/pattern-matching/
 
 # Pattern Matching
 
-Pattern matching in March is exhaustive, nested, and deeply integrated with the type system. The compiler verifies that every possible shape of a value is handled.
+A `match` takes a value apart by its shape and runs the arm whose pattern fits. The
+compiler checks that the arms cover every shape the value can have, and warns about
+arms that can never run. Patterns nest to any depth and appear in `let` bindings and
+function parameters as well as in `match`.
+
+The same pattern grammar serves four constructs: `match` on a value, `match do` with
+no value (a multi-way `if`), `with` for chaining `Result` and `Option` bindings, and
+multi-head functions whose clauses match on their parameters.
+
+This page is the catalogue: every pattern form, `as` and or-patterns, guards,
+exhaustiveness, and the four constructs.
+
+## On this page
+
+**Start here**
+
+- [Which construct do I need?](#which-construct-do-i-need)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [Basic Match](#basic-match)
+
+**The pattern catalogue**
+
+- [Pattern Catalog](#pattern-catalog): [wildcards and variables](#wildcards-and-variables), [literals](#literal-patterns), [constructors](#constructor-patterns), [Option and Result](#option-and-result), [tuples](#tuple-patterns), [lists](#list-patterns), [records](#record-patterns), [atoms](#atom-patterns), [qualified constructors](#qualified-constructor-patterns), [negative integers](#negative-integer-patterns)
+- [As Patterns](#as-patterns)
+- [Or Patterns](#or-patterns)
+- [Guards](#guards)
+- [Nested Patterns](#nested-patterns)
+
+**What the compiler checks**
+
+- [Exhaustiveness Checking](#exhaustiveness-checking)
+
+**The constructs**
+
+- [Multi-Expression Arms](#multi-expression-arms)
+- [Cond (Pattern-Free Multi-Way If)](#cond-pattern-free-multi-way-if)
+- [With (Monadic Pattern Matching)](#with-monadic-pattern-matching)
+- [Patterns in Let Bindings](#patterns-in-let-bindings)
+- [Multi-head Functions](#multi-head-functions) and [`when` guards](#when-guards)
+- [See also](#see-also)
+
+## Which construct do I need?
+
+| You want | Write |
+|---|---|
+| Branch on the shape of one value | `match v do … end` |
+| Branch on two values at once | `match (a, b) do … end` with tuple patterns |
+| A chain of boolean conditions with no value to inspect | `match do cond -> … end` |
+| Chain several `Result` or `Option` steps and handle the first failure | `with Ok(x) <- …, Ok(y) <- … do … else … end` |
+| Propagate an `Err` immediately from a block | `let? x = …`; see [`let?`]({{ site.baseurl }}/docs/let-propagation/) |
+| Define a function by cases on its argument | Multi-head `fn f(0) … fn f(n) …` |
+| Pull fields or elements out of a value you already hold | A pattern in `let`, or in a parameter |
+| Name the whole value and its parts at once | `p as name` |
+| Several shapes, one arm body | `p1 \| p2 -> …`, binding the same names in each |
+| A condition a pattern cannot express | `when` on the arm or the function head |
+
+## How it fits with the rest of March
+
+| Concept | Where patterns meet it | Chapter |
+|---|---|---|
+| **Type system** | Patterns are checked against the scrutinee's type; a record pattern's open field list comes from the type, and a constructor the type lacks is an error. | [Type System]({{ site.baseurl }}/docs/types/) |
+| **Refinement types** | An `if` or `when` guard becomes a fact the refinement checker can use on the arm it dominates. | [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) |
+| **Linear types** | Destructuring consumes a linear value; `_` cannot discard one, and every arm that returns must consume it. | [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
+| **Session types** | The label an `offer` returns is matched against the protocol's closed branch set, with a hard error for a missing branch. | [Session Types]({{ site.baseurl }}/docs/session-types/#choice-choose-and-offer) |
+| **Interfaces** | An `impl` body is usually a `match`; `derive` generates such matches from the type. | [Interfaces]({{ site.baseurl }}/docs/interfaces/) |
+| **Capabilities** | Under `cap no_panic` a non-exhaustive `match` is an error, not a warning. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
 
 ---
 
@@ -180,8 +245,7 @@ This record has no field `xx`.
 
 #### Composing with other patterns
 
-Record patterns nest anywhere a pattern can appear, which is where they earn
-their keep. A record inside a record:
+Record patterns nest anywhere a pattern can appear. A record inside a record:
 
 ```march
 type Origin = { host : String, port : Int }
@@ -497,14 +561,6 @@ match n do
 end
 ```
 
-> **Note (resolved):** an earlier version of this document warned that a
-> guard expression using `==`/`!=`/`>=`/`<=`/`&&`/`||`/`++` needed
-> parenthesizing when followed by another guarded arm, due to a parser
-> arm-boundary-lookahead limitation. Verified live: this no longer
-> occurs: chained guards using any of these operators, with no
-> parens, parse and evaluate correctly. The parens in the example above
-> are harmless but no longer necessary.
-
 Guards on function heads work the same way:
 
 ```march
@@ -630,14 +686,6 @@ match do
 end
 ```
 
-> **Note (resolved):** an earlier version of this document warned that each
-> condition needed parenthesizing when chaining two or more cond arms using
-> a comparison/logical operator (`>=`, `<=`, `==`, `!=`, `&&`, `||`, `++`),
-> citing an arm-boundary-lookahead parser limitation. Verified live: this no
-> longer occurs for any of these operators, chained or mixed, with or
-> without a trailing wildcard arm. The parens above are harmless but no
-> longer necessary.
-
 This is equivalent to a chain of `if/else` but reads more cleanly.
 
 ---
@@ -657,13 +705,6 @@ else
   Err(AuthTimeout) -> reply(503, "Service unavailable")
 end
 ```
-
-> **Note (resolved):** an earlier version of this document warned that
-> multiple `else` arms had to be crammed onto **one line**, separated by
-> `|`, because splitting them across lines (as above) failed to parse.
-> Verified live: multi-line `else` arms parse and dispatch correctly now;
-> each of the three arms above is independently reachable and gives the
-> right reply for its error case.
 
 Each `<-` binding: if the expression matches the pattern, execution continues with the binding in scope. On mismatch, control passes to the `else` block (or the non-matching value propagates if there's no `else`).
 
@@ -746,15 +787,14 @@ match score do
 end
 ```
 
-> See the note under "Guards" above: parenthesizing `>=`/`<=`/`==`/etc.
-> guards when chaining more than one is no longer required (fixed).
-
 A guard that fails causes the clause to be skipped and the next clause is tried. A function with no matching clause (after guards) panics at runtime; make the last clause unconditional or use a wildcard to ensure exhaustiveness.
 
 ---
 
-## Next Steps
+## See also
 
 - [Type System](types.md): the types you're matching against
 - [Tour](tour.md): language overview with more examples
 - [Interfaces](interfaces.md): polymorphic dispatch with `interface`
+- [Refinement Types]({{ site.baseurl }}/docs/refinement-types/): guards as facts the checker can use
+- [Session Types]({{ site.baseurl }}/docs/session-types/#choice-choose-and-offer): matching an `offer`'s label
