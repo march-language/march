@@ -3453,6 +3453,13 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Capabilities chapter restructured.** `docs/capabilities/` now opens with a
+  plain statement of the three checks (manifest, upper limit, grant), one
+  "which tool do I need" table, an index of every section, and a table of how
+  capabilities meet modules, actors, linear and refinement types, choreography,
+  hot code reload and the enforcement/audit tooling. Dated changelog asides are
+  folded into short history notes. No content was removed; the anchors other
+  chapters link to are unchanged.
 - **Choreography chapter restructured.** `docs/choreography/` now opens with when to
   use a choreography and what to reach for instead, an index of every section, and
   a table of how it builds on session types, actors, capabilities, clustering and
