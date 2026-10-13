@@ -1335,19 +1335,35 @@ let check_wildcard_let_discard env (pat : Ast.pattern) rhs_expr rhs_ty =
     Curried arrow types cannot tell `fn add(a, b)` from `fn a -> fn b -> …`,
     and March has no partial application, so a mismatch typechecked and then
     failed at runtime (an arity panic interpreted, a SIGSEGV compiled). *)
+let rec callee_call_arities env (name : string)
+    : (string * int option) list option =
+  let entry_at sp =
+    match StrMap.find_opt name env.param_call_arities with
+    | Some (sp', ps) when sp = sp' -> Some ps
+    | _ -> None in
+  if String.contains name '.' then
+    match StrMap.find_opt name env.qual_fn_arities with
+    | Some (_, sp) -> entry_at sp
+    | None -> None
+  else
+    match StrMap.find_opt name env.fn_arities with
+    | Some (_, sp) -> entry_at sp
+    | None ->
+      (* A let-bound lambda literal: its entry is keyed by the let name at
+         the lambda's span (see the [Ast.ELet] case of [infer_block]). *)
+      (match StrMap.find_opt name env.lambda_arities with
+       | Some (_, lam_sp, _) -> entry_at lam_sp
+       | None ->
+         (* `let h = f`: [h] is [f]. *)
+         (match StrMap.find_opt name env.fn_aliases with
+          | Some (_, orig) when orig <> name -> callee_call_arities env orig
+          | _ -> None))
+
 let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
   let callee =
     match f with
-    | Ast.EVar name when String.contains name.txt '.' ->
-      (match StrMap.find_opt name.txt env.qual_fn_arities,
-             StrMap.find_opt name.txt env.param_call_arities with
-       | Some (_, sp), Some (sp', ps) when sp = sp' -> Some (name.txt, ps)
-       | _ -> None)
     | Ast.EVar name ->
-      (match StrMap.find_opt name.txt env.fn_arities,
-             StrMap.find_opt name.txt env.param_call_arities with
-       | Some (_, sp), Some (sp', ps) when sp = sp' -> Some (name.txt, ps)
-       | _ -> None)
+      Option.map (fun ps -> (name.txt, ps)) (callee_call_arities env name.txt)
     | _ -> None
   in
   match callee with
@@ -1367,11 +1383,14 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
              | None -> None)
           | Some _, Ast.EVar v ->
             (match StrMap.find_opt v.txt env.fn_arities,
-                   StrMap.find_opt v.txt env.lambda_arities with
-             | Some (n, _), _ -> Some (Printf.sprintf "`%s`" v.txt, n, v.span)
-             | None, Some (n, _, _) ->
+                   StrMap.find_opt v.txt env.lambda_arities,
+                   StrMap.find_opt v.txt env.fn_aliases with
+             | Some (n, _), _, _ -> Some (Printf.sprintf "`%s`" v.txt, n, v.span)
+             | None, Some (n, _, _), _ ->
                Some (Printf.sprintf "`%s` (a lambda)" v.txt, n, v.span)
-             | None, None -> None)
+             | None, None, Some (n, orig) ->
+               Some (Printf.sprintf "`%s` (bound to `%s`)" v.txt orig, n, v.span)
+             | None, None, None -> None)
           | Some _, _ -> None
         in
         match m, known with
@@ -2470,7 +2489,46 @@ let rec infer_expr env (e : Ast.expr) : ty =
            | _ -> None)
         | _ -> None
       in
+      (* The same rule for an alias of a known function ([fn_aliases]):
+         `let h = add` then `h(1)` called the two-parameter `add` with one
+         argument. *)
+      let alias_arity_error =
+        match f, lambda_arity_error with
+        | Ast.EVar name, None when not (String.contains name.txt '.') ->
+          (match StrMap.find_opt name.txt env.fn_aliases with
+           | Some (arity, orig)
+             when arity >= 1 && List.length args <> arity
+                  && count_arrows f_ty >= arity ->
+             Some (name, arity, List.length args, orig)
+           | _ -> None)
+        | _ -> None
+      in
       (match arity_error, noncallable_error, lambda_arity_error with
+       | None, None, None when alias_arity_error <> None ->
+         let (name, arity, n_args, orig) = Option.get alias_arity_error in
+         List.iter (fun a -> ignore (infer_expr env a)) args;
+         let plural n = if n = 1 then "" else "s" in
+         Err.report env.errors
+           { Err.severity = Err.Error; span = sp;
+             message = Printf.sprintf
+               "`%s` is bound to `%s`, which takes %d argument%s, but is called \
+                with %d argument%s.\n\
+                March has no partial application — a call must supply all arguments."
+               name.txt orig arity (plural arity) n_args (plural n_args);
+             labels = (match StrMap.find_opt name.txt env.binder_spans with
+                 | Some b -> [{ Err.lbl_span = b;
+                                Err.lbl_message = Printf.sprintf "bound to `%s` here" orig }]
+                 | None -> []);
+             notes = [];
+             code = Err.Code.arity_mismatch; fix = None };
+         (* Under-application is the curried reading (`let g = h(1)` then
+            `g(2)`): its result has no type to give, so do not cascade one. *)
+         if n_args < arity then TError
+         else
+           let rec peel n t =
+             if n <= 0 then t
+             else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
+           peel arity f_ty
        | None, None, Some (name, arity, n_args, lam_sp, wildcard) ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
          let plural n = if n = 1 then "" else "s" in
@@ -3895,7 +3953,7 @@ and infer_block env exprs =
        test/native/unit_callback_zero_arg.march.) *)
     let env' =
       match b.bind_pat, auto_lin, b.bind_expr with
-      | Ast.PatVar name, Ast.Unrestricted, Ast.ELam (params, _, lam_sp) ->
+      | Ast.PatVar name, Ast.Unrestricted, Ast.ELam (params, body_of_lam, lam_sp) ->
         (* Remember the lambda's arity for the call-site check (D4): see
            [lambda_arities]. `fn _ -> e` also records the `fn _` extent,
            which is the text the fix replaces with `fn`. *)
@@ -3906,10 +3964,48 @@ and infer_block env exprs =
                                Ast.end_col = p.Ast.param_name.Ast.span.Ast.end_col }
           | _ -> None
         in
+        (* And how its body applies each parameter, so a call of it is
+           callback-arity checked like a call of a module fn
+           ([check_callback_arities]); keyed by the let name at the lambda's
+           span. Resolved in the pre-binding [env]. *)
+        let lookup n =
+          Option.map (fun ps -> (lam_sp, ps)) (callee_call_arities env n) in
+        let ps = Typecheck_callarity.lambda ~lookup params body_of_lam in
         { env' with lambda_arities =
-            StrMap.add name.txt (List.length params, lam_sp, wildcard) env'.lambda_arities }
-      | Ast.PatVar name, Ast.Unrestricted, _ ->
-        { env' with plain_let_names = StringSet.add name.txt env'.plain_let_names }
+            StrMap.add name.txt (List.length params, lam_sp, wildcard) env'.lambda_arities;
+                    param_call_arities =
+            StrMap.add name.txt (lam_sp, ps) env'.param_call_arities }
+      | Ast.PatVar name, Ast.Unrestricted, rhs ->
+        let env' =
+          { env' with plain_let_names = StringSet.add name.txt env'.plain_let_names } in
+        (* `let g = f`, [f] a function value of known arity: [g] is [f]
+           ([lambda_arities] / [fn_aliases]). Looked up in the pre-binding
+           [env], so `let f = f` sees the outer [f]. *)
+        let rec strip = function Ast.EAnnot (e, _, _) -> strip e | e -> e in
+        (match strip rhs with
+         | Ast.EVar v when String.contains v.txt '.' ->
+           (match StrMap.find_opt v.txt env.qual_fn_arities with
+            | Some (n, _) when n >= 1 ->
+              { env' with fn_aliases = StrMap.add name.txt (n, v.txt) env'.fn_aliases }
+            | _ -> env')
+         | Ast.EVar v ->
+           (match StrMap.find_opt v.txt env.fn_arities,
+                  StrMap.find_opt v.txt env.lambda_arities,
+                  StrMap.find_opt v.txt env.fn_aliases with
+            | Some (n, _), _, _ when n >= 1 ->
+              { env' with fn_aliases = StrMap.add name.txt (n, v.txt) env'.fn_aliases }
+            | None, Some ((_, lam_sp, _) as la), _ ->
+              { env' with
+                lambda_arities = StrMap.add name.txt la env'.lambda_arities;
+                param_call_arities =
+                  (match StrMap.find_opt v.txt env.param_call_arities with
+                   | Some (sp', ps) when sp' = lam_sp ->
+                     StrMap.add name.txt (sp', ps) env'.param_call_arities
+                   | _ -> env'.param_call_arities) }
+            | None, None, Some al ->
+              { env' with fn_aliases = StrMap.add name.txt al env'.fn_aliases }
+            | _ -> env')
+         | _ -> env')
       | _ -> env'
     in
     (* F5 path-dependent OFFER refinement: if this let destructures a
