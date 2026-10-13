@@ -9,7 +9,83 @@ permalink: /docs/supervision/
 
 # Supervision Trees
 
-Supervision trees are how March programs achieve fault tolerance. When an actor crashes, its supervisor automatically restarts it according to a configurable policy.
+A supervisor is an actor that watches other actors and restarts them when they
+crash. You declare which children it starts, which strategy decides who else is
+restarted when one of them dies, and how many restarts it tolerates before it gives
+up and crashes itself, handing the fault to *its* supervisor. The result is a tree in
+which a failure is contained to the one thing that broke, and recovery is automatic.
+
+This is how March programs achieve fault tolerance. Instead of wrapping every
+operation in defensive error handling, a worker does its job and crashes on an
+unexpected error; its supervisor brings it back with fresh state. You write the happy
+path once, and the supervisor handles "something went wrong" uniformly, every time.
+
+The page covers the `supervise` block and everything that hangs off it: restart types
+and strategies, the restart budget and backoff, graceful stops, nested trees, the
+`app` entry point, and a capstone that grows one worker into a crash-tolerant,
+backpressured pool.
+
+## On this page
+
+**Start here**
+
+- [When to use a supervisor](#when-to-use-a-supervisor)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [The Idea](#the-idea)
+- [Declaring a Supervisor](#declaring-a-supervisor) and [children with `init` arguments](#children-with-init-arguments)
+- [A Full Supervision Example](#a-full-supervision-example)
+
+**What happens when a child dies**
+
+- [Restart types](#restart-types)
+- [Restart Strategies](#restart-strategies): [`one_for_one`](#one_for_one), [`one_for_all`](#one_for_all), [`rest_for_one`](#rest_for_one), [compared](#supervision-strategies-compared)
+- [Escalation: Max Restarts Budget](#escalation-max-restarts-budget)
+- [Restart Backoff](#restart-backoff)
+
+**Stopping and structure**
+
+- [Stopping gracefully](#stopping-gracefully) and [stopping a tree](#stopping-a-tree)
+- [Nested Supervision Trees](#nested-supervision-trees)
+- [App-Level Entry Point](#app-level-entry-point)
+
+**Putting it to work**
+
+- [Strategies for Supervision Design](#strategies-for-supervision-design)
+- [Capstone: a crash-tolerant job processor](#capstone-a-crash-tolerant-job-processor)
+- [See also](#see-also)
+
+## When to use a supervisor
+
+Put an actor under a supervisor when it is **long-lived** and a crash should not take
+it away for good: a connection holder, a cache, a worker in a pool, a service other
+actors find by name. The supervisor restarts it with fresh state from `init`, under a
+budget that turns a crash loop into an escalation instead of a storm.
+
+| Situation | What to reach for |
+|---|---|
+| Independent workers; one crash should not touch the others | `strategy one_for_one` |
+| Children that share state and must restart together | `strategy one_for_all` |
+| A pipeline where later children depend on earlier ones | `strategy rest_for_one` |
+| A worker that finishes its job and is stopped on purpose | `restart transient`, so `kill()` retires it |
+| A one-shot helper that should never come back | `restart temporary` |
+| A child that needs a value to start with (a database handle) | `Worker w(db)` in the block; a restart re-supplies it |
+| Shut down in order, letting in-flight work finish | `Actor.stop` on the supervisor; per-child `shutdown` budgets |
+| The root of a long-running application | `app` with `Supervisor.spec` (interpreter) or a top-level actor with `supervise` (compiled) |
+
+A supervisor is not the tool for a one-off computation (use a task), for a transient
+fault you can handle locally (handle it), or for a child whose state must survive a
+crash (persist it outside the actor, or hand it in through `init` arguments).
+
+## How it fits with the rest of March
+
+| Concept | Where supervision meets it | Chapter |
+|---|---|---|
+| **Actors** | A supervisor is an actor whose state fields hold its children's Pids. A restarted child has a new Pid and a new capability epoch; names survive the restart, so hold names across a restart boundary. | [Actors]({{ site.baseurl }}/docs/actors/) |
+| **Hot code reload** | An actor killed at a hard drain deadline is restarted by its supervisor on the new code; `on_stop` under a reload is the one registered when the actor was spawned. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/#drains) |
+| **Observing a running node** | `TREE` shows the tree, `ACTOR <pid>` a supervisor's strategy and restarts held, and `forge diagnose`'s `crash.loop` fires on three crashes under one supervisor. | [Observe]({{ site.baseurl }}/docs/observe/) |
+| **Overload and resilience** | Mailbox limits, load shedding and restart backoff working together. | [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/) |
+| **Parallel collections and Flow** | A supervised pool gives throughput; `pmap_n` and `Flow` bound how much work is in flight. | [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/), [Flow]({{ site.baseurl }}/docs/flow/) |
+| **Clustering and topology** | A supervised app is what a topology places on nodes and what a cluster deploy restarts pool by pool. | [Clustering]({{ site.baseurl }}/docs/clustering/), [Topology]({{ site.baseurl }}/docs/topology/) |
 
 ---
 
@@ -17,24 +93,23 @@ Supervision trees are how March programs achieve fault tolerance. When an actor 
 
 Most languages push you toward *defensive* error handling: wrap anything that might go
 wrong in a try/catch, check every return value, anticipate every failure mode up front.
-It works, but it's a lot of code, and it's easy to miss a case.
+It works, but it is a lot of code, and it is easy to miss a case.
 
 Supervision trees are built on a different instinct, sometimes called **"let it
 crash"** (the idea comes from Erlang/OTP, which March's actor model draws from). It
-sounds backwards at first: isn't crashing bad? The insight is that most failures are
-**transient**: a stale cache entry, a flaky connection, one bad message that corrupted a
-bit of local state. For that kind of bug, the cheapest reliable fix isn't to carefully
-detect and repair the corruption; it's to throw the whole thing away and start over
-with fresh state. So instead of handling every error everywhere, you structure your
-system so that:
+sounds backwards at first: is crashing not bad? The observation behind it is that most
+failures are **transient**: a stale cache entry, a flaky connection, one bad message
+that corrupted a bit of local state. For that kind of bug, the cheapest reliable fix
+is not to carefully detect and repair the corruption; it is to throw the whole thing
+away and start over with fresh state. So instead of handling every error everywhere,
+you structure your system so that:
 
-1. Worker actors do their job, and simply crash on unexpected errors instead of trying to handle them
+1. Worker actors do their job, and crash on unexpected errors instead of trying to handle them
 2. Supervisor actors watch workers and restart them with clean state when they crash
 3. Supervisors can themselves be supervised
 
 The result is a tree of processes where failures are isolated to the one thing that
-broke, and recovery is automatic: you write the "happy path" logic once, and the
-supervisor handles the "something went wrong" case for you, uniformly, every time.
+broke, and recovery is automatic.
 
 ---
 
@@ -57,9 +132,9 @@ end
 ```
 
 The `supervise` block:
-- `strategy`: restart policy (see below)
+- `strategy`: restart policy (see [Restart Strategies](#restart-strategies))
 - `max_restarts N within S`: if more than N restarts occur in S seconds, the supervisor itself crashes (escalates to its own supervisor)
-- `backoff base <ms> cap <ms> jitter <n>%` (optional): tunes the delay between repeated restarts of the same child — see [Restart backoff](#restart-backoff)
+- `backoff base <ms> cap <ms> jitter <n>%` (optional): tunes the delay between repeated restarts of the same child; see [Restart backoff](#restart-backoff)
 - Each line `ActorName field_name`: a child to supervise, with `field_name` being the state field that stores its current `Pid`, optionally followed by `restart <type>` (see [Restart types](#restart-types)) and/or `shutdown <ms> | infinity | brutal` (see [Stopping a tree](#stopping-a-tree))
 - `ActorName field_name(arg, ...)`: the same, for a child whose `init` takes parameters (see [Parameterised `init`](actors.md#parameterised-init)). The arguments are evaluated once, when the supervisor spawns, and may use the supervisor's own `init` parameters.
 
@@ -96,161 +171,6 @@ registers with the runtime; interpreted, on the child's instance), so a
 replacement never re-evaluates the expression and never starts without its
 argument. Everything else about the replacement is as for any restart: fresh
 state from `init`, a new `Pid`, the old capabilities stale.
-
----
-
-## Restart types
-
-By default every child is `permanent`: it comes back whether it crashed or was
-deliberately stopped with `kill()`. A trailing `restart` modifier changes that
-per child:
-
-```march
-supervise do
-  strategy one_for_one
-  max_restarts 5 within 60
-  Counter counter                      -- permanent (the default)
-  Job     job     restart transient    -- crash restarts it; kill() retires it
-  Reaper  reaper  restart temporary    -- never restarted
-end
-```
-
-| Restart type | Child crashed | `kill(child)` | Child returned normally |
-|---|---|---|---|
-| `permanent` (default) | restarted | restarted | not restarted |
-| `transient` | restarted | **not restarted** | not restarted |
-| `temporary` | not restarted | not restarted | not restarted |
-
-`transient` is the job-worker case: a worker that finishes its assignment and
-is stopped on purpose stays stopped, while one that dies badly is brought back.
-
-A death that does not restart also spends **none** of the supervisor's
-`max_restarts` budget, so retiring children can never escalate a healthy
-supervisor. Under `one_for_all` and `rest_for_one`, a `temporary` child caught
-in a batch restart is stopped with its siblings and simply not brought back;
-its state field keeps the dead child's `Pid`, since only an actual respawn
-rewrites it.
-
-> **Coming from Erlang/OTP?** March's `permanent` is *not* OTP's. OTP restarts a
-> permanent child even when it exits normally; March never restarts a child that
-> returned normally, under any restart type. March's `permanent` is therefore
-> closest to OTP's `transient`, with `kill()` counting as an abnormal exit, and
-> March's `transient` differs from `permanent` exactly in that `kill()` retires
-> it. This was a deliberate choice: the normal-exit behaviour predates restart
-> types, and changing it would silently alter every `supervise` block already
-> written.
-
----
-
-## Stopping gracefully
-
-`kill(pid)` is immediate: whatever was queued in the actor's mailbox is
-discarded. That is the wrong tool for a deploy, which needs the opposite —
-stop accepting new work, let the in-flight work finish, *then* exit.
-
-`Actor.stop(pid, timeout_ms)` does that:
-
-```march
-let stopped = Actor.stop(worker, 5000)
-```
-
-1. The actor is marked **draining**: `send` to it returns `None`, so no new
-   work is accepted.
-2. It works off the messages already in its mailbox.
-3. It dies a **normal** death — which no restart type restarts, so a stopped
-   child does not fight its supervisor.
-
-`stop` returns only once the actor has actually stopped, so a shutdown
-sequence can be written as straight-line code. It returns `false` if the actor
-was already dead or already stopping. `timeout_ms` bounds the drain: a negative
-value waits indefinitely, and `0` discards the queue as soon as the in-flight
-message returns. `Actor.is_draining(pid)` distinguishes "shutting down" from
-"dead", which `is_alive` alone cannot.
-
-### Stopping a tree
-
-Stopping a supervisor stops its children first, in **reverse declaration
-order** — the mirror of the order they were started in — each with its own
-`shutdown` budget:
-
-```march
-supervise do
-  strategy one_for_one
-  max_restarts 5 within 60
-  Db      db                      -- stopped last  (5s default)
-  Cache   cache shutdown 1000     -- stopped second (1s)
-  Api     api   shutdown infinity -- stopped first  (waits as long as it takes)
-end
-```
-
-`shutdown` takes a millisecond budget, `infinity`, or `brutal` (die at once,
-mailbox discarded — what `kill` does). A child that has not finished when its
-budget runs out is killed. The default is 5 seconds; `kill` never consults this
-field, so it changes nothing for code that does not call `stop`.
-
-Children are detached from the supervisor before being stopped, so an orderly
-teardown does not trigger a restart — otherwise the children would come back
-and the tree would never go down.
-
-**Not yet supported:** a `terminate`-style callback. An actor cannot run
-cleanup code of its own at shutdown; it can only finish the messages it has.
-Draining is also not yet integrated with hot code reload.
-
----
-
-## Restart Strategies
-
-### `one_for_one`
-
-Only the crashed child is restarted. Other children continue running.
-
-```march
-supervise do
-  strategy one_for_one
-  max_restarts 3 within 60
-  Worker1 w1
-  Worker2 w2
-  Worker3 w3
-end
--- If w2 crashes, only w2 is restarted
-```
-
-Use `one_for_one` when children are independent.
-
-### `one_for_all`
-
-When any child crashes, **all** children are stopped and restarted.
-
-```march
-supervise do
-  strategy one_for_all
-  max_restarts 2 within 30
-  DbConnection db
-  CacheConnection cache
-  QueryEngine engine
-end
--- If db crashes, db + cache + engine are all restarted
-```
-
-Use `one_for_all` when children are tightly coupled and must be in sync.
-
-### `rest_for_one`
-
-When a child crashes, it and all children **started after it** are restarted. Children started before it are left as they were.
-
-```march
-supervise do
-  strategy rest_for_one
-  max_restarts 5 within 60
-  Config    cfg      -- started first, independent
-  Database  db       -- depends on nothing
-  ApiServer api      -- depends on db
-  Logger    log      -- depends on api
-end
--- If db crashes, db + api + log restart; cfg is left running
-```
-
-Use `rest_for_one` when later children depend on earlier ones.
 
 ---
 
@@ -339,6 +259,121 @@ mod BasicSupervision do
 end
 ```
 
+Reading a child's Pid out of the supervisor's state takes a `Cap(Actor.Introspect)`,
+minted once in `main` by `Actor.introspect(io)`; see
+[Introspection is a capability](actors.md#introspection-is-a-capability).
+
+---
+
+## Restart types
+
+By default every child is `permanent`: it comes back whether it crashed or was
+deliberately stopped with `kill()`. A trailing `restart` modifier changes that
+per child:
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 5 within 60
+  Counter counter                      -- permanent (the default)
+  Job     job     restart transient    -- crash restarts it; kill() retires it
+  Reaper  reaper  restart temporary    -- never restarted
+end
+```
+
+| Restart type | Child crashed | `kill(child)` | Child returned normally |
+|---|---|---|---|
+| `permanent` (default) | restarted | restarted | not restarted |
+| `transient` | restarted | **not restarted** | not restarted |
+| `temporary` | not restarted | not restarted | not restarted |
+
+`transient` is the job-worker case: a worker that finishes its assignment and
+is stopped on purpose stays stopped, while one that dies badly is brought back.
+
+A death that does not restart also spends **none** of the supervisor's
+`max_restarts` budget, so retiring children can never escalate a healthy
+supervisor. Under `one_for_all` and `rest_for_one`, a `temporary` child caught
+in a batch restart is stopped with its siblings and simply not brought back;
+its state field keeps the dead child's `Pid`, since only an actual respawn
+rewrites it.
+
+> **Coming from Erlang/OTP?** March's `permanent` is *not* OTP's. OTP restarts a
+> permanent child even when it exits normally; March never restarts a child that
+> returned normally, under any restart type. March's `permanent` is therefore
+> closest to OTP's `transient`, with `kill()` counting as an abnormal exit, and
+> March's `transient` differs from `permanent` exactly in that `kill()` retires
+> it. This was a deliberate choice: the normal-exit behaviour predates restart
+> types, and changing it would silently alter every `supervise` block already
+> written.
+
+---
+
+## Restart Strategies
+
+### `one_for_one`
+
+Only the crashed child is restarted. Other children continue running.
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 3 within 60
+  Worker1 w1
+  Worker2 w2
+  Worker3 w3
+end
+-- If w2 crashes, only w2 is restarted
+```
+
+Use `one_for_one` when children are independent.
+
+### `one_for_all`
+
+When any child crashes, **all** children are stopped and restarted.
+
+```march
+supervise do
+  strategy one_for_all
+  max_restarts 2 within 30
+  DbConnection db
+  CacheConnection cache
+  QueryEngine engine
+end
+-- If db crashes, db + cache + engine are all restarted
+```
+
+Use `one_for_all` when children are tightly coupled and must be in sync.
+
+### `rest_for_one`
+
+When a child crashes, it and all children **started after it** are restarted. Children started before it are left as they were.
+
+```march
+supervise do
+  strategy rest_for_one
+  max_restarts 5 within 60
+  Config    cfg      -- started first, independent
+  Database  db       -- depends on nothing
+  ApiServer api      -- depends on db
+  Logger    log      -- depends on api
+end
+-- If db crashes, db + api + log restart; cfg is left running
+```
+
+Use `rest_for_one` when later children depend on earlier ones.
+
+### Supervision Strategies Compared
+
+```
+Worker crashes:     W1  W2  W3
+                    ↑
+                  crash
+
+one_for_one:        ↻   ok  ok    (only W1 restarts)
+one_for_all:        ↻   ↻   ↻     (all restart)
+rest_for_one:       ↻   ↻   ok    (W1 and later restart)
+```
+
 ---
 
 ## Escalation: Max Restarts Budget
@@ -421,17 +456,66 @@ regression suite; leave it unset in production.
 
 ---
 
-## Supervision Strategies Compared
+## Stopping gracefully
 
-```
-Worker crashes:     W1  W2  W3
-                    ↑
-                  crash
+`kill(pid)` is immediate: whatever was queued in the actor's mailbox is
+discarded. That is the wrong tool for a deploy, which needs the opposite:
+stop accepting new work, let the in-flight work finish, *then* exit.
 
-one_for_one:        ↻   ok  ok    (only W1 restarts)
-one_for_all:        ↻   ↻   ↻     (all restart)
-rest_for_one:       ↻   ↻   ok    (W1 and later restart)
+`Actor.stop(pid, timeout_ms)` does that:
+
+```march
+let stopped = Actor.stop(worker, 5000)
 ```
+
+1. The actor is marked **draining**: `send` to it returns `None`, so no new
+   work is accepted.
+2. It works off the messages already in its mailbox.
+3. It runs its `on_stop` block, if it declares one.
+4. It dies a **normal** death, which no restart type restarts, so a stopped
+   child does not fight its supervisor.
+
+`stop` returns only once the actor has actually stopped, so a shutdown
+sequence can be written as straight-line code. It returns `false` if the actor
+was already dead or already stopping. `timeout_ms` bounds the drain: a negative
+value waits indefinitely, and `0` discards the queue as soon as the in-flight
+message returns. `Actor.is_draining(pid)` distinguishes "shutting down" from
+"dead", which `is_alive` alone cannot.
+
+An actor that needs to flush a buffer, checkpoint state, or hand unfinished work
+back to a queue at shutdown declares an `on_stop` block; it runs after the drain
+and before the normal death, on every graceful stop but never on `kill`. See
+[`on_stop`: the terminate callback](actors.md#on_stop-the-terminate-callback).
+
+### Stopping a tree
+
+Stopping a supervisor stops its children first, in **reverse declaration
+order** (the mirror of the order they were started in), each with its own
+`shutdown` budget:
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 5 within 60
+  Db      db                      -- stopped last  (5s default)
+  Cache   cache shutdown 1000     -- stopped second (1s)
+  Api     api   shutdown infinity -- stopped first  (waits as long as it takes)
+end
+```
+
+`shutdown` takes a millisecond budget, `infinity`, or `brutal` (die at once,
+mailbox discarded, what `kill` does). A child that has not finished when its
+budget runs out is killed. The default is 5 seconds; `kill` never consults this
+field, so it changes nothing for code that does not call `stop`.
+
+Children are detached from the supervisor before being stopped, so an orderly
+teardown does not trigger a restart; otherwise the children would come back
+and the tree would never go down.
+
+**Still open:** draining across a hot code reload. A deploy's own drains are
+described under [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/#drains);
+the `on_stop` that runs under a reload is the one registered when the actor was
+spawned (`specs/todos/2026-08-12-graceful-shutdown-and-drain.md`).
 
 ---
 
@@ -476,7 +560,7 @@ actor DbSupervisor do
 end
 ```
 
-A crash in the Web tier doesn't affect the DB tier. A crash in the DB tier escalates to TopSupervisor.
+A crash in the Web tier does not affect the DB tier. A crash in the DB tier escalates to TopSupervisor.
 
 ---
 
@@ -519,25 +603,27 @@ in a `supervise do … end` block.
 
 ## Strategies for Supervision Design
 
-**Start with `one_for_one`**: it's the most common and most isolated strategy.
+**Start with `one_for_one`**: it is the most common and most isolated strategy.
 
 **Use `one_for_all` when children share state**: for example, a group of actors that all read from a shared config loaded at startup. If one crashes, the shared state might be stale and all should reload.
 
 **Use `rest_for_one` for pipelines**: if actor B depends on actor A having started first, use `rest_for_one` so a crash in A also restarts B.
 
-**Keep supervisors thin**: a supervisor's job is supervision, not business logic. Don't add handlers to a supervisor actor beyond what's needed to manage children.
+**Keep supervisors thin**: a supervisor's job is supervision, not business logic. Do not add handlers to a supervisor actor beyond what is needed to manage children.
 
 **Budget restarts conservatively**: `max_restarts 3 within 5` is aggressive; `max_restarts 10 within 60` is more lenient. Match the budget to how often legitimate transient failures are expected.
+
+**Hold names, not Pids, across a restart.** A restarted child has a new Pid; a name registered with `Actor.register` is carried forward to the replacement. See [Named Actors](actors.md#named-actors).
 
 ---
 
 ## Capstone: a crash-tolerant job processor
 
-Let's build something real by layering the pieces one at a time; each step adds exactly one capability, and you can stop at whichever level your problem needs.
+The pieces are layered one at a time; each step adds exactly one capability, and you can stop at whichever level your problem needs.
 
 ### Step 1: one worker
 
-Start with a single actor that processes jobs. On a bad job it just crashes; we'll make that survivable in the next step.
+Start with a single actor that processes jobs. On a bad job it crashes; the next step makes that survivable.
 
 ```march
 mod JobProcessorV1 do
@@ -564,7 +650,7 @@ mod JobProcessorV1 do
 end
 ```
 
-That's the whole job processor, but if `Process` crashes at any point, the worker is gone and every later job is dropped.
+That is the whole job processor, but if `Process` crashes at any point, the worker is gone and every later job is dropped.
 
 ### Step 2: put it under a supervisor (crash recovery)
 
@@ -625,9 +711,7 @@ end
 
 ### Step 3: fan out to N workers
 
-One worker is a bottleneck. Spawn a pool and spread jobs across it. Each worker is the same supervised actor; we just spawn several and round-robin work to them. This step and the next borrow tools from other pages; you don't
-need to have read them first, just see how they slot into the same "add exactly the
-resilience you need" pattern.
+One worker is a bottleneck. Spawn a pool and spread jobs across it. Each worker is the same supervised actor; spawn several and round-robin work to them. This step and the next borrow tools from other pages; you do not need to have read them first.
 
 The data-parallel shortcut for "run this over a whole list across the pool" is [`List.pmap`]({{ site.baseurl }}/docs/parallel-collections/); same scheduler, order-preserving results:
 
@@ -639,12 +723,11 @@ fn dispatch_all(jobs : List(Int)) do
 end
 ```
 
-Under a supervisor you'd list several `Worker` children (`Worker w1`, `Worker w2`, …, each its own state field) so a crash in one doesn't disturb the others; that's exactly what `one_for_one` gives a pool.
+Under a supervisor you would list several `Worker` children (`Worker w1`, `Worker w2`, …, each its own state field) so a crash in one does not disturb the others; that is exactly what `one_for_one` gives a pool.
 
 ### Step 4: add backpressure so a fast producer can't flood the pool
 
-**Backpressure** just means: the slow stage sets the pace, instead of letting a fast
-stage pile up work faster than it can be handled. The missing piece here: if jobs arrive faster than the pool drains them, an unbounded queue grows until memory runs out. Put a [`Flow`]({{ site.baseurl }}/docs/flow/) pipeline in front so the *consumer* (the pool) sets the pace; the producer only runs as far ahead as there's capacity:
+**Backpressure** means the slow stage sets the pace, instead of letting a fast stage pile up work faster than it can be handled. If jobs arrive faster than the pool drains them, an unbounded queue grows until memory runs out. Put a [`Flow`]({{ site.baseurl }}/docs/flow/) pipeline in front so the *consumer* (the pool) sets the pace; the producer only runs as far ahead as there is capacity:
 
 ```march
 fn process_stream(jobs : List(Int)) do
@@ -655,16 +738,19 @@ fn process_stream(jobs : List(Int)) do
 end
 ```
 
-If you'd rather bound concurrency on a plain list without a pipeline, [`List.pmap_n(jobs, handle_job, 4)`]({{ site.baseurl }}/docs/parallel-collections/) caps in-flight work the same way. Either way, the chain is now complete: **one worker → supervised (persists through crashes) → a pool (throughput) → backpressured (bounded memory under load).** That progression (start simple, add exactly the resilience you need) is the heart of how March systems are built.
+To bound concurrency on a plain list without a pipeline, [`List.pmap_n(jobs, handle_job, 4)`]({{ site.baseurl }}/docs/parallel-collections/) caps in-flight work the same way. Either way, the chain is now complete: **one worker → supervised (persists through crashes) → a pool (throughput) → backpressured (bounded memory under load).** That progression (start simple, add exactly the resilience you need) is how March systems are built.
 
 > **What runs where.** The plain actor/supervisor programs (Steps 1–2) execute in the interpreter via `run_until_idle()`. The `Flow` / `pmap` stages (Steps 3–4) produce identical *results* in the interpreter but only parallelise when **compiled**; see [Parallel Collections → Interpreter vs. compiled]({{ site.baseurl }}/docs/parallel-collections/) and [Flow & Backpressure]({{ site.baseurl }}/docs/flow/).
 
 ---
 
-## Next Steps
+## See also
 
-- [Actors]({{ site.baseurl }}/docs/actors/): the actor model basics and the concurrency decision guide.
+- [Actors]({{ site.baseurl }}/docs/actors/): the actor model basics, `on_stop`, named actors, and the concurrency decision guide.
+- [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/): drains, and what a supervisor does when an actor is killed at a hard deadline.
+- [Observing a running node]({{ site.baseurl }}/docs/observe/): `TREE`, the crash ring, and the `crash.loop` finding.
+- [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/): mailbox limits, load shedding, deadlines and restart backoff together.
 - [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/): `pmap` / `pmap_n` for fanning work across a pool.
-- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/): bounded streaming so a fast producer can't flood your workers.
+- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/): bounded streaming so a fast producer cannot flood your workers.
 - [Clustering & RPC]({{ site.baseurl }}/docs/clustering/): take a supervised app from one node to a cluster.
 - [Linear Types]({{ site.baseurl }}/docs/linear-types/): how linear types support safe actor messaging.
