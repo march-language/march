@@ -150,6 +150,17 @@ val shell_lower_program :
   program_type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
   unit
 
+(** True on a macOS host.  Exported for the shell-triple tests, which pick
+    a host-native triple. *)
+val is_macos : unit -> bool
+
+(** The clang target flags for the node's HELLO triple, as
+    [(target_is_mac, flags)].  Raises [Failure] on a triple
+    [Jit_emit.triple_ok] rejects (HELLO is unauthenticated and the flags
+    reach a [Sys.command] line) and on a macOS triple on a non-macOS host.
+    [None], [""] and ["unknown"] give no flag. *)
+val shell_target_flags : triple:string option -> bool * string
+
 (** Typecheck and compile one input (a module whose [main] is the input)
     against the program the node runs.  [store_as] makes it an init fragment
     that stores its value in that slot.  With [ident], an input reaching
