@@ -18,6 +18,8 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-13
+
 ### Highlights
 
 0.5.0 is a large release: about 2,100 commits since 0.4.0. The full list of
