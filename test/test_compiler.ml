@@ -17683,6 +17683,7 @@ let compiler_suites =
       ("cas_report_bypass", Test_cas_report_bypass.tests);
       ("cas_b7", Test_cas_b7.tests);
       ("shell_ident", Test_shell_ident.tests);
+      ("shell_triple", Test_shell_triple.tests);
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
