@@ -515,6 +515,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- A compiled program whose scheduler is about to resume a corrupt or freed
+  green-thread context now stops with a `march_sched[BUG]: dispatch of pid N
+  ... with a context it did not save` line (the pid, the saved stack pointer
+  and the stack bounds) and aborts. Before, that switch blocked SIGSEGV
+  through the garbage signal mask and then faulted, so the process died with
+  only the shell's `Segmentation fault (core dumped)` and no `march: fatal`
+  line, which is all one CI crash of `native_run_until_idle_ping_pong` left.
 - **Breaking: passing a function that takes a different number of arguments
   than the callee applies it to is an error.** `fn add(a, b)` and a curried
   `fn a -> fn b -> a + b` have the same type, but March has no partial
