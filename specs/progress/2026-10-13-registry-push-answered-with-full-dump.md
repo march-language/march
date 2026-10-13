@@ -76,5 +76,8 @@ seen b die. c, cut off by a and b, rightly declares both dead once its SWIM susp
 timeout runs (measured: ~3.2-3.5 s after the cut), and the release completes ~3.6-3.7 s
 after the cut, so the check raced the timeout. It probably passed on main because c's node
 was busy with registry dumps; with them gone it failed 4 of 4 runs. It failed on main too, 1 of 4
-(c timed out 0.2 s before the release completed). The check now reads
-only a's output. 3/3 green after, Linux and macOS.
+(c timed out 0.2 s before the release completed). This branch's own fix (read only a's
+output) was dropped when it joined the 0.5.0 release train: #961 fixed the same race on
+main first, and better (it ignores c's lines after the revocation but still checks c's
+lines from before it). The train keeps #961's check; its runs with this fix are recorded
+in the train PR.
