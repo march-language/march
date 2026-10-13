@@ -852,6 +852,35 @@ let test_pool_gate_runs_before_build () =
         Alcotest.(check (list (option string))) "env passed" [ None; Some "prod" ] calls
       | _ -> Alcotest.fail "deploy went ahead past a refusing pool gate")
 
+(** The pool gate and the later refusals of [forge deploy hot] do not mask
+    each other: the gate passing (a granted widening) only RETURNS its
+    recorder, and [deploy] calls it once every server has taken the patch.
+    A refusal after the gate, at any later stage (here a missing
+    [hot-reload] section; in a real deploy the borrow-mode refusal, which
+    [run] turns into an [Error], or a failed server), leaves the recorded
+    pool caps alone, so the next deploy still has to grant the widening. *)
+let test_pool_gate_not_recorded_when_later_refused () =
+  with_topology_project (fun root _ ->
+      let cwd = Sys.getcwd () in
+      Sys.chdir root;
+      let r = Fun.protect ~finally:(fun () -> Sys.chdir cwd) (fun () ->
+          let gated = ref 0 and recorded = ref 0 in
+          let pool_gate _ ~env:_ =
+            incr gated; Ok (fun () -> incr recorded) in
+          let a = Cmd_deploy_hot.deploy ~grant_caps:[ "IO.FileWrite" ] ~pool_gate () in
+          let b = Cmd_deploy_hot.deploy_env ~env:"prod" ~grant_caps:[ "IO.FileWrite" ]
+              ~pool_gate () in
+          (a, b, !gated, !recorded)) in
+      match r with
+      | (Error a, Error b, gated, recorded) ->
+        Alcotest.(check int) "the gate ran for both" 2 gated;
+        Alcotest.(check int) "a refused deploy records no pool caps" 0 recorded;
+        Alcotest.(check bool) "the later refusal is the one reported (deploy)" false
+          (contains a "pool");
+        Alcotest.(check bool) "the later refusal is the one reported (deploy_env)" false
+          (contains b "pool")
+      | _ -> Alcotest.fail "a deploy with no [hot-reload] section went ahead")
+
 let () =
   Alcotest.run "deploy-plan" [
     ("mechanism", [
@@ -886,6 +915,7 @@ let () =
         Alcotest.test_case "deploy hot: first, unchanged, narrowed pass; no derivation fails closed" `Quick test_pool_caps_narrow_unchanged_first;
         Alcotest.test_case "forge build warns about a widened pool (D26)" `Quick test_pool_caps_build_warning;
         Alcotest.test_case "deploy hot runs the pool gate before building" `Quick test_pool_gate_runs_before_build;
+        Alcotest.test_case "a granted widening is not recorded when a later stage refuses" `Quick test_pool_gate_not_recorded_when_later_refused;
       ]);
     ("render", [ Alcotest.test_case "the six blocks of 6.8, in order" `Quick test_six_blocks ]);
     ("cluster backend", [
