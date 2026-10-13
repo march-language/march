@@ -3453,6 +3453,13 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Capabilities chapter restructured.** `docs/capabilities/` now opens with a
+  plain statement of the three checks (manifest, upper limit, grant), one
+  "which tool do I need" table, an index of every section, and a table of how
+  capabilities meet modules, actors, linear and refinement types, choreography,
+  hot code reload and the enforcement/audit tooling. Dated changelog asides are
+  folded into short history notes. No content was removed; the anchors other
+  chapters link to are unchanged.
 - **Observe chapter restructured.** `docs/observe/` now opens with which forge
   command answers which question, what each of the three tiers (observe, debug,
   shell) reveals and needs, an index of every section, and how it connects to
