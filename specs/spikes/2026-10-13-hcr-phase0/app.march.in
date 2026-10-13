@@ -1,0 +1,92 @@
+-- HCR Phase 0 spike -- THROWAWAY.  @HANDLER@ is replaced by run.sh with one
+-- of handlers/*.march; the base binary is built with handlers/v1.march and
+-- each patch .so from the same file with another handler body.
+mod App do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  needs IO.Process
+
+  extern "c" : Cap(Ffi) do
+    fn hcr0_swap(k: Int): Int = "hcr0_swap"
+    fn hcr0_versions(k: Int): Int = "hcr0_versions"
+  end
+
+  type SpikeConn = { path: String, headers: List(String), status: Int }
+
+  mod Handler do
+@HANDLER@
+  end
+
+  pfn env_int(name: String, dflt: Int): Int do
+    match process_env(name) do
+      Some(s) -> match string_to_int(s) do
+        Some(v) -> v
+        None -> dflt
+      end
+      None -> dflt
+    end
+  end
+
+  pfn mk_conn(i: Int): SpikeConn do
+    { path: "/r/" ++ int_to_string(i), headers: ["a: " ++ int_to_string(i), "b"], status: 200 + i % 7 }
+  end
+
+  pfn call_all(fs: List(Int -> Int), acc: Int): Int do
+    match fs do
+      Nil -> acc
+      Cons(f, rest) -> call_all(rest, acc + f(1))
+    end
+  end
+
+  pfn len_all(ss: List(String), acc: Int): Int do
+    match ss do
+      Nil -> acc
+      Cons(s, rest) -> len_all(rest, acc + string_length(s))
+    end
+  end
+
+  -- n requests; the k-th swap happens at request every * k.
+  pfn serve(i: Int, n: Int, every: Int, k: Int, acc: Int,
+            kept: List(Int -> Int), tags: List(String)): Int do
+    if i == n do
+      -- strings returned by every version (literals in its .so), then the
+      -- closures every version built: both outlive the swaps
+      let b = len_all(tags, 0)
+      println("kept tags len=" ++ int_to_string(b))
+      let a = call_all(kept, 0)
+      println("kept closures sum=" ++ int_to_string(a))
+      acc
+    else
+      let k2 = if i > 0 && i % (if every > 0 do every else n + 1 end) == 0 do
+        let e = hcr0_swap(k)
+        println("swap " ++ int_to_string(k) ++ " at " ++ int_to_string(i) ++ " -> epoch " ++ int_to_string(e)
+                ++ " live versions=" ++ int_to_string(hcr0_versions(0)))
+        k + 1
+      else k end
+      let c = mk_conn(i)
+      let r = Handler.handle(c)
+      let f = Handler.mk(c)
+      let v = f(i)
+      -- the caller keeps using the borrowed Conn after the boundary call
+      let after = string_length(c.path) + c.status
+      -- a borrowable (List) parameter across the boundary; the caller keeps
+      -- the list alive afterwards (it is still a field of c)
+      let hs = c.headers
+      let cnt = Handler.count(hs)
+      let after2 = after + cnt + List.length(hs)
+      let kept2 = if i % 997 == 0 do Cons(f, kept) else kept end
+      let tags2 = if i % 997 == 0 do Cons(Handler.tag(), tags) else tags end
+      serve(i + 1, n, every, k2, acc + r + v % 1000 + after2, kept2, tags2)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process)) : Unit do
+    let n = env_int("HCR0_N", 20000)
+    let every = env_int("HCR0_EVERY", 0)
+    let before = live_allocs()
+    let total = serve(0, n, every, 1, 0, Nil, Nil)
+    println("total=" ++ int_to_string(total))
+    println("live_allocs delta=" ++ int_to_string(live_allocs() - before))
+  end
+end
