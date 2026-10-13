@@ -3461,6 +3461,12 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Landing page corrected and completed.** The site root no longer claims actor
+  links, compile-time deadlock freedom for session channels, or a `Future` type;
+  restart strategies are spelled as in the language; the FBIP table links its
+  benchmark. The Documentation table is regrouped and now links every page,
+  twenty of which (hot code reload, observe, topology, certificates, capability
+  enforcement and audit, LSP, and more) it previously did not.
 - **Seven more chapters restructured.** Session types, linear types, memory
   model, interfaces, pattern matching, parallel collections and the tooling
   page each open with a plain summary, a when-to-use table, how the topic meets
