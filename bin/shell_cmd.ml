@@ -557,7 +557,17 @@ let run ~socket ~(program : Ast.module_) ~type_map ~tc_env ~timeout_ms ~(force :
             program_decls = program.Ast.mod_decls;
             program_type_map = type_map; shows = Shell_render_gen.show_impls program.Ast.mod_decls;
             limit = default_limit; timeout_ms; n = 0; bound = [];
-            failed = false; triple = field hello "triple"; ident; force; skewed = false;
+            failed = false;
+            triple = (match field hello "triple" with
+                | Some t when t <> "unknown" && not (March_jit.Jit_emit.triple_ok t) ->
+                  (* HELLO is unauthenticated and the triple reaches a clang
+                     command line; a node that sends anything but a triple
+                     is refused outright. *)
+                  Printf.eprintf "march shell: the node's HELLO triple is not a valid \
+                                  target triple (%S); refusing the session\n%!" t;
+                  exit 1
+                | t -> t);
+            ident; force; skewed = false;
             challenge = (match field hello "session" with
                 | Some c -> c
                 | None ->
