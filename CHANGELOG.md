@@ -3460,6 +3460,12 @@ git log is authoritative for exact commits.
   topology and observe, and an index grouping every section; sections are
   regrouped into one server, many hosts, running work, and trust. Bodies are
   unchanged apart from a few phrase edits.
+- **Actors chapter restructured.** `docs/actors/` now opens with what an actor is,
+  the concurrency-primitive chooser, an index of every section, and how actors
+  meet supervision, capabilities, linear and session types, observe, hot code
+  reload and clustering. The interpreted-vs-compiled status block that opened
+  the page is its own section near the end, with the dated fix notes gathered
+  into one history list. No content was removed.
 - **Capabilities chapter restructured.** `docs/capabilities/` now opens with a
   plain statement of the three checks (manifest, upper limit, grant), one
   "which tool do I need" table, an index of every section, and a table of how
