@@ -550,6 +550,53 @@ mod TestClusterNode do
       end
     end
 
+    -- A pushed leaf is merged and never answered with the whole registry.
+    -- Answering it (the two roots differ whenever both sides have changed a
+    -- name) made session churn ping-pong full registry dumps, tombstones
+    -- included: 400 back-to-back two-node sessions slowed to ~1 s each.
+    test "a pushed registration is merged, not answered with the whole registry" do
+      match linked_ab() do
+        (b, st, _) ->
+          let a = ClusterNode.node_id_of("a")
+          let stb0 = ClusterNode.core_new(cfg("b", Nil), 1)
+          match ClusterNode.core_linked(stb0, a, "a", "127.0.0.1:7000", 1, 10, 11, a, 99) do
+            (stb, _) ->
+              match ClusterNode.core_register(stb, "ap", 7, 0) do
+                (_, beffs) ->
+                  let pushes = List.filter(sends_to(beffs, a), fn bytes -> PeerReader.tag_of(bytes) == 6)
+                  assert (List.length(pushes) == 1)
+                  -- a holds a name b has not seen, so the roots differ.
+                  match ClusterNode.core_register(st, "mine", 42, 0) do
+                    (st2, _) ->
+                      match pushes do
+                        Cons(push, _) ->
+                          match ClusterNode.core_frame(st2, b, 6, push) do
+                            (st3, effs) ->
+                              assert (lookup_node(st3, "ap") == b)
+                              assert (List.is_empty(sends_to(effs, b)))
+                          end
+                        Nil -> assert false
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+    test "a full registry sync from a peer that lacks our names is answered with ours" do
+      match linked_ab() do
+        (b, st, _) ->
+          let theirs = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, VectorClock.increment(VectorClock.new(), b))
+          match ClusterNode.core_register(st, "mine", 42, 0) do
+            (st2, _) ->
+              let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(theirs), GlobalRegistry.all_entries(theirs))
+              match ClusterNode.core_frame(st2, b, 6, frame) do
+                (_, effs) -> assert (List.any(sends_to(effs, b), fn bytes -> PeerReader.tag_of(bytes) == 6))
+              end
+          end
+      end
+    end
+
     test "a name another holder has visibly bound is refused" do
       match linked_ab() do
         (b, st, _) ->

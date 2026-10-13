@@ -123,7 +123,12 @@ done
 grep -q "complete" "$work/revoke.out" || fail "the revocation release did not complete: $(cat "$work/revoke.out")"
 wait_line a "app a: c dead: certificate revoked"
 wait_line b "app b: c dead: certificate revoked"
-grep -q "app a: b dead\|app c: b dead" "$work/a.out" "$work/c.out" && fail "b died"
+# Only a's view counts here: c, cut off by a and b, rightly declares both of
+# them dead once its SWIM suspect timeout runs out (~3.2 s after the cut),
+# and the release takes ~3.6 s to complete past it. Checking c.out too raced
+# that timeout; measured 2026-10-13 in the ubuntu container it failed on main
+# whenever c's node was not too busy to time out first.
+grep -q "app a: b dead" "$work/a.out" && fail "b died"
 
 # The candidates' own copies went over the certificate handshake (both carry
 # Ctl.Control:offer): the standby holds the releases and the leader's audit

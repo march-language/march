@@ -174,11 +174,13 @@ What the lab has found so far, each filed with its repro:
 - [`2026-10-04-lab-control-wiring-none-ctor-ambiguous.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-04-lab-control-wiring-none-ctor-ambiguous.md):
   a protocol branch labelled `none` breaks the control-plane wiring of a `[control]` app;
   the lab's branch is called `out`.
-- The per-session leaks already filed
-  ([`2026-10-01-session-node-vault-tables-leak.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-01-session-node-vault-tables-leak.md),
-  [`2026-09-28-linux-per-session-memory-growth.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-09-28-linux-per-session-memory-growth.md)):
-  at a session every 300 ms the first lab nodes reached 1.5-2 GB in four minutes, so the
-  lab paces traffic at one session a second.
+- The per-session leaks
+  ([`2026-10-01-session-node-vault-tables-leak.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-01-session-node-vault-tables-leak.md),
+  [`2026-09-28-linux-per-session-memory-growth.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-09-28-linux-per-session-memory-growth.md),
+  both fixed): at a session every 300 ms the first lab nodes reached 1.5-2 GB in four
+  minutes, so the lab paces traffic at one session a second. Since 2026-10-13 a node pair
+  runs 400 back-to-back sessions in ~40 MB per node on Linux, so the pacing is no longer
+  needed for memory; it has not been raised.
 
 ## Security
 
