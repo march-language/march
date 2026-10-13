@@ -52,15 +52,6 @@ git log is authoritative for exact commits.
   `style` attribute and in a `<style>` body alike.
 
 ### Added
-- **A topology pool's derived capabilities can no longer widen silently.**
-  When `topology.toml` leaves a pool's `caps` out, the compiler derives them,
-  and `forge deploy hot` now compares them with the ones recorded at the
-  environment's last completed deploy (`.forge/deploy/<env>/derived.json`, the
-  file `forge deploy` already keeps). A pool that gains a capability stops the
-  deploy before anything is built unless `--grant-cap` names it
-  (`--grant-cap IO.FileWrite`, matched by subsumption, for every pool that
-  widens to it); a completed deploy records the new caps. `forge build` warns
-  about each pool that widens relative to a recorded deploy.
 - **`--verify-tir` checks the representations codegen commits to.** At emission,
   every allocation, match and equality site's encoding of a type (boxed, niche,
   newtype or unboxed) must agree for the same payload, and a type whose short
@@ -524,6 +515,17 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Breaking: a topology pool's derived capabilities can no longer widen silently.**
+  When `topology.toml` leaves a pool's `caps` out, the compiler derives them,
+  and `forge deploy hot` now compares them with the ones recorded at the
+  environment's last completed deploy (`.forge/deploy/<env>/derived.json`, the
+  file `forge deploy` already keeps). A pool that gains a capability stops the
+  deploy before anything is built unless `--grant-cap` names it
+  (`--grant-cap IO.FileWrite`, matched by subsumption, for every pool that
+  widens to it); a completed deploy records the new caps. `forge build` warns
+  about each pool that widens relative to a recorded deploy.
+  To migrate a deploy that is now refused, pass `--grant-cap CAP` for each
+  capability the refusal names, or set the pool's `caps` in `topology.toml`.
 - **Breaking: passing a function that takes a different number of arguments
   than the callee applies it to is an error.** `fn add(a, b)` and a curried
   `fn a -> fn b -> a + b` have the same type, but March has no partial
