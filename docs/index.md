@@ -11,11 +11,11 @@ permalink: /
 
 # March
 
-**Elixir's concurrency model. ML's type safety. Native performance.**
+**Actors from the BEAM. Types from ML. Native binaries, no garbage collector.**
 
-March is a statically-typed, capability-based functional language built for concurrent and distributed systems: the kind you'd normally reach for Elixir or Erlang to build, but with a static type system, a compile-time effect system, algebraic data types, and compilation to native binaries via LLVM.
+March is a statically-typed functional language: actors and message passing from the BEAM, algebraic data types from ML, compiled to native binaries through LLVM. Perceus reference counting with in-place reuse means no garbage collector and no pauses, at Rust-like performance. And side effects live in the type as capabilities, so what any module can touch is visible, and auditable across your dependencies.
 
-A March program is actors, supervision trees and message passing, compiled to a native binary. The compiler checks that it touches only the resources its `main` was granted, that every resource is used in order and released, that message protocols are followed, and that a crashed actor is restarted the way you declared. It deploys to a running node without a restart, and it runs with no garbage collector pauses.
+The same compiler checks that every resource is used in order and released, that message protocols are followed, and that a crashed actor is restarted the way you declared. A running node takes new code without a restart.
 
 ---
 
@@ -136,7 +136,7 @@ Grant it, and the node still has the last word: a node whose policy forbids
 
 ### Actors with supervision trees
 
-March's concurrency model is the actor model: share-nothing, message-passing processes, just like Elixir. Actors are first-class: spawn them, monitor them, and organize them into supervision trees that automatically restart failed processes.
+March's concurrency model is the actor model: share-nothing, message-passing processes, as on the BEAM. Actors are first-class: spawn them, monitor them, and organize them into supervision trees that automatically restart failed processes.
 
 ```march
 actor Counter do
@@ -259,7 +259,7 @@ end
 - **Algebraic data types**: `type Shape = Circle(Float) | Rect(Float, Float)`
 - **Pattern matching** with exhaustiveness checking and guards
 - **Pipe operator**: `list |> map(f) |> filter(g) |> sum`
-- **Multi-head functions**: Elixir-style clause dispatch
+- **Multi-head functions**: clause dispatch on patterns in the parameter list
 - **`with` expressions**: monadic chaining for `Result`/`Option`
 - **`let?` propagation**: `let? x = e` binds `Ok(x)` and returns `Err` immediately
 - **Linear and affine types**: ownership tracking for resource safety
