@@ -1,0 +1,18 @@
+    -- v2a: bisection of v2_newshape: only handle's body changes (to v2's).
+    fn handle(conn: SpikeConn): Int do
+      conn.status * 2 + List.length(conn.headers)
+    end
+    fn mk(conn: SpikeConn): Int -> Int do
+      let s = conn.status
+      fn x -> x + s
+    end
+    fn tag(): String do
+      "v1-tag"
+    end
+    -- count borrows its List (it only reads it).
+    fn count(hs: List(String)): Int do
+      match hs do
+        Nil -> 0
+        Cons(h, _) -> 1 + string_length(h)
+      end
+    end

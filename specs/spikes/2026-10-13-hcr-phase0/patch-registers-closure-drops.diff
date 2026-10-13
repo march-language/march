@@ -1,0 +1,18 @@
+diff --git a/lib/tir/llvm_toplevel.ml b/lib/tir/llvm_toplevel.ml
+index ab09815e7..d66a592c5 100644
+--- a/lib/tir/llvm_toplevel.ml
++++ b/lib/tir/llvm_toplevel.ml
+@@ -1940,7 +1940,12 @@ let emit_module ~emit_expr
+          ("\ndefine void @__march_init(i32 %epoch) {\nentry:\n\
+           \  store i32 %epoch, ptr @__march_hcr_epoch\n"
+           ^ Buffer.contents resolve
+-          ^ "  ret void\n}\n")
++          ^ (if Sys.getenv_opt "HCR0_PATCH_REGISTERS_DROPS" = Some "1"
++             then "  call void @march_clo_drops_register()\n" else "")
++          ^ "  ret void\n}\n"
++          ^ (if Sys.getenv_opt "HCR0_PATCH_REGISTERS_DROPS" = Some "1"
++             then clo_drop_registration ~rec_drops:(Llvm_data.shape_drop_registrations ctx) m
++             else ""))
+      end else
+      if m.Tir.tm_tests <> [] then begin
+        (* --test mode: emit a @main that calls the test harness.
