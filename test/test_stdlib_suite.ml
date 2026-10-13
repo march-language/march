@@ -12036,6 +12036,109 @@ let test_hcr_migrate_msg_converts_real_old_message () =
   | _ -> ()
 
 
+(* A hot patch that flips a boundary parameter between borrowed and owned
+   (specs/progress/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md; the HCR
+   Phase 0 spike's E2).  The source signature of [count] never changes; its
+   body decides the mode: v1 only reads the list (borrowed), [owned] stores
+   it (owned).  [serve], compiled against v1, keeps using the list after the
+   call, so an accepted owned patch is a use-after-free.  [body] changes the
+   body but keeps the mode. *)
+let borrow_flip_src variant =
+  let count_body = match variant with
+    | `V1 -> "    match hs do\n      Nil -> 0\n      Cons(h, _) -> 1 + string_length(h)\n    end\n"
+    | `Body -> "    match hs do\n      Nil -> 0\n      Cons(h, _) -> 2 + string_length(h)\n    end\n"
+    | `Owned -> "    let l = [hs, hs]\n    List.length(l) + 1\n"
+  in
+  "mod Main do\n\
+  \  needs IO\n\
+  \  fn count(hs : List(String)) : Int do\n"
+  ^ count_body
+  ^ "  end\n\
+  \  fn serve(i : Int, n : Int, acc : Int) : Int do\n\
+  \    if i >= n do acc else\n\
+  \      let hs = [int_to_string(i), \"bb\"]\n\
+  \      let c = count(hs)\n\
+  \      let after = List.length(hs)\n\
+  \      sleep_ms(5)\n\
+  \      serve(i + 1, n, acc + c + after)\n\
+  \    end\n\
+  \  end\n\
+  \  fn main(_io : Cap(IO)) do\n\
+  \    println(\"serving\")\n\
+  \    let r = serve(0, 60000, 0)\n\
+  \    println(\"served \" ++ int_to_string(r))\n\
+  \  end\n\
+   end\n"
+
+let test_hcr_borrow_flip_refused_end_to_end () =
+  let module H = March_forge.Cmd_deploy_hot in
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let pk_b64 = March_ed25519.Ed25519.pk_to_base64 pk in
+  let base = build_role_fixture ~tag:"bfbase"
+      ~extra_args:("--hot-reload Main --signing-pubkey " ^ Filename.quote pk_b64)
+      (borrow_flip_src `V1) in
+  let so tag v = build_role_fixture ~tag ~extra_args:"--hot-reload Main --compile-so" (borrow_flip_src v) in
+  match base, so "bfv1" `V1, so "bfbody" `Body, so "bfowned" `Owned with
+  | Some (dir, bin), Some (_, v1), Some (_, body), Some (_, owned) ->
+    let manifest p = match H.parse_manifest (p ^ ".hcr_manifest") with
+      | Ok m -> m | Error e -> Alcotest.fail e in
+    let sock = Printf.sprintf "/tmp/march_bflip_%d.sock" (Unix.getpid ()) in
+    let log = Filename.concat dir "server.log" in
+    with_reload_server ~dir ~bin ~sock ~extra_env:[||] (fun pid ->
+        (match e2e_connect sock with
+         | None -> Alcotest.failf "reload server never listened on %s (see %s)" sock log
+         | Some fd -> Unix.close fd);
+        let deploy so_path =
+          H.run ~tunnel:false ~ssh_host:"local" ~remote_socket:sock
+            ~signing_pubkey:pk_b64 ~sk ~manifest:(manifest so_path) ~so_path () in
+        let alive () = match Unix.waitpid [ Unix.WNOHANG ] pid with (0, _) -> true | _ -> false in
+        let refused_for_mode e =
+          Alcotest.(check bool) ("refused naming the change: " ^ e) true
+            (contains "parameter 1 of count changed from borrowed to owned" e) in
+        (* The running version's sig_hash for [count], from ABI_QUERY. *)
+        let slot_sig () =
+          match e2e_connect sock with
+          | None -> Alcotest.fail "ABI_QUERY: no connection"
+          | Some fd ->
+            let conn = H.conn_of_fd fd in
+            H.send_line conn "ABI_QUERY";
+            let slots = H.parse_abi_query conn in
+            Unix.close fd;
+            (match List.find_opt (fun s -> s.H.slot_name = "count") slots with
+             | Some s -> s.H.slot_sig_hash
+             | None -> Alcotest.fail "no slot for count")
+        in
+        let count_sig so_path =
+          (List.find (fun f -> f.H.fn_name = "count") (manifest so_path).H.functions).H.fn_sig_hash in
+        (* 1. The unchanged build: nothing to deploy. *)
+        (match deploy v1 with
+         | Ok _ -> ()
+         | Error e -> Alcotest.failf "the unchanged build was refused: %s\n%s" e (read_file_contents log));
+        (* 2. The flip against the baseline: refused before activation. *)
+        (match deploy owned with
+         | Ok _ -> Alcotest.failf "the borrowed->owned patch was ACCEPTED against the baseline\n%s"
+                     (read_file_contents log)
+         | Error e -> refused_for_mode e);
+        Alcotest.(check string) "after the refusal count still runs v1's ABI" (count_sig v1) (slot_sig ());
+        Alcotest.(check bool) "the owned patch's count has another sig_hash than v1's" true
+          (count_sig owned <> count_sig v1);
+        Alcotest.(check string) "a body-only change keeps the sig_hash" (count_sig v1) (count_sig body);
+        (* 3. A body-only change deploys. *)
+        (match deploy body with
+         | Ok _ -> ()
+         | Error e -> Alcotest.failf "the body-only patch was refused: %s\n%s" e (read_file_contents log));
+        Alcotest.(check string) "the activated patch's sig_hash is recorded, not (none)"
+          (count_sig body) (slot_sig ());
+        (* 4. The flip against a patched slot: refused too. *)
+        (match deploy owned with
+         | Ok _ -> Alcotest.failf "the borrowed->owned patch was ACCEPTED against a patched slot\n%s"
+                     (read_file_contents log)
+         | Error e -> refused_for_mode e);
+        Unix.sleepf 0.5;
+        if not (alive ()) then
+          Alcotest.failf "the server died after the deploys:\n%s" (read_file_contents log))
+  | _ -> ()
+
 let test_hcr_manifest_actor_handler_caps_populated () =
   let main_exe = find_main_exe () in
   let tmp = Filename.temp_file "march_hcractorcaps" "" in
@@ -15351,6 +15454,8 @@ let stdlib_suites =
           test_cas_hit_restores_so_sidecars;
         Alcotest.test_case "HCR migrate_msg: a compiled deploy converts a real old-format message (Tally Add|Legacy -> Add)" `Slow
           test_hcr_migrate_msg_converts_real_old_message;
+        Alcotest.test_case "HCR: a patch that flips a parameter borrowed->owned is refused; body-only and unchanged builds deploy" `Slow
+          test_hcr_borrow_flip_refused_end_to_end;
         Alcotest.test_case "HCR manifest: disjoint fn caps stay separate, not the whole-artifact union (granularity revision)" `Slow
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow

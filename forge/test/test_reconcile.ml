@@ -541,7 +541,7 @@ let test_ping_closed_peer () =
 
 let test_drift () =
   let fm name h = { Cmd_deploy_hot.fn_name = name; fn_impl_hash = h; fn_sig_hash = ""; fn_callers = [];
-                    fn_caps = []; fn_has_caps = true } in
+                    fn_caps = []; fn_has_caps = true; fn_type_sig = ""; fn_modes = "" } in
   let desired = { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None; slots = None;
                   functions = [ fm "App.f" "abc123"; fm "App.g" "zzz"; fm "App.new" "n" ]; roles = [] } in
   let slot name h = { Cmd_deploy_hot.ds_id = 0; ds_name = name; ds_impl_hash = h; ds_activated_at = 0L;
@@ -679,6 +679,93 @@ let test_run_preflights_identity () =
    | Ok _ -> Alcotest.fail "a patch for another target was deployed");
   Alcotest.(check string) "only HCR_INFO reached the server" "HCR_INFO\n" (read_file log)
 
+(* ── toolchain upgrade across an HCR ABI bump (2026-10-13) ──────────────── *)
+
+(** A server built by an older toolchain (its HCR ABI id has a lower
+    version, same triple) refuses a newer patch at the preflight, before any
+    upload, and the message says to restart once.  This is what an operator
+    sees on the first hot deploy after upgrading to a toolchain whose slot
+    sig_hash folds in borrow modes (march-hcr-v4) against a v3 server. *)
+let test_upgrade_refused_with_restart_advice () =
+  let v3 = "march-hcr-v3;triple=aarch64-unknown-linux-gnu;ptr=8"
+  and v4 = "march-hcr-v4;triple=aarch64-unknown-linux-gnu;ptr=8" in
+  (match Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:v4 ()) ~info:{ info with abi = v3 } with
+   | Error m ->
+     List.iter (fun frag -> Alcotest.(check bool) (frag ^ " in: " ^ m) true (contains m frag))
+       [ "older March toolchain (HCR ABI " ^ v3 ^ ")"; "borrow modes"; "nothing was deployed";
+         "Restart the server once on a base build from this toolchain" ]
+   | Ok () -> Alcotest.fail "a v4 patch was accepted by a v3 server");
+  (match Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:v3 ()) ~info:{ info with abi = v4 } with
+   | Error m -> Alcotest.(check bool) m true (contains m "rebuild the patch with the toolchain that built the server")
+   | Ok () -> Alcotest.fail "a v3 patch was accepted by a v4 server");
+  (* End to end against a server that answers an older ABI. *)
+  let dir = short_tmp () in
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let sock = Filename.concat dir "u.sock" and log = Filename.concat dir "u.log" in
+  let server = fake_hcr_server ~pk ~log sock in
+  reaping [ server ] @@ fun () ->
+  let r = Cmd_deploy_hot.run ~tunnel:false ~ssh_host:"n" ~remote_socket:sock ~signing_pubkey:"" ~sk
+      ~manifest:(v2 ~abi:"march-hcr-v3;triple=aarch64-unknown-linux-gnu;ptr=8" ())
+      ~so_path:"/nonexistent.so" () in
+  (try ignore (Unix.waitpid [] server) with Unix.Unix_error _ -> ());
+  (match r with
+   | Error m -> Alcotest.(check bool) m true (contains m "Restart the server once")
+   | Ok _ -> Alcotest.fail "a patch from a newer toolchain was deployed into an older server");
+  Alcotest.(check string) "only HCR_INFO reached the server" "HCR_INFO\n" (read_file log)
+
+(* ── parameter borrow modes in the slot sig_hash (2026-10-13) ─────────────── *)
+
+let abi_fn ~tsig ~modes =
+  { Cmd_deploy_hot.fn_name = "App.count"; fn_impl_hash = "i";
+    fn_sig_hash = March_cas.Hash.hcr_sig_hash ~sig_hash:tsig ~modes;
+    fn_callers = [ "App.serve" ]; fn_caps = []; fn_has_caps = true; fn_type_sig = tsig; fn_modes = modes }
+
+let abi_slot sig_h =
+  { Cmd_deploy_hot.slot_id = 1; slot_name = "App.count"; slot_impl_hash = "old";
+    slot_sig_hash = sig_h; slot_callers = [] }
+
+let test_borrow_mode_changes () =
+  let tsig = String.make 64 'a' in
+  let h modes = March_cas.Hash.hcr_sig_hash ~sig_hash:tsig ~modes in
+  Alcotest.(check bool) "the modes are in the hash" true (h "bo" <> h "oo");
+  let changes ~running fm =
+    Cmd_deploy_hot.mode_changes ~slot_of:(fun _ -> Some (abi_slot running)) ~to_activate:[ fm ] in
+  (* borrowed -> owned: the use-after-free direction *)
+  Alcotest.(check (list (pair string (list string)))) "borrowed -> owned named"
+    [ ("App.count", [ "parameter 2 of App.count changed from borrowed to owned" ]) ]
+    (changes ~running:(h "ob") (abi_fn ~tsig ~modes:"oo"));
+  (* owned -> borrowed: the leak direction *)
+  Alcotest.(check (list (pair string (list string)))) "owned -> borrowed named"
+    [ ("App.count", [ "parameter 1 of App.count changed from owned to borrowed" ]) ]
+    (changes ~running:(h "oo") (abi_fn ~tsig ~modes:"bo"));
+  Alcotest.(check (list (pair string (list string)))) "same modes: no change" []
+    (changes ~running:(h "bo") (abi_fn ~tsig ~modes:"bo"));
+  (* A type change (another type hash) is not a mode change: the
+     coordinated-upgrade gate handles it as before. *)
+  Alcotest.(check (list (pair string (list string)))) "a type change is not a mode change" []
+    (changes ~running:(March_cas.Hash.hcr_sig_hash ~sig_hash:(String.make 64 'b') ~modes:"oo")
+       (abi_fn ~tsig ~modes:"bo"));
+  Alcotest.(check (list (pair string (list string)))) "a manifest without tsig=/modes=: unknown" []
+    (changes ~running:(h "oo") { (abi_fn ~tsig ~modes:"bo") with fn_type_sig = ""; fn_modes = "" });
+  let msg = Cmd_deploy_hot.mode_change_refusal (changes ~running:(h "ob") (abi_fn ~tsig ~modes:"oo")) in
+  Alcotest.(check bool) msg true (contains msg "Deploy this build with a restart");
+  (* the manifest fields *)
+  let root = tmp_root () in
+  let path = Filename.concat root "m" in
+  write_file path (Printf.sprintf "# march-hcr-manifest v2\n# cas_hash cc\n\
+                                   App.count ii %s callers:App.serve tsig=%s modes=bo caps=\nApp.old ii ss caps=\n"
+                     (h "bo") tsig);
+  match Cmd_deploy_hot.parse_manifest path with
+  | Ok m ->
+    (match m.functions with
+     | [ f; g ] ->
+       Alcotest.(check string) "tsig=" tsig f.fn_type_sig;
+       Alcotest.(check string) "modes=" "bo" f.fn_modes;
+       Alcotest.(check (list string)) "callers still read" [ "App.serve" ] f.fn_callers;
+       Alcotest.(check string) "an older line has none" "" g.fn_modes
+     | _ -> Alcotest.fail "two functions expected")
+  | Error e -> Alcotest.fail e
+
 let () =
   Alcotest.run "reconcile" [
     ("diff", [
@@ -710,5 +797,7 @@ let () =
         Alcotest.test_case "manifest vs HCR_INFO, host target vs manifest" `Quick test_identity_checks;
         Alcotest.test_case "# hcr_abi is parsed" `Quick test_manifest_reads_hcr_abi;
         Alcotest.test_case "deploy hot refuses another target before uploading" `Quick test_run_preflights_identity;
+        Alcotest.test_case "a newer toolchain's patch into an older server: refused, restart once" `Quick test_upgrade_refused_with_restart_advice;
+        Alcotest.test_case "a parameter borrow-mode change is recognised and named" `Quick test_borrow_mode_changes;
       ]);
   ]

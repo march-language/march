@@ -125,6 +125,19 @@ error: the standard library changed (stdlib 3f2a91c07d4e -> 8b0c5e11a2f9): stdli
 error: deploy aborted, nothing was activated: deploy this build with a restart
 ```
 
+A **toolchain upgrade that changes the hot-reload ABI** is a restart deploy too. Every
+binary and patch records an ABI id (`# hcr_abi` in the manifest, `HCR_INFO` on the
+server, `march-hcr-v4;triple=...;ptr=8` today). When the running server's id is older
+than the patch's, `forge deploy hot` refuses before it uploads anything:
+
+```
+error: the running server was built by an older March toolchain (HCR ABI march-hcr-v3;triple=...) than this patch (march-hcr-v4;triple=...). The hot-reload ABI changed in between (from march-hcr-v4, a boundary function's signature hash covers its parameters' borrow modes, so a v3 server's hashes cannot be checked against this patch's), so this server cannot take hot patches from this toolchain, and nothing was deployed. Restart the server once on a base build from this toolchain (a cold deploy); hot deploys work again after that
+```
+
+The server repeats the check after it loads a patch (`ERR identity abi mismatch`), so an
+older `forge` cannot slip one past it either. Restart once on a build from the new
+toolchain; later hot deploys from that toolchain go through as before.
+
 ---
 
 ## Multi-host deploys
@@ -959,6 +972,37 @@ When a function's signature changes between deploys (for example, `B.foo` gains 
   ```
 
 If neither module in a pair has been deployed with caller tracking enabled at any point (e.g. they were compiled separately before this feature existed), the gate conservatively allows the deploy: the caller set is empty, so there are no recorded callers to check.
+
+### Parameter borrow modes are part of the signature
+
+A boundary function's `sig_hash` covers more than its types. The compiler decides, from
+the body, whether each heap parameter (a `String`, a `List`, any ADT) is **borrowed** (the
+callee only reads it, and the caller keeps its reference) or **owned** (the callee takes
+the reference, for example because it stores the value, returns it or passes it on to an
+owning position). A caller is compiled against those modes. So a body edit that turns a
+borrowed parameter owned changes the function's ABI even though its source signature did
+not change: running code would keep using a value the new code frees (a use-after-free),
+and the reverse change would leak one reference per call. Records and tuples are always
+passed owned, so a change to how a body uses one never changes the ABI.
+
+Each boundary function's `sig_hash` (in the `.hcr_manifest`, in the binary's dispatch
+table and in `ABI_QUERY`) is therefore a hash of the type signature **and** one mode per
+parameter; the manifest also lists the parts (`tsig=` and `modes=`, `b` borrowed, `o`
+owned). A deploy that changes only a mode is always refused, naming the parameter:
+
+```
+error: a hot deploy cannot change a boundary function's parameter borrow mode: parameter 1 of Handler.count changed from borrowed to owned. Code already running was compiled against the old mode and would use a reference the new code releases (a use-after-free) or never release one it now owns (a leak per call). Deploy this build with a restart, or keep the mode (a parameter becomes owned when the body stores it, returns it or passes it to an owning position)
+error: deploy aborted, nothing was activated
+```
+
+Unlike a type change, shipping every caller in the same deploy does not make it safe: a
+caller's call that is already running (a request loop on `main`, which always follows the
+newest code) keeps running the old code, and its next call reaches the new version with
+the old convention. Deploy such a change with a restart. A body-only change that keeps
+every mode deploys hot as before.
+
+A server records the `sig_hash` of each version it activates (from the patch itself), so
+the check applies to every deploy, not only the first one after a restart.
 
 ---
 

@@ -526,6 +526,27 @@ git log is authoritative for exact commits.
   about each pool that widens relative to a recorded deploy.
   To migrate a deploy that is now refused, pass `--grant-cap CAP` for each
   capability the refusal names, or set the pool's `caps` in `topology.toml`.
+- **Breaking (hot reload): a patch that changes a boundary function's
+  parameter borrow mode is refused, and the hot-reload ABI is now
+  `march-hcr-v4`.** Whether a `String`, `List` or ADT parameter is borrowed
+  or owned is decided by the function's body, and running callers depend on
+  it, but the deploy gate's `sig_hash` covered only the types: `forge deploy
+  hot` accepted a body edit that turned a borrowed parameter owned, which
+  freed a value the running caller still used (a use-after-free; a crash
+  in the Phase 0 spike), or, the other way round, leaked one reference per
+  call. A boundary function's `sig_hash` now includes each parameter's mode,
+  and such a deploy is refused before anything is activated, naming the
+  parameter (`parameter 1 of Handler.count changed from borrowed to owned`):
+  deploy that build with a restart. Body-only changes that keep the modes
+  deploy hot as before. **Upgrading the toolchain:** a server built by an
+  earlier March cannot take hot patches from this one. The first `forge
+  deploy hot` after the upgrade is refused before upload with "the running
+  server was built by an older March toolchain (HCR ABI march-hcr-v3...)
+  ... Restart the server once on a base build from this toolchain", and
+  nothing is deployed. Restart each hot-reload server once on a build from
+  the new toolchain; hot deploys work again from then on. A server also
+  now records the `sig_hash` of each patch it activates, where it used to
+  report `(none)`, so the check covers later deploys too.
 - **Breaking: passing a function that takes a different number of arguments
   than the callee applies it to is an error.** `fn add(a, b)` and a curried
   `fn a -> fn b -> a + b` have the same type, but March has no partial

@@ -13,8 +13,17 @@ type t = {
    march_actor_set_call_base to march_actor_set_call_tags
    (specs/progress/2026-09-25-migrate-msg-actor-message-tags.md). A patch
    built by this compiler would drop every actor message a v2 process sends
-   it, and could not even load against a v2 runtime. *)
-let runtime_abi = 3
+   it, and could not even load against a v2 runtime.
+   4: a dispatch slot's sig_hash folds in its parameters' borrow modes
+   (March_cas.Hash.hcr_sig_hash), so a patch that flips one is a signature
+   change to forge's gate instead of a use-after-free or a leak
+   (specs/progress/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md).  A v3
+   process published type-only hashes, which no v4 patch's can match, and
+   its patches record no sig_hash at all: hot deploys from this compiler
+   into a v3 process are refused by identity (forge's HCR_INFO preflight,
+   then the runtime's own check after dlopen) and need one restart on a v4
+   build. *)
+let runtime_abi = 4
 
 let contains haystack needle =
   let hay_len = String.length haystack in

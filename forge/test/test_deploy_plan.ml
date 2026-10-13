@@ -22,7 +22,7 @@ let refuse what text subs =
 
 let fm ?(sig_ = "s") ?(caps = []) name impl =
   { Cmd_deploy_hot.fn_name = name; fn_impl_hash = impl; fn_sig_hash = sig_; fn_callers = []; fn_caps = caps;
-    fn_has_caps = true }
+    fn_has_caps = true; fn_type_sig = ""; fn_modes = "" }
 
 let abi_arm = "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8"
 
