@@ -231,6 +231,12 @@ mod SessionNode do
     end
   end
 
+  -- Whether anything is parked on [ep] that a continuation awaiting [want]
+  -- (0: anyone) would take.
+  pfn has_pending(pending : Vault(List((Int, Bytes))), ep : Int, want : Int) : Bool do
+    List.any(Vault.get_or(pending, ekey(ep), Nil), fn e -> match e do (from, _) -> want == 0 || from == want end)
+  end
+
   pfn drop_first(xs : List((Int, Bytes)), from : Int, seen : List((Int, Bytes))) : List((Int, Bytes)) do
     match xs do
       Nil -> List.reverse(seen)
@@ -668,9 +674,23 @@ mod SessionNode do
         ep
       Some(k) ->
         if want == 0 || want == from do
-          -- This continuation is consumed by the call; anything parked is for
-          -- whatever it installs next.
-          consume(p, k, ep, from, msg)
+          -- Per-sender FIFO: an older message parked from a sender this
+          -- continuation takes goes first. In the callback API the drain
+          -- runs in this same turn as the install, so nothing is ever
+          -- parked here; a HOSTED endpoint's `suspend` installs in the host's
+          -- turn and only queues a `Drain`, and a delivery handled before
+          -- that Drain overtook the parked one: the host, awaiting the first
+          -- message, was resumed with the second ("unexpected message in
+          -- state ...", specs/progress/2026-10-05-hosted-protocol-change-
+          -- unexpected-hello-under-asan.md).
+          if has_pending(p.pending, ep, want) do
+            park(p.pending, ep, from, msg)
+            drain(p, ep)
+          else
+            -- This continuation is consumed by the call; anything parked is
+            -- for whatever it installs next.
+            consume(p, k, ep, from, msg)
+          end
         else
           park(p.pending, ep, from, msg)
           ep
@@ -2982,12 +3002,39 @@ mod SessionNode do
                   deliver : String -> Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                   cancel : String -> Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Offer, RunError) do
     let holders = ap_holder_check(node, proto, roles)
+    let trace = hosted_trace_on()
+    let what = proto ++ "/" ++ int_to_string(my_role) ++ " fp=" ++ fingerprint ++ " host=" ++ int_to_string(host)
     offer_with(node, proto, fingerprint, roles, compat, my_role, capacity, fn (sid, abandoned) ->
       run_cluster_hosted_with(io, node, my_role, peers, sid, on_close, host,
-                              fn s -> start(sid, s),
-                              fn (s, from, msg, ep) -> deliver(sid, s, from, msg, ep),
-                              fn (s, role, cause, ep) -> cancel(sid, s, role, cause, ep),
+                              fn s -> do
+                                hosted_trace(trace, what, "start", sid, "")
+                                start(sid, s)
+                              end,
+                              fn (s, from, msg, ep) -> do
+                                hosted_trace(trace, what, "deliver", sid,
+                                             "from=" ++ int_to_string(from) ++ " ep=" ++ int_to_string(ep)
+                                               ++ " bytes=" ++ int_to_string(Bytes.length(msg)))
+                                deliver(sid, s, from, msg, ep)
+                              end,
+                              fn (s, role, cause, ep) -> do
+                                hosted_trace(trace, what, "cancel", sid,
+                                             "role=" ++ int_to_string(role) ++ " ep=" ++ int_to_string(ep) ++ " cause=" ++ cause)
+                                cancel(sid, s, role, cause, ep)
+                              end,
                               abandoned, holders))
+  end
+
+  -- Debug trace of a hosted access point's callbacks (MARCH_SESSION_TRACE_HOSTED=1):
+  -- one stderr line per start / deliver / cancel, naming the offer (protocol,
+  -- role, fingerprint, host actor pid) and the session id, so a delivery
+  -- that reaches the wrong session or host shows up in a passing run's log.
+  -- Read once per offer; off, it prints nothing.
+  pfn hosted_trace_on() : Bool do Env.get("MARCH_SESSION_TRACE_HOSTED", "") == "1" end
+
+  pfn hosted_trace(enabled : Bool, what : String, event : String, sid : String, detail : String) : () do
+    if enabled do print_stderr("session_node: hosted " ++ event ++ " " ++ what ++ " sid=" ++ sid
+                          ++ (if detail == "" do "" else " " ++ detail end) ++ "\n")
+    else () end
   end
 
   -- The offer itself: an actor that answers invitations and runs each
