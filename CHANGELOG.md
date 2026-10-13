@@ -711,6 +711,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A cluster name rebound to another process is reported to its watchers
+  once.** When a globally registered name moved from one pid to another and
+  the node could see at least one other name, every watcher of the name got
+  the change twice (two `Bound`s; a local registration that lost the name
+  heard `Lost` and then a stray `Bound`). The visible-name walk deduplicated
+  with `List.dedup`, which only drops adjacent duplicates.
 - **An actor handler that matches on a tuple no longer leaks its old state
   when compiled.** A handler whose body was a `match` on a tuple a call
   returned (`match LinearMap.take_slot(state.sessions, id) do (None, slot) ->
