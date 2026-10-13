@@ -10,22 +10,97 @@ permalink: /docs/observe/
 A compiled March program can answer questions about itself while it runs: which
 actors exist, how deep their mailboxes are, who is crashing, how busy each
 scheduler is, how much memory is live, and which hot-reload epochs are still
-pinned. It answers on a Unix socket, read-only, and `forge` has four commands
-on top of it. This page is for the person on call: how to turn it on, what every
-number means, and what to do when one looks wrong.
+pinned. It answers on a read-only Unix socket, and `forge` has four commands on
+top of it: `status`, `diagnose`, `top` and `observe`. The same questions can be
+asked from inside the program through the `Recon` and `Diagnose` modules, on
+both the interpreter and compiled code.
 
+Everything is split into three tiers by how much it can reveal. The **observe
+tier** reports counts, states and kinds, never message contents, actor state or
+panic text, and needs only filesystem access to the socket. The **debug tier**
+shows an actor's state, panic messages, a trace of calls and messages, and a
+function's source; every request is signed with the deploy key and gated by a
+policy file on the node. The **remote shell** runs March code on the node under
+the same key and its own policy.
+
+This page is written for the person on call: how to turn it on, which command
+answers which question, what every number means, and what to do when one looks
+wrong.
+
+## On this page
+
+**Start here**
+
+- [Which tool answers which question](#which-tool-answers-which-question)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
 - [Turning it on](#turning-it-on)
-- [The protocol](#the-protocol)
-- [The verbs](#the-verbs)
-- [The forge commands](#the-forge-commands)
-- [Reading diagnose findings](#reading-diagnose-findings)
-- [From inside a program: Recon and Diagnose](#from-inside-a-program-recon-and-diagnose)
 - [Walkthrough: a node is slow, what now](#walkthrough-a-node-is-slow-what-now)
-- [Interpreter vs compiled, and what is not there yet](#interpreter-vs-compiled-and-what-is-not-there-yet)
 
-Everything here is the **observe tier**: it reports counts, states and kinds,
-never message contents, actor state, or panic text. Reading actor state is a
-separate, later debug tier (see the [end of the page](#what-is-not-there-yet)).
+**The forge commands**
+
+- [forge status](#forge-status)
+- [forge diagnose](#forge-diagnose)
+- [forge top](#forge-top)
+- [forge observe](#forge-observe), [the interactive view](#the-interactive-view), [crash dumps](#crash-dumps)
+- [On the host: the release launcher](#on-the-host-the-release-launcher)
+- [Reading diagnose findings](#reading-diagnose-findings)
+
+**From inside a program**
+
+- [Recon and Diagnose](#from-inside-a-program-recon-and-diagnose)
+
+**The socket, verb by verb**
+
+- [The protocol](#the-protocol)
+- [The verbs](#the-verbs): [ACTORS](#actors), [ACTOR](#actor), [TREE](#tree), [NAMES](#names), [SCHED](#sched), [MEM](#mem), [EPOCHS](#epochs), [CRASHES](#crashes), [TOP](#top), [SNAPSHOT](#snapshot), [WATCH](#watch)
+
+**The debug tier**
+
+- [Signed requests, STATE and CRASHES_FULL](#the-debug-tier-signed-requests)
+- [Tracing boundary calls](#tracing-boundary-calls) and [actor events](#actor-events-sent-received-spawned-exited-dropped)
+- [Which code is running: WHICH and SOURCE](#which-code-is-running-which-and-source)
+- [A remote shell: forge shell and forge rpc](#a-remote-shell-forge-shell-and-forge-rpc)
+
+**Reference**
+
+- [Interpreter vs compiled, and what is not there yet](#interpreter-vs-compiled-and-what-is-not-there-yet)
+- [See also](#see-also)
+
+## Which tool answers which question
+
+| Question | Reach for | Tier |
+|---|---|---|
+| Is the node up, and roughly how does it look? | [`forge status`](#forge-status) | observe |
+| Something is wrong; what, and what next? | [`forge diagnose`](#forge-diagnose) | observe |
+| Which actors are biggest or busiest, and who supervises them? | [`forge top`](#forge-top) | observe |
+| Watch a node live, or read one verb's raw JSON | [`forge observe`](#forge-observe) | observe |
+| Why did the process die? | a [crash dump](#crash-dumps), read with `forge observe --dump` | operator-owned file |
+| What is inside this actor's state? Which panic messages? | `forge observe --state`, `--crashes-full` | debug (signed) |
+| Which functions run, and who sends what to whom? | [tracing](#tracing-boundary-calls) | debug (signed) |
+| Which version of a function is this node running, and what is its text? | [`WHICH` and `SOURCE`](#which-code-is-running-which-and-source) | observe / debug |
+| Run some March on the node and look at the result | [`forge shell`](#a-remote-shell-forge-shell-and-forge-rpc) | shell (signed) |
+| Ask these questions from the program itself, or under the interpreter | [`Recon` and `Diagnose`](#from-inside-a-program-recon-and-diagnose) | in-process |
+
+The three tiers differ in what they can reveal and what unlocks them:
+
+| Tier | Reveals | Needs |
+|---|---|---|
+| **observe** | counts, states, kinds, names, hashes | read access to the socket (mode `0600`) |
+| **debug** | actor state, panic text, call and message traces, function source | a `--hot-reload` build with a deploy key, a request signed by that key, and the verb listed in `$MARCH_DEBUG_POLICY` |
+| **shell** | anything the input computes | the same key, and each capability the input uses listed in `$MARCH_SHELL_POLICY` |
+
+Every debug-tier and shell request, allowed or refused, is written to the
+node's audit log.
+
+## How it fits with the rest of March
+
+| Concept | What you see through observe | Chapter |
+|---|---|---|
+| **Actors and supervision** | Every row is an actor: its mailbox, `held` work in an `Actor.call`, its supervisor, restart counts, and the crash ring the supervisor feeds. `forge diagnose` reads supervision structure to spot a crash loop. | [Actors](actors.md), [Supervision](supervision.md), [Overload resilience](overload-resilience.md) |
+| **Capabilities** | In-process access is a capability: `Cap(Actor.Introspect)` for the observe tier, `Cap(Actor.Debug)` for state, traces and source. On the socket, the signature and the policy file play the same role. | [Capabilities](capabilities.md) |
+| **Hot code reload** | `EPOCHS` shows what each deploy is waiting on, `WHICH` and `SOURCE` say which version of a function runs, and the deploy key that signs patches also signs debug requests. A deploy ends a shell session. | [Hot code reload](hot-code-reload.md) |
+| **Topology and release bundles** | `forge status` reads `topology.toml`; a `forge release build` bundle's launcher speaks the observe protocol itself. | [Topology](topology.md), [Tooling](tooling.md) |
+| **Clustering** | Not yet: `SNAPSHOT` has no cluster section, so peers and SWIM state are not reported ([what is not there yet](#what-is-not-there-yet)). | [Clustering](clustering.md) |
 
 ---
 
@@ -44,7 +119,7 @@ MARCH_OBSERVE_SOCKET=/run/myapp/observe.sock ./myapp
 | `MARCH_OBSERVE_IDLE_MS=<ms>` | How long a connected client may stay silent before it is dropped (default 5000). |
 | `MARCH_NODE_NAME=<name>` | The `node` field of every reply (default `pid:<os pid>`). |
 
-Any compiled program serves it: no compiler flag is needed (the server is
+Any compiled program serves it; no compiler flag is needed (the server is
 started by the runtime's scheduler entry, `runtime/march_observe.c`). With
 neither socket variable set, nothing is started. The interpreter does not serve
 a socket; it answers the same questions in-process (see
@@ -79,6 +154,646 @@ scheduler) and -0.54% (8 schedulers), both inside the noise. A query walks the
 actor table once: about 9-11 ms per 100 000 actors for the walk, about 20 ms for
 a full `ACTORS` reply. Details: `specs/progress/2026-10-02-observe-r2-counters-crash-ring.md`
 and `specs/progress/2026-10-02-observe-r1-snapshot-verbs.md`.
+
+---
+
+## Walkthrough: a node is slow, what now
+
+Requests to `web-1` are timing out. Start wide and narrow down.
+
+**1. Is it alive, and what does it look like?**
+
+```bash
+forge status --env prod
+```
+
+```
+web-1: actors 1, queued 1550, rss 5 MB, busy 0%, crashes (1h) 0, deepest mailbox sink (pid 0) 1550
+```
+
+It answers, nothing is crashing, and the schedulers are mostly idle over its
+lifetime. But 1550 messages are queued, all of them on `sink`. A mostly idle
+node with a deep queue is a consumer that is stuck, not a node that is
+overloaded.
+
+**2. What is wrong right now?**
+
+```bash
+forge diagnose --env prod --dump /tmp/web-1-incident.json
+echo $?    # 2: critical
+```
+
+Its `findings`, in short: `mailbox.growth` (critical; row `{"pid": 0, "mbox":
+2066, "delta": 499, "names": ["sink"]}`) and `rc.climb` (warning; live objects
+1574 to 2073, actors 1). `sink`'s queue grew by about 500 a second and it holds
+the whole node's queue, so this is critical. `rc.climb` is the same queue seen
+from the heap: messages are heap objects. The `--dump` file keeps both raw
+snapshots for the incident ticket.
+
+**3. Is it draining at all?**
+
+```bash
+forge top --env prod --sort msgs_in --once -n 5
+```
+
+```
+web-1  actors 1, queued 2598, rss 5 MB, busy 0%, crashes (1h) 0, deepest mailbox sink (pid 0) 2598
+sorted by msgs_in over 1000 ms
+
+     PID  NAME                 TYPE               STATUS        MBOX    MSGS_IN
+       0  sink                                    waiting       2597          0
+```
+
+`sink` received nothing in the last second while its queue kept growing.
+
+**4. What is it doing?**
+
+```bash
+forge observe --env prod ACTOR 0
+```
+
+```json
+{"pid":0,"alive":true,"actor":{"pid":0,"names":["sink"],"status":"waiting","mbox":2616,
+ "held":0,"msgs_in":1,"msgs_out":0, ...},"supervisor":null,"terminal":null}
+```
+
+`msgs_in: 1`: it has taken one message off its mailbox since it started, and is
+`waiting` inside that handler, not in `receive`: the first handler is blocked
+(here, a long sleep; in production, typically a slow call or I/O). With `held`
+large instead, it would be waiting in an `Actor.call`. The fix is in that
+handler: give the slow operation a timeout, move it to a task, or put a mailbox
+limit on `sink` so the node sheds load instead of growing.
+
+**5. If you need to see inside.** `forge observe --env prod --state 0` shows the
+actor's state (debug tier; the node must allow `STATE` in its policy), and
+`forge shell --env prod` runs March against the node. Both are covered below.
+
+---
+
+## The forge commands
+
+All four take a target the same way:
+
+- `--socket PATH`: a local observe socket (the program's `MARCH_OBSERVE_SOCKET`).
+- otherwise the `[hot-reload]` hosts in `forge.toml`, reached over ssh at
+  `<reload socket>.observe`; `--env NAME` picks the `[[hot-reload.env]]`
+  entries with that name. `forge status` also reads `topology.toml`.
+
+### forge status
+
+```
+forge status [--json] [--socket PATH] [--env NAME]
+```
+
+One line per node. With a `topology.toml`, it first prints `forge topology
+status`'s report (alive, versions, drift), then the observe line for each node
+that has a socket; otherwise it reads the `[hot-reload]` hosts.
+
+```
+web-1: actors 1, queued 1550, rss 5 MB, busy 0%, crashes (1h) 0, deepest mailbox sink (pid 0) 1550
+```
+
+`busy` is the lifetime utilisation over all schedulers (since start, not now:
+use `forge diagnose` or `SCHED` for now). `crashes (1h)` counts the crashes in
+the last 20 ring entries that fall in the last hour. The deepest mailbox is
+named by its first registered name, else its type, else `?`. A node that does
+not answer prints `observe unavailable (<reason>)`. `--json` prints one
+`march.status/1` document:
+
+```json
+{"proto":"march.status/1","topology":null,"nodes":[{"name":"web-1","observe":{"actors":20,"queued":500,"rss_mb":2,"utilisation":0.0003,"crashes_hour":1,"deepest":{"pid":15,"name":"hot","waiting":500}}}]}
+```
+
+### forge diagnose
+
+```
+forge diagnose [--window MS] [--dump FILE] [--json] [--socket PATH] [--env NAME]
+```
+
+Takes two `SNAPSHOT`s `--window` apart (default 1000 ms), runs a fixed list of
+checks over the pair, and prints a `march.diagnose/1` envelope per target:
+
+```json
+{
+  "proto": "march.diagnose/1",
+  "node": "web-1",
+  "window_ms": 1000,
+  "findings": [
+    {
+      "id": "mailbox.growth",
+      "severity": "critical",
+      "rows": [ { "pid": 0, "mbox": 2066, "delta": 499, "names": [ "sink" ] } ],
+      "next": "forge observe ACTORS mbox 20, then ACTOR <pid> for the deepest"
+    }
+  ],
+  "coverage": {
+    "ran": [ "mailbox.growth", "mailbox.over_limit", "sched.saturated", "sched.idle_imbalance",
+             "crash.loop", "rc.climb", "epoch.stuck", "epoch.old_units" ],
+    "unavailable": {
+      "cluster.suspect": "no cluster section yet (observe plan R1.3)",
+      "names.lost": "global-registry Lost events are not recorded"
+    },
+    "partial": {
+      "mailbox.over_limit": "per-actor dropped counts are not tracked; the node total is used"
+    }
+  }
+}
+```
+
+Each finding has an `id`, a `severity` (`warning` or `critical`), the `rows`
+that triggered it, and `next`: the command to run next. Each check, its
+threshold and what it usually means is under
+[Reading diagnose findings](#reading-diagnose-findings).
+
+| Exit | Meaning |
+|---|---|
+| 0 | nothing found |
+| 1 | warnings only |
+| 2 | at least one critical finding |
+| 3 | a target could not be reached |
+
+With several targets the exit code is the worst of them. `--dump FILE` also
+writes the raw before/after pair (`{"before": ..., "after": ...}`) for the first
+target, in the same format as the test fixtures in
+`forge/test/fixtures/diagnose/`: attach it to the incident, or turn it into a
+regression fixture.
+
+`forge diagnose` works as a health probe for a cron job or a deploy gate:
+
+```bash
+forge diagnose --env prod --json > diagnose.json; rc=$?
+[ "$rc" -ge 2 ] && page-someone < diagnose.json
+```
+
+### forge top
+
+```
+forge top [--sort ATTR] [-n N] [--window MS] [--once] [--json] [--socket PATH] [--env NAME]
+```
+
+Redraws the biggest or busiest actors in place until interrupted. `--sort` is
+`mbox` (default), `stack` (committed stack bytes), `crashes`, `slices`,
+`msgs_in` or `msgs_out`; the last three rank the change over `--window`
+(default 1000 ms), which is also their refresh. The others refresh every
+max(1 s, 4x the time the node took to answer). `-n` is the row count (default
+20; note it is `-n`, not `--n`). `--once` prints one frame with no screen
+control, for scripts and tickets. `--json` prints the node's `TOP` reply (every
+row with its supervision fields) as one line and exits. Over `--env`, it
+watches the first matching host, through the same ssh tunnel as the other
+observe verbs; it needs only the observe tier.
+
+For "which actors are biggest, and who supervises them":
+`forge top --once --sort stack -n 10`, or `--sort mbox` for the deepest queues.
+
+```
+web-1  actors 20, queued 500, rss 5 MB, busy 0%, crashes (1h) 1, deepest mailbox hot (pid 16) 500
+sorted by mbox
+
+     PID  NAME                 TYPE               STATUS        MBOX     STACK       MBOX CRASHES  LINK       SUPERVISOR             POLICY (held/max in window)
+      16  hot                                     waiting        500     16384        500       0  none       -                      -
+       1                                          waiting          0     16384          0       0  supervised 4                      -
+       4  sup_one                                 waiting          0     16384          0       1  none       -                      one_for_one 1/5 in 60s, 4 kids
+```
+
+The first line is the `forge status` summary. `MBOX` is waiting work
+(`mbox + held`), `STACK` the committed stack, and the column named for the sort
+is the ranked value. `CRASHES` is the actor's own plus its children's in the last
+hour. `LINK` is `supervised`, `spawned` or `none`; `SUPERVISOR` is the supervisor's
+pid and type (or `spawned by <pid>`); `POLICY` is shown for a supervisor only:
+strategy, restarts currently held out of the allowed maximum within the window,
+and its child count.
+
+### forge observe
+
+```
+forge observe [REQUEST...] [--section S]... [--json] [--socket PATH] [--env NAME]
+forge observe [--tui] [--panel NAME] [--interval MS] [--sort ATTR] [--pid PID] [--socket PATH] [--env NAME]
+forge observe --dump FILE [--panel NAME] [--json]
+forge observe --state PID [--timeout-ms MS] | --crashes-full [-n N]   [--socket PATH] [--env NAME]
+forge observe --trace-start FNS (--max-events N | --rate N/SECS) | --trace-drain ID [-n MAX] | --trace-stop ID
+```
+
+With a request, it sends it and prints the reply envelope (indented, or one
+line per host with `--json`). The request is the positional words; the first
+is upper-cased, so `forge observe actors mbox 20` works. With no words it sends
+`SNAPSHOT`; `--section` (repeatable) narrows it.
+
+```bash
+forge observe --socket /run/myapp/observe.sock                 # a terminal: the interactive view; a pipe: SNAPSHOT
+forge observe --socket /run/myapp/observe.sock --json          # SNAPSHOT, every section, one line
+forge observe --socket /run/myapp/observe.sock actors mbox 10  # the 10 deepest mailboxes
+forge observe --socket /run/myapp/observe.sock ACTOR 42
+forge observe --env prod --section mem --section crashes       # every prod host, over ssh
+forge observe --env prod TOP msgs_in 10 2000 --json
+```
+
+Exit 0 when every target answered; 1 if any failed, including an error reply
+(`error: observe: unknown_verb`).
+
+**With no request, on a terminal** (or with `--tui`), `forge observe` opens the
+interactive view instead of printing JSON. Scripts that pipe its output are
+unaffected: without a terminal, or with `--json`, a request, or `--section`, it
+behaves as above.
+
+The `--state`, `--crashes-full` and `--trace-*` forms are debug-tier requests;
+`forge` signs them for you. See
+[the debug tier](#the-debug-tier-signed-requests) and
+[tracing](#tracing-boundary-calls).
+
+#### The interactive view
+
+One screen on one node, fed by a single [`WATCH`](#watch) stream (every
+`--interval` ms, default 1000, at least 250) plus, for the panel on screen, one
+short request on a second connection. For a remote host both go through one ssh
+tunnel, opened when the host is selected and closed when you move on; ssh's
+own messages are discarded so they cannot draw over the screen. When the stream
+ends (3600 frames) or the node restarts, the view reconnects.
+
+| Panel (key) | Reads | Shows |
+|---|---|---|
+| System (1) | `SNAPSHOT` | node, sample time, actors and queued messages, RSS, schedulers, code epoch, crashes in the last hour |
+| Load (2) | `SNAPSHOT` | per-scheduler busy bar and counters, a mean-busy sparkline over the frames received, run queue, drops, heap objects |
+| Actors (3) | `TOP <sort> 100` | the same table as `forge top`, supervision columns included; `s` cycles the ranking (mbox, stack, crashes, slices, msgs_in, msgs_out; counters are cumulative here) |
+| Actor (4) | `ACTOR <pid>` | one actor; Enter on a row of Actors, Supervision or Crashes opens it. State and mailbox need the debug tier: `forge observe --state PID` |
+| Supervision (5) | `SNAPSHOT` | the tree, crashes per node, kids; Enter opens the actor |
+| Names (6) | `SNAPSHOT` | registered names |
+| Epochs (7) | `SNAPSHOT` | current epoch, pins and drains, hot-reload slots with their impl hashes and ages, reload counters: the panel a deploy is watched from |
+| Cluster (8) | `CLUSTER` | members and SWIM state when the node publishes a cluster section; otherwise it says so (no `CLUSTER` verb exists yet: `specs/todos/2026-10-02-observe-r1-cluster-section.md`) |
+| Crashes (9) | `SNAPSHOT` | the crash ring, newest first; panic text only in a crash dump |
+
+Keys: `q` or Esc quit; `1`-`9` or Tab switch panel; Up/Down, `j`/`k`, PgUp/PgDn,
+Home/End move the selection; Enter opens the selected actor; `s` re-ranks Actors;
+`n` cycles the hosts of `--env` (several `[[hot-reload.env]]` entries); `r`
+refreshes the panel's own request. There is no Trace panel yet (see
+[what is not there yet](#what-is-not-there-yet)).
+
+`--panel NAME` prints one panel as text and exits (system, load, actors, actor,
+supervision, names, epochs, cluster, crashes), for logs and scripts:
+
+```
+$ forge observe --socket /run/myapp/observe.sock --panel supervision
+6 actors; trees below, supervisors first
+1 Boss [boss]   waiting  mbox 0  1 kids  crashes(1h) 3
+  +- 4 Fragile   waiting  mbox 0
+...
+```
+
+#### Crash dumps
+
+A node started with `MARCH_CRASH_DUMP=/var/crash/web-1.json` writes one JSON
+document there when it dies of an **unsupervised panic** or of one of the
+runtime's own **fatal errors** (reference-count underflow, an internal invariant,
+out of memory in the runtime). The file is written to `<path>.tmp` and renamed, so
+it is either absent or complete, with mode 0600:
+
+```json
+{"proto":"march.observe.dump/1","reason":"panic","at_ms":1791743698380,"pid":19089,
+ "snapshot": { ...the SNAPSHOT envelope, every section... },
+ "crashes_total":4,
+ "crashes_full":[{"seq":4,"kind":"panic","pid":null,"message":"cannot parse config", ...}, ...]}
+```
+
+`snapshot` is exactly what `SNAPSHOT` returned at that moment. `crashes_full`
+is the crash ring **with the panic text** that no live observe verb carries: the
+dump is operator-owned, not served on a socket, and the panic text can hold
+payloads, so treat the file like a log. `reason` is `panic`, or the name of the
+runtime function that aborted.
+
+Read it with:
+
+```bash
+forge observe --dump web-1.json                  # the panels, as text (a terminal: the interactive view)
+forge observe --dump web-1.json --panel crashes  # panic text included
+forge observe --dump web-1.json --json
+forge diagnose --from-dump web-1.json            # findings; exit 0/1/2 as for a live node
+```
+
+Panels that need a question asked of a live node (Actor, Cluster) are greyed.
+`forge diagnose --from-dump` has one snapshot, so the checks that compare two
+(`mailbox.growth`, `rc.climb`) find nothing; `crash.loop`, `mailbox.over_limit`,
+`sched.*` and `epoch.*` still do. (`forge diagnose --dump FILE`, which *writes* a
+before/after pair, is unchanged; reading a crash dump is `--from-dump`.)
+
+**What does not produce a dump, and why.** The dump builds JSON, which allocates,
+and takes the actor-table lock; neither is safe from a signal handler that may
+have interrupted the allocator or that lock. So no signal handler ever writes it:
+
+- a `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` (a miscompile, a stack overflow
+  past the guard page), `SIGKILL`, the kernel's out-of-memory kill, or `abort()`
+  from the C library or a linked library (glibc's heap checks, a sanitizer
+  report) leave **no dump**;
+- a fatal runtime error that happens inside a reclamation critical section or on
+  a signal stack skips it too (the data it would walk may be mid-update);
+- a panic inside a supervised actor is not fatal and does not dump (the
+  supervisor restarts it; it is in the crash ring of the next dump).
+
+Even where a dump is attempted, the dying thread does not write it: it hands the
+work to a helper thread created at startup and waits for it at most
+`MARCH_CRASH_DUMP_TIMEOUT_MS` (default 3000), then dies regardless. A helper
+stuck behind a lock the dying thread holds costs the dump, never the exit; a
+timed-out dump leaves at worst `<path>.tmp`, never a truncated `<path>`. A path
+that cannot be written (no such directory) also costs only the dump. An
+unwritten dump is not an error anywhere: if there is no file, the node died some
+other way.
+
+### On the host: the release launcher
+
+A bundle built with `forge release build` (see [tooling](tooling.md#release-bundles-forge-release-build))
+carries a `bin/<app>` launcher that sets `MARCH_HOT_RELOAD_SOCKET` (hot-reload
+builds) or `MARCH_OBSERVE_SOCKET` to `run/<app>.sock[.observe]` and speaks the
+protocol itself: `bin/<app> ping` sends `PING`, `version` and `status` send
+`EPOCHS` and `MEM`. It needs `nc -U`, `socat` or `python3` on the host for that.
+`bin/<app> observe` and `diagnose` run `forge observe --socket` /
+`forge diagnose --socket` when `forge` is installed there.
+
+---
+
+## Reading diagnose findings
+
+Each check compares the **before** and **after** snapshots. Thresholds below are
+exact, from `forge/lib/diagnose.ml`; `stdlib/diagnose.march` implements the same
+checks with the same thresholds, and both are tested against the same fixtures.
+"Waiting work" is `mbox + held`.
+
+### mailbox.growth
+
+**Fires when** an actor's waiting work rose across the window (any increase) and
+is at least 10 in the after snapshot. **Critical** if one of those actors holds
+more than half of the node's queued messages and the node has 100 or more
+queued; **warning** otherwise. The rows are the five that grew most, with their
+depth and growth (`delta`).
+
+**Usually means** a consumer slower than its producers: a handler blocked on
+something slow (a call, I/O, a sleep), a hot actor everyone sends to, or a
+consumer that crashed and restarted and is catching up. A large `held` with
+`mbox` near 0 means the actor is waiting in an `Actor.call` while work piles up
+behind it.
+
+**Next:** `forge observe ACTORS mbox 20`, then `ACTOR <pid>` for the deepest.
+Look at its `status` (is it running, or waiting?), `idle_ms` (has it run
+lately?), and `held`. `forge top --sort msgs_in` tells you whether it is still
+draining at all. If the queue is bounded by design, give the actor a mailbox
+limit and a policy rather than letting it grow.
+
+### mailbox.over_limit
+
+**Fires when** an actor with a mailbox limit and a `drop_new` or `drop_old`
+policy has waiting work at or over its limit, **and** the node's dropped-message
+total (`SCHED`'s `msgs_dropped`) rose during the window. **Warning.** Actors with
+the `block` policy never trip it (their senders wait instead).
+
+**Usually means** the node is shedding load: messages to that actor are being
+discarded. This is the policy working, but someone is losing messages.
+
+**Next:** decide whether dropping is acceptable. If not, raise the limit, add
+consumers, or slow the producers upstream. This check is *partial*: per-actor
+drop counts are not tracked, so a drop elsewhere on the node in the same window
+also satisfies the second condition.
+
+### sched.saturated
+
+**Fires when** some scheduler was more than 95% busy over the window (idle time
+under 5% of the wall time between the snapshots) **and** the node's run queue was
+non-empty in the after snapshot. **Warning.**
+
+**Usually means** the node is CPU-bound: there is runnable work and no idle
+scheduler to take it. Latency rises for everything on that node.
+
+**Next:** `forge observe TOP slices 10 1000` shows who is being dispatched most
+(or `forge top --sort slices`). A single actor at the top is a hot spot to
+split or shard; a broad spread means the node needs more cores or less work.
+
+### sched.idle_imbalance
+
+**Fires when** the node has at least two schedulers with data, one more than
+80% busy over the window and another less than 20% busy. **Warning.**
+
+**Usually means** one scheduler carries the load. Common causes: work pinned to
+scheduler 0 (the main thread: `pinned: true` in the rows), or one hot actor,
+which can only run on one scheduler at a time. On a lightly loaded node with one
+busy actor this fires and is harmless.
+
+**Next:** `forge observe ACTORS status 20` and look at `sched` and `pinned` on
+the running actors; `TOP slices 10 1000` for the hot one.
+
+### crash.loop
+
+**Fires when** the crash ring holds 3 or more crashes with the same supervisor.
+**Critical** if 3 or more fall in the last minute (before the after snapshot's
+time); **warning** if 3 or more fall in the last hour. Rows are the supervisors
+and their counts. Only supervised crashes count (an unsupervised panic has no
+supervisor), and only the 20 most recent ring entries are read (the snapshot's
+`crashes` section).
+
+**Usually means** a child that cannot start or keeps hitting the same bad input.
+When the supervisor exhausts `max_restarts` within its window, it gives up and
+the failure moves up the tree.
+
+**Next:** `forge observe CRASHES 20` for the kinds, pids and restart numbers, then
+`ACTOR <supervisor>` for its strategy, `max_restarts`, and how many restarts it
+is currently holding (`restarts_held`, `restart_ages_ms`). The panic text is not
+available from the observe tier; check the program's own logs, or
+`forge observe --crashes-full` if the node allows it.
+
+### rc.climb
+
+**Fires when** live heap objects (`MEM`'s `live_objects`) were at least 1000
+before and grew by more than 10% across the window, **while** the actor count
+stayed within 5%. **Warning.** Never fires under the interpreter (no gauge).
+
+**Usually means** memory is being held with no new actors to explain it: a leak,
+a cache without a bound, or messages piling up. Queued messages are heap
+objects, so this often fires together with `mailbox.growth`; fix that first and
+see whether this one goes away.
+
+**Next:** take `forge observe --section mem` a few times over minutes. A steady
+climb with flat `queued_messages` and flat actors is a leak worth a bug report.
+A one-window spike that settles is usually a burst of work.
+
+### epoch.stuck
+
+**Fires when** any pinned hot-reload epoch is marked draining. **Warning.**
+
+**Usually means** a deploy is still waiting for actors to leave old code: a
+long-running handler, or an actor that never receives the migrate marker.
+
+**Next:** `forge hot-reload status`; then `forge observe ACTORS epoch 20` lists
+the actors on the oldest epoch first.
+
+### epoch.old_units
+
+**Fires when** some epoch two or more behind the current one still has pins.
+**Warning.**
+
+**Usually means** units still run code two or more deploys old, which every
+later deploy's drain has to wait for.
+
+**Next:** `forge observe ACTORS epoch 20` to find them, and `ACTOR <pid>` for
+what they are doing.
+
+### Coverage
+
+The envelope's `coverage` says what was and was not checked, so an empty
+`findings` list is never read as "healthy" for things nobody looked at:
+
+- `ran`: every check above.
+- `unavailable`: `cluster.suspect` (the snapshot has no cluster section yet, so
+  unreachable or suspect peers are not reported) and `names.lost` (global
+  registry `Lost` events are not recorded).
+- `partial`: `mailbox.over_limit`, which uses the node's total dropped count
+  because per-actor drop counts are not tracked.
+
+Two more limits come from the snapshot itself: its `actors` section is the 100
+deepest mailboxes (so `mailbox.growth` sees at most those), and its `crashes`
+section is the last 20 crashes (so `crash.loop` sees at most those).
+
+---
+
+## From inside a program: Recon and Diagnose
+
+The stdlib modules `Recon` and `Diagnose` ask the same questions from March
+code, in-process, on both the interpreter and compiled code. Every function
+takes a `Cap(Actor.Introspect)`, which `main` mints from its `IO` capability
+with `Actor.introspect(io)`; a module that names the capability declares
+`needs Actor.Introspect`. Nothing here returns a panic message.
+
+| Function | Returns |
+|---|---|
+| `Recon.info(c, pid)` | `Option(ActorInfo)`: one live actor (`None` if dead or never spawned) |
+| `Recon.actors(c)` | `List(ActorInfo)`, deepest mailbox first (at most 10 000) |
+| `Recon.proc_count(c, attr, n)` | `List((Int, Int))`: (pid, value), highest first; counters are cumulative |
+| `Recon.top(c, attr, n)` | `List(TopRow)`: the `n` biggest actors by `attr` (`mbox` or `mailbox`, `stack`, `crashes`, or a cumulative counter), each with `value`, `mbox`, `stack_bytes`, `link`, `parent`, `parent_type`, `spawned_by`, `children`, `crashes`, `child_crashes` and `supervision` (`Some({policy, limit, window_secs, held})` for a supervisor); ties by pid |
+| `Recon.print_top(c, attr, n)` | prints `top` as an aligned table (the shell one-liner) |
+| `Recon.format_top(rows)` | the table as a `String` |
+| `Recon.proc_window(c, attr, n, window_ms)` | the same, ranked by the rise over the window (`slices`, `msgs_in`, `msgs_out`) |
+| `Recon.tree(c)` | `List(SupNode)`: `SupNode(pid, type, names, children)` |
+| `Recon.node_stats(c)` | `NodeStats`: actors, queued, `rss_bytes`, `live_objects`, schedulers, `crashes_total` |
+| `Recon.crashes(c, n)` | `List(CrashReport)`: seq, kind, pid, type, supervisor, restart, at_ms |
+| `Recon.epochs(c)` | `EpochReport`: current epoch and (epoch, pins) pairs |
+| `Recon.which(c, name)` | `Result(FnVersion, String)`: `impl_hash`, `baseline_hash`, `patched`, `epoch`, `activated_at_ms` of a reloadable function (`Err("not_found")` if `name` is no slot) |
+| `Recon.source(d, name)` | `Result(String, String)`: the running version's source; needs `Cap(Actor.Debug)` and `SOURCE` in `$MARCH_DEBUG_POLICY` (`Err("policy")`, `Err("no_source")`) |
+| `Recon.scheduler_usage(c, window_ms)` | `List((Int, Float))`: (scheduler id, fraction busy) |
+| `Diagnose.run(c, window_ms)` | `List(Finding)`: the `forge diagnose` findings for this program |
+| `Diagnose.findings(before, after)` | the same over two `SNAPSHOT` envelopes you already have |
+
+`ActorInfo` carries `pid`, `type_name`, `names`, `status`, `mbox`, `held`,
+`parent`, `children`, `slices`, `msgs_in`, `msgs_out`, `crashes` and
+`child_crashes`, with the meanings in the [row table](#actors). A
+`Diagnose.Finding` is `{ id, severity, rows, next }`, where `rows` is a list of
+pids (or scheduler ids, supervisor pids, epochs) rather than forge's objects.
+
+The windowed functions (`proc_window`, `scheduler_usage`, `Diagnose.run`) take
+two samples and sleep the **calling** green thread between them, so call them
+from a task or an actor that can afford to wait, not from a hot handler.
+
+The debug-tier calls (`Actor.inspect_state`, the `Trace` module,
+`Recon.source`) take a `Cap(Actor.Debug)` instead, minted with
+`Actor.debug(io)`; see [the debug tier](#the-debug-tier-signed-requests).
+
+A node report from `main`:
+
+```march
+mod Main do
+  needs IO
+  needs IO.Console
+  needs Actor.Introspect
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on Work(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  fn report(c : Cap(Actor.Introspect)) do
+    let ns = Recon.node_stats(c)
+    println("actors " ++ int_to_string(ns.actors) ++ ", queued " ++ int_to_string(ns.queued))
+    match ns.rss_bytes do
+      Some(b) -> println("rss " ++ int_to_string(b / 1048576) ++ " MB")
+      None -> println("rss unknown (interpreter)")
+    end
+    -- The three deepest mailboxes, as (pid, waiting).
+    List.each(Recon.proc_count(c, "mbox", 3), fn p ->
+      match p do
+        (pid, depth) ->
+          let label = match Recon.info(c, pid) do
+            Some(a) -> String.join(a.names, ",")
+            None -> "(gone)"
+          end
+          println("  pid " ++ int_to_string(pid) ++ " " ++ label ++ ": " ++ int_to_string(depth))
+      end)
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    let w = spawn(Worker)
+    let _r = Actor.register(w, "worker")
+    let _ = send(w, Work(1))
+    report(c)
+  end
+end
+```
+
+Rates, scheduler load and recent crashes:
+
+```march
+mod Main do
+  needs IO
+  needs IO.Console
+  needs Actor.Introspect
+
+  fn busiest(c : Cap(Actor.Introspect)) do
+    -- Who handled the most messages over the next half second.
+    List.each(Recon.proc_window(c, "msgs_in", 5, 500), fn p ->
+      match p do
+        (pid, n) -> println(int_to_string(pid) ++ ": " ++ int_to_string(n) ++ " in 500 ms")
+      end)
+    -- How busy each scheduler was over the next second.
+    List.each(Recon.scheduler_usage(c, 1000), fn s ->
+      match s do
+        (id, u) -> println("scheduler " ++ int_to_string(id) ++ ": " ++ float_to_string(u))
+      end)
+    -- Recent crashes: how, where, and which restart, never the message.
+    List.each(Recon.crashes(c, 5), fn cr ->
+      let sup = match cr.supervisor do
+        Some(s) -> int_to_string(s)
+        None -> "none"
+      end
+      println(cr.kind ++ " under " ++ sup ++ ", restart " ++ int_to_string(cr.restart)))
+  end
+
+  fn main(io : Cap(IO)) do
+    busiest(Actor.introspect(io))
+  end
+end
+```
+
+A self-check, for a health endpoint or a periodic task:
+
+```march
+mod Main do
+  needs IO
+  needs IO.Console
+  needs Actor.Introspect
+
+  fn check(c : Cap(Actor.Introspect)) : Bool do
+    let fs = Diagnose.run(c, 1000)
+    List.each(fs, fn f ->
+      println(f.severity ++ " " ++ f.id ++ ": " ++ f.next))
+    List.any(fs, fn f -> f.severity == "critical")
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    if check(c) do
+      println("critical finding")
+    else
+      println("healthy")
+    end
+  end
+end
+```
 
 ---
 
@@ -122,6 +837,10 @@ Error codes:
 | `windowed_in_process` | A windowed `SCHED` or `TOP` was asked in-process (through `Recon`/`observe_query`): the window would sleep a scheduler thread. `Recon` takes its windows differently; you only see this if you build the request yourself. |
 | `out_of_memory` | The node could not allocate the reply. |
 
+The debug-tier verbs add their own codes (`signing_not_configured`,
+`bad_signature`, `wrong_boot`, `expired`, `replay`, `policy`, and the tracing
+codes); they are listed with the verbs below.
+
 ---
 
 ## The verbs
@@ -143,17 +862,17 @@ Error codes:
 | `SCHED` | `[window_ms]` | scheduler threads, utilisation, scheduler counters |
 | `MEM` | | RSS, peak RSS, live heap objects, queued messages |
 | `EPOCHS` | | hot-reload epochs, pins, dispatch slots, reload counters |
-| `WHICH` | `<name>` | which version of a reloadable function runs: `impl_hash`, baseline, epoch, `activated_at_ms` |
+| `WHICH` | `<name>` | which version of a reloadable function runs: `impl_hash`, baseline, epoch, `activated_at_ms` ([below](#which-code-is-running-which-and-source)) |
 | `CRASHES` | `[n]` | the last `n` crashes, without messages |
 | `TOP` | `<attr> <n> [window_ms]` | the `n` actors highest on one attribute |
 | `SNAPSHOT` | `[sections]` | several of the above from one actor walk |
+| `WATCH` | `<sections> <interval_ms> <max>` | a stream of `SNAPSHOT`s ([below](#watch)); socket only |
 | `HELLO` | | this process's `boot` id and whether `signing` is configured; what a client needs before it signs |
 | `STATE` | `<sig> nonce:… boot:… not_after_ms:… pid:<p> [timeout_ms:<t>]` | debug tier: one actor's state ([below](#the-debug-tier-signed-requests)) |
 | `CRASHES_FULL` | `<sig> nonce:… boot:… not_after_ms:… [n:<n>]` | debug tier: `CRASHES` with each crash's message |
 | `TRACE_START` | `<sig> nonce:… boot:… not_after_ms:… (count:<n> \| rate:<n> per_s:<s>) [fn:<a,b,…>] [events:<k,…> pids:<p,…>] [ring:<r>]` | debug tier: start a bounded trace of boundary calls and/or actor events ([below](#tracing-boundary-calls)) |
 | `TRACE_DRAIN` | `<sig> nonce:… boot:… not_after_ms:… session:<id> [max:<n>]` | debug tier: the events a trace session has recorded |
 | `TRACE_STOP` | `<sig> nonce:… boot:… not_after_ms:… session:<id>` | debug tier: stop and free a trace session |
-| `WATCH` | `<sections> <interval_ms> <max>` | a stream of `SNAPSHOT`s ([below](#watch)); socket only |
 | `SOURCE` | `<sig> nonce:… boot:… not_after_ms:… name:<fn>` | debug tier: the source text of the version of a function that runs now ([below](#which-code-is-running-which-and-source)) |
 
 The example replies below are real output from
@@ -244,7 +963,7 @@ A dead actor answers with the kind of death and nothing else:
 
 The panic message is never shown here or anywhere in the observe tier: panic
 strings can carry payloads (tokens, user data). It is kept in the node's crash
-ring for the planned debug tier.
+ring for the debug tier's `CRASHES_FULL`.
 
 ### TREE
 
@@ -342,8 +1061,8 @@ ring keeps 256).
 | `at_ms` | Wall-clock time, Unix milliseconds. |
 
 There is no message field, by design: the observe tier never returns panic
-text. The ring keeps the message for the planned debug tier, which will need a
-separate capability.
+text. The ring keeps the message for `CRASHES_FULL`, which needs a signed
+request.
 
 ### TOP
 
@@ -403,7 +1122,6 @@ Each section is that verb's data, with fixed arguments: `actors` is
 `ACTORS mbox 100`, `sched` is `SCHED 0` (lifetime only, never sleeps), `crashes`
 is `CRASHES 20`. This is what `forge diagnose` and `forge status` read.
 
-
 ### WATCH
 
 `WATCH <sections> <interval_ms> <max>` turns the connection into a stream: the
@@ -416,7 +1134,7 @@ frame is an ordinary envelope plus two fields, `"seq"` (1-based) and `"of"`
 printf 'WATCH mem,sched 1000 5\n' | nc -U /run/myapp/observe.sock
 ```
 
-The bounds are part of the contract:
+The bounds:
 
 | | |
 |---|---|
@@ -437,8 +1155,8 @@ its only frame. Over `observe_query` (inside the program) `WATCH` answers
 
 The verbs above show counts, never data. Three more show data: `STATE` (an
 actor's state), `CRASHES_FULL` (crashes with their panic messages) and
-`SOURCE` (the text of a function's source). A node
-answers them only when all of these hold:
+`SOURCE` (the text of a function's source). The tracing verbs are gated the
+same way. A node answers them only when all of these hold:
 
 1. **It was built with a deploy key**: `march --compile --hot-reload <Mod>
    --signing-pubkey <base64>`, the same key `forge deploy hot` signs patches
@@ -466,8 +1184,8 @@ answers them only when all of these hold:
 
 The checks run in that order (`signing_not_configured`, `bad_args`,
 `bad_signature`, `wrong_boot`, freshness, `policy`): an unsigned client learns
-nothing about the policy. Every attempt, allowed or not, appends a line to the audit log the
-reload server writes (`$MARCH_AUDIT_LOG`, default
+nothing about the policy. Every attempt, allowed or not, appends a line to the
+audit log the reload server writes (`$MARCH_AUDIT_LOG`, default
 `~/.local/share/march/audit.jsonl`):
 
 ```json
@@ -477,8 +1195,16 @@ reload server writes (`$MARCH_AUDIT_LOG`, default
 
 `detail` appears on the trace verbs (the session, the limit, how many
 functions, whether actor events were asked for and how many pids; a refused
-start says the same). An in-process caller (`Trace` from March code) is audited with
-`"signer":"in-process"`.
+start says the same). An in-process caller (`Trace` from March code) is audited
+with `"signer":"in-process"`.
+
+**In-process, the capability stands in for the signature.** From March code,
+`Actor.inspect_state`, the `Trace` module and `Recon.source` take a
+`Cap(Actor.Debug)` (`Actor.debug(io)`, or `debug` in the remote shell). No
+signature is needed, but `$MARCH_DEBUG_POLICY` must still list the verb, and
+every attempt is audited with the signer `in-process`.
+
+### STATE and CRASHES_FULL
 
 `forge observe` builds and signs these requests for you:
 
@@ -489,11 +1215,9 @@ forge observe --env prod --crashes-full --count 50
 ```
 
 `forge` fetches the node's `HELLO` first and signs its `boot` id into the
-request, once per target.
-
-It signs with `~/.march/ed25519_secret.key` and makes each request valid for
-30 s, so a node whose clock differs by more than 30 s refuses it. forge then
-says which way the clock is off.
+request, once per target. It signs with `~/.march/ed25519_secret.key` and makes
+each request valid for 30 s, so a node whose clock differs by more than 30 s
+refuses it. forge then says which way the clock is off.
 
 A `STATE` reply's `data` is `{"pid":42,"state":"{ n: 5, tags: [x] }","error":null}`.
 `state` is exactly what `Actor.inspect_state` returns inside the program: the
@@ -653,8 +1377,9 @@ is not reported. `Sent` carries the sender's pid only for a sender that is an
 actor. Nothing is recorded on the interpreter, which has no hooks yet
 (`tracing_unavailable`).
 
-From March code, with the debug capability (`Actor.debug(io)`, or `debug` in the
-remote shell):
+### Tracing from March code
+
+With the debug capability (`Actor.debug(io)`, or `debug` in the remote shell):
 
 ```march
 match Trace.start(debug, ["Billing.charge"], Trace.MaxEvents(10)) do
@@ -694,8 +1419,10 @@ boundary calls and `actor_events` the rest.
 The in-process calls need no signature (holding `Cap(Actor.Debug)` stands in
 for it, as for `Actor.inspect_state`), but `$MARCH_DEBUG_POLICY` must still list
 `TRACE_START`, `TRACE_DRAIN` and `TRACE_STOP`: they answer `Unavailable(policy)`
-otherwise. They share the same sessions and limits. Under the interpreter, and in a build without `--hot-reload`, they
-answer `Unavailable("tracing_unavailable")` or `UnknownFunction`.
+otherwise. They share the same sessions and limits. Under the interpreter, and
+in a build without `--hot-reload`, they answer
+`Unavailable("tracing_unavailable")` or `UnknownFunction`.
+
 ## Which code is running: WHICH and SOURCE
 
 After a hot deploy, "which version of `Billing.price` is this node running?"
@@ -718,10 +1445,10 @@ without `--hot-reload`) answers `not_found`.
 **`SOURCE <sig> nonce:… boot:… not_after_ms:… name:<fn>`** (debug tier) returns the text
 of the version `WHICH` names: `{"name":…,"impl_hash":…,"epoch":…,"source":"fn
 price(qty : Int) : Int do\n  qty * 12 + 1\nend"}`. It is signed, fresh and
-policy-gated exactly like `STATE` (see the next section), and `forge observe`
-does not send it yet. `$MARCH_DEBUG_POLICY` must list `SOURCE`. Source is
-debug tier because it is the program's own text: comments, names, and
-whatever a developer left in a function.
+policy-gated exactly like `STATE` (see [the debug tier](#the-debug-tier-signed-requests)),
+and `forge observe` does not send it yet. `$MARCH_DEBUG_POLICY` must list
+`SOURCE`. Source is debug tier because it is the program's own text: comments,
+names, and whatever a developer left in a function.
 
 The text is the function's declaration, from its first token to where the next
 declaration starts (so a multi-clause function is whole and comments written
@@ -757,628 +1484,6 @@ caller's `Cap(Actor.Debug)` stands in for the signature, as it does for
 `Actor.inspect_state`, but `$MARCH_DEBUG_POLICY` must still list `SOURCE`
 (`Err("policy")` otherwise), and every attempt is audited with the signer
 `in-process`.
-
-## The forge commands
-
-All four take a target the same way:
-
-- `--socket PATH`: a local observe socket (the program's `MARCH_OBSERVE_SOCKET`).
-- otherwise the `[hot-reload]` hosts in `forge.toml`, reached over ssh at
-  `<reload socket>.observe`; `--env NAME` picks the `[[hot-reload.env]]`
-  entries with that name. `forge status` also reads `topology.toml`.
-
-### forge observe
-
-```
-forge observe [REQUEST...] [--section S]... [--json] [--socket PATH] [--env NAME]
-forge observe [--tui] [--panel NAME] [--interval MS] [--sort ATTR] [--pid PID] [--socket PATH] [--env NAME]
-forge observe --dump FILE [--panel NAME] [--json]
-forge observe --state PID [--timeout-ms MS] | --crashes-full [-n N]   [--socket PATH] [--env NAME]
-forge observe --trace-start FNS (--max-events N | --rate N/SECS) | --trace-drain ID [-n MAX] | --trace-stop ID
-```
-
-With a request, sends it and prints the reply envelope (indented, or one line per
-host with `--json`). The request is the positional words; the first is
-upper-cased, so `forge observe actors mbox 20` works. With no words it sends
-`SNAPSHOT`; `--section` (repeatable) narrows it.
-
-```bash
-forge observe --socket /run/myapp/observe.sock                 # a terminal: the interactive view; a pipe: SNAPSHOT
-forge observe --socket /run/myapp/observe.sock --json          # SNAPSHOT, every section, one line
-forge observe --socket /run/myapp/observe.sock actors mbox 10  # the 10 deepest mailboxes
-forge observe --socket /run/myapp/observe.sock ACTOR 42
-forge observe --env prod --section mem --section crashes       # every prod host, over ssh
-forge observe --env prod TOP msgs_in 10 2000 --json
-```
-
-Exit 0 when every target answered; 1 if any failed, including an error reply
-(`error: observe: unknown_verb`).
-
-**With no request, on a terminal** (or with `--tui`), `forge observe` opens the
-interactive view instead of printing JSON. Scripts that pipe its output are
-unaffected: without a terminal, or with `--json`, a request, or `--section`, it
-behaves as above.
-
-#### The interactive view
-
-One screen on one node, fed by a single [`WATCH`](#watch) stream (every
-`--interval` ms, default 1000, at least 250) plus, for the panel on screen, one
-short request on a second connection. For a remote host both go through one ssh
-tunnel, opened when the host is selected and closed when you move on; ssh's
-own messages are discarded so they cannot draw over the screen. When the stream
-ends (3600 frames) or the node restarts, the view reconnects.
-
-| Panel (key) | Reads | Shows |
-|---|---|---|
-| System (1) | `SNAPSHOT` | node, sample time, actors and queued messages, RSS, schedulers, code epoch, crashes in the last hour |
-| Load (2) | `SNAPSHOT` | per-scheduler busy bar and counters, a mean-busy sparkline over the frames received, run queue, drops, heap objects |
-| Actors (3) | `TOP <sort> 100` | the same table as `forge top`, supervision columns included; `s` cycles the ranking (mbox, stack, crashes, slices, msgs_in, msgs_out; counters are cumulative here) |
-| Actor (4) | `ACTOR <pid>` | one actor; Enter on a row of Actors, Supervision or Crashes opens it. State and mailbox need the debug tier: `forge observe --state PID` |
-| Supervision (5) | `SNAPSHOT` | the tree, crashes per node, kids; Enter opens the actor |
-| Names (6) | `SNAPSHOT` | registered names |
-| Epochs (7) | `SNAPSHOT` | current epoch, pins and drains, hot-reload slots with their impl hashes and ages, reload counters: the panel a deploy is watched from |
-| Cluster (8) | `CLUSTER` | members and SWIM state when the node publishes a cluster section; otherwise it says so (no `CLUSTER` verb exists yet: `specs/todos/2026-10-02-observe-r1-cluster-section.md`) |
-| Crashes (9) | `SNAPSHOT` | the crash ring, newest first; panic text only in a crash dump |
-
-Keys: `q` or Esc quit; `1`-`9` or Tab switch panel; Up/Down, `j`/`k`, PgUp/PgDn,
-Home/End move the selection; Enter opens the selected actor; `s` re-ranks Actors;
-`n` cycles the hosts of `--env` (several `[[hot-reload.env]]` entries); `r`
-refreshes the panel's own request. The Trace panel arrives with tracing (R8).
-
-`--panel NAME` prints one panel as text and exits (system, load, actors, actor,
-supervision, names, epochs, cluster, crashes), for logs and scripts:
-
-```
-$ forge observe --socket /run/myapp/observe.sock --panel supervision
-6 actors; trees below, supervisors first
-1 Boss [boss]   waiting  mbox 0  1 kids  crashes(1h) 3
-  +- 4 Fragile   waiting  mbox 0
-...
-```
-
-#### Crash dumps
-
-A node started with `MARCH_CRASH_DUMP=/var/crash/web-1.json` writes one JSON
-document there when it dies of an **unsupervised panic** or of one of the
-runtime's own **fatal errors** (reference-count underflow, an internal invariant,
-out of memory in the runtime). The file is written to `<path>.tmp` and renamed, so
-it is either absent or complete, with mode 0600:
-
-```json
-{"proto":"march.observe.dump/1","reason":"panic","at_ms":1791743698380,"pid":19089,
- "snapshot": { ...the SNAPSHOT envelope, every section... },
- "crashes_total":4,
- "crashes_full":[{"seq":4,"kind":"panic","pid":null,"message":"cannot parse config", ...}, ...]}
-```
-
-`snapshot` is exactly what `SNAPSHOT` returned at that moment. `crashes_full`
-is the crash ring **with the panic text** that no live observe verb carries: the
-dump is operator-owned, not served on a socket, and the panic text can hold
-payloads, so treat the file like a log. `reason` is `panic`, or the name of the
-runtime function that aborted.
-
-Read it with:
-
-```bash
-forge observe --dump web-1.json                  # the panels, as text (a terminal: the interactive view)
-forge observe --dump web-1.json --panel crashes  # panic text included
-forge observe --dump web-1.json --json
-forge diagnose --from-dump web-1.json            # findings; exit 0/1/2 as for a live node
-```
-
-Panels that need a question asked of a live node (Actor, Cluster) are greyed.
-`forge diagnose --from-dump` has one snapshot, so the checks that compare two
-(`mailbox.growth`, `rc.climb`) find nothing; `crash.loop`, `mailbox.over_limit`,
-`sched.*` and `epoch.*` still do. (`forge diagnose --dump FILE`, which *writes* a
-before/after pair, is unchanged; reading a crash dump is `--from-dump`.)
-
-**What does not produce a dump, and why.** The dump builds JSON, which allocates,
-and takes the actor-table lock; neither is safe from a signal handler that may
-have interrupted the allocator or that lock. So no signal handler ever writes it:
-
-- a `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` (a miscompile, a stack overflow
-  past the guard page), `SIGKILL`, the kernel's out-of-memory kill, or `abort()`
-  from the C library or a linked library (glibc's heap checks, a sanitizer
-  report) leave **no dump**;
-- a fatal runtime error that happens inside a reclamation critical section or on
-  a signal stack skips it too (the data it would walk may be mid-update);
-- a panic inside a supervised actor is not fatal and does not dump (the
-  supervisor restarts it; it is in the crash ring of the next dump).
-
-Even where a dump is attempted, the dying thread does not write it: it hands the
-work to a helper thread created at startup and waits for it at most
-`MARCH_CRASH_DUMP_TIMEOUT_MS` (default 3000), then dies regardless. A helper
-stuck behind a lock the dying thread holds costs the dump, never the exit; a
-timed-out dump leaves at worst `<path>.tmp`, never a truncated `<path>`. A path
-that cannot be written (no such directory) also costs only the dump. An
-unwritten dump is not an error anywhere: if there is no file, the node died some
-other way.
-
-### forge status
-
-```
-forge status [--json] [--socket PATH] [--env NAME]
-```
-
-One line per node. With a `topology.toml`, it first prints `forge topology
-status`'s report (alive, versions, drift), then the observe line for each node
-that has a socket; otherwise it reads the `[hot-reload]` hosts.
-
-```
-web-1: actors 1, queued 1550, rss 5 MB, busy 0%, crashes (1h) 0, deepest mailbox sink (pid 0) 1550
-```
-
-`busy` is the lifetime utilisation over all schedulers (since start, not now:
-use `forge diagnose` or `SCHED` for now). `crashes (1h)` counts the crashes in
-the last 20 ring entries that fall in the last hour. The deepest mailbox is
-named by its first registered name, else its type, else `?`. A node that does
-not answer prints `observe unavailable (<reason>)`. `--json` prints one
-`march.status/1` document:
-
-```json
-{"proto":"march.status/1","topology":null,"nodes":[{"name":"web-1","observe":{"actors":20,"queued":500,"rss_mb":2,"utilisation":0.0003,"crashes_hour":1,"deepest":{"pid":15,"name":"hot","waiting":500}}}]}
-```
-
-### forge top
-
-```
-forge top [--sort ATTR] [-n N] [--window MS] [--once] [--json] [--socket PATH] [--env NAME]
-```
-
-Redraws the biggest or busiest actors in place until interrupted. `--sort` is `mbox`
-(default), `stack` (committed stack bytes), `crashes`, `slices`, `msgs_in` or `msgs_out`; the last three rank the
-change over `--window` (default 1000 ms), which is also their refresh. The
-others refresh every max(1 s, 4x the time the node took to answer). `-n` is the
-row count (default 20; note it is `-n`, not `--n`). `--once` prints one frame
-with no screen control, for scripts and tickets. `--json` prints the node's
-`TOP` reply (every row with its supervision fields) as one line and exits. Over
-`--env`, it watches the first matching host, through the same ssh tunnel as the
-other observe verbs; it needs only the observe tier.
-
-The quick answer to "which actors are biggest, and who supervises them":
-`forge top --once --sort stack -n 10`, or `--sort mbox` for the deepest queues.
-
-```
-web-1  actors 20, queued 500, rss 5 MB, busy 0%, crashes (1h) 1, deepest mailbox hot (pid 16) 500
-sorted by mbox
-
-     PID  NAME                 TYPE               STATUS        MBOX     STACK       MBOX CRASHES  LINK       SUPERVISOR             POLICY (held/max in window)
-      16  hot                                     waiting        500     16384        500       0  none       -                      -
-       1                                          waiting          0     16384          0       0  supervised 4                      -
-       4  sup_one                                 waiting          0     16384          0       1  none       -                      one_for_one 1/5 in 60s, 4 kids
-```
-
-The first line is the `forge status` summary. `MBOX` is waiting work
-(`mbox + held`), `STACK` the committed stack, and the column named for the sort
-is the ranked value. `CRASHES` is the actor's own plus its children's in the last
-hour. `LINK` is `supervised`, `spawned` or `none`; `SUPERVISOR` is the supervisor's
-pid and type (or `spawned by <pid>`); `POLICY` is shown for a supervisor only:
-strategy, restarts currently held out of the allowed maximum within the window,
-and its child count.
-
-### forge diagnose
-
-```
-forge diagnose [--window MS] [--dump FILE] [--json] [--socket PATH] [--env NAME]
-```
-
-Takes two `SNAPSHOT`s `--window` apart (default 1000 ms), runs a fixed list of
-checks over the pair, and prints a `march.diagnose/1` envelope per target:
-
-```json
-{
-  "proto": "march.diagnose/1",
-  "node": "web-1",
-  "window_ms": 1000,
-  "findings": [
-    {
-      "id": "mailbox.growth",
-      "severity": "critical",
-      "rows": [ { "pid": 0, "mbox": 2066, "delta": 499, "names": [ "sink" ] } ],
-      "next": "forge observe ACTORS mbox 20, then ACTOR <pid> for the deepest"
-    }
-  ],
-  "coverage": {
-    "ran": [ "mailbox.growth", "mailbox.over_limit", "sched.saturated", "sched.idle_imbalance",
-             "crash.loop", "rc.climb", "epoch.stuck", "epoch.old_units" ],
-    "unavailable": {
-      "cluster.suspect": "no cluster section yet (observe plan R1.3)",
-      "names.lost": "global-registry Lost events are not recorded"
-    },
-    "partial": {
-      "mailbox.over_limit": "per-actor dropped counts are not tracked; the node total is used"
-    }
-  }
-}
-```
-
-Each finding has an `id`, a `severity` (`warning` or `critical`), the `rows`
-that triggered it, and `next`: the command to run next.
-
-| Exit | Meaning |
-|---|---|
-| 0 | nothing found |
-| 1 | warnings only |
-| 2 | at least one critical finding |
-| 3 | a target could not be reached |
-
-With several targets the exit code is the worst of them. `--dump FILE` also
-writes the raw before/after pair (`{"before": ..., "after": ...}`) for the first
-target, in the same format as the test fixtures in
-`forge/test/fixtures/diagnose/`: attach it to the incident, or turn it into a
-regression fixture.
-
-`forge diagnose` is a good health probe for a cron job or a deploy gate:
-
-```bash
-forge diagnose --env prod --json > diagnose.json; rc=$?
-[ "$rc" -ge 2 ] && page-someone < diagnose.json
-```
-
-### On the host: the release launcher
-
-A bundle built with `forge release build` (see [tooling](tooling.md#release-bundles-forge-release-build))
-carries a `bin/<app>` launcher that sets `MARCH_HOT_RELOAD_SOCKET` (hot-reload
-builds) or `MARCH_OBSERVE_SOCKET` to `run/<app>.sock[.observe]` and speaks the
-protocol above itself: `bin/<app> ping` sends `PING`, `version` and `status`
-send `EPOCHS` and `MEM`. It needs `nc -U`, `socat` or `python3` on the host for
-that. `bin/<app> observe` and `diagnose` run `forge observe --socket` /
-`forge diagnose --socket` when `forge` is installed there.
-
----
-
-## Reading diagnose findings
-
-Each check compares the **before** and **after** snapshots. Thresholds below are
-exact, from `forge/lib/diagnose.ml`; `stdlib/diagnose.march` implements the same
-checks with the same thresholds, and both are tested against the same fixtures.
-"Waiting work" is `mbox + held`.
-
-### mailbox.growth
-
-**Fires when** an actor's waiting work rose across the window (any increase) and
-is at least 10 in the after snapshot. **Critical** if one of those actors holds
-more than half of the node's queued messages and the node has 100 or more
-queued; **warning** otherwise. The rows are the five that grew most, with their
-depth and growth (`delta`).
-
-**Usually means** a consumer slower than its producers: a handler blocked on
-something slow (a call, I/O, a sleep), a hot actor everyone sends to, or a
-consumer that crashed and restarted and is catching up. A large `held` with
-`mbox` near 0 means the actor is waiting in an `Actor.call` while work piles up
-behind it.
-
-**Next:** `forge observe ACTORS mbox 20`, then `ACTOR <pid>` for the deepest.
-Look at its `status` (is it running, or waiting?), `idle_ms` (has it run
-lately?), and `held`. `forge top --sort msgs_in` tells you whether it is still
-draining at all. If the queue is bounded by design, give the actor a mailbox
-limit and a policy rather than letting it grow.
-
-### mailbox.over_limit
-
-**Fires when** an actor with a mailbox limit and a `drop_new` or `drop_old`
-policy has waiting work at or over its limit, **and** the node's dropped-message
-total (`SCHED`'s `msgs_dropped`) rose during the window. **Warning.** Actors with
-the `block` policy never trip it (their senders wait instead).
-
-**Usually means** the node is shedding load: messages to that actor are being
-discarded. This is the policy working, but someone is losing messages.
-
-**Next:** decide whether dropping is acceptable. If not, raise the limit, add
-consumers, or slow the producers upstream. This check is *partial*: per-actor
-drop counts are not tracked, so a drop elsewhere on the node in the same window
-also satisfies the second condition.
-
-### sched.saturated
-
-**Fires when** some scheduler was more than 95% busy over the window (idle time
-under 5% of the wall time between the snapshots) **and** the node's run queue was
-non-empty in the after snapshot. **Warning.**
-
-**Usually means** the node is CPU-bound: there is runnable work and no idle
-scheduler to take it. Latency rises for everything on that node.
-
-**Next:** `forge observe TOP slices 10 1000` shows who is being dispatched most
-(or `forge top --sort slices`). A single actor at the top is a hot spot to
-split or shard; a broad spread means the node needs more cores or less work.
-
-### sched.idle_imbalance
-
-**Fires when** the node has at least two schedulers with data, one more than
-80% busy over the window and another less than 20% busy. **Warning.**
-
-**Usually means** one scheduler carries the load. Common causes: work pinned to
-scheduler 0 (the main thread: `pinned: true` in the rows), or one hot actor,
-which can only run on one scheduler at a time. On a lightly loaded node with one
-busy actor this fires and is harmless.
-
-**Next:** `forge observe ACTORS status 20` and look at `sched` and `pinned` on
-the running actors; `TOP slices 10 1000` for the hot one.
-
-### crash.loop
-
-**Fires when** the crash ring holds 3 or more crashes with the same supervisor.
-**Critical** if 3 or more fall in the last minute (before the after snapshot's
-time); **warning** if 3 or more fall in the last hour. Rows are the supervisors
-and their counts. Only supervised crashes count (an unsupervised panic has no
-supervisor), and only the 20 most recent ring entries are read (the snapshot's
-`crashes` section).
-
-**Usually means** a child that cannot start or keeps hitting the same bad input.
-When the supervisor exhausts `max_restarts` within its window, it gives up and
-the failure moves up the tree.
-
-**Next:** `forge observe CRASHES 20` for the kinds, pids and restart numbers, then
-`ACTOR <supervisor>` for its strategy, `max_restarts`, and how many restarts it
-is currently holding (`restarts_held`, `restart_ages_ms`). The panic text is not
-available from the observe tier; check the program's own logs.
-
-### rc.climb
-
-**Fires when** live heap objects (`MEM`'s `live_objects`) were at least 1000
-before and grew by more than 10% across the window, **while** the actor count
-stayed within 5%. **Warning.** Never fires under the interpreter (no gauge).
-
-**Usually means** memory is being held with no new actors to explain it: a leak,
-a cache without a bound, or messages piling up. Queued messages are heap
-objects, so this often fires together with `mailbox.growth`; fix that first and
-see whether this one goes away.
-
-**Next:** take `forge observe --section mem` a few times over minutes. A steady
-climb with flat `queued_messages` and flat actors is a leak worth a bug report.
-A one-window spike that settles is usually a burst of work.
-
-### epoch.stuck
-
-**Fires when** any pinned hot-reload epoch is marked draining. **Warning.**
-
-**Usually means** a deploy is still waiting for actors to leave old code: a
-long-running handler, or an actor that never receives the migrate marker.
-
-**Next:** `forge hot-reload status`; then `forge observe ACTORS epoch 20` lists
-the actors on the oldest epoch first.
-
-### epoch.old_units
-
-**Fires when** some epoch two or more behind the current one still has pins.
-**Warning.**
-
-**Usually means** units still run code two or more deploys old, which every
-later deploy's drain has to wait for.
-
-**Next:** `forge observe ACTORS epoch 20` to find them, and `ACTOR <pid>` for
-what they are doing.
-
-### Coverage
-
-The envelope's `coverage` says what was and was not checked, so an empty
-`findings` list is never read as "healthy" for things nobody looked at:
-
-- `ran`: every check above.
-- `unavailable`: `cluster.suspect` (the snapshot has no cluster section yet, so
-  unreachable or suspect peers are not reported) and `names.lost` (global
-  registry `Lost` events are not recorded).
-- `partial`: `mailbox.over_limit`, which uses the node's total dropped count
-  because per-actor drop counts are not tracked.
-
-Two more limits come from the snapshot itself: its `actors` section is the 100
-deepest mailboxes (so `mailbox.growth` sees at most those), and its `crashes`
-section is the last 20 crashes (so `crash.loop` sees at most those).
-
----
-
-## From inside a program: Recon and Diagnose
-
-The stdlib modules `Recon` and `Diagnose` ask the same questions from March
-code, in-process, on both the interpreter and compiled code. Every function
-takes a `Cap(Actor.Introspect)`, which `main` mints from its `IO` capability
-with `Actor.introspect(io)`; a module that names the capability declares
-`needs Actor.Introspect`. Nothing here returns a panic message.
-
-| Function | Returns |
-|---|---|
-| `Recon.info(c, pid)` | `Option(ActorInfo)`: one live actor (`None` if dead or never spawned) |
-| `Recon.actors(c)` | `List(ActorInfo)`, deepest mailbox first (at most 10 000) |
-| `Recon.proc_count(c, attr, n)` | `List((Int, Int))`: (pid, value), highest first; counters are cumulative |
-| `Recon.top(c, attr, n)` | `List(TopRow)`: the `n` biggest actors by `attr` (`mbox` or `mailbox`, `stack`, `crashes`, or a cumulative counter), each with `value`, `mbox`, `stack_bytes`, `link`, `parent`, `parent_type`, `spawned_by`, `children`, `crashes`, `child_crashes` and `supervision` (`Some({policy, limit, window_secs, held})` for a supervisor); ties by pid |
-| `Recon.print_top(c, attr, n)` | prints `top` as an aligned table (the shell one-liner) |
-| `Recon.format_top(rows)` | the table as a `String` |
-| `Recon.proc_window(c, attr, n, window_ms)` | the same, ranked by the rise over the window (`slices`, `msgs_in`, `msgs_out`) |
-| `Recon.tree(c)` | `List(SupNode)`: `SupNode(pid, type, names, children)` |
-| `Recon.node_stats(c)` | `NodeStats`: actors, queued, `rss_bytes`, `live_objects`, schedulers, `crashes_total` |
-| `Recon.crashes(c, n)` | `List(CrashReport)`: seq, kind, pid, type, supervisor, restart, at_ms |
-| `Recon.epochs(c)` | `EpochReport`: current epoch and (epoch, pins) pairs |
-| `Recon.which(c, name)` | `Result(FnVersion, String)`: `impl_hash`, `baseline_hash`, `patched`, `epoch`, `activated_at_ms` of a reloadable function (`Err("not_found")` if `name` is no slot) |
-| `Recon.source(d, name)` | `Result(String, String)`: the running version's source; needs `Cap(Actor.Debug)` and `SOURCE` in `$MARCH_DEBUG_POLICY` (`Err("policy")`, `Err("no_source")`) |
-| `Recon.scheduler_usage(c, window_ms)` | `List((Int, Float))`: (scheduler id, fraction busy) |
-| `Diagnose.run(c, window_ms)` | `List(Finding)`: the `forge diagnose` findings for this program |
-| `Diagnose.findings(before, after)` | the same over two `SNAPSHOT` envelopes you already have |
-
-`ActorInfo` carries `pid`, `type_name`, `names`, `status`, `mbox`, `held`,
-`parent`, `children`, `slices`, `msgs_in`, `msgs_out`, `crashes` and
-`child_crashes`, with the meanings in the [row table](#actors). A
-`Diagnose.Finding` is `{ id, severity, rows, next }`, where `rows` is a list of
-pids (or scheduler ids, supervisor pids, epochs) rather than forge's objects.
-
-The windowed functions (`proc_window`, `scheduler_usage`, `Diagnose.run`) take
-two samples and sleep the **calling** green thread between them, so call them
-from a task or an actor that can afford to wait, not from a hot handler.
-
-A node report from `main`:
-
-```march
-mod Main do
-  needs IO
-  needs IO.Console
-  needs Actor.Introspect
-
-  actor Worker do
-    state { n : Int }
-    init  { n: 0 }
-    on Work(k : Int) do
-      { n: state.n + k }
-    end
-  end
-
-  fn report(c : Cap(Actor.Introspect)) do
-    let ns = Recon.node_stats(c)
-    println("actors " ++ int_to_string(ns.actors) ++ ", queued " ++ int_to_string(ns.queued))
-    match ns.rss_bytes do
-      Some(b) -> println("rss " ++ int_to_string(b / 1048576) ++ " MB")
-      None -> println("rss unknown (interpreter)")
-    end
-    -- The three deepest mailboxes, as (pid, waiting).
-    List.each(Recon.proc_count(c, "mbox", 3), fn p ->
-      match p do
-        (pid, depth) ->
-          let label = match Recon.info(c, pid) do
-            Some(a) -> String.join(a.names, ",")
-            None -> "(gone)"
-          end
-          println("  pid " ++ int_to_string(pid) ++ " " ++ label ++ ": " ++ int_to_string(depth))
-      end)
-  end
-
-  fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
-    let w = spawn(Worker)
-    let _r = Actor.register(w, "worker")
-    let _ = send(w, Work(1))
-    report(c)
-  end
-end
-```
-
-Rates, scheduler load and recent crashes:
-
-```march
-mod Main do
-  needs IO
-  needs IO.Console
-  needs Actor.Introspect
-
-  fn busiest(c : Cap(Actor.Introspect)) do
-    -- Who handled the most messages over the next half second.
-    List.each(Recon.proc_window(c, "msgs_in", 5, 500), fn p ->
-      match p do
-        (pid, n) -> println(int_to_string(pid) ++ ": " ++ int_to_string(n) ++ " in 500 ms")
-      end)
-    -- How busy each scheduler was over the next second.
-    List.each(Recon.scheduler_usage(c, 1000), fn s ->
-      match s do
-        (id, u) -> println("scheduler " ++ int_to_string(id) ++ ": " ++ float_to_string(u))
-      end)
-    -- Recent crashes: how, where, and which restart, never the message.
-    List.each(Recon.crashes(c, 5), fn cr ->
-      let sup = match cr.supervisor do
-        Some(s) -> int_to_string(s)
-        None -> "none"
-      end
-      println(cr.kind ++ " under " ++ sup ++ ", restart " ++ int_to_string(cr.restart)))
-  end
-
-  fn main(io : Cap(IO)) do
-    busiest(Actor.introspect(io))
-  end
-end
-```
-
-A self-check, for a health endpoint or a periodic task:
-
-```march
-mod Main do
-  needs IO
-  needs IO.Console
-  needs Actor.Introspect
-
-  fn check(c : Cap(Actor.Introspect)) : Bool do
-    let fs = Diagnose.run(c, 1000)
-    List.each(fs, fn f ->
-      println(f.severity ++ " " ++ f.id ++ ": " ++ f.next))
-    List.any(fs, fn f -> f.severity == "critical")
-  end
-
-  fn main(io : Cap(IO)) do
-    let c = Actor.introspect(io)
-    if check(c) do
-      println("critical finding")
-    else
-      println("healthy")
-    end
-  end
-end
-```
-
----
-
-## Walkthrough: a node is slow, what now
-
-Requests to `web-1` are timing out. Start wide and narrow down.
-
-**1. Is it alive, and what does it look like?**
-
-```bash
-forge status --env prod
-```
-
-```
-web-1: actors 1, queued 1550, rss 5 MB, busy 0%, crashes (1h) 0, deepest mailbox sink (pid 0) 1550
-```
-
-It answers, nothing is crashing, and the schedulers are mostly idle over its
-lifetime. But 1550 messages are queued, all of them on `sink`. A mostly idle
-node with a deep queue is a consumer that is stuck, not a node that is
-overloaded.
-
-**2. What is wrong right now?**
-
-```bash
-forge diagnose --env prod --dump /tmp/web-1-incident.json
-echo $?    # 2: critical
-```
-
-Its `findings`, in short: `mailbox.growth` (critical; row `{"pid": 0, "mbox":
-2066, "delta": 499, "names": ["sink"]}`) and `rc.climb` (warning; live objects
-1574 to 2073, actors 1). `sink`'s queue grew by about 500 a second and it holds
-the whole node's queue, so this is critical. `rc.climb` is the same queue seen
-from the heap: messages are heap objects. The `--dump` file keeps both raw
-snapshots for the incident ticket.
-
-**3. Is it draining at all?**
-
-```bash
-forge top --env prod --sort msgs_in --once -n 5
-```
-
-```
-web-1  actors 1, queued 2598, rss 5 MB, busy 0%, crashes (1h) 0, deepest mailbox sink (pid 0) 2598
-sorted by msgs_in over 1000 ms
-
-     PID  NAME                 TYPE               STATUS        MBOX    MSGS_IN
-       0  sink                                    waiting       2597          0
-```
-
-`sink` received nothing in the last second while its queue kept growing.
-
-**4. What is it doing?**
-
-```bash
-forge observe --env prod ACTOR 0
-```
-
-```json
-{"pid":0,"alive":true,"actor":{"pid":0,"names":["sink"],"status":"waiting","mbox":2616,
- "held":0,"msgs_in":1,"msgs_out":0, ...},"supervisor":null,"terminal":null}
-```
-
-`msgs_in: 1`: it has taken one message off its mailbox since it started, and is
-`waiting` inside that handler, not in `receive`: the first handler is blocked
-(here, a long sleep; in production, typically a slow call or I/O). With `held`
-large instead, it would be waiting in an `Actor.call`. The fix is in that
-handler: give the slow operation a timeout, move it to a task, or put a mailbox
-limit on `sink` so the node sheds load instead of growing.
-
----
 
 ## A remote shell: forge shell and forge rpc
 
@@ -1432,6 +1537,8 @@ rows as values, call `Recon.top(intro, "mailbox", 10)` (a list of `TopRow`).
 Capabilities are pre-bound names: `console` (`Cap(IO.Console)`), `clock`,
 `intro` (`Cap(Actor.Introspect)`), `debug` (`Cap(Actor.Debug)`).
 
+### How values print
+
 A value prints by its type, the way you would write it:
 
 ```
@@ -1465,6 +1572,8 @@ march> [{ name: "first", tags: ["a", "b", "c"] }] limit: 2
 The shell generates this renderer from the input's static type, into the
 input's fragment only (`bin/shell_render_gen.ml`, stdlib `ShellRender`); the
 node's code is not changed.
+
+### What the node checks
 
 The node refuses an input whose compiled code uses a capability its policy
 does not list (`** refused: policy IO.Clock`). This counts capabilities the
@@ -1554,7 +1663,7 @@ carries `"skew":1`. The operations are recognised by the names of the
 runtime functions the input calls, so treat `--force` as an operator's tool
 for looking, not as a sandbox.
 
-What happens when:
+### What happens when
 
 - **An input panics.** You see `** panic: <message>`; the node and the
   session carry on.
@@ -1571,10 +1680,12 @@ What happens when:
   challenge the node hands out when you attach), so it runs on no other
   connection, no other node and not after the node restarts.
 
-**Line editing and history.** On a terminal the prompt is a real line editor
-(`lib/repl/shell_line.ml`, `bin/shell_tty.ml`). When stdin or stdout is not a
-terminal (a pipe, `--shell-inputs`, `forge rpc`) none of this is active and
-input is read exactly as before.
+### Line editing and history
+
+On a terminal the prompt is a real line editor (`lib/repl/shell_line.ml`,
+`bin/shell_tty.ml`). When stdin or stdout is not a terminal (a pipe,
+`--shell-inputs`, `forge rpc`) none of this is active and input is read exactly
+as before.
 
 | Keys | Action |
 |------|--------|
@@ -1606,6 +1717,8 @@ Under the hood `forge shell` runs `march --shell <reload socket>.shell
 <entry>` with the project's `MARCH_LIB_PATH`, through an ssh tunnel for a
 remote host. Running that directly works too.
 
+---
+
 ## Interpreter vs compiled, and what is not there yet
 
 ### Interpreter differences
@@ -1625,6 +1738,8 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
 - A windowed `SCHED` or `TOP` is refused with `windowed_in_process`, as it is
   for any in-process caller on the compiled side (`Recon`'s windowed functions
   do not use them).
+- `Trace` answers `Unavailable("tracing_unavailable")`: the interpreter has no
+  hooks yet.
 
 ### What is not there yet
 
@@ -1633,28 +1748,43 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
   Register long-lived actors under names (`Actor.register`) so rows are
   recognisable.
 - **The cluster section.** `SNAPSHOT` has no view of peers, so `diagnose`
-  reports `cluster.suspect` as unavailable
-  (`specs/todos/2026-10-02-observe-r1-cluster-section.md`).
+  reports `cluster.suspect` as unavailable and the TUI's Cluster panel has
+  nothing to read (`specs/todos/2026-10-02-observe-r1-cluster-section.md`).
 - **Mailbox contents (`MESSAGES`).** The rest of the debug tier: the queued
   messages of an actor, most useful exactly when it is stuck and cannot render
   them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
-- **The rest of the remote shell.** It works (see above), but:
-  - it has not had its security review yet (plan R5).
-- **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;
-  today `forge top` is the live view.
-- **Message tracing.** Tracing covers boundary calls. Sent/received/spawned/exited
-  events (the introspection design's `Sent` and `Received`, which hook the send
-  path) are not built: `specs/todos/2026-10-11-observe-trace-actor-events.md`.
-- **The Trace panel in the TUI** (R7's follow-up); the JSON shapes above are its input.
-- **Trace panel.** The interactive view has a place for it; it arrives with
-  tracing (R8).
+- **Per-actor heap bytes.** `TOP stack` is the only per-actor memory figure; the
+  heap is shared and reference-counted with no per-actor accounting
+  (`specs/todos/2026-10-08-observe-per-actor-heap-bytes.md`).
+- **In the interactive view: state, messages and a Trace panel.** The Actor
+  panel points at `forge observe --state PID` instead of asking itself, and
+  the Trace panel that would read `TRACE_DRAIN` is not built
+  (`specs/todos/2026-10-11-observe-tui-debug-tier-and-trace-panels.md`).
+- **Tracing follow-ups.** Events carry a function's name but not its arity;
+  there are no `Recon.trace_*` wrappers; the interpreter records nothing; and
+  message payloads are never rendered, which would need its own security
+  review (`specs/todos/2026-10-11-observe-trace-actor-events.md`).
+- **`SOURCE` from `forge observe`.** Only hand-built requests and
+  `Recon.source` reach it today; `forge observe --which` and `--source` are not
+  built, and a cluster release does not carry source
+  (`specs/todos/2026-10-11-observe-source-followups.md`).
+- **The remote shell's security review.** The shell works as described above;
+  the review packet exists (`specs/reviews/2026-10-07-shell-r5-review-packet.md`)
+  and its first findings are fixed, but the review itself is still to do.
 - **Dumps on fatal signals.** By design none (see [Crash dumps](#crash-dumps)); a
   `SIGSEGV` leaves no file. Core dumps and the OS-level supervisor of the process
   are the tools for that.
-- **Tracing (R8).** Message and call tracing with mandatory limits.
 
 The plan for all of these is `specs/plans/2026-09-28-observe-recon-shell-plan.md`.
 
-See also: [Tooling](tooling.md), [Hot Code Reload](hot-code-reload.md),
-[Supervision](supervision.md), [Topology](topology.md),
-[Overload resilience](overload-resilience.md).
+## See also
+
+- [Actors](actors.md) and [Supervision](supervision.md): what the rows, trees
+  and crash ring describe.
+- [Overload resilience](overload-resilience.md): mailbox limits and policies,
+  which `mailbox.over_limit` reports on.
+- [Capabilities](capabilities.md): `Actor.Introspect` and `Actor.Debug`.
+- [Hot Code Reload](hot-code-reload.md): epochs, drains, the deploy key, and
+  `WHICH`/`SOURCE` after a deploy.
+- [Topology](topology.md) and [Tooling](tooling.md): `forge status` over a
+  topology, and release bundles.

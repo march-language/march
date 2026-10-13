@@ -3453,6 +3453,12 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Observe chapter restructured.** `docs/observe/` now opens with which forge
+  command answers which question, what each of the three tiers (observe, debug,
+  shell) reveals and needs, an index of every section, and how it connects to
+  actors, capabilities and hot code reload; the slow-node walkthrough comes before
+  the verb reference. Its "not there yet" list was stale: the interactive view,
+  tracing and actor events had shipped and were still listed as missing.
 - **Choreography chapter restructured.** `docs/choreography/` now opens with when to
   use a choreography and what to reach for instead, an index of every section, and
   a table of how it builds on session types, actors, capabilities, clustering and
