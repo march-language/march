@@ -2744,6 +2744,11 @@ typedef struct {
     int64_t  *name_lens;
     char     *kinds;      /* one of 'i','f','p','g' per field */
     char     *desc;       /* owned canonical descriptor string */
+    /* The compiler's deep drop for records of this shape, or NULL.  Set once
+     * by march_record_register_drops for a descriptor that names one (its
+     * "#__drop$R.." suffix, which also makes the shape id distinct per field
+     * TYPES); read by march_decrc_erased. */
+    _Atomic(void *) drop;
 } march_record_shape;
 
 /* Shape registry.  Writers ([march_record_shape_intern]) hold [rec_shape_mu];
@@ -2832,6 +2837,58 @@ static march_record_shape *rec_shape_of(void *rec) {
     int32_t id = ((march_hdr *)rec)->pad;
     if (id <= 0 || id > __atomic_load_n(&rec_shape_count, __ATOMIC_ACQUIRE)) return NULL;
     return __atomic_load_n(&rec_shape_table, __ATOMIC_ACQUIRE)[id - 1];
+}
+
+/* ── Deep release of a record through an erased type ──────────────────────
+ * A record released where its static type is a type variable (a lambda's
+ * erased parameter, an element released by a generic container's drop) is a
+ * bare release that names no layout, so it freed the cell and leaked every
+ * heap field (a String name, a List).  The compiler tags the shape of each
+ * record type that owns a heap field with that type's deep drop
+ * (Llvm_data.shape_desc_with_drop) and registers the pair from main's
+ * prologue; an erased release of a record cell with such a shape runs the
+ * drop, which releases the cell and, when that freed it, its fields.
+ * Anything else is released exactly as before.  Lookups take no lock: a
+ * shape's drop is written once, before the scheduler starts, and a record
+ * of that shape is built by code that runs after it.
+ * specs/progress/2026-10-12-erased-record-shallow-release.md */
+typedef void (*march_rec_drop_fn)(void *rec);
+
+void march_record_register_drops(void **triples, int64_t n) {
+    for (int64_t i = 0; i < n; i++) {
+        const char *desc  = (const char *)triples[3 * i];
+        int32_t    *cache = (int32_t *)triples[3 * i + 1];
+        void       *drop  = triples[3 * i + 2];
+        int32_t id = __atomic_load_n(cache, __ATOMIC_RELAXED);
+        if (id == 0) {
+            id = march_record_shape_intern(desc);
+            __atomic_store_n(cache, id, __ATOMIC_RELAXED);
+        }
+        march_record_shape *s =
+            __atomic_load_n(&rec_shape_table, __ATOMIC_ACQUIRE)[id - 1];
+        atomic_store_explicit(&s->drop, drop, memory_order_release);
+    }
+}
+
+static march_rec_drop_fn rec_erased_drop(void *p) {
+    march_hdr *h = (march_hdr *)p;
+    if (h->tag != 0 || h->pad <= 0) return NULL;
+    int32_t id = h->pad;
+    if (id > __atomic_load_n(&rec_shape_count, __ATOMIC_ACQUIRE)) return NULL;
+    march_record_shape *s = __atomic_load_n(&rec_shape_table, __ATOMIC_ACQUIRE)[id - 1];
+    return (march_rec_drop_fn)atomic_load_explicit(&s->drop, memory_order_acquire);
+}
+
+void march_decrc_erased(void *p) {
+    if (!IS_HEAP_PTR(p)) return;
+    march_rec_drop_fn drop = rec_erased_drop(p);
+    if (drop) drop(p); else march_decrc(p);
+}
+
+void march_decrc_erased_local(void *p) {
+    if (!IS_HEAP_PTR(p)) return;
+    march_rec_drop_fn drop = rec_erased_drop(p);
+    if (drop) drop(p); else march_decrc_local(p);
 }
 
 static int64_t rec_field_raw(void *rec, int32_t i) {
@@ -3263,7 +3320,12 @@ void *march_get_actor_field(void *pid, void *name) {
      * None: handing its raw bits back as a value was an unchecked cast (and
      * an unowned reference). */
     if (s->kinds[i] != 'i') return NULL;
-    int64_t raw = rec_field_raw(pid, i);
+    /* A relaxed atomic load (the same `ldr` as a plain one): this reads
+     * another actor's live state from outside it, and a supervisor's
+     * child-pid word is stored by the runtime from whichever thread ran
+     * the restart (march_runtime.c, sup_slot_publish). */
+    int64_t raw = __atomic_load_n((int64_t *)((char *)pid + 16 + (size_t)i * 8),
+                                  __ATOMIC_RELAXED);
     return (void *)(intptr_t)((raw << 1) | 1);
 }
 

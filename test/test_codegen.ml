@@ -9496,7 +9496,7 @@ let test_compile_local_shadows_builtin_still_gets_rc_ops () =
   Alcotest.(check bool) "at least one SSA temp loads %kill.addr" true
     (ssa_temps_loading_kill_addr <> []);
   let rc_call_re =
-    Str.regexp "call void @march_\\(decrc_local\\|incrc_local\\|free\\|incrc\\|decrc\\)(ptr %\\([A-Za-z0-9_$]+\\))"
+    Str.regexp "call void @march_\\(decrc_local\\|decrc_erased_local\\|decrc_erased\\|incrc_local\\|free\\|incrc\\|decrc\\)(ptr %\\([A-Za-z0-9_$]+\\))"
   in
   let rc_call_args =
     let rec go i acc =
@@ -14620,6 +14620,8 @@ declare void @march_decrc_local(ptr %p)
 declare i64  @march_decrc_local_freed(ptr %p)
 declare void @march_clo_param_own(ptr %p)
 declare void @march_clo_release(ptr %p)
+declare void @march_decrc_erased(ptr %p)
+declare void @march_decrc_erased_local(ptr %p)
 declare ptr  @march_clo_float_arg(ptr %p)
 declare void @march_free(ptr %p)
 declare ptr  @march_tco_defer_push(ptr %buf, ptr %release, ptr %v)
@@ -17063,6 +17065,90 @@ let test_tir_verify_rc_perceus_bugs_fixed () =
       ("nested projection, parent consumed", "line", rc_bug_nested_projection);
       ("record update from a find result", "pick", rc_bug_record_update) ]
 
+(* Leak findings (check 3 with [~leaks:true]) for the named functions, judged
+   on the real pipeline's tir-perceus module.  Unoptimised, so the borrow map
+   Perceus used is exactly [Borrow.infer_module] on its input (no owned-call
+   clones). *)
+let rc_leak_findings src fns =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let pre = ref None and post = ref None in
+  ignore (March_tir.Contract_pipeline.run ~iface_methods ~opt:false
+            ~before_perceus:(fun ~k_table t -> pre := Some (k_table, t))
+            ~snap:(fun name t -> if name = "tir-perceus" then post := Some t) tir);
+  match !pre, !post with
+  | Some (k_table, before), Some after ->
+    let borrow_map = March_tir.Borrow.infer_module ~k_table before in
+    List.filter_map (fun (fn, msg) -> if List.mem fn fns then Some msg else None)
+      (March_tir.Tir_verify_rc.check ~stage:"tir-perceus" ~leaks:true ~k_table ~borrow_map after)
+  | _ -> [ "the pipeline never reached tir-perceus" ]
+
+(* The 2026-10-12 leak sweep (specs/progress/2026-10-12-verifier-leak-sweep.md).
+   [has], [str_or], [both]: shapes the checker reported though Perceus was
+   right: a discarded unit result, the nullary arm of a niche Option at a
+   join, and [Some(i)] of a tagged Option(Int).  [keeps_new], [stmt_case],
+   [go]: real leaks it found, each now dropped by Perceus. *)
+let rc_leak_sweep_src = {|mod Sweep do
+  type St = { me : String, fd : Int }
+  type Ln = { node_id : String, dialer : String }
+  type S = { label : Option(String), style : String }
+  pfn note(s : String) : () do if string_byte_length(s) > 99 do () else () end end
+  fn opt_int(n : Int) : Option(Int) do if n > 0 do Some(n) else None end end
+  fn opt_str(n : Int) : Option(String) do if n > 0 do Some(int_to_string(n)) else None end end
+  fn has(n : Int) : Bool do
+    match opt_int(n) do
+      Some(_) -> true
+      None -> false
+    end
+  end
+  fn str_or(n : Int, d : String) : String do
+    let v = match opt_str(n) do
+      Some(s) -> s
+      None -> d
+    end
+    v
+  end
+  fn both(n : Int) : Int do
+    let s = int_to_string(n)
+    note(s)
+    n
+  end
+  fn keeps_new(st : St, l : Ln) : Bool do
+    let lower = if st.me < l.node_id do st.me else l.node_id end
+    l.dialer == lower
+  end
+  pfn touch(n : Int) : Int do n + 1 end
+  fn stmt_case(n : Int) : Int do
+    let st = { me: int_to_string(n), fd: n - 1 }
+    if st.fd >= 0 do touch(st.fd) else 0 end
+    n * 2
+  end
+  fn go(lst : List(S)) : List(String) do
+    match lst do
+      Nil -> Nil
+      Cons(s, rest) ->
+        match s.label do
+          None -> go(rest)
+          Some(lbl) -> Cons(lbl ++ s.style, go(rest))
+        end
+    end
+  end
+  fn main() : Int do
+    let st = { me: "a", fd: 1 }
+    let k = if keeps_new(st, { node_id: "b", dialer: "a" }) do 1 else 0 end
+    let g = go(Cons({ label: Some("x"), style: "y" }, Nil))
+    k + stmt_case(3) + both(2) + string_byte_length(str_or(1, "d")) + List.length(g)
+      + (if has(1) do 1 else 0 end)
+  end
+end|}
+
+let test_tir_verify_rc_leak_sweep () =
+  Alcotest.(check (list string)) "no leak finding in the sweep's shapes" []
+    (rc_leak_findings rc_leak_sweep_src
+       [ "has"; "str_or"; "both"; "keeps_new"; "stmt_case"; "go"; "go$dps" ])
+
 (* ── Dce.prune_unreachable ~roots (the remote shell's fragments) ─────────
 
    A REPL or shell fragment lowers together with the program it attaches to,
@@ -17142,6 +17228,7 @@ let codegen_suites =
           Alcotest.test_case "rc: per-arm path (RED)" `Quick test_tir_verify_rc_case_arms_join;
           Alcotest.test_case "rc: perceus parent-released-before-field-use fixed" `Quick test_tir_verify_rc_perceus_bugs_fixed;
           Alcotest.test_case "rc: indirect $dps call borrows its destination" `Quick test_tir_verify_rc_indirect_dps_call;
+          Alcotest.test_case "rc: leak sweep shapes are clean" `Quick test_tir_verify_rc_leak_sweep;
         ]);
       ( "vectorize_check", [
           Alcotest.test_case "module loads, misuse case reports one diagnostic" `Quick

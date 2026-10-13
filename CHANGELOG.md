@@ -691,6 +691,20 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **An actor handler that matches on a tuple no longer leaks its old state
+  when compiled.** A handler whose body was a `match` on a tuple a call
+  returned (`match LinearMap.take_slot(state.sessions, id) do (None, slot) ->
+  .. end`) kept the old state record, and everything it held, on every
+  message.
+- **A record released through a generic value no longer leaks its fields
+  when compiled.** A record handed to a lambda whose parameter type stayed
+  generic (one stored in a container that hides its element type) was freed
+  without its String and List fields.
+- **Opening a file or CSV reader no longer leaks memory when compiled.**
+  Every `file_open` and `csv_open` (and so every `Csv.read_all`,
+  `Csv.each_row` and line-reading helper) leaked a small handle cell even after
+  the handle was closed. Closing twice is still a no-op, and reading a closed
+  handle is still end of stream.
 - **A release's topology step no longer halts because the node had not
   re-read the topology yet.** The control plane's Agent relayed the step's
   signed `TOPOLOGY` line and checked the node's report once, straight away; the
@@ -745,6 +759,39 @@ git log is authoritative for exact commits.
   generic (in a list inside a variant whose element type is hidden) released
   its argument only when it never used it; `fn r -> r.age > 28` leaked the
   record on every call. The record is now released after the read.
+- **Compiled code no longer leaks a record that one branch released and
+  another only read.** Three shapes kept the record, and every heap value in
+  it, for good:
+  - a parameter read in a `let`'s `if` value (`let lower = if st.me < n do
+    st.me else n end`) while the rest of the function used another
+    parameter;
+  - a let-bound record read by an `if` used as a statement, once per
+    message in a compiled actor handler;
+  - a record destructured in a list-building recursive function that
+    tail-recursion-modulo-cons compiles to a loop, once per element.
+  The TIR verifier's leak check found all three in stdlib code
+  (`ClusterNode`, `SessionNode`, `Control`, `Plot`).
+- **`MARCH_VERIFY_TIR_LEAKS=1` no longer reports about 257 false leaks in
+  every program.** The reference-count check counted a discarded unit
+  result, the `None` arm of a niche `Option`, and `Some(i)` of an
+  `Option(Int)` as held references. What remains is listed in
+  `specs/todos/2026-10-08-verifier-a4-followups.md`.
+- **A compiled program that hits an illegal or trap instruction now says
+  where, instead of dying silently.** SIGILL and SIGTRAP had no handler, so
+  the only trace was the shell's exit status (132 or 133). The runtime now
+  prints a `march: fatal SIGILL ...` line with the faulting pc, lr and a
+  frame-pointer walk (image-relative on macOS, for `lldb <binary>` and
+  `image lookup -a`), then exits with the same status. Set
+  `MARCH_FATAL_BACKTRACE=1` to also print symbol names.
+- **Cluster nodes started or restarted together no longer run out of
+  memory.** Nodes of a topology app that started at the same moment (a
+  `forge deploy`, or restarting every host) could each allocate about 1 GB of
+  heap within a minute and be OOM-killed. The cause was a leak on every
+  cluster message, already fixed by the colliding-type drop fix below
+  (`Msgpack.Value` frames are now freed with their payload). A new two-node
+  scenario, `control_restart_together`, starts and then restarts three nodes
+  together under session traffic and fails if any node's heap passes 400,000
+  objects.
 - **Compiled `to_string` no longer prints a record's `Bool` field as a
   number.** `{ n: true }` printed `{ n: 1 }` when compiled, because the record
   was matched to another declared record with the same field names (here a
@@ -772,6 +819,25 @@ git log is authoritative for exact commits.
   backends, `println`, string interpolation, `inspect` and the REPL now
   print `{ y: 2, z: 1 }`. Only the display changed: fields are still
   evaluated in the order you write them.
+- **A send by name to a restarting child is no longer lost.** When a supervisor
+  restarted a registered child, `Actor.whereis` could return the replacement a
+  moment before it could take messages; a `send` in that moment returned `None`
+  and an `Actor.call` failed, though the child then ran normally. The names now
+  resolve only once the replacement can take messages (until then `whereis`
+  returns `None`, as it already did while the child was down), and a
+  replacement that crashes at once still hands them on to the next one. See
+  `specs/progress/2026-10-12-respawn-names-before-activation.md`.
+- **A supervisor no longer loses track of a child restarted while it is
+  handling a message.** When a supervised child died while its supervisor was
+  inside a handler (a handler that kills its own child, or any crash on another
+  scheduler), the handler's state write-back put the dead child's pid back, so
+  the supervisor's field (and `Actor.get_field`) went on naming the dead child.
+  The field now shows the replacement once the handler returns. A restarted
+  child's pid also no longer appears in the supervisor's state before the child
+  can take messages, which made a send to it vanish. Restart decisions are
+  unchanged. `MARCH_SANITIZE=thread` builds no longer report a race on this
+  field, or on concurrent panics in supervised actors. See
+  `specs/progress/2026-10-12-supervisor-child-slot-race.md`.
 - **`MARCH_SANITIZE=thread` builds no longer report a race on scheduler
   statistics.** Reading per-scheduler dispatch and idle counts (for example
   through `Recon.node_stats` or an observe snapshot) while the schedulers were
@@ -794,6 +860,20 @@ git log is authoritative for exact commits.
   from C on two schedulers at once raced on a lazily filled cache. The cached
   value was always the same, so no wrong result was possible, but TSAN
   reported it. See `specs/progress/2026-10-12-tsan-type-id-memo-race.md`.
+- **A program whose module is named `List` or `String` compiles.** An entry
+  module named like a stdlib module that the rest of the stdlib uses failed
+  `--compile` with "body could not be specialized", though it ran
+  interpreted. The stdlib module now stays beside yours. Your module's own
+  `List.f` calls reach your `f`, and every other `List.f` reaches the
+  stdlib's. An entry module still replaces a same-named stdlib module when it
+  defines every member the rest of the stdlib calls.
+- **Compiled set operations no longer free a set the caller still holds.**
+  Calling `Set.union(a, b, cmp)` and then `Set.intersection` or
+  `Set.difference` on the same sets crashed the compiled program at exit
+  (SIGSEGV, a use-after-free under ASAN): the union released tree nodes of `b`
+  that `b` still owned. The optimizer renamed the cell an inlined match reused,
+  which hid the reuse from the code that protects a shared cell's children.
+  The interpreter was unaffected.
 - **Compiled `to_string` names a `Bytes` returned by the runtime.**
   `to_string(Base64.decode(s))` printed `Ok(#<tag:0>)` compiled and
   `Ok(Bytes("..."))` interpreted; the same held for Bytes from hashing,

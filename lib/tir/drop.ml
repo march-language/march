@@ -178,45 +178,7 @@ let rec apply_subst (subst : (string * Tir.ty) list) (ty : Tir.ty) : Tir.ty =
    spelling ([V_]); see the arm below.  That is sound: this pass treats every [TVar] alike (an
    erased slot, released by a bare [EDecRC]), so two alpha-equivalent types
    get alpha-equivalent drop functions. *)
-let mangle (ty : Tir.ty) : string =
-  let seen : (string, int) Hashtbl.t = Hashtbl.create 4 in
-  let var n =
-    match Hashtbl.find_opt seen n with
-    | Some k -> k
-    | None -> let k = Hashtbl.length seen in Hashtbl.replace seen n k; k in
-  let rec mangle (ty : Tir.ty) : string =
-    match ty with
-    | Tir.TInt -> "Int" | Tir.TFloat -> "Float" | Tir.TBool -> "Bool"
-    | Tir.TString -> "String" | Tir.TUnit -> "Unit"
-    | Tir.TTuple ts -> "T" ^ string_of_int (List.length ts)
-                       ^ "_" ^ String.concat "_" (List.map mangle ts)
-    | Tir.TRecord fs ->
-      (* Field names AND types, sorted, not merely the arity.  This key is the
-         memo key in [env.names] and the suffix of the synthesized function's
-         name, so a bare "R<n>" made every n-field record collide: the first
-         2-field record to be asked about decided the answer for all of them,
-         and a memoized negative (no heap children) then suppressed the drop
-         for a later { n : Int, s : String }, silently leaking its string.
-         Names are part of the identity because the drop projects fields by
-         name and TRecord's layout is name-sorted. *)
-      let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
-      "R" ^ string_of_int (List.length fs)
-      ^ "_" ^ String.concat "_"
-                (List.map (fun (n, t) -> n ^ "$" ^ mangle t) sorted)
-    | Tir.TCon (n, []) -> String.map (fun c -> if c = '.' then '_' else c) n
-    | Tir.TCon (n, args) ->
-      String.map (fun c -> if c = '.' then '_' else c) n
-      ^ "_" ^ String.concat "_" (List.map mangle args)
-    | Tir.TFn _ -> "Fn"
-    | Tir.TPtr _ -> "Ptr"
-    (* Lowering's placeholder [TVar "_"] is not a residual variable: it is
-       one fixed name, and [Kind] classifies it apart from the others
-       ([borrowable_of]).  Spelled as before, so it never shares a key (and
-       a memoized answer) with a real variable. *)
-    | Tir.TVar "_" -> "V_"
-    | Tir.TVar n -> "V" ^ string_of_int (var n)
-  in
-  mangle ty
+let mangle = Tir_names.drop_type_key
 
 type env = {
   type_defs     : Tir.type_def list;
@@ -1733,6 +1695,33 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
           end
         | _ -> None) m.Tir.tm_types
   in
+  (* Deep drops for the records the program allocates.  A record released
+     through an ERASED type (a lambda's [TVar] parameter, an element of a
+     generic container's drop) is a bare [EDecRC] on a [TVar], which names no
+     layout: the runtime freed the cell and leaked every heap field.  Each
+     allocated record type that owns a heap field gets its [__drop$R..]
+     here; [Dce] keeps it alive through the allocation, and the LLVM backend
+     tags the record's shape with it and registers it with the runtime, which
+     runs it from [march_decrc_erased]
+     (specs/progress/2026-10-12-erased-record-shallow-release.md). *)
+  let rec record_allocs (e : Tir.expr) : unit =
+    match e with
+    | Tir.ERecord fields ->
+      ignore (drop_fn_for env (Tir.TRecord
+        (List.sort (fun (a, _) (b, _) -> String.compare a b)
+           (List.map (fun (n, a) -> (n, Tir_names.atom_ty a)) fields))))
+    | Tir.EUpdate (Tir.AVar { Tir.v_ty = Tir.TRecord fs; _ }, _) ->
+      ignore (drop_fn_for env (Tir.TRecord fs))
+    | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> record_allocs a; record_allocs b
+    | Tir.ELetRec (fds, body) ->
+      List.iter (fun (fd : Tir.fn_def) -> record_allocs fd.Tir.fn_body) fds;
+      record_allocs body
+    | Tir.ECase (_, brs, d) ->
+      List.iter (fun (br : Tir.branch) -> record_allocs br.Tir.br_body) brs;
+      Option.iter record_allocs d
+    | _ -> ()
+  in
+  List.iter (fun (f : Tir.fn_def) -> record_allocs f.Tir.fn_body) fns;
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
   { m with Tir.tm_fns = fns @ clo_drops @ actor_drops @ List.rev env.fns }

@@ -999,7 +999,29 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
   in
   let rec go bal (x : Tir.expr) : Tir.expr =
     match x with
-    | _ when releases_var name x && not (is_branching x) -> x
+    (* This rule also covers the actor-handler tuple-match leak (the match's panic
+       arms release [state]; specs/progress/2026-10-12-actor-handler-tuple-match-state-leak.md),
+       which a parallel branch fixed with the narrower is_branching-only form. *)
+    (* A statement or let value that releases [v] (on some path, maybe not
+       all), with [v] dead after it: [v]'s lifetime ends inside it, so each of
+       its paths settles [v] for itself, and the paths that release it are
+       left alone below.  Treating "releases somewhere" as "releases" leaked
+       [v] on the other paths: [if st.fd >= 0 do close(st.fd) else () end; ..]
+       (the cross-branch pass releases [st] in the else arm only) leaked a
+       compiled actor's state record on every message (ClusterNode's
+       CtlWriter, found by the TIR verifier's leak sweep). *)
+    | Tir.ESeq (a, body)
+      when releases_var name a && not (Perceus_liveness.name_free_in name body) ->
+      Tir.ESeq (go bal a, body)
+    | Tir.ELet (w, e1, body)
+      when releases_var name e1 && not (Perceus_liveness.name_free_in name body) ->
+      Tir.ELet (w, go bal e1, body)
+    (* A release on the straight path (not under a case): nothing to add.
+       A let or statement is not one by itself; the rules below stop at the
+       piece that releases, so a release nested in a later case still lets
+       the other paths of that case be dropped. *)
+    | _ when releases_var name x && not (is_branching x)
+             && (match x with Tir.ELet _ | Tir.ESeq _ -> false | _ -> true) -> x
     | Tir.ELet (_, e1, _) when releases_var name e1 -> x
     | Tir.ESeq (a, _) when releases_var name a -> x
     | Tir.ELet (w, e1, body) ->
@@ -1033,6 +1055,17 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
        actor handler's trailing `:unit`; a literal has no type to bind). *)
     | Tir.EAtom (Tir.ALit _) as tail -> Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
     | (Tir.EApp _ | Tir.ECallPtr _) as tail when call_is_safe tail ->
+      Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
+    (* A TRMC destination write ([$dst.1 <- x], the tail of a [$dps]
+       helper's non-recursive arm, e.g. its panic default) has no type to
+       bind; when neither side points into [v] the release goes in front of
+       it.  Refusing it abandoned the drop on EVERY path, so a record
+       destructured in a TRMC'd map leaked once per element (Plot's
+       render_legend, found by the TIR verifier's leak sweep). *)
+    | Tir.ESetField (o, _, value) as tail
+      when not (List.exists (function
+          | Tir.AVar w -> points_into w
+          | _ -> false) [ o; value ]) ->
       Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
     | tail ->
       (match tir_expr_ty tail with

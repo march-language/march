@@ -1812,6 +1812,60 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/local_fn_capture_not_generalized.expected native_local_fn_capture_not_generalized.out)))
 
+; An entry module named `List` / `String` keeps the stdlib module of that
+; name beside it (the rest of the stdlib calls into it), so it compiles and
+; matches the interpreter; it used to fail with "body could not be
+; specialized".  Needs the stdlib.
+(rule
+ (targets native_entry_module_named_list native_entry_module_named_list.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/entry_module_named_list.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_entry_module_named_list native/entry_module_named_list.march)
+   (with-stdout-to native_entry_module_named_list.out (system "./native_entry_module_named_list")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/entry_module_named_list.expected native_entry_module_named_list.out)))
+
+(rule
+ (targets native_entry_module_named_string native_entry_module_named_string.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/entry_module_named_string.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_entry_module_named_string native/entry_module_named_string.march)
+   (with-stdout-to native_entry_module_named_string.out (system "./native_entry_module_named_string")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/entry_module_named_string.expected native_entry_module_named_string.out)))
+
+; Set.union then Set.intersection / Set.difference over the same sets with
+; one comparator: cprop rewrote node_fold's `reuse node` token to the alias
+; while the `case` scrutinee kept the original name, so codegen skipped the
+; shared-cell field dup and union freed b's tree nodes under the caller
+; (use-after-free at exit).  Needs the stdlib (Set, List).
+(rule
+ (targets native_set_ops_shared_comparator native_set_ops_shared_comparator.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/set_ops_shared_comparator.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_set_ops_shared_comparator native/set_ops_shared_comparator.march)
+   (with-stdout-to native_set_ops_shared_comparator.out (system "./native_set_ops_shared_comparator")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/set_ops_shared_comparator.expected native_set_ops_shared_comparator.out)))
+
 ; A Bytes cell the C runtime builds (Base64.decode) carries the `Bytes.Bytes`
 ; header type id, so compiled `to_string` names it like the interpreter
 ; (it printed `#<tag:0>`).  Needs the stdlib (Bytes, Base64).
@@ -1921,6 +1975,43 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/aggregate_dupd_consume_drop.expected native_aggregate_dupd_consume_drop.out)))
+
+; An owned record released by one path of a branching let value or statement
+; and only read by another is released on the reading path too (the TIR
+; verifier's 2026-10-12 leak sweep); default opt and --opt 2.
+(rule
+ (targets native_partial_release_aggregate_drop native_partial_release_aggregate_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/partial_release_aggregate_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_partial_release_aggregate_drop
+        native/partial_release_aggregate_drop.march)
+   (with-stdout-to native_partial_release_aggregate_drop.out
+        (system "./native_partial_release_aggregate_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/partial_release_aggregate_drop.expected native_partial_release_aggregate_drop.out)))
+
+(rule
+ (targets native_partial_release_aggregate_drop_o2 native_partial_release_aggregate_drop_o2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/partial_release_aggregate_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_partial_release_aggregate_drop_o2
+        native/partial_release_aggregate_drop.march)
+   (with-stdout-to native_partial_release_aggregate_drop_o2.out
+        (system "./native_partial_release_aggregate_drop_o2")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/partial_release_aggregate_drop.expected native_partial_release_aggregate_drop_o2.out)))
 
 (rule
  (targets native_aggregate_param_field_alias native_aggregate_param_field_alias.out)
@@ -6193,6 +6284,52 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/proc_reclaim_kill_respawn.expected native_proc_reclaim_kill_respawn.out)))
+
+; ── A supervisor's child-pid state words under concurrent restarts
+; (specs/progress/2026-10-12-supervisor-child-slot-race.md): four children
+; crashing at once restart on four scheduler threads, and a restart that lands
+; while the supervisor is inside a handler must survive the handler's state
+; write-back.  Run at 14 schedulers; under MARCH_SANITIZE=thread it must
+; report nothing.
+(rule
+ (targets native_supervisor_concurrent_child_crash native_supervisor_concurrent_child_crash.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (source_tree ../stdlib)
+       (file native/supervisor_concurrent_child_crash.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_concurrent_child_crash
+        native/supervisor_concurrent_child_crash.march)
+   (with-stdout-to native_supervisor_concurrent_child_crash.out
+        (system "MARCH_NUM_SCHEDULERS=14 ./native_supervisor_concurrent_child_crash")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_concurrent_child_crash.expected native_supervisor_concurrent_child_crash.out)))
+
+; ── A restarted child's registered names resolve only once it can take
+; messages (specs/progress/2026-10-12-respawn-names-before-activation.md).
+; Two clients crash-loop their own registered children while spinning on
+; whereis; at 14 schedulers the spin lands in the window between the name's
+; re-registration and the replacement's activation.  Under
+; MARCH_SANITIZE=thread (scripts/tsan-sweep.sh) it must report nothing.
+(rule
+ (targets native_supervisor_respawn_names_before_activation native_supervisor_respawn_names_before_activation.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (source_tree ../stdlib)
+       (file native/supervisor_respawn_names_before_activation.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_respawn_names_before_activation
+        native/supervisor_respawn_names_before_activation.march)
+   (with-stdout-to native_supervisor_respawn_names_before_activation.out
+        (system "MARCH_NUM_SCHEDULERS=14 ./native_supervisor_respawn_names_before_activation")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_respawn_names_before_activation.expected native_supervisor_respawn_names_before_activation.out)))
 
 ; ── pid_of_int on a dead pid whose record is freed (metas PR,
 ; specs/progress/2026-09-23-proc-struct-reclamation-metas.md "Survey additions").  The
@@ -13509,11 +13646,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_state_released
         native/actor_state_released.march)
    (with-stdout-to native_actor_state_released.out
-        (system "./native_actor_state_released; rc=$?; [ $rc -eq 0 ] || echo \"native_actor_state_released: exit status $rc (above 128: signal $((rc - 128)))\" >&2; exit $rc")))))
+        (system "MARCH_FATAL_BACKTRACE=1 ./native_actor_state_released; rc=$?; [ $rc -eq 0 ] || echo \"native_actor_state_released: exit status $rc (above 128: signal $((rc - 128)))\" >&2; exit $rc")))))
 
 (rule
  (alias runtest)
  (action (diff native/actor_state_released.expected native_actor_state_released.out)))
+
+; ── A SIGILL/SIGTRAP is reported, not a silent death (2026-10-12): the
+; runtime's trap handler writes the fault line, the image-relative pc/lr and a
+; frame walk before _exit(128 + sig). The shim forks and traps in the child.
+; RED before: "child exit status: 132" with every report line false.
+(rule
+ (targets native_fatal_trap_report native_fatal_trap_report.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/fatal_trap_report.march) (file native/fatal_trap_report.c))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --ffi-c native/fatal_trap_report.c
+        -o native_fatal_trap_report native/fatal_trap_report.march)
+   (with-stdout-to native_fatal_trap_report.out
+        (system "./native_fatal_trap_report")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/fatal_trap_report.expected native_fatal_trap_report.out)))
 
 ; ── A wildcard-bound value is dropped deep (2026-10-06): the `_` of
 ; `(None, _)` is typed erased, so its Deque was freed shallow. RED before: 200.
@@ -14159,3 +14317,69 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/file_path_builtins_leak_probe.expected native_file_path_builtins_leak_probe.out)))
+
+; ── Leak guard: an actor handler whose body matches on a tuple a call returned
+; (LinearMap.take_slot) leaked its old state record and the map it held on
+; every message: the match's panic arms released `state`, and the aggregate
+; scope-end drop then placed no drop on any path. Red before the fix: every
+; leg reads `flat: false`. The Keep leg is the shared-state control.
+; specs/progress/2026-10-12-actor-handler-tuple-match-state-leak.md
+(rule
+ (targets native_actor_tuple_match_state_leak_probe native_actor_tuple_match_state_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_tuple_match_state_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_tuple_match_state_leak_probe
+        native/actor_tuple_match_state_leak_probe.march)
+   (with-stdout-to native_actor_tuple_match_state_leak_probe.out
+        (system "./native_actor_tuple_match_state_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_tuple_match_state_leak_probe.expected native_actor_tuple_match_state_leak_probe.out)))
+
+; ── Leak guard: a record released through an ERASED type (a lambda's
+; unspecialised parameter) was freed shallowly, leaking its String and List
+; fields. Red before the fix: every fresh leg reports a nonzero growth.
+; specs/progress/2026-10-12-erased-record-shallow-release.md
+(rule
+ (targets native_erased_record_deep_release_probe native_erased_record_deep_release_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/erased_record_deep_release_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_record_deep_release_probe
+        native/erased_record_deep_release_probe.march)
+   (with-stdout-to native_erased_record_deep_release_probe.out
+        (system "./native_erased_record_deep_release_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_record_deep_release_probe.expected native_erased_record_deep_release_probe.out)))
+
+; ── Leak guard: file_open / csv_open handles were heap cells passed around as
+; Ints, never freed (a second close must stay a no-op). Handles are now
+; runtime table entries freed on close. Red before the fix: both open/close
+; legs read `flat: false`; the stale-handle lines are unchanged.
+; specs/progress/2026-10-12-file-csv-handle-cell-leak.md
+(rule
+ (targets native_file_handle_leak_probe native_file_handle_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/file_handle_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_file_handle_leak_probe
+        native/file_handle_leak_probe.march)
+   (with-stdout-to native_file_handle_leak_probe.out
+        (system "./native_file_handle_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_handle_leak_probe.expected native_file_handle_leak_probe.out)))

@@ -159,8 +159,9 @@ What the lab has found so far, each filed with its repro:
   ever, nearly always in certificate mode and occasionally with a shared secret.
 - [`2026-10-05-lab-leaderless-agents-leak.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-leaderless-agents-leak.md):
   with no leader, every node grows by ~13k heap objects a second with no traffic at all.
-- [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-10-05-lab-simultaneous-restart-memory-burst.md):
-  nodes restarted together can each allocate ~1 GB in 30 s and be OOM-killed.
+- [`2026-10-05-lab-simultaneous-restart-memory-burst.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-simultaneous-restart-memory-burst.md)
+  (fixed): nodes restarted together could each allocate ~1 GB in 30 s and be OOM-killed,
+  a leak on every cluster message; the two-node scenario `control_restart_together` guards it.
 - [`2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md)
   (fixed 2026-10-12): a halted first `forge deploy` recorded nothing (the retry restarted
   every node again), and following a release gave up on `ERR no_leader`. A retry now

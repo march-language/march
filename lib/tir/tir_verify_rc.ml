@@ -125,7 +125,14 @@ let check_fn ~(k_table : Kind.table) ~(borrow_map : Borrow.borrow_map)
     (fd : Tir.fn_def) =
   if contains_letrec fd.Tir.fn_body then () else begin
   let ctr = ref 0 in
-  let tracked (v : Tir.var) = v.Tir.v_lin = Tir.Unr && Kind.needs_rc_of k_table v.Tir.v_ty in
+  (* Unit is sometimes typed as the empty tuple, which [needs_rc] counts as an
+     aggregate; its value is i64 0 and Perceus releases nothing for it
+     ([Perceus_core.discarded_call_result_ty]).  Tracking it reported every
+     discarded [println] result as a leak. *)
+  let tracked (v : Tir.var) =
+    v.Tir.v_lin = Tir.Unr
+    && (match v.Tir.v_ty with Tir.TTuple [] | Tir.TUnit -> false | _ -> true)
+    && Kind.needs_rc_of k_table v.Tir.v_ty in
   let path_str st = match st.path with [] -> "entry" | p -> String.concat " > " (List.rev p) in
   let find st id = IntMap.find id st.cls in
   let set st id c = { st with cls = IntMap.add id c st.cls } in
@@ -373,6 +380,10 @@ let check_fn ~(k_table : Kind.table) ~(borrow_map : Borrow.borrow_map)
            | [ v ], [ _ ] ->
              ({ st with names = StringMap.add v.Tir.v_name id st.names }, b.Tir.br_body)
            | [], [] -> (set st id { (find st id) with immortal = true }, b.Tir.br_body)
+           (* the payload IS the scrutinee, and it is a scalar ([Some(i)] of
+              a tagged [Option(Int)]): no cell in this arm either *)
+           | [], [ v ] when v.Tir.v_lin = Tir.Unr ->
+             (opaque_binders (set st id { (find st id) with immortal = true }), b.Tir.br_body)
            | _ -> (opaque_binders st, b.Tir.br_body))
         | Some id ->
           (match Case_handoff.strip_scrut_decrc scrut_name b.Tir.br_body with
@@ -436,7 +447,10 @@ let check_fn ~(k_table : Kind.table) ~(borrow_map : Borrow.borrow_map)
             if leaks && not opaque && not c.immortal then
               List.iter (fun (st_a, _) ->
                   let ca = find st_a id in
-                  if ca.held > held then
+                  (* an arm that found the object immortal (the nullary arm
+                     of a payload-sharing scrutinee: a niche [None] is no
+                     cell) holds nothing to settle *)
+                  if ca.held > held && not ca.immortal then
                     report "leak" c.label (path_str st_a)
                       (Printf.sprintf "this arm holds %d more reference(s) than another arm where they join"
                          (ca.held - held)))

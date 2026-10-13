@@ -252,14 +252,7 @@ let field_index_for ctx (ty : Tir.ty) (field_name : string) : int * Tir.ty =
 (* ── Record shape metadata (native record introspection) ─────────────── *)
 
 (** Static TIR type of an atom (used for shape kinds and builtin kind hints). *)
-let atom_tir_ty : Tir.atom -> Tir.ty = function
-  | Tir.AVar v -> v.Tir.v_ty
-  | Tir.ALit (March_ast.Ast.LitInt _)    -> Tir.TInt
-  | Tir.ALit (March_ast.Ast.LitFloat _)  -> Tir.TFloat
-  | Tir.ALit (March_ast.Ast.LitBool _)   -> Tir.TBool
-  | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
-  | Tir.ALit (March_ast.Ast.LitAtom _)   -> Tir.TCon ("Atom", [])
-  | Tir.ADefRef _ -> Tir.TVar "_"
+let atom_tir_ty : Tir.atom -> Tir.ty = Tir_names.atom_ty
 
 (** Field kind char for the runtime shape descriptor — describes the natural
     in-slot representation (must match runtime/march_extras.c):
@@ -276,6 +269,38 @@ let shape_desc (fields : (string * Tir.ty) list) : string =
   let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
   String.concat "" (List.map (fun (n, t) ->
     Printf.sprintf "%s:%c;" n (shape_kind_char t)) sorted)
+
+(** Separates a descriptor's fields from the deep-drop function name a
+    record type with heap fields carries ([shape_desc_with_drop]).  The
+    runtime's descriptor parser reads only the [nfields] "name:k;" entries
+    and ignores what follows the last [;]. *)
+let shape_drop_sep = '#'
+
+(** [shape_desc fields], plus [#<drop fn>] when the module defines the
+    record's deep-drop function ([Tir_names.record_drop_fn_name]).  The suffix
+    makes the shape id distinct per field TYPES, not just per field kinds
+    (two records with one String field and one List field share "name:p;"),
+    so the runtime can map a shape id to the one drop that fits it
+    ([march_record_register_drops], [march_decrc_erased]): a record released
+    through an erased type is then released deeply
+    (specs/progress/2026-10-12-erased-record-shallow-release.md). *)
+let shape_desc_with_drop ctx (fields : (string * Tir.ty) list) : string =
+  let base = shape_desc fields in
+  let drop = Tir_names.record_drop_fn_name fields in
+  if Hashtbl.mem ctx.Llvm_ctx.top_fns drop
+  then Printf.sprintf "%s%c%s" base shape_drop_sep drop
+  else base
+
+(** The (descriptor global, id-cache global, drop function) of every record
+    shape this module stamped with a drop suffix, sorted. *)
+let shape_drop_registrations ctx : (string * string * string) list =
+  Hashtbl.fold (fun desc (dg, cg) acc ->
+      match String.index_opt desc shape_drop_sep with
+      | Some i ->
+        (dg, cg, String.sub desc (i + 1) (String.length desc - i - 1)) :: acc
+      | None -> acc)
+    ctx.Llvm_ctx.rec_shape_globals []
+  |> List.sort compare
 
 (** Emit (once per shape) the descriptor string constant and the i32 id-cache
     global; returns (desc_global, cache_global). *)
@@ -295,7 +320,7 @@ let ensure_shape_globals ctx (desc : string) : string * string =
     pad word.  No-op on WASM targets (no native runtime registry). *)
 let emit_set_shape ctx ptr (fields : (string * Tir.ty) list) =
   if ctx.Llvm_ctx.shape_meta then begin
-    let (dg, cg) = ensure_shape_globals ctx (shape_desc fields) in
+    let (dg, cg) = ensure_shape_globals ctx (shape_desc_with_drop ctx fields) in
     Llvm_ctx.emit ctx (Printf.sprintf
       "call void @march_record_set_shape(ptr %s, ptr %s, ptr %s)" ptr dg cg)
   end
