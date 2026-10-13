@@ -627,6 +627,20 @@ A role new to the baseline widens by its whole closure. A baseline written befor
 
 On the wire, a manifest with `ROLE` lines is deployed with the `ACTIVATE6` message: `ACTIVATE5`'s fields plus `role_caps:<Proto.Role>=<digest>;...` inside the signed line (one digest per role, sorted by role, the `cap_root` recipe over its closure) and an unsigned `roles:<Proto.Role>=<caps>;...` block. The server recomputes every digest from the block and refuses a mismatch, a signed role the block leaves out, or a role it adds unsigned (`ERR role_cap_tamper`), then checks the IO capabilities of every closure against `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy Stream.Cons IO.FileWrite`), or of every role the policy's `serves` line names. A granted widening therefore still stops at a node whose policy forbids it. It is a new message rather than an extra field because an older server rebuilds the signed line without the role digests, so a signature check there would fail for a confusing reason. Today forge sends both shapes as `ACTIVATE7`, which adds a signed digest of the patch's bytes (see [Artifact integrity](#artifact-integrity-the-signature-covers-the-bytes)); a server that predates it refuses the deploy (upgrade it).
 
+### Topology pools' derived capabilities
+
+In a topology app (a project with a `topology.toml`), a pool whose `caps` the file leaves out gets them derived by the compiler from what its hook and roles reach. Derived does not mean unchecked: `forge deploy hot` compares each pool's derived caps with the ones recorded at the last completed deploy to the same environment (`.forge/deploy/<env>/derived.json`, `default` without `--env`; the same file `forge deploy` records), before it builds anything. A pool that gains a capability stops the deploy unless `--grant-cap` covers it:
+
+```
+error: hot deploy would widen pool edge's derived capabilities (D26)
+  last deployed caps:    IO.Console   (the default environment)
+  new version adds:      IO.FileWrite
+  A hot deploy may only narrow authority. To authorize this widening, re-run with:
+      forge deploy hot --grant-cap IO.FileWrite
+```
+
+A grant names the capability, not the pool: it authorizes it for every pool that widens to it. A pool new to the record widens by all its caps. With no record yet (the first deploy) the gate is permissive, with a note; when a record exists but the caps cannot be derived, the deploy stops rather than pass the gate blind. The record advances only when the deploy completes on every server. `forge build` prints a warning for each pool that widens relative to any environment's record. See [Topology → Derived capabilities and the widening gate]({{ site.baseurl }}/docs/topology/#derived-capabilities-and-the-widening-gate).
+
 ### `--grant-cap`
 
 `--grant-cap <CAP>` is repeatable and subsumption-matched: `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. The granted capability becomes part of the deployed function's own signed capability set, so it can't be stripped or altered without breaking the signature; the server's audit log records who deployed which function, when, and with which capability set, so a widening is always traceable back to the person who authorized it.

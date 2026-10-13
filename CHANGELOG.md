@@ -52,6 +52,15 @@ git log is authoritative for exact commits.
   `style` attribute and in a `<style>` body alike.
 
 ### Added
+- **A topology pool's derived capabilities can no longer widen silently.**
+  When `topology.toml` leaves a pool's `caps` out, the compiler derives them,
+  and `forge deploy hot` now compares them with the ones recorded at the
+  environment's last completed deploy (`.forge/deploy/<env>/derived.json`, the
+  file `forge deploy` already keeps). A pool that gains a capability stops the
+  deploy before anything is built unless `--grant-cap` names it
+  (`--grant-cap IO.FileWrite`, matched by subsumption, for every pool that
+  widens to it); a completed deploy records the new caps. `forge build` warns
+  about each pool that widens relative to a recorded deploy.
 - **`--verify-tir` checks the representations codegen commits to.** At emission,
   every allocation, match and equality site's encoding of a type (boxed, niche,
   newtype or unboxed) must agree for the same payload, and a type whose short

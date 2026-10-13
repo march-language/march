@@ -2118,11 +2118,21 @@ let build_so ~proj ~output = build_so_for ~target:None ~proj ~output
 
 (* ─── Entry point ────────────────────────────────────────────────────────── *)
 
+(** [pool_gate], when given, runs right after [Topology.gate] and before
+    anything is built: [forge deploy hot]'s derived-pool-caps widening gate
+    ([Pool_caps.deploy_gate], D26; passed in by the CLI because [Pool_caps]
+    sits above this module). Its [Ok record] is called once the deploy has
+    completed on every server, so the next deploy compares against it. *)
+type pool_gate = Project.project -> env:string option -> (unit -> unit, string) result
+
+let no_pool_gate : pool_gate = fun _ ~env:_ -> Ok (fun () -> ())
+
 (** [deploy ~so ~output ()] deploys a hot-reload artifact.
     When [so] is non-empty, it is used as the pre-built .so (the build step is
     skipped).  This allows cross-compiled artifacts (e.g. built in Docker for
     a remote Linux host) to be deployed without a local rebuild. *)
-let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ()
+let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=false)
+    ?(pool_gate = no_pool_gate) ()
     : (unit, string) result =
   (* Load project *)
   match Project.load () with
@@ -2131,6 +2141,9 @@ let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=
     match Topology.gate ~proj () with
     | Error m -> Error m
     | Ok () ->
+    match pool_gate proj ~env:None with
+    | Error m -> Error m
+    | Ok record_pool_caps ->
     match proj.Project.hot_reload with
     | None -> Error "no [hot-reload] section in forge.toml — add ssh_host, socket, public_key"
     | Some hr ->
@@ -2225,7 +2238,9 @@ let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=
                 with Sys_error _ -> ())
               | _ -> ());
               (match result2 with
-              | Ok _ -> save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path
+              | Ok _ ->
+                save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
+                record_pool_caps ()
               | Error _ -> ());
               result2 |> Result.map ignore
       end
@@ -2289,7 +2304,8 @@ let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
     - [canary]: if > 0, deploy to the first n servers, health-check, then roll out to rest.
     - [timeout_ms]: canary health-check window in milliseconds (default 30 000). *)
 let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
-    ?(grant_caps=([] : string list)) ?(no_cap_gate=false) () : (unit, string) result =
+    ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ?(pool_gate = no_pool_gate) ()
+    : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
   | Ok proj ->
@@ -2297,6 +2313,9 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
     match Topology.gate ?env:(if env = "" then None else Some env) ~proj () with
     | Error m -> Error m
     | Ok () ->
+    match pool_gate proj ~env:(if env = "" then None else Some env) with
+    | Error m -> Error m
+    | Ok record_pool_caps ->
     match proj.Project.hot_reload with
     | None -> Error "no [hot-reload] section in forge.toml — add ssh_host, socket, public_key"
     | Some hr ->
@@ -2440,6 +2459,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                     if failed = [] then begin
                       save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                       save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
+                      record_pool_caps ();
                       Ok ()
                     end else
                       Error (Printf.sprintf "%d server(s) failed during rollout" (List.length failed))
@@ -2456,6 +2476,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                 if failed = [] then begin
                   save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                   save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
+                  record_pool_caps ();
                   Ok ()
                 end else begin
                   Printf.eprintf "\nFailed servers:\n";
@@ -2475,6 +2496,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                   (* Only advance the schema baseline when all servers succeeded. *)
                   save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                   save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
+                  record_pool_caps ();
                   Ok ()
                 end else begin
                   Printf.eprintf "\nFailed servers:\n";
