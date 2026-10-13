@@ -1398,7 +1398,10 @@ mod ClusterNode do
   -- by forgetting local registrations another holder has taken (Lost).
   pfn refresh_names(st : CnState) : (CnState, List(CnEffect)) do
     let new_vis = visible_map(st)
-    let names = List.dedup(List.append(Map.keys(st.vis), Map.keys(new_vis)))
+    -- Each name once: List.dedup only drops ADJACENT duplicates, and a name
+    -- in both maps is not adjacent to itself in the appended key lists.
+    let added = List.filter(Map.keys(new_vis), fn k -> not(Map.contains_key(st.vis, k, Map.str_cmp)))
+    let names = List.append(Map.keys(st.vis), added)
     let out = List.fold_left(names, (st, Nil), fn (acc, name) ->
       match acc do
         (s, effs) ->
