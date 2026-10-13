@@ -23,7 +23,7 @@ Write code that reads like Elixir. Get compile-time guarantees that your message
 
 ### Actors with supervision trees
 
-March's concurrency model is the actor model: share-nothing, message-passing processes, just like Elixir. Actors are first-class: spawn them, link them, monitor them, and organize them into supervision trees that automatically restart failed processes.
+March's concurrency model is the actor model: share-nothing, message-passing processes, just like Elixir. Actors are first-class: spawn them, monitor them, and organize them into supervision trees that automatically restart failed processes.
 
 ```march
 actor Counter do
@@ -61,7 +61,7 @@ The type system enforces actor isolation: you cannot accidentally share mutable 
 
 ### Session types: typed communication protocols
 
-March can verify at compile time that two actors follow a compatible communication protocol, including that neither side will deadlock. If your protocol states the server sends a response after receiving a request, the compiler checks both sides agree.
+March can verify at compile time that two parties follow a compatible communication protocol. If your protocol states the server sends a response after receiving a request, the compiler checks that both sides agree and that neither side sends out of turn, uses a closed channel, or leaves a branch unhandled.
 
 ```march
 -- Protocol: Client sends a query, Server replies with results.
@@ -72,9 +72,11 @@ protocol Search do
 end
 ```
 
-Each side gets its own projected view and the compiler checks they're duals, so
-mismatched message patterns and deadlocks become compile errors, not runtime
-surprises. See [Session Types]({{ site.baseurl }}/docs/session-types/) for the full walkthrough.
+Each side gets its own projected view and the compiler checks they are duals, so
+a mismatched message pattern is a compile error, not a runtime surprise. See
+[Session Types]({{ site.baseurl }}/docs/session-types/) for the full walkthrough,
+and [Choreography]({{ site.baseurl }}/docs/choreography/) for the same idea with
+any number of roles, each compiled to its own program.
 
 ### Perceus reference counting + FBIP
 
@@ -98,7 +100,7 @@ On a depth-20 binary tree (1M leaves), 100 passes of a transformation like this:
 | Rust (`Box`) | 9.5 s |
 | **March (FBIP)** | **1.3 s** |
 
-March wins not because C is slow, but because FBIP eliminates 200M allocator calls entirely.
+March wins not because C is slow, but because FBIP eliminates 200M allocator calls entirely. The benchmark is [`bench/tree_transform.march`](https://github.com/march-language/march/blob/main/bench/tree_transform.march); current numbers are in [`bench/RESULTS.md`](https://github.com/march-language/march/blob/main/bench/RESULTS.md).
 
 ### Linear and affine types
 
@@ -173,9 +175,11 @@ end
 
 ### Concurrency
 - **Actor model**: share-nothing message passing, isolated by the type system
-- **Supervision trees**: OneForOne, OneForAll, RestForOne restart strategies
-- **Session types**: typed two-party protocols; deadlocks caught at compile time
-- **Structured concurrency** via `Task(a)` and `Future(a)`
+- **Supervision trees**: `one_for_one`, `one_for_all`, `rest_for_one` restart strategies, restart budgets and backoff
+- **Session types**: typed two-party protocols; a send out of turn is a compile error
+- **Choreographies**: one protocol, many roles, each role compiled to its own program on its own node
+- **Structured concurrency** via `Task.async`, `await_many`, `race` and `scope`
+- **Hot code reload**: deploy to a running node; actors migrate their state in place
 
 ### Runtime and performance
 - **Perceus reference counting**: deterministic, no tracing collector; freeing is inline work at a point you choose ([memory model]({{ site.baseurl }}/docs/memory-model/))
@@ -216,41 +220,80 @@ end
 
 ### Start here
 
-New to March? Read these three in order, then branch out.
-
 | Guide | What it covers |
 |-------|---------------|
 | [Installation](installation.md) | Prebuilt binaries (recommended); building from source |
 | [Getting Started](getting-started.md) | Hello world, compiling, running the REPL |
 | [Language Tour](tour.md) | Variables, functions, types, pipes: the essentials |
+| [Try It Out](playground.md) | A March interpreter in the browser; no install |
+| [Build a CLI Tool](build-a-cli.md) | Start-to-finish: scaffold, args, files, test, build |
+| [Cookbook](cookbook/) | Goal-oriented recipes: CLI, HTTP, JSON, files, config |
+| [Examples](examples.md) | Runnable programs in `examples/`, one feature each |
+| Coming from [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md) | Mental-model maps for newcomers |
 
-Prefer to poke at it live? [Try It Out](playground.md) runs March in your browser.
-
-### Guides and reference
+### The language
 
 | Guide | What it covers |
 |-------|---------------|
-| [Build a CLI Tool](build-a-cli.md) | Start-to-finish: scaffold, args, files, test, build |
-| [Cookbook](cookbook/) | Goal-oriented recipes: CLI, HTTP, JSON, files, config |
 | [Type System](types.md) | ADTs, records, generics, Option, Result |
-| [Linear Types](linear-types.md) | Ownership, linear and affine qualifiers |
-| [Capabilities](capabilities.md) | IO permission caps, proof tokens, `needs` enforcement |
-| [Refinement Types](refinement-types.md) | `{T \| pred}` predicates checked by Z3 |
-| [Pattern Matching](pattern-matching.md) | Match, guards, exhaustiveness, nested patterns |
-| [Safety by Construction](safety-by-construction.md) | Composing linear, capability, refinement, and typestate guarantees |
-| [Memory Model](memory-model.md) | Perceus RC, FBIP in-place reuse, allocation-free code |
+| [Pattern Matching](pattern-matching.md) | Match, guards, exhaustiveness, `with`, multi-head functions |
 | [Module System](modules.md) | `mod`, `use`, `import`, `alias`, visibility |
-| [Actors](actors.md) | Spawn, send, receive, linking, monitoring |
-| [Supervision](supervision.md) | Supervision trees, restart strategies |
-| [Parallelism](parallelism.md) | Tasks, `pmap`, the M:N work-stealing scheduler |
-| [Session Types](session-types.md) | Typed two-party protocols; deadlocks caught at compile time |
-| [Choreography](choreography.md) | One protocol, many roles, each role its own program on its own node |
-| [Flow](flow.md) | Backpressure pipelines for streaming work |
-| [Overload & Resilience](overload-resilience.md) | Bounded mailboxes, load shedding, and backoff, withstanding thundering herds |
-| [Clustering](clustering.md) | Distributed actors: SWIM, CRDTs, RPC across nodes |
 | [Interfaces](interfaces.md) | `interface`, `impl`, `derive` |
-| [FFI](ffi.md) | Bind C/Rust libraries: `extern`, ownership, codecs, the `march` crate |
+| [Sigils & Templating](sigils.md) | `~H`, `~T` and friends: typed literals for HTML, TOML and more |
+| [Parsing](parsing.md) | The `Parse` combinator library |
 | [Standard Library](stdlib.md) | List, Map, String, Option, Result, and more |
+| [Coding Standards](coding-standards.md) | Style, safety and idiom rules, and `forge lint` |
+
+### Safety at compile time
+
+| Guide | What it covers |
+|-------|---------------|
+| [Safety by Construction](safety-by-construction.md) | Which layer catches which bug: capabilities, linearity, refinements |
+| [Capabilities](capabilities.md) | IO permission caps, the upper limit, the grant, proof caps, typestate |
+| [Linear Types](linear-types.md) | Ownership, linear and affine qualifiers, `LinearMap`, `RingBuf` |
+| [Refinement Types](refinement-types.md) | `{T \| pred}` predicates checked by Z3, `cap verified`, `cap no_panic` |
+| [Capability Enforcement](capability-enforcement.md) | Turning declared capabilities into an OS sandbox and a deploy gate |
+| [Capability Audit](capability-audit.md) | `forge audit` on dependency updates; `forge cap inspect` on a binary |
+| [Memory Model](memory-model.md) | Perceus RC, FBIP in-place reuse, allocation-free code |
+
+### Concurrency
+
+| Guide | What it covers |
+|-------|---------------|
+| [Actors](actors.md) | Spawn, send, receive, monitoring, named actors, mailbox limits |
+| [Supervision](supervision.md) | Supervision trees, restart strategies, budgets and backoff |
+| [Parallelism](parallelism.md) | `pmap` and friends on the M:N work-stealing scheduler |
+| [Flow](flow.md) | Backpressure pipelines for streaming work |
+| [Overload & Resilience](overload-resilience.md) | Bounded mailboxes, load shedding and backoff, withstanding thundering herds |
+| [Session Types](session-types.md) | Typed two-party protocols; a send out of turn is a compile error |
+| [Choreography](choreography.md) | One protocol, many roles, each role its own program on its own node |
+| [SIMD & Native Arrays](simd-vectorization.md) | Auto-vectorised numeric loops and explicit vector types; [benchmarks](simd-benchmarks.md) |
+
+### Distribution and operations
+
+| Guide | What it covers |
+|-------|---------------|
+| [Clustering](clustering.md) | Nodes, membership, the global registry, typed remote messages, RPC |
+| [Cluster Certificates](cluster-certificates.md) | Admitting nodes by certificate: issuing, renewing, revoking |
+| [Topology](topology.md) | `topology.toml`: which pool serves which role, and on which hosts |
+| [Hot Code Reload](hot-code-reload.md) | Deploy to a running node; state migration, capability-safe deploys |
+| [Observing a running node](observe.md) | The observe socket, `forge status` / `diagnose` / `top`, the remote shell |
+| [Multi-host Lab](lab.md) | What happens to a real multi-host deployment when it is cut, restarted and failed over |
+
+### Tooling
+
+| Guide | What it covers |
+|-------|---------------|
+| [Tooling](tooling.md) | `forge` command reference: build, test, search, deploy, and more |
+| [LSP & Editors](lsp.md) | `march-lsp` features, editor setup, the DAP debugger |
 | [REPL](repl.md) | Interactive session guide |
-| [Tooling](tooling.md) | LSP, Zed, forge build tool |
-| Coming from [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md) | Mental-model maps for newcomers |
+| [Property Testing](property-testing.md) | `Check.all` generators and shrinking |
+| [FFI](ffi.md) | Bind C/Rust libraries: `extern`, ownership, codecs, the `march` crate |
+| [Value Representation](value-representation.md) | Compiler internals: how values are laid out in memory |
+
+### Upgrading
+
+| Guide | What it covers |
+|-------|---------------|
+| [Upgrading to 0.4.0](upgrading-to-0-4-0.md) | No breaking source changes; what moved |
+| [Upgrading to 0.3.0](upgrading-to-0-3-0.md) | The breaking changes in 0.3.0, one by one |
