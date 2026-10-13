@@ -11,7 +11,7 @@ permalink: /
 
 # March
 
-**Actors from the BEAM. Types from ML. Native binaries, no garbage collector.**
+**ML's types. Capabilities for every effect. BEAM-style actors, compiled to native code.**
 
 March is a statically-typed functional language: actors and message passing from the BEAM, algebraic data types from ML, compiled to native binaries through LLVM. Perceus reference counting with in-place reuse means no garbage collector and no pauses, at Rust-like performance. And side effects live in the type as capabilities, so what any module can touch is visible, and auditable across your dependencies.
 
