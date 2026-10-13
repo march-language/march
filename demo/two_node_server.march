@@ -2,6 +2,8 @@ mod TwoNodeServer do
   needs IO.Console
   needs IO.NetListen
   needs IO.NetConnect
+  needs IO.Mut
+  needs IO.Clock
 
   fn square(n : Int) : Int do n * n end
 
@@ -27,7 +29,7 @@ mod TwoNodeServer do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen)) do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_mut : Cap(IO.Mut), _cap_clock : Cap(IO.Clock)) do
     let port = 29852
     let fd = match tcp_listen(port) do
       Ok(fd) -> fd
