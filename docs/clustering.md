@@ -9,20 +9,92 @@ permalink: /docs/clustering/
 
 # Clustering & RPC
 
-March's distributed layer lets multiple nodes form a cluster, discover each other, detect failures, and call functions across node boundaries with type-safety guarantees. The full stack is built from composable pure modules layered on top of the [actor runtime]({{ site.baseurl }}/docs/actors/) and its [supervision trees]({{ site.baseurl }}/docs/supervision/).
+A March cluster is a set of named nodes joined by authenticated TCP links. Nodes find
+each other, agree on who is alive, share a cluster-wide name registry, and send typed
+actor messages and type-checked function calls to one another. All of it is the actor
+model stretched across machines: a name that resolves to a `Pid` on one node resolves
+to a `GlobalPid` on the cluster, and a `send` to an actor becomes a frame on a peer's
+connection that is refused, not lost, when it cannot be delivered.
 
-> **This page is an API reference, not a runnable quickstart.** The code below shows how
-> the layers fit together, but the end-to-end examples are *skeletons*; two things can
-> only come from a real build, not from copy-paste: the actual byte transport over each
-> socket, and the `sig_hash` / `impl_hash` values the compiler bakes into your binary for
-> the specific functions you enroll (see [Putting It Together](#putting-it-together)). For
-> a complete executing example, the cluster integration tests under the project's `test/`
-> tree run the whole accept → handshake → enroll → call → reply loop.
->
-> **New to March concurrency?** Don't start here. Begin with
-> [Actors]({{ site.baseurl }}/docs/actors/) (`spawn` / `send`) and
-> [Supervision Trees]({{ site.baseurl }}/docs/supervision/): clustering is the
-> distributed generalization of those, and this page assumes them throughout.
+Most programs start with `ClusterNode`, the assembled node: one call joins the cluster
+and gives you membership events, the registry, remote messages and monitors over one
+authenticated connection pair per peer. Underneath it is a stack of pure modules
+(framing, handshake, SWIM, CRDT registry, RPC) that can also be assembled by hand, and
+the rest of this page is that stack, layer by layer.
+
+Clustering assumes [Actors]({{ site.baseurl }}/docs/actors/) and
+[Supervision Trees]({{ site.baseurl }}/docs/supervision/); start there if `spawn`,
+`send` and `supervise` are new. The end-to-end examples below the `ClusterNode`
+section are skeletons: the byte transport over each socket and the `sig_hash` /
+`impl_hash` values the compiler bakes into a binary can only come from a real build.
+The cluster integration tests under `test/` run the whole accept → handshake →
+enroll → call → reply loop.
+
+## On this page
+
+**Start here**
+
+- [When to use it](#when-to-use-it)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [From one node to a cluster](#from-one-node-to-a-cluster)
+- [A running node: `ClusterNode`](#a-running-node-clusternode)
+
+**The layers**
+
+- [Overview](#overview)
+- [Node Identity](#node-identity)
+- [Authentication & Handshake](#authentication--handshake): [shared secret](#shared-secret-mode), [certificates](#certificate-mode), [per-frame MAC](#per-frame-mac), [expiry and revocation](#expiry-and-revocation), [threat model](#threat-model), [in code](#the-handshake-in-code)
+- [Authorization](#authorization): [roles](#roles-who-may-form-a-session), [raw sends](#raw-sends), [cross-node references](#cross-node-references), [what it does not cover](#what-authorization-does-not-cover)
+- [Membership & Failure Detection](#membership--failure-detection)
+- [Global Registry](#global-registry)
+
+**Sending across nodes**
+
+- [Remote actor messages: `NodeSend`](#remote-actor-messages-nodesend)
+- [Typed remote messages: `Node.send` and `@[remote]`](#typed-remote-messages-nodesend-and-remote)
+- [Remote Calls](#remote-calls) and the [responder side](#responder-side-noderpc)
+
+**Assembling it by hand**
+
+- [Putting It Together](#putting-it-together)
+
+**Status**
+
+- [Conformance status](#conformance-status)
+- [See also](#see-also)
+
+## When to use it
+
+Use the cluster when one program has to run as **several nodes that find each other
+by name and keep working when one of them dies**: a service whose workers live on
+other machines, a pool a supervisor places roles onto, a protocol whose roles run on
+different hosts, or a deploy that rolls through a fleet.
+
+| You want | Reach for |
+|---|---|
+| Join the cluster, see who is up, register and look up names | `ClusterNode.start`, `subscribe`, `register`, `lookup`, `watch` |
+| Send a typed message to an actor on another node | `Node.enqueue` with a `NodeQueue` policy, and `@[remote]` on the receiving actor |
+| Know when a remote actor dies | `ClusterNode.monitor_remote` |
+| Call a function on another node and get a typed reply | `RemoteCall` and `NodeRpc`, checked by `sig_hash` and `impl_hash` |
+| Run one protocol with roles on several nodes | A [choreography]({{ site.baseurl }}/docs/choreography/#running-over-a-cluster-node) over the node |
+| Limit what a node may do, not only who it is | Certificate mode: roles and the `raw_send` flag |
+| Test cluster reactions with no sockets | `ClusterNode.attach(io, ops)` with an `ops_stub` |
+
+Two things the cluster is not. A global name is not a lock: during a partition each
+side can register it, and one binding wins when the partition heals. And the links are
+authenticated and integrity-checked but not encrypted: run the cluster on a private
+network or under a mesh that encrypts.
+
+## How it fits with the rest of March
+
+| Concept | Where the cluster meets it | Chapter |
+|---|---|---|
+| **Actors and supervision** | A `GlobalPid` is a node's `Pid` plus a creation counter; a supervised restart is a new creation, so a stale reference is refused. `GlobalRegistry` is the distributed `Actor.register`. | [Actors]({{ site.baseurl }}/docs/actors/), [Supervision]({{ site.baseurl }}/docs/supervision/) |
+| **Capabilities** | `ClusterNode.start` returns a `Cap(ClusterNode.Live)`; code without it cannot use the cluster. A node's certificate is the cross-node counterpart: roles say which sessions it may join, `raw_send` whether it may reach a process outside one. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Choreography** | Sessions ride the node's connections; `cluster_<Role>` and access points use the node's membership as their failure detector, and certificates decide who may take a role. | [Choreography]({{ site.baseurl }}/docs/choreography/) |
+| **Hot code reload** | Typed messages carry a schema hash, so a sender on another version of a type is converted by `migrate_msg` or refused. The node's own reader tasks move epochs at the next frame. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/#protocol-changes) |
+| **Topology and certificates** | `forge host init` and `forge deploy` place roles on nodes and carry certificates and revocations through the control plane. | [Topology]({{ site.baseurl }}/docs/topology/), [Cluster Certificates]({{ site.baseurl }}/docs/cluster-certificates/) |
+| **Observing a running node** | The cluster section of `SNAPSHOT` is not built yet, so peers and SWIM state are observed through `subscribe` and `on_security_event` for now. | [Observe]({{ site.baseurl }}/docs/observe/) |
 
 ---
 
@@ -32,7 +104,7 @@ Start from where [Supervision Trees]({{ site.baseurl }}/docs/supervision/) leave
 
 **Clustering is that exact pattern, stretched across machines.** `GlobalRegistry` is *the distributed version of spawning and registering an actor*: instead of a name → `Pid` map living in one process, it's a cluster-wide, gossip-replicated name → `{node_id, pid}` map that every node converges on. Register a worker under a cluster name on Node A, and Node B can look that name up and call it, without holding A's raw `Pid` at any point.
 
-Here's the whole arc in miniature. On Node A, a supervised worker registers itself under a cluster-wide name:
+The whole arc in miniature. On Node A, a supervised worker registers itself under a cluster-wide name:
 
 ```march
 -- Node A: register a local worker under a cluster-wide name.
@@ -69,8 +141,9 @@ The rest of this page is the infrastructure that makes those two snippets safe: 
 
 ## A running node: `ClusterNode`
 
-Everything below this section is the layer cake: pure modules and socket glue you can
-assemble by hand. `ClusterNode` is the assembled node, and most programs should start with it:
+`ClusterNode` is the assembled node, and most programs should start with it. Everything
+after this section is the layer cake underneath: pure modules and socket glue you can
+assemble by hand.
 
 ```march
 -- MARCH_NODE_NAME=a MARCH_NODE_PORT=4001 MARCH_CLUSTER_NODES=10.0.0.2:4001 \
@@ -635,144 +708,6 @@ Merge is idempotent: applying the same remote view twice produces the same resul
 
 ---
 
-## Remote Calls
-
-### GlobalPid: cluster-wide process identifiers
-
-A `GlobalPid` uniquely identifies a process across the cluster:
-
-```march
-let pid = GlobalPid.make("alice@192.168.1.10", 42, 1)
--- { node_id: "alice@192.168.1.10", local_pid: 42, creation: 1 }
-
--- Serialise / deserialise (for inclusion in RPC messages)
-let v    = GlobalPid.to_value(pid)
-let pid2 = GlobalPid.of_value(v)   -- Result(GlobalPid.Pid, String)
-```
-
-The `creation` counter lets the runtime distinguish a new process at the same local pid from a restarted one.
-
-### RemoteRef: type-safe function references
-
-A `RemoteRef` pins a remote function by both its type signature hash and its implementation hash:
-
-```march
-let fref = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
--- { module_name: "Math", fn_name: "add", sig_hash: ..., impl_hash: ... }
-```
-
-| Field | Hash of | Guards against |
-|-------|---------|----------------|
-| `sig_hash` | Public type signature | Calling a function with a different type |
-| `impl_hash` | Function body (Merkle root) | Calling a different version of the same function |
-
-The hashes are recorded in the compiled binary. The responder node's RPC dispatcher rejects any call where they don't match its local copy.
-
-### Making a call
-
-Build a `CallRequest`, encode it, send it over the connection, then decode the reply:
-
-```march
-let reply_pid = GlobalPid.make(my_node_id, my_local_pid, 1)
-let fref      = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
-let args      = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(2), Cons(Msgpack.int(3), Nil))))
-let req       = RemoteCall.request(fref, args, reply_pid, deadline_ms, correlation_id)
-
--- Encode to bytes for transport
-let frame = RemoteCall.encode_request(req)
-
--- On the caller side, when a reply arrives:
-match NodeRpc.interpret(reply) do
-  Ok(payload) ->
-    -- payload is raw Msgpack bytes; decode them
-    match Msgpack.decode(payload) do
-      Ok(Msgpack.Int(n)) -> n
-      _                  -> ...
-    end
-  Err(err) ->
-    -- err is a CallError — see below
-    ...
-end
-```
-
-### CallError taxonomy
-
-| Error | Meaning |
-|-------|---------|
-| `DeadlineExceeded` | No reply before the deadline |
-| `NoConnection` | The peer is unreachable or has disconnected |
-| `RemoteExit(msg)` | The target function raised an error |
-| `TypeMismatch` | `sig_hash` did not match; type API changed |
-| `VersionSkew` | `sig_hash` matched but `impl_hash` did not; different body version |
-| `NoTarget` | No function enrolled under that module/function name |
-
-`TypeMismatch` and `VersionSkew` are safe: the remote body was **never invoked**.
-
-### Caller-side helpers
-
-```march
--- Check whether a reply belongs to a given request (by correlation id)
-NodeRpc.matches(req, reply)    -- Bool
-
--- Timeout check (compare current time to request deadline)
-NodeRpc.timed_out(now_ms, req.deadline)   -- Bool
-
--- Synthesise a peer-down error reply
-NodeRpc.peer_down_error()   -- CallError
-```
-
----
-
-## Responder Side (NodeRpc)
-
-Each node runs an RPC dispatcher that maps `(module, function)` keys to local stubs. The stubs decode MessagePack arguments, call the local function, and encode the result.
-
-### Enrolling a function
-
-```march
--- A stub: decode args, call the real function, encode the result
-fn add_stub(args : List(Int)) : Result(List(Int), String) do
-  match Msgpack.decode(args) do
-    Err(e) -> Err(e)
-    Ok(v)  ->
-      match v do
-        Msgpack.Array(Cons(Msgpack.Int(a), Cons(Msgpack.Int(b), Nil))) ->
-          Ok(Msgpack.encode(Msgpack.int(a + b)))
-        _ -> Err("add: bad args")
-      end
-  end
-end
-
-let targets = NodeRpc.empty()
-let target  = { sig_hash: sig_hash, impl_hash: impl_hash, invoke: add_stub }
-let targets = NodeRpc.enroll(targets, "Math", "add", target)
-```
-
-### Dispatching incoming frames
-
-```march
--- Given raw bytes from the network:
-match NodeRpc.handle_frame(targets, frame) do
-  Some(reply) ->
-    -- Encode the reply and send it back
-    let reply_bytes = RemoteCall.encode_reply(reply)
-    -- ... write reply_bytes to the peer's socket ...
-  None ->
-    -- Malformed frame — log and discard
-    ()
-end
-```
-
-`handle_frame` decodes the request, verifies `sig_hash` and `impl_hash` against the enrolled stub, invokes it (if both match), and returns a `CallReply`. The verification logic is:
-
-1. No stub for `(module, fn)` → `NoTarget`
-2. `sig_hash` mismatch → `TypeMismatch` (stub never called)
-3. `impl_hash` mismatch → `VersionSkew` (stub never called)
-4. Stub returns `Err(msg)` → `RemoteExit(msg)`
-5. Stub returns `Ok(bytes)` → `Returned(bytes)`
-
----
-
 ## Remote actor messages: `NodeSend`
 
 A `NodeCall` is a synchronous call to a *function*. To send a one-way
@@ -810,6 +745,8 @@ payload codec (encode the message with its `derive`d codec into bytes; the
 frame carries bytes). Pids never travel: a message that must name an actor
 carries a `GlobalPid`. `test/native/node_send_loopback.march` runs the whole
 exchange over TCP loopback, including all three failure replies.
+
+---
 
 ## Typed remote messages: `Node.send` and `@[remote]`
 
@@ -989,6 +926,146 @@ session its predecessor parked; run again for a new one. (That is the event API'
 the same as in-process: the step can read the actor's state because the session state *is*
 actor state, and actor state does not survive a restart.)
 
+---
+
+## Remote Calls
+
+### GlobalPid: cluster-wide process identifiers
+
+A `GlobalPid` uniquely identifies a process across the cluster:
+
+```march
+let pid = GlobalPid.make("alice@192.168.1.10", 42, 1)
+-- { node_id: "alice@192.168.1.10", local_pid: 42, creation: 1 }
+
+-- Serialise / deserialise (for inclusion in RPC messages)
+let v    = GlobalPid.to_value(pid)
+let pid2 = GlobalPid.of_value(v)   -- Result(GlobalPid.Pid, String)
+```
+
+The `creation` counter lets the runtime distinguish a new process at the same local pid from a restarted one.
+
+### RemoteRef: type-safe function references
+
+A `RemoteRef` pins a remote function by both its type signature hash and its implementation hash:
+
+```march
+let fref = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
+-- { module_name: "Math", fn_name: "add", sig_hash: ..., impl_hash: ... }
+```
+
+| Field | Hash of | Guards against |
+|-------|---------|----------------|
+| `sig_hash` | Public type signature | Calling a function with a different type |
+| `impl_hash` | Function body (Merkle root) | Calling a different version of the same function |
+
+The hashes are recorded in the compiled binary. The responder node's RPC dispatcher rejects any call where they don't match its local copy.
+
+### Making a call
+
+Build a `CallRequest`, encode it, send it over the connection, then decode the reply:
+
+```march
+let reply_pid = GlobalPid.make(my_node_id, my_local_pid, 1)
+let fref      = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
+let args      = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(2), Cons(Msgpack.int(3), Nil))))
+let req       = RemoteCall.request(fref, args, reply_pid, deadline_ms, correlation_id)
+
+-- Encode to bytes for transport
+let frame = RemoteCall.encode_request(req)
+
+-- On the caller side, when a reply arrives:
+match NodeRpc.interpret(reply) do
+  Ok(payload) ->
+    -- payload is raw Msgpack bytes; decode them
+    match Msgpack.decode(payload) do
+      Ok(Msgpack.Int(n)) -> n
+      _                  -> ...
+    end
+  Err(err) ->
+    -- err is a CallError — see below
+    ...
+end
+```
+
+### CallError taxonomy
+
+| Error | Meaning |
+|-------|---------|
+| `DeadlineExceeded` | No reply before the deadline |
+| `NoConnection` | The peer is unreachable or has disconnected |
+| `RemoteExit(msg)` | The target function raised an error |
+| `TypeMismatch` | `sig_hash` did not match; type API changed |
+| `VersionSkew` | `sig_hash` matched but `impl_hash` did not; different body version |
+| `NoTarget` | No function enrolled under that module/function name |
+
+`TypeMismatch` and `VersionSkew` are safe: the remote body was **never invoked**.
+
+### Caller-side helpers
+
+```march
+-- Check whether a reply belongs to a given request (by correlation id)
+NodeRpc.matches(req, reply)    -- Bool
+
+-- Timeout check (compare current time to request deadline)
+NodeRpc.timed_out(now_ms, req.deadline)   -- Bool
+
+-- Synthesise a peer-down error reply
+NodeRpc.peer_down_error()   -- CallError
+```
+
+---
+
+## Responder Side (NodeRpc)
+
+Each node runs an RPC dispatcher that maps `(module, function)` keys to local stubs. The stubs decode MessagePack arguments, call the local function, and encode the result.
+
+### Enrolling a function
+
+```march
+-- A stub: decode args, call the real function, encode the result
+fn add_stub(args : List(Int)) : Result(List(Int), String) do
+  match Msgpack.decode(args) do
+    Err(e) -> Err(e)
+    Ok(v)  ->
+      match v do
+        Msgpack.Array(Cons(Msgpack.Int(a), Cons(Msgpack.Int(b), Nil))) ->
+          Ok(Msgpack.encode(Msgpack.int(a + b)))
+        _ -> Err("add: bad args")
+      end
+  end
+end
+
+let targets = NodeRpc.empty()
+let target  = { sig_hash: sig_hash, impl_hash: impl_hash, invoke: add_stub }
+let targets = NodeRpc.enroll(targets, "Math", "add", target)
+```
+
+### Dispatching incoming frames
+
+```march
+-- Given raw bytes from the network:
+match NodeRpc.handle_frame(targets, frame) do
+  Some(reply) ->
+    -- Encode the reply and send it back
+    let reply_bytes = RemoteCall.encode_reply(reply)
+    -- ... write reply_bytes to the peer's socket ...
+  None ->
+    -- Malformed frame — log and discard
+    ()
+end
+```
+
+`handle_frame` decodes the request, verifies `sig_hash` and `impl_hash` against the enrolled stub, invokes it (if both match), and returns a `CallReply`. The verification logic is:
+
+1. No stub for `(module, fn)` → `NoTarget`
+2. `sig_hash` mismatch → `TypeMismatch` (stub never called)
+3. `impl_hash` mismatch → `VersionSkew` (stub never called)
+4. Stub returns `Err(msg)` → `RemoteExit(msg)`
+5. Stub returns `Ok(bytes)` → `Returned(bytes)`
+
+---
+
 ## Putting It Together
 
 > **This is a layered API-reference skeleton, not a runnable program.** It shows how the pieces connect (identity, listen/connect, handshake, then a `RemoteCall`) but elides two things you must supply for real: (1) the actual byte transport over the socket `fd`, and (2) concrete `sig_hash` / `impl_hash` values, which the compiler bakes into your binary for the specific functions you enroll. The send/recv framing is `NetFrame`'s job (length-prefixed frames); see the *Wiring up the transport* note after the skeleton for how to close the loop.
@@ -1049,7 +1126,7 @@ end
 
 To turn the skeleton into a running program, close the two gaps the note above flagged:
 
-1. **Framing.** `RemoteCall.encode_request(req)` gives you a `List(Int)` of bytes. Wrap it in a length prefix with `NetFrame` and write it to the socket `fd`; on the other end, read a length-prefixed frame back and hand the bytes to `RemoteCall.decode_reply` (caller side) or `NodeRpc.handle_frame` (responder side). The accept/recv loop is the same shape as the `ClusterConn.listen` example in [Starting the listener](#starting-the-listener): receive a frame, dispatch, write the reply.
+1. **Framing.** `RemoteCall.encode_request(req)` gives you a `List(Int)` of bytes. Wrap it in a length prefix with `NetFrame` and write it to the socket `fd`; on the other end, read a length-prefixed frame back and hand the bytes to `RemoteCall.decode_reply` (caller side) or `NodeRpc.handle_frame` (responder side). The accept/recv loop is the same shape as the `ClusterConn.listen` example in [The handshake in code](#the-handshake-in-code): receive a frame, dispatch, write the reply.
 2. **Hashes.** `sig_hash` and `impl_hash` are produced by the compiler for the enrolled function (`Image.resize`, `Math.add`, …) and recorded in the binary; you reference the compiler-provided values rather than inventing them. A mismatch is caught *before* the remote body runs (`TypeMismatch` / `VersionSkew`), which is the whole point of the type-safe call path.
 
 For a complete, executing example, see the cluster integration tests under the project's `test/` tree (search with `forge search` for `ClusterConn`, `NodeRpc`, and `GlobalRegistry`), which exercise the full accept → handshake → enroll → call → reply loop end to end.
@@ -1130,3 +1207,6 @@ includes the disjoint-key case unconditionally.
 - [Actors]({{ site.baseurl }}/docs/actors/): `spawn` / `send` and the mailbox model the cluster layers on; `GlobalRegistry` is the distributed counterpart of registering a `Pid` under a name.
 - [Supervision Trees]({{ site.baseurl }}/docs/supervision/): start from a supervised actor app on one node, then register its workers in the cluster as shown in [From one node to a cluster](#from-one-node-to-a-cluster).
 - [Session Types]({{ site.baseurl }}/docs/session-types/): typed two-party protocols, the in-process analogue of a type-safe `RemoteCall`.
+- [Choreography]({{ site.baseurl }}/docs/choreography/): one protocol, many roles, run over a `ClusterNode` or its own connections.
+- [Cluster Certificates]({{ site.baseurl }}/docs/cluster-certificates/): issuing, renewing and revoking node certificates.
+- [Topology]({{ site.baseurl }}/docs/topology/): placing roles on nodes and deploying across them.

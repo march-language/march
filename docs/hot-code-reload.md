@@ -7,9 +7,92 @@ permalink: /docs/hot-code-reload/
 
 # Hot Code Reload
 
-March supports deploying new code to a running server **without restarting the process**. Actors keep running and their state is preserved. Work that started on the old code finishes on the old code: each actor handles the messages it already has queued with the version they were sent to, then moves to the new version and migrates its state. New work runs on the new code.
+March can deploy new code to a running server **without restarting the process**.
+Actors keep running and keep their state. Work that started on the old code finishes
+on the old code: each actor handles the messages it already has queued with the
+version they were sent to, then moves to the new version and migrates its state. New
+work runs on the new code.
 
-This is useful in practice: no cold-start latency, no dropped connections, no TCP state reset, and no need to drain traffic before a routine code push.
+The mechanism is a signed patch of only the functions that changed, loaded into the
+live process and activated as one step under a new **epoch** number. Every unit of
+work (an actor, a task, a session) remembers the epoch it runs at and calls the
+version of each function that was current at that epoch, so a partial rollout never
+hands a live call the wrong shape of arguments. Two gates decide whether a patch may
+widen what the node is allowed to do, and every signed request is sequenced so it
+cannot be replayed.
+
+In practice: no cold-start latency, no dropped connections, no TCP state reset, and no
+need to drain traffic before a routine code push.
+
+## On this page
+
+**Start here**
+
+- [When to use it](#when-to-use-it)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [How it works](#how-it-works)
+
+**One server**
+
+- [Server setup](#server-setup)
+- [Configuring forge.toml](#configuring-forgetoml) and the [`[hot-reload]` reference](#single-server-forgetoml-reference)
+- [Deploying](#deploying)
+
+**Many hosts**
+
+- [Multi-host deploys](#multi-host-deploys) and [the in-cluster control plane](#through-the-in-cluster-control-plane)
+- [Pushing a topology: the `TOPOLOGY` verb](#pushing-a-topology-the-topology-verb)
+
+**What happens to running work**
+
+- [Actor state migration](#actor-state-migration): [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
+- [Compatibility annotations](#compatibility-annotations)
+- [Verifying migration soundness with `@invariant`](#verifying-migration-soundness-with-invariant) and [what `@invariant` accepts](#what-expressions-are-allowed-in-invariant)
+- [Deploying signature changes](#deploying-signature-changes)
+- [Independent deploy pace (epoch-tagged dispatch)](#independent-deploy-pace-epoch-tagged-dispatch)
+
+**Trust and durability**
+
+- [Capability-safe deploys](#capability-safe-deploys): the two gates, `MARCH_DEPLOY_POLICY`, per-role closures, `--grant-cap`, the threat model
+- [Sequenced releases: no replayed requests](#sequenced-releases-no-replayed-requests)
+- [Artifact integrity: the signature covers the bytes](#artifact-integrity-the-signature-covers-the-bytes)
+- [Restart durability](#restart-durability)
+
+- [See also](#see-also)
+
+## When to use it
+
+Use a hot deploy for a **routine code push to a long-running node**: a handler
+change, a bug fix, a new field on an actor's state with a `migrate_state` to fill it,
+a protocol change that is compatible or that you roll out in the documented order.
+What you keep is everything a restart would lose: in-memory actor state, open
+connections, sessions in flight, and the warm process.
+
+| The change | How it ships |
+|---|---|
+| A function body, an actor handler, a nested module's function | Hot patch of just that function |
+| An actor's state shape | Hot patch plus a `migrate_state` (or a `@compat` annotation) |
+| An actor's message type | Hot patch plus a `migrate_msg`, or old-format messages are dropped and counted |
+| A function's signature | Hot patch; every caller must be in the same batch, unless the server supports epoch-tagged dispatch |
+| A protocol a `choose` branch was added to | Hot patch, receivers of the choice before its chooser |
+| `main`, a topology hook, generated protocol code, the standard library, the runtime | A restart; `forge deploy` plans it for you |
+| A patch that reaches a capability the running version did not | Stops at the deploy-time gate until you `--grant-cap` it, and at the node's policy regardless |
+
+Reach for a plain restart when the change is one of the last two rows, when the patch
+stack has grown long (see [compaction](#restart-durability)), or when nothing on the
+node is worth keeping.
+
+## How it fits with the rest of March
+
+| Concept | Where hot reload meets it | Chapter |
+|---|---|---|
+| **Actors** | The unit that migrates. An actor moves epochs at a marker in its own mailbox and runs `migrate_state` there; a supervisor restarts an actor killed at a hard drain on the new code. | [Actors]({{ site.baseurl }}/docs/actors/), [Supervision]({{ site.baseurl }}/docs/supervision/) |
+| **Capabilities** | Each patched function carries its own IO capabilities. The deploy-time gate refuses a widening without `--grant-cap`; the node's `MARCH_DEPLOY_POLICY` refuses one regardless. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Choreography** | A session pins the epoch it formed in; a deploy changes only which protocol version new sessions form under, and drains sessions at loop boundaries. | [Choreography]({{ site.baseurl }}/docs/choreography/#changing-a-protocol) |
+| **Refinement types** | `@invariant` on an actor is checked against `migrate_state` by the same SMT checker, with a counterexample on failure. | [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) |
+| **Topology and clustering** | `forge deploy` plans per pool, pushes a signed topology, and with a `[control]` section runs releases through the in-cluster control plane. | [Topology]({{ site.baseurl }}/docs/topology/), [Clustering]({{ site.baseurl }}/docs/clustering/) |
+| **Observing a running node** | `EPOCHS` shows what each deploy is still waiting on; `WHICH` and `SOURCE` say which version of a function runs; the deploy key also signs debug requests. | [Observe]({{ site.baseurl }}/docs/observe/) |
+| **Tooling** | `forge deploy hot`, `forge deploy --plan`, `forge hot-reload keygen` / `status` / `migrate-msg-stub`, `forge host init`. | [Tooling]({{ site.baseurl }}/docs/tooling/) |
 
 ---
 
@@ -75,6 +158,27 @@ forge hot-reload keygen
 ```
 
 Put the public key in `forge.toml` and embed the secret key in the server binary at build time (or pass it as an environment variable; see your server's startup flags).
+
+---
+
+## Single-server `forge.toml` reference
+
+```toml
+[hot-reload]
+ssh_host   = "my-server"        # required: SSH host (alias or hostname)
+socket     = "/tmp/app.sock"    # optional: Unix socket path on the remote (default: /tmp/march_hcr.sock)
+public_key = "base64key="       # ed25519 public key (base64), embedded for signature verification
+```
+
+Only `ssh_host` is strictly required; `socket` falls back to `/tmp/march_hcr.sock` if omitted. The deploy uses `ssh` from the system PATH; your `~/.ssh/config` aliases and identity files are respected.
+
+More `[hot-reload]` options serve
+larger deployments: a `strategy` key (`"rolling"`, the default, vs. `"simultaneous"`), a
+`health_check_url` polled between rolling-deploy steps, and `compact_after = N`
+(see [Restart durability](#restart-durability)). For a fleet, see
+[Multi-host deploys](#multi-host-deploys); the older repeatable `[[hot-reload.env]]`
+table (each entry with its own `ssh_host`/`socket`/`public_key`, deployed with
+`forge deploy hot --env <name>`) is still supported.
 
 ---
 
@@ -305,6 +409,20 @@ directory (`.forge/run/<node>.control`) and its control API on its cluster port 
 
 ---
 
+## Pushing a topology: the `TOPOLOGY` verb
+
+Pushing a topology changes what a node offers, so, like every reconciler action, it is signed. `Cmd_deploy_hot.push_topology` sends
+
+```
+TOPOLOGY <blake3 of the file> <signature> <size>
+```
+
+with the signature over `TOPOLOGY <blake3>` made with the deploy key. The server checks the signature **before** it accepts the body (`READY`), checks that the body hashes to the signed digest (`ERR digest_mismatch`), writes it to the service's state directory (`topology.toml`), records the digest and signature in the persisted state, and calls the runtime's topology hook, `march_hcr_on_topology(path)`, then answers `OK <blake3>`. At start, a persisted topology whose signature and digest still verify goes through the hook again, so the node comes back on the topology it had.
+
+The signed copy is the one that takes effect. The server sets `MARCH_TOPOLOGY_VERIFIED_FILE` to that `topology.toml` when it starts, and `Topology.reload` reads it in preference to the unsigned `MARCH_TOPOLOGY_FILE`. After a push, the hook sends the process SIGHUP so the node re-reads it and opens its own offers, but only when a SIGHUP watcher is installed (`Topology.place` installs one): a program with no watcher would die of the signal. At start the hook does nothing; `Topology.place` applies the verified copy itself, so a restarted node comes back on the topology last pushed to it, not the one it was built with. With `MARCH_HCR_REQUIRE_RELEASE=1` the unsigned file is never read. The ssh reconciler backend (`forge topology apply --env`, `forge deploy --env`) still also writes the digest to `MARCH_TOPOLOGY_FILE` and signals the unit, for nodes built before this; a node whose server refused the signed push is not signalled.
+
+---
+
 ## Actor state migration
 
 When an actor's state record changes between deploys, the server needs to know how to upgrade the existing in-memory state of every live actor. You provide a `migrate_state` function:
@@ -448,11 +566,258 @@ so a session started by patched code can crash the process
 
 ---
 
+## Compatibility annotations
+
+Without a `migrate_state` function, `forge deploy hot` enforces strict compatibility: if the state schema changed, the deploy is rejected. You can relax this with `@compat`:
+
+```march
+-- Default: any schema change requires migrate_state
+@compat(full)
+actor Counter do ... end
+
+-- Allow adding fields without migrate_state (new actors get init; old actors keep their field values)
+@compat(forward)
+actor Counter do ... end
+
+-- Skip schema checking entirely (dangerous — use only for rapid iteration)
+@compat(any)
+actor Counter do ... end
+```
+
+| Policy | What's allowed without `migrate_state` |
+|---|---|
+| `full` (default) | No changes; any change requires migration |
+| `forward` | Adding new fields (existing actors use default values from `init`) |
+| `any` | Any change; no migration check |
+
+For production deployments, `full` with explicit `migrate_state` is safest. It means every state transition is intentional and reviewed.
+
+---
+
+## Verifying migration soundness with `@invariant`
+
+If your actor has a state invariant (a condition that must hold for every live actor), you can annotate it and the compiler will **prove** that your `migrate_state` function preserves it before the deploy is allowed through.
+
+```march
+-- The actor invariant: count is always non-negative
+@invariant(count >= 0)
+@compat(full)
+actor Counter do
+  state { count: Int }
+  init  { count: 0 }
+
+  on Inc() do { count: state.count + 1 } end
+end
+```
+
+When you add a field and write a migration:
+
+```march
+@invariant(count >= 0 && len(history) == count)
+@compat(full)
+actor Counter do
+  state { count: Int, history: List(Int) }
+  init  { count: 0, history: [] }
+  ...
+end
+
+fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
+  { count: old.count, history: [] }
+end
+```
+
+`forge deploy hot` runs the compiler's migration checker before uploading anything. If the migration cannot be proven sound, the deploy is aborted:
+
+```
+-- ERROR --------------------------------- src/my_app.march
+
+`counter_migrate_state` does not satisfy its return type constraint on all code paths.
+
+The return type requires:
+
+    count >= 0 && len(history) == count
+
+A counterexample was found:
+
+    old = { count: 1 }
+
+30 |   fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Every branch must produce a return value satisfying `count >= 0 && len(history) == count`.
+
+error: migration check failed — deploy aborted
+```
+
+The error names the function, shows the constraint, and gives a concrete counterexample: with `old = { count: 1 }`, returning `{ count: 1, history: [] }` violates `len(history) == count` because `len([]) = 0 ≠ 1`.
+
+Fix the migration to satisfy the invariant for all inputs:
+
+```march
+fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
+  -- Reset count to 0 so history: [] is consistent with count == 0
+  { count: 0, history: [] }
+end
+```
+
+Or keep the count and build the history to match:
+
+```march
+fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
+  -- Fill history with `count` placeholder entries
+  let hist = List.replicate(old.count, 0)
+  { count: old.count, history: hist }
+end
+```
+
+Both satisfy `len(history) == count`. The compiler verifies this using an SMT solver; no input can slip through.
+
+---
+
+## What expressions are allowed in `@invariant`
+
+Invariant predicates support:
+
+| Expression | Example |
+|---|---|
+| Arithmetic comparisons | `count >= 0`, `size < capacity` |
+| Boolean connectives | `count >= 0 && len(history) == count` |
+| `len` on list fields | `len(history) == count` |
+| Field access | `count`, `capacity`, `history` (bare names refer to `state.*`) |
+| Negation | `!is_empty` |
+| Integer literals | `count >= 0`, `size > 1` |
+
+Invariants can only reference the actor's own state fields. External function calls and heap allocation are not allowed in predicates.
+
+> **Write an unsupported expression and the invariant is silently skipped, not
+> rejected.** If an `@invariant` predicate falls outside this grammar, the compiler
+> prints a `warning: @invariant on <actor> contains unsupported expression; omitting` at
+> build time and drops the invariant entirely; `forge deploy hot` then proceeds with
+> **no SMT verification at all** for that actor, not a rejected deploy. `@invariant` is
+> enforced only for predicates in the table above, so treat that compiler warning as
+> something to look for, not something you can ignore.
+
+---
+
+## Deploying signature changes
+
+When a function's signature changes between deploys (for example, `B.foo` gains a new parameter), the server needs to know that every existing caller of the old signature is also being replaced in the same deploy batch. Otherwise old callers would pass the wrong number or type of arguments to new code.
+
+`forge deploy hot` enforces this automatically via the **coordinated upgrade gate**. The compiler records which boundary functions call each export in the `.hcr_manifest` sidecar (`callers:` field). The server stores this caller set per slot at activation time. On the next deploy, when it detects a `sig_hash` change for `B.foo`, it checks whether every server-recorded caller is included in the current deploy batch:
+
+- **All callers covered:** the deploy proceeds, and forge notes it:
+  ```
+  Coordinated upgrade: sig_hash changed, all callers covered.
+  ```
+
+- **A caller is missing:** the deploy is rejected, naming exactly which caller is uncovered:
+  ```
+  error: function signature changed but not all callers are in this deploy:
+
+    B.foo — uncovered caller(s):
+      A.Worker_dispatch
+
+  Include the missing modules in this deploy, or use expand-contract:
+    1. Add B.foo_v2 alongside B.foo, update callers, deploy together
+    2. In a later deploy, remove B.foo
+
+  error: deploy aborted
+  ```
+
+If neither module in a pair has been deployed with caller tracking enabled at any point (e.g. they were compiled separately before this feature existed), the gate conservatively allows the deploy: the caller set is empty, so there are no recorded callers to check.
+
+### Parameter borrow modes are part of the signature
+
+A boundary function's `sig_hash` covers more than its types. The compiler decides, from
+the body, whether each heap parameter (a `String`, a `List`, any ADT) is **borrowed** (the
+callee only reads it, and the caller keeps its reference) or **owned** (the callee takes
+the reference, for example because it stores the value, returns it or passes it on to an
+owning position). A caller is compiled against those modes. So a body edit that turns a
+borrowed parameter owned changes the function's ABI even though its source signature did
+not change: running code would keep using a value the new code frees (a use-after-free),
+and the reverse change would leak one reference per call. Records and tuples are always
+passed owned, so a change to how a body uses one never changes the ABI.
+
+Each boundary function's `sig_hash` (in the `.hcr_manifest`, in the binary's dispatch
+table and in `ABI_QUERY`) is therefore a hash of the type signature **and** one mode per
+parameter; the manifest also lists the parts (`tsig=` and `modes=`, `b` borrowed, `o`
+owned). A deploy that changes only a mode is always refused, naming the parameter:
+
+```
+error: a hot deploy cannot change a boundary function's parameter borrow mode: parameter 1 of Handler.count changed from borrowed to owned. Code already running was compiled against the old mode and would use a reference the new code releases (a use-after-free) or never release one it now owns (a leak per call). Deploy this build with a restart, or keep the mode (a parameter becomes owned when the body stores it, returns it or passes it to an owning position)
+error: deploy aborted, nothing was activated
+```
+
+Unlike a type change, shipping every caller in the same deploy does not make it safe: a
+caller's call that is already running (a request loop on `main`, which always follows the
+newest code) keeps running the old code, and its next call reaches the new version with
+the old convention. Deploy such a change with a restart. A body-only change that keeps
+every mode deploys hot as before.
+
+A server records the `sig_hash` of each version it activates (from the patch itself), so
+the check applies to every deploy, not only the first one after a restart.
+
+---
+
+## Independent deploy pace (epoch-tagged dispatch)
+
+The coordinated upgrade gate above is a hard synchronization requirement: every caller
+of a changed signature has to be redeployed in the very same batch, or the deploy is
+blocked entirely. That is the right default, since it keeps a partial rollout from passing the
+wrong arguments to new code, but it is a real constraint. Sometimes
+`A` and `B` are owned by different people, or you would rather ship `B.foo` v2
+today and update `A` to match next sprint, without the two deploys being forced
+to happen together.
+
+**Epoch-tagged dispatch** is the alternative mechanism that makes that safe, and the
+idea is closer to keeping a small version history than to any kind of locking. Every
+deploy batch is tagged with a **monotonically increasing epoch number**; think of it
+like a global "build number" that only goes up. Each function keeps not just its
+newest version but a short rolling history of recent versions too (its **ring slots**,
+a small, fixed-size buffer of "this version, introduced at this epoch"). And critically,
+every *unit of work* (an actor, a task, a session) remembers the epoch it runs at.
+
+When a caller invokes a function under epoch-tagged dispatch, the runtime doesn't just
+jump to the newest version: it walks the callee's ring slots and picks **the newest
+version that existed at or before the caller's own epoch**. So:
+
+- An actor still at epoch 5 (it has not reached its marker yet) calls `B.foo` → it gets
+  the `B.foo` that was current *at epoch 5*, the version its code was built against.
+- The same actor after its marker, now at epoch 7, calls `B.foo` → it gets the newest
+  `B.foo`, because its own epoch has caught up.
+
+A unit of work only sees versions compatible with its own epoch, never
+anything newer, whether the call is made from the base binary or from a hot patch. It
+picks up the new versions when it moves epochs (an actor at its marker; a task or session
+never, so it finishes on the code it started with). No coordination, no batching, no
+window where a live call could receive the wrong shape of arguments.
+
+This changes what the coordinated upgrade gate does: once a server supports epoch-tagged
+dispatch, a missing caller is no longer a hard error: the gate downgrades to an
+advisory warning, because epoch routing has already made it *safe* for that caller to
+lag behind; the deploy proceeds. Mechanically, forge asks the server for the batch's
+epoch number (via a `GET_EPOCH` request) before deploying, and the server hands back a
+number that only increases. If the server doesn't support this exchange at all, forge
+falls back to epoch 0 and the plain coordinated upgrade gate applies exactly as described
+above, so this feature degrades gracefully rather than silently skipping the safety
+check.
+
+### Compatibility table
+
+| Server supports epochs | Forge supports epochs | Result |
+|---|---|---|
+| No | No | Coordinated upgrade gate only (hard error on a missing caller) |
+| Yes | No | Same; forge never asks for an epoch, so it never uses the feature |
+| No | Yes | Forge asks for an epoch, the server doesn't answer, forge falls back to epoch 0, same as above |
+| Yes | Yes | Full epoch-tagged routing; the gate becomes an advisory warning instead of a hard error |
+
+---
+
 ## Capability-safe deploys
 
 A hot deploy pushes new code straight into a running process: it's compiled, shipped to the server, loaded into the live process's memory with `dlopen` (the OS mechanism for loading a shared library at runtime, the same one plugins use), and starts handling requests. The ed25519 signature on each patch answers one question: *is this really from us?* It leaves a second, equally important one unanswered: *is this code allowed to do what it does?*
 
-That gap is real. A patch you signed could call `file_delete`, open a network connection, or spawn a process, even if the version it replaces never touched the filesystem or the network at all. Signing proves **origin**, not **behavior**.
+A patch you signed could call `file_delete`, open a network connection, or spawn a process, even if the version it replaces never touched the filesystem or the network at all. Signing proves **origin**, not **behavior**.
 
 Capability-safe deploys add the missing check. March already knows each function's IO capabilities from compile time: its `needs` declarations plus the effects inferred from its body. A hot deploy brings those capabilities with it, and **two gates** decide whether the new code may run: one on your machine when you deploy, and one on the server when it activates.
 
@@ -466,7 +831,7 @@ The trust boundary follows from this: the **base server binary is trusted**: you
 
 ### Two gates
 
-1. **Monotonicity gate (deploy-time, on your machine).** *Monotonicity* just means the capabilities can only move in one direction. Across deploys, a function's set of capabilities may get *smaller* on its own, but it can't get *bigger* without your say-so.
+1. **Monotonicity gate (deploy-time, on your machine).** *Monotonicity* means the capabilities can only move in one direction. Across deploys, a function's set of capabilities may get *smaller* on its own, but it can't get *bigger* without your say-so.
 
    - **Dropping** a capability is always allowed: a function that used to write files and no longer does is strictly safer, so it deploys without ceremony.
    - **Adding** a capability is called a **widening**: for example, a function that gains the ability to write files, open a socket, or spawn a process that its running version didn't have. A widening **stops the deploy** and asks you to confirm it explicitly with `--grant-cap`.
@@ -541,7 +906,7 @@ error: hot deploy would add authority not held by the running version
 error: capability widening — deploy aborted
 ```
 
-Note the diagnostic names the exact capability *and* the specific function that introduced it. Widening the authority of a live system mid-flight is exactly the event an operator should consciously sign off on.
+The diagnostic names the exact capability *and* the specific function that introduced it. Widening the authority of a live system mid-flight is exactly the event an operator should consciously sign off on.
 
 **Step 2: grant the widening, but the node policy forbids it.** With `--grant-cap` you pass the deploy-time gate, the artifact uploads, and the server's policy gate rejects the activation:
 
@@ -700,6 +1065,50 @@ Every gate is opt-in and additive. A pre-capability artifact (no capability fiel
 
 ---
 
+## Sequenced releases: no replayed requests
+
+A signed line on its own proves who wrote it, not when. Without more, a signed `ACTIVATE`, `TOPOLOGY` or `DRAIN` recorded once could be sent again later: to roll a function back to an old version, re-push an old placement, or repeat a drain. So forge wraps every signed line it sends in a **release**:
+
+```
+SEQ <seq> <id> <signature> <signed line>
+```
+
+signed over `SEQ <seq> <id> <signed line>` with the deploy key. The inner line keeps its own signature, checked as before. One `forge` invocation is one release: `<id>` is random (32 hex digits), and `<seq>` is the time in milliseconds, or one more than the node's current release if that is higher. The node keeps the highest release it has accepted, its **head**, in a file of its own next to the persisted state (`<state dir>/release`), so a restart, `MARCH_HCR_NO_REPLAY` or a different build on the socket does not forget it:
+
+| The release | The node |
+|---|---|
+| newer than the head | accepts it, and it becomes the head (gaps are fine: a node a deploy did not touch never saw that release) |
+| the head itself | accepts it: a retry, or the next line of the same deploy |
+| the head's number with another id | refuses it, `ERR release_fork head:<n>:<id>`: two deploys chose the same number |
+| older than the head | refuses it, `ERR stale_release head:<n>` |
+
+Once a node holds a release, or when it was started with `MARCH_HCR_REQUIRE_RELEASE=1`, a signed line that is not wrapped is refused with `ERR release_required`, so a line recorded before the node saw its first release cannot be replayed either. `RELEASE_HEAD` answers `HEAD <seq> <id>` (`HEAD 0 -` before any release, with ` required` appended under `MARCH_HCR_REQUIRE_RELEASE`); forge asks it once per connection and sends unwrapped lines only to a server that does not know the request. Every release a node accepts or refuses is audited (`type` `release`).
+
+forge reports a refusal in words: a stale release means another deploy reached the node first, or this machine's clock is behind; a fork means two deploys ran at once. Re-run the deploy either way.
+
+---
+
+## Artifact integrity: the signature covers the bytes
+
+A patch reaches a node in two parts: its bytes go into the node's artifact store (the CAS, `~/.march/cas/artifacts/`, under the compiler's compilation hash), and a signed `ACTIVATE` line names them. The CAS is **not** a trust boundary. Anyone who can reach the reload socket, or the control API of a candidate, can write it with `CAS_PUT`, and the compilation hash is a hash of the build's inputs, not of the bytes stored under it. Until `ACTIVATE7` nothing signed the bytes, so whoever could write a node's CAS chose what an operator's signed line loaded, constructors included (review `specs/progress/2026-10-04-dd12-review-cas-artifact-unverified.md`).
+
+`ACTIVATE7` carries the BLAKE3 of the `.so` file's bytes, `so_blake3:<hex>`, **inside** the signed line (between `epoch:` and `cap_root:`); otherwise it is `ACTIVATE5`, or `ACTIVATE6` with the role blocks. Before it maps anything, the node reads the artifact once, hashes exactly the bytes it read, and copies them to a directory of its own (`<state dir>/loaded/<so_blake3>.so`, mode `0700`, written by no request). It loads that copy only if the bytes are the signed ones, so a file replaced between the check and the load changes nothing. Bytes that do not match are refused with `ERR artifact_digest`, audited as `err_artifact_digest`, and none of their code runs.
+
+The CAS verbs take the digest as well, so forge spots a bad copy before it activates anything:
+
+| Request | Answer |
+|---|---|
+| `CAS_CHECK <hash> so_blake3:<hex>` | `PRESENT` only if the stored bytes hash to `<hex>`, so forge uploads a stale or substituted artifact again |
+| `CAS_PUT <hash> <size> so_blake3:<hex>` | `ERR digest_mismatch` (nothing stored) for bytes that do not hash to `<hex>` |
+
+Both still accept the old form without the digest. Someone who can write the CAS can still replace an artifact after forge uploads it; the deploy then fails with `ERR artifact_digest`, and forge says so. That is a delay, not a forgery: no unsigned code runs (design D37).
+
+Older lines (`ACTIVATE` through `ACTIVATE6`) sign no digest of the bytes. A node that holds a release, or runs with `MARCH_HCR_REQUIRE_RELEASE=1`, refuses them with `ERR artifact_digest_required`, wrapped in a release or not, and does not replay such entries from its patch stack (see [Restart durability](#restart-durability)). Before its first release a node still accepts them, as before. forge sends `ACTIVATE7` for every capability-aware deploy. `--no-cap-gate` still sends the legacy `ACTIVATE3`, so it only works against a node that accepts unbound lines.
+
+The reload socket itself is owner-only (`0600`, set before it accepts connections, whatever the umask the node inherited), and a peer whose uid is not the node's (or root's) is disconnected.
+
+---
+
 ## Restart durability
 
 A restarted server comes back on the code it was running, without a redeploy and before `main` runs (so before a node opens any offer). The reload server keeps a **patch stack** on the host, under its CAS root next to `next_epoch`:
@@ -737,333 +1146,13 @@ When it grows long, `forge deploy --compact --env <env>` rebuilds each build's b
 
 ---
 
-## Pushing a topology: the `TOPOLOGY` verb
-
-Pushing a topology changes what a node offers, so, like every reconciler action, it is signed. `Cmd_deploy_hot.push_topology` sends
-
-```
-TOPOLOGY <blake3 of the file> <signature> <size>
-```
-
-with the signature over `TOPOLOGY <blake3>` made with the deploy key. The server checks the signature **before** it accepts the body (`READY`), checks that the body hashes to the signed digest (`ERR digest_mismatch`), writes it to the service's state directory (`topology.toml`), records the digest and signature in the persisted state, and calls the runtime's topology hook, `march_hcr_on_topology(path)`, then answers `OK <blake3>`. At start, a persisted topology whose signature and digest still verify goes through the hook again, so the node comes back on the topology it had.
-
-The signed copy is the one that takes effect. The server sets `MARCH_TOPOLOGY_VERIFIED_FILE` to that `topology.toml` when it starts, and `Topology.reload` reads it in preference to the unsigned `MARCH_TOPOLOGY_FILE`. After a push, the hook sends the process SIGHUP so the node re-reads it and opens its own offers, but only when a SIGHUP watcher is installed (`Topology.place` installs one): a program with no watcher would die of the signal. At start the hook does nothing; `Topology.place` applies the verified copy itself, so a restarted node comes back on the topology last pushed to it, not the one it was built with. With `MARCH_HCR_REQUIRE_RELEASE=1` the unsigned file is never read. The ssh reconciler backend (`forge topology apply --env`, `forge deploy --env`) still also writes the digest to `MARCH_TOPOLOGY_FILE` and signals the unit, for nodes built before this; a node whose server refused the signed push is not signalled.
-
-## Sequenced releases: no replayed requests
-
-A signed line on its own proves who wrote it, not when. Without more, a signed `ACTIVATE`, `TOPOLOGY` or `DRAIN` recorded once could be sent again later: to roll a function back to an old version, re-push an old placement, or repeat a drain. So forge wraps every signed line it sends in a **release**:
-
-```
-SEQ <seq> <id> <signature> <signed line>
-```
-
-signed over `SEQ <seq> <id> <signed line>` with the deploy key. The inner line keeps its own signature, checked as before. One `forge` invocation is one release: `<id>` is random (32 hex digits), and `<seq>` is the time in milliseconds, or one more than the node's current release if that is higher. The node keeps the highest release it has accepted, its **head**, in a file of its own next to the persisted state (`<state dir>/release`), so a restart, `MARCH_HCR_NO_REPLAY` or a different build on the socket does not forget it:
-
-| The release | The node |
-|---|---|
-| newer than the head | accepts it, and it becomes the head (gaps are fine: a node a deploy did not touch never saw that release) |
-| the head itself | accepts it: a retry, or the next line of the same deploy |
-| the head's number with another id | refuses it, `ERR release_fork head:<n>:<id>`: two deploys chose the same number |
-| older than the head | refuses it, `ERR stale_release head:<n>` |
-
-Once a node holds a release, or when it was started with `MARCH_HCR_REQUIRE_RELEASE=1`, a signed line that is not wrapped is refused with `ERR release_required`, so a line recorded before the node saw its first release cannot be replayed either. `RELEASE_HEAD` answers `HEAD <seq> <id>` (`HEAD 0 -` before any release, with ` required` appended under `MARCH_HCR_REQUIRE_RELEASE`); forge asks it once per connection and sends unwrapped lines only to a server that does not know the request. Every release a node accepts or refuses is audited (`type` `release`).
-
-forge reports a refusal in words: a stale release means another deploy reached the node first, or this machine's clock is behind; a fork means two deploys ran at once. Re-run the deploy either way.
-
-## Artifact integrity: the signature covers the bytes
-
-A patch reaches a node in two parts: its bytes go into the node's artifact store (the CAS, `~/.march/cas/artifacts/`, under the compiler's compilation hash), and a signed `ACTIVATE` line names them. The CAS is **not** a trust boundary. Anyone who can reach the reload socket, or the control API of a candidate, can write it with `CAS_PUT`, and the compilation hash is a hash of the build's inputs, not of the bytes stored under it. Until `ACTIVATE7` nothing signed the bytes, so whoever could write a node's CAS chose what an operator's signed line loaded, constructors included (review `specs/progress/2026-10-04-dd12-review-cas-artifact-unverified.md`).
-
-`ACTIVATE7` carries the BLAKE3 of the `.so` file's bytes, `so_blake3:<hex>`, **inside** the signed line (between `epoch:` and `cap_root:`); otherwise it is `ACTIVATE5`, or `ACTIVATE6` with the role blocks. Before it maps anything, the node reads the artifact once, hashes exactly the bytes it read, and copies them to a directory of its own (`<state dir>/loaded/<so_blake3>.so`, mode `0700`, written by no request). It loads that copy only if the bytes are the signed ones, so a file replaced between the check and the load changes nothing. Bytes that do not match are refused with `ERR artifact_digest`, audited as `err_artifact_digest`, and none of their code runs.
-
-The CAS verbs take the digest as well, so forge spots a bad copy before it activates anything:
-
-| Request | Answer |
-|---|---|
-| `CAS_CHECK <hash> so_blake3:<hex>` | `PRESENT` only if the stored bytes hash to `<hex>`, so forge uploads a stale or substituted artifact again |
-| `CAS_PUT <hash> <size> so_blake3:<hex>` | `ERR digest_mismatch` (nothing stored) for bytes that do not hash to `<hex>` |
-
-Both still accept the old form without the digest. Someone who can write the CAS can still replace an artifact after forge uploads it; the deploy then fails with `ERR artifact_digest`, and forge says so. That is a delay, not a forgery: no unsigned code runs (design D37).
-
-Older lines (`ACTIVATE` through `ACTIVATE6`) sign no digest of the bytes. A node that holds a release, or runs with `MARCH_HCR_REQUIRE_RELEASE=1`, refuses them with `ERR artifact_digest_required`, wrapped in a release or not, and does not replay such entries from its patch stack (see [Restart durability](#restart-durability)). Before its first release a node still accepts them, as before. forge sends `ACTIVATE7` for every capability-aware deploy. `--no-cap-gate` still sends the legacy `ACTIVATE3`, so it only works against a node that accepts unbound lines.
-
-The reload socket itself is owner-only (`0600`, set before it accepts connections, whatever the umask the node inherited), and a peer whose uid is not the node's (or root's) is disconnected.
-
----
-
-## Compatibility annotations
-
-Without a `migrate_state` function, `forge deploy hot` enforces strict compatibility: if the state schema changed, the deploy is rejected. You can relax this with `@compat`:
-
-```march
--- Default: any schema change requires migrate_state
-@compat(full)
-actor Counter do ... end
-
--- Allow adding fields without migrate_state (new actors get init; old actors keep their field values)
-@compat(forward)
-actor Counter do ... end
-
--- Skip schema checking entirely (dangerous — use only for rapid iteration)
-@compat(any)
-actor Counter do ... end
-```
-
-| Policy | What's allowed without `migrate_state` |
-|---|---|
-| `full` (default) | No changes; any change requires migration |
-| `forward` | Adding new fields (existing actors use default values from `init`) |
-| `any` | Any change; no migration check |
-
-For production deployments, `full` with explicit `migrate_state` is safest. It means every state transition is intentional and reviewed.
-
----
-
-## Verifying migration soundness with `@invariant`
-
-If your actor has a state invariant (a condition that must hold for every live actor), you can annotate it and the compiler will **prove** that your `migrate_state` function preserves it before the deploy is allowed through.
-
-```march
--- The actor invariant: count is always non-negative
-@invariant(count >= 0)
-@compat(full)
-actor Counter do
-  state { count: Int }
-  init  { count: 0 }
-
-  on Inc() do { count: state.count + 1 } end
-end
-```
-
-When you add a field and write a migration:
-
-```march
-@invariant(count >= 0 && len(history) == count)
-@compat(full)
-actor Counter do
-  state { count: Int, history: List(Int) }
-  init  { count: 0, history: [] }
-  ...
-end
-
-fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
-  { count: old.count, history: [] }
-end
-```
-
-`forge deploy hot` runs the compiler's migration checker before uploading anything. If the migration cannot be proven sound, the deploy is aborted:
-
-```
--- ERROR --------------------------------- src/my_app.march
-
-`counter_migrate_state` does not satisfy its return type constraint on all code paths.
-
-The return type requires:
-
-    count >= 0 && len(history) == count
-
-A counterexample was found:
-
-    old = { count: 1 }
-
-30 |   fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-    Every branch must produce a return value satisfying `count >= 0 && len(history) == count`.
-
-error: migration check failed — deploy aborted
-```
-
-The error names the function, shows the constraint, and gives a concrete counterexample: with `old = { count: 1 }`, returning `{ count: 1, history: [] }` violates `len(history) == count` because `len([]) = 0 ≠ 1`.
-
-Fix the migration to satisfy the invariant for all inputs:
-
-```march
-fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
-  -- Reset count to 0 so history: [] is consistent with count == 0
-  { count: 0, history: [] }
-end
-```
-
-Or keep the count and build the history to match:
-
-```march
-fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
-  -- Fill history with `count` placeholder entries
-  let hist = List.replicate(old.count, 0)
-  { count: old.count, history: hist }
-end
-```
-
-Both satisfy `len(history) == count`. The compiler verifies this using an SMT solver; no input can slip through.
-
----
-
-## What expressions are allowed in `@invariant`
-
-Invariant predicates support:
-
-| Expression | Example |
-|---|---|
-| Arithmetic comparisons | `count >= 0`, `size < capacity` |
-| Boolean connectives | `count >= 0 && len(history) == count` |
-| `len` on list fields | `len(history) == count` |
-| Field access | `count`, `capacity`, `history` (bare names refer to `state.*`) |
-| Negation | `!is_empty` |
-| Integer literals | `count >= 0`, `size > 1` |
-
-Invariants can only reference the actor's own state fields. External function calls and heap allocation are not allowed in predicates.
-
-> **Write an unsupported expression and the invariant is silently skipped, not
-> rejected.** If an `@invariant` predicate falls outside this grammar, the compiler
-> prints a `warning: @invariant on <actor> contains unsupported expression; omitting` at
-> build time and drops the invariant entirely; `forge deploy hot` then proceeds with
-> **no SMT verification at all** for that actor, not a rejected deploy. It's easy to
-> read the previous section and assume `@invariant` is always enforced; in practice it's
-> only enforced for predicates in the table above, so treat that compiler warning as
-> something to look for, not something you can ignore.
-
----
-
-## Single-server `forge.toml` reference
-
-```toml
-[hot-reload]
-ssh_host   = "my-server"        # required: SSH host (alias or hostname)
-socket     = "/tmp/app.sock"    # optional: Unix socket path on the remote (default: /tmp/march_hcr.sock)
-public_key = "base64key="       # ed25519 public key (base64), embedded for signature verification
-```
-
-Only `ssh_host` is strictly required; `socket` falls back to `/tmp/march_hcr.sock` if omitted. The deploy uses `ssh` from the system PATH; your `~/.ssh/config` aliases and identity files are respected.
-
-This is the single-server setup this page focuses on. More `[hot-reload]` options serve
-larger deployments: a `strategy` key (`"rolling"`, the default, vs. `"simultaneous"`), a
-`health_check_url` polled between rolling-deploy steps, and `compact_after = N`
-(see [Restart durability](#restart-durability)). For a fleet, see
-[Multi-host deploys](#multi-host-deploys); the older repeatable `[[hot-reload.env]]`
-table (each entry with its own `ssh_host`/`socket`/`public_key`, deployed with
-`forge deploy hot --env <name>`) is still supported.
-
----
-
-## Deploying signature changes
-
-When a function's signature changes between deploys (for example, `B.foo` gains a new parameter), the server needs to know that every existing caller of the old signature is also being replaced in the same deploy batch. Otherwise old callers would pass the wrong number or type of arguments to new code.
-
-`forge deploy hot` enforces this automatically via the **coordinated upgrade gate**. The compiler records which boundary functions call each export in the `.hcr_manifest` sidecar (`callers:` field). The server stores this caller set per slot at activation time. On the next deploy, when it detects a `sig_hash` change for `B.foo`, it checks whether every server-recorded caller is included in the current deploy batch:
-
-- **All callers covered:** the deploy proceeds, and forge notes it:
-  ```
-  Coordinated upgrade: sig_hash changed, all callers covered.
-  ```
-
-- **A caller is missing:** the deploy is rejected, naming exactly which caller is uncovered:
-  ```
-  error: function signature changed but not all callers are in this deploy:
-
-    B.foo — uncovered caller(s):
-      A.Worker_dispatch
-
-  Include the missing modules in this deploy, or use expand-contract:
-    1. Add B.foo_v2 alongside B.foo, update callers, deploy together
-    2. In a later deploy, remove B.foo
-
-  error: deploy aborted
-  ```
-
-If neither module in a pair has been deployed with caller tracking enabled at any point (e.g. they were compiled separately before this feature existed), the gate conservatively allows the deploy: the caller set is empty, so there are no recorded callers to check.
-
-### Parameter borrow modes are part of the signature
-
-A boundary function's `sig_hash` covers more than its types. The compiler decides, from
-the body, whether each heap parameter (a `String`, a `List`, any ADT) is **borrowed** (the
-callee only reads it, and the caller keeps its reference) or **owned** (the callee takes
-the reference, for example because it stores the value, returns it or passes it on to an
-owning position). A caller is compiled against those modes. So a body edit that turns a
-borrowed parameter owned changes the function's ABI even though its source signature did
-not change: running code would keep using a value the new code frees (a use-after-free),
-and the reverse change would leak one reference per call. Records and tuples are always
-passed owned, so a change to how a body uses one never changes the ABI.
-
-Each boundary function's `sig_hash` (in the `.hcr_manifest`, in the binary's dispatch
-table and in `ABI_QUERY`) is therefore a hash of the type signature **and** one mode per
-parameter; the manifest also lists the parts (`tsig=` and `modes=`, `b` borrowed, `o`
-owned). A deploy that changes only a mode is always refused, naming the parameter:
-
-```
-error: a hot deploy cannot change a boundary function's parameter borrow mode: parameter 1 of Handler.count changed from borrowed to owned. Code already running was compiled against the old mode and would use a reference the new code releases (a use-after-free) or never release one it now owns (a leak per call). Deploy this build with a restart, or keep the mode (a parameter becomes owned when the body stores it, returns it or passes it to an owning position)
-error: deploy aborted, nothing was activated
-```
-
-Unlike a type change, shipping every caller in the same deploy does not make it safe: a
-caller's call that is already running (a request loop on `main`, which always follows the
-newest code) keeps running the old code, and its next call reaches the new version with
-the old convention. Deploy such a change with a restart. A body-only change that keeps
-every mode deploys hot as before.
-
-A server records the `sig_hash` of each version it activates (from the patch itself), so
-the check applies to every deploy, not only the first one after a restart.
-
----
-
-## Independent deploy pace (epoch-tagged dispatch)
-
-The coordinated upgrade gate above is a hard synchronization requirement: every caller
-of a changed signature has to be redeployed in the very same batch, or the deploy is
-blocked entirely. That's the right default (it's what keeps a partial rollout from
-passing the wrong arguments to new code), but it's also a real constraint. Sometimes
-`A` and `B` are owned by different people, or you'd truly rather ship `B.foo` v2
-today and only get around to updating `A` to match next sprint, without the two
-deploys being forced to happen together.
-
-**Epoch-tagged dispatch** is the alternative mechanism that makes that safe, and the
-idea is closer to keeping a small version history than to any kind of locking. Every
-deploy batch is tagged with a **monotonically increasing epoch number**; think of it
-like a global "build number" that only goes up. Each function keeps not just its
-newest version but a short rolling history of recent versions too (its **ring slots**,
-a small, fixed-size buffer of "this version, introduced at this epoch"). And critically,
-every *unit of work* (an actor, a task, a session) remembers the epoch it runs at.
-
-When a caller invokes a function under epoch-tagged dispatch, the runtime doesn't just
-jump to the newest version: it walks the callee's ring slots and picks **the newest
-version that existed at or before the caller's own epoch**. So:
-
-- An actor still at epoch 5 (it has not reached its marker yet) calls `B.foo` → it gets
-  the `B.foo` that was current *at epoch 5*, the version its code was built against.
-- The same actor after its marker, now at epoch 7, calls `B.foo` → it gets the newest
-  `B.foo`, because its own epoch has caught up.
-
-In other words, a unit of work only sees versions compatible with its own epoch, never
-anything newer, whether the call is made from the base binary or from a hot patch. It
-picks up the new versions when it moves epochs (an actor at its marker; a task or session
-never, so it finishes on the code it started with). No coordination, no batching, no
-window where a live call could receive the wrong shape of arguments.
-
-This changes what the coordinated upgrade gate does: once a server supports epoch-tagged
-dispatch, a missing caller is no longer a hard error: the gate downgrades to an
-advisory warning, because epoch routing has already made it *safe* for that caller to
-lag behind; the deploy proceeds. Mechanically, forge asks the server for the batch's
-epoch number (via a `GET_EPOCH` request) before deploying, and the server hands back a
-number that only increases. If the server doesn't support this exchange at all, forge
-falls back to epoch 0 and the plain coordinated upgrade gate applies exactly as described
-above, so this feature degrades gracefully rather than silently skipping the safety
-check.
-
-### Compatibility table
-
-| Server supports epochs | Forge supports epochs | Result |
-|---|---|---|
-| No | No | Coordinated upgrade gate only (hard error on a missing caller) |
-| Yes | No | Same; forge never asks for an epoch, so it never uses the feature |
-| No | Yes | Forge asks for an epoch, the server doesn't answer, forge falls back to epoch 0, same as above |
-| Yes | Yes | Full epoch-tagged routing; the gate becomes an advisory warning instead of a hard error |
-
----
-
-## Next Steps
+## See also
 
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/): the capability system behind capability-safe deploys, including the full IO capability hierarchy
 - [Actors]({{ site.baseurl }}/docs/actors/): the actor model hot reload builds on
 - [Supervision Trees]({{ site.baseurl }}/docs/supervision/): combine hot reload with fault-tolerant supervision
 - [Refinement Types]({{ site.baseurl }}/docs/refinement-types/): the type-level system behind `@invariant` checking
 - [Tooling]({{ site.baseurl }}/docs/tooling/): `forge` build tool reference
+- [Choreography]({{ site.baseurl }}/docs/choreography/#changing-a-protocol): what a protocol change means for sessions in flight
+- [Observing a running node]({{ site.baseurl }}/docs/observe/): `EPOCHS`, `WHICH` and `SOURCE` on a node after a deploy
+- [Topology]({{ site.baseurl }}/docs/topology/): the pools, hosts and control plane `forge deploy` plans against
