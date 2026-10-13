@@ -3453,6 +3453,13 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Hot code reload chapter restructured.** `docs/hot-code-reload/` now opens
+  with the mechanism in one paragraph, a table from the kind of change to how
+  it ships (hot patch, migration, same-batch callers, restart, gated widening),
+  how a deploy meets actors, capabilities, choreography, refinement types,
+  topology and observe, and an index grouping every section; sections are
+  regrouped into one server, many hosts, running work, and trust. Bodies are
+  unchanged apart from a few phrase edits.
 - **Observe chapter restructured.** `docs/observe/` now opens with which forge
   command answers which question, what each of the three tiers (observe, debug,
   shell) reveals and needs, an index of every section, and how it connects to
