@@ -7,29 +7,43 @@
 #include <string.h>
 #include <stdio.h>
 
-/* dlclose for hot-patch handle GC.  Guard so the file compiles on non-POSIX. */
-#if defined(__linux__) || defined(__APPLE__)
-#include <dlfcn.h>
-#define MARCH_HAS_DLCLOSE 1
-#else
-#define MARCH_HAS_DLCLOSE 0
-#endif
-
-/* Test seam: when set, slot_dlclose calls this INSTEAD of dlclose, so a unit
- * test can observe the exact moment a handle is released (and what a reader
- * can still reach at that moment) without loading real shared objects. */
+/* Test seam: when set, slot_release_handle calls this INSTEAD of retiring the
+ * handle, so a unit test can observe the exact moment the ring lets go of a
+ * handle (and what a reader can still reach at that moment) without loading
+ * real shared objects. */
 static void (*g_close_hook)(void *handle) = NULL;
 
 void march_dispatch_set_close_hook(void (*hook)(void *handle)) {
     g_close_hook = hook;
 }
 
-static void slot_dlclose(void *handle) {
+/* A patch image is NEVER unmapped.  When the ring reclaims a version, only
+ * the slot's bookkeeping is recycled; the .so stays mapped for the life of
+ * the process.  A version's `refs` counts calls in progress, but its image
+ * is also reachable from values it handed out and nothing counts: closures
+ * (apply code pointer at +16, kept in actor state, a Vault, a callback),
+ * immortal statics, and the capture-release entries its __march_init put in
+ * the runtime's closure-drop table (march_clo_register_drops), whose keys
+ * are never removed.  dlclose'ing it turned any later call of such a closure
+ * into a jump into unmapped code (SIGSEGV, pc == fault address).  Cost: one
+ * mapped image per deploy, until restart.
+ * specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md */
+static _Atomic(uint64_t) g_retained_images = 0;
+
+uint64_t march_dispatch_retained_images(void) {
+    return atomic_load_explicit(&g_retained_images, memory_order_relaxed);
+}
+
+void march_dispatch_retain_image(void *handle) {
+    if (!handle) return;
+    atomic_fetch_add_explicit(&g_retained_images, 1, memory_order_relaxed);
+    /* Deliberately no dlclose: see above. */
+}
+
+static void slot_release_handle(void *handle) {
     if (!handle) return;
     if (g_close_hook) { g_close_hook(handle); return; }
-#if MARCH_HAS_DLCLOSE
-    dlclose(handle);
-#endif
+    march_dispatch_retain_image(handle);
 }
 
 typedef struct {
@@ -172,9 +186,11 @@ void march_dispatch_shutdown(void) {
     for (uint32_t i = 0; i < n; i++) {
         free(slots[i].callers_str);
         slots[i].callers_str = NULL;
-        /* Release any live .so handles (server shutdown path). */
+        /* Let go of any live .so handles (server shutdown path).  They stay
+         * mapped (slot_release_handle): exit handlers and other threads can
+         * still drop or call a closure a patch built. */
         for (uint32_t v = 0; v < MARCH_MAX_LIVE_VERSIONS; v++) {
-            slot_dlclose(slots[i].ring[v].handle);
+            slot_release_handle(slots[i].ring[v].handle);
             slots[i].ring[v].handle = NULL;
         }
     }
@@ -306,14 +322,16 @@ int march_dispatch_stage(uint32_t name_id, void *fn_ptr,
         if (idx < 0) return -1;
         MarchFnVersion *old = &s->ring[idx];
         if (reclaim) {
-            /* Retire, THEN re-check refs, THEN dlclose.  The refs==0 test in
-             * pick_ring_slot is only a filter: a reader (enter/enter_gen)
-             * that passed its live-check just before it can still pin
-             * afterwards, and its post-pin re-validation would pass as long
-             * as `live` is still 1 -- handing it a fn_ptr into a .so we are
-             * about to unload.  So store live=0 first; after that, any reader
-             * that pins either shows up in the refs re-check below or sees
-             * live==0 on re-validation and backs out without touching fn_ptr.
+            /* Retire, THEN re-check refs, THEN recycle the slot.  The refs==0
+             * test in pick_ring_slot is only a filter: a reader
+             * (enter/enter_gen) that passed its live-check just before it can
+             * still pin afterwards, and its post-pin re-validation would pass
+             * as long as `live` is still 1 -- handing it a version whose slot
+             * we are about to rewrite (the image itself stays mapped:
+             * slot_release_handle).  So store live=0 first; after that, any
+             * reader that pins either shows up in the refs re-check below or
+             * sees live==0 on re-validation and backs out without touching
+             * fn_ptr.
              *
              * This is a store-buffering (Dekker) pair: we store `live` then
              * load `refs`; the reader RMWs `refs` then loads `live`.
@@ -330,7 +348,7 @@ int march_dispatch_stage(uint32_t name_id, void *fn_ptr,
         }
         /* A free slot can still hold the handle of a version retired while a
          * racing reader held it (the -1 above, on an earlier stage). */
-        slot_dlclose(old->handle);
+        slot_release_handle(old->handle);
         old->handle = NULL;
     }
 
@@ -565,8 +583,9 @@ const char *march_dispatch_callers(uint32_t name_id) {
     return g_slots[name_id].callers_str;
 }
 
-/* Store the dlopen handle for a ring slot so it can be dlclosed when the slot
- * is reclaimed.  Called by the ACTIVATE handler after a successful publish.
+/* Store the dlopen handle for a ring slot so the slot can let go of it when
+ * it is reclaimed (retained, never dlclose'd: slot_release_handle).  Called
+ * by the ACTIVATE handler after a successful publish.
  * Baseline publishes (from the main binary's startup code) never call this —
  * their slots keep handle = NULL (calloc'd to zero). */
 void march_dispatch_set_handle(uint32_t name_id, uint32_t version, void *handle) {

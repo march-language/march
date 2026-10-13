@@ -100,17 +100,26 @@ int  march_dispatch_name_to_id(const char *name, uint32_t *out_id);
 void        march_dispatch_set_callers(uint32_t name_id, const char *callers_str);
 const char *march_dispatch_callers(uint32_t name_id);
 
-/* dlclose GC: store the dlopen handle associated with a ring slot so the
- * dispatch table can release it when the slot is reclaimed.  Call after a
+/* Store the dlopen handle associated with a ring slot so the dispatch table
+ * can let go of it when the slot is reclaimed (it is retained, never
+ * dlclose'd: march_dispatch_retain_image).  Call after a
  * successful march_dispatch_publish / march_dispatch_publish_epoch.
  * Baseline slots (main binary) never call this; their handle stays NULL. */
 void march_dispatch_set_handle(uint32_t name_id, uint32_t version, void *handle);
 
 /* Test seam: when hook is non-NULL, reclaiming a ring slot calls hook(handle)
- * INSTEAD of dlclose(handle).  Lets a unit test observe the exact moment a
+ * INSTEAD of retiring it.  Lets a unit test observe the exact moment a
  * handle is released without loading real shared objects.  NULL restores the
- * real dlclose.  Not for production use. */
+ * default.  Not for production use. */
 void march_dispatch_set_close_hook(void (*hook)(void *handle));
+
+/* A patch image is never dlclose'd: a reclaimed version's closures, statics
+ * and closure-drop table entries can still point into it.  retain_image is
+ * where a handle the runtime lets go of ends up (it stays mapped until the
+ * process exits); retained_images counts them (one per handle reference,
+ * i.e. per (deploy, slot)). */
+void     march_dispatch_retain_image(void *handle);
+uint64_t march_dispatch_retained_images(void);
 
 /* Phase 9: epoch-tagged dispatch.
  *
