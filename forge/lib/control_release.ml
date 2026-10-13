@@ -162,7 +162,12 @@ let serve_recorder ~listener ~(old : Cmd_deploy_hot.manifest) ~(manifest : Cmd_d
        | [ "HCR_INFO" ] ->
          reply (Printf.sprintf "HCR_INFO target:%s abi:%s prefix:%s key:%s"
                   (Option.value ~default:"native" manifest.target)
-                  (Option.value ~default:"-" manifest.hcr_abi)
+                  (* The ABI of what RUNS (the baseline), so a patch from a
+                     newer toolchain than the nodes' (an HCR ABI bump) is
+                     refused here with forge's upgrade message, not by
+                     every node's own identity check. *)
+                  (Option.value ~default:"-"
+                     (match old.hcr_abi with Some a -> Some a | None -> manifest.hcr_abi))
                   (Option.value ~default:"" manifest.module_prefix) key_hex)
        | [ "VERSIONS" ] ->
          List.iter (fun (f : Cmd_deploy_hot.fn_manifest) ->

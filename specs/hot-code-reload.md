@@ -139,6 +139,14 @@ Per changed definition:
 
 This replaces the first draft's hand-written, per-module "allowed/rejected" ABI table (old Part 7) with a mechanical, per-definition rule the compiler already has the hashes for.
 
+> **As built (2026-10-13):** a dispatch slot's `sig_hash` is not the type-only CAS hash
+> above but `Hash.hcr_sig_hash`: the type signature plus each parameter's borrow mode,
+> because "the calling convention callers compiled against" includes the modes, which
+> borrow inference derives from the body. `forge deploy hot` refuses a mode-only change
+> outright (a running caller frame would reach the new version with the old convention)
+> and asks for a restart. HCR ABI `march-hcr-v4`.
+> See `specs/progress/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md`.
+
 ### "What changed" is an `impl_hash` set-diff
 
 The running process knows its active `impl_hash` set (those are the CAS keys it loaded) and can report it on the reload socket. The deploy diff is then:

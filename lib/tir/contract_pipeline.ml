@@ -25,6 +25,10 @@ type result = {
   k_table : Kind.table;
   (** The per-type table the passes reasoned against, rebound to [final]'s
       type list — hand it to the emitter (specs/2026-09-10-type-kinds-design.md). *)
+  borrow_map : Borrow.borrow_map;
+  (** The converged parameter modes Perceus placed RC against (with any
+      owned clones' rows).  A hot-reload slot's ABI hash folds them in
+      ([March_cas.Hash.hcr_sig_hash]). *)
 }
 
 let island_suffixes = ["render"; "update"; "init"]
@@ -331,7 +335,8 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let contract_diags =
     Alloc_contract.check ~decls ~allocating ~retaining ~opt tir in
   stamp_tir "alloc-contract" tir;
-  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table }
+  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table;
+    borrow_map }
 
 (** The allocation contracts, judged without emitting anything: what `march
     --check` and `march check` run when the program carries an obligation

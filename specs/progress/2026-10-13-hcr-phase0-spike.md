@@ -97,7 +97,12 @@ gate compares (or a separate `abi_hash`). The existing rule that callers of a
 sig-changed slot must ship in the same deploy then covers a flip. The
 alternative from the spec, freezing boundary parameters as owned, costs an
 inc/dec per borrowable argument per call.
-Todo: `specs/todos/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md`.
+**Fixed 2026-10-13:** `specs/progress/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md`.
+The slot `sig_hash` now folds in the modes (HCR ABI `march-hcr-v4`), and a
+mode-only change is refused outright: the caller-coverage rule turned out not
+to make it safe (a running caller frame on `main` still crashed with every
+caller in the deploy), see
+`specs/todos/2026-10-13-hcr-coordinated-sig-change-running-caller-frame.md`.
 
 **The record (`Conn`) case is already safe, and the spec's cost premise is out
 of date.** Records and tuples are never borrowed parameters
@@ -192,6 +197,10 @@ costs this spike was asked to measure:
 2. ABI hash: which borrow and ownership facts beyond parameter modes are part
    of a slot's ABI (return ownership, `Clo_flags` conventions, unboxed
    aggregates in closure captures)?
+   Answered for the native model (2026-10-13, the borrow-mode fix's progress
+   record): only parameter modes vary per function. Returns are always owned,
+   the closure-call convention is fixed, and representation is in the type
+   hash.
 3. TLS from JIT'd code on macOS (`march_tls_reductions`): fix the JIT's TLS
    handling, or route the read through a runtime call?
 4. Is target-side compilation needed at all, given AOT `.so` patches built and

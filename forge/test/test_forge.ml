@@ -1505,9 +1505,9 @@ let test_gate_io_root_add_blocked () =
 let test_gate_attribution_names_introducing_function () =
   let functions = [
     { Cmd_deploy_hot.fn_name = "MyApp.Server.handle"; fn_impl_hash = "h1"; fn_sig_hash = "s1";
-      fn_callers = []; fn_caps = ["IO.Process"]; fn_has_caps = true };
+      fn_callers = []; fn_caps = ["IO.Process"]; fn_has_caps = true; fn_type_sig = ""; fn_modes = "" };
     { Cmd_deploy_hot.fn_name = "MyApp.Other.fn"; fn_impl_hash = "h2"; fn_sig_hash = "s2";
-      fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true };
+      fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true; fn_type_sig = ""; fn_modes = "" };
   ] in
   let attributed = Cmd_deploy_hot.attribute_widening functions ["IO.Process"] in
   Alcotest.(check (list (pair string string))) "attributes widened cap to its function"
@@ -1521,7 +1521,7 @@ let test_gate_attribution_names_introducing_function () =
 
 let fm ~name ~caps =
   { Cmd_deploy_hot.fn_name = name; fn_impl_hash = "h"; fn_sig_hash = "s";
-    fn_callers = []; fn_caps = caps; fn_has_caps = true }
+    fn_callers = []; fn_caps = caps; fn_has_caps = true; fn_type_sig = ""; fn_modes = "" }
 
 let test_scoped_caps_no_prior_baseline_permissive () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
@@ -1960,7 +1960,7 @@ let test_activate4_caps_csv_is_sorted_own_caps_per_function () =
      function's caps must not leak into this one's CSV. *)
   let handle_fn =
     { Cmd_deploy_hot.fn_name = "MyApp.handle"; fn_impl_hash = "h"; fn_sig_hash = "s";
-      fn_callers = []; fn_caps = ["IO.NetConnect"; "IO.Console"]; fn_has_caps = true } in
+      fn_callers = []; fn_caps = ["IO.NetConnect"; "IO.Console"]; fn_has_caps = true; fn_type_sig = ""; fn_modes = "" } in
   let caps_csv = String.concat "," (List.sort String.compare handle_fn.Cmd_deploy_hot.fn_caps) in
   Alcotest.(check string) "own caps CSV, sorted" "IO.Console,IO.NetConnect" caps_csv
 
@@ -1977,7 +1977,7 @@ let manifest_with_caps =
     target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None; slots = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
-        fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ];
+        fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true; fn_type_sig = ""; fn_modes = "" } ];
     roles = [] }
 
 let legacy_manifest =
@@ -1985,7 +1985,7 @@ let legacy_manifest =
     target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None; slots = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
-        fn_callers = []; fn_caps = []; fn_has_caps = false } ];
+        fn_callers = []; fn_caps = []; fn_has_caps = false; fn_type_sig = ""; fn_modes = "" } ];
     roles = [] }
 
 let test_branch_caps_present_no_flag_selects_activate4 () =

@@ -31,6 +31,12 @@ type fn_manifest = {
                            a genuinely pre-Phase-5C legacy manifest (no fn
                            has this field) from a current manifest where a
                            capless function legitimately has fn_caps = []. *)
+  fn_type_sig  : string;  (* `tsig=`: the type-only signature hash; "" for a
+                             manifest from before 2026-10-13 *)
+  fn_modes     : string;  (* `modes=`: one char per parameter, 'b' borrowed /
+                             'o' owned ("-": not inferred); fn_sig_hash is
+                             March_cas.Hash.hcr_sig_hash over tsig and these.
+                             "" for a manifest from before 2026-10-13 *)
 }
 
 (** One [ROLE <Proto.Role> caps=<csv> [via=<cap>:<frame>>...;...]] line
@@ -159,19 +165,27 @@ let parse_manifest path : (manifest, string) result =
              | Some f -> parse_caps f
              | None -> []
            in
-           (callers, caps, has_caps)
+           let field p =
+             match List.find_opt (fun f -> has_prefix f p) tail with
+             | Some f -> String.sub f (String.length p) (String.length f - String.length p)
+             | None -> ""
+           in
+           (callers, caps, has_caps, field "tsig=", field "modes=")
          in
          (match String.split_on_char ' ' line with
          | name :: impl_h :: sig_h :: tail when tail <> [] ->
-           let (callers, caps, has_caps) = extract_from_tail tail in
+           let (callers, caps, has_caps, tsig, modes) = extract_from_tail tail in
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
-                    fn_callers = callers; fn_caps = caps; fn_has_caps = has_caps } :: !fns
+                    fn_callers = callers; fn_caps = caps; fn_has_caps = has_caps;
+                    fn_type_sig = tsig; fn_modes = modes } :: !fns
          | [name; impl_h; sig_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
-                    fn_callers = []; fn_caps = []; fn_has_caps = false } :: !fns
+                    fn_callers = []; fn_caps = []; fn_has_caps = false;
+                    fn_type_sig = ""; fn_modes = "" } :: !fns
          | [name; impl_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = "";
-                    fn_callers = []; fn_caps = []; fn_has_caps = false } :: !fns
+                    fn_callers = []; fn_caps = []; fn_has_caps = false;
+                    fn_type_sig = ""; fn_modes = "" } :: !fns
          | _ -> ())  (* skip malformed lines *)
        end
      done with End_of_file -> ());
@@ -845,6 +859,27 @@ let canonical_of_triple (triple : string) : string option =
   | Some o, Some a -> Some (o ^ "/" ^ a)
   | _ -> None
 
+(** The [N] of an ABI id ["march-hcr-vN;..."]. *)
+let abi_version (abi : string) : int option =
+  let p = "march-hcr-v" in
+  let n = String.length p in
+  match String.index_opt abi ';' with
+  | Some i when i > n && String.sub abi 0 n = p -> int_of_string_opt (String.sub abi n (i - n))
+  | _ -> None
+
+(** Two ABI ids that differ only in their version (same triple, same pointer size). *)
+let same_abi_rest (a : string) (b : string) : bool =
+  let rest s = match String.index_opt s ';' with
+    | Some i -> String.sub s i (String.length s - i) | None -> s in
+  rest a = rest b
+
+(** What a version bump that a running server predates changed, in words. *)
+let abi_change_note (patch_version : int) : string =
+  if patch_version >= 4 then
+    " (from march-hcr-v4, a boundary function's signature hash covers its parameters' \
+     borrow modes, so a v3 server's hashes cannot be checked against this patch's)"
+  else ""
+
 (** Compare a patch's manifest identity with a running server's HCR_INFO.
     A v1 manifest carries no identity (the legacy native path): nothing to
     compare. *)
@@ -858,7 +893,21 @@ let check_identity ~(manifest : manifest) ~(info : hcr_info) : (unit, string) re
     in
     match manifest.target, manifest.hcr_abi, manifest.module_prefix with
     | Some t, _, _ when t <> info.target -> mism "target" t info.target
-    | _, Some a, _ when a <> info.abi -> mism "HCR ABI" a info.abi
+    | _, Some a, _ when a <> info.abi ->
+      (match abi_version a, abi_version info.abi with
+       | Some pv, Some sv when pv > sv && same_abi_rest a info.abi ->
+         Error (Printf.sprintf
+                  "the running server was built by an older March toolchain (HCR ABI %s) than this patch (%s). \
+                   The hot-reload ABI changed in between%s, so this server cannot take hot patches from this \
+                   toolchain, and nothing was deployed. Restart the server once on a base build from this \
+                   toolchain (a cold deploy); hot deploys work again after that"
+                  info.abi a (abi_change_note pv))
+       | Some pv, Some sv when pv < sv && same_abi_rest a info.abi ->
+         Error (Printf.sprintf
+                  "this patch was built by an older March toolchain (HCR ABI %s) than the running server (%s): \
+                   rebuild the patch with the toolchain that built the server"
+                  a info.abi)
+       | _ -> mism "HCR ABI" a info.abi)
     | _, _, Some p when p <> "" && p <> info.prefix -> mism "module prefix" p info.prefix
     | _ -> Ok ()
   end
@@ -996,6 +1045,91 @@ let parse_abi_query conn =
     end
   in
   loop ()
+
+(* ─── Borrow-mode changes (2026-10-13) ─────────────────────────────────────
+
+   A slot's sig_hash is March_cas.Hash.hcr_sig_hash: the type signature hash
+   plus one mode character per parameter ('b' borrowed, 'o' owned), the
+   modes the running callers were compiled against.  A patch whose body
+   turns a borrowed parameter owned releases a reference its old callers
+   still hold (a use-after-free); the reverse leaks one per call
+   (specs/progress/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md).
+
+   When the server's hash differs from the patch's, [running_modes] finds
+   out whether only the modes differ: the manifest carries the patch's
+   type-only hash (`tsig=`), so forge hashes it with every other mode
+   string of the same length and compares.
+
+   A mode change is refused outright, even when every caller ships in the
+   same deploy (and they nearly always do: a caller's own RC around the
+   call changes with the callee's mode, so its hash changes too).  The
+   coordinated-upgrade rule does not make it safe: a caller's invocation
+   that is already running keeps running the OLD code, and its next call
+   reaches the new version with the old convention.  The spike's `serve`
+   loop on the compiled `main` (which always follows the newest code) did
+   exactly that: count + serve activated together, then SIGSEGV
+   (test_stdlib_suite, test_hcr_borrow_flip_refused_end_to_end).  Epoch
+   routing protects a pinned unit, not that frame.  The deploy has to be a
+   restart. *)
+
+(** The modes the running version of [fm] was built with, when the server's
+    [slot_sig] is the slot ABI hash of [fm]'s type signature with modes other
+    than [fm]'s.  [None] when the type signature changed too, the manifest
+    predates `tsig=`/`modes=`, or the function has more than 16 parameters. *)
+let running_modes ~(slot_sig : string) (fm : fn_manifest) : string option =
+  let k = String.length fm.fn_modes in
+  if fm.fn_type_sig = "" || fm.fn_modes = "" || k > 16 || String.length slot_sig <> 64
+  then None
+  else begin
+    let matches modes =
+      modes <> fm.fn_modes
+      && March_cas.Hash.hcr_sig_hash ~sig_hash:fm.fn_type_sig ~modes = slot_sig in
+    if matches "-" then Some "-"
+    else if fm.fn_modes = "-" then None
+    else
+      let rec go m =
+        if m >= 1 lsl k then None
+        else
+          let modes = String.init k (fun i -> if (m lsr i) land 1 = 1 then 'b' else 'o') in
+          if matches modes then Some modes else go (m + 1)
+      in
+      go 0
+  end
+
+(** ["parameter 2 of Handler.count changed from borrowed to owned"], one per
+    parameter whose mode differs. *)
+let describe_mode_change ~(name : string) ~(old_modes : string) ~(new_modes : string) : string list =
+  let word = function 'b' -> "borrowed" | 'o' -> "owned" | _ -> "not inferred" in
+  if String.length old_modes = String.length new_modes && old_modes <> "-" && new_modes <> "-" then
+    List.filter_map (fun i ->
+        if old_modes.[i] = new_modes.[i] then None
+        else Some (Printf.sprintf "parameter %d of %s changed from %s to %s"
+                     (i + 1) name (word old_modes.[i]) (word new_modes.[i])))
+      (List.init (String.length new_modes) Fun.id)
+  else [ Printf.sprintf "the parameter borrow modes of %s changed (%s -> %s)" name old_modes new_modes ]
+
+(** The functions of [to_activate] whose parameter borrow modes differ from
+    the running version's (same types), each with the change in words. *)
+let mode_changes ~(slot_of : string -> slot option) ~(to_activate : fn_manifest list)
+  : (string * string list) list =
+  List.filter_map (fun fm ->
+      match slot_of fm.fn_name with
+      | Some slot when slot.slot_sig_hash <> fm.fn_sig_hash ->
+        Option.map (fun old_modes ->
+            (fm.fn_name, describe_mode_change ~name:fm.fn_name ~old_modes ~new_modes:fm.fn_modes))
+          (running_modes ~slot_sig:slot.slot_sig_hash fm)
+      | _ -> None)
+    to_activate
+
+(** The refusal for [mode_changes]' non-empty answer, in words. *)
+let mode_change_refusal (changes : (string * string list) list) : string =
+  Printf.sprintf
+    "a hot deploy cannot change a boundary function's parameter borrow mode: %s. \
+     Code already running was compiled against the old mode and would use a reference the new code \
+     releases (a use-after-free) or never release one it now owns (a leak per call). \
+     Deploy this build with a restart, or keep the mode (a parameter becomes owned when the body \
+     stores it, returns it or passes it to an owning position)"
+    (String.concat "; " (List.concat_map snd changes))
 
 (** Parse VERSIONS response. Returns list of (name, baseline, current_or_none). *)
 type version_entry = {
@@ -1396,6 +1530,15 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
             slot.slot_sig_hash <> fm.fn_sig_hash &&
             not (has_migrate_exemption fm.fn_name)
         ) to_activate in
+        (* A parameter's borrow mode changed (same types): never a hot
+           deploy, whatever the callers and the epoch (see [mode_changes]). *)
+        let modes = mode_changes ~slot_of:(Hashtbl.find_opt slot_map) ~to_activate in
+        if modes <> [] then begin
+          Printf.eprintf "error: %s\n" (mode_change_refusal modes);
+          Printf.eprintf "error: deploy aborted, nothing was activated\n%!";
+          Unix.close fd;
+          raise (Failure (mode_change_refusal modes))
+        end;
         (* Phase 8 — coordinated upgrade gate.
            For each sig-changed function, check whether all server-recorded callers
            are also being replaced in this deploy.  If the server has no caller data
