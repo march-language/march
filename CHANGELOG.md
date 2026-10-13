@@ -3466,6 +3466,12 @@ git log is authoritative for exact commits.
   actors, capabilities and hot code reload; the slow-node walkthrough comes before
   the verb reference. Its "not there yet" list was stale: the interactive view,
   tracing and actor events had shipped and were still listed as missing.
+- **Refinement types chapter restructured.** `docs/refinement-types/` now opens
+  with the definite-failure bargain in plain terms, when to use a refinement and
+  when not to, how refinements meet the type system, guards, capabilities and
+  stdlib contracts, and an index grouping all 27 sections; the sections are
+  reordered so the teaching ones come first, then each kind of value, then the
+  tooling, then the strict modes. Section bodies are unchanged.
 - **Choreography chapter restructured.** `docs/choreography/` now opens with when to
   use a choreography and what to reach for instead, an index of every section, and
   a table of how it builds on session types, actors, capabilities, clustering and

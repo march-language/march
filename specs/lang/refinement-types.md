@@ -10,30 +10,105 @@ permalink: /docs/refinement-types/
 # Refinement Types
 
 A **refinement type** attaches a logical predicate to an ordinary type:
-`{Int | _ >= 0}` is "an `Int` that is non-negative". March discharges these
-predicates with an SMT solver (Z3) at compile time, so a whole class of bugs
-(out-of-bounds indices, negative sizes, division by zero, broken invariants)
-becomes a **compile error** instead of a runtime panic.
+`{Int | _ >= 0}` is "an `Int` that is non-negative". Write one on a parameter
+and every call must satisfy it; write one on a return type and every return
+path must satisfy it. The compiler discharges the predicates with the Z3 SMT
+solver at compile time, so out-of-bounds indices, negative sizes, division by
+zero and broken invariants become compile errors instead of runtime panics.
+Nothing is checked at runtime: a refined type compiles to exactly its base type.
 
-Refinements are March's pragmatic slice of **dependent typing**: types that
-depend on *values*. You get the safety where it pays off (preconditions,
-bounds, postconditions) without a proof assistant's ceremony; and, crucially,
-**without false positives**: if the checker can't prove a value is definitely
-wrong, it stays silent.
+The checker reports a violation **only when it can demonstrate one**, and then
+names the concrete input that fails. If it cannot prove a value is wrong, it
+stays silent. That is the design's central bargain: no false positives on
+correct code, at the price that silence does not mean "proved". The page's
+tooling sections show how to tell the two apart, and `cap verified` turns
+silence into an error for a module that wants a guarantee.
 
 > **Requires Z3.** Refinement checking runs only when the `z3` solver is on your
 > `PATH`. Without it, the predicates type-check as their base type and no
 > refinement diagnostics are produced (the build still succeeds).
 
-**New to this?** Read [Syntax](#syntax) through
-[A Parameter's Own Contract Is a Fact Inside Its Body](#a-parameters-own-contract-is-a-fact-inside-its-body)
-and you'll be able to write and read everyday refinements. Everything after
-[Postconditions](#postconditions) goes deeper: measures over your own data
-structures, `String`/`Bool`/`Float`/tag refinements, the strict `cap verified` /
-[`cap no_panic`](#cap-no_panic--divisions-that-cant-panic) modes, and the full
-[Limitations](#limitations) list. If you just want to know why a specific
-contract *isn't* catching something, jump straight to Limitations or to
-[`--refine-report`](#counting-the-obligations---refine-report).
+## On this page
+
+**Start here**
+
+- [When to use refinements](#when-to-use-refinements)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [The Problem They Solve](#the-problem-they-solve)
+- [Syntax](#syntax)
+- [How Checking Works: Definite Failure](#how-checking-works-definite-failure)
+- [Counterexamples: the failing input, in source terms](#counterexamples-the-failing-input-in-source-terms)
+- [Path Sensitivity: Guards Establish Facts](#path-sensitivity-guards-establish-facts)
+- [A Parameter's Own Contract Is a Fact Inside Its Body](#a-parameters-own-contract-is-a-fact-inside-its-body)
+- [Postconditions](#postconditions) and [how they flow to call sites](#postconditions-flow-to-call-sites)
+- [Where Refinements Resolve](#where-refinements-resolve)
+- [Practical Rules](#practical-rules)
+
+**Refining each kind of value**
+
+- [Measures: Refining over Data Structures](#measures-refining-over-data-structures)
+- [String Refinements](#string-refinements)
+- [Set Refinements](#set-refinements)
+- [Bool Refinements](#bool-refinements)
+- [Float Refinements](#float-refinements)
+- [Constructor Tags: Refining over ADT Variants](#constructor-tags-refining-over-adt-variants)
+- [Element Refinements: Refining What a Container Holds](#element-refinements-refining-what-a-container-holds)
+
+**Finding out what was actually checked**
+
+- [Counting the obligations: `--refine-report`](#counting-the-obligations---refine-report)
+- [Getting a contract proposed for you: `forge refine`](#getting-a-contract-proposed-for-you-forge-refine)
+- [Coverage audit: does the checker even look at this refinement?](#coverage-audit-does-the-checker-even-look-at-this-refinement)
+- [Promoting a skip: a demonstrated precondition failure](#promoting-a-skip-a-demonstrated-precondition-failure)
+- [The `--no-measure-axioms` Flag](#the---no-measure-axioms-flag)
+
+**Strict modes**
+
+- [`cap verified`: turning silence into an error](#cap-verified-turning-silence-into-an-error)
+- [`cap no_panic`: Divisions That Can't Panic](#cap-no_panic--divisions-that-cant-panic)
+
+**Limits and status**
+
+- [Limitations](#limitations)
+- [Conformance status](#conformance-status)
+- [See also](#see-also)
+
+## When to use refinements
+
+Use a refinement where a bad value is a **real bug the caller can avoid**: an
+index into a list, a chunk size, an unguarded divisor, a non-empty input a
+function cannot do without, a return value a caller will rely on. One contract
+at the function boundary replaces a runtime check in the body and a comment in
+the docs, and the compiler enforces it at every call.
+
+| You want to | Reach for |
+|---|---|
+| Reject a bad argument at the call site | A refined parameter: `i : {Int | _ >= 0 && _ < len(xs)}` |
+| Promise something about a result | A refined return type: `: {Int | _ >= 0}` |
+| Talk about a list's length, a record's fields, or your own data | A [measure](#measures-refining-over-data-structures) |
+| Say which elements a collection holds | [Set](#set-refinements) and [element](#element-refinements-refining-what-a-container-holds) refinements |
+| Say which constructor an ADT value is | A [constructor tag](#constructor-tags-refining-over-adt-variants) |
+| Make unproven contracts an error, not silence | [`cap verified`](#cap-verified-turning-silence-into-an-error) |
+| Prove no division in a module can panic | [`cap no_panic`](#cap-no_panic--divisions-that-cant-panic) |
+| Find out whether a contract is checked at all | [`--refine-report`](#counting-the-obligations---refine-report) and the [coverage audit](#coverage-audit-does-the-checker-even-look-at-this-refinement) |
+
+Do not refine every `Int`. Many March APIs clamp defensively and have no real
+precondition; a contract there adds obligations without preventing a bug. And
+do not use a refinement for a fact about *where a value came from* ("this
+string was sanitized"): that is an opaque type's job, see
+[Capabilities]({{ site.baseurl }}/docs/capabilities/).
+
+## How it fits with the rest of March
+
+| Concept | Where refinements meet it | Chapter |
+|---|---|---|
+| **Type system** | A refined type is its base type to the type checker; refinement checking is a separate pass after inference, at call sites and return paths. | [Type System](type-system.md) |
+| **Pattern matching** | `if` and `match … when` guards become facts the solver can use on the branch they dominate. | [Pattern Matching](pattern-matching.md) |
+| **Capabilities** | `cap verified` and `cap no_panic` are behavioral caps that change what the checker does with an unproven obligation. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Standard library** | Stdlib functions such as `List.head`, `List.nth` and `Option.unwrap` carry refinement contracts, so a user call site is checked against them. | [Standard Library](standard-library.md) |
+| **Linear types** | The other compile-time safety layer: linearity tracks *use*, refinements track *value*. | [Linear Types](linear-types.md) |
+| **Safety by construction** | Refinements are one of three orthogonal layers, beside capabilities and typestate. | [Safety by Construction](safety-by-construction.md) |
+| **Tooling** | `forge refine` proposes a contract; `--refine-report` and `--refine-audit` say what was proved, skipped, or never looked at. | [Tooling](https://github.com/march-language/march/blob/main/docs/tooling.md) |
 
 ---
 
@@ -355,74 +430,6 @@ included). A return refinement over a collection takes the Tier 2 structural
 induction path instead, which emits no diagnostic either way (see
 [Limitations](#limitations)), so a broken `{List(Int) | len(_) > 0}` return is
 caught where the value is *used*, not where it is produced.
-
----
-
-## Postconditions Flow to Call Sites
-
-A function's declared return refinement is a fact its callers can use. Both the
-direct and the `let`-bound form are checked:
-
-```march
-fn neg() : {Int | _ < 0} do 0 - 1 end
-fn takepos(n : {Int | _ >= 0}) : Int do n end
-
-takepos(neg())          -- error: `neg` returns a negative, `takepos` needs >= 0
-
-let c = neg()
-takepos(c)              -- error: same, through the binding
-```
-
-Resolution follows the same rules as everything else: direct named calls,
-across modules, through `alias` and `use`.
-
-**Relational postconditions propagate too, by substitution.** A predicate that
-mentions a parameter (`{Int | _ < n}`, `{Int | _ < len(xs)}`) is *relational*.
-At a call site the call's arguments are substituted for the callee's parameters,
-which restates the contract entirely in the caller's own terms:
-
-```march
-fn below(n : Int) : {Int | _ < n} do n - 1 end
-fn takepos(k : {Int | _ >= 0}) : Int do k end
-
-takepos(below(0))       -- error: `_ < n` instantiates to `_ < 0`, never >= 0
-takepos(below(10))      -- fine: `_ < 10` can still be >= 0
-```
-
-Parameters are matched to arguments **positionally**, and substitution is
-**simultaneous**: with `fn f(n : Int, m : Int) : {Int | _ < n + m}` called as
-`f(m, 1)`, the result is `_ < m + 1` (the caller's `m`), never `_ < 1 + 1`.
-
-Propagation is **skipped** (silently, and with no loss of soundness) whenever
-the instantiation cannot be made exactly:
-
-- the predicate mentions a name that is neither the refinement binder nor one of
-  the callee's parameters;
-- a parameter the predicate mentions has no corresponding argument (an arity
-  mismatch, or an omitted defaulted argument);
-- the predicate uses syntax the checker does not reflect;
-- the callee has a *pattern* parameter, which is rewritten before this pass runs
-  and so no longer includes the parameter names the predicate refers to.
-
-A partially substituted predicate is never used: mixing the callee's and the
-caller's namespaces is exactly how a false positive would arise here, so the
-checker abandons the whole instantiation rather than guess at part of it.
-
-**Only *proven* postconditions propagate.** A declared return refinement
-becomes an assumption at call sites only when the definition side actually
-*proved* it: every return path of every clause discharged as verified. A
-postcondition the checker can neither prove nor refute stays perfectly legal at
-the definition (rejecting it would flag correct-but-unprovable code), it simply
-does not travel: callers learn no fact from it.
-
-This is not a stylistic preference, it is what keeps the no-false-positives
-promise. A propagated fact is *added* to the assumptions a call-site query
-proves against, so a false assumption makes a violation easier to "prove": a
-stale `{Int | _ < 0}` on a function that in fact returns `6` would flag the
-perfectly correct call `takepos(score(5))`. Only facts that are true may be
-assumed. The cost is incompleteness (a postcondition with a body opaque to
-the solver buys its callers no facts), which is the safe direction and the trade
-this checker makes everywhere else.
 
 ---
 
@@ -915,6 +922,138 @@ narrower, more powerful case is covered in [Limitations](#limitations), under
 
 ---
 
+## Postconditions Flow to Call Sites
+
+A function's declared return refinement is a fact its callers can use. Both the
+direct and the `let`-bound form are checked:
+
+```march
+fn neg() : {Int | _ < 0} do 0 - 1 end
+fn takepos(n : {Int | _ >= 0}) : Int do n end
+
+takepos(neg())          -- error: `neg` returns a negative, `takepos` needs >= 0
+
+let c = neg()
+takepos(c)              -- error: same, through the binding
+```
+
+Resolution follows the same rules as everything else: direct named calls,
+across modules, through `alias` and `use`.
+
+**Relational postconditions propagate too, by substitution.** A predicate that
+mentions a parameter (`{Int | _ < n}`, `{Int | _ < len(xs)}`) is *relational*.
+At a call site the call's arguments are substituted for the callee's parameters,
+which restates the contract entirely in the caller's own terms:
+
+```march
+fn below(n : Int) : {Int | _ < n} do n - 1 end
+fn takepos(k : {Int | _ >= 0}) : Int do k end
+
+takepos(below(0))       -- error: `_ < n` instantiates to `_ < 0`, never >= 0
+takepos(below(10))      -- fine: `_ < 10` can still be >= 0
+```
+
+Parameters are matched to arguments **positionally**, and substitution is
+**simultaneous**: with `fn f(n : Int, m : Int) : {Int | _ < n + m}` called as
+`f(m, 1)`, the result is `_ < m + 1` (the caller's `m`), never `_ < 1 + 1`.
+
+Propagation is **skipped** (silently, and with no loss of soundness) whenever
+the instantiation cannot be made exactly:
+
+- the predicate mentions a name that is neither the refinement binder nor one of
+  the callee's parameters;
+- a parameter the predicate mentions has no corresponding argument (an arity
+  mismatch, or an omitted defaulted argument);
+- the predicate uses syntax the checker does not reflect;
+- the callee has a *pattern* parameter, which is rewritten before this pass runs
+  and so no longer includes the parameter names the predicate refers to.
+
+A partially substituted predicate is never used: mixing the callee's and the
+caller's namespaces is exactly how a false positive would arise here, so the
+checker abandons the whole instantiation rather than guess at part of it.
+
+**Only *proven* postconditions propagate.** A declared return refinement
+becomes an assumption at call sites only when the definition side actually
+*proved* it: every return path of every clause discharged as verified. A
+postcondition the checker can neither prove nor refute stays perfectly legal at
+the definition (rejecting it would flag correct-but-unprovable code), it simply
+does not travel: callers learn no fact from it.
+
+This is not a stylistic preference, it is what keeps the no-false-positives
+promise. A propagated fact is *added* to the assumptions a call-site query
+proves against, so a false assumption makes a violation easier to "prove": a
+stale `{Int | _ < 0}` on a function that in fact returns `6` would flag the
+perfectly correct call `takepos(score(5))`. Only facts that are true may be
+assumed. The cost is incompleteness (a postcondition with a body opaque to
+the solver buys its callers no facts), which is the safe direction and the trade
+this checker makes everywhere else.
+
+---
+
+## Where Refinements Resolve
+
+Refinement checking follows the same name resolution as the type checker:
+**direct named calls**, across modules, through **`alias`** and **`use`**:
+
+```march
+mod App do
+  use Lib.{take_pos}          -- imported name resolves to Lib.take_pos
+  alias Lib.Inner as I        -- alias resolves to Lib.Inner.*
+
+  fn run() : Int do
+    take_pos(-1)              -- error: resolved + checked against Lib's precondition
+    I.helper(-1)             -- error: alias-qualified call checked too
+  end
+end
+```
+
+A bare call binds to the nearest enclosing module that defines it (with
+shadowing), so a local helper is never confused with a same-named function
+elsewhere. Resolution is scope-aware about imports: at each enclosing scope the
+checker consults that scope's own definition and then that *same* scope's
+`use`-imports before falling outward. So a `use` written **inside** a nested
+module beats an enclosing module's own definition of the same name, matching
+how the call really dispatches, while an enclosing module's `use` still loses
+to a nested module's *own* definition: an import never reaches in and
+overrides a local one.
+
+```march
+mod Outer do
+  fn take_pos(n : {Int | n >= 0}) : Int do n end   -- Outer's own contract
+
+  mod Inner do
+    use Lib.{take_pos}                              -- Lib's take_pos, unrefined
+
+    fn go() : Int do
+      take_pos(-1)   -- resolves to Lib.take_pos, NOT Outer's: no error
+    end
+  end
+end
+```
+
+Checking this call against the enclosing `Outer.take_pos` instead would be a
+false positive on correct code, since `Inner.go` never actually calls it. (This
+was a live false positive until 2026-07-31; see item 6 in
+[Open holes](#open-holes-stated-as-of-2026-07-29).)
+
+---
+
+## Practical Rules
+
+1. **Refine the contract, not the convenience.** Add `{Int | _ > 0}` where a
+   non-positive value is a real bug (a chunk size, an unguarded divisor), not
+   to every `Int`. Many March APIs already clamp defensively and have no real
+   precondition.
+2. **Guard, then call.** A precondition you can't satisfy with a literal is
+   discharged by an `if`/`when` guard right before the call.
+3. **Reach for `assert` as your lemma.** When you *know* a fact the checker
+   can't derive, `assert(p)` makes it available, and documents the assumption.
+4. **Annotate measures you'll reason about.** A `@[measure]` only earns its
+   keep if a predicate mentions it; keep them total, exhaustive, and structural
+   so they pass the gate.
+
+---
+
 ## Measures: Refining over Data Structures
 
 A **measure** is a function from a value to an `Int` (or `Bool`) that you can
@@ -1229,6 +1368,8 @@ pick the stand-in's value would not be one.
 
 Records also compose with measures: `{v : State | len(v.history) == v.count}`
 reasons about a `List` field by structure, exactly as `len` does elsewhere.
+
+---
 
 ## String Refinements
 
@@ -1631,6 +1772,8 @@ renders its model as a set literal: `Set.insert() can return {4}`,
   ordinary code, including an `if` guard, they are just names: a module's own
   `fn keys(r)` or `fn member(xs, x)` is treated like any other function.
 - **A rebound name loses its set promise**, exactly as it loses a `len` one.
+
+---
 
 ## Bool Refinements
 
@@ -2139,54 +2282,6 @@ demand meets one of these):
 - **A predicate relating elements to each other** (sortedness, distinctness)
   cannot be written; see [Set Refinements](#set-refinements) for what a
   predicate can say about a collection's elements as a set.
-
----
-
-## Where Refinements Resolve
-
-Refinement checking follows the same name resolution as the type checker:
-**direct named calls**, across modules, through **`alias`** and **`use`**:
-
-```march
-mod App do
-  use Lib.{take_pos}          -- imported name resolves to Lib.take_pos
-  alias Lib.Inner as I        -- alias resolves to Lib.Inner.*
-
-  fn run() : Int do
-    take_pos(-1)              -- error: resolved + checked against Lib's precondition
-    I.helper(-1)             -- error: alias-qualified call checked too
-  end
-end
-```
-
-A bare call binds to the nearest enclosing module that defines it (with
-shadowing), so a local helper is never confused with a same-named function
-elsewhere. Resolution is scope-aware about imports: at each enclosing scope the
-checker consults that scope's own definition and then that *same* scope's
-`use`-imports before falling outward. So a `use` written **inside** a nested
-module beats an enclosing module's own definition of the same name, matching
-how the call really dispatches, while an enclosing module's `use` still loses
-to a nested module's *own* definition: an import never reaches in and
-overrides a local one.
-
-```march
-mod Outer do
-  fn take_pos(n : {Int | n >= 0}) : Int do n end   -- Outer's own contract
-
-  mod Inner do
-    use Lib.{take_pos}                              -- Lib's take_pos, unrefined
-
-    fn go() : Int do
-      take_pos(-1)   -- resolves to Lib.take_pos, NOT Outer's: no error
-    end
-  end
-end
-```
-
-Checking this call against the enclosing `Outer.take_pos` instead would be a
-false positive on correct code, since `Inner.go` never actually calls it. (This
-was a live false positive until 2026-07-31; see item 6 in
-[Open holes](#open-holes-stated-as-of-2026-07-29).)
 
 ---
 
@@ -2766,6 +2861,20 @@ for a contract the solver proved can never hold. A nonzero `violated` count on
 a module without `cap verified` is therefore not necessarily a bad annotation;
 it can be a demonstrated call-site failure the checker found on its own. The
 report does not currently distinguish the two shapes.
+
+---
+
+## The `--no-measure-axioms` Flag
+
+Pass `--no-measure-axioms` to reflect `@[measure]` functions **symbolically**
+instead of axiomatising them. This skips the datatype/quantifier reasoning (and
+the soundness gate), trading structural measure reasoning for speed. It changes
+only diagnostics, never the compiled artifact. Refinement checking of plain
+`Int`/`Bool` predicates is unaffected and always cheap.
+
+```bash
+march --check --no-measure-axioms app.march
+```
 
 ---
 
@@ -3661,36 +3770,6 @@ edges:
 
 ---
 
-## The `--no-measure-axioms` Flag
-
-Pass `--no-measure-axioms` to reflect `@[measure]` functions **symbolically**
-instead of axiomatising them. This skips the datatype/quantifier reasoning (and
-the soundness gate), trading structural measure reasoning for speed. It changes
-only diagnostics, never the compiled artifact. Refinement checking of plain
-`Int`/`Bool` predicates is unaffected and always cheap.
-
-```bash
-march --check --no-measure-axioms app.march
-```
-
----
-
-## Practical Rules
-
-1. **Refine the contract, not the convenience.** Add `{Int | _ > 0}` where a
-   non-positive value is a real bug (a chunk size, an unguarded divisor), not
-   to every `Int`. Many March APIs already clamp defensively and have no real
-   precondition.
-2. **Guard, then call.** A precondition you can't satisfy with a literal is
-   discharged by an `if`/`when` guard right before the call.
-3. **Reach for `assert` as your lemma.** When you *know* a fact the checker
-   can't derive, `assert(p)` makes it available, and documents the assumption.
-4. **Annotate measures you'll reason about.** A `@[measure]` only earns its
-   keep if a predicate mentions it; keep them total, exhaustive, and structural
-   so they pass the gate.
-
----
-
 ## Conformance status
 
 Refinement types are now a conformance-tested part of the language reference
@@ -3755,8 +3834,12 @@ tags, `Bool`, `Float`, `String` `len`, non-empty `List`, and the stdlib
 output on one program using all of them: an exact byte match, exit 0 both. The
 golden corpus itself remains 46/46 MATCH.
 
-## Next Steps
+---
+
+## See also
 
 - [Type System](type-system.md): the types refinements attach to
 - [Linear Types](linear-types.md): the other compile-time safety layer
 - [Pattern Matching](pattern-matching.md): `match` guards feed path sensitivity
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/): `cap no_panic` and `cap verified` beside the other behavioral caps
+- [Safety by Construction](safety-by-construction.md): refinements as one of three layers
