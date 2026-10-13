@@ -6,7 +6,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>March — Functional Native Language</title>
-  <meta name="description" content="A statically-typed functional language. Actors from the BEAM, algebraic data types from ML, compiled to native binaries via LLVM.">
+  <meta name="description" content="A statically typed functional language for programs built from actors: ML types, capabilities for every effect, BEAM-style actors, compiled to native code with no garbage collector.">
   <link rel="icon" href="{{ site.baseurl }}/assets/logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -127,6 +127,9 @@
       font-style: italic; letter-spacing: -0.025em; color: var(--text); margin-bottom: 24px;
     }
     .m-hero-p { font-size: 17px; line-height: 1.78; color: var(--text-muted); max-width: 490px; margin-bottom: 40px; }
+    .m-hero-p a, .m-section-lead a { color: var(--text); text-decoration: none; border-bottom: 1px solid var(--accent-border); }
+    .m-hero-p a:hover, .m-section-lead a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+    .m-section-lead { font-size: 17px; line-height: 1.78; color: var(--text-muted); max-width: 760px; margin: -32px 0 48px; }
     .m-ctas { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
     .m-btn-primary {
       display: inline-block; background: var(--accent); color: var(--accent-text);
@@ -465,13 +468,13 @@
         <span class="m-hero-badge-dot"></span>
         Early Access · v0.5.0
       </div>
-      <h1 class="m-hero-h1">ML types.<br>Actor concurrency.<br>No GC Pauses.</h1>
+      <h1 class="m-hero-h1">ML types.<br>Effects as capabilities.<br>Actors, compiled native.</h1>
       <p class="m-hero-p">
-        March is a statically-typed functional language: actors and message passing from the BEAM,
-        algebraic data types from ML, compiled to native binaries through LLVM. Perceus reference
-        counting with in-place reuse means no garbage collector and no pauses, at Rust-like performance.
-        And side effects live in the type as capabilities — so what any module can touch is visible, and
-        auditable across your dependencies.
+        March is a statically typed functional language for programs built from actors. It takes
+        message passing and supervision from the BEAM and algebraic data types from ML, and compiles
+        the result to a native binary through LLVM. Memory is managed by
+        <a href="{{ site.baseurl }}/docs/memory-model/">Perceus reference counting with in-place reuse</a>,
+        so there is no garbage collector and no pauses, and functional code runs at Rust-like speed.
       </p>
       <div class="m-ctas">
         <a href="{{ site.baseurl }}/docs/getting-started/" class="m-btn-primary">Read the Docs</a>
@@ -496,9 +499,63 @@
 <section class="m-features">
   <div class="m-features-inner">
     <p class="m-section-label">What makes March different</p>
-    <h2 class="m-section-h2">The right ideas, done right.</h2>
+    <h2 class="m-section-h2">Safety is the compiler's job, not the test suite's.</h2>
+    <p class="m-section-lead">
+      Side effects are part of the type: a module declares the
+      <a href="{{ site.baseurl }}/docs/capabilities/">capabilities</a> it needs, so what any piece of
+      code can touch is visible in its signature, bounded by what <code>main</code> was granted, and
+      auditable across every dependency you pull in.
+      <a href="{{ site.baseurl }}/docs/linear-types/">Linear types</a> make a resource that is used out
+      of order, twice, or never a compile error.
+      <a href="{{ site.baseurl }}/docs/refinement-types/">Refinement types</a> reject a value a function
+      cannot accept before it runs. A message protocol is checked on both sides, a crashed actor is
+      restarted the way you declared, and a running node
+      <a href="{{ site.baseurl }}/docs/hot-code-reload/">takes new code without a restart</a>.
+    </p>
 
     <div class="m-feature-grid">
+      <!-- GRANT -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Capabilities</p>
+        <h3 class="m-feature-h3">The whole program is bounded by <code>main</code></h3>
+        <p class="m-feature-p"><code>main</code>'s capability parameter is the program's grant. Everything it reaches has to fit under it: every helper, every stdlib call, every dependency. Reach past it and the build fails, naming the chain that got there.</p>
+        <pre class="m-feature-pre"><code id="grant-code"></code></pre>
+      </div>
+
+      <!-- SAFETY LAYERS -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Three layers, one function</p>
+        <h3 class="m-feature-h3">What, in what order, with what values</h3>
+        <p class="m-feature-p">Capabilities say what resources code may touch. Linear types and typestate say how many times, and in what order, a resource is used. Refinement types say with what values a function may be called. They are independent, they compose on the same function, and all three fire at compile time.</p>
+        <pre class="m-feature-pre"><code id="layers-code"></code></pre>
+      </div>
+
+      <!-- PROTOCOLS -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Protocols</p>
+        <h3 class="m-feature-h3">Typed conversations, two parties or twenty</h3>
+        <p class="m-feature-p">Write the conversation once. Each role gets a typed module, so a send out of turn, a second receive, or a role that stops halfway does not compile; a runner connects the roles over the network, each its own program on its own machine.</p>
+        <pre class="m-feature-pre"><code id="proto-code"></code></pre>
+      </div>
+
+      <!-- HOT DEPLOY -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Hot deploy</p>
+        <h3 class="m-feature-h3">New code into a running node, gated by what it may do</h3>
+        <p class="m-feature-p"><code>forge deploy hot</code> ships only the functions that changed; actors keep their state and migrate it in place. A patch that reaches for authority the running version did not have stops until you grant it by name, and the node's own policy can still refuse it.</p>
+        <pre class="m-feature-pre"><code id="deploy-code"></code></pre>
+      </div>
+
+      <!-- CONCURRENCY -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Concurrency</p>
+        <h3 class="m-feature-h3">Actor model, typed and isolated</h3>
+        <p class="m-feature-p">Share-nothing message-passing actors with supervision trees. Accidental shared mutable state is a compile error, not a runtime bug.</p>
+        <div class="m-code-wrap">
+          <pre class="m-feature-pre"><code id="actor-code"></code></pre>
+          <button class="m-try-btn" onclick="tryACTOR()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
+        </div>
+      </div>
 
       <!-- PERFORMANCE — flip card -->
       <div class="m-perf-card" id="perf-card">
@@ -531,52 +588,6 @@
             <p class="m-feature-hint">← Back</p>
           </div>
         </div>
-      </div>
-
-      <!-- CONCURRENCY -->
-      <div class="m-feature-card">
-        <p class="m-feature-label">Concurrency</p>
-        <h3 class="m-feature-h3">Actor model, typed and isolated</h3>
-        <p class="m-feature-p">Share-nothing message-passing actors with supervision trees. Accidental shared mutable state is a compile error, not a runtime bug.</p>
-        <div class="m-code-wrap">
-          <pre class="m-feature-pre"><code id="actor-code"></code></pre>
-          <button class="m-try-btn" onclick="tryACTOR()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
-        </div>
-      </div>
-
-      <!-- TYPE SYSTEM -->
-      <div class="m-feature-card">
-        <p class="m-feature-label">Type System</p>
-        <h3 class="m-feature-h3">Hindley-Milner inference, ADTs, exhaustive patterns</h3>
-        <p class="m-feature-p">Types flow without annotation boilerplate. The compiler enforces exhaustive pattern matching — a missing case is a compile error. Generics are monomorphized, no boxing overhead.</p>
-        <div class="m-code-wrap">
-          <pre class="m-feature-pre"><code id="type-code"></code></pre>
-          <button class="m-try-btn" onclick="tryTYPES()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
-        </div>
-      </div>
-
-      <!-- MEMORY -->
-      <div class="m-feature-card">
-        <p class="m-feature-label">Memory</p>
-        <h3 class="m-feature-h3">Deterministic memory, no collector.</h3>
-        <p class="m-feature-p">Perceus reference counting reclaims memory the instant it's no longer used, at a point the compiler picks. Predictable latency, no collector, no pauses. Linear types guarantee file handles, sockets, and connections can't leak or double-free.</p>
-        <pre class="m-feature-pre"><code id="linear-code"></code></pre>
-      </div>
-
-      <!-- REFINEMENT TYPES -->
-      <div class="m-feature-card">
-        <p class="m-feature-label">Refinement Types</p>
-        <h3 class="m-feature-h3">Preconditions an SMT solver proves</h3>
-        <p class="m-feature-p">Attach a predicate to a type — a range, a bound, a relationship between two arguments. The checker (Z3) reads your if-guards to prove it holds, so the invariant is guaranteed, not defensively re-checked — and the result carries its own proof back out.</p>
-        <pre class="m-feature-pre"><code id="refine-code"></code></pre>
-      </div>
-
-      <!-- CAPABILITIES -->
-      <div class="m-feature-card">
-        <p class="m-feature-label">Capabilities</p>
-        <h3 class="m-feature-h3">Least privilege, scoped to a single file</h3>
-        <p class="m-feature-p">A module declares exactly the effects it needs — here, read access to one file and nothing else. Reach outside that scope and it's a compile error, and forge audit diffs these across dependencies, so widening authority lands in review, not in production.</p>
-        <pre class="m-feature-pre"><code id="cap-code"></code></pre>
       </div>
 
     </div>
@@ -671,7 +682,7 @@ function syntaxHL(code, dark) {
   const kws = new Set(['fn','mod','type','let','match','with','end','do','if','then','else',
     'actor','state','init','on','spawn','send','reply','linear','session','supervisor',
     'strategy','children','when','not','and','or','in','use','import','as','pub',
-    'impl','interface','derive','forge','needs','property']);
+    'impl','interface','derive','forge','needs','property','pfn','protocol','tag','always_linear']);
   const D = {
     kw:'oklch(74% 0.11 200)', tp:'oklch(82% 0.12 70)', st:'oklch(82% 0.11 200)',
     nm:'oklch(78% 0.09 265)', cm:'oklch(42% 0.07 215)', op:'oklch(57% 0.09 205)',
@@ -878,63 +889,48 @@ send(pid, Inc(1))
 send(pid, Get())
 run_until_idle()`;
 
-const TYPES = `type Shape = Circle(Float) | Rect(Float, Float)
-
-fn area(s : Shape) : Float do
-  match s do
-    Circle(r)  -> 3.14159 *. r *. r
-    Rect(w, h) -> w *. h
-  end
-end`;
-
-const TYPES_TRY = `type Shape = Circle(Float) | Rect(Float, Float)
-
-fn area(s : Shape) : Float do
-  match s do
-    Circle(r)  -> 3.14159 *. r *. r
-    Rect(w, h) -> w *. h
+const GRANT = `mod Report do
+  needs IO.Console
+  fn main(cap : Cap(IO.Console)) : () do
+    println("report done")
+    save_to_disk()         -- a helper that calls file_write
   end
 end
-
-(area(Circle(5.0)), area(Rect(3.0, 4.0)))`;
-
-const LINEAR = `always_linear type FileHandle = FileHandle(Int)
-
-fn write_and_close(
-  f : FileHandle, s : String
-) : Unit do
-  File.write(f, s)  -- f consumed here
-  -- compile error if f used again
-end`;
-
-const REFINE = `fn withdraw(bal : {Int | _ >= 0},
-            amt : {Int | _ > 0 && _ <= bal}) : {Int | _ >= 0} do
-  bal - amt
+-- ! \`main\` is granted Cap(IO.Console), but the program
+-- ! reaches IO.FileWrite (main → save_to_disk). The grant is
+-- ! a ceiling on the WHOLE program; declaring \`needs
+-- ! IO.FileWrite\` does not raise it.`;
+const LAYERS = `needs IO.FileRead                       -- (1) may read files
+always_linear type File(s) = File(Int)  -- (2) used exactly once
+tag Open
+tag Closed
+fn read_chunk(
+  f      : File(Open),                  -- (2) and only while open
+  offset : {Int | _ >= 0},              -- (3) proved by Z3
+  size   : {Int | _ > 0 && _ <= 4096}
+) : (String, File(Open)) do ... end
+-- ! read_chunk(f, -1, 8192): argument does not satisfy \`_ >= 0\``;
+const PROTO = `@[endpoints]
+protocol Fan do
+  number:  A -> C : Int
+  second:  B -> C : Int
+  verdict: C -> A : Bool
 end
-
--- amt arrives at runtime — the if-guard discharges the precondition
-fn on_withdraw(bal : {Int | _ >= 0}, amt : Int) : Int do
-  if amt > 0 && amt <= bal do
-    -- proved by the guard; drop it and it won't compile
-    withdraw(bal, amt)
-  else
-    bal
-  end
+-- role B, as the compiler types it: send, then close.
+pfn role_b(s : Cap(Session.Live),
+           st : Fan_B.Entry) : Fan_B.Yield do
+  Fan_B.close(s, Fan_B.send_Second(s, st, 9))
 end`;
-
-const CAP = `mod Config do
-  needs IO.FileRead("/etc/app.toml")   -- exactly one file
-
-  fn load() : Settings do
-    File.read("/etc/app.toml") |> parse
-  end
-end
-
--- read anything else, and it won't compile:
---   File.read("/var/secrets")
---   ! outside the declared IO.FileRead scope`;
-
-
+const DEPLOY = `$ forge deploy hot --so v2.so
+Deploying 1 changed function(s)...
+error: hot deploy would add authority not held
+       by the running version
+  running version caps:  IO.Console
+  new version adds:      IO.FileWrite (from Server.handle)
+  A hot deploy may only narrow authority.
+  To authorize this widening, re-run with:
+      forge deploy hot --grant-cap IO.FileWrite
+error: capability widening — deploy aborted`;
 // ─── State ────────────────────────────────────────────────────────────────────
 let dark = true, heroTab = 0;
 
@@ -962,10 +958,10 @@ function renderAll() {
 function renderFeatures() {
   document.getElementById('fbip-code').innerHTML = hl(FBIP);
   document.getElementById('actor-code').innerHTML = hl(ACTOR);
-  document.getElementById('type-code').innerHTML = hl(TYPES);
-  document.getElementById('linear-code').innerHTML = hl(LINEAR);
-  document.getElementById('refine-code').innerHTML = hl(REFINE);
-  document.getElementById('cap-code').innerHTML = hl(CAP);
+  document.getElementById('grant-code').innerHTML = hl(GRANT);
+  document.getElementById('layers-code').innerHTML = hl(LAYERS);
+  document.getElementById('proto-code').innerHTML = hl(PROTO);
+  document.getElementById('deploy-code').innerHTML = hl(DEPLOY);
 }
 
 function renderHeroTabs() {
@@ -1065,7 +1061,6 @@ function tryInRepl(code) {
 }
 function tryFBIP()  { tryInRepl(FBIP_TRY);  }
 function tryACTOR() { tryInRepl(ACTOR_TRY); }
-function tryTYPES() { tryInRepl(TYPES_TRY); }
 // ─── Events ───────────────────────────────────────────────────────────────────
 document.getElementById('theme-btn').addEventListener('click', () => {
   dark = !dark;
