@@ -20,6 +20,14 @@ git log is authoritative for exact commits.
 
 ### Security
 
+- **`march --shell` / `forge shell` no longer let a node run commands on the operator's
+  machine.** The client put the target triple from the node's unauthenticated `HELLO`
+  reply on a `/bin/sh` command line unquoted, so a compromised node (or anything able to
+  serve its `.shell` socket, including through `forge shell`'s ssh tunnel) could execute
+  commands as the operator on the first evaluated input. The triple is now allowlisted
+  (`[A-Za-z0-9._-]+`) when `HELLO` is read, the session is refused otherwise, and the
+  clang command builder refuses and quotes it independently. A real node's triple is
+  unaffected.
 - **`~H` no longer lets an interpolated value choose a link's scheme.** In
   `href="${s}://${rest}"`, a value of `javascript` passed the URL check because
   it has no colon of its own; the template's `:` then made it the scheme, and
