@@ -3459,12 +3459,25 @@ git log is authoritative for exact commits.
   reload and clustering. The interpreted-vs-compiled status block that opened
   the page is its own section near the end, with the dated fix notes gathered
   into one history list. No content was removed.
+- **Capabilities chapter restructured.** `docs/capabilities/` now opens with a
+  plain statement of the three checks (manifest, upper limit, grant), one
+  "which tool do I need" table, an index of every section, and a table of how
+  capabilities meet modules, actors, linear and refinement types, choreography,
+  hot code reload and the enforcement/audit tooling. Dated changelog asides are
+  folded into short history notes. No content was removed; the anchors other
+  chapters link to are unchanged.
 - **Observe chapter restructured.** `docs/observe/` now opens with which forge
   command answers which question, what each of the three tiers (observe, debug,
   shell) reveals and needs, an index of every section, and how it connects to
   actors, capabilities and hot code reload; the slow-node walkthrough comes before
   the verb reference. Its "not there yet" list was stale: the interactive view,
   tracing and actor events had shipped and were still listed as missing.
+- **Refinement types chapter restructured.** `docs/refinement-types/` now opens
+  with the definite-failure bargain in plain terms, when to use a refinement and
+  when not to, how refinements meet the type system, guards, capabilities and
+  stdlib contracts, and an index grouping all 27 sections; the sections are
+  reordered so the teaching ones come first, then each kind of value, then the
+  tooling, then the strict modes. Section bodies are unchanged.
 - **Choreography chapter restructured.** `docs/choreography/` now opens with when to
   use a choreography and what to reach for instead, an index of every section, and
   a table of how it builds on session types, actors, capabilities, clustering and

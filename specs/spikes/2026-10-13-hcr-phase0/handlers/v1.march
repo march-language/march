@@ -1,0 +1,18 @@
+    -- v1: borrowed Conn (only read); closure captures an Int.
+    fn handle(conn: SpikeConn): Int do
+      conn.status + string_length(conn.path)
+    end
+    fn mk(conn: SpikeConn): Int -> Int do
+      let s = conn.status
+      fn x -> x + s
+    end
+    fn tag(): String do
+      "v1-tag"
+    end
+    -- count borrows its List (it only reads it).
+    fn count(hs: List(String)): Int do
+      match hs do
+        Nil -> 0
+        Cons(h, _) -> 1 + string_length(h)
+      end
+    end
