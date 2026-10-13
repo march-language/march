@@ -3461,6 +3461,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Landing page pitch leads with safety.** "What makes March different" now
+  opens with the grant that bounds a whole program by `main`'s signature, the
+  three safety layers on one function, typed protocols for any number of roles,
+  and capability-gated hot deploys, followed by actors and FBIP; the REPL and
+  forge move into the feature overview.
 - **Landing page corrected and completed.** The site root no longer claims actor
   links, compile-time deadlock freedom for session channels, or a `Future` type;
   restart strategies are spelled as in the language; the FBIP table links its
