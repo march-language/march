@@ -61,4 +61,41 @@ mod TestSessionNode do
     end
 
   end
+
+  -- A HOSTED endpoint's `suspend` runs in the host actor's turn: it installs
+  -- the continuation and only SENDS the endpoint actor a `Drain` for what
+  -- was parked meanwhile. A delivery that the endpoint actor handles between
+  -- the two (a peer that sent two messages back to back) found the
+  -- continuation installed and was forwarded at once, AHEAD of the older
+  -- parked message: the host, awaiting the first, was resumed with the
+  -- second, and the generated `resume` panicked "unexpected message in state
+  -- S_recv_Hello" (hosted_protocol_change under ASan,
+  -- specs/progress/2026-10-05-hosted-protocol-change-unexpected-hello-under-asan.md).
+  -- This forces that interleaving: park one, install the continuation as
+  -- the host's suspend does with its Drain not yet run, deliver the second.
+  describe "SessionNode delivery: per-sender FIFO" do
+
+    test "a delivery behind a parked one from the same sender waits its turn" do
+      let p = SessionNode.party(2, "fifo-test", fn _ -> ())
+      let got : Vault(String) = Vault.new("test_session_node_fifo_got")
+      Vault.set(p.forward, "f", fn (_from, msg, _ep) ->
+        Vault.set(got, "seen", Vault.get_or(got, "seen", "") ++ Bytes.to_string(msg) ++ ";"))
+      -- No continuation yet (the host has not parked): the first is parked.
+      let _ = SessionNode.deliver(p, 2, 1, Bytes.from_string("hello"))
+      assert (Vault.get_or(got, "seen", "") == "")
+      -- The host parks: its continuation is installed, its Drain still queued.
+      Vault.set(p.waiting, "e2", 1)
+      Vault.set(p.handlers, "e2", fn (_f, _m, ep) -> ep)
+      -- The sender's second message arrives before that Drain runs.
+      let _ = SessionNode.deliver(p, 2, 1, Bytes.from_string("go"))
+      assert (Vault.get_or(got, "seen", "") == "hello;")
+      -- "go" is parked for the host's next suspension.
+      match Vault.get_or(p.pending, "e2", Nil) do
+        Cons((1, m), Nil) -> assert (Bytes.to_string(m) == "go")
+        _ -> assert false
+      end
+      kill(p.ep)
+    end
+
+  end
 end
