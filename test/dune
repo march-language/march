@@ -3766,6 +3766,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff cap_mock/cap_mock_clock.expected cap_mock_clock.out)))
 
+; Mocking an IO op typed as a bare value (process_cwd/argv/pid): the dispatch
+; wrapper must exist for it, and its dictionary field holds a value.
+(rule
+ (targets cap_mock_process_bin cap_mock_process.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file cap_mock/cap_mock_process.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o cap_mock_process_bin
+        cap_mock/cap_mock_process.march)
+   (with-stdout-to cap_mock_process.out (system "./cap_mock_process_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff cap_mock/cap_mock_process.expected cap_mock_process.out)))
+
 ; ── Capability runtime dictionaries, compiled ─────────────────────────────
 ; Compiled/interpreted parity for cap_impl / cap_dict / mint_cap.  See the
 ; header comment in native/cap_dictionary.march for what each line witnesses;

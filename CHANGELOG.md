@@ -932,6 +932,13 @@ detail.
   explicitly. No source-level change.
 
 ### Fixed
+- **`forge test` no longer fails to compile for code that calls `Process.cwd()`,
+  `Process.argv()` or `Process.pid()`.** A test build failed on an
+  undefined `__march_dispatch_process_argv` (or `_cwd`, `_pid`) whenever it
+  emitted a function calling one of them, even one no test called. That
+  included every project depending on bastion, whose CLI `main` calls
+  `Process.argv()`. These operations can now also be mocked in tests: the
+  mock's field holds the value (`process_cwd: Some("/tmp")`), not a function.
 - **Hot reload: a closure built by an old version no longer crashes once that
   version is reclaimed.** A callback, `plug` or closure kept in actor state or
   a Vault, built by a patch, crashed the node with a SIGSEGV when called after

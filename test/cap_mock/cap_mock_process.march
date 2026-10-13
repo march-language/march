@@ -1,0 +1,37 @@
+mod CapMockProcess do
+  -- Capability mocking for an IO operation typed as a bare VALUE rather than
+  -- a function (`process_cwd : String`, `process_argv : List(String)`,
+  -- `process_pid : Int`).  Their dictionary fields hold a value, not a
+  -- closure, and the dispatch wrapper once was not generated for them at all
+  -- while the call was still rewritten to it — so any `--test` build that
+  -- merely EMITTED a function calling `Process.argv()` failed with an
+  -- undefined `__march_dispatch_process_argv` (every project depending on
+  -- bastion, whose CLI `main` calls it).
+  needs IO.Console
+  needs IO.Process
+
+  -- code under test: takes no capability and names none
+  pfn where_am_i() : String do
+    Process.cwd()
+  end
+
+  pfn arg_count() : Int do
+    List.length(Process.argv())
+  end
+
+  test "a value-typed process op dispatches through its mock" do
+    let c : Cap(IO.Process) = cap_narrow(root_cap)
+    let before = where_am_i()
+    let mock = cap_impl(c, { cap_ops_empty(c) with
+      process_cwd: Some("/mocked"),
+      process_pid: Some(42) })
+    let mocked = with_cap(mock, fn _ -> where_am_i())
+    let pid = with_cap(mock, fn _ -> Process.pid())
+    let after = where_am_i()
+    Test.assert_eq("/mocked", mocked, "inside with_cap the mock is in force")
+    Test.assert_eq(42, pid, "a mocked Int-valued op")
+    Test.assert_true(before != "/mocked", "before with_cap: the real cwd")
+    Test.assert_true(after == before, "after with_cap: the real cwd again")
+    Test.assert_true(arg_count() >= 1, "an un-mocked op falls through to the real argv")
+  end
+end
