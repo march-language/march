@@ -3458,6 +3458,28 @@ git log is authoritative for exact commits.
   and how the cluster meets actors, capabilities, choreography, hot code reload
   and topology; the actor-message sections come before the RPC ones. A dead
   in-page link is fixed. Section bodies are unchanged.
+- **Supervision chapter restructured.** `docs/supervision/` now opens with what
+  a supervisor is, a situation-to-feature table, an index of every section, and
+  how supervision meets actors, hot code reload, observe and Flow. Restart
+  types, strategies, escalation and backoff are contiguous. The stale "not yet
+  supported: a terminate-style callback" note is corrected: `on_stop` shipped.
+- **Safety by construction chapter restructured.** `docs/safety-by-construction/`
+  now opens with the question each of the three layers answers, a table from the
+  bug you want to make impossible to the layer and syntax that does it, and an
+  index. The worked example is unchanged.
+- **Hot code reload chapter restructured.** `docs/hot-code-reload/` now opens
+  with the mechanism in one paragraph, a table from the kind of change to how
+  it ships (hot patch, migration, same-batch callers, restart, gated widening),
+  how a deploy meets actors, capabilities, choreography, refinement types,
+  topology and observe, and an index grouping every section; sections are
+  regrouped into one server, many hosts, running work, and trust. Bodies are
+  unchanged apart from a few phrase edits.
+- **Actors chapter restructured.** `docs/actors/` now opens with what an actor is,
+  the concurrency-primitive chooser, an index of every section, and how actors
+  meet supervision, capabilities, linear and session types, observe, hot code
+  reload and clustering. The interpreted-vs-compiled status block that opened
+  the page is its own section near the end, with the dated fix notes gathered
+  into one history list. No content was removed.
 - **Capabilities chapter restructured.** `docs/capabilities/` now opens with a
   plain statement of the three checks (manifest, upper limit, grant), one
   "which tool do I need" table, an index of every section, and a table of how
