@@ -9,15 +9,85 @@ permalink: /docs/session-types/
 
 # Session Types
 
-A protocol is an agreement about *who sends what, and in what order*. Two programs that disagree (one sends before the other is ready, or a channel is used after it's closed) deadlock or corrupt data at runtime, usually under load, usually in production.
+A protocol is an agreement about *who sends what, and in what order*. Two programs
+that disagree, because one sends before the other is ready or uses a channel after it
+is closed, deadlock or corrupt data at runtime, usually under load. March's **session
+types** turn that agreement into a type the compiler checks: you declare a `protocol`,
+the compiler derives each side's obligations, and a program that breaks the protocol
+does not compile.
 
-March's **session types** turn those agreements into types the compiler checks. You declare a `protocol`, the compiler derives each side's obligations, and any program that breaks the protocol **fails to compile**. Sending in the wrong order, using a channel after it's closed, forgetting to close a finished channel, and leaving a branch a peer might choose unhandled are all type errors, not surprises; see [The guarantees, in one place](#the-guarantees-in-one-place) for the precise, verified story, including the two narrower gaps that remain.
+A session-typed channel is a linear value whose type advances at every operation.
+After a `send` the type says "now receive"; after a `receive` it says "now send" or
+"now close". Sending out of order, using an endpoint after `close`, dropping a finished
+endpoint without closing it, and leaving a branch the peer might choose unhandled are
+all type errors.
 
-These are *binary* session types: a protocol describes exactly two roles talking over one channel. (For data-parallel fan-out across a whole collection, see [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/); for actor mailboxes, see [Actors]({{ site.baseurl }}/docs/actors/), and the [section below](#session-types-and-actors) on how the two relate.)
+The `Chan` API on this page is for **two** roles over one in-process channel. The same
+protocol syntax, with `@[endpoints]`, generates typed endpoints over a swappable
+transport for any number of roles; that is the subject of the
+[Choreography]({{ site.baseurl }}/docs/choreography/) chapter, and the last two
+sections here introduce it.
 
-**What matches exactly between interpreted and compiled, and what does NOT.** The **binary channel plane** (`Chan.*`, not `MPST.*`) with `Int`/`Bool`/`String` payloads, correctly interleaved, produces identical observable output on both backends, mechanically pinned by the golden conformance corpus (`specs/lang/golden/g38`–`g39`, verified `MATCH` interpreted-vs-compiled; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.5). **`MPST.*` send/recv/close round-trips run correctly on both backends, confirmed again 2026-07-24** (transcript in `specs/todos/`): a 3-role and a 4-role protocol, each with `Int`/`Bool`/`String` payloads, both compile and run, printing output identical to the interpreter, exit 0; the segfault this section used to describe (finding F3) no longer shows up. What truly remains unimplemented is **multiparty `choose`/`offer`** (`MPST.choose`/`MPST.offer` do not exist as typed operations yet; calling them is a compile error, not a crash), and MPST still has no *golden* conformance witness (`specs/lang/golden/`), only the ad hoc transcript cited above, so a send/recv/close-only MPST program is verified-correct but not yet mechanically pinned the way the binary plane is. See the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.7.4 for the projection/consistency infrastructure MPST protocols go through.
+## On this page
 
-For the typing side (protocol declaration, projection, duality, per-operation channel-state typing) see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.7; for the runtime model (the crossed-queue representation, why `recv` never suspends, and the no-scheduler deadlock boundary) see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.
+**Start here**
+
+- [When to use a session type](#when-to-use-a-session-type)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [The idea](#the-idea)
+- [Declaring a protocol](#declaring-a-protocol)
+- [The `Chan` API](#the-chan-api)
+- [A worked example: request–reply](#a-worked-example-requestreply) and [each role's view](#each-roles-view)
+
+**Branching and repetition**
+
+- [Choice: `choose` and `offer`](#choice-choose-and-offer)
+- [Repetition: `loop`](#repetition-loop) and [exiting a loop: `stop`](#exiting-a-loop-stop)
+
+**What is guaranteed**
+
+- [The guarantees, in one place](#the-guarantees-in-one-place)
+- [Session types and actors](#session-types-and-actors) and [handing an endpoint to an actor](#worked-example-handing-an-endpoint-to-an-actor)
+
+**Beyond one process**
+
+- [Swapping the transport: `Session`](#swapping-the-transport-session)
+- [Generated endpoints: `@[endpoints]`](#generated-endpoints-endpoints) and [hosting an endpoint in an actor](#hosting-an-endpoint-in-an-actor-the-event-api)
+
+**Status**
+
+- [Interpreted vs compiled](#interpreted-vs-compiled)
+- [See also](#see-also)
+
+## When to use a session type
+
+Use a session type when **two parties run a fixed conversation** and getting the order
+wrong is a bug you want the compiler to catch: a login handshake, a request and reply
+with a branch on the outcome, a negotiation, a stream with a stop condition.
+
+| You want | Reach for |
+|---|---|
+| Two roles, one conversation, in one process | A `protocol` and the `Chan` API on this page |
+| The same, but the sides run as actors | Hand an endpoint over in a message, [send-before-handoff](#worked-example-handing-an-endpoint-to-an-actor) |
+| Three or more roles, each its own program on its own node | `@[endpoints]` and the [Choreography]({{ site.baseurl }}/docs/choreography/) runner |
+| A transport you can swap between production and a deterministic test | `Session.attach` with a [transport dictionary](#swapping-the-transport-session) |
+| Many senders, one receiver, no required order | An [actor](({{ site.baseurl }}/docs/actors/)) mailbox, not a session |
+
+Two limits to know before you start. `Chan.recv` never suspends: the two sides share one
+control flow, so every `send` must run before its matching `recv`. And a channel
+abandoned part-way through its protocol is not caught. Both are spelled out under
+[The guarantees, in one place](#the-guarantees-in-one-place).
+
+## How it fits with the rest of March
+
+| Concept | Where session types meet it | Chapter |
+|---|---|---|
+| **Linear types** | An endpoint is linear: each operation consumes it and returns the advanced one, which is what makes "exactly once, then close" checkable. | [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
+| **Actors** | An endpoint rides inside a message; mailbox causality replaces the scheduler a channel does not have. The event API parks a generated endpoint in an actor's state. | [Actors]({{ site.baseurl }}/docs/actors/), [choosing a primitive]({{ site.baseurl }}/docs/actors/#choosing-a-concurrency-primitive) |
+| **Capabilities** | `Cap(Session.Live)` carries the transport as a dictionary; `Session.attach` is the only mint. | [Capabilities]({{ site.baseurl }}/docs/capabilities/#runtime-dictionaries-swapping-what-a-capability-does) |
+| **Choreography** | Multi-party protocols, generated role modules, the network runner, failure and drains. | [Choreography]({{ site.baseurl }}/docs/choreography/) |
+| **Pattern matching** | An `offer`'s label is matched against the protocol's closed branch set, not the open `Atom` universe. | [Pattern Matching]({{ site.baseurl }}/docs/pattern-matching/) |
+| **Hot code reload** | A generated receive at a `loop` head is a drain point; a deploy can end a session there. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/#drains) |
 
 ---
 
@@ -84,7 +154,7 @@ A few rules the type checker enforces, so they never reach runtime:
 
 ## A worked example: request–reply
 
-Here is the `Echo` protocol, fully implemented and **runnable**. Because a channel's two directional queues have no scheduler behind them (`Chan.recv` never suspends; see the Runtime note below), a working program interleaves both sides' *steps* into a single control flow, so every `send` runs before its matching `recv`:
+The `Echo` protocol, fully implemented and **runnable**. Because a channel's two directional queues have no scheduler behind them (`Chan.recv` never suspends; see the Runtime note below), a working program interleaves both sides' *steps* into a single control flow, so every `send` runs before its matching `recv`:
 
 ```march
 fn main() do
@@ -265,7 +335,7 @@ If a program using session-typed channels compiles, then:
 
   **The precise scope of that guarantee.** Exactly two things are mechanically enforced, and they are both compiler-side checks rather than properties of the session type: (1) every `Chan.*` operation applied to the pending channel is rejected, by comparing the channel's *identity* against a table the compiler marks at the `offer`; (2) every unification of that marked channel with another channel type is rejected. Everything the language currently does with a channel (annotating it, joining it in an `if`/`match`, storing it in a record field, passing it to a function or lambda) routes through one of those two, so every laundering shape known today is covered. That is a statement about routes that have been *tried*, not a proof: the enforcement is a checked invariant, not a structural impossibility, and it has been broken in practice more than once. Most recently (2026-07-27) an annotated *lambda* or nested-`fn` parameter reached neither check, because lambda parameter annotations were never reconciled with the lambda's arrow type, so the argument unified with a bare type variable and no `TChan`/`TChan` unification took place at all. That is now fixed at its source (an annotated parameter is unified with the expected type, like every other annotation), but the shape of the failure is the point: a future construct that binds a channel without either operating on it or unifying it would reopen the hole silently. Making "awaiting refinement" a session *state*, so it persists by construction, is the durable form of this fix and is logged in `specs/todos/`. Witnesses: `specs/lang/types/reject/t95` (no `match` at all), `t97` (shadowed label), `t98`/`t99`/`t100` (annotation, `if`-join, top-level function parameter), `t102`/`t103` (lambda and nested-`fn` parameter); accept twins `t43` and `t104`.
 
-These properties are the same ones you'd otherwise chase with runtime assertions and integration tests, promoted to compile-time checks that hold for *all* executions, not just the ones your tests happened to hit.
+These are the properties you would otherwise chase with runtime assertions and integration tests, promoted to compile-time checks that hold for *all* executions.
 
 **Two gaps remain, both intentionally out of scope of the fixes above** (logged in `specs/todos/`; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.6 for the full write-up):
 
@@ -353,7 +423,6 @@ causal ordering itself: skip discipline 1 or 2 and the program still typechecks,
 dies at runtime with `Chan.recv: … no pending value`; that footgun is the scope
 boundary described above, repeated in concrete terms.
 
-
 ---
 
 ## Swapping the transport: `Session`
@@ -439,6 +508,8 @@ arrives before its handler exists.)
 
 Any module that takes a `Cap(Session.Live)` parameter declares
 `needs Session.Live`, as for any proof capability.
+
+---
 
 ## Generated endpoints: `@[endpoints]`
 
@@ -575,8 +646,20 @@ the two APIs part ways:
   and the transport should abandon the session and close the peer
   (`test/session/stream_actor_events_supervised.march`).
 
+---
+
+## Interpreted vs compiled
+
+The **binary channel plane** (`Chan.*`, not `MPST.*`) with `Int`/`Bool`/`String` payloads, correctly interleaved, produces identical observable output on both backends, mechanically pinned by the golden conformance corpus (`specs/lang/golden/g38`–`g39`, verified `MATCH` interpreted-vs-compiled; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.5). **`MPST.*` send/recv/close round-trips run correctly on both backends, confirmed again 2026-07-24** (transcript in `specs/todos/`): a 3-role and a 4-role protocol, each with `Int`/`Bool`/`String` payloads, both compile and run, printing output identical to the interpreter, exit 0; the segfault this section used to describe (finding F3) no longer shows up. What truly remains unimplemented is **multiparty `choose`/`offer`** (`MPST.choose`/`MPST.offer` do not exist as typed operations yet; calling them is a compile error, not a crash), and MPST still has no *golden* conformance witness (`specs/lang/golden/`), only the ad hoc transcript cited above, so a send/recv/close-only MPST program is verified-correct but not yet mechanically pinned the way the binary plane is. See the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.7.4 for the projection/consistency infrastructure MPST protocols go through.
+
+For the typing side (protocol declaration, projection, duality, per-operation channel-state typing) see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.7; for the runtime model (the crossed-queue representation, why `recv` never suspends, and the no-scheduler deadlock boundary) see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.
+
+---
+
 ## See also
 
 - [Actors]({{ site.baseurl }}/docs/actors/): mailboxes, `spawn`/`send`, and the scheduler these channels run on.
 - [Linear Types]({{ site.baseurl }}/docs/linear-types/): the linearity discipline that makes "use exactly once, then close" checkable.
 - [Choosing a concurrency primitive]({{ site.baseurl }}/docs/actors/#choosing-a-concurrency-primitive): where session channels fit among the other concurrency tools.
+- [Choreography]({{ site.baseurl }}/docs/choreography/): the same protocols with three or more roles, generated endpoints, and the network runner.
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/#runtime-dictionaries-swapping-what-a-capability-does): the dictionary mechanism `Session.attach` uses.
