@@ -3453,6 +3453,10 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Safety by construction chapter restructured.** `docs/safety-by-construction/`
+  now opens with the question each of the three layers answers, a table from the
+  bug you want to make impossible to the layer and syntax that does it, and an
+  index. The worked example is unchanged.
 - **Hot code reload chapter restructured.** `docs/hot-code-reload/` now opens
   with the mechanism in one paragraph, a table from the kind of change to how
   it ships (hot patch, migration, same-batch callers, restart, gated widening),
