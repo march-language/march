@@ -17666,6 +17666,67 @@ let test_callarity_shadowed_param_ignored () =
   Alcotest.(check bool) "shadowed parameter: no callback-arity error" false
     (has_error_with ctx "calls its parameter")
 
+(* 2026-10-13: a `let h = add` alias is `add` itself. Calling it with the
+   wrong count (`h(1)` then the result) and passing it as a curried callback
+   were both accepted, then panicked interpreted / SIGSEGV'd compiled. *)
+let test_callarity_fn_alias_direct_call_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do
+      let h = add
+      let g = h(1)
+      g(2)
+    end
+  end|}) in
+  Alcotest.(check bool) "alias under-applied: error" true
+    (has_error_with ctx "`h` is bound to `add`, which takes 2 arguments, but is called with 1 argument");
+  Alcotest.(check bool) "no cascade on the result" false
+    (has_error_with ctx "is not a function")
+
+let test_callarity_fn_alias_as_callback_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do
+      let h = add
+      let f = fn a -> fn b -> a + b
+      let g = f
+      ap2(h, 1, 2) + both(g, 1, 2)
+    end
+  end|}) in
+  Alcotest.(check bool) "fn alias as curried callback: error" true
+    (has_error_with ctx "`h` (bound to `add`) takes 2 arguments, but `ap2` calls its parameter `f` with 1 argument");
+  Alcotest.(check bool) "lambda alias as 2-arg callback: error" true
+    (has_error_with ctx "`g` (a lambda) takes 1 argument, but `both` calls its parameter `f` with 2 arguments")
+
+(* A let-bound lambda as the CALLEE: its parameters' call-arities are
+   computed from its body, like a module fn's. *)
+let test_callarity_let_lambda_callee_errors () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do
+      let ap = fn (f, x, y) ->
+        let g = f(x)
+        g(y)
+      let ap_via = fn (f, x, y) -> ap2(f, x, y)
+      ap(add, 1, 2) + ap_via(add, 1, 2)
+    end
+  end|}) in
+  Alcotest.(check bool) "lambda callee applying curried: error" true
+    (has_error_with ctx "`add` takes 2 arguments, but `ap` calls its parameter `f` with 1 argument");
+  Alcotest.(check bool) "lambda callee handing on to ap2: error" true
+    (has_error_with ctx "`add` takes 2 arguments, but `ap_via` calls its parameter `f` with 1 argument")
+
+let test_callarity_aliases_matching_ok () =
+  let ctx = typecheck ("mod Test do" ^ callarity_prelude ^ {|
+    fn main() : Int do
+      let h = add
+      let k = List.length
+      let f = fn a -> fn b -> a + b
+      let g = f
+      let r = g(1)
+      let ap = fn (cb, x, y) -> cb(x, y)
+      h(1, 2) + k([1]) + r(2) + both(h, 1, 2) + ap2(g, 1, 2) + ap(add, 1, 2)
+    end
+  end|}) in
+  Alcotest.(check bool) "matching aliases / lambda callee: no error" false (has_errors ctx)
+
 let compiler_suites =
   [
       sigil_interp_suite;
@@ -18905,6 +18966,10 @@ let compiler_suites =
           Alcotest.test_case "inherited through a helper (Map.insert): error"   `Quick test_callarity_inherited_through_helper_errors;
           Alcotest.test_case "matching shapes: no error"                        `Quick test_callarity_matching_shapes_ok;
           Alcotest.test_case "shadowed parameter: ignored"                      `Quick test_callarity_shadowed_param_ignored;
+          Alcotest.test_case "fn alias called with wrong count: error"         `Quick test_callarity_fn_alias_direct_call_errors;
+          Alcotest.test_case "fn / lambda alias as callback: error"            `Quick test_callarity_fn_alias_as_callback_errors;
+          Alcotest.test_case "let-bound lambda callee: error"                  `Quick test_callarity_let_lambda_callee_errors;
+          Alcotest.test_case "matching aliases / lambda callee: no error"      `Quick test_callarity_aliases_matching_ok;
         ] );
       ( "curried_lambda_over_tuple", [
           Alcotest.test_case "fn (_, w) over a pair (silent case): error"       `Quick test_curried_lambda_over_pair_silent_case_errors;

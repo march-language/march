@@ -20,3 +20,11 @@ A sound fix needs one of:
   `convert_ty`, refinements and the LSP; or
 - an arity-adapting call path (closure arity word plus `caml_applyN`-style
   over/under-application), a closure ABI change that reaches HCR.
+
+**Findings 2026-10-13.** After the alias / let-bound-lambda extension
+(`specs/progress/2026-10-12-two-arg-fn-accepted-as-curried.md`), these still
+`--check` clean and crash at runtime (arity panic interpreted, SIGSEGV
+compiled): a fn returned by another fn (`pfn pick() do add end`, then
+`ap2(pick(), 1, 2)`), and a fn taken out of a list (`[add]`, `Cons(f, _)`,
+`f(1)`). Both need arity to flow through types or values; no syntactic
+extension reaches them soundly.

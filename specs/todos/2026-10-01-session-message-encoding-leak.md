@@ -1,4 +1,4 @@
-# `[P2]` A session message costs far more than its bytes, and keeps costing after it is delivered
+# `[P3]` A session message costs far more than its bytes (per-byte `List(Int)` framing); the retention after delivery is gone
 
 Filed 2026-10-01 (dd step 12a). A session payload is a `derive Json` value encoded over
 `List(Int)` framing (`stdlib/net_frame.march`, `NetFrame`): one cons cell and one tagged
@@ -37,3 +37,35 @@ come back.
   A repro: one in-process session, 1000 messages of 9 KB, `live_allocs()` before and after.
 - A byte-string payload type for sessions (a `Bytes` message encoded as bytes, not as a
   JSON array of Ints) would make a chunked fetch over a session viable again.
+
+## Re-measured 2026-10-13 (origin/main 3d2925fce): nothing is retained after delivery
+
+The repro this file asked for, compiled, private HOME, `live_allocs()` before and after:
+
+- **One node, in-process cluster session** (the `session_party_released` shape: an offer,
+  `Ping_Run.initiate_Client` in a loop), 500 sessions of two messages each, i.e. 1000
+  messages. Left behind after the run: 8,101 objects with a 2-byte `String` payload and
+  8,101 with a 9,000-byte one, on macOS and on Linux (ubuntu arm64 container) alike. A
+  9 KB message's per-byte `List(Int)` framing (Msgpack frame, `NodeQueue`) is freed; the
+  ~16 objects per session that do stay are the session's registry tombstones (two names,
+  8 objects each, kept 3 h by design) and the known one-`GlobalPid` leftover
+  ([2026-10-07-session-refresh-names-globalpid-leftover.md](2026-10-07-session-refresh-names-globalpid-leftover.md)).
+- **Two nodes over TCP** (`cluster_A` / `cluster_B`, 200 sessions, 9 KB echoed both ways):
+  ~3,750 objects left per node either way, the same ~19 per session. Peak RSS ~90 MB per
+  node with the 9 KB payload (the transient per-byte lists), and back.
+- What the 10-01 numbers were: the nodes then still leaked every session's 13 Vault
+  tables and every value a Vault write displaced (fixed by #785, 2026-10-05; see
+  [../progress/2026-09-28-linux-per-session-memory-growth.md](../progress/2026-09-28-linux-per-session-memory-growth.md)),
+  the likely source of the "some of it does not come back" part (not re-run on the
+  10-01 tree, so not proven).
+- While measuring, the two-node runs with a 2-byte payload were the SLOW ones: a registry
+  that answered every pushed name change with its whole contents made session churn
+  quadratic (fixed 2026-10-13,
+  [../progress/2026-10-13-registry-push-answered-with-full-dump.md](../progress/2026-10-13-registry-push-answered-with-full-dump.md)).
+
+So the leak half of this item is closed. What stays open is the cost half: a session
+message is still encoded as one cons cell and one tagged Int per byte on both sides (a
+9 KB message is ~9,000 cells of transient garbage per hop), and there is still no
+byte-string payload type that would make a chunked artifact fetch over a session viable.
+That is a performance feature, not a leak; the control plane does not need it
+(`CAS_GET`, above).

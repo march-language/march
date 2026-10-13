@@ -331,6 +331,32 @@ static void test_reclaim_retires_before_dlclose(void) {
     if (g_failed == 0) printf("PASS: test_reclaim_retires_before_dlclose\n");
 }
 
+/* A reclaimed version's image is retained, never dlclose'd: its closures,
+ * statics and closure-drop table entries may still point into it
+ * (specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md).
+ * With no close hook installed, the fake handles below would crash a real
+ * dlclose; the default path must only count them, at reclaim and at
+ * shutdown alike. */
+static void test_reclaim_retains_image(void) {
+    march_epoch_reset_for_test();
+    march_dispatch_init(1);
+    march_dispatch_set_close_hook(NULL);
+    uint64_t r0 = march_dispatch_retained_images();
+    CHECK(march_dispatch_publish_epoch(0, FN1, H1, NULL, MARCH_NATIVE, 1) == 0, "v0 at slot 0");
+    march_dispatch_set_handle(0, 0, H_OLD);
+    CHECK(march_dispatch_publish_epoch(0, FN2, H2, NULL, MARCH_NATIVE, 2) == 1, "v1 at slot 1");
+    march_dispatch_set_handle(0, 1, H_NEW);
+    CHECK(march_dispatch_publish_epoch(0, FN3, H2, NULL, MARCH_NATIVE, 3) == 2, "v2 at slot 2");
+    advance_to(3);
+    CHECK(march_dispatch_publish_epoch(0, FN4, H1, NULL, MARCH_NATIVE, 4) == 0,
+          "fourth publish reclaims slot 0");
+    CHECK(march_dispatch_retained_images() == r0 + 1, "reclaim retained H_OLD's image");
+    march_dispatch_shutdown();   /* slot 1 still holds H_NEW: retained, not closed */
+    CHECK(march_dispatch_retained_images() == r0 + 2, "shutdown retained the live image");
+    march_epoch_reset_for_test();
+    if (g_failed == 0) printf("PASS: test_reclaim_retains_image\n");
+}
+
 /* ── 9. retire-before-dlclose under real threads ──────────────────────────
  * Publish k installs fn k / handle k with epoch k.  Readers aim enter_gen at
  * epoch k-1: the non-current version, i.e. the NEXT one to be reclaimed.  The
@@ -735,6 +761,7 @@ int main(void) {
     test_name_registry();
     test_startup_publish_enter_race();
     test_reclaim_retires_before_dlclose();
+    test_reclaim_retains_image();
     test_reclaim_race_threads();
     test_epoch_written_before_live_threads();
     test_reclaim_respects_newer_pinned_epoch();

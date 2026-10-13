@@ -228,6 +228,26 @@ sweep() {
   total_pass=$((total_pass+pass)); total_fail=$((total_fail+fail)); total_ran=$((total_ran+$#))
 }
 
+# ── Hot reload: a reclaimed version's closures (test/hcr_closure_pin) ─────
+# A --hot-reload base plus four --compile-so patches deployed in process, then
+# a call of closures the first patch built after the 3-version ring reclaimed
+# it. Not a single-file program, so the sweep above cannot build it; the
+# fixture's own script does, with MARCH_SANITIZE=1 for the base and every
+# patch. Its stdout must still match the plain test/dune rule's expected file.
+# specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md
+hcr_closure_pin_leg() {
+  local d="$root/test/hcr_closure_pin" o="$work/hcr_closure_pin"
+  if MARCH_SANITIZE=1 bash "$d/run.sh" "$bin" "$o" >"$work/hcr_closure_pin.log" 2>&1 \
+     && diff -q "$work/hcr_closure_pin.log" "$d/expected" >/dev/null \
+     && ! grep -qiE "AddressSanitizer|runtime error:|LeakSanitizer" "$work/hcr_closure_pin.log" "$o/run.err"; then
+    echo "  [hcr/hcr_closure_pin] CLEAN"; total_pass=$((total_pass+1))
+  else
+    echo "  [hcr/hcr_closure_pin] SANITIZER FAIL"; sed 's/^/    /' "$work/hcr_closure_pin.log"
+    total_fail=$((total_fail+1))
+  fi
+  total_ran=$((total_ran+1))
+}
+
 # SANITIZE_TWO_NODE_ONLY=1 skips the golden and native sweeps, for the CI
 # shards after the first: shard 1 runs them plus its two-node slice, the
 # others only their slice (see SANITIZE_TWO_NODE_SHARD below).
@@ -237,6 +257,8 @@ else
   sweep golden 25 "$here"/*.march
   echo
   sweep native 25 "${native_files[@]}"
+  echo
+  hcr_closure_pin_leg
 fi
 
 # ── Corpus 3: the two-node scenarios ──────────────────────────────────────

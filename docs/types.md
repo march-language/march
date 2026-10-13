@@ -531,8 +531,10 @@ function, and a callee that calls `f(x, y)` (as `List.fold_left` does) needs a
 two-argument one. Passing a named function or a lambda of the other shape is
 the `callback_arity_mismatch` error, which suggests the curried wrapper
 `fn a -> fn b -> add(a, b)`. The check sees a function passed directly to a
-known function's parameter. A function value stored in a record or list and
-applied later is not checked.
+known function's or a let-bound lambda's parameter, including through a
+`let h = add` alias; such an alias is also called like `add` itself, so
+`h(1)` is an `arity_mismatch`. A function value stored in a record or list,
+or returned from a function, and applied later is not checked.
 
 ---
 

@@ -44,6 +44,7 @@ val emit_module :
   ?impl_hashes:(string, string) Hashtbl.t ->
   ?remote_impl_hashes:(string, string) Hashtbl.t ->
   ?remote_sig_hashes:(string, string) Hashtbl.t ->
+  ?hr_sig_hashes:(string, string) Hashtbl.t ->
   ?emit_main:bool ->
   ?cap_attrib:(String.t * string) list ->
   ?cap_decls:(string * string) list ->

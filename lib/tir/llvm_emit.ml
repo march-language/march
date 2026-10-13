@@ -2691,11 +2691,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 let emit_preamble = Llvm_toplevel.emit_preamble
 
 let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
-    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
+    ?remote_impl_hashes ?remote_sig_hashes ?hr_sig_hashes ?emit_main ?cap_attrib ?cap_decls
     ?cap_manifest ?k_table (m : Tir.tir_module) : string =
   Llvm_toplevel.emit_module ~emit_expr
     ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
-    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
+    ?remote_impl_hashes ?remote_sig_hashes ?hr_sig_hashes ?emit_main ?cap_attrib ?cap_decls
     ?cap_manifest ?k_table m
 
 

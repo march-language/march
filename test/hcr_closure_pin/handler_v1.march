@@ -1,0 +1,5 @@
+    -- v1: the closure captures an Int.
+    fn mk(conn: PinConn): Int -> Int do
+      let s = conn.status
+      fn x -> x + s
+    end

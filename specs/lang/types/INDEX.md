@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t321 accept, t01–t320 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (189 accept, 252 reject; see the Result line below) -->
+# Typing corpus index (t01–t321 accept, t01–t322 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (189 accept, 253 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -248,7 +248,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 441/441: 189 accept, 252
+Exit 0 iff every program behaves as declared (currently 442/442: 189 accept, 253
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -622,7 +622,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 441 / 441 (189 accept, 252 reject).** `accept/t296`–`t299` and
+**Result: 442 / 442 (189 accept, 253 reject).** `accept/t296`–`t299` and
 `reject/t300`–`t307` (2026-10-06, Part C, Phase C2 of
 `specs/plans/2026-09-25-send-data-race-freedom-plan.md`): `RingBuf` is
 `always_linear`. The eight rejects are the plan's holes H1–H8, each of which
@@ -755,6 +755,7 @@ their own table entries.
 | `t317_annotated_tyvar_rigid` | **Annotation type variables are rigid (2026-10-11, `specs/progress/2026-10-11-annotated-tyvars-rigid.md`).** `bad(xs : List(a)) : List(a)` returns `[0 - 5]`, fixing `a` to `Int`; nothing calls it at another type, so only the definition can report it. Accepted silently before 2026-09-22, a warning (exit 0) until 2026-10-11 | ``The type variable `a` in `bad`'s signature is not generic`` |
 | `t318_derive_json_same_short_name` | **Two types with the same short name both `derive Json` (owner decision 2026-10-11, `specs/todos/2026-10-03-derive-json-same-short-name-two-modules.md`).** `A.Note` and `B.Note`: `from_json` picks its decoder by the result type's short name and the typechecker canonicalizes nested-module types to their bare name, so it decoded with the wrong codec interpreted and failed as an ambiguous call compiled. Now rejected at the second derive, with a label on the first. Only one of the two deriving Json stays accepted (`test/stdlib/test_json_collision.march`); golden twin `test/errors/json_derive_name_collision_1` | ``Two different types named `Note` both derive Json`` |
 | `t320_two_arg_fn_passed_as_curried` | **A two-argument fn where the callee applies its parameter one argument at a time (2026-10-12, `specs/progress/2026-10-12-two-arg-fn-accepted-as-curried.md`).** `ap2(add, 1, 2)` with `ap2` doing `let g = f(x)` then `g(y)`: `fn add(a, b)` and a curried fn share the type `Int -> Int -> Int`, but March has no partial application, so this typechecked and then panicked interpreted and SIGSEGV'd compiled. Now `callback_arity_mismatch`. Accept twin `t321` | ``takes 2 arguments, but `ap2` calls its parameter `f` with 1 argument`` |
+| `t322_fn_alias_called_curried` | **A `let h = add` alias called one argument at a time (2026-10-13, same progress file).** The alias has `add`'s curried type, so `let g = h(1)` then `g(2)` typechecked and then panicked interpreted and SIGSEGV'd compiled. The alias now carries `add`'s arity (`fn_aliases`), checked like a direct call of `add` (`arity_mismatch`); the same entry makes `ap2(h, 1, 2)` a `callback_arity_mismatch` | ``is bound to `add`, which takes 2 arguments, but is called with 1 argument`` |
 | `t285_linear_param_rebound_then_dropped` | **A plain `let` rename can't launder a binding-linear value (2026-09-22).** `h` is linear only because of its binding (`linear h : Res`, a plain ADT), so `ELet`'s type-driven auto-promotion bound `let h2 = h` Unrestricted: the read of `h` was its one use and `h2` was then dropped silently — the named twin of `t283`. `h2` now inherits the tracked binding's linearity. Accepted before the fix | `` The linear value `h2` was never used. `` |
 | `t291_config_typed_key_read_as_pid` | **Config typed keys (2026-09-22): the `specs/progress/2026-09-22-config-typed-keys.md` witness, spelled with the typed API.** The untyped `Config.put(:ns, :name, 42)` / `Config.get(:ns, :name)` pair typechecked and handed the stored `Int` to `is_alive` as a `Pid`; `Config.get(key : Key(v)) : Option(v)` on a `Key(Int)` now yields `Option(Int)`. Accept twin `t292` | ``expected `Pid(`` |
 

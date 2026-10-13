@@ -1347,6 +1347,7 @@ let emit_module ~emit_expr
     ?(hot_reload=None) ?(impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(remote_impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(remote_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
+    ?(hr_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(emit_main=true)
     ?(cap_attrib=([] : (string * string) list))
     ?(cap_decls=([] : (string * string) list))
@@ -1452,8 +1453,12 @@ let emit_module ~emit_expr
                   Printf.sprintf "ptr %s" g
                 | _ -> "ptr null"
               in
+              (* The slot ABI hash (type signature + parameter borrow
+                 modes, March_cas.Hash.hcr_sig_hash), NOT the type-only
+                 RPC hash in remote_sig_hashes: forge's sig_hash gate
+                 compares a patch's against this one. *)
               let sig_arg =
-                match Hashtbl.find_opt ctx.Llvm_ctx.remote_sig_hashes fn.Tir.fn_name with
+                match Hashtbl.find_opt hr_sig_hashes fn.Tir.fn_name with
                 | Some h when String.length h > 0 ->
                   let sg = Printf.sprintf "@.hr_sighash%d" id in
                   Buffer.add_string ctx.Llvm_ctx.preamble
@@ -1940,7 +1945,35 @@ let emit_module ~emit_expr
          ("\ndefine void @__march_init(i32 %epoch) {\nentry:\n\
           \  store i32 %epoch, ptr @__march_hcr_epoch\n"
           ^ Buffer.contents resolve
-          ^ "  ret void\n}\n")
+          (* The patch's own closure capture-release and record shape drops,
+             as main's prologue registers the base's: without them a closure
+             type the patch introduces leaks its captures whenever it is
+             released outside its apply.  The keys point into this image,
+             which is never unloaded (march_dispatch_retain_image), so they
+             stay valid.
+             specs/progress/2026-10-13-hcr-patch-closures-not-in-drop-table.md *)
+          ^ "  call void @march_clo_drops_register()\n"
+          ^ "  ret void\n}\n"
+          ^ clo_drop_registration
+              ~rec_drops:(Llvm_data.shape_drop_registrations ctx) m);
+       (* The slot ABI hash of every boundary function this patch defines,
+          one "<name> <hash>\n" line each: the reload server records it as
+          the activated version's sig_hash (runtime/march_reload.c,
+          activate_items), so ABI_QUERY reports the RUNNING version's ABI
+          after a deploy, not "(none)", and the next deploy's gate compares
+          against it.  Covered by ACTIVATE7's signed digest of the bytes. *)
+       let sig_lines = Buffer.create 256 in
+       List.iter (fun (fn : Tir.fn_def) ->
+           match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name,
+                 Hashtbl.find_opt hr_sig_hashes fn.Tir.fn_name with
+           | Some _, Some h when String.length h = 64 ->
+             Printf.bprintf sig_lines "%s %s\n" fn.Tir.fn_name h
+           | _ -> ())
+         m.Tir.tm_fns;
+       let tbl = Buffer.contents sig_lines in
+       Printf.bprintf out
+         "@__march_hcr_sigs = constant [%d x i8] c\"%s\\00\"\n"
+         (String.length tbl + 1) (Llvm_ctx.llvm_escape_string tbl)
      end else
      if m.Tir.tm_tests <> [] then begin
        (* --test mode: emit a @main that calls the test harness.

@@ -196,7 +196,7 @@
 #define MARCH_HCR_STRINGIFY1(x) #x
 #define MARCH_HCR_STRINGIFY(x) MARCH_HCR_STRINGIFY1(x)
 #ifndef MARCH_HCR_ABI_ID
-#define MARCH_HCR_ABI_ID "march-hcr-v3;triple=" MARCH_HCR_STRINGIFY(MARCH_HCR_TRIPLE) ";ptr=8"
+#define MARCH_HCR_ABI_ID "march-hcr-v4;triple=" MARCH_HCR_STRINGIFY(MARCH_HCR_TRIPLE) ";ptr=8"
 #endif
 
 /* ── Signing public key (embedded at build time) ──────────────────────── */
@@ -910,13 +910,39 @@ typedef struct {
     const char         *so_digest;
 } act_item;
 
+/* The slot ABI hash the patch [handle] records for boundary function [name]
+ * (its "__march_hcr_sigs" table: "<name> <64 hex>\n" lines, emitted by
+ * Llvm_toplevel for a --hot-reload --compile-so build), copied into [out];
+ * 0 when the patch has no table or no line for [name].  It becomes the
+ * activated version's sig_hash, so ABI_QUERY reports the running version's
+ * ABI (type signature + parameter borrow modes) after a deploy instead of
+ * "(none)", and forge's gate checks the NEXT deploy against it. */
+static int patch_sig_hash(void *handle, const char *name, char out[65]) {
+    const char *t = (const char *)dlsym(handle, "__march_hcr_sigs");
+    if (!t) return 0;
+    size_t nl = strlen(name);
+    for (const char *p = t; *p; ) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (len == nl + 1 + 64 && strncmp(p, name, nl) == 0 && p[nl] == ' ') {
+            memcpy(out, p + nl + 1, 64);
+            out[64] = '\0';
+            return 1;
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+    return 0;
+}
+
 /* Activate [n] functions as one deploy.  Returns 0 (OK), 1 (WAIT: nothing
  * changed, [resp] holds the WAIT line) or -1 (error: nothing changed, [resp]
  * holds the ERR line). */
 static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
     march_hcr_unit *u = (march_hcr_unit *)calloc((size_t)n, sizeof(*u));
-    if (!u) { snprintf(resp, rsz, "ERR oom\n"); return -1; }
-    int opened = 0, rc = -1;
+    char (*sigs)[65] = (char (*)[65])calloc((size_t)n, 65);
+    if (!u || !sigs) { free(u); free(sigs); snprintf(resp, rsz, "ERR oom\n"); return -1; }
+    int opened = 0, rc = -1, inited = 0;
     uint32_t req = 0;
     for (int i = 0; i < n; i++, opened++) {
         uint32_t slot_id;
@@ -970,7 +996,7 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
         u[i].slot           = slot_id;
         u[i].fn             = fn_ptr;
         u[i].impl_hash      = it[i].impl_hash;
-        u[i].sig_hash       = NULL;
+        u[i].sig_hash       = patch_sig_hash(handle, it[i].name, sigs[i]) ? sigs[i] : NULL;
         u[i].kind           = (uint8_t)MARCH_NATIVE;
         u[i].state_changed  = (it[i].migrate & MIGRATE_STATE) != 0;
         u[i].msgs_changed   = (it[i].migrate & MIGRATE_MSGS) != 0;
@@ -984,8 +1010,10 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
     }
     {
         /* __march_init still stamps the per-.so epoch cell (retired: nothing
-         * reads it, D33), with the epoch this deploy will get. */
+         * reads it, D33), with the epoch this deploy will get, and registers
+         * the image's closure capture-release functions (see fail: below). */
         uint32_t predicted = march_epoch_next(req);
+        inited = 1;
         for (int i = 0; i < n; i++) {
             void (*init_fn)(uint32_t) = NULL;
             void *raw_init = dlsym(u[i].handle, "__march_init");
@@ -1009,8 +1037,8 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
         snprintf(resp, rsz, "ERR publish_failed\n");
         goto fail;
     }
-    /* The dispatch table owns every handle now (dlclosed when its ring slot
-     * is reclaimed). */
+    /* The dispatch table owns every handle now (retained, never dlclosed,
+     * when its ring slot is reclaimed: march_dispatch_retain_image). */
     {
         struct timeval atv; gettimeofday(&atv, NULL);
         long long ats = (long long)atv.tv_sec * 1000LL + (long long)atv.tv_usec / 1000;
@@ -1033,10 +1061,21 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
         }
     }
     free(u);
+    free(sigs);
     return 0;
 fail:
-    for (int i = 0; i < opened; i++) if (u[i].handle) dlclose(u[i].handle);
+    /* Before __march_init ran, nothing of an image escaped: close it.  After,
+     * its closure capture-release functions are in the runtime's drop table
+     * (march_clo_register_drops, keys never removed), so the image must stay
+     * mapped like a reclaimed version's (march_dispatch_retain_image).  A
+     * retried deploy re-opens the same file and gets the same mapping. */
+    for (int i = 0; i < opened; i++) {
+        if (!u[i].handle) continue;
+        if (inited) march_dispatch_retain_image(u[i].handle);
+        else dlclose(u[i].handle);
+    }
     free(u);
+    free(sigs);
     return rc;
 }
 

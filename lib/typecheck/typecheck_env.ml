@@ -352,7 +352,15 @@ type env = {
       application) and the runtime panics on a wrong-arity call
       ("arity mismatch: expected 1 args, got 0"), which the type `a -> T`
       cannot express: the thunk `fn -> e` and the discard `fn _ -> e` both
-      unify with `() -> T`. Cleared by [bind_var] like [fn_arities]. *)
+      unify with `() -> T`. Cleared by [bind_var] like [fn_arities].
+      `let g = f` with [f] itself in this map copies [f]'s entry. *)
+  fn_aliases : (int * string) StrMap.t;
+  (** Names most recently bound by `let name = f`, [f] a function of known
+      arity n >= 1 named by value (a module fn, or a qualified export): n and
+      [f]'s spelling.  The value is that function's closure, which takes
+      exactly n arguments, so a call of [name] and a callback check treat it
+      as [f] itself (`let h = add` then `h(1)` was accepted, then panicked
+      interpreted / SIGSEGV'd compiled).  Cleared by [bind_var]. *)
   plain_let_names : StringSet.t;
   (** Names most recently bound by a simple, unrestricted `let name = expr`
       (single-variable pattern — see the [Ast.ELet] case of [infer_block]).
@@ -751,6 +759,7 @@ let make_env errors type_map = {
   binder_spans = StrMap.empty;
   pat_spans = Hashtbl.create 16;
   lambda_arities = StrMap.empty;
+  fn_aliases = StrMap.empty;
   proof_caps = [];
   (* "RingBuf" is seeded here so the builtin type is tracked as linear with
      no declaring module (Part C, Phase C2 of
@@ -1954,6 +1963,7 @@ let bind_var ?span name sch env =
              plain_let_names = StringSet.remove name env.plain_let_names;
              binder_spans = binder_spans_with name span env;
              lambda_arities = StrMap.remove name env.lambda_arities;
+             fn_aliases = StrMap.remove name env.fn_aliases;
              local_fns = StrMap.remove name env.local_fns;
              offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 

@@ -983,8 +983,11 @@ mod ClusterNode do
                 let swept = collect_tombstones(st4, now)
                 let ae_peers = List.filter(SwimDriver.anti_entropy_peers(swept.driver, now), fn id -> is_linked(swept, id))
                 let st5 = if List.is_empty(ae_peers) do swept else { swept with driver: SwimDriver.bump_anti_entropy(swept.driver, now) } end
-                let req = NetKernel.encode_registry_sync_req(GlobalRegistry.root_hash(st5.reg))
-                let ae = List.map(ae_peers, fn id -> Send(id, req))
+                -- The root hash hashes every entry: only when a REQ goes out.
+                let ae = if List.is_empty(ae_peers) do Nil else
+                  let req = NetKernel.encode_registry_sync_req(GlobalRegistry.root_hash(st5.reg))
+                  List.map(ae_peers, fn id -> Send(id, req))
+                end
                 match refresh_names(st5) do
                   (st6, name_effs) ->
                     let out = (st6, List.append(cert_effs, List.append(frames, List.append(ev_effs, List.append(dials, List.append(ae, name_effs))))))
@@ -1458,11 +1461,29 @@ mod ClusterNode do
     end
   end
 
-  -- Frames carrying registry leaves to every linked peer.
+  -- Frames carrying registry leaves to every linked peer: a REGISTRY_SYNC_RESP
+  -- whose root is `push_root()`, not this replica's root hash. A receiver
+  -- merges the leaves and does not answer. Answering a push with the whole
+  -- registry (what a root mismatch did, and still does for a node that
+  -- predates this) made every name change under session churn cost two full
+  -- dumps of the registry, tombstones included: the two nodes' roots almost
+  -- never match while names change on both, so the dumps ping-ponged, and the
+  -- registry grows by two names per session until its tombstones expire
+  -- (3 h). 400 back-to-back sessions slowed to ~1 s each, with millions of
+  -- transient objects per node. A lost push is still repaired: the link-up
+  -- sync and the periodic anti-entropy (REQ/RESP with real roots) send
+  -- everything.
   pfn push_leaves(st : CnState, leaves : List((String, GlobalRegistry.Entry))) : List(CnEffect) do
-    let bytes = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st.reg), leaves)
-    List.map(linked_ids(st), fn id -> Send(id, bytes))
+    match linked_ids(st) do
+      Nil -> Nil
+      ids ->
+        let bytes = NetKernel.encode_registry_sync_resp(push_root(), leaves)
+        List.map(ids, fn id -> Send(id, bytes))
+    end
   end
+
+  -- Never a root hash (those are hex digests, or "" for an empty registry).
+  pfn push_root() : String do "push" end
 
   pfn leaf(st : CnState, name : String) : List((String, GlobalRegistry.Entry)) do
     match GlobalRegistry.entry(st.reg, name) do
@@ -1593,16 +1614,23 @@ mod ClusterNode do
       match NetKernel.decode_registry_sync_resp(frame) do
         Err(_) -> (st, Nil)
         Ok((rh, leaves)) ->
-          let merged = GlobalRegistry.diff_entries(st.reg, rh, stamp_leaves(st, from, leaves))
+          let pushed = rh == push_root()
+          let stamped = stamp_leaves(st, from, leaves)
+          let merged = if pushed do
+            List.fold_left(stamped, st.reg, fn (acc, kv) -> match kv do (name, e) -> GlobalRegistry.observe(acc, name, e) end)
+          else GlobalRegistry.diff_entries(st.reg, rh, stamped) end
           match retire_stale({ st with reg: merged, reg_synced: true }) do
             (st2, retired) ->
-              let mine = GlobalRegistry.root_hash(st2.reg)
-              -- Answer with everything when the sender's state (its root) is
-              -- not what we now hold, so it can merge ours: two rounds at most,
-              -- since after merging both hold the join.
-              let reply = if mine != rh do
-                Cons(Send(from, NetKernel.encode_registry_sync_resp(mine, GlobalRegistry.all_entries(st2.reg))), Nil)
-              else Nil end
+              -- Answer a full sync with everything when the sender's state (its
+              -- root) is not what we now hold, so it can merge ours: two rounds
+              -- at most, since after merging both hold the join. A push (a
+              -- few leaves, `push_root`) is never answered: see push_leaves.
+              let reply = if pushed do Nil else
+                let mine = GlobalRegistry.root_hash(st2.reg)
+                if mine != rh do
+                  Cons(Send(from, NetKernel.encode_registry_sync_resp(mine, GlobalRegistry.all_entries(st2.reg))), Nil)
+                else Nil end
+              end
               let retire_push = List.flat_map(retired, fn n -> push_leaves(st2, leaf(st2, n)))
               match refresh_names(st2) do
                 (st3, effs) ->

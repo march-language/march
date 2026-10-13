@@ -15,7 +15,8 @@ three hit the native patch model that **already ships** (`--compile-so` patches,
 property of native swap: an ORC loader would inherit every one. So:
 
 1. Fix the three findings below in the shipped `.so` model first (each has a
-   todo, two are small). That is where the risk is today.
+   todo, two are small). That is where the risk is today. (Findings 1 and 3
+   were fixed 2026-10-13, see below; finding 2 is open.)
 2. Do not build Phase 6 (ORC in the server) on the current evidence. What it adds
    over the shipped model is compiling on the target, which means linking LLVM
    into every production binary, and ORC has a known macOS problem with the
@@ -80,7 +81,11 @@ code. E4 reproduces it with four deploys. In production it takes three later
 deploys of the same slot. The design said captured closures "carry their
 version and keep it pinned" (§ Part 3). Nothing implements that. The same
 problem would reach ORC as `ResourceTracker::remove`.
-Todo: `specs/todos/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md`.
+**Fixed 2026-10-13**: a patch image is never unmapped. A reclaim recycles only
+the slot (`march_dispatch_retain_image`; known limit: one mapped `.so` per
+deploy until restart). Regression test: `test/hcr_closure_pin/` (plain, and
+ASan in `sanitize.sh`). Record:
+`specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md`.
 
 ### 2. Borrow modes are part of the boundary ABI, and the deploy gate does not check them (UAF or leak)
 
@@ -97,7 +102,12 @@ gate compares (or a separate `abi_hash`). The existing rule that callers of a
 sig-changed slot must ship in the same deploy then covers a flip. The
 alternative from the spec, freezing boundary parameters as owned, costs an
 inc/dec per borrowable argument per call.
-Todo: `specs/todos/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md`.
+**Fixed 2026-10-13:** `specs/progress/2026-10-13-hcr-borrow-mode-not-in-sig-hash.md`.
+The slot `sig_hash` now folds in the modes (HCR ABI `march-hcr-v4`), and a
+mode-only change is refused outright: the caller-coverage rule turned out not
+to make it safe (a running caller frame on `main` still crashed with every
+caller in the deploy), see
+`specs/todos/2026-10-13-hcr-coordinated-sig-change-running-caller-frame.md`.
 
 **The record (`Conn`) case is already safe, and the spec's cost premise is out
 of date.** Records and tuples are never borrowed parameters
@@ -128,7 +138,9 @@ the leak, LSan-clean on Linux (E1'). It has to land together with finding 1:
 the table's keys are never removed ("a fragment's code is never unloaded"), so
 once patches unload, a registered drop is a dangling function pointer, and a
 later patch mapped at the same address could match a stale key.
-Todo: `specs/todos/2026-10-13-hcr-patch-closures-not-in-drop-table.md`.
+**Fixed 2026-10-13** (with finding 1): a patch's `__march_init` registers its
+own closure and record-shape drops. Record:
+`specs/progress/2026-10-13-hcr-patch-closures-not-in-drop-table.md`.
 
 ### Other risks checked
 
@@ -186,12 +198,18 @@ costs this spike was asked to measure:
 ## Open questions for Phase 6, if it is reopened
 
 1. Code lifetime: pin a version's code from every closure it allocates (an RC'd
-   code object per version, checked on reclaim), or never unload code. Without
+   code object per version, checked on reclaim), or never unload code. The
+   shipped model now never unloads (2026-10-13); per-image pinning is
+   `specs/todos/2026-10-13-hcr-unload-unreachable-patch-images.md`. Without
    a tracing pass, March cannot find old closures the way BEAM's purge finds
    old processes.
 2. ABI hash: which borrow and ownership facts beyond parameter modes are part
    of a slot's ABI (return ownership, `Clo_flags` conventions, unboxed
    aggregates in closure captures)?
+   Answered for the native model (2026-10-13, the borrow-mode fix's progress
+   record): only parameter modes vary per function. Returns are always owned,
+   the closure-call convention is fixed, and representation is in the type
+   hash.
 3. TLS from JIT'd code on macOS (`march_tls_reductions`): fix the JIT's TLS
    handling, or route the read through a runtime call?
 4. Is target-side compilation needed at all, given AOT `.so` patches built and

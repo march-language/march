@@ -36,10 +36,11 @@ for h in $LAB_HOSTS; do
   lab_expect "host init" "$LAB_OUT" "$(lab_node "$h") (root@$h, pool $(lab_pool "$h"))"
 done
 lab_expect "host init" "$LAB_OUT" "target $LAB_TARGET"
-# One session a second, at most 4 at once: every cluster session leaves
-# memory behind on each node it touches (specs/todos/2026-10-01-session-node-vault-tables-leak.md,
-# 2026-10-01-session-message-encoding-leak.md, 2026-09-28-linux-per-session-memory-growth.md),
-# so the lab keeps traffic modest. lab-1's hook re-reads this file before each session.
+# One session a second, at most 4 at once: every cluster session used to leave
+# memory behind on each node it touches (specs/progress/2026-10-01-session-node-vault-tables-leak.md,
+# specs/todos/2026-10-01-session-message-encoding-leak.md, specs/progress/2026-09-28-linux-per-session-memory-growth.md;
+# all three were measured gone 2026-10-13),
+# so the lab kept traffic modest, and still does. lab-1's hook re-reads this file before each session.
 lab_traffic 1000 16
 
 lab_forge_ok deploy --env lab --plan

@@ -523,6 +523,38 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Breaking: a topology pool's derived capabilities can no longer widen silently.**
+  When `topology.toml` leaves a pool's `caps` out, the compiler derives them,
+  and `forge deploy hot` now compares them with the ones recorded at the
+  environment's last completed deploy (`.forge/deploy/<env>/derived.json`, the
+  file `forge deploy` already keeps). A pool that gains a capability stops the
+  deploy before anything is built unless `--grant-cap` names it
+  (`--grant-cap IO.FileWrite`, matched by subsumption, for every pool that
+  widens to it); a completed deploy records the new caps. `forge build` warns
+  about each pool that widens relative to a recorded deploy.
+  To migrate a deploy that is now refused, pass `--grant-cap CAP` for each
+  capability the refusal names, or set the pool's `caps` in `topology.toml`.
+- **Breaking (hot reload): a patch that changes a boundary function's
+  parameter borrow mode is refused, and the hot-reload ABI is now
+  `march-hcr-v4`.** Whether a `String`, `List` or ADT parameter is borrowed
+  or owned is decided by the function's body, and running callers depend on
+  it, but the deploy gate's `sig_hash` covered only the types: `forge deploy
+  hot` accepted a body edit that turned a borrowed parameter owned, which
+  freed a value the running caller still used (a use-after-free; a crash
+  in the Phase 0 spike), or, the other way round, leaked one reference per
+  call. A boundary function's `sig_hash` now includes each parameter's mode,
+  and such a deploy is refused before anything is activated, naming the
+  parameter (`parameter 1 of Handler.count changed from borrowed to owned`):
+  deploy that build with a restart. Body-only changes that keep the modes
+  deploy hot as before. **Upgrading the toolchain:** a server built by an
+  earlier March cannot take hot patches from this one. The first `forge
+  deploy hot` after the upgrade is refused before upload with "the running
+  server was built by an older March toolchain (HCR ABI march-hcr-v3...)
+  ... Restart the server once on a base build from this toolchain", and
+  nothing is deployed. Restart each hot-reload server once on a build from
+  the new toolchain; hot deploys work again from then on. A server also
+  now records the `sig_hash` of each patch it activates, where it used to
+  report `(none)`, so the check covers later deploys too.
 - **Breaking: passing a function that takes a different number of arguments
   than the callee applies it to is an error.** `fn add(a, b)` and a curried
   `fn a -> fn b -> a + b` have the same type, but March has no partial
@@ -536,6 +568,18 @@ git log is authoritative for exact commits.
   affected; one typing-corpus fixture passed a two-argument comparator to
   `Map.insert` and now uses a curried one. Function values passed through records or lists are
   not checked yet (`specs/todos/2026-10-12-function-arity-not-in-types.md`).
+- **Breaking: the call-arity check now follows a `let h = add` alias and checks calls
+  of a let-bound lambda.** `let h = add` then `h(1)` (calling the
+  two-argument `add` one argument at a time) is an `arity_mismatch`, and
+  `ap2(h, 1, 2)` or a curried-lambda alias passed to `List.fold_left` is a
+  `callback_arity_mismatch`. A callback passed to a let-bound lambda
+  (`let ap = fn (f, x, y) -> …`) is checked against how that lambda's body
+  applies it. All of these typechecked and then panicked interpreted and
+  crashed with SIGSEGV compiled. A `--check` sweep of 1484 corpus programs
+  (`test/native`, `examples`, `test/stdlib`, `specs/lang`, `bench`,
+  `test/errors`, `docs`) and the stdlib found no newly rejected program.
+  To migrate, call the function with all its arguments, or pass the curried
+  wrapper the `callback_arity_mismatch` hint suggests (`fn a -> fn b -> h(a, b)`).
 - **Breaking: a command that cannot be executed is an `Err` from
   `Process.run`, `Process.run_stream`, `Process.spawn_async` and
   `System.cmd`.** A missing or non-executable program now returns
@@ -711,6 +755,35 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Hot reload: a closure built by an old version no longer crashes once that
+  version is reclaimed.** A callback, `plug` or closure kept in actor state or
+  a Vault, built by a patch, crashed the node with a SIGSEGV when called after
+  three later deploys of the same function: reclaiming the version unloaded its
+  `.so`. A reclaimed patch now stays mapped. Known limit: each deploy keeps
+  one patch `.so` mapped until the node restarts.
+- **Hot reload: a patch's closures no longer leak what they capture.** A
+  closure type introduced by a hot patch leaked its captured values whenever
+  it was dropped. The patch now registers its own capture-release functions
+  when it loads.
+- **A role hosted in an actor no longer receives a peer's messages out of
+  order.** When a peer sent two messages back to back (`hello` then `go`), the
+  second could reach the hosting actor ahead of the first, and the session
+  panicked with "unexpected message in state ...". Every hosted role is
+  affected (`offer_hosted`, `run_hosted`, `run_cluster_hosted`). Set
+  `MARCH_SESSION_TRACE_HOSTED=1` to log each hosted access point's start,
+  delivery and cancel callbacks to stderr.
+- **Cluster sessions no longer slow down, and burst memory, the longer a node
+  pair runs them.** Every registry name change was pushed to peers as a few
+  leaves, and a peer whose registry differed in any way (always, while sessions
+  register names on both nodes) answered with its whole registry, tombstones
+  included; the answer was answered the same way. The registry grows by two
+  names per session until their tombstones expire (3 h), so two nodes running
+  sessions back to back went from ~55 ms to ~1-2 s per session after a few
+  hundred, with millions of short-lived objects and 270-450 MB peak RSS per
+  node. A pushed leaf is now merged without an answer (the link-up sync and
+  the periodic anti-entropy still repair any divergence), and the idle tick no
+  longer hashes the whole registry. 400 sessions: 23 s and ~40 MB per node on
+  Linux (was 326 s, 3 failed), 22 s and ~10 MB on macOS.
 - **A cluster name rebound to another process is reported to its watchers
   once.** When a globally registered name moved from one pid to another and
   the node could see at least one other name, every watcher of the name got

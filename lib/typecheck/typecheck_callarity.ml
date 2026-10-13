@@ -42,6 +42,57 @@ let param_names (def : Ast.fn_def) : string option list option =
         | Ast.FPPat _ | Ast.FPDefault _ -> None) c.Ast.fc_params)
   | _ -> None
 
+(** [param_arities ~callee_param names sites] is, per parameter in [names],
+    the one argument count every use in [sites] applies it with: directly
+    (`f(x)` is 1), or by passing it on as argument [j] of a callee whose
+    parameter [j] has a known call-arity ([callee_param callee j]).  Mixed
+    counts, a zero-argument call, or no use at all give [None]. *)
+let param_arities ~(callee_param : string -> int -> int option)
+    (names : string option list) (sites : Calls.app_site list)
+    : (string * int option) list =
+  (* A callee that is one of these parameters is the parameter, never a
+     like-named known function. *)
+  let callee_param callee j =
+    if List.mem (Some callee) names then None else callee_param callee j in
+  List.map (fun nm ->
+      match nm with
+      | None -> ("_", None)
+      | Some p ->
+        let counts =
+          List.concat_map (fun (s : Calls.app_site) ->
+              let direct =
+                if s.Calls.as_callee = p then [ List.length s.Calls.as_args ]
+                else [] in
+              let passed =
+                List.concat (List.mapi (fun j a ->
+                    match a with
+                    | Some x when x = p ->
+                      (match callee_param s.Calls.as_callee j with
+                       | Some m -> [ m ]
+                       | None -> [])
+                    | _ -> []) s.Calls.as_args) in
+              direct @ passed) sites
+        in
+        (match List.sort_uniq compare counts with
+         | [ m ] when m >= 1 -> (p, Some m)
+         | _ -> (p, None)))
+    names
+
+(** [lambda ~lookup params body] is the call-arity of each parameter of a
+    let-bound lambda literal `fn (p1, …) -> body`, so a call of that lambda is
+    checked like a call of a module fn.  [lookup name] gives a callee's
+    entry (a module fn, a qualified export, an enclosing let-bound lambda),
+    or [None]. *)
+let lambda ~(lookup : string -> entry option) (params : Ast.param list)
+    (body : Ast.expr) : (string * int option) list =
+  let names = List.map (fun (p : Ast.param) -> Some p.Ast.param_name.Ast.txt) params in
+  let callee_param callee j =
+    match lookup callee with
+    | Some (_, ps) when j < List.length ps -> snd (List.nth ps j)
+    | _ -> None
+  in
+  param_arities ~callee_param names (Calls.free_app_sites body)
+
 (** [compute ~lookup defs] is the call-arity entry of every analysable fn in
     [defs] (one module's top-level functions).  [lookup name] gives the entry
     of a callee that is NOT one of [defs] (a qualified export already
@@ -72,31 +123,7 @@ let compute ~(lookup : string -> entry option) (defs : Ast.fn_def list)
   let one_round () =
     let changed = ref false in
     List.iter (fun (fname, sp, names, sites) ->
-        let arities =
-          List.map (fun nm ->
-              match nm with
-              | None -> ("_", None)
-              | Some p ->
-                let counts =
-                  List.concat_map (fun (s : Calls.app_site) ->
-                      let direct =
-                        if s.Calls.as_callee = p then [ List.length s.Calls.as_args ]
-                        else [] in
-                      let passed =
-                        List.concat (List.mapi (fun j a ->
-                            match a with
-                            | Some x when x = p ->
-                              (match callee_param s.Calls.as_callee j with
-                               | Some m -> [ m ]
-                               | None -> [])
-                            | _ -> []) s.Calls.as_args) in
-                      direct @ passed) sites
-                in
-                (match List.sort_uniq compare counts with
-                 | [ m ] when m >= 1 -> (p, Some m)
-                 | _ -> (p, None)))
-            names
-        in
+        let arities = param_arities ~callee_param names sites in
         (match Hashtbl.find_opt table fname with
          | Some (_, old) when old = arities -> ()
          | _ -> changed := true);

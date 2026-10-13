@@ -1006,6 +1006,31 @@ let hr_config () =
                  entry_top_level = !hr_entry_top_level })
     !hot_reload_prefix
 
+(* Hot Code Reload: the slot ABI hash of every function with a type-signature
+   hash in [type_sigs] (March_cas.Hash.hcr_sig_hash: the type signature plus
+   each parameter's borrow mode from [borrow_map], the one Perceus placed RC
+   against).  This, not the type-only hash, is what the baseline publishes
+   and the .hcr_manifest's sig_hash column carries, so a patch whose body
+   flips a parameter between borrowed and owned is a signature change to
+   forge's gate.  Empty without --hot-reload: nothing else reads it, and no
+   other build's IR changes.  Returns (abi hash, modes) per function. *)
+let hr_abi_sigs ~(borrow_map : March_tir.Borrow.borrow_map)
+    (type_sigs : (string, string) Hashtbl.t) : (string, string * string) Hashtbl.t =
+  let t = Hashtbl.create (Hashtbl.length type_sigs) in
+  if hr_config () <> None then
+    Hashtbl.iter (fun name s ->
+        if s <> "" then begin
+          let modes = March_cas.Hash.modes_string borrow_map name in
+          Hashtbl.replace t name (March_cas.Hash.hcr_sig_hash ~sig_hash:s ~modes, modes)
+        end)
+      type_sigs;
+  t
+
+let hr_sig_table (abi : (string, string * string) Hashtbl.t) : (string, string) Hashtbl.t =
+  let t = Hashtbl.create (Hashtbl.length abi) in
+  Hashtbl.iter (fun n (h, _) -> Hashtbl.replace t n h) abi;
+  t
+
 (* Hot Code Reload: turn [hr_impl_hashes] (per-fn, non-transitive CAS hashes
    of [tir] and [pre_opt]) into the reload identities the baseline publishes
    and the .hcr_manifest lists.  Both the --compile and the --emit-llvm path
@@ -4225,6 +4250,9 @@ let compile filename =
          | Some cfg ->
            hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes;
            hr_store_sources ~cfg ~store ~decls:desugared.March_ast.Ast.mod_decls hr_impl_hashes);
+        let hr_abi = hr_abi_sigs ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
+            remote_sig_hashes in
+        let hr_sig_hashes = hr_sig_table hr_abi in
         (* Post-TIR cache: same key construction as the source-level early
            check above (build_cas_key), keyed on the module's per-SCC impl
            hashes instead of the source digest. *)
@@ -4286,7 +4314,7 @@ let compile filename =
              only this assignment in the else branch and run emission +
              clang on every cache hit too. *)
           let () = March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None in
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls ?cap_manifest
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~hr_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls ?cap_manifest
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           let ir = match !shell_ident_decls with
             | Some decls ->
@@ -5060,7 +5088,12 @@ let compile filename =
            (v2 adds `# target`, `# hcr_abi`, `# module_prefix`,
            `# stdlib_hash <digest of the stdlib source compiled against>`
            and `# slots <a>,<b>` (the patch's dispatch slots) header lines.)
-           sig_hash may be empty if the function was not hashed.
+           sig_hash may be empty if the function was not hashed.  Under
+           --hot-reload it is the slot ABI hash (type signature + parameter
+           borrow modes, [hr_abi_sigs]), and the line carries
+           `tsig=<type-only hash> modes=<b|o per parameter>` just before
+           `caps=` (2026-10-13; `caps=` stays last: scripts match it at the
+           end of the line).
            callers: lists other boundary functions that call this one (omitted
            when empty).  The deploy tool uses this to verify that all callers
            of a sig-changed function are also being updated.
@@ -5241,15 +5274,21 @@ let compile filename =
                   renames and "changes" them wholesale, and the planner would
                   count each as an undeliverable change (restart).  Not listed. *)
                if String.starts_with ~prefix:March_tir.Tir_names.clo_drop_fn_prefix name then () else
-               let sig_h = Option.value ~default:""
-                   (Hashtbl.find_opt remote_sig_hashes name) in
+               (* sig_hash is the slot ABI hash (type + borrow modes,
+                  [hr_abi_sigs]); `tsig=` (the type-only hash) and `modes=`
+                  let forge name what changed when the two builds' ABI
+                  hashes differ only by a mode. *)
+               let (sig_h, abi_fields) =
+                 match Hashtbl.find_opt hr_abi name, Hashtbl.find_opt remote_sig_hashes name with
+                 | Some (h, modes), Some tsig -> (h, Printf.sprintf " tsig=%s modes=%s" tsig modes)
+                 | _, ts -> (Option.value ~default:"" ts, "") in
                let callers_field =
                  match Hashtbl.find_opt callee_to_callers name with
                  | Some (_ :: _ as cs) -> " callers:" ^ String.concat "," cs
                  | _ -> ""
                in
                let caps_field = "caps=" ^ String.concat "," (caps_for name) in
-               Printf.fprintf oc "%s %s %s%s %s\n" name impl_h sig_h callers_field caps_field
+               Printf.fprintf oc "%s %s %s%s%s %s\n" name impl_h sig_h callers_field abi_fields caps_field
              ) hr_impl_hashes;
              (* DD build step 10: one ROLE line per role with a grant, its
                 FULL closure from the solve check_role_grants runs (section
@@ -5406,8 +5445,11 @@ let compile filename =
         (match hr_config () with
          | None -> ()
          | Some cfg -> hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes);
+        let hr_sig_hashes =
+          hr_sig_table (hr_abi_sigs ~borrow_map:pipe.March_tir.Contract_pipeline.borrow_map
+                          remote_sig_hashes2) in
         March_tir.Llvm_toplevel.rc_checks := sanitize_mode () <> None;
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls ?cap_manifest
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~hr_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls ?cap_manifest
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           let ir = finish_ir target ir in
         (* Same temp-then-rename as --compile, so a concurrent reader never
