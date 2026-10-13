@@ -223,6 +223,29 @@ What they do **not** cover, which matters when choosing one:
 Related: `dune build @types-check` **without `--force` is an empty check**: it exits 0
 with a zero-byte log. Assert on the log's contents, never on the exit code.
 
+## Agent skills
+
+The repo carries its own skills in `.claude/skills/<name>/SKILL.md` and slash commands in
+`.claude/commands/`. Load the one that matches the task; each is checked into the repo, so keep
+it current when the code it describes changes (doc-lint checks their source pointers).
+
+| Skill | Use it for |
+|---|---|
+| `march-debug` | Any misbehaving program, failing test, compiled-vs-interpreted divergence, leak, slow compile or red CI: symptom → first command → how to read it. Covers `scripts/triage.sh`, `--verify-tir`, `march query`, `--bisect-pass`, `--reduce`, `--rc-trace`, the sanitizer and the oracles. |
+| `compiler-rc` | Reference-counting bugs: Perceus, borrow inference, drop glue, runtime RC. |
+| `compiler-builtin` | Adding a builtin: every table, runtime symbol and test that must agree. |
+| `steward` | Driving a PR to green: known flaky checks, reading CI logs, what CI enforces. |
+| `march-lang` | The language itself: syntax, builtins, stdlib API, pitfalls. |
+| `spec-search` | Full-text search over the language reference, internals and feature designs. |
+| `march-test` | Writing `.march` unit and property tests (`Check.all`), and running them here. |
+| `march-docs` | `doc` annotations and `march>` doctests; `forge doc`. |
+| `forge-search` | Finding March code by name, type or doc text, and every caller of a name. |
+| `forge-add` | Adding a dependency to a March project. |
+| `pulse`, `narratives`, `archaeology` | Decision-graph modes (see Decision Graph Workflow below). |
+
+Slash commands (`.claude/commands/`): `/build-test` (build and test the compiler, or a forge
+project) and the decision-graph commands listed under Decision Graph Workflow.
+
 ## Multi-file compilation (MARCH_LIB_PATH)
 
 March accepts exactly ONE input file per invocation. Multi-file projects (apps + library deps) use the `MARCH_LIB_PATH` environment variable to auto-discover all `.march` files in dependency directories.
@@ -287,7 +310,7 @@ lib/tir/                    typed IR: lower (+lower_state/types/match/decls/expr
                              llvm_emit (+llvm_ctx/builtins/eq/data/case/calls/tco/toplevel/repl,
                              and the per-arm bodies in llvm_emit_{arith,alloc,call,data,html,task,tcoarm,simd,nmap}),
                              builtin_name (closed variant for builtin dispatch),
-                             tir_names (cross-pass name contracts), rc_types (needs_rc/borrow_eligible)
+                             tir_names (cross-pass name contracts), kind (per-type table: needs_rc_of/borrowable_of, repr)
 lib/refinecheck/            refinement/contract checking (SMT): refine_check (orchestrator),
                              +refine_{encode,scope,resolve,call,post} — the pipeline in
                              dependency order, each including the one before it; plus
