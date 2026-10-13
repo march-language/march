@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: `h` is bound to `add`, which takes 2 arguments, but is called with 1 argument
+-- A `let h = add` alias is `add` itself (2026-10-13,
+-- specs/progress/2026-10-12-two-arg-fn-accepted-as-curried.md). Calling it
+-- one argument at a time typechecked (the alias's type is the curried
+-- `Int -> Int -> Int`), then panicked interpreted and SIGSEGV'd compiled.
+-- Base check: reject/t320 (the callback form).
+mod Main do
+  needs IO.Console
+
+  pfn add(a : Int, b : Int) : Int do a + b end
+
+  fn main(_c : Cap(IO.Console)) do
+    let h = add
+    let g = h(1)
+    println(int_to_string(g(2)))
+  end
+end

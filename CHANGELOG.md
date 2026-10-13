@@ -528,6 +528,16 @@ git log is authoritative for exact commits.
   affected; one typing-corpus fixture passed a two-argument comparator to
   `Map.insert` and now uses a curried one. Function values passed through records or lists are
   not checked yet (`specs/todos/2026-10-12-function-arity-not-in-types.md`).
+- **The call-arity check now follows a `let h = add` alias and checks calls
+  of a let-bound lambda.** `let h = add` then `h(1)` (calling the
+  two-argument `add` one argument at a time) is an `arity_mismatch`, and
+  `ap2(h, 1, 2)` or a curried-lambda alias passed to `List.fold_left` is a
+  `callback_arity_mismatch`. A callback passed to a let-bound lambda
+  (`let ap = fn (f, x, y) -> …`) is checked against how that lambda's body
+  applies it. All of these typechecked and then panicked interpreted and
+  crashed with SIGSEGV compiled. A `--check` sweep of 1484 corpus programs
+  (`test/native`, `examples`, `test/stdlib`, `specs/lang`, `bench`,
+  `test/errors`, `docs`) and the stdlib found no newly rejected program.
 - **Breaking: a command that cannot be executed is an `Err` from
   `Process.run`, `Process.run_stream`, `Process.spawn_async` and
   `System.cmd`.** A missing or non-executable program now returns

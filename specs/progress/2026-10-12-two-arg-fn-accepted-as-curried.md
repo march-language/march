@@ -97,3 +97,54 @@ fold, sort or `Map.` found nothing else.
 **Tests.** `specs/lang/types/reject/t320_two_arg_fn_passed_as_curried`,
 `accept/t321_curried_and_two_arg_callbacks` (run-witnessed interpreted and
 compiled), and the `callback_call_arity` group in `test/test_compiler.ml`.
+
+## Fixed 2026-10-13: the stale todo, and two narrow extensions
+
+**Fixed by #948.** The original repro (`ap2(add, 1, 2)`) and `Map.insert` with
+a two-argument comparator were already rejected on main by #948 (this file's
+Resolution above). The open todo `specs/todos/2026-10-12-two-arg-fn-accepted-as-curried.md`
+was a duplicate filed on a parallel branch (6c3111a6f) and never removed; it is
+deleted in this commit. Re-checked on origin/main 3d2925fce: rejected are a
+named 2-arg fn / 2-arg lambda passed where the callee curries, a curried
+lambda passed to `List.fold_left` / `Range.reduce` / a local `f(x, y)` callee,
+and the same through a helper (`Map.insert`).
+
+**Still accepted on main, now rejected** (each `--check` exit 0, then
+`arity mismatch` interpreted and `SIGSEGV si_code=2 addr=0x13` compiled):
+
+- `let h = add` then `let g = h(1)`; `g(2)`: an alias of a known fn called
+  with the wrong count. Now `arity_mismatch`: "`h` is bound to `add`, which
+  takes 2 arguments, but is called with 1 argument", labelled at the binding;
+  an under-applied call's result is `TError`, so no "not a function" cascade.
+- `ap2(h, 1, 2)` with that alias, and `let g = f` (`f` a curried lambda)
+  passed to `List.fold_left`: an alias passed as a callback. Now
+  `callback_arity_mismatch`.
+- `let ap = fn (f, x, y) -> let g = f(x) … ; ap(add, 1, 2)`: a let-bound
+  lambda as the CALLEE. Its parameters' call-arities are computed from its
+  body (`Typecheck_callarity.lambda`, same counting as module fns, callees
+  resolved in the scope at the `let`), so it is checked like a module fn.
+
+**How.** New env field `fn_aliases` (name -> arity, aliased spelling), set at
+`let name = f` for `f` a module fn or qualified export of arity >= 1 (or
+another alias), cleared by `bind_var`; `let g = f` with `f` a let-bound lambda
+copies `f`'s `lambda_arities` and `param_call_arities` entries. One resolver,
+`callee_call_arities`, now finds a callee's parameter call-arities for a
+module fn, a qualified export, a let-bound lambda (entry keyed by the let name
+at the lambda's span) or an alias. Also fixed in passing: a fn's own parameter
+used as a callee is never resolved to a like-named module fn when counting.
+
+**Not covered (unchanged, owner decision pending):** a function returned from
+a function (`ap2(pick(), 1, 2)`, `pfn pick() do add end`) or carried in a
+list/record/`Option`; see `specs/todos/2026-10-12-function-arity-not-in-types.md`.
+
+**Corpus.** `--check` of all 1484 `.march` files under `test/native`,
+`examples`, `test/stdlib`, `specs/lang`, `bench`, `test/errors`, `docs`, with
+origin/main's compiler and with this one (private HOME): identical exit codes
+and diagnostic codes (890 accept / 594 reject on both). Stdlib ratchet
+unchanged (`stdlib_known_internal_errors` still empty).
+
+**Tests.** Four cases in `test/test_compiler.ml` group `callback_call_arity`
+(alias called wrong, alias as callback, let-bound lambda callee, matching
+shapes accepted): three FAIL on origin/main, all pass here.
+`specs/lang/types/reject/t322_fn_alias_called_curried` (accepted on
+origin/main, rejected here).
