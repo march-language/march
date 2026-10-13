@@ -21,7 +21,7 @@ suite unsharded. Be most careful with macOS: 5 slots for the whole org.
 | [`ci.yml`](ci.yml) | every PR and push to `main`, **except Markdown-only changes** | The merge gate: tests, corpora, sanitizers, property/oracle checks. |
 | [`doc-lint.yml`](doc-lint.yml) | every PR and push to `main` | Seconds-long doc and source-level checks, including on Markdown-only changes. |
 | [`nightly.yml`](nightly.yml) | 00:00 UTC; manual | Publishes a `nightly-YYYYMMDD` prerelease when `main` is green and has moved. |
-| [`release.yml`](release.yml) | push of a `v*` tag | Builds and publishes a versioned release. |
+| [`release.yml`](release.yml) | push of a `v*` tag; manual | Builds and publishes a versioned release. Run manually with a `tag` to rebuild an existing release's archives and replace them. |
 | [`build.yml`](build.yml) | called by nightly/release | Builds the three distributable archives. Not triggered on its own. |
 | [`gen-stdlib-docs.yml`](gen-stdlib-docs.yml) | push to `main` touching `stdlib/**` | Regenerates the committed stdlib API pages and search index. |
 | [`sync-docs-search-index.yml`](sync-docs-search-index.yml) | push to `main` touching `docs/**` | Regenerates the committed Pagefind index (`docs/pagefind/`). |
@@ -121,7 +121,13 @@ Every job checks out the commit `gate` picked.
 `build.yml` produces `darwin-arm64`, `linux-x86_64` and `linux-aarch64`
 archives. Both Linux legs build inside Alpine and are fully static (musl);
 the job fails if a "static" binary has dynamic dependencies or won't run in a
-bare container. `release.yml` calls it on a `v*` tag and publishes a release.
+bare container, and on every leg if the packaged compiler cannot compile and
+run a program with only the archive's own runtime and stdlib (v0.5.0 shipped
+archives missing `runtime/third_party/` because only `--version` was checked).
+`release.yml` calls it on a `v*` tag and publishes a release. Run manually
+(`gh workflow run release.yml -f tag=vX.Y.Z`), it rebuilds that existing tag's
+sources with the current `build.yml` and replaces the release's archives and
+checksums, leaving the notes, the tag and `latest` alone.
 
 ## Docs bots
 
