@@ -242,7 +242,7 @@ typedef struct {
 
 ### Reclamation via epochs + Cas.gc
 
-A retired version is freed only after its `refs` hits zero **and** a grace epoch has elapsed with no thread holding a pointer into it (reuse [epochs-design.md](epochs-design.md)). Closures captured from old-version code carry their version and keep it pinned, so a captured callback cannot outlive its code. On-disk retention is bounded by `Cas.gc` with `keep_artifacts = active ∪ in-flight-pinned impl_hashes`.
+A retired version is freed only after its `refs` hits zero **and** a grace epoch has elapsed with no thread holding a pointer into it (reuse [epochs-design.md](epochs-design.md)). A captured callback must not outlive its code. **As shipped (2026-10-13), a native patch image is never unmapped**: reclaiming a ring slot frees only the slot's bookkeeping, and the `.so` stays mapped until the process exits (`march_dispatch_retain_image`, runtime/march_dispatch.c). Closures built by an old version, the statics it returned, and the capture-release entries its `__march_init` registered therefore stay valid. A closure does not pin its version as a counted reference. Known limit: one mapped `.so` per deploy, accumulating until restart. Per-image pinning, which would allow unloading, is `specs/todos/2026-10-13-hcr-unload-unreachable-patch-images.md` (specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md). On-disk retention is bounded by `Cas.gc` with `keep_artifacts = active ∪ in-flight-pinned impl_hashes`.
 
 ### Version cap + purge (Erlang's lesson)
 

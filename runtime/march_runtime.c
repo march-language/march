@@ -762,10 +762,11 @@ void march_decrc(void *p) {
  * closure type whose environment owns its captures and registers it here
  * under the closure's apply function (field 0), once, from main's prologue
  * (march_clo_register_drops).  march_clo_release runs it when the release
- * frees the cell.  A closure with no entry -- a runtime trampoline, a type
- * whose environment borrows, one built by a hot patch or a local REPL
- * fragment, which do not register -- is released exactly as before: never a
- * crash, at worst the old leak.  See
+ * frees the cell.  A hot patch registers its own pairs from its
+ * __march_init (specs/progress/2026-10-13-hcr-patch-closures-not-in-drop-table.md).
+ * A closure with no entry -- a runtime trampoline, a type whose environment
+ * borrows, one built by a local REPL fragment, which does not register -- is
+ * released exactly as before: never a crash, at worst the old leak.  See
  * specs/progress/2026-10-05-dropped-closure-captures.md.
  *
  * A remote-shell fragment registers its own pairs when it starts
@@ -785,7 +786,9 @@ void march_decrc(void *p) {
  *     copied entries.  The old table is never freed, since a lookup may still
  *     be probing it; the tables a run ever retires add up to less than the
  *     live one.
- * Keys are never removed: a fragment's code is never unloaded. */
+ * Keys are never removed: a fragment's code is never unloaded, and neither
+ * is a hot patch's (march_dispatch_retain_image), so every entry's apply and
+ * drop stay mapped and no later image can reuse a registered address. */
 typedef void (*march_clo_drop_fn)(void *clo);
 typedef struct { _Atomic(void *) apply; _Atomic(void *) drop; } march_clo_drop_entry;
 typedef struct { size_t cap; march_clo_drop_entry e[]; } march_clo_drop_table;  /* cap: a power of two */

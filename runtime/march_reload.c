@@ -942,7 +942,7 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
     march_hcr_unit *u = (march_hcr_unit *)calloc((size_t)n, sizeof(*u));
     char (*sigs)[65] = (char (*)[65])calloc((size_t)n, 65);
     if (!u || !sigs) { free(u); free(sigs); snprintf(resp, rsz, "ERR oom\n"); return -1; }
-    int opened = 0, rc = -1;
+    int opened = 0, rc = -1, inited = 0;
     uint32_t req = 0;
     for (int i = 0; i < n; i++, opened++) {
         uint32_t slot_id;
@@ -1010,8 +1010,10 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
     }
     {
         /* __march_init still stamps the per-.so epoch cell (retired: nothing
-         * reads it, D33), with the epoch this deploy will get. */
+         * reads it, D33), with the epoch this deploy will get, and registers
+         * the image's closure capture-release functions (see fail: below). */
         uint32_t predicted = march_epoch_next(req);
+        inited = 1;
         for (int i = 0; i < n; i++) {
             void (*init_fn)(uint32_t) = NULL;
             void *raw_init = dlsym(u[i].handle, "__march_init");
@@ -1035,8 +1037,8 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
         snprintf(resp, rsz, "ERR publish_failed\n");
         goto fail;
     }
-    /* The dispatch table owns every handle now (dlclosed when its ring slot
-     * is reclaimed). */
+    /* The dispatch table owns every handle now (retained, never dlclosed,
+     * when its ring slot is reclaimed: march_dispatch_retain_image). */
     {
         struct timeval atv; gettimeofday(&atv, NULL);
         long long ats = (long long)atv.tv_sec * 1000LL + (long long)atv.tv_usec / 1000;
@@ -1062,7 +1064,16 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
     free(sigs);
     return 0;
 fail:
-    for (int i = 0; i < opened; i++) if (u[i].handle) dlclose(u[i].handle);
+    /* Before __march_init ran, nothing of an image escaped: close it.  After,
+     * its closure capture-release functions are in the runtime's drop table
+     * (march_clo_register_drops, keys never removed), so the image must stay
+     * mapped like a reclaimed version's (march_dispatch_retain_image).  A
+     * retried deploy re-opens the same file and gets the same mapping. */
+    for (int i = 0; i < opened; i++) {
+        if (!u[i].handle) continue;
+        if (inited) march_dispatch_retain_image(u[i].handle);
+        else dlclose(u[i].handle);
+    }
     free(u);
     free(sigs);
     return rc;

@@ -1,0 +1,81 @@
+-- HCR regression fixture: closures outlive the version that built them.
+-- run.sh splices handler_<v>.march in place of @HANDLER@; the base binary is
+-- built with handler_v1 (--hot-reload App) and each patch .so from the same
+-- template with another handler (--compile-so --hot-reload App).
+--
+-- The program serves N requests and deploys patch k at request every * k,
+-- in process (shim.c, what the reload server's ACTIVATE does).  It keeps one
+-- closure in 97 that each version's Handler.mk built, and calls all of them
+-- after the last deploy, when the ring (3 versions) has reclaimed the oldest
+-- patches.  Then it checks the net heap objects, which a patch's closures
+-- leaked when the patch did not register its capture-release functions.
+-- specs/progress/2026-10-13-hcr-reclaimed-patch-unmaps-live-closure-code.md
+-- specs/progress/2026-10-13-hcr-patch-closures-not-in-drop-table.md
+mod App do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  needs IO.Process
+
+  extern "c" : Cap(Ffi) do
+    fn hcrpin_deploy(k: Int): Int = "hcrpin_deploy"
+    fn hcrpin_retained(): Int = "hcrpin_retained"
+  end
+
+  type PinConn = { path: String, headers: List(String), status: Int }
+
+  mod Handler do
+@HANDLER@
+  end
+
+  pfn env_int(name: String, dflt: Int): Int do
+    match process_env(name) do
+      Some(s) -> match string_to_int(s) do
+        Some(v) -> v
+        None -> dflt
+      end
+      None -> dflt
+    end
+  end
+
+  pfn mk_conn(i: Int): PinConn do
+    { path: "/r/" ++ int_to_string(i), headers: ["a: " ++ int_to_string(i), "b"], status: 200 + i % 7 }
+  end
+
+  pfn call_all(fs: List(Int -> Int), acc: Int): Int do
+    match fs do
+      Nil -> acc
+      Cons(f, rest) -> call_all(rest, acc + f(1))
+    end
+  end
+
+  pfn serve(i: Int, n: Int, every: Int, k: Int, acc: Int, kept: List(Int -> Int)): Int do
+    if i == n do
+      println("kept closures sum=" ++ int_to_string(call_all(kept, 0)))
+      acc
+    else
+      let k2 = if i > 0 && i % every == 0 do
+        let e = hcrpin_deploy(k)
+        println("deploy " ++ int_to_string(k) ++ " ok=" ++ (if e > 0 do "true" else "false" end))
+        k + 1
+      else k end
+      let f = Handler.mk(mk_conn(i))
+      let v = f(i)
+      let kept2 = if i % 97 == 0 do Cons(f, kept) else kept end
+      serve(i + 1, n, every, k2, acc + v % 1000, kept2)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process)) : Unit do
+    let n = env_int("HCRPIN_N", 5000)
+    let deploys = env_int("HCRPIN_DEPLOYS", 4)
+    let before = live_allocs()
+    let total = serve(0, n, n / (deploys + 1), 1, 0, Nil)
+    println("total=" ++ int_to_string(total))
+    let delta = live_allocs() - before
+    -- A clean run nets a handful of objects (the deploys' own); the leak was
+    -- several per request served by a patch.
+    println("live_allocs bounded=" ++ (if delta < 100 do "true" else "false delta=" ++ int_to_string(delta) end))
+    println("retained images=" ++ int_to_string(hcrpin_retained()))
+  end
+end

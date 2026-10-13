@@ -1,0 +1,9 @@
+deploy 1 ok=true
+deploy 2 ok=true
+deploy 3 ok=true
+deploy 4 ok=true
+kept closures sum=48499
+total=2497497
+live_allocs bounded=true
+retained images=1
+exit=0

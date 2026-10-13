@@ -1945,7 +1945,17 @@ let emit_module ~emit_expr
          ("\ndefine void @__march_init(i32 %epoch) {\nentry:\n\
           \  store i32 %epoch, ptr @__march_hcr_epoch\n"
           ^ Buffer.contents resolve
-          ^ "  ret void\n}\n");
+          (* The patch's own closure capture-release and record shape drops,
+             as main's prologue registers the base's: without them a closure
+             type the patch introduces leaks its captures whenever it is
+             released outside its apply.  The keys point into this image,
+             which is never unloaded (march_dispatch_retain_image), so they
+             stay valid.
+             specs/progress/2026-10-13-hcr-patch-closures-not-in-drop-table.md *)
+          ^ "  call void @march_clo_drops_register()\n"
+          ^ "  ret void\n}\n"
+          ^ clo_drop_registration
+              ~rec_drops:(Llvm_data.shape_drop_registrations ctx) m);
        (* The slot ABI hash of every boundary function this patch defines,
           one "<name> <hash>\n" line each: the reload server records it as
           the activated version's sig_hash (runtime/march_reload.c,

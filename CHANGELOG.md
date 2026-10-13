@@ -735,6 +735,16 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Hot reload: a closure built by an old version no longer crashes once that
+  version is reclaimed.** A callback, `plug` or closure kept in actor state or
+  a Vault, built by a patch, crashed the node with a SIGSEGV when called after
+  three later deploys of the same function: reclaiming the version unloaded its
+  `.so`. A reclaimed patch now stays mapped. Known limit: each deploy keeps
+  one patch `.so` mapped until the node restarts.
+- **Hot reload: a patch's closures no longer leak what they capture.** A
+  closure type introduced by a hot patch leaked its captured values whenever
+  it was dropped. The patch now registers its own capture-release functions
+  when it loads.
 - **An actor handler that matches on a tuple no longer leaks its old state
   when compiled.** A handler whose body was a `match` on a tuple a call
   returned (`match LinearMap.take_slot(state.sessions, id) do (None, slot) ->
