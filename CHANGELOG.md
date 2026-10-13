@@ -27,6 +27,17 @@ git log is authoritative for exact commits.
   only the shell's `Segmentation fault (core dumped)` and no `march: fatal`
   line, which is all one CI crash of `native_run_until_idle_ping_pong` left.
 
+### Fixed
+
+- **The release archives include the vendored C libraries, so a prebuilt
+  `march` can compile programs again.** The v0.5.0 archives bundled
+  `runtime/*.c` and `*.h` but not `runtime/third_party/` (BLAKE3 and mimalloc,
+  vendored since 0.4.0), so every `march --compile` from a prebuilt toolchain
+  failed with `'third_party/blake3/blake3.h' file not found`. The packaging now
+  copies the directory, and the release build compiles and runs a program with
+  each packaged archive before publishing. The v0.5.0 archives were rebuilt
+  and replaced; reinstall with `forge toolchain install v0.5.0`.
+
 ## [0.5.0] - 2026-10-13
 
 ### Highlights
