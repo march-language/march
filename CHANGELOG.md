@@ -764,6 +764,18 @@ git log is authoritative for exact commits.
   affected (`offer_hosted`, `run_hosted`, `run_cluster_hosted`). Set
   `MARCH_SESSION_TRACE_HOSTED=1` to log each hosted access point's start,
   delivery and cancel callbacks to stderr.
+- **Cluster sessions no longer slow down, and burst memory, the longer a node
+  pair runs them.** Every registry name change was pushed to peers as a few
+  leaves, and a peer whose registry differed in any way (always, while sessions
+  register names on both nodes) answered with its whole registry, tombstones
+  included; the answer was answered the same way. The registry grows by two
+  names per session until their tombstones expire (3 h), so two nodes running
+  sessions back to back went from ~55 ms to ~1-2 s per session after a few
+  hundred, with millions of short-lived objects and 270-450 MB peak RSS per
+  node. A pushed leaf is now merged without an answer (the link-up sync and
+  the periodic anti-entropy still repair any divergence), and the idle tick no
+  longer hashes the whole registry. 400 sessions: 23 s and ~40 MB per node on
+  Linux (was 326 s, 3 failed), 22 s and ~10 MB on macOS.
 - **An actor handler that matches on a tuple no longer leaks its old state
   when compiled.** A handler whose body was a `match` on a tuple a call
   returned (`match LinearMap.take_slot(state.sessions, id) do (None, slot) ->
