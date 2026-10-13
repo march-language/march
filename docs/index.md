@@ -15,7 +15,7 @@ permalink: /
 
 March is a statically-typed, capability-based functional language built for concurrent and distributed systems: the kind you'd normally reach for Elixir or Erlang to build, but with a static type system, a compile-time effect system, algebraic data types, and compilation to native binaries via LLVM.
 
-Write code that reads like Elixir. Get compile-time guarantees that a program touches only the resources its `main` was granted, that resources are used in order and released, that message protocols are followed, and that supervision trees handle faults the way you expect. Deploy to a running node without restarting it. Run at native speed with no garbage collector pauses.
+A March program is actors, supervision trees and message passing, compiled to a native binary. The compiler checks that it touches only the resources its `main` was granted, that every resource is used in order and released, that message protocols are followed, and that a crashed actor is restarted the way you declared. It deploys to a running node without a restart, and it runs with no garbage collector pauses.
 
 ---
 
