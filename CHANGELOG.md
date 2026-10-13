@@ -3453,6 +3453,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Supervision chapter restructured.** `docs/supervision/` now opens with what
+  a supervisor is, a situation-to-feature table, an index of every section, and
+  how supervision meets actors, hot code reload, observe and Flow. Restart
+  types, strategies, escalation and backoff are contiguous. The stale "not yet
+  supported: a terminate-style callback" note is corrected: `on_stop` shipped.
 - **Capabilities chapter restructured.** `docs/capabilities/` now opens with a
   plain statement of the three checks (manifest, upper limit, grant), one
   "which tool do I need" table, an index of every section, and a table of how
