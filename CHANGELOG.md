@@ -3453,6 +3453,13 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Seven more chapters restructured.** Session types, linear types, memory
+  model, interfaces, pattern matching, parallel collections and the tooling
+  page each open with a plain summary, a when-to-use table, how the topic meets
+  the rest of the language, and an index of every section. Session types'
+  interpreted-vs-compiled status moves out of the intro; pattern matching loses
+  three "resolved" notes about a parser limitation that no longer exists; the
+  tooling page is regrouped by task. Section bodies are unchanged.
 - **Clustering chapter restructured.** `docs/clustering/` now opens with what a
   cluster is in actor terms, a goal-to-API table, an index of every section,
   and how the cluster meets actors, capabilities, choreography, hot code reload
