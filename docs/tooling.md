@@ -7,7 +7,105 @@ permalink: /docs/tooling/
 
 # Tooling
 
-March ships with a build tool, an LSP server, and a tree-sitter grammar for editor syntax highlighting.
+`forge` is March's project tool: it creates, builds, runs, tests, lints and formats a
+project, manages its dependencies and toolchains, searches the standard library, and
+deploys and observes a running node. Beside it March ships `march-lsp`, a language
+server built on the compiler's own pipeline, a tree-sitter grammar for editors, a
+time-travel debugger, and the compiler's own analysis commands.
+
+This page is the command reference. Each section is one command or one family of
+commands with its flags and what they do; the index below groups them by what you are
+trying to do, and the table after it goes from a task to the command.
+
+## On this page
+
+**Start here**
+
+- [Installing forge](#installing-forge)
+- [Which command do I need?](#which-command-do-i-need)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+
+**Everyday**
+
+- [forge: Build Tool](#forge-build-tool): [creating a project](#creating-a-project), [building and running](#building-and-running), [GUI apps](#gui-apps-main-on-the-process-main-thread), [JavaScript backend](#javascript-backend), [cross-compiling to Linux](#cross-compiling-to-linux), [checking types](#checking-types), [asking the compiler questions](#asking-the-compiler-questions), [auto-fixing diagnostics](#auto-fixing-diagnostics), [testing](#testing), [linting](#linting), [watch mode](#watch-mode), [formatting](#formatting), [cleaning](#cleaning-build-artifacts), [REPL](#interactive-mode-repl)
+
+**Finding things**
+
+- [forge search: Hoogle-style Search](#forge-search-hoogle-style-search)
+- [AI assistant search: spec-search Claude Skill](#ai-assistant-search--spec-search-claude-skill)
+
+**Safety tooling**
+
+- [forge refine: Suggest a refinement type](#forge-refine-suggest-a-refinement-type)
+- [forge cap: Capability and typestate inspection](#forge-cap-capability-and-typestate-inspection)
+- [Dependency Capability Audit](#dependency-capability-audit)
+- [License Audit](#license-audit)
+
+**Dependencies and toolchains**
+
+- [Dependency Management](#dependency-management): [adding](#adding-dependencies), [updating](#updating-dependencies), [the lock file](#lock-file), [offline builds](#offline-builds), [semver](#semver-constraints), [the tree](#dependency-tree)
+- [Archive Management](#archive-management)
+- [Toolchain Management](#toolchain-management)
+
+**Changing and documenting code**
+
+- [Refactoring](#refactoring)
+- [Documentation Generation](#documentation-generation)
+- [Notebooks](#notebooks)
+
+**Deploying and operating**
+
+- [forge topology: the topology file](#forge-topology-the-topology-file)
+- [Hot Code Reload](#hot-code-reload)
+- [forge observe: what a running node is doing](#forge-observe-what-a-running-node-is-doing)
+- [Versioning and Release](#versioning-and-release): [bumping](#inspect-and-bump-versions), [the release pipeline](#guarded-release-pipeline), [release bundles](#release-bundles-forge-release-build), [publishing](#publishing)
+
+**Editors and debugging**
+
+- [LSP Server](#lsp-server)
+- [Zed Editor](#zed-editor)
+- [Time-Travel Debugger](#time-travel-debugger)
+- [Compiler Analysis](#compiler-analysis)
+- [Shell Completions](#shell-completions)
+
+**Reference**
+
+- [Environment Variables](#environment-variables)
+- [See also](#see-also)
+
+## Which command do I need?
+
+| You want to | Run |
+|---|---|
+| Start a project | `forge new my_app`, or `forge init` in an existing directory |
+| Build, run, test | `forge build`, `forge run`, `forge test`; add `--compiled` or `--release` for native builds |
+| Typecheck without building | `forge check` |
+| Rebuild on every save | `forge watch`, `forge watch test`, `forge watch run` |
+| Apply the fixes the compiler already knows | `forge fix` |
+| Find a function by name, type or docstring | `forge search "map"`, `forge search --type "List(a) -> (a -> b) -> List(b)"` |
+| Understand what the compiler did to a function | `forge query fn Name`, `forge query origin`, `forge query why-miss` |
+| Add a dependency, or see what it would newly be allowed to do | `forge add`, `forge audit`, `forge outdated` |
+| Get a refinement contract proposed | `forge refine fn_name` |
+| See what a binary may do, or run it in a sandbox | `forge cap inspect`, `forge cap run` |
+| Rename or move a declaration across the project | `forge refactor rename`, `forge refactor move` |
+| Build for Linux from a Mac | `forge build --target linux/amd64` |
+| Compile to JavaScript | `march --target js` or `forge build --target js` |
+| Deploy to a running server without restarting | `forge deploy hot`; with a topology, `forge deploy --env prod` |
+| See what a running node is doing | `forge status`, `forge diagnose`, `forge top`, `forge observe` |
+| Cut a release | `forge release`, `forge release build` |
+| Switch compiler versions | `forge toolchain use`, `forge toolchain pin` |
+
+## How it fits with the rest of March
+
+| Concept | The tooling for it | Chapter |
+|---|---|---|
+| **Capabilities** | `forge cap query` and `inspect`, `forge cap run`, `forge audit`, and the `needs` lines `forge fix` inserts. | [Capabilities]({{ site.baseurl }}/docs/capabilities/), [Capability Audit](capability-audit.md), [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) |
+| **Refinement types** | `forge refine` proposes a contract; `--refine-report` and `--refine-audit` say what was checked. | [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) |
+| **Hot code reload and topology** | `forge deploy hot`, `forge deploy --env`, `forge host init`, `forge topology`. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/), [Topology](topology.md) |
+| **Observing a running node** | `forge status`, `diagnose`, `top`, `observe`, `shell`. | [Observe](observe.md) |
+| **Memory model** | `forge query repr`, `forge phases`, the GC trace viewer, and the editor's reuse hints. | [Memory Model]({{ site.baseurl }}/docs/memory-model/) |
+| **Editors** | `march-lsp` features, per-editor setup, the DAP debugger. | [LSP & Editors]({{ site.baseurl }}/docs/lsp/) |
+| **Testing** | `forge test` flags, property tests and seeds. | [Property Testing](property-testing.md) |
 
 ---
 
@@ -31,7 +129,7 @@ forge search "map"
 
 ## forge: Build Tool
 
-`forge` is the official project manager for March.
+`forge` is the project manager. The subsections below cover the everyday commands.
 
 ### Creating a Project
 
@@ -670,22 +768,41 @@ forge cap run --allow-only IO.Console ./untrusted          # run untrusted code 
 
 ---
 
-## forge topology: the topology file
+## Dependency Capability Audit
 
-`forge topology check` validates a `topology.toml` (which function or actor serves each protocol role, which pools of nodes serve which roles, hosts per environment) against your sources with `file:line` errors, and runs automatically in `forge build`, `forge run` and `forge deploy hot`. `forge topology export --json` prints the digested topology with the pool connectivity graph; `forge topology gen systemd|ufw|do-firewall|compose` writes deployment files from it, and any `forge-topology-<target>` on `PATH` is a generator plugin. See the [Topology](topology.md) page.
-
-## forge observe: what a running node is doing
-
-A compiled program started with `MARCH_OBSERVE_SOCKET=<path>` (or with `MARCH_HOT_RELOAD_SOCKET`, which puts the observe socket at `<path>.observe`) answers read-only questions about itself on that owner-only socket: its actors and mailboxes, supervision tree, names, schedulers, memory, crashes and hot-reload epochs. It never shows message contents or panic text.
-
-```bash
-forge observe --socket /tmp/app.observe actors mbox 10   # one request, the JSON reply
-forge top --env web --sort msgs_in                      # the busiest actors, redrawn in place
-forge diagnose --env web                                # known trouble; exit 0/1/2/3
-forge status                                            # every node at a glance
+```sh
+forge audit --record                             # record each dependency's capability set (forge.caps.lock)
+forge audit                                      # exit 1 if a dependency gained authority
+forge audit --inferred                           # infer each set from the code (`march caps`), not `needs`
+forge audit --inferred --allow-unanalyzable      # gate on the deps that typecheck; list the rest
+forge add <name> ... --accept-caps               # keep a new dep that widens the baseline
+forge deps --accept-caps                         # keep a hand-edited upgrade that widens it
 ```
 
-From inside a program, the `Recon` and `Diagnose` stdlib modules ask the same questions. [Observing a running node](observe.md) is the operator's guide: every verb and field, the forge commands' flags and exit codes, what each `forge diagnose` finding means and what to do about it, and a worked incident.
+`forge add`, `forge deps` and `forge outdated` use the baseline too: an add, or
+a `forge deps` after a hand edit to `forge.toml`, that brings in new authority
+is refused unless `--accept-caps`, and `forge outdated` shows what each
+available upgrade would newly ask for. Installing what `forge.lock` already
+says is never gated.
+
+`--inferred` needs a toolchain whose `march` supports `caps` (0.3.0 or later)
+and stops with the toolchain's path and version if it does not. It caches
+each dependency's result under `.forge/audit-cache/`, so only changed
+dependencies are re-analyzed. A dependency that does not typecheck fails the
+audit unless `--allow-unanalyzable` is given, and it is listed with the
+compiler's reason either way. See [Capability Audit](capability-audit.md).
+
+---
+
+## License Audit
+
+```sh
+forge licenses             # list each dependency and its declared license
+forge licenses --json      # JSON output for tooling
+forge licenses --strict    # exit non-zero if any dependency has no license
+```
+
+---
 
 ## Dependency Management
 
@@ -791,6 +908,74 @@ forge why depot    # show all paths that pull in `depot`
 
 ---
 
+## Archive Management
+
+Archives are globally installed forge extensions: tools, task runners, and generators.
+
+```sh
+# Install from the registry or a git URL
+forge install march_doc
+forge install scroll
+forge install https://github.com/march-language/my_tool
+forge install --force scroll     # reinstall even if already installed
+
+# Remove an archive
+forge uninstall march_doc
+
+# List installed archives
+forge archives
+
+# Update installed archives
+forge update                     # update all
+forge update march_doc           # update one
+
+# Verify archive integrity
+forge verify                     # verify all
+forge verify march_doc           # verify one
+```
+
+Archive tasks are invoked as `forge <archive>.<task>`:
+
+```sh
+forge march_doc.build    # run the `build` task of march_doc
+```
+
+---
+
+## Toolchain Management
+
+`forge toolchain` manages installed March compiler versions.
+
+```sh
+# List installed toolchains
+forge toolchain list
+
+# List available versions from GitHub releases
+forge toolchain list --remote
+
+# Install a specific version
+forge toolchain install v0.4.0
+forge toolchain install nightly          # latest nightly
+forge toolchain install nightly-20251201
+
+# Switch the active toolchain
+forge toolchain use v0.4.0
+
+# Pin this project to a specific version (writes .march-version)
+forge toolchain pin v0.4.0
+
+# Show which toolchain resolves for the current directory
+forge toolchain which
+
+# Remove an installed toolchain
+forge toolchain uninstall v0.2.0
+
+# Install the latest stable and make it active
+forge upgrade
+```
+
+---
+
 ## Refactoring
 
 `forge refactor` provides project-wide, parser-based refactorings. All subcommands accept `--dry-run` / `-n` to preview changes without writing any files.
@@ -891,6 +1076,12 @@ forge notebook --no-open
 
 ---
 
+## forge topology: the topology file
+
+`forge topology check` validates a `topology.toml` (which function or actor serves each protocol role, which pools of nodes serve which roles, hosts per environment) against your sources with `file:line` errors, and runs automatically in `forge build`, `forge run` and `forge deploy hot`. `forge topology export --json` prints the digested topology with the pool connectivity graph; `forge topology gen systemd|ufw|do-firewall|compose` writes deployment files from it, and any `forge-topology-<target>` on `PATH` is a generator plugin. See the [Topology](topology.md) page.
+
+---
+
 ## Hot Code Reload
 
 `forge deploy hot` deploys new code to a running server without restarting the process. Actors keep running and their state is preserved; only changed functions are uploaded and activated.
@@ -915,6 +1106,21 @@ public_key = "base64key="     # ed25519 public key
 When actor state changes, provide a `<actor>_migrate_state` function to upgrade live actors. If the actor bears an `@invariant`, the compiler verifies the migration preserves it before anything is uploaded.
 
 See [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) for the full guide.
+
+---
+
+## forge observe: what a running node is doing
+
+A compiled program started with `MARCH_OBSERVE_SOCKET=<path>` (or with `MARCH_HOT_RELOAD_SOCKET`, which puts the observe socket at `<path>.observe`) answers read-only questions about itself on that owner-only socket: its actors and mailboxes, supervision tree, names, schedulers, memory, crashes and hot-reload epochs. It never shows message contents or panic text.
+
+```bash
+forge observe --socket /tmp/app.observe actors mbox 10   # one request, the JSON reply
+forge top --env web --sort msgs_in                      # the busiest actors, redrawn in place
+forge diagnose --env web                                # known trouble; exit 0/1/2/3
+forge status                                            # every node at a glance
+```
+
+From inside a program, the `Recon` and `Diagnose` stdlib modules ask the same questions. [Observing a running node](observe.md) is the operator's guide: every verb and field, the forge commands' flags and exit codes, what each `forge diagnose` finding means and what to do about it, and a worked incident.
 
 ---
 
@@ -992,122 +1198,6 @@ forge publish --old-source ../my_lib-v1.0        # enforce semver against old AP
 ```
 
 When `--old-source` is provided, forge computes the API surface diff and errors if the declared version bump is too small (e.g. a breaking change requires a major bump).
-
----
-
-## Archive Management
-
-Archives are globally installed forge extensions: tools, task runners, and generators.
-
-```sh
-# Install from the registry or a git URL
-forge install march_doc
-forge install scroll
-forge install https://github.com/march-language/my_tool
-forge install --force scroll     # reinstall even if already installed
-
-# Remove an archive
-forge uninstall march_doc
-
-# List installed archives
-forge archives
-
-# Update installed archives
-forge update                     # update all
-forge update march_doc           # update one
-
-# Verify archive integrity
-forge verify                     # verify all
-forge verify march_doc           # verify one
-```
-
-Archive tasks are invoked as `forge <archive>.<task>`:
-
-```sh
-forge march_doc.build    # run the `build` task of march_doc
-```
-
----
-
-## Toolchain Management
-
-`forge toolchain` manages installed March compiler versions.
-
-```sh
-# List installed toolchains
-forge toolchain list
-
-# List available versions from GitHub releases
-forge toolchain list --remote
-
-# Install a specific version
-forge toolchain install v0.4.0
-forge toolchain install nightly          # latest nightly
-forge toolchain install nightly-20251201
-
-# Switch the active toolchain
-forge toolchain use v0.4.0
-
-# Pin this project to a specific version (writes .march-version)
-forge toolchain pin v0.4.0
-
-# Show which toolchain resolves for the current directory
-forge toolchain which
-
-# Remove an installed toolchain
-forge toolchain uninstall v0.2.0
-
-# Install the latest stable and make it active
-forge upgrade
-```
-
----
-
-## License Audit
-
-```sh
-forge licenses             # list each dependency and its declared license
-forge licenses --json      # JSON output for tooling
-forge licenses --strict    # exit non-zero if any dependency has no license
-```
-
----
-
-## Dependency Capability Audit
-
-```sh
-forge audit --record                             # record each dependency's capability set (forge.caps.lock)
-forge audit                                      # exit 1 if a dependency gained authority
-forge audit --inferred                           # infer each set from the code (`march caps`), not `needs`
-forge audit --inferred --allow-unanalyzable      # gate on the deps that typecheck; list the rest
-forge add <name> ... --accept-caps               # keep a new dep that widens the baseline
-forge deps --accept-caps                         # keep a hand-edited upgrade that widens it
-```
-
-`forge add`, `forge deps` and `forge outdated` use the baseline too: an add, or
-a `forge deps` after a hand edit to `forge.toml`, that brings in new authority
-is refused unless `--accept-caps`, and `forge outdated` shows what each
-available upgrade would newly ask for. Installing what `forge.lock` already
-says is never gated.
-
-`--inferred` needs a toolchain whose `march` supports `caps` (0.3.0 or later)
-and stops with the toolchain's path and version if it does not. It caches
-each dependency's result under `.forge/audit-cache/`, so only changed
-dependencies are re-analyzed. A dependency that does not typecheck fails the
-audit unless `--allow-unanalyzable` is given, and it is listed with the
-compiler's reason either way. See [Capability Audit](capability-audit.md).
-
----
-
-## Shell Completions
-
-Generate a completion script for your shell and source it:
-
-```sh
-forge completions bash >> ~/.bashrc
-forge completions zsh  >> ~/.zshrc
-forge completions fish > ~/.config/fish/completions/forge.fish
-```
 
 ---
 
@@ -1263,6 +1353,18 @@ Each `bench/*.march` file is a standalone benchmark program with a `main()` func
 
 ---
 
+## Shell Completions
+
+Generate a completion script for your shell and source it:
+
+```sh
+forge completions bash >> ~/.bashrc
+forge completions zsh  >> ~/.zshrc
+forge completions fish > ~/.config/fish/completions/forge.fish
+```
+
+---
+
 ## Environment Variables
 
 | Variable | Effect |
@@ -1276,8 +1378,11 @@ Each `bench/*.march` file is a standalone benchmark program with a `main()` func
 
 ---
 
-## Next Steps
+## See also
 
 - [Getting Started](getting-started.md): set up your first project with forge
 - [REPL](repl.md): interactive exploration
 - [Standard Library](stdlib.md): what you can search with `forge search`
+- [Observing a running node](observe.md): the operator's guide behind `forge status`, `diagnose`, `top` and `observe`
+- [Hot Code Reload](hot-code-reload.md): the full `forge deploy` story
+- [Capability Audit](capability-audit.md): `forge audit` and `forge cap inspect` in depth

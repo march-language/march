@@ -9,14 +9,69 @@ permalink: /docs/interfaces/
 
 # Interfaces
 
-Interfaces (typeclasses) provide ad-hoc polymorphism: the ability to write code that works for any type that satisfies a contract, without inheritance.
+An interface names a contract: a set of function signatures a type can implement. Code
+written against the interface works for any type that implements it, and the compiler
+picks the implementation from the type at each call. This is ad-hoc polymorphism
+without inheritance, what other languages call typeclasses or traits.
 
-**The bug they kill:** duplication that drifts out of sync. Without interfaces
-you write `show_color`, `show_user`, `show_order`: N near-identical functions
-that every new caller has to know about and every refactor has to update in
-lockstep. One `show` constraint collapses them into a single contract: callers
-write `show(x)`, and the compiler routes to the right implementation. Add a new
-type and you write *one* `impl`, not a new function name to thread everywhere.
+The payoff is one name instead of many. Without interfaces you write `show_color`,
+`show_user` and `show_order`, and every caller and every refactor has to know all
+three. With `interface Show(a)`, callers write `show(x)`, and adding a type means one
+`impl`, not a new function name to thread through the program. `derive` goes one step
+further and generates the implementation from the type's structure, so adding a field
+cannot leave `eq` or `show` silently stale.
+
+This page covers declaring and implementing interfaces, defaults and superinterfaces,
+conditional implementations, constraints on functions, the four standard interfaces,
+`derive`, and how dispatch works on each backend.
+
+## On this page
+
+**Start here**
+
+- [When to use an interface](#when-to-use-an-interface)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+- [Defining an Interface](#defining-an-interface): [default implementations](#default-implementations), [superinterfaces](#superinterfaces)
+- [Implementing an Interface](#implementing-an-interface)
+- [Conditional Implementations](#conditional-implementations)
+- [Using Interfaces in Function Signatures](#using-interfaces-in-function-signatures)
+
+**The standard interfaces**
+
+- [Standard Interfaces](#standard-interfaces): [`Eq`](#eqa-equality), [`Ord`](#orda-ordering) and [`compare` on `Float`](#built-in-compare-on-float-and-nan), [`Show`](#showa-string-representation), [`Hash`](#hasha-hashing)
+- [`derive`: Automatic Implementations](#derive-automatic-implementations)
+
+**Reference**
+
+- [A Complete Example: Implementing a Container](#a-complete-example-implementing-a-container)
+- [Interface Dispatch](#interface-dispatch)
+- [See also](#see-also)
+
+## When to use an interface
+
+| You want | Write |
+|---|---|
+| One operation name that works across several of your types | `interface Name(a)` with the signature, and an `impl` per type |
+| Equality, ordering, printing or hashing for your own type | `derive Eq, Ord, Show, Hash for T`; hand-write an `impl` only when structure is the wrong answer |
+| A function that accepts any type with that operation | A `when Iface(a)` constraint on the function |
+| Two constraints on one function | A superinterface that `requires` both, and constrain on that |
+| An implementation that depends on the element type | `impl Show(Bag(a)) when Show(a)` |
+| A type as a `Map` key or `Set` element | `Hash` and `Eq`, usually derived |
+| A type that crosses the network or a hot deploy | `derive Json`; see [Clustering]({{ site.baseurl }}/docs/clustering/) |
+
+Do not reach for an interface to model a type hierarchy: there is no inheritance, and
+a variant type with a `match` is usually the simpler tool when the set of cases is
+closed.
+
+## How it fits with the rest of March
+
+| Concept | Where interfaces meet it | Chapter |
+|---|---|---|
+| **Type system** | Interfaces constrain type variables; a `when` clause is part of the function's type. | [Type System]({{ site.baseurl }}/docs/types/) |
+| **Pattern matching** | An `impl` body is ordinarily a `match` over the type's constructors; `derive Ord` orders variants by declaration order. | [Pattern Matching]({{ site.baseurl }}/docs/pattern-matching/) |
+| **Standard library** | `Map` and `Set` need `Hash` and `Eq`; `Sort` takes comparators built from `Ord`; stdlib types already implement the four standard interfaces. | [Standard Library]({{ site.baseurl }}/docs/stdlib/) |
+| **Clustering and hot reload** | `derive Json` is the codec a typed remote message or a protocol payload needs; two types with one short name cannot both derive it. | [Clustering]({{ site.baseurl }}/docs/clustering/), [Choreography]({{ site.baseurl }}/docs/choreography/) |
+| **Interpreter vs compiled** | The compiled backend resolves most dispatch statically; the interpreter uses a runtime table and cannot qualify a method name with its module. | [Interface Dispatch](#interface-dispatch) |
 
 ---
 
@@ -314,7 +369,7 @@ Required for keys in `Map` and elements in `Set`.
 
 ## `derive`: Automatic Implementations
 
-**The bug `derive` kills:** field drift. A hand-written `eq` or `show` that
+**What `derive` prevents:** field drift. A hand-written `eq` or `show` that
 enumerates a record's fields silently goes stale the moment you add a field;
 the new field just isn't compared or printed, and no diagnostic appears. `derive`
 regenerates the implementation from the type definition on every build, so adding
@@ -439,7 +494,7 @@ end
 
 For the **compiled backend**, the compiler resolves most interface dispatch at compile time (after monomorphization): a call site with a statically known argument type is compiled to a direct function call to the concrete implementation, with no boxing for primitive types and no per-call overhead.
 
-That compile-time-resolved picture is not the whole story, though: it describes the compiled backend's common case, not a single dispatch mechanism the whole language shares. See `core-march.md` §4.4.2 ("Method dispatch: `impl_tbl` vs. ordinary lexical `env` binding") for the full, precise operational account, which this section summarizes:
+That compile-time-resolved picture describes the compiled backend's common case, not a single dispatch mechanism the whole language shares. See `core-march.md` §4.4.2 ("Method dispatch: `impl_tbl` vs. ordinary lexical `env` binding") for the full, precise operational account, which this section summarizes:
 
 - The **built-in type-directed interfaces** (`Show`, `Eq`, `Ord`, `Hash`) dispatch, in the **interpreter**, through a real **runtime hashtable** (`impl_tbl`, keyed `(interface, type_name)`) looked up by the argument's dynamic type at the call site. This is real runtime type-directed dispatch, not something resolved ahead of time.
 - **User-defined interfaces** used to get no dispatch table at all and overlapping impls were silently "last one wins"; that's no longer the case. **Impl coherence** (checked at declaration) now rejects a second `impl Speak(Dog)` for the same `(interface, type)` pair as an immediate compile error ("Overlapping implementation ... A type may implement an interface at most once"), so it's a diagnostic, not silent shadowing. Separately, **FQN dispatch identity** (commit `44e7a6bb7`, #57; `core-march.md` §4.4.3) lets two truly distinct types that happen to share a short name across different modules (e.g. an unrelated `Thing` declared in two library modules) each `impl` the same general interface and dispatch correctly by the value's runtime type, in *both* backends, when the collision is present: the interpreter qualifies its dispatch table by declaring module and the compiled backend generates a runtime ctor-tag dispatch function for the ambiguous call sites. One narrow, pre-existing gap remains in the **interpreter only**: calling an interface method unqualified from a module other than the one that declared the `impl` can fail to resolve (`unbound variable`) even when the identical call compiles and runs correctly. This shows up again even with no short-name collision at all, so it's a general interpreter scoping limitation, not specific to the collision-dispatch mechanism. See `core-march.md` §4.4.2/§4.4.3 for the full operational account.
@@ -471,8 +526,9 @@ So "no vtables or runtime type lookups" is accurate for the compiled backend's s
 
 ---
 
-## Next Steps
+## See also
 
 - [Types](types.md): types you implement interfaces for
 - [Standard Library](stdlib.md): stdlib types and their interface implementations
 - [Pattern Matching](pattern-matching.md): using `match` with interface-dispatched values
+- [Clustering]({{ site.baseurl }}/docs/clustering/#typed-remote-messages-nodesend-and-remote): `derive Json` as the wire codec
