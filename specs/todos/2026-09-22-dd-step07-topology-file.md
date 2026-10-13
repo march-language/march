@@ -22,10 +22,11 @@ completion, hover).
   a written `caps` is enforced against role grants, hook signatures and the pool's
   reach; body and actor `init` shapes against the hook's `Env`; `IO.Foreign` outside an
   isolated pool behind `--topology-isolate-foreign`.
-- **The widening gate (D26).** `forge deploy hot --grant-cap` still does not see pool
-  capabilities, and `forge build` does not warn when a pool's derived caps widen. The
-  derived values now exist; what is missing is recording the previous deploy's and
-  comparing.
+- ~~**The widening gate (D26).**~~ Done 2026-10-13:
+  [../progress/2026-10-13-dd-d26-widening-gate.md](../progress/2026-10-13-dd-d26-widening-gate.md)
+  (`forge/lib/pool_caps.ml`: `forge deploy hot` compares each pool's derived caps with
+  `.forge/deploy/<env>/derived.json` and stops unless `--grant-cap` covers a widening;
+  `forge build` warns; `forge deploy --plan` marked it since step 10b).
 - **Derived `initiates` through a closure value or an interface method.** The typed
   derivation follows the typechecker's reference graph (`fn_refs`), which records
   names referenced as values too, but a call through a closure received as a parameter
@@ -34,5 +35,6 @@ completion, hover).
 - **`k8s` generator** comes with its backend (step 10 onwards), per II.6.
 - **`replicas`** is parsed and exported but no backend consumes it.
 
-**Acceptance for the rest:** a code change that widens a pool's derived caps stops
-`forge deploy hot` at the monotonicity gate unless `--grant-cap` names it.
+**Acceptance for the rest:** a pool's derived `initiates` include a role initiated
+through a closure value received as a parameter or through an interface method; the
+`k8s` generator and `replicas` land with their backend (step 10 onwards).

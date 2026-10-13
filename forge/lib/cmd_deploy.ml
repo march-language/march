@@ -94,7 +94,7 @@ let schemas_in dir build = Filename.concat dir (build ^ ".schemas.json")
 let base_in dir build = Filename.concat dir (build ^ ".base.json")
 let schemas_file c build = schemas_in (dir c) build
 let base_file c build = base_in (dir c) build
-let derived_file c = Filename.concat (dir c) "derived.json"
+let derived_file c = Pool_caps.baseline_file ~root:c.root c.env
 let protocols_dir c = Filename.concat (dir c) "protocols"
 let split_file c = Filename.concat (dir c) "pending_split.json"
 let work_dir c = Filename.concat (dir c) "build"
@@ -225,19 +225,10 @@ let base_runtime c build =
   | Some j -> (match Yojson.Safe.Util.member "runtime" j with `String s when s <> "" -> Some s | _ -> None)
   | None -> None
 
-let derived_of_json j : Deploy_plan.derived option =
-  let module U = Yojson.Safe.Util in
-  try
-    Some (List.map (fun (pool, v) ->
-        (pool, (List.map U.to_string (U.to_list (U.member "caps" v)),
-                List.map U.to_string (U.to_list (U.member "initiates" v)))))
-        (U.to_assoc j))
-  with _ -> None
-
-let derived_json (d : Deploy_plan.derived) : Yojson.Safe.t =
-  `Assoc (List.map (fun (pool, (caps, inits)) ->
-      (pool, `Assoc [ ("caps", `List (List.map (fun s -> `String s) caps));
-                      ("initiates", `List (List.map (fun s -> `String s) inits)) ])) d)
+(* derived.json's format is Pool_caps's: [forge deploy hot] reads and
+   records the same file (the D26 widening gate). *)
+let derived_of_json = Pool_caps.derived_of_json
+let derived_json = Pool_caps.derived_json
 
 (* ── Protocol versions (D21) ──────────────────────────────────────────── *)
 

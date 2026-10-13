@@ -210,6 +210,43 @@ Prints the digest plus the derived facts:
 The JSON schema is documented in
 [specs/features/topology.md](https://github.com/march-language/march/blob/main/specs/features/topology.md).
 
+## Derived capabilities and the widening gate
+
+A pool's derived `caps` are not unchecked: a code change that makes a pool reach a
+capability it did not reach at the last deploy (a helper starts calling `file_write`,
+say) is a widening, and goes through the same monotonicity gate as a hot deploy's
+function and role capabilities. The baseline is `.forge/deploy/<env>/derived.json`
+(`default` without `--env`), each pool's derived `caps` and `initiates`, written when a
+`forge deploy` or `forge deploy hot` completes.
+
+- **`forge deploy hot`** compares before it builds. A pool that widens stops the deploy:
+
+  ```
+  error: hot deploy would widen pool edge's derived capabilities (D26)
+    last deployed caps:    IO.Console   (the default environment)
+    new version adds:      IO.FileWrite
+    A hot deploy may only narrow authority. To authorize this widening, re-run with:
+        forge deploy hot --grant-cap IO.FileWrite
+  ```
+
+  `--grant-cap <CAP>` names the capability, not the pool, and is matched by subsumption
+  (`--grant-cap IO.FileSystem` covers `IO.FileWrite`); it authorizes that capability for
+  every pool that widens to it, and prints `granted widening: pool edge gains
+  IO.FileWrite (via --grant-cap IO.FileWrite)`. Narrowing is always allowed. A pool new
+  to the record widens by all its caps. With no record (a first deploy) the gate is
+  permissive, with a note; with a record but no derivation (the compiler could not run)
+  it refuses.
+- **`forge deploy --plan`** marks it in block 6 (`back derived caps (D26) widens to
+  IO.FileWrite: needs --grant-cap IO.FileWrite`), and `forge deploy` blocks that pool.
+- **`forge build`** warns, once per pool and recorded environment:
+
+  ```
+  warning: pool edge's derived caps widen since the last deploy to env prod: adds IO.FileWrite; deploying it needs --grant-cap IO.FileWrite
+  ```
+
+A written `caps` is an upper limit the compiler enforces, so it never widens silently;
+the gate is what keeps an omitted one from doing so.
+
 ## `forge topology gen <target>`
 
 Built-in targets, each written to stdout behind `# ==> <file> <==` markers, or under a

@@ -720,6 +720,138 @@ let test_restrict_manifest () =
   Alcotest.(check string) "no slots known: unchanged" path (Cluster_deploy.restrict_manifest ~slots:[] ~dir path);
   Alcotest.(check string) "no slot in it: unchanged" path (Cluster_deploy.restrict_manifest ~slots:[ "X" ] ~dir path)
 
+
+(* ── D26 for [forge deploy hot] and [forge build]: Pool_caps ─────────────── *)
+
+(** A throwaway topology project; [f root proj]. *)
+let with_topology_project f =
+  let root = Filename.temp_dir "pool_caps_" "" in
+  Fun.protect ~finally:(fun () -> ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote root))))
+    (fun () ->
+       let write path text = Out_channel.with_open_bin (Filename.concat root path) (fun oc -> output_string oc text) in
+       write "forge.toml" "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"app\"\n";
+       Sys.mkdir (Filename.concat root "lib") 0o755;
+       write "lib/app.march" "mod App do\n  mod Edge do\n    fn start() do () end\n  end\n  fn main() do () end\nend\n";
+       write "topology.toml" "[pool.edge]\nstart = \"App.Edge.start\"\nhosts = [\"root@e1\"]\n";
+       let proj = match Project.load_from_dir root with Ok p -> p | Error m -> Alcotest.fail m in
+       f root proj)
+
+let derived_v1 : P.derived = [ ("edge", ([ "IO.Console" ], [])); ("back", ([ "IO.NetConnect" ], [])) ]
+let derived_wide : P.derived = [ ("edge", ([ "IO.Console"; "IO.FileWrite" ], [])); ("back", ([ "IO.NetConnect" ], [])) ]
+let derived_narrow : P.derived = [ ("edge", ([], [])); ("back", ([ "IO.NetConnect" ], [])) ]
+
+let derive_as d = fun (_ : Project.project) -> Ok d
+
+(** Run [f] with stderr captured into a string. *)
+let capture_stderr f =
+  let tmp = Filename.temp_file "pool_caps_err" ".txt" in
+  flush stderr;
+  let saved = Unix.dup Unix.stderr in
+  let fd = Unix.openfile tmp [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
+  Unix.dup2 fd Unix.stderr; Unix.close fd;
+  let r = Fun.protect ~finally:(fun () -> flush stderr; Unix.dup2 saved Unix.stderr; Unix.close saved) f in
+  let text = In_channel.with_open_bin tmp In_channel.input_all in
+  Sys.remove tmp;
+  (r, text)
+
+let gate ?(grant = []) ?env ~d proj =
+  capture_stderr (fun () -> Pool_caps.deploy_gate ~derive:(derive_as d) ~proj ~env ~grant_caps:grant ())
+
+let test_pool_caps_widening_refused () =
+  with_topology_project (fun root proj ->
+      Pool_caps.record ~root None derived_v1;
+      let (r, err) = gate ~d:derived_wide proj in
+      (match r with
+       | Ok _ -> Alcotest.fail "a widened pool deployed without --grant-cap"
+       | Error m -> expect "error" m [ "pool capability widening" ]);
+      expect "diagnostic" err [ "error: hot deploy would widen pool edge's derived capabilities (D26)";
+                                "last deployed caps:    IO.Console";
+                                "new version adds:      IO.FileWrite";
+                                "forge deploy hot --grant-cap IO.FileWrite" ];
+      refuse "diagnostic" err [ "pool back" ];
+      Alcotest.(check bool) "the baseline is untouched" true (Pool_caps.read_baseline ~root None = Some derived_v1);
+      (* an env's suggestion carries its --env *)
+      Pool_caps.record ~root (Some "prod") derived_v1;
+      let (_, err) = gate ~env:"prod" ~d:derived_wide proj in
+      expect "env diagnostic" err [ "forge deploy hot --env prod --grant-cap IO.FileWrite"; "(env prod)" ])
+
+let test_pool_caps_granted_recorded () =
+  with_topology_project (fun root proj ->
+      Pool_caps.record ~root None derived_v1;
+      (* a broader grant covers it, by subsumption *)
+      List.iter (fun g ->
+          let (r, err) = gate ~grant:[ g ] ~d:derived_wide proj in
+          match r with
+          | Error m -> Alcotest.failf "--grant-cap %s refused: %s\n%s" g m err
+          | Ok record ->
+            Alcotest.(check bool) "not recorded before the deploy completes" true
+              (Pool_caps.read_baseline ~root None = Some derived_v1);
+            record ();
+            Alcotest.(check bool) "recorded" true (Pool_caps.read_baseline ~root None = Some derived_wide);
+            Pool_caps.record ~root None derived_v1)
+        [ "IO.FileWrite"; "IO" ];
+      (* a grant of something else is inert *)
+      let (r, _) = gate ~grant:[ "IO.Process" ] ~d:derived_wide proj in
+      Alcotest.(check bool) "an unrelated grant does not authorize it" true (Result.is_error r);
+      let ws = Pool_caps.widenings ~prior:derived_v1 ~current:derived_wide ~grant_caps:[ "IO.FileWrite" ] in
+      Alcotest.(check (list string)) "granted line"
+        [ "  granted widening: pool edge gains IO.FileWrite (via --grant-cap IO.FileWrite)" ] (Pool_caps.granted_lines ws))
+
+let test_pool_caps_narrow_unchanged_first () =
+  with_topology_project (fun root proj ->
+      (* first deploy: no baseline, permissive, recorded on completion *)
+      (match gate ~d:derived_wide proj with
+       | (Ok record, _) -> record ()
+       | (Error m, _) -> Alcotest.failf "first deploy refused: %s" m);
+      Alcotest.(check bool) "first deploy recorded" true (Pool_caps.read_baseline ~root None = Some derived_wide);
+      (match gate ~d:derived_wide proj with
+       | (Ok _, _) -> ()
+       | (Error m, _) -> Alcotest.failf "unchanged refused: %s" m);
+      (match gate ~d:derived_narrow proj with
+       | (Ok record, _) -> record ()
+       | (Error m, _) -> Alcotest.failf "narrowed refused: %s" m);
+      Alcotest.(check bool) "narrowing recorded" true (Pool_caps.read_baseline ~root None = Some derived_narrow);
+      (* the plan's file format: [forge deploy] and [forge deploy hot] share it *)
+      Alcotest.(check bool) "same file as forge deploy's derived.json" true
+        (Pool_caps.read_file (Filename.concat (Filename.concat (Filename.concat root ".forge") "deploy")
+                                 (Filename.concat "default" "derived.json")) = Some derived_narrow);
+      (* a baseline but no derivation: refuse rather than pass blind *)
+      let (r, _) = capture_stderr (fun () ->
+          Pool_caps.deploy_gate ~derive:(fun _ -> Error "no compiler") ~proj ~env:None ~grant_caps:[] ()) in
+      Alcotest.(check bool) "fails closed" true (Result.is_error r))
+
+let test_pool_caps_build_warning () =
+  with_topology_project (fun root proj ->
+      Alcotest.(check (list string)) "no deploy recorded: nothing to compare" []
+        (Pool_caps.build_warnings ~derive:(derive_as derived_wide) ~proj ());
+      Pool_caps.record ~root None derived_v1;
+      Pool_caps.record ~root (Some "prod") derived_wide;
+      Alcotest.(check (list string)) "warns against the default env only"
+        [ "warning: pool edge's derived caps widen since the last deploy to the default environment: \
+           adds IO.FileWrite; deploying it needs --grant-cap IO.FileWrite" ]
+        (Pool_caps.build_warnings ~derive:(derive_as derived_wide) ~proj ());
+      Alcotest.(check (list string)) "narrowed: silent" []
+        (Pool_caps.build_warnings ~derive:(derive_as derived_narrow) ~proj ()))
+
+(** The hook runs before anything is built: a refusing gate stops
+    [forge deploy hot] even in a project with no [hot-reload] section. *)
+let test_pool_gate_runs_before_build () =
+  with_topology_project (fun root _ ->
+      let cwd = Sys.getcwd () in
+      Sys.chdir root;
+      let r = Fun.protect ~finally:(fun () -> Sys.chdir cwd) (fun () ->
+          let calls = ref [] in
+          let pool_gate _ ~env = calls := env :: !calls; Error "pool gate said no" in
+          let a = Cmd_deploy_hot.deploy ~pool_gate () in
+          let b = Cmd_deploy_hot.deploy_env ~env:"prod" ~pool_gate () in
+          (a, b, List.rev !calls)) in
+      match r with
+      | (Error a, Error b, calls) ->
+        Alcotest.(check string) "deploy" "pool gate said no" a;
+        Alcotest.(check string) "deploy_env" "pool gate said no" b;
+        Alcotest.(check (list (option string))) "env passed" [ None; Some "prod" ] calls
+      | _ -> Alcotest.fail "deploy went ahead past a refusing pool gate")
+
 let () =
   Alcotest.run "deploy-plan" [
     ("mechanism", [
@@ -749,6 +881,11 @@ let () =
     ("authority", [
         Alcotest.test_case "derived caps widening needs --grant-cap (D26)" `Quick test_derived_caps_widening;
         Alcotest.test_case "a role closure widening blocks" `Quick test_role_closure_widening;
+        Alcotest.test_case "deploy hot: a widened pool without --grant-cap is refused (D26)" `Quick test_pool_caps_widening_refused;
+        Alcotest.test_case "deploy hot: --grant-cap authorizes and records (D26)" `Quick test_pool_caps_granted_recorded;
+        Alcotest.test_case "deploy hot: first, unchanged, narrowed pass; no derivation fails closed" `Quick test_pool_caps_narrow_unchanged_first;
+        Alcotest.test_case "forge build warns about a widened pool (D26)" `Quick test_pool_caps_build_warning;
+        Alcotest.test_case "deploy hot runs the pool gate before building" `Quick test_pool_gate_runs_before_build;
       ]);
     ("render", [ Alcotest.test_case "the six blocks of 6.8, in order" `Quick test_six_blocks ]);
     ("cluster backend", [

@@ -176,6 +176,14 @@ let build_cmd =
                  cross-compile a dynamic-glibc Linux binary via $(b,zig cc). \
                  Use $(b,js) to emit an ES module (.mjs) for browsers and Node.js.")
   in
+  (* D26: after a successful build of a topology app, warn about each pool
+     whose derived caps widen relative to a recorded deploy. *)
+  let report binary =
+    (match Project.load () with
+     | Ok proj -> List.iter prerr_endline (Pool_caps.build_warnings ~proj ())
+     | Error _ -> ());
+    Printf.printf "built: %s\n%!" binary
+  in
   let run r d f pkg tgt =
     let cwd = Sys.getcwd () in
     match Workspace.find_root cwd with
@@ -185,18 +193,18 @@ let build_cmd =
         (match Workspace.run_for_members ~root ~members ~package:pkg
                  (fun () ->
                     match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f ?target:tgt () with
-                    | Ok binary -> Printf.printf "built: %s\n%!" binary; Ok ()
+                    | Ok binary -> report binary; Ok ()
                     | Error m   -> Error m) with
          | Ok ()   -> ()
          | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1)
       else begin
         match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f ?target:tgt () with
-        | Ok binary -> Printf.printf "built: %s\n%!" binary
+        | Ok binary -> report binary
         | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
       end
     | _ ->
       match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f ?target:tgt () with
-      | Ok binary -> Printf.printf "built: %s\n%!" binary
+      | Ok binary -> report binary
       | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "build" ~doc:"Build the current project")
@@ -1389,7 +1397,9 @@ let deploy_hot_cmd =
          info ["grant-cap"] ~docv:"CAP"
            ~doc:"Authorize a specific capability widening (repeatable). Each occurrence \
                  permits one capability (or anything it subsumes) that the running \
-                 version did not previously hold.")
+                 version did not previously hold: a changed function's caps, a role's \
+                 closure, or a topology pool's derived caps (for every pool that widens \
+                 to it).")
   in
   let no_cap_gate =
     Arg.(value & flag &
@@ -1401,13 +1411,15 @@ let deploy_hot_cmd =
   in
   let run o s target prefix e c t grant_caps no_cap_gate =
     ignore target; ignore prefix;
+    (* D26: a topology app's derived pool caps go through the same gate. *)
+    let pool_gate proj ~env = Pool_caps.deploy_gate ~proj ~env ~grant_caps () in
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
-        Cmd_deploy_hot.deploy ~output:o ~so:s ~grant_caps ~no_cap_gate ()
+        Cmd_deploy_hot.deploy ~output:o ~so:s ~grant_caps ~no_cap_gate ~pool_gate ()
       else
         Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t
-          ~grant_caps ~no_cap_gate ()
+          ~grant_caps ~no_cap_gate ~pool_gate ()
     in
     match result with
     | Ok () -> ()
