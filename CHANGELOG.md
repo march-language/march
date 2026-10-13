@@ -3717,6 +3717,12 @@ detail.
 
 ### Documentation
 
+- **Site home page pitch rewritten.** The landing layout (what march-lang.org
+  actually serves; the Markdown body of `docs/index.md` is never rendered there)
+  now leads with safety: the grant that bounds a program by `main`'s signature,
+  three safety layers on one function, typed protocols for any number of roles,
+  and capability-gated hot deploys, then actors and FBIP. New hero tagline and
+  lead paragraph.
 - **Landing page pitch leads with safety.** "What makes March different" now
   opens with the grant that bounds a whole program by `main`'s signature, the
   three safety layers on one function, typed protocols for any number of roles,
