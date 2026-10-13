@@ -98,6 +98,8 @@ mod CertAuthz do
       names: fn _ -> Vault.keys(net.names),
       on_peer_closed: fn _ -> 0,
       off_peer_closed: fn _ -> (),
+      on_session_failed: fn (_, _) -> (),
+      off_session_failed: fn _ -> (),
       peer_cert: fn id -> if certified do Vault.get(net.certs, id) else None end,
       own_cert: fn _ -> if certified do Vault.get(net.certs, me) else None end }
   end
