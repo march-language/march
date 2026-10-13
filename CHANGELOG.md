@@ -3453,6 +3453,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Clustering chapter restructured.** `docs/clustering/` now opens with what a
+  cluster is in actor terms, a goal-to-API table, an index of every section,
+  and how the cluster meets actors, capabilities, choreography, hot code reload
+  and topology; the actor-message sections come before the RPC ones. A dead
+  in-page link is fixed. Section bodies are unchanged.
 - **Capabilities chapter restructured.** `docs/capabilities/` now opens with a
   plain statement of the three checks (manifest, upper limit, grant), one
   "which tool do I need" table, an index of every section, and a table of how
