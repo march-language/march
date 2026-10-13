@@ -18,6 +18,183 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Highlights
+
+0.5.0 is a large release: about 2,100 commits since 0.4.0. The full list of
+changes follows these sections. Read **Breaking changes** before upgrading.
+
+**Hot-reload servers need one cold restart after upgrading.** The hot-reload
+ABI is now `march-hcr-v4`, so a server built by an earlier March refuses hot
+patches built by this one. Nothing is deployed, and the server stays up.
+Restart each server once on a build from 0.5.0, and hot deploys work again.
+
+- **Distributed March.** `ClusterNode` runs a cluster (SWIM failure detection,
+  one authenticated connection pair per peer, a name registry, and cross-node
+  monitors). `SessionNode` runs an `@[endpoints]` choreography across two or
+  more nodes, and an actor can host a role. Topology apps get a generated
+  `main`, placement, and `forge run --processes`. `forge host init` and
+  `forge deploy --env` roll a build out over ssh, pool by pool. A protocol
+  change across versions is split into an expand deploy and a contract deploy.
+- **Secured clusters and deploys.** Node certificates (SPIFFE-style names and
+  role permissions) are checked in both directions. Every frame carries a MAC,
+  and an in-cluster control plane delivers certificates and revocations. Signed
+  hot deploys run only the bytes the operator signed. Certificates can't be
+  rolled back and updates can't be replayed.
+- **Hot reload you can deploy with.** Each actor, task and session runs at the
+  epoch it started under, and drains are bounded by soft and hard deadlines.
+  Actor state migrates in order. A patch `.so` no longer carries its own copy
+  of the runtime, and a patch that adds a function no longer crashes the node.
+  The deploy gate refuses a patch that changes a parameter's borrow mode, and a
+  closure from an old version stays callable after that version is reclaimed.
+- **Look inside a running node.** `forge observe` is an interactive view with a
+  `WATCH` stream and crash dumps. `forge top`, `forge diagnose` and
+  `forge status` cover the rest. `Trace` records boundary calls and actor
+  events, `WHICH`/`SOURCE` show the code a node runs, and `forge shell` spawns
+  the program's own actors, with line editing and history.
+- **Tools for compiler bugs.** `--verify-tir` checks the TIR contracts and
+  representation invariants. `march --bisect-pass` finds the pass behind a
+  miscompile, `march --reduce` shrinks a failing program, and `march query`
+  asks one compile a question. `--debug-info` adds function-level DWARF.
+- **Faster compiled code.**
+  - Allocation comes from a vendored mimalloc, and reference-count updates are
+    inlined.
+  - `NativeArray.fold_*` with a lambda is up to 67x faster, and `fold`/`sum`
+    over a `map` compile to one loop.
+  - Float lambdas passed to `List` higher-order functions are up to 25x
+    faster.
+  - Actors that message back and forth are up to 2.6x faster.
+  - `--target-cpu` builds for a specific CPU.
+- **Far fewer compiled-code leaks.** About 60 memory fixes came from ASan, TSan and
+  LSan sweeps, a differential interpreter-vs-compiled sweep, and the TIR
+  verifier. The leaks fixed include every message a compiled actor received,
+  monitors, closures, `Seq`, string `match`, subprocess calls and task
+  cancellation.
+- **Stronger refinement types.** Set refinements (`elts`, `keys`, `card`)
+  arrived, along with non-linear arithmetic and `/` and `%` in predicates.
+  Refinements inside `List(...)` and `Option(...)` are enforced. `List.filter`
+  and other combinators keep what their predicate says, and list contracts are
+  proved from list code.
+- **Language additions.** Tuples are ordered. Actors can take `init`
+  parameters and declare an `on_stop` callback and a `mailbox N policy`. A
+  choreography role's first state has a name, `<P>_<Role>.Entry`. Linearity
+  checking closes several holes (branches, wildcards, closures, record
+  fields).
+- **Better errors.** Mechanical fixes are offered for common syntax slips, and
+  every compiler fix is available as an editor quick fix. A missing `end` is
+  reported at the construct that is missing it. Lexer errors are ordinary
+  diagnostics instead of OCaml backtraces.
+
+### Breaking changes
+
+Each entry is described in full in the sections below, with migration
+detail.
+
+**Language and type checker**
+
+- **Calling or passing a function at the wrong arity is an error**
+  (`arity_mismatch`, `callback_arity_mismatch`). A two-argument function
+  applied one argument at a time used to typecheck, then crash at run time.
+  The check covers a function passed as a callback, a `let h = add` alias, and
+  a callback passed to a let-bound lambda. Call the function with all its
+  arguments, or wrap it in the curried form the hint suggests.
+- **Signature type variables are rigid** (`annotated_tyvar_fixed`). A body that
+  fixes `a` to a concrete type, or makes two signature variables equal, is an
+  error. It was a warning since 2026-09-22. Write the concrete type, or make
+  the body generic.
+- **Linearity is enforced where it used to leak.** Code the checker used to
+  accept is now rejected:
+  - a linear value discarded with `let _ = …` or a `_` pattern;
+  - a linear value consumed on only some branches;
+  - a linear value captured by a closure or local `fn`;
+  - a record whose linear field is both consumed and kept;
+  - an unmarked parameter that holds a `linear` type variable;
+  - a module-level `let` of a linear type.
+- **A module-level `let` annotation is checked.** `let x : Int = "hello"`
+  inside a `mod` used to be accepted.
+- **A path scope that cannot take effect is a compile error.** Examples are a
+  scope on a capability other than the file ones, and a relative path.
+
+**Standard library**
+
+- **`RingBuf` is linear.** Every operation consumes the buffer and hands it
+  back, for example `let (n, rb) = RingBuf.size(rb)`.
+- **`Config` values are read through typed keys.** Write
+  `Config.key(:ns, :name, Config.int())` and pass the key to `put`, `get` and
+  the other accessors, in place of the namespace and name pair.
+- **`ClusterNode.start(io, cfg)` returns `Cap(ClusterNode.Live)`.** The
+  `ClusterHandle` type is gone. Start the node in `main` and pass the
+  capability down.
+- **Finding an actor you weren't handed takes `Cap(Actor.Introspect)`.** This
+  covers `Actor.whereis`, `registered`, `list`, `top_by_mailbox` and
+  `over_mailbox`. `pid_of_int` is replaced by `Actor.pid_from_int(c, n)`. Mint
+  the capability with `Actor.introspect(io)`.
+- **Using the cluster transport directly needs `IO.Mut` and `IO.Clock`.** This
+  applies to `NetKernel`, `ClusterConn`, `NodeSend` and the rest of that layer
+  when a program runs under a narrow grant.
+- **Contract preconditions moved into signatures.** `Stats.median`, `std_dev`,
+  `iqr`, `iqr_default` and `quantile_default` take a non-empty list.
+  `Seq.batched` and `Flow.batch` take a positive `n`, and `Gen.frequency`
+  takes a non-empty list. A provably bad argument is now a compile error. Use
+  `march --check --refine-suggest <fn>` to get the refinement to add to your
+  own function.
+- **A program that cannot be executed is an `Err`.** `Process.run`,
+  `run_stream`, `spawn_async` and `System.cmd` return
+  `Err("cannot execute …")` for a missing or non-executable program, where
+  compiled code used to return `Ok` with exit code 127. Children start with
+  `posix_spawn`, with default signal handling, and on macOS they inherit only
+  stdin, stdout and stderr. Match `Err` instead of checking for 127.
+- **Corrected signatures.**
+  - `get_actor_field` returns `Option(Int)`.
+  - `sha256` is `Bytes -> String`.
+  - `Plot.save` returns `Result(Unit, File.FileError)`.
+  - The `Compress` functions return `Compress.Error`.
+  - `RRB` and `AhoCorasick` use `Array.PVec(a)`.
+- **Choreography session API.**
+  - `run_<Role>` and its fronts return `Result(Session.Outcome, RunError)`.
+    Code that matches `Ok(_)` is unaffected.
+  - A hosted role's `cancel` takes the session: `cancel(s, parked)`.
+  - A session frame refused with `DELIVERY_FAILED` now fails its session. It
+    no longer reaches `ClusterNode.on_delivery_failed`.
+
+**Hot reload and deploys**
+
+- **A patch that changes a parameter's borrow mode is refused**, and the
+  hot-reload ABI is now `march-hcr-v4`. Deploy such a build with a restart.
+  Every hot-reload server needs one cold restart after upgrading (see the top
+  of these notes).
+- **A topology pool's derived capabilities can no longer widen silently.**
+  `forge deploy hot` refuses, before building, a deploy whose pool gains a
+  capability since the environment's last completed deploy. Pass
+  `--grant-cap CAP`, or write the pool's `caps` in `topology.toml`.
+
+**Tooling and flags**
+
+- **`--trmc`, `--no-trmc`, `MARCH_NO_TRMC` and the `respond` builtin are
+  gone.** Tail-recursion-modulo-cons always runs.
+- **`forge.toml` is parsed strictly.** A malformed line is an error that names
+  the line, and an unknown key is a warning.
+- **Compiled `int_shl`/`int_shr` with a shift count outside `[0, 62]`
+  panics,** and interpreted `int_shr` is an arithmetic shift.
+
+### Known issues
+
+- **Each hot deploy keeps one patch `.so` mapped until the node restarts.** A
+  reclaimed version is no longer unloaded, because closures and constants from
+  it may still be in use. The pages are file-backed and mostly clean.
+- **A coordinated type-signature change can still reach a running caller.** The
+  deploy gate accepts a patch that changes a boundary function's types when
+  every caller ships in the same deploy, but a caller already running old code
+  can call the new function. Restart for signature changes.
+  (`specs/todos/2026-10-13-hcr-coordinated-sig-change-running-caller-frame.md`)
+- **Two nested types with the same short name are one type to the checker.**
+  With `mod A do type Note = … end` and `mod B do type Note = … end`, an
+  `A.Note` passed where a `B.Note` is expected passes `--check` and fails at
+  run time. Give the types distinct names.
+- **A function from another module used as a value fails to compile.**
+  `let k = List.length` then `k(xs)` runs interpreted but does not link
+  compiled. Wrap it in a lambda (`fn xs -> List.length(xs)`).
+  (`specs/todos/2026-10-13-other-module-fn-as-value-undefined-symbol.md`)
+
 ### Security
 
 - **`march --shell` / `forge shell` no longer let a node run commands on the operator's

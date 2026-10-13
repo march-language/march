@@ -24,6 +24,8 @@ end
 - Records with functional update syntax (`{ r with field: value }`)
 - Polymorphic functions monomorphized at compile time (no boxing overhead)
 - Linear and affine types for ownership, safe mutation, and actor message-passing isolation
+- Refinement types checked by an SMT solver (z3): `{Int | _ > 0}`, set measures over collections (`elts`, `keys`, `card`), and abstract refinements, so `List.filter` keeps what its predicate proves
+- Capabilities: effects are values (`Cap(IO.FileRead)`), declared with `needs` and checked as a ceiling on the whole program
 
 **Syntax**
 - `fn name(x, y) do ... end`: named functions
@@ -51,6 +53,18 @@ end
 - Actor state updated via record spread: `{ state with count: state.count + 1 }`
 - Structured concurrency via `Task`: `Task.async`, `Task.await`, `Task.race`, `Task.any`, `Task.all_settled`, `Task.scope`
 - Cancellation tokens: `task_cancel_token_new`, `task_cancel`, `task_is_cancelled`, `task_spawn_with_cancel`, `task_cancel_by_id`
+
+**Distribution**
+- Choreographies: an `@[endpoints] protocol` is one global description of an interaction, projected to a typed endpoint API for every role, so a role that sends the wrong message or skips a step is a compile error
+- `ClusterNode`: SWIM membership, one authenticated connection pair per peer, a global name registry, cross-node monitors, and node certificates
+- `SessionNode` runs a choreography's roles on separate nodes; an actor can host a role
+- Topology apps and `forge deploy`: place roles on pools in `topology.toml`, then roll a build out pool by pool
+- Hot code reload: each actor, task and session keeps the code epoch it started under, and state migrates in order
+
+**Operating a running node**
+- `forge shell`: a REPL connected to a live node, which can spawn the program's own actors
+- `forge observe`, `forge top`, `forge diagnose`: actors, mailboxes, crash dumps and leak checks on a running node
+- `Trace`: bounded tracing of boundary calls and actor events; `WHICH` / `SOURCE` show which code a node is running
 
 ## FBIP: Functional But In-Place
 
