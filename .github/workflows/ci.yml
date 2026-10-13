@@ -17,7 +17,7 @@
 #   macos-checks  (macos)               property groups (all but the oracle) + @vault-scale
 #   two-node      (ubuntu) × 3          two-node scenarios, sharded 1/3, 2/3, 3/3;
 #                                       shard 1 also runs the node_discovery soak
-#   conformance   (ubuntu)              @types-check, @grammar-check, @vault-scale, docs
+#   conformance   (ubuntu)              @types-check, @grammar-check, @vault-scale, docs, @demo
 #   tree-sitter   (ubuntu)              tree-sitter-march/ parses what the compiler accepts
 #   sanitize-gate (ubuntu) × 3          ASAN: golden + curated native (shard 1) + two-node 1/3..3/3
 #   ocaml-build   (ubuntu) ─┬─ property-tests × 3
@@ -648,6 +648,19 @@ jobs:
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             python3 scripts/check-stdlib-doctests.py --check
+
+      # Compiles every demo/*.march program (the `demo` alias in demo/dune).
+      # Nothing else in CI builds demo/: at the 0.5.0 cut seven demos had
+      # silently stopped compiling once the cluster transport began requiring
+      # IO.Mut and IO.Clock, and only the release script's targetless
+      # `dune build --root .` noticed. Compile-only; the demos are not run.
+      # Lives here because this job already has the compiler built and the
+      # runtime staged, and it adds ~1 min to a job far off the critical path.
+      - name: Build demo/ programs
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune build @demo/demo
 
   # AddressSanitizer sweep over three corpora on this runner.
   # sanitize.sh covers every specs/lang/golden/*.march; a curated by-name list of

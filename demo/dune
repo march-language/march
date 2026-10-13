@@ -1,3 +1,22 @@
+; Every demo below compiles a demo/*.march program to a native binary.
+; CI builds them all through the `demo` alias (the `conformance` job), so a
+; stdlib or capability change that breaks a demo goes red on the PR that
+; causes it; before that, nothing built demo/ except the release script's
+; targetless `dune build --root .`, and seven demos broke unnoticed until
+; the 0.5.0 cut. A new demo rule must be added to this alias.
+;
+; Each rule depends on the whole stdlib and runtime trees, not a hand-picked
+; list of the stdlib modules it imports: the 0.5.0 breakage came from the
+; cluster transport's capability requirements, which a per-file list can
+; miss when the change lands in a module the list does not name.
+;
+; Build all:  dune build --root . @demo/demo
+(alias
+ (name demo)
+ (deps two_node_rpc.exe two_node_server.exe two_node_client.exe
+       resource_report.exe hcr_server.exe hcr_client.exe
+       load_server.exe load_client.exe))
+
 ; Two-node RPC demo: compiles two_node_rpc.march to a native binary.
 ;
 ; Build:   dune build demo/two_node_rpc.exe
@@ -5,14 +24,8 @@
 (rule
  (targets two_node_rpc.exe)
  (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (file two_node_rpc.march)
-       (file ../stdlib/node_call.march)
-       (file ../stdlib/node_rpc.march)
-       (file ../stdlib/remote_call.march)
-       (file ../stdlib/global_pid.march)
-       (file ../stdlib/net_kernel.march)
-       (file ../stdlib/net_frame.march))
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file two_node_rpc.march))
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_rpc.march)))
 
@@ -24,28 +37,16 @@
 (rule
  (targets two_node_server.exe)
  (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (file two_node_server.march)
-       (file ../stdlib/node_call.march)
-       (file ../stdlib/node_rpc.march)
-       (file ../stdlib/remote_call.march)
-       (file ../stdlib/global_pid.march)
-       (file ../stdlib/net_kernel.march)
-       (file ../stdlib/net_frame.march))
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file two_node_server.march))
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_server.march)))
 
 (rule
  (targets two_node_client.exe)
  (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (file two_node_client.march)
-       (file ../stdlib/node_call.march)
-       (file ../stdlib/node_rpc.march)
-       (file ../stdlib/remote_call.march)
-       (file ../stdlib/global_pid.march)
-       (file ../stdlib/net_kernel.march)
-       (file ../stdlib/net_frame.march))
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file two_node_client.march))
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_client.march)))
 
@@ -58,10 +59,8 @@
 (rule
  (targets resource_report.exe)
  (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (file resource_report.march)
-       (file ../stdlib/cluster_load.march)
-       (file ../stdlib/system.march))
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file resource_report.march))
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} resource_report.march)))
 
@@ -74,30 +73,16 @@
 (rule
  (targets hcr_server.exe)
  (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (file hcr_server.march)
-       (file ../stdlib/cluster_load.march)
-       (file ../stdlib/system.march)
-       (file ../stdlib/node_call.march)
-       (file ../stdlib/node_rpc.march)
-       (file ../stdlib/remote_call.march)
-       (file ../stdlib/global_pid.march)
-       (file ../stdlib/net_kernel.march)
-       (file ../stdlib/net_frame.march))
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file hcr_server.march))
  (action
   (run %{exe:../bin/main.exe} --compile --hot-reload Server -o %{targets} hcr_server.march)))
 
 (rule
  (targets hcr_client.exe)
  (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (file hcr_client.march)
-       (file ../stdlib/node_call.march)
-       (file ../stdlib/node_rpc.march)
-       (file ../stdlib/remote_call.march)
-       (file ../stdlib/global_pid.march)
-       (file ../stdlib/net_kernel.march)
-       (file ../stdlib/net_frame.march))
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file hcr_client.march))
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} hcr_client.march)))
 
@@ -110,31 +95,15 @@
 (rule
  (targets load_server.exe)
  (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (file load_server.march)
-       (file ../stdlib/cluster_load.march)
-       (file ../stdlib/system.march)
-       (file ../stdlib/node_call.march)
-       (file ../stdlib/node_rpc.march)
-       (file ../stdlib/remote_call.march)
-       (file ../stdlib/global_pid.march)
-       (file ../stdlib/net_kernel.march)
-       (file ../stdlib/net_frame.march))
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file load_server.march))
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} load_server.march)))
 
 (rule
  (targets load_client.exe)
  (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (file load_client.march)
-       (file ../stdlib/cluster_load.march)
-       (file ../stdlib/system.march)
-       (file ../stdlib/node_call.march)
-       (file ../stdlib/node_rpc.march)
-       (file ../stdlib/remote_call.march)
-       (file ../stdlib/global_pid.march)
-       (file ../stdlib/net_kernel.march)
-       (file ../stdlib/net_frame.march))
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file load_client.march))
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} load_client.march)))
