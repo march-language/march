@@ -20,6 +20,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A topology app under continuous session traffic stops on Ctrl-C/SIGTERM.**
+  A node whose hook tasks kept starting sessions (an `initiate_<Role>` loop) never
+  drained: each new session kept the count above zero, so every drain ran to its
+  `[drain] hard_ms` (120 s by default) and exited 1, and under `forge run
+  --processes` the pools after it then waited their own turn. A draining node now
+  starts no new session (`initiate_<Role>` returns `Err(Left("draining"))`); a
+  session whose initiating node died while it formed now gives up once the cluster
+  declares that node dead instead of holding its slot for 30 s; and a second
+  SIGTERM or SIGINT to a draining node stops it at once, as documented, instead of
+  being ignored.
 - **The release archives include the vendored C libraries, so a prebuilt
   `march` can compile programs again.** The v0.5.0 archives bundled
   `runtime/*.c` and `*.h` but not `runtime/third_party/` (BLAKE3 and mimalloc,

@@ -2388,12 +2388,24 @@ mod SessionNode do
                                       control: task_spawn(fn _ -> 0) })
             _ -> None
           end))
-      Some((missing, _, _)) ->
-        if left <= 0 do Err(missing) else
+      Some((missing, g, _)) ->
+        -- A peer on a node SWIM has declared dead never links: give up now
+        -- rather than at [left]. A session whose initiator's node died
+        -- while it formed otherwise held its offer's slot for the whole
+        -- 30 s, and kept that node's own SIGTERM drain from finishing.
+        if left <= 0 || node_dead(node, g.node_id) do Err(missing) else
           sleep_ms(50)
           cluster_links(node, found, left - 50)
         end
     end
+  end
+
+  pfn node_dead(node : Cap(ClusterNode.Live), node_id : String) : Bool do
+    List.any(ClusterNode.all_members(node), fn m ->
+      m.node_id == node_id && (match m.status do
+        Membership.Dead -> true
+        _ -> false
+      end))
   end
 
   -- This party gives up before it formed (a peer never registered, a
@@ -2527,6 +2539,23 @@ mod SessionNode do
   """
   fn initiated(node : Cap(ClusterNode.Live)) : Int do
     Vault.get_or(initiated_table(node), "n", 0)
+  end
+
+  doc """
+  From now on, every `initiate` on [node] is refused with
+  `Err(Left("draining"))` before it invites anyone: the node is draining
+  (`Topology`'s SIGTERM drain calls it), so a task that keeps starting
+  sessions -- a pool hook's traffic loop -- cannot keep the drain from ever
+  seeing zero sessions. Sessions already started run on. Permanent for the
+  node.
+  """
+  fn refuse_initiations(node : Cap(ClusterNode.Live)) : () do
+    Vault.set(initiated_table(node), "refuse", 1)
+  end
+
+  doc "Has `refuse_initiations` been called for [node]?"
+  fn refusing_initiations(node : Cap(ClusterNode.Live)) : Bool do
+    Vault.get(initiated_table(node), "refuse") != None
   end
 
   pfn initiated_table(node : Cap(ClusterNode.Live)) : Vault(Int) do
@@ -2846,8 +2875,14 @@ mod SessionNode do
         let start = o.start
         let me = o.worker
         let wkey = withdraw_key(o, sid)
+        let onode = o.node
+        -- Abandoned while still forming once the initiator withdraws it, or
+        -- once SWIM has declared the initiator's node dead: it can no longer
+        -- withdraw, and its role will never be registered, so the session
+        -- otherwise held this offer's slot for the whole 30 s peer wait
+        -- (and kept this node's SIGTERM drain from finishing).
         let _ = task_spawn(fn _ -> do
-          let _ = start(sid, fn _ -> Vault.get(flags, wkey) != None)
+          let _ = start(sid, fn _ -> Vault.get(flags, wkey) != None || node_dead(onode, from))
           let _ = Vault.delete(flags, wkey)
           let _ = send(me, Ended(o, sid))
           0
@@ -3411,7 +3446,12 @@ mod SessionNode do
       : Result(Session.Outcome, RunError) do
     -- Counted from the invitations on: a session still forming when a
     -- SIGTERM drain starts is waited for too (its offers refuse or it forms).
-    counted(node, fn () -> initiate_counted(io, node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body))
+    -- Once the drain has started, a new one is refused outright: under
+    -- continuous traffic the count otherwise never reached zero and every
+    -- drain ran to its hard deadline (specs/progress/2026-10-13-topology-
+    -- drain-continuous-initiators.md).
+    if refusing_initiations(node) do Err(RunError.Left("draining"))
+    else counted(node, fn () -> initiate_counted(io, node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body)) end
   end
 
   pfn initiate_counted(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,

@@ -1062,11 +1062,16 @@ mod Topology do
     List.each(Vault.get_or(st.roles, "roles", Nil), fn r ->
       if ranked(r.place) do mark(node, st, r.name, false) else () end)
     List.each(Vault.all(st.offers), fn kv -> match kv do (name, o) -> retire(st, name, o) end)
+    -- And start no session of its own: a hook's task that initiates
+    -- sessions back to back now gets `Err(Left("draining"))`, so the drain
+    -- can reach zero sessions instead of running to its hard deadline.
+    SessionNode.refuse_initiations(node)
   end
 
   doc """
   On SIGTERM or SIGINT: close every offer of [node] (new invitations are
-  refused), drain every code epoch the process runs (running sessions end
+  refused) and refuse every new `initiate` on it (`Err(Left("draining"))`),
+  drain every code epoch the process runs (running sessions end
   at their next loop boundary, D27, and actors take the epoch drain's
   deadlines), then exit 0 once no session is running. At [soft_ms] a drain
   still waiting is reported; at [hard_ms] the process exits 1, naming how
@@ -1078,10 +1083,21 @@ mod Topology do
     Signal.watch(Signal.Int, fn -> drain(node, soft_ms, hard_ms))
   end
 
-  doc "Drain [node] now, as SIGTERM does under `drain_on_signal`."
+  doc """
+  Drain [node] now, as SIGTERM does under `drain_on_signal`. Called again
+  while a drain runs (a second signal), it stops the process at once, with
+  status 1.
+  """
   fn drain(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : () do
     let st = state_of(node)
-    if Vault.get(st.meta, "closing") != None do () else
+    if Vault.get(st.meta, "draining") != None do
+      -- The runtime's own second-signal escape only ends an HTTP server's
+      -- loop, so without this a draining node ignored every further
+      -- SIGTERM until its hard deadline.
+      report("second signal: stopping " ++ label(node) ++ " now with " ++ int_to_string(unfinished(node)) ++ " session(s) still running")
+      process_exit(1)
+    else if Vault.get(st.meta, "closing") != None do () else
+      Vault.set(st.meta, "draining", 1)
       report("draining " ++ label(node) ++ " (soft " ++ int_to_string(soft_ms) ++ " ms, hard "
              ++ int_to_string(hard_ms) ++ " ms)")
       close_all(node)
@@ -1095,7 +1111,7 @@ mod Topology do
       let t0 = unix_time_ms()
       let _ = task_spawn(fn _ -> drain_wait(node, soft_ms, hard_ms, t0, false))
       ()
-    end
+    end end
   end
 
   pfn drain_wait(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int, t0 : Int, warned : Bool) : Int do

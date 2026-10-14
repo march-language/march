@@ -291,8 +291,10 @@ generated `main`:
    declares, then the node handle;
 3. opens the offers the topology places on this node, re-evaluating as nodes join
    and leave;
-4. on SIGTERM or SIGINT, closes every offer, lets running sessions finish, and exits
-   (`[drain] hard_ms` is the most it waits);
+4. on SIGTERM or SIGINT, closes every offer, starts no new session (an
+   `initiate_<Role>` from a hook's task returns `Err(Left("draining"))`), lets
+   running sessions finish, and exits (`[drain] hard_ms` is the most it waits; a
+   second signal stops it at once, with status 1);
 5. offers a role again if its offer, or the actor serving it, dies.
 
 A process of a shared build runs the pools named in `MARCH_POOLS` (comma-separated),

@@ -1,0 +1,3 @@
+node-a: up
+topology: drained node-a
+topology: draining node-a (soft 1000 ms, hard 4000 ms)
