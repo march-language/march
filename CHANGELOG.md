@@ -18,6 +18,15 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+- A compiled program whose scheduler is about to resume a corrupt or freed
+  green-thread context now stops with a `march_sched[BUG]: dispatch of pid N
+  ... with a context it did not save` line (the pid, the saved stack pointer
+  and the stack bounds) and aborts. Before, that switch blocked SIGSEGV
+  through the garbage signal mask and then faulted, so the process died with
+  only the shell's `Segmentation fault (core dumped)` and no `march: fatal`
+  line, which is all one CI crash of `native_run_until_idle_ping_pong` left.
+
 ### Fixed
 
 - **The release archives include the vendored C libraries, so a prebuilt

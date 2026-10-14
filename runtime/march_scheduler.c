@@ -2088,6 +2088,58 @@ static void proc_free(void *v) {
                               memory_order_relaxed);
 }
 
+/* Dispatch-time check of the context about to be resumed.
+ *
+ * Resuming a corrupt or freed ucontext is the one way this runtime dies of
+ * SIGSEGV WITHOUT a "march: fatal" line: setcontext/swapcontext restores the
+ * saved uc_sigmask before jumping to the saved pc, so a garbage context
+ * typically blocks SIGSEGV and then faults, and the kernel kills the process
+ * with the default action ("Segmentation fault (core dumped)", nothing else).
+ * That is exactly what native_run_until_idle_ping_pong printed once on the
+ * Linux amd64 CI leg (specs/todos/2026-10-04-run-until-idle-ping-pong-
+ * segfault-14-scheds.md).  A legitimately saved green-thread context never
+ * blocks the synchronous fault signals (sched_spawn_common strips them, and
+ * no green thread switches out with them blocked) and its stack pointer is
+ * inside its own reservation, so either violation means the proc's context
+ * is not one it saved: report it here, at the dispatch, with the pid and
+ * the bad words, and abort, instead of letting the switch die silently.
+ *
+ * Cost: two bit tests and, on Linux, two compares, next to a swapcontext
+ * that itself makes a sigprocmask syscall. */
+static uint64_t ctx_saved_sp(const ucontext_t *uc) {
+#if defined(__linux__) && defined(__x86_64__)
+    return (uint64_t)uc->uc_mcontext.gregs[REG_RSP];
+#elif defined(__linux__) && defined(__aarch64__)
+    return (uint64_t)uc->uc_mcontext.sp;
+#else
+    (void)uc;   /* macOS: uc_mcontext is a pointer; not dereferenced here */
+    return 0;
+#endif
+}
+
+static void dispatch_check_ctx(const march_scheduler *sched, const march_proc *p) {
+    const ucontext_t *uc = p->ctx;
+    int mask_bad = sigismember(&uc->uc_sigmask, SIGSEGV) == 1
+                   || sigismember(&uc->uc_sigmask, SIGBUS) == 1;
+    uint64_t sp = ctx_saved_sp(uc);
+    uint64_t lo = (uint64_t)(uintptr_t)p->stack_mmap_base;
+    uint64_t hi = lo + (uint64_t)p->stack_alloc;
+    int sp_bad = sp != 0 && lo != 0 && (sp < lo || sp > hi);
+    if (__builtin_expect(!mask_bad && !sp_bad, 1)) return;
+    fprintf(stderr,
+            "march_sched[BUG]: dispatch of pid %lld on scheduler %d with a "
+            "context it did not save (%s%s%s): saved sp=0x%llx, stack "
+            "[0x%llx, 0x%llx], status=%d\n",
+            (long long)p->pid, sched->id,
+            mask_bad ? "signal mask blocks SIGSEGV/SIGBUS" : "",
+            mask_bad && sp_bad ? ", " : "",
+            sp_bad ? "stack pointer outside its stack" : "",
+            (unsigned long long)sp, (unsigned long long)lo,
+            (unsigned long long)hi,
+            (int)atomic_load_explicit(&p->status, memory_order_acquire));
+    march_abort(__func__);
+}
+
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
      * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
@@ -2331,6 +2383,7 @@ static void sched_loop(march_scheduler *sched) {
                     (long long)p->pid);
             march_abort(__func__);
         }
+        dispatch_check_ctx(sched, p);
         MARCH_ASAN_SWITCH_TO_PROC(sched, p);
         MARCH_TSAN_SWITCH_TO_PROC(p);
         atomic_store_explicit(&sched->busy, 1, memory_order_relaxed);
