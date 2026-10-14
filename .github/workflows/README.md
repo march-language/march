@@ -139,8 +139,17 @@ generated files must be committed. Three bots keep them fresh after a merge:
 `gen-stdlib-docs.yml` (stdlib pages + search index, on stdlib changes),
 `sync-docs-search-index.yml` (search index, on any docs change) and
 `gen-browser-repl.yml` (the in-browser REPL, live compiler and Tetris files under
-`docs/assets/`, on compiler, stdlib or `js/` changes). PRs should not commit
-`docs/pagefind/`; `doc-lint` rejects it. PRs need not regenerate the browser files. `deploy-pages.yml` is a
+`docs/assets/`, on compiler, stdlib or `js/` changes). A stdlib merge
+usually fires all three, and all push to `main`. The two index bots retry a rejected
+push by resetting onto the new `main` and regenerating the index there (never
+`git pull --rebase`: Pagefind's file names are not reproducible, so two indexes
+conflict). gen-stdlib-docs keeps its generated pages across a retry, and stops
+if `stdlib/**` changed meanwhile, since its newer queued run will publish those.
+gen-browser-repl never touches `docs/pagefind/`, so it retries with
+`git pull --rebase`. Their pushes use `GITHUB_TOKEN`, so they trigger no other
+workflow (not each other, not `deploy-pages.yml`); GitHub's Pages build still picks
+them up. PRs should not commit `docs/pagefind/`; `doc-lint` rejects it. PRs need not
+regenerate the browser files. `deploy-pages.yml` is a
 separate path that publishes to the external `march-language.github.io` repo.
 
 ## Running the same checks locally
