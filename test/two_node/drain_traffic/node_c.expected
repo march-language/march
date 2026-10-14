@@ -1,0 +1,3 @@
+node-c: traffic flowing
+topology: drained node-c
+topology: draining node-c (soft 1000 ms, hard 4000 ms)

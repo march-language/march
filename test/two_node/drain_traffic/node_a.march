@@ -1,0 +1,56 @@
+-- Three-node scenario "drain_traffic": node-a serves Order.Stock through
+-- `Topology.place` and drains on SIGTERM, as a generated topology `main`
+-- does. Stock answers `have` for items whose last two digits are at most 3,
+-- so every session runs three loop iterations and then `out`. See
+-- scenario.sh.
+mod DrainTrafficA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Signal
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : Int
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : Int
+        out  -> Stock -> Shop : Int
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  pfn stock(s : Cap(Session.Live), st : Order_Stock.Entry) : Order_Stock.Yield do
+    Order_Stock.recv_Want(s, st, fn (item, st1) ->
+      if item % 100 <= 3 do
+        let st2 = Order_Stock.choose_have(s, st1, item * 10)
+        stock(s, Order_Stock.send_Book(s, st2, item))
+      else
+        let st2 = Order_Stock.choose_out(s, st1, item)
+        Order_Stock.close(s, Order_Stock.send_Skip(s, st2, item))
+      end)
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "drain-traffic-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        Topology.place(h, [ Topology.offer_role("Order.Stock", Topology.everywhere(), 32,
+                              fn cap -> Order_Run.offer_Stock(c, h, cap, fn (s, st) -> stock(s, st))) ])
+        Topology.drain_on_signal(h, 1000, 4000)
+        Topology.supervise_offers(h)
+    end
+  end
+end

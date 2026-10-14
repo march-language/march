@@ -1,0 +1,72 @@
+-- Three-node scenario "drain_traffic": node-c is the shop. It serves no
+-- role; like a pool hook it starts 8 tasks that each initiate Order
+-- sessions back to back, without pause, for as long as the process runs,
+-- and drains on SIGTERM with a 1 s soft and a 4 s hard deadline. The drain
+-- must end the process by its hard deadline although new sessions keep
+-- being started: an initiate during the drain is refused (it gets
+-- `Err(Left("draining"))`) and the sessions already running end at their
+-- next loop boundary (D27). See scenario.sh.
+mod DrainTrafficC do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Signal
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : Int
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : Int
+        out  -> Stock -> Shop : Int
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  pfn shop(s : Cap(Session.Live), st : Order_Shop.Entry, item : Int) : Order_Shop.Yield do
+    Order_Shop.offer_have_out(s, Order_Shop.send_Want(s, st, item),
+      fn (_price, st1) -> Order_Shop.recv_Booked(s, st1, fn (_total, st2) -> shop(s, st2, item + 1)),
+      fn (_item, st1) -> Order_Shop.close(s, st1))
+  end
+
+  -- One initiator: sessions back to back. The first 20 finished sessions
+  -- across all initiators print "node-c: traffic flowing" once.
+  pfn traffic(c : Cap(IO), h : Cap(ClusterNode.Live), done : Vault(Int)) : Int do
+    match Order_Run.initiate_Shop(c, h, fn (s, st) -> shop(s, st, 101)) do
+      Ok(_) ->
+        if Vault.incr(done, "sessions", 1) == 20 do println("node-c: traffic flowing") else () end
+      Err(_) -> sleep_ms(10)
+    end
+    traffic(c, h, done)
+  end
+
+  pfn idle() : () do
+    sleep_ms(250)
+    idle()
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-c", Env.require_int("MARCH_PORT_C"), "", Cons(seed, Nil), "drain-traffic-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 2, 120000) do () else panic("node-c: never joined") end
+        Topology.drain_on_signal(h, 1000, 4000)
+        let done = Vault.new("traffic")
+        let _ = List.map(List.range(0, 8), fn _ -> task_spawn(fn _ -> traffic(c, h, done)))
+        -- The drain exits the process.
+        idle()
+    end
+  end
+end

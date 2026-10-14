@@ -1240,6 +1240,12 @@ it does not change the protocol's fingerprint.
 every actor still on old code). `Topology.drain_on_signal` calls it on SIGTERM, and a hot
 deploy's `DRAIN` does the same for the epochs it retires.
 
+`Topology.drain_on_signal` also stops the node starting sessions: from the first SIGTERM
+on, every `<P>_Run.initiate_<Role>` on it returns `Err(Left("draining"))` without inviting
+anyone, so a hook's task that starts sessions back to back cannot keep the drain from
+reaching zero. A loop that retries on `Err` keeps getting that answer until the process
+exits. A second SIGTERM or SIGINT stops the process at once, with status 1.
+
 ## Changing a protocol
 
 A protocol is a contract between binaries that are deployed separately, so changing one
