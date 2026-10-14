@@ -45,6 +45,8 @@
 --
 -- Performance: put/take/take_slot/fill O(log32 n) (a get plus an insert or a
 -- remove); size O(1); keys/drain/to_list O(n), in hash order.
+--
+-- doc: try
 
 mod LinearMap do
 

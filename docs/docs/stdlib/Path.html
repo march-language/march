@@ -2974,29 +2974,39 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Path</span></nav><h1>Path</h1><div class="mdoc"><p>Path module: pure path manipulation (no I/O). All operations are pure string functions.</p></div><h2>Functions</h2><div class="item" id="fn-assert_no_traversal"><div class="ih"><span class="badge bfn">fn</span><span class="name">assert_no_traversal</span><span class="sig">assert_no_traversal(path)</span><a class="anchor-link" href="#fn-assert_no_traversal" title="Link">#</a></div><div class="ib"><p>Panic if <code>path</code> contains any <code>..</code> component (path traversal attempt). Call this before joining a user-supplied path segment into a filesystem path.</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.assert_no_traversal(<span class="tok-str">&quot;foo/bar&quot;</span>)
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Path</span></nav><h1>Path</h1><div class="mdoc"><p>Path module: pure path manipulation (no I/O). All operations are pure string functions.</p></div><h2>Functions</h2><div class="item" id="fn-assert_no_traversal"><div class="ih"><span class="badge bfn">fn</span><span class="name">assert_no_traversal</span><span class="sig">assert_no_traversal(path)</span><a class="anchor-link" href="#fn-assert_no_traversal" title="Link">#</a></div><div class="ib"><p>Panic if <code>path</code> contains any <code>..</code> component (path traversal attempt). Call this before joining a user-supplied path segment into a filesystem path.</p><h3>Examples</h3><pre data-try="Path.assert_no_traversal(&quot;foo/bar&quot;)
+Path.assert_no_traversal(&quot;../etc/passwd&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.assert_no_traversal(<span class="tok-str">&quot;foo/bar&quot;</span>)
 ()
 march&gt; <span class="tok-ty">Path</span>.assert_no_traversal(<span class="tok-str">&quot;../etc/passwd&quot;</span>)
 ** panic: path traversal detected: ../etc/passwd</code></pre></div></div>
-<div class="item" id="fn-basename"><div class="ih"><span class="badge bfn">fn</span><span class="name">basename</span><span class="sig">basename(path)</span><a class="anchor-link" href="#fn-basename" title="Link">#</a></div><div class="ib"><p>Return the last component of a path, or the path itself when there are no components (empty string, single segment with no <code>/</code>).</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.basename(<span class="tok-str">&quot;/usr/local/bin/march&quot;</span>)
+<div class="item" id="fn-basename"><div class="ih"><span class="badge bfn">fn</span><span class="name">basename</span><span class="sig">basename(path)</span><a class="anchor-link" href="#fn-basename" title="Link">#</a></div><div class="ib"><p>Return the last component of a path, or the path itself when there are no components (empty string, single segment with no <code>/</code>).</p><h3>Examples</h3><pre data-try="Path.basename(&quot;/usr/local/bin/march&quot;)
+Path.basename(&quot;file.txt&quot;)
+Path.basename(&quot;/&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.basename(<span class="tok-str">&quot;/usr/local/bin/march&quot;</span>)
 <span class="tok-str">&quot;march&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.basename(<span class="tok-str">&quot;file.txt&quot;</span>)
 <span class="tok-str">&quot;file.txt&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.basename(<span class="tok-str">&quot;/&quot;</span>)
 <span class="tok-str">&quot;/&quot;</span></code></pre></div></div>
-<div class="item" id="fn-components"><div class="ih"><span class="badge bfn">fn</span><span class="name">components</span><span class="sig">components(path)</span><a class="anchor-link" href="#fn-components" title="Link">#</a></div><div class="ib"><p>Split a path into its non-empty <code>/</code>-separated components. Repeated separators and a leading <code>/</code> collapse to no extra entries.</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.components(<span class="tok-str">&quot;/usr/local/bin&quot;</span>)
+<div class="item" id="fn-components"><div class="ih"><span class="badge bfn">fn</span><span class="name">components</span><span class="sig">components(path)</span><a class="anchor-link" href="#fn-components" title="Link">#</a></div><div class="ib"><p>Split a path into its non-empty <code>/</code>-separated components. Repeated separators and a leading <code>/</code> collapse to no extra entries.</p><h3>Examples</h3><pre data-try="Path.components(&quot;/usr/local/bin&quot;)
+Path.components(&quot;a//b/&quot;)
+Path.components(&quot;&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.components(<span class="tok-str">&quot;/usr/local/bin&quot;</span>)
 [<span class="tok-str">&quot;usr&quot;</span>, <span class="tok-str">&quot;local&quot;</span>, <span class="tok-str">&quot;bin&quot;</span>]
 march&gt; <span class="tok-ty">Path</span>.components(<span class="tok-str">&quot;a//b/&quot;</span>)
 [<span class="tok-str">&quot;a&quot;</span>, <span class="tok-str">&quot;b&quot;</span>]
 march&gt; <span class="tok-ty">Path</span>.components(<span class="tok-str">&quot;&quot;</span>)
 []</code></pre></div></div>
-<div class="item" id="fn-dirname"><div class="ih"><span class="badge bfn">fn</span><span class="name">dirname</span><span class="sig">dirname(path)</span><a class="anchor-link" href="#fn-dirname" title="Link">#</a></div><div class="ib"><p>Return the directory portion of a path: everything except the last component.  Returns <code>&quot;/&quot;</code> for an absolute path with one component and <code>&quot;.&quot;</code> for a relative path with one component, mirroring the POSIX convention.</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.dirname(<span class="tok-str">&quot;/usr/local/bin/march&quot;</span>)
+<div class="item" id="fn-dirname"><div class="ih"><span class="badge bfn">fn</span><span class="name">dirname</span><span class="sig">dirname(path)</span><a class="anchor-link" href="#fn-dirname" title="Link">#</a></div><div class="ib"><p>Return the directory portion of a path: everything except the last component.  Returns <code>&quot;/&quot;</code> for an absolute path with one component and <code>&quot;.&quot;</code> for a relative path with one component, mirroring the POSIX convention.</p><h3>Examples</h3><pre data-try="Path.dirname(&quot;/usr/local/bin/march&quot;)
+Path.dirname(&quot;/etc&quot;)
+Path.dirname(&quot;file.txt&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.dirname(<span class="tok-str">&quot;/usr/local/bin/march&quot;</span>)
 <span class="tok-str">&quot;/usr/local/bin&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.dirname(<span class="tok-str">&quot;/etc&quot;</span>)
 <span class="tok-str">&quot;/&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.dirname(<span class="tok-str">&quot;file.txt&quot;</span>)
 <span class="tok-str">&quot;.&quot;</span></code></pre></div></div>
-<div class="item" id="fn-extension"><div class="ih"><span class="badge bfn">fn</span><span class="name">extension</span><span class="sig">extension(path)</span><a class="anchor-link" href="#fn-extension" title="Link">#</a></div><div class="ib"><p>Return the file extension (without the leading dot), or the empty string if there is none.  A leading <code>.</code> does not count as an extension (so <code>.bashrc</code> has no extension).</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.extension(<span class="tok-str">&quot;file.txt&quot;</span>)
+<div class="item" id="fn-extension"><div class="ih"><span class="badge bfn">fn</span><span class="name">extension</span><span class="sig">extension(path)</span><a class="anchor-link" href="#fn-extension" title="Link">#</a></div><div class="ib"><p>Return the file extension (without the leading dot), or the empty string if there is none.  A leading <code>.</code> does not count as an extension (so <code>.bashrc</code> has no extension).</p><h3>Examples</h3><pre data-try="Path.extension(&quot;file.txt&quot;)
+Path.extension(&quot;archive.tar.gz&quot;)
+Path.extension(&quot;.bashrc&quot;)
+Path.extension(&quot;README&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.extension(<span class="tok-str">&quot;file.txt&quot;</span>)
 <span class="tok-str">&quot;txt&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.extension(<span class="tok-str">&quot;archive.tar.gz&quot;</span>)
 <span class="tok-str">&quot;gz&quot;</span>
@@ -3004,25 +3014,35 @@ march&gt; <span class="tok-ty">Path</span>.extension(<span class="tok-str">&quot
 <span class="tok-str">&quot;&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.extension(<span class="tok-str">&quot;README&quot;</span>)
 <span class="tok-str">&quot;&quot;</span></code></pre></div></div>
-<div class="item" id="fn-is_absolute"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_absolute</span><span class="sig">is_absolute(path)</span><a class="anchor-link" href="#fn-is_absolute" title="Link">#</a></div><div class="ib"><p>Returns true if <code>path</code> starts with <code>/</code>.</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.is_absolute(<span class="tok-str">&quot;/etc&quot;</span>)
+<div class="item" id="fn-is_absolute"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_absolute</span><span class="sig">is_absolute(path)</span><a class="anchor-link" href="#fn-is_absolute" title="Link">#</a></div><div class="ib"><p>Returns true if <code>path</code> starts with <code>/</code>.</p><h3>Examples</h3><pre data-try="Path.is_absolute(&quot;/etc&quot;)
+Path.is_absolute(&quot;etc&quot;)
+Path.is_absolute(&quot;&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.is_absolute(<span class="tok-str">&quot;/etc&quot;</span>)
 <span class="tok-kw">true</span>
 march&gt; <span class="tok-ty">Path</span>.is_absolute(<span class="tok-str">&quot;etc&quot;</span>)
 <span class="tok-kw">false</span>
 march&gt; <span class="tok-ty">Path</span>.is_absolute(<span class="tok-str">&quot;&quot;</span>)
 <span class="tok-kw">false</span></code></pre></div></div>
-<div class="item" id="fn-join"><div class="ih"><span class="badge bfn">fn</span><span class="name">join</span><span class="sig">join(a, b)</span><a class="anchor-link" href="#fn-join" title="Link">#</a></div><div class="ib"><p>Join two path segments with a single separator, avoiding double slashes if <code>a</code> already ends with <code>/</code>.</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.join(<span class="tok-str">&quot;/usr&quot;</span>, <span class="tok-str">&quot;local&quot;</span>)
+<div class="item" id="fn-join"><div class="ih"><span class="badge bfn">fn</span><span class="name">join</span><span class="sig">join(a, b)</span><a class="anchor-link" href="#fn-join" title="Link">#</a></div><div class="ib"><p>Join two path segments with a single separator, avoiding double slashes if <code>a</code> already ends with <code>/</code>.</p><h3>Examples</h3><pre data-try="Path.join(&quot;/usr&quot;, &quot;local&quot;)
+Path.join(&quot;/usr/&quot;, &quot;local&quot;)
+Path.join(&quot;a&quot;, &quot;b&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.join(<span class="tok-str">&quot;/usr&quot;</span>, <span class="tok-str">&quot;local&quot;</span>)
 <span class="tok-str">&quot;/usr/local&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.join(<span class="tok-str">&quot;/usr/&quot;</span>, <span class="tok-str">&quot;local&quot;</span>)
 <span class="tok-str">&quot;/usr/local&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.join(<span class="tok-str">&quot;a&quot;</span>, <span class="tok-str">&quot;b&quot;</span>)
 <span class="tok-str">&quot;a/b&quot;</span></code></pre></div></div>
-<div class="item" id="fn-join_all"><div class="ih"><span class="badge bfn">fn</span><span class="name">join_all</span><span class="sig">join_all(parts)</span><a class="anchor-link" href="#fn-join_all" title="Link">#</a></div><div class="ib"><p>Join a list of path segments into a single path, inserting <code>/</code> separators. Respects a trailing <code>/</code> on any segment (avoids doubling). An empty list returns the empty string.</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.join_all([<span class="tok-str">&quot;usr&quot;</span>, <span class="tok-str">&quot;local&quot;</span>, <span class="tok-str">&quot;bin&quot;</span>])
+<div class="item" id="fn-join_all"><div class="ih"><span class="badge bfn">fn</span><span class="name">join_all</span><span class="sig">join_all(parts)</span><a class="anchor-link" href="#fn-join_all" title="Link">#</a></div><div class="ib"><p>Join a list of path segments into a single path, inserting <code>/</code> separators. Respects a trailing <code>/</code> on any segment (avoids doubling). An empty list returns the empty string.</p><h3>Examples</h3><pre data-try="Path.join_all([&quot;usr&quot;, &quot;local&quot;, &quot;bin&quot;])
+Path.join_all([&quot;/var/store&quot;, &quot;packages&quot;, &quot;ab&quot;, &quot;cd&quot;])
+Path.join_all([])" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.join_all([<span class="tok-str">&quot;usr&quot;</span>, <span class="tok-str">&quot;local&quot;</span>, <span class="tok-str">&quot;bin&quot;</span>])
 <span class="tok-str">&quot;usr/local/bin&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.join_all([<span class="tok-str">&quot;/var/store&quot;</span>, <span class="tok-str">&quot;packages&quot;</span>, <span class="tok-str">&quot;ab&quot;</span>, <span class="tok-str">&quot;cd&quot;</span>])
 <span class="tok-str">&quot;/var/store/packages/ab/cd&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.join_all([])
 <span class="tok-str">&quot;&quot;</span></code></pre></div></div>
-<div class="item" id="fn-normalize"><div class="ih"><span class="badge bfn">fn</span><span class="name">normalize</span><span class="sig">normalize(path)</span><a class="anchor-link" href="#fn-normalize" title="Link">#</a></div><div class="ib"><p>Normalize a path by collapsing <code>.</code> (current dir) and <code>..</code> (parent) segments.  Absolute paths cannot ascend past root; relative paths preserve leading <code>..</code> components.  An empty input or a path that cancels out to nothing returns <code>&quot;.&quot;</code>.</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.normalize(<span class="tok-str">&quot;/usr/local/../bin&quot;</span>)
+<div class="item" id="fn-normalize"><div class="ih"><span class="badge bfn">fn</span><span class="name">normalize</span><span class="sig">normalize(path)</span><a class="anchor-link" href="#fn-normalize" title="Link">#</a></div><div class="ib"><p>Normalize a path by collapsing <code>.</code> (current dir) and <code>..</code> (parent) segments.  Absolute paths cannot ascend past root; relative paths preserve leading <code>..</code> components.  An empty input or a path that cancels out to nothing returns <code>&quot;.&quot;</code>.</p><h3>Examples</h3><pre data-try="Path.normalize(&quot;/usr/local/../bin&quot;)
+Path.normalize(&quot;a/./b/../c&quot;)
+Path.normalize(&quot;../foo/../bar&quot;)
+Path.normalize(&quot;&quot;)
+Path.normalize(&quot;/..&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.normalize(<span class="tok-str">&quot;/usr/local/../bin&quot;</span>)
 <span class="tok-str">&quot;/usr/bin&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.normalize(<span class="tok-str">&quot;a/./b/../c&quot;</span>)
 <span class="tok-str">&quot;a/c&quot;</span>
@@ -3032,7 +3052,10 @@ march&gt; <span class="tok-ty">Path</span>.normalize(<span class="tok-str">&quot
 <span class="tok-str">&quot;.&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.normalize(<span class="tok-str">&quot;/..&quot;</span>)
 <span class="tok-str">&quot;/&quot;</span></code></pre></div></div>
-<div class="item" id="fn-strip_extension"><div class="ih"><span class="badge bfn">fn</span><span class="name">strip_extension</span><span class="sig">strip_extension(path)</span><a class="anchor-link" href="#fn-strip_extension" title="Link">#</a></div><div class="ib"><p>Remove the final extension from a path, preserving the directory. Files with no extension (or only a leading dot) are returned unchanged.</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.strip_extension(<span class="tok-str">&quot;file.txt&quot;</span>)
+<div class="item" id="fn-strip_extension"><div class="ih"><span class="badge bfn">fn</span><span class="name">strip_extension</span><span class="sig">strip_extension(path)</span><a class="anchor-link" href="#fn-strip_extension" title="Link">#</a></div><div class="ib"><p>Remove the final extension from a path, preserving the directory. Files with no extension (or only a leading dot) are returned unchanged.</p><h3>Examples</h3><pre data-try="Path.strip_extension(&quot;file.txt&quot;)
+Path.strip_extension(&quot;/tmp/archive.tar.gz&quot;)
+Path.strip_extension(&quot;README&quot;)
+Path.strip_extension(&quot;.bashrc&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.strip_extension(<span class="tok-str">&quot;file.txt&quot;</span>)
 <span class="tok-str">&quot;file&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.strip_extension(<span class="tok-str">&quot;/tmp/archive.tar.gz&quot;</span>)
 <span class="tok-str">&quot;/tmp/archive.tar&quot;</span>
@@ -3040,12 +3063,78 @@ march&gt; <span class="tok-ty">Path</span>.strip_extension(<span class="tok-str"
 <span class="tok-str">&quot;README&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.strip_extension(<span class="tok-str">&quot;.bashrc&quot;</span>)
 <span class="tok-str">&quot;.bashrc&quot;</span></code></pre></div></div>
-<div class="item" id="fn-strip_leading_slash"><div class="ih"><span class="badge bfn">fn</span><span class="name">strip_leading_slash</span><span class="sig">strip_leading_slash(path)</span><a class="anchor-link" href="#fn-strip_leading_slash" title="Link">#</a></div><div class="ib"><p>Remove a single leading <code>/</code> from a path, if present. A path that does not start with <code>/</code> is returned unchanged. An empty path is returned unchanged.</p><h3>Examples</h3><pre><code>march&gt; <span class="tok-ty">Path</span>.strip_leading_slash(<span class="tok-str">&quot;/foo/bar&quot;</span>)
+<div class="item" id="fn-strip_leading_slash"><div class="ih"><span class="badge bfn">fn</span><span class="name">strip_leading_slash</span><span class="sig">strip_leading_slash(path)</span><a class="anchor-link" href="#fn-strip_leading_slash" title="Link">#</a></div><div class="ib"><p>Remove a single leading <code>/</code> from a path, if present. A path that does not start with <code>/</code> is returned unchanged. An empty path is returned unchanged.</p><h3>Examples</h3><pre data-try="Path.strip_leading_slash(&quot;/foo/bar&quot;)
+Path.strip_leading_slash(&quot;foo/bar&quot;)
+Path.strip_leading_slash(&quot;/&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Path</span>.strip_leading_slash(<span class="tok-str">&quot;/foo/bar&quot;</span>)
 <span class="tok-str">&quot;foo/bar&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.strip_leading_slash(<span class="tok-str">&quot;foo/bar&quot;</span>)
 <span class="tok-str">&quot;foo/bar&quot;</span>
 march&gt; <span class="tok-ty">Path</span>.strip_leading_slash(<span class="tok-str">&quot;/&quot;</span>)
-<span class="tok-str">&quot;&quot;</span></code></pre></div></div></main></div><script>
+<span class="tok-str">&quot;&quot;</span></code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

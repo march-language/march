@@ -25,6 +25,8 @@
 --     march> let s = RRB.slice(v, 1, 4)
 --     march> RRB.fold(s, 0, fn (acc, x) -> acc + x)
 --     9
+--
+-- doc: try
 
 mod RRB do
 

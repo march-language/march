@@ -13,6 +13,8 @@
 --   pop               O(1) amortized
 --   length            O(1)
 --   from_list / fold  O(n)
+--
+-- doc: try
 
 mod Array do
 

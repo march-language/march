@@ -38,6 +38,9 @@ const EXPECTED_FAILURES = {
   'path.march: Path.assert_no_traversal("../etc/passwd")': 'runtime error: panic: path traversal detected',
 };
 
+module.exports = { EXPECTED_FAILURES };
+if (require.main !== module) return;
+
 const repl = loadRepl(assets);
 const seen = new Set();
 const problems = [];

@@ -3,6 +3,8 @@
 -- This is Layer 1 of March's HTTP library. It contains no I/O — only
 -- data types and functions for building and inspecting HTTP requests
 -- and responses. Libraries that work with HTTP types depend on this alone.
+--
+-- doc: try
 
 mod Http do
 

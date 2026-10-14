@@ -71,7 +71,9 @@ fi
 
 echo "==> Generating stdlib docs into $OUT_DIR/ (served at /docs/stdlib/)"
 export MARCH_STDLIB="$ROOT/stdlib"
-_build/default/forge/bin/main.exe doc --stdlib -o "$OUT_DIR"
+# --try-it: modules whose header comment says `doc: try` get "Try it" buttons on
+# their `march>` examples, running in the site's in-browser REPL (/assets/march-repl.js).
+_build/default/forge/bin/main.exe doc --stdlib --try-it -o "$OUT_DIR"
 
 # The module URI was renamed URI -> Uri; on case-insensitive filesystems git may keep
 # the old-case filename while the regenerated index links the new case (a 404 on

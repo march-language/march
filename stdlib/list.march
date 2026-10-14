@@ -7,6 +7,8 @@
 -- - Safe variants use the _opt suffix and return Option
 -- - fold_left is the primitive; fold_right recurses on the structure
 -- - sort uses merge sort
+--
+-- doc: try
 
 mod List do
 
