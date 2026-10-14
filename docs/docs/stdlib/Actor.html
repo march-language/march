@@ -3,13 +3,15 @@
 :root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
 --acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
 --faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
---fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
 
 /* Light theme overrides */
 [data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
 --acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
 --faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
---fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
 
 /* Reset + base */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -34,6 +36,9 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:
 code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
 pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
 code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
 h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
 h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
 p{margin:8px 0}
@@ -2967,109 +2972,65 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Actor</span></nav><h1>Actor</h1><div class="mdoc"><p>Actor module: messaging helpers for the actor system.</p><p>cast/2 is fire-and-forget (async): the message is enqueued and the caller continues immediately without waiting for a response.</p><p>call/3 is synchronous: it sends the given message to the target actor and blocks until the actor calls Actor.reply(reply_to, result). Returns Ok(result), or Err(reason) if no reply arrives.</p><p>call protocol: Pass a zero-arg sentinel constructor as the call message. Its tag selects which handler receives the call, and the runtime injects the caller (the &quot;reply channel&quot;) as that handler's first argument. The handler must call Actor.reply(reply_to, result) to unblock the caller; if it never replies, call returns Err(&quot;no reply ...&quot;).</p><pre><code>So the call handler must be declared FIRST in the actor (tag 0), and
-the sentinel must have a name distinct from that handler to avoid a
-constructor-name clash.</code></pre><p>Example:</p><pre><code>type GetReq = GetReq          -- zero-arg sentinel for the sync call
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Actor</span></nav><h1>Actor</h1><div class="mdoc"><p>Actor module: messaging helpers for the actor system.</p><p>cast/2 is fire-and-forget (async): the message is enqueued and the caller continues immediately without waiting for a response.</p><p>call/3 is synchronous: it sends the given message to the target actor and blocks until the actor calls Actor.reply(reply_to, result). Returns Ok(result), or Err(reason) if no reply arrives.</p><p>call protocol: pass a zero-arg sentinel constructor as the call message. Its tag selects which handler receives the call, and the runtime injects the caller (the &quot;reply channel&quot;) as that handler's first argument. The handler must call Actor.reply(reply_to, result) to unblock the caller; if it never replies, call returns Err(&quot;no reply ...&quot;).</p><p>So the call handler must be declared FIRST in the actor (tag 0), and the sentinel must have a name distinct from that handler to avoid a constructor-name clash.</p><p>Example:</p><pre><code><span class="tok-kw">type</span> <span class="tok-ty">GetReq</span> = <span class="tok-ty">GetReq</span>          <span class="tok-com">-- zero-arg sentinel for the sync call</span>
 
-actor Counter do
-  state { count : Int }
-  init  { count: 0 }
+<span class="tok-kw">actor</span> <span class="tok-ty">Counter</span> <span class="tok-kw">do</span>
+  state { count : <span class="tok-ty">Int</span> }
+  init  { count: <span class="tok-num">0</span> }
 
-  -- First handler (tag 0) = the call handler; reply_to is the caller.
-  on GetCount(reply_to) do
-    Actor.reply(reply_to, state.count)
+  <span class="tok-com">-- First handler (tag 0) = the call handler; reply_to is the caller.</span>
+  <span class="tok-kw">on</span> <span class="tok-ty">GetCount</span>(reply_to) <span class="tok-kw">do</span>
+    <span class="tok-ty">Actor</span>.reply(reply_to, state.count)
     state
-  end
+  <span class="tok-kw">end</span>
 
-  on Inc(n : Int) do
-    { state with count: state.count + n }
-  end
-end
+  <span class="tok-kw">on</span> <span class="tok-ty">Inc</span>(n : <span class="tok-ty">Int</span>) <span class="tok-kw">do</span>
+    { state <span class="tok-kw">with</span> count: state.count + n }
+  <span class="tok-kw">end</span>
+<span class="tok-kw">end</span>
 
-fn main() do
-  let pid = spawn(Counter)
-  Actor.cast(pid, Inc(1))
+<span class="tok-kw">fn</span> main() <span class="tok-kw">do</span>
+  <span class="tok-kw">let</span> pid = <span class="tok-kw">spawn</span>(<span class="tok-ty">Counter</span>)
+  <span class="tok-ty">Actor</span>.cast(pid, <span class="tok-ty">Inc</span>(<span class="tok-num">1</span>))
   run_until_idle()
-  match Actor.call(pid, GetReq, 5000) do
-    Ok(n)  -&gt; println(&quot;count = &quot; ++ int_to_string(n))
-    Err(e) -&gt; println(&quot;error: &quot; ++ e)
-  end
-end</code></pre></div><h2>Types</h2><div class="item" id="type-InspectError"><div class="ih"><span class="badge bty">type</span><span class="name">InspectError</span><span class="sig"><a href="#type-InspectError">InspectError</a> = InspectTimeout | InspectDead | InspectSelf | InspectFailed(String)</span><a class="anchor-link" href="#type-InspectError" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-call"><div class="ih"><span class="badge bfn">fn</span><span class="name">call</span><span class="sig">call(pid, msg, timeout_ms)</span><a class="anchor-link" href="#fn-call" title="Link">#</a></div><div class="ib"><p>Synchronous call: send msg (a zero-arg sentinel) to the actor and wait for a reply. The runtime injects the caller as the target handler's first argument; that handler must call Actor.reply(reply_to, result) to unblock the caller. Returns Ok(result) or Err(reason). timeout_ms is a real wall-clock deadline on both backends: a reply produced after it has passed is discarded and the call returns Err, so the timeout you write is a bound you can build retry and fallback logic on.</p></div></div>
+  <span class="tok-kw">match</span> <span class="tok-ty">Actor</span>.call(pid, <span class="tok-ty">GetReq</span>, <span class="tok-num">5000</span>) <span class="tok-kw">do</span>
+    <span class="tok-ty">Ok</span>(n)  -&gt; println(<span class="tok-str">&quot;count = &quot;</span> ++ int_to_string(n))
+    <span class="tok-ty">Err</span>(e) -&gt; println(<span class="tok-str">&quot;error: &quot;</span> ++ e)
+  <span class="tok-kw">end</span>
+<span class="tok-kw">end</span></code></pre></div><h2>Types</h2><div class="item" id="type-InspectError"><div class="ih"><span class="badge bty">type</span><span class="name">InspectError</span><span class="sig"><a href="#type-InspectError">InspectError</a> = InspectTimeout | InspectDead | InspectSelf | InspectFailed(String)</span><a class="anchor-link" href="#type-InspectError" title="Link">#</a></div><div class="ib"><p>Why Actor.inspect_state could not answer: InspectTimeout: the actor did not get to the request in time (a long handler, a backlog ahead of it, or it was inside a nested receive); InspectDead: the pid is not alive; InspectSelf: an actor asked about itself (it would wait on itself); InspectFailed: the actor could not render its state (the reason).</p></div></div><h2>Functions</h2><div class="item" id="fn-call"><div class="ih"><span class="badge bfn">fn</span><span class="name">call</span><span class="sig">call(pid, msg, timeout_ms)</span><a class="anchor-link" href="#fn-call" title="Link">#</a></div><div class="ib"><p>Synchronous call: send msg (a zero-arg sentinel) to the actor and wait for a reply. The runtime injects the caller as the target handler's first argument; that handler must call Actor.reply(reply_to, result) to unblock the caller. Returns Ok(result) or Err(reason). timeout_ms is a real wall-clock deadline on both backends: a reply produced after it has passed is discarded and the call returns Err, so the timeout you write is a bound you can build retry and fallback logic on.</p></div></div>
 <div class="item" id="fn-cancel_timer"><div class="ih"><span class="badge bfn">fn</span><span class="name">cancel_timer</span><span class="sig">cancel_timer(ref)</span><a class="anchor-link" href="#fn-cancel_timer" title="Link">#</a></div><div class="ib"><p>Cancel a pending Actor.send_after timer. Safe to call at any time, including after the timer has already fired or been cancelled already (both are harmless no-ops) — delivers nothing if called before the deadline.</p></div></div>
 <div class="item" id="fn-cast"><div class="ih"><span class="badge bfn">fn</span><span class="name">cast</span><span class="sig">cast(pid, msg)</span><a class="anchor-link" href="#fn-cast" title="Link">#</a></div><div class="ib"><p>Fire-and-forget: enqueue msg in the actor's mailbox without waiting.</p></div></div>
-<div class="item" id="fn-debug"><div class="ih"><span class="badge bfn">fn</span><span class="name">debug</span><span class="sig">debug(io : Cap(IO)) : Cap(Actor.Debug)</span><a class="anchor-link" href="#fn-debug" title="Link">#</a></div><div class="ib"><p>Mint the debug capability from the root capability: mint it once in <code>main</code> and forward it only to code that may read actor state.</p><pre><code>    fn main(io : Cap(IO)) do
-      let d = Actor.debug(io)
-      match Actor.inspect_state(d, pid, 1000) do ... end
-    end</code></pre></div></div>
-<div class="item" id="fn-inspect_state"><div class="ih"><span class="badge bfn">fn</span><span class="name">inspect_state</span><span class="sig">inspect_state(_d : Cap(Actor.Debug), pid, timeout_ms : Int) : Result(String, <a href="#type-InspectError">InspectError</a>)</span><a class="anchor-link" href="#fn-inspect_state" title="Link">#</a></div><div class="ib"><p>The actor's current state, rendered as text (the same rendering <code>to_string</code> gives a record). The request queues behind every message already sent to the actor and is answered between two handlers on the actor's own thread, so the state is never seen half-updated; a full or bounded mailbox does not drop it. An actor inside a nested <code>receive()</code> answers <code>InspectTimeout</code> at once, and its <code>receive()</code> still gets its real message. Within <code>timeout_ms</code> or <code>Err(InspectTimeout)</code>.</p><pre><code>    match Actor.inspect_state(d, pid, 1000) do
-      Ok(text) -&gt; println(text)
-      Err(Actor.InspectTimeout) -&gt; println(&quot;busy&quot;)
-      Err(e) -&gt; println(&quot;cannot inspect&quot;)
-    end</code></pre></div></div>
-<div class="item" id="fn-introspect"><div class="ih"><span class="badge bfn">fn</span><span class="name">introspect</span><span class="sig">introspect(io : Cap(IO)) : Cap(Actor.Introspect)</span><a class="anchor-link" href="#fn-introspect" title="Link">#</a></div><div class="ib"><p>Mint the introspection capability from the root capability. The only way to obtain a <code>Cap(Actor.Introspect)</code>: mint it once in <code>main</code> and forward it to the code that needs it.</p><pre><code>    fn main(io : Cap(IO)) do
-      let c = Actor.introspect(io)
-      match Actor.whereis(c, &quot;counter&quot;) do ... end
-    end</code></pre></div></div>
+<div class="item" id="fn-debug"><div class="ih"><span class="badge bfn">fn</span><span class="name">debug</span><span class="sig">debug(io : Cap(IO)) : Cap(Actor.Debug)</span><a class="anchor-link" href="#fn-debug" title="Link">#</a></div><div class="ib"><p>Mint the debug capability from the root capability: mint it once in <code>main</code> and forward it only to code that may read actor state.</p><pre><code><span class="tok-kw">fn</span> main(io : <span class="tok-ty">Cap</span>(<span class="tok-ty">IO</span>)) <span class="tok-kw">do</span>
+  <span class="tok-kw">let</span> d = <span class="tok-ty">Actor</span>.debug(io)
+  <span class="tok-kw">match</span> <span class="tok-ty">Actor</span>.inspect_state(d, pid, <span class="tok-num">1000</span>) <span class="tok-kw">do</span> ... <span class="tok-kw">end</span>
+<span class="tok-kw">end</span></code></pre></div></div>
+<div class="item" id="fn-inspect_state"><div class="ih"><span class="badge bfn">fn</span><span class="name">inspect_state</span><span class="sig">inspect_state(_d : Cap(Actor.Debug), pid, timeout_ms : Int) : Result(String, <a href="#type-InspectError">InspectError</a>)</span><a class="anchor-link" href="#fn-inspect_state" title="Link">#</a></div><div class="ib"><p>The actor's current state, rendered as text (the same rendering <code>to_string</code> gives a record). The request queues behind every message already sent to the actor and is answered between two handlers on the actor's own thread, so the state is never seen half-updated; a full or bounded mailbox does not drop it. An actor inside a nested <code>receive()</code> answers <code>InspectTimeout</code> at once, and its <code>receive()</code> still gets its real message. Within <code>timeout_ms</code> or <code>Err(InspectTimeout)</code>.</p><pre><code><span class="tok-kw">match</span> <span class="tok-ty">Actor</span>.inspect_state(d, pid, <span class="tok-num">1000</span>) <span class="tok-kw">do</span>
+  <span class="tok-ty">Ok</span>(text) -&gt; println(text)
+  <span class="tok-ty">Err</span>(<span class="tok-ty">Actor</span>.<span class="tok-ty">InspectTimeout</span>) -&gt; println(<span class="tok-str">&quot;busy&quot;</span>)
+  <span class="tok-ty">Err</span>(e) -&gt; println(<span class="tok-str">&quot;cannot inspect&quot;</span>)
+<span class="tok-kw">end</span></code></pre></div></div>
+<div class="item" id="fn-introspect"><div class="ih"><span class="badge bfn">fn</span><span class="name">introspect</span><span class="sig">introspect(io : Cap(IO)) : Cap(Actor.Introspect)</span><a class="anchor-link" href="#fn-introspect" title="Link">#</a></div><div class="ib"><p>Mint the introspection capability from the root capability. The only way to obtain a <code>Cap(Actor.Introspect)</code>: mint it once in <code>main</code> and forward it to the code that needs it.</p><pre><code><span class="tok-kw">fn</span> main(io : <span class="tok-ty">Cap</span>(<span class="tok-ty">IO</span>)) <span class="tok-kw">do</span>
+  <span class="tok-kw">let</span> c = <span class="tok-ty">Actor</span>.introspect(io)
+  <span class="tok-kw">match</span> <span class="tok-ty">Actor</span>.whereis(c, <span class="tok-str">&quot;counter&quot;</span>) <span class="tok-kw">do</span> ... <span class="tok-kw">end</span>
+<span class="tok-kw">end</span></code></pre></div></div>
 <div class="item" id="fn-is_draining"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_draining</span><span class="sig">is_draining(pid)</span><a class="anchor-link" href="#fn-is_draining" title="Link">#</a></div><div class="ib"><p>Is <code>pid</code> stopping — accepting no new messages, but not dead yet? <code>is_alive</code> alone cannot express this: a draining actor is still alive.</p></div></div>
-<div class="item" id="fn-list"><div class="ih"><span class="badge bfn">fn</span><span class="name">list</span><span class="sig">list(_c : Cap(Actor.Introspect))</span><a class="anchor-link" href="#fn-list" title="Link">#</a></div><div class="ib"><p>Every actor alive right now. The enumeration primitive monitoring code needs: <code>mailbox_size(pid)</code> can only be asked about a Pid you already hold, so without this there is no way to discover an unknown hot actor — only ones you can name in advance with <code>whereis</code>.</p><pre><code>A snapshot, and inherently racy: an actor can die between this call and
-anything you do with the result. That is already the norm for a Pid, and
-every consumer handles a dead one.
-
-    let hot = List.filter(Actor.list(c), fn p -&gt; mailbox_size(p) &gt; 500)
-
-Ordered by spawn sequence, so the list is deterministic rather than ordered
-by heap address.</code></pre></div></div>
-<div class="item" id="fn-over_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">over_mailbox</span><span class="sig">over_mailbox(c : Cap(Actor.Introspect), threshold : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>(a), Int))</span><a class="anchor-link" href="#fn-over_mailbox" title="Link">#</a></div><div class="ib"><p>Every actor whose mailbox is deeper than <code>threshold</code>, as <code>(pid, depth)</code> pairs in spawn order — the growing-mailbox alarm, polled. An empty result is the healthy case, so a monitor can be <code>if Actor.over_mailbox(c, 500) != Nil</code>.</p><pre><code>    List.each(Actor.over_mailbox(c, 500), fn hot -&gt;
-      match hot do (p, d) -&gt; log_slow_actor(p, d) end)
-
-Depth is `mailbox_backlog`, as for `top_by_mailbox`. Same snapshot caveats.
-A threshold below zero returns every live actor.</code></pre></div></div>
+<div class="item" id="fn-list"><div class="ih"><span class="badge bfn">fn</span><span class="name">list</span><span class="sig">list(_c : Cap(Actor.Introspect))</span><a class="anchor-link" href="#fn-list" title="Link">#</a></div><div class="ib"><p>Every actor alive right now. The enumeration primitive monitoring code needs: <code>mailbox_size(pid)</code> can only be asked about a Pid you already hold, so without this there is no way to discover an unknown hot actor — only ones you can name in advance with <code>whereis</code>.</p><p>A snapshot, and inherently racy: an actor can die between this call and anything you do with the result. That is already the norm for a Pid, and every consumer handles a dead one.</p><pre><code><span class="tok-kw">let</span> hot = <span class="tok-ty">List</span>.filter(<span class="tok-ty">Actor</span>.list(c), <span class="tok-kw">fn</span> p -&gt; mailbox_size(p) &gt; <span class="tok-num">500</span>)</code></pre><p>Ordered by spawn sequence, so the list is deterministic rather than ordered by heap address.</p></div></div>
+<div class="item" id="fn-over_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">over_mailbox</span><span class="sig">over_mailbox(c : Cap(Actor.Introspect), threshold : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>(a), Int))</span><a class="anchor-link" href="#fn-over_mailbox" title="Link">#</a></div><div class="ib"><p>Every actor whose mailbox is deeper than <code>threshold</code>, as <code>(pid, depth)</code> pairs in spawn order — the growing-mailbox alarm, polled. An empty result is the healthy case, so a monitor can be <code>if Actor.over_mailbox(c, 500) != Nil</code>.</p><pre><code><span class="tok-ty">List</span>.each(<span class="tok-ty">Actor</span>.over_mailbox(c, <span class="tok-num">500</span>), <span class="tok-kw">fn</span> hot -&gt;
+  <span class="tok-kw">match</span> hot <span class="tok-kw">do</span> (p, d) -&gt; log_slow_actor(p, d) <span class="tok-kw">end</span>)</code></pre><p>Depth is <code>mailbox_backlog</code>, as for <code>top_by_mailbox</code>. Same snapshot caveats. A threshold below zero returns every live actor.</p></div></div>
 <div class="item" id="fn-pid_from_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">pid_from_int</span><span class="sig">pid_from_int(_c : Cap(Actor.Introspect), n : Int)</span><a class="anchor-link" href="#fn-pid_from_int" title="Link">#</a></div><div class="ib"><p>Turn a spawn index (what <code>pid_to_int</code> returns, or what <code>get_actor_field</code> reads out of a supervisor's state) back into a Pid. An unknown index resolves to a safe already-dead sentinel, so <code>is_alive</code> on it is <code>false</code> and <code>send</code> to it returns <code>None</code>.</p></div></div>
 <div class="item" id="fn-register"><div class="ih"><span class="badge bfn">fn</span><span class="name">register</span><span class="sig">register(pid, name)</span><a class="anchor-link" href="#fn-register" title="Link">#</a></div><div class="ib"><p>Register <code>pid</code> under <code>name</code>, so holders can re-resolve it after a restart. Returns false if the name is already held by a LIVE actor, or if <code>pid</code> is dead. A registered actor's name is carried forward across supervisor restarts, so callers should hold the name, not the Pid.</p></div></div>
 <div class="item" id="fn-registered"><div class="ih"><span class="badge bfn">fn</span><span class="name">registered</span><span class="sig">registered(_c : Cap(Actor.Introspect))</span><a class="anchor-link" href="#fn-registered" title="Link">#</a></div><div class="ib"><p>Every currently-registered name.</p></div></div>
 <div class="item" id="fn-reply"><div class="ih"><span class="badge bfn">fn</span><span class="name">reply</span><span class="sig">reply(ref_id, result)</span><a class="anchor-link" href="#fn-reply" title="Link">#</a></div><div class="ib"><p>Reply to a synchronous call from within an actor handler. ref_id is the reply channel — the handler's first argument, injected by Actor.call. result is the value to return to the caller.</p></div></div>
-<div class="item" id="fn-send_after"><div class="ih"><span class="badge bfn">fn</span><span class="name">send_after</span><span class="sig">send_after(pid, msg, delay_ms)</span><a class="anchor-link" href="#fn-send_after" title="Link">#</a></div><div class="ib"><p>Schedule msg for delivery to pid after delay_ms milliseconds — a fire-once timer built on the same scheduler primitive that already backs Actor.call's timeout and supervisor restart backoff. Returns a TimerRef usable with cancel_timer. Message delivery goes through the actor's normal mailbox, so msg follows the same &quot;constructor the actor has an <code>on</code> handler for&quot; convention as Actor.cast — cast(pid, Inc(1)) and send_after(pid, Inc(1), 1000) reach the exact same dispatch path, just on different schedules.</p><pre><code>A pending timer does not keep run_until_idle() waiting: if nothing else is
-happening, run_until_idle() returns even while a send_after is still
-pending, and delivers it whenever it's next called after the deadline has
-passed. A real long-running process (an IO.Process-style server) is kept
-alive by its own non-daemon/actor processes, not by run_until_idle, so this
-does not affect whether the message eventually arrives — only whether
-waiting for it blocks a test harness.
-
-    let pid = spawn(Worker)
-    let ref = Actor.send_after(pid, Tick, 100)
-    -- ... later, before it fires ...
-    Actor.cancel_timer(ref)</code></pre></div></div>
-<div class="item" id="fn-set_queue_limit"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_queue_limit</span><span class="sig">set_queue_limit(pid, limit, policy)</span><a class="anchor-link" href="#fn-set_queue_limit" title="Link">#</a></div><div class="ib"><p>Bound this actor's mailbox. policy: 0 unbounded (default), 1 drop_new, 2 drop_old, 3 block_sender (compiled backend only: the interpreter's single-threaded eager scheduler cannot park a sender, so under <code>march run</code> policy 3 is refused at this call rather than silently treated as 0). Dropped messages are counted in Scheduler.dropped_messages().</p><pre><code>Under a drop policy (1 or 2), a dropped Actor.call request or its reply is
-indistinguishable from a lost reply at the caller — both surface as a
-timeout Err from Actor.call. Callers that rely on Actor.call against a
-bounded actor should prefer the block policy (3) instead, so no request
-or reply is ever silently discarded.</code></pre></div></div>
-<div class="item" id="fn-stop"><div class="ih"><span class="badge bfn">fn</span><span class="name">stop</span><span class="sig">stop(pid, timeout_ms)</span><a class="anchor-link" href="#fn-stop" title="Link">#</a></div><div class="ib"><p>Stop <code>pid</code> gracefully: it accepts no further messages, works off whatever is already queued, and then dies a NORMAL death (which no restart type restarts). Returns false if it was already dead or already stopping.</p><pre><code>This is the deploy story `kill` cannot tell. `kill(pid)` is immediate and
-drops the mailbox, so stopping a busy actor loses exactly the requests that
-were waiting; `stop` finishes them first.
-
-Waits up to `timeout_ms` for the queue to empty, then gives up and dies with
-whatever is left undelivered. A negative timeout waits indefinitely; 0
-discards the queue as soon as the in-flight message returns.
-
-Stopping a supervisor stops its children first, in REVERSE declaration
-order, each with its own `shutdown` budget from the `supervise` block's
-child spec (`Worker w shutdown 5000`), defaulting to 5 seconds.</code></pre></div></div>
-<div class="item" id="fn-top_by_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">top_by_mailbox</span><span class="sig">top_by_mailbox(c : Cap(Actor.Introspect), n : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>(a), Int))</span><a class="anchor-link" href="#fn-top_by_mailbox" title="Link">#</a></div><div class="ib"><p>The <code>n</code> deepest mailboxes right now, deepest first, as <code>(pid, depth)</code> pairs. This is the &quot;which actor is behind?&quot; question a monitoring loop actually asks; <code>Scheduler</code> counters only answer &quot;is the system behind?&quot;.</p><pre><code>    match Actor.top_by_mailbox(c, 1) do
-      Cons((hot, depth), _) -&gt; shed_from(hot, depth)
-      Nil                   -&gt; ()
-    end
-
-The depth is the actor's waiting work, `mailbox_backlog`: its queued
-messages plus any that an `Actor.call` it is blocked in has set aside until
-the reply. An actor stuck in a slow call with work piling up is exactly the
-one this should find, and `mailbox_size` alone reads 0 for it.
-
-A snapshot: it walks `Actor.list(c)` and asks `mailbox_backlog` of each, so an
-actor can die or drain between the walk and your reaction. Ties keep spawn
-order. Cost is one pass over every live actor plus a sort, so call it from a
-timer, not from a hot path.</code></pre></div></div>
+<div class="item" id="fn-send_after"><div class="ih"><span class="badge bfn">fn</span><span class="name">send_after</span><span class="sig">send_after(pid, msg, delay_ms)</span><a class="anchor-link" href="#fn-send_after" title="Link">#</a></div><div class="ib"><p>Schedule msg for delivery to pid after delay_ms milliseconds — a fire-once timer built on the same scheduler primitive that already backs Actor.call's timeout and supervisor restart backoff. Returns a TimerRef usable with cancel_timer. Message delivery goes through the actor's normal mailbox, so msg follows the same &quot;constructor the actor has an <code>on</code> handler for&quot; convention as Actor.cast — cast(pid, Inc(1)) and send_after(pid, Inc(1), 1000) reach the exact same dispatch path, just on different schedules.</p><p>A pending timer does not keep run_until_idle() waiting: if nothing else is happening, run_until_idle() returns even while a send_after is still pending, and delivers it whenever it's next called after the deadline has passed. A real long-running process (an IO.Process-style server) is kept alive by its own non-daemon/actor processes, not by run_until_idle, so this does not affect whether the message eventually arrives — only whether waiting for it blocks a test harness.</p><pre><code><span class="tok-kw">let</span> pid = <span class="tok-kw">spawn</span>(<span class="tok-ty">Worker</span>)
+<span class="tok-kw">let</span> ref = <span class="tok-ty">Actor</span>.send_after(pid, <span class="tok-ty">Tick</span>, <span class="tok-num">100</span>)
+<span class="tok-com">-- ... later, before it fires ...</span>
+<span class="tok-ty">Actor</span>.cancel_timer(ref)</code></pre></div></div>
+<div class="item" id="fn-set_queue_limit"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_queue_limit</span><span class="sig">set_queue_limit(pid, limit, policy)</span><a class="anchor-link" href="#fn-set_queue_limit" title="Link">#</a></div><div class="ib"><p>Bound this actor's mailbox. policy: 0 unbounded (default), 1 drop_new, 2 drop_old, 3 block_sender (compiled backend only: the interpreter's single-threaded eager scheduler cannot park a sender, so under <code>march run</code> policy 3 is refused at this call rather than silently treated as 0). Dropped messages are counted in Scheduler.dropped_messages().</p><p>Under a drop policy (1 or 2), a dropped Actor.call request or its reply is indistinguishable from a lost reply at the caller — both surface as a timeout Err from Actor.call. Callers that rely on Actor.call against a bounded actor should prefer the block policy (3) instead, so no request or reply is ever silently discarded.</p></div></div>
+<div class="item" id="fn-stop"><div class="ih"><span class="badge bfn">fn</span><span class="name">stop</span><span class="sig">stop(pid, timeout_ms)</span><a class="anchor-link" href="#fn-stop" title="Link">#</a></div><div class="ib"><p>Stop <code>pid</code> gracefully: it accepts no further messages, works off whatever is already queued, and then dies a NORMAL death (which no restart type restarts). Returns false if it was already dead or already stopping.</p><p>This is the deploy story <code>kill</code> cannot tell. <code>kill(pid)</code> is immediate and drops the mailbox, so stopping a busy actor loses exactly the requests that were waiting; <code>stop</code> finishes them first.</p><p>Waits up to <code>timeout_ms</code> for the queue to empty, then gives up and dies with whatever is left undelivered. A negative timeout waits indefinitely; 0 discards the queue as soon as the in-flight message returns.</p><p>Stopping a supervisor stops its children first, in REVERSE declaration order, each with its own <code>shutdown</code> budget from the <code>supervise</code> block's child spec (<code>Worker w shutdown 5000</code>), defaulting to 5 seconds.</p></div></div>
+<div class="item" id="fn-top_by_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">top_by_mailbox</span><span class="sig">top_by_mailbox(c : Cap(Actor.Introspect), n : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>(a), Int))</span><a class="anchor-link" href="#fn-top_by_mailbox" title="Link">#</a></div><div class="ib"><p>The <code>n</code> deepest mailboxes right now, deepest first, as <code>(pid, depth)</code> pairs. This is the &quot;which actor is behind?&quot; question a monitoring loop actually asks; <code>Scheduler</code> counters only answer &quot;is the system behind?&quot;.</p><pre><code><span class="tok-kw">match</span> <span class="tok-ty">Actor</span>.top_by_mailbox(c, <span class="tok-num">1</span>) <span class="tok-kw">do</span>
+  <span class="tok-ty">Cons</span>((hot, depth), _) -&gt; shed_from(hot, depth)
+  <span class="tok-ty">Nil</span>                   -&gt; ()
+<span class="tok-kw">end</span></code></pre><p>The depth is the actor's waiting work, <code>mailbox_backlog</code>: its queued messages plus any that an <code>Actor.call</code> it is blocked in has set aside until the reply. An actor stuck in a slow call with work piling up is exactly the one this should find, and <code>mailbox_size</code> alone reads 0 for it.</p><p>A snapshot: it walks <code>Actor.list(c)</code> and asks <code>mailbox_backlog</code> of each, so an actor can die or drain between the walk and your reaction. Ties keep spawn order. Cost is one pass over every live actor plus a sort, so call it from a timer, not from a hot path.</p></div></div>
 <div class="item" id="fn-unregister"><div class="ih"><span class="badge bfn">fn</span><span class="name">unregister</span><span class="sig">unregister(name)</span><a class="anchor-link" href="#fn-unregister" title="Link">#</a></div><div class="ib"><p>Remove a name. Returns false if it was not registered.</p></div></div>
 <div class="item" id="fn-whereis"><div class="ih"><span class="badge bfn">fn</span><span class="name">whereis</span><span class="sig">whereis(_c : Cap(Actor.Introspect), name)</span><a class="anchor-link" href="#fn-whereis" title="Link">#</a></div><div class="ib"><p>Resolve a name to the actor currently holding it. Returns None if the name is unregistered, or if its actor has died — including the window while a supervised actor is waiting out its restart backoff, which is the honest signal that the service is mid-restart. Registering is not authority; resolving a name you were never handed is, so this takes the cap.</p></div></div></main></div><script>
 /* Theme toggle */

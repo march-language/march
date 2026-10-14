@@ -54,7 +54,7 @@ import time
 # value in a bare REPL.
 PURE_MODULES = {
     "list", "option", "string", "path", "base64",
-    "hash_map", "ring_buf", "rrb_vec",
+    "hash_map", "ring_buf", "rrb_vec", "http",
 }
 
 REPL_VALUE_RE = re.compile(r"march\((\d+)\)>\s*=\s*(.*)$")

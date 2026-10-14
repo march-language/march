@@ -6,18 +6,48 @@
 
 mod Http do
 
+  -- An HTTP request method. The nine standard methods are nullary constructors;
+  -- `Other(name)` carries any extension method (`PROPFIND`, `MKCOL`, ...) verbatim.
+  -- Render one for the wire with `method_to_string`.
   type Method = Get | Post | Put | Patch | Delete | Head | Options | Trace | Connect | Other(String)
 
+  -- The URL scheme a request targets: `SchemeHttp` (`http://`) or `SchemeHttps` (`https://`).
   type Scheme = SchemeHttp | SchemeHttps
 
+  -- An HTTP status code. `Status(n)` wraps any integer, so non-standard codes
+  -- such as `Status(418)` are representable. Read it with `status_code`, build the
+  -- common ones with `status_ok`, `status_not_found`, ...; classify with
+  -- `is_success`, `is_redirect`, `is_client_error`, ...
   type Status = Status(Int)
 
+  -- One header field: `Header(name, value)`. Names keep the case they were
+  -- created with; lookups (`get_header`, `get_request_header`) compare names
+  -- case-insensitively. Header lists are plain `List(Header)` and may hold the
+  -- same name more than once.
   type Header = Header(String, String)
 
+  -- Why `parse_url` rejected a URL:
+  --
+  -- - `InvalidScheme(url)`: the URL starts with neither `http://` nor `https://`.
+  -- - `MissingHost`: nothing between the scheme and the first `/`, `:` or end.
+  -- - `InvalidPort(host_and_port)`: the text after `:` is not an integer.
+  -- - `MalformedUrl(url)`: reserved for other malformed input; `parse_url` does not currently produce it.
   type UrlError = InvalidScheme(String) | MissingHost | InvalidPort(String) | MalformedUrl(String)
 
+  -- An HTTP request, generic over its body type:
+  -- `Request(method, scheme, host, port, path, query, headers, body)`.
+  --
+  -- `port` is `None` when the URL named none (use the scheme's default), `query`
+  -- is the raw text after `?` without the `?`, and `body` is whatever the caller
+  -- stores there: `Unit` for a request built by `get`/`parse_url`, a `String` or
+  -- `Bytes` for one built by `post`. Prefer the accessors (`method`, `host`,
+  -- `path`, ...) and the `set_*` transforms over matching on the constructor:
+  -- its field order is an implementation detail.
   type Request(body) = Request(Method, Scheme, String, Option(Int), String, Option(String), List(Header), body)
 
+  -- An HTTP response, generic over its body type: `Response(status, headers, body)`.
+  -- Read it with `response_status`, `response_status_code`, `response_headers`,
+  -- `response_body`, and `get_header`.
   type Response(body) = Response(Status, List(Header), body)
 
   -- ---- Method helpers ----
@@ -177,48 +207,77 @@ mod Http do
 
   -- Request accessors
 
+  doc """
+  The request method.
+
+  ## Examples
+
+      march> match Http.parse_url("https://api.example.com:8443/v1/users?page=2") do Ok(r) -> Http.method_to_string(Http.method(r)) | Err(_) -> "" end
+      "GET"
+  """
   fn method(req : Request(b)) : Method do
     match req do
     Request(m, _, _, _, _, _, _, _) -> m
     end
   end
 
+  doc "The request scheme, `SchemeHttp` or `SchemeHttps`."
   fn scheme(req : Request(b)) : Scheme do
     match req do
     Request(_, s, _, _, _, _, _, _) -> s
     end
   end
 
+  doc """
+  The host name, without scheme, port or path.
+
+  ## Examples
+
+      march> match Http.parse_url("https://api.example.com:8443/v1/users?page=2") do Ok(r) -> Http.host(r) | Err(_) -> "" end
+      "api.example.com"
+  """
   fn host(req : Request(b)) : String do
     match req do
     Request(_, _, h, _, _, _, _, _) -> h
     end
   end
 
+  doc "The explicit port, or `None` when the URL named none (the scheme default, 80 or 443, applies)."
   fn port(req : Request(b)) : Option(Int) do
     match req do
     Request(_, _, _, p, _, _, _, _) -> p
     end
   end
 
+  doc """
+  The path, starting with `/`; `"/"` when the URL had none. Excludes the query string.
+
+  ## Examples
+
+      march> match Http.parse_url("https://api.example.com:8443/v1/users?page=2") do Ok(r) -> Http.path(r) | Err(_) -> "" end
+      "/v1/users"
+  """
   fn path(req : Request(b)) : String do
     match req do
     Request(_, _, _, _, p, _, _, _) -> p
     end
   end
 
+  doc "The raw query string after `?` (without the `?`), or `None` when the URL had none. Not decoded."
   fn query(req : Request(b)) : Option(String) do
     match req do
     Request(_, _, _, _, _, q, _, _) -> q
     end
   end
 
+  doc "All request headers, most recently added first (`set_header` prepends)."
   fn headers(req : Request(b)) : List(Header) do
     match req do
     Request(_, _, _, _, _, _, h, _) -> h
     end
   end
 
+  doc "The request body."
   fn body(req : Request(b)) : b do
     match req do
     Request(_, _, _, _, _, _, _, b) -> b
@@ -227,36 +286,42 @@ mod Http do
 
   -- Request transforms
 
+  doc "Replace the request method, keeping every other field."
   fn set_method(req : Request(b), m : Method) : Request(b) do
     match req do
     Request(_, sc, h, p, pa, q, hd, bd) -> Request(m, sc, h, p, pa, q, hd, bd)
     end
   end
 
+  doc "Replace the request scheme. The port is left alone, so switching to `SchemeHttps` does not change an explicit `:80`."
   fn set_scheme(req : Request(b), s : Scheme) : Request(b) do
     match req do
     Request(m, _, h, p, pa, q, hd, bd) -> Request(m, s, h, p, pa, q, hd, bd)
     end
   end
 
+  doc "Replace the host name."
   fn set_host(req : Request(b), new_host : String) : Request(b) do
     match req do
     Request(m, sc, _, p, pa, q, hd, bd) -> Request(m, sc, new_host, p, pa, q, hd, bd)
     end
   end
 
+  doc "Set an explicit port (stored as `Some(new_port)`). The value is not range-checked."
   fn set_port(req : Request(b), new_port : Int) : Request(b) do
     match req do
     Request(m, sc, h, _, pa, q, hd, bd) -> Request(m, sc, h, Some(new_port), pa, q, hd, bd)
     end
   end
 
+  doc "Replace the path. The query string is separate and is left unchanged; pass a path beginning with `/`."
   fn set_path(req : Request(b), new_path : String) : Request(b) do
     match req do
     Request(m, sc, h, p, _, q, hd, bd) -> Request(m, sc, h, p, new_path, q, hd, bd)
     end
   end
 
+  doc "Replace the body. The body type may change: a `Request(Unit)` from `get` becomes a `Request(String)` after `set_body(req, \"...\")`."
   fn set_body(req : Request(a), new_body : b) : Request(b) do
     match req do
     Request(m, sc, h, p, pa, q, hd, _) -> Request(m, sc, h, p, pa, q, hd, new_body)
@@ -317,38 +382,49 @@ mod Http do
 
   -- Response accessors
 
+  doc "The response status."
   fn response_status(resp : Response(b)) : Status do
     match resp do
     Response(s, _, _) -> s
     end
   end
 
+  doc "All response headers, in the order they were stored."
   fn response_headers(resp : Response(b)) : List(Header) do
     match resp do
     Response(_, h, _) -> h
     end
   end
 
+  doc "The response body."
   fn response_body(resp : Response(b)) : b do
     match resp do
     Response(_, _, b) -> b
     end
   end
 
+  doc "The response status as an integer, e.g. `200`. Shorthand for `status_code(response_status(resp))`."
   fn response_status_code(resp : Response(b)) : Int do
     status_code(response_status(resp))
   end
 
+  doc "True when the response status is `2xx`."
   fn response_is_success(resp : Response(b)) : Bool do
     is_success(response_status(resp))
   end
 
+  doc "True when the response status is `3xx`. Read the target with `get_header(resp, \"location\")`."
   fn response_is_redirect(resp : Response(b)) : Bool do
     is_redirect(response_status(resp))
   end
 
   -- Header lookup (case-insensitive)
 
+  doc """
+  The value of the first response header named `name`, compared
+  case-insensitively, or `None`. When a header repeats, only the first is returned;
+  scan `response_headers` to see them all.
+  """
   fn get_header(resp : Response(b), name : String) : Option(String) do
     let lower_name = string_to_lowercase(name)
     fn find(hs : List(Header)) : Option(String) do
@@ -363,6 +439,11 @@ mod Http do
     find(response_headers(resp))
   end
 
+  doc """
+  The value of the first request header named `name`, compared
+  case-insensitively, or `None`. `set_header` prepends, so after setting the same
+  name twice this returns the most recent value.
+  """
   fn get_request_header(req : Request(b), name : String) : Option(String) do
     let lower_name = string_to_lowercase(name)
     fn find(hs : List(Header)) : Option(String) do
@@ -379,6 +460,28 @@ mod Http do
 
   -- URL parsing
 
+  doc """
+  Parse an absolute `http://` or `https://` URL into a `GET` request with a
+  `Unit` body and no headers.
+
+  The URL is split into host, optional `:port`, path (default `"/"`) and the raw
+  query after `?`. Nothing is percent-decoded and nothing past the split is
+  validated: a `#fragment` stays part of the path or query, `user:pass@` is not
+  recognised, and an IPv6 literal (`[::1]`) is not supported. The port must be an
+  integer but is not range-checked.
+
+  Errors: `InvalidScheme` for any other scheme, `MissingHost` for an empty host,
+  `InvalidPort` for a non-numeric port.
+
+  ## Examples
+
+      march> match Http.parse_url("https://api.example.com:8443/v1/users?page=2") do Ok(r) -> Http.host(r) | Err(_) -> "" end
+      "api.example.com"
+      march> match Http.parse_url("https://api.example.com:8443/v1/users?page=2") do Ok(r) -> Http.query(r) == Some("page=2") | Err(_) -> false end
+      true
+      march> Http.parse_url("ftp://example.com") == Err(InvalidScheme("ftp://example.com"))
+      true
+  """
   fn parse_url(url : String) : Result(Request(Unit), UrlError) do
     let has_https = string_starts_with(url, "https://")
     let has_http = string_starts_with(url, "http://")
@@ -432,10 +535,12 @@ mod Http do
 
   -- Convenience constructors
 
+  doc "A `GET` request for `url`. The same as `parse_url`, named for symmetry with `post`, `put`, ..."
   fn get(url : String) : Result(Request(Unit), UrlError) do
     parse_url(url)
   end
 
+  doc "A `POST` request for `url` carrying `bdy`. Fails exactly when `parse_url(url)` does. No `Content-Type` header is added; set one with `set_header`."
   fn post(url : String, bdy : b) : Result(Request(b), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(set_body(req, bdy), Post))
@@ -443,6 +548,7 @@ mod Http do
     end
   end
 
+  doc "A `PUT` request for `url` carrying `bdy`. Fails exactly when `parse_url(url)` does."
   fn put(url : String, bdy : b) : Result(Request(b), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(set_body(req, bdy), Put))
@@ -450,6 +556,7 @@ mod Http do
     end
   end
 
+  doc "A `PATCH` request for `url` carrying `bdy`. Fails exactly when `parse_url(url)` does."
   fn patch(url : String, bdy : b) : Result(Request(b), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(set_body(req, bdy), Patch))
@@ -457,6 +564,7 @@ mod Http do
     end
   end
 
+  doc "A `DELETE` request for `url`, with a `Unit` body. Fails exactly when `parse_url(url)` does."
   fn delete(url : String) : Result(Request(Unit), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(req, Delete))
@@ -464,6 +572,7 @@ mod Http do
     end
   end
 
+  doc "A `HEAD` request for `url`. Fails exactly when `parse_url(url)` does."
   fn head(url : String) : Result(Request(Unit), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(req, Head))
@@ -471,6 +580,7 @@ mod Http do
     end
   end
 
+  doc "An `OPTIONS` request for `url`. Fails exactly when `parse_url(url)` does."
   fn options(url : String) : Result(Request(Unit), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(req, Options))
@@ -480,6 +590,21 @@ mod Http do
 
   -- Query string encoding
 
+  doc """
+  Join `(key, value)` pairs into a query string `k1=v1&k2=v2`, in order.
+
+  Keys and values are inserted VERBATIM: nothing is percent-encoded, so a value
+  containing `&`, `=`, `#`, a space or non-ASCII text produces a different
+  query than intended. Use `Uri.encode_query` when the pairs are not already
+  encoded.
+
+  ## Examples
+
+      march> Http.encode_query([("q", "march"), ("page", "2")])
+      "q=march&page=2"
+      march> Http.encode_query([])
+      ""
+  """
   fn encode_query(params : List((String, String))) : String do
     fn encode_pair(k : String, v : String) : String do
       k ++ "=" ++ v
@@ -493,6 +618,10 @@ mod Http do
     string_join(go(params), "&")
   end
 
+  doc """
+  Replace the query string with `encode_query(params)`; an empty list removes
+  it (`query` becomes `None`). Like `encode_query`, this does not percent-encode.
+  """
   fn set_query(req : Request(b), params : List((String, String))) : Request(b) do
     match req do
     Request(m, sc, h, p, pa, _, hd, bd) -> do

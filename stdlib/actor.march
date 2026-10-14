@@ -7,16 +7,15 @@
 -- and blocks until the actor calls Actor.reply(reply_to, result).
 -- Returns Ok(result), or Err(reason) if no reply arrives.
 --
--- call protocol:
---   Pass a zero-arg sentinel constructor as the call message. Its tag
---   selects which handler receives the call, and the runtime injects the
---   caller (the "reply channel") as that handler's first argument. The
---   handler must call Actor.reply(reply_to, result) to unblock the caller;
---   if it never replies, call returns Err("no reply ...").
+-- call protocol: pass a zero-arg sentinel constructor as the call message.
+-- Its tag selects which handler receives the call, and the runtime injects
+-- the caller (the "reply channel") as that handler's first argument. The
+-- handler must call Actor.reply(reply_to, result) to unblock the caller;
+-- if it never replies, call returns Err("no reply ...").
 --
---   So the call handler must be declared FIRST in the actor (tag 0), and
---   the sentinel must have a name distinct from that handler to avoid a
---   constructor-name clash.
+-- So the call handler must be declared FIRST in the actor (tag 0), and
+-- the sentinel must have a name distinct from that handler to avoid a
+-- constructor-name clash.
 --
 -- Example:
 --

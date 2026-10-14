@@ -3,13 +3,15 @@
 :root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
 --acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
 --faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
---fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
 
 /* Light theme overrides */
 [data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
 --acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
 --faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
---fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
 
 /* Reset + base */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -34,6 +36,9 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:
 code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
 pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
 code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
 h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
 h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
 p{margin:8px 0}
@@ -2971,35 +2976,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-connect"><div class="ih"><span class="badge bfn">fn</span><span class="name">connect</span><span class="sig">connect(host : String, port : Int) : Result(Int, <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-connect" title="Link">#</a></div><div class="ib"><p>Open a TCP connection to host:port. Returns Ok(fd) or Err.</p></div></div>
 <div class="item" id="fn-connect_timeout"><div class="ih"><span class="badge bfn">fn</span><span class="name">connect_timeout</span><span class="sig">connect_timeout(host : String, port : Int, timeout_ms : Int) : Result(Int, <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-connect_timeout" title="Link">#</a></div><div class="ib"><p>Open a TCP connection to host:port, giving up after timeout_ms if the peer never answers (a SYN dropped by a partition gets no RST, so a plain <code>connect</code> waits out the kernel's SYN retries, a minute or two). timeout_ms &lt;= 0 means no bound. A refused connection still fails at once.</p></div></div>
 <div class="item" id="fn-error_message"><div class="ih"><span class="badge bfn">fn</span><span class="name">error_message</span><span class="sig">error_message(e : <a href="#type-SocketError">SocketError</a>) : String</span><a class="anchor-link" href="#fn-error_message" title="Link">#</a></div><div class="ib"><p>Return a human-readable description of a SocketError.</p></div></div>
-<div class="item" id="fn-recv"><div class="ih"><span class="badge bfn">fn</span><span class="name">recv</span><span class="sig">recv(fd : Int, max_bytes : Int) : Result(String, <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-recv" title="Link">#</a></div><div class="ib"><p>Receive up to max_bytes from fd, with no per-call deadline.</p><pre><code>This still reports Err(RecvTimeout(0)) if the fd carries a deadline from
-set_recv_timeout and that deadline expires -- the 0 records that the bound
-came from the descriptor rather than from this call, which had none of its
-own.  Otherwise it blocks until the peer sends or the connection closes.</code></pre></div></div>
-<div class="item" id="fn-recv_deadline"><div class="ih"><span class="badge bfn">fn</span><span class="name">recv_deadline</span><span class="sig">recv_deadline(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(Option(String), <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-recv_deadline" title="Link">#</a></div><div class="ib"><p>As <code>recv_timeout</code>, but an expired deadline is <code>Ok(None)</code> rather than an <code>Err</code>.</p><pre><code>The same read, reported differently. `Err(RecvTimeout(ms))` says a timeout
-is a kind of failure; `Ok(None)` says it is the absence of an event, which
-is what a caller polling a quiet peer usually means. Pick whichever makes
-the calling code say what it means — a reader that treats silence as normal
-and one that treats it as an error should not have to share a spelling.
-
-`Ok(Some(&quot;&quot;))` is a clean EOF, as in `recv`.</code></pre></div></div>
-<div class="item" id="fn-recv_timeout"><div class="ih"><span class="badge bfn">fn</span><span class="name">recv_timeout</span><span class="sig">recv_timeout(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(String, <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-recv_timeout" title="Link">#</a></div><div class="ib"><p>Receive up to max_bytes from fd, waiting at most timeout_ms for the peer to send anything.  timeout_ms &lt;= 0 means no timeout.</p><pre><code>Returns Err(RecvTimeout(timeout_ms)) when the deadline expires with the peer
-still silent -- a distinct fact from Err(RecvFailed(...)), because only one
-of the two is worth retrying.  The deadline applies to this call alone and
-leaves no lasting property on fd; to bound reads made through TLS, use
-set_recv_timeout instead.
-
-On a peer that accepts the connection and then sends nothing, this returns
-Err(RecvTimeout(timeout_ms)) rather than blocking.</code></pre></div></div>
-<div class="item" id="fn-set_recv_timeout"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_recv_timeout</span><span class="sig">set_recv_timeout(fd : Int, timeout_ms : Int) : Result((), <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-set_recv_timeout" title="Link">#</a></div><div class="ib"><p>Bound every subsequent blocking read on fd to timeout_ms (SO_RCVTIMEO). timeout_ms &lt;= 0 clears the deadline.</p><pre><code>Unlike recv_timeout this is a persistent property of the descriptor, and
-that is the point: it is the only mechanism that reaches reads made through
-OpenSSL, so a TLS client calls it on the fd BEFORE Tls.connect to bound both
-the handshake and every later Tls.read against a peer that goes silent.
-
-The cost of that reach: a deadline firing part-way through a TLS record
-leaves the session unusable.  On timeout, close the connection -- do not
-retry the read.
-
-Returns Ok(()) once the option is applied.</code></pre></div></div>
+<div class="item" id="fn-recv"><div class="ih"><span class="badge bfn">fn</span><span class="name">recv</span><span class="sig">recv(fd : Int, max_bytes : Int) : Result(String, <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-recv" title="Link">#</a></div><div class="ib"><p>Receive up to max_bytes from fd, with no per-call deadline.</p><p>This still reports Err(RecvTimeout(0)) if the fd carries a deadline from set_recv_timeout and that deadline expires -- the 0 records that the bound came from the descriptor rather than from this call, which had none of its own.  Otherwise it blocks until the peer sends or the connection closes.</p></div></div>
+<div class="item" id="fn-recv_deadline"><div class="ih"><span class="badge bfn">fn</span><span class="name">recv_deadline</span><span class="sig">recv_deadline(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(Option(String), <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-recv_deadline" title="Link">#</a></div><div class="ib"><p>As <code>recv_timeout</code>, but an expired deadline is <code>Ok(None)</code> rather than an <code>Err</code>.</p><p>The same read, reported differently. <code>Err(RecvTimeout(ms))</code> says a timeout is a kind of failure; <code>Ok(None)</code> says it is the absence of an event, which is what a caller polling a quiet peer usually means. Pick whichever makes the calling code say what it means — a reader that treats silence as normal and one that treats it as an error should not have to share a spelling.</p><p><code>Ok(Some(&quot;&quot;))</code> is a clean EOF, as in <code>recv</code>.</p></div></div>
+<div class="item" id="fn-recv_timeout"><div class="ih"><span class="badge bfn">fn</span><span class="name">recv_timeout</span><span class="sig">recv_timeout(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(String, <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-recv_timeout" title="Link">#</a></div><div class="ib"><p>Receive up to max_bytes from fd, waiting at most timeout_ms for the peer to send anything.  timeout_ms &lt;= 0 means no timeout.</p><p>Returns Err(RecvTimeout(timeout_ms)) when the deadline expires with the peer still silent -- a distinct fact from Err(RecvFailed(...)), because only one of the two is worth retrying.  The deadline applies to this call alone and leaves no lasting property on fd; to bound reads made through TLS, use set_recv_timeout instead.</p><p>On a peer that accepts the connection and then sends nothing, this returns Err(RecvTimeout(timeout_ms)) rather than blocking.</p></div></div>
+<div class="item" id="fn-set_recv_timeout"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_recv_timeout</span><span class="sig">set_recv_timeout(fd : Int, timeout_ms : Int) : Result((), <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-set_recv_timeout" title="Link">#</a></div><div class="ib"><p>Bound every subsequent blocking read on fd to timeout_ms (SO_RCVTIMEO). timeout_ms &lt;= 0 clears the deadline.</p><p>Unlike recv_timeout this is a persistent property of the descriptor, and that is the point: it is the only mechanism that reaches reads made through OpenSSL, so a TLS client calls it on the fd BEFORE Tls.connect to bound both the handshake and every later Tls.read against a peer that goes silent.</p><p>The cost of that reach: a deadline firing part-way through a TLS record leaves the session unusable.  On timeout, close the connection -- do not retry the read.</p><p>Returns Ok(()) once the option is applied.</p></div></div>
 <div class="item" id="fn-with_connection"><div class="ih"><span class="badge bfn">fn</span><span class="name">with_connection</span><span class="sig">with_connection(host : String, port : Int, f)</span><a class="anchor-link" href="#fn-with_connection" title="Link">#</a></div><div class="ib"><p>Open a connection, run f(fd), then close. fd is always closed.</p></div></div>
 <div class="item" id="fn-write"><div class="ih"><span class="badge bfn">fn</span><span class="name">write</span><span class="sig">write(fd : Int, data : String) : Result((), <a href="#type-SocketError">SocketError</a>)</span><a class="anchor-link" href="#fn-write" title="Link">#</a></div><div class="ib"><p>Write all bytes of data over fd. Returns Ok(()) or Err(WriteFailed(...)).</p></div></div></main></div><script>
 /* Theme toggle */
