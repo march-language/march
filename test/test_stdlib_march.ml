@@ -108,6 +108,7 @@ let all_stdlib_decls =
     "http_client.march";
     "seq.march";
     "path.march";
+    "uri.march";
     "file.march";
     "dir.march";
     "sort.march";
@@ -734,5 +735,9 @@ let () =
     ("crypto_builtins", [
       Alcotest.test_case "bare sha256 builtin returns a hex String"
         `Quick (run_stdlib_test "test_crypto_builtins.march" "TestCryptoBuiltins");
+    ]);
+    ("uri", [
+      Alcotest.test_case "Uri module: RFC 3986 parse, merge, merge_strict"
+        `Quick (run_stdlib_test "test_uri.march" "TestUri");
     ]);
   ]
