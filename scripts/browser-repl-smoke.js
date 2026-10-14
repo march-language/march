@@ -47,6 +47,10 @@ const CASES = [
     output: "42\n", error: null },
   { input: "fn main() do println(\"hello from main\") end",
     output: "hello from main\n", error: null },
+  // A main that declares its capability (the only form native March accepts
+  // for a main that does IO) gets an erased () per parameter, as natively.
+  { input: "fn main(io : Cap(IO)) do println(\"capped main\") end",
+    output: "capped main\n", error: null },
   { input: "let = 1",
     output: "", error: "unexpected equals sign — did you mean: let name = expr\nlet = 1\n    ^" },
   { input: "List.head([])",

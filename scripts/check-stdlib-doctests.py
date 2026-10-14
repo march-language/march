@@ -19,22 +19,34 @@ Doctests are batched one `march repl` session per module (the REPL prints one
 `march(N)> = VALUE` line per input expression, in order) to amortise the ~0.6s
 stdlib load per session.
 
-LOUD SKIPS (Wave-2 doctrine — never an invisible skip). The `## Examples` are
-idealised transcripts, not literal REPL output: the bare REPL renders `None` as
-`null`, `Some(1)` as a raw tagged int, an opaque `ptype` as `#<tag>` and `()` as
-`1`, so only PRIMITIVE values (Int, Bool, String, and lists of those) render
-byte-for-byte as documented. A doctest is therefore skipped, with its reason
-printed, when:
-  * the module is IO/effect-heavy (network/filesystem/env/actors), whose
-    examples show side effects rather than a pure return value;
-  * the expected output is a `** panic ...` line (panics go to stderr);
+Which modules: those in PURE_MODULES, plus every module that opted its examples
+into the docs' "Try it" buttons with a `-- doc: try` header line (a reader can
+run those in the browser, so they must be right). Every expression of a checked
+module is fed, in file order, to ONE session, so a `let` example line sets up
+the bindings later lines use; only lines followed by an expected value are
+checked.
+
+How values are compared. The bare REPL renders `None` as `null`, `Some(1)` as a
+raw tagged int, an opaque `ptype` as `#<tag>`, so its printed text matches the
+doc only for PRIMITIVE values (Int, Bool, String, lists of those); those are
+compared as text. Any other expected value is checked by also evaluating
+`(EXPR) == (EXPECTED)` in the session and requiring `true`.
+
+LOUD SKIPS (Wave-2 doctrine — never an invisible skip). A doctest is skipped,
+with its reason printed, when:
+  * its module is neither in PURE_MODULES nor opted in with `doc: try`;
+  * the expected output is a `** panic ...` line (a panic ends a native REPL
+    session, so these are not even fed);
   * the expected value spans more than one line;
-  * the expected value is not a primitive rendering (a constructor like
-    `Some(..)`/`Ok(..)`, `None`/`null`, unit `()`, or a `ptype` — the REPL's
-    terser rendering legitimately differs from the doc);
-  * the REPL produced no value for it (the example references a binding a prior
-    `let` in the same block set up, which a one-shot eval doesn't have).
+  * no value came back (for `==`: the expected value is not a March expression
+    with equality, e.g. `<fn>` or an opaque value).
 Everything else is RUN and must match.
+
+Whole-program examples: a ```march try fence (the docs' opt-in for a complete
+program) is interpreted with the native compiler and must exit 0; when it is
+followed by an ```output fence, its standard output must equal that block. A
+program without `mod` is wrapped in `mod DocExample do needs IO ... end`, the
+way the in-browser REPL accepts top-level declarations.
 
 Usage:
   MARCH_BIN=./_build/default/bin/main.exe python3 scripts/check-stdlib-doctests.py --check [stdlib/foo.march ...]
@@ -118,6 +130,100 @@ def extract_doctests(path):
         yield (i + 1, expr, expected, reason)
 
 
+TRY_MARKER_RE = re.compile(r"^\s*--\s*doc:\s*try\s*$", re.M)
+FENCE_RE = re.compile(r"^\s*(?:--\s?)?```\s*(\S*)\s*(\S*)\s*$")
+
+
+def strip_comment(expr):
+    """`expr` without a trailing `-- note` (a `--` outside string literals)."""
+    in_str = False
+    i = 0
+    while i < len(expr):
+        c = expr[i]
+        if in_str:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif expr.startswith("--", i):
+            return expr[:i].rstrip()
+        i += 1
+    return expr
+
+
+def _content(line):
+    """A source line as doc text: a `-- ` header-comment prefix removed."""
+    stripped = line.lstrip()
+    if stripped.startswith("--"):
+        rest = stripped[2:]
+        return rest[1:] if rest.startswith(" ") else rest
+    return line
+
+
+def _dedent(lines):
+    widths = [len(l) - len(l.lstrip()) for l in lines if l.strip()]
+    cut = min(widths) if widths else 0
+    return "\n".join(l[cut:] if len(l) >= cut else "" for l in lines).strip("\n") + "\n"
+
+
+def extract_programs(src):
+    """Yield (lineno, code, expected_output|None) for each ```march try fence."""
+    lines = src.split("\n")
+    i = 0
+    while i < len(lines):
+        m = FENCE_RE.match(lines[i])
+        if not (m and m.group(1) == "march" and m.group(2) == "try"):
+            i += 1
+            continue
+        start = i + 1
+        body = []
+        i += 1
+        while i < len(lines) and not (FENCE_RE.match(lines[i]) and _content(lines[i]).strip() == "```"):
+            body.append(_content(lines[i]))
+            i += 1
+        i += 1
+        # An ```output fence right after (blank lines allowed) is the expected stdout.
+        j = i
+        while j < len(lines) and _content(lines[j]).strip() == "":
+            j += 1
+        want = None
+        if j < len(lines):
+            om = FENCE_RE.match(lines[j])
+            if om and om.group(1) == "output":
+                out = []
+                j += 1
+                while j < len(lines) and _content(lines[j]).strip() != "```":
+                    out.append(_content(lines[j]))
+                    j += 1
+                want = _dedent(out)
+                i = j + 1
+        yield (start, _dedent(body), want)
+
+
+def run_program(bin_path, code, want):
+    """Interpret one example program natively; None if it passes, else a message."""
+    import tempfile
+    if not re.search(r"^\s*mod\s", code, re.M):
+        code = ("mod DocExample do\n  needs IO\n\n"
+                + "".join("  " + l + "\n" if l.strip() else "\n" for l in code.split("\n"))
+                + "end\n")
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "doc_example.march")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(code)
+        proc = subprocess.run([os.path.abspath(bin_path), src], cwd=d,
+                              capture_output=True, text=True, timeout=180,
+                              env={**os.environ, "HOME": d})
+    if proc.returncode != 0 or "-- ERROR" in proc.stdout + proc.stderr:
+        detail = (proc.stdout + proc.stderr).strip().splitlines()
+        return f"exited {proc.returncode}: " + " | ".join(detail[:6])
+    if want is not None and proc.stdout.strip() != want.strip():
+        return f"output differs\n        expected: {want.strip()!r}\n        actual:   {proc.stdout.strip()!r}"
+    return None
+
+
 def run_module(bin_path, path, exprs):
     """Feed exprs to one `march repl` session; return ({input_index: value}, jit_errors).
 
@@ -166,51 +272,71 @@ def main():
     failures = []
     skips = []
 
+    programs_run = 0
     for path in files:
         stem = module_stem(path)
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        opted_in = stem in PURE_MODULES or TRY_MARKER_RE.search(src) is not None
         doctests = list(extract_doctests(path))
-        if not doctests:
-            continue
-        runnable = []
+        inputs = []   # fed to the session, in file order
+        checks = []   # (input_index, kind, lineno, expr, expected, expr_index)
         for (lineno, expr, expected, reason) in doctests:
-            if reason is None and stem not in PURE_MODULES:
-                reason = f"module '{stem}' not in the pure-REPL allowlist"
-            if reason is not None:
+            if not opted_in:
+                total_skip += 1
+                skips.append(f"  SKIP {path}:{lineno}  {expr!r} — module '{stem}' "
+                             "neither in PURE_MODULES nor opted in with `doc: try`")
+                continue
+            if expr == "" or (reason or "").startswith("expected a panic"):
                 total_skip += 1
                 skips.append(f"  SKIP {path}:{lineno}  {expr!r} — {reason}")
                 continue
-            runnable.append((lineno, expr, expected))
-        if not runnable:
-            continue
-        values, jit_errors = run_module(bin_path, path, [e for (_, e, _) in runnable])
-        for err in jit_errors:
-            failures.append(f"  FAIL {path}: stdlib prelude did not load: {err}")
-        for idx, (lineno, expr, expected) in enumerate(runnable):
-            actual = values.get(idx + 1)  # REPL input index is 1-based
-            if actual is None:
-                # The REPL emitted no value for this expression — the example
-                # references a `let` binding a prior line in the same block set
-                # up, which a one-shot eval doesn't have. Skip, don't fail.
+            inputs.append(expr)
+            expr_index = len(inputs)
+            if reason is None:
+                checks.append((expr_index, "text", lineno, expr, expected, expr_index))
+            elif reason.startswith("non-primitive"):
+                inputs.append(f"({strip_comment(expr)}) == ({expected})")
+                checks.append((len(inputs), "eq", lineno, expr, expected, expr_index))
+            else:
+                # Fed for its bindings / effects, but nothing to compare against.
                 total_skip += 1
-                skips.append(
-                    f"  SKIP {path}:{lineno}  {expr!r} — REPL produced no value "
-                    f"(example likely needs setup bindings)")
-                continue
-            total_run += 1
-            if actual != expected:
-                failures.append(
-                    f"  FAIL {path}:{lineno}  {expr}\n"
-                    f"        expected: {expected!r}\n"
-                    f"        actual:   {actual!r}"
-                )
+                skips.append(f"  SKIP {path}:{lineno}  {expr!r} — {reason}")
+        if checks:
+            values, jit_errors = run_module(bin_path, path, inputs)
+            for err in jit_errors:
+                failures.append(f"  FAIL {path}: stdlib prelude did not load: {err}")
+            for (idx, kind, lineno, expr, expected, expr_index) in checks:
+                actual = values.get(idx)
+                if actual is None:
+                    total_skip += 1
+                    why = ("REPL produced no value" if kind == "text" else
+                           "`==` produced no value (the expected value is not a March "
+                           "expression with equality)")
+                    skips.append(f"  SKIP {path}:{lineno}  {expr!r} — {why}")
+                    continue
+                total_run += 1
+                ok = actual == expected if kind == "text" else actual == "true"
+                if not ok:
+                    shown = actual if kind == "text" else values.get(expr_index, "(no value)")
+                    failures.append(
+                        f"  FAIL {path}:{lineno}  {expr}\n"
+                        f"        expected: {expected!r}\n"
+                        f"        actual:   {shown!r}")
+        for (lineno, code, want) in extract_programs(src):
+            programs_run += 1
+            err = run_program(bin_path, code, want)
+            if err:
+                failures.append(f"  FAIL {path}:{lineno}  ```march try program\n        {err}")
 
     for s in skips:
         print(s)
-    print(f"\nstdlib doctests: {total_run} run, {total_skip} skipped, {len(failures)} failed")
+    print(f"\nstdlib doctests: {total_run} run, {total_skip} skipped, {programs_run} programs, "
+          f"{len(failures)} failed")
     if failures:
         print("\n".join(failures))
         return 1
-    if total_run == 0:
+    if total_run == 0 and programs_run == 0:
         print("error: no doctests were actually run — the extractor matched nothing", file=sys.stderr)
         return 2
     return 0
