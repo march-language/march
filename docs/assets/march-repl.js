@@ -6,7 +6,8 @@
  *   repl.submit()           — eval whatever is in the textarea
  *   repl.load(code)         — HTML-decode and load code into the textarea
  *   repl.loadThen(s, code)  — silently eval s, then load code into the textarea
- *   repl.reset()            — clear session and history
+ *   repl.clear()            — clear the screen; definitions and input history stay
+ *   repl.reset()            — clear the screen and forget every definition
  *
  * cfg.cls must have: entry, inputLine, output, error, info
  */
@@ -51,6 +52,11 @@
           self._input.value = "";
         }
         self._resize();
+      } else if ((e.key === "l" || e.key === "L") && e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Ctrl+L clears the screen, as in a terminal. (Cmd+L is the browser's
+        // address bar on macOS, so it is left alone.)
+        e.preventDefault();
+        self.clear();
       } else if (!self._loaded && !self._loading) {
         self._loadBundle(function () {});
       }
@@ -304,11 +310,16 @@
     if (this._cmdHist.length > 50) this._cmdHist.pop();
     this._histIdx = -1;
 
+    if (trimmed === ":clear") {
+      this._wipe();
+      return;
+    }
+
     this._appendInput(code);
 
     if (trimmed === ":reset") {
       if (this._loaded && window.marchResetSession) window.marchResetSession();
-      while (this._hist.firstChild) this._hist.removeChild(this._hist.firstChild);
+      this._wipe();
       this._appendLine("Session reset.", cls.info);
       return;
     }
@@ -318,7 +329,8 @@
         "March REPL — quick reference",
         "",
         "Commands:",
-        "  :reset        clear session and history",
+        "  :clear        clear the screen (Ctrl+L); definitions stay",
+        "  :reset        clear the screen and forget every definition",
         "  :help         show this message",
         "  h(name)       look up stdlib docs (e.g. h(map))",
         "",
@@ -377,7 +389,29 @@
     this._run(code);
   };
 
-  // Clear session and history.
+  // Remove every transcript entry except the one holding the loading-status
+  // line: on the landing page and the cookbook sidebar that line lives inside
+  // the transcript, and removing it would leave later "Loading interpreter…"
+  // updates writing to a detached node.
+  MarchRepl.prototype._wipe = function () {
+    var keep = null;
+    for (var n = this._loadEl; n && n !== this._hist; n = n.parentNode) keep = n;
+    if (keep && keep.parentNode !== this._hist) keep = null;
+    var kids = Array.prototype.slice.call(this._hist.childNodes);
+    for (var i = 0; i < kids.length; i++) {
+      if (kids[i] !== keep) this._hist.removeChild(kids[i]);
+    }
+  };
+
+  // Clear the screen. The interpreter session (every definition) and the
+  // up/down input history are kept; nothing is evaluated, so this works
+  // before the interpreter has loaded and never triggers its download.
+  MarchRepl.prototype.clear = function () {
+    this._wipe();
+    this._input.focus();
+  };
+
+  // Clear the screen and forget every definition.
   MarchRepl.prototype.reset = function () {
     this._input.value = "";
     this._resize();

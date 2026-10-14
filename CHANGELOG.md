@@ -29,6 +29,11 @@ git log is authoritative for exact commits.
   would overflow it is reported, where it used to silently give a wrong answer
   (`65536 * 65536` was `0`).
 
+- **The in-browser REPL can clear the screen without forgetting your definitions.**
+  Every REPL on the site (playground, landing page, cookbook sidebar) has a **clear**
+  button, `:clear` and Ctrl+L, which wipe the screen and keep what you defined, next to
+  **reset**, which also forgets it. The cookbook sidebar previously had neither.
+
 ### Changed
 - A compiled program whose scheduler is about to resume a corrupt or freed
   green-thread context now stops with a `march_sched[BUG]: dispatch of pid N

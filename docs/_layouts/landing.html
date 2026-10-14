@@ -271,7 +271,7 @@
       display: flex; align-items: center; padding: 11px 16px;
       border-bottom: 1px solid var(--border); gap: 6px;
     }
-    .m-repl-title { margin-left: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); flex: 1; }
+    .m-repl-title { margin-left: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .m-repl-reset-btn {
       background: none; border: 1px solid var(--border); color: var(--text-faint);
       border-radius: 4px; padding: 2px 10px; font-size: 11px; cursor: pointer;
@@ -608,7 +608,8 @@
         <span class="m-dot" style="background:#febc2e;"></span>
         <span class="m-dot" style="background:#28c840;"></span>
         <span class="m-repl-title">march — interactive</span>
-        <button class="m-repl-reset-btn" id="m-repl-reset">reset</button>
+        <button class="m-repl-reset-btn" id="m-repl-clear" title="Clear the screen; definitions stay (Ctrl+L)">clear</button>
+        <button class="m-repl-reset-btn" id="m-repl-reset" title="Clear the screen and forget every definition">reset</button>
       </div>
       <div class="m-repl-history" id="m-repl-history">
         <div class="m-repl-entry"><span class="m-repl-nfo">March REPL — type an expression and press Enter.</span></div>
@@ -1022,6 +1023,7 @@ function _loadRepl() {
       }
     });
     document.getElementById('m-repl-submit').addEventListener('click', function () { repl.submit(); });
+    document.getElementById('m-repl-clear').addEventListener('click', function () { repl.clear(); });
     document.getElementById('m-repl-reset').addEventListener('click', function () { repl.reset(); });
     window.mReplLoad     = function (code)        { repl.load(code); };
     window.mReplLoadThen = function (setup, code) { repl.loadThen(setup, code); };

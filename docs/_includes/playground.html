@@ -46,6 +46,10 @@
     font-size: 11px;
     letter-spacing: 0.04em;
     flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .pg-reset-btn {
     background: none;
@@ -205,7 +209,8 @@
         <span class="pg-dot pg-dot-yellow"></span>
         <span class="pg-dot pg-dot-green"></span>
         <span class="pg-title-label">march repl</span>
-        <button class="pg-reset-btn" onclick="pgReset()">reset</button>
+        <button class="pg-reset-btn" onclick="pgClear()" title="Clear the screen; definitions stay (Ctrl+L)">clear</button>
+        <button class="pg-reset-btn" onclick="pgReset()" title="Clear the screen and forget every definition">reset</button>
       </div>
 
       <!-- Scrollable output history -->
@@ -250,6 +255,7 @@
       <button class="pg-example-chip pg-chip-error" onclick="pgLoad('count = 0')">wrong assignment</button>
       <button class="pg-example-chip pg-chip-error" onclick="pgLoad('let classify = fn n -> match n do\n  0 -> &quot;zero&quot;\n  1 -> &quot;one&quot;\nend\nclassify(5)')">missing match arm</button>
       <button class="pg-example-chip pg-chip-error" onclick="pgLoadThen('actor Counter do\n  state { value : Int }\n  init { value: 0 }\n  on Inc(n : Int) do { value: state.value + n } end\nend\nlet pid = spawn(Counter)', 'send(pid(, Inc(1))')">pid typo</button>
+      <button class="pg-example-chip" onclick="pgLoad(':clear')">:clear</button>
       <button class="pg-example-chip" onclick="pgLoad(':reset')">:reset</button>
       <button class="pg-example-chip" onclick="pgLoad(':help')">:help</button>
     </div>
@@ -267,7 +273,7 @@
       multi-line input. <kbd>↑</kbd> / <kbd>↓</kbd> cycles history.
     </p>
     <p>
-      Type <code>:reset</code> to clear the session and start fresh.
+      Type <code>:clear</code> (or press Ctrl+L) to clear the screen and keep your definitions, or <code>:reset</code> to start fresh.
     </p>
     <p>
       No install needed — the interpreter runs entirely in your browser.
