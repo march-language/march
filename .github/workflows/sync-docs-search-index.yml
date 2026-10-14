@@ -44,9 +44,10 @@ permissions:
   contents: write
 
 # Serialize with any other run of this workflow so two overlapping pushes cannot race each
-# other's `git push`. gen-stdlib-docs.yml pushes the index too; the rebase-retry loop in
-# the commit step below tolerates a concurrent push from it (or from a human) rather than
-# relying on a shared group across workflows.
+# other's `git push`. gen-stdlib-docs.yml pushes the index too, usually for the SAME merge
+# (stdlib PRs touch docs/); both commit steps retry against a moving main rather than
+# share a group across workflows, because a group keeps only one pending run and cancels
+# the older one, which would silently drop a queued run of the other workflow.
 concurrency:
   group: sync-docs-search-index
   cancel-in-progress: false
@@ -109,9 +110,9 @@ jobs:
 
             scripts/gen-docs-search-index.sh
             git add docs/pagefind
-            # No [skip ci]: the commit touches docs/pagefind/**, which is in
-            # deploy-pages.yml's trigger paths (docs/**) so the fresh index gets published,
-            # but is EXCLUDED from this workflow's own trigger, so it does not self-loop.
+            # No [skip ci], though it would change nothing: a push made with GITHUB_TOKEN
+            # starts no `on: push` workflow (not this one, nor deploy-pages.yml). The live
+            # site is GitHub's legacy Pages build over main:/docs, which does rebuild on it.
             git commit -m "docs: sync pagefind search index with docs sources"
 
             if git push origin HEAD:main; then
