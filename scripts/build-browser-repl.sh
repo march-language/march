@@ -7,7 +7,11 @@
 # outputs. Built by hand, they went stale: the July bundles predated stdlib builtins
 # and modules (Json failed with `unbound variable: string_byte_at`, the live compiler
 # could not compile anything), and they were development builds ten times larger than
-# needed. This script is the one way to produce them; CI runs it with --check.
+# needed. This script is the one way to produce them. The committed copies are
+# BOT-OWNED: .github/workflows/gen-browser-repl.yml reruns this on every push to main
+# that can change them and commits the result, so a pull request never has to. PR CI
+# (ci.yml, job browser-repl) builds them with --out and runs
+# scripts/browser-repl-smoke.js against the fresh build.
 #
 # Produces:
 #   docs/assets/march.js                  interpreter REPL (cookbook, landing, playground)
@@ -23,19 +27,38 @@
 # is never rebuilt in release mode or the reverse. js_of_ocaml output is byte-identical
 # across checkout paths, which is what lets --check compare byte for byte.
 #
-# Usage:  scripts/build-browser-repl.sh           write the artifacts
-#         scripts/build-browser-repl.sh --check   compare instead; exit 1 naming every stale file
+# Usage:  scripts/build-browser-repl.sh             write the artifacts into docs/assets/
+#         scripts/build-browser-repl.sh --out DIR   write them into DIR instead (same layout)
+#         scripts/build-browser-repl.sh --check     compare with docs/assets/; exit 1 naming
+#                                                   every stale file
 set -euo pipefail
 
 CHECK=0
+DEST=""
 case "${1:-}" in
   --check) CHECK=1 ;;
+  --out) [ -n "${2:-}" ] || { echo "usage: $0 [--check | --out DIR]" >&2; exit 2; }
+         mkdir -p "$2/tetris"; DEST="$(cd "$2" && pwd)" ;;
   "") ;;
-  *) echo "usage: $0 [--check]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--check | --out DIR]" >&2; exit 2 ;;
 esac
 
 ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$ROOT"
+DEST="${DEST:-$ROOT/docs/assets}"
+
+# Byte-for-byte comparison is only meaningful with the js_of_ocaml that built the
+# committed bundles; each records it in its header (`//# buildInfo: ... version=X`).
+# CI installs that version first (see the browser-repl job in ci.yml).
+if [ "$CHECK" = 1 ]; then
+  want="$(sed -n '2s/.*version=\([0-9][0-9.]*\).*/\1/p' docs/assets/march.js)"
+  have="$(js_of_ocaml --version 2>/dev/null || echo none)"
+  if [ "$want" != "$have" ]; then
+    echo "error: committed bundles were built with js_of_ocaml $want; installed is $have." >&2
+    echo "Install $want to check them, or rebuild them with $have in the PR that bumps it." >&2
+    exit 1
+  fi
+fi
 
 BUILD_DIR="$ROOT/_build_browser"
 STAGE="$(mktemp -d)"
@@ -85,12 +108,12 @@ if [ "$CHECK" = 1 ]; then
   exit 0
 fi
 
-# Everything built: only now touch docs/assets/.
+# Everything built: only now touch the destination.
 for a in "${ARTIFACTS[@]}"; do
-  mv -f "$STAGE/$a" "docs/assets/$a"
+  mv -f "$STAGE/$a" "$DEST/$a"
 done
 echo "==> Wrote:"
 for a in "${ARTIFACTS[@]}"; do
-  printf '  %-42s %10d bytes  (gzip %d)\n' "docs/assets/$a" \
-    "$(wc -c <"docs/assets/$a")" "$(gzip -9c "docs/assets/$a" | wc -c)"
+  printf '  %-42s %10d bytes  (gzip %d)\n' "$DEST/$a" \
+    "$(wc -c <"$DEST/$a")" "$(gzip -9c "$DEST/$a" | wc -c)"
 done

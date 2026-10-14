@@ -1,7 +1,7 @@
 # Browser REPL bundle: release build, one build script, CI freshness and smoke checks
 
 Date: 2026-10-14
-Status: design approved in conversation; spec awaiting review
+Status: implemented 2026-10-14 (see "Changes during implementation" at the end)
 
 ## Context
 
@@ -184,3 +184,41 @@ the Tetris playground, each in a browser.
 
 None blocking. Whether the build is byte-identical everywhere is answered by the
 first implementation task, and section 2 defines both outcomes.
+
+## Changes during implementation (2026-10-14)
+
+- **Freshness: a bot instead of a PR-time check.** The bundles embed the parser,
+  typechecker, evaluator, JS backend and stdlib, so a PR-time `--check` would have
+  made almost every `lib/` or `stdlib/` PR regenerate and commit about 4 MB of JS. The
+  committed artifacts are bot-owned instead, following `gen-stdlib-docs.yml`:
+  - `.github/workflows/gen-browser-repl.yml` rebuilds them after each merge that can
+    change them, smoke-tests the rebuild, and commits it.
+  - PR CI (`ci.yml` job `browser-repl`) builds them fresh with `--out` and smoke-tests
+    that build, so a PR that breaks the browser REPL still goes red.
+  - `--check` remains for local use. It refuses to run unless the installed js_of_ocaml
+    matches the version recorded in the committed bundle header.
+  - The search-index digest covers only `docs/**/*.{md,html}`, so these commits do not
+    stale `docs/pagefind/`.
+- **Byte identity: confirmed.** Two release builds from different checkout paths, with the
+  dune cache disabled, were identical and contained no absolute paths (js_of_ocaml
+  6.3.2, macOS). The bot builds on Linux and commits whatever it builds, so a
+  cross-OS difference would show up as one extra bot commit, not as a red check.
+- **The live compiler was broken and is repaired.** The smoke case "the Tetris source
+  compiles" failed on the committed July build, and on a fresh build, for three
+  reasons:
+  1. `string.march` now uses `Bytes`, which the browser compiler did not load.
+     `bytes.march` is added to both stdlib lists.
+  2. `js/march_browser_compile.ml` never registered the browser stdlib with
+     `Typecheck_builtins.note_stdlib_decls`. So the capability checks blamed the
+     user's module for the prelude's `IO.Console` use, and blamed `List` for declaring
+     no `needs IO.Spawn`. It now registers it, as the driver and the LSP do.
+  3. The Tetris demo's `main` lacked the `IO.Foreign` grant that `Js.Dom` requires,
+     and the committed playground source still used the pre-#201 name `Dom`.
+     `demo_app/tetris` is fixed and the source is regenerated.
+- **More artifacts are script-owned.** `docs/assets/tetris/tetris-source.march.txt`,
+  `tetris.mjs`, `march_runtime.mjs` and `march_dom.mjs` were also hand-copied and
+  stale (both runtimes had drifted from `runtime/`). The script builds all seven.
+- **A finding for project 3:** 57 of the 151 ` ```march ` blocks in the cookbook and the
+  `coming-from-*` pages fail in the browser REPL, identically on the old and new
+  bundles (the new one fixes one: `json-api.md`). These are the blocks that already
+  carry a "run" button.

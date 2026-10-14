@@ -1,13 +1,13 @@
 ; March browser REPL — compiled to JavaScript via js_of_ocaml.
 ;
-; To build the JS bundle:
-;   dune build --root=<worktree-root> js/march_browser.bc.js
-;
-; After building, copy the bundle to docs/assets/:
-;   cp _build/default/js/march_browser.bc.js docs/assets/march.js
-;
-; Or use the playground alias which does both:
-;   dune build --root=<worktree-root> @js/playground
+; The committed bundle (docs/assets/march.js) is built by
+;   scripts/build-browser-repl.sh
+; which builds BOTH executables in this file with --profile release (a dev-profile
+; build is ten times larger), regenerates docs/assets/march_stdlib.js and the Tetris
+; playground files, and moves them into docs/assets/. Those committed copies are
+; bot-owned: .github/workflows/gen-browser-repl.yml reruns the script after every
+; merge that can change them, and PR CI (ci.yml job browser-repl) builds them fresh
+; and smoke-tests that build. A PR does not need to regenerate them.
 
 (executable
  (name march_browser)
@@ -36,8 +36,8 @@
 
 ; March browser live-compile entry point — runs the real --target js compile
 ; pipeline (lib/driver/js_pipeline.ml) against user-edited source, in the
-; browser. Build/copy the same way as march_browser above, with
-; march_browser_compile.bc.js -> docs/assets/march_compile.js.
+; browser. Built into docs/assets/march_compile.js by
+; scripts/build-browser-repl.sh, with march_browser above.
 (executable
  (name march_browser_compile)
  (libraries

@@ -29,6 +29,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The in-browser REPL downloads a tenth as much, and the Tetris playground compiles
+  again.** The REPL on the playground, cookbook and landing pages loaded a 19.7 MB
+  development build (2.1 MB compressed); it is now a 1.9 MB release build (408 KB
+  compressed). Editing the Tetris playground and pressing Run had failed on every
+  program since at least July; it compiles and runs again. Both are now rebuilt
+  automatically after every compiler or stdlib change, which also fixes `Json` in the
+  REPL (`unbound variable: string_byte_at`).
+
 - **A topology app under continuous session traffic stops on Ctrl-C/SIGTERM.**
   A node whose hook tasks kept starting sessions (an `initiate_<Role>` loop) never
   drained: each new session kept the count above zero, so every drain ran to its
