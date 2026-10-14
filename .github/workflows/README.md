@@ -24,6 +24,7 @@ suite unsharded. Be most careful with macOS: 5 slots for the whole org.
 | [`release.yml`](release.yml) | push of a `v*` tag; manual | Builds and publishes a versioned release. Run manually with a `tag` to rebuild an existing release's archives and replace them. |
 | [`build.yml`](build.yml) | called by nightly/release | Builds the three distributable archives. Not triggered on its own. |
 | [`gen-stdlib-docs.yml`](gen-stdlib-docs.yml) | push to `main` touching `stdlib/**` | Regenerates the committed stdlib API pages and search index. |
+| [`gen-browser-repl.yml`](gen-browser-repl.yml) | push to `main` touching `lib/**`, `stdlib/**`, `js/**`, the JS runtimes or the Tetris demo | Rebuilds the committed in-browser REPL, live compiler and Tetris playground files (`scripts/build-browser-repl.sh`), smoke-tests them, and commits them if they changed. |
 | [`sync-docs-search-index.yml`](sync-docs-search-index.yml) | push to `main` touching `docs/**` | Regenerates the committed Pagefind index (`docs/pagefind/`). |
 | [`deploy-pages.yml`](deploy-pages.yml) | push to `main` touching `docs/**` | Publishes the separately built site to `march-language.github.io`. |
 | [`march-lean-dispatch.yml`](march-lean-dispatch.yml) | push to `main` touching the type corpus/checker | Tells the independent Lean re-checker (`march-lean`) to re-run. |
@@ -63,6 +64,7 @@ sanitize-gate (ubuntu) × 1/3 | 2/3 | 3/3
 bench-gate (ubuntu)
 conformance (ubuntu)
 tree-sitter (ubuntu)
+browser-repl (ubuntu)
 ocaml-build (ubuntu) ─┬─ property-tests × soundness | tir | rest ─┐
                       │                                           └─ property-coverage
                       ├─ cross-linux-oracle
@@ -83,6 +85,7 @@ ocaml-build (ubuntu) ─┬─ property-tests × soundness | tir | rest ─┐
 | `bench-gate` | Compiles every gated `bench/*.march` at `--opt 2`, runs it, checks the printed value. The only place benchmarks run in CI. | A benchmark stopped compiling or computes a different answer (not a timing check). |
 | `conformance` | Ubuntu only. `@types-check` (static-semantics corpus) and `@grammar-check`, the refinement obligation ratchet, `@vault-scale`, doc notebooks (`.scrollmd`) compile, stdlib `march>` doctests, and `@demo/demo` (compiles every `demo/*.march` program; nothing else in CI builds `demo/`). (The coverage-audit ratchet was dropped as a near-copy of refinecheck's `audit-baseline` test, and the formatting step, which could never fail, was removed.) | The step name says which. Ratchets fail when coverage drops, not just on errors. `Build demo/ programs` red means a stdlib, capability or language change broke a demo: `dune build --root . @demo/demo` reproduces it; fix the demo in the same PR. |
 | `tree-sitter` | `scripts/check-tree-sitter.sh --self-test`, then the script: `tree-sitter-march/src` regenerates byte-identical with the pinned CLI, `tree-sitter test` corpus passes, every `.scm` under `tree-sitter-march/queries/` and `zed-march/languages/march/` compiles, and every `.march` under `stdlib/ test/ examples/ bench/ specs/lang/` parses without ERROR except those in `tree-sitter-march/known-failures.txt`. | A syntax change the grammar does not cover (extend `grammar.js`, or list the file with a todo), a grammar edit without `tree-sitter generate`, a stale known-failures entry, or a query that no longer matches the grammar. |
+| `browser-repl` | `scripts/build-browser-repl.sh --out $RUNNER_TEMP/browser` builds the in-browser March from this commit (both js_of_ocaml bundles release-built, `march_stdlib.js`, the Tetris playground source, `tetris.mjs` and its runtimes), then `node scripts/browser-repl-smoke.js` loads that build (17 pinned REPL results, including on-demand module loading, the "not available in the browser" message and Int overflow; the live compiler must compile the Tetris source), and `node scripts/browser-repl-doc-sweep.js` runs every stdlib `march>` example through it, failures only as listed in its `EXPECTED_FAILURES`. The committed copies in `docs/assets/` are bot-owned (`gen-browser-repl.yml` regenerates them after a merge) and are not compared. | A compiler, stdlib, `js/` or `runtime/*.mjs` change that breaks the browser REPL or the Tetris live compiler (a missing primitive, a stdlib module the browser list no longer loads, a value-printer regression, a capability or typecheck regression in the live compile). |
 | `sanitize-gate (K/3)` | AddressSanitizer over the golden corpus, a curated native list and the two-node sweep (`specs/lang/golden/sanitize.sh`). Guards RC/use-after-free bugs. Ubuntu only. Three shards: each sweeps a third of the two-node scenarios (`SANITIZE_TWO_NODE_SHARD=K/3`); shard 1 also runs golden + native, the others set `SANITIZE_TWO_NODE_ONLY=1`. | A memory-safety bug even if every test passed. A two-node scenario that exits 3 is reported as SKIP with the scenario's own final log line (for example `protocol_evolve` says it is timing-bound under ASan); the skip is not a pass. On a Mac, reproduce in a Linux Docker container: ASAN binaries can hang on macOS hosts running endpoint security software. |
 | `ocaml-build` | Ubuntu. Builds the compiler and oracle binaries once and uploads them for the jobs below. | A build break; everything downstream is skipped. |
 | `property-tests (<shard>)` | QCheck property groups from `test/test_properties.ml`, split into three shards, on Linux. | Shrunk counterexample is in the log. |
@@ -132,17 +135,21 @@ checksums, leaving the notes, the tag and `latest` alone.
 ## Docs bots
 
 The site (`march-lang.org`) is served by GitHub's own Jekyll over `docs/`, so
-generated files must be committed. Two bots keep them fresh after a merge:
-`gen-stdlib-docs.yml` (stdlib pages + search index, on stdlib changes) and
-`sync-docs-search-index.yml` (search index, on any docs change). A stdlib merge
-usually fires both, and both push to `main`; each commit step retries a rejected
+generated files must be committed. Three bots keep them fresh after a merge:
+`gen-stdlib-docs.yml` (stdlib pages + search index, on stdlib changes),
+`sync-docs-search-index.yml` (search index, on any docs change) and
+`gen-browser-repl.yml` (the in-browser REPL, live compiler and Tetris files under
+`docs/assets/`, on compiler, stdlib or `js/` changes). A stdlib merge
+usually fires all three, and all push to `main`. The two index bots retry a rejected
 push by resetting onto the new `main` and regenerating the index there (never
 `git pull --rebase`: Pagefind's file names are not reproducible, so two indexes
 conflict). gen-stdlib-docs keeps its generated pages across a retry, and stops
 if `stdlib/**` changed meanwhile, since its newer queued run will publish those.
-Their pushes use `GITHUB_TOKEN`, so they trigger no other workflow (not each
-other, not `deploy-pages.yml`); GitHub's Pages build still picks them up. PRs should not
-commit `docs/pagefind/`; `doc-lint` rejects it. `deploy-pages.yml` is a
+gen-browser-repl never touches `docs/pagefind/`, so it retries with
+`git pull --rebase`. Their pushes use `GITHUB_TOKEN`, so they trigger no other
+workflow (not each other, not `deploy-pages.yml`); GitHub's Pages build still picks
+them up. PRs should not commit `docs/pagefind/`; `doc-lint` rejects it. PRs need not
+regenerate the browser files. `deploy-pages.yml` is a
 separate path that publishes to the external `march-language.github.io` repo.
 
 ## Running the same checks locally

@@ -30,9 +30,9 @@ let base_env : env =
      here, dispatched via E-App-Prim (§4.2) — there is no separate arithmetic
      evaluation path. *)
   [ (* Integer arithmetic *)
-    ("+",  arith_num ( + ) ( +. ) "+")   (* δ-Add-I / δ-Add-F — §4.4 *)
-  ; ("-",  arith_num ( - ) ( -. ) "-")   (* δ-Sub-I / δ-Sub-F — §4.4 *)
-  ; ("*",  arith_num ( * ) ( *. ) "*")   (* δ-Mul-I / δ-Mul-F — §4.4 *)
+    ("+",  arith_num int_add ( +. ) "+")   (* δ-Add-I / δ-Add-F — §4.4 *)
+  ; ("-",  arith_num int_sub ( -. ) "-")   (* δ-Sub-I / δ-Sub-F — §4.4 *)
+  ; ("*",  arith_num int_mul ( *. ) "*")   (* δ-Mul-I / δ-Mul-F — §4.4 *)
   ; ("/",  VBuiltin ("/", function       (* δ-Div-I / δ-Div-F / δ-Div-0 / δ-Div-0F — §4.4 *)
         | [VInt a;   VInt b]   when b <> 0   -> VInt (a / b)
         | [VFloat a; VFloat b] when b <> 0.0 -> VFloat (a /. b)
@@ -170,7 +170,12 @@ let base_env : env =
   ; ("string_to_int", VBuiltin ("string_to_int", function
         | [VString s] ->
           (try VCon ("Some", [VInt (int_of_string s)])
-           with Failure _ -> VCon ("None", []))
+           with Failure _ ->
+             (* A narrow host (the browser REPL) rejects a decimal native
+                March would accept: report the width, not "not a number". *)
+             if narrow_int && Int64.of_string_opt s <> None
+             then int_overflow "string_to_int"
+             else VCon ("None", []))
         | _ -> eval_error "string_to_int: expected string"))
   ; ("string_length", VBuiltin ("string_length", function
         | [VString s] -> VInt (String.length s)
@@ -218,7 +223,7 @@ let base_env : env =
         | _ -> eval_error "is_nil: expected list"))
     (* Negation *)
   ; ("negate", VBuiltin ("negate", function
-        | [VInt n]   -> VInt (~- n)
+        | [VInt n]   -> VInt (int_neg n)
         | [VFloat f] -> VFloat (~-. f)
         | _ -> eval_error "negate: expected number"))
     (* Actor builtins — operate on the global actor_registry *)
@@ -975,13 +980,13 @@ let base_env : env =
 
     (* ---- Int primitives ---- *)
   ; ("int_abs", VBuiltin ("int_abs", function
-        | [VInt n] -> VInt (abs n)
+        | [VInt n] -> VInt (if n < 0 then int_neg n else n)
         | _ -> eval_error "int_abs: expected int"))
   ; ("int_pow", VBuiltin ("int_pow", function
         | [VInt base; VInt exp] ->
           if exp < 0 then eval_error "int_pow: negative exponent"
           else
-            let rec go acc b e = if e = 0 then acc else go (acc * b) b (e - 1)
+            let rec go acc b e = if e = 0 then acc else go (int_mul acc b) b (e - 1)
             in VInt (go 1 base exp)
         | _ -> eval_error "int_pow: expected two ints"))
   ; ("int_div", VBuiltin ("int_div", function
@@ -1034,6 +1039,8 @@ let base_env : env =
   ; ("int_shl", VBuiltin ("int_shl", function
         | [VInt a; VInt n] ->
           if n < 0 || n >= 63 then eval_error "int_shl: shift out of range"
+          else if narrow_int && (n >= Sys.int_size - 1 || (a asr (Sys.int_size - 1 - n)) <> (if a < 0 then -1 else 0))
+          then (if a = 0 then VInt 0 else int_overflow "int_shl")
           else VInt (a lsl n)
         | _ -> eval_error "int_shl: expected two ints"))
   ; ("int_shr", VBuiltin ("int_shr", function
@@ -1071,10 +1078,10 @@ let base_env : env =
         | [VFloat f] -> VInt (Float.to_int (Float.round f))
         | _ -> eval_error "float_round: expected float"))
   ; ("float_truncate", VBuiltin ("float_truncate", function
-        | [VFloat f] -> VInt (Float.to_int f)
+        | [VFloat f] -> VInt (int_of_float_checked "float_truncate" f)
         | _ -> eval_error "float_truncate: expected float"))
   ; ("float_to_int", VBuiltin ("float_to_int", function
-        | [VFloat f] -> VInt (Float.to_int f)
+        | [VFloat f] -> VInt (int_of_float_checked "float_to_int" f)
         | _ -> eval_error "float_to_int: expected float"))
   ; ("float_is_nan", VBuiltin ("float_is_nan", function
         | [VFloat f] -> VBool (Float.is_nan f)

@@ -18,6 +18,22 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **The in-browser REPL can use the whole standard library, and reports what it
+  can't do.** Modules load the first time you use them, so `HashMap`, `Uri`, `Csv`
+  and about a hundred others now work on the playground and cookbook pages (197 of
+  the 210 stdlib doc examples run in the browser, up from 63) without slowing startup.
+  Modules that need a file system, sockets, processes or the cluster runtime say so
+  instead of failing obscurely. The browser REPL's `Int` is 32-bit, so a result that
+  would overflow it is reported, where it used to silently give a wrong answer
+  (`65536 * 65536` was `0`).
+
+- **The in-browser REPL can clear the screen without forgetting your definitions.**
+  Every REPL on the site (playground, landing page, cookbook sidebar) has a **clear**
+  button, `:clear` and Ctrl+L, which wipe the screen and keep what you defined, next to
+  **reset**, which also forgets it. The cookbook sidebar previously had neither.
+
 ### Changed
 - A compiled program whose scheduler is about to resume a corrupt or freed
   green-thread context now stops with a `march_sched[BUG]: dispatch of pid N
@@ -28,6 +44,14 @@ git log is authoritative for exact commits.
   line, which is all one CI crash of `native_run_until_idle_ping_pong` left.
 
 ### Fixed
+
+- **The in-browser REPL downloads a tenth as much, and the Tetris playground compiles
+  again.** The REPL on the playground, cookbook and landing pages loaded a 19.7 MB
+  development build (2.1 MB compressed); it is now a 1.9 MB release build (408 KB
+  compressed). Editing the Tetris playground and pressing Run had failed on every
+  program since at least July; it compiles and runs again. Both are now rebuilt
+  automatically after every compiler or stdlib change, which also fixes `Json` in the
+  REPL (`unbound variable: string_byte_at`).
 
 - **A topology app under continuous session traffic stops on Ctrl-C/SIGTERM.**
   A node whose hook tasks kept starting sessions (an `initiate_<Role>` loop) never

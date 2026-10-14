@@ -27,29 +27,9 @@ export function march_float_to_string(f) {
   return /^-?\d+$/.test(s) ? s + '.' : s;   // bare integer 1 -> "1."
 }
 
-/** Truncating integer division, matching runtime/march_runtime.c's
- *  march_checked_idiv (panics on a zero divisor instead of producing
- *  Infinity/NaN). Used for the `int_div` builtin (e.g. stdlib/array.march's
- *  PVec leaf-count math), distinct from the bare `/` operator's looser
- *  unchecked lowering. */
-export function march_int_div(a, b) {
-  if (b === 0) throw new Error("int_div: division by zero");
-  return Math.trunc(a / b);
-}
-
-/** Truncating integer remainder (sign follows the dividend, matching JS's
- *  native `%` and C's `%`), matching march_runtime.c's march_checked_imod. */
-export function march_int_mod(a, b) {
-  if (b === 0) throw new Error("int_mod: division by zero");
-  return a % b;
-}
-
-/** Euclidean remainder (always non-negative), matching march_runtime.c's
- *  march_checked_umod for the magnitudes representable as JS numbers. */
-export function march_int_mod_euclid(a, b) {
-  if (b === 0) throw new Error("int_mod_euclid: division by zero");
-  return ((a % b) + Math.abs(b)) % Math.abs(b);
-}
+/* int_div / int_mod / int_mod_euclid are defined below in the checked
+   "Int builtins (63-bit semantics)" section (exact within ±(2^53−1), throw
+   beyond). int_pow stays here — it is JS-target-only. */
 
 /** Integer exponentiation by squaring, matching march_runtime.c's
  *  march_int_pow (negative exponents return 0, mirroring the native
@@ -65,12 +45,7 @@ export function march_int_pow(base, exp) {
   return result;
 }
 
-/** Seconds since epoch as a fractional float, matching march_runtime.c's
- *  march_unix_time (CLOCK_REALTIME tv_sec + tv_nsec/1e9). Used by
- *  stdlib/random.march's default seed and a few timestamp helpers. */
-export function march_unix_time() {
-  return Date.now() / 1000;
-}
+/* march_unix_time is defined below in the System section. */
 
 /** String byte length (UTF-8 bytes, matching the native backend) */
 export function march_string_byte_length(s) {
@@ -115,6 +90,14 @@ export function march_string_from_chars(list) {
   return s;
 }
 
+export function march_string_concat3(a, b, c) {
+  return a + b + c;
+}
+
+export function march_string_concat_n(...parts) {
+  return parts.join("");
+}
+
 export function march_string_join(list, sep) {
   const parts = [];
   while (list.$ === "Cons") { parts.push(list._0); list = list._1; }
@@ -125,8 +108,50 @@ export function march_string_contains(s, sub) { return s.includes(sub); }
 export function march_string_starts_with(s, pre) { return s.startsWith(pre); }
 export function march_string_ends_with(s, suf) { return s.endsWith(suf); }
 
-export function march_string_slice(s, start, end_) {
-  return s.slice(start, end_);
+/* Mirrors march_string_slice in runtime/march_runtime.c.
+ *
+ * The third argument is a LENGTH, not an end index — this used to call
+ * s.slice(start, len) directly, so every slice with a non-zero start returned
+ * the wrong text (string_slice("abcdefgh", 5, 3) gave "" here and "fgh"
+ * natively).  Clamping is spelled out rather than left to s.slice because JS
+ * treats a negative index as an offset from the end, where C clamps to 0. */
+export function march_string_slice(s, start, len) {
+  const slen = s.length;
+  if (start < 0) start = 0;
+  if (start > slen) start = slen;
+  if (len < 0) len = 0;
+  if (start + len > slen) len = slen - start;
+  return s.slice(start, start + len);
+}
+
+/* Mirrors march_string_byte_at: byte value 0..255, or -1 out of range.
+ *
+ * CAVEAT: JS strings are UTF-16 code units, not bytes, so this indexes code
+ * units and agrees with the C version only for ASCII.  That is the same
+ * pre-existing representational split that march_string_byte_length and
+ * march_string_slice already have on this backend, not a new one. */
+export function march_string_byte_at(s, i) {
+  if (i < 0 || i >= s.length) return -1;
+  return s.charCodeAt(i);
+}
+
+/** List(Int) of Unicode code points (mirrors `string_to_codepoints`).
+ * `[...s]` iterates by code point, not UTF-16 code unit, so an astral
+ * character yields ONE element rather than a surrogate pair. */
+export function march_string_to_codepoints(s) {
+  let list = { $: "Nil" };
+  for (const c of [...s].reverse()) list = { $: "Cons", _0: c.codePointAt(0), _1: list };
+  return list;
+}
+
+/** Option(String) for one code point (mirrors `string_from_codepoint`).
+ * None for out of range or a lone UTF-16 surrogate half — String.fromCodePoint
+ * accepts surrogates, so that case has to be rejected explicitly to match the
+ * native and interpreted backends. */
+export function march_string_from_codepoint(cp) {
+  if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff) return { $: "None" };
+  if (cp >= 0xd800 && cp <= 0xdfff) return { $: "None" };
+  return { $: "Some", _0: String.fromCodePoint(cp) };
 }
 
 export function march_string_split(s, sep) {
@@ -165,6 +190,14 @@ export function march_string_index_of(s, sub) {
   return i < 0 ? { $: "None" } : { $: "Some", _0: i };
 }
 
+export function march_string_index_of_from(s, sub, start) {
+  if (start < 0) start = 0;
+  if (start > s.length) return { $: "None" };
+  if (sub.length === 0) return { $: "Some", _0: start };
+  const i = s.indexOf(sub, start);
+  return i < 0 ? { $: "None" } : { $: "Some", _0: i };
+}
+
 export function march_string_last_index_of(s, sub) {
   const i = s.lastIndexOf(sub);
   return i < 0 ? { $: "None" } : { $: "Some", _0: i };
@@ -188,6 +221,158 @@ export function march_char_is_digit(c) { return /^\d$/.test(c); }
 export function march_char_is_alphanumeric(c) { return /^\w$/.test(c); }
 export function march_char_is_whitespace(c) { return /^\s$/.test(c); }
 
+/* ── Int builtins (63-bit semantics, checked) ──────────────────────── */
+/*
+ * March Int is a 63-bit integer natively, but the JS target stores it in an
+ * IEEE-754 double, which is exact only within ±(2^53 - 1). These helpers
+ * implement the specified 63-bit semantics (specs/lang/type-system.md, "Int
+ * width and overflow": int_shr is an ARITHMETIC shift and int_popcount counts
+ * the 63-bit two's-complement pattern, as the interpreter and native code do)
+ * exactly within that range,
+ * and THROW a RangeError rather than silently rounding when an argument or
+ * result falls outside it. Fast paths cover int32 and non-negative
+ * double-exact operands so hot code (e.g. stdlib Random's 32-bit sfc32 core)
+ * never touches BigInt.
+ */
+
+const __INT_LIMIT_MSG =
+  " on --target js: March Int is stored in a JS double, exact only within" +
+  " ±(2^53 - 1); full 63-bit values are not representable on this target.";
+
+function __int_check(x, op) {
+  if (!Number.isSafeInteger(x))
+    throw new RangeError(op + ": argument " + x +
+      " is outside the exact integer range" + __INT_LIMIT_MSG);
+}
+
+function __int_result(b, op) {
+  const n = Number(b);
+  if (!Number.isSafeInteger(n))
+    throw new RangeError(op + ": result " + b +
+      " overflows the exact integer range" + __INT_LIMIT_MSG);
+  return n;
+}
+
+const __in32 = (x) => x >= -0x80000000 && x <= 0x7fffffff;
+const __MAX_SAFE = Number.MAX_SAFE_INTEGER;
+const __POW32 = 0x100000000;
+
+/* Split non-negative safe ints into (hi, lo) 2^32-radix words so bitwise ops
+ * stay exact without BigInt. hi ≤ 2^21, lo < 2^32; `>>> 0` re-reads the JS
+ * 32-bit op's int32 result as unsigned. */
+export function march_int_and(a, b) {
+  if (__in32(a) && __in32(b)) return a & b;
+  if (a >= 0 && b >= 0 && a <= __MAX_SAFE && b <= __MAX_SAFE) {
+    const hi = Math.floor(a / __POW32) & Math.floor(b / __POW32);
+    return hi * __POW32 + (((a % __POW32) & (b % __POW32)) >>> 0);
+  }
+  __int_check(a, "int_and"); __int_check(b, "int_and");
+  return __int_result(BigInt.asIntN(63, BigInt(a) & BigInt(b)), "int_and");
+}
+
+export function march_int_or(a, b) {
+  if (__in32(a) && __in32(b)) return a | b;
+  if (a >= 0 && b >= 0 && a <= __MAX_SAFE && b <= __MAX_SAFE) {
+    const hi = Math.floor(a / __POW32) | Math.floor(b / __POW32);
+    return hi * __POW32 + (((a % __POW32) | (b % __POW32)) >>> 0);
+  }
+  __int_check(a, "int_or"); __int_check(b, "int_or");
+  return __int_result(BigInt.asIntN(63, BigInt(a) | BigInt(b)), "int_or");
+}
+
+export function march_int_xor(a, b) {
+  if (__in32(a) && __in32(b)) return a ^ b;
+  if (a >= 0 && b >= 0 && a <= __MAX_SAFE && b <= __MAX_SAFE) {
+    const hi = Math.floor(a / __POW32) ^ Math.floor(b / __POW32);
+    return hi * __POW32 + (((a % __POW32) ^ (b % __POW32)) >>> 0);
+  }
+  __int_check(a, "int_xor"); __int_check(b, "int_xor");
+  return __int_result(BigInt.asIntN(63, BigInt(a) ^ BigInt(b)), "int_xor");
+}
+
+/** lnot: ~x = -x - 1, exact for every safe-integer argument. */
+export function march_int_not(a) {
+  __int_check(a, "int_not");
+  return __int_result(-a - 1, "int_not");
+}
+
+/** lsl with 63-bit wraparound; shift range checked like the interpreter. */
+export function march_int_shl(a, n) {
+  if (n < 0 || n >= 63) throw new Error("int_shl: shift out of range");
+  __int_check(a, "int_shl");
+  if (Math.abs(a) <= Math.floor(__MAX_SAFE / 2 ** n)) return a * 2 ** n;
+  return __int_result(BigInt.asIntN(63, BigInt(a) << BigInt(n)), "int_shl");
+}
+
+/** asr: ARITHMETIC (sign-propagating) shift, like the interpreter and native
+ * code: int_shr(-8, 1) = -4. That is floor division by 2^n, exact for every
+ * safe-integer argument (dividing by a power of two is exact in a double). */
+export function march_int_shr(a, n) {
+  if (n < 0 || n >= 63) throw new Error("int_shr: shift out of range");
+  __int_check(a, "int_shr");
+  return Math.floor(a / 2 ** n);
+}
+
+/** Population count of the 63-bit two's-complement pattern, like the
+ * interpreter and native code: int_popcount(-1) = 63. */
+export function march_int_popcount(a) {
+  __int_check(a, "int_popcount");
+  let b = BigInt.asUintN(63, BigInt(a));
+  let c = 0;
+  while (b) { b &= b - 1n; c++; }
+  return c;
+}
+
+/* a % b on doubles is fmod, which is EXACT for exact-integer operands and
+ * truncates toward zero — same as OCaml's Rem / C's %. int_div derives the
+ * quotient from it: (a - a % b) is an exact multiple of b, so the division
+ * is exact too (Math.trunc(a / b) alone can be off by one near 2^53). */
+export function march_int_mod(a, b) {
+  if (b === 0) throw new Error("int_mod: division by zero");
+  __int_check(a, "int_mod"); __int_check(b, "int_mod");
+  return a % b;
+}
+
+export function march_int_div(a, b) {
+  if (b === 0) throw new Error("int_div: division by zero");
+  __int_check(a, "int_div"); __int_check(b, "int_div");
+  return (a - a % b) / b;
+}
+
+export function march_int_mod_euclid(a, b) {
+  if (b === 0) throw new Error("int_mod_euclid: division by zero");
+  __int_check(a, "int_mod_euclid"); __int_check(b, "int_mod_euclid");
+  const r = a % b;
+  return r < 0 ? r + Math.abs(b) : r;
+}
+
+export function march_int_div_euclid(a, b) {
+  if (b === 0) throw new Error("int_div_euclid: division by zero");
+  __int_check(a, "int_div_euclid"); __int_check(b, "int_div_euclid");
+  const q = (a - a % b) / b;
+  const r = a % b;
+  if (r < 0) return b > 0 ? q - 1 : q + 1;
+  return q;
+}
+
+/** Float → Int rounding, half AWAY FROM ZERO (mirrors OCaml Float.round;
+ * JS Math.round rounds half toward +inf, so Math.round(-2.5) would differ). */
+export function march_float_round(f) {
+  return Math.sign(f) * Math.round(Math.abs(f));
+}
+
+/* ── System ────────────────────────────────────────────────────────── */
+
+/** Seconds since the Unix epoch as a Float (mirrors `unix_time`). */
+export function march_unix_time() {
+  return Date.now() / 1000;
+}
+
+/** Milliseconds since the Unix epoch as an Int (mirrors `unix_time_ms`). */
+export function march_unix_time_ms() {
+  return Date.now();
+}
+
 /* ── List operations ───────────────────────────────────────────────── */
 
 export function march_list_append(list, elem) {
@@ -205,4 +390,57 @@ export function march_list_concat(a, b) {
   let result = b;
   for (const x of arr.reverse()) result = { $: "Cons", _0: x, _1: result };
   return result;
+}
+
+/* Stable sorts behind Array.sort_by / sort_by_key and RRB.sort_by /
+ * sort_by_key (the native builtins are list_stable_sort_by /
+ * list_sort_by_int_key in march_runtime.c). Array.prototype.sort is stable
+ * (ES2019). `le(a, b)` true means a may come before b; a pair that is `le`
+ * both ways compares equal, so ties keep input order, as in the native
+ * sort for a `<=`-style comparator. The key closure is called once per
+ * element. */
+export function march_list_stable_sort_by(list, le) {
+  const arr = [];
+  while (list.$ === "Cons") { arr.push(list._0); list = list._1; }
+  arr.sort((a, b) => le._0(le, a, b) ? (le._0(le, b, a) ? 0 : -1) : 1);
+  let result = { $: "Nil" };
+  for (let i = arr.length - 1; i >= 0; i--) result = { $: "Cons", _0: arr[i], _1: result };
+  return result;
+}
+
+export function march_list_sort_by_int_key(list, key) {
+  const arr = [];
+  while (list.$ === "Cons") { arr.push(list._0); list = list._1; }
+  const keys = arr.map((x) => key._0(key, x));
+  const idx = arr.map((_, i) => i);
+  idx.sort((i, j) => (keys[i] < keys[j] ? -1 : keys[i] > keys[j] ? 1 : 0));
+  let result = { $: "Nil" };
+  for (let k = idx.length - 1; k >= 0; k--) result = { $: "Cons", _0: arr[idx[k]], _1: result };
+  return result;
+}
+
+/* ── Structural equality ────────────────────────────────────────────
+ * Deep, tag-aware `==`/`!=` for NON-primitive operands. js_emit routes
+ * bare `==`/`!=` here whenever either operand's static type is not a
+ * primitive (an ADT/tuple/record, or an erased type variable that may hold
+ * one at runtime); primitive-vs-primitive stays on JS `===`. Values are the
+ * usual shapes: variants `{ $: tag, _0, _1, … }`, records `{ field: … }`,
+ * tuples `{ _0, _1, … }`, scalars as JS number/string/boolean. Mirrors
+ * native's per-type __eq / march_poly_eq. */
+export function march_deep_eq(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null ||
+      typeof a !== "object" || typeof b !== "object") {
+    return a === b;
+  }
+  /* Constructor tag ($) must match; undefined on both for records/tuples. */
+  if (a.$ !== b.$) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+    if (!march_deep_eq(a[k], b[k])) return false;
+  }
+  return true;
 }

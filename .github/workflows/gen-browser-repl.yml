@@ -1,0 +1,100 @@
+name: Regenerate Browser REPL
+
+# The in-browser March on march-lang.org (docs/assets/march.js, march_compile.js,
+# march_stdlib.js, march_stdlib_index.js, the per-module docs/assets/stdlib/, and the
+# Tetris playground files under docs/assets/tetris/) is
+# committed, because the site is GitHub's own Jekyll over this repo's docs/ with no
+# build hook (see scripts/gen-stdlib-docs.sh). Those files embed the parser,
+# typechecker, evaluator, JS backend and stdlib, so nearly any compiler or stdlib
+# change alters them. Rather than make every such PR regenerate and commit ~4 MB of
+# JS, they are BOT-OWNED: this workflow rebuilds them with
+# scripts/build-browser-repl.sh after each merge and commits the result. PR CI
+# (ci.yml, job browser-repl) builds them fresh and smoke-tests that build, so a PR
+# that breaks the browser REPL still goes red before merge.
+#
+# The search-index digest (scripts/gen-docs-search-index.sh) covers only docs
+# *.md/*.html, so this commit does not stale docs/pagefind/.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'stdlib/**'
+      - 'js/**'
+      - 'runtime/march_runtime.mjs'
+      - 'runtime/march_dom.mjs'
+      - 'demo_app/tetris/**'
+      - 'demo_app/tetris_logic/**'
+      - 'dune-project'
+      - 'march.opam'
+      - 'scripts/build-browser-repl.sh'
+      - 'scripts/gen-browser-stdlib.py'
+      - 'scripts/gen-tetris-playground-source.py'
+      - '.github/workflows/gen-browser-repl.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gen-browser-repl
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain (OCaml + cached opam deps + system libs)
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Rebuild the browser artifacts
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          scripts/build-browser-repl.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Never publish a bundle that cannot load or run.
+      - name: Smoke-test the rebuilt artifacts
+        run: |
+          node scripts/browser-repl-smoke.js
+          node scripts/browser-repl-doc-sweep.js
+
+      - name: Commit regenerated artifacts
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # None of these paths is in this workflow's trigger list, so the commit
+          # does not re-trigger it.
+          if git status --porcelain docs/assets | grep -q .; then
+            git add -A docs/assets/march.js docs/assets/march_compile.js docs/assets/march_stdlib.js \
+              docs/assets/march_stdlib_index.js docs/assets/stdlib docs/assets/tetris
+            git commit -m "browser: regenerate the in-browser REPL and live compiler"
+            # Another bot (or a merge) may have pushed meanwhile; rebase onto it.
+            for attempt in 1 2 3; do
+              git pull --rebase origin main && git push && exit 0
+              sleep $((attempt * 10))
+            done
+            echo "::error::could not push the regenerated artifacts after 3 attempts"
+            exit 1
+          else
+            echo "docs/assets browser artifacts already up to date — nothing to commit."
+          fi
+
+      - name: Explain a red run on the commit that caused it
+        if: failure()
+        run: |
+          {
+            echo "## Browser REPL regeneration FAILED"
+            echo "Triggered by \`${GITHUB_SHA}\`. docs/assets/ was NOT updated; the site's"
+            echo "REPL and Tetris playground keep the previous build until this is fixed."
+            echo "Reproduce with scripts/build-browser-repl.sh && node scripts/browser-repl-smoke.js."
+          } >> "$GITHUB_STEP_SUMMARY"

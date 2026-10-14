@@ -24,6 +24,10 @@ every `specs/lang/*.md` with Jekyll front matter) are GENERATED from it by
 `scripts/gen-lang-docs.py` and committed. Edit the `specs/lang/` chapter, run
 `scripts/gen-lang-docs.py`, and commit both; doc-lint Check F fails on a hand-edited or
 un-regenerated `docs/` chapter. `docs/pagefind/` is still bot-owned: don't regenerate it in a PR.
+The in-browser March (`docs/assets/march.js`, `march_compile.js`, `march_stdlib.js`,
+`docs/assets/tetris/`) is bot-owned too: `gen-browser-repl.yml` rebuilds it with
+`scripts/build-browser-repl.sh` after each merge. A PR need not regenerate it; CI's
+`browser-repl` job builds it fresh and runs `scripts/browser-repl-smoke.js`.
 
 **Doc freshness lint.** `scripts/check-docs.sh` (run in CI) guards the current-truth docs
 (root guides, `docs/`, `specs/features/`, the agent SKILL) against two kinds of rot: dead

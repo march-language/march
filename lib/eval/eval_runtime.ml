@@ -683,6 +683,45 @@ let vault_shard_for (k : string) (shards : vault_shard array) : vault_shard =
 (* Pattern matching                                                    *)
 (* ------------------------------------------------------------------ *)
 
+(** March [Int] is 63-bit. The interpreter stores it in an OCaml [int], which is
+    63-bit natively but only 32-bit under js_of_ocaml (the browser REPL,
+    js/march_browser.ml). There a result that leaves the host range would
+    silently wrap to a value native March never produces, so on a narrow host
+    the Int builtins check and raise [int_overflow] instead. On native builds
+    [narrow_int] is [false] and every helper below is the plain operator. *)
+let narrow_int = Sys.int_size < 63
+
+let int_overflow op =
+  eval_error
+    "%s: this result does not fit the browser REPL's %d-bit Int; native March uses 63-bit Int"
+    op Sys.int_size
+
+let int_add a b =
+  let r = a + b in
+  if narrow_int && (a >= 0) = (b >= 0) && (r >= 0) <> (a >= 0)
+  then int_overflow "+" else r
+
+let int_sub a b =
+  let r = a - b in
+  if narrow_int && (a >= 0) <> (b >= 0) && (r >= 0) <> (a >= 0)
+  then int_overflow "-" else r
+
+let int_mul a b =
+  let r = a * b in
+  if narrow_int && a <> 0
+     && (r / a <> b || (a = -1 && b = min_int) || (b = -1 && a = min_int))
+  then int_overflow "*" else r
+
+let int_neg a =
+  if narrow_int && a = min_int then int_overflow "negate" else ~- a
+
+(** [Float.to_int], raising [int_overflow op] when [f] is outside the host Int
+    range on a narrow host. *)
+let int_of_float_checked op f =
+  if narrow_int && not (Float.is_nan f)
+     && (f >= Float.of_int max_int +. 1. || f < Float.of_int min_int)
+  then int_overflow op else Float.to_int f
+
 let arith_num iop fop name = VBuiltin (name, function
     | [VInt a;   VInt b]   -> VInt   (iop a b)
     | [VFloat a; VFloat b] -> VFloat (fop a b)

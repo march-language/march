@@ -347,6 +347,44 @@ jobs:
           eval $(opam env)
           dune build @bench_gate
 
+  # The in-browser March (the REPL bundle behind the cookbook, landing page and
+  # playground; the Tetris live compiler; the stdlib sources they read), built
+  # fresh from this commit with scripts/build-browser-repl.sh --out, then a Node
+  # smoke test that loads it and runs fixed inputs: 12 pinned REPL results, and
+  # the live compiler must compile the Tetris playground source. A PR that
+  # breaks either goes red here. The committed copies in docs/assets/ are
+  # bot-owned (gen-browser-repl.yml regenerates them after a merge), so this job
+  # never compares against them. Design: specs/2026-10-14-browser-repl-bundle-design.md.
+  browser-repl:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Build the browser artifacts from this commit
+        timeout-minutes: 8
+        run: |
+          eval $(opam env)
+          scripts/build-browser-repl.sh --out "$RUNNER_TEMP/browser"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Browser REPL smoke test
+        timeout-minutes: 3
+        run: node scripts/browser-repl-smoke.js "$RUNNER_TEMP/browser"
+
+      # Every stdlib `march>` example through the browser REPL's on-demand
+      # module loading; failures must match the script's EXPECTED_FAILURES.
+      - name: Stdlib doc examples run in the browser REPL
+        timeout-minutes: 3
+        run: node scripts/browser-repl-doc-sweep.js "$RUNNER_TEMP/browser"
+
   # tree-sitter-march/ (the grammar Zed highlights from) against the March the
   # compiler accepts: freshness of the generated parser, the corpus tests, the
   # query files, and a list ratchet over every .march file in the repo

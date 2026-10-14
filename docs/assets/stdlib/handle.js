@@ -1,0 +1,2 @@
+window.marchStdlib = window.marchStdlib || {};
+window.marchStdlib["handle.march"] = "mod Handle do\n\n  -- A typestate handle: R is the resource tag (phantom), S is the state tag (phantom).\n  -- The constructor wraps a real runtime value (an Int token or pointer).\n  -- Declaring always_linear means every binding of Handle(r, s) is automatically\n  -- tracked as linear by the compiler -- no per-site `linear` annotation needed.\n  always_linear type Handle(r, s) = Handle(Int)\n\nend\n";
