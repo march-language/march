@@ -99,3 +99,5 @@ __pycache__/
 # Stray build/tooling leftovers
 /.claire/
 /_build_wt/
+# scripts/build-browser-repl.sh: release-profile js_of_ocaml build
+/_build_browser/

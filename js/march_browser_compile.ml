@@ -24,6 +24,7 @@ let browser_stdlib_files = [
   "option.march";
   "list.march";
   "math.march";
+  "bytes.march";
   "string.march";
   "array.march";
   "dom.march";
@@ -97,6 +98,12 @@ let compile_to_js source =
   | Error errs -> (None, errs)
   | Ok user_mod ->
     let stdlib_decls = load_browser_stdlib () in
+    (* Record these files as the standard library's, as the native driver and
+       the LSP do on load. Without it the capability checks treat the prelude
+       (spliced into the user's module) and every stdlib module as user code:
+       `Tetris` is blamed for the prelude's IO.Console use, and `List` for
+       declaring no `needs IO.Spawn`. *)
+    March_typecheck.Typecheck_builtins.note_stdlib_decls stdlib_decls;
     let merged =
       { user_mod with
         March_ast.Ast.mod_decls =

@@ -6,10 +6,13 @@ browser_stdlib_files (the interpreter-backed REPL) and
 js/march_browser_compile.ml's browser_stdlib_files (the live-compile
 playground) — each reader only pulls the filenames it lists for itself;
 extra entries are simply unused by whichever reader doesn't need them.
-Run from the project (worktree) root: python3 scripts/gen-browser-stdlib.py
+Run from the project (worktree) root: python3 scripts/gen-browser-stdlib.py [DEST]
+DEST defaults to docs/assets/march_stdlib.js; scripts/build-browser-repl.sh passes a
+staging path.
 """
 import json
 import os
+import sys
 
 FILES = [
     "prelude.march", "option.march", "result.march", "list.march",
@@ -24,6 +27,9 @@ FILES = [
     # live-compile playground entry point), not by march_browser.ml's
     # interpreter.
     "dom.march", "hash_map.march",
+    # bytes.march: string.march calls Bytes; the live compiler typechecks
+    # string.march, so it needs Bytes in scope.
+    "bytes.march",
 ]
 
 
@@ -34,7 +40,8 @@ def main():
         with open(os.path.join(root, "stdlib", name), encoding="utf-8") as fh:
             src = fh.read()
         out.append("window.marchStdlib[%s] = %s;" % (json.dumps(name), json.dumps(src)))
-    dest = os.path.join(root, "docs", "assets", "march_stdlib.js")
+    dest = (sys.argv[1] if len(sys.argv) > 1
+            else os.path.join(root, "docs", "assets", "march_stdlib.js"))
     with open(dest, "w", encoding="utf-8") as fh:
         fh.write("\n".join(out) + "\n")
     print("wrote %d modules to %s" % (len(FILES), dest))
