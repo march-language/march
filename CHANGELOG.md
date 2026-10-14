@@ -32,6 +32,13 @@ git log is authoritative for exact commits.
   no line yet. It is vendor-neutral: an error-service integration such as Sentry
   is a package built on top.
 
+- **"Try it" on the stdlib API reference.** On march-lang.org/docs/stdlib, the
+  examples of the modules that opt in (`-- doc: try` in the module header, or a
+  ```` ```march try ```` fence) have a **Try it** button that opens a REPL sidebar and runs
+  the example, one result per line as in the docs. The REPL loads on the first click,
+  so the pages stay fast. 107 examples across 14 modules (List, Option, Http, Path,
+  HashMap, ...) to start. `forge doc --try-it` generates the same buttons.
+
 - **The in-browser REPL can use the whole standard library, and reports what it
   can't do.** Modules load the first time you use them, so `HashMap`, `Uri`, `Csv`
   and about a hundred others now work on the playground and cookbook pages (197 of

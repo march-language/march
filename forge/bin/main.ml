@@ -1004,9 +1004,21 @@ let doc_cmd =
   let stdlib_only =
     Arg.(value & flag & info ["stdlib"] ~doc:"Document stdlib only (skip project sources)")
   in
-  let run o p s = handle (Cmd_doc.run ~output_dir:o ~include_private:p ~stdlib_only:s ()) in
+  let try_it =
+    Arg.(value & flag & info ["try-it"]
+           ~doc:"Add \"Try it\" buttons that run opted-in examples in an in-browser REPL \
+                 (modules marked $(b,doc: try), fences tagged $(b,march try)); \
+                 the REPL is loaded from $(b,--site-base)/assets/march-repl.js")
+  in
+  let site_base =
+    Arg.(value & opt string "" & info ["site-base"] ~docv:"PATH"
+           ~doc:"Site root the in-browser REPL assets are served under, for $(b,--try-it) \
+                 (default: the site root)")
+  in
+  let run o p s t b =
+    handle (Cmd_doc.run ~output_dir:o ~include_private:p ~stdlib_only:s ~try_it:t ~site_base:b ()) in
   Cmd.v (Cmd.info "doc" ~doc:"Generate HTML documentation from March source files")
-    Term.(const run $ output $ private_ $ stdlib_only)
+    Term.(const run $ output $ private_ $ stdlib_only $ try_it $ site_base)
 
 (* --------------------------------------------------------------- forge notebook *)
 

@@ -10,6 +10,8 @@
 --
 -- Key order is hash-traversal order (not insertion order, not sorted).
 -- Use Map if you need sorted iteration or Ord-derived equality.
+--
+-- doc: try
 
 mod HashMap do
 
@@ -373,8 +375,8 @@ mod HashMap do
   doc """
   Returns an empty HashMap. No comparator needed.
 
-  march> HashMap.is_empty(HashMap.new())
-  true
+      march> HashMap.is_empty(HashMap.new())
+      true
   """
   fn new() do
     HamtHashMap(HEmpty)
@@ -391,8 +393,8 @@ mod HashMap do
   doc """
   Inserts or replaces a key-value pair. Returns the new map.
 
-  march> HashMap.get(HashMap.put(HashMap.new(), "a", 1), "a")
-  Some(1)
+      march> HashMap.get(HashMap.put(HashMap.new(), "a", 1), "a")
+      Some(1)
   """
   fn put(m, key, val) do
     match m do
@@ -406,8 +408,8 @@ mod HashMap do
   doc """
   Returns `Some(value)` if key is present, or `None`.
 
-  march> HashMap.get(HashMap.new(), "missing")
-  None
+      march> HashMap.get(HashMap.new(), "missing")
+      None
   """
   fn get(m, key) do
     match m do
@@ -437,8 +439,8 @@ mod HashMap do
   doc """
   Removes a key from the map. Returns the map unchanged if key is absent.
 
-  march> HashMap.has(HashMap.delete(HashMap.put(HashMap.new(), "a", 1), "a"), "a")
-  false
+      march> HashMap.has(HashMap.delete(HashMap.put(HashMap.new(), "a", 1), "a"), "a")
+      false
   """
   fn delete(m, key) do
     match m do
@@ -488,8 +490,8 @@ mod HashMap do
   Builds a HashMap from a list of (key, value) pairs.
   Later entries overwrite earlier ones for duplicate keys.
 
-  march> HashMap.size(HashMap.from_list([("a",1),("b",2),("a",99)]))
-  2
+      march> HashMap.size(HashMap.from_list([("a",1),("b",2),("a",99)]))
+      2
   """
   fn from_list(pairs) do
     fn go(lst, acc) do
@@ -514,8 +516,8 @@ mod HashMap do
   `None` is passed when the key is absent; `Some(existing)` when present.
   The function's return value becomes the new value for that key.
 
-  march> HashMap.get(HashMap.update(HashMap.new(), "k", fn _ -> 42), "k")
-  Some(42)
+      march> HashMap.get(HashMap.update(HashMap.new(), "k", fn _ -> 42), "k")
+      Some(42)
   """
   fn update(m, key, f) do
     let new_val = f(get(m, key))

@@ -8,6 +8,8 @@
 -- MIME Base64 wraps lines at 76 characters with CRLF line endings.
 --
 -- All decode functions return Ok(Bytes) on success, Err(:invalid) on bad input.
+--
+-- doc: try
 
 mod Base64 do
 

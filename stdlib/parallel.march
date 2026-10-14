@@ -33,6 +33,8 @@
 --     let sq    = Parallel.pmap(nums, fn n -> n * n)          -- Vec of squares
 --
 -- See docs/cookbook/parallel-data.md for full examples.
+--
+-- doc: try
 
 mod Parallel do
 

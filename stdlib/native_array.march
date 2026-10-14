@@ -76,6 +76,8 @@
 --   let arr = NativeArray.make_float(1000, 0.0)
 --   let arr2 = NativeArray.map_float(arr, fn x -> x *. 2.0)
 --   let s    = NativeArray.sum_float(arr2)
+--
+-- doc: try
 
 mod NativeArray do
 

@@ -37,6 +37,8 @@
 -- cannot hold a value that must itself be consumed.
 --
 -- Design: specs/2026-10-06-linear-ringbuf-and-sendable-arrays-design.md.
+--
+-- doc: try
 
 mod RingBuf do
 

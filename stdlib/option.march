@@ -2,6 +2,8 @@
 --
 -- All functions are pure. The type Option(a) is a builtin
 -- with constructors Some and None.
+--
+-- doc: try
 
 mod Option do
 

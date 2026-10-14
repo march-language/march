@@ -4,6 +4,7 @@
  * Usage:
  *   var repl = new MarchRepl({ wrapId, historyId, inputId, loadingId, cls });
  *   repl.submit()           — eval whatever is in the textarea
+ *   repl.run(code)          — eval code as if typed (queued: runs in order)
  *   repl.load(code)         — HTML-decode and load code into the textarea
  *   repl.loadThen(s, code)  — silently eval s, then load code into the textarea
  *   repl.clear()            — clear the screen; definitions and input history stay
@@ -96,6 +97,10 @@
     var fail = function () {
       self._loading = false;
       self._loadEl.textContent = "Failed to load interpreter.";
+      // Still call back: each waiting input then reports "Interpreter not
+      // available." and the run queue moves on instead of hanging.
+      cb();
+      if (self._pending) { var f = self._pending; self._pending = null; f(); }
     };
 
     // Startup stdlib, then the module index (which module lives in which file,
@@ -299,7 +304,30 @@
   /* Public API                                                          */
   /* ------------------------------------------------------------------ */
 
+  // Inputs run strictly in order. One may wait on the interpreter download or
+  // on an on-demand stdlib module, so later inputs (a "Try it" transcript sends
+  // several at once) queue behind it rather than overtaking it or being
+  // dropped by _loadBundle's single pending slot.
   MarchRepl.prototype._run = function (code) {
+    this._queue = this._queue || [];
+    this._queue.push(code);
+    if (!this._busy) this._drain();
+  };
+
+  MarchRepl.prototype._drain = function () {
+    var self = this;
+    while (this._queue.length) {
+      var code = this._queue.shift();
+      this._busy = true;
+      var pending = this._runNow(code, function () { self._busy = false; self._drain(); });
+      if (pending) return; // the done callback resumes the queue
+      this._busy = false;
+    }
+  };
+
+  // Evaluate one input. Returns true when it finishes asynchronously, in which
+  // case done() is called once it has; returns false when it already finished.
+  MarchRepl.prototype._runNow = function (code, done) {
     var self = this;
     var cls  = this._cls;
     var trimmed = code.trim();
@@ -351,6 +379,7 @@
     this._loadBundle(function () {
       if (!window.marchEvalLine) {
         self._appendLine("Interpreter not available.", cls.error);
+        done();
         return;
       }
 
@@ -369,17 +398,23 @@
             self._appendLine("  " + h.sig, cls.output);
           });
         }
+        done();
         return;
       }
 
       self._ensureModules(code, function (err) {
-        if (err) { self._appendLine(err, cls.error); return; }
+        if (err) { self._appendLine(err, cls.error); done(); return; }
         var result = window.marchEvalLine(code);
         if (result.output && result.output.trim()) self._appendLine(result.output.trimEnd(), cls.output);
         if (result.error !== null)                 self._appendLine(result.error, cls.error);
+        done();
       });
     });
+    return true;
   };
+
+  // Evaluate code as if the reader had typed it (used by "Try it" buttons).
+  MarchRepl.prototype.run = function (code) { this._run(code); };
 
   // Submit whatever is currently in the textarea.
   MarchRepl.prototype.submit = function () {
