@@ -24,6 +24,10 @@
   }
 
   document.getElementById('ck-repl-close').addEventListener('click', closePanel);
+  // The panel (and so these buttons) is only visible once openPanel() has
+  // created the REPL; the guard covers a click racing that.
+  document.getElementById('ck-repl-clear').addEventListener('click', function () { if (repl) repl.clear(); });
+  document.getElementById('ck-repl-reset').addEventListener('click', function () { if (repl) repl.reset(); });
 
   /* ── MarchRepl instantiation (lazy) ────────────────────────────────── */
 
