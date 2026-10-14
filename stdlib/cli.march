@@ -12,6 +12,8 @@
 --   Cli.positional(parsed)                    : List(String)
 --   Cli.error_message(err)                    : String
 --   Cli.help_text(program_name, specs)        : String
+--
+-- doc: try
 
 mod Cli do
 
