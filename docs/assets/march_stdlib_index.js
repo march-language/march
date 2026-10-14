@@ -382,6 +382,13 @@ window.marchModuleIndex = {
     "List"
    ]
   },
+  "Diagnostics": {
+   "file": "diagnostics.march",
+   "unavailable": null,
+   "uses": [
+    "List"
+   ]
+  },
   "Dir": {
    "file": "dir.march",
    "unavailable": "it needs a file system",
