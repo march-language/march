@@ -54,9 +54,9 @@ jobs:
           eval $(opam env)
           scripts/gen-stdlib-docs.sh
 
-      # Needed for scripts/gen-docs-search-index.sh below: it runs `bundle install` +
-      # `jekyll build` over docs/ and then `npx pagefind` on the built site. Mirrors the
-      # toolchain versions deploy-pages.yml uses to build the same site.
+      # Needed for scripts/gen-docs-search-index.sh in the commit step: it runs `bundle
+      # install` + `jekyll build` over docs/ and then `npx pagefind` on the built site.
+      # Mirrors the toolchain versions deploy-pages.yml uses to build the same site.
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
@@ -69,11 +69,6 @@ jobs:
         with:
           node-version: '20'
 
-      # Regenerate the committed Pagefind index alongside the stdlib pages so the two
-      # never land in separate commits — see the digest-scope note above.
-      - name: Regenerate docs search index
-        run: scripts/gen-docs-search-index.sh
-
       # The bot must not publish a page set that omits a public symbol: compare
       # each regenerated page to its stdlib source before anything is pushed
       # (scripts/check-docs.sh Check D; see
@@ -81,22 +76,79 @@ jobs:
       - name: Check every public stdlib symbol is on its generated page
         run: CHECK_STDLIB_HTML=1 scripts/check-docs.sh
 
+      # Commit the pages, with an index regenerated over them, and push, retrying against a
+      # moving main. A single `git push` lost the race on 9 of 10 runs 2026-10-09..14:
+      # sync-docs-search-index.yml fires on the same merge (stdlib PRs touch docs/ too),
+      # pushes its index first, and this ~10-minute job is then rejected (fetch first).
+      #
+      # Not `git pull --rebase` (as a docs-free bot could): docs/pagefind/ is
+      # content-hash named and NOT reproducible, so two bots' indexes conflict file by
+      # file. Instead, on a rejected push: reset to the new main, put our generated pages
+      # back, and regenerate the index over THAT tree. The pages are kept from this run
+      # (they need the compiler, which only a stdlib change invalidates); the index is
+      # rebuilt because whatever else landed may have changed what it must cover.
+      #
+      # Not a concurrency group shared with sync-docs-search-index.yml: a group holds one
+      # pending run, and a newer pending run CANCELS the older one, so a docs push queued
+      # behind this job would silently drop a pending stdlib regeneration (or vice versa).
+      # Not "let sync-docs-search-index rebuild the index": a push made with GITHUB_TOKEN
+      # triggers no `on: push` workflow, so this job's commit would never start it.
       - name: Commit regenerated docs
         run: |
+          set -euo pipefail
           # The generator clones march_doc into ./march_doc; never commit that.
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # No [skip ci]: the commit touches docs/docs/stdlib/** and docs/pagefind/**,
-          # neither of which is in this workflow's trigger paths (so it won't
-          # self-retrigger) but both of which ARE in deploy-pages.yml's (docs/**), so the
-          # regenerated docs get published.
-          if git status --porcelain docs/docs/stdlib docs/pagefind | grep -q .; then
-            git add docs/docs/stdlib docs/pagefind
+
+          pages="$RUNNER_TEMP/stdlib-pages"
+          rm -rf "$pages"
+          cp -a docs/docs/stdlib "$pages"
+
+          for attempt in 1 2 3 4 5; do
+            if [ "$attempt" -gt 1 ]; then
+              git fetch origin main
+              git reset --hard origin/main
+              # If the stdlib (or this generator) changed since our trigger, our pages are
+              # out of date and a newer run of this workflow is already queued behind us in
+              # the gen-stdlib-docs group; it will publish the right ones.
+              if ! git diff --quiet "$GITHUB_SHA" origin/main -- \
+                   stdlib scripts/gen-stdlib-docs.sh .github/workflows/gen-stdlib-docs.yml; then
+                echo "::notice::stdlib changed on main since ${GITHUB_SHA}; leaving the pages to the queued newer run."
+                exit 0
+              fi
+              rm -rf docs/docs/stdlib
+              cp -a "$pages" docs/docs/stdlib
+            fi
+
+            # Stage first: the index digest covers TRACKED docs files only (git ls-files),
+            # so a page for a brand-new module counts only once it is added.
+            git add -A docs/docs/stdlib
+            # Commit guard is the pages diff plus the digest, never `git status
+            # docs/pagefind`: Pagefind filenames differ on every regeneration, so that
+            # would commit a fresh index on every run whether or not anything changed.
+            if git diff --cached --quiet -- docs/docs/stdlib && scripts/gen-docs-search-index.sh --check; then
+              echo "docs/docs/stdlib and docs/pagefind already up to date on main; nothing to commit."
+              exit 0
+            fi
+            if ! scripts/gen-docs-search-index.sh --check; then
+              scripts/gen-docs-search-index.sh
+            fi
+            git add -A docs/pagefind
+            # No [skip ci], though it would change nothing: a push made with GITHUB_TOKEN
+            # starts no `on: push` workflow (so neither this one, nor
+            # sync-docs-search-index, nor deploy-pages runs on it). The live site is GitHub's
+            # legacy Pages build over main:/docs, which does rebuild on this push.
             git commit -m "docs(stdlib): regenerate API docs from stdlib source"
-            git push
-          else
-            echo "docs/docs/stdlib and docs/pagefind already up to date — nothing to commit."
-          fi
+
+            if git push origin HEAD:main; then
+              echo "Pushed the regenerated docs (attempt $attempt)."
+              exit 0
+            fi
+            echo "Push rejected (main moved); resetting onto the new main and retrying (attempt $attempt)."
+          done
+
+          echo "::error::Could not push the regenerated stdlib docs after 5 attempts (main kept moving)." >&2
+          exit 1
 
       - name: Explain a red run on the commit that caused it
         if: failure()
@@ -105,5 +157,6 @@ jobs:
             echo "## Stdlib docs regeneration FAILED"
             echo "Triggered by \`${GITHUB_SHA}\`. The published stdlib pages were NOT updated;"
             echo "the site is stale until this is fixed. Usual causes: march_doc needs updating"
-            echo "for a compiler change, or a generated page omits a public symbol (Check D)."
+            echo "for a compiler change, a generated page omits a public symbol (Check D), or the"
+            echo "push lost to a moving main on all 5 attempts (re-run the workflow)."
           } >> "$GITHUB_STEP_SUMMARY"
