@@ -3010,6 +3010,44 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/unit_to_string.expected interp_unit_to_string.out)))
 
+; Diagnostics crash observers (stdlib/diagnostics.march) on both backends,
+; one .expected: report contents, registration order, observer isolation,
+; removal mid-dispatch, handled panics unreported, with_context scoping, the
+; supervisor restart unchanged, and an unhandled panic still exiting 1.
+(rule
+ (targets native_diagnostics_crash_observers native_diagnostics_crash_observers.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/diagnostics_crash_observers.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_diagnostics_crash_observers
+        native/diagnostics_crash_observers.march)
+   ; The unhandled panic at the end exits 1, and must still.
+   (with-stdout-to native_diagnostics_crash_observers.out
+    (system "./native_diagnostics_crash_observers; test $? -eq 1")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/diagnostics_crash_observers.expected
+               native_diagnostics_crash_observers.out)))
+
+(rule
+ (targets interp_diagnostics_crash_observers.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/diagnostics_crash_observers.march))
+ (action
+  (with-stdout-to interp_diagnostics_crash_observers.out
+   (with-accepted-exit-codes 1
+    (run %{exe:../bin/main.exe} native/diagnostics_crash_observers.march)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/diagnostics_crash_observers.expected
+               interp_diagnostics_crash_observers.out)))
+
 ; Recon (stdlib/recon.march, R3 of the observe plan) on both backends: the
 ; same program compiled and interpreted must print the same lines. Exercises
 ; the observe_query builtin's two implementations (runtime/

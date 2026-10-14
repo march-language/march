@@ -2074,6 +2074,10 @@ __attribute__((weak)) void march_signal_drain(void) { }
  * failing to link. */
 __attribute__((weak)) void march_incrc(void *p) { (void)p; }
 
+/* Releases a dead proc's Diagnostics crash context (march_runtime.c, STRONG);
+ * the same standalone-unit-test fallback as above. */
+__attribute__((weak)) void march_diag_proc_exit(void *ctx) { (void)ctx; }
+
 /* march_reclaim's free function for a reaped proc: runs once no thread can
  * still hold a pointer it resolved before the reap (see the retire call in
  * sched_loop's PROC_DEAD branch).  Its context and stack were released at
@@ -2600,6 +2604,15 @@ static void sched_loop(march_scheduler *sched) {
              * reported use-after-free rather than a silent read.  This is
              * 880 of the struct's 1136 bytes on macOS/arm64
              * (specs/progress/2026-09-17-proc-ctx-released-at-death.md). */
+            /* The Diagnostics crash context this proc still held (a context
+             * left set by a path that skipped with_context's cleanup, such
+             * as a task cancellation).  Dropped outside every lock, like the
+             * mailbox payloads above. */
+            if (p->diag_ctx) {
+                void *dctx = p->diag_ctx;
+                p->diag_ctx = NULL;
+                march_diag_proc_exit(dctx);
+            }
             if (p->ctx) {
                 free(p->ctx);
                 p->ctx = NULL;

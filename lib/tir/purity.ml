@@ -69,6 +69,7 @@ let impure_builtins = [
 let impure_prefixes = [
   "task_"; "tcp_"; "tls_"; "http_"; "file_"; "dir_"; "process_"; "actor_";
   "vault_"; "dist_"; "signal_"; "ws_"; "logger_"; "ring_buf_"; "remote_";
+  "diag_";
   "csv_"; "dns_"; "socket_"; "udp_";
 ]
 

@@ -629,6 +629,11 @@ let extern_owned_builtins : string list = [
        appender registry (march_logger_register_appender), releasing both
        when the entry is replaced, removed or cleared. *)
     "logger_register_appender";
+    (* diag_observe keeps its callback in the crash-observer registry until
+       diag_unobserve; diag_context_set keeps the context list on the proc,
+       releasing the one it replaces (march_runtime.c, "Diagnostics: crash
+       observers"). *)
+    "diag_observe"; "diag_context_set";
     (* actor_inspect_store keeps its String in the proc's inspect_out slot
        until the actor loop sends it as the reply (observe plan R4). *)
     "actor_inspect_store";
