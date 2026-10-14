@@ -801,6 +801,10 @@ let get_march_stack () : march_frame list = !march_stack
 
 let clear_march_stack () : unit = march_stack := []
 
+let () = Eval_prim.march_stack_mark := (fun () ->
+    let saved = !march_stack in
+    fun () -> march_stack := saved)
+
 (** Global reduction context — None means reduction counting is disabled. *)
 let reduction_ctx : March_scheduler.Scheduler.reduction_ctx option ref = ref None
 
@@ -839,6 +843,65 @@ let check_reductions () : unit =
 
 (* Moved to eval_prim.ml; re-exported so [Eval.eval_error] keeps working. *)
 let eval_error = Eval_prim.eval_error
+
+(** Diagnostics: report a crash caught at a runtime boundary (the actor loop,
+    the top level) to the crash observers, before that boundary acts on it.
+    [exn] is what escaped.  Its frames are still on [march_stack] (a panic
+    leaves them for the backtrace), but each names the CALLEE at its call
+    site; they are re-paired into the compiled runtime's shape, where a frame
+    names the function the line is in, and [outer] names the outermost one
+    ("main", or the actor handler).  [base] is the stack depth at the
+    boundary's entry: an actor handler runs inside whatever pumped the
+    scheduler, whose frames are not the actor's.  The message drops the "panic: " /
+    "todo: " prefix the builtins add, as the compiled report carries the bare
+    message. *)
+let diag_report_crash ?(base = 0) ~(kind : int) ~(pid : int) ~(supervised : bool)
+    ~(outer : string) (exn : exn) : unit =
+  if !Eval_prim.diag_observers <> [] && not !Eval_prim.diag_dispatching then begin
+    let raw = match exn with
+      | Eval_error m -> m
+      | Match_failure m -> "match failure — " ^ m
+      | Assert_failure m -> m
+      | e -> Printexc.to_string e
+    in
+    let strip prefix s =
+      if String.starts_with ~prefix s then
+        String.sub s (String.length prefix) (String.length s - String.length prefix)
+      else s
+    in
+    let msg = strip "todo: " (strip "panic: " raw) in
+    let ctx = match exn, !Eval_prim.diag_raise_ctx with
+      | Eval_error m, Some (m', c) when m = m' -> c
+      | _ -> !Eval_prim.diag_ctx
+    in
+    let rec take n = function
+      | x :: rest when n > 0 -> x :: take (n - 1) rest
+      | _ -> []
+    in
+    let stack = take (List.length !march_stack - base) !march_stack in
+    let rec pair = function
+      | [] -> []
+      | [f] -> [(outer, f)]
+      | f :: (g :: _ as rest) -> (g.mf_name, f) :: pair rest
+    in
+    (* The innermost frames inside the prelude's panic/todo/unreachable
+       wrappers are the panic machinery, as march_panic's are compiled. *)
+    let rec drop_prelude = function
+      | (_, f) :: rest when Filename.basename f.mf_file = "prelude.march" ->
+        drop_prelude rest
+      | l -> l
+    in
+    let frames =
+      List.filter_map (fun (name, f) ->
+          if f.mf_file = "<none>" || f.mf_line <= 0 then None
+          else Some (VCon ("DiagFrame",
+                           [VString name; VString f.mf_file; VInt f.mf_line])))
+        (drop_prelude (pair stack))
+    in
+    let lst = List.fold_right (fun v acc -> VCon ("Cons", [v; acc]))
+        frames (VCon ("Nil", [])) in
+    Eval_prim.diag_dispatch ~kind ~msg ~frames:lst ~pid ~supervised ~ctx
+  end
 
 
 
@@ -2719,6 +2782,7 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
                  @ [("self", VPid pid)] @ !(inst.ai_env_ref)
                in
                Hashtbl.replace busy_actors pid ();
+               let stack_base = List.length (get_march_stack ()) in
                (match Fun.protect
                         ~finally:(fun () -> Hashtbl.remove busy_actors pid)
                         (fun () -> !eval_expr_hook handler_env handler.ah_body)
@@ -2754,6 +2818,10 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
                   (* Handler raised an exception: crash the actor.
                      Clear the march stack so leaked frames from this handler
                      don't pollute the backtrace of the next crash. *)
+                  diag_report_crash ~base:stack_base
+                    ~kind:(if inst.ai_supervisor <> None then 1 else 0)
+                    ~pid ~supervised:(inst.ai_supervisor <> None)
+                    ~outer:msg_tag exn;
                   clear_march_stack ();
                   crash_actor pid (Printexc.to_string exn));
                current_pid := prev_pid

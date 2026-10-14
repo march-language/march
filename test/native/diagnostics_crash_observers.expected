@@ -1,0 +1,10 @@
+nested context: [inner=null][outer=true]
+context after return: 
+context after a handled panic:  (caught=true)
+handled panic: true (no report above)
+A: actor_crashed "poisoned at depth" supervised=true actor=true context=[attempt=2][request_id=r-42] backtrace_ok=true
+C: actor_crashed "poisoned at depth" supervised=true actor=true context=[attempt=2][request_id=r-42] backtrace_ok=true
+E: actor_crashed "poisoned at depth" supervised=true actor=true context=[attempt=2][request_id=r-42] backtrace_ok=true
+restarted: true
+context in main after the crash: 
+E: panic "poisoned at depth" supervised=false actor=false context=[job=nightly] backtrace_ok=true

@@ -5631,7 +5631,16 @@ let compile filename =
     in
     March_eval.Eval.clear_march_stack ();
     setup_interpreter_ffi ();
-    (try March_eval.Eval.run_module desugared
+    (try
+       (try March_eval.Eval.run_module desugared
+        with
+        | (March_eval.Eval.Eval_error _ | March_eval.Eval.Match_failure _
+          | March_eval.Eval.Assert_failure _) as e ->
+          (* Diagnostics crash observers see an unhandled panic before the
+             process reports it and exits, as compiled (march_panic). *)
+          March_eval.Eval.diag_report_crash ~kind:0 ~pid:(-1)
+            ~supervised:false ~outer:"main" e;
+          raise e)
      with
      | March_eval.Eval.Eval_error msg ->
        (* panic_/todo_/unreachable_ builtins already prefix their messages with
