@@ -52,6 +52,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march repl` no longer crashes on an atom inside a value.** `Err(:invalid)`,
+  `Some(:a)`, `[:a, :b]`, `(:a, 1)` and `UUID.parse("not-a-uuid")` killed the REPL with a
+  segmentation fault; they now print. A `None` inside a list or tuple prints as `None`
+  instead of `null`. Compiled programs had a related bug: an `Option(Atom)` built from a
+  literal atom (`Some(:a)`) did not match its own atom (`x == :a` was `false`) and printed
+  as `Some(:<atom>)`. Both are fixed.
+
 - **The in-browser REPL downloads a tenth as much, and the Tetris playground compiles
   again.** The REPL on the playground, cookbook and landing pages loaded a 19.7 MB
   development build (2.1 MB compressed); it is now a 1.9 MB release build (408 KB
