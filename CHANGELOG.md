@@ -61,6 +61,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march repl` prints negative numbers inside lists, options and tuples correctly.**
+  The native REPL showed `[-1, 2]` as `[9223372036854775807, 2]` (and likewise
+  `Some(-1)`, `(-1, 2)`, `NativeArray.to_list_i32(...)` with a negative element). Only
+  the printed result was wrong; the values themselves, `--compile` and the interpreter
+  were always right.
+
 - **The in-browser REPL downloads a tenth as much, and the Tetris playground compiles
   again.** The REPL on the playground, cookbook and landing pages loaded a 19.7 MB
   development build (2.1 MB compressed); it is now a 1.9 MB release build (408 KB
