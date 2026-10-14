@@ -257,6 +257,17 @@ let extern_borrow_table : (string * bool list) list = [
      Bytes.from_list runs on every call — ~430 B per 3-byte Bytes.from_list,
      the bulk of an idle conduit worker's ~5 MB/min growth via depot's
      Postgres wire encoder/decoder. *)
+  (* The `~H` escapers only read the hole's value: march_html_escape_ctx,
+     march_html_auto_escape and their _dyn forms always return a fresh String
+     and neither store nor free their argument.  Unlisted (they are not
+     [in_is_builtin] rows, so test_builtin_borrow_classification never asked)
+     they defaulted to OWNED, and every dynamic hole of every template leaked
+     the value it interpolated -- a nested partial its whole IOList.  The
+     emitter's arms (Llvm_emit_html) are written for a borrowed argument: the
+     trusted pass-through takes its own reference to the String it hands
+     back.  Guard: test/native/h_sigil_hole_leak_probe.march. *)
+  ("html_auto_escape",     [true]);
+  ("html_escape_ctx",      [true; true]);
   ("string_chars",         [true]);
   ("string_from_chars",    [true]);
   (* march_tcp_send_all (march_http.c) writes the String's bytes to the
