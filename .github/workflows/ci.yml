@@ -379,6 +379,12 @@ jobs:
         timeout-minutes: 3
         run: node scripts/browser-repl-smoke.js "$RUNNER_TEMP/browser"
 
+      # Every stdlib `march>` example through the browser REPL's on-demand
+      # module loading; failures must match the script's EXPECTED_FAILURES.
+      - name: Stdlib doc examples run in the browser REPL
+        timeout-minutes: 3
+        run: node scripts/browser-repl-doc-sweep.js "$RUNNER_TEMP/browser"
+
   # tree-sitter-march/ (the grammar Zed highlights from) against the March the
   # compiler accepts: freshness of the generated parser, the corpus tests, the
   # query files, and a list ratchet over every .march file in the repo

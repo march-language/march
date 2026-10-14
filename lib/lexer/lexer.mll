@@ -155,6 +155,16 @@ rule token = parse
          ParseError instead so the frontend reports a clean diagnostic. *)
       match int_of_string_opt n with
       | Some v -> INT v
+      | None when Sys.int_size < 63 ->
+        (* The browser REPL (js_of_ocaml, 32-bit int): native March accepts
+           this literal, so name the host's limit, not March's. *)
+        raise (March_errors.Errors.ParseError
+          (Printf.sprintf
+             "Integer literal `%s` exceeds the browser REPL's %d-bit Int \
+              (max %d); native March allows up to 4611686018427387903"
+             n Sys.int_size max_int,
+           Some "Run this with a native March install, or use a smaller literal.",
+           Lexing.lexeme_start_p lexbuf))
       | None ->
         raise (March_errors.Errors.ParseError
           (Printf.sprintf

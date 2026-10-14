@@ -92,12 +92,60 @@
       self._loadEl.textContent = "Failed to load interpreter.";
     };
 
-    this._loadScript(this._base + "/assets/march_stdlib.js?v=" + this._ver, function () {
-      self._loadScript(self._base + "/assets/march.js?v=" + self._ver, finish, fail);
-    }, function () {
-      // stdlib load failed — interpreter still works without it
-      self._loadScript(self._base + "/assets/march.js?v=" + self._ver, finish, fail);
-    });
+    // Startup stdlib, then the module index (which module lives in which file,
+    // for on-demand loading), then the interpreter. A failed stdlib or index load
+    // still leaves a working interpreter, just with less of the stdlib.
+    var v = "?v=" + this._ver;
+    var loadMarch = function () {
+      self._loadScript(self._base + "/assets/march.js" + v, finish, fail);
+    };
+    var loadIndex = function () {
+      self._loadScript(self._base + "/assets/march_stdlib_index.js" + v, loadMarch, loadMarch);
+    };
+    this._loadScript(this._base + "/assets/march_stdlib.js" + v, loadIndex, loadIndex);
+  };
+
+  /* ------------------------------------------------------------------ */
+  /* On-demand stdlib modules                                            */
+  /* ------------------------------------------------------------------ */
+
+  // Before evaluating [code], load the stdlib modules it uses that this session
+  // does not have yet (march.js's marchModulesNeeded follows the module index,
+  // dependencies first), one stdlib/<file>.js each. Calls cb(null) when ready, or
+  // cb(message) when [code] names a module that cannot run in a browser or a
+  // module failed to load; then nothing is evaluated. Mirrors
+  // scripts/browser-repl-node.js, which the CI smoke test and doc sweep use.
+  MarchRepl.prototype._ensureModules = function (code, cb) {
+    var self = this;
+    if (!window.marchModulesNeeded) { cb(null); return; }
+    var need = window.marchModulesNeeded(code);
+    var unavailable = Array.prototype.slice.call(need.unavailable);
+    if (unavailable.length) {
+      cb(unavailable.map(function (u) {
+        return u.module + " isn't available in the browser REPL: " + u.reason +
+               ". Install March to run this: " + location.origin + self._base +
+               "/docs/installation/";
+      }).join("\n"));
+      return;
+    }
+    var files = Array.prototype.slice.call(need.load);
+    var next = function (i) {
+      if (i >= files.length) { self._loadEl.textContent = ""; cb(null); return; }
+      var file = files[i];
+      self._loadEl.textContent = "Loading " + file.replace(/\.march$/, "") + "…";
+      self._loadScript(
+        self._base + "/assets/stdlib/" + file.replace(/\.march$/, ".js") + "?v=" + self._ver,
+        function () {
+          var r = window.marchLoadModule(file, (window.marchStdlib || {})[file] || "");
+          if (r.error) { self._loadEl.textContent = ""; cb(r.error); }
+          else next(i + 1);
+        },
+        function () {
+          self._loadEl.textContent = "";
+          cb("could not download the stdlib module " + file);
+        });
+    };
+    next(0);
   };
 
   /* ------------------------------------------------------------------ */
@@ -312,9 +360,12 @@
         return;
       }
 
-      var result = window.marchEvalLine(code);
-      if (result.output && result.output.trim()) self._appendLine(result.output.trimEnd(), cls.output);
-      if (result.error !== null)                 self._appendLine(result.error, cls.error);
+      self._ensureModules(code, function (err) {
+        if (err) { self._appendLine(err, cls.error); return; }
+        var result = window.marchEvalLine(code);
+        if (result.output && result.output.trim()) self._appendLine(result.output.trimEnd(), cls.output);
+        if (result.error !== null)                 self._appendLine(result.error, cls.error);
+      });
     });
   };
 

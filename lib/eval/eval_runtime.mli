@@ -235,6 +235,23 @@ exception BlockedOnReceive
     Each takes the per-type operation and the builtin's name (for the error
     message) and returns the builtin's [value]. *)
 
+(** [true] when the host [int] is narrower than March's 63-bit [Int] (the
+    js_of_ocaml browser REPL); then the helpers below raise on overflow instead
+    of wrapping. [false] on native builds, where they are the plain operators. *)
+val narrow_int : bool
+
+(** Raise the "does not fit the browser REPL's Int" error for [op]. *)
+val int_overflow : string -> 'a
+
+val int_add : int -> int -> int
+val int_sub : int -> int -> int
+val int_mul : int -> int -> int
+val int_neg : int -> int
+
+(** [Float.to_int], raising [int_overflow op] when the float is out of the
+    host Int range on a narrow host. *)
+val int_of_float_checked : string -> float -> int
+
 val arith_num :
   (int -> int -> int) -> (float -> float -> float) -> string -> value
 

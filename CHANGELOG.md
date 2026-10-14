@@ -18,6 +18,17 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **The in-browser REPL can use the whole standard library, and reports what it
+  can't do.** Modules load the first time you use them, so `HashMap`, `Uri`, `Csv`
+  and about a hundred others now work on the playground and cookbook pages (197 of
+  the 210 stdlib doc examples run in the browser, up from 63) without slowing startup.
+  Modules that need a file system, sockets, processes or the cluster runtime say so
+  instead of failing obscurely. The browser REPL's `Int` is 32-bit, so a result that
+  would overflow it is reported, where it used to silently give a wrong answer
+  (`65536 * 65536` was `0`).
+
 ### Changed
 - A compiled program whose scheduler is about to resume a corrupt or freed
   green-thread context now stops with a `march_sched[BUG]: dispatch of pid N

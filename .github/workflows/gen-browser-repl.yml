@@ -1,7 +1,8 @@
 name: Regenerate Browser REPL
 
 # The in-browser March on march-lang.org (docs/assets/march.js, march_compile.js,
-# march_stdlib.js, and the Tetris playground files under docs/assets/tetris/) is
+# march_stdlib.js, march_stdlib_index.js, the per-module docs/assets/stdlib/, and the
+# Tetris playground files under docs/assets/tetris/) is
 # committed, because the site is GitHub's own Jekyll over this repo's docs/ with no
 # build hook (see scripts/gen-stdlib-docs.sh). Those files embed the parser,
 # typechecker, evaluator, JS backend and stdlib, so nearly any compiler or stdlib
@@ -63,7 +64,9 @@ jobs:
 
       # Never publish a bundle that cannot load or run.
       - name: Smoke-test the rebuilt artifacts
-        run: node scripts/browser-repl-smoke.js
+        run: |
+          node scripts/browser-repl-smoke.js
+          node scripts/browser-repl-doc-sweep.js
 
       - name: Commit regenerated artifacts
         run: |
@@ -72,7 +75,8 @@ jobs:
           # None of these paths is in this workflow's trigger list, so the commit
           # does not re-trigger it.
           if git status --porcelain docs/assets | grep -q .; then
-            git add docs/assets/march.js docs/assets/march_compile.js docs/assets/march_stdlib.js docs/assets/tetris
+            git add -A docs/assets/march.js docs/assets/march_compile.js docs/assets/march_stdlib.js \
+              docs/assets/march_stdlib_index.js docs/assets/stdlib docs/assets/tetris
             git commit -m "browser: regenerate the in-browser REPL and live compiler"
             # Another bot (or a merge) may have pushed meanwhile; rebase onto it.
             for attempt in 1 2 3; do

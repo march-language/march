@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // browser-repl-smoke.js — prove the committed browser bundles load and run.
 //
-// Loads docs/assets/march_stdlib.js and docs/assets/march.js (the interpreter REPL
-// behind the cookbook sidebar, the landing page and /docs/playground/) into a Node
-// `vm` context that stands in for a browser window, then feeds `marchEvalLine` a
-// fixed list of inputs and asserts the exact {output, error} it returns. A bundle
+// Loads the interpreter REPL (march.js, behind the cookbook sidebar, the landing page
+// and /docs/playground/) the way a page does (scripts/browser-repl-node.js: startup
+// stdlib, module index, on-demand per-module loading), feeds it a fixed list of inputs
+// and asserts the exact {output, error} it returns. A bundle
 // that fails to load (a missing js_of_ocaml primitive or browser global), a stdlib
 // module the browser list stopped loading, or a value-printer regression turns this
 // red. march_compile.js (the Tetris live compiler) must compile the Tetris
@@ -19,6 +19,7 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { browserContext, loadRepl } = require('./browser-repl-node');
 
 const args = process.argv.slice(2);
 const print = args[0] === '--print';
@@ -50,27 +51,26 @@ const CASES = [
     output: "", error: "unexpected equals sign — did you mean: let name = expr\nlet = 1\n    ^" },
   { input: "List.head([])",
     output: "", error: "runtime error: panic: List.head: empty list" },
+  // Loaded on demand: hash_map.march is not in the startup set.
+  { input: "HashMap.size(HashMap.from_list([(\"a\", 1), (\"b\", 2)]))",
+    output: "2\n", error: null },
+  // Named but cannot run in a browser: a clear message, nothing evaluated.
+  { input: "File.read(\"notes.txt\")",
+    output: "", error: "File isn't available in the browser REPL: it needs a file system. Install March to run this." },
+  // The browser's Int is 32-bit: overflow is reported, never wrapped.
+  { input: "2147483647 + 1",
+    output: "", error: "runtime error: +: this result does not fit the browser REPL's 32-bit Int; native March uses 63-bit Int" },
+  // Package code goes through the same loader (marchLoadModule); see PACKAGE below.
+  { input: "Greeter.hello(\"march\")", package: true,
+    output: "\"hello, march\"\n", error: null },
   { input: "double(1)", reset: true,
     output: "", error: "runtime error: unbound variable: double" },
 ];
 
-function browserContext() {
-  const ctx = {
-    console, TextDecoder, TextEncoder, setTimeout, clearTimeout, performance,
-    crypto: globalThis.crypto,
-  };
-  // js_of_ocaml reaches the standard constructors through the global object.
-  for (const name of Object.getOwnPropertyNames(globalThis)) {
-    if (!(name in ctx) && /^[A-Z]/.test(name)) ctx[name] = globalThis[name];
-  }
-  for (const name of ['isNaN', 'isFinite', 'parseInt', 'parseFloat',
-                      'encodeURIComponent', 'decodeURIComponent']) {
-    ctx[name] = globalThis[name];
-  }
-  ctx.window = ctx; ctx.self = ctx; ctx.globalThis = ctx;
-  vm.createContext(ctx);
-  return ctx;
-}
+// A package module, loaded the way a package's docs will load it (project 3):
+// marchLoadModule with a file name and its source.
+const PACKAGE = { file: 'greeter.march',
+                  source: 'mod Greeter do\n  fn hello(name) do "hello, " ++ name end\nend\n' };
 
 function load(ctx, file) {
   vm.runInContext(fs.readFileSync(path.join(assets, file), 'utf8'), ctx, { filename: file });
@@ -85,18 +85,26 @@ function check(label, expected, actual) {
 }
 
 // ── Interpreter REPL ────────────────────────────────────────────────────────
-const repl = browserContext();
-load(repl, 'march_stdlib.js');
-load(repl, 'march.js');
-for (const g of ['marchEvalLine', 'marchResetSession']) {
-  if (typeof repl[g] !== 'function') { console.error(`FAIL march.js does not export ${g}`); process.exit(1); }
-}
+let repl;
+try { repl = loadRepl(assets); }
+catch (e) { console.error(`FAIL ${e.message}`); process.exit(1); }
 for (const c of CASES) {
-  if (c.reset) repl.marchResetSession();
-  const r = repl.marchEvalLine(c.input);
+  if (c.reset) repl.reset();
+  if (c.package) {
+    const r = repl.ctx.marchLoadModule(PACKAGE.file, PACKAGE.source);
+    if (r.error) { failures++; console.error(`FAIL loading ${PACKAGE.file}: ${r.error}`); }
+  }
+  const r = repl.run(c.input);
   if (print) { console.log(JSON.stringify({ input: c.input, reset: !!c.reset, output: r.output, error: r.error })); continue; }
   check(`${JSON.stringify(c.input)}.output`, c.output, r.output);
   check(`${JSON.stringify(c.input)}.error`, c.error, r.error);
+}
+// A reset forgets on-demand modules too: HashMap has to load again.
+{
+  const again = Array.from(repl.ctx.marchModulesNeeded('HashMap.new()').load);
+  if (!print && !again.includes('hash_map.march')) {
+    failures++; console.error(`FAIL after reset, HashMap should need loading again; needs ${JSON.stringify(again)}`);
+  }
 }
 
 // ── Live compiler ───────────────────────────────────────────────────────────
