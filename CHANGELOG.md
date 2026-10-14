@@ -29,6 +29,16 @@ git log is authoritative for exact commits.
   each packaged archive before publishing. The v0.5.0 archives were rebuilt
   and replaced; reinstall with `forge toolchain install v0.5.0`.
 
+### Documentation
+
+- **The stdlib API reference has syntax highlighting, and Http is documented.**
+  Code examples on march-lang.org/docs/stdlib/ were plain monochrome text: the
+  generator only coloured fences tagged with a language, and the pages shipped
+  no highlight colours. Examples are now highlighted as March in both themes.
+  The paragraphs after the first in many doc comments no longer render as code
+  blocks, and the comment above a `type` now appears as its description. Every
+  `Http` function and type has a description, and its examples are now run in CI.
+
 ## [0.5.0] - 2026-10-13
 
 ### Highlights

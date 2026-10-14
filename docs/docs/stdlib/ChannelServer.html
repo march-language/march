@@ -3,13 +3,15 @@
 :root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
 --acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
 --faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
---fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
 
 /* Light theme overrides */
 [data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
 --acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
 --faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
---fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
 
 /* Reset + base */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -34,6 +36,9 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:
 code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
 pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
 code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
 h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
 h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
 p{margin:8px 0}
@@ -2967,31 +2972,31 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>ChannelServer</span></nav><h1>ChannelServer</h1><div class="mdoc"><p>ChannelServer module: runtime helpers for Phoenix-style channel processes.</p><p>This module provides the building blocks for implementing channel processes using March's actor system.  The actual actor declarations must be provided by the application (actors cannot be spawned from closures in March).</p><p>A channel process is an actor that:</p><ol><li>Receives a ChannelJoin message with topic/params.</li><li>Calls the handler's join/3 callback.</li><li>On success, subscribes to PubSub for the topic.</li><li>Loops receiving ChannelMailbox messages and dispatching to callbacks.</li><li>On ChannelLeave, unsubscribes from PubSub and calls leave/3.</li></ol><p>Example actor using these helpers:</p><pre><code>actor MyChannelProcess do
-  state = ChannelServer.init_state()
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>ChannelServer</span></nav><h1>ChannelServer</h1><div class="mdoc"><p>ChannelServer module: runtime helpers for Phoenix-style channel processes.</p><p>This module provides the building blocks for implementing channel processes using March's actor system.  The actual actor declarations must be provided by the application (actors cannot be spawned from closures in March).</p><p>A channel process is an actor that:</p><ol><li>Receives a ChannelJoin message with topic/params.</li><li>Calls the handler's join/3 callback.</li><li>On success, subscribes to PubSub for the topic.</li><li>Loops receiving ChannelMailbox messages and dispatching to callbacks.</li><li>On ChannelLeave, unsubscribes from PubSub and calls leave/3.</li></ol><p>Example actor using these helpers:</p><pre><code><span class="tok-kw">actor</span> <span class="tok-ty">MyChannelProcess</span> <span class="tok-kw">do</span>
+  state = <span class="tok-ty">ChannelServer</span>.init_state()
 
-  on ChannelIn(ref, event, payload) -&gt;
-    ChannelServer.handle_in_msg(state, ref, event, payload)
+  <span class="tok-kw">on</span> <span class="tok-ty">ChannelIn</span>(ref, event, payload) -&gt;
+    <span class="tok-ty">ChannelServer</span>.handle_in_msg(state, ref, event, payload)
 
-  on ChannelBroadcast(topic, event, payload) -&gt;
-    ChannelServer.handle_broadcast(state, topic, event, payload)
+  <span class="tok-kw">on</span> <span class="tok-ty">ChannelBroadcast</span>(topic, event, payload) -&gt;
+    <span class="tok-ty">ChannelServer</span>.handle_broadcast(state, topic, event, payload)
 
-  on ChannelLeave(reason) -&gt;
-    ChannelServer.handle_leave(state, reason)
-end</code></pre><p>PubSub shard actors are similarly declared by the framework user:</p><pre><code>actor PubSubShard do
-  state = PubSub.new_state()
+  <span class="tok-kw">on</span> <span class="tok-ty">ChannelLeave</span>(reason) -&gt;
+    <span class="tok-ty">ChannelServer</span>.handle_leave(state, reason)
+<span class="tok-kw">end</span></code></pre><p>PubSub shard actors are similarly declared by the framework user:</p><pre><code><span class="tok-kw">actor</span> <span class="tok-ty">PubSubShard</span> <span class="tok-kw">do</span>
+  state = <span class="tok-ty">PubSub</span>.new_state()
 
-  on PubSubSubscribe(topic, pid) -&gt;
-    PubSub.subscribe_state(state, topic, pid)
+  <span class="tok-kw">on</span> <span class="tok-ty">PubSubSubscribe</span>(topic, pid) -&gt;
+    <span class="tok-ty">PubSub</span>.subscribe_state(state, topic, pid)
 
-  on PubSubUnsubscribe(topic, pid) -&gt;
-    PubSub.unsubscribe_state(state, topic, pid)
+  <span class="tok-kw">on</span> <span class="tok-ty">PubSubUnsubscribe</span>(topic, pid) -&gt;
+    <span class="tok-ty">PubSub</span>.unsubscribe_state(state, topic, pid)
 
-  on PubSubBroadcast(topic, excl, event, payload) -&gt;
-    PubSub.broadcast_to(PubSub.get_subscribers(state, topic), excl, event, payload)
+  <span class="tok-kw">on</span> <span class="tok-ty">PubSubBroadcast</span>(topic, excl, event, payload) -&gt;
+    <span class="tok-ty">PubSub</span>.broadcast_to(<span class="tok-ty">PubSub</span>.get_subscribers(state, topic), excl, event, payload)
     state
-end</code></pre></div><h2>Types</h2><div class="item" id="type-JoinResult"><div class="ih"><span class="badge bty">type</span><span class="name">JoinResult</span><span class="sig"><a href="#type-JoinResult">JoinResult</a>(a) = JoinOk(a) | JoinErr(String)</span><a class="anchor-link" href="#type-JoinResult" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-ChannelConfig"><div class="ih"><span class="badge bty">type</span><span class="name">ChannelConfig</span><span class="sig"><a href="#type-ChannelConfig">ChannelConfig</a>(a, b, c, d, e) = <a href="#type-ChannelConfig">ChannelConfig</a>(</span><a class="anchor-link" href="#type-ChannelConfig" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-apply_result"><div class="ih"><span class="badge bfn">fn</span><span class="name">apply_result</span><span class="sig">apply_result(cfg, result, ref)</span><a class="anchor-link" href="#fn-apply_result" title="Link">#</a></div><div class="ib"><p>Apply a HandleResult: if Reply, send the reply to the transport; return the new state.  For Stop, call do_leave. Returns the new channel state. Must be called from within an actor handler (requires actor runtime).</p></div></div>
+<span class="tok-kw">end</span></code></pre></div><h2>Types</h2><div class="item" id="type-JoinResult"><div class="ih"><span class="badge bty">type</span><span class="name">JoinResult</span><span class="sig"><a href="#type-JoinResult">JoinResult</a>(a) = JoinOk(a) | JoinErr(String)</span><a class="anchor-link" href="#type-JoinResult" title="Link">#</a></div><div class="ib"><p>Result of a channel join attempt. JoinOk(state)     — join accepted; state is the handler's initial state JoinErr(reason)   — join rejected with a reason string</p></div></div>
+<div class="item" id="type-ChannelConfig"><div class="ih"><span class="badge bty">type</span><span class="name">ChannelConfig</span><span class="sig"><a href="#type-ChannelConfig">ChannelConfig</a>(a, b, c, d, e) = <a href="#type-ChannelConfig">ChannelConfig</a>(</span><a class="anchor-link" href="#type-ChannelConfig" title="Link">#</a></div><div class="ib"><p>Runtime configuration for a single channel process. socket         — the Channel.Socket for this join join_fn        — fn(topic, params, socket) -&gt; Result(state, String) handle_in_fn   — fn(ref, event, payload, state, socket) -&gt; HandleResult handle_info_fn — fn(msg, state, socket) -&gt; HandleResult leave_fn       — fn(reason, state, socket) -&gt; Unit pubsub_shard   — pid of the PubSub shard actor for this topic</p></div></div><h2>Functions</h2><div class="item" id="fn-apply_result"><div class="ih"><span class="badge bfn">fn</span><span class="name">apply_result</span><span class="sig">apply_result(cfg, result, ref)</span><a class="anchor-link" href="#fn-apply_result" title="Link">#</a></div><div class="ib"><p>Apply a HandleResult: if Reply, send the reply to the transport; return the new state.  For Stop, call do_leave. Returns the new channel state. Must be called from within an actor handler (requires actor runtime).</p></div></div>
 <div class="item" id="fn-config_shard"><div class="ih"><span class="badge bfn">fn</span><span class="name">config_shard</span><span class="sig">config_shard(cfg)</span><a class="anchor-link" href="#fn-config_shard" title="Link">#</a></div><div class="ib"><p>Extract the pubsub shard pid from a config.</p></div></div>
 <div class="item" id="fn-config_socket"><div class="ih"><span class="badge bfn">fn</span><span class="name">config_socket</span><span class="sig">config_socket(cfg)</span><a class="anchor-link" href="#fn-config_socket" title="Link">#</a></div><div class="ib"><p>Extract the socket from a config.</p></div></div>
 <div class="item" id="fn-do_join"><div class="ih"><span class="badge bfn">fn</span><span class="name">do_join</span><span class="sig">do_join(cfg, topic, params_json)</span><a class="anchor-link" href="#fn-do_join" title="Link">#</a></div><div class="ib"><p>Perform the join handshake.  Calls join_fn, subscribes to PubSub on success. Returns JoinOk(state) or JoinErr(reason). Must be called from within an actor handler (requires actor runtime).</p></div></div>

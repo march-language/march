@@ -3,13 +3,15 @@
 :root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
 --acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
 --faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
---fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
 
 /* Light theme overrides */
 [data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
 --acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
 --faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
---fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
 
 /* Reset + base */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -34,6 +36,9 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:
 code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
 pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
 code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
 h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
 h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
 p{margin:8px 0}
@@ -2967,12 +2972,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>SessionAP</span></nav><h1>SessionAP</h1><div class="mdoc"><p>SessionAP: who may form a session at an access point (distributed-deploys build step 11b, the authorization half of node certificates).</p><p>A node certificate (NodeCert) names the protocol roles its node may play, as &quot;Proto.Role:offer&quot; (it may OFFER the role at an access point) and &quot;Proto.Role:initiate&quot; (it may INITIATE a session in the role). When a session forms at access points both sides check (plan section 3, &quot;Two-way checks when a session forms&quot;):</p><ul><li>the offer checks that the INITIATOR's certificate names</li></ul><pre><code>  &quot;Proto.Role:initiate&quot; for the role it plays (SessionNode.offer_verdict);
-* the initiator checks that each OFFERING node's certificate names
-  &quot;Proto.Role:offer&quot; for the role it offers, before inviting it
-  (SessionNode.candidates). Offers are registered under names any member
-  can write, so the check is on the certificate of the node that holds
-  the offer, never on the registry entry.</code></pre><p>Everything here is pure: the certificate is the one ClusterNode verified in its handshake (<code>ClusterNode.peer_cert</code>). Checks apply in CERTIFICATE mode only; a shared-secret node has no certificates and checks nothing (specs/lang/clustering.md, &quot;Authorization&quot;).</p></div><h2>Functions</h2><div class="item" id="fn-authorize"><div class="ih"><span class="badge bfn">fn</span><span class="name">authorize</span><span class="sig">authorize(cert : Option(NodeCert.Cert), proto : String, role : String, mode : String) : Result((), String)</span><a class="anchor-link" href="#fn-authorize" title="Link">#</a></div><div class="ib"><p>May the node that presented [cert] play role [role] of protocol [proto] in [mode] (<code>offer_mode()</code> or <code>initiate_mode()</code>)? <code>Ok(())</code>, or <code>Err(why)</code>: &quot;presented no certificate&quot; when the peer presented none (a certificate-mode node never links to such a peer, so this is a peer this node has not verified), else &quot;not authorized for Proto.Role&quot;. A caller in shared-secret mode does not call this at all.</p></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>SessionAP</span></nav><h1>SessionAP</h1><div class="mdoc"><p>SessionAP: who may form a session at an access point (distributed-deploys build step 11b, the authorization half of node certificates).</p><p>A node certificate (NodeCert) names the protocol roles its node may play, as &quot;Proto.Role:offer&quot; (it may OFFER the role at an access point) and &quot;Proto.Role:initiate&quot; (it may INITIATE a session in the role). When a session forms at access points both sides check (plan section 3, &quot;Two-way checks when a session forms&quot;):</p><ul><li>the offer checks that the INITIATOR's certificate names</li></ul><pre><code>  <span class="tok-str">&quot;Proto.Role:initiate&quot;</span> <span class="tok-kw">for</span> the role it plays (<span class="tok-ty">SessionNode</span>.offer_verdict);
+* the initiator checks that each <span class="tok-ty">OFFERING</span> node's certificate names
+  <span class="tok-str">&quot;Proto.Role:offer&quot;</span> <span class="tok-kw">for</span> the role it offers, before inviting it
+  (<span class="tok-ty">SessionNode</span>.candidates). <span class="tok-ty">Offers</span> are registered under names any member
+  can write, so the check is <span class="tok-kw">on</span> the certificate of the node that holds
+  the offer, never <span class="tok-kw">on</span> the registry entry.</code></pre><p>Everything here is pure: the certificate is the one ClusterNode verified in its handshake (<code>ClusterNode.peer_cert</code>). Checks apply in CERTIFICATE mode only; a shared-secret node has no certificates and checks nothing (specs/lang/clustering.md, &quot;Authorization&quot;).</p></div><h2>Functions</h2><div class="item" id="fn-authorize"><div class="ih"><span class="badge bfn">fn</span><span class="name">authorize</span><span class="sig">authorize(cert : Option(NodeCert.Cert), proto : String, role : String, mode : String) : Result((), String)</span><a class="anchor-link" href="#fn-authorize" title="Link">#</a></div><div class="ib"><p>May the node that presented [cert] play role [role] of protocol [proto] in [mode] (<code>offer_mode()</code> or <code>initiate_mode()</code>)? <code>Ok(())</code>, or <code>Err(why)</code>: &quot;presented no certificate&quot; when the peer presented none (a certificate-mode node never links to such a peer, so this is a peer this node has not verified), else &quot;not authorized for Proto.Role&quot;. A caller in shared-secret mode does not call this at all.</p></div></div>
 <div class="item" id="fn-initiate_mode"><div class="ih"><span class="badge bfn">fn</span><span class="name">initiate_mode</span><span class="sig">initiate_mode() : String do &quot;initiate&quot; end</span><a class="anchor-link" href="#fn-initiate_mode" title="Link">#</a></div><div class="ib"><p>The mode an initiating node's certificate must name for a role.</p></div></div>
 <div class="item" id="fn-offer_mode"><div class="ih"><span class="badge bfn">fn</span><span class="name">offer_mode</span><span class="sig">offer_mode() : String do &quot;offer&quot; end</span><a class="anchor-link" href="#fn-offer_mode" title="Link">#</a></div><div class="ib"><p>The mode an offering node's certificate must name for a role.</p></div></div>
 <div class="item" id="fn-permission"><div class="ih"><span class="badge bfn">fn</span><span class="name">permission</span><span class="sig">permission(proto : String, role : String, mode : String) : String</span><a class="anchor-link" href="#fn-permission" title="Link">#</a></div><div class="ib"><p>The permission a certificate must carry: \</p></div></div>

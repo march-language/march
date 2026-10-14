@@ -3,13 +3,15 @@
 :root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
 --acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
 --faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
---fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
 
 /* Light theme overrides */
 [data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
 --acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
 --faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
---fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
 
 /* Reset + base */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -34,6 +36,9 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:
 code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
 pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
 code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
 h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
 h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
 p{margin:8px 0}
@@ -2967,47 +2972,23 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>UUID</span></nav><h1>UUID</h1><div class="mdoc"><p>UUID module: RFC 4122 UUID generation and manipulation.</p><p>The UUID type wraps a canonical string representation: &quot;xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx&quot; where M is the version digit and N is the variant digit (8, 9, a, or b).</p><p>Supported versions: v4  — randomly generated (RFC 4122 §4.4) v5  — name-based using SHA-1 (RFC 4122 §4.3) NOTE: v5 uses the first 16 bytes of a SHA-1 hash with version/ variant bits set; the resulting UUID is RFC-compliant.</p><p>The nil UUID (&quot;00000000-0000-0000-0000-000000000000&quot;) is the all-zeros UUID. version/1 returns 0 for the nil UUID.</p></div><h2>Types</h2><div class="item" id="type-UUID"><div class="ih"><span class="badge bty">type</span><span class="name">UUID</span><span class="sig"><a href="#type-UUID">UUID</a> = <a href="#type-UUID">UUID</a>(String)</span><a class="anchor-link" href="#type-UUID" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-is_valid"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_valid</span><span class="sig">is_valid(s)</span><a class="anchor-link" href="#fn-is_valid" title="Link">#</a></div><div class="ib"><p>Return true if the string is a valid UUID in xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx form.</p><pre><code>    UUID.is_valid(&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;)  -- true
-    UUID.is_valid(&quot;00000000-0000-0000-0000-000000000000&quot;)  -- true
-    UUID.is_valid(&quot;not-a-uuid&quot;)                             -- false</code></pre></div></div>
-<div class="item" id="fn-nil"><div class="ih"><span class="badge bfn">fn</span><span class="name">nil</span><span class="sig">nil()</span><a class="anchor-link" href="#fn-nil" title="Link">#</a></div><div class="ib"><p>The nil UUID: all 128 bits are zero.</p><pre><code>    UUID.to_string(UUID.nil())
-    -- &quot;00000000-0000-0000-0000-000000000000&quot;</code></pre></div></div>
-<div class="item" id="fn-parse"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse</span><span class="sig">parse(s)</span><a class="anchor-link" href="#fn-parse" title="Link">#</a></div><div class="ib"><p>Parse a UUID string, returning Ok(UUID) or Err(:invalid).</p><pre><code>Accepts both upper and lower case hex digits; validates the
-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format (36 characters, 4 dashes).
-
-    UUID.parse(&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;)  -- Ok(UUID(...))
-    UUID.parse(&quot;not-a-uuid&quot;)                             -- Err(:invalid)</code></pre></div></div>
-<div class="item" id="fn-timestamp_ms"><div class="ih"><span class="badge bfn">fn</span><span class="name">timestamp_ms</span><span class="sig">timestamp_ms(uuid)</span><a class="anchor-link" href="#fn-timestamp_ms" title="Link">#</a></div><div class="ib"><p>Extract the Unix timestamp (milliseconds) embedded in a v7 UUID.</p><pre><code>Returns Some(ms) for valid v7 UUIDs; None for other versions or
-unparseable strings.  The inverse of `v7_at`: for any m in a
-reasonable range, `timestamp_ms(v7_at(m)) == Some(m)`.</code></pre></div></div>
-<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(uuid)</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Convert a UUID to its canonical lowercase string representation.</p><pre><code>    UUID.to_string(UUID.nil())
-    -- &quot;00000000-0000-0000-0000-000000000000&quot;</code></pre></div></div>
-<div class="item" id="fn-v4"><div class="ih"><span class="badge bfn">fn</span><span class="name">v4</span><span class="sig">v4()</span><a class="anchor-link" href="#fn-v4" title="Link">#</a></div><div class="ib"><p>Generate a random UUID v4.</p><pre><code>    UUID.v4()  -- e.g. UUID(&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;)
-
-Uses the runtime's CSPRNG.  Version bits (4) and variant bits (RFC 4122)
-are set correctly.</code></pre></div></div>
-<div class="item" id="fn-v5"><div class="ih"><span class="badge bfn">fn</span><span class="name">v5</span><span class="sig">v5(namespace, name)</span><a class="anchor-link" href="#fn-v5" title="Link">#</a></div><div class="ib"><p>Generate a name-based UUID v5 (SHA-1, RFC 4122 §4.3).</p><pre><code>    let dns = UUID.parse(&quot;6ba7b810-9dad-11d1-80b4-00c04fd430c8&quot;)
-    UUID.v5(dns, &quot;www.example.com&quot;)  -- deterministic UUID
-
-The namespace must be a valid UUID.  The name is an arbitrary string.
-The result is deterministic: the same namespace + name always produce the
-same UUID.</code></pre></div></div>
-<div class="item" id="fn-v7"><div class="ih"><span class="badge bfn">fn</span><span class="name">v7</span><span class="sig">v7()</span><a class="anchor-link" href="#fn-v7" title="Link">#</a></div><div class="ib"><p>Generate a time-ordered UUID v7 (RFC 9562).</p><pre><code>    UUID.v7()  -- e.g. UUID(&quot;018e7c9b-2a55-7890-9d51-...&quot;)
-
-The leading 48 bits are the current Unix timestamp in milliseconds;
-the remaining 74 bits are random (CSPRNG).  Version bits (7) and
-variant bits (RFC 4122) are set correctly.
-
-v7 UUIDs are sortable by generation time, which dramatically improves
-B-tree locality when used as database primary keys versus v4.  Prefer
-v7 over v4 for new schemas.</code></pre></div></div>
-<div class="item" id="fn-v7_at"><div class="ih"><span class="badge bfn">fn</span><span class="name">v7_at</span><span class="sig">v7_at(unix_ms : Int) : <a href="#type-UUID">UUID</a></span><a class="anchor-link" href="#fn-v7_at" title="Link">#</a></div><div class="ib"><p>Generate a v7 UUID at a specific Unix timestamp (milliseconds).</p><pre><code>    UUID.v7_at(1_700_000_000_000)  -- UUID with timestamp pinned to 2023-11-14
-
-Useful for backfilling historical records with time-ordered UUIDs and
-for deterministic tests that want to control the timestamp portion.
-The random bits are still CSPRNG-generated on every call.</code></pre></div></div>
-<div class="item" id="fn-version"><div class="ih"><span class="badge bfn">fn</span><span class="name">version</span><span class="sig">version(uuid)</span><a class="anchor-link" href="#fn-version" title="Link">#</a></div><div class="ib"><p>Return the version number of a UUID (1–5), or 0 for unrecognised/nil.</p><pre><code>    UUID.version(UUID.v4())  -- 4
-    UUID.version(UUID.nil()) -- 0</code></pre></div></div></main></div><script>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>UUID</span></nav><h1>UUID</h1><div class="mdoc"><p>UUID module: RFC 4122 UUID generation and manipulation.</p><p>The UUID type wraps a canonical string representation: &quot;xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx&quot; where M is the version digit and N is the variant digit (8, 9, a, or b).</p><p>Supported versions: v4  — randomly generated (RFC 4122 §4.4) v5  — name-based using SHA-1 (RFC 4122 §4.3) NOTE: v5 uses the first 16 bytes of a SHA-1 hash with version/ variant bits set; the resulting UUID is RFC-compliant.</p><p>The nil UUID (&quot;00000000-0000-0000-0000-000000000000&quot;) is the all-zeros UUID. version/1 returns 0 for the nil UUID.</p></div><h2>Types</h2><div class="item" id="type-UUID"><div class="ih"><span class="badge bty">type</span><span class="name">UUID</span><span class="sig"><a href="#type-UUID">UUID</a> = <a href="#type-UUID">UUID</a>(String)</span><a class="anchor-link" href="#type-UUID" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-is_valid"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_valid</span><span class="sig">is_valid(s)</span><a class="anchor-link" href="#fn-is_valid" title="Link">#</a></div><div class="ib"><p>Return true if the string is a valid UUID in xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx form.</p><pre><code><span class="tok-ty">UUID</span>.is_valid(<span class="tok-str">&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;</span>)  <span class="tok-com">-- true</span>
+<span class="tok-ty">UUID</span>.is_valid(<span class="tok-str">&quot;00000000-0000-0000-0000-000000000000&quot;</span>)  <span class="tok-com">-- true</span>
+<span class="tok-ty">UUID</span>.is_valid(<span class="tok-str">&quot;not-a-uuid&quot;</span>)                             <span class="tok-com">-- false</span></code></pre></div></div>
+<div class="item" id="fn-nil"><div class="ih"><span class="badge bfn">fn</span><span class="name">nil</span><span class="sig">nil()</span><a class="anchor-link" href="#fn-nil" title="Link">#</a></div><div class="ib"><p>The nil UUID: all 128 bits are zero.</p><pre><code><span class="tok-ty">UUID</span>.to_string(<span class="tok-ty">UUID</span>.nil())
+<span class="tok-com">-- &quot;00000000-0000-0000-0000-000000000000&quot;</span></code></pre></div></div>
+<div class="item" id="fn-parse"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse</span><span class="sig">parse(s)</span><a class="anchor-link" href="#fn-parse" title="Link">#</a></div><div class="ib"><p>Parse a UUID string, returning Ok(UUID) or Err(:invalid).</p><p>Accepts both upper and lower case hex digits; validates the xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format (36 characters, 4 dashes).</p><pre><code><span class="tok-ty">UUID</span>.parse(<span class="tok-str">&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;</span>)  <span class="tok-com">-- Ok(UUID(...))</span>
+<span class="tok-ty">UUID</span>.parse(<span class="tok-str">&quot;not-a-uuid&quot;</span>)                             <span class="tok-com">-- Err(:invalid)</span></code></pre></div></div>
+<div class="item" id="fn-timestamp_ms"><div class="ih"><span class="badge bfn">fn</span><span class="name">timestamp_ms</span><span class="sig">timestamp_ms(uuid)</span><a class="anchor-link" href="#fn-timestamp_ms" title="Link">#</a></div><div class="ib"><p>Extract the Unix timestamp (milliseconds) embedded in a v7 UUID.</p><p>Returns Some(ms) for valid v7 UUIDs; None for other versions or unparseable strings.  The inverse of <code>v7_at</code>: for any m in a reasonable range, <code>timestamp_ms(v7_at(m)) == Some(m)</code>.</p></div></div>
+<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(uuid)</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Convert a UUID to its canonical lowercase string representation.</p><pre><code><span class="tok-ty">UUID</span>.to_string(<span class="tok-ty">UUID</span>.nil())
+<span class="tok-com">-- &quot;00000000-0000-0000-0000-000000000000&quot;</span></code></pre></div></div>
+<div class="item" id="fn-v4"><div class="ih"><span class="badge bfn">fn</span><span class="name">v4</span><span class="sig">v4()</span><a class="anchor-link" href="#fn-v4" title="Link">#</a></div><div class="ib"><p>Generate a random UUID v4.</p><pre><code><span class="tok-ty">UUID</span>.v4()  <span class="tok-com">-- e.g. UUID(&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;)</span></code></pre><p>Uses the runtime's CSPRNG.  Version bits (4) and variant bits (RFC 4122) are set correctly.</p></div></div>
+<div class="item" id="fn-v5"><div class="ih"><span class="badge bfn">fn</span><span class="name">v5</span><span class="sig">v5(namespace, name)</span><a class="anchor-link" href="#fn-v5" title="Link">#</a></div><div class="ib"><p>Generate a name-based UUID v5 (SHA-1, RFC 4122 §4.3).</p><pre><code><span class="tok-kw">let</span> dns = <span class="tok-ty">UUID</span>.parse(<span class="tok-str">&quot;6ba7b810-9dad-11d1-80b4-00c04fd430c8&quot;</span>)
+<span class="tok-ty">UUID</span>.v5(dns, <span class="tok-str">&quot;www.example.com&quot;</span>)  <span class="tok-com">-- deterministic UUID</span></code></pre><p>The namespace must be a valid UUID.  The name is an arbitrary string. The result is deterministic: the same namespace + name always produce the same UUID.</p></div></div>
+<div class="item" id="fn-v7"><div class="ih"><span class="badge bfn">fn</span><span class="name">v7</span><span class="sig">v7()</span><a class="anchor-link" href="#fn-v7" title="Link">#</a></div><div class="ib"><p>Generate a time-ordered UUID v7 (RFC 9562).</p><pre><code><span class="tok-ty">UUID</span>.v7()  <span class="tok-com">-- e.g. UUID(&quot;018e7c9b-2a55-7890-9d51-...&quot;)</span></code></pre><p>The leading 48 bits are the current Unix timestamp in milliseconds; the remaining 74 bits are random (CSPRNG).  Version bits (7) and variant bits (RFC 4122) are set correctly.</p><p>v7 UUIDs are sortable by generation time, which dramatically improves B-tree locality when used as database primary keys versus v4.  Prefer v7 over v4 for new schemas.</p></div></div>
+<div class="item" id="fn-v7_at"><div class="ih"><span class="badge bfn">fn</span><span class="name">v7_at</span><span class="sig">v7_at(unix_ms : Int) : <a href="#type-UUID">UUID</a></span><a class="anchor-link" href="#fn-v7_at" title="Link">#</a></div><div class="ib"><p>Generate a v7 UUID at a specific Unix timestamp (milliseconds).</p><pre><code><span class="tok-ty">UUID</span>.v7_at(<span class="tok-num">1_700_000_000_000</span>)  <span class="tok-com">-- UUID with timestamp pinned to 2023-11-14</span></code></pre><p>Useful for backfilling historical records with time-ordered UUIDs and for deterministic tests that want to control the timestamp portion. The random bits are still CSPRNG-generated on every call.</p></div></div>
+<div class="item" id="fn-version"><div class="ih"><span class="badge bfn">fn</span><span class="name">version</span><span class="sig">version(uuid)</span><a class="anchor-link" href="#fn-version" title="Link">#</a></div><div class="ib"><p>Return the version number of a UUID (1–5), or 0 for unrecognised/nil.</p><pre><code><span class="tok-ty">UUID</span>.version(<span class="tok-ty">UUID</span>.v4())  <span class="tok-com">-- 4</span>
+<span class="tok-ty">UUID</span>.version(<span class="tok-ty">UUID</span>.nil()) <span class="tok-com">-- 0</span></code></pre></div></div></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

@@ -3,13 +3,15 @@
 :root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
 --acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
 --faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
---fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
 
 /* Light theme overrides */
 [data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
 --acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
 --faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
---fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
 
 /* Reset + base */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -34,6 +36,9 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:
 code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
 pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
 code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
 h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
 h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
 p{margin:8px 0}
@@ -2967,13 +2972,13 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>DistLink</span></nav><h1>DistLink</h1><div class="mdoc"><p>DistLink: cross-node process monitors and bidirectional links (P5c).</p><p>Monitor protocol (two-step):</p><ol><li>Local: call monitor(target_pid, timeout_ms) → sends MONITOR_REQ to</li></ol><pre><code>   the node that hosts target_pid, returns Ok(MonitorRef).
-2. Remote node: receives MONITOR_REQ, calls march_dist_monitor_register
-   in its C runtime.  On actor exit it sends MONITOR_FIRE back.
-3. Local net-kernel loop: receives MONITOR_FIRE, delivers
-   Down(ref, pid, reason) to the watcher's mailbox.</code></pre><p>Node-down: when the peer connection drops (PeerDown from SwimDriver), the DistLink actor sweeps its pending_monitors table and fires Down(NodeDown) locally to all watchers of targets on that node.</p><p>Links build on monitors: both sides call monitor on each other.  A Down message triggers EXIT propagation in the linked process (unless trapping).</p><p>Down reason: Normal | Killed | Crash(String) | NodeDown</p><p>MonitorRef is an opaque integer; demonitor(ref) cancels the monitor.</p></div><h2>Types</h2><div class="item" id="type-DownReason"><div class="ih"><span class="badge bty">type</span><span class="name">DownReason</span><span class="sig"><a href="#type-DownReason">DownReason</a> = Normal | Killed | Crash(String) | NodeDown</span><a class="anchor-link" href="#type-DownReason" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-MonitorRef"><div class="ih"><span class="badge bty">type</span><span class="name">MonitorRef</span><span class="sig"><a href="#type-MonitorRef">MonitorRef</a> = <a href="#type-MonitorRef">MonitorRef</a>(Int)</span><a class="anchor-link" href="#type-MonitorRef" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-PendingMonitor"><div class="ih"><span class="badge bty">type</span><span class="name">PendingMonitor</span><span class="sig"><a href="#type-PendingMonitor">PendingMonitor</a> = {</span><a class="anchor-link" href="#type-PendingMonitor" title="Link">#</a></div><div class="ib"></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>DistLink</span></nav><h1>DistLink</h1><div class="mdoc"><p>DistLink: cross-node process monitors and bidirectional links (P5c).</p><p>Monitor protocol (two-step):</p><ol><li>Local: call monitor(target_pid, timeout_ms) → sends MONITOR_REQ to</li></ol><pre><code>   the node that hosts target_pid, returns <span class="tok-ty">Ok</span>(<span class="tok-ty">MonitorRef</span>).
+<span class="tok-num">2.</span> <span class="tok-ty">Remote</span> node: receives <span class="tok-ty">MONITOR_REQ</span>, calls march_dist_monitor_register
+   <span class="tok-kw">in</span> its <span class="tok-ty">C</span> runtime.  <span class="tok-ty">On</span> <span class="tok-kw">actor</span> exit it sends <span class="tok-ty">MONITOR_FIRE</span> back.
+<span class="tok-num">3.</span> <span class="tok-ty">Local</span> net-kernel <span class="tok-kw">loop</span>: receives <span class="tok-ty">MONITOR_FIRE</span>, delivers
+   <span class="tok-ty">Down</span>(ref, pid, reason) to the watcher's mailbox.</code></pre><p>Node-down: when the peer connection drops (PeerDown from SwimDriver), the DistLink actor sweeps its pending_monitors table and fires Down(NodeDown) locally to all watchers of targets on that node.</p><p>Links build on monitors: both sides call monitor on each other.  A Down message triggers EXIT propagation in the linked process (unless trapping).</p><p>Down reason: Normal | Killed | Crash(String) | NodeDown</p><p>MonitorRef is an opaque integer; demonitor(ref) cancels the monitor.</p></div><h2>Types</h2><div class="item" id="type-DownReason"><div class="ih"><span class="badge bty">type</span><span class="name">DownReason</span><span class="sig"><a href="#type-DownReason">DownReason</a> = Normal | Killed | Crash(String) | NodeDown</span><a class="anchor-link" href="#type-DownReason" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="type-MonitorRef"><div class="ih"><span class="badge bty">type</span><span class="name">MonitorRef</span><span class="sig"><a href="#type-MonitorRef">MonitorRef</a> = <a href="#type-MonitorRef">MonitorRef</a>(Int)</span><a class="anchor-link" href="#type-MonitorRef" title="Link">#</a></div><div class="ib"><p>Opaque monitor reference returned by monitor/2.</p></div></div>
+<div class="item" id="type-PendingMonitor"><div class="ih"><span class="badge bty">type</span><span class="name">PendingMonitor</span><span class="sig"><a href="#type-PendingMonitor">PendingMonitor</a> = {</span><a class="anchor-link" href="#type-PendingMonitor" title="Link">#</a></div><div class="ib"><p>Internal: one entry in the pending monitor table.</p></div></div>
 <div class="item" id="type-MonitorTable"><div class="ih"><span class="badge bty">type</span><span class="name">MonitorTable</span><span class="sig"><a href="#type-MonitorTable">MonitorTable</a> = <a href="#type-MonitorTable">MonitorTable</a>(<a href="Map.html#type-Map">Map</a>(Int, <a href="#type-PendingMonitor">PendingMonitor</a>))</span><a class="anchor-link" href="#type-MonitorTable" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-decode_ack"><div class="ih"><span class="badge bfn">fn</span><span class="name">decode_ack</span><span class="sig">decode_ack(bytes : List(Int)) : Result((Int, Int), String)</span><a class="anchor-link" href="#fn-decode_ack" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-decode_fire"><div class="ih"><span class="badge bfn">fn</span><span class="name">decode_fire</span><span class="sig">decode_fire(bytes : List(Int)) : Result((Int, <a href="#type-DownReason">DownReason</a>), String)</span><a class="anchor-link" href="#fn-decode_fire" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-decode_req"><div class="ih"><span class="badge bfn">fn</span><span class="name">decode_req</span><span class="sig">decode_req(bytes : List(Int)) : Result((String, Int, Int), String)</span><a class="anchor-link" href="#fn-decode_req" title="Link">#</a></div><div class="ib"></div></div>

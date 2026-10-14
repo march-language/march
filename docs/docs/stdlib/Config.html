@@ -3,13 +3,15 @@
 :root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
 --acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
 --faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
---fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
 
 /* Light theme overrides */
 [data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
 --acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
 --faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
---fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
 
 /* Reset + base */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -34,6 +36,9 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:
 code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
 pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
 code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
 h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
 h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
 p{margin:8px 0}
@@ -2967,40 +2972,40 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Config</span></nav><h1>Config</h1><div class="mdoc"><p>Config module: layered application configuration with typed keys.</p><p>Every configuration value lives under a typed KEY. A key names a path (<code>(ns, name)</code> or <code>(ns, section, name)</code>, all atoms) and carries a codec that fixes the value's type:</p><pre><code>let port = Config.key(:myapp, :port, Config.int())         -- Key(Int)
-let host = Config.key_in(:myapp, :db, :host, Config.string()) -- Key(String)
-Config.put(port, 4000)
-Config.get(port)                 -- =&gt; Some(4000)
-Config.put(host, &quot;localhost&quot;)
-Config.get(host)                 -- =&gt; Some(&quot;localhost&quot;)</code></pre><p>Storage is heterogeneous (an Int port and a String host share one table), but a read can never hand back a value at the wrong type. Two things guarantee that:</p><ul><li>statically, <code>put(key : Key(v), value : v)</code> and `get(key : Key(v)) :</li></ul><pre><code>  Option(v)` tie the value to the key's type, so storing an Int through
-  `port` and using the result of `get(port)` as a Pid is a type error;
-* at runtime, each value is stored as a tagged `Config.Value` and decoded
-  by the READING key's codec. Two keys minted for the same path with
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Config</span></nav><h1>Config</h1><div class="mdoc"><p>Config module: layered application configuration with typed keys.</p><p>Every configuration value lives under a typed KEY. A key names a path (<code>(ns, name)</code> or <code>(ns, section, name)</code>, all atoms) and carries a codec that fixes the value's type:</p><pre><code><span class="tok-kw">let</span> port = <span class="tok-ty">Config</span>.key(:myapp, :port, <span class="tok-ty">Config</span>.int())         <span class="tok-com">-- Key(Int)</span>
+<span class="tok-kw">let</span> host = <span class="tok-ty">Config</span>.key_in(:myapp, :db, :host, <span class="tok-ty">Config</span>.string()) <span class="tok-com">-- Key(String)</span>
+<span class="tok-ty">Config</span>.put(port, <span class="tok-num">4000</span>)
+<span class="tok-ty">Config</span>.get(port)                 <span class="tok-com">-- =&gt; Some(4000)</span>
+<span class="tok-ty">Config</span>.put(host, <span class="tok-str">&quot;localhost&quot;</span>)
+<span class="tok-ty">Config</span>.get(host)                 <span class="tok-com">-- =&gt; Some(&quot;localhost&quot;)</span></code></pre><p>Storage is heterogeneous (an Int port and a String host share one table), but a read can never hand back a value at the wrong type. Two things guarantee that:</p><ul><li>statically, <code>put(key : Key(v), value : v)</code> and `get(key : Key(v)) :</li></ul><pre><code>  <span class="tok-ty">Option</span>(v)` tie the value to the key's <span class="tok-kw">type</span>, so storing an <span class="tok-ty">Int</span> through
+  `port` and using the result of `get(port)` <span class="tok-kw">as</span> a <span class="tok-ty">Pid</span> is a <span class="tok-kw">type</span> error;
+* at runtime, each value is stored <span class="tok-kw">as</span> a tagged `<span class="tok-ty">Config</span>.<span class="tok-ty">Value</span>` and decoded
+  by the <span class="tok-ty">READING</span> key's codec. <span class="tok-ty">Two</span> keys minted <span class="tok-kw">for</span> the same path <span class="tok-kw">with</span>
   different codecs (`key(:a, :b, int())` and `key(:a, :b, string())`)
-  therefore disagree safely: the read is `None` from `get` and
-  `Err(KeyWrongType(...))` from `fetch`, never an unchecked value.</code></pre><p>Built-in codecs: int(), float(), string(), bool(), atom(), list(codec). Custom types: Config.codec(name, encode, decode), mapping onto Value.</p><p>Load from environment at startup: Config.from_env(Config.key(:myapp, :secret, Config.string()), &quot;SECRET_KEY_BASE&quot;, &quot;&quot;) Config.from_env_int(port, &quot;PORT&quot;, 4000)</p><p>Validate values: Config.validate(port, fn p -&gt; p &gt; 0 &amp;&amp; p &lt; 65536)</p><p>Detect current environment (reads MARCH_ENV): Config.env()   -- :dev | :test | :prod</p><p>Endpoint config shorthand (for web servers): Config.put_endpoint(4000, &quot;localhost&quot;, my_secret) Config.endpoint_port(4000) Config.endpoint_host(&quot;localhost&quot;) Config.secret_key_base()</p><p>Named stores (for isolation in tests): let store = Config.new_store(&quot;my_test_store&quot;) Config.store_put(store, port, 4000) Config.store_get(store, port)</p></div><h2>Types</h2><div class="item" id="type-Value"><div class="ih"><span class="badge bty">type</span><span class="name">Value</span><span class="sig"><a href="#type-Value">Value</a> = CfgInt(Int) | CfgFloat(Float) | CfgString(String)</span><a class="anchor-link" href="#type-Value" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-Codec"><div class="ih"><span class="badge bty">type</span><span class="name">Codec</span><span class="sig"><a href="#type-Codec">Codec</a>(v) = <a href="#type-Codec">Codec</a>(String, v -&gt; <a href="#type-Value">Value</a>, <a href="#type-Value">Value</a> -&gt; Option(v))</span><a class="anchor-link" href="#type-Codec" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-Key"><div class="ih"><span class="badge bty">type</span><span class="name">Key</span><span class="sig"><a href="#type-Key">Key</a>(v) = <a href="#type-Key">Key</a>(String, <a href="#type-Codec">Codec</a>(v))</span><a class="anchor-link" href="#type-Key" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-Error"><div class="ih"><span class="badge bty">type</span><span class="name">Error</span><span class="sig"><a href="Compress.html#type-Error">Error</a> = KeyMissing(String) | KeyWrongType(String, String, String)</span><a class="anchor-link" href="#type-Error" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-atom"><div class="ih"><span class="badge bfn">fn</span><span class="name">atom</span><span class="sig">atom() : <a href="#type-Codec">Codec</a>(Atom) do <a href="#type-Codec">Codec</a>(&quot;Atom&quot;, fn a -&gt; CfgAtom(a), decode_atom) end</span><a class="anchor-link" href="#fn-atom" title="Link">#</a></div><div class="ib"><p>Codec for <code>Atom</code> values.</p></div></div>
+  therefore disagree safely: the read is `<span class="tok-ty">None</span>` from `get` and
+  `<span class="tok-ty">Err</span>(<span class="tok-ty">KeyWrongType</span>(...))` from `fetch`, never an unchecked value.</code></pre><p>Built-in codecs: int(), float(), string(), bool(), atom(), list(codec). Custom types: Config.codec(name, encode, decode), mapping onto Value.</p><p>Load from environment at startup: Config.from_env(Config.key(:myapp, :secret, Config.string()), &quot;SECRET_KEY_BASE&quot;, &quot;&quot;) Config.from_env_int(port, &quot;PORT&quot;, 4000)</p><p>Validate values: Config.validate(port, fn p -&gt; p &gt; 0 &amp;&amp; p &lt; 65536)</p><p>Detect current environment (reads MARCH_ENV): Config.env()   -- :dev | :test | :prod</p><p>Endpoint config shorthand (for web servers): Config.put_endpoint(4000, &quot;localhost&quot;, my_secret) Config.endpoint_port(4000) Config.endpoint_host(&quot;localhost&quot;) Config.secret_key_base()</p><p>Named stores (for isolation in tests): let store = Config.new_store(&quot;my_test_store&quot;) Config.store_put(store, port, 4000) Config.store_get(store, port)</p></div><h2>Types</h2><div class="item" id="type-Value"><div class="ih"><span class="badge bty">type</span><span class="name">Value</span><span class="sig"><a href="#type-Value">Value</a> = CfgInt(Int) | CfgFloat(Float) | CfgString(String)</span><a class="anchor-link" href="#type-Value" title="Link">#</a></div><div class="ib"><p>A stored configuration value. This closed, tagged sum is what the config table actually holds, which is what makes a heterogeneous table safe to read: a key's codec decodes a <code>Value</code> back to its own type and rejects any other tag.</p></div></div>
+<div class="item" id="type-Codec"><div class="ih"><span class="badge bty">type</span><span class="name">Codec</span><span class="sig"><a href="#type-Codec">Codec</a>(v) = <a href="#type-Codec">Codec</a>(String, v -&gt; <a href="#type-Value">Value</a>, <a href="#type-Value">Value</a> -&gt; Option(v))</span><a class="anchor-link" href="#type-Codec" title="Link">#</a></div><div class="ib"><p>How a key's values are stored and read back: a type name (used in error messages), an encoder into <code>Value</code>, and a decoder that returns <code>None</code> for a <code>Value</code> of any other shape. Build one with <code>int()</code>, <code>float()</code>, <code>string()</code>, <code>bool()</code>, <code>atom()</code>, <code>list(codec)</code>, or <code>codec(name, encode, decode)</code>.</p></div></div>
+<div class="item" id="type-Key"><div class="ih"><span class="badge bty">type</span><span class="name">Key</span><span class="sig"><a href="#type-Key">Key</a>(v) = <a href="#type-Key">Key</a>(String, <a href="#type-Codec">Codec</a>(v))</span><a class="anchor-link" href="#type-Key" title="Link">#</a></div><div class="ib"><p>A typed configuration key: a path plus the codec fixing its value type.</p></div></div>
+<div class="item" id="type-Error"><div class="ih"><span class="badge bty">type</span><span class="name">Error</span><span class="sig"><a href="Compress.html#type-Error">Error</a> = KeyMissing(String) | KeyWrongType(String, String, String)</span><a class="anchor-link" href="#type-Error" title="Link">#</a></div><div class="ib"><p>Why a typed read produced no value. <code>KeyMissing(path)</code> means nothing is stored under the path; <code>KeyWrongType(path, expected, found)</code> means a value is stored there, but it was written through a key of another type.</p></div></div><h2>Functions</h2><div class="item" id="fn-atom"><div class="ih"><span class="badge bfn">fn</span><span class="name">atom</span><span class="sig">atom() : <a href="#type-Codec">Codec</a>(Atom) do <a href="#type-Codec">Codec</a>(&quot;Atom&quot;, fn a -&gt; CfgAtom(a), decode_atom) end</span><a class="anchor-link" href="#fn-atom" title="Link">#</a></div><div class="ib"><p>Codec for <code>Atom</code> values.</p></div></div>
 <div class="item" id="fn-bool"><div class="ih"><span class="badge bfn">fn</span><span class="name">bool</span><span class="sig">bool() : <a href="#type-Codec">Codec</a>(Bool) do <a href="#type-Codec">Codec</a>(&quot;Bool&quot;, fn b -&gt; CfgBool(b), decode_bool) end</span><a class="anchor-link" href="#fn-bool" title="Link">#</a></div><div class="ib"><p>Codec for <code>Bool</code> values.</p></div></div>
-<div class="item" id="fn-codec"><div class="ih"><span class="badge bfn">fn</span><span class="name">codec</span><span class="sig">codec(name : String, encode : v -&gt; <a href="#type-Value">Value</a>, decode : <a href="#type-Value">Value</a> -&gt; Option(v)) : <a href="#type-Codec">Codec</a>(v)</span><a class="anchor-link" href="#fn-codec" title="Link">#</a></div><div class="ib"><p>A custom codec: store a <code>v</code> as a <code>Value</code> and read it back. <code>name</code> appears in <code>KeyWrongType</code> errors. Because <code>Value</code> is a closed sum, any codec that typechecks is safe; a decoder can only produce a <code>v</code> it can build from a <code>Value</code>.</p><pre><code>    type Mode = Fast | Safe
+<div class="item" id="fn-codec"><div class="ih"><span class="badge bfn">fn</span><span class="name">codec</span><span class="sig">codec(name : String, encode : v -&gt; <a href="#type-Value">Value</a>, decode : <a href="#type-Value">Value</a> -&gt; Option(v)) : <a href="#type-Codec">Codec</a>(v)</span><a class="anchor-link" href="#fn-codec" title="Link">#</a></div><div class="ib"><p>A custom codec: store a <code>v</code> as a <code>Value</code> and read it back. <code>name</code> appears in <code>KeyWrongType</code> errors. Because <code>Value</code> is a closed sum, any codec that typechecks is safe; a decoder can only produce a <code>v</code> it can build from a <code>Value</code>.</p><pre><code><span class="tok-kw">type</span> <span class="tok-ty">Mode</span> = <span class="tok-ty">Fast</span> | <span class="tok-ty">Safe</span>
 
-    fn encode_mode(m : Mode) : Config.Value do
-      match m do
-        Fast -&gt; CfgAtom(:fast)
-        Safe -&gt; CfgAtom(:safe)
-      end
-    end
+<span class="tok-kw">fn</span> encode_mode(m : <span class="tok-ty">Mode</span>) : <span class="tok-ty">Config</span>.<span class="tok-ty">Value</span> <span class="tok-kw">do</span>
+  <span class="tok-kw">match</span> m <span class="tok-kw">do</span>
+    <span class="tok-ty">Fast</span> -&gt; <span class="tok-ty">CfgAtom</span>(:fast)
+    <span class="tok-ty">Safe</span> -&gt; <span class="tok-ty">CfgAtom</span>(:safe)
+  <span class="tok-kw">end</span>
+<span class="tok-kw">end</span>
 
-    fn decode_mode(d : Config.Value) : Option(Mode) do
-      match d do
-        CfgAtom(:fast) -&gt; Some(Fast)
-        CfgAtom(:safe) -&gt; Some(Safe)
-        _              -&gt; None
-      end
-    end
+<span class="tok-kw">fn</span> decode_mode(d : <span class="tok-ty">Config</span>.<span class="tok-ty">Value</span>) : <span class="tok-ty">Option</span>(<span class="tok-ty">Mode</span>) <span class="tok-kw">do</span>
+  <span class="tok-kw">match</span> d <span class="tok-kw">do</span>
+    <span class="tok-ty">CfgAtom</span>(:fast) -&gt; <span class="tok-ty">Some</span>(<span class="tok-ty">Fast</span>)
+    <span class="tok-ty">CfgAtom</span>(:safe) -&gt; <span class="tok-ty">Some</span>(<span class="tok-ty">Safe</span>)
+    _              -&gt; <span class="tok-ty">None</span>
+  <span class="tok-kw">end</span>
+<span class="tok-kw">end</span>
 
-    let mode = Config.key(:myapp, :mode, Config.codec(&quot;Mode&quot;, encode_mode, decode_mode))</code></pre></div></div>
+<span class="tok-kw">let</span> mode = <span class="tok-ty">Config</span>.key(:myapp, :mode, <span class="tok-ty">Config</span>.codec(<span class="tok-str">&quot;Mode&quot;</span>, encode_mode, decode_mode))</code></pre></div></div>
 <div class="item" id="fn-endpoint_host"><div class="ih"><span class="badge bfn">fn</span><span class="name">endpoint_host</span><span class="sig">endpoint_host(default_host : String) : String</span><a class="anchor-link" href="#fn-endpoint_host" title="Link">#</a></div><div class="ib"><p>Get the configured host. Returns default_host if not set.</p></div></div>
 <div class="item" id="fn-endpoint_host_key"><div class="ih"><span class="badge bfn">fn</span><span class="name">endpoint_host_key</span><span class="sig">endpoint_host_key() : <a href="#type-Key">Key</a>(String) do key(:bastion, :host, string()) end</span><a class="anchor-link" href="#fn-endpoint_host_key" title="Link">#</a></div><div class="ib"><p>The key <code>put_endpoint</code> stores the host under: <code>(:bastion, :host)</code>.</p></div></div>
 <div class="item" id="fn-endpoint_port"><div class="ih"><span class="badge bfn">fn</span><span class="name">endpoint_port</span><span class="sig">endpoint_port(default_port : Int) : Int</span><a class="anchor-link" href="#fn-endpoint_port" title="Link">#</a></div><div class="ib"><p>Get the configured HTTP port. Returns default_port if not set.</p></div></div>

@@ -31,15 +31,15 @@ tail, length, reverse) where the unqualified name reads better.
 ## fn with_cap(_c, f) do f(()) end
 
 Runs `f` with `c` installed as the capability its operations dispatch
-  through, so a test can substitute an implementation:
+through, so a test can substitute an implementation:
 
 
-  At runtime this simply calls `f` — the capability is consumed by the
-  compiler's capability-passing elaboration, which rewrites calls inside `f`
-  to route through `c`'s dictionary. Outside a `--test` build the elaboration
-  does not run and this is exactly `f(())`.
+At runtime this simply calls `f` — the capability is consumed by the
+compiler's capability-passing elaboration, which rewrites calls inside `f`
+to route through `c`'s dictionary. Outside a `--test` build the elaboration
+does not run and this is exactly `f(())`.
 
 ```march
-  with_cap(mock, fn _ -> code_under_test())
+with_cap(mock, fn _ -> code_under_test())
 ```
 

@@ -3,13 +3,15 @@
 :root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
 --acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
 --faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
---fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
 
 /* Light theme overrides */
 [data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
 --acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
 --faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
---fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
 
 /* Reset + base */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -34,6 +36,9 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:
 code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
 pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
 code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
 h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
 h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
 p{margin:8px 0}
@@ -2967,12 +2972,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>ClusterLoad</span></nav><h1>ClusterLoad</h1><div class="mdoc"><p>ClusterLoad: per-node CPU/memory headroom for capacity-aware RPC routing.</p><p>Each node samples its own resources with <code>local/1</code> (backed by the System.* builtins).  Samples are shared across the cluster (e.g. gossiped or pulled on demand) and collected into a candidate list; <code>pick_by/2</code> then routes to the node your scoring function rates highest.  Raw metrics are exposed — you choose what &quot;headroom&quot; means.</p><p>Wire transfer: <code>to_ints/1</code> / <code>from_ints/2</code> marshal a NodeLoad to/from a flat Int list (node_id stays caller-side, since the caller knows which node it queried), suitable for MessagePack or any int-array codec.</p><pre><code>  let me   = ClusterLoad.local(&quot;node-a&quot;)
-  -- ... collect peers' NodeLoad into `candidates` ...
-  match ClusterLoad.pick_by(candidates, ClusterLoad.spare_cpu_milli) do
-    Some(node) -&gt; -- route the expensive call to node.node_id
-    None       -&gt; -- cluster view empty; fall back to local
-  end</code></pre></div><h2>Types</h2><div class="item" id="type-NodeLoad"><div class="ih"><span class="badge bty">type</span><span class="name">NodeLoad</span><span class="sig"><a href="#type-NodeLoad">NodeLoad</a> = {</span><a class="anchor-link" href="#type-NodeLoad" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-from_ints"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_ints</span><span class="sig">from_ints(node_id : String, xs : List(Int)) : <a href="#type-NodeLoad">NodeLoad</a></span><a class="anchor-link" href="#fn-from_ints" title="Link">#</a></div><div class="ib"><p>Rebuild a NodeLoad from a wire Int list plus the known node_id. Missing fields default to 0.</p></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>ClusterLoad</span></nav><h1>ClusterLoad</h1><div class="mdoc"><p>ClusterLoad: per-node CPU/memory headroom for capacity-aware RPC routing.</p><p>Each node samples its own resources with <code>local/1</code> (backed by the System.* builtins).  Samples are shared across the cluster (e.g. gossiped or pulled on demand) and collected into a candidate list; <code>pick_by/2</code> then routes to the node your scoring function rates highest.  Raw metrics are exposed — you choose what &quot;headroom&quot; means.</p><p>Wire transfer: <code>to_ints/1</code> / <code>from_ints/2</code> marshal a NodeLoad to/from a flat Int list (node_id stays caller-side, since the caller knows which node it queried), suitable for MessagePack or any int-array codec.</p><pre><code><span class="tok-kw">let</span> me   = <span class="tok-ty">ClusterLoad</span>.local(<span class="tok-str">&quot;node-a&quot;</span>)
+<span class="tok-com">-- ... collect peers' NodeLoad into `candidates` ...</span>
+<span class="tok-kw">match</span> <span class="tok-ty">ClusterLoad</span>.pick_by(candidates, <span class="tok-ty">ClusterLoad</span>.spare_cpu_milli) <span class="tok-kw">do</span>
+  <span class="tok-ty">Some</span>(node) -&gt; <span class="tok-com">-- route the expensive call to node.node_id</span>
+  <span class="tok-ty">None</span>       -&gt; <span class="tok-com">-- cluster view empty; fall back to local</span>
+<span class="tok-kw">end</span></code></pre></div><h2>Types</h2><div class="item" id="type-NodeLoad"><div class="ih"><span class="badge bty">type</span><span class="name">NodeLoad</span><span class="sig"><a href="#type-NodeLoad">NodeLoad</a> = {</span><a class="anchor-link" href="#type-NodeLoad" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-from_ints"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_ints</span><span class="sig">from_ints(node_id : String, xs : List(Int)) : <a href="#type-NodeLoad">NodeLoad</a></span><a class="anchor-link" href="#fn-from_ints" title="Link">#</a></div><div class="ib"><p>Rebuild a NodeLoad from a wire Int list plus the known node_id. Missing fields default to 0.</p></div></div>
 <div class="item" id="fn-local"><div class="ih"><span class="badge bfn">fn</span><span class="name">local</span><span class="sig">local(node_id : String, now_ms : Int) : <a href="#type-NodeLoad">NodeLoad</a></span><a class="anchor-link" href="#fn-local" title="Link">#</a></div><div class="ib"><p>Sample the local node's current CPU/memory headroom at [now_ms].</p></div></div>
 <div class="item" id="fn-pick_by"><div class="ih"><span class="badge bfn">fn</span><span class="name">pick_by</span><span class="sig">pick_by(candidates : List(<a href="#type-NodeLoad">NodeLoad</a>), score : <a href="#type-NodeLoad">NodeLoad</a> -&gt; Int) : Option(<a href="#type-NodeLoad">NodeLoad</a>)</span><a class="anchor-link" href="#fn-pick_by" title="Link">#</a></div><div class="ib"><p>Pick the candidate your <code>score</code> function rates highest (argmax).  Ties keep the earlier candidate.  Returns None for an empty list.</p></div></div>
 <div class="item" id="fn-spare_cpu_milli"><div class="ih"><span class="badge bfn">fn</span><span class="name">spare_cpu_milli</span><span class="sig">spare_cpu_milli(nl : <a href="#type-NodeLoad">NodeLoad</a>) : Int</span><a class="anchor-link" href="#fn-spare_cpu_milli" title="Link">#</a></div><div class="ib"><p>Spare CPU as load-millis below saturation: cpu_count*1000 - load. Higher = more idle.</p></div></div>

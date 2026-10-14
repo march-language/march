@@ -3,13 +3,15 @@
 :root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
 --acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
 --faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
---fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
 
 /* Light theme overrides */
 [data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
 --acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
 --faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
---fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
 
 /* Reset + base */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -34,6 +36,9 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:
 code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
 pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
 code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
 h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
 h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
 p{margin:8px 0}
@@ -2967,15 +2972,15 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>ClusterAuth</span></nav><h1>ClusterAuth</h1><div class="mdoc"><p>ClusterAuth: how a node proves it belongs to the cluster in the net-kernel handshake, and the key material the handshake derives.</p><p>Two modes (specs/lang/clustering.md, &quot;Authentication &amp; Handshake&quot;):</p><pre><code>shared secret  every node holds one secret (MARCH_CLUSTER_SECRET). The
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>ClusterAuth</span></nav><h1>ClusterAuth</h1><div class="mdoc"><p>ClusterAuth: how a node proves it belongs to the cluster in the net-kernel handshake, and the key material the handshake derives.</p><p>Two modes (specs/lang/clustering.md, &quot;Authentication &amp; Handshake&quot;):</p><pre><code>shared secret  every node holds one secret (<span class="tok-ty">MARCH_CLUSTER_SECRET</span>). <span class="tok-ty">The</span>
                challenger sends a random nonce; the responder returns
-               HMAC(secret, nonce); the secret never goes on the wire.
-certificate    every node holds an ed25519 key and a certificate for it
-               signed by the operator key (NodeCert; MARCH_NODE_KEY,
-               MARCH_NODE_CERT, MARCH_CLUSTER_OPERATOR_PUBKEY). Each side
+               <span class="tok-ty">HMAC</span>(secret, nonce); the secret never goes <span class="tok-kw">on</span> the wire.
+certificate    every node holds an ed25519 key and a certificate <span class="tok-kw">for</span> it
+               signed by the operator key (<span class="tok-ty">NodeCert</span>; <span class="tok-ty">MARCH_NODE_KEY</span>,
+               <span class="tok-ty">MARCH_NODE_CERT</span>, <span class="tok-ty">MARCH_CLUSTER_OPERATOR_PUBKEY</span>). <span class="tok-ty">Each</span> side
                verifies the other's certificate and then signs the peer's
-               nonce together with the handshake transcript.</code></pre><p>Either way the handshake ends with a per-connection MAC key pair (<code>frame_keys</code>): HKDF-SHA256 over the handshake transcript, keyed in certificate mode by an X25519 agreement between ephemeral keys each side sent in its (signed) hello, and in shared-secret mode by the secret.</p></div><h2>Types</h2><div class="item" id="type-Auth"><div class="ih"><span class="badge bty">type</span><span class="name">Auth</span><span class="sig"><a href="#type-Auth">Auth</a> = Secret(String) | Certified(NodeCert.Credentials)</span><a class="anchor-link" href="#type-Auth" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-FrameKeys"><div class="ih"><span class="badge bty">type</span><span class="name">FrameKeys</span><span class="sig"><a href="#type-FrameKeys">FrameKeys</a> = { tx_key : <a href="Bytes.html#type-Bytes">Bytes</a>, rx_key : <a href="Bytes.html#type-Bytes">Bytes</a> }</span><a class="anchor-link" href="#type-FrameKeys" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-cert_proof_message"><div class="ih"><span class="badge bfn">fn</span><span class="name">cert_proof_message</span><span class="sig">cert_proof_message(challenge : String, th : <a href="Bytes.html#type-Bytes">Bytes</a>) : <a href="Bytes.html#type-Bytes">Bytes</a></span><a class="anchor-link" href="#fn-cert_proof_message" title="Link">#</a></div><div class="ib"><p>What a certificate-mode node signs to prove it holds its certificate's key: the PEER's nonce (the challenge) and the transcript, which covers both hellos (identities, roles, addresses, certificates and the ephemeral X25519 keys), so a man in the middle cannot swap any of them.</p></div></div>
+               nonce together <span class="tok-kw">with</span> the handshake transcript.</code></pre><p>Either way the handshake ends with a per-connection MAC key pair (<code>frame_keys</code>): HKDF-SHA256 over the handshake transcript, keyed in certificate mode by an X25519 agreement between ephemeral keys each side sent in its (signed) hello, and in shared-secret mode by the secret.</p></div><h2>Types</h2><div class="item" id="type-Auth"><div class="ih"><span class="badge bty">type</span><span class="name">Auth</span><span class="sig"><a href="#type-Auth">Auth</a> = Secret(String) | Certified(NodeCert.Credentials)</span><a class="anchor-link" href="#type-Auth" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="type-FrameKeys"><div class="ih"><span class="badge bty">type</span><span class="name">FrameKeys</span><span class="sig"><a href="#type-FrameKeys">FrameKeys</a> = { tx_key : <a href="Bytes.html#type-Bytes">Bytes</a>, rx_key : <a href="Bytes.html#type-Bytes">Bytes</a> }</span><a class="anchor-link" href="#type-FrameKeys" title="Link">#</a></div><div class="ib"><p>One direction's MAC key: the sender's.</p></div></div><h2>Functions</h2><div class="item" id="fn-cert_proof_message"><div class="ih"><span class="badge bfn">fn</span><span class="name">cert_proof_message</span><span class="sig">cert_proof_message(challenge : String, th : <a href="Bytes.html#type-Bytes">Bytes</a>) : <a href="Bytes.html#type-Bytes">Bytes</a></span><a class="anchor-link" href="#fn-cert_proof_message" title="Link">#</a></div><div class="ib"><p>What a certificate-mode node signs to prove it holds its certificate's key: the PEER's nonce (the challenge) and the transcript, which covers both hellos (identities, roles, addresses, certificates and the ephemeral X25519 keys), so a man in the middle cannot swap any of them.</p></div></div>
 <div class="item" id="fn-cert_prove"><div class="ih"><span class="badge bfn">fn</span><span class="name">cert_prove</span><span class="sig">cert_prove(secret_key : <a href="Bytes.html#type-Bytes">Bytes</a>, challenge : String, th : <a href="Bytes.html#type-Bytes">Bytes</a>) : <a href="Bytes.html#type-Bytes">Bytes</a></span><a class="anchor-link" href="#fn-cert_prove" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-cert_verify"><div class="ih"><span class="badge bfn">fn</span><span class="name">cert_verify</span><span class="sig">cert_verify(pubkey : <a href="Bytes.html#type-Bytes">Bytes</a>, challenge : String, th : <a href="Bytes.html#type-Bytes">Bytes</a>, proof : <a href="Bytes.html#type-Bytes">Bytes</a>) : Bool</span><a class="anchor-link" href="#fn-cert_verify" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-frame_keys"><div class="ih"><span class="badge bfn">fn</span><span class="name">frame_keys</span><span class="sig">frame_keys(ikm : <a href="Bytes.html#type-Bytes">Bytes</a>, th : <a href="Bytes.html#type-Bytes">Bytes</a>, my_nonce : String, peer_nonce : String) : <a href="#type-FrameKeys">FrameKeys</a></span><a class="anchor-link" href="#fn-frame_keys" title="Link">#</a></div><div class="ib"><p>The per-connection MAC keys from input key material [ikm] (the X25519 shared secret, or the cluster secret) and the transcript [th]: one key per direction, told apart by the SENDER's nonce, so a frame reflected back to its sender does not verify.</p></div></div>
