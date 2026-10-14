@@ -1046,6 +1046,55 @@ let test_repl_floats_interp () =
   check_float_session ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" float_session)
 
+(* ── Negative Ints in a tagged slot (2026-10-14) ───────────────────────
+   specs/progress/2026-10-14-repl-jit-negative-tagged-int.md.
+
+   The JIT REPL printer untagged a tagged scalar word ((v<<1)|1) with a
+   LOGICAL shift, so every negative Int inside a List / Option / tuple /
+   ctor payload printed as max_int-ish garbage: `[-1]` showed
+   `[9223372036854775807]`, and so did
+   `NativeArray.to_list_i32(NativeArray.from_list_i32([3, -1, 2]))`.  The
+   runtime and the generated code were right all along (a bare `-1`, or
+   `get_i32`, printed fine); only the printer was wrong. *)
+
+let negative_int_session =
+  [ "NativeArray.to_list_i32(NativeArray.from_list_i32([3, -1, 2]))";
+    "NativeArray.to_list_i32(NativeArray.sort_i32(NativeArray.from_list_i32([30, -10, 20])))";
+    "NativeArray.get_i32(NativeArray.from_list_i32([3, -7, 2]), 1)";
+    "NativeArray.to_list_i32(NativeArray.make_i32(2, -5))";
+    "NativeArray.to_list_u8(NativeArray.from_list_u8([3, -1, 256]))";
+    "Some(-42)";
+    "(-3, 4)";
+    "[[-8, 9]]" ]
+
+let check_negative_int_session ~label (out, code) =
+  Alcotest.(check int) (Printf.sprintf "%s: REPL exit code (output: %s)" label out) 0 code;
+  List.iter (fun (needle, what) ->
+    if not (contains ~needle out) then
+      Alcotest.failf "%s: expected %s (%s) in session output, got:\n%s"
+        label needle what out)
+    [ "= [3, -1, 2]", "from_list_i32 / to_list_i32 round trip";
+      "= [-10, 20, 30]", "sort_i32 with a negative element";
+      "= -7", "get_i32 of a negative element";
+      "= [-5, -5]", "make_i32 with a negative fill";
+      "= [3, 255, 0]", "u8 wraps -1 to 255";
+      "= Some(-42)", "Option(Int) payload";
+      "= (-3, 4)", "tuple Int slot";
+      "= [[-8, 9]]", "nested List(Int)" ];
+  if contains ~needle:"922337203685477" out then
+    Alcotest.failf "%s: a negative Int was untagged with a logical shift:\n%s" label out
+
+let test_repl_negative_ints_jit () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else
+    check_negative_int_session ~label:"JIT"
+      (run_repl_session ~env_prefix:"" negative_int_session)
+
+(* Parity control: the interpreter was always right. *)
+let test_repl_negative_ints_interp () =
+  check_negative_int_session ~label:"interpreter mode"
+    (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" negative_int_session)
+
 (* ── `to_string` on a generic container (2026-09-25) ───────────────────
    specs/progress/2026-09-25-jit-file-to-string-list.md.
 
@@ -1165,6 +1214,10 @@ let () =
         test_repl_fragment_leaks_jit;
       Alcotest.test_case "Floats print and survive the v slot (interpreter)"
         `Quick test_repl_floats_interp;
+      Alcotest.test_case "negative Ints in List/Option/tuple slots print (JIT)"
+        `Slow test_repl_negative_ints_jit;
+      Alcotest.test_case "negative Ints in List/Option/tuple slots print (interpreter)"
+        `Quick test_repl_negative_ints_interp;
       Alcotest.test_case "to_string of List/Option/tuple (JIT)" `Slow
         test_repl_to_string_generic_jit;
       Alcotest.test_case "to_string of List/Option/tuple (interpreter)"
