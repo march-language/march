@@ -502,12 +502,12 @@ mod Json do
 
       march> Json.parse("null")
       Ok(Null)
-      march> Json.parse("42")
-      Ok(Number(42.0))
-      march> Json.parse("[1, 2, 3]")
-      Ok(Array([Number(1.0), Number(2.0), Number(3.0)]))
-      march> Json.parse("{\"x\": 1}")
-      Ok(Object([("x", Number(1.0))]))
+      march> Json.parse("42") == Ok(Number(42.0))
+      true
+      march> Json.parse("[1, 2, 3]") == Ok(Array([Number(1.0), Number(2.0), Number(3.0)]))
+      true
+      march> Json.parse("{\"x\": 1}") == Ok(Object([("x", Number(1.0))]))
+      true
   """
   fn parse(s) do
     match parse_value(s, 0) do
@@ -560,8 +560,8 @@ mod Json do
   Returns Some(value) if found, or None otherwise.
   If jv is not an Object, returns None.
 
-      march> Json.get(Object([("x", Number(1.0))]), "x")
-      Some(Number(1.0))
+      march> Json.get(Object([("x", Number(1.0))]), "x") == Some(Number(1.0))
+      true
       march> Json.get(Null, "x")
       None
   """
@@ -591,8 +591,8 @@ mod Json do
   record decoder, which destructures `Object(kvs)` once and then looks up
   each field by name without re-matching the wrapper each time.
 
-      march> Json.get_field([("x", Number(1.0))], "x")
-      Some(Number(1.0))
+      march> Json.get_field([("x", Number(1.0))], "x") == Some(Number(1.0))
+      true
       march> Json.get_field([], "x")
       None
   """
@@ -614,6 +614,7 @@ mod Json do
       march> let obj = Object([("a", Object([("b", Object([("c", Bool(true))]))]))])
       march> Json.get_in(obj, ["a", "b", "c"])  -- equivalent to obj.a.b.c
       Some(Bool(true))
+      march> let obj = Object([("a", Object([("b", Object([("c", Bool(true))]))]))])
       march> Json.get_in(obj, ["a", "x"])
       None
 
@@ -639,8 +640,8 @@ mod Json do
   Returns Some(value) if in range, or None otherwise (also None if jv
   is not an Array, or if i is negative).
 
-      march> Json.get_at(Array([Number(1.0), Number(2.0)]), 1)
-      Some(Number(2.0))
+      march> Json.get_at(Array([Number(1.0), Number(2.0)]), 1) == Some(Number(2.0))
+      true
       march> Json.get_at(Array([Number(1.0)]), 5)
       None
   """

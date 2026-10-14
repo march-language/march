@@ -3004,14 +3004,16 @@ march&gt; <span class="tok-ty">Vault</span>.has(<span class="tok-ty">Vault</span
 Vault.set(ex, &quot;a&quot;, 1)
 Vault.set(ex, &quot;b&quot;, 2)
 List.length(Vault.keys(ex))
-Vault.set(ex, 2, 20)  -- an Int key: not the same entry as &quot;2&quot;
-Vault.get_or(ex, &quot;2&quot;, 0)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> ex = <span class="tok-ty">Vault</span>.new(<span class="tok-str">&quot;ex&quot;</span>)
+let ints = Vault.new(&quot;ints&quot;)
+Vault.set(ints, 2, 20)  -- an Int key: not the same entry as &quot;2&quot;
+Vault.get_or(ints, &quot;2&quot;, 0)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> ex = <span class="tok-ty">Vault</span>.new(<span class="tok-str">&quot;ex&quot;</span>)
 march&gt; <span class="tok-ty">Vault</span>.set(ex, <span class="tok-str">&quot;a&quot;</span>, <span class="tok-num">1</span>)
 march&gt; <span class="tok-ty">Vault</span>.set(ex, <span class="tok-str">&quot;b&quot;</span>, <span class="tok-num">2</span>)
 march&gt; <span class="tok-ty">List</span>.length(<span class="tok-ty">Vault</span>.keys(ex))
 <span class="tok-num">2</span>
-march&gt; <span class="tok-ty">Vault</span>.set(ex, <span class="tok-num">2</span>, <span class="tok-num">20</span>)  <span class="tok-com">-- an Int key: not the same entry as &quot;2&quot;</span>
-march&gt; <span class="tok-ty">Vault</span>.get_or(ex, <span class="tok-str">&quot;2&quot;</span>, <span class="tok-num">0</span>)
+march&gt; <span class="tok-kw">let</span> ints = <span class="tok-ty">Vault</span>.new(<span class="tok-str">&quot;ints&quot;</span>)
+march&gt; <span class="tok-ty">Vault</span>.set(ints, <span class="tok-num">2</span>, <span class="tok-num">20</span>)  <span class="tok-com">-- an Int key: not the same entry as &quot;2&quot;</span>
+march&gt; <span class="tok-ty">Vault</span>.get_or(ints, <span class="tok-str">&quot;2&quot;</span>, <span class="tok-num">0</span>)
 <span class="tok-num">0</span></code></pre><p>Cost: O(n) where n is the number of entries in the table. Collected shard by shard, so — like <code>size</code> — the list is not a single instant's snapshot of the whole table, and the key order is unspecified.</p></div></div>
 <div class="item" id="fn-live_tables"><div class="ih"><span class="badge bfn">fn</span><span class="name">live_tables</span><span class="sig">live_tables() : Int</span><a class="anchor-link" href="#fn-live_tables" title="Link">#</a></div><div class="ib"><p>The number of Vault tables this process holds: created and not yet freed. A leak gauge: a long-running program whose count keeps rising is making tables it never <code>close</code>s.  Always counts what the runtime holds, so a closed table still counts until its last handle is dropped.</p></div></div>
 <div class="item" id="fn-new"><div class="ih"><span class="badge bfn">fn</span><span class="name">new</span><span class="sig">new(name) : Vault(v)</span><a class="anchor-link" href="#fn-new" title="Link">#</a></div><div class="ib"><p>Create a new named vault table.  Returns a <code>Vault(v)</code> handle, where <code>v</code> is the type of the values the table holds.</p><pre data-try="let visits = Vault.new(&quot;visits&quot;)

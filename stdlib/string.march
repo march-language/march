@@ -423,8 +423,8 @@ mod String do
 
       march> String.to_float("3.14")
       Ok(3.14)
-      march> String.to_float("1e10")
-      Ok(10000000000.0)
+      march> String.to_float("1e10") == Ok(10000000000.0)
+      true
       march> String.to_float("abc")
       Err("not a valid float: abc")
 
@@ -481,26 +481,6 @@ mod String do
   """
   fn last_index_of(s, sub) do string_last_index_of(s, sub) end
 
-  doc """
-  Encode a Unicode codepoint as a UTF-8 string.
-  Returns `Some(string)` if the codepoint is valid, `None` otherwise.
-
-  Valid codepoints are in the range 0x0 to 0x10FFFF, excluding surrogate pairs
-  (0xD800 to 0xDFFF).
-
-      march> String.from_codepoint(65)  -- U+0041
-      Some("A")
-      march> String.from_codepoint(233)  -- U+00E9
-      Some("é")
-      march> String.from_codepoint(128512)  -- U+1F600
-      Some("😀")
-      march> String.from_codepoint(-1)  -- out of range
-      None
-      march> String.from_codepoint(55296)  -- U+D800, a surrogate
-      None
-
-  Cost: O(1).
-  """
   -- Encode a validated codepoint to its UTF-8 byte list (1-4 bytes).
   -- Types are annotated so monomorphization pins concrete types even when the
   -- function is reachable but not driven by a concrete call site (an unpinned
@@ -533,6 +513,26 @@ mod String do
   -- specs/todos/2026-08-22-builtins-that-typecheck-but-do-not-link.md. Kept as
   -- is for now: it is tested, it agrees with the builtin on every case
   -- including truncated input, and swapping it is its own change.
+  doc """
+  Encode a Unicode codepoint as a UTF-8 string.
+  Returns `Some(string)` if the codepoint is valid, `None` otherwise.
+
+  Valid codepoints are in the range 0x0 to 0x10FFFF, excluding surrogate pairs
+  (0xD800 to 0xDFFF).
+
+      march> String.from_codepoint(65)  -- U+0041
+      Some("A")
+      march> String.from_codepoint(233) == Some("é")  -- U+00E9
+      true
+      march> String.from_codepoint(128512) == Some("😀")  -- U+1F600
+      true
+      march> String.from_codepoint(-1)  -- out of range
+      None
+      march> String.from_codepoint(55296)  -- U+D800, a surrogate
+      None
+
+  Cost: O(1).
+  """
   fn from_codepoint(cp : Int) : Option(String) do
     if cp < 0 do
       None

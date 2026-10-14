@@ -83,8 +83,8 @@ mod Duration do
 
       march> Duration.to_seconds(Duration.milliseconds(1500))
       1.5
-      march> Duration.to_seconds(Duration.minutes(1))
-      60.0
+      march> Duration.to_seconds(Duration.minutes(1)) == 60.0
+      true
   """
   fn to_seconds(d) do
     match d do Duration(ms) -> int_to_float(ms) / 1000.0 end

@@ -2986,26 +2986,32 @@ march&gt; <span class="tok-ty">AhoCorasick</span>.matches(ac, <span class="tok-s
 <div class="item" id="fn-find_all"><div class="ih"><span class="badge bfn">fn</span><span class="name">find_all</span><span class="sig">find_all(automaton : <a href="#type-Automaton">Automaton</a>, haystack : String) : List(<a href="#type-Match">Match</a>)</span><a class="anchor-link" href="#fn-find_all" title="Link">#</a></div><div class="ib"><p>Find every match of any pattern in <code>haystack</code>, in one linear pass. Matches can overlap, and a shorter pattern that is a suffix of a longer matched pattern is reported separately (see module doc's &quot;he&quot;/&quot;she&quot; example).</p><pre data-try="let ac = AhoCorasick.build([&quot;he&quot;, &quot;she&quot;])
 AhoCorasick.find_all(ac, &quot;ushers&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> ac = <span class="tok-ty">AhoCorasick</span>.build([<span class="tok-str">&quot;he&quot;</span>, <span class="tok-str">&quot;she&quot;</span>])
 march&gt; <span class="tok-ty">AhoCorasick</span>.find_all(ac, <span class="tok-str">&quot;ushers&quot;</span>)
-[{pattern: <span class="tok-str">&quot;she&quot;</span>, pattern_index: <span class="tok-num">1</span>, start: <span class="tok-num">1</span>, stop: <span class="tok-num">4</span>}, {pattern: <span class="tok-str">&quot;he&quot;</span>, pattern_index: <span class="tok-num">0</span>, start: <span class="tok-num">2</span>, stop: <span class="tok-num">4</span>}]</code></pre></div></div>
+[{ pattern: <span class="tok-str">&quot;she&quot;</span>, pattern_index: <span class="tok-num">1</span>, start: <span class="tok-num">1</span>, stop: <span class="tok-num">4</span> }, { pattern: <span class="tok-str">&quot;he&quot;</span>, pattern_index: <span class="tok-num">0</span>, start: <span class="tok-num">2</span>, stop: <span class="tok-num">4</span> }]</code></pre></div></div>
 <div class="item" id="fn-find_first"><div class="ih"><span class="badge bfn">fn</span><span class="name">find_first</span><span class="sig">find_first(automaton : <a href="#type-Automaton">Automaton</a>, haystack : String) : Option(<a href="#type-Match">Match</a>)</span><a class="anchor-link" href="#fn-find_first" title="Link">#</a></div><div class="ib"><p>Find the first match (by end position, longest pattern first) of any pattern in <code>haystack</code>, without building the full match list.</p><pre data-try="let ac = AhoCorasick.build([&quot;he&quot;, &quot;she&quot;])
-AhoCorasick.find_first(ac, &quot;ushers&quot;)
+Option.map(AhoCorasick.find_first(ac, &quot;ushers&quot;), fn m -&gt; (m.pattern, m.start, m.stop))
+let ac = AhoCorasick.build([&quot;he&quot;, &quot;she&quot;])
 AhoCorasick.find_first(ac, &quot;xyz&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> ac = <span class="tok-ty">AhoCorasick</span>.build([<span class="tok-str">&quot;he&quot;</span>, <span class="tok-str">&quot;she&quot;</span>])
-march&gt; <span class="tok-ty">AhoCorasick</span>.find_first(ac, <span class="tok-str">&quot;ushers&quot;</span>)
-<span class="tok-ty">Some</span>({pattern: <span class="tok-str">&quot;she&quot;</span>, pattern_index: <span class="tok-num">1</span>, start: <span class="tok-num">1</span>, stop: <span class="tok-num">4</span>})
+march&gt; <span class="tok-ty">Option</span>.map(<span class="tok-ty">AhoCorasick</span>.find_first(ac, <span class="tok-str">&quot;ushers&quot;</span>), <span class="tok-kw">fn</span> m -&gt; (m.pattern, m.start, m.stop))
+<span class="tok-ty">Some</span>((<span class="tok-str">&quot;she&quot;</span>, <span class="tok-num">1</span>, <span class="tok-num">4</span>))
+march&gt; <span class="tok-kw">let</span> ac = <span class="tok-ty">AhoCorasick</span>.build([<span class="tok-str">&quot;he&quot;</span>, <span class="tok-str">&quot;she&quot;</span>])
 march&gt; <span class="tok-ty">AhoCorasick</span>.find_first(ac, <span class="tok-str">&quot;xyz&quot;</span>)
 <span class="tok-ty">None</span></code></pre></div></div>
 <div class="item" id="fn-matches"><div class="ih"><span class="badge bfn">fn</span><span class="name">matches</span><span class="sig">matches(automaton : <a href="#type-Automaton">Automaton</a>, haystack : String) : Bool</span><a class="anchor-link" href="#fn-matches" title="Link">#</a></div><div class="ib"><p>Whether any pattern matches anywhere in <code>haystack</code>.</p><pre data-try="let ac = AhoCorasick.build([&quot;needle&quot;])
 AhoCorasick.matches(ac, &quot;a needle in a haystack&quot;)
+let ac = AhoCorasick.build([&quot;needle&quot;])
 AhoCorasick.matches(ac, &quot;nothing here&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> ac = <span class="tok-ty">AhoCorasick</span>.build([<span class="tok-str">&quot;needle&quot;</span>])
 march&gt; <span class="tok-ty">AhoCorasick</span>.matches(ac, <span class="tok-str">&quot;a needle in a haystack&quot;</span>)
 <span class="tok-kw">true</span>
+march&gt; <span class="tok-kw">let</span> ac = <span class="tok-ty">AhoCorasick</span>.build([<span class="tok-str">&quot;needle&quot;</span>])
 march&gt; <span class="tok-ty">AhoCorasick</span>.matches(ac, <span class="tok-str">&quot;nothing here&quot;</span>)
 <span class="tok-kw">false</span></code></pre></div></div>
 <div class="item" id="fn-pattern_at"><div class="ih"><span class="badge bfn">fn</span><span class="name">pattern_at</span><span class="sig">pattern_at(automaton : <a href="#type-Automaton">Automaton</a>, index : Int) : Option(String)</span><a class="anchor-link" href="#fn-pattern_at" title="Link">#</a></div><div class="ib"><p>The pattern text at <code>index</code> (its position in the list passed to <code>build</code>), or <code>None</code> if out of range.</p><pre data-try="let ac = AhoCorasick.build([&quot;he&quot;, &quot;she&quot;])
 AhoCorasick.pattern_at(ac, 1)
+let ac = AhoCorasick.build([&quot;he&quot;, &quot;she&quot;])
 AhoCorasick.pattern_at(ac, 99)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> ac = <span class="tok-ty">AhoCorasick</span>.build([<span class="tok-str">&quot;he&quot;</span>, <span class="tok-str">&quot;she&quot;</span>])
 march&gt; <span class="tok-ty">AhoCorasick</span>.pattern_at(ac, <span class="tok-num">1</span>)
 <span class="tok-ty">Some</span>(<span class="tok-str">&quot;she&quot;</span>)
+march&gt; <span class="tok-kw">let</span> ac = <span class="tok-ty">AhoCorasick</span>.build([<span class="tok-str">&quot;he&quot;</span>, <span class="tok-str">&quot;she&quot;</span>])
 march&gt; <span class="tok-ty">AhoCorasick</span>.pattern_at(ac, <span class="tok-num">99</span>)
 <span class="tok-ty">None</span></code></pre></div></div>
 <div class="item" id="fn-pattern_count"><div class="ih"><span class="badge bfn">fn</span><span class="name">pattern_count</span><span class="sig">pattern_count(automaton : <a href="#type-Automaton">Automaton</a>) : Int</span><a class="anchor-link" href="#fn-pattern_count" title="Link">#</a></div><div class="ib"><p>The number of patterns <code>automaton</code> was built from (including any empty ones, which are stored but never match — see module doc).</p><pre data-try="AhoCorasick.pattern_count(AhoCorasick.build([&quot;a&quot;, &quot;b&quot;, &quot;c&quot;]))

@@ -292,7 +292,7 @@ mod AhoCorasick do
 
       march> let ac = AhoCorasick.build(["he", "she"])
       march> AhoCorasick.find_all(ac, "ushers")
-      [{pattern: "she", pattern_index: 1, start: 1, stop: 4}, {pattern: "he", pattern_index: 0, start: 2, stop: 4}]
+      [{ pattern: "she", pattern_index: 1, start: 1, stop: 4 }, { pattern: "he", pattern_index: 0, start: 2, stop: 4 }]
   """
   fn find_all(automaton : Automaton, haystack : String) : List(Match) do
     match automaton do
@@ -320,8 +320,9 @@ mod AhoCorasick do
   pattern in `haystack`, without building the full match list.
 
       march> let ac = AhoCorasick.build(["he", "she"])
-      march> AhoCorasick.find_first(ac, "ushers")
-      Some({pattern: "she", pattern_index: 1, start: 1, stop: 4})
+      march> Option.map(AhoCorasick.find_first(ac, "ushers"), fn m -> (m.pattern, m.start, m.stop))
+      Some(("she", 1, 4))
+      march> let ac = AhoCorasick.build(["he", "she"])
       march> AhoCorasick.find_first(ac, "xyz")
       None
   """
@@ -354,6 +355,7 @@ mod AhoCorasick do
       march> let ac = AhoCorasick.build(["needle"])
       march> AhoCorasick.matches(ac, "a needle in a haystack")
       true
+      march> let ac = AhoCorasick.build(["needle"])
       march> AhoCorasick.matches(ac, "nothing here")
       false
   """
@@ -371,6 +373,7 @@ mod AhoCorasick do
       march> let ac = AhoCorasick.build(["he", "she"])
       march> AhoCorasick.pattern_at(ac, 1)
       Some("she")
+      march> let ac = AhoCorasick.build(["he", "she"])
       march> AhoCorasick.pattern_at(ac, 99)
       None
   """

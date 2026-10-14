@@ -3024,10 +3024,10 @@ Duration.to_milliseconds(Duration.minutes(1))" data-try-kind="transcript"><code>
 march&gt; <span class="tok-ty">Duration</span>.to_milliseconds(<span class="tok-ty">Duration</span>.minutes(<span class="tok-num">1</span>))
 <span class="tok-num">60000</span></code></pre></div></div>
 <div class="item" id="fn-to_seconds"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_seconds</span><span class="sig">to_seconds(d)</span><a class="anchor-link" href="#fn-to_seconds" title="Link">#</a></div><div class="ib"><p>Return the duration as a floating-point number of seconds.</p><pre data-try="Duration.to_seconds(Duration.milliseconds(1500))
-Duration.to_seconds(Duration.minutes(1))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.to_seconds(<span class="tok-ty">Duration</span>.milliseconds(<span class="tok-num">1500</span>))
+Duration.to_seconds(Duration.minutes(1)) == 60.0" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.to_seconds(<span class="tok-ty">Duration</span>.milliseconds(<span class="tok-num">1500</span>))
 <span class="tok-num">1.5</span>
-march&gt; <span class="tok-ty">Duration</span>.to_seconds(<span class="tok-ty">Duration</span>.minutes(<span class="tok-num">1</span>))
-<span class="tok-num">60.0</span></code></pre></div></div>
+march&gt; <span class="tok-ty">Duration</span>.to_seconds(<span class="tok-ty">Duration</span>.minutes(<span class="tok-num">1</span>)) == <span class="tok-num">60.0</span>
+<span class="tok-kw">true</span></code></pre></div></div>
 <div class="item" id="fn-weeks"><div class="ih"><span class="badge bfn">fn</span><span class="name">weeks</span><span class="sig">weeks(n) do <a href="#type-Duration">Duration</a>(n * 604800000) end</span><a class="anchor-link" href="#fn-weeks" title="Link">#</a></div><div class="ib"><p>Create a Duration of n weeks (7 days each).</p></div></div><style>
 /* Try it */
 .try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}

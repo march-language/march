@@ -733,6 +733,7 @@ mod Xml do
       march> let root = Xml.root(Xml.parse_exn("<shop><item><name>pen</name></item><item><name>ink</name></item></shop>"))
       march> Xml.find(root, "item/name")  -- the first <name> inside an <item>
       Some(Element("name", [], [Text("pen")]))
+      march> let root = Xml.root(Xml.parse_exn("<shop><item><name>pen</name></item><item><name>ink</name></item></shop>"))
       march> Xml.find(root, "item/price")
       None
   """

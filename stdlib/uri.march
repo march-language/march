@@ -337,10 +337,13 @@ mod Uri do
       march> let base = Uri.parse("https://example.com/a/b/c")
       march> Uri.to_string(Uri.merge(base, URI("", "", None, "../d", "", "")))
       "https://example.com/a/d"
+      march> let base = Uri.parse("https://example.com/a/b/c")
       march> Uri.to_string(Uri.merge(base, URI("", "other.com", None, "/x", "", "")))
       "https://other.com/x"
+      march> let base = Uri.parse("https://example.com/a/b/c")
       march> Uri.to_string(Uri.merge(base, Uri.parse("/x?y=1")))
       "https://example.com/x?y=1"
+      march> let base = Uri.parse("https://example.com/a/b/c")
       march> Uri.path(Uri.merge(base, URI("", "", None, "../../../../x", "", "")))
       "x"
   """
@@ -400,6 +403,7 @@ mod Uri do
       march> let base = Uri.parse("https://example.com/a/b/c")
       march> Uri.merge_strict(base, URI("", "", None, "../d", "", ""))
       Ok(URI("https", "example.com", None, "/a/d", "", ""))
+      march> let base = Uri.parse("https://example.com/a/b/c")
       march> Uri.merge_strict(base, URI("", "", None, "../../../../etc/passwd", "", ""))
       Err("Uri.merge_strict: relative reference traverses above base")
 

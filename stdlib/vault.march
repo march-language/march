@@ -301,8 +301,9 @@ mod Vault do
       march> Vault.set(ex, "b", 2)
       march> List.length(Vault.keys(ex))
       2
-      march> Vault.set(ex, 2, 20)  -- an Int key: not the same entry as "2"
-      march> Vault.get_or(ex, "2", 0)
+      march> let ints = Vault.new("ints")
+      march> Vault.set(ints, 2, 20)  -- an Int key: not the same entry as "2"
+      march> Vault.get_or(ints, "2", 0)
       0
 
   Cost: O(n) where n is the number of entries in the table. Collected shard by

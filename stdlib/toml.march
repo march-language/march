@@ -976,6 +976,7 @@ mod Toml do
       march> let table = Toml.parse_exn("port = 8080")
       march> Toml.get(table, "port")
       Some(TInt(8080))
+      march> let table = Toml.parse_exn("port = 8080")
       march> Toml.get(table, "host")
       None
   """
@@ -992,6 +993,7 @@ mod Toml do
       march> let config = Toml.parse_exn("[server]\nhost = \"localhost\"\nport = 8080")
       march> Toml.get_in(config, ["server", "host"])
       Some(TStr("localhost"))
+      march> let config = Toml.parse_exn("[server]\nhost = \"localhost\"\nport = 8080")
       march> Toml.get_in(config, ["server", "user"])
       None
   """

@@ -83,7 +83,9 @@ _STR_RE = re.compile(r'^".*"$')
 def is_primitive_expected(expected):
     if _INT_RE.match(expected) or expected in ("true", "false") or _STR_RE.match(expected):
         return True
-    if expected.startswith("[") and expected.endswith("]") and "(" not in expected:
+    # A list of records is structured: printers differ on `{ a: 1 }` spacing.
+    if expected.startswith("[") and expected.endswith("]") and "(" not in expected \
+            and "{" not in expected:
         return True
     return False
 

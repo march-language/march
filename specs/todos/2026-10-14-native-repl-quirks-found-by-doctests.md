@@ -14,7 +14,11 @@ the browser REPL unless noted. Each was worked around in the docs; none is fixed
 3. **Non-ASCII strings print as escaped bytes** (`"caf\195\169"` for "café").
    Workaround: `... == "café"` → `true`.
 4. **Unit prints as `1`** (e.g. a `Vault.set` result); the browser prints `()`.
-5. **A panic ends the session** (later inputs get no value). The doctest checker does
+5. **Record equality goes wrong after an earlier record-list `==`.** In one session,
+   `AhoCorasick.find_all(ac, s) == [{ ... }, { ... }]` (true), then
+   `AhoCorasick.find_first(ac, s) == Some({ ... })` is `false`; alone it is `true`.
+   Workaround: stdlib/aho_corasick.march `find_first` shows a tuple projection.
+6. **A panic ends the session** (later inputs get no value). The doctest checker does
    not feed `** panic` examples for this reason.
 
 Filed separately: `Err(:atom)` as a bare result segfaults the REPL (session task

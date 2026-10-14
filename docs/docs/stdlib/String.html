@@ -3015,7 +3015,20 @@ march&gt; <span class="tok-ty">String</span>.ends_with(<span class="tok-str">&qu
 <span class="tok-kw">false</span>
 march&gt; <span class="tok-ty">String</span>.ends_with(<span class="tok-str">&quot;hello&quot;</span>, <span class="tok-str">&quot;&quot;</span>)
 <span class="tok-kw">true</span></code></pre><p>Cost: O(|suffix|).</p></div></div>
-<div class="item" id="fn-from_codepoint"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_codepoint</span><span class="sig">from_codepoint(cp : Int) : Option(String)</span><a class="anchor-link" href="#fn-from_codepoint" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="fn-from_codepoint"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_codepoint</span><span class="sig">from_codepoint(cp : Int) : Option(String)</span><a class="anchor-link" href="#fn-from_codepoint" title="Link">#</a></div><div class="ib"><p>Encode a Unicode codepoint as a UTF-8 string. Returns <code>Some(string)</code> if the codepoint is valid, <code>None</code> otherwise.</p><p>Valid codepoints are in the range 0x0 to 0x10FFFF, excluding surrogate pairs (0xD800 to 0xDFFF).</p><pre data-try="String.from_codepoint(65)  -- U+0041
+String.from_codepoint(233) == Some(&quot;é&quot;)  -- U+00E9
+String.from_codepoint(128512) == Some(&quot;😀&quot;)  -- U+1F600
+String.from_codepoint(-1)  -- out of range
+String.from_codepoint(55296)  -- U+D800, a surrogate" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.from_codepoint(<span class="tok-num">65</span>)  <span class="tok-com">-- U+0041</span>
+<span class="tok-ty">Some</span>(<span class="tok-str">&quot;A&quot;</span>)
+march&gt; <span class="tok-ty">String</span>.from_codepoint(<span class="tok-num">233</span>) == <span class="tok-ty">Some</span>(<span class="tok-str">&quot;é&quot;</span>)  <span class="tok-com">-- U+00E9</span>
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">String</span>.from_codepoint(<span class="tok-num">128512</span>) == <span class="tok-ty">Some</span>(<span class="tok-str">&quot;😀&quot;</span>)  <span class="tok-com">-- U+1F600</span>
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">String</span>.from_codepoint(-<span class="tok-num">1</span>)  <span class="tok-com">-- out of range</span>
+<span class="tok-ty">None</span>
+march&gt; <span class="tok-ty">String</span>.from_codepoint(<span class="tok-num">55296</span>)  <span class="tok-com">-- U+D800, a surrogate</span>
+<span class="tok-ty">None</span></code></pre><p>Cost: O(1).</p></div></div>
 <div class="item" id="fn-from_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_float</span><span class="sig">from_float(f) do float_to_string(f) end</span><a class="anchor-link" href="#fn-from_float" title="Link">#</a></div><div class="ib"><p>Convert a float to a string using OCaml's default float formatting.</p><pre data-try="String.from_float(3.14)
 String.from_float(1.0)
 String.from_float(10000000000.0)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.from_float(<span class="tok-num">3.14</span>)
@@ -3138,11 +3151,11 @@ march&gt; <span class="tok-ty">String</span>.starts_with(<span class="tok-str">&
 <span class="tok-kw">true</span></code></pre><p>Cost: O(|prefix|).</p></div></div>
 <div class="item" id="fn-to_codepoints"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_codepoints</span><span class="sig">to_codepoints(s : String) : List(Int)</span><a class="anchor-link" href="#fn-to_codepoints" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-to_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_float</span><span class="sig">to_float(s)</span><a class="anchor-link" href="#fn-to_float" title="Link">#</a></div><div class="ib"><p>Parse <code>s</code> as a floating-point number. Returns <code>Ok(f)</code> on success, <code>Err(msg)</code> if the string is not a valid float.</p><pre data-try="String.to_float(&quot;3.14&quot;)
-String.to_float(&quot;1e10&quot;)
+String.to_float(&quot;1e10&quot;) == Ok(10000000000.0)
 String.to_float(&quot;abc&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.to_float(<span class="tok-str">&quot;3.14&quot;</span>)
 <span class="tok-ty">Ok</span>(<span class="tok-num">3.14</span>)
-march&gt; <span class="tok-ty">String</span>.to_float(<span class="tok-str">&quot;1e10&quot;</span>)
-<span class="tok-ty">Ok</span>(<span class="tok-num">10000000000.0</span>)
+march&gt; <span class="tok-ty">String</span>.to_float(<span class="tok-str">&quot;1e10&quot;</span>) == <span class="tok-ty">Ok</span>(<span class="tok-num">10000000000.0</span>)
+<span class="tok-kw">true</span>
 march&gt; <span class="tok-ty">String</span>.to_float(<span class="tok-str">&quot;abc&quot;</span>)
 <span class="tok-ty">Err</span>(<span class="tok-str">&quot;not a valid float: abc&quot;</span>)</code></pre><p>Cost: O(n).</p></div></div>
 <div class="item" id="fn-to_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_int</span><span class="sig">to_int(s)</span><a class="anchor-link" href="#fn-to_int" title="Link">#</a></div><div class="ib"><p>Parse <code>s</code> as a decimal integer. Returns <code>Ok(n)</code> on success, <code>Err(msg)</code> if the string is not a valid integer.</p><pre data-try="String.to_int(&quot;42&quot;)

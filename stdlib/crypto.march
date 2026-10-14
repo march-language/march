@@ -198,6 +198,7 @@ mod Crypto do
       march> let h = "pbkdf2:sha256:1000:30313233343536373839616263646566:a63e13df90f6bf8b58982d6c4c9d72e6d70c00339db67406bee1e6c980d08768"
       march> Crypto.verify_password("hunter2", h)
       true
+      march> let h = "pbkdf2:sha256:1000:30313233343536373839616263646566:a63e13df90f6bf8b58982d6c4c9d72e6d70c00339db67406bee1e6c980d08768"
       march> Crypto.verify_password("hunter3", h)
       false
       march> Crypto.verify_password("hunter2", "md5:abc")  -- unrecognised format
@@ -313,8 +314,8 @@ mod Crypto do
   doc """
   Decode a standard Base64 string to Bytes.
 
-      march> Crypto.base64_decode("SGVsbG8=")
-      Ok(Bytes.from_string("Hello"))
+      march> Crypto.base64_decode("SGVsbG8=") == Ok(Bytes.from_string("Hello"))
+      true
       march> Result.is_err(Crypto.base64_decode("!!"))
       true
 
@@ -339,8 +340,8 @@ mod Crypto do
   doc """
   Decode a URL-safe Base64 string (- and _, no padding) to Bytes.
 
-      march> Crypto.base64_url_decode("SGVsbG8")
-      Ok(Bytes.from_string("Hello"))
+      march> Crypto.base64_url_decode("SGVsbG8") == Ok(Bytes.from_string("Hello"))
+      true
       march> Result.is_err(Crypto.base64_url_decode("!!"))
       true
   """
