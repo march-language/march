@@ -16,6 +16,8 @@
 --   Toml.get_bool(v, key)     : Option(Bool)
 --   Toml.get_table(v, key)    : Option(TomlValue)
 --   Toml.get_array(v, key)    : Option(List(TomlValue))
+--
+-- doc: try
 
 mod Toml do
 
@@ -919,7 +921,10 @@ mod Toml do
   Parse a TOML document string. Returns Ok(TomlValue) on success or
   Err(TomlError(message, line, col)) on failure.
 
-      Toml.parse("port = 8080")  -- Ok(TTable([("port", TInt(8080))]))
+      march> Toml.parse("port = 8080")
+      Ok(TTable([("port", TInt(8080))]))
+      march> Toml.parse("port = ")
+      Err(TomlError("expected value, got end of input", 1, 7))
   """
   fn parse(src : String) : Result(TomlValue, TomlError) do
     let st = make_state(src)
@@ -945,6 +950,9 @@ mod Toml do
 
   doc """
   Convert a TomlValue to a string representation.
+
+      march> Toml.to_string(Toml.parse_exn("port = 8080"))
+      "{ port = 8080 }"
   """
   fn to_string(v : TomlValue) : String do
     match v do
@@ -965,7 +973,11 @@ mod Toml do
   doc """
   Look up a top-level key in a TOML table value.
 
-      Toml.get(table, "port")  -- Some(TInt(8080)) or None
+      march> let table = Toml.parse_exn("port = 8080")
+      march> Toml.get(table, "port")
+      Some(TInt(8080))
+      march> Toml.get(table, "host")
+      None
   """
   fn get(v : TomlValue, key : String) : Option(TomlValue) do
     match v do
@@ -977,7 +989,11 @@ mod Toml do
   doc """
   Look up a nested key path.
 
-      Toml.get_in(v, ["server", "host"])
+      march> let config = Toml.parse_exn("[server]\nhost = \"localhost\"\nport = 8080")
+      march> Toml.get_in(config, ["server", "host"])
+      Some(TStr("localhost"))
+      march> Toml.get_in(config, ["server", "user"])
+      None
   """
   fn get_in(v : TomlValue, keys : List(String)) : Option(TomlValue) do
     match keys do

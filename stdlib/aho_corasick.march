@@ -15,10 +15,9 @@
 -- Two-phase use, matching the "compile once, scan many times" shape that
 -- makes the automaton worth building in the first place:
 --
---   let ac = AhoCorasick.build(["he", "she", "his", "hers"])
---   AhoCorasick.find_all(ac, "ushers")
---   -- [{start: 1, stop: 4, pattern_index: 1, pattern: "she"},
---   --  {start: 2, stop: 4, pattern_index: 0, pattern: "he"}]
+--     march> let ac = AhoCorasick.build(["he", "she", "his", "hers"])
+--     march> List.map(AhoCorasick.find_all(ac, "ushers"), fn m -> m.pattern)
+--     ["she", "he", "hers"]
 --
 -- Matches are returned in the order their END position is reached scanning
 -- left to right; matches sharing an end position are ordered longest-pattern-
@@ -36,6 +35,8 @@
 -- literal substrings" search and would need special-casing throughout. It is
 -- simply excluded from the automaton — no error, no match ever produced for
 -- it.
+--
+-- doc: try
 
 mod AhoCorasick do
 
@@ -272,8 +273,9 @@ mod AhoCorasick do
   Patterns are referenced by their position in `patterns` (`pattern_index`
   on a `Match`). An empty pattern string is skipped (see module doc).
 
-      let ac = AhoCorasick.build(["he", "she", "his", "hers"])
-      AhoCorasick.matches(ac, "ushers")  -- true
+      march> let ac = AhoCorasick.build(["he", "she", "his", "hers"])
+      march> AhoCorasick.matches(ac, "ushers")
+      true
   """
   fn build(patterns : List(String)) : Automaton do
     let nodes0 = Array.push(Array.empty(), AcNode(Nil, 0, Nil))
@@ -288,10 +290,9 @@ mod AhoCorasick do
   can overlap, and a shorter pattern that is a suffix of a longer matched
   pattern is reported separately (see module doc's "he"/"she" example).
 
-      let ac = AhoCorasick.build(["he", "she"])
-      AhoCorasick.find_all(ac, "ushers")
-      -- [{start: 1, stop: 4, pattern_index: 1, pattern: "she"},
-      --  {start: 2, stop: 4, pattern_index: 0, pattern: "he"}]
+      march> let ac = AhoCorasick.build(["he", "she"])
+      march> AhoCorasick.find_all(ac, "ushers")
+      [{pattern: "she", pattern_index: 1, start: 1, stop: 4}, {pattern: "he", pattern_index: 0, start: 2, stop: 4}]
   """
   fn find_all(automaton : Automaton, haystack : String) : List(Match) do
     match automaton do
@@ -318,9 +319,11 @@ mod AhoCorasick do
   Find the first match (by end position, longest pattern first) of any
   pattern in `haystack`, without building the full match list.
 
-      let ac = AhoCorasick.build(["he", "she"])
-      AhoCorasick.find_first(ac, "ushers")  -- Some({start: 1, stop: 4, ...})
-      AhoCorasick.find_first(ac, "xyz")     -- None
+      march> let ac = AhoCorasick.build(["he", "she"])
+      march> AhoCorasick.find_first(ac, "ushers")
+      Some({pattern: "she", pattern_index: 1, start: 1, stop: 4})
+      march> AhoCorasick.find_first(ac, "xyz")
+      None
   """
   fn find_first(automaton : Automaton, haystack : String) : Option(Match) do
     match automaton do
@@ -348,9 +351,11 @@ mod AhoCorasick do
   doc """
   Whether any pattern matches anywhere in `haystack`.
 
-      let ac = AhoCorasick.build(["needle"])
-      AhoCorasick.matches(ac, "a needle in a haystack")  -- true
-      AhoCorasick.matches(ac, "nothing here")             -- false
+      march> let ac = AhoCorasick.build(["needle"])
+      march> AhoCorasick.matches(ac, "a needle in a haystack")
+      true
+      march> AhoCorasick.matches(ac, "nothing here")
+      false
   """
   fn matches(automaton : Automaton, haystack : String) : Bool do
     match find_first(automaton, haystack) do
@@ -363,9 +368,11 @@ mod AhoCorasick do
   The pattern text at `index` (its position in the list passed to `build`),
   or `None` if out of range.
 
-      let ac = AhoCorasick.build(["he", "she"])
-      AhoCorasick.pattern_at(ac, 1)   -- Some("she")
-      AhoCorasick.pattern_at(ac, 99)  -- None
+      march> let ac = AhoCorasick.build(["he", "she"])
+      march> AhoCorasick.pattern_at(ac, 1)
+      Some("she")
+      march> AhoCorasick.pattern_at(ac, 99)
+      None
   """
   fn pattern_at(automaton : Automaton, index : Int) : Option(String) do
     match automaton do
@@ -380,7 +387,10 @@ mod AhoCorasick do
   The number of patterns `automaton` was built from (including any empty
   ones, which are stored but never match — see module doc).
 
-      AhoCorasick.pattern_count(AhoCorasick.build(["a", "b", "c"]))  -- 3
+      march> AhoCorasick.pattern_count(AhoCorasick.build(["a", "b", "c"]))
+      3
+      march> AhoCorasick.pattern_count(AhoCorasick.build(["a", "", "c"]))  -- empty one counted
+      3
   """
   fn pattern_count(automaton : Automaton) : Int do
     match automaton do

@@ -47,6 +47,9 @@ const CASES = [
     output: "42\n", error: null },
   { input: "fn main() do println(\"hello from main\") end",
     output: "hello from main\n", error: null },
+  // Input is desugared before evaluation: a pipe works.
+  { input: "[1, 2, 3] |> List.map(fn x -> x + 1)",
+    output: "[2, 3, 4]\n", error: null },
   // A main that declares its capability (the only form native March accepts
   // for a main that does IO) gets an erased () per parameter, as natively.
   { input: "fn main(io : Cap(IO)) do println(\"capped main\") end",

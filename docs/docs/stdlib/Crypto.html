@@ -2974,30 +2974,109 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Crypto</span></nav><h1>Crypto</h1><div class="mdoc"><p>Crypto module: general-purpose cryptographic primitives.</p><p>Exposes hashing, HMAC, password hashing/verification, random generation, and Base64 encoding as a public API.  The underlying implementations are provided by the March runtime (Digestif SHA-256/512, PBKDF2, CSPRNG).</p><p>Password hashing uses PBKDF2-SHA256 with a 16-byte random salt and</p><ol><li> The stored</li></ol><p>format is: &quot;pbkdf2:sha256:600000:&lt;salt_hex&gt;:&lt;hash_hex&gt;&quot; The iteration count is embedded in the stored hash, so existing hashes produced with a different count still verify correctly via <code>verify_password/2</code>. This is intentionally simple to verify without external libraries.</p><p>All hex output is lowercase.</p></div><h2>Functions</h2><div class="item" id="fn-base64_decode"><div class="ih"><span class="badge bfn">fn</span><span class="name">base64_decode</span><span class="sig">base64_decode(s)</span><a class="anchor-link" href="#fn-base64_decode" title="Link">#</a></div><div class="ib"><p>Decode a standard Base64 string to Bytes.</p><pre><code><span class="tok-ty">Crypto</span>.base64_decode(<span class="tok-str">&quot;SGVsbG8=&quot;</span>)  <span class="tok-com">-- Ok(Bytes for &quot;Hello&quot;)</span>
-<span class="tok-ty">Crypto</span>.base64_decode(<span class="tok-str">&quot;!!&quot;</span>)        <span class="tok-com">-- Err(&quot;base64_decode: ...&quot;)</span></code></pre></div></div>
-<div class="item" id="fn-base64_encode"><div class="ih"><span class="badge bfn">fn</span><span class="name">base64_encode</span><span class="sig">base64_encode(data)</span><a class="anchor-link" href="#fn-base64_encode" title="Link">#</a></div><div class="ib"><p>Base64-encode a Bytes value (standard alphabet with padding).</p><pre><code><span class="tok-kw">let</span> b = <span class="tok-ty">Crypto</span>.random_bytes(<span class="tok-num">12</span>)
-<span class="tok-ty">Crypto</span>.base64_encode(b)  <span class="tok-com">-- 16-character Base64 string</span></code></pre></div></div>
-<div class="item" id="fn-base64_url_decode"><div class="ih"><span class="badge bfn">fn</span><span class="name">base64_url_decode</span><span class="sig">base64_url_decode(s)</span><a class="anchor-link" href="#fn-base64_url_decode" title="Link">#</a></div><div class="ib"><p>Decode a URL-safe Base64 string (- and _, no padding) to Bytes.</p><pre><code><span class="tok-ty">Crypto</span>.base64_url_decode(<span class="tok-str">&quot;SGVsbG8&quot;</span>)  <span class="tok-com">-- Ok(Bytes)</span>
-<span class="tok-ty">Crypto</span>.base64_url_decode(<span class="tok-str">&quot;!!&quot;</span>)       <span class="tok-com">-- Err(...)</span></code></pre></div></div>
-<div class="item" id="fn-base64_url_encode"><div class="ih"><span class="badge bfn">fn</span><span class="name">base64_url_encode</span><span class="sig">base64_url_encode(data)</span><a class="anchor-link" href="#fn-base64_url_encode" title="Link">#</a></div><div class="ib"><p>Base64-encode using the URL-safe alphabet (- and _ instead of + and /), with no padding characters.</p><pre><code><span class="tok-ty">Crypto</span>.base64_url_encode(<span class="tok-ty">Crypto</span>.random_bytes(<span class="tok-num">16</span>))
-<span class="tok-com">-- URL-safe 22-character string</span></code></pre></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Crypto</span></nav><h1>Crypto</h1><div class="mdoc"><p>Crypto module: general-purpose cryptographic primitives.</p><p>Exposes hashing, HMAC, password hashing/verification, random generation, and Base64 encoding as a public API.  The underlying implementations are provided by the March runtime (Digestif SHA-256/512, PBKDF2, CSPRNG).</p><p>Password hashing uses PBKDF2-SHA256 with a 16-byte random salt and</p><ol><li> The stored</li></ol><p>format is: &quot;pbkdf2:sha256:600000:&lt;salt_hex&gt;:&lt;hash_hex&gt;&quot; The iteration count is embedded in the stored hash, so existing hashes produced with a different count still verify correctly via <code>verify_password/2</code>. This is intentionally simple to verify without external libraries.</p><p>All hex output is lowercase.</p></div><h2>Functions</h2><div class="item" id="fn-base64_decode"><div class="ih"><span class="badge bfn">fn</span><span class="name">base64_decode</span><span class="sig">base64_decode(s)</span><a class="anchor-link" href="#fn-base64_decode" title="Link">#</a></div><div class="ib"><p>Decode a standard Base64 string to Bytes.</p><pre data-try="Crypto.base64_decode(&quot;SGVsbG8=&quot;)
+Result.is_err(Crypto.base64_decode(&quot;!!&quot;))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Crypto</span>.base64_decode(<span class="tok-str">&quot;SGVsbG8=&quot;</span>)
+<span class="tok-ty">Ok</span>(<span class="tok-ty">Bytes</span>.from_string(<span class="tok-str">&quot;Hello&quot;</span>))
+march&gt; <span class="tok-ty">Result</span>.is_err(<span class="tok-ty">Crypto</span>.base64_decode(<span class="tok-str">&quot;!!&quot;</span>))
+<span class="tok-kw">true</span></code></pre><p>Invalid input gives <code>Err(message)</code>; natively <code>Crypto.base64_decode(&quot;!!&quot;)</code> is <code>Err(&quot;base64_decode: invalid character&quot;)</code>.</p></div></div>
+<div class="item" id="fn-base64_encode"><div class="ih"><span class="badge bfn">fn</span><span class="name">base64_encode</span><span class="sig">base64_encode(data)</span><a class="anchor-link" href="#fn-base64_encode" title="Link">#</a></div><div class="ib"><p>Base64-encode a String (standard alphabet with padding).</p><pre data-try="Crypto.base64_encode(&quot;Hello&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Crypto</span>.base64_encode(<span class="tok-str">&quot;Hello&quot;</span>)
+<span class="tok-str">&quot;SGVsbG8=&quot;</span></code></pre><p>The argument must be a String; pass a Bytes value through <code>Bytes.to_string</code> first.</p></div></div>
+<div class="item" id="fn-base64_url_decode"><div class="ih"><span class="badge bfn">fn</span><span class="name">base64_url_decode</span><span class="sig">base64_url_decode(s)</span><a class="anchor-link" href="#fn-base64_url_decode" title="Link">#</a></div><div class="ib"><p>Decode a URL-safe Base64 string (- and _, no padding) to Bytes.</p><pre data-try="Crypto.base64_url_decode(&quot;SGVsbG8&quot;)
+Result.is_err(Crypto.base64_url_decode(&quot;!!&quot;))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Crypto</span>.base64_url_decode(<span class="tok-str">&quot;SGVsbG8&quot;</span>)
+<span class="tok-ty">Ok</span>(<span class="tok-ty">Bytes</span>.from_string(<span class="tok-str">&quot;Hello&quot;</span>))
+march&gt; <span class="tok-ty">Result</span>.is_err(<span class="tok-ty">Crypto</span>.base64_url_decode(<span class="tok-str">&quot;!!&quot;</span>))
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-base64_url_encode"><div class="ih"><span class="badge bfn">fn</span><span class="name">base64_url_encode</span><span class="sig">base64_url_encode(data)</span><a class="anchor-link" href="#fn-base64_url_encode" title="Link">#</a></div><div class="ib"><p>Base64-encode using the URL-safe alphabet (- and _ instead of + and /), with no padding characters.</p><pre data-try="Crypto.base64_url_encode(&quot;Hello?&gt;&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Crypto</span>.base64_url_encode(<span class="tok-str">&quot;Hello?&gt;&quot;</span>)
+<span class="tok-str">&quot;SGVsbG8_Pg&quot;</span></code></pre></div></div>
 <div class="item" id="fn-hash_password"><div class="ih"><span class="badge bfn">fn</span><span class="name">hash_password</span><span class="sig">hash_password(plain)</span><a class="anchor-link" href="#fn-hash_password" title="Link">#</a></div><div class="ib"><p>Hash a plaintext password using PBKDF2-SHA256 with a random salt.</p><pre><code><span class="tok-kw">let</span> h = <span class="tok-ty">Crypto</span>.hash_password(<span class="tok-str">&quot;my-secret&quot;</span>)
 <span class="tok-com">-- &quot;pbkdf2:sha256:600000:&lt;salt_hex&gt;:&lt;hash_hex&gt;&quot;</span></code></pre><p>The result is safe to store in a database.  Use <code>verify_password/2</code> to check a candidate password against the stored hash.</p><p>Uses 600 000 PBKDF2 iterations (OWASP 2023 recommendation for SHA-256) with a 16-byte random salt and 32-byte output.  Existing hashes stored with a different iteration count continue to verify correctly because the count is embedded in the hash string.</p></div></div>
-<div class="item" id="fn-hmac"><div class="ih"><span class="badge bfn">fn</span><span class="name">hmac</span><span class="sig">hmac(algo, key, data)</span><a class="anchor-link" href="#fn-hmac" title="Link">#</a></div><div class="ib"><p>Compute an HMAC using the given algorithm.</p><pre><code><span class="tok-ty">Crypto</span>.hmac(:sha256, <span class="tok-str">&quot;secret&quot;</span>, <span class="tok-str">&quot;message&quot;</span>)
-<span class="tok-com">-- lowercase hex string of the HMAC-SHA256 result</span></code></pre><p>Supported algorithms: <code>:sha256</code>.  Returns the HMAC as a lowercase hex string. The key and data may each be a String or Bytes value.</p></div></div>
+<div class="item" id="fn-hmac"><div class="ih"><span class="badge bfn">fn</span><span class="name">hmac</span><span class="sig">hmac(algo, key, data)</span><a class="anchor-link" href="#fn-hmac" title="Link">#</a></div><div class="ib"><p>Compute an HMAC using the given algorithm.</p><pre data-try="Crypto.hmac(:sha256, &quot;secret&quot;, &quot;message&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Crypto</span>.hmac(:sha256, <span class="tok-str">&quot;secret&quot;</span>, <span class="tok-str">&quot;message&quot;</span>)
+<span class="tok-str">&quot;8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b&quot;</span></code></pre><p>Supported algorithms: <code>:sha256</code>.  Returns the HMAC as a lowercase hex string. The key and data must each be a String.</p></div></div>
 <div class="item" id="fn-random_bytes"><div class="ih"><span class="badge bfn">fn</span><span class="name">random_bytes</span><span class="sig">random_bytes(n : {Int | _ &gt;= 0})</span><a class="anchor-link" href="#fn-random_bytes" title="Link">#</a></div><div class="ib"><p>Generate n cryptographically secure random bytes.  The bytes come from the operating system's CSPRNG (<code>/dev/urandom</code> on Unix), so the output is suitable for cryptographic keys, IVs, nonces, salts, and session tokens.</p><p>Panics if <code>n</code> is negative or if <code>/dev/urandom</code> cannot be opened.</p><pre><code><span class="tok-ty">Crypto</span>.random_bytes(<span class="tok-num">16</span>)  <span class="tok-com">-- Bytes value with 16 random bytes</span></code></pre></div></div>
 <div class="item" id="fn-random_hex"><div class="ih"><span class="badge bfn">fn</span><span class="name">random_hex</span><span class="sig">random_hex(n : {Int | _ &gt;= 0})</span><a class="anchor-link" href="#fn-random_hex" title="Link">#</a></div><div class="ib"><p>Generate n random bytes and return them as a lowercase hex string (2n chars).</p><pre><code><span class="tok-ty">Crypto</span>.random_hex(<span class="tok-num">16</span>)  <span class="tok-com">-- 32-character lowercase hex string</span></code></pre></div></div>
 <div class="item" id="fn-secure_compare"><div class="ih"><span class="badge bfn">fn</span><span class="name">secure_compare</span><span class="sig">secure_compare(a, b)</span><a class="anchor-link" href="#fn-secure_compare" title="Link">#</a></div><div class="ib"><p>Compare two strings for equality in time proportional to <code>max(|a|, |b|)</code>, never short-circuiting on the first byte difference or on length mismatch.</p><p>Prevents timing attacks that would otherwise reveal (a) the length of the expected value or (b) the position of the first differing byte when validating a secret such as a token, HMAC digest, or session cookie.</p><p>Returns <code>true</code> iff <code>a</code> and <code>b</code> have the same bytes.</p><p>Note: the interpreter does not guarantee constant time at the machine level; this function provides <em>algorithmic</em> constant-time behaviour that translates to machine-level constant time under the native compiler.</p><pre><code><span class="tok-ty">Crypto</span>.secure_compare(<span class="tok-str">&quot;abc&quot;</span>, <span class="tok-str">&quot;abc&quot;</span>)  <span class="tok-com">-- true</span>
 <span class="tok-ty">Crypto</span>.secure_compare(<span class="tok-str">&quot;abc&quot;</span>, <span class="tok-str">&quot;abd&quot;</span>)  <span class="tok-com">-- false</span>
 <span class="tok-ty">Crypto</span>.secure_compare(<span class="tok-str">&quot;abc&quot;</span>, <span class="tok-str">&quot;abcd&quot;</span>) <span class="tok-com">-- false (no length-based early exit)</span></code></pre></div></div>
-<div class="item" id="fn-sha256"><div class="ih"><span class="badge bfn">fn</span><span class="name">sha256</span><span class="sig">sha256(data)</span><a class="anchor-link" href="#fn-sha256" title="Link">#</a></div><div class="ib"><p>Compute the SHA-256 hash of data, returning a lowercase hex string.</p><pre><code><span class="tok-ty">Crypto</span>.sha256(<span class="tok-str">&quot;hello&quot;</span>)
-<span class="tok-com">-- &quot;2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824&quot;</span></code></pre><p>The argument may be a String or Bytes value.</p></div></div>
-<div class="item" id="fn-sha512"><div class="ih"><span class="badge bfn">fn</span><span class="name">sha512</span><span class="sig">sha512(data : String) : String</span><a class="anchor-link" href="#fn-sha512" title="Link">#</a></div><div class="ib"><p>Compute the SHA-512 hash of a String, returning a 128-char lowercase hex string.</p><pre><code><span class="tok-ty">Crypto</span>.sha512(<span class="tok-str">&quot;hello&quot;</span>)
-<span class="tok-com">-- &quot;9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca7...&quot;</span></code></pre></div></div>
+<div class="item" id="fn-sha256"><div class="ih"><span class="badge bfn">fn</span><span class="name">sha256</span><span class="sig">sha256(data)</span><a class="anchor-link" href="#fn-sha256" title="Link">#</a></div><div class="ib"><p>Compute the SHA-256 hash of a String, returning a 64-char lowercase hex string.</p><pre data-try="Crypto.sha256(&quot;hello&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Crypto</span>.sha256(<span class="tok-str">&quot;hello&quot;</span>)
+<span class="tok-str">&quot;2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824&quot;</span></code></pre><p>The argument must be a String; pass a Bytes value through <code>Bytes.to_string</code> first.</p></div></div>
+<div class="item" id="fn-sha512"><div class="ih"><span class="badge bfn">fn</span><span class="name">sha512</span><span class="sig">sha512(data : String) : String</span><a class="anchor-link" href="#fn-sha512" title="Link">#</a></div><div class="ib"><p>Compute the SHA-512 hash of a String, returning a 128-char lowercase hex string.</p><pre data-try="Crypto.sha512(&quot;hello&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Crypto</span>.sha512(<span class="tok-str">&quot;hello&quot;</span>)
+<span class="tok-str">&quot;9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043&quot;</span></code></pre></div></div>
 <div class="item" id="fn-verify_password"><div class="ih"><span class="badge bfn">fn</span><span class="name">verify_password</span><span class="sig">verify_password(plain, stored)</span><a class="anchor-link" href="#fn-verify_password" title="Link">#</a></div><div class="ib"><p>Verify a plaintext password against a stored hash produced by <code>hash_password/1</code>.</p><pre><code><span class="tok-kw">let</span> h = <span class="tok-ty">Crypto</span>.hash_password(<span class="tok-str">&quot;correct-horse-battery-staple&quot;</span>)
 <span class="tok-ty">Crypto</span>.verify_password(<span class="tok-str">&quot;correct-horse-battery-staple&quot;</span>, h)  <span class="tok-com">-- true</span>
-<span class="tok-ty">Crypto</span>.verify_password(<span class="tok-str">&quot;wrong-password&quot;</span>, h)                <span class="tok-com">-- false</span></code></pre><p>Returns <code>false</code> if the hash format is unrecognised.</p></div></div></main></div><script>
+<span class="tok-ty">Crypto</span>.verify_password(<span class="tok-str">&quot;wrong-password&quot;</span>, h)                <span class="tok-com">-- false</span></code></pre><p>The iteration count is read from the stored hash, so a hash made with a lower count (here 1000, salt <code>&quot;0123456789abcdef&quot;</code>) verifies quickly:</p><pre data-try="let h = &quot;pbkdf2:sha256:1000:30313233343536373839616263646566:a63e13df90f6bf8b58982d6c4c9d72e6d70c00339db67406bee1e6c980d08768&quot;
+Crypto.verify_password(&quot;hunter2&quot;, h)
+Crypto.verify_password(&quot;hunter3&quot;, h)
+Crypto.verify_password(&quot;hunter2&quot;, &quot;md5:abc&quot;)  -- unrecognised format" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> h = <span class="tok-str">&quot;pbkdf2:sha256:1000:30313233343536373839616263646566:a63e13df90f6bf8b58982d6c4c9d72e6d70c00339db67406bee1e6c980d08768&quot;</span>
+march&gt; <span class="tok-ty">Crypto</span>.verify_password(<span class="tok-str">&quot;hunter2&quot;</span>, h)
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">Crypto</span>.verify_password(<span class="tok-str">&quot;hunter3&quot;</span>, h)
+<span class="tok-kw">false</span>
+march&gt; <span class="tok-ty">Crypto</span>.verify_password(<span class="tok-str">&quot;hunter2&quot;</span>, <span class="tok-str">&quot;md5:abc&quot;</span>)  <span class="tok-com">-- unrecognised format</span>
+<span class="tok-kw">false</span></code></pre><p>Returns <code>false</code> if the hash format is unrecognised.</p></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

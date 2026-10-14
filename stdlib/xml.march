@@ -20,6 +20,8 @@
 --   Xml.find_all(node, path)   : List(XmlNode)
 --   Xml.elem(tag, attrs, kids) : XmlNode
 --   Xml.text_node(s)           : XmlNode
+--
+-- doc: try
 
 mod Xml do
 
@@ -636,8 +638,8 @@ mod Xml do
   This is a non-validating parser: it does not check DTDs or enforce constraints
   beyond well-formedness.
 
-      Xml.parse("<root><item>hello</item></root>")
-      -- Ok(XmlDoc(None, Element("root", [], [Element("item", [], [Text("hello")])])))
+      march> Xml.parse("<root><item>hello</item></root>")
+      Ok(XmlDoc(None, Element("root", [], [Element("item", [], [Text("hello")])])))
   """
   fn parse(src : String) : Result(XmlDoc, XmlError) do
     let st = make_state(src)
@@ -728,7 +730,11 @@ mod Xml do
   doc """
   Navigate to the first node matching a slash-delimited tag path.
 
-      Xml.find(root, "item/name")  -- finds <item><name>...</name></item>
+      march> let root = Xml.root(Xml.parse_exn("<shop><item><name>pen</name></item><item><name>ink</name></item></shop>"))
+      march> Xml.find(root, "item/name")  -- the first <name> inside an <item>
+      Some(Element("name", [], [Text("pen")]))
+      march> Xml.find(root, "item/price")
+      None
   """
   fn find(node : XmlNode, path : String) : Option(XmlNode) do
     let parts = string_split(path, "/")
@@ -767,7 +773,9 @@ mod Xml do
   doc """
   Find all element children at the last segment of a slash-delimited path.
 
-      Xml.find_all(root, "items/item")  -- all <item> inside <items>
+      march> let root = Xml.root(Xml.parse_exn("<order><items><item>pen</item><item>ink</item></items></order>"))
+      march> List.map(Xml.find_all(root, "items/item"), Xml.text)  -- all <item> inside <items>
+      [Some("pen"), Some("ink")]
   """
   fn find_all(node : XmlNode, path : String) : List(XmlNode) do
     let parts = string_split(path, "/")

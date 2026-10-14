@@ -20,6 +20,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **"Try it" on 33 stdlib pages, and documentation examples are now checked.**
+  String, Json, Uri, Crypto, Regex, Task, Vault and 12 more modules have runnable
+  examples (248 "Try it" examples in all, up from 107), and every one is verified
+  against both the native REPL and the in-browser REPL in CI, so a documented result
+  that drifts from the real one fails the build. Converting them corrected dozens of
+  wrong examples (for instance `String.split(s, "")` splits into bytes, not "returns
+  the whole string"). Actor's module example is now a complete program you can run.
+  The browser REPL now accepts `|>` pipes and a `main` that takes `Cap(IO)`.
+
 - **"Try it" on the stdlib API reference.** On march-lang.org/docs/stdlib, the
   examples of the modules that opt in (`-- doc: try` in the module header, or a
   ```` ```march try ```` fence) have a **Try it** button that opens a REPL sidebar and runs

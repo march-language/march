@@ -70,7 +70,8 @@ PURE_MODULES = {
 }
 
 REPL_VALUE_RE = re.compile(r"march\((\d+)\)>\s*=\s*(.*)$")
-MARCH_LINE_RE = re.compile(r"^\s*march>\s?(.*)$")
+# A `march>` line in a doc string, or in a module's `--` header comment.
+MARCH_LINE_RE = re.compile(r"^\s*(?:--\s*)?march>\s?(.*)$")
 
 # A value the bare REPL renders byte-for-byte as the doc shows: an integer, a
 # bool, a double-quoted string, or a `[...]` list of such (no constructor `(`
@@ -105,11 +106,12 @@ def extract_doctests(path):
         if not m:
             continue
         expr = m.group(1).strip()
-        # The expected value is the next line, dedented to its content.
-        expected = lines[i + 1].strip() if i + 1 < n else ""
+        # The expected value is the next line, dedented to its content (a
+        # header-comment line's `--` prefix removed).
+        expected = _content(lines[i + 1]).strip() if i + 1 < n else ""
         # Is the value multi-line? (the line after that is neither a new
         # `march>` nor the end of the indented example block).
-        after = lines[i + 2].strip() if i + 2 < n else ""
+        after = _content(lines[i + 2]).strip() if i + 2 < n else ""
         multiline = (
             after != ""
             and not after.startswith("march>")
