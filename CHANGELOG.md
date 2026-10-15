@@ -108,6 +108,19 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Overstated claims on the landing page and in the docs are corrected.** The
+  tree-transform benchmark showed numbers no recorded run produced (Rust 9977 ms,
+  "19x faster than Rust"); it now shows the `bench/RESULTS.md` medians (March 579 ms,
+  OCaml 3670, Rust 4902, Elixir 2369) and says the other languages allocate a fresh
+  tree each pass. The README's FBIP table and its "7x faster than C" claim (no C
+  program is benchmarked) are replaced the same way. The landing page no longer calls
+  actors "typed" or says shared mutable state is a compile error, since `send` does not
+  check a message against the target actor. The actors chapter says the interpreter's
+  `Actor.call` timeout decides the result but does not cut the caller's wait short.
+  The hot-reload page gains a "Current limitations" section listing the open issues,
+  and the memory-model chapter describes the march-lean oracle instead of calling it
+  "not started".
+
 - **The stdlib API reference has syntax highlighting, and Http is documented.**
   Code examples on march-lang.org/docs/stdlib/ were plain monochrome text: the
   generator only coloured fences tagged with a language, and the pages shipped

@@ -453,7 +453,8 @@ Two consequences of the tag-selects-the-handler rule:
 There is no `Call` wrapper constructor, and the call handler takes exactly one argument
 (the reply channel).
 
-**The timeout is real on both backends.** Compiled, the caller's green thread parks on
+**The timeout decides the result on both backends; only compiled code also stops
+waiting at the deadline.** Compiled, the caller's green thread parks on
 the scheduler with a deadline (`march_actor_call`, `runtime/march_runtime.c`) rather
 than busy-polling, and wakes on reply delivery or at the deadline. Every reply is
 wrapped in an envelope carrying the correlation id issued for that specific call, and
@@ -461,7 +462,12 @@ the receive loop discards an envelope whose id does not match, so a late reply f
 timed-out first call can never be misdelivered as the answer to a second, unrelated
 call (`march_actor_call_unwrap`). The interpreter dispatches `Actor.call` the same
 way: it tag-routes the sentinel to the handler at the same ctor index and binds the
-caller as the handler's single argument (`lib/eval/eval.ml` `actor_call`). Both are
+caller as the handler's single argument (`lib/eval/eval.ml` `actor_call`), but its
+scheduler runs the handler to completion before the caller looks for a reply. It then
+compares the reply's timestamp with the deadline (`lib/eval/eval_builtins.ml`) and
+returns `Err("call timed out")` for a late one. So the *result* matches the compiled
+backend, but the elapsed time does not: a ten-second handler called with a 1 ms timeout
+takes ten seconds to return `Err` interpreted, and about 1 ms compiled. Both are
 pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. (See
 [Interpreted vs compiled](#interpreted-vs-compiled) for the history.)
 
@@ -1198,10 +1204,12 @@ observable output on both backends for a program with output that does not depen
 scheduler interleaving; this is mechanically pinned by the golden conformance corpus
 (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled; see the
 [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.5).
-The **`Actor.call` plane** is backend-identical: both backends tag-route the zero-arg
-sentinel positionally to the handler at its ctor index, and both enforce `timeout_ms`
-(compiled via a deadline-bounded park in `march_actor_call`, `runtime/march_runtime.c`;
-`timeout_ms <= 0` means wait indefinitely); pinned by `test/native/actor_counter` and
+The **`Actor.call` plane** returns identical results on both backends: both tag-route the
+zero-arg sentinel positionally to the handler at its ctor index, and both turn a reply
+that missed `timeout_ms` into `Err` (compiled via a deadline-bounded park in
+`march_actor_call`, `runtime/march_runtime.c`; interpreted by comparing the reply's
+timestamp after the handler has finished, so the interpreted caller waits for the
+handler regardless of the deadline; `timeout_ms <= 0` means wait indefinitely); pinned by `test/native/actor_counter` and
 `test/native/actor_call_timeout`. The **capability / dead-`send` plane** (`get_cap`,
 `send_checked`, `revoke_cap`, `is_cap_valid`, plain `send` to a *dead* pid) is an exact
 byte match (`core-march.md` §4.10.6), and so is the **supervision / external state
