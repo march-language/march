@@ -78,6 +78,8 @@ let impure_suffixes = [ "_set"; "_store" ]
 let impure_named = [
   (* diverging *)
   "panic"; "panic_"; "todo_"; "unreachable_";
+  (* records the next panic's call site: kept, in order, before that call *)
+  "__panic_site";
   (* random / time-derived *)
   "uuid_v7"; "uuid_v7_at";
   (* actors, monitors, supervision, capabilities *)

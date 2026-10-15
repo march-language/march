@@ -1078,10 +1078,11 @@ let test_actor_handler_binder_shadows_toplevel_fn () =
     end
   end|} in
   (* The bug emitted the function's address as a call argument. Match the
-     ARGUMENT form (comma-preceded) so this cannot alias the `define` line. *)
+     ARGUMENT form (comma-preceded) so this cannot alias the `define` line,
+     and leave out the function table, whose entry for Helper.text has it. *)
   Alcotest.(check bool)
     "handler binder is not replaced by the imported Helper.text function"
-    false (ir_contains ir ", ptr @Helper.text")
+    false (ir_contains (ir_outside_fn_table ir) ", ptr @Helper.text")
 
 (** Finding 20 follow-up (adversarial-review Critical, fixed): the actor-struct
     always-in-place gate must be STRUCTURAL (does this type's field 0 carry
@@ -14873,6 +14874,7 @@ declare i64  @march_diag_observe(ptr %cb)
 declare ptr  @march_diag_unobserve(i64 %id)
 declare ptr  @march_diag_context_get()
 declare ptr  @march_diag_context_set(ptr %ctx)
+declare ptr  @march_panic_site(ptr %file, i64 %line)
 ; REPL JIT persistent variable slot table (march_extras.c)
 declare i64  @march_repl_get(i64 %slot)
 declare void @march_repl_set(i64 %slot, i64 %val)

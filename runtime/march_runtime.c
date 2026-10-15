@@ -2170,9 +2170,38 @@ static pthread_mutex_t g_diag_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local void    *diag_tl_ctx = NULL;
 static _Thread_local jmp_buf *diag_tl_jmp = NULL;
 
+static _Thread_local void    *diag_tl_site_file = NULL;
+static _Thread_local int64_t  diag_tl_site_line = 0;
+
 static void **diag_ctx_slot(void) {
     march_proc *p = march_sched_current();
     return p ? &p->diag_ctx : &diag_tl_ctx;
+}
+
+/* __panic_site(file, line): lowering emits this right before a direct
+ * panic / todo / unreachable call, after the message is evaluated, so the
+ * march_panic that follows can report where it was called (Rust's
+ * track_caller, for the three diverging prelude functions).  [file] is a
+ * String literal, immortal, so it is kept without a reference.  On the proc,
+ * not in TLS: the prelude wrapper between here and march_panic can reach a
+ * reduction check and resume on another OS thread. */
+void *march_panic_site(void *file, int64_t line) {
+    march_proc *p = march_sched_current();
+    if (p) { p->diag_site_file = file; p->diag_site_line = line; }
+    else   { diag_tl_site_file = file; diag_tl_site_line = line; }
+    return NULL;
+}
+
+/* Take (and clear) the recorded site. */
+static int64_t diag_take_site(void **file) {
+    march_proc *p = march_sched_current();
+    void   **fslot = p ? &p->diag_site_file : &diag_tl_site_file;
+    int64_t *lslot = p ? &p->diag_site_line : &diag_tl_site_line;
+    *file = *fslot;
+    int64_t line = *lslot;
+    *fslot = NULL;
+    *lslot = 0;
+    return *file ? line : 0;
 }
 
 static jmp_buf **diag_jmp_slot(void) {
@@ -2284,8 +2313,93 @@ static void *diag_frame_cell(const char *fn_name, size_t len) {
     return cell;
 }
 
-/* The March frames of [pcs], innermost first, as a fresh List(DiagFrame).
- * Names come from dladdr, so a frame resolves only when its symbol is
+/* The function table a compiled program's main registers
+ * (lib/tir/llvm_toplevel.ml's fn_table_block): every function the module
+ * defines, with its source name, file and definition line (NULL / 0 for
+ * compiler glue), in definition order, bounded above by march_text_end.
+ * Sorted by address on first use, not at startup: only a crash report reads
+ * it. */
+typedef struct {
+    const char *name;
+    const char *file;
+    int64_t     line;
+    void       *fn;     /* last: see fn_table_block */
+} march_fn_info;
+
+static const march_fn_info *g_fn_table      = NULL;
+static int64_t              g_fn_table_len  = 0;
+static uintptr_t            g_fn_text_end   = 0;
+static march_fn_info       *g_fn_sorted     = NULL;   /* NULL: unusable */
+static pthread_once_t       g_fn_sort_once  = PTHREAD_ONCE_INIT;
+
+void march_fn_table_register(const void *table, const int64_t *len, void *text_end) {
+    g_fn_table     = (const march_fn_info *)table;
+    g_fn_table_len = len ? *len : 0;
+    g_fn_text_end  = (uintptr_t)text_end;
+}
+
+static int fn_info_cmp(const void *a, const void *b) {
+    uintptr_t x = (uintptr_t)((const march_fn_info *)a)->fn;
+    uintptr_t y = (uintptr_t)((const march_fn_info *)b)->fn;
+    return x < y ? -1 : x > y;
+}
+
+static void fn_table_sort(void) {
+    if (!g_fn_table || g_fn_table_len <= 0) return;
+    march_fn_info *s = (march_fn_info *)malloc((size_t)g_fn_table_len * sizeof *s);
+    if (!s) return;
+    memcpy(s, g_fn_table, (size_t)g_fn_table_len * sizeof *s);
+    qsort(s, (size_t)g_fn_table_len, sizeof *s, fn_info_cmp);
+    /* The end marker must lie above every function, or the module was not
+     * laid out in one piece and the bound means nothing: do without. */
+    if (g_fn_text_end <= (uintptr_t)s[g_fn_table_len - 1].fn) { free(s); return; }
+    g_fn_sorted = s;
+}
+
+/* The entry whose function contains [pc]; NULL outside the module (runtime
+ * code, libc, a hot-reload patch) or with no usable table. */
+static const march_fn_info *fn_table_lookup(uintptr_t pc) {
+    pthread_once(&g_fn_sort_once, fn_table_sort);
+    if (!g_fn_sorted) return NULL;
+    if (pc < (uintptr_t)g_fn_sorted[0].fn || pc >= g_fn_text_end) return NULL;
+    int64_t lo = 0, hi = g_fn_table_len - 1;
+    while (lo < hi) {                     /* the last entry at or below pc */
+        int64_t mid = lo + (hi - lo + 1) / 2;
+        if ((uintptr_t)g_fn_sorted[mid].fn <= pc) lo = mid; else hi = mid - 1;
+    }
+    return &g_fn_sorted[lo];
+}
+
+static int fn_table_usable(void) {
+    pthread_once(&g_fn_sort_once, fn_table_sort);
+    return g_fn_sorted != NULL;
+}
+
+/* The March frames of [pcs], from the function table: every pc inside a
+ * named entry, innermost first.  Runtime frames are simply not in it, so the
+ * panic machinery, the scheduler and the C entry drop out on their own. */
+static void *diag_frames_from_table(void **pcs, int n) {
+    void *lst = make_nil();
+    const march_fn_info *kept[MARCH_DIAG_MAX_FRAMES];
+    int k = 0;
+    for (int i = 0; i < n && k < MARCH_DIAG_MAX_FRAMES; i++) {
+        const march_fn_info *e = fn_table_lookup((uintptr_t)pcs[i] - 1);
+        if (e && e->name) kept[k++] = e;
+    }
+    for (int i = k - 1; i >= 0; i--) {
+        void *cell = march_alloc(16 + 3 * 8);
+        void **fp = (void **)((char *)cell + 16);
+        fp[0] = march_string_lit(kept[i]->name, (int64_t)strlen(kept[i]->name));
+        fp[1] = march_string_lit(kept[i]->file, (int64_t)strlen(kept[i]->file));
+        *(int64_t *)&fp[2] = kept[i]->line;
+        lst = make_cons(cell, lst);
+    }
+    return lst;
+}
+
+/* The March frames of [pcs], innermost first, as a fresh List(DiagFrame):
+ * from the function table when the program registered one, else (a program
+ * built without it, a JIT) by dladdr.  Names come from dladdr, so a frame resolves only when its symbol is
  * visible to it: every symbol of a macOS executable, but on Linux only the
  * dynamic table of an --export-dynamic (hot-reload) build.  The walk skips
  * the panic machinery (everything up to and including march_panic, static
@@ -2294,6 +2408,7 @@ static void *diag_frame_cell(const char *fn_name, size_t len) {
  * (reported as `main`, the March function it is) or a green-thread entry.
  * Stdlib frames are kept. */
 static void *diag_frames_list(void **pcs, int n) {
+    if (fn_table_usable()) return diag_frames_from_table(pcs, n);
 #ifdef MARCH_HAVE_EXECINFO
     Dl_info self_info;
     void *self_base = dladdr((void *)&march_diag_observe, &self_info)
@@ -2332,25 +2447,29 @@ static void *diag_frames_list(void **pcs, int n) {
 #endif
 }
 
-/* Diagnostics.DiagCrash(kind, message, frames, pid, supervised, context):
- * a fresh cell holding its own reference to each heap field ([message],
- * [frames] and [ctx] are borrowed). */
+/* Diagnostics.DiagCrash(kind, message, frames, pid, supervised, context,
+ * site_file, site_line): a fresh cell holding its own reference to each
+ * heap field ([message], [frames], [ctx] and [site_file] are borrowed). */
 static void *diag_crash_cell(int kind, void *message, void *frames,
-                             int64_t pid, int supervised, void *ctx) {
-    void *cell = march_alloc(16 + 6 * 8);
+                             int64_t pid, int supervised, void *ctx,
+                             void *site_file, int64_t site_line) {
+    void *cell = march_alloc(16 + 8 * 8);
     void **fp = (void **)((char *)cell + 16);
     *(int64_t *)&fp[0] = kind;
-    march_incrc(message); fp[1] = message;
-    march_incrc(frames);  fp[2] = frames;
+    march_incrc(message);   fp[1] = message;
+    march_incrc(frames);    fp[2] = frames;
     *(int64_t *)&fp[3] = pid;
     *(int64_t *)&fp[4] = supervised;
-    march_incrc(ctx);     fp[5] = ctx;
+    march_incrc(ctx);       fp[5] = ctx;
+    march_incrc(site_file); fp[6] = site_file;
+    *(int64_t *)&fp[7] = site_line;
     return cell;
 }
 
 int64_t march_pid_index_of(void *actor);
 
-static void diag_dispatch(int kind, const char *msg, size_t msg_len) {
+static void diag_dispatch(int kind, const char *msg, size_t msg_len,
+                          void *site_file, int64_t site_line) {
     pthread_mutex_lock(&g_diag_mu);
     int64_t n = 0;
     for (diag_observer *e = g_diag_observers; e; e = e->next) n++;
@@ -2369,6 +2488,9 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len) {
     void *frames  = diag_frames_list(pcs, npc);
     void *message = march_string_lit(msg, (int64_t)msg_len);
     void *ctx     = march_diag_context_get();
+    /* "" and 0 when the panic did not come from a recorded call site. */
+    void *site    = site_line > 0 ? site_file : march_string_lit("", 0);
+    if (site_line > 0) march_incrc(site);
     march_proc *cp = march_sched_current();
     int64_t pid = (cp && cp->actor) ? march_pid_index_of(cp->actor) : -1;
     int supervised = kind == MARCH_DIAG_KIND_ACTOR_CRASHED;
@@ -2384,7 +2506,8 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len) {
         jmp_buf jb;
         *jslot = &jb;
         if (setjmp(jb) == 0) {
-            void *report = diag_crash_cell(kind, message, frames, pid, supervised, ctx);
+            void *report = diag_crash_cell(kind, message, frames, pid, supervised, ctx,
+                                           site, site_line > 0 ? site_line : 0);
             void *cb = cbs[k];
             void *(*fn)(void *, void *) = *(void *(**)(void *, void *))((char *)cb + 16);
             (void)fn(cb, report);   /* consumes cb's reference and report */
@@ -2398,6 +2521,7 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len) {
     march_decrc(frames);
     march_decrc(message);
     march_decrc(ctx);
+    march_decrc(site);
     free(cbs);
 }
 
@@ -2407,16 +2531,24 @@ void march_panic(void *s) {
      * panic raised by a crash observer itself, outside any try_finally of
      * the observer's own, ends that observer and nothing else. */
     {
-        jmp_buf **dj = diag_jmp_slot();
-        if (*dj && !march_test_in_test) longjmp(**dj, 1);
+        /* Every panic consumes the recorded site and the re-raise flag,
+         * reported or not, an observer's own included, so neither is left
+         * for the next panic.  (An observer panicking inside its own
+         * try_finally re-raises onto diag_jmp below; taking the flag after
+         * that longjmp left it set, and the next real crash went
+         * unreported.) */
+        void *site_file = NULL;
+        int64_t site_line = diag_take_site(&site_file);
         int reraise = march_panic_reraise;
         march_panic_reraise = 0;
+        jmp_buf **dj = diag_jmp_slot();
+        if (*dj && !march_test_in_test) longjmp(**dj, 1);
         if (!*dj && !reraise && !march_panic_handled
             && atomic_load_explicit(&g_diag_count, memory_order_relaxed) > 0) {
             march_proc *cp = march_sched_current();
             diag_dispatch(cp && cp->crash_jmp ? MARCH_DIAG_KIND_ACTOR_CRASHED
                                               : MARCH_DIAG_KIND_PANIC,
-                          ms->data, (size_t)ms->len);
+                          ms->data, (size_t)ms->len, site_file, site_line);
         }
     }
     /* In test mode, capture the message and longjmp back to the test runner

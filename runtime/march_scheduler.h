@@ -460,6 +460,12 @@ typedef struct march_proc {
      * the proc for the crash_jmp migration reason. */
     void                      *diag_ctx;
     jmp_buf                   *diag_jmp;
+    /* The source site of the panic call about to run (march_panic_site,
+     * emitted by lowering right before a direct panic/todo/unreachable
+     * call): a March String literal (never freed) and its line, 0 = none.
+     * Read and cleared by the next march_panic on this proc. */
+    void                      *diag_site_file;
+    int64_t                    diag_site_line;
     _Atomic int                cancel_requested;
     /* The unified epoch model (D12/D33; specs/plans/2026-09-21-distributed-
      * authority-and-deploys-plan.md, II.4.1).  The code epoch this unit of

@@ -12,11 +12,17 @@
 --   * a panic handled by __try_call is not reported, and with_context
 --     restores the outer context on the way out of both return and panic;
 --   * an unhandled panic in main is reported as Panic and the process still
---     exits 1 with its usual stderr.
+--     exits 1 with its usual stderr, even after an observer panicked inside
+--     its own with_context during an earlier crash (its re-raise once left a
+--     flag set that silenced the next report);
+--   * the location is the panic or todo call, compiled as interpreted.
 --
--- The backtrace check is backend-neutral: interpreted frames always name
--- `boom`; compiled frames are native and named from the symbol table, which
--- on Linux a non-hot-reload build does not export, so there it may be empty.
+-- Location and backtrace, on both backends and every platform: the location
+-- is the panic call (line 32, recorded by lowering's __panic_site compiled);
+-- every frame has a file and a line, and one is in this file.  Frame NAMES
+-- differ (interpreted frames name each call; compiled frames come from the
+-- program's function table, where LLVM may have inlined `boom`), so they are
+-- not compared.
 mod Main do
   needs IO
   needs IO.Console
@@ -29,6 +35,11 @@ mod Main do
   actor Fragile do
     state { handled : Int }
     init  { handled: 0 }
+    on Later() do
+      let _ : Int = todo("later")
+      state
+    end
+
     on Poison() do
       let _ = Diagnostics.with_context([("request_id", Diagnostics.DStr("r-42"))],
         fn -> Diagnostics.with_context([("attempt", Diagnostics.DInt(2))], fn -> boom(3)))
@@ -63,23 +74,24 @@ mod Main do
       end)
   end
 
-  fn names_boom(fs : List(Diagnostics.StackFrame)) : Bool do
-    List.any(fs, fn f -> f.name == "boom")
+  fn in_fixture(file : String) : Bool do
+    String.ends_with(file, "diagnostics_crash_observers.march")
   end
 
-  -- Interpreted, the frames name `boom` and the location is its panic line;
-  -- compiled, frames are native (no file or line yet, so no location).
   fn backtrace_ok(r : Diagnostics.CrashReport) : Bool do
-    let has_frames = match r.backtrace do
-      Nil -> false
-      Cons(_, _) -> true
+    let location_ok = match r.location do
+      -- The lines of boom's panic(...) and Fragile.Later's todo(...): keep
+      -- them in step if this file's lines move.
+      Some(loc) -> in_fixture(loc.file) && loc.line == (if r.message == "later" do 39 else 32 end)
+      None -> false
     end
-    match r.location do
-    Some(loc) ->
-      String.ends_with(loc.file, "diagnostics_crash_observers.march") && loc.line == 26
-        && names_boom(r.backtrace)
-    None -> has_frames || System.os() != "macos"
-    end
+    -- Fragile.Later's body may be inlined into the actor's dispatch
+    -- function compiled, which has no source span: its frames can be empty.
+    let well_formed =
+      List.all(r.backtrace, fn f -> f.name != "" && f.file != "" && f.line > 0)
+    let frames_ok = well_formed
+      && (r.message == "later" || List.any(r.backtrace, fn f -> in_fixture(f.file)))
+    location_ok && frames_ok
   end
 
   fn describe(tag : String, r : Diagnostics.CrashReport) : Unit do
@@ -140,6 +152,10 @@ mod Main do
     send(Actor.pid_from_int(intro, victim), Poison())
     run_until_idle()
     println("restarted: " ++ bool_to_string(current_child(boss) != victim))
+    -- todo(...) goes through the prelude's todo wrapper compiled: its site
+    -- survives the call.
+    send(Actor.pid_from_int(intro, current_child(boss)), Later())
+    run_until_idle()
     println("context in main after the crash: " ++ ctx_text(Diagnostics.current_context()))
 
     Diagnostics.unobserve(c)

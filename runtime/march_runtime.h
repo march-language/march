@@ -1165,6 +1165,8 @@ void   *march_diag_unobserve(int64_t id);
 void   *march_diag_context_get(void);
 void   *march_diag_context_set(void *ctx);
 void    march_diag_proc_exit(void *ctx);
+void   *march_panic_site(void *file, int64_t line);
+void    march_fn_table_register(const void *table, const int64_t *len, void *text_end);
 
 /* Test harness — used by --test compiled binaries. */
 extern jmp_buf  march_test_jmp_buf;
