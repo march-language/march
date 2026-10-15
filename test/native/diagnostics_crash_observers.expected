@@ -6,5 +6,7 @@ A: actor_crashed "poisoned at depth" supervised=true actor=true context=[attempt
 C: actor_crashed "poisoned at depth" supervised=true actor=true context=[attempt=2][request_id=r-42] backtrace_ok=true
 E: actor_crashed "poisoned at depth" supervised=true actor=true context=[attempt=2][request_id=r-42] backtrace_ok=true
 restarted: true
+A: actor_crashed "later" supervised=true actor=true context= backtrace_ok=true
+E: actor_crashed "later" supervised=true actor=true context= backtrace_ok=true
 context in main after the crash: 
 E: panic "poisoned at depth" supervised=false actor=false context=[job=nightly] backtrace_ok=true

@@ -20,6 +20,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Compiled crash reports say where the panic was called, and name every frame.**
+  A `Diagnostics` crash report's `location` is now the exact file and line of the
+  `panic`, `todo` or `unreachable` call in compiled programs, as it already was
+  interpreted. Compiled backtrace frames now give each function's source name (no
+  more `$lam0__…`), file and definition line, on Linux as well as macOS: the
+  compiler records the program's functions in a small table instead of relying on
+  the symbols the executable exports.
+
 - **"Try it" on 33 stdlib pages, and documentation examples are now checked.**
   String, Json, Uri, Crypto, Regex, Task, Vault and 12 more modules have runnable
   examples (249 "Try it" examples in all, up from 107), and every one is verified
@@ -63,6 +71,12 @@ git log is authoritative for exact commits.
   **reset**, which also forgets it. The cookbook sidebar previously had neither.
 
 ### Changed
+- **The stdlib API reference loads much faster.** Every page inlined a sidebar listing
+  all 2,964 entries of every module, and fetched the whole search index on load, so a
+  page was about 400 KB plus a 424 KB index download. The sidebar now lists the modules
+  and expands only the one you are reading, and the search index loads when you first
+  open search: a page is now 60-95 KB (8.3 MB for all 133 pages, down from 50.5 MB).
+
 - A compiled program whose scheduler is about to resume a corrupt or freed
   green-thread context now stops with a `march_sched[BUG]: dispatch of pid N
   ... with a context it did not save` line (the pid, the saved stack pointer
@@ -81,6 +95,12 @@ git log is authoritative for exact commits.
   the same shape still can't be told apart, since a pid's type is its actor's state.
   The same error catches two actors sharing a handler name, where a bare name picks
   one of them and compiled and interpreted code used to disagree.
+- **A session that forms just as a peer node dies no longer outlives it.** For a
+  moment after a node's connection closed, the cluster node still handed out that
+  connection to sessions being set up. A session that linked to it in that window
+  never heard that the node was gone and waited for that link's end for ever,
+  so a SIGTERM drain on its node ran to its hard deadline and exited 1. A dead
+  connection is now no longer handed out from the moment it closes.
 
 - **`march --jit` names the program's own atoms.** `to_string(:zz)` printed
   `:<atom>` under `--jit` (both the ORC and clang backends) for any atom the stdlib

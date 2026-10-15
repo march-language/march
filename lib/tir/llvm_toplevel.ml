@@ -1375,6 +1375,118 @@ let check4_findings ctx (m : Tir.tir_module) : (string * string) list =
          ~tag_of:(fun key -> Option.map (fun e -> e.Llvm_ctx.ce_tag)
                      (Hashtbl.find_opt ctx.Llvm_ctx.ctor_info key)))
 
+(* ── The function table (Diagnostics crash-report frames) ───────────────
+   A compiled program's main registers a table of every function its module
+   defines: readable source name, file, definition line and address
+   (march_runtime.c's march_fn_table_register).  A crash report maps each
+   return address on the failing stack to the entry at or below it, so its
+   frames are named from the program itself: on any platform (dladdr sees only
+   exported symbols, which a Linux executable does not export), with source
+   names rather than mangled ones, and with anything outside the table known
+   to be runtime code.  @march_text_end, defined last, bounds the last entry:
+   the module's functions are laid out in definition order in one object.
+   A function with no source span (drop glue, closure wrappers, actor
+   dispatch) is an entry with no name, so its frames are skipped but still
+   bounded.  alwaysinline helpers are left out: listing one would keep its
+   body alive after it was inlined everywhere. *)
+
+(* The defined function names of [ir], in definition order, with whether the
+   definition is alwaysinline. *)
+let fn_table_defines (ir : string) : (string * bool) list =
+  let acc = ref [] in
+  List.iter (fun line ->
+      if String.length line > 7 && String.sub line 0 7 = "define " then
+        match String.index_opt line '@' with
+        | None -> ()
+        | Some at ->
+          let rest = String.sub line (at + 1) (String.length line - at - 1) in
+          let name =
+            if rest <> "" && rest.[0] = '"' then
+              (match String.index_from_opt rest 1 '"' with
+               | Some q -> Some (String.sub rest 1 (q - 1))
+               | None -> None)
+            else
+              (match String.index_opt rest '(' with
+               | Some p -> Some (String.sub rest 0 p)
+               | None -> None)
+          in
+          (match name with
+           | Some n ->
+             let contains sub =
+               let ls = String.length line and lsub = String.length sub in
+               let rec go i = i + lsub <= ls && (String.sub line i lsub = sub || go (i + 1)) in
+               go 0 in
+             acc := (n, contains "alwaysinline") :: !acc
+           | None -> ()))
+    (String.split_on_char '\n' ir);
+  List.rev !acc
+
+(* How a crash report names [fn_name]: the source function, without the
+   specialisation suffixes passes add ("List.append$dps$...", "f$Int"), and
+   a lambda as "<host>.{fn}". *)
+let fn_table_display (fn_name : string) : string =
+  let base n = match String.index_opt n '$' with
+    | None | Some 0 -> n
+    | Some i -> String.sub n 0 i in
+  if fn_name <> "" && fn_name.[0] = '$' then
+    match Provenance.find fn_name with
+    | Some { Provenance.host = Some h; _ } -> base h ^ ".{fn}"
+    | _ -> "{fn}"
+  else base fn_name
+
+(* The table's globals and the end marker, for the functions [ir] defines;
+   [tir_name_of] maps an LLVM name back to its TIR function. *)
+let fn_table_block (ir : string) (tir_name_of : string -> string option) : string =
+  let b = Buffer.create 4096 in
+  let strings : (string, string) Hashtbl.t = Hashtbl.create 64 in
+  let n_str = ref 0 in
+  let str s =
+    match Hashtbl.find_opt strings s with
+    | Some g -> g
+    | None ->
+      let g = Printf.sprintf "@.fnt.s%d" !n_str in
+      incr n_str;
+      Hashtbl.replace strings s g;
+      Printf.bprintf b "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+        g (String.length s + 1) (Llvm_ctx.llvm_escape_string s);
+      g
+  in
+  let ref_of n =
+    if String.exists (fun c -> not (Char.code c < 128 &&
+                                    (c = '_' || c = '.' || c = '$' || c = '-'
+                                     || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                                     || (c >= '0' && c <= '9')))) n
+    then Printf.sprintf "@\"%s\"" n else "@" ^ n in
+  let entries =
+    List.filter_map (fun (n, inl) ->
+        if inl || n = "main" then None
+        else
+          let info = match tir_name_of n with
+            | None -> None
+            | Some t ->
+              (match Provenance.effective_span t with
+               | Some sp when sp.March_ast.Ast.start_line > 0 ->
+                 Some (fn_table_display t, Provenance.display_file sp.March_ast.Ast.file,
+                       sp.March_ast.Ast.start_line)
+               | _ -> None) in
+          let fields = match info with
+            | Some (disp, file, line) ->
+              Printf.sprintf "ptr %s, ptr %s, i64 %d" (str disp) (str file) line
+            | None -> "ptr null, ptr null, i64 0" in
+          (* The function pointer last: "ptr @f," is how a hot-reload slot
+             publish reads, and IR checks look for exactly that. *)
+          Some (Printf.sprintf "{ ptr, ptr, i64, ptr } { %s, ptr %s }" fields (ref_of n)))
+      (fn_table_defines ir)
+  in
+  Printf.bprintf b
+    "@march_fn_table = private constant [%d x { ptr, ptr, i64, ptr }] [\n  %s\n]\n\
+     @march_fn_table_len = private constant i64 %d\n\
+     define void @march_text_end() noinline nounwind {\nentry:\n  ret void\n}\n"
+    (List.length entries) (String.concat ",\n  " entries) (List.length entries);
+  Buffer.contents b
+
+let fn_table_wanted = ref false
+
 let emit_module ~emit_expr
     ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     ?(hot_reload=None) ?(impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
@@ -1393,6 +1505,7 @@ let emit_module ~emit_expr
   (* Check 4 reads the recorded decisions back after emission. *)
   Llvm_ctx.repr_audit_forced := Tir_verify.enabled ();
   dbg_reset ();
+  fn_table_wanted := false;
   (* Capability markers: start each module emission with a clean slate so
      symbols recorded by a previous emission in the same process (tests,
      forge multi-entry checks) cannot leak into this module's markers. *)
@@ -2107,19 +2220,31 @@ let emit_module ~emit_expr
                     call void @%s(%s)\n\
                     ret void\n}\n" mangled erased_args)
           in
+          (* The function table (see fn_table_block): native targets only,
+             the wasm runtime has no crash observers. *)
+          let fn_table_setup =
+            if is_wasm_target target then ""
+            else begin
+              fn_table_wanted := true;
+              "  call void @march_fn_table_register(ptr @march_fn_table, \
+               ptr @march_fn_table_len, ptr @march_text_end)\n"
+            end in
           Buffer.add_string out
             (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
              declare void @march_spawn_main%s(ptr %%fn)\n\
-             %s\
+             %s%s\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
                call void @march_clo_drops_register()\n\
+             %s\
                call void @march_remote_init()\n\
              %s%s\
                call void @march_spawn_main%s(ptr %s)\n\
                call void @march_run_scheduler()\n\
                ret i32 0\n}\n" (if !pin_main then "_pinned" else "")
-                thunk_def hr_setup stub_setup
+                (if fn_table_setup = "" then ""
+                 else "declare void @march_fn_table_register(ptr, ptr, ptr)\n")
+                thunk_def fn_table_setup hr_setup stub_setup
                 (if !pin_main then "_pinned" else "") spawn_target);
           Buffer.add_string out
             (clo_drop_registration ~rec_drops:(Llvm_data.shape_drop_registrations ctx) m)
@@ -2286,6 +2411,14 @@ let emit_module ~emit_expr
            \"llvm.metadata\"\n"
           (List.length refs) (String.concat ", " refs)));
 
+  if !fn_table_wanted then begin
+    let tir_names : (string, string) Hashtbl.t = Hashtbl.create 256 in
+    List.iter (fun (fn : Tir.fn_def) ->
+        Hashtbl.replace tir_names (Llvm_builtins.mangle_extern fn.Tir.fn_name) fn.Tir.fn_name)
+      m.Tir.tm_fns;
+    Buffer.add_string out
+      (fn_table_block (Buffer.contents out) (Hashtbl.find_opt tir_names))
+  end;
   Llvm_ctx.repr_audit_report ();
   (if Tir_verify.enabled () then
      match check4_findings ctx m with
