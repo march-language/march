@@ -2154,6 +2154,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff cap_mock/cap_mock_io.expected cap_mock_io.out)))
 
+; ── #708: an interface impl reached through a generic receiver ───────────
+; The impl's body performs an interceptable operation (IO.Clock), but a call
+; through the interface names the METHOD until Mono resolves it, so the pass
+; must leave the impl un-elaborated or the call passes one argument too few
+; (SIGSEGV under --test). Generic helper, default method and direct call; the
+; .expected is the interpreter's output.
+(rule
+ (targets cap_mock_iface_generic_bin cap_mock_iface_generic.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file cap_mock/cap_mock_iface_generic.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o cap_mock_iface_generic_bin
+        cap_mock/cap_mock_iface_generic.march)
+   (with-stdout-to cap_mock_iface_generic.out (system "./cap_mock_iface_generic_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff cap_mock/cap_mock_iface_generic.expected cap_mock_iface_generic.out)))
+
 ; ── Session transport swapped for deterministic in-process replay ─────────
 ; The payoff case of the capability-dictionary design: the `Stream` protocol's
 ; two endpoints (send by role, suspend with a handler, close -- what a
@@ -2840,6 +2862,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/record_field_tail_projection.expected native_record_field_tail_projection.out)))
+
+; ── #705: an actor handler ending in `result.new_state` (a field projected from
+; a helper's result record) read the new state after the record was released,
+; so compiled code saw the old state on every message. Both backends diffed
+; against ONE .expected, the interpreter's.
+(rule
+ (targets native_actor_handler_tail_field_projection native_actor_handler_tail_field_projection.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_handler_tail_field_projection.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_actor_handler_tail_field_projection
+        native/actor_handler_tail_field_projection.march)
+   (with-stdout-to native_actor_handler_tail_field_projection.out
+        (system "./native_actor_handler_tail_field_projection")))))
+
+(rule
+ (targets interp_actor_handler_tail_field_projection.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_handler_tail_field_projection.march))
+ (action
+  (with-stdout-to interp_actor_handler_tail_field_projection.out
+    (run %{exe:../bin/main.exe} native/actor_handler_tail_field_projection.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_handler_tail_field_projection.expected native_actor_handler_tail_field_projection.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_handler_tail_field_projection.expected interp_actor_handler_tail_field_projection.out)))
 
 (rule
  (alias runtest)

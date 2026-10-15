@@ -73,6 +73,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`forge test` no longer segfaults calling an interface impl through a generic
+  helper.** Under `--test`, an `impl` method that read the clock, the console or any
+  other mockable operation was compiled with a hidden capability parameter, but a
+  call reaching it through the interface from generic code didn't pass one, so every
+  argument shifted by one (#708). Such impls are now compiled without the hidden
+  parameter; an operation inside one runs on the real capability rather than a
+  `with_cap` mock.
+
 - **Security: `Uri.merge_strict` now rejects every path traversal above the root.**
   The guard was off by one: the empty segment before a path's leading `/` absorbed one
   `..`, so against a base path `/a/b/c` the reference `../../../etc/passwd` was accepted
