@@ -1,0 +1,41 @@
+mod Main do
+  -- The `send_wrong_actor` check (reject/t323) must not reject a correct send
+  -- it cannot see through, or one whose owner is right (two actors with
+  -- different state, each sent its own messages):
+  --   * a pid whose type is still generic (a helper's unannotated parameter);
+  --   * a message built before the send and held in a variable;
+  --   * an actor sending to itself through `self`.
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do { state with n: state.n + k } end
+    on Again() do
+      send(self, Bump(1))
+      state
+    end
+  end
+
+  actor Logger do
+    state { lines : List(String) }
+    init { lines: Nil }
+    on Note(t : String) do { state with lines: Cons(t, state.lines) } end
+  end
+
+  fn poke(pid, msg) do
+    send(pid, msg)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let c = spawn(Counter)
+    send(c, Bump(1))
+    let m = Bump(2)
+    send(c, m)
+    poke(c, Again())
+    let lg = spawn(Logger)
+    send(lg, Note("x"))
+    poke(lg, Note("y"))
+    println("ok")
+  end
+end

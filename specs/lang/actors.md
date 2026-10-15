@@ -253,8 +253,17 @@ exactly analogous to the [no-per-module-type-namespace design point](https://git
 stdlib type) already declares is ambiguous: writing `send(counter, Ping(…))` when the
 stdlib also declares a `Ping` constructor is rejected (`Constructor \`Ping\` is defined by
 multiple types … Use a qualified form to disambiguate`). Pick message names unlikely to
-collide (e.g. `Increment`, `Poke`), or qualify. Two consequences of this design (the
-compiled wrong-actor-`send` misroute and the payload-typing rule) are documented in the
+collide (e.g. `Increment`, `Poke`). Two actors that both declare a handler of the same
+name are the sharp case: a bare name resolves to only one of them, and no qualified
+spelling selects an actor's message today, so rename one of the handlers.
+
+**A `send` is checked against the target, one side only.** When the pid's type shows
+its actor's state, a message of an actor with a different state is a compile error
+(`send_wrong_actor`): `send(b, Poke(1))`, with `Poke` a handler of an actor `A` and `b`
+spawned from `B`, is rejected. A pid's type is `Pid(state)`, and the state is a
+structural record, so the check cannot tell apart two actors whose states have the same
+shape; such a message still compiles and is dropped by the target at run time, on both
+backends. The details, and the payload-typing rule, are in the
 [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.4.
 
 **An actor declared in a nested module** is spawned and messaged from the parent by

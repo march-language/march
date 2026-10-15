@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: is a message for `A`
+mod Main do
+  -- Finding 19 (core-march-types.md §2.6.4): `send` never related the message
+  -- to the actor the pid belongs to, so `Poke`, a message of actor `A`, sent
+  -- to a pid spawned from actor `B` checked clean and was dropped at `B` at
+  -- run time (specs/todos/2026-10-12-send-message-not-checked-against-pid-actor.md).
+  -- The pid's type is `Pid({ s : String })`, and no actor handling `Poke` has
+  -- that state, so the send is now rejected (`send_wrong_actor`).
+  needs IO.Console
+
+  actor A do
+    state { n : Int }
+    init { n: 0 }
+    on Poke(k : Int) do { state with n: state.n + k } end
+  end
+
+  actor B do
+    state { s : String }
+    init { s: "" }
+    on Note(t : String) do { state with s: t } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let b = spawn(B)
+    send(b, Poke(1))
+  end
+end
