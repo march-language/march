@@ -1,0 +1,8 @@
+String hole: <p>7</p> bytes=108894 flat: true
+Int hole: <p>7</p> bytes=108894 flat: true
+nested ~H hole: <p><b>7</b></p> bytes=178894 flat: true
+IOList in attribute: <a title="&lt;b&gt;7&lt;/b&gt;">x</a> bytes=398894 flat: true
+ADT hole: <p>Pt(7, 7)</p> bytes=207788 flat: true
+TrustedHtml hole: <p>7</p> bytes=108894 flat: true
+TrustedHtml in attribute: <a title="7">x</a> bytes=208894 flat: true
+Html.tag attribute: <a title="7"></a> bytes=198894 flat: true
