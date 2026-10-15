@@ -257,6 +257,17 @@ let extern_borrow_table : (string * bool list) list = [
      Bytes.from_list runs on every call — ~430 B per 3-byte Bytes.from_list,
      the bulk of an idle conduit worker's ~5 MB/min growth via depot's
      Postgres wire encoder/decoder. *)
+  (* The `~H` escapers only read the hole's value: march_html_escape_ctx,
+     march_html_auto_escape and their _dyn forms always return a fresh String
+     and neither store nor free their argument.  Unlisted (they are not
+     [in_is_builtin] rows, so test_builtin_borrow_classification never asked)
+     they defaulted to OWNED, and every dynamic hole of every template leaked
+     the value it interpolated -- a nested partial its whole IOList.  The
+     emitter's arms (Llvm_emit_html) are written for a borrowed argument: the
+     trusted pass-through takes its own reference to the String it hands
+     back.  Guard: test/native/h_sigil_hole_leak_probe.march. *)
+  ("html_auto_escape",     [true]);
+  ("html_escape_ctx",      [true; true]);
   ("string_chars",         [true]);
   ("string_from_chars",    [true]);
   (* march_tcp_send_all (march_http.c) writes the String's bytes to the
@@ -629,6 +640,11 @@ let extern_owned_builtins : string list = [
        appender registry (march_logger_register_appender), releasing both
        when the entry is replaced, removed or cleared. *)
     "logger_register_appender";
+    (* diag_observe keeps its callback in the crash-observer registry until
+       diag_unobserve; diag_context_set keeps the context list on the proc,
+       releasing the one it replaces (march_runtime.c, "Diagnostics: crash
+       observers"). *)
+    "diag_observe"; "diag_context_set";
     (* actor_inspect_store keeps its String in the proc's inspect_out slot
        until the actor loop sends it as the reply (observe plan R4). *)
     "actor_inspect_store";

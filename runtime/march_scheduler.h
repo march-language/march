@@ -451,6 +451,15 @@ typedef struct march_proc {
      * cancelled, so a task computing without receiving no longer runs on.
      * Lives on the proc for the same migration reason as crash_jmp. */
     jmp_buf                   *task_jmp;
+    /* Diagnostics (stdlib/diagnostics.march; march_runtime.c's "Diagnostics:
+     * crash observers").  diag_ctx is this green thread's crash context, a
+     * March List((String, DiagnosticValue)) the proc owns one reference to
+     * (NULL = empty; released at the reap through march_diag_proc_exit).
+     * diag_jmp is the landing for a panic an observer raises while this proc
+     * dispatches a crash report (NULL when not dispatching).  Both live on
+     * the proc for the crash_jmp migration reason. */
+    void                      *diag_ctx;
+    jmp_buf                   *diag_jmp;
     _Atomic int                cancel_requested;
     /* The unified epoch model (D12/D33; specs/plans/2026-09-21-distributed-
      * authority-and-deploys-plan.md, II.4.1).  The code epoch this unit of

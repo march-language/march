@@ -453,7 +453,7 @@ Two consequences of the tag-selects-the-handler rule:
 There is no `Call` wrapper constructor, and the call handler takes exactly one argument
 (the reply channel).
 
-**The timeout is real on both backends.** Compiled, the caller's green thread parks on
+**The timeout is a deadline on both backends, but only the compiled one stops waiting.** Compiled, the caller's green thread parks on
 the scheduler with a deadline (`march_actor_call`, `runtime/march_runtime.c`) rather
 than busy-polling, and wakes on reply delivery or at the deadline. Every reply is
 wrapped in an envelope carrying the correlation id issued for that specific call, and
@@ -464,6 +464,14 @@ way: it tag-routes the sentinel to the handler at the same ctor index and binds 
 caller as the handler's single argument (`lib/eval/eval.ml` `actor_call`). Both are
 pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. (See
 [Interpreted vs compiled](#interpreted-vs-compiled) for the history.)
+
+The interpreter cannot preempt a running handler, so it runs the handler to completion
+first and then compares the reply's timestamp with the deadline. A reply that arrived
+late is discarded and the call returns `Err`, exactly as compiled, but the caller is
+not released early: a handler that takes ten seconds blocks an `Actor.call` made with
+`timeout_ms = 1` for ten seconds under the interpreter, and for about one millisecond
+compiled (`lib/eval/eval_builtins.ml` `actor_call`; the result is pinned by
+`test/native/actor_call_late_reply`, elapsed time is not).
 
 **Calling from inside a handler.** A handler may itself `Actor.call` another actor. While
 it waits, the calling actor handles nothing else: messages sent to it in the meantime
@@ -1199,9 +1207,11 @@ scheduler interleaving; this is mechanically pinned by the golden conformance co
 (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled; see the
 [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.5).
 The **`Actor.call` plane** is backend-identical: both backends tag-route the zero-arg
-sentinel positionally to the handler at its ctor index, and both enforce `timeout_ms`
-(compiled via a deadline-bounded park in `march_actor_call`, `runtime/march_runtime.c`;
-`timeout_ms <= 0` means wait indefinitely); pinned by `test/native/actor_counter` and
+sentinel positionally to the handler at its ctor index, and both report a reply later
+than `timeout_ms` as `Err` (compiled via a deadline-bounded park in `march_actor_call`,
+`runtime/march_runtime.c`, which also stops the caller waiting at the deadline; the
+interpreter returns only after the handler has finished; `timeout_ms <= 0` means wait
+indefinitely); pinned by `test/native/actor_counter` and
 `test/native/actor_call_timeout`. The **capability / dead-`send` plane** (`get_cap`,
 `send_checked`, `revoke_cap`, `is_cap_valid`, plain `send` to a *dead* pid) is an exact
 byte match (`core-march.md` §4.10.6), and so is the **supervision / external state
@@ -1214,7 +1224,8 @@ plane: spawn-time child `init`, crash isolation, all three restart strategies;
 - the interpreter cannot park a sender, so mailbox policy `3` (`block_sender`) is
   compiled-only and refused by the interpreter;
 - the interpreter cannot preempt running code, so an `on_stop` compute loop runs to
-  completion there;
+  completion there, and an `Actor.call` returns `Err` for a late reply only after the
+  slow handler has finished instead of at `timeout_ms`;
 - the `app` / `Supervisor.spec` / `worker` DSL is interpreter-only; compiled programs
   use `supervise`;
 - `Scheduler` counters other than the live actor count read `0` under the interpreter.

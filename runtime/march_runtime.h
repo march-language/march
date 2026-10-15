@@ -237,6 +237,7 @@ void   *march_logger_register_appender(void *name, void *cb);
 void    march_set_atom_namer(void *fn);
 void    march_unset_atom_namer(void *fn);
 void   *march_atom_name_registered(int64_t h);
+int64_t march_atom_name_cstr(int64_t h, char *buf, int64_t cap);
 void   *march_logger_remove_appender(void *name);
 void   *march_logger_clear_appenders(void);
 void   *march_logger_appender_names(void);
@@ -1158,10 +1159,21 @@ void   *march_mpst_send(void *ep, void *target_role_str, void *val);
 void   *march_mpst_recv(void *ep, void *source_role_str);
 int64_t march_mpst_close(void *ep);
 
+/* Diagnostics crash observers (stdlib/diagnostics.march). */
+int64_t march_diag_observe(void *cb);
+void   *march_diag_unobserve(int64_t id);
+void   *march_diag_context_get(void);
+void   *march_diag_context_set(void *ctx);
+void    march_diag_proc_exit(void *ctx);
+
 /* Test harness — used by --test compiled binaries. */
 extern jmp_buf  march_test_jmp_buf;
 extern int      march_test_in_test;
 extern char     march_test_fail_buf[4096];
+/* Nonzero while a catcher that HANDLES a panic is active (the test runner,
+ * __try_call).  try_finally only intercepts and re-raises, so it leaves this
+ * alone: a panic under it still reaches the crash observers. */
+extern int      march_panic_handled;
 void    march_test_init(int32_t argc, char **argv);
 void    march_test_setup_all(void (*fn)(void));
 void    march_test_run(void (*fn)(void), const char *name, void (*setup)(void));

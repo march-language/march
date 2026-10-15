@@ -573,6 +573,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_remove_appender(ptr %name)" };
   { march_name = "logger_clear_appenders"; c_name = Some "march_logger_clear_appenders"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_clear_appenders()" };
+  (* Diagnostics crash observers (march_runtime.c's "Diagnostics: crash
+     observers"; stdlib/diagnostics.march). *)
+  { march_name = "diag_observe"; c_name = Some "march_diag_observe"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_diag_observe(ptr %cb)" };
+  { march_name = "diag_unobserve"; c_name = Some "march_diag_unobserve"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_diag_unobserve(i64 %id)" };
+  { march_name = "diag_context_get"; c_name = Some "march_diag_context_get"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_diag_context_get()" };
+  { march_name = "diag_context_set"; c_name = Some "march_diag_context_set"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_diag_context_set(ptr %ctx)" };
   { march_name = "logger_appender_names"; c_name = Some "march_logger_appender_names"; ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_appender_names()" };
   { march_name = "logger_set_module_level"; c_name = Some "march_logger_set_module_level"; ret_ty = Some Tir.TUnit;
@@ -1663,6 +1673,11 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_logger_set_module_level";
   PDeclare "march_logger_clear_module_level";
   PDeclare "march_logger_module_level";
+  PComment "; Diagnostics crash observers";
+  PDeclare "march_diag_observe";
+  PDeclare "march_diag_unobserve";
+  PDeclare "march_diag_context_get";
+  PDeclare "march_diag_context_set";
   PComment "; REPL JIT persistent variable slot table (march_extras.c)";
   PDeclare "march_repl_get";
   PDeclare "march_repl_set";

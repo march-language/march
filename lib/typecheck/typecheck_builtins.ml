@@ -1342,6 +1342,13 @@ let builtin_bindings : (string * scheme) list =
     ("logger_register_appender",
        poly1 (fun a -> TArrow (t_string, TArrow (a, t_unit))));
     ("logger_remove_appender",   Mono (TArrow (t_string, t_unit)));
+    (* Diagnostics crash observers (stdlib/diagnostics.march).  Polymorphic
+       like the appender pipeline above: Diagnostics.DiagCrash and the
+       context's DiagnosticValue are stdlib types the call sites fix. *)
+    ("diag_observe",     poly1 (fun a -> TArrow (TArrow (a, t_unit), t_int)));
+    ("diag_unobserve",   Mono (TArrow (t_int, t_unit)));
+    ("diag_context_get", poly1 (fun a -> a));
+    ("diag_context_set", poly1 (fun a -> TArrow (a, t_unit)));
     ("logger_clear_appenders",   Mono t_unit);
     ("logger_appender_names",    Mono (t_list t_string));
     ("logger_dispatch",

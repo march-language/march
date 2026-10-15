@@ -137,3 +137,19 @@ CAMLprim value march_read_march_string(value v_ptr) {
     memcpy(Bytes_val(result), base + 24, (size_t)len);
     CAMLreturn(result);
 }
+
+/* Name an atom hash through the runtime's march_atom_name_cstr (passed as
+   [v_fptr], dlsym'd from the runtime .so): Some ":name", or None when no
+   registered atom table knows the hash. */
+CAMLprim value march_call_atom_name(value v_fptr, value v_hash) {
+    CAMLparam2(v_fptr, v_hash);
+    CAMLlocal2(name, result);
+    int64_t (*fn)(int64_t, char *, int64_t) =
+        (int64_t (*)(int64_t, char *, int64_t))Nativeint_val(v_fptr);
+    char buf[256];
+    int64_t n = fn(Int64_val(v_hash), buf, (int64_t)sizeof buf);
+    if (n < 0) CAMLreturn(Val_none);
+    name = caml_alloc_initialized_string((mlsize_t)n, buf);
+    result = caml_alloc_some(name);
+    CAMLreturn(result);
+}

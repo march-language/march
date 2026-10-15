@@ -484,6 +484,13 @@ and repr_of (t : table) (ty0 : Tir.ty) : repr =
 and payload_needs_tag (t : table) (ty : Tir.ty) : bool =
   match ty with
   | Tir.TInt | Tir.TBool -> true
+  (* An atom is an i64 hash, and [Llvm_ctx.coerce] tags it on its way into a
+     ptr slot like any i64.  Until 2026-10-14 this fell to the TCon arm below
+     ([repr_of] says Boxed for a name with no variant) and answered false, so
+     an Option(Atom) niche decoded with tagged=false: `Some(x)` bound the
+     TAGGED word, `x == :a` was false compiled, `to_string` printed
+     `Some(:<atom>)`, and the REPL printer read the word as a heap cell. *)
+  | Tir.TCon ("Atom", []) -> true
   | Tir.TCon _ ->
     (match repr_of t ty with
      | Newtype inner -> payload_needs_tag t inner

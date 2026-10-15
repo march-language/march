@@ -44,6 +44,7 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "Array",
+    "Option",
     "Queue"
    ]
   },
@@ -332,7 +333,8 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "Bytes",
-    "IO"
+    "IO",
+    "Result"
    ]
   },
   "Csv": {
@@ -379,6 +381,13 @@ window.marchModuleIndex = {
    "uses": [
     "Actor",
     "Json",
+    "List"
+   ]
+  },
+  "Diagnostics": {
+   "file": "diagnostics.march",
+   "unavailable": null,
+   "uses": [
     "List"
    ]
   },
@@ -1074,7 +1083,8 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "Bytes",
-    "List"
+    "List",
+    "Option"
    ]
   },
   "Swim": {
@@ -1181,7 +1191,8 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "Bytes",
-    "IO"
+    "IO",
+    "Result"
    ]
   },
   "Uri": {
@@ -1194,7 +1205,8 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "IO",
-    "List"
+    "List",
+    "Option"
    ]
   },
   "VectorClock": {

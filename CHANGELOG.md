@@ -20,6 +20,27 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **"Try it" on 33 stdlib pages, and documentation examples are now checked.**
+  String, Json, Uri, Crypto, Regex, Task, Vault and 12 more modules have runnable
+  examples (249 "Try it" examples in all, up from 107), and every one is verified
+  against both the native REPL and the in-browser REPL in CI, so a documented result
+  that drifts from the real one fails the build. Converting them corrected dozens of
+  wrong examples (for instance `String.split(s, "")` splits into bytes, not "returns
+  the whole string"). Actor's module example is now a complete program you can run.
+  The browser REPL now accepts `|>` pipes and a `main` that takes `Cap(IO)`.
+
+- **`Diagnostics`: observe crashes the runtime owns.** `Diagnostics.observe_crashes`
+  registers a callback that receives a `CrashReport` (kind, message, backtrace, the
+  failing actor, and context) for every panic nothing handles, in an actor or in
+  `main`, before the supervisor restarts the actor or the process exits.
+  `Diagnostics.with_context` attaches request or job metadata that the report
+  carries even though the panic unwound past it. Observers run in registration
+  order. One that panics is skipped without changing the outcome, and a panic caught
+  by `__try_call` or a test is not reported. Interpreted backtraces have file and
+  line; compiled ones name the functions on macOS (Linux needs a later change), with
+  no line yet. It is vendor-neutral: an error-service integration such as Sentry
+  is a package built on top.
+
 - **"Try it" on the stdlib API reference.** On march-lang.org/docs/stdlib, the
   examples of the modules that opt in (`-- doc: try` in the module header, or a
   ```` ```march try ```` fence) have a **Try it** button that opens a REPL sidebar and runs
@@ -56,6 +77,46 @@ git log is authoritative for exact commits.
   `:<atom>` under `--jit` (both the ORC and clang backends) for any atom the stdlib
   does not itself use; it now prints `:zz`, as the interpreter and `--compile` do.
 
+- **Security: `Uri.merge_strict` now rejects every path traversal above the root.**
+  The guard was off by one: the empty segment before a path's leading `/` absorbed one
+  `..`, so against a base path `/a/b/c` the reference `../../../etc/passwd` was accepted
+  as `Ok(...)` with path `etc/passwd`, and only four `..` were rejected. Any `..` with
+  nothing left to remove is now an `Err`, including one in an absolute-path reference
+  (`/../etc/passwd`). If you used `merge_strict` to vet untrusted relative references,
+  upgrade.
+- **`Uri.merge` keeps the leading `/` (RFC 3986 §5.2.4).** Surplus `..` segments turned
+  the path relative, so `../../../x` against `https://example.com/a/b/c` gave
+  `"https://example.comx"`; it now gives `"https://example.com/x"`. Merging also follows
+  §5.2 in the remaining cases: dot segments are removed from absolute-path and
+  network-path references too, a base with an empty path merges as `/` + the reference,
+  and a fragment-only reference keeps the base query.
+- **`Uri.parse` reads relative references per RFC 3986 §4.2.** A scheme-less string not
+  starting with `/` was split as `host/path` (`Uri.parse("../d")` had host `..`), and
+  `//other.com/x` put everything in the path. Now only `//` introduces an authority:
+  `../d` and `a/b` are paths, `//other.com/x` has host `other.com` and path `/x`, and
+  `Uri.to_string` writes such a reference back with its `//`. A `://` inside a path or
+  query (`/go?to=http://x`) no longer makes a scheme.
+- **The in-browser REPL no longer runs out of stack.** On the playground, cookbook and
+  "Try it" pages, `List.map` over more than about 200 elements, or a recursive function
+  a few hundred calls deep, failed with "Maximum call stack size exceeded". The
+  interpreter is now compiled so that recursion depth is limited by memory: a
+  100,000-element list or 100,000-deep recursion works. Call-heavy code runs about a
+  third slower, and the download is about 10% smaller. Also, defining a function after
+  `main` no longer runs `main` again.
+
+- **`march repl` no longer crashes on an atom inside a value.** `Err(:invalid)`,
+  `Some(:a)`, `[:a, :b]`, `(:a, 1)` and `UUID.parse("not-a-uuid")` killed the REPL with a
+  segmentation fault; they now print. A `None` inside a list or tuple prints as `None`
+  instead of `null`. Compiled programs had a related bug: an `Option(Atom)` built from a
+  literal atom (`Some(:a)`) did not match its own atom (`x == :a` was `false`) and printed
+  as `Some(:<atom>)`. Both are fixed.
+
+- **`march repl` prints negative numbers inside lists, options and tuples correctly.**
+  The native REPL showed `[-1, 2]` as `[9223372036854775807, 2]` (and likewise
+  `Some(-1)`, `(-1, 2)`, `NativeArray.to_list_i32(...)` with a negative element). Only
+  the printed result was wrong; the values themselves, `--compile` and the interpreter
+  were always right.
+
 - **The in-browser REPL downloads a tenth as much, and the Tetris playground compiles
   again.** The REPL on the playground, cookbook and landing pages loaded a 19.7 MB
   development build (2.1 MB compressed); it is now a 1.9 MB release build (408 KB
@@ -84,6 +145,8 @@ git log is authoritative for exact commits.
   and replaced; reinstall with `forge toolchain install v0.5.0`.
 
 ### Documentation
+
+- **`Actor.call`'s timeout under the interpreter is described accurately.** The actors chapter said the timeout is real on both backends. Compiled, the caller stops waiting at `timeout_ms`; under the interpreter the handler runs to completion first and a late reply is then discarded and reported as `Err`, so a slow handler still blocks the caller for its full duration. The chapter now says so, in the call section and in the list of backend differences.
 
 - **The stdlib API reference has syntax highlighting, and Http is documented.**
   Code examples on march-lang.org/docs/stdlib/ were plain monochrome text: the

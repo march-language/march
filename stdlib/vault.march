@@ -5,17 +5,24 @@
 -- message passing — every actor that holds the same VaultTable handle sees
 -- the same data.
 --
--- Keys can be any plain value: Int, String, Bool, Atom, Tuple, or Ctor.
--- Function values, Pids, and Tasks cannot be used as keys.  Keys are
--- STRINGIFIED on the way in, which is why the handle is not parameterised by
--- a key type: `set(t, 1, v)` and `set(t, "1", v)` address the same entry, and
--- `keys(t)` gives back `List(String)`, never the original key values.
+-- Keys can be Int, String, Bool or Atom values.  Function values, Pids, and
+-- Tasks cannot be used as keys, and neither can Tuple or Ctor values in
+-- compiled code (it panics: a heap value carries no arity at runtime; the
+-- interpreter accepts them).  Keys are ENCODED to strings on the way in,
+-- which is why the handle is not parameterised by a key type.  The encoding
+-- keeps the key's kind, so `set(t, 1, v)` and `set(t, "1", v)` are two
+-- different entries.  (Compiled code cannot tell Int, Bool and Atom keys
+-- apart: `true` and `1` are the same key there.)  `keys(t)` is typed
+-- `List(String)`: String keys come back unchanged, but any other key comes
+-- back encoded in compiled code (Int `1` as `"i:1"`) and as its original
+-- value in the interpreter, so rely on `keys` only in String-keyed tables.
 --
 -- A table handle is `Vault(v)`, phantom in the type of the values it holds:
 --
---     let counters = Vault.new("counters")   -- Vault(v), v not yet chosen
---     Vault.set(counters, "hits", 1)         -- v := Int
---     Vault.get(counters, "hits")            -- Option(Int)
+--     march> let counters = Vault.new("counters")  -- Vault(v), v not yet chosen
+--     march> Vault.set(counters, "hits", 1)  -- v := Int
+--     march> Vault.get(counters, "hits")  -- Option(Int)
+--     Some(1)
 --
 -- The element type is fixed at the binding (Vault handles do not
 -- let-generalize — see `demote_vault_handle_vars` in the typechecker), so
@@ -43,6 +50,8 @@
 --
 -- TTL semantics: expiry is checked lazily on get/update/size.  There is
 -- no background sweeper thread; expired entries are evicted on access.
+--
+-- doc: try
 
 mod Vault do
   needs IO.Mut
@@ -51,9 +60,10 @@ mod Vault do
   Create a new named vault table.  Returns a `Vault(v)` handle, where `v` is
   the type of the values the table holds.
 
-      let counters = Vault.new("counters")
-      Vault.set(counters, "hits", 1)
-      Vault.get(counters, "hits")   -- Some(1) : Option(Int)
+      march> let visits = Vault.new("visits")
+      march> Vault.set(visits, "home", 1)
+      march> Vault.get_or(visits, "home", 0)  -- Vault.get gives Some(1)
+      1
 
   The element type is fixed at the binding, so reading the table back at a
   different type is a type error rather than a value reinterpreted at the
@@ -67,7 +77,10 @@ mod Vault do
   Open (or create) a named vault table.  Returns an existing table if one with
   this name already exists; otherwise creates a new empty table.
 
-      let rate_table = Vault.open("rate_limits")
+      march> let rate_table = Vault.open("rate_limits")
+      march> Vault.set(rate_table, "alice", 3)
+      march> Vault.get_or(Vault.open("rate_limits"), "alice", 0)  -- the same table
+      3
 
   Like `new` and `whereis`, this MINTS a handle from a string, so it is where
   the element type is chosen rather than checked: two `Vault.open` calls on
@@ -123,10 +136,13 @@ mod Vault do
   close still works, on an empty, unregistered table, so a task that
   outlives its owner by a little reads `None` rather than crashing.
 
-      let t = Vault.new("request_" ++ id)
-      Vault.set(t, "user", u)
-      ...
-      Vault.close(t)
+      march> let req = Vault.new("request_42")
+      march> Vault.set(req, "user", "ada")
+      march> Vault.close(req)
+      march> Vault.get_or(req, "user", "gone")  -- the handle still works, on an empty table
+      "gone"
+      march> Vault.has(Vault.open("request_42"), "user")  -- open now makes a fresh table
+      false
   """
   fn close(table) : Unit do
     let _ = vault_close(table)
@@ -276,13 +292,19 @@ mod Vault do
 
   doc """
   Return all live (non-expired) keys in the table as a List(String).
-  Always `List(String)`, whatever was passed as a key — keys are stringified
-  on insert.
+  String keys come back unchanged; a key of any other kind comes back in its
+  internal encoding in compiled code (Int `2` as `"i:2"`), so use `keys` on
+  String-keyed tables (see the module header).
 
-      let t = Vault.new("ex")
-      Vault.set(t, "a", 1)
-      Vault.set(t, "b", 2)
-      List.length(Vault.keys(t))  -- 2
+      march> let ex = Vault.new("ex")
+      march> Vault.set(ex, "a", 1)
+      march> Vault.set(ex, "b", 2)
+      march> List.length(Vault.keys(ex))
+      2
+      march> let ints = Vault.new("ints")
+      march> Vault.set(ints, 2, 20)  -- an Int key: not the same entry as "2"
+      march> Vault.get_or(ints, "2", 0)
+      0
 
   Cost: O(n) where n is the number of entries in the table. Collected shard by
   shard, so — like `size` — the list is not a single instant's snapshot of the
@@ -311,7 +333,9 @@ mod Vault do
   `ns_get` will hand back whatever type the caller asks for. Prefer
   `open` + `get`/`set` when you can.
 
-      Vault.ns_set("my_ns", "key", 42)
+      march> Vault.ns_set("my_ns", "key", 42)
+      march> Vault.get_or(Vault.open("my_ns"), "key", 0)
+      42
   """
   fn ns_set(ns, key, value) do
     set(open(ns), key, value)
@@ -324,7 +348,10 @@ mod Vault do
   ELEMENT-ERASED, like `ns_set` — the result type is whatever the caller
   expects, not what was stored.
 
-      Vault.ns_get("my_ns", "key")  -- Some(42) or None
+      march> Option.unwrap_or(Vault.ns_get("my_ns", "key"), 0)  -- ns_get gave Some(42)
+      42
+      march> Vault.ns_get("no_such_ns", "key")
+      None
   """
   fn ns_get(ns, key) do
     vault_ns_get(ns, key)

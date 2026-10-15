@@ -88,6 +88,7 @@ let stdlib_file_list = [
   "consistent_hash.march";
   "work_dispatch.march";
   "logger.march";
+  "diagnostics.march";
   "actor.march";
   "scheduler.march";
   "flow.march";

@@ -158,6 +158,8 @@ native_diagnose_fixtures: coverage audit (user + stdlib): 135 enforced, 0 inert 
 native_diagnose_fixtures: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_diagnose_runaway: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_diagnose_runaway: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_diagnostics_crash_observers: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_diagnostics_crash_observers: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_dist_monitor_loopback: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_dist_monitor_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_dns_resolve_parity: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -254,6 +256,8 @@ native_h_escape_ctx_builtin: coverage audit (user + stdlib): 135 enforced, 0 ine
 native_h_escape_ctx_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_h_sigil_adt_interp: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_h_sigil_adt_interp: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_h_sigil_hole_leak_probe: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_h_sigil_hole_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_h_sigil_safe_collision: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_h_sigil_safe_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_h_tag_hardening: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
@@ -886,6 +890,8 @@ stdlib_deque: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 
 stdlib_deque: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_diagnose: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 stdlib_diagnose: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_diagnostics: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+stdlib_diagnostics: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_dir: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 stdlib_dir: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_dist_link: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

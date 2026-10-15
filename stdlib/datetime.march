@@ -10,6 +10,8 @@
 --
 -- Calendar arithmetic assumes the proleptic Gregorian calendar throughout.
 -- Day-of-week encoding: 0 = Sunday, 1 = Monday, ..., 6 = Saturday.
+--
+-- doc: try
 
 mod DateTime do
 
@@ -156,8 +158,10 @@ mod DateTime do
   doc """
   Convert a Unix timestamp (Int seconds) to a DateTime.
 
-      DateTime.from_timestamp(0)     -- DateTime(Date(1970, 1, 1), Time(0, 0, 0))
-      DateTime.from_timestamp(86400) -- DateTime(Date(1970, 1, 2), Time(0, 0, 0))
+      march> DateTime.from_timestamp(0)
+      DateTime(Date(1970, 1, 1), Time(0, 0, 0))
+      march> DateTime.from_timestamp(86400)
+      DateTime(Date(1970, 1, 2), Time(0, 0, 0))
   """
   fn from_timestamp(ts) do
     let days = floor_div(ts, 86400)
@@ -171,7 +175,8 @@ mod DateTime do
   doc """
   Convert a DateTime to a Unix timestamp (Int seconds since 1970-01-01 UTC).
 
-      DateTime.to_timestamp(DateTime(Date(1970, 1, 1), Time(0, 0, 0))) -- 0
+      march> DateTime.to_timestamp(DateTime(Date(1970, 1, 1), Time(0, 0, 0)))
+      0
   """
   fn to_timestamp(dt) do
     match dt do
@@ -243,7 +248,8 @@ mod DateTime do
   Format a DateTime as a string.
   Supported specifiers: %Y %m %d %H %M %S %%
 
-  Example: DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
+      march> DateTime.format(DateTime.from_timestamp(1700000000), "%Y-%m-%d %H:%M:%S")
+      "2023-11-14 22:13:20"
   """
   fn format(dt, fmt) do
     match dt do

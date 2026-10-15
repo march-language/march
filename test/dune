@@ -2954,6 +2954,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/builtin_borrow_leak_probe.expected native_builtin_borrow_leak_probe.out)))
 
+; ── A ~H hole must release the value it interpolates. html_escape_ctx and
+; html_auto_escape were missing from borrow.ml's extern_borrow_table, so they
+; defaulted to OWNED while the C escapers only read the value: every dynamic
+; hole of every template leaked (1-10 objects per hole). live_allocs() deltas
+; over 10,000 renders per hole shape, booleans in the golden. Red on main:
+; every leg.
+(rule
+ (targets native_h_sigil_hole_leak_probe native_h_sigil_hole_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/h_sigil_hole_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_h_sigil_hole_leak_probe
+        native/h_sigil_hole_leak_probe.march)
+   (with-stdout-to native_h_sigil_hole_leak_probe.out
+        (system "./native_h_sigil_hole_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/h_sigil_hole_leak_probe.expected native_h_sigil_hole_leak_probe.out)))
+
 ; ── A Vault write released only the displaced value's own cell, never its
 ; children; a closed table must be freed. live_allocs() deltas per operation,
 ; booleans in the golden. Red on main: every displaced-value leg.
@@ -3009,6 +3032,44 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/unit_to_string.expected interp_unit_to_string.out)))
+
+; Diagnostics crash observers (stdlib/diagnostics.march) on both backends,
+; one .expected: report contents, registration order, observer isolation,
+; removal mid-dispatch, handled panics unreported, with_context scoping, the
+; supervisor restart unchanged, and an unhandled panic still exiting 1.
+(rule
+ (targets native_diagnostics_crash_observers native_diagnostics_crash_observers.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/diagnostics_crash_observers.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_diagnostics_crash_observers
+        native/diagnostics_crash_observers.march)
+   ; The unhandled panic at the end exits 1, and must still.
+   (with-stdout-to native_diagnostics_crash_observers.out
+    (system "./native_diagnostics_crash_observers; test $? -eq 1")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/diagnostics_crash_observers.expected
+               native_diagnostics_crash_observers.out)))
+
+(rule
+ (targets interp_diagnostics_crash_observers.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/diagnostics_crash_observers.march))
+ (action
+  (with-stdout-to interp_diagnostics_crash_observers.out
+   (with-accepted-exit-codes 1
+    (run %{exe:../bin/main.exe} native/diagnostics_crash_observers.march)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/diagnostics_crash_observers.expected
+               interp_diagnostics_crash_observers.out)))
 
 ; Recon (stdlib/recon.march, R3 of the observe plan) on both backends: the
 ; same program compiled and interpreted must print the same lines. Exercises

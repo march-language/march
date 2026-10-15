@@ -16,15 +16,20 @@
 --   but both functions return 2, and a ZWJ emoji sequence is one grapheme but
 --   both return 3.  Prefer `codepoint_count`, whose name matches what it does.
 -- - Use `byte_size` for performance-critical paths.
+--
+-- doc: try
 
 mod String do
 
   doc """
   Return the number of bytes in the UTF-8 encoding of `s`.
 
-      String.byte_size("hello")  -- 5
-      String.byte_size("é")      -- 2  (2-byte UTF-8 sequence)
-      String.byte_size("")       -- 0
+      march> String.byte_size("hello")
+      5
+      march> String.byte_size("é")  -- 2-byte UTF-8 sequence
+      2
+      march> String.byte_size("")
+      0
 
   Cost: O(1) — reads a stored length field.
   """
@@ -34,8 +39,10 @@ mod String do
   Return a byte-indexed substring of `s` starting at byte offset `start`
   with length `len` bytes.
 
-      String.slice_bytes("hello world", 6, 5)  -- "world"
-      String.slice_bytes("hello", 0, 100)       -- "hello"  (clamped)
+      march> String.slice_bytes("hello world", 6, 5)
+      "world"
+      march> String.slice_bytes("hello", 0, 100)  -- clamped
+      "hello"
 
   Both `start` and `len` are clamped to valid byte ranges; no exception is
   raised for out-of-bounds values.  The returned string is a copy (the
@@ -51,9 +58,12 @@ mod String do
   doc """
   Return `true` if `substring` appears anywhere in `s`.
 
-      String.contains("hello world", "world")  -- true
-      String.contains("hello world", "xyz")    -- false
-      String.contains("abc", "")               -- true  (empty is always found)
+      march> String.contains("hello world", "world")
+      true
+      march> String.contains("hello world", "xyz")
+      false
+      march> String.contains("abc", "")  -- empty is always found
+      true
 
   Cost: O(n * m) worst case, where n = byte_size(s) and m = byte_size(substring).
   """
@@ -62,9 +72,12 @@ mod String do
   doc """
   Return `true` if `s` begins with `prefix`.
 
-      String.starts_with("hello", "he")  -- true
-      String.starts_with("hello", "lo")  -- false
-      String.starts_with("hello", "")    -- true
+      march> String.starts_with("hello", "he")
+      true
+      march> String.starts_with("hello", "lo")
+      false
+      march> String.starts_with("hello", "")
+      true
 
   Cost: O(|prefix|).
   """
@@ -73,9 +86,12 @@ mod String do
   doc """
   Return `true` if `s` ends with `suffix`.
 
-      String.ends_with("hello", "lo")  -- true
-      String.ends_with("hello", "he")  -- false
-      String.ends_with("hello", "")    -- true
+      march> String.ends_with("hello", "lo")
+      true
+      march> String.ends_with("hello", "he")
+      false
+      march> String.ends_with("hello", "")
+      true
 
   Cost: O(|suffix|).
   """
@@ -84,7 +100,8 @@ mod String do
   doc """
   Concatenate two strings.
 
-      String.concat("foo", "bar")  -- "foobar"
+      march> String.concat("foo", "bar")
+      "foobar"
 
   Prefer the `++` operator for inline concatenation.  Use `IOList` when
   building many string segments to avoid O(n²) copying.
@@ -96,8 +113,10 @@ mod String do
   doc """
   Replace the **first** occurrence of `old` in `s` with `new`.
 
-      String.replace("aabbaa", "a", "x")  -- "xabbaa"
-      String.replace("hello", "xyz", "!")  -- "hello"  (no match)
+      march> String.replace("aabbaa", "a", "x")
+      "xabbaa"
+      march> String.replace("hello", "xyz", "!")  -- no match
+      "hello"
 
   If `old` is the empty string, `s` is returned unchanged.
   See `replace_all` to replace every occurrence.
@@ -109,8 +128,10 @@ mod String do
   doc """
   Replace **every** non-overlapping occurrence of `old` in `s` with `new`.
 
-      String.replace_all("aabbaa", "a", "x")  -- "xxbbxx"
-      String.replace_all("hello", "l", "r")   -- "herro"
+      march> String.replace_all("aabbaa", "a", "x")
+      "xxbbxx"
+      march> String.replace_all("hello", "l", "r")
+      "herro"
 
   If `old` is the empty string, `s` is returned unchanged.
 
@@ -121,11 +142,19 @@ mod String do
   doc """
   Split `s` on every occurrence of `sep`, returning a `List(String)`.
 
-      String.split("a,b,c", ",")   -- ["a", "b", "c"]
-      String.split("hello", "")    -- ["hello"]  (empty sep returns whole string)
-      String.split("aXbXc", "X")   -- ["a", "b", "c"]
+      march> String.split("a,b,c", ",")
+      ["a", "b", "c"]
+      march> String.split("abc", "")  -- empty sep: one string per byte
+      ["a", "b", "c"]
+      march> String.split("aXbXc", "X")
+      ["a", "b", "c"]
 
   Adjacent separators produce empty strings in the result list.
+
+  An empty `sep` splits into single **bytes**, not characters: ASCII text comes
+  apart one character per string, but a multi-byte UTF-8 character is cut into
+  invalid pieces (`String.split("é", "")` gives two one-byte strings). To work
+  character by character, use `String.to_codepoints`.
 
   Cost: O(n) where n = byte_size(s).
   """
@@ -133,11 +162,14 @@ mod String do
 
   doc """
   Split `s` on the **first** occurrence of `sep`.
-  Returns `Some(head, tail)` if `sep` is found, or `None` if not found.
+  Returns `Some((head, tail))` if `sep` is found, or `None` if not found.
 
-      String.split_first("a:b:c", ":")  -- Some("a", "b:c")
-      String.split_first("hello", ":")  -- None
-      String.split_first("key=val", "=") -- Some("key", "val")
+      march> String.split_first("a:b:c", ":")
+      Some(("a", "b:c"))
+      march> String.split_first("hello", ":")
+      None
+      march> String.split_first("key=val", "=")
+      Some(("key", "val"))
 
   Useful for parsing key-value pairs or protocols where only the first
   delimiter matters.
@@ -149,9 +181,12 @@ mod String do
   doc """
   Join a list of strings with a separator inserted between each element.
 
-      String.join(["a", "b", "c"], "-")  -- "a-b-c"
-      String.join([], ",")               -- ""
-      String.join(["solo"], ",")         -- "solo"
+      march> String.join(["a", "b", "c"], "-")
+      "a-b-c"
+      march> String.join([], ",")
+      ""
+      march> String.join(["solo"], ",")
+      "solo"
 
   Cost: O(total bytes in list + (n-1) * |sep|).
   """
@@ -160,9 +195,12 @@ mod String do
   doc """
   Remove leading and trailing ASCII whitespace (spaces, tabs, newlines, CR).
 
-      String.trim("  hello  ")   -- "hello"
-      String.trim("\thello\n")   -- "hello"
-      String.trim("hello")       -- "hello"
+      march> String.trim("  hello  ")
+      "hello"
+      march> String.trim("\thello\n")
+      "hello"
+      march> String.trim("hello")
+      "hello"
 
   Cost: O(n).
   """
@@ -171,7 +209,8 @@ mod String do
   doc """
   Remove leading ASCII whitespace only.
 
-      String.trim_start("  hello  ")  -- "hello  "
+      march> String.trim_start("  hello  ")
+      "hello  "
 
   Cost: O(n).
   """
@@ -180,7 +219,8 @@ mod String do
   doc """
   Remove trailing ASCII whitespace only.
 
-      String.trim_end("  hello  ")  -- "  hello"
+      march> String.trim_end("  hello  ")
+      "  hello"
 
   Cost: O(n).
   """
@@ -189,7 +229,8 @@ mod String do
   doc """
   Convert all ASCII letters in `s` to uppercase.
 
-      String.to_uppercase("Hello World")  -- "HELLO WORLD"
+      march> String.to_uppercase("Hello World")
+      "HELLO WORLD"
 
   Only ASCII letters (A–Z, a–z) are affected.  For full Unicode case mapping
   use an external library.
@@ -201,7 +242,8 @@ mod String do
   doc """
   Convert all ASCII letters in `s` to lowercase.
 
-      String.to_lowercase("HELLO WORLD")  -- "hello world"
+      march> String.to_lowercase("HELLO WORLD")
+      "hello world"
 
   Only ASCII letters are affected.
 
@@ -212,9 +254,12 @@ mod String do
   doc """
   Repeat `s` exactly `n` times.
 
-      String.repeat("ab", 3)  -- "ababab"
-      String.repeat("x", 0)   -- ""
-      String.repeat("x", 1)   -- "x"
+      march> String.repeat("ab", 3)
+      "ababab"
+      march> String.repeat("x", 0)
+      ""
+      march> String.repeat("x", 1)
+      "x"
 
   Cost: O(n * |s|) — allocates a new string.
   """
@@ -223,8 +268,10 @@ mod String do
   doc """
   Return `s` with its **bytes** reversed.
 
-      String.reverse("hello")   -- "olleh"
-      String.reverse("racecar") -- "racecar"
+      march> String.reverse("hello")
+      "olleh"
+      march> String.reverse("racecar")
+      "racecar"
 
   Note: byte-reversal is not the same as grapheme-reversal for multi-byte
   UTF-8 codepoints.  This function is primarily useful for ASCII strings.
@@ -237,8 +284,10 @@ mod String do
   Pad `s` on the left with `fill` until the byte length reaches `width`.
   If `byte_size(s) >= width`, `s` is returned unchanged.
 
-      String.pad_left("hi", 5, "0")   -- "000hi"
-      String.pad_left("hello", 3, "0") -- "hello"  (already long enough)
+      march> String.pad_left("hi", 5, "0")
+      "000hi"
+      march> String.pad_left("hello", 3, "0")  -- already long enough
+      "hello"
 
   `fill` must be a single-byte string (single ASCII character).
 
@@ -250,8 +299,10 @@ mod String do
   Pad `s` on the right with `fill` until the byte length reaches `width`.
   If `byte_size(s) >= width`, `s` is returned unchanged.
 
-      String.pad_right("hi", 5, ".")  -- "hi..."
-      String.pad_right("hello", 3, ".") -- "hello"
+      march> String.pad_right("hi", 5, ".")
+      "hi..."
+      march> String.pad_right("hello", 3, ".")
+      "hello"
 
   `fill` must be a single-byte string (single ASCII character).
 
@@ -262,9 +313,12 @@ mod String do
   doc """
   Return `true` if `s` contains no bytes.
 
-      String.is_empty("")      -- true
-      String.is_empty("x")    -- false
-      String.is_empty("  ")   -- false
+      march> String.is_empty("")
+      true
+      march> String.is_empty("x")
+      false
+      march> String.is_empty("  ")
+      false
 
   Cost: O(1).
   """
@@ -278,10 +332,14 @@ mod String do
   NOT grapheme clusters — combining marks (`á` = `a` + ◌́), emoji
   modifiers, and ZWJ sequences each count as multiple codepoints.
 
-      String.codepoint_count("hello")  -- 5
-      String.codepoint_count("é")      -- 1  (NFC: one codepoint, two bytes)
-      String.codepoint_count("é")      -- 2  (NFD: e + combining acute)
-      String.codepoint_count("")       -- 0
+      march> String.codepoint_count("hello")
+      5
+      march> String.codepoint_count("é")  -- NFC: one codepoint, two bytes
+      1
+      march> String.codepoint_count("e" ++ Option.unwrap(String.from_codepoint(769)))  -- NFD: e + combining acute
+      2
+      march> String.codepoint_count("")
+      0
 
   Use a dedicated Unicode library when you need true grapheme cluster
   segmentation (for cursor-position arithmetic in a text editor, for
@@ -302,9 +360,12 @@ mod String do
   Find the byte offset of the first occurrence of `substring` in `s`.
   Returns `Some(offset)` if found, `None` if not found.
 
-      String.index_of("hello", "ll")   -- Some(2)
-      String.index_of("hello", "xyz")  -- None
-      String.index_of("hello", "")     -- Some(0)
+      march> String.index_of("hello", "ll")
+      Some(2)
+      march> String.index_of("hello", "xyz")
+      None
+      march> String.index_of("hello", "")
+      Some(0)
 
   Cost: O(n * m) worst case.
   """
@@ -320,9 +381,12 @@ mod String do
   re-copies the remaining bytes on every step, making a full tokenize O(n²)
   in bytes copied.
 
-      String.index_of_from("a,b,c", ",", 0)   -- Some(1)
-      String.index_of_from("a,b,c", ",", 2)   -- Some(3)
-      String.index_of_from("a,b,c", ",", 4)   -- None
+      march> String.index_of_from("a,b,c", ",", 0)
+      Some(1)
+      march> String.index_of_from("a,b,c", ",", 2)
+      Some(3)
+      march> String.index_of_from("a,b,c", ",", 4)
+      None
 
   A negative `start` is treated as 0; a `start` past the end returns `None`;
   an empty `substring` matches at `start`.
@@ -337,9 +401,12 @@ mod String do
   Parse `s` as a decimal integer.
   Returns `Ok(n)` on success, `Err(msg)` if the string is not a valid integer.
 
-      String.to_int("42")   -- Ok(42)
-      String.to_int("-7")   -- Ok(-7)
-      String.to_int("abc")  -- Err("not a valid integer")
+      march> String.to_int("42")
+      Ok(42)
+      march> String.to_int("-7")
+      Ok(-7)
+      march> String.to_int("abc")
+      Err("not a valid integer: abc")
 
   Cost: O(n).
   """
@@ -354,9 +421,12 @@ mod String do
   Parse `s` as a floating-point number.
   Returns `Ok(f)` on success, `Err(msg)` if the string is not a valid float.
 
-      String.to_float("3.14")  -- Ok(3.14)
-      String.to_float("1e10")  -- Ok(10000000000.0)
-      String.to_float("abc")   -- Err("not a valid float")
+      march> String.to_float("3.14")
+      Ok(3.14)
+      march> String.to_float("1e10") == Ok(10000000000.0)
+      true
+      march> String.to_float("abc")
+      Err("not a valid float: abc")
 
   Cost: O(n).
   """
@@ -370,9 +440,12 @@ mod String do
   doc """
   Convert an integer to its decimal string representation.
 
-      String.from_int(42)   -- "42"
-      String.from_int(-7)   -- "-7"
-      String.from_int(0)    -- "0"
+      march> String.from_int(42)
+      "42"
+      march> String.from_int(-7)
+      "-7"
+      march> String.from_int(0)
+      "0"
 
   Cost: O(digits).
   """
@@ -381,9 +454,12 @@ mod String do
   doc """
   Convert a float to a string using OCaml's default float formatting.
 
-      String.from_float(3.14)  -- "3.14"
-      String.from_float(1.0)   -- "1."
-      String.from_float(1e10)  -- "10000000000."
+      march> String.from_float(3.14)
+      "3.14"
+      march> String.from_float(1.0)
+      "1."
+      march> String.from_float(10000000000.0)
+      "10000000000."
 
   The exact format matches OCaml's `string_of_float`.
   Cost: O(1).
@@ -394,29 +470,17 @@ mod String do
   Find the byte offset of the **last** occurrence of `substring` in `s`.
   Returns `Some(offset)` if found, `None` if not found.
 
-      String.last_index_of("hello.world.txt", ".")  -- Some(11)
-      String.last_index_of("hello", "xyz")           -- None
-      String.last_index_of("hello", "")              -- Some(5)
+      march> String.last_index_of("hello.world.txt", ".")
+      Some(11)
+      march> String.last_index_of("hello", "xyz")
+      None
+      march> String.last_index_of("hello", "")
+      Some(5)
 
   Cost: O(n * m) worst case.
   """
   fn last_index_of(s, sub) do string_last_index_of(s, sub) end
 
-  doc """
-  Encode a Unicode codepoint as a UTF-8 string.
-  Returns `Some(string)` if the codepoint is valid, `None` otherwise.
-
-  Valid codepoints are in the range 0x0 to 0x10FFFF, excluding surrogate pairs
-  (0xD800 to 0xDFFF).
-
-      String.from_codepoint(0x41)    -- Some("A")
-      String.from_codepoint(0xE9)    -- Some("é")
-      String.from_codepoint(0x1F600) -- Some("😀")
-      String.from_codepoint(-1)      -- None  (out of range)
-      String.from_codepoint(0xD800)  -- None  (surrogate pair)
-
-  Cost: O(1).
-  """
   -- Encode a validated codepoint to its UTF-8 byte list (1-4 bytes).
   -- Types are annotated so monomorphization pins concrete types even when the
   -- function is reachable but not driven by a concrete call site (an unpinned
@@ -449,6 +513,26 @@ mod String do
   -- specs/todos/2026-08-22-builtins-that-typecheck-but-do-not-link.md. Kept as
   -- is for now: it is tested, it agrees with the builtin on every case
   -- including truncated input, and swapping it is its own change.
+  doc """
+  Encode a Unicode codepoint as a UTF-8 string.
+  Returns `Some(string)` if the codepoint is valid, `None` otherwise.
+
+  Valid codepoints are in the range 0x0 to 0x10FFFF, excluding surrogate pairs
+  (0xD800 to 0xDFFF).
+
+      march> String.from_codepoint(65)  -- U+0041
+      Some("A")
+      march> String.from_codepoint(233) == Some("é")  -- U+00E9
+      true
+      march> String.from_codepoint(128512) == Some("😀")  -- U+1F600
+      true
+      march> String.from_codepoint(-1)  -- out of range
+      None
+      march> String.from_codepoint(55296)  -- U+D800, a surrogate
+      None
+
+  Cost: O(1).
+  """
   fn from_codepoint(cp : Int) : Option(String) do
     if cp < 0 do
       None
@@ -470,10 +554,14 @@ mod String do
   as individual byte values (0x0 to 0xFF); well-formed March strings will not
   encounter this case.
 
-      String.to_codepoints("A")    -- [65]
-      String.to_codepoints("é")    -- [233]
-      String.to_codepoints("AB")   -- [65, 66]
-      String.to_codepoints("😀")    -- [128512]
+      march> String.to_codepoints("A")
+      [65]
+      march> String.to_codepoints("é")
+      [233]
+      march> String.to_codepoints("AB")
+      [65, 66]
+      march> String.to_codepoints("😀")
+      [128512]
 
   Cost: O(n) where n is the byte length of the string.
   """

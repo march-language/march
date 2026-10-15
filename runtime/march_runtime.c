@@ -43,6 +43,18 @@ static void migrate_msg_free(void *mm);
 #if !defined(__linux__) || defined(__GLIBC__)
 #define MARCH_HAVE_EXECINFO 1
 #include <execinfo.h>
+#include <dlfcn.h>   /* dladdr: Diagnostics backtrace frame names */
+#if defined(__GLIBC__) && !defined(__USE_GNU)
+/* glibc declares Dl_info and dladdr only under _GNU_SOURCE, which this
+ * runtime does not define (see pipe2 below); the layout is the ABI's. */
+typedef struct {
+    const char *dli_fname;
+    void       *dli_fbase;
+    const char *dli_sname;
+    void       *dli_saddr;
+} Dl_info;
+extern int dladdr(const void *addr, Dl_info *info);
+#endif
 #endif
 #include <pthread.h>
 
@@ -2106,8 +2118,307 @@ static void crash_ring_push(int64_t pid, const char *type, int kind,
                             uint32_t code_epoch, int64_t supervisor, int restart,
                             const char *message, size_t message_len);
 
+/* ── Diagnostics: crash observers ────────────────────────────────────────
+ * specs/todos/2026-10-14-runtime-diagnostics-crash-observers.md;
+ * stdlib/diagnostics.march is the March side.
+ *
+ * Diagnostics.observe_crashes registers a closure here.  A panic nobody
+ * handles builds one report and calls every observer registered at that
+ * moment, in registration order, from inside march_panic: on the failing
+ * green thread, with its stack still intact (so the backtrace is the
+ * panic's), and before the existing test-trap / crash-trap / exit decision
+ * runs.  An observer cannot change that decision:
+ *   - a panic inside an observer lands on the proc's diag_jmp, abandons that
+ *     observer, and dispatch moves on to the next one;
+ *   - no report is dispatched while one is being dispatched on this proc;
+ *   - march_test_in_test is cleared for the dispatch, so an observer's panic
+ *     never unwinds into a try_finally that encloses the ORIGINAL panic.
+ * Observers run inline, so they must not block: the documented contract is
+ * to hand the report to an actor or queue and return.
+ *
+ * "Nobody handles" means march_panic_handled is 0.  try_finally intercepts
+ * a panic through the test trap too, but only to run its cleanup and
+ * re-raise, so it does not set march_panic_handled; its re-raise sets
+ * march_panic_reraise so the same panic is not reported twice.  The report
+ * is built at the ORIGINAL panic, which is why with_context's context (a
+ * try_finally) is still in place when it is captured.
+ *
+ * What the observer closure receives is a Diagnostics.DiagCrash cell, built
+ * here, which stdlib/diagnostics.march turns into a CrashReport (the runtime
+ * cannot build an ADT whose constructor tags the compiler picks; DiagCrash
+ * and DiagFrame are single-constructor types, tag 0, with raw Int fields,
+ * like Logger's AppenderCall). */
+int march_panic_handled = 0;
+static int march_panic_reraise = 0;
+
+#define MARCH_DIAG_KIND_PANIC         0
+#define MARCH_DIAG_KIND_ACTOR_CRASHED 1
+#define MARCH_DIAG_MAX_FRAMES         64
+
+typedef struct diag_observer {
+    int64_t id;
+    void *cb;                      /* one reference, owned by the registry */
+    struct diag_observer *next;
+} diag_observer;
+static diag_observer  *g_diag_observers = NULL;   /* registration order */
+static int64_t         g_diag_next_id   = 1;      /* under g_diag_mu */
+static _Atomic int64_t g_diag_count     = 0;      /* march_panic's fast path */
+static pthread_mutex_t g_diag_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* Code that runs on no green thread (the main OS thread outside the
+ * scheduler, a foreign thread) keeps its context and landing here. */
+static _Thread_local void    *diag_tl_ctx = NULL;
+static _Thread_local jmp_buf *diag_tl_jmp = NULL;
+
+static void **diag_ctx_slot(void) {
+    march_proc *p = march_sched_current();
+    return p ? &p->diag_ctx : &diag_tl_ctx;
+}
+
+static jmp_buf **diag_jmp_slot(void) {
+    march_proc *p = march_sched_current();
+    return p ? &p->diag_jmp : &diag_tl_jmp;
+}
+
+static void *make_nil(void);
+static void *make_cons(void *head, void *tail);
+
+/* Consumes [cb]; the handle is a positive id, never reused. */
+int64_t march_diag_observe(void *cb) {
+    diag_observer *e = (diag_observer *)malloc(sizeof *e);
+    if (!e) { fputs("march: out of memory registering a crash observer\n", stderr); exit(1); }
+    e->cb = cb;
+    e->next = NULL;
+    pthread_mutex_lock(&g_diag_mu);
+    e->id = g_diag_next_id++;
+    diag_observer **pp = &g_diag_observers;
+    while (*pp) pp = &(*pp)->next;
+    *pp = e;
+    atomic_fetch_add_explicit(&g_diag_count, 1, memory_order_relaxed);
+    pthread_mutex_unlock(&g_diag_mu);
+    return e->id;
+}
+
+/* Idempotent: an unknown or already-removed id is a no-op.  A dispatch in
+ * flight holds its own reference to every observer it snapshotted, so
+ * removing one mid-dispatch neither frees it nor stops that dispatch. */
+void *march_diag_unobserve(int64_t id) {
+    diag_observer *found = NULL;
+    pthread_mutex_lock(&g_diag_mu);
+    for (diag_observer **pp = &g_diag_observers; *pp; pp = &(*pp)->next) {
+        if ((*pp)->id == id) {
+            found = *pp;
+            *pp = found->next;
+            atomic_fetch_sub_explicit(&g_diag_count, 1, memory_order_relaxed);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_diag_mu);
+    if (found) {
+        march_decrc(found->cb);
+        free(found);
+    }
+    return NULL;
+}
+
+/* A NEW reference to this green thread's context (a fresh Nil when unset). */
+void *march_diag_context_get(void) {
+    void *c = *diag_ctx_slot();
+    if (!c) return make_nil();
+    march_incrc(c);
+    return c;
+}
+
+/* Consumes [ctx]; releases the context it replaces. */
+void *march_diag_context_set(void *ctx) {
+    void **slot = diag_ctx_slot();
+    void *old = *slot;
+    *slot = ctx;
+    if (old) march_decrc(old);
+    return NULL;
+}
+
+/* The scheduler's reap of a dead proc that still held a context. */
+void march_diag_proc_exit(void *ctx) {
+    march_decrc(ctx);
+}
+
+/* The panic's own stack as return addresses, innermost first.  Native
+ * unwinding through the CFI LLVM emits: no per-call instrumentation, and
+ * nothing at all is paid by a program that never reports a crash. */
+static int diag_capture_stack(void **pcs, int max) {
+#ifdef MARCH_HAVE_EXECINFO
+    return backtrace(pcs, max);
+#else
+    (void)pcs; (void)max;
+    return 0;
+#endif
+}
+
+/* Is [name] runtime or startup code rather than a March function?  The
+ * runtime's global C symbols are march_- or __march_-prefixed; `main` and
+ * `start` are the C entry. */
+static int diag_runtime_symbol(const char *name) {
+    return strncmp(name, "march_", 6) == 0 || strncmp(name, "__march", 7) == 0
+        || strncmp(name, "_march", 6) == 0 || strcmp(name, "main") == 0
+        || strcmp(name, "start") == 0;
+}
+
+/* Where March code is entered from the runtime: the walk ends here.  The
+ * green-thread entry (march_scheduler.c) and the actor and task loops are
+ * static, so they are named only where dladdr sees local symbols (macOS). */
+static int diag_entry_symbol(const char *name) {
+    return strcmp(name, "proc_trampoline") == 0
+        || strcmp(name, "actor_green_thread") == 0
+        || strcmp(name, "march_thunk_trampoline") == 0
+        || strcmp(name, "march_main_entry_thunk") == 0;
+}
+
+/* Diagnostics.DiagFrame(fn_name, file, line): a fresh cell. */
+static void *diag_frame_cell(const char *fn_name, size_t len) {
+    void *cell = march_alloc(16 + 3 * 8);
+    void **fp = (void **)((char *)cell + 16);
+    fp[0] = march_string_lit(fn_name, (int64_t)len);
+    fp[1] = march_string_lit("", 0);
+    *(int64_t *)&fp[2] = 0;
+    return cell;
+}
+
+/* The March frames of [pcs], innermost first, as a fresh List(DiagFrame).
+ * Names come from dladdr, so a frame resolves only when its symbol is
+ * visible to it: every symbol of a macOS executable, but on Linux only the
+ * dynamic table of an --export-dynamic (hot-reload) build.  The walk skips
+ * the panic machinery (everything up to and including march_panic, static
+ * helpers included), keeps only frames of the executable's own image, skips
+ * runtime symbols, and ends where March code was entered: at march_main
+ * (reported as `main`, the March function it is) or a green-thread entry.
+ * Stdlib frames are kept. */
+static void *diag_frames_list(void **pcs, int n) {
+#ifdef MARCH_HAVE_EXECINFO
+    Dl_info self_info;
+    void *self_base = dladdr((void *)&march_diag_observe, &self_info)
+                      ? self_info.dli_fbase : NULL;
+    const char *names[MARCH_DIAG_MAX_FRAMES];
+    int kept = 0;
+    int start = 0;
+    for (int i = 0; i < n; i++) {
+        Dl_info info;
+        if (dladdr((void *)((uintptr_t)pcs[i] - 1), &info) && info.dli_sname
+            && strcmp(info.dli_sname, "march_panic") == 0) {
+            start = i + 1;
+            break;
+        }
+    }
+    for (int i = start; i < n && kept < MARCH_DIAG_MAX_FRAMES; i++) {
+        Dl_info info;
+        /* A return address points just past its call; step back into it so
+         * a call that ends a function resolves to that function. */
+        void *pc = (void *)((uintptr_t)pcs[i] - 1);
+        if (!dladdr(pc, &info) || !info.dli_sname) continue;
+        if (self_base && info.dli_fbase != self_base) continue;
+        const char *name = info.dli_sname;
+        if (strcmp(name, "march_main") == 0) { names[kept++] = "main"; break; }
+        if (diag_entry_symbol(name)) break;
+        if (diag_runtime_symbol(name)) continue;
+        names[kept++] = name;
+    }
+    void *lst = make_nil();
+    for (int i = kept - 1; i >= 0; i--)
+        lst = make_cons(diag_frame_cell(names[i], strlen(names[i])), lst);
+    return lst;
+#else
+    (void)pcs; (void)n;
+    return make_nil();
+#endif
+}
+
+/* Diagnostics.DiagCrash(kind, message, frames, pid, supervised, context):
+ * a fresh cell holding its own reference to each heap field ([message],
+ * [frames] and [ctx] are borrowed). */
+static void *diag_crash_cell(int kind, void *message, void *frames,
+                             int64_t pid, int supervised, void *ctx) {
+    void *cell = march_alloc(16 + 6 * 8);
+    void **fp = (void **)((char *)cell + 16);
+    *(int64_t *)&fp[0] = kind;
+    march_incrc(message); fp[1] = message;
+    march_incrc(frames);  fp[2] = frames;
+    *(int64_t *)&fp[3] = pid;
+    *(int64_t *)&fp[4] = supervised;
+    march_incrc(ctx);     fp[5] = ctx;
+    return cell;
+}
+
+int64_t march_pid_index_of(void *actor);
+
+static void diag_dispatch(int kind, const char *msg, size_t msg_len) {
+    pthread_mutex_lock(&g_diag_mu);
+    int64_t n = 0;
+    for (diag_observer *e = g_diag_observers; e; e = e->next) n++;
+    void **cbs = n > 0 ? (void **)malloc((size_t)n * sizeof(void *)) : NULL;
+    if (n > 0 && !cbs) { pthread_mutex_unlock(&g_diag_mu); return; }
+    int64_t i = 0;
+    for (diag_observer *e = g_diag_observers; e; e = e->next) {
+        march_incrc(e->cb);
+        cbs[i++] = e->cb;
+    }
+    pthread_mutex_unlock(&g_diag_mu);
+    if (n == 0) return;
+
+    void *pcs[MARCH_DIAG_MAX_FRAMES];
+    int npc = diag_capture_stack(pcs, MARCH_DIAG_MAX_FRAMES);
+    void *frames  = diag_frames_list(pcs, npc);
+    void *message = march_string_lit(msg, (int64_t)msg_len);
+    void *ctx     = march_diag_context_get();
+    march_proc *cp = march_sched_current();
+    int64_t pid = (cp && cp->actor) ? march_pid_index_of(cp->actor) : -1;
+    int supervised = kind == MARCH_DIAG_KIND_ACTOR_CRASHED;
+
+    /* An observer's panic must land on diag_jmp, not on a try_finally (or
+     * test trap) around the panic being reported; nor may it leave a prefix
+     * behind for a __try_call that catches the original. */
+    int saved_in_test = march_test_in_test;
+    const char *saved_prefix = PANIC_PREFIX_GET();
+    march_test_in_test = 0;
+    jmp_buf **jslot = diag_jmp_slot();
+    for (volatile int64_t k = 0; k < n; k++) {
+        jmp_buf jb;
+        *jslot = &jb;
+        if (setjmp(jb) == 0) {
+            void *report = diag_crash_cell(kind, message, frames, pid, supervised, ctx);
+            void *cb = cbs[k];
+            void *(*fn)(void *, void *) = *(void *(**)(void *, void *))((char *)cb + 16);
+            (void)fn(cb, report);   /* consumes cb's reference and report */
+        }
+        /* else: the observer panicked; what it held is abandoned, like a
+         * crashed actor's frames. */
+        *jslot = NULL;
+    }
+    march_test_in_test = saved_in_test;
+    PANIC_PREFIX_SET(saved_prefix);
+    march_decrc(frames);
+    march_decrc(message);
+    march_decrc(ctx);
+    free(cbs);
+}
+
 void march_panic(void *s) {
     march_string *ms = (march_string *)s;
+    /* Diagnostics (see "Diagnostics: crash observers" above).  First: a
+     * panic raised by a crash observer itself, outside any try_finally of
+     * the observer's own, ends that observer and nothing else. */
+    {
+        jmp_buf **dj = diag_jmp_slot();
+        if (*dj && !march_test_in_test) longjmp(**dj, 1);
+        int reraise = march_panic_reraise;
+        march_panic_reraise = 0;
+        if (!*dj && !reraise && !march_panic_handled
+            && atomic_load_explicit(&g_diag_count, memory_order_relaxed) > 0) {
+            march_proc *cp = march_sched_current();
+            diag_dispatch(cp && cp->crash_jmp ? MARCH_DIAG_KIND_ACTOR_CRASHED
+                                              : MARCH_DIAG_KIND_PANIC,
+                          ms->data, (size_t)ms->len);
+        }
+    }
     /* In test mode, capture the message and longjmp back to the test runner
        instead of terminating the process. */
     if (march_test_in_test) {
@@ -2358,10 +2669,12 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
 
     march_test_fail_buf[0] = '\0';
     march_test_in_test = 1;
+    march_panic_handled = 1;   /* a failing test is not a crash to report */
     int jmp_rc = setjmp(march_test_jmp_buf);
     if (jmp_rc == 0) {
         fn();
         march_test_in_test = 0;
+        march_panic_handled = 0;
         /* Test passed */
         if (test_verbose) {
             printf("  \xe2\x9c\x93 %s\n", name);
@@ -2372,6 +2685,7 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
         }
     } else {
         march_test_in_test = 0;
+        march_panic_handled = 0;
         /* Test failed (panic / assertion) */
         if (test_verbose) {
             printf("  \xe2\x9c\x97 %s\n    %s\n", name, march_test_fail_buf);
@@ -2474,8 +2788,10 @@ void *march_try_call(void *thunk) {
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
     const char *saved_prefix = PANIC_PREFIX_GET();
+    int saved_handled = march_panic_handled;
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
+    march_panic_handled    = 1;   /* the Err is the handling: not a crash */
     PANIC_PREFIX_SET(NULL);
 
     int64_t ok_result = 0;
@@ -2497,6 +2813,7 @@ void *march_try_call(void *thunk) {
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
+    march_panic_handled = saved_handled;
     PANIC_PREFIX_SET(saved_prefix);
 
     /* No march_decrc(thunk) here. Like the task_spawn trampoline (see its
@@ -2568,8 +2885,10 @@ void *march_try_call_val(void *thunk) {
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
     const char *saved_prefix = PANIC_PREFIX_GET();
+    int saved_handled = march_panic_handled;
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
+    march_panic_handled    = 1;   /* the Err is the handling: not a crash */
     PANIC_PREFIX_SET(NULL);
 
     int64_t ok_result = 0;
@@ -2587,6 +2906,7 @@ void *march_try_call_val(void *thunk) {
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
+    march_panic_handled = saved_handled;
     PANIC_PREFIX_SET(saved_prefix);
 
     /* No march_decrc(thunk) — see the identical comment in __try_call above. */
@@ -2686,6 +3006,9 @@ void *march_try_finally(void *action, void *cleanup) {
     march_test_in_test = saved_in_test;
 
     if (panicked) {
+        /* The same panic, already reported to any crash observer at the
+         * point it was raised (with its context and stack still there). */
+        march_panic_reraise = 1;
         march_panic(err_str);   /* does not return */
     }
     return (void *)result;
@@ -15004,6 +15327,27 @@ static void *march_atom_name_lookup(int64_t h) {
  * is in the program fragment's table. */
 void *march_atom_name_registered(int64_t h) {
     return march_atom_name_lookup(h);
+}
+
+/* Public face of march_atom_name_lookup for the REPL JIT's value printer
+ * (lib/jit/repl_jit.ml, pp_atom_word), which dlsym's it from the runtime .so
+ * to render an atom it found in a heap cell: the stdlib precompile registers
+ * its table, so an atom a precompiled stdlib fn returned (UUID.parse's
+ * :invalid) is named here.  Writes ":name" NUL-terminated into buf
+ * (truncated to cap - 1 bytes) and returns its length, or -1 if no
+ * registered table knows [h].  A C string rather than a March String so the
+ * caller never has to decode an SSO immediate. */
+int64_t march_atom_name_cstr(int64_t h, char *buf, int64_t cap) {
+    if (!buf || cap <= 0) return -1;
+    void *name = march_atom_name_lookup(h);
+    if (!name) return -1;
+    char sso[MARCH_SSO_MAX + 1];
+    int64_t n = march_str_len(name);
+    if (n >= cap) n = cap - 1;
+    memcpy(buf, march_str_data(name, sso), (size_t)n);
+    buf[n] = '\0';
+    march_decrc(name);
+    return n;
 }
 
 /* The text of a non-String LogValue, as eval_runtime.ml's

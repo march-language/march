@@ -47,7 +47,8 @@ const problems = [];
 let total = 0, passed = 0;
 for (const file of fs.readdirSync(stdlib).filter(f => f.endsWith('.march')).sort()) {
   const src = fs.readFileSync(path.join(stdlib, file), 'utf8');
-  for (const m of src.matchAll(/^\s*march>\s?(.*)$/gm)) {
+  // A `march>` line in a doc string, or in a module's `--` header comment.
+  for (const m of src.matchAll(/^\s*(?:--\s*)?march>\s?(.*)$/gm)) {
     total++;
     const key = `${file}: ${m[1].trim()}`;
     const r = repl.run(m[1]);
