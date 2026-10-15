@@ -523,7 +523,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       v_ty = Tir.TFn ([Tir.TString; Tir.TInt], Tir.TUnit);
       v_lin = Tir.Unr } in
     let site = Tir.EApp (site_var,
-                         [Tir.ALit (Ast.LitString sp.Ast.file);
+                         [Tir.ALit (Ast.LitString (Provenance.display_file sp.Ast.file));
                           Tir.ALit (Ast.LitInt sp.Ast.start_line)]) in
     let saved = !panic_site_lowering in
     panic_site_lowering := Some call;

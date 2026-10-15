@@ -1433,7 +1433,8 @@ let fn_table_block (ir : string) (tir_name_of : string -> string option) : strin
             | Some t ->
               (match Provenance.effective_span t with
                | Some sp when sp.March_ast.Ast.start_line > 0 ->
-                 Some (fn_table_display t, sp.March_ast.Ast.file, sp.March_ast.Ast.start_line)
+                 Some (fn_table_display t, Provenance.display_file sp.March_ast.Ast.file,
+                       sp.March_ast.Ast.start_line)
                | _ -> None) in
           let fields = match info with
             | Some (disp, file, line) ->

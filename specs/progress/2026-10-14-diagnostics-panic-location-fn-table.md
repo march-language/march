@@ -45,6 +45,18 @@ a lambda as `<host>.{fn}`; file and line are the function's definition span.
 Glue with no span (drop glue, closure wrappers, actor dispatch) is an
 unnamed entry: bounded, never reported.
 
+File names go through `Provenance.display_file` (and its twin in
+`Eval.diag_report_crash`): a stdlib file is `stdlib/<name>.march`, so neither
+the site literals nor the table carry the absolute path the compiler's stdlib
+was installed at (TIR snapshots of stdlib panics, and every binary, stay
+machine-independent); a user file is as the compiler was given it.
+
+IR checks that search the whole module for `ptr @f` now also find the table's
+entry for `f`. The function pointer is each entry's last field so a hot-reload
+slot publish (`ptr @f,`) cannot match it, and
+`actor_dispatch_codegen`'s "handler binder" check uses
+`Test_helpers.ir_call_contains`, which looks at call lines only.
+
 The runtime sorts the table on first use (not at startup), maps each return
 address to the entry at or below it (inside `[first, march_text_end)`, else
 runtime code), and keeps only named entries, so the panic machinery and the
