@@ -1,9 +1,12 @@
 mod Main do
   needs IO.Console
   -- Operational actor foreign-message-drop witness (core-march.md §4.10, finding
-  -- 19 compiled-misroute fix). `send` does NOT gate a message by its target actor
-  -- (a deferred type-system gap), so a `Logger` message (`Zlog`) can be sent to a
-  -- `Counter` Pid and still typechecks (exit 0). The INTERPRETER matches handlers by
+  -- 19 compiled-misroute fix). Since 2026-10-15 `send` rejects a message whose
+  -- actor's state cannot be the pid's (`send_wrong_actor`), but a pid's type is its
+  -- actor's STRUCTURAL state record, so the check is one-sided: `Logger` below is
+  -- given the SAME state shape as `Counter` (`{ count : Int }`), which keeps a
+  -- `Logger` message (`Zlog`) sent to a `Counter` Pid well-typed (exit 0) and this
+  -- program a witness for the runtime drop that remains. The INTERPRETER matches handlers by
   -- NAME and silently DROPS a message no handler accepts (eval.ml `No handler for
   -- this message tag`). The COMPILED backend used to MISROUTE it: each actor's
   -- message type lowered to a per-actor variant dispatched by an ECase, so `Zlog`'s
@@ -41,12 +44,12 @@ mod Main do
   end
 
   actor Logger do
-    state { seen : Int }
-    init  { seen: 0 }
+    state { count : Int }
+    init  { count: 0 }
 
     on Zlog(m : String) do
       println("Logger.Zlog -> " ++ m)
-      { seen: state.seen + 1 }
+      { count: state.count + 1 }
     end
   end
 
