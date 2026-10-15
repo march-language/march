@@ -50,6 +50,15 @@ const CASES = [
   // Input is desugared before evaluation: a pipe works.
   { input: "[1, 2, 3] |> List.map(fn x -> x + 1)",
     output: "[2, 3, 4]\n", error: null },
+  // Deep recursion does not depend on the JS stack (march.js is CPS-compiled,
+  // js/dune): this overflowed at 243 elements before.
+  { input: "List.length(List.map(List.range(0, 20000), fn x -> x + 1))",
+    output: "20000\n", error: null },
+  // Defining another function after `main` does not run `main` again.
+  { input: "fn depth(n) do if n == 0 do 0 else 1 + depth(n - 1) end end",
+    output: "", error: null },
+  { input: "depth(5000)",
+    output: "5000\n", error: null },
   // A main that declares its capability (the only form native March accepts
   // for a main that does IO) gets an erased () per parameter, as natively.
   { input: "fn main(io : Cap(IO)) do println(\"capped main\") end",
