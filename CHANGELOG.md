@@ -92,6 +92,20 @@ git log is authoritative for exact commits.
   `../d` and `a/b` are paths, `//other.com/x` has host `other.com` and path `/x`, and
   `Uri.to_string` writes such a reference back with its `//`. A `://` inside a path or
   query (`/go?to=http://x`) no longer makes a scheme.
+- **The in-browser REPL no longer runs out of stack.** On the playground, cookbook and
+  "Try it" pages, `List.map` over more than about 200 elements, or a recursive function
+  a few hundred calls deep, failed with "Maximum call stack size exceeded". The
+  interpreter is now compiled so that recursion depth is limited by memory: a
+  100,000-element list or 100,000-deep recursion works. Call-heavy code runs about a
+  third slower, and the download is about 10% smaller. Also, defining a function after
+  `main` no longer runs `main` again.
+
+- **`march repl` no longer crashes on an atom inside a value.** `Err(:invalid)`,
+  `Some(:a)`, `[:a, :b]`, `(:a, 1)` and `UUID.parse("not-a-uuid")` killed the REPL with a
+  segmentation fault; they now print. A `None` inside a list or tuple prints as `None`
+  instead of `null`. Compiled programs had a related bug: an `Option(Atom)` built from a
+  literal atom (`Some(:a)`) did not match its own atom (`x == :a` was `false`) and printed
+  as `Some(:<atom>)`. Both are fixed.
 
 - **`march repl` prints negative numbers inside lists, options and tuples correctly.**
   The native REPL showed `[-1, 2]` as `[9223372036854775807, 2]` (and likewise
@@ -127,6 +141,8 @@ git log is authoritative for exact commits.
   and replaced; reinstall with `forge toolchain install v0.5.0`.
 
 ### Documentation
+
+- **`Actor.call`'s timeout under the interpreter is described accurately.** The actors chapter said the timeout is real on both backends. Compiled, the caller stops waiting at `timeout_ms`; under the interpreter the handler runs to completion first and a late reply is then discarded and reported as `Err`, so a slow handler still blocks the caller for its full duration. The chapter now says so, in the call section and in the list of backend differences.
 
 - **The stdlib API reference has syntax highlighting, and Http is documented.**
   Code examples on march-lang.org/docs/stdlib/ were plain monochrome text: the

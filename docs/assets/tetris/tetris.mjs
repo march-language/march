@@ -9408,13 +9408,13 @@ function $lam0_string_to_int_list$apply$0_string_to_int_list($clo, x) {
   {
     const $t44687 = (() => {
       {
-        const $rc_3098 = march_string_to_int(x);
-        return $rc_3098;
+        const $rc_3099 = march_string_to_int(x);
+        return $rc_3099;
       }
     })();
     {
-      const $rc_3097 = Option$unwrap_or$Option_Int$Int($t44687, 0);
-      return $rc_3097;
+      const $rc_3098 = Option$unwrap_or$Option_Int$Int($t44687, 0);
+      return $rc_3098;
     }
   }
 }
@@ -9473,8 +9473,8 @@ function $lam0__lam0_render_board$apply$1_render_board($clo, x) {
                 {
                   const $t44747 = String(y);
                   {
-                    const $rc_3099 = march_string_concat_n("cell-", $t44746, "-", $t44747);
-                    return $rc_3099;
+                    const $rc_3100 = march_string_concat_n("cell-", $t44746, "-", $t44747);
+                    return $rc_3100;
                   }
                 }
               }
@@ -9594,8 +9594,8 @@ function $lam0_render_falling$apply$0_render_falling($clo, c) {
                             {
                               const $t44765 = String(y);
                               {
-                                const $rc_3100 = march_string_concat_n("cell-", $t44764, "-", $t44765);
-                                return $rc_3100;
+                                const $rc_3101 = march_string_concat_n("cell-", $t44764, "-", $t44765);
+                                return $rc_3101;
                               }
                             }
                           }
@@ -9692,8 +9692,8 @@ function $lam0_tick$apply$0_tick($clo, board, piece, rot, x, y, next, score, lin
         if ($t44900 === true) {
           return (() => {
             {
-              const $rc_3101 = lock_and_advance(board, piece, rot, x, y, next, score, lines, rng);
-              return $rc_3101;
+              const $rc_3102 = lock_and_advance(board, piece, rot, x, y, next, score, lines, rng);
+              return $rc_3102;
             }
           })();
         } else if ($t44900 === false) {
@@ -9864,8 +9864,8 @@ function $lam0_hard_drop$apply$0_hard_drop($clo, board, piece, rot, x, y, next, 
           return fall_from(board, cells, x, y);
         })();
         {
-          const $rc_3102 = lock_and_advance(board, piece, rot, x, final_y, next, score, lines, rng);
-          return $rc_3102;
+          const $rc_3103 = lock_and_advance(board, piece, rot, x, final_y, next, score, lines, rng);
+          return $rc_3103;
         }
       }
     }
@@ -9930,8 +9930,8 @@ function $lam0__lam0_build_board_dom$apply$1_build_board_dom($clo, x) {
                 {
                   const $t45003 = String(y);
                   {
-                    const $rc_3103 = march_string_concat_n("cell-", $t45002, "-", $t45003);
-                    return $rc_3103;
+                    const $rc_3104 = march_string_concat_n("cell-", $t45002, "-", $t45003);
+                    return $rc_3104;
                   }
                 }
               }
