@@ -55,7 +55,8 @@ IR checks that search the whole module for `ptr @f` now also find the table's
 entry for `f`. The function pointer is each entry's last field so a hot-reload
 slot publish (`ptr @f,`) cannot match it, and
 `actor_dispatch_codegen`'s "handler binder" check uses
-`Test_helpers.ir_call_contains`, which looks at call lines only.
+`Test_helpers.ir_outside_fn_table`, which drops the table's entries and
+nothing else.
 
 The runtime sorts the table on first use (not at startup), maps each return
 address to the entry at or below it (inside `[first, march_text_end)`, else

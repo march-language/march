@@ -488,22 +488,18 @@ let ir_contains ir pat =
   try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
   with Not_found -> false
 
-(** [pat] on some `call` / `invoke` line of [ir]: for checks about what a
-    call passes, which a substring search of the whole module also finds in
-    data (the Diagnostics function table lists `ptr @f` for every function). *)
-let ir_call_contains ir pat =
-  let is_call l =
-    let l = String.trim l in
-    let l = match String.index_opt l '=' with
-      | Some i when String.length l > 0 && l.[0] = '%' ->
-        String.trim (String.sub l (i + 1) (String.length l - i - 1))
-      | _ -> l in
-    List.exists (fun p -> String.length l >= String.length p
-                          && String.sub l 0 (String.length p) = p)
-      ["call "; "tail call "; "musttail call "; "notail call "; "invoke "]
-  in
-  List.exists (fun l -> is_call l && ir_contains l pat)
-    (String.split_on_char '\n' ir)
+(** [ir] without the entries of the Diagnostics function table
+    (`@march_fn_table`, emitted by Llvm_toplevel.fn_table_block), which lists
+    `ptr @f` for every function the module defines: for checks that a
+    function's address appears nowhere else. *)
+let ir_outside_fn_table ir =
+  let entry = "{ ptr, ptr, i64, ptr } {" in
+  String.split_on_char '\n' ir
+  |> List.filter (fun l ->
+      let l = String.trim l in
+      not (String.length l >= String.length entry
+           && String.sub l 0 (String.length entry) = entry))
+  |> String.concat "\n"
 
 (** Compiled actor: dispatch function is emitted in the LLVM IR. *)
 let ir_count ir pat =

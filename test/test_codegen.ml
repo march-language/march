@@ -1078,11 +1078,11 @@ let test_actor_handler_binder_shadows_toplevel_fn () =
     end
   end|} in
   (* The bug emitted the function's address as a call argument. Match the
-     ARGUMENT form (comma-preceded) on call lines only, so this cannot alias
-     the `define` line or the function table's entry for Helper.text. *)
+     ARGUMENT form (comma-preceded) so this cannot alias the `define` line,
+     and leave out the function table, whose entry for Helper.text has it. *)
   Alcotest.(check bool)
     "handler binder is not replaced by the imported Helper.text function"
-    false (ir_call_contains ir ", ptr @Helper.text")
+    false (ir_contains (ir_outside_fn_table ir) ", ptr @Helper.text")
 
 (** Finding 20 follow-up (adversarial-review Critical, fixed): the actor-struct
     always-in-place gate must be STRUCTURAL (does this type's field 0 carry
