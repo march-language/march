@@ -73,6 +73,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A session that forms just as a peer node dies no longer outlives it.** For a
+  moment after a node's connection closed, the cluster node still handed out that
+  connection to sessions being set up. A session that linked to it in that window
+  never heard that the node was gone and waited for that link's end for ever,
+  so a SIGTERM drain on its node ran to its hard deadline and exited 1. A dead
+  connection is now no longer handed out from the moment it closes.
+
 - **`march --jit` names the program's own atoms.** `to_string(:zz)` printed
   `:<atom>` under `--jit` (both the ORC and clang backends) for any atom the stdlib
   does not itself use; it now prints `:zz`, as the interpreter and `--compile` do.
