@@ -632,6 +632,8 @@ and emit_val_impl ctx expr =
         emit ctx "march_string_from_codepoint("; emit_atom ctx a; emit ctx ")"
       | "print_stderr", [a] ->
         emit ctx "console.error("; emit_atom ctx a; emit ctx ")"
+      (* The Diagnostics panic-site record: nothing to record in JS. *)
+      | "__panic_site", _ -> emit ctx "undefined"
       | ("panic" | "panic_" | "todo_" | "unreachable_"), _ ->
         let msg = if args = [] then "\"panic\""
                   else (let b = Buffer.create 16 in

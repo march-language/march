@@ -567,6 +567,13 @@ void march_panic(void *s) {
     __builtin_trap();
 }
 
+/* Diagnostics' panic-site record (march_runtime.c): the wasm runtime has no
+ * crash observers, so the site lowering emits before a panic is dropped. */
+void *march_panic_site(void *file, int64_t line) {
+    (void)file; (void)line;
+    return NULL;
+}
+
 /* Structured cleanup — see march_try_finally in march_runtime.c for the
  * full contract.  WASM has no longjmp-based panic channel (march_panic
  * traps the instance above), so there is nothing to catch: on the panic

@@ -3,21 +3,26 @@
 **Filed:** 2026-10-14, from `progress/2026-10-14-runtime-diagnostics-crash-observers.md`.
 What the first cut left open:
 
-1. **Linux frame names.** `dladdr` sees only the dynamic symbol table, which a
-   non-hot-reload Linux executable does not export, so compiled reports there
-   carry an empty backtrace. Read the executable's own `.symtab` instead
-   (`/proc/self/exe`, bias from `dladdr`'s `dli_fbase`), or vendor
-   `libbacktrace` (BSD), which also gives item 2. Do not turn on
-   `--export-dynamic` globally: a user function named like a libc symbol would
-   interpose it.
-2. **File and line.** `--debug-info` emits one `DISubprogram` per function
-   (`lib/tir/llvm_toplevel.ml`), so a DWARF reader gives each frame its
-   definition line; per-call-site lines need `DILocation`s on calls. Then fill
-   `StackFrame.file/line` and `CrashReport.location` compiled.
-3. **Readable names.** Lambda-lifted and specialised functions report their
-   LLVM names (`$lam0__lam0__top$apply$1_Fragile_Poison`). The provenance side
-   table (`lib/tir/provenance.ml`) maps them back to source functions; it is
-   compile-time only today.
+Done since (`progress/2026-10-14-diagnostics-panic-location-fn-table.md`): the
+panic's `location` compiled (lowering records the panic / todo / unreachable
+call site), and frame names, files and definition lines on every platform from
+a compiler-emitted function table (no dladdr, so Linux too).
+
+1. **Exact line for every compiled frame.** Frames carry their function's
+   DEFINITION line. The current line needs spans threaded through TIR (no
+   `fn_def` or expr carries one; `lib/tir/provenance.ml` is a per-function side
+   table), `DILocation`s on calls, and a DWARF line-table reader at runtime
+   (`libbacktrace` (BSD); macOS keeps DWARF in the objects / a `.dSYM`, not the
+   executable, so `dsymutil` at build time).
+2. **Inlined frames.** A function LLVM inlined has no frame; an actor handler
+   inlined into `<Actor>_dispatch` (which has no span) can leave a report with
+   no frames at all. DWARF inline info (item 1) recovers both; cheaper, give
+   the dispatch functions the actor's span so its frame at least names it.
+3. **Locations for the other panics.** `unwrap` / `expect` (prelude helpers:
+   track their caller's site as `panic` does, which needs a site that is
+   cleared when the helper returns normally), `assert` and non-exhaustive
+   matches (the interpreter reports neither line today), and runtime errors
+   (division by zero).
 4. **The stderr backtrace.** `march_print_backtrace` walks the `march_frame_*`
    stack the compiler never emits, so a compiled unhandled panic prints no
    stack trace. Print the unwinder's frames instead (changes every compiled

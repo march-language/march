@@ -488,6 +488,19 @@ let ir_contains ir pat =
   try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
   with Not_found -> false
 
+(** [ir] without the entries of the Diagnostics function table
+    (`@march_fn_table`, emitted by Llvm_toplevel.fn_table_block), which lists
+    `ptr @f` for every function the module defines: for checks that a
+    function's address appears nowhere else. *)
+let ir_outside_fn_table ir =
+  let entry = "{ ptr, ptr, i64, ptr } {" in
+  String.split_on_char '\n' ir
+  |> List.filter (fun l ->
+      let l = String.trim l in
+      not (String.length l >= String.length entry
+           && String.sub l 0 (String.length entry) = entry))
+  |> String.concat "\n"
+
 (** Compiled actor: dispatch function is emitted in the LLVM IR. *)
 let ir_count ir pat =
   let re = Str.regexp_string pat in
