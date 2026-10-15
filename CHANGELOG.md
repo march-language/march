@@ -145,6 +145,8 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **`Actor.call`'s timeout under the interpreter is described accurately.** The actors chapter said the timeout is real on both backends. Compiled, the caller stops waiting at `timeout_ms`; under the interpreter the handler runs to completion first and a late reply is then discarded and reported as `Err`, so a slow handler still blocks the caller for its full duration. The chapter now says so, in the call section and in the list of backend differences.
+
 - **The stdlib API reference has syntax highlighting, and Http is documented.**
   Code examples on march-lang.org/docs/stdlib/ were plain monochrome text: the
   generator only coloured fences tagged with a language, and the pages shipped
