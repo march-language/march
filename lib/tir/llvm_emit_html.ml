@@ -49,6 +49,21 @@ let stringify_for_escape ctx (a : Tir.atom) (v : string) : string =
       (Printf.sprintf "%s = call ptr @%s(ptr %s)" s fn_name v);
     s
 
+(* Ownership.  Both escaper builtins BORROW their value (Borrow's
+   extern_borrow_table): the caller keeps its reference and releases it after
+   the call, and each arm below must return a String the caller OWNS.  So an
+   arm that hands back a String it did not allocate -- the one inside a
+   Safe/Trusted cell -- takes a reference to it, and an arm that allocates an
+   intermediate (the to_string of a non-String hole, an IOList flattened for a
+   non-HTML context) releases it once the escaper has copied it.  Until
+   2026-10-14 the builtins defaulted to owned with nothing freeing the
+   argument, so every hole leaked (test/native/h_sigil_hole_leak_probe). *)
+let emit_incrc ctx (v : string) =
+  emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" v)
+
+let emit_decrc ctx (v : string) =
+  emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" v)
+
 (** Body of the `html_auto_escape` arm for an [Html.Safe] argument: the
     payload passes through unescaped, which is exactly Safe's contract. *)
 let emit_html_auto_escape_safe ~emit_atom ctx (a : Tir.atom)
@@ -61,6 +76,7 @@ let emit_html_auto_escape_safe ~emit_atom ctx (a : Tir.atom)
     emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp vp);
     let r = fresh ctx "safe_s" in
     emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r fp);
+    emit_incrc ctx r;
     ("ptr", r)
 
 (** Body of the general `html_auto_escape` arm: decide from the static TIR
@@ -98,9 +114,10 @@ let emit_html_auto_escape ~emit_atom ctx (a : Tir.atom) : string * string =
       emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape_dyn(ptr %s)" r v);
       ("ptr", r)
     | _ ->
-      let v = if runtime_safe then v else stringify_for_escape ctx a v in
+      let sv = if runtime_safe then v else stringify_for_escape ctx a v in
       let r = fresh ctx "hae" in
-      emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" r v);
+      emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" r sv);
+      if not runtime_safe then emit_decrc ctx sv;
       ("ptr", r)
 
 (** Body of the `html_escape_ctx` arm for a COMPILE-TIME escaper id. *)
@@ -181,37 +198,41 @@ let emit_html_escape_ctx_static ~emit_atom ctx (id : int) (a : Tir.atom)
        through `march_html_auto_escape`, whose IOList path flattens verbatim.
        Everything else takes to_string (an erased TVar took the dyn arm
        above). *)
-    let v =
+    (* [owned]: [v] is an intermediate this arm allocated, not the borrowed
+       hole value or the String borrowed out of its Safe/Trusted cell. *)
+    let (v, owned) =
       match atom_tir_ty a with
-      | Tir.TString -> v
+      | Tir.TString -> (v, false)
       | _ when is_safe ->
         (* Boxed single-field ADT: the wrapped String is at offset +16. *)
         let fp = fresh ctx "hec_safe_fp" in
         emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp v);
         let sv = fresh ctx "hec_safe_s" in
         emit ctx (Printf.sprintf "%s = load ptr, ptr %s" sv fp);
-        sv
+        (sv, false)
       | _ when is_iolist ->
         let fv = fresh ctx "hec_flat" in
         emit ctx
           (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" fv v);
-        fv
+        (fv, true)
       | _ ->
-        stringify_for_escape ctx a v
+        (stringify_for_escape ctx a v, true)
     in
     let trust_covers_this_context =
       match trusted_ids with
       | Some ids -> List.mem id ids
       | None -> is_html_ctx && is_iolist
     in
-    if trust_covers_this_context then
+    if trust_covers_this_context then begin
       (* The value is trusted for exactly this context: insert verbatim. *)
+      if not owned then emit_incrc ctx v;
       ("ptr", v)
-    else begin
+    end else begin
       let r = fresh ctx "hec" in
       emit ctx
         (Printf.sprintf
            "%s = call ptr @march_html_escape_ctx(i64 %d, ptr %s)" r id v);
+      if owned then emit_decrc ctx v;
       ("ptr", r)
     end
 
@@ -233,15 +254,16 @@ let emit_html_escape_ctx_dynamic ~emit_atom ctx (idx : Tir.atom)
            r id_v v);
       ("ptr", r)
     | _ ->
-    let v =
+    let (v, owned) =
       match atom_tir_ty a with
-      | Tir.TString -> v
+      | Tir.TString -> (v, false)
       | _ ->
-        stringify_for_escape ctx a v
+        (stringify_for_escape ctx a v, true)
     in
     let r = fresh ctx "hecd" in
     emit ctx
       (Printf.sprintf "%s = call ptr @march_html_escape_ctx(i64 %s, ptr %s)"
          r id_v v);
+    if owned then emit_decrc ctx v;
     ("ptr", r)
 

@@ -142,6 +142,10 @@ let get_orc ctx =
     let j = Jit_orc.create () in
     ctx.orc <- Some j; j
 
+(* The REPL printer's atom-name tables; see [atom_name]. *)
+let atom_lits : (int64, string) Hashtbl.t = Hashtbl.create 64
+let atom_name_fn : nativeint ref = ref Nativeint.zero
+
 let create ~runtime_so ?(clang="clang") () =
   (* Per-process artifact dir.  A single shared "march_jit" dir raced when
      several JIT sessions ran concurrently (dune executes the test runners in
@@ -192,6 +196,10 @@ let create ~runtime_so ?(clang="clang") () =
   end;
   (* Load the runtime .so first so its symbols are globally available *)
   let rt_handle = Jit.dlopen runtime_so in
+  (* The printer's runtime atom-name source (see [atom_lits]).  A runtime
+     too old to export it just leaves the printer on its own table. *)
+  (try atom_name_fn := Jit.dlsym rt_handle "march_atom_name_cstr"
+   with Failure _ -> ());
   let undef_flag = if is_macos () then " -undefined dynamic_lookup" else "" in
   (* Only macOS needs the explicit two-level runtime binding; Linux resolves
      RTLD_GLOBAL symbols correctly, so keep its link line unchanged. *)
@@ -812,6 +820,61 @@ let ctor_index_of_tag ~ctor_tags (name : string) (tag : int) : int option =
       | t :: rest -> if t = tag then Some i else go (i + 1) rest in
     go 0 tags
 
+(** Atom names for the printer.  Atoms compile to nameless FNV-1a hashes
+    ([Llvm_ctx.atom_hash]), so rendering one needs a hash -> name table.
+    Two sources, tried in order:
+    - [atom_lits]: every atom literal in a fragment this process lowered
+      ([record_atom_lits]), covering atoms typed at the prompt — a fragment
+      like `Some(:a)` never calls atom_to_string, so it registers no table
+      with the runtime;
+    - the runtime's registry ([march_atom_name_cstr], dlsym'd into
+      [atom_name_fn] by [create]): the stdlib precompile registers its table
+      there, covering atoms a precompiled stdlib fn returned (UUID.parse's
+      :invalid), whose literal no fragment ever contains.
+    Process-wide, not per-session: a hash is a pure function of the name, so
+    a name learned by another session can only be right.  The two tables
+    themselves are defined above [create], which fills [atom_name_fn]. *)
+
+(** Record every atom literal in [fns] in [atom_lits]. *)
+let record_atom_lits (fns : March_tir.Tir.fn_def list) : unit =
+  let open March_tir.Tir in
+  let atom = function
+    | ALit (March_ast.Ast.LitAtom name) ->
+      Hashtbl.replace atom_lits (March_tir.Llvm_ctx.atom_hash name) name
+    | ALit _ | AVar _ | ADefRef _ -> () in
+  let rec go = function
+    | EAtom a | EField (a, _) | EFree a | EIncRC a | EDecRC a
+    | EAtomicIncRC a | EAtomicDecRC a -> atom a
+    | EApp (_, args) -> List.iter atom args
+    | ECallPtr (f, args) -> atom f; List.iter atom args
+    | ELet (_, e1, e2) | ESeq (e1, e2) -> go e1; go e2
+    | ELetRec (lfns, e2) ->
+      List.iter (fun (f : fn_def) -> go f.fn_body) lfns; go e2
+    | ECase (scrut, branches, dflt) ->
+      atom scrut;
+      List.iter (fun (b : branch) -> go b.br_body) branches;
+      Option.iter go dflt
+    | ETuple atoms | EAlloc (_, atoms) | EStackAlloc (_, atoms) ->
+      List.iter atom atoms
+    | ERecord fields -> List.iter (fun (_, a) -> atom a) fields
+    | EUpdate (a, fields) -> atom a; List.iter (fun (_, x) -> atom x) fields
+    | EReuse (a, _, atoms) -> atom a; List.iter atom atoms
+    | EAllocHole (tok, _, atoms, _) -> Option.iter atom tok; List.iter atom atoms
+    | ESetField (obj, _, v) -> atom obj; atom v
+  in
+  List.iter (fun (f : fn_def) -> go f.fn_body) fns
+
+(** Render the atom hash [h] as ":name", or ":<atom>" (the compiled
+    fallback's spelling) when neither table knows it. *)
+let atom_name (h : int64) : string =
+  match Hashtbl.find_opt atom_lits h with
+  | Some name -> ":" ^ name
+  | None ->
+    let from_runtime =
+      if !atom_name_fn = Nativeint.zero then None
+      else Jit.call_atom_name !atom_name_fn h in
+    Option.value from_runtime ~default:":<atom>"
+
 (** Pretty-print a March heap value given its TIR type.
     [type_defs] provides user-declared TDVariant/TDRecord lookups for
     non-builtin TCon names.  Recursion is bounded to depth 64. *)
@@ -825,6 +888,8 @@ let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (
      the recursive calls re-entering here cost only a hash hit. *)
   let ty = qualify_ty ~type_defs ty in
   match ty with
+  (* An atom is the raw (untagged) i64 hash, not a cell — see [pp_word]. *)
+  | TCon ("Atom", []) -> atom_name (Int64.of_nativeint ptr)
   (* Niche / newtype types are NOT heap cells: [ptr] is the raw payload word
      (or 0 for a niche's nullary ctor), so these must be decoded before the
      null guard and before any tag read. *)
@@ -977,6 +1042,14 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
   | TBool -> if scalar () = 0L then "false" else "true"
   | TUnit -> "()"
   | TFloat -> pp_float_word ~erased:tagged w
+  | TCon ("Atom", []) ->
+    (* An atom is an i64 hash, never a heap cell (until 2026-10-14 this fell
+       through to [pp_heap_value], which read a "tag" at the hash: Err(:x)
+       segfaulted the REPL).  In an erased slot it is low-bit tagged; the
+       ARITHMETIC shift restores bit 63, which [atom_hash] mints equal to
+       bit 62 precisely so the hash survives that round trip. *)
+    let h = Int64.of_nativeint w in
+    atom_name (if tagged then Int64.shift_right h 1 else h)
   | TVar _ ->
     (* Erased slot: a scalar is low-bit tagged, a heap value is an aligned
        pointer.  Decide from the word itself — dereferencing a tagged scalar
@@ -987,8 +1060,12 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
     else if is_float_box w then pp_float_word ~erased:true w
     else Printf.sprintf "#<tag:%d>" (heap_tag w)
   | _ ->
-    if w = Nativeint.zero then "null"
-    else pp_heap_value ~depth:(depth + 1) ~type_defs ~ctor_tags ty w
+    (* A zero word is a niche type's nullary ctor (`None` in a list of
+       Options), which only [pp_heap_value]'s niche arm can name; anything
+       else it answers "#<null>" for, spelled "null" here as before. *)
+    (match pp_heap_value ~depth:(depth + 1) ~type_defs ~ctor_tags ty w with
+     | "#<null>" -> "null"
+     | s -> s)
 
 (** True when a value of [ty] is NOT a heap pointer but the raw payload word
     of a niche/newtype representation — the two cases where the "small word =
@@ -1289,6 +1366,15 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
          main_fn.March_tir.Tir.fn_params) in
   let thunk = Printf.sprintf "march_jit_main_thunk_%d" n in
   let entry = Printf.sprintf "march_jit_program_%d" n in
+  (* Register this fragment's atom-name table before main runs.  The ORC
+     backend runs no @llvm.global_ctors, so the constructor that registers it
+     (Llvm_toplevel.emit_atom_show_table) only fires under the clang/dlopen
+     backend; without the registration the prelude's Show$Atom.show cannot
+     name the program's own atoms and prints ":<atom>".  Registration is
+     idempotent, so the clang backend's double call is harmless. *)
+  let register_atoms =
+    if contains_sub ir "define internal void @march_atom_namer_register()"
+    then "  call void @march_atom_namer_register()\n" else "" in
   let ir =
     ir
     ^ "\n" ^ declare_if_absent ir "declare void @march_remote_init()"
@@ -1300,11 +1386,11 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
         (if ret_ty = "void" then "" else "%_r = ")
         ret_ty mangled erased_args
     ^ Printf.sprintf
-        "\ndefine void @%s() {\nentry:\n\
+        "\ndefine void @%s() {\nentry:\n%s\
         \  call void @march_remote_init()\n\
         \  call void @march_spawn_main(ptr @%s)\n\
         \  call void @march_run_scheduler()\n\
-        \  ret void\n}\n" entry thunk in
+        \  ret void\n}\n" entry register_atoms thunk in
   let handle = compile_fragment ctx ir in
   mark_compiled_fns ctx new_fns;
   commit_wraps ctx sw;
@@ -1329,6 +1415,7 @@ let run_expr ctx ~tc_env m =
     (fun () -> with_prior_fns ctx (fun () ->
          lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m)) in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
+  record_atom_lits tir.March_tir.Tir.tm_fns;
   let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name = "main") tir.March_tir.Tir.tm_fns with
   | Some f -> f
@@ -1383,6 +1470,8 @@ let run_expr ctx ~tc_env m =
     | March_tir.Tir.TUnit ->
       Jit.call_void_to_void fptr;
       "()"
+    | March_tir.Tir.TCon ("Atom", []) ->
+      atom_name (Jit.call_void_to_int fptr)
     | March_tir.Tir.TVar _ ->
       (* Unresolved type var — try to recover the actual type.  Walk the fn body
          into the tail position, recursing through ELet, ESeq, and ECase branches.

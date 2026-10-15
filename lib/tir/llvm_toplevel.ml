@@ -684,8 +684,18 @@ let buffer_contains (b : Buffer.t) (needle : string) : bool =
     body is routinely inlined into its caller, so the wrapper vanishes while the
     call to @march_atom_to_string remains.  Scanning the emitted IR is the
     ground truth.  The `not already-defined` guard makes a second call on the
-    same ctx a no-op (can't double-define the symbol or its globals). *)
-let emit_atom_show_table ctx =
+    same ctx a no-op (can't double-define the symbol or its globals).
+
+    [~jit] (every JIT/REPL emitter in llvm_repl.ml) changes two things.  A
+    JIT program is split across modules: `show(:zz)` in the program fragment
+    calls the precompiled stdlib prelude's Show$Atom.show, i.e. the PRELUDE's
+    table, which never saw :zz.  So a JIT module (1) emits its table whenever
+    it has atoms of its own, even with no call site, so the runtime registry
+    learns them, and (2) asks that registry (march_atom_name_registered,
+    march_runtime.c) for a hash its own table lacks before answering
+    ":<atom>".  The registry calls each module's pure lookup, never this
+    function, so the fallback cannot recurse. *)
+let emit_atom_show_table ?(jit = false) ctx =
   let in_module s =
     buffer_contains ctx.Llvm_ctx.buf s
     || buffer_contains ctx.Llvm_ctx.extra_fns s
@@ -698,6 +708,8 @@ let emit_atom_show_table ctx =
     in_module "call ptr @march_atom_to_string"
     || in_module "call ptr @march_logger_dispatch("
     || in_module "call ptr @march_logger_get_context("
+    || (jit && ctx.Llvm_ctx.shape_meta
+        && Hashtbl.length ctx.Llvm_ctx.atom_names > 0)
   in
   let already_defined =
     buffer_contains ctx.Llvm_ctx.extra_fns "define internal ptr @march_atom_to_string"
@@ -754,6 +766,27 @@ let emit_atom_show_table ctx =
        first @march_atom_to_string the dynamic linker found (an earlier
        fragment's, or the runtime's since-removed weak NULL stub) and showed
        "null" for `show(:ok)`. *)
+    if jit && ctx.Llvm_ctx.shape_meta then
+      Buffer.add_string b
+        "declare ptr @march_atom_name_registered(i64)\n\
+         define internal ptr @march_atom_to_string(i64 %h) {\n\
+         entry:\n\
+        \  %s = call ptr @march_atom_name_or_null(i64 %h)\n\
+        \  %known = icmp ne ptr %s, null\n\
+        \  br i1 %known, label %atom_known, label %atom_other\n\
+         atom_known:\n\
+        \  ret ptr %s\n\
+         atom_other:\n\
+        \  %r = call ptr @march_atom_name_registered(i64 %h)\n\
+        \  %rknown = icmp ne ptr %r, null\n\
+        \  br i1 %rknown, label %atom_reg, label %atom_unknown\n\
+         atom_reg:\n\
+        \  ret ptr %r\n\
+         atom_unknown:\n\
+        \  %u = call ptr @march_string_lit(ptr @.atomname_unknown, i64 7)\n\
+        \  ret ptr %u\n\
+         }\n"
+    else
     Buffer.add_string b
       "define internal ptr @march_atom_to_string(i64 %h) {\n\
        entry:\n\
