@@ -20,6 +20,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **"Try it" on 33 stdlib pages, and documentation examples are now checked.**
+  String, Json, Uri, Crypto, Regex, Task, Vault and 12 more modules have runnable
+  examples (249 "Try it" examples in all, up from 107), and every one is verified
+  against both the native REPL and the in-browser REPL in CI, so a documented result
+  that drifts from the real one fails the build. Converting them corrected dozens of
+  wrong examples (for instance `String.split(s, "")` splits into bytes, not "returns
+  the whole string"). Actor's module example is now a complete program you can run.
+  The browser REPL now accepts `|>` pipes and a `main` that takes `Cap(IO)`.
+
 - **`Diagnostics`: observe crashes the runtime owns.** `Diagnostics.observe_crashes`
   registers a callback that receives a `CrashReport` (kind, message, backtrace, the
   failing actor, and context) for every panic nothing handles, in an actor or in
@@ -63,6 +72,12 @@ git log is authoritative for exact commits.
   line, which is all one CI crash of `native_run_until_idle_ping_pong` left.
 
 ### Fixed
+
+- **`march repl` prints negative numbers inside lists, options and tuples correctly.**
+  The native REPL showed `[-1, 2]` as `[9223372036854775807, 2]` (and likewise
+  `Some(-1)`, `(-1, 2)`, `NativeArray.to_list_i32(...)` with a negative element). Only
+  the printed result was wrong; the values themselves, `--compile` and the interpreter
+  were always right.
 
 - **The in-browser REPL downloads a tenth as much, and the Tetris playground compiles
   again.** The REPL on the playground, cookbook and landing pages loaded a 19.7 MB

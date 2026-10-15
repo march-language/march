@@ -14,6 +14,8 @@
 -- This is intentionally simple to verify without external libraries.
 --
 -- All hex output is lowercase.
+--
+-- doc: try
 
 mod Crypto do
   needs IO.Random
@@ -115,12 +117,14 @@ mod Crypto do
   -- ── Hash functions ────────────────────────────────────────────────────────
 
   doc """
-  Compute the SHA-256 hash of data, returning a lowercase hex string.
+  Compute the SHA-256 hash of a String, returning a 64-char lowercase hex
+  string.
 
-      Crypto.sha256("hello")
-      -- "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      march> Crypto.sha256("hello")
+      "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 
-  The argument may be a String or Bytes value.
+  The argument must be a String; pass a Bytes value through
+  `Bytes.to_string` first.
   """
   fn sha256(data) do
     stdlib_sha256(data)
@@ -130,8 +134,8 @@ mod Crypto do
   Compute the SHA-512 hash of a String, returning a 128-char lowercase hex
   string.
 
-      Crypto.sha512("hello")
-      -- "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca7..."
+      march> Crypto.sha512("hello")
+      "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043"
   """
   fn sha512(data : String) : String do
     stdlib_sha512(data)
@@ -140,11 +144,11 @@ mod Crypto do
   doc """
   Compute an HMAC using the given algorithm.
 
-      Crypto.hmac(:sha256, "secret", "message")
-      -- lowercase hex string of the HMAC-SHA256 result
+      march> Crypto.hmac(:sha256, "secret", "message")
+      "8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b"
 
   Supported algorithms: `:sha256`.  Returns the HMAC as a lowercase hex string.
-  The key and data may each be a String or Bytes value.
+  The key and data must each be a String.
   """
   fn hmac(algo, key, data) do
     match algo do
@@ -187,6 +191,18 @@ mod Crypto do
       let h = Crypto.hash_password("correct-horse-battery-staple")
       Crypto.verify_password("correct-horse-battery-staple", h)  -- true
       Crypto.verify_password("wrong-password", h)                -- false
+
+  The iteration count is read from the stored hash, so a hash made with a
+  lower count (here 1000, salt `"0123456789abcdef"`) verifies quickly:
+
+      march> let h = "pbkdf2:sha256:1000:30313233343536373839616263646566:a63e13df90f6bf8b58982d6c4c9d72e6d70c00339db67406bee1e6c980d08768"
+      march> Crypto.verify_password("hunter2", h)
+      true
+      march> let h = "pbkdf2:sha256:1000:30313233343536373839616263646566:a63e13df90f6bf8b58982d6c4c9d72e6d70c00339db67406bee1e6c980d08768"
+      march> Crypto.verify_password("hunter3", h)
+      false
+      march> Crypto.verify_password("hunter2", "md5:abc")  -- unrecognised format
+      false
 
   Returns `false` if the hash format is unrecognised.
   """
@@ -283,10 +299,13 @@ mod Crypto do
   -- ── Base64 helpers ────────────────────────────────────────────────────────
 
   doc """
-  Base64-encode a Bytes value (standard alphabet with padding).
+  Base64-encode a String (standard alphabet with padding).
 
-      let b = Crypto.random_bytes(12)
-      Crypto.base64_encode(b)  -- 16-character Base64 string
+      march> Crypto.base64_encode("Hello")
+      "SGVsbG8="
+
+  The argument must be a String; pass a Bytes value through
+  `Bytes.to_string` first.
   """
   fn base64_encode(data) do
     stdlib_base64_encode(data)
@@ -295,8 +314,13 @@ mod Crypto do
   doc """
   Decode a standard Base64 string to Bytes.
 
-      Crypto.base64_decode("SGVsbG8=")  -- Ok(Bytes for "Hello")
-      Crypto.base64_decode("!!")        -- Err("base64_decode: ...")
+      march> Crypto.base64_decode("SGVsbG8=") == Ok(Bytes.from_string("Hello"))
+      true
+      march> Result.is_err(Crypto.base64_decode("!!"))
+      true
+
+  Invalid input gives `Err(message)`; natively `Crypto.base64_decode("!!")`
+  is `Err("base64_decode: invalid character")`.
   """
   fn base64_decode(s) do
     stdlib_base64_decode(s)
@@ -306,8 +330,8 @@ mod Crypto do
   Base64-encode using the URL-safe alphabet (- and _ instead of + and /),
   with no padding characters.
 
-      Crypto.base64_url_encode(Crypto.random_bytes(16))
-      -- URL-safe 22-character string
+      march> Crypto.base64_url_encode("Hello?>")
+      "SGVsbG8_Pg"
   """
   fn base64_url_encode(data) do
     to_url_safe_b64(base64_encode(data))
@@ -316,8 +340,10 @@ mod Crypto do
   doc """
   Decode a URL-safe Base64 string (- and _, no padding) to Bytes.
 
-      Crypto.base64_url_decode("SGVsbG8")  -- Ok(Bytes)
-      Crypto.base64_url_decode("!!")       -- Err(...)
+      march> Crypto.base64_url_decode("SGVsbG8") == Ok(Bytes.from_string("Hello"))
+      true
+      march> Result.is_err(Crypto.base64_url_decode("!!"))
+      true
   """
   fn base64_url_decode(s) do
     base64_decode(from_url_safe_b64(s))

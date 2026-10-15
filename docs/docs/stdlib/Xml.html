@@ -2995,17 +2995,92 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-children"><div class="ih"><span class="badge bfn">fn</span><span class="name">children</span><span class="sig">children(node : <a href="#type-XmlNode">XmlNode</a>) : List(<a href="#type-XmlNode">XmlNode</a>)</span><a class="anchor-link" href="#fn-children" title="Link">#</a></div><div class="ib"><p>Get all child nodes of an element (text, elements, comments, etc.).</p></div></div>
 <div class="item" id="fn-elem"><div class="ih"><span class="badge bfn">fn</span><span class="name">elem</span><span class="sig">elem(tag_name : String, attrs : List((String, String)), kids : List(<a href="#type-XmlNode">XmlNode</a>)) : <a href="#type-XmlNode">XmlNode</a></span><a class="anchor-link" href="#fn-elem" title="Link">#</a></div><div class="ib"><p>Construct an element node.</p></div></div>
 <div class="item" id="fn-elements"><div class="ih"><span class="badge bfn">fn</span><span class="name">elements</span><span class="sig">elements(node : <a href="#type-XmlNode">XmlNode</a>) : List(<a href="#type-XmlNode">XmlNode</a>)</span><a class="anchor-link" href="#fn-elements" title="Link">#</a></div><div class="ib"><p>Get only element-type children (filters out text, comments, etc.).</p></div></div>
-<div class="item" id="fn-find"><div class="ih"><span class="badge bfn">fn</span><span class="name">find</span><span class="sig">find(node : <a href="#type-XmlNode">XmlNode</a>, path : String) : Option(<a href="#type-XmlNode">XmlNode</a>)</span><a class="anchor-link" href="#fn-find" title="Link">#</a></div><div class="ib"><p>Navigate to the first node matching a slash-delimited tag path.</p><pre><code><span class="tok-ty">Xml</span>.find(root, <span class="tok-str">&quot;item/name&quot;</span>)  <span class="tok-com">-- finds &lt;item&gt;&lt;name&gt;...&lt;/name&gt;&lt;/item&gt;</span></code></pre></div></div>
-<div class="item" id="fn-find_all"><div class="ih"><span class="badge bfn">fn</span><span class="name">find_all</span><span class="sig">find_all(node : <a href="#type-XmlNode">XmlNode</a>, path : String) : List(<a href="#type-XmlNode">XmlNode</a>)</span><a class="anchor-link" href="#fn-find_all" title="Link">#</a></div><div class="ib"><p>Find all element children at the last segment of a slash-delimited path.</p><pre><code><span class="tok-ty">Xml</span>.find_all(root, <span class="tok-str">&quot;items/item&quot;</span>)  <span class="tok-com">-- all &lt;item&gt; inside &lt;items&gt;</span></code></pre></div></div>
-<div class="item" id="fn-parse"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse</span><span class="sig">parse(src : String) : Result(<a href="#type-XmlDoc">XmlDoc</a>, <a href="#type-XmlError">XmlError</a>)</span><a class="anchor-link" href="#fn-parse" title="Link">#</a></div><div class="ib"><p>Parse an XML string. Returns Ok(XmlDoc) on success or Err(XmlError) on failure. This is a non-validating parser: it does not check DTDs or enforce constraints beyond well-formedness.</p><pre><code><span class="tok-ty">Xml</span>.parse(<span class="tok-str">&quot;&lt;root&gt;&lt;item&gt;hello&lt;/item&gt;&lt;/root&gt;&quot;</span>)
-<span class="tok-com">-- Ok(XmlDoc(None, Element(&quot;root&quot;, [], [Element(&quot;item&quot;, [], [Text(&quot;hello&quot;)])])))</span></code></pre></div></div>
+<div class="item" id="fn-find"><div class="ih"><span class="badge bfn">fn</span><span class="name">find</span><span class="sig">find(node : <a href="#type-XmlNode">XmlNode</a>, path : String) : Option(<a href="#type-XmlNode">XmlNode</a>)</span><a class="anchor-link" href="#fn-find" title="Link">#</a></div><div class="ib"><p>Navigate to the first node matching a slash-delimited tag path.</p><pre data-try="let root = Xml.root(Xml.parse_exn(&quot;&lt;shop&gt;&lt;item&gt;&lt;name&gt;pen&lt;/name&gt;&lt;/item&gt;&lt;item&gt;&lt;name&gt;ink&lt;/name&gt;&lt;/item&gt;&lt;/shop&gt;&quot;))
+Xml.find(root, &quot;item/name&quot;)  -- the first &lt;name&gt; inside an &lt;item&gt;
+let root = Xml.root(Xml.parse_exn(&quot;&lt;shop&gt;&lt;item&gt;&lt;name&gt;pen&lt;/name&gt;&lt;/item&gt;&lt;item&gt;&lt;name&gt;ink&lt;/name&gt;&lt;/item&gt;&lt;/shop&gt;&quot;))
+Xml.find(root, &quot;item/price&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> root = <span class="tok-ty">Xml</span>.root(<span class="tok-ty">Xml</span>.parse_exn(<span class="tok-str">&quot;&lt;shop&gt;&lt;item&gt;&lt;name&gt;pen&lt;/name&gt;&lt;/item&gt;&lt;item&gt;&lt;name&gt;ink&lt;/name&gt;&lt;/item&gt;&lt;/shop&gt;&quot;</span>))
+march&gt; <span class="tok-ty">Xml</span>.find(root, <span class="tok-str">&quot;item/name&quot;</span>)  <span class="tok-com">-- the first &lt;name&gt; inside an &lt;item&gt;</span>
+<span class="tok-ty">Some</span>(<span class="tok-ty">Element</span>(<span class="tok-str">&quot;name&quot;</span>, [], [<span class="tok-ty">Text</span>(<span class="tok-str">&quot;pen&quot;</span>)]))
+march&gt; <span class="tok-kw">let</span> root = <span class="tok-ty">Xml</span>.root(<span class="tok-ty">Xml</span>.parse_exn(<span class="tok-str">&quot;&lt;shop&gt;&lt;item&gt;&lt;name&gt;pen&lt;/name&gt;&lt;/item&gt;&lt;item&gt;&lt;name&gt;ink&lt;/name&gt;&lt;/item&gt;&lt;/shop&gt;&quot;</span>))
+march&gt; <span class="tok-ty">Xml</span>.find(root, <span class="tok-str">&quot;item/price&quot;</span>)
+<span class="tok-ty">None</span></code></pre></div></div>
+<div class="item" id="fn-find_all"><div class="ih"><span class="badge bfn">fn</span><span class="name">find_all</span><span class="sig">find_all(node : <a href="#type-XmlNode">XmlNode</a>, path : String) : List(<a href="#type-XmlNode">XmlNode</a>)</span><a class="anchor-link" href="#fn-find_all" title="Link">#</a></div><div class="ib"><p>Find all element children at the last segment of a slash-delimited path.</p><pre data-try="let root = Xml.root(Xml.parse_exn(&quot;&lt;order&gt;&lt;items&gt;&lt;item&gt;pen&lt;/item&gt;&lt;item&gt;ink&lt;/item&gt;&lt;/items&gt;&lt;/order&gt;&quot;))
+List.map(Xml.find_all(root, &quot;items/item&quot;), Xml.text)  -- all &lt;item&gt; inside &lt;items&gt;" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> root = <span class="tok-ty">Xml</span>.root(<span class="tok-ty">Xml</span>.parse_exn(<span class="tok-str">&quot;&lt;order&gt;&lt;items&gt;&lt;item&gt;pen&lt;/item&gt;&lt;item&gt;ink&lt;/item&gt;&lt;/items&gt;&lt;/order&gt;&quot;</span>))
+march&gt; <span class="tok-ty">List</span>.map(<span class="tok-ty">Xml</span>.find_all(root, <span class="tok-str">&quot;items/item&quot;</span>), <span class="tok-ty">Xml</span>.text)  <span class="tok-com">-- all &lt;item&gt; inside &lt;items&gt;</span>
+[<span class="tok-ty">Some</span>(<span class="tok-str">&quot;pen&quot;</span>), <span class="tok-ty">Some</span>(<span class="tok-str">&quot;ink&quot;</span>)]</code></pre></div></div>
+<div class="item" id="fn-parse"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse</span><span class="sig">parse(src : String) : Result(<a href="#type-XmlDoc">XmlDoc</a>, <a href="#type-XmlError">XmlError</a>)</span><a class="anchor-link" href="#fn-parse" title="Link">#</a></div><div class="ib"><p>Parse an XML string. Returns Ok(XmlDoc) on success or Err(XmlError) on failure. This is a non-validating parser: it does not check DTDs or enforce constraints beyond well-formedness.</p><pre data-try="Xml.parse(&quot;&lt;root&gt;&lt;item&gt;hello&lt;/item&gt;&lt;/root&gt;&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Xml</span>.parse(<span class="tok-str">&quot;&lt;root&gt;&lt;item&gt;hello&lt;/item&gt;&lt;/root&gt;&quot;</span>)
+<span class="tok-ty">Ok</span>(<span class="tok-ty">XmlDoc</span>(<span class="tok-ty">None</span>, <span class="tok-ty">Element</span>(<span class="tok-str">&quot;root&quot;</span>, [], [<span class="tok-ty">Element</span>(<span class="tok-str">&quot;item&quot;</span>, [], [<span class="tok-ty">Text</span>(<span class="tok-str">&quot;hello&quot;</span>)])])))</code></pre></div></div>
 <div class="item" id="fn-parse_exn"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse_exn</span><span class="sig">parse_exn(src : String) : <a href="#type-XmlDoc">XmlDoc</a></span><a class="anchor-link" href="#fn-parse_exn" title="Link">#</a></div><div class="ib"><p>Parse XML, panicking on error.</p></div></div>
 <div class="item" id="fn-root"><div class="ih"><span class="badge bfn">fn</span><span class="name">root</span><span class="sig">root(xdoc : <a href="#type-XmlDoc">XmlDoc</a>) : <a href="#type-XmlNode">XmlNode</a></span><a class="anchor-link" href="#fn-root" title="Link">#</a></div><div class="ib"><p>Get the root element of a document.</p></div></div>
 <div class="item" id="fn-tag"><div class="ih"><span class="badge bfn">fn</span><span class="name">tag</span><span class="sig">tag(node : <a href="#type-XmlNode">XmlNode</a>) : Option(String)</span><a class="anchor-link" href="#fn-tag" title="Link">#</a></div><div class="ib"><p>Get the tag name of an element node, or None for non-element nodes.</p></div></div>
 <div class="item" id="fn-text"><div class="ih"><span class="badge bfn">fn</span><span class="name">text</span><span class="sig">text(node : <a href="#type-XmlNode">XmlNode</a>) : Option(String)</span><a class="anchor-link" href="#fn-text" title="Link">#</a></div><div class="ib"><p>Get the concatenated direct text content of a node, or None if no text children.</p></div></div>
 <div class="item" id="fn-text_node"><div class="ih"><span class="badge bfn">fn</span><span class="name">text_node</span><span class="sig">text_node(s : String) : <a href="#type-XmlNode">XmlNode</a></span><a class="anchor-link" href="#fn-text_node" title="Link">#</a></div><div class="ib"><p>Construct a text node.</p></div></div>
 <div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(xdoc : <a href="#type-XmlDoc">XmlDoc</a>) : String</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Serialize an XmlDoc to a compact XML string.</p></div></div>
-<div class="item" id="fn-to_string_pretty"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string_pretty</span><span class="sig">to_string_pretty(xdoc : <a href="#type-XmlDoc">XmlDoc</a>) : String</span><a class="anchor-link" href="#fn-to_string_pretty" title="Link">#</a></div><div class="ib"><p>Serialize an XmlDoc to a pretty-printed XML string.</p></div></div></main></div><script>
+<div class="item" id="fn-to_string_pretty"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string_pretty</span><span class="sig">to_string_pretty(xdoc : <a href="#type-XmlDoc">XmlDoc</a>) : String</span><a class="anchor-link" href="#fn-to_string_pretty" title="Link">#</a></div><div class="ib"><p>Serialize an XmlDoc to a pretty-printed XML string.</p></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

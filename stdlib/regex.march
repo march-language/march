@@ -17,11 +17,14 @@
 --   \\  \.  \*  etc.    literal special characters
 --
 -- Functions:
---   match(pattern, string)                -> Bool
---   find(pattern, string)                 -> Option(String)
---   find_all(pattern, string)             -> List(String)
---   replace(pattern, replacement, string) -> String
---   split(pattern, string)                -> List(String)
+--   matches(pattern, string)                  -> Bool
+--   find(pattern, string)                     -> Option(String)
+--   find_all(pattern, string)                 -> List(String)
+--   replace(pattern, replacement, string)     -> String
+--   replace_all(pattern, replacement, string) -> String
+--   split(pattern, string)                    -> List(String)
+--
+-- doc: try
 
 mod Regex do
 
@@ -723,9 +726,12 @@ mod Regex do
   If pattern starts with '^', the match is anchored to the start.
   If pattern ends with '$', the match is anchored to the end.
 
-      Regex.matches("\\d+", "hello 42 world")  -- true
-      Regex.matches("^hello", "hello world")   -- true
-      Regex.matches("^hello", "say hello")     -- false
+      march> Regex.matches("\\d+", "hello 42 world")
+      true
+      march> Regex.matches("^hello", "hello world")
+      true
+      march> Regex.matches("^hello", "say hello")
+      false
   """
   fn matches(pattern, string) do
     matches_opts(pattern, string, default_opts())
@@ -734,9 +740,8 @@ mod Regex do
   doc """
   Like `matches`, but accepts a `RegexOpts` record for per-call flags.
 
-      Regex.matches_opts("HELLO", "hello world",
-                         { case_insensitive: true, multiline: false })
-      -- true
+      march> Regex.matches_opts("HELLO", "hello world", { case_insensitive: true, multiline: false })
+      true
   """
   fn matches_opts(pattern, string, opts) do
     -- Routed through the NFA simulation, not the backtracking matcher: a
@@ -802,8 +807,10 @@ mod Regex do
   Find the first match of `pattern` in `string`.
   Returns Some(matched_substring) or None.
 
-      Regex.find("\\d+", "price: 42 dollars")  -- Some("42")
-      Regex.find("xyz", "hello")               -- None
+      march> Regex.find("\\d+", "price: 42 dollars")
+      Some("42")
+      march> Regex.find("xyz", "hello")
+      None
   """
   fn find(pattern, string) do
     match compile(pattern) do
@@ -822,7 +829,8 @@ mod Regex do
   Find all non-overlapping matches of `pattern` in `string`.
   Returns a list of matched substrings in order.
 
-      Regex.find_all("\\d+", "a1 b22 c333")  -- ["1", "22", "333"]
+      march> Regex.find_all("\\d+", "a1 b22 c333")
+      ["1", "22", "333"]
   """
   fn find_all(pattern, string) do
     match compile(pattern) do
@@ -851,7 +859,8 @@ mod Regex do
   Replace the first match of `pattern` in `string` with `replacement`.
   Returns the resulting string.
 
-      Regex.replace("\\d+", "NUM", "price 42")  -- "price NUM"
+      march> Regex.replace("\\d+", "NUM", "price 42")
+      "price NUM"
   """
   fn replace(pattern, replacement, string) do
     match compile(pattern) do
@@ -871,7 +880,8 @@ mod Regex do
   Replace all non-overlapping matches of `pattern` in `string` with `replacement`.
   Returns the resulting string.
 
-      Regex.replace_all("\\d", "X", "a1b2c3")  -- "aXbXcX"
+      march> Regex.replace_all("\\d", "X", "a1b2c3")
+      "aXbXcX"
   """
   fn replace_all(pattern, replacement, string) do
     match compile(pattern) do
@@ -905,8 +915,10 @@ mod Regex do
   Split `string` on matches of `pattern`.
   Returns the list of substrings between matches.
 
-      Regex.split("\\s+", "hello   world  foo")  -- ["hello", "world", "foo"]
-      Regex.split(",", "a,b,c")                   -- ["a", "b", "c"]
+      march> Regex.split("\\s+", "hello   world  foo")
+      ["hello", "world", "foo"]
+      march> Regex.split(",", "a,b,c")
+      ["a", "b", "c"]
   """
   fn split(pattern, string) do
     match compile(pattern) do
