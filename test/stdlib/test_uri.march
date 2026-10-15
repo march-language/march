@@ -1,0 +1,214 @@
+-- test/stdlib/test_uri.march
+-- Tests for the Uri module: RFC 3986 reference parsing (§4.2) and
+-- resolution (§5.2: merge, remove_dot_segments), including the
+-- merge_strict path-traversal guard.
+-- Run with: dune exec march -- test test/stdlib/test_uri.march
+
+mod TestUri do
+
+  pfn ex_base() do
+    Uri.parse("https://example.com/a/b/c")
+  end
+
+  -- URI has no Eq impl, so compare a rendering of all six fields.
+  pfn fields(u) do
+    let port = match Uri.port(u) do
+      None    -> "None"
+      Some(p) -> "Some(" ++ int_to_string(p) ++ ")"
+      end
+    string_join([Uri.scheme(u), Uri.host(u), port, Uri.path(u), Uri.query(u), Uri.fragment(u)], "|")
+  end
+
+  pfn uri_is(u, scheme, host, port, path, query, fragment) do
+    fields(u) == fields(URI(scheme, host, port, path, query, fragment))
+  end
+
+  pfn strict(rel) do
+    strict_on(ex_base(), rel)
+  end
+
+  pfn strict_on(b, rel) do
+    match Uri.merge_strict(b, Uri.parse(rel)) do
+    Ok(u)  -> "Ok " ++ fields(u)
+    Err(e) -> "Err " ++ e
+    end
+  end
+
+  pfn traversal_err() do
+    "Err Uri.merge_strict: relative reference traverses above base"
+  end
+
+  pfn strict_ok(path) do
+    "Ok https|example.com|None|" ++ path ++ "||"
+  end
+
+  -- RFC 3986 §5.4.1 "normal examples" are resolved against this base.
+  pfn rfc_base() do
+    Uri.parse("http://a/b/c/d;p?q")
+  end
+
+  pfn resolves(rel, expected) do
+    Uri.to_string(Uri.merge(rfc_base(), Uri.parse(rel))) == expected
+  end
+
+  describe "Uri.parse: relative references (RFC 3986 §4.2)" do
+    test "a dot-relative reference is a path, not a host" do
+      assert (uri_is(Uri.parse("../d"), "", "", None, "../d", "", ""))
+    end
+
+    test "a relative path with a slash is a path, not host/path" do
+      assert (uri_is(Uri.parse("a/b"), "", "", None, "a/b", "", ""))
+    end
+
+    test "a bare segment is a path" do
+      assert (uri_is(Uri.parse("g"), "", "", None, "g", "", ""))
+    end
+
+    test "a network-path reference has an authority" do
+      assert (uri_is(Uri.parse("//other.com/x"), "", "other.com", None, "/x", "", ""))
+    end
+
+    test "a network-path reference with a port, query and fragment" do
+      assert (uri_is(Uri.parse("//h:81/p?q=1#f"), "", "h", Some(81), "/p", "q=1", "f"))
+    end
+
+    test "an absolute-path reference has no authority" do
+      assert (uri_is(Uri.parse("/x/y?z=1"), "", "", None, "/x/y", "z=1", ""))
+    end
+
+    test "a :// inside a query does not make a scheme" do
+      assert (uri_is(Uri.parse("/go?to=http://x"), "", "", None, "/go", "to=http://x", ""))
+    end
+
+    test "an absolute URI still parses host, port and path" do
+      assert (uri_is(Uri.parse("https://example.com:8080/api?q=1#top"), "https", "example.com", Some(8080), "/api", "q=1", "top"))
+    end
+
+    test "a network-path reference round-trips through to_string" do
+      assert (Uri.to_string(Uri.parse("//other.com/x")) == "//other.com/x")
+    end
+  end
+
+  describe "Uri.merge_strict: path-traversal guard" do
+    test "the regression: three .. against /a/b/c climbs above the root" do
+      assert (strict("../../../etc/passwd") == traversal_err())
+    end
+
+    test "four .. is rejected too" do
+      assert (strict("../../../../etc/passwd") == traversal_err())
+    end
+
+    test "two .. reaches the root exactly and keeps the leading /" do
+      assert (strict("../../etc/passwd") == strict_ok("/etc/passwd"))
+    end
+
+    test "one .. stays inside" do
+      assert (strict("../d") == strict_ok("/a/d"))
+    end
+
+    test "a .. that climbs and comes back down is still rejected" do
+      assert (strict("../../../a/b/d") == traversal_err())
+    end
+
+    test "an absolute-path reference that climbs is rejected" do
+      assert (strict("/../etc/passwd") == traversal_err())
+    end
+
+    test "a base path at the root rejects a single .." do
+      assert (strict_on(Uri.parse("https://example.com/"), "../x") == traversal_err())
+    end
+
+    test "a base with an empty path rejects a single .." do
+      assert (strict_on(Uri.parse("https://example.com"), "../x") == traversal_err())
+    end
+
+    test "dot segments inside a reference that stays put are accepted" do
+      assert (strict("./x/../y") == strict_ok("/a/b/y"))
+    end
+  end
+
+  describe "Uri.merge: remove_dot_segments keeps the leading /" do
+    test "over-traversal is absorbed but the path stays absolute" do
+      assert (Uri.path(Uri.merge(ex_base(), Uri.parse("../../../x"))) == "/x")
+    end
+
+    test "to_string of an over-traversed merge has a / after the host" do
+      assert (Uri.to_string(Uri.merge(ex_base(), Uri.parse("../../../x"))) == "https://example.com/x")
+    end
+
+    test "many surplus .. still give /x" do
+      assert (Uri.path(Uri.merge(ex_base(), Uri.parse("../../../../../../x"))) == "/x")
+    end
+
+    test "a base with an empty path merges as /rpath" do
+      assert (Uri.to_string(Uri.merge(Uri.parse("https://example.com"), Uri.parse("x")))
+              == "https://example.com/x")
+    end
+
+    test "merge with a parsed dot-relative reference" do
+      assert (Uri.to_string(Uri.merge(ex_base(), Uri.parse("../d"))) == "https://example.com/a/d")
+    end
+
+    test "merge with a parsed network-path reference" do
+      assert (Uri.to_string(Uri.merge(ex_base(), Uri.parse("//other.com/x"))) == "https://other.com/x")
+    end
+  end
+
+  describe "Uri.merge: RFC 3986 §5.4.1 normal examples" do
+    test "g, ./g, g/, /g, //g" do
+      assert (resolves("g", "http://a/b/c/g"))
+      assert (resolves("./g", "http://a/b/c/g"))
+      assert (resolves("g/", "http://a/b/c/g/"))
+      assert (resolves("/g", "http://a/g"))
+      assert (resolves("//g", "http://g"))
+    end
+
+    test "query and fragment references" do
+      assert (resolves("?y", "http://a/b/c/d;p?y"))
+      assert (resolves("g?y", "http://a/b/c/g?y"))
+      assert (resolves("#s", "http://a/b/c/d;p?q#s"))
+      assert (resolves("g#s", "http://a/b/c/g#s"))
+      assert (resolves("g?y#s", "http://a/b/c/g?y#s"))
+      assert (resolves(";x", "http://a/b/c/;x"))
+      assert (resolves("g;x", "http://a/b/c/g;x"))
+      assert (resolves("", "http://a/b/c/d;p?q"))
+    end
+
+    test "dot segments" do
+      assert (resolves(".", "http://a/b/c/"))
+      assert (resolves("./", "http://a/b/c/"))
+      assert (resolves("..", "http://a/b/"))
+      assert (resolves("../", "http://a/b/"))
+      assert (resolves("../g", "http://a/b/g"))
+      assert (resolves("../..", "http://a/"))
+      assert (resolves("../../", "http://a/"))
+      assert (resolves("../../g", "http://a/g"))
+    end
+  end
+
+  describe "Uri.merge: RFC 3986 §5.4.2 abnormal examples" do
+    test "surplus .. is absorbed at the root" do
+      assert (resolves("../../../g", "http://a/g"))
+      assert (resolves("../../../../g", "http://a/g"))
+      assert (resolves("/./g", "http://a/g"))
+      assert (resolves("/../g", "http://a/g"))
+    end
+
+    test "segments that merely contain dots are kept" do
+      assert (resolves("g.", "http://a/b/c/g."))
+      assert (resolves(".g", "http://a/b/c/.g"))
+      assert (resolves("g..", "http://a/b/c/g.."))
+      assert (resolves("..g", "http://a/b/c/..g"))
+    end
+
+    test "nonsensical dot forms" do
+      assert (resolves("./../g", "http://a/b/g"))
+      assert (resolves("./g/.", "http://a/b/c/g/"))
+      assert (resolves("g/./h", "http://a/b/c/g/h"))
+      assert (resolves("g/../h", "http://a/b/c/h"))
+      assert (resolves("g;x=1/./y", "http://a/b/c/g;x=1/y"))
+      assert (resolves("g;x=1/../y", "http://a/b/c/y"))
+    end
+  end
+
+end

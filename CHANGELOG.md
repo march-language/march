@@ -73,6 +73,25 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Security: `Uri.merge_strict` now rejects every path traversal above the root.**
+  The guard was off by one: the empty segment before a path's leading `/` absorbed one
+  `..`, so against a base path `/a/b/c` the reference `../../../etc/passwd` was accepted
+  as `Ok(...)` with path `etc/passwd`, and only four `..` were rejected. Any `..` with
+  nothing left to remove is now an `Err`, including one in an absolute-path reference
+  (`/../etc/passwd`). If you used `merge_strict` to vet untrusted relative references,
+  upgrade.
+- **`Uri.merge` keeps the leading `/` (RFC 3986 §5.2.4).** Surplus `..` segments turned
+  the path relative, so `../../../x` against `https://example.com/a/b/c` gave
+  `"https://example.comx"`; it now gives `"https://example.com/x"`. Merging also follows
+  §5.2 in the remaining cases: dot segments are removed from absolute-path and
+  network-path references too, a base with an empty path merges as `/` + the reference,
+  and a fragment-only reference keeps the base query.
+- **`Uri.parse` reads relative references per RFC 3986 §4.2.** A scheme-less string not
+  starting with `/` was split as `host/path` (`Uri.parse("../d")` had host `..`), and
+  `//other.com/x` put everything in the path. Now only `//` introduces an authority:
+  `../d` and `a/b` are paths, `//other.com/x` has host `other.com` and path `/x`, and
+  `Uri.to_string` writes such a reference back with its `//`. A `://` inside a path or
+  query (`/go?to=http://x`) no longer makes a scheme.
 - **The in-browser REPL no longer runs out of stack.** On the playground, cookbook and
   "Try it" pages, `List.map` over more than about 200 elements, or a recursive function
   a few hundred calls deep, failed with "Maximum call stack size exceeded". The
