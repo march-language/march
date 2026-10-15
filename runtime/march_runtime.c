@@ -15281,6 +15281,16 @@ void march_set_atom_namer(void *fn) {
     if (!n) return;
     n->fn = (march_atom_namer_fn)fn;
     pthread_mutex_lock(&march_atom_namers_mu);
+    /* Idempotent: a --jit program fragment registers its table explicitly
+     * from its entry (ORC runs no global constructors) AND through its
+     * constructor when the clang backend dlopens it. */
+    for (march_atom_namer_node *e = march_atom_namers; e; e = e->next) {
+        if ((void *)e->fn == fn) {
+            pthread_mutex_unlock(&march_atom_namers_mu);
+            free(n);
+            return;
+        }
+    }
     n->next = march_atom_namers;
     march_atom_namers = n;
     pthread_mutex_unlock(&march_atom_namers_mu);
@@ -15308,6 +15318,15 @@ static void *march_atom_name_lookup(int64_t h) {
         name = n->fn(h);
     pthread_mutex_unlock(&march_atom_namers_mu);
     return name;
+}
+
+/* ":name" for [h] from any registered table, or NULL.  A JIT/REPL module's
+ * generated @march_atom_to_string falls back to this for a hash its own
+ * table lacks: under --jit the call `show(:zz)` lands in the precompiled
+ * stdlib prelude's table, which only knows the stdlib's atoms, while :zz
+ * is in the program fragment's table. */
+void *march_atom_name_registered(int64_t h) {
+    return march_atom_name_lookup(h);
 }
 
 /* Public face of march_atom_name_lookup for the REPL JIT's value printer

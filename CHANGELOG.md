@@ -73,6 +73,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march --jit` names the program's own atoms.** `to_string(:zz)` printed
+  `:<atom>` under `--jit` (both the ORC and clang backends) for any atom the stdlib
+  does not itself use; it now prints `:zz`, as the interpreter and `--compile` do.
+
 - **Security: `Uri.merge_strict` now rejects every path traversal above the root.**
   The guard was off by one: the empty segment before a path's leading `/` absorbed one
   `..`, so against a base path `/a/b/c` the reference `../../../etc/passwd` was accepted

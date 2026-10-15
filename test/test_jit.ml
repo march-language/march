@@ -523,6 +523,49 @@ let test_jit_file_clang () =
       (run_jit_file ~env_prefix:"MARCH_JIT_BACKEND=clang" jit_file_fib_src)
       ["checksum=6765"]
 
+(* `to_string` of the program's OWN atoms under --jit.  The call lands in
+   the precompiled stdlib prelude's Show$Atom.show, whose generated atom
+   table only knows the stdlib's atoms; until 2026-10-14 every program atom
+   printed ":<atom>".  The fragment now registers its table with the runtime
+   (explicitly from its entry, since ORC runs no constructors) and the
+   prelude's fallback consults that registry.  :ok is runtime-seeded, so it
+   pins that the prelude's own names still win. *)
+let jit_file_atoms_src = {|mod JitFileAtoms do
+  needs IO.Console
+
+  fn pick(b : Bool) : Atom do
+    if b do :left_side else :right_side end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("bare=" ++ to_string(:zz))
+    println("fn=" ++ to_string(pick(true)) ++ "," ++ to_string(pick(false)))
+    println("ok=" ++ to_string(:ok))
+  end
+end
+|}
+
+let check_jit_file_atoms ~label result =
+  check_jit_file ~label result
+    ["bare=:zz"; "fn=:left_side,:right_side"; "ok=:ok"];
+  if contains ~needle:":<atom>" (fst result) then
+    Alcotest.failf "%s: an atom printed as :<atom>:\n%s" label (fst result)
+
+let test_jit_file_atoms_orc () =
+  if not (clang_available ()) then ()
+  else begin
+    let (out, code) =
+      run_jit_file ~env_prefix:"MARCH_JIT_BACKEND=orc" jit_file_atoms_src in
+    if contains ~needle:"libLLVM not found" out then ()
+    else check_jit_file_atoms ~label:"--jit atoms (ORC backend)" (out, code)
+  end
+
+let test_jit_file_atoms_clang () =
+  if not (clang_available ()) then ()
+  else
+    check_jit_file_atoms ~label:"--jit atoms (clang backend)"
+      (run_jit_file ~env_prefix:"MARCH_JIT_BACKEND=clang" jit_file_atoms_src)
+
 (* An actor program must not be JIT-compiled yet: it falls back to the
    interpreter with a notice on stderr, and still produces the right answer.
    Pins BOTH halves — a silent fallback would be indistinguishable from
@@ -1327,6 +1370,10 @@ let () =
         test_jit_file_orc;
       Alcotest.test_case "march --jit runs a whole program (clang JIT)" `Slow
         test_jit_file_clang;
+      Alcotest.test_case "march --jit names the program's atoms (ORC JIT)" `Slow
+        test_jit_file_atoms_orc;
+      Alcotest.test_case "march --jit names the program's atoms (clang JIT)" `Slow
+        test_jit_file_atoms_clang;
       Alcotest.test_case "march --jit falls back to the interpreter for actors"
         `Slow test_jit_file_actor_falls_back;
       Alcotest.test_case
