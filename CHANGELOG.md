@@ -73,6 +73,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The in-browser REPL no longer runs out of stack.** On the playground, cookbook and
+  "Try it" pages, `List.map` over more than about 200 elements, or a recursive function
+  a few hundred calls deep, failed with "Maximum call stack size exceeded". The
+  interpreter is now compiled so that recursion depth is limited by memory: a
+  100,000-element list or 100,000-deep recursion works. Call-heavy code runs about a
+  third slower, and the download is about 10% smaller. Also, defining a function after
+  `main` no longer runs `main` again.
+
 - **`march repl` no longer crashes on an atom inside a value.** `Err(:invalid)`,
   `Some(:a)`, `[:a, :b]`, `(:a, 1)` and `UUID.parse("not-a-uuid")` killed the REPL with a
   segmentation fault; they now print. A `None` inside a list or tuple prints as `None`
