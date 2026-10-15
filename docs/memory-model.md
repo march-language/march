@@ -573,9 +573,13 @@ to construct rather than cleaning them up afterwards:
   cycle could be made of.
 
 Two caveats. First, this is a *design argument*, not a mechanized proof:
-no part of March is mechanically verified today (a Lean 4 metatheory effort is
-planned, not started; see `specs/lean4-metatheory-plan.md`), and there is no
-runtime detector that would tell you if it were wrong. Second, the argument covers user-level
+the separate [march-lean](https://github.com/march-language/march-lean) repository
+is a Lean 4 differential oracle for the type checker (capability lattice, linearity,
+tail calls and an inference oracle, compared against `march --emit-core-ast`) with
+kernel-checked laws for the capability checker's verdict algebra, but nothing in it
+covers Perceus, FBIP or this no-cycles argument (the fuller metatheory is still a plan:
+`specs/lean4-metatheory-plan.md`), and there is no runtime detector that would tell you
+if it were wrong. Second, the argument covers user-level
 data; the runtime does construct self-referential shapes internally (a
 self-recursive closure captures itself), and those are handled by
 compiler-inserted drops on specific paths rather than by reference counting

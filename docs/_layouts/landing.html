@@ -508,7 +508,8 @@
       <a href="{{ site.baseurl }}/docs/linear-types/">Linear types</a> make a resource that is used out
       of order, twice, or never a compile error.
       <a href="{{ site.baseurl }}/docs/refinement-types/">Refinement types</a> reject a value a function
-      cannot accept before it runs. A message protocol is checked on both sides, a crashed actor is
+      cannot accept before it runs. A <a href="{{ site.baseurl }}/docs/session-types/">session-typed</a>
+      channel's protocol is checked on both sides, a crashed actor is
       restarted the way you declared, and a running node
       <a href="{{ site.baseurl }}/docs/hot-code-reload/">takes new code without a restart</a>.
     </p>
@@ -549,8 +550,8 @@
       <!-- CONCURRENCY -->
       <div class="m-feature-card">
         <p class="m-feature-label">Concurrency</p>
-        <h3 class="m-feature-h3">Actor model, typed and isolated</h3>
-        <p class="m-feature-p">Share-nothing message-passing actors with supervision trees. Accidental shared mutable state is a compile error, not a runtime bug.</p>
+        <h3 class="m-feature-h3">Actor model, isolated and supervised</h3>
+        <p class="m-feature-p">Share-nothing message-passing actors with supervision trees. A mutable buffer cannot be sent in a message, and process-global state such as a Vault table needs <code>IO.Mut</code>, so shared mutable state shows up in a module's signature.</p>
         <div class="m-code-wrap">
           <pre class="m-feature-pre"><code id="actor-code"></code></pre>
           <button class="m-try-btn" onclick="tryACTOR()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
@@ -573,16 +574,16 @@
           <div class="m-perf-face m-perf-back">
             <p class="m-feature-label">Benchmark</p>
             <h3 class="m-feature-h3" style="font-size:20px; margin-bottom:8px;">tree-transform(depth=20, 100 passes)</h3>
-            <p class="m-feature-p" style="font-size:13px; margin-bottom:20px;">After pass 1, March allocates nothing — every node rewritten in-place. 7.5× faster than OCaml. 19× faster than Rust. Apple M-series, <code style="font-family:'JetBrains Mono',monospace;font-size:11px;">--opt 2</code>.</p>
+            <p class="m-feature-p" style="font-size:13px; margin-bottom:20px;">After pass 1, March allocates nothing — every node rewritten in-place. The OCaml, Rust and Elixir versions build a fresh tree each pass, so this measures in-place reuse against allocation, not March against hand-written mutation. Median of 10, Apple M3 Max, <code style="font-family:'JetBrains Mono',monospace;font-size:11px;">--opt 2</code>, from <a href="https://github.com/march-language/march/blob/main/bench/RESULTS.md" onclick="event.stopPropagation()">bench/RESULTS.md</a> (2026-07-24). March is slower on fib, binary-trees and list-ops there.</p>
             <table class="m-bench-table">
               <thead><tr>
                 <th>Language</th><th>Median</th><th>Allocs/pass</th>
               </tr></thead>
               <tbody>
-                <tr><td>Elixir (BEAM)</td><td>2580 ms</td><td>2M</td></tr>
-                <tr><td>OCaml (ocamlopt)</td><td>3825 ms</td><td>2M</td></tr>
-                <tr><td>Rust (rustc -O)</td><td>9977 ms</td><td>2M</td></tr>
-                <tr class="march"><td>March (FBIP)</td><td>513 ms</td><td>0 ✓</td></tr>
+                <tr><td>Elixir (BEAM)</td><td>2369 ms</td><td>2M</td></tr>
+                <tr><td>OCaml (ocamlopt)</td><td>3670 ms</td><td>2M</td></tr>
+                <tr><td>Rust (rustc -O)</td><td>4902 ms</td><td>2M</td></tr>
+                <tr class="march"><td>March (FBIP)</td><td>579 ms</td><td>0 ✓</td></tr>
               </tbody>
             </table>
             <p class="m-feature-hint">← Back</p>

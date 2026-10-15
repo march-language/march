@@ -68,7 +68,7 @@ end
 
 ## FBIP: Functional But In-Place
 
-One of March's most distinctive performance features is **FBIP (Functional But In-Place)**, derived from the [Perceus reference counting paper](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/). March code that recursively transforms a data structure can automatically run as fast as (or faster than) equivalent imperative C code that mutates in-place.
+One of March's most distinctive performance features is **FBIP (Functional But In-Place)**, derived from the [Perceus reference counting paper](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/). March code that recursively transforms a uniquely-owned data structure reuses its memory in place, with no allocation on the reuse path and no annotations.
 
 ### How it works
 
@@ -96,17 +96,22 @@ With FBIP active, after the initial tree is built, every subsequent pass of `inc
 
 ### Benchmark: `bench/tree_transform.march`
 
-Depth-20 binary tree (1,048,576 leaves), 100 passes of `inc_leaves`:
+Depth-20 binary tree (1,048,576 leaves), 100 passes of `inc_leaves`. Median of 10 runs,
+Apple M3 Max, `--opt 2`, from [`bench/RESULTS.md`](bench/RESULTS.md) (2026-07-24):
 
-| Implementation | Time | Allocations per pass |
+| Implementation | Median | Allocations per pass |
 |---|---|---|
-| March (FBIP off, before the fix) | 11.0 s | 2 × 2^20 = 2M |
-| C (`malloc` / `free`) | 8.8 s | 2 × 2^20 = 2M |
-| Rust (`Box`) | 9.5 s | 2 × 2^20 = 2M |
-| OCaml (GC) | ~3.65 s | 2 × 2^20 = 2M (amortized) |
-| **March (FBIP on)** | **1.3 s** | 0 (after pass 1) |
+| Rust (`rustc -O`, `Box`) | 4902 ms | 2 × 2^20 = 2M |
+| OCaml (`ocamlopt`) | 3670 ms | 2 × 2^20 = 2M |
+| Elixir (BEAM) | 2369 ms | 2 × 2^20 = 2M |
+| **March (FBIP)** | **579 ms** | 0 (after pass 1) |
 
-March is **7× faster than C** on this benchmark, not because C is slow, but because `malloc`/`free` carry real overhead (bookkeeping, potential locks, cache pressure). 200M allocator calls across 100 passes add up. March avoids all of them with in-place reuse.
+Read this as in-place reuse against allocation, not as March against those languages in
+general. The Rust, OCaml and Elixir programs (`bench/rust/`, `bench/ocaml/`, `bench/elixir/`)
+build a fresh tree every pass; a Rust version that mutates through `&mut`, or a C version
+that reuses nodes, is not benchmarked. On the other workloads in the same table March is
+behind: fib(40), binary-trees(15) and list-ops(1M) are all faster in Rust or OCaml. With FBIP
+reuse disabled (a regression fixed 2026-07-24) this benchmark took 3842 ms, slower than OCaml.
 
 ### What patterns benefit
 

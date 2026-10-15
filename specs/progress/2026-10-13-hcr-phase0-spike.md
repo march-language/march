@@ -15,8 +15,9 @@ three hit the native patch model that **already ships** (`--compile-so` patches,
 property of native swap: an ORC loader would inherit every one. So:
 
 1. Fix the three findings below in the shipped `.so` model first (each has a
-   todo, two are small). That is where the risk is today. (Findings 1 and 3
-   were fixed 2026-10-13, see below; finding 2 is open.)
+   todo, two are small). That is where the risk is today. (All three were
+   fixed 2026-10-13: findings 1 and 3 see below; finding 2 in 816ea39e9,
+   `specs/progress/2026-10-13-hcr-patch-closures-not-in-drop-table.md`.)
 2. Do not build Phase 6 (ORC in the server) on the current evidence. What it adds
    over the shipped model is compiling on the target, which means linking LLVM
    into every production binary, and ORC has a known macOS problem with the
