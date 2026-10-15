@@ -80,18 +80,35 @@ git log is authoritative for exact commits.
   nothing left to remove is now an `Err`, including one in an absolute-path reference
   (`/../etc/passwd`). If you used `merge_strict` to vet untrusted relative references,
   upgrade.
+
 - **`Uri.merge` keeps the leading `/` (RFC 3986 §5.2.4).** Surplus `..` segments turned
   the path relative, so `../../../x` against `https://example.com/a/b/c` gave
   `"https://example.comx"`; it now gives `"https://example.com/x"`. Merging also follows
   §5.2 in the remaining cases: dot segments are removed from absolute-path and
   network-path references too, a base with an empty path merges as `/` + the reference,
   and a fragment-only reference keeps the base query.
+
 - **`Uri.parse` reads relative references per RFC 3986 §4.2.** A scheme-less string not
   starting with `/` was split as `host/path` (`Uri.parse("../d")` had host `..`), and
   `//other.com/x` put everything in the path. Now only `//` introduces an authority:
   `../d` and `a/b` are paths, `//other.com/x` has host `other.com` and path `/x`, and
   `Uri.to_string` writes such a reference back with its `//`. A `://` inside a path or
   query (`/go?to=http://x`) no longer makes a scheme.
+
+- **The in-browser REPL no longer runs out of stack.** On the playground, cookbook and
+  "Try it" pages, `List.map` over more than about 200 elements, or a recursive function
+  a few hundred calls deep, failed with "Maximum call stack size exceeded". The
+  interpreter is now compiled so that recursion depth is limited by memory: a
+  100,000-element list or 100,000-deep recursion works. Call-heavy code runs about a
+  third slower, and the download is about 10% smaller. Also, defining a function after
+  `main` no longer runs `main` again.
+
+- **`march repl` no longer crashes on an atom inside a value.** `Err(:invalid)`,
+  `Some(:a)`, `[:a, :b]`, `(:a, 1)` and `UUID.parse("not-a-uuid")` killed the REPL with a
+  segmentation fault; they now print. A `None` inside a list or tuple prints as `None`
+  instead of `null`. Compiled programs had a related bug: an `Option(Atom)` built from a
+  literal atom (`Some(:a)`) did not match its own atom (`x == :a` was `false`) and printed
+  as `Some(:<atom>)`. Both are fixed.
 
 - **`march repl` prints negative numbers inside lists, options and tuples correctly.**
   The native REPL showed `[-1, 2]` as `[9223372036854775807, 2]` (and likewise
