@@ -20,6 +20,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Compiled crash reports say where the panic was called, and name every frame.**
+  A `Diagnostics` crash report's `location` is now the exact file and line of the
+  `panic`, `todo` or `unreachable` call in compiled programs, as it already was
+  interpreted. Compiled backtrace frames now give each function's source name (no
+  more `$lam0__…`), file and definition line, on Linux as well as macOS: the
+  compiler records the program's functions in a small table instead of relying on
+  the symbols the executable exports.
+
 - **"Try it" on 33 stdlib pages, and documentation examples are now checked.**
   String, Json, Uri, Crypto, Regex, Task, Vault and 12 more modules have runnable
   examples (249 "Try it" examples in all, up from 107), and every one is verified
@@ -63,6 +71,12 @@ git log is authoritative for exact commits.
   **reset**, which also forgets it. The cookbook sidebar previously had neither.
 
 ### Changed
+- **The stdlib API reference loads much faster.** Every page inlined a sidebar listing
+  all 2,964 entries of every module, and fetched the whole search index on load, so a
+  page was about 400 KB plus a 424 KB index download. The sidebar now lists the modules
+  and expands only the one you are reading, and the search index loads when you first
+  open search: a page is now 60-95 KB (8.3 MB for all 133 pages, down from 50.5 MB).
+
 - A compiled program whose scheduler is about to resume a corrupt or freed
   green-thread context now stops with a `march_sched[BUG]: dispatch of pid N
   ... with a context it did not save` line (the pid, the saved stack pointer
@@ -80,6 +94,16 @@ git log is authoritative for exact commits.
   argument shifted by one (#708). Such impls are now compiled without the hidden
   parameter; an operation inside one runs on the real capability rather than a
   `with_cap` mock.
+- **A session that forms just as a peer node dies no longer outlives it.** For a
+  moment after a node's connection closed, the cluster node still handed out that
+  connection to sessions being set up. A session that linked to it in that window
+  never heard that the node was gone and waited for that link's end for ever,
+  so a SIGTERM drain on its node ran to its hard deadline and exited 1. A dead
+  connection is now no longer handed out from the moment it closes.
+
+- **`march --jit` names the program's own atoms.** `to_string(:zz)` printed
+  `:<atom>` under `--jit` (both the ORC and clang backends) for any atom the stdlib
+  does not itself use; it now prints `:zz`, as the interpreter and `--compile` do.
 
 - **Security: `Uri.merge_strict` now rejects every path traversal above the root.**
   The guard was off by one: the empty segment before a path's leading `/` absorbed one
@@ -150,6 +174,16 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Overstated claims on the landing page and in the docs are corrected.** The
+  tree-transform benchmark showed numbers no recorded run produced (Rust 9977 ms,
+  "19x faster than Rust"); it now shows the `bench/RESULTS.md` medians (March 579 ms,
+  OCaml 3670, Rust 4902, Elixir 2369) and says the other languages allocate a fresh
+  tree each pass. The README's FBIP table and its "7x faster than C" claim (no C
+  program is benchmarked) are replaced the same way. The landing page no longer calls
+  actors "typed" or says shared mutable state is a compile error, since `send` does not
+  check a message against the target actor. The hot-reload page gains a "Current limitations" section listing the open issues,
+  and the memory-model chapter describes the march-lean oracle instead of calling it
+  "not started".
 - **`Actor.call`'s timeout under the interpreter is described accurately.** The actors chapter said the timeout is real on both backends. Compiled, the caller stops waiting at `timeout_ms`; under the interpreter the handler runs to completion first and a late reply is then discarded and reported as `Err`, so a slow handler still blocks the caller for its full duration. The chapter now says so, in the call section and in the list of backend differences.
 
 - **The stdlib API reference has syntax highlighting, and Http is documented.**

@@ -870,6 +870,12 @@ let diag_report_crash ?(base = 0) ~(kind : int) ~(pid : int) ~(supervised : bool
       else s
     in
     let msg = strip "todo: " (strip "panic: " raw) in
+    (* A stdlib file as "stdlib/<name>.march", as the compiled backend names
+       it (March_tir.Provenance.display_file; this library does not link
+       march_tir). *)
+    let display_file file =
+      if Filename.basename (Filename.dirname file) = "stdlib"
+      then "stdlib/" ^ Filename.basename file else file in
     let ctx = match exn, !Eval_prim.diag_raise_ctx with
       | Eval_error m, Some (m', c) when m = m' -> c
       | _ -> !Eval_prim.diag_ctx
@@ -895,12 +901,25 @@ let diag_report_crash ?(base = 0) ~(kind : int) ~(pid : int) ~(supervised : bool
       List.filter_map (fun (name, f) ->
           if f.mf_file = "<none>" || f.mf_line <= 0 then None
           else Some (VCon ("DiagFrame",
-                           [VString name; VString f.mf_file; VInt f.mf_line])))
+                           [VString name; VString (display_file f.mf_file);
+                            VInt f.mf_line])))
         (drop_prelude (pair stack))
     in
     let lst = List.fold_right (fun v acc -> VCon ("Cons", [v; acc]))
         frames (VCon ("Nil", [])) in
-    Eval_prim.diag_dispatch ~kind ~msg ~frames:lst ~pid ~supervised ~ctx
+    (* The panic's call site, as the compiled backend records it
+       (march_panic_site): the innermost call outside the prelude, when it is
+       a call to panic / todo / unreachable.  A panic raised inside a prelude
+       helper (unwrap, ...) has none. *)
+    let site =
+      match List.find_opt (fun f ->
+          Filename.basename f.mf_file <> "prelude.march") stack with
+      | Some f when List.mem f.mf_name ["panic"; "todo"; "unreachable"]
+                    && f.mf_file <> "<none>" && f.mf_line > 0 ->
+        Some (display_file f.mf_file, f.mf_line)
+      | _ -> None
+    in
+    Eval_prim.diag_dispatch ~kind ~msg ~frames:lst ~pid ~supervised ~ctx ~site
   end
 
 

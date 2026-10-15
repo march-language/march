@@ -44,6 +44,10 @@ let _use_aliases = Lower_state._use_aliases
 let _protocol_roles = Lower_state._protocol_roles
 let _current_module_fns = Lower_state._current_module_fns
 
+(* The panic/todo/unreachable call whose site the panic-site arm of
+   [lower_expr] is lowering, so the same call is not matched twice. *)
+let panic_site_lowering : Ast.expr option ref = ref None
+
 (** The value-level supervisor DSL (`app … Supervisor.spec(:one_for_one,
     [worker(W)])`) is interpreter-only: these names typecheck, [eval.ml]
     implements them, and the compiled backend has neither a lowering nor a C
@@ -496,6 +500,37 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     failwith (Printf.sprintf "%s:%d:%d: error: `%s` %s"
       span.Ast.file span.Ast.start_line span.Ast.start_col name
       (List.assoc name interpreter_only_builtin_reasons))
+  (* --- panic / todo / unreachable: record the call site first, so a
+     Diagnostics crash report can say where the panic was called (Rust's
+     track_caller for the three diverging prelude functions; march_runtime.c's
+     march_panic_site).  The site call goes right before the call and costs
+     nothing unless the panic happens (a message whose evaluation panics
+     first consumes the site itself, which names the same line).  Not for a
+     local binding of the same name, nor inside the prelude: a panic raised
+     there (Option.unwrap, ...) reports no location, as the interpreter does.
+     [_current_module_fns] cannot tell a user's own top-level `panic` apart:
+     the prelude's functions are in it too.  Such a function, if it does not
+     panic, leaves a site the next siteless panic would report; every panic
+     clears it, so the window is one panic.  [panic_site_lowering] marks the call while it is
+     lowered again below, so this arm does not match it twice. --- *)
+  | Ast.EApp (Ast.EVar { txt = ("panic" | "todo" | "unreachable") as name; _ }, _, sp) as call
+    when sp.Ast.start_line > 0
+         && Filename.basename sp.Ast.file <> "prelude.march"
+         && (match !panic_site_lowering with Some c -> c != call | None -> true)
+         && not (Lower_state.is_local_binding name) ->
+    let site_var : Tir.var = {
+      Tir.v_name = "__panic_site";
+      v_ty = Tir.TFn ([Tir.TString; Tir.TInt], Tir.TUnit);
+      v_lin = Tir.Unr } in
+    let site = Tir.EApp (site_var,
+                         [Tir.ALit (Ast.LitString (Provenance.display_file sp.Ast.file));
+                          Tir.ALit (Ast.LitInt sp.Ast.start_line)]) in
+    let saved = !panic_site_lowering in
+    panic_site_lowering := Some call;
+    let lowered =
+      Fun.protect ~finally:(fun () -> panic_site_lowering := saved)
+        (fun () -> lower_expr env call) in
+    Tir.ESeq (site, lowered)
   | Ast.EApp (Ast.EVar { txt = "Chan.new"; _ }, [proto_arg], _) ->
     lower_to_atom_k env proto_arg (fun proto' ->
       let fn_var : Tir.var = {

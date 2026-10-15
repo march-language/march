@@ -22,7 +22,8 @@ widen what the node is allowed to do, and every signed request is sequenced so i
 cannot be replayed.
 
 In practice: no cold-start latency, no dropped connections, no TCP state reset, and no
-need to drain traffic before a routine code push.
+need to drain traffic before a routine code push. Some edge cases are still open; read
+[Current limitations](#current-limitations) before relying on it in production.
 
 ## On this page
 
@@ -31,6 +32,7 @@ need to drain traffic before a routine code push.
 - [When to use it](#when-to-use-it)
 - [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
 - [How it works](#how-it-works)
+- [Current limitations](#current-limitations)
 
 **One server**
 
@@ -1145,6 +1147,38 @@ Patch stack: 3 persisted patches over 2 deploys (2 functions), 1 artifact, 1.2 M
 When it grows long, `forge deploy --compact --env <env>` rebuilds each build's base image from the current version, restarts its hosts onto it (the new base build makes the server set the old stack aside) and removes what was set aside; each node then reports an empty stack. With `[hot-reload] compact_after = N` in `forge.toml`, `forge deploy` does this by itself for a build whose nodes report a stack longer than `N`.
 
 ---
+
+## Current limitations
+
+Hot reload swaps native code in a live process, and that has failure modes a restart
+does not. The Phase 0 soundness spike (2026-10-13,
+[`specs/progress/2026-10-13-hcr-phase0-spike.md`](https://github.com/march-language/march/blob/main/specs/progress/2026-10-13-hcr-phase0-spike.md))
+ran the shipped `.so` patch model under AddressSanitizer and found three ways a swap
+corrupted or leaked memory: a parameter changing from borrowed to owned (use-after-free),
+a patch introducing a new closure shape (leaked captures), and a reclaimed patch image
+being unmapped under live closure code (crash). All three were fixed the same day. The
+spike's verdict was to keep the shipped native-patch model and not build an in-server
+JIT on top of it.
+
+These are still open:
+
+- **A signature change can reach a running old frame.** A deploy that changes a
+  function's signature is accepted when every recorded caller ships with it, but a caller
+  invocation that is already running (a request loop on `main`, or an actor loop that
+  never returns to its mailbox) keeps executing the old code and calls the new version.
+  Avoid signature changes to functions called from long-running loops, or restart for
+  them.
+  ([todo](https://github.com/march-language/march/blob/main/specs/todos/2026-10-13-hcr-coordinated-sig-change-running-caller-frame.md))
+- **An actor spawned by un-redeployed code may start with the old state layout**
+  (suspected from code reading, not reproduced).
+  ([todo](https://github.com/march-language/march/blob/main/specs/todos/2026-09-21-hcr-spawn-site-state-layout.md))
+- **`--hot-reload` with `--cap-sandbox`:** the reload server's listener races the
+  sandbox install, so whether it can listen depends on thread timing. No test combines
+  the two flags.
+  ([todo](https://github.com/march-language/march/blob/main/specs/todos/2026-09-30-hcr-reload-listener-races-cap-sandbox-install.md))
+- **Old patch images stay mapped.** A reclaimed version's `.so` is never unloaded, so a
+  long-lived node keeps one mapped image per deploy until it restarts.
+  ([todo](https://github.com/march-language/march/blob/main/specs/todos/2026-10-13-hcr-unload-unreachable-patch-images.md))
 
 ## See also
 

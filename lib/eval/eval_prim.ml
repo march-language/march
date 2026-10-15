@@ -106,12 +106,16 @@ let march_stack_mark : (unit -> (unit -> unit)) ref =
     Diagnostics.DiagCrash.  An observer's exception is swallowed, and an
     observer's own crash is never reported. *)
 let diag_dispatch ~(kind : int) ~(msg : string) ~(frames : value)
-    ~(pid : int) ~(supervised : bool) ~(ctx : value) : unit =
+    ~(pid : int) ~(supervised : bool) ~(ctx : value)
+    ~(site : (string * int) option) : unit =
   if !diag_observers <> [] && not !diag_dispatching then begin
+    let site_file, site_line = match site with
+      | Some (f, l) -> (f, l) | None -> ("", 0) in
     let report =
       VCon ("DiagCrash",
             [VInt kind; VString msg; frames; VInt pid;
-             VInt (if supervised then 1 else 0); ctx]) in
+             VInt (if supervised then 1 else 0); ctx;
+             VString site_file; VInt site_line]) in
     let snapshot = !diag_observers in
     diag_dispatching := true;
     Fun.protect ~finally:(fun () -> diag_dispatching := false) (fun () ->

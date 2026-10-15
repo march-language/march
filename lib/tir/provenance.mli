@@ -57,6 +57,10 @@ val effective_span : string -> March_ast.Ast.span option
 val module_file : string option ref
 (** The lowered module's source file (set by [seed_from_lowering]). *)
 
+(** A crash report's name for a source file: a stdlib file (its directory
+    named "stdlib") as "stdlib/<name>.march", any other as given. *)
+val display_file : string -> string
+
 val string_of_span : March_ast.Ast.span -> string
 
 val string_of_derivation : derivation -> string

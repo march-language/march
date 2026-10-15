@@ -1932,6 +1932,8 @@ mod ClusterNode do
       if l.dfd >= 0 do NetKernel.forget(l.dfd) else () end
       discard(send(pid_of_int(l.cw), CtlClose()))
       let qk = "q" ++ int_to_string(l.cfd)
+      -- Before the fds close: a new connection may reuse the number.
+      Vault.drop(h.meta, data_closed_key(l))
       match Vault.get(h.qs, qk) do
         Some(w) ->
           Vault.drop(h.qs, qk)
@@ -2301,12 +2303,20 @@ mod ClusterNode do
         send(node, MoveReader(1, l, frame, rest))
         0
       None ->
+        -- No session may link to this connection from here on: mark it
+        -- BEFORE the close handlers run (`h_queue_for`). Its queue stays in
+        -- `h.qs` until every reader has released it (`release_link`), so a
+        -- session forming in between got the dead queue and missed the
+        -- close it was told before it subscribed.
+        Vault.set(h.meta, data_closed_key(l), 1)
         data_closed(h, l)
         send(node, LinkClosed(l.node_id, l.gen))
         release_link(h, l, 3)
         0
     end
   end
+
+  pfn data_closed_key(l : CnLink) : String do "dc" ++ int_to_string(l.cfd) end
 
   pfn data_closed(h : CnHandle, l : CnLink) : () do
     let why = Vault.get_or(h.causes, "c" ++ int_to_string(l.cfd), "connection lost")
@@ -2980,10 +2990,15 @@ mod ClusterNode do
     match Vault.get(h.links, node_id) do
       None -> None
       Some(l) ->
+        -- A connection whose data reader has ended is no route, though the
+        -- node actor has not dropped it yet: a session party linking to it
+        -- would subscribe to its close after the close was told
+        -- (specs/progress/2026-10-15-session-links-dead-connection.md).
+        if Vault.get(h.meta, data_closed_key(l)) != None do None else
         match Vault.get(h.qs, "q" ++ int_to_string(l.cfd)) do
           Some(w) -> Some((pid_of_int(w), l.dfd))
           None -> None
-        end
+        end end
     end end
   end
 

@@ -247,6 +247,8 @@ let scalar_builtins = [
      constant), and the match fall-through lower_match inserts calls `panic_`
      — without this entry every `match` would fail its contract. *)
   "panic"; "panic_"; "todo_"; "unreachable_"; "process_exit";
+  (* Stores a literal's address and a line on the proc; allocates nothing. *)
+  "__panic_site";
   (* Reference counting and freeing, not allocating: [Drop.run] synthesizes a
      call to [march_decrc_freed] inside every generated __drop$T helper, so
      without this entry any function that drops an owned value fails. *)

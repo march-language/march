@@ -22,11 +22,17 @@
 -- is swallowed, but it must not block: no network I/O, no waiting on a reply.
 -- Hand the report to an actor or a queue and return.
 --
--- Backtraces.  Compiled, the frames are the native stack, named from the
--- executable's symbol table: on macOS every March function resolves; on
--- Linux only a `--hot-reload` (export-dynamic) build does, and others report
--- an empty backtrace.  Compiled frames carry no file or line yet, so
--- `location` is None.  Interpreted, every frame has its file and line.
+-- Location.  `location` is the `panic`, `todo` or `unreachable` call that
+-- raised the panic, compiled and interpreted.  A panic raised inside a
+-- prelude helper (`unwrap`, ...), by an `assert`, a non-exhaustive match or
+-- a runtime error (division by zero) has none.
+--
+-- Backtraces.  Interpreted, each frame is the line it was executing.
+-- Compiled, the frames are the native stack, named from a table of the
+-- program's own functions, on every platform: each frame is the source
+-- function with its file and DEFINITION line (lambdas as `<host>.{fn}`).
+-- Functions LLVM inlined into their caller do not appear, and an actor
+-- handler inlined into its actor's dispatch can leave no frame at all.
 -- `CrashKind.TaskFailed` is reserved: a compiled panic in a task exits the
 -- process and is reported as `Panic`.
 mod Diagnostics do
@@ -43,7 +49,8 @@ mod Diagnostics do
 
   type SourceLocation = { file : String, line : Int }
 
-  -- One frame, innermost first.  `file` is "" and `line` 0 when unknown.
+  -- One frame, innermost first: interpreted, the line it was executing;
+  -- compiled, its function's definition line.
   type StackFrame = { name : String, file : String, line : Int }
 
   -- `pid` is the failing actor's pid, or -1 outside an actor; `supervised` is
@@ -64,10 +71,11 @@ mod Diagnostics do
   -- What the runtime passes an observer's wrapper (march_runtime.c's
   -- diag_crash_cell / the interpreter's diag_dispatch): single-constructor
   -- types, tag 0, Ints stored raw, so the C runtime can build them.  `kind`
-  -- is 0 Panic, 1 ActorCrashed, 2 TaskFailed.  The names are unique on
+  -- is 0 Panic, 1 ActorCrashed, 2 TaskFailed; the last two fields are the
+  -- panic call's recorded site ("" and 0 when there is none).  The names are unique on
   -- purpose: a colliding constructor name gets global tags.
   type DiagFrame = DiagFrame(String, String, Int)
-  type DiagCrash = DiagCrash(Int, String, List(DiagFrame), Int, Int, List((String, DiagnosticValue)))
+  type DiagCrash = DiagCrash(Int, String, List(DiagFrame), Int, Int, List((String, DiagnosticValue)), String, Int)
 
   pfn kind_of(k : Int) : CrashKind do
     if k == 1 do ActorCrashed else if k == 2 do TaskFailed else Panic end end
@@ -83,21 +91,16 @@ mod Diagnostics do
     end
   end
 
-  -- The innermost frame that knows its file.
-  pfn location_of(fs : List(StackFrame)) : Option(SourceLocation) do
-    match fs do
-    Nil -> None
-    Cons(f, rest) ->
-      if f.file != "" && f.line > 0 do Some({ file: f.file, line: f.line })
-      else location_of(rest) end
-    end
+  -- The recorded call site of the panic, todo or unreachable call.
+  pfn location_of(file : String, line : Int) : Option(SourceLocation) do
+    if line > 0 do Some({ file: file, line: line }) else None end
   end
 
   pfn report_of(call : DiagCrash) : CrashReport do
     match call do
-    DiagCrash(k, msg, raw_frames, pid, supervised, ctx) ->
+    DiagCrash(k, msg, raw_frames, pid, supervised, ctx, site_file, site_line) ->
       let frames = frames_of(raw_frames)
-      { kind: kind_of(k), message: msg, location: location_of(frames),
+      { kind: kind_of(k), message: msg, location: location_of(site_file, site_line),
         backtrace: frames, process: { pid: pid, supervised: supervised != 0 },
         context: ctx }
     end

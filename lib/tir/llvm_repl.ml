@@ -361,7 +361,7 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   List.iter (fun fn -> Buffer.add_string out (Llvm_toplevel.fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.Llvm_ctx.preamble;
   Buffer.add_buffer out ctx.Llvm_ctx.buf;
-  Llvm_toplevel.emit_atom_show_table ctx;
+  Llvm_toplevel.emit_atom_show_table ~jit:true ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
   Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
@@ -418,7 +418,7 @@ let emit_repl_decl ~emit_expr ?(fast_math=false) ~(n : int) ~(name : string)
   List.iter (fun fn -> Buffer.add_string out (Llvm_toplevel.fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.Llvm_ctx.preamble;
   Buffer.add_buffer out ctx.Llvm_ctx.buf;
-  Llvm_toplevel.emit_atom_show_table ctx;
+  Llvm_toplevel.emit_atom_show_table ~jit:true ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
   Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
@@ -452,7 +452,7 @@ let emit_repl_fn ~emit_expr ?(fast_math=false) ~(n : int)
   List.iter (fun f -> Buffer.add_string out (Llvm_toplevel.fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.Llvm_ctx.preamble;
   Buffer.add_buffer out ctx.Llvm_ctx.buf;
-  Llvm_toplevel.emit_atom_show_table ctx;
+  Llvm_toplevel.emit_atom_show_table ~jit:true ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
   Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
@@ -550,7 +550,7 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
      wrapper text is silently dropped and @<fn>$clo_wrap becomes an undefined
      symbol at link/dlopen time (B11 sibling bug: this emitter used to omit
      extra_fns entirely). *)
-  Llvm_toplevel.emit_atom_show_table ctx;
+  Llvm_toplevel.emit_atom_show_table ~jit:true ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
   Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
@@ -618,7 +618,7 @@ let emit_fns_fragment
   List.iter (fun f -> Buffer.add_string out (Llvm_toplevel.fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.Llvm_ctx.preamble;
   Buffer.add_buffer out ctx.Llvm_ctx.buf;
-  Llvm_toplevel.emit_atom_show_table ctx;
+  Llvm_toplevel.emit_atom_show_table ~jit:true ctx;
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
   Llvm_ctor_desc.flush ctx out;
   Buffer.contents out
