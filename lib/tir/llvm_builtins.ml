@@ -119,6 +119,11 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_unreachable_ext()" };
   { march_name = "todo_"; c_name = Some "march_todo_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_todo_ext(ptr %s)" };
+  (* Emitted by lowering (never written in source) right before a direct
+     panic / todo / unreachable call: the call site a Diagnostics crash
+     report gives as its location. *)
+  { march_name = "__panic_site"; c_name = Some "march_panic_site"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_panic_site(ptr %file, i64 %line)" };
   (* Structured cleanup: try_finally(action, cleanup) runs action(), then
      cleanup() (even if action panicked), then re-raises action's panic.
      Returns the action's value at the polymorphic type `a` DIRECTLY, so
@@ -1678,6 +1683,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_diag_unobserve";
   PDeclare "march_diag_context_get";
   PDeclare "march_diag_context_set";
+  PDeclare "march_panic_site";
   PComment "; REPL JIT persistent variable slot table (march_extras.c)";
   PDeclare "march_repl_get";
   PDeclare "march_repl_set";

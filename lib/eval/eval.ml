@@ -900,7 +900,19 @@ let diag_report_crash ?(base = 0) ~(kind : int) ~(pid : int) ~(supervised : bool
     in
     let lst = List.fold_right (fun v acc -> VCon ("Cons", [v; acc]))
         frames (VCon ("Nil", [])) in
-    Eval_prim.diag_dispatch ~kind ~msg ~frames:lst ~pid ~supervised ~ctx
+    (* The panic's call site, as the compiled backend records it
+       (march_panic_site): the innermost call outside the prelude, when it is
+       a call to panic / todo / unreachable.  A panic raised inside a prelude
+       helper (unwrap, ...) has none. *)
+    let site =
+      match List.find_opt (fun f ->
+          Filename.basename f.mf_file <> "prelude.march") stack with
+      | Some f when List.mem f.mf_name ["panic"; "todo"; "unreachable"]
+                    && f.mf_file <> "<none>" && f.mf_line > 0 ->
+        Some (f.mf_file, f.mf_line)
+      | _ -> None
+    in
+    Eval_prim.diag_dispatch ~kind ~msg ~frames:lst ~pid ~supervised ~ctx ~site
   end
 
 

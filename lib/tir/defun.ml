@@ -145,6 +145,7 @@ let builtin_names : StringSet.t =
       "logger_clear_module_level"; "logger_module_level";
       (* Diagnostics crash observers *)
       "diag_observe"; "diag_unobserve"; "diag_context_get"; "diag_context_set";
+      "__panic_site";
       "http_fetch"; "http_fetch_available";
       "__try_call"; "__try_call_val";
       (* Integer builtins *)

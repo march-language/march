@@ -494,6 +494,9 @@ let extern_borrow_table : (string * bool list) list = [
      leaked one reference to the probed actor record, which could then never
      be freed (test/native/pid_to_int_leak_probe.march). ── *)
   ("get_actor_field",           [true; true]);
+  (* __panic_site keeps its String literal without a reference (literals are
+     immortal) and reads nothing else. *)
+  ("__panic_site",              [true; true]);
   ("march_get_actor_field",     [true; true]);
   ("logger_write",              [true; true; true; true]);
   ("logger_dispatch",           [true; true; true; true]);

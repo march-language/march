@@ -20,6 +20,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Compiled crash reports say where the panic was called, and name every frame.**
+  A `Diagnostics` crash report's `location` is now the exact file and line of the
+  `panic`, `todo` or `unreachable` call in compiled programs, as it already was
+  interpreted. Compiled backtrace frames now give each function's source name (no
+  more `$lam0__…`), file and definition line, on Linux as well as macOS: the
+  compiler records the program's functions in a small table instead of relying on
+  the symbols the executable exports.
+
 - **"Try it" on 33 stdlib pages, and documentation examples are now checked.**
   String, Json, Uri, Crypto, Regex, Task, Vault and 12 more modules have runnable
   examples (249 "Try it" examples in all, up from 107), and every one is verified
