@@ -12,6 +12,8 @@
 --
 -- The nil UUID ("00000000-0000-0000-0000-000000000000") is the all-zeros UUID.
 -- version/1 returns 0 for the nil UUID.
+--
+-- doc: try
 
 mod UUID do
   needs IO.Random
@@ -174,7 +176,7 @@ mod UUID do
   doc """
   Generate a v7 UUID at a specific Unix timestamp (milliseconds).
 
-      UUID.v7_at(1_700_000_000_000)  -- UUID with timestamp pinned to 2023-11-14
+      UUID.v7_at(1700000000000)  -- UUID with timestamp pinned to 2023-11-14
 
   Useful for backfilling historical records with time-ordered UUIDs and
   for deterministic tests that want to control the timestamp portion.
@@ -190,6 +192,11 @@ mod UUID do
   Returns Some(ms) for valid v7 UUIDs; None for other versions or
   unparseable strings.  The inverse of `v7_at`: for any m in a
   reasonable range, `timestamp_ms(v7_at(m)) == Some(m)`.
+
+      UUID.timestamp_ms(UUID.v7_at(1700000000000))  -- Some(1700000000000)
+
+      march> UUID.timestamp_ms(UUID.nil())  -- not a v7 UUID
+      None
   """
   fn timestamp_ms(uuid) do
     match uuid do
@@ -217,8 +224,10 @@ mod UUID do
   Accepts both upper and lower case hex digits; validates the
   xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format (36 characters, 4 dashes).
 
-      UUID.parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")  -- Ok(UUID(...))
-      UUID.parse("not-a-uuid")                             -- Err(:invalid)
+      march> Result.map(UUID.parse("F47AC10B-58CC-4372-A567-0E02B2C3D479"), UUID.to_string)
+      Ok("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+      march> UUID.parse("not-a-uuid") == Err(:invalid)
+      true
   """
   fn parse(s) do
     if validate_format(s) do Ok(UUID(string_to_lowercase(s)))
@@ -228,8 +237,8 @@ mod UUID do
   doc """
   Convert a UUID to its canonical lowercase string representation.
 
-      UUID.to_string(UUID.nil())
-      -- "00000000-0000-0000-0000-000000000000"
+      march> UUID.to_string(UUID.nil())
+      "00000000-0000-0000-0000-000000000000"
   """
   fn to_string(uuid) do
     match uuid do UUID(s) -> s end
@@ -238,8 +247,8 @@ mod UUID do
   doc """
   The nil UUID: all 128 bits are zero.
 
-      UUID.to_string(UUID.nil())
-      -- "00000000-0000-0000-0000-000000000000"
+      march> UUID.to_string(UUID.nil())
+      "00000000-0000-0000-0000-000000000000"
   """
   fn nil() do
     UUID("00000000-0000-0000-0000-000000000000")
@@ -248,8 +257,9 @@ mod UUID do
   doc """
   Generate a name-based UUID v5 (SHA-1, RFC 4122 §4.3).
 
-      let dns = UUID.parse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
-      UUID.v5(dns, "www.example.com")  -- deterministic UUID
+      march> let dns = Result.unwrap(UUID.parse("6ba7b810-9dad-11d1-80b4-00c04fd430c8"))
+      march> UUID.to_string(UUID.v5(dns, "www.example.com"))
+      "2ed6657d-e927-568b-95e1-2665a8aea6a2"
 
   The namespace must be a valid UUID.  The name is an arbitrary string.
   The result is deterministic: the same namespace + name always produce the
@@ -306,10 +316,16 @@ mod UUID do
   end
 
   doc """
-  Return the version number of a UUID (1–5), or 0 for unrecognised/nil.
+  Return the version digit of a UUID (e.g. 4, 5 or 7), or 0 for
+  unrecognised/nil.
 
       UUID.version(UUID.v4())  -- 4
-      UUID.version(UUID.nil()) -- 0
+      UUID.version(UUID.v7())  -- 7
+
+      march> UUID.version(UUID.v5(UUID.nil(), "x"))
+      5
+      march> UUID.version(UUID.nil())
+      0
   """
   fn version(uuid) do
     match uuid do
@@ -328,9 +344,12 @@ mod UUID do
   doc """
   Return true if the string is a valid UUID in xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx form.
 
-      UUID.is_valid("f47ac10b-58cc-4372-a567-0e02b2c3d479")  -- true
-      UUID.is_valid("00000000-0000-0000-0000-000000000000")  -- true
-      UUID.is_valid("not-a-uuid")                             -- false
+      march> UUID.is_valid("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+      true
+      march> UUID.is_valid("00000000-0000-0000-0000-000000000000")
+      true
+      march> UUID.is_valid("not-a-uuid")
+      false
   """
   fn is_valid(s) do
     validate_format(s)

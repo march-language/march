@@ -12,6 +12,8 @@
 --   let b = IO.read_byte()         -- read one raw byte from stdin (-1 on EOF)
 --   let x = IO.inspect(some_value) -- pretty-print and return value
 --   let line = IO.gets("Name: ")   -- print prompt then read line
+--
+-- doc: try
 
 mod IO do
   needs IO.Console
@@ -80,7 +82,8 @@ mod IO do
   Convert an IOList to a String by flattening all segments.
   Delegates to IOList.to_string/1.
 
-      IO.iodata_to_string(IOList.from_string("hello"))  -- "hello"
+      march> IO.iodata_to_string(IOList.from_string("hello"))
+      "hello"
   """
   fn iodata_to_string(iodata) : String do
     IOList.to_string(iodata)

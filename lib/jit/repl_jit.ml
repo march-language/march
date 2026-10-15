@@ -1033,7 +1033,9 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
   let open March_tir.Tir in
   let scalar () =
     let v = Int64.of_nativeint w in
-    if tagged then Int64.shift_right_logical v 1 else v
+    (* ARITHMETIC shift: a tagged word is (v<<1)|1 for a signed v, so a
+       logical shift turns -1 (all ones) into max_int. *)
+    if tagged then Int64.shift_right v 1 else v
   in
   match ty with
   | TInt  -> Int64.to_string (scalar ())
@@ -1053,7 +1055,7 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
        pointer.  Decide from the word itself — dereferencing a tagged scalar
        as a cell would read unmapped memory. *)
     if Nativeint.logand w 1n = 1n then
-      Int64.to_string (Int64.shift_right_logical (Int64.of_nativeint w) 1)
+      Int64.to_string (Int64.shift_right (Int64.of_nativeint w) 1)
     else if w = Nativeint.zero then "null"
     else if is_float_box w then pp_float_word ~erased:true w
     else Printf.sprintf "#<tag:%d>" (heap_tag w)

@@ -1,0 +1,161 @@
+-- Diagnostics: observe crashes the runtime owns.
+--
+-- A panic in an actor or a task is a runtime failure, not something
+-- application code can catch on its way out: the runtime owns the failure,
+-- the supervisor's restart and the process exit.  `observe_crashes` registers
+-- a callback the runtime calls with a `CrashReport` for every panic nobody
+-- handles, at the point of failure, before the supervisor decides anything.
+-- `with_context` attaches request or job metadata that survives into that
+-- report.  The module is vendor-neutral: building an event for an error
+-- service, queueing it and sending it belong in a package built on this one.
+--
+-- What is reported: a panic that no `__try_call` (`Result.try_call`, the
+-- property runner) or test handles.  A panic inside `try_finally` (and so
+-- inside `with_context` or `Logger.with_scope`) is reported once, where it
+-- was raised, with that scope's context still attached.  A panic inside an
+-- observer is never reported.  Runtime errors that exit without a panic (an
+-- out-of-bounds array index, an allocation failure) are not reported.
+--
+-- Observers run inline, on the failing actor's or task's own thread, in
+-- registration order.  An observer cannot change what happens next (the
+-- restart or the exit goes ahead exactly as without it) and a panic inside one
+-- is swallowed, but it must not block: no network I/O, no waiting on a reply.
+-- Hand the report to an actor or a queue and return.
+--
+-- Backtraces.  Compiled, the frames are the native stack, named from the
+-- executable's symbol table: on macOS every March function resolves; on
+-- Linux only a `--hot-reload` (export-dynamic) build does, and others report
+-- an empty backtrace.  Compiled frames carry no file or line yet, so
+-- `location` is None.  Interpreted, every frame has its file and line.
+-- `CrashKind.TaskFailed` is reserved: a compiled panic in a task exits the
+-- process and is reported as `Panic`.
+mod Diagnostics do
+
+  type CrashKind = Panic | ActorCrashed | TaskFailed
+
+  -- A JSON-safe context value.
+  type DiagnosticValue =
+      DStr(String)
+    | DInt(Int)
+    | DFloat(Float)
+    | DBool(Bool)
+    | DNull
+
+  type SourceLocation = { file : String, line : Int }
+
+  -- One frame, innermost first.  `file` is "" and `line` 0 when unknown.
+  type StackFrame = { name : String, file : String, line : Int }
+
+  -- `pid` is the failing actor's pid, or -1 outside an actor; `supervised` is
+  -- true when a supervisor will decide what happens next.
+  type ProcessInfo = { pid : Int, supervised : Bool }
+
+  type CrashReport = {
+    kind : CrashKind,
+    message : String,
+    location : Option(SourceLocation),
+    backtrace : List(StackFrame),
+    process : ProcessInfo,
+    context : List((String, DiagnosticValue))
+  }
+
+  type ObserverHandle = ObserverHandle(Int)
+
+  -- What the runtime passes an observer's wrapper (march_runtime.c's
+  -- diag_crash_cell / the interpreter's diag_dispatch): single-constructor
+  -- types, tag 0, Ints stored raw, so the C runtime can build them.  `kind`
+  -- is 0 Panic, 1 ActorCrashed, 2 TaskFailed.  The names are unique on
+  -- purpose: a colliding constructor name gets global tags.
+  type DiagFrame = DiagFrame(String, String, Int)
+  type DiagCrash = DiagCrash(Int, String, List(DiagFrame), Int, Int, List((String, DiagnosticValue)))
+
+  pfn kind_of(k : Int) : CrashKind do
+    if k == 1 do ActorCrashed else if k == 2 do TaskFailed else Panic end end
+  end
+
+  pfn frames_of(fs : List(DiagFrame)) : List(StackFrame) do
+    match fs do
+    Nil -> Nil
+    Cons(f, rest) ->
+      match f do
+      DiagFrame(n, file, line) -> Cons({ name: n, file: file, line: line }, frames_of(rest))
+      end
+    end
+  end
+
+  -- The innermost frame that knows its file.
+  pfn location_of(fs : List(StackFrame)) : Option(SourceLocation) do
+    match fs do
+    Nil -> None
+    Cons(f, rest) ->
+      if f.file != "" && f.line > 0 do Some({ file: f.file, line: f.line })
+      else location_of(rest) end
+    end
+  end
+
+  pfn report_of(call : DiagCrash) : CrashReport do
+    match call do
+    DiagCrash(k, msg, raw_frames, pid, supervised, ctx) ->
+      let frames = frames_of(raw_frames)
+      { kind: kind_of(k), message: msg, location: location_of(frames),
+        backtrace: frames, process: { pid: pid, supervised: supervised != 0 },
+        context: ctx }
+    end
+  end
+
+  pfn deliver(observer : CrashReport -> Unit, call : DiagCrash) : Unit do
+    observer(report_of(call))
+  end
+
+  doc """
+  Call `observer` with a `CrashReport` for every unhandled panic from now on,
+  until `unobserve`.  Observers run in registration order, inline on the
+  failing thread: hand the report off and return, never block.
+
+      let h = Diagnostics.observe_crashes(fn r -> send(reporter, Report(r)))
+  """
+  fn observe_crashes(observer : CrashReport -> Unit) : ObserverHandle do
+    ObserverHandle(diag_observe(fn call -> deliver(observer, call)))
+  end
+
+  doc """
+  Stop calling the observer `handle` registered.  Removing one twice, or
+  during a dispatch, is harmless; a dispatch already under way still calls it.
+  """
+  fn unobserve(handle : ObserverHandle) : Unit do
+    match handle do
+    ObserverHandle(id) -> diag_unobserve(id)
+    end
+  end
+
+  doc """
+  The context a crash on this actor or task would report right now,
+  innermost scope first.
+  """
+  fn current_context() : List((String, DiagnosticValue)) do
+    diag_context_get()
+  end
+
+  doc """
+  Run `thunk` with `values` added to this actor's or task's crash context,
+  and restore the previous context when it returns or panics.  Inner scopes
+  come first in a report's `context`, so they win for a repeated key.
+
+      Diagnostics.with_context([("request_id", Diagnostics.DStr(id))],
+                               fn -> handle(req))
+  """
+  fn with_context(values : List((String, DiagnosticValue)), thunk : () -> a) : a do
+    let saved = diag_context_get()
+    diag_context_set(List.append(values, saved))
+    try_finally(fn _ -> thunk(), fn _ -> diag_context_set(saved))
+  end
+
+  doc "The name of a crash kind: \"panic\", \"actor_crashed\" or \"task_failed\"."
+  fn kind_to_string(k : CrashKind) : String do
+    match k do
+    Panic -> "panic"
+    ActorCrashed -> "actor_crashed"
+    TaskFailed -> "task_failed"
+    end
+  end
+end

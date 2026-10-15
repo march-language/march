@@ -921,6 +921,20 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Diagnose.html#fn-findings"><span class="sb-kind" style="color:var(--fn)">F</span>findings</a>
 <a class="sl" href="Diagnose.html#fn-ids_of"><span class="sb-kind" style="color:var(--fn)">F</span>ids_of</a>
 <a class="sl" href="Diagnose.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Diagnostics.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Diagnostics.html">Diagnostics</a></div><div class="sb-sub"><a class="sl" href="Diagnostics.html#type-CrashKind"><span class="sb-kind" style="color:var(--ty)">T</span>CrashKind</a>
+<a class="sl" href="Diagnostics.html#type-DiagnosticValue"><span class="sb-kind" style="color:var(--ty)">T</span>DiagnosticValue</a>
+<a class="sl" href="Diagnostics.html#type-SourceLocation"><span class="sb-kind" style="color:var(--ty)">T</span>SourceLocation</a>
+<a class="sl" href="Diagnostics.html#type-StackFrame"><span class="sb-kind" style="color:var(--ty)">T</span>StackFrame</a>
+<a class="sl" href="Diagnostics.html#type-ProcessInfo"><span class="sb-kind" style="color:var(--ty)">T</span>ProcessInfo</a>
+<a class="sl" href="Diagnostics.html#type-CrashReport"><span class="sb-kind" style="color:var(--ty)">T</span>CrashReport</a>
+<a class="sl" href="Diagnostics.html#type-ObserverHandle"><span class="sb-kind" style="color:var(--ty)">T</span>ObserverHandle</a>
+<a class="sl" href="Diagnostics.html#type-DiagFrame"><span class="sb-kind" style="color:var(--ty)">T</span>DiagFrame</a>
+<a class="sl" href="Diagnostics.html#type-DiagCrash"><span class="sb-kind" style="color:var(--ty)">T</span>DiagCrash</a>
+<a class="sl" href="Diagnostics.html#fn-current_context"><span class="sb-kind" style="color:var(--fn)">F</span>current_context</a>
+<a class="sl" href="Diagnostics.html#fn-kind_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>kind_to_string</a>
+<a class="sl" href="Diagnostics.html#fn-observe_crashes"><span class="sb-kind" style="color:var(--fn)">F</span>observe_crashes</a>
+<a class="sl" href="Diagnostics.html#fn-unobserve"><span class="sb-kind" style="color:var(--fn)">F</span>unobserve</a>
+<a class="sl" href="Diagnostics.html#fn-with_context"><span class="sb-kind" style="color:var(--fn)">F</span>with_context</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Dir.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Dir.html">Dir</a></div><div class="sb-sub"><a class="sl" href="Dir.html#fn-exists"><span class="sb-kind" style="color:var(--fn)">F</span>exists</a>
 <a class="sl" href="Dir.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
 <a class="sl" href="Dir.html#fn-list_full"><span class="sb-kind" style="color:var(--fn)">F</span>list_full</a>
@@ -2989,10 +3003,14 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-fixed_zone"><div class="ih"><span class="badge bfn">fn</span><span class="name">fixed_zone</span><span class="sig">fixed_zone(name : String, offset_seconds : {Int | _ &gt;= -50400 &amp;&amp; _ &lt;= 50400}) : <a href="#type-Tz">Tz</a></span><a class="anchor-link" href="#fn-fixed_zone" title="Link">#</a></div><div class="ib"><p>Build a fixed-offset zone from an explicit label and second offset. <code>offset_seconds</code> is positive east of UTC, negative west.  Panics if the offset is outside ±14 hours (the widest real-world legal range).</p></div></div>
 <div class="item" id="fn-fixed_zone_hm"><div class="ih"><span class="badge bfn">fn</span><span class="name">fixed_zone_hm</span><span class="sig">fixed_zone_hm(hours : Int, minutes : {Int | _ &gt;= 0 &amp;&amp; _ &lt; 60}) : <a href="#type-Tz">Tz</a></span><a class="anchor-link" href="#fn-fixed_zone_hm" title="Link">#</a></div><div class="ib"><p>Convenience constructor: fixed offset as <code>(hours, minutes)</code> with a single sign applied by <code>hours</code> (per ISO convention).  For UTC+05:30 pass <code>(5, 30)</code>; for UTC−03:30 pass <code>(-3, 30)</code> (minutes always positive, sign comes from <code>hours</code>).  Name is auto-derived.</p></div></div>
 <div class="item" id="fn-fixed_zone_hours"><div class="ih"><span class="badge bfn">fn</span><span class="name">fixed_zone_hours</span><span class="sig">fixed_zone_hours(hours : Int) : <a href="#type-Tz">Tz</a></span><a class="anchor-link" href="#fn-fixed_zone_hours" title="Link">#</a></div><div class="ib"><p>Convenience constructor: fixed offset in whole hours.  The name is auto-derived in ISO 8601 form (e.g. <code>&quot;+05:00&quot;</code>, <code>&quot;-08:00&quot;</code>, <code>&quot;Z&quot;</code>). For custom labels use <code>fixed_zone(name, seconds)</code>.</p></div></div>
-<div class="item" id="fn-format"><div class="ih"><span class="badge bfn">fn</span><span class="name">format</span><span class="sig">format(dt, fmt)</span><a class="anchor-link" href="#fn-format" title="Link">#</a></div><div class="ib"><p>Format a DateTime as a string. Supported specifiers: %Y %m %d %H %M %S %%</p><p>Example: DateTime.format(dt, &quot;%Y-%m-%d %H:%M:%S&quot;)</p></div></div>
+<div class="item" id="fn-format"><div class="ih"><span class="badge bfn">fn</span><span class="name">format</span><span class="sig">format(dt, fmt)</span><a class="anchor-link" href="#fn-format" title="Link">#</a></div><div class="ib"><p>Format a DateTime as a string. Supported specifiers: %Y %m %d %H %M %S %%</p><pre data-try="DateTime.format(DateTime.from_timestamp(1700000000), &quot;%Y-%m-%d %H:%M:%S&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">DateTime</span>.format(<span class="tok-ty">DateTime</span>.from_timestamp(<span class="tok-num">1700000000</span>), <span class="tok-str">&quot;%Y-%m-%d %H:%M:%S&quot;</span>)
+<span class="tok-str">&quot;2023-11-14 22:13:20&quot;</span></code></pre></div></div>
 <div class="item" id="fn-format_offset"><div class="ih"><span class="badge bfn">fn</span><span class="name">format_offset</span><span class="sig">format_offset(tz : <a href="#type-Tz">Tz</a>) : String</span><a class="anchor-link" href="#fn-format_offset" title="Link">#</a></div><div class="ib"><p>Format a zone's offset as ISO 8601: \&quot;Z\&quot; for UTC, \&quot;+HH:MM\&quot; or \&quot;-HH:MM\&quot; otherwise.  Seconds-of-offset are ignored (no real zone uses sub-minute offsets since 1972).</p></div></div>
-<div class="item" id="fn-from_timestamp"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_timestamp</span><span class="sig">from_timestamp(ts)</span><a class="anchor-link" href="#fn-from_timestamp" title="Link">#</a></div><div class="ib"><p>Convert a Unix timestamp (Int seconds) to a DateTime.</p><pre><code><span class="tok-ty">DateTime</span>.from_timestamp(<span class="tok-num">0</span>)     <span class="tok-com">-- DateTime(Date(1970, 1, 1), Time(0, 0, 0))</span>
-<span class="tok-ty">DateTime</span>.from_timestamp(<span class="tok-num">86400</span>) <span class="tok-com">-- DateTime(Date(1970, 1, 2), Time(0, 0, 0))</span></code></pre></div></div>
+<div class="item" id="fn-from_timestamp"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_timestamp</span><span class="sig">from_timestamp(ts)</span><a class="anchor-link" href="#fn-from_timestamp" title="Link">#</a></div><div class="ib"><p>Convert a Unix timestamp (Int seconds) to a DateTime.</p><pre data-try="DateTime.from_timestamp(0)
+DateTime.from_timestamp(86400)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">DateTime</span>.from_timestamp(<span class="tok-num">0</span>)
+<span class="tok-ty">DateTime</span>(<span class="tok-ty">Date</span>(<span class="tok-num">1970</span>, <span class="tok-num">1</span>, <span class="tok-num">1</span>), <span class="tok-ty">Time</span>(<span class="tok-num">0</span>, <span class="tok-num">0</span>, <span class="tok-num">0</span>))
+march&gt; <span class="tok-ty">DateTime</span>.from_timestamp(<span class="tok-num">86400</span>)
+<span class="tok-ty">DateTime</span>(<span class="tok-ty">Date</span>(<span class="tok-num">1970</span>, <span class="tok-num">1</span>, <span class="tok-num">2</span>), <span class="tok-ty">Time</span>(<span class="tok-num">0</span>, <span class="tok-num">0</span>, <span class="tok-num">0</span>))</code></pre></div></div>
 <div class="item" id="fn-local_datetime"><div class="ih"><span class="badge bfn">fn</span><span class="name">local_datetime</span><span class="sig">local_datetime(ldt : <a href="#type-LocalDateTime">LocalDateTime</a>) : <a href="#type-DateTime">DateTime</a></span><a class="anchor-link" href="#fn-local_datetime" title="Link">#</a></div><div class="ib"><p>Return the civil (wall-clock) <code>DateTime</code> component.</p></div></div>
 <div class="item" id="fn-local_format"><div class="ih"><span class="badge bfn">fn</span><span class="name">local_format</span><span class="sig">local_format(ldt : <a href="#type-LocalDateTime">LocalDateTime</a>, fmt : String) : String</span><a class="anchor-link" href="#fn-local_format" title="Link">#</a></div><div class="ib"><p>Format a <code>LocalDateTime</code>.  All <code>DateTime.format</code> specifiers are supported (<code>%Y %m %d %H %M %S %%</code>) plus: <code>%z</code>  — offset without colon, e.g. <code>+0530</code>, <code>-0800</code>, <code>+0000</code> <code>%:z</code> — ISO 8601 offset, e.g. <code>+05:30</code>, <code>-08:00</code>, <code>Z</code> for UTC <code>%Z</code>  — zone name (whatever was passed to the Tz constructor)</p></div></div>
 <div class="item" id="fn-local_from_timestamp"><div class="ih"><span class="badge bfn">fn</span><span class="name">local_from_timestamp</span><span class="sig">local_from_timestamp(ts : Int, tz : <a href="#type-Tz">Tz</a>) : <a href="#type-LocalDateTime">LocalDateTime</a></span><a class="anchor-link" href="#fn-local_from_timestamp" title="Link">#</a></div><div class="ib"><p>Build a <code>LocalDateTime</code> from a UTC instant expressed as a Unix timestamp (Int seconds).</p></div></div>
@@ -3006,10 +3024,75 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-now"><div class="ih"><span class="badge bfn">fn</span><span class="name">now</span><span class="sig">now()</span><a class="anchor-link" href="#fn-now" title="Link">#</a></div><div class="ib"><p>Return the current Unix timestamp as an Int (seconds since 1970-01-01 UTC).</p></div></div>
 <div class="item" id="fn-parse"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse</span><span class="sig">parse(s)</span><a class="anchor-link" href="#fn-parse" title="Link">#</a></div><div class="ib"><p>Parse a UTC DateTime from a string.  Accepts <code>&quot;YYYY-MM-DD&quot;</code> and <code>&quot;YYYY-MM-DD HH:MM:SS&quot;</code>.  Returns <code>Ok(DateTime)</code> or <code>Err(message)</code> — rejects out-of-range fields (month 13, day 32, hour 25, …) rather than constructing a garbage calendar value.</p><p>This entry point is timezone-naive: the returned <code>DateTime</code> always represents UTC.  For ISO 8601 strings with an explicit offset (<code>Z</code>, <code>+HH:MM</code>, <code>-HHMM</code>, …) use <code>parse_offset</code> to get a <code>LocalDateTime</code> whose zone is recovered from the suffix.</p></div></div>
 <div class="item" id="fn-parse_offset"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse_offset</span><span class="sig">parse_offset(s : String) : Result(<a href="#type-LocalDateTime">LocalDateTime</a>, String)</span><a class="anchor-link" href="#fn-parse_offset" title="Link">#</a></div><div class="ib"><p>Parse an ISO 8601 datetime with explicit offset, e.g. <code>&quot;2024-01-15T10:30:45Z&quot;</code> or <code>&quot;2024-01-15 10:30:45+05:30&quot;</code>. Returns <code>Ok(LocalDateTime)</code> or <code>Err(msg)</code>.</p><p>Bare UTC instants (no offset suffix) parse as UTC.  The <code>T</code>/space separator is required.  Offsets may use <code>:</code> (ISO form) or the compact <code>+HHMM</code> form.  Civil fields are range-validated, as is the offset itself: an hour outside <code>[0, 24)</code> or a minute outside <code>[0, 60)</code> (e.g. <code>&quot;+01:60&quot;</code>) is an <code>Err</code>, not a panic.</p></div></div>
-<div class="item" id="fn-to_timestamp"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_timestamp</span><span class="sig">to_timestamp(dt)</span><a class="anchor-link" href="#fn-to_timestamp" title="Link">#</a></div><div class="ib"><p>Convert a DateTime to a Unix timestamp (Int seconds since 1970-01-01 UTC).</p><pre><code><span class="tok-ty">DateTime</span>.to_timestamp(<span class="tok-ty">DateTime</span>(<span class="tok-ty">Date</span>(<span class="tok-num">1970</span>, <span class="tok-num">1</span>, <span class="tok-num">1</span>), <span class="tok-ty">Time</span>(<span class="tok-num">0</span>, <span class="tok-num">0</span>, <span class="tok-num">0</span>))) <span class="tok-com">-- 0</span></code></pre></div></div>
+<div class="item" id="fn-to_timestamp"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_timestamp</span><span class="sig">to_timestamp(dt)</span><a class="anchor-link" href="#fn-to_timestamp" title="Link">#</a></div><div class="ib"><p>Convert a DateTime to a Unix timestamp (Int seconds since 1970-01-01 UTC).</p><pre data-try="DateTime.to_timestamp(DateTime(Date(1970, 1, 1), Time(0, 0, 0)))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">DateTime</span>.to_timestamp(<span class="tok-ty">DateTime</span>(<span class="tok-ty">Date</span>(<span class="tok-num">1970</span>, <span class="tok-num">1</span>, <span class="tok-num">1</span>), <span class="tok-ty">Time</span>(<span class="tok-num">0</span>, <span class="tok-num">0</span>, <span class="tok-num">0</span>)))
+<span class="tok-num">0</span></code></pre></div></div>
 <div class="item" id="fn-utc_zone"><div class="ih"><span class="badge bfn">fn</span><span class="name">utc_zone</span><span class="sig">utc_zone() : <a href="#type-Tz">Tz</a></span><a class="anchor-link" href="#fn-utc_zone" title="Link">#</a></div><div class="ib"><p>The UTC zone (offset 0, name \</p></div></div>
 <div class="item" id="fn-zone_name"><div class="ih"><span class="badge bfn">fn</span><span class="name">zone_name</span><span class="sig">zone_name(tz : <a href="#type-Tz">Tz</a>) : String</span><a class="anchor-link" href="#fn-zone_name" title="Link">#</a></div><div class="ib"><p>Return the zone's human label (e.g. \</p></div></div>
-<div class="item" id="fn-zone_offset_seconds"><div class="ih"><span class="badge bfn">fn</span><span class="name">zone_offset_seconds</span><span class="sig">zone_offset_seconds(tz : <a href="#type-Tz">Tz</a>) : Int</span><a class="anchor-link" href="#fn-zone_offset_seconds" title="Link">#</a></div><div class="ib"><p>Return the zone's offset from UTC in seconds (east is positive).</p></div></div></main></div><script>
+<div class="item" id="fn-zone_offset_seconds"><div class="ih"><span class="badge bfn">fn</span><span class="name">zone_offset_seconds</span><span class="sig">zone_offset_seconds(tz : <a href="#type-Tz">Tz</a>) : Int</span><a class="anchor-link" href="#fn-zone_offset_seconds" title="Link">#</a></div><div class="ib"><p>Return the zone's offset from UTC in seconds (east is positive).</p></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

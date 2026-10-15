@@ -14,6 +14,8 @@
 --
 -- encode_query / decode_query work with List((String, String)) association
 -- lists (not Map) so this module has no stdlib dependencies.
+--
+-- doc: try
 
 mod Uri do
 
@@ -67,16 +69,22 @@ mod Uri do
   doc """
   Parse a URI string into its components.
 
-      Uri.parse("https://example.com:8080/api/users?q=hello#top")
-      -- URI("https", "example.com", Some(8080), "/api/users", "q=hello", "top")
+      march> Uri.parse("https://example.com:8080/api/users?q=hello#top")
+      URI("https", "example.com", Some(8080), "/api/users", "q=hello", "top")
+      march> Uri.parse("http://localhost/path")
+      URI("http", "localhost", None, "/path", "", "")
+      march> Uri.parse("/relative/path?foo=bar")
+      URI("", "", None, "/relative/path", "foo=bar", "")
 
-      Uri.parse("http://localhost/path")
-      -- URI("http", "localhost", None, "/path", "", "")
+  Relative URIs (no scheme) that start with `/` are supported; host and port
+  will be empty/None.  A scheme-less string that does NOT start with `/` is
+  read as `host/path`, so dot-relative references and network-path
+  references are not parsed as RFC 3986 relative references:
 
-      Uri.parse("/relative/path?foo=bar")
-      -- URI("", "", None, "/relative/path", "foo=bar", "")
-
-  Relative URIs (no scheme) are supported; host and port will be empty/None.
+      march> Uri.parse("../d")  -- ".." is taken as the host
+      URI("", "..", None, "/d", "", "")
+      march> Uri.parse("//other.com/x")  -- the whole thing is the path
+      URI("", "", None, "//other.com/x", "", "")
   """
   fn parse(s) do
     -- Extract scheme (everything before "://")
@@ -120,11 +128,10 @@ mod Uri do
   doc """
   Convert a URI back to its string representation.
 
-      Uri.to_string(URI("https", "example.com", None, "/path", "q=1", "top"))
-      -- "https://example.com/path?q=1#top"
-
-      Uri.to_string(URI("http", "localhost", Some(4000), "/", "", ""))
-      -- "http://localhost:4000/"
+      march> Uri.to_string(URI("https", "example.com", None, "/path", "q=1", "top"))
+      "https://example.com/path?q=1#top"
+      march> Uri.to_string(URI("http", "localhost", Some(4000), "/", "", ""))
+      "http://localhost:4000/"
   """
   fn to_string(uri) do
     match uri do
@@ -152,9 +159,12 @@ mod Uri do
   Unreserved characters (A–Z, a–z, 0–9, -, _, ., ~) are left unchanged;
   all other bytes are encoded as %XX (uppercase hex).
 
-      Uri.encode("hello world")  -- "hello%20world"
-      Uri.encode("foo=bar&baz")  -- "foo%3Dbar%26baz"
-      Uri.encode("café")         -- "caf%C3%A9"
+      march> Uri.encode("hello world")
+      "hello%20world"
+      march> Uri.encode("foo=bar&baz")
+      "foo%3Dbar%26baz"
+      march> Uri.encode("café")
+      "caf%C3%A9"
   """
   fn encode(s) do
     let len = string_length(s)
@@ -234,9 +244,12 @@ mod Uri do
   %XX sequences are decoded to their byte values; + is left unchanged
   (use decode_query for form-encoded values where + means space).
 
-      Uri.decode("hello%20world")  -- "hello world"
-      Uri.decode("caf%C3%A9")      -- "café"
-      Uri.decode("no-encoding")    -- "no-encoding"
+      march> Uri.decode("hello%20world")
+      "hello world"
+      march> Uri.decode("caf%C3%A9") == "café"  -- the REPL prints non-ASCII bytes escaped
+      true
+      march> Uri.decode("no-encoding")
+      "no-encoding"
   """
   fn decode(s) do
     decode_scan(s, string_length(s), 0, 0, Nil, false)
@@ -247,10 +260,10 @@ mod Uri do
 
   Keys and values are percent-encoded; pairs are joined with "&".
 
-      Uri.encode_query([("q", "hello world"), ("page", "2")])
-      -- "q=hello%20world&page=2"
-
-      Uri.encode_query([])  -- ""
+      march> Uri.encode_query([("q", "hello world"), ("page", "2")])
+      "q=hello%20world&page=2"
+      march> Uri.encode_query([])
+      ""
   """
   fn encode_query(pairs) do
     fn encode_pair(kv) do
@@ -273,10 +286,10 @@ mod Uri do
   Percent-encoded sequences are decoded; "+" is treated as a space
   (application/x-www-form-urlencoded convention).
 
-      Uri.decode_query("q=hello+world&page=2")
-      -- [("q", "hello world"), ("page", "2")]
-
-      Uri.decode_query("")  -- []
+      march> Uri.decode_query("q=hello+world&page=2")
+      [("q", "hello world"), ("page", "2")]
+      march> Uri.decode_query("")
+      []
   """
   fn decode_query(s) do
     if string_is_empty(s) do Nil
@@ -312,17 +325,27 @@ mod Uri do
     per RFC 3986 §5.2.4 ("Remove Dot Segments").
 
   Dot segments that would resolve "above" the root are silently
-  absorbed, matching the RFC's recommendation: `Uri.merge(base,
-  Uri.parse("../../../x"))` yields a path of `x` (or `/x` for
-  authoritative base) regardless of how many `..` segments are present.
-  Use `merge_strict` if you need to *detect* such over-traversal.
+  absorbed: against the base below, a relative path of `../../../x` (or
+  any number of extra `..` segments) yields the path `x`, which has lost
+  its leading `/`.  Use `merge_strict` if you need to *detect* such
+  over-traversal.
 
-      let base = Uri.parse("https://example.com/a/b/c")
-      Uri.to_string(Uri.merge(base, Uri.parse("../d")))
-      -- "https://example.com/a/d"
+  `Uri.parse` does not parse dot-relative (`../d`) or network-path
+  (`//other.com/x`) references (see `parse`), so these examples build the
+  relative reference with the `URI` constructor:
 
-      Uri.to_string(Uri.merge(base, Uri.parse("//other.com/x")))
-      -- "https://other.com/x"
+      march> let base = Uri.parse("https://example.com/a/b/c")
+      march> Uri.to_string(Uri.merge(base, URI("", "", None, "../d", "", "")))
+      "https://example.com/a/d"
+      march> let base = Uri.parse("https://example.com/a/b/c")
+      march> Uri.to_string(Uri.merge(base, URI("", "other.com", None, "/x", "", "")))
+      "https://other.com/x"
+      march> let base = Uri.parse("https://example.com/a/b/c")
+      march> Uri.to_string(Uri.merge(base, Uri.parse("/x?y=1")))
+      "https://example.com/x?y=1"
+      march> let base = Uri.parse("https://example.com/a/b/c")
+      march> Uri.path(Uri.merge(base, URI("", "", None, "../../../../x", "", "")))
+      "x"
   """
   fn merge(base, relative) do
     match (base, relative) do
@@ -377,8 +400,17 @@ mod Uri do
   untrusted input and you want to reject directory-traversal attempts
   rather than silently absorb them.
 
-      Uri.merge_strict(base, Uri.parse("../../../etc/passwd"))
-      -- Err("Uri.merge_strict: relative reference traverses above base")
+      march> let base = Uri.parse("https://example.com/a/b/c")
+      march> Uri.merge_strict(base, URI("", "", None, "../d", "", ""))
+      Ok(URI("https", "example.com", None, "/a/d", "", ""))
+      march> let base = Uri.parse("https://example.com/a/b/c")
+      march> Uri.merge_strict(base, URI("", "", None, "../../../../etc/passwd", "", ""))
+      Err("Uri.merge_strict: relative reference traverses above base")
+
+  The leading root segment of the base path absorbs one `..` before the
+  stack counts as empty, so against `/a/b/c` it takes four `..` segments,
+  not three, to be rejected: `../../../etc/passwd` returns
+  `Ok(URI("https", "example.com", None, "etc/passwd", "", ""))`.
   """
   fn merge_strict(base, relative) do
     match (base, relative) do

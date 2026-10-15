@@ -32,7 +32,8 @@ The library is organized by domain. The main families:
 - **Encoding / crypto**: `Base64`, `Crypto`, `UUID`, `URI`, `JSON`,
   `MsgPack`, `Compress`.
 - **Data formats**: `TOML`, `YAML`, `XML`.
-- **IO / files**: `File`, `Dir`, `Path`, `Env`, `Logger`.
+- **IO / files**: `File`, `Dir`, `Path`, `Env`, `Logger`, `Diagnostics` (crash
+  observers and crash context for error-reporting integrations).
 - **Networking / HTTP**: `Http`, `HttpTransport`, `HttpClient`, `HttpServer`,
   `TLS`, `WebSocket`, `DNS`.
 - **Actors / concurrency**: `Process`, `Actor`, `Task`, `Channel`, `PubSub`,

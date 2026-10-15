@@ -17,34 +17,40 @@
 -- the sentinel must have a name distinct from that handler to avoid a
 -- constructor-name clash.
 --
--- Example:
+-- Example (runs as written: "Try it" on the docs page, or natively):
 --
---   type GetReq = GetReq          -- zero-arg sentinel for the sync call
+-- ```march try
+-- type GetReq = GetReq          -- zero-arg sentinel for the sync call
 --
---   actor Counter do
---     state { count : Int }
---     init  { count: 0 }
+-- actor Counter do
+--   state { count : Int }
+--   init  { count: 0 }
 --
---     -- First handler (tag 0) = the call handler; reply_to is the caller.
---     on GetCount(reply_to) do
---       Actor.reply(reply_to, state.count)
---       state
---     end
---
---     on Inc(n : Int) do
---       { state with count: state.count + n }
---     end
+--   -- First handler (tag 0) = the call handler; reply_to is the caller.
+--   on GetCount(reply_to) do
+--     Actor.reply(reply_to, state.count)
+--     state
 --   end
 --
---   fn main() do
---     let pid = spawn(Counter)
---     Actor.cast(pid, Inc(1))
---     run_until_idle()
---     match Actor.call(pid, GetReq, 5000) do
---       Ok(n)  -> println("count = " ++ int_to_string(n))
---       Err(e) -> println("error: " ++ e)
---     end
+--   on Inc(n : Int) do
+--     { state with count: state.count + n }
 --   end
+-- end
+--
+-- fn main(io : Cap(IO)) do
+--   let pid = spawn(Counter)
+--   Actor.cast(pid, Inc(1))
+--   run_until_idle()
+--   match Actor.call(pid, GetReq, 5000) do
+--     Ok(n)  -> println("count = " ++ int_to_string(n))
+--     Err(e) -> println("error: " ++ e)
+--   end
+-- end
+-- ```
+--
+-- ```output
+-- count = 1
+-- ```
 
 mod Actor do
   needs IO

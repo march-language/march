@@ -921,6 +921,20 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Diagnose.html#fn-findings"><span class="sb-kind" style="color:var(--fn)">F</span>findings</a>
 <a class="sl" href="Diagnose.html#fn-ids_of"><span class="sb-kind" style="color:var(--fn)">F</span>ids_of</a>
 <a class="sl" href="Diagnose.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Diagnostics.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Diagnostics.html">Diagnostics</a></div><div class="sb-sub"><a class="sl" href="Diagnostics.html#type-CrashKind"><span class="sb-kind" style="color:var(--ty)">T</span>CrashKind</a>
+<a class="sl" href="Diagnostics.html#type-DiagnosticValue"><span class="sb-kind" style="color:var(--ty)">T</span>DiagnosticValue</a>
+<a class="sl" href="Diagnostics.html#type-SourceLocation"><span class="sb-kind" style="color:var(--ty)">T</span>SourceLocation</a>
+<a class="sl" href="Diagnostics.html#type-StackFrame"><span class="sb-kind" style="color:var(--ty)">T</span>StackFrame</a>
+<a class="sl" href="Diagnostics.html#type-ProcessInfo"><span class="sb-kind" style="color:var(--ty)">T</span>ProcessInfo</a>
+<a class="sl" href="Diagnostics.html#type-CrashReport"><span class="sb-kind" style="color:var(--ty)">T</span>CrashReport</a>
+<a class="sl" href="Diagnostics.html#type-ObserverHandle"><span class="sb-kind" style="color:var(--ty)">T</span>ObserverHandle</a>
+<a class="sl" href="Diagnostics.html#type-DiagFrame"><span class="sb-kind" style="color:var(--ty)">T</span>DiagFrame</a>
+<a class="sl" href="Diagnostics.html#type-DiagCrash"><span class="sb-kind" style="color:var(--ty)">T</span>DiagCrash</a>
+<a class="sl" href="Diagnostics.html#fn-current_context"><span class="sb-kind" style="color:var(--fn)">F</span>current_context</a>
+<a class="sl" href="Diagnostics.html#fn-kind_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>kind_to_string</a>
+<a class="sl" href="Diagnostics.html#fn-observe_crashes"><span class="sb-kind" style="color:var(--fn)">F</span>observe_crashes</a>
+<a class="sl" href="Diagnostics.html#fn-unobserve"><span class="sb-kind" style="color:var(--fn)">F</span>unobserve</a>
+<a class="sl" href="Diagnostics.html#fn-with_context"><span class="sb-kind" style="color:var(--fn)">F</span>with_context</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Dir.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Dir.html">Dir</a></div><div class="sb-sub"><a class="sl" href="Dir.html#fn-exists"><span class="sb-kind" style="color:var(--fn)">F</span>exists</a>
 <a class="sl" href="Dir.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
 <a class="sl" href="Dir.html#fn-list_full"><span class="sb-kind" style="color:var(--fn)">F</span>list_full</a>
@@ -2974,33 +2988,125 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Duration</span></nav><h1>Duration</h1><div class="mdoc"><p>Duration module: time span representation and arithmetic.</p><p>Duration is stored internally as a whole number of milliseconds (Int). This makes arithmetic exact and interoperable with timestamps.</p><p>Construction helpers: Duration.milliseconds(n)  Duration.seconds(n) Duration.minutes(n)       Duration.hours(n) Duration.days(n)          Duration.weeks(n)</p><p>Or use Duration.new/2 with a unit atom: :ms  :s  :m  :h  :d  :w</p><p>Negative durations are supported (e.g. for countdown timers). Duration.format/1 handles negatives by prepending &quot;-&quot;.</p></div><h2>Types</h2><div class="item" id="type-Duration"><div class="ih"><span class="badge bty">type</span><span class="name">Duration</span><span class="sig"><a href="#type-Duration">Duration</a> = <a href="#type-Duration">Duration</a>(Int)   -- internal: milliseconds</span><a class="anchor-link" href="#type-Duration" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-add"><div class="ih"><span class="badge bfn">fn</span><span class="name">add</span><span class="sig">add(a, b)</span><a class="anchor-link" href="#fn-add" title="Link">#</a></div><div class="ib"><p>Add two durations.</p><pre><code><span class="tok-ty">Duration</span>.add(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">30</span>), <span class="tok-ty">Duration</span>.seconds(<span class="tok-num">30</span>))
-<span class="tok-com">-- Duration(60000)  i.e. 1 minute</span></code></pre></div></div>
-<div class="item" id="fn-compare"><div class="ih"><span class="badge bfn">fn</span><span class="name">compare</span><span class="sig">compare(a, b)</span><a class="anchor-link" href="#fn-compare" title="Link">#</a></div><div class="ib"><p>Compare two durations.</p><p>Returns -1 if a &lt; b, 0 if a == b, 1 if a &gt; b.</p><pre><code><span class="tok-ty">Duration</span>.compare(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">10</span>), <span class="tok-ty">Duration</span>.minutes(<span class="tok-num">1</span>))  <span class="tok-com">-- -1</span>
-<span class="tok-ty">Duration</span>.compare(<span class="tok-ty">Duration</span>.hours(<span class="tok-num">1</span>), <span class="tok-ty">Duration</span>.hours(<span class="tok-num">1</span>))       <span class="tok-com">-- 0</span>
-<span class="tok-ty">Duration</span>.compare(<span class="tok-ty">Duration</span>.days(<span class="tok-num">1</span>), <span class="tok-ty">Duration</span>.hours(<span class="tok-num">12</span>))       <span class="tok-com">-- 1</span></code></pre></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Duration</span></nav><h1>Duration</h1><div class="mdoc"><p>Duration module: time span representation and arithmetic.</p><p>Duration is stored internally as a whole number of milliseconds (Int). This makes arithmetic exact and interoperable with timestamps.</p><p>Construction helpers: Duration.milliseconds(n)  Duration.seconds(n) Duration.minutes(n)       Duration.hours(n) Duration.days(n)          Duration.weeks(n)</p><p>Or use Duration.new/2 with a unit atom: :ms  :s  :m  :h  :d  :w</p><p>Negative durations are supported (e.g. for countdown timers). Duration.format/1 handles negatives by prepending &quot;-&quot;.</p></div><h2>Types</h2><div class="item" id="type-Duration"><div class="ih"><span class="badge bty">type</span><span class="name">Duration</span><span class="sig"><a href="#type-Duration">Duration</a> = <a href="#type-Duration">Duration</a>(Int)   -- internal: milliseconds</span><a class="anchor-link" href="#type-Duration" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-add"><div class="ih"><span class="badge bfn">fn</span><span class="name">add</span><span class="sig">add(a, b)</span><a class="anchor-link" href="#fn-add" title="Link">#</a></div><div class="ib"><p>Add two durations.</p><pre data-try="Duration.add(Duration.seconds(30), Duration.seconds(30))  -- 1 minute" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.add(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">30</span>), <span class="tok-ty">Duration</span>.seconds(<span class="tok-num">30</span>))  <span class="tok-com">-- 1 minute</span>
+<span class="tok-ty">Duration</span>(<span class="tok-num">60000</span>)</code></pre></div></div>
+<div class="item" id="fn-compare"><div class="ih"><span class="badge bfn">fn</span><span class="name">compare</span><span class="sig">compare(a, b)</span><a class="anchor-link" href="#fn-compare" title="Link">#</a></div><div class="ib"><p>Compare two durations.</p><p>Returns -1 if a &lt; b, 0 if a == b, 1 if a &gt; b.</p><pre data-try="Duration.compare(Duration.seconds(10), Duration.minutes(1))
+Duration.compare(Duration.hours(1), Duration.hours(1))
+Duration.compare(Duration.days(1), Duration.hours(12))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.compare(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">10</span>), <span class="tok-ty">Duration</span>.minutes(<span class="tok-num">1</span>))
+-<span class="tok-num">1</span>
+march&gt; <span class="tok-ty">Duration</span>.compare(<span class="tok-ty">Duration</span>.hours(<span class="tok-num">1</span>), <span class="tok-ty">Duration</span>.hours(<span class="tok-num">1</span>))
+<span class="tok-num">0</span>
+march&gt; <span class="tok-ty">Duration</span>.compare(<span class="tok-ty">Duration</span>.days(<span class="tok-num">1</span>), <span class="tok-ty">Duration</span>.hours(<span class="tok-num">12</span>))
+<span class="tok-num">1</span></code></pre></div></div>
 <div class="item" id="fn-days"><div class="ih"><span class="badge bfn">fn</span><span class="name">days</span><span class="sig">days(n) do <a href="#type-Duration">Duration</a>(n * 86400000) end</span><a class="anchor-link" href="#fn-days" title="Link">#</a></div><div class="ib"><p>Create a Duration of n days (24-hour days).</p></div></div>
-<div class="item" id="fn-format"><div class="ih"><span class="badge bfn">fn</span><span class="name">format</span><span class="sig">format(d)</span><a class="anchor-link" href="#fn-format" title="Link">#</a></div><div class="ib"><p>Format a Duration as a human-readable string.</p><pre><code><span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">90</span>))          <span class="tok-com">-- &quot;1 minute, 30 seconds&quot;</span>
-<span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.hours(<span class="tok-num">2</span>))             <span class="tok-com">-- &quot;2 hours&quot;</span>
-<span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.milliseconds(<span class="tok-num">500</span>))    <span class="tok-com">-- &quot;500 milliseconds&quot;</span>
-<span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.new(<span class="tok-num">0</span>, :ms))          <span class="tok-com">-- &quot;0 milliseconds&quot;</span>
-<span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.seconds(-<span class="tok-num">70</span>))         <span class="tok-com">-- &quot;-1 minute, 10 seconds&quot;</span></code></pre><p>Units shown (from largest to smallest): weeks, days, hours, minutes, seconds, milliseconds.  Zero-valued units are omitted.  Singular forms are used when the count is 1.</p></div></div>
+<div class="item" id="fn-format"><div class="ih"><span class="badge bfn">fn</span><span class="name">format</span><span class="sig">format(d)</span><a class="anchor-link" href="#fn-format" title="Link">#</a></div><div class="ib"><p>Format a Duration as a human-readable string.</p><pre data-try="Duration.format(Duration.seconds(90))
+Duration.format(Duration.hours(2))
+Duration.format(Duration.milliseconds(500))
+Duration.format(Duration.new(0, :ms))
+Duration.format(Duration.seconds(-70))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">90</span>))
+<span class="tok-str">&quot;1 minute, 30 seconds&quot;</span>
+march&gt; <span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.hours(<span class="tok-num">2</span>))
+<span class="tok-str">&quot;2 hours&quot;</span>
+march&gt; <span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.milliseconds(<span class="tok-num">500</span>))
+<span class="tok-str">&quot;500 milliseconds&quot;</span>
+march&gt; <span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.new(<span class="tok-num">0</span>, :ms))
+<span class="tok-str">&quot;0 milliseconds&quot;</span>
+march&gt; <span class="tok-ty">Duration</span>.format(<span class="tok-ty">Duration</span>.seconds(-<span class="tok-num">70</span>))
+<span class="tok-str">&quot;-1 minute, 10 seconds&quot;</span></code></pre><p>Units shown (from largest to smallest): weeks, days, hours, minutes, seconds, milliseconds.  Zero-valued units are omitted.  Singular forms are used when the count is 1.</p></div></div>
 <div class="item" id="fn-hours"><div class="ih"><span class="badge bfn">fn</span><span class="name">hours</span><span class="sig">hours(n) do <a href="#type-Duration">Duration</a>(n * 3600000) end</span><a class="anchor-link" href="#fn-hours" title="Link">#</a></div><div class="ib"><p>Create a Duration of n hours.</p></div></div>
 <div class="item" id="fn-milliseconds"><div class="ih"><span class="badge bfn">fn</span><span class="name">milliseconds</span><span class="sig">milliseconds(n) do <a href="#type-Duration">Duration</a>(n) end</span><a class="anchor-link" href="#fn-milliseconds" title="Link">#</a></div><div class="ib"><p>Create a Duration of n milliseconds.</p></div></div>
 <div class="item" id="fn-minutes"><div class="ih"><span class="badge bfn">fn</span><span class="name">minutes</span><span class="sig">minutes(n) do <a href="#type-Duration">Duration</a>(n * 60000) end</span><a class="anchor-link" href="#fn-minutes" title="Link">#</a></div><div class="ib"><p>Create a Duration of n minutes.</p></div></div>
-<div class="item" id="fn-multiply"><div class="ih"><span class="badge bfn">fn</span><span class="name">multiply</span><span class="sig">multiply(d, factor)</span><a class="anchor-link" href="#fn-multiply" title="Link">#</a></div><div class="ib"><p>Multiply a duration by an integer factor.</p><pre><code><span class="tok-ty">Duration</span>.multiply(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">10</span>), <span class="tok-num">6</span>)  <span class="tok-com">-- Duration(60000)</span>
-<span class="tok-ty">Duration</span>.multiply(<span class="tok-ty">Duration</span>.hours(<span class="tok-num">1</span>), <span class="tok-num">24</span>)    <span class="tok-com">-- Duration for 1 day</span></code></pre></div></div>
-<div class="item" id="fn-new"><div class="ih"><span class="badge bfn">fn</span><span class="name">new</span><span class="sig">new(amount, unit)</span><a class="anchor-link" href="#fn-new" title="Link">#</a></div><div class="ib"><p>Create a Duration from an amount and a unit atom.</p><p>Supported units: <code>:ms</code> (milliseconds), <code>:s</code> (seconds), <code>:m</code> (minutes), <code>:h</code> (hours), <code>:d</code> (days), <code>:w</code> (weeks).</p><pre><code><span class="tok-ty">Duration</span>.new(<span class="tok-num">30</span>, :s)   <span class="tok-com">-- 30 seconds</span>
-<span class="tok-ty">Duration</span>.new(<span class="tok-num">2</span>, :h)    <span class="tok-com">-- 2 hours</span>
-<span class="tok-ty">Duration</span>.new(<span class="tok-num">500</span>, :ms) <span class="tok-com">-- 500 milliseconds</span></code></pre></div></div>
+<div class="item" id="fn-multiply"><div class="ih"><span class="badge bfn">fn</span><span class="name">multiply</span><span class="sig">multiply(d, factor)</span><a class="anchor-link" href="#fn-multiply" title="Link">#</a></div><div class="ib"><p>Multiply a duration by an integer factor.</p><pre data-try="Duration.multiply(Duration.seconds(10), 6)
+Duration.multiply(Duration.hours(1), 24) == Duration.days(1)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.multiply(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">10</span>), <span class="tok-num">6</span>)
+<span class="tok-ty">Duration</span>(<span class="tok-num">60000</span>)
+march&gt; <span class="tok-ty">Duration</span>.multiply(<span class="tok-ty">Duration</span>.hours(<span class="tok-num">1</span>), <span class="tok-num">24</span>) == <span class="tok-ty">Duration</span>.days(<span class="tok-num">1</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-new"><div class="ih"><span class="badge bfn">fn</span><span class="name">new</span><span class="sig">new(amount, unit)</span><a class="anchor-link" href="#fn-new" title="Link">#</a></div><div class="ib"><p>Create a Duration from an amount and a unit atom.</p><p>Supported units: <code>:ms</code> (milliseconds), <code>:s</code> (seconds), <code>:m</code> (minutes), <code>:h</code> (hours), <code>:d</code> (days), <code>:w</code> (weeks).</p><pre data-try="Duration.new(30, :s)  -- 30 seconds
+Duration.new(2, :h)  -- 2 hours
+Duration.new(500, :ms)  -- 500 milliseconds" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.new(<span class="tok-num">30</span>, :s)  <span class="tok-com">-- 30 seconds</span>
+<span class="tok-ty">Duration</span>(<span class="tok-num">30000</span>)
+march&gt; <span class="tok-ty">Duration</span>.new(<span class="tok-num">2</span>, :h)  <span class="tok-com">-- 2 hours</span>
+<span class="tok-ty">Duration</span>(<span class="tok-num">7200000</span>)
+march&gt; <span class="tok-ty">Duration</span>.new(<span class="tok-num">500</span>, :ms)  <span class="tok-com">-- 500 milliseconds</span>
+<span class="tok-ty">Duration</span>(<span class="tok-num">500</span>)</code></pre></div></div>
 <div class="item" id="fn-seconds"><div class="ih"><span class="badge bfn">fn</span><span class="name">seconds</span><span class="sig">seconds(n) do <a href="#type-Duration">Duration</a>(n * 1000) end</span><a class="anchor-link" href="#fn-seconds" title="Link">#</a></div><div class="ib"><p>Create a Duration of n seconds.</p></div></div>
-<div class="item" id="fn-subtract"><div class="ih"><span class="badge bfn">fn</span><span class="name">subtract</span><span class="sig">subtract(a, b)</span><a class="anchor-link" href="#fn-subtract" title="Link">#</a></div><div class="ib"><p>Subtract duration b from duration a.</p><pre><code><span class="tok-ty">Duration</span>.subtract(<span class="tok-ty">Duration</span>.hours(<span class="tok-num">2</span>), <span class="tok-ty">Duration</span>.minutes(<span class="tok-num">30</span>))
-<span class="tok-com">-- Duration(5400000)  i.e. 1 hour 30 minutes</span></code></pre></div></div>
-<div class="item" id="fn-to_milliseconds"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_milliseconds</span><span class="sig">to_milliseconds(d)</span><a class="anchor-link" href="#fn-to_milliseconds" title="Link">#</a></div><div class="ib"><p>Return the duration as a whole number of milliseconds.</p><pre><code><span class="tok-ty">Duration</span>.to_milliseconds(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">2</span>))  <span class="tok-com">-- 2000</span>
-<span class="tok-ty">Duration</span>.to_milliseconds(<span class="tok-ty">Duration</span>.minutes(<span class="tok-num">1</span>))  <span class="tok-com">-- 60000</span></code></pre></div></div>
-<div class="item" id="fn-to_seconds"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_seconds</span><span class="sig">to_seconds(d)</span><a class="anchor-link" href="#fn-to_seconds" title="Link">#</a></div><div class="ib"><p>Return the duration as a floating-point number of seconds.</p><pre><code><span class="tok-ty">Duration</span>.to_seconds(<span class="tok-ty">Duration</span>.milliseconds(<span class="tok-num">1500</span>))  <span class="tok-com">-- 1.5</span>
-<span class="tok-ty">Duration</span>.to_seconds(<span class="tok-ty">Duration</span>.minutes(<span class="tok-num">1</span>))          <span class="tok-com">-- 60.</span></code></pre></div></div>
-<div class="item" id="fn-weeks"><div class="ih"><span class="badge bfn">fn</span><span class="name">weeks</span><span class="sig">weeks(n) do <a href="#type-Duration">Duration</a>(n * 604800000) end</span><a class="anchor-link" href="#fn-weeks" title="Link">#</a></div><div class="ib"><p>Create a Duration of n weeks (7 days each).</p></div></div></main></div><script>
+<div class="item" id="fn-subtract"><div class="ih"><span class="badge bfn">fn</span><span class="name">subtract</span><span class="sig">subtract(a, b)</span><a class="anchor-link" href="#fn-subtract" title="Link">#</a></div><div class="ib"><p>Subtract duration b from duration a.</p><pre data-try="Duration.subtract(Duration.hours(2), Duration.minutes(30))  -- 1 hour 30 minutes" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.subtract(<span class="tok-ty">Duration</span>.hours(<span class="tok-num">2</span>), <span class="tok-ty">Duration</span>.minutes(<span class="tok-num">30</span>))  <span class="tok-com">-- 1 hour 30 minutes</span>
+<span class="tok-ty">Duration</span>(<span class="tok-num">5400000</span>)</code></pre></div></div>
+<div class="item" id="fn-to_milliseconds"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_milliseconds</span><span class="sig">to_milliseconds(d)</span><a class="anchor-link" href="#fn-to_milliseconds" title="Link">#</a></div><div class="ib"><p>Return the duration as a whole number of milliseconds.</p><pre data-try="Duration.to_milliseconds(Duration.seconds(2))
+Duration.to_milliseconds(Duration.minutes(1))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.to_milliseconds(<span class="tok-ty">Duration</span>.seconds(<span class="tok-num">2</span>))
+<span class="tok-num">2000</span>
+march&gt; <span class="tok-ty">Duration</span>.to_milliseconds(<span class="tok-ty">Duration</span>.minutes(<span class="tok-num">1</span>))
+<span class="tok-num">60000</span></code></pre></div></div>
+<div class="item" id="fn-to_seconds"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_seconds</span><span class="sig">to_seconds(d)</span><a class="anchor-link" href="#fn-to_seconds" title="Link">#</a></div><div class="ib"><p>Return the duration as a floating-point number of seconds.</p><pre data-try="Duration.to_seconds(Duration.milliseconds(1500))
+Duration.to_seconds(Duration.minutes(1)) == 60.0" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Duration</span>.to_seconds(<span class="tok-ty">Duration</span>.milliseconds(<span class="tok-num">1500</span>))
+<span class="tok-num">1.5</span>
+march&gt; <span class="tok-ty">Duration</span>.to_seconds(<span class="tok-ty">Duration</span>.minutes(<span class="tok-num">1</span>)) == <span class="tok-num">60.0</span>
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-weeks"><div class="ih"><span class="badge bfn">fn</span><span class="name">weeks</span><span class="sig">weeks(n) do <a href="#type-Duration">Duration</a>(n * 604800000) end</span><a class="anchor-link" href="#fn-weeks" title="Link">#</a></div><div class="ib"><p>Create a Duration of n weeks (7 days each).</p></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

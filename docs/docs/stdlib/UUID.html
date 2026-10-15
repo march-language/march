@@ -921,6 +921,20 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Diagnose.html#fn-findings"><span class="sb-kind" style="color:var(--fn)">F</span>findings</a>
 <a class="sl" href="Diagnose.html#fn-ids_of"><span class="sb-kind" style="color:var(--fn)">F</span>ids_of</a>
 <a class="sl" href="Diagnose.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Diagnostics.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Diagnostics.html">Diagnostics</a></div><div class="sb-sub"><a class="sl" href="Diagnostics.html#type-CrashKind"><span class="sb-kind" style="color:var(--ty)">T</span>CrashKind</a>
+<a class="sl" href="Diagnostics.html#type-DiagnosticValue"><span class="sb-kind" style="color:var(--ty)">T</span>DiagnosticValue</a>
+<a class="sl" href="Diagnostics.html#type-SourceLocation"><span class="sb-kind" style="color:var(--ty)">T</span>SourceLocation</a>
+<a class="sl" href="Diagnostics.html#type-StackFrame"><span class="sb-kind" style="color:var(--ty)">T</span>StackFrame</a>
+<a class="sl" href="Diagnostics.html#type-ProcessInfo"><span class="sb-kind" style="color:var(--ty)">T</span>ProcessInfo</a>
+<a class="sl" href="Diagnostics.html#type-CrashReport"><span class="sb-kind" style="color:var(--ty)">T</span>CrashReport</a>
+<a class="sl" href="Diagnostics.html#type-ObserverHandle"><span class="sb-kind" style="color:var(--ty)">T</span>ObserverHandle</a>
+<a class="sl" href="Diagnostics.html#type-DiagFrame"><span class="sb-kind" style="color:var(--ty)">T</span>DiagFrame</a>
+<a class="sl" href="Diagnostics.html#type-DiagCrash"><span class="sb-kind" style="color:var(--ty)">T</span>DiagCrash</a>
+<a class="sl" href="Diagnostics.html#fn-current_context"><span class="sb-kind" style="color:var(--fn)">F</span>current_context</a>
+<a class="sl" href="Diagnostics.html#fn-kind_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>kind_to_string</a>
+<a class="sl" href="Diagnostics.html#fn-observe_crashes"><span class="sb-kind" style="color:var(--fn)">F</span>observe_crashes</a>
+<a class="sl" href="Diagnostics.html#fn-unobserve"><span class="sb-kind" style="color:var(--fn)">F</span>unobserve</a>
+<a class="sl" href="Diagnostics.html#fn-with_context"><span class="sb-kind" style="color:var(--fn)">F</span>with_context</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Dir.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Dir.html">Dir</a></div><div class="sb-sub"><a class="sl" href="Dir.html#fn-exists"><span class="sb-kind" style="color:var(--fn)">F</span>exists</a>
 <a class="sl" href="Dir.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
 <a class="sl" href="Dir.html#fn-list_full"><span class="sb-kind" style="color:var(--fn)">F</span>list_full</a>
@@ -2974,23 +2988,106 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>UUID</span></nav><h1>UUID</h1><div class="mdoc"><p>UUID module: RFC 4122 UUID generation and manipulation.</p><p>The UUID type wraps a canonical string representation: &quot;xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx&quot; where M is the version digit and N is the variant digit (8, 9, a, or b).</p><p>Supported versions: v4  — randomly generated (RFC 4122 §4.4) v5  — name-based using SHA-1 (RFC 4122 §4.3) NOTE: v5 uses the first 16 bytes of a SHA-1 hash with version/ variant bits set; the resulting UUID is RFC-compliant.</p><p>The nil UUID (&quot;00000000-0000-0000-0000-000000000000&quot;) is the all-zeros UUID. version/1 returns 0 for the nil UUID.</p></div><h2>Types</h2><div class="item" id="type-UUID"><div class="ih"><span class="badge bty">type</span><span class="name">UUID</span><span class="sig"><a href="#type-UUID">UUID</a> = <a href="#type-UUID">UUID</a>(String)</span><a class="anchor-link" href="#type-UUID" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-is_valid"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_valid</span><span class="sig">is_valid(s)</span><a class="anchor-link" href="#fn-is_valid" title="Link">#</a></div><div class="ib"><p>Return true if the string is a valid UUID in xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx form.</p><pre><code><span class="tok-ty">UUID</span>.is_valid(<span class="tok-str">&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;</span>)  <span class="tok-com">-- true</span>
-<span class="tok-ty">UUID</span>.is_valid(<span class="tok-str">&quot;00000000-0000-0000-0000-000000000000&quot;</span>)  <span class="tok-com">-- true</span>
-<span class="tok-ty">UUID</span>.is_valid(<span class="tok-str">&quot;not-a-uuid&quot;</span>)                             <span class="tok-com">-- false</span></code></pre></div></div>
-<div class="item" id="fn-nil"><div class="ih"><span class="badge bfn">fn</span><span class="name">nil</span><span class="sig">nil()</span><a class="anchor-link" href="#fn-nil" title="Link">#</a></div><div class="ib"><p>The nil UUID: all 128 bits are zero.</p><pre><code><span class="tok-ty">UUID</span>.to_string(<span class="tok-ty">UUID</span>.nil())
-<span class="tok-com">-- &quot;00000000-0000-0000-0000-000000000000&quot;</span></code></pre></div></div>
-<div class="item" id="fn-parse"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse</span><span class="sig">parse(s)</span><a class="anchor-link" href="#fn-parse" title="Link">#</a></div><div class="ib"><p>Parse a UUID string, returning Ok(UUID) or Err(:invalid).</p><p>Accepts both upper and lower case hex digits; validates the xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format (36 characters, 4 dashes).</p><pre><code><span class="tok-ty">UUID</span>.parse(<span class="tok-str">&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;</span>)  <span class="tok-com">-- Ok(UUID(...))</span>
-<span class="tok-ty">UUID</span>.parse(<span class="tok-str">&quot;not-a-uuid&quot;</span>)                             <span class="tok-com">-- Err(:invalid)</span></code></pre></div></div>
-<div class="item" id="fn-timestamp_ms"><div class="ih"><span class="badge bfn">fn</span><span class="name">timestamp_ms</span><span class="sig">timestamp_ms(uuid)</span><a class="anchor-link" href="#fn-timestamp_ms" title="Link">#</a></div><div class="ib"><p>Extract the Unix timestamp (milliseconds) embedded in a v7 UUID.</p><p>Returns Some(ms) for valid v7 UUIDs; None for other versions or unparseable strings.  The inverse of <code>v7_at</code>: for any m in a reasonable range, <code>timestamp_ms(v7_at(m)) == Some(m)</code>.</p></div></div>
-<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(uuid)</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Convert a UUID to its canonical lowercase string representation.</p><pre><code><span class="tok-ty">UUID</span>.to_string(<span class="tok-ty">UUID</span>.nil())
-<span class="tok-com">-- &quot;00000000-0000-0000-0000-000000000000&quot;</span></code></pre></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>UUID</span></nav><h1>UUID</h1><div class="mdoc"><p>UUID module: RFC 4122 UUID generation and manipulation.</p><p>The UUID type wraps a canonical string representation: &quot;xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx&quot; where M is the version digit and N is the variant digit (8, 9, a, or b).</p><p>Supported versions: v4  — randomly generated (RFC 4122 §4.4) v5  — name-based using SHA-1 (RFC 4122 §4.3) NOTE: v5 uses the first 16 bytes of a SHA-1 hash with version/ variant bits set; the resulting UUID is RFC-compliant.</p><p>The nil UUID (&quot;00000000-0000-0000-0000-000000000000&quot;) is the all-zeros UUID. version/1 returns 0 for the nil UUID.</p></div><h2>Types</h2><div class="item" id="type-UUID"><div class="ih"><span class="badge bty">type</span><span class="name">UUID</span><span class="sig"><a href="#type-UUID">UUID</a> = <a href="#type-UUID">UUID</a>(String)</span><a class="anchor-link" href="#type-UUID" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-is_valid"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_valid</span><span class="sig">is_valid(s)</span><a class="anchor-link" href="#fn-is_valid" title="Link">#</a></div><div class="ib"><p>Return true if the string is a valid UUID in xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx form.</p><pre data-try="UUID.is_valid(&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;)
+UUID.is_valid(&quot;00000000-0000-0000-0000-000000000000&quot;)
+UUID.is_valid(&quot;not-a-uuid&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">UUID</span>.is_valid(<span class="tok-str">&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;</span>)
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">UUID</span>.is_valid(<span class="tok-str">&quot;00000000-0000-0000-0000-000000000000&quot;</span>)
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">UUID</span>.is_valid(<span class="tok-str">&quot;not-a-uuid&quot;</span>)
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-nil"><div class="ih"><span class="badge bfn">fn</span><span class="name">nil</span><span class="sig">nil()</span><a class="anchor-link" href="#fn-nil" title="Link">#</a></div><div class="ib"><p>The nil UUID: all 128 bits are zero.</p><pre data-try="UUID.to_string(UUID.nil())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">UUID</span>.to_string(<span class="tok-ty">UUID</span>.nil())
+<span class="tok-str">&quot;00000000-0000-0000-0000-000000000000&quot;</span></code></pre></div></div>
+<div class="item" id="fn-parse"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse</span><span class="sig">parse(s)</span><a class="anchor-link" href="#fn-parse" title="Link">#</a></div><div class="ib"><p>Parse a UUID string, returning Ok(UUID) or Err(:invalid).</p><p>Accepts both upper and lower case hex digits; validates the xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format (36 characters, 4 dashes).</p><pre data-try="Result.map(UUID.parse(&quot;F47AC10B-58CC-4372-A567-0E02B2C3D479&quot;), UUID.to_string)
+UUID.parse(&quot;not-a-uuid&quot;) == Err(:invalid)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Result</span>.map(<span class="tok-ty">UUID</span>.parse(<span class="tok-str">&quot;F47AC10B-58CC-4372-A567-0E02B2C3D479&quot;</span>), <span class="tok-ty">UUID</span>.to_string)
+<span class="tok-ty">Ok</span>(<span class="tok-str">&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;</span>)
+march&gt; <span class="tok-ty">UUID</span>.parse(<span class="tok-str">&quot;not-a-uuid&quot;</span>) == <span class="tok-ty">Err</span>(:invalid)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-timestamp_ms"><div class="ih"><span class="badge bfn">fn</span><span class="name">timestamp_ms</span><span class="sig">timestamp_ms(uuid)</span><a class="anchor-link" href="#fn-timestamp_ms" title="Link">#</a></div><div class="ib"><p>Extract the Unix timestamp (milliseconds) embedded in a v7 UUID.</p><p>Returns Some(ms) for valid v7 UUIDs; None for other versions or unparseable strings.  The inverse of <code>v7_at</code>: for any m in a reasonable range, <code>timestamp_ms(v7_at(m)) == Some(m)</code>.</p><pre data-try="UUID.timestamp_ms(UUID.nil())  -- not a v7 UUID" data-try-kind="transcript"><code><span class="tok-ty">UUID</span>.timestamp_ms(<span class="tok-ty">UUID</span>.v7_at(<span class="tok-num">1700000000000</span>))  <span class="tok-com">-- Some(1700000000000)</span>
+
+march&gt; <span class="tok-ty">UUID</span>.timestamp_ms(<span class="tok-ty">UUID</span>.nil())  <span class="tok-com">-- not a v7 UUID</span>
+<span class="tok-ty">None</span></code></pre></div></div>
+<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(uuid)</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Convert a UUID to its canonical lowercase string representation.</p><pre data-try="UUID.to_string(UUID.nil())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">UUID</span>.to_string(<span class="tok-ty">UUID</span>.nil())
+<span class="tok-str">&quot;00000000-0000-0000-0000-000000000000&quot;</span></code></pre></div></div>
 <div class="item" id="fn-v4"><div class="ih"><span class="badge bfn">fn</span><span class="name">v4</span><span class="sig">v4()</span><a class="anchor-link" href="#fn-v4" title="Link">#</a></div><div class="ib"><p>Generate a random UUID v4.</p><pre><code><span class="tok-ty">UUID</span>.v4()  <span class="tok-com">-- e.g. UUID(&quot;f47ac10b-58cc-4372-a567-0e02b2c3d479&quot;)</span></code></pre><p>Uses the runtime's CSPRNG.  Version bits (4) and variant bits (RFC 4122) are set correctly.</p></div></div>
-<div class="item" id="fn-v5"><div class="ih"><span class="badge bfn">fn</span><span class="name">v5</span><span class="sig">v5(namespace, name)</span><a class="anchor-link" href="#fn-v5" title="Link">#</a></div><div class="ib"><p>Generate a name-based UUID v5 (SHA-1, RFC 4122 §4.3).</p><pre><code><span class="tok-kw">let</span> dns = <span class="tok-ty">UUID</span>.parse(<span class="tok-str">&quot;6ba7b810-9dad-11d1-80b4-00c04fd430c8&quot;</span>)
-<span class="tok-ty">UUID</span>.v5(dns, <span class="tok-str">&quot;www.example.com&quot;</span>)  <span class="tok-com">-- deterministic UUID</span></code></pre><p>The namespace must be a valid UUID.  The name is an arbitrary string. The result is deterministic: the same namespace + name always produce the same UUID.</p></div></div>
+<div class="item" id="fn-v5"><div class="ih"><span class="badge bfn">fn</span><span class="name">v5</span><span class="sig">v5(namespace, name)</span><a class="anchor-link" href="#fn-v5" title="Link">#</a></div><div class="ib"><p>Generate a name-based UUID v5 (SHA-1, RFC 4122 §4.3).</p><pre data-try="let dns = Result.unwrap(UUID.parse(&quot;6ba7b810-9dad-11d1-80b4-00c04fd430c8&quot;))
+UUID.to_string(UUID.v5(dns, &quot;www.example.com&quot;))" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> dns = <span class="tok-ty">Result</span>.unwrap(<span class="tok-ty">UUID</span>.parse(<span class="tok-str">&quot;6ba7b810-9dad-11d1-80b4-00c04fd430c8&quot;</span>))
+march&gt; <span class="tok-ty">UUID</span>.to_string(<span class="tok-ty">UUID</span>.v5(dns, <span class="tok-str">&quot;www.example.com&quot;</span>))
+<span class="tok-str">&quot;2ed6657d-e927-568b-95e1-2665a8aea6a2&quot;</span></code></pre><p>The namespace must be a valid UUID.  The name is an arbitrary string. The result is deterministic: the same namespace + name always produce the same UUID.</p></div></div>
 <div class="item" id="fn-v7"><div class="ih"><span class="badge bfn">fn</span><span class="name">v7</span><span class="sig">v7()</span><a class="anchor-link" href="#fn-v7" title="Link">#</a></div><div class="ib"><p>Generate a time-ordered UUID v7 (RFC 9562).</p><pre><code><span class="tok-ty">UUID</span>.v7()  <span class="tok-com">-- e.g. UUID(&quot;018e7c9b-2a55-7890-9d51-...&quot;)</span></code></pre><p>The leading 48 bits are the current Unix timestamp in milliseconds; the remaining 74 bits are random (CSPRNG).  Version bits (7) and variant bits (RFC 4122) are set correctly.</p><p>v7 UUIDs are sortable by generation time, which dramatically improves B-tree locality when used as database primary keys versus v4.  Prefer v7 over v4 for new schemas.</p></div></div>
-<div class="item" id="fn-v7_at"><div class="ih"><span class="badge bfn">fn</span><span class="name">v7_at</span><span class="sig">v7_at(unix_ms : Int) : <a href="#type-UUID">UUID</a></span><a class="anchor-link" href="#fn-v7_at" title="Link">#</a></div><div class="ib"><p>Generate a v7 UUID at a specific Unix timestamp (milliseconds).</p><pre><code><span class="tok-ty">UUID</span>.v7_at(<span class="tok-num">1_700_000_000_000</span>)  <span class="tok-com">-- UUID with timestamp pinned to 2023-11-14</span></code></pre><p>Useful for backfilling historical records with time-ordered UUIDs and for deterministic tests that want to control the timestamp portion. The random bits are still CSPRNG-generated on every call.</p></div></div>
-<div class="item" id="fn-version"><div class="ih"><span class="badge bfn">fn</span><span class="name">version</span><span class="sig">version(uuid)</span><a class="anchor-link" href="#fn-version" title="Link">#</a></div><div class="ib"><p>Return the version number of a UUID (1–5), or 0 for unrecognised/nil.</p><pre><code><span class="tok-ty">UUID</span>.version(<span class="tok-ty">UUID</span>.v4())  <span class="tok-com">-- 4</span>
-<span class="tok-ty">UUID</span>.version(<span class="tok-ty">UUID</span>.nil()) <span class="tok-com">-- 0</span></code></pre></div></div></main></div><script>
+<div class="item" id="fn-v7_at"><div class="ih"><span class="badge bfn">fn</span><span class="name">v7_at</span><span class="sig">v7_at(unix_ms : Int) : <a href="#type-UUID">UUID</a></span><a class="anchor-link" href="#fn-v7_at" title="Link">#</a></div><div class="ib"><p>Generate a v7 UUID at a specific Unix timestamp (milliseconds).</p><pre><code><span class="tok-ty">UUID</span>.v7_at(<span class="tok-num">1700000000000</span>)  <span class="tok-com">-- UUID with timestamp pinned to 2023-11-14</span></code></pre><p>Useful for backfilling historical records with time-ordered UUIDs and for deterministic tests that want to control the timestamp portion. The random bits are still CSPRNG-generated on every call.</p></div></div>
+<div class="item" id="fn-version"><div class="ih"><span class="badge bfn">fn</span><span class="name">version</span><span class="sig">version(uuid)</span><a class="anchor-link" href="#fn-version" title="Link">#</a></div><div class="ib"><p>Return the version digit of a UUID (e.g. 4, 5 or 7), or 0 for unrecognised/nil.</p><pre data-try="UUID.version(UUID.v5(UUID.nil(), &quot;x&quot;))
+UUID.version(UUID.nil())" data-try-kind="transcript"><code><span class="tok-ty">UUID</span>.version(<span class="tok-ty">UUID</span>.v4())  <span class="tok-com">-- 4</span>
+<span class="tok-ty">UUID</span>.version(<span class="tok-ty">UUID</span>.v7())  <span class="tok-com">-- 7</span>
+
+march&gt; <span class="tok-ty">UUID</span>.version(<span class="tok-ty">UUID</span>.v5(<span class="tok-ty">UUID</span>.nil(), <span class="tok-str">&quot;x&quot;</span>))
+<span class="tok-num">5</span>
+march&gt; <span class="tok-ty">UUID</span>.version(<span class="tok-ty">UUID</span>.nil())
+<span class="tok-num">0</span></code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
