@@ -1164,6 +1164,99 @@ let test_repl_to_string_generic_interp () =
   check_to_string_session ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" to_string_session)
 
+(* ── Atoms inside a value at the JIT prompt (2026-10-14) ────────────────
+   specs/progress/2026-10-14-repl-atom-payload-segfault.md.  Two bugs:
+
+   1. Printer: [Repl_jit.pp_word] had no Atom arm, so an atom in a cell
+      (`Err(:invalid)`, `[:a, :b]`, `(:a, 1)`) fell through to
+      [pp_heap_value], which read a constructor tag at the atom's HASH:
+      the REPL died with SIGSEGV (exit 139).  A bare `:a` printed only
+      because its fragment failed to emit and fell back to the interpreter.
+      `UUID.parse` is the original report: the atom comes from a
+      precompiled stdlib fn, so its name is only in the runtime's table.
+
+   2. Codegen: `Some(:a)` with a LITERAL atom was allocated as a boxed cell
+      (the literal's type fell to TUnit, niche-unsafe) while every decode
+      site reads Option(Atom) as a niche, and [Kind.payload_needs_tag] said
+      an atom is stored untagged though [Llvm_ctx.coerce] tags it.  The
+      [--compile] case below pins it: `x == :a` was false and
+      `to_string` printed `Some(:<atom>)`. *)
+
+let atom_session =
+  [ "Err(:invalid)";
+    "Ok(:a)";
+    "Some(:b)";
+    "[:c, :d]";
+    "(:e, 1)";
+    "[Some(:f), None]";
+    "UUID.parse(\"not-a-uuid\")" ]
+
+let atom_expected =
+  [ "= Err(:invalid)"; "= Ok(:a)"; "= Some(:b)"; "= [:c, :d]"; "= (:e, 1)";
+    "= [Some(:f), None]" ]
+
+let test_repl_atoms_orc () =
+  check_session "orc atom payloads" atom_session atom_expected
+
+let test_repl_atoms_clang () =
+  if not (clang_available ()) then ()
+  else
+    check_session ~backend:"clang" "clang atom payloads" atom_session
+      atom_expected
+
+(* Parity control: the interpreter was always right. *)
+let test_repl_atoms_interp () =
+  let (out, code) =
+    run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" atom_session in
+  Alcotest.(check int) ("interpreter atom payloads: exit code; " ^ out) 0 code;
+  List.iter (fun needle ->
+      if not (contains ~needle out) then
+        Alcotest.failf "interpreter atom payloads: expected %S, got:\n%s"
+          needle out)
+    atom_expected
+
+let option_atom_src = {|mod OptionAtom do
+  needs IO.Console
+  fn pick(b : Bool) : Option(Atom) do
+    if b do Some(:a) else None end
+  end
+  fn main(_cap_console : Cap(IO.Console)) do
+    match pick(true) do
+      Some(x) -> println("matched=" ++ to_string(x == :a))
+      None -> println("matched=none")
+    end
+    println(to_string(pick(true)))
+    println(to_string([Some(:c), None]))
+  end
+end
+|}
+
+(* AOT, not --jit: the boxed-encode/niche-decode split needs [pick] inlined
+   into [main] at --compile's optimisation level; under --jit the same
+   program happened to match correctly even before the fix. *)
+let test_compiled_option_atom () =
+  if not (clang_available ()) then ()
+  else begin
+    let src = Filename.temp_file "march_option_atom" ".march" in
+    let exe = Filename.temp_file "march_option_atom" ".exe" in
+    let out_path = Filename.temp_file "march_option_atom" ".out" in
+    let oc = open_out src in
+    output_string oc option_atom_src;
+    close_out oc;
+    let cmd =
+      Printf.sprintf "HOME=%s %s --compile -o %s %s > /dev/null 2>&1 && %s > %s 2>&1"
+        (Filename.quote (Lazy.force session_home)) (Filename.quote main_exe)
+        (Filename.quote exe) (Filename.quote src) (Filename.quote exe)
+        (Filename.quote out_path) in
+    let code = Sys.command cmd in
+    let ic = open_in_bin out_path in
+    let out = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    List.iter (fun f -> try Sys.remove f with _ -> ()) [src; exe; out_path];
+    check_jit_file ~label:"--compile Option(Atom) niche" (out, code)
+      [ "matched=true"; "Some(:a)"; "[Some(:c), None]" ]
+  end
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
@@ -1222,6 +1315,12 @@ let () =
         test_repl_to_string_generic_jit;
       Alcotest.test_case "to_string of List/Option/tuple (interpreter)"
         `Quick test_repl_to_string_generic_interp;
+      Alcotest.test_case "atoms inside values print (ORC JIT)" `Slow
+        test_repl_atoms_orc;
+      Alcotest.test_case "atoms inside values print (clang JIT)" `Slow
+        test_repl_atoms_clang;
+      Alcotest.test_case "atoms inside values print (interpreter)" `Quick
+        test_repl_atoms_interp;
     ];
     "jit_file", [
       Alcotest.test_case "march --jit runs a whole program (ORC JIT)" `Slow
@@ -1247,5 +1346,8 @@ let () =
       Alcotest.test_case
         "march --jit to_string of List/Option/Result/tuple values"
         `Slow test_jit_file_to_string_generic;
+      Alcotest.test_case
+        "--compile Option(Atom) literal payload matches and prints"
+        `Slow test_compiled_option_atom;
     ];
   ]

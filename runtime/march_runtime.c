@@ -15310,6 +15310,27 @@ static void *march_atom_name_lookup(int64_t h) {
     return name;
 }
 
+/* Public face of march_atom_name_lookup for the REPL JIT's value printer
+ * (lib/jit/repl_jit.ml, pp_atom_word), which dlsym's it from the runtime .so
+ * to render an atom it found in a heap cell: the stdlib precompile registers
+ * its table, so an atom a precompiled stdlib fn returned (UUID.parse's
+ * :invalid) is named here.  Writes ":name" NUL-terminated into buf
+ * (truncated to cap - 1 bytes) and returns its length, or -1 if no
+ * registered table knows [h].  A C string rather than a March String so the
+ * caller never has to decode an SSO immediate. */
+int64_t march_atom_name_cstr(int64_t h, char *buf, int64_t cap) {
+    if (!buf || cap <= 0) return -1;
+    void *name = march_atom_name_lookup(h);
+    if (!name) return -1;
+    char sso[MARCH_SSO_MAX + 1];
+    int64_t n = march_str_len(name);
+    if (n >= cap) n = cap - 1;
+    memcpy(buf, march_str_data(name, sso), (size_t)n);
+    buf[n] = '\0';
+    march_decrc(name);
+    return n;
+}
+
 /* The text of a non-String LogValue, as eval_runtime.ml's
  * log_value_to_string renders it.  An LAtom renders as ":name" through the
  * program's atom table (until 2026-09-28 it always rendered as "null"). */
