@@ -154,12 +154,18 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
           repr_of_ty returns Boxed here because EAlloc's ctor key carries no type
           params; we use the actual arg TIR type to determine tagging. *)
        let emit_niche_payload arg =
+         (* A literal atom must answer Atom, not fall to the TUnit default:
+            Unit is niche-UNSAFE, so `Some(:a)` was allocated as a BOXED cell
+            while every decode site reads Option(Atom) as a niche — the match
+            bound the cell pointer as the atom (`x == :a` false compiled,
+            `Some(:<atom>)` printed; 2026-10-14). *)
          let arg_tir_ty = match arg with
            | Tir.AVar v -> v.Tir.v_ty
            | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
            | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
            | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
            | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+           | Tir.ALit (March_ast.Ast.LitAtom _) -> Tir.TCon ("Atom", [])
            | _ -> Tir.TUnit
          in
          let arg_niche_ok =
@@ -244,6 +250,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
               | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
               | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
               | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+              | Tir.ALit (March_ast.Ast.LitAtom _) -> Tir.TCon ("Atom", [])
               | _ -> Tir.TUnit) in
             repr_audit_record ~ty:alloc_type_name ~payload:arg_key
               ~family:fam ~site:(site ^ ":" ^ ctor ^ " in " ^ ctx.cur_emit_fn)
@@ -596,6 +603,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
            | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
            | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
            | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+           | Tir.ALit (March_ast.Ast.LitAtom _) -> Tir.TCon ("Atom", [])
            | _ -> Tir.TUnit
          in
          let arg_niche_ok =

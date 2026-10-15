@@ -73,6 +73,40 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Security: `Uri.merge_strict` now rejects every path traversal above the root.**
+  The guard was off by one: the empty segment before a path's leading `/` absorbed one
+  `..`, so against a base path `/a/b/c` the reference `../../../etc/passwd` was accepted
+  as `Ok(...)` with path `etc/passwd`, and only four `..` were rejected. Any `..` with
+  nothing left to remove is now an `Err`, including one in an absolute-path reference
+  (`/../etc/passwd`). If you used `merge_strict` to vet untrusted relative references,
+  upgrade.
+- **`Uri.merge` keeps the leading `/` (RFC 3986 §5.2.4).** Surplus `..` segments turned
+  the path relative, so `../../../x` against `https://example.com/a/b/c` gave
+  `"https://example.comx"`; it now gives `"https://example.com/x"`. Merging also follows
+  §5.2 in the remaining cases: dot segments are removed from absolute-path and
+  network-path references too, a base with an empty path merges as `/` + the reference,
+  and a fragment-only reference keeps the base query.
+- **`Uri.parse` reads relative references per RFC 3986 §4.2.** A scheme-less string not
+  starting with `/` was split as `host/path` (`Uri.parse("../d")` had host `..`), and
+  `//other.com/x` put everything in the path. Now only `//` introduces an authority:
+  `../d` and `a/b` are paths, `//other.com/x` has host `other.com` and path `/x`, and
+  `Uri.to_string` writes such a reference back with its `//`. A `://` inside a path or
+  query (`/go?to=http://x`) no longer makes a scheme.
+- **The in-browser REPL no longer runs out of stack.** On the playground, cookbook and
+  "Try it" pages, `List.map` over more than about 200 elements, or a recursive function
+  a few hundred calls deep, failed with "Maximum call stack size exceeded". The
+  interpreter is now compiled so that recursion depth is limited by memory: a
+  100,000-element list or 100,000-deep recursion works. Call-heavy code runs about a
+  third slower, and the download is about 10% smaller. Also, defining a function after
+  `main` no longer runs `main` again.
+
+- **`march repl` no longer crashes on an atom inside a value.** `Err(:invalid)`,
+  `Some(:a)`, `[:a, :b]`, `(:a, 1)` and `UUID.parse("not-a-uuid")` killed the REPL with a
+  segmentation fault; they now print. A `None` inside a list or tuple prints as `None`
+  instead of `null`. Compiled programs had a related bug: an `Option(Atom)` built from a
+  literal atom (`Some(:a)`) did not match its own atom (`x == :a` was `false`) and printed
+  as `Some(:<atom>)`. Both are fixed.
+
 - **`march repl` prints negative numbers inside lists, options and tuples correctly.**
   The native REPL showed `[-1, 2]` as `[9223372036854775807, 2]` (and likewise
   `Some(-1)`, `(-1, 2)`, `NativeArray.to_list_i32(...)` with a negative element). Only
@@ -115,11 +149,10 @@ git log is authoritative for exact commits.
   tree each pass. The README's FBIP table and its "7x faster than C" claim (no C
   program is benchmarked) are replaced the same way. The landing page no longer calls
   actors "typed" or says shared mutable state is a compile error, since `send` does not
-  check a message against the target actor. The actors chapter says the interpreter's
-  `Actor.call` timeout decides the result but does not cut the caller's wait short.
-  The hot-reload page gains a "Current limitations" section listing the open issues,
+  check a message against the target actor. The hot-reload page gains a "Current limitations" section listing the open issues,
   and the memory-model chapter describes the march-lean oracle instead of calling it
   "not started".
+- **`Actor.call`'s timeout under the interpreter is described accurately.** The actors chapter said the timeout is real on both backends. Compiled, the caller stops waiting at `timeout_ms`; under the interpreter the handler runs to completion first and a late reply is then discarded and reported as `Err`, so a slow handler still blocks the caller for its full duration. The chapter now says so, in the call section and in the list of backend differences.
 
 - **The stdlib API reference has syntax highlighting, and Http is documented.**
   Code examples on march-lang.org/docs/stdlib/ were plain monochrome text: the

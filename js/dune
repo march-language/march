@@ -21,17 +21,24 @@
   march_typecheck
   march_eval
   js_of_ocaml)
- ; Effects are left at jsoo's default (disabled), which emits a
- ; [missing-effects-backend] warning because march_eval contains effect
- ; handlers (the WS fiber parking in run_http_event_loop — see eval.ml's
- ; [ws_wait_ready]). That handler is unreachable here by construction: it
- ; only runs under the HTTP server's accept loop, which needs Unix sockets
- ; that do not exist in a browser. Enabling --effects=double-translation to
- ; silence the warning costs ~3.3MB (+16%) on this bundle for a code path
- ; that can never execute, so the warning is accepted deliberately. If a
- ; future change makes the browser REPL reach an effect handler, switch to
- ; --effects=double-translation (NOT cps, which slows all code).
- (js_of_ocaml (flags (:standard)))
+ ; --effects=cps: CPS-compile the whole interpreter. Under the default
+ ; (direct-style) backend every March call is a stack of JS frames
+ ; (eval_expr -> apply -> eval_expr ...), about 1.2 KB of JS stack each, and
+ ; js_of_ocaml only turns direct self-calls into loops, not the evaluator's
+ ; calls through closures. A browser's ~1 MB stack then ran out after a few
+ ; hundred March calls, tail calls included: List.range(0, 243) and
+ ; List.map over 195 elements failed with "Maximum call stack size exceeded"
+ ; (specs/progress/2026-10-14-browser-repl-stack-depth.md). In CPS mode
+ ; js_of_ocaml keeps the continuation on the heap and bounces off the stack
+ ; when it gets deep, so recursion depth is limited by memory, not the JS
+ ; stack (1,000,000 tail calls and 100,000 non-tail ones run). Measured
+ ; 2026-10-14: ~25-40% slower on call-heavy code (fib(20): 285 -> 360 ms),
+ ; same startup, and a SMALLER bundle (1.87 MB -> 1.69 MB, 410 -> 363 KB gzip).
+ ; It also gives the evaluator's effect handlers (the WS fiber parking in
+ ; run_http_event_loop) a real backend, so the old missing-effects warning is
+ ; gone. The live compiler below is not CPS: it only compiles; the program it
+ ; produces runs as ordinary JS.
+ (js_of_ocaml (flags (:standard --effects=cps)))
  (modes js))
 
 ; March browser live-compile entry point — runs the real --target js compile
