@@ -24,6 +24,26 @@ let strip_trailing_cr s =
   let n = String.length s in
   if n > 0 && s.[n - 1] = '\r' then String.sub s 0 (n - 1) else s
 
+(* __try_call / __try_call_val: run the thunk (a 1-arg lambda whose argument
+   is ignored) and reflect any runtime failure as Err.  The failure is handled
+   here, so the frames a panic leaves on the March stack for a backtrace are
+   dropped back to the mark taken on entry: kept, they surfaced in every later
+   backtrace, the printed one and a Diagnostics crash report alike. *)
+let try_call_thunk (thunk : value) : value =
+  let restore_stack = !Eval_prim.march_stack_mark () in
+  let err s = restore_stack (); VCon ("Err", [VString s]) in
+  try VCon ("Ok", [!apply_hook thunk [VBool true]])
+  with
+  | BlockedOnReceive    -> raise BlockedOnReceive
+  | Assert_failure msg -> err msg
+  | Match_failure msg  -> err ("match failure: " ^ msg)
+  | Eval_error msg     -> err msg
+  | Failure msg        -> err msg
+  | Division_by_zero   -> err "division by zero"
+  | Stack_overflow     -> err "stack overflow"
+  | Invalid_argument m -> err ("invalid argument: " ^ m)
+  | exn                -> err (Printexc.to_string exn)
+
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
      surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
@@ -127,17 +147,7 @@ let base_env : env =
              is a workaround for a typechecker issue with `() -> a` types
              in argument position. We pass VBool true, which the March-side
              lambda `fn _ -> body` discards. *)
-          (try VCon ("Ok", [!apply_hook thunk [VBool true]])
-           with
-           | BlockedOnReceive    -> raise BlockedOnReceive
-           | Assert_failure msg -> VCon ("Err", [VString msg])
-           | Match_failure msg  -> VCon ("Err", [VString ("match failure: " ^ msg)])
-           | Eval_error msg     -> VCon ("Err", [VString msg])
-           | Failure msg        -> VCon ("Err", [VString msg])
-           | Division_by_zero   -> VCon ("Err", [VString "division by zero"])
-           | Stack_overflow     -> VCon ("Err", [VString "stack overflow"])
-           | Invalid_argument m -> VCon ("Err", [VString ("invalid argument: " ^ m)])
-           | exn                -> VCon ("Err", [VString (Printexc.to_string exn)]))
+          try_call_thunk thunk
         | _ -> eval_error "__try_call: expected one thunk argument"))
     (* Value-carrying try — same semantics as __try_call but the Ok payload is
        the thunk's actual (possibly heap) result rather than a Bool.  The
@@ -145,17 +155,7 @@ let base_env : env =
        the two differ only in the native runtime + typechecker signature. *)
   ; ("__try_call_val", VBuiltin ("__try_call_val", function
         | [thunk] ->
-          (try VCon ("Ok", [!apply_hook thunk [VBool true]])
-           with
-           | BlockedOnReceive    -> raise BlockedOnReceive
-           | Assert_failure msg -> VCon ("Err", [VString msg])
-           | Match_failure msg  -> VCon ("Err", [VString ("match failure: " ^ msg)])
-           | Eval_error msg     -> VCon ("Err", [VString msg])
-           | Failure msg        -> VCon ("Err", [VString msg])
-           | Division_by_zero   -> VCon ("Err", [VString "division by zero"])
-           | Stack_overflow     -> VCon ("Err", [VString "stack overflow"])
-           | Invalid_argument m -> VCon ("Err", [VString ("invalid argument: " ^ m)])
-           | exn                -> VCon ("Err", [VString (Printexc.to_string exn)]))
+          try_call_thunk thunk
         | _ -> eval_error "__try_call_val: expected one thunk argument"))
     (* Conversions *)
   ; ("bool_to_string", VBuiltin ("bool_to_string", function
@@ -3900,6 +3900,28 @@ let base_env : env =
             List.filter (fun (n, _) -> n <> name) !logger_appenders;
           VUnit
         | _ -> eval_error "logger_remove_appender(name: String)"))
+  (* ── Diagnostics crash observers (stdlib/diagnostics.march).  The
+     registry and context live in Eval_prim; Eval.diag_report_crash
+     dispatches at the crash boundaries. ── *)
+  ; ("diag_observe", VBuiltin ("diag_observe", function
+        | [cb] ->
+          let id = !Eval_prim.diag_next_id in
+          incr Eval_prim.diag_next_id;
+          Eval_prim.diag_observers := !Eval_prim.diag_observers @ [(id, cb)];
+          VInt id
+        | _ -> eval_error "diag_observe(observer: DiagCrash -> Unit)"))
+  ; ("diag_unobserve", VBuiltin ("diag_unobserve", function
+        | [VInt id] ->
+          Eval_prim.diag_observers :=
+            List.filter (fun (i, _) -> i <> id) !Eval_prim.diag_observers;
+          VUnit
+        | _ -> eval_error "diag_unobserve(id: Int)"))
+  ; ("diag_context_get", VBuiltin ("diag_context_get", function
+        | [] -> !Eval_prim.diag_ctx
+        | _ -> eval_error "diag_context_get: no arguments"))
+  ; ("diag_context_set", VBuiltin ("diag_context_set", function
+        | [ctx] -> Eval_prim.diag_ctx := ctx; VUnit
+        | _ -> eval_error "diag_context_set(ctx)"))
   ; ("logger_clear_appenders", VBuiltin ("logger_clear_appenders", function
         | [] -> logger_appenders := []; VUnit
         | _ -> eval_error "logger_clear_appenders: no arguments"))

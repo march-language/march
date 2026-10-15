@@ -15,7 +15,29 @@ open Eval_types
 
 exception Eval_error of string
 
-let eval_error fmt = Printf.ksprintf (fun s -> raise (Eval_error s)) fmt
+(** Diagnostics crash observers (stdlib/diagnostics.march; the compiled
+    runtime's twin is march_runtime.c's "Diagnostics: crash observers").
+    [diag_observers] in registration order; [diag_ctx] the crash context,
+    a March List((String, DiagnosticValue)).  One of each: the interpreter
+    runs one handler at a time, and with_context restores the context
+    through try_finally before the next one runs. *)
+let diag_observers : (int * value) list ref = ref []
+let diag_next_id : int ref = ref 1
+let diag_ctx : value ref = ref (VCon ("Nil", []))
+let diag_dispatching : bool ref = ref false
+
+(** The message and context of the last error raised while an observer was
+    registered.  A crash reaches its boundary (the actor loop, the top
+    level) only after every try_finally on the way out has run, which has
+    restored the context of each with_context it left; this keeps the
+    context that was in force where the error was raised, as the compiled
+    runtime reports it. *)
+let diag_raise_ctx : (string * value) option ref = ref None
+
+let eval_error fmt =
+  Printf.ksprintf (fun s ->
+      if !diag_observers <> [] then diag_raise_ctx := Some (s, !diag_ctx);
+      raise (Eval_error s)) fmt
 
 (** Flag set when graceful shutdown has been requested (SIGTERM, App.stop). *)
 let shutdown_requested : bool ref = ref false
@@ -73,3 +95,26 @@ let run_scheduler_hook : (unit -> unit) ref =
     so that [register_resource_ocaml] can call closures at crash time. *)
 let apply_hook : (value -> value list -> value) ref =
   ref (fun _fn _args -> eval_error "apply not yet initialized")
+
+(** Take a mark of the March call stack (Eval.march_stack, which lives
+    above this module); calling the result restores the stack to it.  Set
+    by eval.ml. *)
+let march_stack_mark : (unit -> (unit -> unit)) ref =
+  ref (fun () -> fun () -> ())
+
+(** Call every crash observer registered now, in registration order, with a
+    Diagnostics.DiagCrash.  An observer's exception is swallowed, and an
+    observer's own crash is never reported. *)
+let diag_dispatch ~(kind : int) ~(msg : string) ~(frames : value)
+    ~(pid : int) ~(supervised : bool) ~(ctx : value) : unit =
+  if !diag_observers <> [] && not !diag_dispatching then begin
+    let report =
+      VCon ("DiagCrash",
+            [VInt kind; VString msg; frames; VInt pid;
+             VInt (if supervised then 1 else 0); ctx]) in
+    let snapshot = !diag_observers in
+    diag_dispatching := true;
+    Fun.protect ~finally:(fun () -> diag_dispatching := false) (fun () ->
+        List.iter (fun (_, cb) ->
+            try ignore (!apply_hook cb [report]) with _ -> ()) snapshot)
+  end

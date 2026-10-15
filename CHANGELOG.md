@@ -22,12 +22,24 @@ git log is authoritative for exact commits.
 
 - **"Try it" on 33 stdlib pages, and documentation examples are now checked.**
   String, Json, Uri, Crypto, Regex, Task, Vault and 12 more modules have runnable
-  examples (248 "Try it" examples in all, up from 107), and every one is verified
+  examples (249 "Try it" examples in all, up from 107), and every one is verified
   against both the native REPL and the in-browser REPL in CI, so a documented result
   that drifts from the real one fails the build. Converting them corrected dozens of
   wrong examples (for instance `String.split(s, "")` splits into bytes, not "returns
   the whole string"). Actor's module example is now a complete program you can run.
   The browser REPL now accepts `|>` pipes and a `main` that takes `Cap(IO)`.
+
+- **`Diagnostics`: observe crashes the runtime owns.** `Diagnostics.observe_crashes`
+  registers a callback that receives a `CrashReport` (kind, message, backtrace, the
+  failing actor, and context) for every panic nothing handles, in an actor or in
+  `main`, before the supervisor restarts the actor or the process exits.
+  `Diagnostics.with_context` attaches request or job metadata that the report
+  carries even though the panic unwound past it. Observers run in registration
+  order. One that panics is skipped without changing the outcome, and a panic caught
+  by `__try_call` or a test is not reported. Interpreted backtraces have file and
+  line; compiled ones name the functions on macOS (Linux needs a later change), with
+  no line yet. It is vendor-neutral: an error-service integration such as Sentry
+  is a package built on top.
 
 - **"Try it" on the stdlib API reference.** On march-lang.org/docs/stdlib, the
   examples of the modules that opt in (`-- doc: try` in the module header, or a

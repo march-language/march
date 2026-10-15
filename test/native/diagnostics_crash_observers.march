@@ -1,0 +1,154 @@
+-- Diagnostics crash observers (stdlib/diagnostics.march), interpreted and
+-- compiled against ONE .expected: what an observer sees and what it cannot
+-- change.
+--
+--   * a supervised actor's panic is reported once, as ActorCrashed, with the
+--     panic's bare message and the context of BOTH with_context scopes it was
+--     raised in (inner first), and the supervisor still restarts the child;
+--   * observers run in registration order; one that panics, or panics inside
+--     its own with_context, is abandoned and the next one still runs;
+--   * unregistering an observer during a dispatch still lets that dispatch
+--     call it (a snapshot), and never again after; removing twice is fine;
+--   * a panic handled by __try_call is not reported, and with_context
+--     restores the outer context on the way out of both return and panic;
+--   * an unhandled panic in main is reported as Panic and the process still
+--     exits 1 with its usual stderr.
+--
+-- The backtrace check is backend-neutral: interpreted frames always name
+-- `boom`; compiled frames are native and named from the symbol table, which
+-- on Linux a non-hot-reload build does not export, so there it may be empty.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  @[no_warn_recursion]
+  fn boom(n : Int) : Int do
+    if n <= 0 do panic("poisoned at depth") else boom(n - 1) + 1 end
+  end
+
+  actor Fragile do
+    state { handled : Int }
+    init  { handled: 0 }
+    on Poison() do
+      let _ = Diagnostics.with_context([("request_id", Diagnostics.DStr("r-42"))],
+        fn -> Diagnostics.with_context([("attempt", Diagnostics.DInt(2))], fn -> boom(3)))
+      state
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Fragile child
+    end
+  end
+
+  fn value_text(v : Diagnostics.DiagnosticValue) : String do
+    match v do
+    Diagnostics.DStr(s) -> s
+    Diagnostics.DInt(n) -> int_to_string(n)
+    Diagnostics.DFloat(_) -> "float"
+    Diagnostics.DBool(b) -> bool_to_string(b)
+    Diagnostics.DNull -> "null"
+    end
+  end
+
+  fn ctx_text(ctx : List((String, Diagnostics.DiagnosticValue))) : String do
+    List.fold_left(ctx, "", fn (acc, kv) ->
+      match kv do
+      (k, v) -> acc ++ "[" ++ k ++ "=" ++ value_text(v) ++ "]"
+      end)
+  end
+
+  fn names_boom(fs : List(Diagnostics.StackFrame)) : Bool do
+    List.any(fs, fn f -> f.name == "boom")
+  end
+
+  -- Interpreted, the frames name `boom` and the location is its panic line;
+  -- compiled, frames are native (no file or line yet, so no location).
+  fn backtrace_ok(r : Diagnostics.CrashReport) : Bool do
+    let has_frames = match r.backtrace do
+      Nil -> false
+      Cons(_, _) -> true
+    end
+    match r.location do
+    Some(loc) ->
+      String.ends_with(loc.file, "diagnostics_crash_observers.march") && loc.line == 26
+        && names_boom(r.backtrace)
+    None -> has_frames || System.os() != "macos"
+    end
+  end
+
+  fn describe(tag : String, r : Diagnostics.CrashReport) : Unit do
+    println(tag ++ ": " ++ Diagnostics.kind_to_string(r.kind)
+      ++ " \"" ++ r.message ++ "\""
+      ++ " supervised=" ++ bool_to_string(r.process.supervised)
+      ++ " actor=" ++ bool_to_string(r.process.pid >= 0)
+      ++ " context=" ++ ctx_text(r.context)
+      ++ " backtrace_ok=" ++ bool_to_string(backtrace_ok(r)))
+  end
+
+  fn is_err(r : Result(Bool, String)) : Bool do
+    match r do
+    Ok(_) -> false
+    Err(_) -> true
+    end
+  end
+
+  fn current_child(boss) do
+    match get_actor_field(boss, "child") do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+
+    -- with_context without a crash: nested, inner first, restored after.
+    let inside = Diagnostics.with_context([("outer", Diagnostics.DBool(true))], fn ->
+      Diagnostics.with_context([("inner", Diagnostics.DNull)], fn ->
+        ctx_text(Diagnostics.current_context())))
+    println("nested context: " ++ inside)
+    println("context after return: " ++ ctx_text(Diagnostics.current_context()))
+    let caught = __try_call(fn _ ->
+      Diagnostics.with_context([("scoped", Diagnostics.DInt(1))], fn -> boom(1) > 0))
+    println("context after a handled panic: " ++ ctx_text(Diagnostics.current_context())
+      ++ " (caught=" ++ bool_to_string(is_err(caught)) ++ ")")
+
+    -- A runs first and removes C, which runs after it, mid-dispatch.  A
+    -- cannot name C's handle before C exists, so it rebuilds it: handles are
+    -- the process's registration ids, from 1, and A and C are the first two.
+    let a = Diagnostics.observe_crashes(fn r ->
+      describe("A", r)
+      Diagnostics.unobserve(Diagnostics.ObserverHandle(2)))
+    let c = Diagnostics.observe_crashes(fn r -> describe("C", r))
+    let b = Diagnostics.observe_crashes(fn _ -> panic("observer B exploded"))
+    let d = Diagnostics.observe_crashes(fn _ ->
+      Diagnostics.with_context([("in_observer", Diagnostics.DStr("d"))], fn ->
+        panic("observer D exploded")))
+    let e = Diagnostics.observe_crashes(fn r -> describe("E", r))
+
+    let handled = __try_call(fn _ -> boom(1) > 0)
+    println("handled panic: " ++ bool_to_string(is_err(handled)) ++ " (no report above)")
+
+    let boss = spawn(Boss)
+    let victim = current_child(boss)
+    send(Actor.pid_from_int(intro, victim), Poison())
+    run_until_idle()
+    println("restarted: " ++ bool_to_string(current_child(boss) != victim))
+    println("context in main after the crash: " ++ ctx_text(Diagnostics.current_context()))
+
+    Diagnostics.unobserve(c)
+    Diagnostics.unobserve(a)
+    Diagnostics.unobserve(a)
+    Diagnostics.unobserve(b)
+    Diagnostics.unobserve(d)
+    let _ = e
+    Diagnostics.with_context([("job", Diagnostics.DStr("nightly"))], fn -> boom(2))
+    println("unreachable: the panic above ends the process")
+  end
+end
