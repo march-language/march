@@ -15,6 +15,8 @@
 --   Dns.resolve_one(host)  : Result(String, DnsError)
 --   Dns.is_ip(s)           : Bool
 --   Dns.error_message(e)   : String
+--
+-- doc: try
 
 mod Dns do
 
@@ -22,7 +24,14 @@ mod Dns do
     = NotFound(String)
     | ResolveError(String)
 
-  doc "Return a human-readable description of a DnsError."
+  doc """
+  Return a human-readable description of a DnsError.
+
+      march> Dns.error_message(NotFound("nowhere.invalid"))
+      "no address found for: nowhere.invalid"
+      march> Dns.error_message(ResolveError("timed out"))
+      "DNS resolution error: timed out"
+  """
   fn error_message(e : DnsError) : String do
     match e do
     NotFound(host)      -> "no address found for: " ++ host
@@ -77,8 +86,12 @@ mod Dns do
   Return true if s looks like an IPv4 address (four dot-separated octets).
   Does not validate octet ranges.
 
-      Dns.is_ip("127.0.0.1")    -- true
-      Dns.is_ip("example.com")  -- false
+      march> Dns.is_ip("127.0.0.1")
+      true
+      march> Dns.is_ip("example.com")
+      false
+      march> Dns.is_ip("999.1.1.1")  -- octets are not range-checked
+      true
   """
   fn is_ip(s : String) : Bool do
     let parts = String.split(s, ".")

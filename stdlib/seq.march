@@ -1,6 +1,12 @@
 -- Seq module: lazy fold-based sequences (church-encoded).
 -- Seq(a) wraps fn(b, fn(b, a) -> b) -> b.
 -- Enum operates eagerly on Lists; Seq operates lazily over I/O or generated sequences.
+--
+--     march> let evens = Seq.filter(Seq.from_list([1, 2, 3, 4, 5, 6]), fn x -> x % 2 == 0)
+--     march> Seq.to_list(Seq.map(evens, fn x -> x * 10))
+--     [20, 40, 60]
+--
+-- doc: try
 
 mod Seq do
 
@@ -332,6 +338,11 @@ mod Seq do
   doc """
   A `Seq(a)` that yields `x` exactly `n` times.
   `repeat(_, 0)` is the empty seq; negative `n` is treated as 0.
+
+      march> Seq.to_list(Seq.repeat("hi", 3))
+      ["hi", "hi", "hi"]
+      march> Seq.to_list(Seq.repeat(7, -2))
+      []
   """
   fn repeat(x, n) do
     fn next_repeat(k) do
@@ -345,7 +356,8 @@ mod Seq do
   Apply `step` repeatedly starting from `seed`, yielding `n` elements:
   `[seed, step(seed), step(step(seed)), …]`.  `iterate(_, _, 0)` is empty.
 
-      Seq.iterate(1, fn x -> x * 2, 5)  -- yields [1, 2, 4, 8, 16]
+      march> Seq.to_list(Seq.iterate(1, fn x -> x * 2, 5))
+      [1, 2, 4, 8, 16]
   """
   fn iterate(seed, step, n) do
     fn next_iter(state) do
@@ -365,6 +377,9 @@ mod Seq do
   Because Seq is church-encoded the underlying source is re-folded once
   per cycle; do not pass a one-shot source like `from_file_lines` (each
   re-fold would attempt to re-read a closed fd).
+
+      march> Seq.to_list(Seq.cycle(Seq.from_list([1, 2]), 3))
+      [1, 2, 1, 2, 1, 2]
   """
   fn cycle(seq, n) do
     -- Bind the cycle loop at top-level fn scope (March nested fns must
@@ -383,6 +398,9 @@ mod Seq do
   Alias for `batch`: groups elements into lists of size `n`.  Provided
   for parity with the API name used by the spec/plan; `batch` remains
   the canonical name.
+
+      march> Seq.to_list(Seq.batched(Seq.from_list([1, 2, 3, 4, 5]), 2))
+      [[1, 2], [3, 4], [5]]
   """
   fn batched(seq, n : {Int | _ > 0}) do
     batch(seq, n)
@@ -393,8 +411,9 @@ mod Seq do
   produced.  Stops at the smaller of (a) `next` returning `None` or
   (b) `max` elements yielded.
 
-      let s = Seq.unfold_until(0, fn n -> Some((n, n + 1)), 5)
-      -- Seq.to_list(s) == [0, 1, 2, 3, 4]
+      march> let s = Seq.unfold_until(0, fn n -> Some((n, n + 1)), 5)
+      march> Seq.to_list(s)
+      [0, 1, 2, 3, 4]
   """
   fn unfold_until(seed, next, max) do
     fn step_unfold_until(state) do

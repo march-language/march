@@ -23,6 +23,8 @@
 --   encode_string(String)              -> JsonValue
 --   encode_array(List(JsonValue))      -> JsonValue
 --   encode_object(List((String, JsonValue))) -> JsonValue
+--
+-- doc: try
 
 mod Json do
 
@@ -498,10 +500,14 @@ mod Json do
   Parse a JSON string into a JsonValue.
   Returns Ok(value) on success, Err(message) on parse error.
 
-      Json.parse("null")           -- Ok(Null)
-      Json.parse("42")             -- Ok(Number(42.0))
-      Json.parse("[1, 2, 3]")      -- Ok(Array([Number(1.0), ...]))
-      Json.parse("{\"x\": 1}")     -- Ok(Object([("x", Number(1.0))]))
+      march> Json.parse("null")
+      Ok(Null)
+      march> Json.parse("42") == Ok(Number(42.0))
+      true
+      march> Json.parse("[1, 2, 3]") == Ok(Array([Number(1.0), Number(2.0), Number(3.0)]))
+      true
+      march> Json.parse("{\"x\": 1}") == Ok(Object([("x", Number(1.0))]))
+      true
   """
   fn parse(s) do
     match parse_value(s, 0) do
@@ -517,10 +523,14 @@ mod Json do
   doc """
   Convert a JsonValue to its JSON string representation.
 
-      Json.to_string(Null)         -- "null"
-      Json.to_string(Bool(true))   -- "true"
-      Json.to_string(Number(3.14)) -- "3.14"
-      Json.to_string(Str("hi"))    -- "\"hi\""
+      march> Json.to_string(Null)
+      "null"
+      march> Json.to_string(Bool(true))
+      "true"
+      march> Json.to_string(Number(3.14))
+      "3.14"
+      march> Json.to_string(Str("hi"))
+      "\"hi\""
   """
   fn to_string(jv) do
     match jv do
@@ -550,8 +560,10 @@ mod Json do
   Returns Some(value) if found, or None otherwise.
   If jv is not an Object, returns None.
 
-      Json.get(Object([("x", Number(1.0))]), "x") -- Some(Number(1.0))
-      Json.get(Null, "x")                          -- None
+      march> Json.get(Object([("x", Number(1.0))]), "x") == Some(Number(1.0))
+      true
+      march> Json.get(Null, "x")
+      None
   """
   fn get(jv : JsonValue, key : String) : Option(JsonValue) do
     match jv do
@@ -579,8 +591,10 @@ mod Json do
   record decoder, which destructures `Object(kvs)` once and then looks up
   each field by name without re-matching the wrapper each time.
 
-      Json.get_field([("x", Number(1.0))], "x") -- Some(Number(1.0))
-      Json.get_field([], "x")                    -- None
+      march> Json.get_field([("x", Number(1.0))], "x") == Some(Number(1.0))
+      true
+      march> Json.get_field([], "x")
+      None
   """
   fn get_field(kvs : List((String, JsonValue)), key : String) : Option(JsonValue) do
     match kvs do
@@ -597,7 +611,12 @@ mod Json do
   Nested field access: traverse a path of keys into nested JSON Objects.
   Returns Some(value) if the full path exists, or None if any step fails.
 
-      Json.get_in(obj, ["a", "b", "c"]) -- equivalent to obj.a.b.c
+      march> let obj = Object([("a", Object([("b", Object([("c", Bool(true))]))]))])
+      march> Json.get_in(obj, ["a", "b", "c"])  -- equivalent to obj.a.b.c
+      Some(Bool(true))
+      march> let obj = Object([("a", Object([("b", Object([("c", Bool(true))]))]))])
+      march> Json.get_in(obj, ["a", "x"])
+      None
 
   Object-only.  For paths that include array indices, use `get_path`.
   """
@@ -621,10 +640,10 @@ mod Json do
   Returns Some(value) if in range, or None otherwise (also None if jv
   is not an Array, or if i is negative).
 
-      Json.get_at(Array([Number(1.0), Number(2.0)]), 1)
-      -- Some(Number(2.0))
-      Json.get_at(Array([Number(1.0)]), 5)
-      -- None
+      march> Json.get_at(Array([Number(1.0), Number(2.0)]), 1) == Some(Number(2.0))
+      true
+      march> Json.get_at(Array([Number(1.0)]), 5)
+      None
   """
   fn get_at(jv : JsonValue, i : Int) : Option(JsonValue) do
     match jv do

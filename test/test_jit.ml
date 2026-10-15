@@ -523,6 +523,49 @@ let test_jit_file_clang () =
       (run_jit_file ~env_prefix:"MARCH_JIT_BACKEND=clang" jit_file_fib_src)
       ["checksum=6765"]
 
+(* `to_string` of the program's OWN atoms under --jit.  The call lands in
+   the precompiled stdlib prelude's Show$Atom.show, whose generated atom
+   table only knows the stdlib's atoms; until 2026-10-14 every program atom
+   printed ":<atom>".  The fragment now registers its table with the runtime
+   (explicitly from its entry, since ORC runs no constructors) and the
+   prelude's fallback consults that registry.  :ok is runtime-seeded, so it
+   pins that the prelude's own names still win. *)
+let jit_file_atoms_src = {|mod JitFileAtoms do
+  needs IO.Console
+
+  fn pick(b : Bool) : Atom do
+    if b do :left_side else :right_side end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("bare=" ++ to_string(:zz))
+    println("fn=" ++ to_string(pick(true)) ++ "," ++ to_string(pick(false)))
+    println("ok=" ++ to_string(:ok))
+  end
+end
+|}
+
+let check_jit_file_atoms ~label result =
+  check_jit_file ~label result
+    ["bare=:zz"; "fn=:left_side,:right_side"; "ok=:ok"];
+  if contains ~needle:":<atom>" (fst result) then
+    Alcotest.failf "%s: an atom printed as :<atom>:\n%s" label (fst result)
+
+let test_jit_file_atoms_orc () =
+  if not (clang_available ()) then ()
+  else begin
+    let (out, code) =
+      run_jit_file ~env_prefix:"MARCH_JIT_BACKEND=orc" jit_file_atoms_src in
+    if contains ~needle:"libLLVM not found" out then ()
+    else check_jit_file_atoms ~label:"--jit atoms (ORC backend)" (out, code)
+  end
+
+let test_jit_file_atoms_clang () =
+  if not (clang_available ()) then ()
+  else
+    check_jit_file_atoms ~label:"--jit atoms (clang backend)"
+      (run_jit_file ~env_prefix:"MARCH_JIT_BACKEND=clang" jit_file_atoms_src)
+
 (* An actor program must not be JIT-compiled yet: it falls back to the
    interpreter with a notice on stderr, and still produces the right answer.
    Pins BOTH halves — a silent fallback would be indistinguishable from
@@ -1046,6 +1089,55 @@ let test_repl_floats_interp () =
   check_float_session ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" float_session)
 
+(* ── Negative Ints in a tagged slot (2026-10-14) ───────────────────────
+   specs/progress/2026-10-14-repl-jit-negative-tagged-int.md.
+
+   The JIT REPL printer untagged a tagged scalar word ((v<<1)|1) with a
+   LOGICAL shift, so every negative Int inside a List / Option / tuple /
+   ctor payload printed as max_int-ish garbage: `[-1]` showed
+   `[9223372036854775807]`, and so did
+   `NativeArray.to_list_i32(NativeArray.from_list_i32([3, -1, 2]))`.  The
+   runtime and the generated code were right all along (a bare `-1`, or
+   `get_i32`, printed fine); only the printer was wrong. *)
+
+let negative_int_session =
+  [ "NativeArray.to_list_i32(NativeArray.from_list_i32([3, -1, 2]))";
+    "NativeArray.to_list_i32(NativeArray.sort_i32(NativeArray.from_list_i32([30, -10, 20])))";
+    "NativeArray.get_i32(NativeArray.from_list_i32([3, -7, 2]), 1)";
+    "NativeArray.to_list_i32(NativeArray.make_i32(2, -5))";
+    "NativeArray.to_list_u8(NativeArray.from_list_u8([3, -1, 256]))";
+    "Some(-42)";
+    "(-3, 4)";
+    "[[-8, 9]]" ]
+
+let check_negative_int_session ~label (out, code) =
+  Alcotest.(check int) (Printf.sprintf "%s: REPL exit code (output: %s)" label out) 0 code;
+  List.iter (fun (needle, what) ->
+    if not (contains ~needle out) then
+      Alcotest.failf "%s: expected %s (%s) in session output, got:\n%s"
+        label needle what out)
+    [ "= [3, -1, 2]", "from_list_i32 / to_list_i32 round trip";
+      "= [-10, 20, 30]", "sort_i32 with a negative element";
+      "= -7", "get_i32 of a negative element";
+      "= [-5, -5]", "make_i32 with a negative fill";
+      "= [3, 255, 0]", "u8 wraps -1 to 255";
+      "= Some(-42)", "Option(Int) payload";
+      "= (-3, 4)", "tuple Int slot";
+      "= [[-8, 9]]", "nested List(Int)" ];
+  if contains ~needle:"922337203685477" out then
+    Alcotest.failf "%s: a negative Int was untagged with a logical shift:\n%s" label out
+
+let test_repl_negative_ints_jit () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else
+    check_negative_int_session ~label:"JIT"
+      (run_repl_session ~env_prefix:"" negative_int_session)
+
+(* Parity control: the interpreter was always right. *)
+let test_repl_negative_ints_interp () =
+  check_negative_int_session ~label:"interpreter mode"
+    (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" negative_int_session)
+
 (* ── `to_string` on a generic container (2026-09-25) ───────────────────
    specs/progress/2026-09-25-jit-file-to-string-list.md.
 
@@ -1115,6 +1207,99 @@ let test_repl_to_string_generic_interp () =
   check_to_string_session ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" to_string_session)
 
+(* ── Atoms inside a value at the JIT prompt (2026-10-14) ────────────────
+   specs/progress/2026-10-14-repl-atom-payload-segfault.md.  Two bugs:
+
+   1. Printer: [Repl_jit.pp_word] had no Atom arm, so an atom in a cell
+      (`Err(:invalid)`, `[:a, :b]`, `(:a, 1)`) fell through to
+      [pp_heap_value], which read a constructor tag at the atom's HASH:
+      the REPL died with SIGSEGV (exit 139).  A bare `:a` printed only
+      because its fragment failed to emit and fell back to the interpreter.
+      `UUID.parse` is the original report: the atom comes from a
+      precompiled stdlib fn, so its name is only in the runtime's table.
+
+   2. Codegen: `Some(:a)` with a LITERAL atom was allocated as a boxed cell
+      (the literal's type fell to TUnit, niche-unsafe) while every decode
+      site reads Option(Atom) as a niche, and [Kind.payload_needs_tag] said
+      an atom is stored untagged though [Llvm_ctx.coerce] tags it.  The
+      [--compile] case below pins it: `x == :a` was false and
+      `to_string` printed `Some(:<atom>)`. *)
+
+let atom_session =
+  [ "Err(:invalid)";
+    "Ok(:a)";
+    "Some(:b)";
+    "[:c, :d]";
+    "(:e, 1)";
+    "[Some(:f), None]";
+    "UUID.parse(\"not-a-uuid\")" ]
+
+let atom_expected =
+  [ "= Err(:invalid)"; "= Ok(:a)"; "= Some(:b)"; "= [:c, :d]"; "= (:e, 1)";
+    "= [Some(:f), None]" ]
+
+let test_repl_atoms_orc () =
+  check_session "orc atom payloads" atom_session atom_expected
+
+let test_repl_atoms_clang () =
+  if not (clang_available ()) then ()
+  else
+    check_session ~backend:"clang" "clang atom payloads" atom_session
+      atom_expected
+
+(* Parity control: the interpreter was always right. *)
+let test_repl_atoms_interp () =
+  let (out, code) =
+    run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" atom_session in
+  Alcotest.(check int) ("interpreter atom payloads: exit code; " ^ out) 0 code;
+  List.iter (fun needle ->
+      if not (contains ~needle out) then
+        Alcotest.failf "interpreter atom payloads: expected %S, got:\n%s"
+          needle out)
+    atom_expected
+
+let option_atom_src = {|mod OptionAtom do
+  needs IO.Console
+  fn pick(b : Bool) : Option(Atom) do
+    if b do Some(:a) else None end
+  end
+  fn main(_cap_console : Cap(IO.Console)) do
+    match pick(true) do
+      Some(x) -> println("matched=" ++ to_string(x == :a))
+      None -> println("matched=none")
+    end
+    println(to_string(pick(true)))
+    println(to_string([Some(:c), None]))
+  end
+end
+|}
+
+(* AOT, not --jit: the boxed-encode/niche-decode split needs [pick] inlined
+   into [main] at --compile's optimisation level; under --jit the same
+   program happened to match correctly even before the fix. *)
+let test_compiled_option_atom () =
+  if not (clang_available ()) then ()
+  else begin
+    let src = Filename.temp_file "march_option_atom" ".march" in
+    let exe = Filename.temp_file "march_option_atom" ".exe" in
+    let out_path = Filename.temp_file "march_option_atom" ".out" in
+    let oc = open_out src in
+    output_string oc option_atom_src;
+    close_out oc;
+    let cmd =
+      Printf.sprintf "HOME=%s %s --compile -o %s %s > /dev/null 2>&1 && %s > %s 2>&1"
+        (Filename.quote (Lazy.force session_home)) (Filename.quote main_exe)
+        (Filename.quote exe) (Filename.quote src) (Filename.quote exe)
+        (Filename.quote out_path) in
+    let code = Sys.command cmd in
+    let ic = open_in_bin out_path in
+    let out = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    List.iter (fun f -> try Sys.remove f with _ -> ()) [src; exe; out_path];
+    check_jit_file ~label:"--compile Option(Atom) niche" (out, code)
+      [ "matched=true"; "Some(:a)"; "[Some(:c), None]" ]
+  end
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
@@ -1165,16 +1350,30 @@ let () =
         test_repl_fragment_leaks_jit;
       Alcotest.test_case "Floats print and survive the v slot (interpreter)"
         `Quick test_repl_floats_interp;
+      Alcotest.test_case "negative Ints in List/Option/tuple slots print (JIT)"
+        `Slow test_repl_negative_ints_jit;
+      Alcotest.test_case "negative Ints in List/Option/tuple slots print (interpreter)"
+        `Quick test_repl_negative_ints_interp;
       Alcotest.test_case "to_string of List/Option/tuple (JIT)" `Slow
         test_repl_to_string_generic_jit;
       Alcotest.test_case "to_string of List/Option/tuple (interpreter)"
         `Quick test_repl_to_string_generic_interp;
+      Alcotest.test_case "atoms inside values print (ORC JIT)" `Slow
+        test_repl_atoms_orc;
+      Alcotest.test_case "atoms inside values print (clang JIT)" `Slow
+        test_repl_atoms_clang;
+      Alcotest.test_case "atoms inside values print (interpreter)" `Quick
+        test_repl_atoms_interp;
     ];
     "jit_file", [
       Alcotest.test_case "march --jit runs a whole program (ORC JIT)" `Slow
         test_jit_file_orc;
       Alcotest.test_case "march --jit runs a whole program (clang JIT)" `Slow
         test_jit_file_clang;
+      Alcotest.test_case "march --jit names the program's atoms (ORC JIT)" `Slow
+        test_jit_file_atoms_orc;
+      Alcotest.test_case "march --jit names the program's atoms (clang JIT)" `Slow
+        test_jit_file_atoms_clang;
       Alcotest.test_case "march --jit falls back to the interpreter for actors"
         `Slow test_jit_file_actor_falls_back;
       Alcotest.test_case
@@ -1194,5 +1393,8 @@ let () =
       Alcotest.test_case
         "march --jit to_string of List/Option/Result/tuple values"
         `Slow test_jit_file_to_string_generic;
+      Alcotest.test_case
+        "--compile Option(Atom) literal payload matches and prints"
+        `Slow test_compiled_option_atom;
     ];
   ]

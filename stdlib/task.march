@@ -7,23 +7,26 @@
 --
 -- Basic usage:
 --
---   let t = Task.async(fn () -> expensive_computation())
---   let result = Task.await(t)      -- Ok(value) or Err(reason)
+--     march> let t = Task.async(fn () -> 21 * 2)
+--     march> Task.await(t)  -- Ok(value) or Err(reason)
+--     Ok(42)
 --
--- Parallel map:
+-- Parallel map (each element is Ok(v) or Err(reason), in original order):
 --
---   let results = Task.async_stream([1, 2, 3], fn n -> n * n)
---   -- results : List(Ok(Int) | Err(String)), in original order
+--     march> Task.async_stream([1, 2, 3], fn n -> n * n)
+--     [Ok(1), Ok(4), Ok(9)]
 --
 -- Multiple tasks:
 --
---   let t1 = Task.async(fn () -> fetch_user(1))
---   let t2 = Task.async(fn () -> fetch_user(2))
---   let [r1, r2] = Task.await_many([t1, t2])
+--     let t1 = Task.async(fn () -> fetch_user(1))
+--     let t2 = Task.async(fn () -> fetch_user(2))
+--     let [r1, r2] = Task.await_many([t1, t2])
 --
 -- Note on overloading: March does not support function overloading.
 -- Use await_ms/await_many_ms for explicit timeout variants.
 -- Use async_stream_n for a concurrency-capped parallel map.
+--
+-- doc: try
 
 mod Task do
 
@@ -32,9 +35,9 @@ mod Task do
   f must be a zero-argument function: fn () -> result.
   Returns a Task handle that can be passed to Task.await.
 
-  Example:
-    let t = Task.async(fn () -> 1 + 1)
-    Task.await(t)  -- Ok(2)
+      march> let t = Task.async(fn () -> 1 + 1)
+      march> Task.await(t)
+      Ok(2)
   """
   fn async(f) do
     task_spawn(fn _ -> f())
@@ -44,9 +47,9 @@ mod Task do
   Await the result of a task with a default 5-second timeout.
   Returns Ok(result) or Err(reason).
 
-  Example:
-    let t = Task.async(fn () -> 42)
-    Task.await(t)  -- Ok(42)
+      march> let t = Task.async(fn () -> 42)
+      march> Task.await(t)
+      Ok(42)
   """
   fn await(task) do
     task_await(task)
@@ -58,9 +61,8 @@ mod Task do
   timeout_ms is accepted for API compatibility; enforcement requires
   the async runtime (Phase 2+).
 
-  Example:
-    let t = Task.async(fn () -> slow_query())
-    Task.await_ms(t, 10000)  -- wait up to 10 seconds
+      let t = Task.async(fn () -> slow_query())
+      Task.await_ms(t, 10000)  -- wait up to 10 seconds
   """
   fn await_ms(task, _timeout_ms) do
     task_await(task)
@@ -71,9 +73,9 @@ mod Task do
   Returns the result value directly (not wrapped in Ok).
   Panics if the task failed.
 
-  Example:
-    let t = Task.async(fn () -> 42)
-    Task.await!(t)  -- 42
+      march> let t = Task.async(fn () -> 42)
+      march> Task.await_unwrap(t)
+      42
   """
   fn await_unwrap(task) do
     task_await_unwrap(task)
@@ -84,10 +86,10 @@ mod Task do
   Each element is Ok(v) or Err(reason).
   Uses a default 5-second timeout per task.
 
-  Example:
-    let t1 = Task.async(fn () -> 1)
-    let t2 = Task.async(fn () -> 2)
-    Task.await_many([t1, t2])  -- [Ok(1), Ok(2)]
+      march> let t1 = Task.async(fn () -> 1)
+      march> let t2 = Task.async(fn () -> 2)
+      march> Task.await_many([t1, t2])
+      [Ok(1), Ok(2)]
   """
   fn await_many(tasks) do
     List.map(tasks, fn t -> task_await(t))
@@ -106,9 +108,8 @@ mod Task do
   Run f on each element of list concurrently, returning results in original order.
   Equivalent to a parallel Enum.map.  Each result is Ok(v) or Err(reason).
 
-  Example:
-    Task.async_stream([1, 2, 3], fn n -> n * n)
-    -- [Ok(1), Ok(4), Ok(9)]
+      march> Task.async_stream([1, 2, 3], fn n -> n * n)
+      [Ok(1), Ok(4), Ok(9)]
   """
   fn async_stream(list, f) do
     let tasks = List.map(list, fn x -> task_spawn(fn _ -> f(x)))
@@ -120,8 +121,8 @@ mod Task do
   max_concurrency limits how many tasks run at once (advisory in Phase 1).
   Returns results in original order; each element is Ok(v) or Err(reason).
 
-  Example:
-    Task.async_stream_n(urls, fn url -> http_get(url), 10)
+      march> Task.async_stream_n([1, 2, 3], fn n -> n + 1, 2)
+      [Ok(2), Ok(3), Ok(4)]
   """
   fn async_stream_n(list, f, _max_concurrency) do
     -- Phase 1: single-threaded interpreter runs all tasks eagerly, so
@@ -140,12 +141,14 @@ mod Task do
   cancelled.  In Phase 2+ (multi-core runtime), the first task to actually
   finish wins and the others are cancelled via their shared cancel token.
 
-  Returns Err("empty") if the list is empty.
+  Returns Err("race: empty task list") if the list is empty.
 
-  Example:
-    let t1 = Task.async(fn () -> slow_query())
-    let t2 = Task.async(fn () -> cached_query())
-    Task.race([t1, t2])   -- whichever finishes first
+      let t1 = Task.async(fn () -> slow_query())
+      let t2 = Task.async(fn () -> cached_query())
+      Task.race([t1, t2])   -- whichever finishes first
+
+      march> Task.race([])
+      Err("race: empty task list")
   """
   fn race(tasks) do
     match tasks do
@@ -167,9 +170,13 @@ mod Task do
   In Phase 1 (interpreter), tasks run eagerly in spawn order; "first Ok" is
   the first Ok in list order.
 
-  Example:
-    let tasks = List.map(endpoints, fn ep -> Task.async(fn () -> fetch(ep)))
-    Task.any(tasks)  -- first endpoint that responds successfully
+      let tasks = List.map(endpoints, fn ep -> Task.async(fn () -> fetch(ep)))
+      Task.any(tasks)  -- first endpoint that responds successfully
+
+  With no tasks there is no reason to collect, so the error list is empty:
+
+      march> Task.any([])
+      Err([])
   """
   fn any(tasks) do
     fn go(remaining, errors) do
@@ -200,10 +207,9 @@ mod Task do
   Unlike await_many, all_settled does not short-circuit on error.  Every
   element of the returned list is Ok(v) or Err(reason).
 
-  Example:
-    let tasks = List.map(items, fn x -> Task.async(fn () -> process(x)))
-    let results = Task.all_settled(tasks)
-    -- each element is Ok(processed) or Err(reason)
+      march> let tasks = List.map([1, 2, 3], fn x -> Task.async(fn () -> x * 10))
+      march> Task.all_settled(tasks)
+      [Ok(10), Ok(20), Ok(30)]
   """
   fn all_settled(tasks) do
     List.map(tasks, fn t -> task_await(t))
@@ -220,14 +226,17 @@ mod Task do
   shared cancel token is injected and all in-flight tasks are cancelled on
   scope exit.
 
-  Returns Ok(result) if f completes normally, or Err(reason) if it raises.
+  Returns f's result unchanged (it is not wrapped in Ok); a panic in f
+  propagates to the caller.
 
-  Example:
-    Task.scope(fn () ->
-      let t1 = Task.async(fn () -> fetch_a())
-      let t2 = Task.async(fn () -> fetch_b())
-      [Task.await_unwrap(t1), Task.await_unwrap(t2)]
-    )
+      Task.scope(fn () ->
+        let t1 = Task.async(fn () -> fetch_a())
+        let t2 = Task.async(fn () -> fetch_b())
+        [Task.await_unwrap(t1), Task.await_unwrap(t2)]
+      )
+
+      march> Task.scope(fn () -> Task.await_unwrap(Task.async(fn () -> 6 * 7)))
+      42
   """
   fn scope(f) do
     -- Phase 1: the interpreter runs tasks eagerly, so cancellation on scope
