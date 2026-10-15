@@ -63,6 +63,12 @@ git log is authoritative for exact commits.
   **reset**, which also forgets it. The cookbook sidebar previously had neither.
 
 ### Changed
+- **The stdlib API reference loads much faster.** Every page inlined a sidebar listing
+  all 2,964 entries of every module, and fetched the whole search index on load, so a
+  page was about 400 KB plus a 424 KB index download. The sidebar now lists the modules
+  and expands only the one you are reading, and the search index loads when you first
+  open search: a page is now 60-95 KB (8.3 MB for all 133 pages, down from 50.5 MB).
+
 - A compiled program whose scheduler is about to resume a corrupt or freed
   green-thread context now stops with a `march_sched[BUG]: dispatch of pid N
   ... with a context it did not save` line (the pid, the saved stack pointer
