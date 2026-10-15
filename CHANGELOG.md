@@ -87,6 +87,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`forge test` no longer segfaults calling an interface impl through a generic
+  helper.** Under `--test`, an `impl` method that read the clock, the console or any
+  other mockable operation was compiled with a hidden capability parameter, but a
+  call reaching it through the interface from generic code didn't pass one, so every
+  argument shifted by one (#708). Such impls are now compiled without the hidden
+  parameter; an operation inside one runs on the real capability rather than a
+  `with_cap` mock.
 - **A session that forms just as a peer node dies no longer outlives it.** For a
   moment after a node's connection closed, the cluster node still handed out that
   connection to sessions being set up. A session that linked to it in that window
