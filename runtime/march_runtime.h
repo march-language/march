@@ -236,6 +236,7 @@ void   *march_logger_register_appender(void *name, void *cb);
  * emit_atom_show_table in lib/tir/llvm_toplevel.ml. */
 void    march_set_atom_namer(void *fn);
 void    march_unset_atom_namer(void *fn);
+void   *march_atom_name_registered(int64_t h);
 void   *march_logger_remove_appender(void *name);
 void   *march_logger_clear_appenders(void);
 void   *march_logger_appender_names(void);

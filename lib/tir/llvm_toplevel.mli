@@ -68,7 +68,7 @@ val emit_fn :
   emit_expr:(Llvm_ctx.ctx -> Tir.expr -> string * string) ->
   Llvm_ctx.ctx -> Tir.fn_def -> unit
 val fn_declare_str : Tir.fn_def -> string
-val emit_atom_show_table : Llvm_ctx.ctx -> unit
+val emit_atom_show_table : ?jit:bool -> Llvm_ctx.ctx -> unit
 
 (** The (registry key, release function) pairs the module's closure and actor
     allocations ask for (see the implementation). *)

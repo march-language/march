@@ -52,6 +52,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march --jit` names the program's own atoms.** `to_string(:zz)` printed
+  `:<atom>` under `--jit` (both the ORC and clang backends) for any atom the stdlib
+  does not itself use; it now prints `:zz`, as the interpreter and `--compile` do.
+
 - **The in-browser REPL downloads a tenth as much, and the Tetris playground compiles
   again.** The REPL on the playground, cookbook and landing pages loaded a 19.7 MB
   development build (2.1 MB compressed); it is now a 1.9 MB release build (408 KB

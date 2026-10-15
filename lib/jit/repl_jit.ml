@@ -1287,6 +1287,15 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
          main_fn.March_tir.Tir.fn_params) in
   let thunk = Printf.sprintf "march_jit_main_thunk_%d" n in
   let entry = Printf.sprintf "march_jit_program_%d" n in
+  (* Register this fragment's atom-name table before main runs.  The ORC
+     backend runs no @llvm.global_ctors, so the constructor that registers it
+     (Llvm_toplevel.emit_atom_show_table) only fires under the clang/dlopen
+     backend; without the registration the prelude's Show$Atom.show cannot
+     name the program's own atoms and prints ":<atom>".  Registration is
+     idempotent, so the clang backend's double call is harmless. *)
+  let register_atoms =
+    if contains_sub ir "define internal void @march_atom_namer_register()"
+    then "  call void @march_atom_namer_register()\n" else "" in
   let ir =
     ir
     ^ "\n" ^ declare_if_absent ir "declare void @march_remote_init()"
@@ -1298,11 +1307,11 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
         (if ret_ty = "void" then "" else "%_r = ")
         ret_ty mangled erased_args
     ^ Printf.sprintf
-        "\ndefine void @%s() {\nentry:\n\
+        "\ndefine void @%s() {\nentry:\n%s\
         \  call void @march_remote_init()\n\
         \  call void @march_spawn_main(ptr @%s)\n\
         \  call void @march_run_scheduler()\n\
-        \  ret void\n}\n" entry thunk in
+        \  ret void\n}\n" entry register_atoms thunk in
   let handle = compile_fragment ctx ir in
   mark_compiled_fns ctx new_fns;
   commit_wraps ctx sw;
