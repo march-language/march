@@ -87,6 +87,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`HttpTransport.request` now sends HTTPS over verified TLS.** The convenience
+  request APIs no longer reject `https://` URLs or risk sending them over a plain
+  socket: they establish TLS with SNI and certificate verification, then issue the
+  HTTP/1.1 request. The lower-level APIs that take a raw file descriptor still
+  reject HTTPS, because a descriptor alone does not establish a TLS session.
+
 - **A session that forms just as a peer node dies no longer outlives it.** For a
   moment after a node's connection closed, the cluster node still handed out that
   connection to sessions being set up. A session that linked to it in that window
