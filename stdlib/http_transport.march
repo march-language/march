@@ -7,12 +7,14 @@
 -- Most users should use HttpClient (Layer 3) instead. Use this
 -- directly only when you need low-level control over connections.
 --
--- This module handles plain HTTP only.  For HTTPS, use the Tls module
--- (`Tls.https_get` / `Tls.connect`).  Passing an https:// request to
--- this module returns `Err(SchemeNotSupported(...))` rather than
--- silently downgrading to plaintext.
+-- HTTPS requests use the certificate-verifying TLS client.  The fd-oriented
+-- APIs deliberately remain plain HTTP only: a raw fd carries no TLS context,
+-- so accepting an HTTPS request there could leak a request in plaintext.
 
 mod HttpTransport do
+
+  needs IO.NetConnect
+  needs IO.NetConnect.TLS
 
   type TransportError =
     ConnectionRefused(String)
@@ -23,10 +25,7 @@ mod HttpTransport do
     | Closed
     | SchemeNotSupported(String)
 
-  -- Guard: refuse to send an https:// request over a plain TCP socket.
-  -- Returning an explicit error here prevents callers from unknowingly
-  -- leaking credentials, bodies, or cookies in plaintext when a URL was
-  -- built with https but no TLS context was threaded through.
+  -- Guard the fd-oriented APIs: they use tcp_send_all/tcp_recv_* directly.
   pfn require_plain_http(req) do
     match Http.scheme(req) do
     SchemeHttp  -> Ok(())
@@ -219,12 +218,13 @@ mod HttpTransport do
   end
 
   doc """
-  Send an HTTP request and receive the response.
+  Send an HTTP or HTTPS request and receive the response.
   Opens a TCP connection, sends the request with Connection: close,
   receives and parses the response, then closes the connection.
 
-  Refuses https:// requests with `SchemeNotSupported` — use the Tls
-  module for TLS-enabled requests.
+  HTTPS uses the certificate-verifying TLS client with SNI. `connect`,
+  `request_on`, and `stream_request_on` remain plain-HTTP fd APIs and refuse
+  HTTPS because they cannot safely construct or receive a TLS connection.
 
   In js_of_ocaml builds (where `http_fetch_available()` is true) the request
   is routed through a synchronous XHR instead, which handles both http and
@@ -234,9 +234,78 @@ mod HttpTransport do
     if http_fetch_available() do
       request_via_fetch(req)
     else
-      match require_plain_http(req) do
-      Err(e) -> Err(e)
-      Ok(_) -> request_plain(req)
+      match Http.scheme(req) do
+      SchemeHttp -> request_plain(req)
+      SchemeHttps -> request_https(req)
+      end
+    end
+  end
+
+  pfn request_https(req) do
+    let req = Http.set_header(req, "Connection", "close")
+    let host = Http.host(req)
+    let port = match Http.port(req) do
+      Some(value) -> value
+      None -> 443
+      end
+    let raw = http_serialize_request(
+      Http.method_to_string(Http.method(req)), host, Http.path(req), Http.query(req),
+      Http.headers(req), Http.body(req))
+    match Tls.client_ctx(Tls.default_client_config()) do
+    Err(error) -> Err(ConnectionRefused(Tls.error_to_string(error)))
+    Ok(context) -> do
+      let result = request_https_with_context(context, host, port, raw)
+      Tls.ctx_free(context)
+      result
+    end
+    end
+  end
+
+  pfn request_https_with_context(context, host, port, raw) do
+    match tcp_connect(host, port) do
+    Err(error) -> Err(ConnectionRefused(error))
+    Ok(fd) -> do
+      let result = request_https_on_fd(context, fd, host, raw)
+      tcp_close(fd)
+      result
+    end
+    end
+  end
+
+  pfn request_https_on_fd(context, fd, host, raw) do
+    match Tls.connect(fd, context, host) do
+    Err(error) -> Err(ConnectionRefused(Tls.error_to_string(error)))
+    Ok(connection) -> do
+      let result = request_on_tls(connection, raw)
+      Tls.close(connection)
+      result
+    end
+    end
+  end
+
+  pfn request_on_tls(connection, raw) do
+    match Tls.write(connection, raw) do
+    Err(error) -> Err(SendError(Tls.error_to_string(error)))
+    Ok(_) ->
+      match tls_recv_all(connection, "", 1048576) do
+      Err(error) -> Err(RecvError(Tls.error_to_string(error)))
+      Ok(response) ->
+        match http_parse_response(response) do
+        Err(error) -> Err(ConnParseError(error))
+        Ok((status, headers, body)) -> Ok(Response(Status(status), headers, body))
+        end
+      end
+    end
+  end
+
+  pfn tls_recv_all(connection, received, remaining) do
+    if remaining <= 0 do
+      Err(Tls.TlsReadError("response exceeds 1048576 bytes"))
+    else
+      match Tls.read(connection, remaining) do
+      Err(error) -> Err(error)
+      Ok("") -> Ok(received)
+      Ok(chunk) -> tls_recv_all(connection, received ++ chunk, remaining - string_byte_length(chunk))
       end
     end
   end

@@ -87,6 +87,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`HttpTransport.request` now sends HTTPS over verified TLS.** The convenience
+  request APIs no longer reject `https://` URLs or risk sending them over a plain
+  socket: they establish TLS with SNI and certificate verification, then issue the
+  HTTP/1.1 request. The lower-level APIs that take a raw file descriptor still
+  reject HTTPS, because a descriptor alone does not establish a TLS session.
+
 - **Sending one actor's message to another actor's pid is a compile error when the
   types show it.** `send` didn't relate the message to the target, so
   `send(logger_pid, Increment(1))` compiled and the message was silently dropped at run
