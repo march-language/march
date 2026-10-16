@@ -275,7 +275,15 @@ let test_hot_reload_sidecars () =
       Alcotest.(check string) "pubkey" "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" pub)
 
 let test_cross_linux_amd64 () =
+  (* The hermetic setup above points MARCH_CROSS_SYSROOT_AMD64 at the cache
+     when it exists.  Without a sysroot, march refuses the cross build, so skip
+     locally like a missing zig; CI fetches one, so there a missing sysroot is
+     a failure, not a skip. *)
+  let have_sysroot =
+    Sys.getenv_opt "MARCH_CROSS_SYSROOT_AMD64" <> None || Sys.getenv_opt "MARCH_CROSS_SYSROOT" <> None in
   if not (have "zig") then print_endline "SKIP cross build linux/amd64: zig not installed"
+  else if not have_sysroot && Sys.getenv_opt "CI" = None then
+    print_endline "SKIP cross build linux/amd64: no linux/amd64 sysroot (scripts/fetch-cross-sysroot.sh amd64)"
   else with_project (fun _root ->
       let dir = build_ok ~target:"linux/amd64" () in
       Alcotest.(check bool) ("directory is per-target: " ^ dir) true (contains dir "-linux-amd64");

@@ -188,11 +188,17 @@ let dockerfile = {|FROM alpine:3.21
 RUN apk add --no-cache openssh-server && ssh-keygen -A && mkdir -p /root/.ssh && chmod 700 /root/.ssh \
  && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
  && sed -i 's/^#\?AllowStreamLocalForwarding.*/AllowStreamLocalForwarding yes/' /etc/ssh/sshd_config \
- && passwd -u root 2>/dev/null || true
+ && (passwd -u root 2>/dev/null || true) \
+ && test -x /usr/sbin/sshd
 CMD ["/usr/sbin/sshd", "-D", "-e"]
 |}
 
-let image = "forge-host-init-test:1"
+(* The [|| true] is scoped to [passwd] alone, and the build ends by checking
+   for sshd, so a failed [apk add] (no network in the container) fails the
+   build and takes the skip below; unscoped, it built an image without sshd and
+   the test failed at [docker run].  The tag was bumped from :1 so an image
+   built that way is not reused. *)
+let image = "forge-host-init-test:2"
 
 let test_container_idempotent () =
   if not (sh "command -v docker >/dev/null 2>&1") then skip "docker is not installed";
