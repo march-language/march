@@ -564,7 +564,9 @@ window.marchModuleIndex = {
    "file": "http_transport.march",
    "unavailable": null,
    "uses": [
-    "Http"
+    "Http",
+    "IO",
+    "Tls"
    ]
   },
   "IO": {
