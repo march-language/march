@@ -139,6 +139,7 @@ let role_needs_invalid = "role_needs_invalid"
 let root_cap_reference = "root_cap_reference"
 let satisfy_missing_fn = "satisfy_missing_fn"
 let semicolon_separator = "semicolon_separator"
+let send_wrong_actor = "send_wrong_actor"
 let session_choice_label = "session_choice_label"
 let session_not_closed = "session_not_closed"
 let session_offer_nonexhaustive = "session_offer_nonexhaustive"
@@ -311,6 +312,7 @@ let all = [
   root_cap_reference;
   satisfy_missing_fn;
   semicolon_separator;
+  send_wrong_actor;
   session_choice_label;
   session_not_closed;
   session_offer_nonexhaustive;

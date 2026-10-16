@@ -1427,6 +1427,125 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
         | _ -> ()) ps args
   | Some _ -> ()
 
+(** [send(pid, msg)]: reject a message the actor this pid points to cannot
+    handle (finding 19, specs/lang/core-march-types.md §2.6.4).
+
+    [msg]'s type is its owner's [<Actor>_Msg], and both backends route by that
+    owner: compiled code gives every actor message a globally unique tag, so a
+    message of another actor matches no branch of the target's dispatch and is
+    dropped.  So the question is whether the OWNER's state could be the pid's.
+
+    A pid's type is [Pid(state)], and an actor's state is a STRUCTURAL record,
+    so the pid cannot name its actor; two actors with identically-shaped state
+    share one [Pid] type.  The check is therefore one-sided.  "Could be" treats
+    every unification variable and every non-record type as a wildcard, so it
+    never rejects a program whose pid type it cannot see through (an
+    unannotated or generic pid, a [Pid(SomeAlias)] that has not been expanded).
+    What it misses, a message for an actor whose state has the same shape as
+    the target's, is still dropped at run time on the compiled backend.
+
+    A handler name two actors share is the sharp case: a bare [Get] resolves to
+    ONE owner ([lookup_ctor]), so [send(other_pid, Get(1))] builds the wrong
+    actor's message.  The interpreter dispatches by name and runs the target's
+    handler anyway, while compiled code drops it.  When another actor with that
+    handler fits the pid, the error says so; no qualified spelling selects an
+    actor's message today, so the advice is to rename one handler. *)
+let check_send_target env ~(span : Ast.span) (pid_ty : ty) (msg : Ast.expr) (msg_ty : ty) : unit =
+  let rec could_be a b =
+    match repr a, repr b with
+    | TVar _, _ | _, TVar _ -> true
+    | TRecord fa, TRecord fb ->
+      List.length fa = List.length fb
+      && List.for_all2 (fun (na, ta) (nb, tb) -> na = nb && could_be ta tb) fa fb
+    | TCon (na, aa), TCon (nb, ab) when na = nb ->
+      List.length aa = List.length ab && List.for_all2 could_be aa ab
+    | TCon (na, []), TCon (nb, []) ->
+      (* Two different names are only certainly different types when neither
+         can be an alias or a same-named nominal type from another module. *)
+      let prim = [ "Int"; "Float"; "String"; "Bool"; "Char"; "Bytes"; "Atom"; "Unit" ] in
+      not (List.mem na prim && List.mem nb prim)
+    | TTuple aa, TTuple ab -> List.length aa = List.length ab && List.for_all2 could_be aa ab
+    | (TRecord _ | TTuple _), (TRecord _ | TTuple _) -> false
+    | _ -> true
+  in
+  let msg_sfx = "_Msg" in
+  let actor_of_msg_type t =
+    let n = String.length t and k = String.length msg_sfx in
+    if n > k && String.sub t (n - k) k = msg_sfx then Some (String.sub t 0 (n - k)) else None
+  in
+  (* The state an actor's pid carries: [DActor] binds the actor name to
+     [Pid(state)] in [env.vars] (bare, and module-qualified when nested). *)
+  let state_of (ci : ctor_info) actor =
+    let keys = actor :: (if ci.ci_module = "" then [] else [ci.ci_module ^ "." ^ actor]) in
+    List.find_map (fun k ->
+        match StrMap.find_opt k env.vars with
+        | Some sch ->
+          (match instantiate env.level env sch with
+           | TCon ("Pid", [s]) -> Some s
+           | _ -> None)
+        | None -> None) keys
+  in
+  let fits pid_state ((a : string), (ci : ctor_info)) = match state_of ci a with
+    | Some s -> could_be s pid_state
+    | None -> true
+  in
+  (* Every actor-message constructor whose owner type satisfies [keep]. *)
+  let actor_ctors keep =
+    StrMap.fold (fun name cis acc ->
+        List.fold_left (fun acc (ci : ctor_info) ->
+            if ci.ci_is_actor_msg && keep name ci then
+              match actor_of_msg_type ci.ci_type with
+              | Some a when not (List.mem_assoc a acc) -> (a, ci) :: acc
+              | _ -> acc
+            else acc) acc cis)
+      env.ctors []
+  in
+  match repr pid_ty, repr msg_ty with
+  | TCon ("Pid", [pid_state]), TCon (owner_ty, []) when actor_of_msg_type owner_ty <> None ->
+    (match repr pid_state with
+     | TRecord _ ->
+       let owner = actor_ctors (fun _ ci -> ci.ci_type = owner_ty) in
+       if owner <> [] && not (List.exists (fits pid_state) owner) then begin
+         let owner_name = fst (List.hd owner) in
+         let ctor_name = match msg with
+           | Ast.ECon (n, _, _) -> Some n.txt
+           | _ -> None in
+         let what = match ctor_name with
+           | Some c -> Printf.sprintf "`%s`" c
+           | None -> "this message" in
+         (* Another actor that handles a message of the same name and fits. *)
+         let alternatives = match ctor_name with
+           | None -> []
+           | Some c ->
+             actor_ctors (fun name ci -> name = c && ci.ci_type <> owner_ty)
+             |> List.filter (fits pid_state)
+             |> List.map fst |> List.sort_uniq String.compare
+         in
+         let advice = match alternatives, ctor_name with
+           | a :: _, Some c ->
+             ignore a;
+             Printf.sprintf
+               "`%s` is also a handler of %s, but a bare `%s` resolves to `%s`'s, \
+                and an actor message cannot be qualified by its actor; rename \
+                one of the two handlers."
+               c (String.concat ", " (List.map (fun a -> "`" ^ a ^ "`") alternatives))
+               c owner_name
+           | _ ->
+             Printf.sprintf "Send it to a pid spawned from `%s`, or send this actor one \
+                             of its own messages." owner_name
+         in
+         Err.report env.errors
+           { Err.severity = Err.Error; span;
+             message = Printf.sprintf
+                 "%s is a message for `%s`, but this pid points to an actor whose \
+                  state is `%s`, so the message would be dropped.\n%s"
+                 what owner_name (pp_ty (repr pid_state)) advice;
+             labels = []; notes = [];
+             code = Err.Code.send_wrong_actor; fix = None }
+       end
+     | _ -> ())
+  | _ -> ()
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -3079,7 +3198,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Actor messaging ──────────────────────────────────────────── *)
     | Ast.ESend (cap, msg, _sp) ->
-      ignore (infer_expr env cap);
+      let pid_ty = infer_expr env cap in
       (* Message-payload sendability (RingBuf/NativeIntArr/NativeFloatArr)
          is checked once, at message-CONSTRUCTION time, in the ECon arm
          (guarded by ci_is_actor_msg) -- not here. The overall type of `msg`
@@ -3087,7 +3206,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
          registered with ci_params = []) never varies with payload and so
          could never see a mutable-buffer type nested in it; checking it
          here was a no-op regardless of what check_sendable's argument was. *)
-      let _msg_ty = infer_expr env msg in
+      let msg_ty = infer_expr env msg in
+      check_send_target env ~span:(span_of_expr msg) pid_ty msg msg_ty;
       (* send() returns Option(Unit): Some(()) when the message was enqueued,
          None when the target actor is dead/unknown (fire-and-forget drop).
          This is the ACTUAL contract of both backends — the interpreter's ESend

@@ -16,6 +16,8 @@ native_actor_dispatch_rc_window: coverage audit (user + stdlib): 135 enforced, 0
 native_actor_dispatch_rc_window: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_enumeration: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_enumeration: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_handler_tail_field_projection: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
+native_actor_handler_tail_field_projection: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_init_params: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced
 native_actor_init_params: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_init_params_schema: coverage audit (user + stdlib): 135 enforced, 0 inert (warned), 0 unenforced

@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: rename one of the two handlers
+mod Main do
+  -- Two actors share the handler name `Tally`. A bare `Tally` resolves to ONE
+  -- of them, so `send(c, Tally(1))` builds the other actor's message: the
+  -- interpreter dispatched it to Counter's `Tally` by name, compiled code
+  -- dropped it (`counter 0` vs `counter 1`). Rejected, with advice.
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Tally(k : Int) do { state with n: state.n + k } end
+  end
+
+  actor Labels do
+    state { s : String }
+    init { s: "" }
+    on Tally(k : Int) do { state with s: state.s ++ int_to_string(k) } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let c = spawn(Counter)
+    let l = spawn(Labels)
+    send(c, Tally(1))
+    send(l, Tally(2))
+  end
+end

@@ -1,0 +1,45 @@
+mod CapMockIfaceGeneric do
+  -- #708: an interface impl method that performs an interceptable operation
+  -- (`unix_time`, IO.Clock) was given a hidden leading capability parameter by
+  -- the capability-passing pass, but a call through the interface from a
+  -- GENERIC receiver names the method (`event_append`), not the impl, until
+  -- Mono resolves it, so that call site was never threaded. Compiled under
+  -- --test every argument shifted by one register and the impl segfaulted
+  -- reading `wf` (conduit's `impl Storage` reading `DateTime.now()` under
+  -- `forge test`). The impl is now left un-elaborated.
+  --
+  -- Three ways in: through a generic helper, through an interface default
+  -- method (whose body calls the method by name), and a direct, resolved call.
+  -- Expected output is the interpreter's.
+  needs IO
+
+  interface Storage(s) do
+    fn event_append : s -> String -> Int -> String -> String
+    fn checkpoint : s -> String -> String do
+      fn (st, wf) -> event_append(st, wf, 0, "checkpoint")
+    end
+  end
+
+  type Fake = Fake(String)
+
+  impl Storage(Fake) do
+    fn event_append(self, wf, seq, payload) do
+      let t = unix_time(())
+      match self do
+        Fake(name) ->
+          name ++ ":" ++ wf ++ ":" ++ int_to_string(seq) ++ ":" ++ payload
+            ++ ":" ++ bool_to_string(t > 0.0)
+      end
+    end
+  end
+
+  fn append(s, wf, seq, payload) do
+    event_append(s, wf, seq, payload)
+  end
+
+  fn main(_cap : Cap(IO)) do
+    println(append(Fake("generic"), "wf1", 1, "a"))
+    println(checkpoint(Fake("default"), "wf2"))
+    println(event_append(Fake("direct"), "wf3", 3, "c"))
+  end
+end

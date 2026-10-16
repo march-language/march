@@ -2436,45 +2436,35 @@ mismatch `` expected `Int` but got `String`. `` (witness
 `reject/t29_actor_send_wrong_payload`, captured live); a correctly-typed
 `send(counter, Inc(3))` typechecks (witness `accept/t40_actor_send_typed_payload`).
 
-**The actor-affinity non-guarantee: a `send` is NOT checked against the target
-actor's message set (finding 19).** Because step 1 discards `τ_cap` and step 3
-only consults a (now empty) denylist, **no check confirms that the target actor actually handles
-the message you send it.** Sending a message that a *different* actor declares (
-`send(counter, Log("stray"))` where `Log` is a `Logger` handler, not a `Counter`
-one) `--check`s clean (exit 0). The `Pid`'s parameter cannot gate this even in
-principle: per §2.6.3, `spawn` yields `Pid[state]` (finding 18, fixed
-2026-07-18), and the STATE record type reveals no fact about the actor's
-accepted-MESSAGE set. This is distinct from finding 18: finding 18 was "the Pid
-is unparameterized after spawn / a `Pid(T)` annotation is impossible" (the
-former part now fixed); **this** finding is "`send`
-does not gate the message by the target actor", rooted at `:4178` (target type
-discarded) and `:3331`/`:3335` (`check_sendable` is a denylist, empty since
-2026-10-06, not an acceptance check), and it would remain true even if the Pid *did* carry a state
-type, because `send` never reads `τ_cap`.
+**The actor-affinity check: a `send` is checked against the target actor, one
+side only (finding 19).** Step 1 no longer discards `τ_cap`. When it is
+`Pid[state]` with a concrete record `state`, and `msg` has type `<A>_Msg`,
+the send is rejected (`send_wrong_actor`) unless actor `A`'s state could be
+`state` (`check_send_target`, `typecheck.ml`; unification variables and
+non-record types are wildcards, so a generic or unannotated pid is never
+rejected). `send(counter, Log("stray"))`, with `Log` a `Logger` handler and
+`Counter`'s state a different record, is now an error (`reject/t323`).
 
-The **runtime consequence diverges by backend** (both verified live; see
-`§4.1` finding 19 for the exact captured output):
+What the check cannot see: per §2.6.3 a pid is `Pid[state]`, and the state is a
+structural record, so two actors with identically-shaped state share one `Pid`
+type and a message for one sent to the other still typechecks. The runtime
+outcome of such a send is a drop on both backends:
 
 - **Interpreted:** the message is dispatched by matching its tag against the
-  actor's handler *names* by string equality (`h.ah_msg.txt = msg_tag`,
-  `eval.ml:7545`); a foreign message matches no handler, so the `None ->`
-  branch **silently drops** it (`eval.ml:7547-7549`). No output, no crash.
-- **Compiled:** the message is lowered to a per-actor `<Actor>_Msg` variant in
-  *handler-declaration order* (`lower_actor.ml:17`) and dispatched by an
-  `ECase` on that variant's discriminant with **no default arm** (`ECase(msg,
-  branches, None)`, `lower_actor.ml:256`). A foreign message's discriminant
-  indexes into the *target* actor's branch table and hits whatever handler
-  occupies that slot: the `Log("stray")` above lands in `Counter`'s first
-  handler `Inc`, and its body then reinterprets the `String` payload pointer as an
-  `Int` (garbage, non-deterministic). It is **misrouted, not dropped**: a
-  memory-unsafe outcome, not a benign no-op.
+  actor's handler *names* (`eval.ml`); a foreign message matches none and is
+  dropped.
+- **Compiled:** every `<Actor>_Msg` variant gets a globally unique tag, and the
+  dispatch `ECase` has a default arm that drops a message matching none of the
+  actor's branches (`lower_actor.ml`, since 2026-07-07). It used to have no
+  default arm and to misroute a foreign message into whichever handler shared
+  its discriminant position, reinterpreting the payload; that memory-unsafe
+  outcome no longer exists.
 
-This backend split makes the non-guarantee sharper than "messages are best-effort
-dropped": in compiled code a wrong-actor send is undefined behavior. It is
-documented, not corpus-encoded: it typechecks (exit 0), so it cannot be a
-`reject/` witness; the accept path (`send(counter, Inc(3))`) is
-`accept/t40_actor_send_typed_payload`, and the non-guarantee itself is logged as
-an open gap (finding 19, `specs/todos/`).
+The one backend difference left is a handler name two actors share (see the
+next paragraph): a bare constructor resolves to ONE owner, so the interpreter
+runs the target's same-named handler while compiled code drops the other
+actor's message. When the two actors' states differ, `send_wrong_actor` reports
+it.
 
 **The message-name flat global namespace: a design point, not a bug.** Message
 and handler constructor names (`Inc`, `Log`, …) live in the **single flat global
@@ -2485,11 +2475,10 @@ that resolves ambiguously; a collision requires the ordinary qualified-name form
 (`Actor_Msg.Report`-style qualification) to disambiguate, just as a colliding
 type name across modules requires a qualified path (§2.5). This is intentional and
 uniform with the rest of the constructor namespace; it is not logged as a gap.
-(It also underlies the compiled misroute above: because message constructors
-share one namespace and the compiled dispatch is by per-actor-variant
-discriminant *position*, a message from actor A's variant and a message from
-actor B's variant can occupy the same discriminant slot and look
-the same to B's dispatch `ECase`.)
+(A collision between two actors' handlers is the case the paragraph above
+describes. The suggested `Actor_Msg.Report`-style qualification does not
+resolve for actor messages today, so the practical fix is renaming a handler;
+see `specs/todos/2026-10-15-actor-message-ctor-cannot-be-qualified.md`.)
 
 ### 2.7 Session types: protocols, projection, and channels
 
@@ -5284,71 +5273,30 @@ typechecker that this document exists to pin down, not bugs:
     binding) would be a compiler change, out of scope for this docs slice. See
     §2.6.3 for the full account.
 
-19. **[OPEN, logged, not fixed] `send` does NOT check the message against the
-    target actor's accepted-message set; a wrong-actor send typechecks (exit 0)
-    and, at RUNTIME, is silently DROPPED interpreted but MISROUTED (memory-unsafe)
-    compiled.** Found while building §2.6.4 (message-payload typing, Task 3).
-    Distinct from finding 18 (which is about the `Pid` being unparameterized after
-    `spawn`); this finding is about the `send` *typing arm itself* ignoring the
-    target. The `ESend` arm (`typecheck.ml:4177`) infers the target Pid's type
-    and immediately discards it (`ignore (infer_expr env cap)`, `:4178`), so
-    `send` never consults which actor `cap` is; the only send-side check is
-    `check_sendable` (`:3335`), a denylist (`non_sendable_types`, `:3331`;
-    empty since 2026-10-06, when `RingBuf` became `always_linear` and native
-    arrays were recognised as copy-on-write values), NOT a message-acceptance
-    check. The message payload
-    *shape* IS checked (ordinary `ECon` typing on `infer_expr env msg`, `:4179`;
-    that is finding-19's *complement*, witnessed by `reject/t29`), but *which
-    handler the target actually has* is not. Note this would remain true even if
-    the Pid stored its state type (cf. finding 18): `send` doesn't read the
-    target's type at all. Minimal repro (`Counter` handles only `Inc`, `Logger`
-    handles `Log`; send `Log` to the `Counter` Pid), re-checked live BOTH
-    backends for this task:
-    ```
-    mod Main do
-      actor Counter do
-        state { count : Int }
-        init  { count: 0 }
-        on Inc(x : Int) do
-          println("Counter.Inc -> " ++ int_to_string(state.count + x))
-          { count: state.count + x }
-        end
-      end
-      actor Logger do
-        state { seen : Int }
-        init  { seen: 0 }
-        on Log(m : String) do
-          println("Logger.Log -> " ++ m)
-          { seen: state.seen + 1 }
-        end
-      end
-      fn main() do
-        let counter = spawn(Counter)
-        send(counter, Inc(3))
-        send(counter, Log("stray"))   -- Log is a Logger message, not Counter's
-        run_until_idle()
-        println("done")
-      end
-    end
-    ```
-    `--check` exits **0**. Interpreted run prints only `Counter.Inc -> 3` then
-    `done`; the stray `Log` matched no `Counter` handler name and was silently
-    dropped (`eval.ml:7545` string-equality tag match; `None -> ()`,
-    `eval.ml:7547-7549`). Compiled run (`--compile --opt 2`) prints `Counter.Inc
-    -> 3`, then `Counter.Inc -> <garbage int, e.g. 2796564219>`, then `done`: the
-    stray message was MISROUTED into `Counter`'s first handler slot (the compiled
-    dispatch is an `ECase` on a per-actor `<Actor>_Msg` variant discriminant, in
-    handler-declaration order, with **no default arm** (`ECase(msg, branches,
-    None)`, `lower_actor.ml:256`, variant order `lower_actor.ml:17`), and the
-    `String` payload pointer was reinterpreted as the `Int` param of `Inc`),
-    non-deterministic, memory-unsafe. Logged in `specs/todos/` under "Compiler:
-    Type System" (2026-07-06) with this repro; fixing it (typing Pids by their
-    accepted-message set so `send` can gate the message against the target actor)
-    is a significant type-system design decision, deferred, out of scope for this
-    docs-only slice. Not a corpus `reject/` (it typechecks; a `reject/` witness
-    would codify behavior this finding calls WRONG); the correctly-typed accept
-    path is `accept/t40_actor_send_typed_payload`. Cross-ref §2.6.4 and finding
-    18.
+19. **[FIXED 2026-10-15, partly] `send` did not check the message against the
+    target actor.** The `ESend` arm discarded the pid's type, so a message of
+    one actor sent to another's pid typechecked (exit 0). At run time the
+    interpreter drops it (its tag matches no handler NAME of the target), and
+    compiled code drops it too: since 2026-07-07 (`967c99782`) every
+    `<Actor>_Msg` gets a globally unique tag and each dispatch `ECase` has a
+    default drop arm (`lower_actor.ml`), so the "misrouted into the first
+    handler slot, memory-unsafe" behaviour this finding originally recorded is
+    gone. The send is now checked statically: `check_send_target`
+    (`typecheck.ml`) rejects it with `send_wrong_actor` when the pid's type is
+    `Pid(state)` with a concrete record state that the message owner's state
+    cannot be (`reject/t323`, `test/errors/send_wrong_actor_{1,2}`;
+    `accept/t324` pins what it must not reject). It is one-sided, because
+    `Pid`'s parameter is the actor's STRUCTURAL state record and cannot name
+    the actor: a message for an actor whose state has the same shape as the
+    target's still typechecks and is dropped at run time on both backends.
+    One backend split remains for a handler name two actors share: a bare
+    name resolves to one owner, so the interpreter (dispatching by name) runs
+    the target's handler while compiled code drops the other actor's message.
+    When the target's state differs that is now the `send_wrong_actor` error,
+    whose advice is to rename a handler, since no qualified spelling selects
+    an actor's message (`specs/todos/2026-10-15-actor-message-ctor-cannot-be-qualified.md`).
+    Progress entry: `specs/progress/2026-10-12-send-message-not-checked-against-pid-actor.md`.
+    Cross-ref §2.6.4 and finding 18.
 
 20. **[FIXED 2026-07-07, STALE "[OPEN, logged, not fixed]" tag corrected
     2026-07-22, was inconsistent with this document's own §2.7.5, which

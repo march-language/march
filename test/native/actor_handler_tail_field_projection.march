@@ -1,0 +1,54 @@
+-- #705: an actor handler whose result is a field projected from a helper's
+-- result record,
+--   let result = handle_get(state) ... result.new_state
+-- read the new state after Perceus had released `result` (the tail EField
+-- borrowed without a dup), so compiled code saw the OLD state every time:
+-- `b-0 b-0 b-0 b-0` where the interpreter printed `b-0 b-1 b-2 b-3`. Depot's
+-- connection-pool `on Checkout` had this shape. Fixed in general by
+-- e7f16a50b (specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md);
+-- this pins the actor-handler shape the issue was filed against, including the
+-- variant with no reply at all. Expected output is the interpreter's.
+mod ActorHandlerTailFieldProjection do
+  needs IO.Console
+  type GetReq = GetReq
+
+  actor Box do
+    state { n : Int }
+    init { n: 0 }
+
+    on GetB(reply_to) do
+      let result = handle_get(state)
+      let _ = actor_reply(reply_to, result.item)
+      result.new_state
+    end
+
+    on Bump() do
+      let result = handle_get(state)
+      result.new_state
+    end
+  end
+
+  fn handle_get(state) do
+    { item: Some("b-" ++ int_to_string(state.n)), new_state: { state with n: state.n + 1 } }
+  end
+
+  fn show(r) do
+    match r do
+      Ok(Some(s)) -> s
+      Ok(None) -> "none"
+      Err(e) -> "err:" ++ e
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let b = spawn(Box)
+    let x1 = show(Actor.call(b, GetReq, 1000))
+    let x2 = show(Actor.call(b, GetReq, 1000))
+    Actor.cast(b, Bump())
+    Actor.cast(b, Bump())
+    run_until_idle()
+    let x3 = show(Actor.call(b, GetReq, 1000))
+    let x4 = show(Actor.call(b, GetReq, 1000))
+    println(x1 ++ " " ++ x2 ++ " " ++ x3 ++ " " ++ x4)
+  end
+end

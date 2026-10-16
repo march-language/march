@@ -1,0 +1,3 @@
+generic:wf1:1:a:true
+default:wf2:0:checkpoint:true
+direct:wf3:3:c:true

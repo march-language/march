@@ -93,6 +93,21 @@ git log is authoritative for exact commits.
   HTTP/1.1 request. The lower-level APIs that take a raw file descriptor still
   reject HTTPS, because a descriptor alone does not establish a TLS session.
 
+- **Sending one actor's message to another actor's pid is a compile error when the
+  types show it.** `send` didn't relate the message to the target, so
+  `send(logger_pid, Increment(1))` compiled and the message was silently dropped at run
+  time. When the pid's state type is a different record from the message's actor's
+  state, it is now rejected (`send_wrong_actor`). Two actors whose state records have
+  the same shape still can't be told apart, since a pid's type is its actor's state.
+  The same error catches two actors sharing a handler name, where a bare name picks
+  one of them and compiled and interpreted code used to disagree.
+- **`forge test` no longer segfaults calling an interface impl through a generic
+  helper.** Under `--test`, an `impl` method that read the clock, the console or any
+  other mockable operation was compiled with a hidden capability parameter, but a
+  call reaching it through the interface from generic code didn't pass one, so every
+  argument shifted by one (#708). Such impls are now compiled without the hidden
+  parameter; an operation inside one runs on the real capability rather than a
+  `with_cap` mock.
 - **A session that forms just as a peer node dies no longer outlives it.** For a
   moment after a node's connection closed, the cluster node still handed out that
   connection to sessions being set up. A session that linked to it in that window
