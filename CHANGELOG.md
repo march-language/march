@@ -87,6 +87,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Sending one actor's message to another actor's pid is a compile error when the
+  types show it.** `send` didn't relate the message to the target, so
+  `send(logger_pid, Increment(1))` compiled and the message was silently dropped at run
+  time. When the pid's state type is a different record from the message's actor's
+  state, it is now rejected (`send_wrong_actor`). Two actors whose state records have
+  the same shape still can't be told apart, since a pid's type is its actor's state.
+  The same error catches two actors sharing a handler name, where a bare name picks
+  one of them and compiled and interpreted code used to disagree.
 - **`forge test` no longer segfaults calling an interface impl through a generic
   helper.** Under `--test`, an `impl` method that read the clock, the console or any
   other mockable operation was compiled with a hidden capability parameter, but a
