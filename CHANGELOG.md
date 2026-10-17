@@ -19,6 +19,8 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-17
+
 ### Highlights
 
 0.6.0 is a short release: two security fixes and two small breaking changes,
