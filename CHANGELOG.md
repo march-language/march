@@ -19,6 +19,12 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Documentation
+
+- **An upgrade guide for 0.6.0.** `docs/upgrading-to-0-6-0.md` covers the two
+  security fixes, the `send_wrong_actor` check and the RFC 3986 `Uri` changes. The
+  landing page and the toolchain examples now name v0.6.0.
+
 ## [0.6.0] - 2026-10-17
 
 ### Highlights

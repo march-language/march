@@ -954,15 +954,15 @@ forge toolchain list
 forge toolchain list --remote
 
 # Install a specific version
-forge toolchain install v0.5.0
+forge toolchain install v0.6.0
 forge toolchain install nightly          # latest nightly
 forge toolchain install nightly-20251201
 
 # Switch the active toolchain
-forge toolchain use v0.5.0
+forge toolchain use v0.6.0
 
 # Pin this project to a specific version (writes .march-version)
-forge toolchain pin v0.5.0
+forge toolchain pin v0.6.0
 
 # Show which toolchain resolves for the current directory
 forge toolchain which
