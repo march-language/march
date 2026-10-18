@@ -118,6 +118,107 @@ let rec tails_bound (path : (A.expr * bool) list) (bound : string list) (e : A.e
   | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> [ (path, e, pat_binders p @ bound) ]
   | _ -> [ (path, e, bound) ]
 
+(* ── A tail's inner binders, apart from the names its checker already knows ─
+   A tail is checked in an env built ABOVE it (a clause's parameters, a
+   lambda's), but its path conditions were collected on the way DOWN, under
+   whatever an inner `match` arm or `let` bound.  [tails_bound]'s
+   [path_shadow] drops the facts collected before such a binder, so every
+   mention of a [bound] name still in the path (or in the tail) is about the
+   INNER binding — but read in the outer env it lands on the same SMT name as
+   the parameter it shadows.  `fn g2(n : {Int | _ < 0}, p) : {Int | _ > 0}`
+   with `Some(n) -> if n > 5 do 0 - 7 else 1 end` put `n < 0` and `n > 5` on
+   one `n`, and the contradiction proved the false `-7` tail.  Renaming the
+   inner binding to a fresh name ([inner_name]) in both the path and the tail
+   keeps every fact about it (no precision lost) and never conflates.
+
+   Only names that clash are renamed, so a local `fn` the tail calls keeps
+   the name [post_lookup] resolves it by. *)
+let inner_name (n : string) : string = n ^ "$in"
+
+(* [rename_free_checked env e]: [e] with every FREE occurrence of a name in
+   [env] renamed, capture-avoiding: a lambda's parameters, a `match` arm's or
+   `let`'s pattern, a local `fn`'s name and parameters and a `let?`/`let*`
+   pattern stop the renaming of the names they rebind, for the scope they
+   bind.  Application heads are renamed too (a let-bound lambda reusing a
+   callback parameter's name is the inner value, not the parameter).  The
+   flag is false when a form this does not know still mentions a renamed name:
+   that occurrence was NOT renamed and must not be read ([rename_path] drops
+   such a fact; a tail with one gets no scalar demand hook). *)
+let rename_free_checked (env : (string * string) list) (e : A.expr) : A.expr * bool =
+  let complete = ref true in
+  let drop env ns = List.filter (fun (n, _) -> not (List.mem n ns)) env in
+  let pnames (ps : A.param list) = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+  let rec go env e =
+    if env = [] then e
+    else
+      match e with
+      | A.EVar n -> (match List.assoc_opt n.A.txt env with Some m -> A.EVar { n with A.txt = m } | None -> e)
+      | A.ELit _ | A.EHole _ | A.EResultRef _ -> e
+      | A.EApp (f, args, sp) -> A.EApp (go env f, List.map (go env) args, sp)
+      | A.ETuple (es, sp) -> A.ETuple (List.map (go env) es, sp)
+      | A.ECon (c, es, sp) -> A.ECon (c, List.map (go env) es, sp)
+      | A.EAtom (a, es, sp) -> A.EAtom (a, List.map (go env) es, sp)
+      | A.EField (r, n, sp) -> A.EField (go env r, n, sp)
+      | A.EAnnot (x, t, sp) -> A.EAnnot (go env x, t, sp)
+      | A.EIf (c, t, el, sp) -> A.EIf (go env c, go env t, go env el, sp)
+      | A.ECond (arms, sp) -> A.ECond (List.map (fun (c, b) -> (go env c, go env b)) arms, sp)
+      | A.ERecord (fs, sp) -> A.ERecord (List.map (fun (n, v) -> (n, go env v)) fs, sp)
+      | A.ERecordUpdate (r, fs, sp) ->
+        A.ERecordUpdate (go env r, List.map (fun (n, v) -> (n, go env v)) fs, sp)
+      | A.ELam (ps, body, sp) -> A.ELam (ps, go (drop env (pnames ps)) body, sp)
+      | A.EMatch (x, brs, sp) ->
+        A.EMatch
+          ( go env x
+          , List.map
+              (fun (br : A.branch) ->
+                let env' = drop env (pat_binders br.A.branch_pat) in
+                { br with
+                  A.branch_guard = Option.map (go env') br.A.branch_guard
+                ; A.branch_body = go env' br.A.branch_body })
+              brs
+          , sp )
+      | A.EBlock (es, sp) ->
+        let _, es' =
+          List.fold_left
+            (fun (env, acc) e ->
+              match e with
+              | A.ELet (b, lsp) ->
+                let b' = { b with A.bind_expr = go env b.A.bind_expr } in
+                (drop env (pat_binders b.A.bind_pat), A.ELet (b', lsp) :: acc)
+              | A.ELetFn (n, ps, rt, body, lsp) ->
+                (* The name is in scope in its own body (recursion). *)
+                let env = drop env [ n.A.txt ] in
+                (env, A.ELetFn (n, ps, rt, go (drop env (pnames ps)) body, lsp) :: acc)
+              | e -> (env, go env e :: acc))
+            (env, []) es
+        in
+        A.EBlock (List.rev es', sp)
+      | A.ELet (b, sp) -> A.ELet ({ b with A.bind_expr = go env b.A.bind_expr }, sp)
+      | A.ELetQ (p, e1, e2, sp) -> A.ELetQ (p, go env e1, go (drop env (pat_binders p)) e2, sp)
+      | A.ELetStar (p, e1, e2, sp) -> A.ELetStar (p, go env e1, go (drop env (pat_binders p)) e2, sp)
+      | _ ->
+        if expr_mentions (List.map fst env) e then complete := false;
+        e
+  in
+  let e' = go env e in
+  (e', !complete)
+
+let rename_free (env : (string * string) list) (e : A.expr) : A.expr = fst (rename_free_checked env e)
+
+(* [names] (the [bound] names that clash with the checker's env) renamed apart
+   in a tail's path conditions.  A fact the renaming could not complete is
+   dropped: weaker, never conflated. *)
+let rename_path (names : string list) (path : (A.expr * bool) list) : (A.expr * bool) list =
+  let env = List.map (fun n -> (n, inner_name n)) (List.sort_uniq compare names) in
+  if env = [] then path
+  else
+    List.filter_map
+      (fun (c, neg) ->
+        match rename_free_checked env c with
+        | c', true -> Some (c', neg)
+        | _, false -> None)
+      path
+
 (* Return-position expressions of a body, each with the path reaching it. *)
 let tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A.expr) list =
   List.map (fun (p, t, _) -> (p, t)) (tails_bound path [] e)
@@ -263,6 +364,38 @@ let with_post_lookup lookup (f : unit -> 'a) : 'a =
   post_lookup := lookup;
   Fun.protect ~finally:(fun () -> post_lookup := saved) f
 
+(* ── A scalar demand at a return tail (design 2026-10-18 element-flow
+   follow-ups, phase 2; the hook specs/2026-10-18-fold-accumulator-invariants-design.md
+   §3.1 builds on) ────────────────────────────────────────────────────────
+   `fn go(o : Option({Int | _ > 0})) : {Int | _ > 0} do Option.unwrap_or(o, 1) end`:
+   the tail is a call with no postcondition, so it never reflects, but the
+   declared return may still hold of every value its callee can return
+   ([Refine_check.scalar_demand], the same entry point a precondition's
+   subject reaches through [call_ctx.demand]).  The post engine knows only the
+   clause's parameters, so the hook is handed the tail's [path], the names
+   bound on the way down to it ([tails_bound]'s [bound]) and the parameters,
+   and builds its env from those.  A cell rather than a parameter for the
+   reason [post_lookup] is one; set by [Refine_check] at module init, so the
+   [gate_unverified_posts] pre-pass (which lives here) installs the same hook
+   the walk does.  [`Na] leaves the tail's skip exactly as it was. *)
+type tail_demand =
+  path:(A.expr * bool) list -> bound:string list -> params:A.fn_param list -> sc:scope
+  -> string * A.expr * string option -> A.expr -> [ `Na | `Proved | `Unproved of string ]
+
+let no_tail_demand : tail_demand = fun ~path:_ ~bound:_ ~params:_ ~sc:_ _ _ -> `Na
+
+let tail_demand : tail_demand ref = ref no_tail_demand
+
+let with_tail_demand (d : tail_demand) (f : unit -> 'a) : 'a =
+  let saved = !tail_demand in
+  tail_demand := d;
+  Fun.protect ~finally:(fun () -> tail_demand := saved) f
+
+(* The hook for a module context; [Refine_check] replaces the default. *)
+let tail_demand_of :
+    (root:string -> rctx -> (string, fn_sig option) Hashtbl.t -> tail_demand) ref =
+  ref (fun ~root:_ _ _ -> no_tail_demand)
+
 (* [sg]'s postcondition instantiated at [args], in the caller's namespace
    (the same rule [postcond_of] applies to a resolved callee). *)
 let ret_instance (sg : fn_sig) (args : A.expr list) : (string * A.expr * string option) option =
@@ -293,6 +426,8 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(fn_params : (string * A.ty option) list = [])
     ?(string_ret = false)
     ?(list_ret = false)
+    ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of string ]) option)
+    ?(shown : A.expr option)
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -588,15 +723,27 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        `<predicate>` would read as if that were the user's own spelling, so
        fall back to the function name instead when it does. *)
     let tail_display =
-      let rendered = pred_str tail_e in
+      (* The user's spelling, not a renamed-apart one ([rename_free]). *)
+      let rendered = pred_str (Option.value shown ~default:tail_e) in
       if rendered <> "<predicate>" then Printf.sprintf "the return expression `%s`" rendered
       else
         Printf.sprintf "the return expression of `%s`"
           (Option.value ~default:"<anonymous>" fn_name)
     in
-    if enum_witness_error () then note Obligation.Violated
-    else note (Obligation.Skipped (Obligation.Unreflectable_subject tail_display));
-    false
+    (* A call tail with no postcondition: the declared return may still hold
+       of every value its callee returns ([tail_demand]).  A refuted source
+       stays a skip (design §3.4), unless the enumerative witness confirms a
+       real failing call, exactly as before. *)
+    (match (match demand with Some f -> f tail_e | None -> `Na) with
+     | `Proved -> note Obligation.Proved; true
+     | `Unproved what ->
+       if enum_witness_error () then note Obligation.Violated
+       else note (Obligation.Skipped (Obligation.Parametric_source_unproved what));
+       false
+     | `Na ->
+       if enum_witness_error () then note Obligation.Violated
+       else note (Obligation.Skipped (Obligation.Unreflectable_subject tail_display));
+       false)
   | Some tail_term ->
     let resolve_field = match record_sort with
       | Some sort_name -> make_field_resolver binder sort_name tail_term
@@ -1683,7 +1830,11 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                                     self n))
                             :: !verdicts;
                           false
-                        | None -> proved_tail ~mctx ~pat (path, t))
+                        | None ->
+                          (* The tail mentions none of [outer]'s rebound
+                             names; its path may, about the inner binding. *)
+                          proved_tail ~mctx ~pat
+                            (rename_path (List.filter (fun n -> List.mem n outer) bound) path, t))
                        && acc)
                      true ts
               in
@@ -1813,7 +1964,11 @@ let rec check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool
     let lookup =
       List.fold_left
         (fun lookup (n, lfd) ->
-          if with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false lfd)
+          (* A block-level fn's return tail gets no scalar demand hook in v1:
+             its env (sibling locals, captures) is not the clause's. *)
+          if
+            with_tail_demand no_tail_demand (fun () ->
+                with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false lfd))
           then
             let sg = sig_of_fn lfd in
             fun f args -> if f = n then ret_instance sg args else lookup f args
@@ -1877,7 +2032,38 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
           c.A.fc_params
       in
       let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      let ts = tails base c.A.fc_body in
+      (* A tail's inner binders that clash with a parameter are renamed apart
+         in its path and in the tail itself ([rename_free]): the VC reads the
+         parameters' facts from [sc] and the return predicate over the
+         parameters, so an inner `n` must not be the same SMT name. *)
+      let pnames = List.concat_map fnparam_binders c.A.fc_params in
+      let ts =
+        List.map
+          (fun (p, e, bound) ->
+            let clash = List.sort_uniq compare (List.filter (fun n -> List.mem n pnames) bound) in
+            let env = List.map (fun n -> (n, inner_name n)) clash in
+            let e', complete = rename_free_checked env e in
+            (* The hook declines a tail mentioning a [bound] name it would read
+               in the parameters' env; a renamed-apart one is in no env, so
+               only the names left as they are count.  A tail whose renaming
+               could not complete gets no hook at all. *)
+            ( rename_path clash p
+            , e'
+            , (if complete then Some (List.filter (fun n -> not (List.mem n clash)) bound) else None)
+            , e ))
+          (tails_bound base [] c.A.fc_body)
+      in
+      (* Only a plain scalar return reaches the scalar demand entry point. *)
+      let demand (path, _, bound, _) =
+        match bound with
+        | None -> None
+        | Some bound ->
+        if record_sort <> None || string_ret || list_ret then None
+        else
+          Some
+            (fun e ->
+              !tail_demand ~path ~bound ~params:c.A.fc_params ~sc (binder, ret_pred, marker) e)
+      in
       (* Fold (not List.for_all): every tail must be checked so every
          diagnostic is emitted — short-circuiting would hide errors. *)
       let fn_params =
@@ -1885,10 +2071,10 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       in
       ts <> []
       && List.fold_left
-           (fun acc t ->
+           (fun acc ((p, e, _, shown) as t) ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env ~string_ret
-               ~list_ret ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit ~fn_params
-               sc binder ret_pred t
+               ~list_ret ?demand:(demand t) ~shown ~fn_name:(Some fd.A.fn_name.A.txt) ~emit
+               ~record:emit ~fn_params sc binder ret_pred (p, e)
              && acc)
            true ts
     in
@@ -1980,8 +2166,12 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
   in
   let short key = match String.rindex_opt key '.' with Some i -> String.sub key (i + 1) (String.length key - i - 1) | None -> key in
   let check (key, prefix, fd, sg) =
-    let lookup = postcond_of { rctx0 with modpath = prefix } defs in
-    if with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd) then begin
+    let ctx = { rctx0 with modpath = prefix } in
+    let lookup = postcond_of ctx defs in
+    if
+      with_tail_demand (!tail_demand_of ~root ctx defs) (fun () ->
+          with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd))
+    then begin
       Hashtbl.replace defs key (Some sg);
       true
     end

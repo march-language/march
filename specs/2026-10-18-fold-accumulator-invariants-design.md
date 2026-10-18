@@ -2,6 +2,12 @@
 
 **Date:** 2026-10-18
 **Status:** design. Nothing is built. Probed on `ba8db5805` (0.6.0 + docs), z3 4.16.0.
+Its dependency on sibling (a)'s scalar entry point has landed (2026-10-18, element-flow phase 2,
+`specs/progress/2026-10-18-element-flow-phase2-scalar-demands.md`): `Refine_check.scalar_demand`
+and `discharge_pairs` exist, `check_call` reaches them through `call_ctx.demand`, and a top-level
+function's return tail reaches them through `Refine_post.tail_demand` (§3.1's third row), so
+phase 1 needs no entry point of its own. Closed demands only; `invariant_params` goes inside
+`discharge_pairs`' `lambda_ok`.
 **Closes, when phase 2 lands:** the accumulator half of item 2 of
 `specs/todos/2026-09-18-refine-element-flow-followups.md` ("`fold_left`'s
 accumulator is also where a demand on `b` would act as an invariant (its

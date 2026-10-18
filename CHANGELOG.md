@@ -51,6 +51,19 @@ git log is authoritative for exact commits.
   a concrete base (`List(Int[p])` for `f : Int -> Bool[p]`), and an accumulator
   helper's own `acc : List(a[p])` parameter is now checked inside the definition
   that declares `p`.
+- **Refinements: a scalar demand on a call that returns one of its own inputs is
+  now checked through the callee's arguments.** `need_pos(Option.unwrap_or(o, 1))`
+  with `o : Option({Int | _ > 0})` is proved: by parametricity the result is
+  either an element of `o` or the default, and both are positive. The same holds
+  for a nested call, `Option.unwrap_or_else(o, fn () -> 1)`, an element of a
+  list literal, `List.fold_left(xs, 1, fn (acc, x) -> x)`, an annotated `let`,
+  `need_pos(List.head(xs) + 1)` and a return tail
+  (`fn f(o) : {Int | _ > 0} do Option.unwrap_or(o, 1) end`); each was an
+  `unreflectable-subject` skip (an error under `cap verified`). An argument that
+  fails the demand (`Option.unwrap_or(o, 0)`) is a `parametric-source-unproved`
+  skip, never a violation, since whether it is returned depends on the data. A
+  fold's accumulator still gets no fact, and a demand that names another
+  parameter (`_ < len(xs)`) is not traced.
 
 ### Fixed
 
@@ -71,6 +84,18 @@ git log is authoritative for exact commits.
   own, so the call was reported proved whatever predicate it passed; a slot shape
   not read at a call is now an `abstract-refinement-uninstantiated` skip, and a
   `!p(_)` slot is instantiated with the callee's predicate.
+- **Refinements: a return value bound inside a `match` arm or `let` under a
+  parameter's name no longer proves a false return contract.** In
+  `fn g(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0}` with the arm
+  `Some(n) -> if n > 5 do 0 - 7 else 1 end`, the checker read the parameter's
+  `n < 0` and the arm's guard `n > 5` as facts about one `n`, and the
+  contradiction "proved" the `-7` tail, so `cap verified` accepted it
+  (`g(0 - 1, Some(10))` returns -7). `Some(n) -> n` with a refined parameter `n`
+  was proved the same way. The inner binding is now kept apart: the first is a
+  violation, the second a skip. The same fix covers a lambda's tail inside a
+  demanded call, a function passed where a container return is expected, and a
+  lambda inside the returned call that captures the inner binding
+  (`Some(n) -> ap(1, fn z -> n)`).
 - **Refinements: a container that hides a type parameter inside another type no
   longer passes element checks vacuously.** For `type Wrap(k, v) = Wrap(List((k, v)))`,
   `fn mk() : Wrap(Int, {Int | _ > 0}) do Wrap([(1, 0 - 5)]) end` was counted

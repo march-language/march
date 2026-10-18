@@ -4,7 +4,9 @@
 **Status:** phase 0 landed 2026-10-18 (`specs/progress/2026-10-18-relational-element-refinement-scope.md`,
 which records where it departs from §1); phase 1 landed 2026-10-18
 (`specs/progress/2026-10-18-element-flow-phase1-multiparam-lambda-domains.md`, which records where
-it departs from §4); phases 2-4 are design only. Probed on `ba8db5805` (0.6.0 + docs), z3 4.16.0, with the
+it departs from §4); phase 2 landed 2026-10-18
+(`specs/progress/2026-10-18-element-flow-phase2-scalar-demands.md`, which records where it departs
+from §3 and §7: it also hooks return tails); phases 3-4 are design only. Probed on `ba8db5805` (0.6.0 + docs), z3 4.16.0, with the
 compiler already built in this worktree (`_build/default/bin/main.exe`, Oct 18 10:12).
 **Closes, when phase 4 lands:** items 1-4 of `specs/todos/2026-09-18-refine-element-flow-followups.md`
 (items 5 and 6 are already closed). Each phase strikes its item there and removes its bullet from

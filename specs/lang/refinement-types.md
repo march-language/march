@@ -2150,6 +2150,25 @@ the reason `parametric-source-unproved`. `sum_pos(List.map(ys, fn y -> 0))` is
 fine when `ys` is empty, and whether it is empty is the caller's data. Under
 `cap verified` the skip is an error, as always.
 
+The same rule applies when the callee returns a single value of the type
+variable rather than a container of them, and the demand is a scalar
+refinement: a precondition, an annotated `let`, an element of a literal, or a
+function's declared return.
+
+```march
+fn f(o : Option({Int | _ > 0}), xs : {List({Int | _ > 0}) | len(_) > 0}) : Int do
+  need_pos(Option.unwrap_or(o, 1))                         -- proved: an element of o, or 1
+  need_pos(Option.unwrap_or_else(o, fn () -> 1))           -- proved
+  need_pos(List.fold_left(xs, 1, fn (acc, x) -> x))        -- proved: x comes from xs
+  need_pos(List.head(xs) + 1)                              -- proved: List.head(xs) > 0
+  need_pos(Option.unwrap_or(o, 0))                         -- skip: the default can fail it
+end
+
+fn g(o : Option({Int | _ > 0})) : {Int | _ > 0} do
+  Option.unwrap_or(o, 1)                                   -- proved
+end
+```
+
 ### Callbacks and user-written combinators
 
 A callback's refined codomain is a fact wherever its result lands, including in
@@ -2396,9 +2415,13 @@ demand meets one of these):
   (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
   a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
-- **Only a container demand is traced.** A single element flowing into a scalar
-  position (`need_pos(Option.unwrap_or(o, 1))`, the result of `fold_left`) is
-  not checked through the callee's sources.
+- **A scalar demand is traced only when it is closed.** `need_pos(Option.unwrap_or(o, 1))`
+  is checked through `unwrap_or`'s sources (the elements of `o` and the
+  default), but a demand that names another parameter of its function
+  (`List.nth(xs, Option.unwrap_or(o, 0))` against `_ < len(xs)`) is not, and
+  neither is a relational return (`: {Int | _ >= lo}`) or a block-level `fn`'s
+  return tail. A source that fails the demand makes the call a skip, never a
+  violation.
 - **A fold's accumulator receives no domain fact.** In
   `fold_left(xs, 1, fn (acc, x) -> …)`, `x` assumes `xs`'s element refinement
   but `acc` assumes nothing, so `need_pos(acc)` is a skip: an invariant the
