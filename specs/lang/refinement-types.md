@@ -2282,6 +2282,13 @@ demand meets one of these):
 - **A predicate relating elements to each other** (sortedness, distinctness)
   cannot be written; see [Set Refinements](#set-refinements) for what a
   predicate can say about a collection's elements as a set.
+- **A container whose constructor hides a parameter inside another type**
+  (`type Box(b) = Box(Int -> b)`, `type Wrap(k, v) = Wrap(List((k, v)))`) has
+  its element refinement checked at no construction. `Wrap([(1, 0 - 5)])`
+  against `Wrap(Int, {Int | _ > 0})` is a recorded `unreflectable-subject`
+  skip naming the constructor and the hiding type (an error under
+  `cap verified`), and a function returning such a construction lends no
+  element fact at its call sites.
 
 ---
 

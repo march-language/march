@@ -1,7 +1,8 @@
 # Design: abstract refinements over several arguments, and the relational element fact they need (`Map.filter`)
 
 **Date:** 2026-10-18
-**Status:** design. Nothing is built. Probed on `ba8db5805` (0.6.0 + docs),
+**Status:** design. Phase 0 (no vacuous hidden-field construction) landed 2026-10-18
+(`specs/progress/2026-10-18-hidden-field-element-refinements.md`); phases 1-4 are not built. Probed on `ba8db5805` (0.6.0 + docs),
 compiler `_build/default/bin/main.exe` built 2026-10-18, z3 4.16.0 (CI has 4.8.12).
 **Closes, when phase 4 lands:** the `Map.filter` bullet of
 `specs/todos/2026-09-20-abstract-refinements-multi-arg-callbacks.md` (its gate,

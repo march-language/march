@@ -19,6 +19,20 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Refinements: a container that hides a type parameter inside another type no
+  longer passes element checks vacuously.** For `type Wrap(k, v) = Wrap(List((k, v)))`,
+  `fn mk() : Wrap(Int, {Int | _ > 0}) do Wrap([(1, 0 - 5)]) end` was counted
+  *proved* and `need(Wrap([(1, 0 - 5)]))` filed no obligation at all. Such a
+  construction is now a recorded `unreflectable-subject` skip naming the
+  constructor and the hiding type (an error under `cap verified`), and the
+  function's element return is no longer trusted at its call sites.
+  The same applies to a self-reference whose type arguments are permuted or
+  nested (`type T(a, b) = … | N(T(b, a))`). A `match` binder at such a field no
+  longer inherits the outer container's element facts, which had produced a
+  false proof.
+
 ### Documentation
 
 - **An upgrade guide for 0.6.0.** `docs/upgrading-to-0-6-0.md` covers the two
