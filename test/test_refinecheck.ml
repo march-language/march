@@ -16736,6 +16736,184 @@ let elemflow_namespace_suite =
              (m "  fn hof(n : Int, g : (Int) -> List({Int | _ < 5})) : Int do 0 end\n\
                  \  fn go() : Int do hof(10, fn y -> [50]) end\n"))) ]
 
+(* ── Domain facts for every parameter of a multi-parameter lambda (design
+   specs/2026-10-18-element-flow-followups-design.md, phase 1, §4) ────────
+   `zipw(xs, ys, fn (x, y) -> …)` with `f : a -> b -> c`: every `a` the
+   callee hands position 0 came from a source of `a`, every `b` at position 1
+   from a source of `b`, so each parameter assumes its own position's element
+   fact (the design's §0.2 rows m1-m7).  Before phase 1 only a one-parameter
+   lambda got one; the triple each case had on the unfixed checker is in its
+   comment.  The controls pin the guards (§4.3): a variable with a
+   non-element source gives nothing (G2-4, the fold-accumulator boundary), an
+   own-annotated parameter declines the whole lambda (G2-2), and a fact that
+   names any of the lambda's parameters is not given (G2-3, phase 0's z4 per
+   position). *)
+let elemflow_multiparam_suite =
+  let m body =
+    "mod MP do\n\
+    \  fn need_pos(k : {Int | _ > 0}) : Int do k end\n\
+    \  fn need_neg(k : {Int | _ < 0}) : Int do k end\n\
+    \  fn need_big(k : {Int | _ > 100}) : Int do k end\n\
+    \  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+    \  fn mapl(xs : List(a), g : a -> b) : List(b) do\n\
+    \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> Cons(g(h), mapl(t, g))\n    end\n  end\n\
+    \  fn zipw(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do\n\
+    \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> do\n        match ys do\n\
+    \          Nil -> Nil\n          Cons(k, u) -> Cons(f(h, k), zipw(t, u, f))\n        end\n      end\n    end\n  end\n\
+    \  fn foldl(xs : List(a), acc : b, f : b -> a -> b) : b do\n\
+    \    match xs do\n      Nil -> acc\n      Cons(h, t) -> foldl(t, f(acc, h), f)\n    end\n  end\n\
+    \  fn sortb(xs : List(a), cmp : a -> a -> Bool) : List(a) do xs end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let reasons src = let (_, _, _, rs) = typed_ledger src in rs in
+  let t3 = Alcotest.(triple int int int) in
+  let pos2 = "xs : List({Int | _ > 0}), ys : List({Int | _ > 0})" in
+  [ gated "m1: a tail over both parameters proves an element demand" (fun () ->
+        (* Unfixed: (0, 0, 1), parametric-source-unproved. *)
+        Alcotest.check t3 "sum_pos(zipw(xs, ys, fn (x, y) -> x + y)) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : Int do sum_pos(zipw(xs, ys, fn (x, y) -> x + y)) end\n"))));
+
+    gated "m2: a refutable tail is still a skip, never a violation" (fun () ->
+        (* Unfixed: (0, 0, 1), the same reason. *)
+        let src = m ("  fn go(" ^ pos2 ^ ") : Int do sum_pos(zipw(xs, ys, fn (x, y) -> x - y)) end\n") in
+        Alcotest.check t3 "fn (x, y) -> x - y: skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a parametric-source skip" [ "parametric-source-unproved" ] (reasons src));
+
+    gated "m3: body obligations on both parameters prove" (fun () ->
+        (* Unfixed: (0, 0, 2), unconstrained-subject twice. *)
+        Alcotest.check t3 "need_pos(x) + need_pos(y) proves" (2, 0, 0)
+          (l3
+             (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (x, y) -> need_pos(x) + need_pos(y)) end\n"))));
+
+    gated "m4: a fold's element parameter gets its fact" (fun () ->
+        (* Unfixed: (0, 0, 1). *)
+        Alcotest.check t3 "foldl(xs, 0, fn (acc, x) -> acc + need_pos(x)) proves" (1, 0, 0)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : Int do foldl(xs, 0, fn (acc, x) -> acc + need_pos(x)) end\n")));
+
+    gated "m5: the accumulator gets no fact (boundary with the fold-accumulator design)" (fun () ->
+        (* `acc : b` has a bare source (the initial value) and a codomain
+           source (the callback's own result), so no agreed element slot.
+           Assuming anything about it is the inductive accumulator invariant
+           of specs/2026-10-18-fold-accumulator-invariants-design.md, not a
+           domain fact.  Unfixed: (0, 0, 1); must stay so. *)
+        Alcotest.check t3 "need_pos(acc): skipped" (0, 0, 1)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : Int do foldl(xs, 1, fn (acc, x) -> need_pos(acc) + x) end\n"));
+        (* Both at once: x proves, acc does not.  Unfixed: (0, 0, 2). *)
+        Alcotest.check t3 "need_pos(acc) + need_pos(x): x proves, acc skips" (1, 0, 1)
+          (l3
+             (m "  fn go(xs : List({Int | _ > 0})) : Int do foldl(xs, 1, fn (acc, x) -> need_pos(acc) + need_pos(x)) end\n")));
+
+    gated "m6: one variable at two positions gives both its fact" (fun () ->
+        (* Unfixed: (1, 0, 2) -- the return proves, both need_pos skip. *)
+        Alcotest.check t3 "sortb(xs, fn (a, b) -> need_pos(a) < need_pos(b)) proves" (3, 0, 0)
+          (l3
+             (m "  fn go(xs : List({Int | _ > 0})) : List({Int | _ > 0}) do\n\
+                 \    sortb(xs, fn (a, b) -> need_pos(a) < need_pos(b))\n  end\n")));
+
+    gated "m7: the one-parameter baseline is unchanged" (fun () ->
+        Alcotest.check t3 "mapl(xs, fn x -> need_pos(x)) proves" (1, 0, 0)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : List(Int) do mapl(xs, fn x -> need_pos(x)) end\n")));
+
+    gated "one refined, one unrefined container: only the refined position gets a fact" (fun () ->
+        (* Unfixed: (0, 0, 2). *)
+        Alcotest.check t3 "need_pos(x) proves, need_pos(y) skips" (1, 0, 1)
+          (l3
+             (m "  fn go(xs : List({Int | _ > 0}), us : List(Int)) : List(Int) do\n\
+                 \    zipw(xs, us, fn (x, y) -> need_pos(x) + need_pos(y))\n  end\n")));
+
+    gated "a variable with a bare source as well as an element one gives nothing" (fun () ->
+        (* `a` enters `pick` through `xs`'s elements AND the bare `d`: no
+           agreed element slot, so neither lambda parameter assumes `_ > 0`,
+           even though both sources happen to be positive here. *)
+        Alcotest.check t3 "need_pos(p) + need_pos(q): both skip" (0, 0, 2)
+          (l3
+             (m "  fn pick(xs : List(a), d : a, f : a -> a -> Int) : Int do\n\
+                 \    match xs do\n      Nil -> f(d, d)\n      Cons(h, _) -> f(h, d)\n    end\n  end\n\
+                 \  fn go(xs : List({Int | _ > 0})) : Int do pick(xs, 5, fn (p, q) -> need_pos(p) + need_pos(q)) end\n")));
+
+    gated "G2-2: an own-annotated parameter declines the whole lambda" (fun () ->
+        (* `visit_lambda ~assume:true` would assume `x`'s annotation, which
+           nobody checked: neither parameter is given anything. *)
+        Alcotest.check t3 "need_big(x) + need_pos(y): both skip" (0, 0, 2)
+          (l3
+             (m ("  fn go(" ^ pos2 ^ ") : List(Int) do\n\
+                  \    zipw(xs, ys, fn (x : {Int | _ > 100}, y) -> need_big(x) + need_pos(y))\n  end\n")));
+        (* A plainly typed parameter is fine, as in the one-parameter rule.
+           Unfixed: (0, 0, 2). *)
+        Alcotest.check t3 "fn (x : Int, y) -> need_pos(x) + need_pos(y) proves" (2, 0, 0)
+          (l3
+             (m ("  fn go(" ^ pos2 ^ ") : List(Int) do\n\
+                  \    zipw(xs, ys, fn (x : Int, y) -> need_pos(x) + need_pos(y))\n  end\n"))));
+
+    gated "G2-3: a fact naming one of the lambda's parameters is not given" (fun () ->
+        (* z4's multi-parameter twin: `n` would be given `_ < n` about itself. *)
+        Alcotest.check t3 "fn (n, y) -> need_neg(n): not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    zipw(xs, ys, fn (n, y) -> need_neg(n))\n  end\n"));
+        (* Capture by a SIBLING: `y`'s fact `_ < n` names the CALLER's `n`,
+           and the lambda binds its own `n`.  Given anyway, `y < n` would be
+           read about the lambda's `n`, and the lambda's own guard `n < 0`
+           would prove need_neg(y): a false proof (`f(5, [3], [0 - 1])`
+           hands the lambda y = 3, n = -1).  Both binding orders; with the
+           guard disabled only the (n, y) order proves (perturbation, phase 1
+           progress note): binding `n` after `y` already drops `y`'s fact. *)
+        Alcotest.check t3 "fn (y, n) -> if n < 0 do need_neg(y) …: not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    zipw(xs, ys, fn (y, n) -> if n < 0 do need_neg(y) else 0 end)\n  end\n"));
+        Alcotest.check t3 "fn (n, y) -> if n < 0 do need_neg(y) …: not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    zipw(ys, xs, fn (n, y) -> if n < 0 do need_neg(y) else 0 end)\n  end\n"));
+        (* …while the uncaptured position still gets its own fact.
+           Unfixed: (0, 0, 1). *)
+        Alcotest.check t3 "fn (y, n) -> need_neg(n): proves" (1, 0, 0)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List({Int | _ < 0})) : List(Int) do\n\
+                 \    zipw(xs, ys, fn (y, n) -> need_neg(n))\n  end\n"));
+        (* Control: a fresh name, under a guard that makes the fact useful.
+           Unfixed: (0, 0, 1). *)
+        Alcotest.check t3 "fn (y, m) -> need_neg(y) under n <= 0 proves" (1, 0, 0)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    if n <= 0 do zipw(xs, ys, fn (y, m) -> need_neg(y)) else Nil end\n  end\n")));
+
+    gated "G2-3: a wildcard parameter binds nothing, so it captures nothing" (fun () ->
+        (* `_` is the default binder of every `{Int | _ > 0}`; a wildcard
+           sibling must not count as a name the fact mentions.  bcdaba5f5:
+           (0, 0, 1), an over-rejection. *)
+        Alcotest.check t3 "fn (_, y) -> need_pos(y) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (_, y) -> need_pos(y)) end\n")));
+        Alcotest.check t3 "fn (x, _) -> need_pos(x) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (x, _) -> need_pos(x)) end\n")));
+        (* Control: a NAMED sibling capture still declines. *)
+        Alcotest.check t3 "fn (n, y) -> if n < 0 do need_neg(y) …: still not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    zipw(ys, xs, fn (n, y) -> if n < 0 do need_neg(y) else 0 end)\n  end\n")));
+
+    gated "a violating step still violates" (fun () ->
+        (* A fact never hides a real failure. *)
+        Alcotest.check t3 "need_pos(0 - 1) in a fold step is violated" (0, 1, 0)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : Int do foldl(xs, 0, fn (acc, x) -> need_pos(0 - 1)) end\n"));
+        (* …and a fact that contradicts the step is a violation, the
+           one-parameter rule's verdict for the same shape.  Unfixed: the
+           two-parameter form was (0, 0, 1). *)
+        Alcotest.check t3 "one parameter: mapl(xs, fn x -> need_neg(x)) is violated" (0, 1, 0)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : List(Int) do mapl(xs, fn x -> need_neg(x)) end\n"));
+        Alcotest.check t3 "two parameters: zipw(xs, ys, fn (x, y) -> need_neg(x)) is violated" (0, 1, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (x, y) -> need_neg(x)) end\n"))));
+
+    gated "G2-1: a lambda shorter than its arrow chain gets no facts" (fun () ->
+        (* No position map for a partial application in v1: `fn (x, y) ->
+           fn w -> …` against `a -> b -> Int -> c`. *)
+        Alcotest.check t3 "need_pos(y) in the nested lambda: skipped" (0, 0, 1)
+          (l3
+             (m ("  fn z3w(xs : List(a), ys : List(b), f : a -> b -> Int -> c) : List(c) do Nil end\n\
+                  \  fn go(" ^ pos2 ^ ") : List(Int) do z3w(xs, ys, fn (x, y) -> fn w -> need_pos(y)) end\n")))) ]
+
 (* ── Datatype instances from declared types (plan steps 1.3 + 1.4) ──────
    Each datatype instance is declared as its own monomorphic datatype; a term's instance
    comes from the declared type it is checked against and from what
@@ -19548,6 +19726,7 @@ let () =
       ("callback-elements", callback_elements_suite);
       ("demand-flow", demand_flow_suite);
       ("elemflow-namespace", elemflow_namespace_suite);
+      ("elemflow-multiparam", elemflow_multiparam_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);

@@ -32,6 +32,16 @@ git log is authoritative for exact commits.
   `y > 0 || y < 100`) ``), and a declined body names the construct it could not
   read. A helper with refined parameters is inlined only where those are proved
   at the call (`fn y -> y > 0 && weird(y)` is read; `fn y -> weird(y)` is not).
+- **Refinements: every parameter of a multi-parameter lambda now gets its element
+  fact.** `List.zip_with(xs, ys, fn (x, y) -> need_pos(x) + need_pos(y))` with
+  both lists `List({Int | _ > 0})` is proved, as are
+  `sum_pos(List.zip_with(xs, ys, fn (x, y) -> x + y))`,
+  `List.fold_left(xs, 0, fn (acc, x) -> acc + need_pos(x))` and
+  `List.sort_by(xs, fn (a, b) -> need_pos(a) < need_pos(b))`; before, only a
+  one-parameter lambda received one and each of these was a skip (an error
+  under `cap verified`). A fold's accumulator still gets no fact, a lambda with
+  a refinement-annotated parameter gets none, and a fact naming one of the
+  lambda's own parameters is not given.
 
 ### Fixed
 
