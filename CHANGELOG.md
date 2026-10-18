@@ -98,6 +98,16 @@ git log is authoritative for exact commits.
   (`acc - x` for `_ >= 0`). A callee that can make a value of the variable
   itself, or is `@[trusted]`/`@[assume]` or an `impl` method, gets nothing. A
   relational return (`: {Int | _ >= lo}`) is not traced yet.
+- **Refinements: a bare `filter(...)` and the `Enum`/`Iterable`/`Range` filters
+  carry their predicate.** `Prelude.filter` (what a bare `filter` is),
+  `Enum.filter`, `Enum.take_while` and `Iterable.filter` now declare
+  `List(a[p])`, `Enum.find` and `Iterable.find` declare `Option(a[p])`, and
+  `Range.filter` declares `f : Int -> Bool[p]` returning `List(Int[p])`, each
+  proved on its own definition side. So `sum_pos(filter(ys, fn y -> y > 0))`
+  and `one_pos(Enum.find(ys, fn y -> y > 0))` are proved where each was a
+  `parametric-source-unproved` skip (an error under `cap verified`). The four
+  rewritten filters keep their order and results; they now share
+  `List.filter`'s single-pass body and run about 35% faster compiled.
 
 ### Fixed
 

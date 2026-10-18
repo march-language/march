@@ -20899,6 +20899,277 @@ let abstract_leftovers_c_suite =
         Alcotest.check t3 "whole module (HC)" (4, 0, 0) (triple obs);
         let _, obs = run (m "HC2" (sums ^ part_nat () ^ go_let)) in
         callers_proved obs) ]
+
+(* Abstract refinements, the leftovers, phase D (design
+   specs/2026-10-18-abstract-refinements-leftovers-design.md §4.2, §6.4,
+   §9.4): the stdlib sweep.  `Enum.find`/`Iterable.find` gain
+   `Option(a[p])`; `Enum.filter`, `Enum.take_while`, `Iterable.filter` and
+   `Prelude.filter` are rewritten to `List.filter`'s / `List.take_while`'s
+   natural body and gain `List(a[p])`; `Range.filter` gains
+   `f : Int -> Bool[p]` and `List(Int[p])` over its `List.filter` delegation
+   (a concrete base, phase B).  Each case runs against the REAL stdlib files
+   (loaded from `stdlib/` relative to the cwd, as `stdlib_list_mod` is), so
+   it is RED on a base whose stdlib lacks the signature: run from the base
+   checkout's root.  Per function: the caller's demand proved through it,
+   the function's own definition side all PROVED (no `@[assume]`), a
+   too-weak control, and a copy of the function with a deliberate bug that
+   is NOT proved. *)
+let abstract_leftovers_d_suite =
+  let load_mod name =
+    let m, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (m.March_ast.Ast.mod_name, March_ast.Ast.Public, m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods = List.map load_mod [ "list.march"; "enum.march"; "iterable.march"; "range.march" ] in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  let user_file (o : March_refinecheck.Obligation.t) =
+    let f = o.March_refinecheck.Obligation.span.March_ast.Ast.file in
+    f = "" || f = "<unknown>"
+  in
+  let obs_of keep =
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        if keep o then
+          Some (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> "")
+        else None)
+      (March_refinecheck.Obligation.all ())
+  in
+  (* The lines of [file] from the one starting with [header] (after
+     indentation) to the next doc string, i.e. that one function. *)
+  let fn_range path header =
+    let lines = String.split_on_char '\n' (In_channel.with_open_bin path In_channel.input_all) in
+    let rec find_from k pred i = function
+      | [] -> None
+      | l :: rest -> if i >= k && pred l then Some i else find_from k pred (i + 1) rest
+    in
+    let starts l = String.length (String.trim l) >= String.length header
+                   && String.sub (String.trim l) 0 (String.length header) = header in
+    match find_from 1 starts 1 lines with
+    | None -> Alcotest.failf "no `%s` in %s" header path
+    | Some lo ->
+      let hi = Option.value ~default:max_int (find_from (lo + 1) (fun l -> contains l "  doc ") 1 lines) in
+      (lo, hi)
+  in
+  (* Typecheck and refine-check [src] with the stdlib modules beside it.
+     Returns the user module's error messages, its obligations, and the
+     obligations inside each requested stdlib function ([(file, header)]). *)
+  let run ?(defs = []) (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let m = { m with March_ast.Ast.mod_decls = mods @ prelude_decls @ m.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module m in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx m;
+    let errs =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          let f = d.March_errors.Errors.span.March_ast.Ast.file in
+          if d.March_errors.Errors.severity = March_errors.Errors.Error && (f = "" || f = "<unknown>")
+          then Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    let def_obs =
+      List.map
+        (fun (file, header) ->
+          let path = List.find (fun p -> Filename.basename p = file) paths in
+          let lo, hi = fn_range path header in
+          obs_of (fun o ->
+              let sp = o.March_refinecheck.Obligation.span in
+              sp.March_ast.Ast.file = path && sp.March_ast.Ast.start_line >= lo
+              && sp.March_ast.Ast.start_line < hi))
+        defs
+    in
+    (errs, obs_of user_file, def_obs)
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let of_callee c obs = List.filter_map (fun (c', v, r) -> if c' = c then Some (v, r) else None) obs in
+  let ps = Alcotest.(list (pair string string)) in
+  let t3 = Alcotest.(triple int int int) in
+  let proved = ("proved", "") in
+  let weak = ("skipped", "abstract-refinement-too-weak") in
+  let m name body = "mod " ^ name ^ " do\n" ^ body ^ "end\n" in
+  let sums =
+    {|  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn one_pos(x : Option({Int | _ > 0})) : Int do 0 end
+|}
+  in
+  let caller ~demand ~call = Printf.sprintf "  fn go(ys : List(Int)) : Int do %s(%s) end\n" demand call in
+  (* One row: the demand proves through the shipped function, whose own
+     definition side is entirely PROVED, with [def_n] obligations. *)
+  let accept ~name ~demand ~call ~file ~header ~def_n =
+    gated (Printf.sprintf "%s: the demand proves; the definition side is proved" name) (fun () ->
+        let errs, obs, defs =
+          run ~defs:[ (file, header) ] (m "D" (sums ^ caller ~demand ~call:(call "fn y -> y > 0")))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check ps "the demand" [ proved ] (of_callee demand obs);
+        Alcotest.check t3 "user module" (1, 0, 0) (triple obs);
+        Alcotest.check t3 (name ^ "'s own definition side") (def_n, 0, 0) (triple (List.hd defs)))
+  in
+  let too_weak ~name ~demand ~call =
+    gated (Printf.sprintf "%s: a weaker lambda is too-weak, not proved" name) (fun () ->
+        let _, obs, _ = run (m "W" (sums ^ caller ~demand ~call:(call "fn y -> y >= 0"))) in
+        Alcotest.check ps "the demand" [ weak ] (of_callee demand obs);
+        Alcotest.check t3 "user module" (0, 0, 1) (triple obs))
+  in
+  (* A copy of the function with a bug, in the user module: its return is
+     not proved, and neither is the caller's demand. *)
+  let wrong_body ?(violation = true) ~name ~demand ~fn_src ~call ~bad_ret () =
+    gated (Printf.sprintf "%s: a wrong body is not proved" name) (fun () ->
+        let _, obs, _ = run (m "X" (sums ^ fn_src ^ caller ~demand ~call:(call "fn y -> y > 0"))) in
+        let rv = of_callee bad_ret obs in
+        Alcotest.(check bool) "the wrong return is recorded" true (rv <> []);
+        (* The `Nil` tail may prove; some other tail must not. *)
+        Alcotest.(check bool) "the wrong return is not all proved" true
+          (List.exists (fun x -> x <> proved) rv);
+        Alcotest.(check bool) "a violation in the wrong body" violation
+          (List.exists (fun (_, v, _) -> v = "violated") obs);
+        let dv = of_callee demand obs in
+        Alcotest.(check int) "the demand is recorded" 1 (List.length dv);
+        Alcotest.(check bool) "the demand is not proved" false (List.mem proved dv))
+  in
+  let bad_filter =
+    {|  fn bfilter(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do Cons(h, bfilter(t, pred)) else Cons(h, bfilter(t, pred)) end
+    end
+  end
+|}
+  in
+  [ (* B2 *)
+    accept ~name:"Enum.filter" ~demand:"sum_pos" ~call:(fun f -> "Enum.filter(ys, " ^ f ^ ")")
+      ~file:"enum.march" ~header:"fn filter(" ~def_n:3;
+    too_weak ~name:"Enum.filter" ~demand:"sum_pos" ~call:(fun f -> "Enum.filter(ys, " ^ f ^ ")");
+    wrong_body ~name:"Enum.filter" ~demand:"sum_pos" ~fn_src:bad_filter
+      ~call:(fun f -> "bfilter(ys, " ^ f ^ ")") ~bad_ret:"return of bfilter" ();
+    (* E1 *)
+    accept ~name:"Enum.find" ~demand:"one_pos" ~call:(fun f -> "Enum.find(ys, " ^ f ^ ")")
+      ~file:"enum.march" ~header:"fn find(" ~def_n:2;
+    too_weak ~name:"Enum.find" ~demand:"one_pos" ~call:(fun f -> "Enum.find(ys, " ^ f ^ ")");
+    wrong_body ~name:"Enum.find" ~demand:"one_pos"
+      ~fn_src:
+        {|  fn bfind(xs : List(a), pred : a -> Bool[p]) : Option(a[p]) do
+    match xs do
+    Nil        -> None
+    Cons(h, t) -> if pred(h) do bfind(t, pred) else Some(h) end
+    end
+  end
+|}
+      ~call:(fun f -> "bfind(ys, " ^ f ^ ")") ~bad_ret:"return of bfind" ();
+    (* §9.4: Enum.take_while *)
+    accept ~name:"Enum.take_while" ~demand:"sum_pos" ~call:(fun f -> "Enum.take_while(ys, " ^ f ^ ")")
+      ~file:"enum.march" ~header:"fn take_while(" ~def_n:2;
+    too_weak ~name:"Enum.take_while" ~demand:"sum_pos" ~call:(fun f -> "Enum.take_while(ys, " ^ f ^ ")");
+    wrong_body ~name:"Enum.take_while" ~demand:"sum_pos"
+      ~fn_src:
+        {|  fn btw(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, btw(t, pred)) else Cons(h, Nil) end
+    end
+  end
+|}
+      ~call:(fun f -> "btw(ys, " ^ f ^ ")") ~bad_ret:"return of btw" ();
+    (* B2 *)
+    accept ~name:"Iterable.filter" ~demand:"sum_pos" ~call:(fun f -> "Iterable.filter(ys, " ^ f ^ ")")
+      ~file:"iterable.march" ~header:"fn filter(" ~def_n:3;
+    too_weak ~name:"Iterable.filter" ~demand:"sum_pos" ~call:(fun f -> "Iterable.filter(ys, " ^ f ^ ")");
+    accept ~name:"Iterable.find" ~demand:"one_pos" ~call:(fun f -> "Iterable.find(ys, " ^ f ^ ")")
+      ~file:"iterable.march" ~header:"fn find(" ~def_n:2;
+    too_weak ~name:"Iterable.find" ~demand:"one_pos" ~call:(fun f -> "Iterable.find(ys, " ^ f ^ ")");
+    (* `Some(h)` with no test of `pred`: nothing constrains `$abs_p(h)`, so an
+       `unconstrained-subject` skip rather than a violation (phase B's I3). *)
+    wrong_body ~violation:false ~name:"Iterable.find" ~demand:"one_pos"
+      ~fn_src:
+        {|  fn bifind(xs : List(a), pred : a -> Bool[p]) : Option(a[p]) do
+    match xs do
+    Nil        -> None
+    Cons(h, _) -> Some(h)
+    end
+  end
+|}
+      ~call:(fun f -> "bifind(ys, " ^ f ^ ")") ~bad_ret:"return of bifind" ();
+    (* B1: the bare `filter` IS Prelude.filter *)
+    accept ~name:"Prelude.filter (bare `filter`)" ~demand:"sum_pos" ~call:(fun f -> "filter(ys, " ^ f ^ ")")
+      ~file:"prelude.march" ~header:"fn filter(" ~def_n:3;
+    too_weak ~name:"Prelude.filter (bare `filter`)" ~demand:"sum_pos" ~call:(fun f -> "filter(ys, " ^ f ^ ")");
+    wrong_body ~name:"Prelude.filter (branches swapped)" ~demand:"sum_pos"
+      ~fn_src:
+        {|  fn pfilter(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do pfilter(t, pred) else Cons(h, pfilter(t, pred)) end
+    end
+  end
+|}
+      ~call:(fun f -> "pfilter(ys, " ^ f ^ ")") ~bad_ret:"return of pfilter" ();
+    (* R2: a concrete base, through a private natural-style helper
+       `filter_list` (its obligations sit in the same line range). *)
+    gated "Range.filter: the demand proves; the definition side is proved" (fun () ->
+        let errs, obs, defs =
+          run ~defs:[ ("range.march", "fn filter(") ]
+            (m "R" (sums ^ "  fn go(n : Int) : Int do sum_pos(Range.filter(Range.new(0, n), fn y -> y > 0)) end\n"))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check ps "the demand" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "user module" (1, 0, 0) (triple obs);
+        Alcotest.check t3 "Range.filter's own definition side (with filter_list)" (8, 0, 0)
+          (triple (List.hd defs)));
+    gated "Range.filter: a weaker lambda is too-weak, not proved" (fun () ->
+        let _, obs, _ =
+          run (m "RW" (sums ^ "  fn go(n : Int) : Int do sum_pos(Range.filter(Range.new(0, n), fn y -> y >= 0)) end\n"))
+        in
+        Alcotest.check ps "the demand" [ weak ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "user module" (0, 0, 1) (triple obs));
+    gated "Range.filter: a wrong delegation is not proved" (fun () ->
+        let _, obs, _ =
+          run
+            (m "RX"
+               (sums
+              ^ {|  fn rfilter(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool[p]) : List(Int[p]) do
+    List.filter(Range.to_list(r), fn y -> true)
+  end
+  fn go(n : Int) : Int do sum_pos(rfilter(Range.new(0, n), fn y -> y > 0)) end
+|}))
+        in
+        Alcotest.check ps "the wrong return" [ weak ] (of_callee "return of rfilter" obs);
+        let dv = of_callee "sum_pos" obs in
+        Alcotest.(check int) "the demand is recorded" 1 (List.length dv);
+        Alcotest.(check bool) "the demand is not proved" false (List.mem proved dv));
+    wrong_body ~name:"Range.filter's helper (keeps rejected elements)" ~demand:"sum_pos"
+      ~fn_src:
+        {|  fn rfl(xs : List(Int), f : Int -> Bool[p]) : List(Int[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> if f(h) do Cons(h, rfl(t, f)) else Cons(h, rfl(t, f)) end
+    end
+  end
+  fn rf(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool[p]) : List(Int[p]) do
+    rfl(Range.to_list(r), f)
+  end
+|}
+      ~call:(fun f -> "rf(Range.new(0, List.length(ys)), " ^ f ^ ")") ~bad_ret:"return of rfl" () ]
+
 (* Phase 4 (plan specs/plans/2026-10-07-abstract-refinements-phase4-plan.md):
    the `a[p]` / `Bool[p]` shorthand must mean exactly the spelled-out form.
    Equivalence is checked where it matters: [Refine_abstract.collect] (names
@@ -21990,6 +22261,7 @@ let () =
       ("abstract-leftovers-a", abstract_leftovers_a_suite);
       ("abstract-leftovers-b", abstract_leftovers_b_suite);
       ("abstract-leftovers-c", abstract_leftovers_c_suite);
+      ("abstract-leftovers-d", abstract_leftovers_d_suite);
       ("abstract-sugar", abstract_sugar_suite);
       ("hidden-field-elements", hidden_field_elements_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

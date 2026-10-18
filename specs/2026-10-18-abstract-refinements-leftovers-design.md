@@ -6,7 +6,9 @@
 generalized slots, concrete bases, the erased sort) landed 2026-10-18
 (`specs/progress/2026-10-18-abstract-refinements-leftovers-phaseB.md`); phase C (tuple element
 returns, destructuring, `List.partition`) landed 2026-10-18
-(`specs/progress/2026-10-18-abstract-refinements-leftovers-phaseC.md`); D–E not started.
+(`specs/progress/2026-10-18-abstract-refinements-leftovers-phaseC.md`); phase D (the stdlib
+sweep: `Prelude`/`Enum`/`Iterable`/`Range` filters and finds) landed 2026-10-18
+(`specs/progress/2026-10-18-abstract-refinements-leftovers-phaseD.md`); E not started.
 Five phases (§8), one PR each. Phase E was decided "go" (see the trailing user decisions).
 **Continues:** `specs/2026-09-20-abstract-refinements-design.md`. All four of its phases have
 landed (records: `specs/progress/2026-09-20-…-phase1.md`, `2026-10-06-…-phase2.md`,
@@ -333,7 +335,7 @@ Every stdlib function whose callback is a one-argument Bool predicate (the grep 
 | `Enum.take_while` (`enum.march:577`) | `List(a[p])` | route 1: `List.take_while`'s natural body | D |
 | `Iterable.filter` (`iterable.march:72`) | `List(a[p])` | route 1 | D |
 | `Prelude.filter` (`stdlib/prelude.march:134`) | `List(a[p])` | route 1. **The highest-value row**: a bare `filter(xs, f)` in user code is this function (B1). | D |
-| `Range.filter` (`stdlib/range.march:89`) | `f : Int -> Bool[p]`, `: List(Int[p])` | route 2: the body is already `List.filter(to_list(r), f)`; needs §3.2's concrete base (R1/R2) | D |
+| `Range.filter` (`stdlib/range.march:89`) | `f : Int -> Bool[p]`, `: List(Int[p])` | route 2 as designed (the body is already `List.filter(to_list(r), f)`); needs §3.2's concrete base (R1/R2). **As built: route 1**, a private natural-style `pfn filter_list(xs : List(Int), f : Int -> Bool[p]) : List(Int[p])`, because a `List.filter` call resolves to no definition when `stdlib/list.march` is itself the entry, which would raise that file's CI skip ratchet (progress note, phase D) | D |
 | `Deque.filter` (`stdlib/deque.march:130`) | `Deque(a[p])` | route 1 over the fields, after phase E (§6.5) | E |
 
 **Not candidates, and why:**
@@ -514,7 +516,8 @@ as input and `fn y -> y > 5`, `neg` gets `_ > 0 && !(y > 5)` (§3.4, conjoined o
 
 ### 6.4 Phase D (stdlib sweep)
 
-Signatures and bodies per §4.2's table, nothing in OCaml. `Range.filter` depends on phase B.
+Signatures and bodies per §4.2's table, nothing in OCaml. `Range.filter` depends on phase B
+(and, as built, calls its own natural-style `filter_list` instead of `List.filter`; see §4.2).
 Each rewritten body (Enum.filter, Enum.take_while, Iterable.filter, Prelude.filter) is
 `List.filter`'s or `List.take_while`'s natural body verbatim, renamed.
 

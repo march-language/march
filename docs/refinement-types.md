@@ -2383,14 +2383,23 @@ as `y > 0 && y > 0`.
 
 **The standard library.** `List.filter`, `List.find`
 (`Option({a | p(_)})`), `List.take_while`, `Option.filter` and
-`List.partition` all carry `p`:
+`List.partition` all carry `p`, and so do the same combinators elsewhere:
+the bare `filter` (`Prelude.filter`), `Enum.filter`, `Enum.take_while` and
+`Iterable.filter` (`List(a[p])`), `Enum.find` and `Iterable.find`
+(`Option(a[p])`), and `Range.filter`, whose predicate is over `Int`
+(`f : Int -> Bool[p]`, returning `List(Int[p])`):
 
 ```march
 fn one_pos(o : Option({Int | _ > 0})) : Int do … end
 one_pos(List.find(ys, fn y -> y > 0))         -- proved
 one_pos(Option.filter(o, is_pos))             -- proved
 sum_pos(List.take_while(ys, is_pos))          -- proved
+sum_pos(filter(ys, fn y -> y > 0))            -- proved: Prelude.filter
+one_pos(Enum.find(ys, fn y -> y > 0))         -- proved
+sum_pos(Range.filter(Range.new(0, n), fn y -> y > 0))  -- proved
 ```
+
+Each proves its own contract on the definition side; none is assumed.
 
 **Tuples: `List.partition`.** A return that is a tuple of containers carries
 one element slot per component:
@@ -2447,8 +2456,11 @@ demand meets one of these):
 - **One argument only.** `Map.filter`'s `(k, v) -> Bool` would need a
   two-argument `p(k, v)`. (A fold's accumulator invariant needs no abstract
   refinement at all; see [Folds](#folds-an-accumulator-invariant).)
-- **Not every combinator.** `drop_while` keeps no element fact;
-  `Deque.filter` does not declare one.
+- **Not every combinator.** `drop_while` (`List`, `Enum`) keeps no element
+  fact: its result starts at the first element that FAILS `pred`, so nothing
+  holds of all of it. `List.filter_map`'s callback returns an `Option`, not a
+  `Bool`, so nothing defines `p`. `List.find_index` returns an index, not an
+  element. `Deque.filter` does not declare one yet.
 - **A tuple component only through destructuring.** `Tuple.first(g(…))`, a
   tuple bound whole and taken apart later (`let r = g(…)` then
   `match r do …`), a `match` with more than one arm or a refutable component
@@ -2533,9 +2545,11 @@ later carries nothing.
 
 ### What element refinements do not do
 
-- **Only five combinators carry an abstract refinement** (`List.filter`,
-  `List.find`, `List.take_while`, `Option.filter`, and `List.partition`, per
-  component), instantiated from a lambda
+- **Only these combinators carry an abstract refinement:** `List.filter`,
+  `List.find`, `List.take_while`, `Option.filter`, `List.partition` (per
+  component), `Prelude.filter` (the bare `filter`), `Enum.filter`,
+  `Enum.find`, `Enum.take_while`, `Iterable.filter`, `Iterable.find` and
+  `Range.filter`. Each is instantiated from a lambda
   (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
   a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
