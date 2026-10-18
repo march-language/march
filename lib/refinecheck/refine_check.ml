@@ -728,6 +728,28 @@ let entry_mentions (names : string list) ((_, slots) : string * elem option list
   in
   names <> [] && List.exists slot slots
 
+(* Does the structural induction hypothesis ([elem_ret_hyp]) cover the call
+   [fname(args)]?  It must be a call to the function being walked (not a
+   local or callback of the name), some argument must be a structural
+   subvariable of its parameter, and every DEFINER position of an abstract
+   refinement must receive the function's own parameter, unshadowed
+   (review of a2f9fb2a5: `filt(t, fn y -> true)` returned elements that
+   satisfy `true`, and the hypothesis read them as `p`; so did a swapped
+   pair of definers, a name rebound to another lambda, and an alias, which
+   is declined too). *)
+let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
+    ((self, sets, definers) : string * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
+  fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
+  && List.length sets = List.length args
+  && List.exists2
+       (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+       args sets
+  && List.for_all
+       (fun (i, n, sg) ->
+         (match List.nth_opt args i with Some (A.EVar { A.txt = v; _ }) -> v = n | _ -> false)
+         && match List.assoc_opt n cb with Some sg' -> sg' == sg | None -> false)
+       definers
+
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
   : (string * elem option list) option =
   match e with
@@ -735,12 +757,7 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
   | A.EAnnot (e', _, _) -> container_entry_of_expr ctx defs cb ce e'
   | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
     (match !elem_ret_hyp with
-     | Some (self, sets, entry)
-       when fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
-            && List.length sets = List.length args
-            && List.exists2
-                 (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
-                 args sets ->
+     | Some (self, sets, Single entry, definers) when hyp_applies ctx cb fname args (self, sets, definers) ->
        Some entry
      | _ ->
        (match
@@ -785,6 +802,33 @@ and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
             when entry_is_closed entry
                  && not (entry_mentions (callee_abstracts ctx fname) entry) ->
             Some entry
+          | _ -> None)
+       | None -> None)
+    | _ -> None
+
+(* The declared TUPLE element return of [fname] (leftovers design 2026-10-18
+   §5.2, §5.4), one entry per component, as a fact at a call site: only once
+   every tail was proved to meet it ([elem_ret_proved]), and per component
+   under [declared_elem_return]'s conditions (closed, free of the callee's
+   abstract refinements, which mean something different at every call).  A
+   callback parameter or local of the name carries nothing. *)
+let declared_tuple_return (ctx : rctx) (cb : cbenv) (fname : string)
+  : (string * elem option list) option list option =
+  if List.mem_assoc fname cb then None
+  else
+    match resolve_key ctx fname with
+    | Some key when Hashtbl.mem elem_ret_proved key ->
+      (match Hashtbl.find_opt fn_defs_tbl key with
+       | Some (_, fd) ->
+         (match ret_elems_of_ty fd.A.fn_ret_ty with
+          | Some (Tuple comps) ->
+            let abs = callee_abstracts ctx fname in
+            Some
+              (List.map
+                 (function
+                   | Some e when entry_is_closed e && not (entry_mentions abs e) -> Some e
+                   | _ -> None)
+                 comps)
           | _ -> None)
        | None -> None)
     | _ -> None
@@ -1076,9 +1120,17 @@ let abstract_slot_of_ty ~(abs : string list) (t : A.ty) : (abstract_slot, string
      | _ -> None)
   | _ -> None
 
-let abstract_return_slot (fd : A.fn_def) : (abstract_slot, string) result option =
-  Option.bind fd.A.fn_ret_ty
-    (abstract_slot_of_ty ~abs:(Refine_abstract.names ~is_known:known_predicate_fn fd))
+(* [~component:i]: the slot of component [i] of a TUPLE return (leftovers
+   design 2026-10-18 §5.3); without it a tuple return has no slot. *)
+let abstract_return_slot ?component (fd : A.fn_def) : (abstract_slot, string) result option =
+  let rec strip (t : A.ty) = match unlinear t with A.TyRefine (b, _, _) -> strip b | t -> t in
+  let ret =
+    match component, fd.A.fn_ret_ty with
+    | None, t -> t
+    | Some i, Some t -> (match strip t with A.TyTuple ts -> List.nth_opt ts i | _ -> None)
+    | Some _, None -> None
+  in
+  Option.bind ret (abstract_slot_of_ty ~abs:(Refine_abstract.names ~is_known:known_predicate_fn fd))
 
 (* [inst(S, p ↦ (y, q))] over [y]: the slot's binder renamed to [y] (the slot
    is closed over its binder, so this captures nothing), then every `p(v)`
@@ -1538,8 +1590,9 @@ let scratch_implies ~root defs (ctx : rctx) path lets sc re (cb : cbenv) ~(span 
    query, in a scratch ledger, so a refutation is reported as too-weak rather
    than as a definite violation (§3.3, decision 9.2).  [None]: [g] declares no
    abstract element return; the caller falls through to [demand_flow]. *)
-let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv) ~(span : A.span)
-    ~(callee : string) ((_, slots) : string * elem option list) (g : string) (args : A.expr list)
+let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) ~(callee : string) ((_, slots) : string * elem option list) (g : string)
+    (args : A.expr list)
   : [ `Proved | `Too_weak of string | `Uninstantiated of string | `Undecided ] option =
   let abs = callee_abstracts ctx g in
   match resolve_key ctx g, slots with
@@ -1547,7 +1600,7 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
     (match Hashtbl.find_opt fn_defs_tbl key with
      | None -> None
      | Some (_, fd) ->
-       (match abstract_return_slot fd with
+       (match abstract_return_slot ?component fd with
         | Some (Ok sl) when List.mem sl.sl_abs abs ->
           let p = sl.sl_abs in
           let is_known = known_predicate_fn in
@@ -1702,6 +1755,58 @@ let postcond_param ~(cb : cbenv) (ctx : rctx) defs (ce : contenv) :
      | Some (`Scalar r) -> Some r
      | _ -> None)
 
+(* `$tuple_proj(i, n, g(args))`: component [i] of the [n]-tuple a call
+   returns, as a [launder] entry.  The `$` prefix cannot be a March
+   identifier, so no program can spell it and nothing resolves it: the other
+   readers of [lets] ([local_lambda_of]: lambdas only;
+   [Refine_call.alias_withdrawal_cause]: a head equal to a measure spelling)
+   pass it by.  The arity rides along so a reader can check it against the
+   callee's declared tuple. *)
+let tuple_proj (i : int) (n : int) (call : A.expr) : A.expr =
+  let lit k = A.ELit (A.LitInt k, A.dummy_span) in
+  A.EApp (A.EVar { A.txt = "$tuple_proj"; A.span = A.dummy_span }, [ lit i; lit n; call ], A.dummy_span)
+
+(* Push the projections a destructuring pattern binds, [lets] already
+   shadowed by [names] (every binder of the construct).  Only a flat tuple of
+   variables and wildcards over a direct call qualifies, and only when the
+   call mentions none of the new binders (`let (xs, b) = g(xs)`: the entry
+   would name the NEW `xs`). *)
+let push_tuple_projs (lets : launder) ~(names : string list) (pat : A.pattern) (rhs : A.expr) : launder =
+  match pat, rhs with
+  | A.PatTuple (ps, _), A.EApp (A.EVar _, _, _)
+    when List.for_all (function A.PatVar _ | A.PatWild _ -> true | _ -> false) ps
+         && not (expr_mentions names rhs) ->
+    let n = List.length ps in
+    fst
+      (List.fold_left
+         (fun (lets, i) p ->
+           match p with
+           | A.PatVar x -> ((x.A.txt, tuple_proj i n rhs) :: lets, i + 1)
+           | _ -> (lets, i + 1))
+         (lets, 0) ps)
+  | _ -> lets
+
+(* The arity of [g]'s declared tuple return, if it declares one. *)
+let tuple_arity (ctx : rctx) defs (cb : cbenv) (g : string) : int option =
+  let rec strip (t : A.ty) = match unlinear t with A.TyRefine (b, _, _) -> strip b | t -> t in
+  match Option.bind (callee_sig ctx defs cb g) (fun sg -> sg.ret_ty) with
+  | Some t -> (match strip t with A.TyTuple ts -> Some (List.length ts) | _ -> None)
+  | None -> None
+
+(* The tuple structural induction hypothesis (leftovers design 2026-10-18
+   §5.2, §5.4): a call [g(args)] to the function being walked, whose TUPLE
+   element return of arity [n] is being gated (or was proved), with some
+   argument a structural subvariable of its parameter — the condition
+   [container_entry_of_expr]'s hypothesis arm applies to a container
+   return.  Its per-component entries. *)
+let tuple_self_hyp (ctx : rctx) (cb : cbenv) (g : string) (args : A.expr list) (n : int)
+  : (string * elem option list) option list option =
+  match !elem_ret_hyp with
+  | Some (self, sets, Tuple h, definers)
+    when List.length h = n && hyp_applies ctx cb g args (self, sets, definers) ->
+    Some h
+  | _ -> None
+
 let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
     (a : A.expr) : bool =
@@ -1820,18 +1925,45 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
              (`let zs = List.filter(ys, fn y -> y > 0)`): re-examine that call
              here.  [lets] retires the record when [xv] or any name the call
              mentions is rebound, so the call still denotes [xv]'s value. *)
-          let via_let =
-            match List.assoc_opt xv lets with
-            | Some (A.EApp (A.EVar { A.txt = g; _ }, args, _)) ->
-              abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
-            | _ -> None
+          let no_entry () =
+            record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots)
+              ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
+            false
           in
-          (match via_let with
-           | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
-           | None ->
-             record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots)
-               ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
-             false)
+          (* [xv] as an entry: Refined-vs-Refined against the demand, exactly
+             as a [contenv] variable. *)
+          let as_entry (entry : string * elem option list) : bool =
+            check_elements ~root errctx defs ctx path lets sc re cb ((xv, entry) :: ce) ~span ~callee
+              (container, slots) a
+          in
+          (match List.assoc_opt xv lets with
+           (* A component of a destructured call (`let (yes, no) = g(…)`, or a
+              single-arm tuple `match`; leftovers design 2026-10-18 §5.4):
+              the tuple self-hypothesis, then the abstract instantiation of
+              that component, then the callee's proved declared tuple return. *)
+           | Some (A.EApp (A.EVar { A.txt = "$tuple_proj"; _ }, [ A.ELit (A.LitInt i, _); A.ELit (A.LitInt n, _); A.EApp (A.EVar { A.txt = g; _ }, args, _) ], _))
+             when tuple_arity ctx defs cb g = Some n ->
+             (match tuple_self_hyp ctx cb g args n with
+              | Some h ->
+                (match List.nth_opt h i with Some (Some entry) -> as_entry entry | _ -> no_entry ())
+              | None ->
+                (match
+                   abstract_flow ~component:i ~root defs ctx path lets sc re cb ce ~span:xsp ~callee
+                     (container, slots) g args
+                 with
+                 | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
+                 | None ->
+                   (match declared_tuple_return ctx cb g with
+                    | Some d when List.length d = n ->
+                      (match List.nth_opt d i with Some (Some entry) -> as_entry entry | _ -> no_entry ())
+                    | _ -> no_entry ())))
+           | Some (A.EApp (A.EVar { A.txt = g; _ }, args, _)) ->
+             (match
+                abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
+              with
+              | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
+              | None -> no_entry ())
+           | _ -> no_entry ())
         | A.EApp (A.EVar { A.txt = g; _ }, args, _) ->
           (match
              abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
@@ -2137,6 +2269,84 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
           | Some (`V, what) ->
             `Unproved (Printf.sprintf "%s can fail it for some input" what)
           | Some (_, what) -> `Unproved (Printf.sprintf "%s is not known to satisfy it" what))
+
+(* One TAIL of a function whose return is a TUPLE of element-refined
+   components (leftovers design 2026-10-18 §5.2), against those components:
+   - a tuple of the right arity: each component by [check_elements];
+   - a call: per component, the tuple self-hypothesis ([tuple_self_hyp]),
+     else the abstract instantiation of that component ([abstract_flow
+     ~component]), else the callee's proved declared tuple return;
+   - anything else (a variable, a `match` result bound earlier): a recorded
+     skip.  Returns whether every component was proved. *)
+let rec check_ret_elems ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) ~(callee : string) (comps : (string * elem option list) option list)
+    (t : A.expr) : bool =
+  let n = List.length comps in
+  let first_pred () =
+    match List.find_map Fun.id comps with Some (_, slots) -> first_slot_pred slots | None -> "<element refinement>"
+  in
+  let untraced what =
+    record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_pred ()) ~what;
+    false
+  in
+  let each (f : int -> string * elem option list -> bool) : bool =
+    List.fold_left
+      (fun (acc, i) c ->
+        match c with
+        | None -> (acc, i + 1)
+        | Some er ->
+          let ok = f i er in
+          (acc && ok, i + 1))
+      (true, 0) comps
+    |> fst
+  in
+  match t with
+  | A.EAnnot (e, _, _) -> check_ret_elems ~root errctx defs ctx path lets sc re cb ce ~span ~callee comps e
+  | A.ETuple (es, _) when List.length es = n ->
+    each (fun i er ->
+        check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er (List.nth es i))
+  | A.EApp (A.EVar { A.txt = g; A.span = gsp }, args, _) ->
+    let label = g ^ "(…)" in
+    (* A component entry stands in for the call under a name no program can
+       spell, so the comparison reads like a variable's. *)
+    let against (er : string * elem option list) (have : (string * elem option list) option) : bool =
+      match have with
+      | Some entry ->
+        check_elements ~root errctx defs ctx path lets sc re cb ((label, entry) :: ce) ~span ~callee er
+          (A.EVar { A.txt = label; A.span = gsp })
+      | None ->
+        record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred (snd er))
+          ~what:(Printf.sprintf "this component of `%s` is not known to satisfy it" label);
+        false
+    in
+    (match tuple_self_hyp ctx cb g args n with
+     | Some h -> each (fun i er -> against er (Option.join (List.nth_opt h i)))
+     | None ->
+       let declared =
+         lazy (match declared_tuple_return ctx cb g with Some d when List.length d = n -> Some d | _ -> None)
+       in
+       each (fun i er ->
+           match
+             abstract_flow ~component:i ~root defs ctx path lets sc re cb ce ~span:(arg_span span t) ~callee er g
+               args
+           with
+           | Some v ->
+             record_abstract_verdict errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred (snd er)) v
+           | None ->
+             (match Lazy.force declared with
+              | Some d -> against er (Option.join (List.nth_opt d i))
+              | None ->
+                record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred (snd er))
+                  ~what:(Printf.sprintf "`%s` declares no proved tuple element return" g);
+                false)))
+  | _ -> untraced "the tuple's components are not traced here"
+
+(* A tail against a function's element return, whichever shape it has. *)
+let check_ret_shape ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) ~(callee : string) (er : ret_elems) (t : A.expr) : bool =
+  match er with
+  | Single er -> check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er t
+  | Tuple comps -> check_ret_elems ~root errctx defs ctx path lets sc re cb ce ~span ~callee comps t
 
 (* The sort marker of a container argument's ELEMENTS, from the typechecker's
    span table ([None] marker = Int): [Some m] when known, [None] when the
@@ -2450,7 +2660,7 @@ let let_rhs_admitted (ctx : rctx) (e : A.expr) : bool =
    the enclosing function's verdict (design 2026-10-18 element-flow
    follow-ups, G3-2). *)
 let ret_elem_demand :
-    (string * (string * elem option list) * A.span * A.expr list ref * bool ref) option ref =
+    (string * ret_elems * A.span * A.expr list ref * bool ref) option ref =
   ref None
 
 let with_no_ret_demand (f : unit -> 'a) : 'a =
@@ -2470,15 +2680,28 @@ let with_no_ret_demand (f : unit -> 'a) : 'a =
    element-flow follow-ups, row z2.  For the fallback check, which runs in the
    parameters' env, inner binders clashing with a parameter ([pnames]) are
    renamed apart in the path and the tail ([Refine_post.rename_free]). *)
+(* The predicate a skip about a container return names: the first slot of
+   its first entry (a [Tuple] has at least one). *)
+let ret_elems_pred (er : ret_elems) : string =
+  match er with
+  | Single e -> first_slot_pred (snd e)
+  | Tuple cs ->
+    (match List.find_map Fun.id cs with
+     | Some e -> first_slot_pred (snd e)
+     | None -> "<element refinement>")
+
 let elem_return_tails errctx ~(label : string) ~(fname : string) ~(span : A.span)
     ~(verdict : bool ref) ~(pnames : string list) (base : (A.expr * bool) list) (body : A.expr)
-    (er : string * elem option list) =
+    (er : ret_elems) =
   List.filter_map
     (fun (p, t, bound) ->
-      match List.find_opt (fun n -> elem_entry_mentions [ n ] er) bound with
+      (* Every component of a tuple return counts (leftovers phase C). *)
+      match
+        List.find_opt (fun n -> List.exists (elem_entry_mentions [ n ]) (ret_entries er)) bound
+      with
       | Some n ->
         record_elem_skip errctx ~span:(arg_span span t) ~callee:label
-          ~predicate:(first_slot_pred (snd er))
+          ~predicate:(ret_elems_pred er)
           ~what:
             (Printf.sprintf "the return expression of `%s` under an inner binding that rebinds `%s`"
                fname n);
@@ -2494,7 +2717,7 @@ let elem_return_tails errctx ~(label : string) ~(fname : string) ~(span : A.span
 (* The tails of [ts] the walk never reached ([remaining]), checked under the
    env given (the leftover check of [elem_return_tails]'s doc). *)
 let check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~(label : string) ~(fname : string)
-    ~(span : A.span) ~(verdict : bool ref) er ts (remaining : A.expr list ref) : unit =
+    ~(span : A.span) ~(verdict : bool ref) (er : ret_elems) ts (remaining : A.expr list ref) : unit =
   List.iter
     (fun (_, t, (p', t', complete)) ->
       if List.exists (fun r -> r == t) !remaining then
@@ -2502,13 +2725,13 @@ let check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~(label : string
           (* An inner binder the renaming could not reach is still under the
              parameter's name: not checked. *)
           record_elem_skip errctx ~span:(arg_span span t) ~callee:label
-            ~predicate:(first_slot_pred (snd er))
+            ~predicate:(ret_elems_pred er)
             ~what:
               (Printf.sprintf
                  "the return expression of `%s` under an inner binding of a parameter's name" fname);
           verdict := false
         end
-        else if not (check_elements ~root errctx defs ctx p' lets sc re cb ce ~span ~callee:label er t')
+        else if not (check_ret_shape ~root errctx defs ctx p' lets sc re cb ce ~span ~callee:label er t')
         then verdict := false)
     ts
 
@@ -2519,7 +2742,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   (match !ret_elem_demand with
    | Some (label, er, span, remaining, verdict) when List.exists (fun t -> t == e) !remaining ->
      remaining := List.filter (fun t -> t != e) !remaining;
-     if not (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee:label er e) then
+     if not (check_ret_shape ~root errctx defs ctx path lets sc re cb ce ~span ~callee:label er e) then
        verdict := false
    | _ -> ());
   match e with
@@ -2746,6 +2969,9 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                let lets = launder_shadow lets names in
                (match b.A.bind_pat, b.A.bind_expr with
                 | A.PatVar n, (A.EApp _ as rhs) -> (n.A.txt, rhs) :: lets
+                (* `let (yes, no) = g(…)`: each component, as a projection of
+                   the call (leftovers design 2026-10-18 §5.4). *)
+                | A.PatTuple _, _ -> push_tuple_projs lets ~names b.A.bind_pat b.A.bind_expr
                 (* A lambda, for an abstract refinement instantiated from the
                    name (`let f = fn y -> y > 0` then `filter(ys, f)`); the
                    alias arm below copies it forward like an application. *)
@@ -2877,6 +3103,14 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         let path = path_shadow path binders in
         (* …and a same-named laundered-guard fact — see [launder]. *)
         let lets = launder_shadow lets binders in
+        (* A SINGLE-arm, guard-free, irrefutable tuple `match` on a call binds
+           its components exactly as `let (a, b) = g(…)` does (leftovers
+           design 2026-10-18 §5.4); any other `match` binds none. *)
+        let lets =
+          match branches, br.A.branch_guard with
+          | [ _ ], None -> push_tuple_projs lets ~names:binders br.A.branch_pat subj
+          | _ -> lets
+        in
         (* …and a same-named callback/alias fact — see [cbenv]. *)
         let cb = cb_shadow cb binders in
         (* …and a same-named container fact — see [contenv]; the OUTER env is
@@ -3266,7 +3500,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     cont_add_params ce
       (if escapes then List.map (fun (p : A.param) -> { p with A.param_ty = None }) ps else ps)
   in
-  (match elem_refinement ret_ty with
+  (match ret_elems_of_ty ret_ty with
    | None -> visit ~root errctx defs ctx path lets sc re cb ce body
    | Some er ->
      (* A declared CONTAINER return (design 2026-10-18 element-flow
@@ -3311,8 +3545,15 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
          visit ~root errctx defs ctx path lets sc re cb ce body;
          check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~label ~fname:n.A.txt ~span:sp
            ~verdict er ts remaining);
-     if !verdict && entry_is_closed er && not (entry_mentions !current_abstracts er) then
-       local_elem_ret_proved := sg :: !local_elem_ret_proved);
+     (* A TUPLE return (leftovers phase C) is checked the same way, tail by
+        tail through [check_ret_shape], but lends nothing:
+        [declared_tuple_return] never reads a [cbenv] entry, and a local's
+        tuple lending is not built (conservative). *)
+     (match er with
+      | Single e
+        when !verdict && entry_is_closed e && not (entry_mentions !current_abstracts e) ->
+        local_elem_ret_proved := sg :: !local_elem_ret_proved
+      | _ -> ()));
   entry
 
 (* A lambda's body.  [assume] says whether its own parameter refinements may
@@ -3997,7 +4238,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
     with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
         with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
     let walked = if assume_params then fd else strip_param_refinements fd in
-    last_elem_return_proved := elem_refinement fd.A.fn_ret_ty <> None;
+    last_elem_return_proved := ret_elems_of_ty fd.A.fn_ret_ty <> None;
     List.iter
       (fun (c : A.fn_clause) ->
         let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
@@ -4011,7 +4252,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
            computes and the parameter-only env, the pre-2026-09-18 rule. *)
         let label = Printf.sprintf "return of %s" fd.A.fn_name.A.txt in
         let demand =
-          match elem_refinement fd.A.fn_ret_ty with
+          match ret_elems_of_ty fd.A.fn_ret_ty with
           | Some er ->
             let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
             let ts =
@@ -4047,7 +4288,27 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
                   | A.FPPat _ -> Hashtbl.create 1)
                 c.A.fc_params
             in
-            if entry_is_closed er then Some (fd.A.fn_name.A.txt, sets, er) else None
+            (* Each abstract refinement's definer parameter, with the
+               [cbenv] entry this clause starts with ([hyp_applies]).  A
+               definer the env does not hold (no callback signature)
+               leaves no way to tell it apart from a rebinding: no
+               hypothesis at all. *)
+            let definers =
+              List.map
+                (fun p ->
+                  match Refine_abstract.definer_index ~is_known:known_predicate_fn fd p with
+                  | Some i ->
+                    (match List.nth_opt c.A.fc_params i with
+                     | Some (A.FPNamed prm | A.FPDefault (prm, _)) ->
+                       let n = prm.A.param_name.A.txt in
+                       Option.map (fun sg -> (i, n, sg)) (List.assoc_opt n cb)
+                     | _ -> None)
+                  | None -> None)
+                !current_abstracts
+            in
+            if List.for_all entry_is_closed (ret_entries er) && List.for_all Option.is_some definers then
+              Some (fd.A.fn_name.A.txt, sets, er, List.filter_map Fun.id definers)
+            else None
           | _ -> None
         in
         (* A PARAMETER named like a module-level function shadows it for callee
@@ -5016,7 +5277,7 @@ let has_elem_return (fd : A.fn_def) : bool =
   let saved = !current_abstracts in
   current_abstracts := Refine_abstract.names ~is_known:known_predicate_fn fd;
   Fun.protect ~finally:(fun () -> current_abstracts := saved)
-    (fun () -> elem_refinement fd.A.fn_ret_ty <> None)
+    (fun () -> ret_elems_of_ty fd.A.fn_ret_ty <> None)
 
 let gate_elem_returns ~root defs (decls : A.decl list) : unit =
   let candidates = ref [] in

@@ -1472,6 +1472,29 @@ let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
     if List.exists Option.is_some slots then Some (c, slots) else None
   | _ -> None
 
+(* A function's element RETURN (leftovers design 2026-10-18 §5.1): today's
+   container return, or a TUPLE of them, one entry per component (`None`: that
+   component carries no element refinement).  A tuple counts only when some
+   component has an entry; a nested tuple or a tuple inside a container reads
+   [None] for that component (out of scope).  Read under whatever
+   [current_abstracts] the caller set, exactly as [elem_refinement]. *)
+type ret_elems =
+  | Single of (string * elem option list)
+  | Tuple of (string * elem option list) option list
+
+let ret_elems_of_ty (t : A.ty option) : ret_elems option =
+  let rec strip (t : A.ty) = match unlinear t with A.TyRefine (b, _, _) -> strip b | t -> t in
+  match Option.map strip t with
+  | Some (A.TyTuple ts) ->
+    let comps = List.map (fun c -> elem_refinement (Some c)) ts in
+    if List.exists Option.is_some comps then Some (Tuple comps) else None
+  | _ -> Option.map (fun e -> Single e) (elem_refinement t)
+
+(* Every entry of a [ret_elems] (never empty: a [Tuple] has at least one). *)
+let ret_entries : ret_elems -> (string * elem option list) list = function
+  | Single e -> [ e ]
+  | Tuple comps -> List.filter_map Fun.id comps
+
 let cont_add_param (ce : contenv) (p : A.param) : contenv =
   let ce = cont_shadow ce [ p.A.param_name.A.txt ] in
   match elem_refinement p.A.param_ty with

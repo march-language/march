@@ -181,3 +181,17 @@ proved and `sum_pos(mk(zs))` lent; now both skip) and its non-escaping
 control (proved, lent). `elemflow-*` groups 63/63; `scripts/run-tests.sh -q
 compiler` 1348 pass; `refine-oracle.sh check` against the same `6fcef2c9d`
 baseline (staged stdlib set aside): identical, 7786 lines over 549 fixtures.
+
+## Merge with leftovers phase C (tuple returns)
+
+Merging `086f18987` (abstract-refinement leftovers phase C) changed the
+container-return demand to `ret_elems` (`Single | Tuple`). `ret_elem_demand`
+now carries `ret_elems` and the verdict cell; `elem_return_tails` /
+`check_leftover_tails` take `ret_elems`, check through `check_ret_shape`, name
+the first slot of the first entry in a skip, and apply the z2 rebinding rule
+to every component of a tuple. A local whose return is a TUPLE of
+element-refined containers is checked the same way (each component of each
+tail), but lends nothing: `declared_tuple_return` never reads a `cbenv`
+entry, and a local's tuple lending is not built (conservative; test "a local
+with a TUPLE container return"). Both audit changes (phase C's and this
+phase's `Refine_audit.classify` local-site rule) are kept.

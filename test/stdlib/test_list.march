@@ -402,6 +402,39 @@ describe "splitting" do
     end
   end
 
+  test "partition keeps each half in input order" do
+    let (evens, odds) = List.partition(five(), fn x -> x % 2 == 0)
+    assert (evens == Cons(2, Cons(4, Nil)))
+    assert (odds == Cons(1, Cons(3, Cons(5, Nil))))
+  end
+
+  test "partition of the empty list is two empty lists" do
+    let empty : List(Int) = Nil
+    let (yes, no) = List.partition(empty, fn x -> x > 0)
+    assert List.is_empty(yes)
+    assert List.is_empty(no)
+  end
+
+  test "partition with every element passing" do
+    let (yes, no) = List.partition(five(), fn x -> x > 0)
+    assert (yes == five())
+    assert List.is_empty(no)
+  end
+
+  test "partition with every element failing" do
+    let (yes, no) = List.partition(five(), fn x -> x > 100)
+    assert List.is_empty(yes)
+    assert (no == five())
+  end
+
+  test "partition's halves together are the input" do
+    let (yes, no) = List.partition(three(), fn x -> x == 20)
+    assert (yes == Cons(20, Nil))
+    assert (no == Cons(10, Cons(30, Nil)))
+    assert (List.length(yes) + List.length(no) == List.length(three()))
+    assert (List.sort_by(List.append(yes, no), fn (a, b) -> a <= b) == three())
+  end
+
   test "drop_last removes last element" do
     let r = List.drop_last(three())
     assert (List.length(r) == 2)
