@@ -19224,18 +19224,19 @@ let abstract_leftovers_c_suite =
       no_slot ret nil pass fail ret
   in
   (* P2: the natural style, the recursive result destructured by a `let`. *)
-  let part_nat ?(pass = "(Cons(h, yes), no)") ?(fail = "(yes, Cons(h, no))") () =
+  let part_nat ?(call = "let (yes, no) = part(t, pred)") ?(pass = "(Cons(h, yes), no)")
+      ?(fail = "(yes, Cons(h, no))") () =
     Printf.sprintf
       {|  fn part(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)})) do
     match xs do
     Nil -> (Nil, Nil)
     Cons(h, t) ->
-      let (yes, no) = part(t, pred)
+      %s
       if pred(h) do %s else %s end
     end
   end
 |}
-      pass fail
+      call pass fail
   in
   let go_let =
     {|  fn go(ys : List(Int)) : Int do
@@ -19527,8 +19528,124 @@ let abstract_leftovers_c_suite =
         Alcotest.check t3 "whole module (C11)" (14, 0, 1) (triple obs);
         let _, obs = run (m "C11c" (rev ^ part_go () ^ caller "pos")) in
         Alcotest.check ps "returning pos is proved" [ proved ] (of_callee "return of sel" obs);
-        Alcotest.check t3 "whole module (C11c)" (15, 0, 0) (triple obs)) ]
-
+        Alcotest.check t3 "whole module (C11c)" (15, 0, 0) (triple obs));
+    (* Review of a2f9fb2a5 (CRITICAL): the structural induction hypothesis was
+       taken for a recursive call whatever it passed for the definer.  A
+       recursion that passes ANOTHER predicate (`fn y -> true`, a swapped
+       callback, a rebound name) returns elements that need not satisfy the
+       caller's `p`, so the hypothesis applies only when every definer
+       position receives the function's own parameter, unshadowed.  RED
+       before the fix: every row below was proved. *)
+    gated "H1 (e1): a single-container recursion passing another predicate is not proved" (fun () ->
+        let _, obs =
+          run
+            (m "H1"
+               ({|  fn filt(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, filt(t, fn y -> true)) else filt(t, fn y -> true) end
+    end
+  end
+|}
+               ^ sums ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "the recursive tails not proved" false (List.mem proved (of_callee "filt(…)" obs));
+        Alcotest.check t3 "whole module (H1)" (1, 0, 3) (triple obs));
+    gated "H2 (d1): a destructured recursion passing another predicate is not proved" (fun () ->
+        let src body =
+          Printf.sprintf
+            {|  fn part(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)})) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+%s
+    end
+  end
+|}
+            body
+        in
+        let row name body want =
+          let _, obs = run (m name (sums ^ src body ^ go_let)) in
+          Alcotest.(check bool) (name ^ ": sum_pos not proved") true (not_proved "sum_pos" obs);
+          Alcotest.(check bool) (name ^ ": sum_nonpos not proved") true (not_proved "sum_nonpos" obs);
+          Alcotest.check t3 ("whole module (" ^ name ^ ")") want (triple obs)
+        in
+        row "H2a"
+          "      let (yes, no) = part(t, fn y -> true)\n      if pred(h) do (Cons(h, yes), no) else (yes, Cons(h, no)) end"
+          (2, 0, 6);
+        (* d2: the same through a single-arm tuple match. *)
+        row "H2b"
+          "      match part(t, fn y -> true) do\n      (yes, no) -> if pred(h) do (Cons(h, yes), no) else (yes, Cons(h, no)) end\n      end"
+          (2, 0, 6);
+        (* d3: a direct recursive tail (run-confirmed wrong: `part([-5, 3],
+           fn y -> y > 0)` returns `-5` in the first half). *)
+        row "H2c" "      part(t, fn y -> true)" (0, 0, 4);
+        (* The definer's NAME rebound to another lambda before a direct
+           recursive tail (the d3 shape): the name alone would admit the
+           hypothesis; the clause's own [cbenv] entry does not. *)
+        row "H2d" "      let pred = fn y -> true\n      part(t, pred)" (0, 0, 4));
+    gated "H3 (d4): two definers passed swapped are not proved" (fun () ->
+        let _, obs =
+          run
+            (m "H3"
+               ({|  fn two(xs : List(a), q : a -> Bool[p], r : a -> Bool[s]) : (List(a[p]), List(a[s])) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+      let (ys, zs) = two(t, r, q)
+      if q(h) do (if r(h) do (Cons(h, ys), Cons(h, zs)) else (Cons(h, ys), zs) end)
+      else (if r(h) do (ys, Cons(h, zs)) else (ys, zs) end) end
+    end
+  end
+|}
+               ^ sums
+               ^ "  fn go(ys : List(Int)) : Int do\n    let (a, b) = two(ys, fn y -> y > 0, fn y -> y > 0 - 100)\n    sum_pos(a) + List.length(b)\n  end\n"))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (H3)" (4, 0, 9) (triple obs));
+    gated "H4 (d6): an accumulator recursing with another predicate is not proved" (fun () ->
+        (* The pushes prove (the callee's `p` instantiated to `true` at the
+           self-call holds of anything), so only the hypothesis stood between
+           this body and a false proof. *)
+        let _, obs =
+          run
+            (m "H4"
+               (sums ^ rev
+               ^ part_go ~pass:"part_go(t, fn y -> true, Cons(h, yes), no)"
+                   ~fail:"part_go(t, fn y -> false, yes, Cons(h, no))" ()
+               ^ go_let))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (H4)" (2, 0, 12) (triple obs));
+    gated "H5: passing `pred` through a let alias declines (conservative)" (fun () ->
+        let _, obs =
+          run
+            (m "H5"
+               (sums
+               ^ part_nat ~call:"let q = pred\n      let (yes, no) = part(t, q)" ()
+               ^ go_let))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (H5)" (2, 0, 6) (triple obs));
+    gated "control: recursion passing `pred` itself still proves (single and tuple)" (fun () ->
+        let _, obs =
+          run
+            (m "HC"
+               ({|  fn filt(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, filt(t, pred)) else filt(t, pred) end
+    end
+  end
+|}
+               ^ sums ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"))
+        in
+        Alcotest.check ps "sum_pos" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module (HC)" (4, 0, 0) (triple obs);
+        let _, obs = run (m "HC2" (sums ^ part_nat () ^ go_let)) in
+        callers_proved obs) ]
 (* Phase 4 (plan specs/plans/2026-10-07-abstract-refinements-phase4-plan.md):
    the `a[p]` / `Bool[p]` shorthand must mean exactly the spelled-out form.
    Equivalence is checked where it matters: [Refine_abstract.collect] (names

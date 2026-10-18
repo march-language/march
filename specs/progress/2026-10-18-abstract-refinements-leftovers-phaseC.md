@@ -13,7 +13,7 @@ element-flow phase 1)
 | `match List.partition(ys, fn y -> y > 0) do (pos, _) -> sum_pos(pos) end` (Z3) | `unreflectable-subject` | **proved** |
 | user natural-style `part(xs, pred : a -> Bool[p]) : (List(a[p]), List({a \| !p(_)}))` with `let (yes, no) = part(t, pred)` (P2) | return never checked; calls `unreflectable-subject` | body **proved** (tuple self-hypothesis); calls **proved** |
 | `sum_pos(neg)` (C5) | `unreflectable-subject` | `abstract-refinement-too-weak`, "in the element slot `!p(_)` (read as `!(y > 0)`)" |
-| a wrong `part` (halves swapped, an element in both, the negation dropped, the Nil tail's components swapped, a wrong natural body) | the tuple return was **never checked**: no violation for the return-side mistakes | a **violation** at the wrong push or tail; no caller proved |
+| a wrong `part` (halves swapped, an element in both, the negation dropped, the Nil tail's components swapped, a wrong natural body) | the tuple return was **never checked**: no violation for the return-side mistakes | a **violation** at the wrong push or tail; no caller proved. **Not** true of the first commit for a body that recurses with another predicate; see the review follow-up below |
 | `fn split_pos(xs : List(Int)) : (List({Int \| _ > 0}), List(Int))`, destructured (C9) | return never checked, call `unreflectable-subject` | **proved**; with a wrong body a violation and the caller skips |
 
 `List.partition` is now
@@ -159,6 +159,63 @@ pinned on the slot-reading text; the base rejects it with a different message).
   0.180 / 0.193 s (median 0.191): parity, identical output. `bench/list_ops.march` compiled: output
   identical (`333333666666`), 0.056-0.071 s on both.
 - Ecosystem repos: `conduit`/`depot` contain no `partition` call (grepped); not re-run.
+
+## Review follow-up (second commit): the hypothesis ignored the definer argument
+
+An independent review of `a2f9fb2a5` found a CRITICAL false proof, runtime-confirmed (the checker
+reported every obligation proved; the program then divided by zero):
+
+```march
+fn part(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)})) do
+  match xs do
+  Nil -> (Nil, Nil)
+  Cons(h, t) ->
+    let (yes, no) = part(t, fn y -> true)      -- not `pred`
+    if pred(h) do (Cons(h, yes), no) else (yes, Cons(h, no)) end
+  end
+end
+```
+
+The structural induction hypothesis (`tuple_self_hyp`, and `container_entry_of_expr`'s arm for a
+single container) was taken whenever some argument was a structural subvariable, whatever the call
+passed for the definer. `fn y -> true` makes the recursive result's elements satisfy `true`, not
+the caller's `p`. Also through a single-arm `match`, a direct tail `part(t, fn y -> true)`, two
+definers passed swapped, and a name rebound to another lambda.
+
+**Pre-existing for a single container.** Probed on `1ef3d4b76` (a real build of the base):
+`filt(xs, pred : a -> Bool[p]) : List(a[p])` recursing as `filt(t, fn y -> true)` had its return and
+the caller's `sum_pos(filt(ys, fn y -> y > 0))` proved (4 proved, 0 skipped). Phase C copied the
+condition into the tuple path. CHANGELOG `### Fixed` names it.
+
+**Fix.** `elem_ret_hyp` carries, per abstract refinement of the function, its definer parameter's
+position, name and the `cbenv` entry the clause starts with. `hyp_applies` (shared by both paths)
+additionally requires each such position to receive a bare variable of that name whose current
+`cbenv` entry is that very entry (physical equality: every rebinding of the name, `let`, `match`
+binder or lambda parameter, retires or replaces it). A definer the env holds no signature for
+leaves no hypothesis at all. **Conservative call:** an alias (`let q = pred`, then `part(t, q)`) is
+declined; it would need alias tracking for no stdlib or test use.
+
+The `abstract_flow` route the declined calls fall back to instantiates the callee's `p` with
+whatever the call passes, so `filt(t, pred)` after the function is proved still reads as `p` and
+`filt(t, fn y -> true)` as `true`.
+
+**Tests (group `abstract-leftovers-c`, 6 new; RED on `a2f9fb2a5` by verdict unless noted):**
+H1 (the single-container shape; RED by verdict on `1ef3d4b76` too), H2 (four shapes: destructured,
+single-arm `match`, direct tail, a rebound name before a direct tail), H3 (two definers swapped),
+H5 (the alias, pinned as declined). H4 (an accumulator recursing with `fn y -> true` /
+`fn y -> false`) was already not proved on `a2f9fb2a5` (its `no` push fails under `!true`) and is
+a guard, RED there only by ledger triple. Control, green on both: recursion passing `pred` itself
+still proves, single and tuple.
+
+**Perturbation.** Dropping the definer requirement reddens exactly H1, H2, H3, H5; keeping the name
+check but dropping the `cbenv` identity check reddens exactly H2 (its rebound-name shape). No other
+`abstract-*` group moved under either.
+
+**Verification (second commit).** `test_refinecheck.exe -e` (VC cleared once): 1153 tests, all
+passed, 0 `[SKIP]`. `scripts/run-tests.sh -q compiler`: 1348 passed. Refine oracle against the same
+`1ef3d4b76` baseline: the same diff as the first commit, line for line (every fixture `+14 proved`,
+nothing else); the fix moves no corpus line, since `partition_go` recurses with `pred` itself.
+`list.march` ratchet 37 (ceiling 37), proved 77. Audit baselines unchanged.
 
 ## Still open
 

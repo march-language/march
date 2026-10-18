@@ -722,6 +722,28 @@ let entry_mentions (names : string list) ((_, slots) : string * elem option list
   in
   names <> [] && List.exists slot slots
 
+(* Does the structural induction hypothesis ([elem_ret_hyp]) cover the call
+   [fname(args)]?  It must be a call to the function being walked (not a
+   local or callback of the name), some argument must be a structural
+   subvariable of its parameter, and every DEFINER position of an abstract
+   refinement must receive the function's own parameter, unshadowed
+   (review of a2f9fb2a5: `filt(t, fn y -> true)` returned elements that
+   satisfy `true`, and the hypothesis read them as `p`; so did a swapped
+   pair of definers, a name rebound to another lambda, and an alias, which
+   is declined too). *)
+let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
+    ((self, sets, definers) : string * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
+  fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
+  && List.length sets = List.length args
+  && List.exists2
+       (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+       args sets
+  && List.for_all
+       (fun (i, n, sg) ->
+         (match List.nth_opt args i with Some (A.EVar { A.txt = v; _ }) -> v = n | _ -> false)
+         && match List.assoc_opt n cb with Some sg' -> sg' == sg | None -> false)
+       definers
+
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
   : (string * elem option list) option =
   match e with
@@ -729,12 +751,7 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
   | A.EAnnot (e', _, _) -> container_entry_of_expr ctx defs cb ce e'
   | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
     (match !elem_ret_hyp with
-     | Some (self, sets, Single entry)
-       when fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
-            && List.length sets = List.length args
-            && List.exists2
-                 (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
-                 args sets ->
+     | Some (self, sets, Single entry, definers) when hyp_applies ctx cb fname args (self, sets, definers) ->
        Some entry
      | _ ->
        (match
@@ -1753,13 +1770,8 @@ let tuple_arity (ctx : rctx) defs (cb : cbenv) (g : string) : int option =
 let tuple_self_hyp (ctx : rctx) (cb : cbenv) (g : string) (args : A.expr list) (n : int)
   : (string * elem option list) option list option =
   match !elem_ret_hyp with
-  | Some (self, sets, Tuple h)
-    when g = self && (not (List.mem g ctx.locals)) && (not (List.mem_assoc g cb))
-         && List.length h = n
-         && List.length sets = List.length args
-         && List.exists2
-              (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
-              args sets ->
+  | Some (self, sets, Tuple h, definers)
+    when List.length h = n && hyp_applies ctx cb g args (self, sets, definers) ->
     Some h
   | _ -> None
 
@@ -3983,7 +3995,27 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
                   | A.FPPat _ -> Hashtbl.create 1)
                 c.A.fc_params
             in
-            if List.for_all entry_is_closed (ret_entries er) then Some (fd.A.fn_name.A.txt, sets, er) else None
+            (* Each abstract refinement's definer parameter, with the
+               [cbenv] entry this clause starts with ([hyp_applies]).  A
+               definer the env does not hold (no callback signature)
+               leaves no way to tell it apart from a rebinding: no
+               hypothesis at all. *)
+            let definers =
+              List.map
+                (fun p ->
+                  match Refine_abstract.definer_index ~is_known:known_predicate_fn fd p with
+                  | Some i ->
+                    (match List.nth_opt c.A.fc_params i with
+                     | Some (A.FPNamed prm | A.FPDefault (prm, _)) ->
+                       let n = prm.A.param_name.A.txt in
+                       Option.map (fun sg -> (i, n, sg)) (List.assoc_opt n cb)
+                     | _ -> None)
+                  | None -> None)
+                !current_abstracts
+            in
+            if List.for_all entry_is_closed (ret_entries er) && List.for_all Option.is_some definers then
+              Some (fd.A.fn_name.A.txt, sets, er, List.filter_map Fun.id definers)
+            else None
           | _ -> None
         in
         (* A PARAMETER named like a module-level function shadows it for callee

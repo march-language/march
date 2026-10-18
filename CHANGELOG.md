@@ -64,6 +64,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a recursive combinator that recurses with a DIFFERENT
+  predicate no longer proves its abstract element return.**
+  `fn filt(xs, pred : a -> Bool[p]) : List(a[p])` whose body recursed as
+  `filt(t, fn y -> true)` (or passed a swapped or rebound callback) had its
+  return proved by the structural induction hypothesis, so a caller's
+  `sum_pos(filt(ys, fn y -> y > 0))` was reported proved while the result could
+  hold `-3`. The hypothesis now applies only when every predicate position of
+  the recursive call receives the function's own, unshadowed parameter (an
+  alias such as `let q = pred` is declined too). The hole predates the tuple
+  returns above for single-container returns; the tuple form had it from the
+  start.
 - **Refinements: a recursive helper's element return is no longer trusted when
   its own recursive call skips a precondition.** A helper such as
   `pfn go(lst, acc : List({Int | _ > 0})) : List({Int | _ > 0})` that recursed

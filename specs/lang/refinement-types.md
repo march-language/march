@@ -2281,7 +2281,10 @@ pushed without testing `pred` is a skip). A recursive helper's element return
 is proved by induction only when every element precondition of its recursive
 call is PROVED: a skip or a violation there leaves the return unproved, so the
 helper lends nothing to its callers. This holds for a concrete slot
-(`acc : List({Int | _ > 0})`) as well. A
+(`acc : List({Int | _ > 0})`) as well. The recursive call must also pass the
+function's own callback, unchanged, for each abstract refinement: `filt(t, pred)`
+is covered, while `filt(t, fn y -> true)`, two callbacks passed swapped, a
+rebound `pred` or an alias (`let q = pred`) leave the return unproved. A
 definition may also pass its own callback on to another combinator
 (`List.filter(xs, pred)` in `myfilter(xs, pred : a -> Bool[p]) : List(a[p])`).
 `p` applied under anything but `&&`, `||` and `!` (`p(_) == false`), or two
