@@ -58,6 +58,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a return value bound inside a `match` arm or `let` under a
+  parameter's name no longer proves a false return contract.** In
+  `fn g(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0}` with the arm
+  `Some(n) -> if n > 5 do 0 - 7 else 1 end`, the checker read the parameter's
+  `n < 0` and the arm's guard `n > 5` as facts about one `n`, and the
+  contradiction "proved" the `-7` tail, so `cap verified` accepted it
+  (`g(0 - 1, Some(10))` returns -7). `Some(n) -> n` with a refined parameter `n`
+  was proved the same way. The inner binding is now kept apart: the first is a
+  violation, the second a skip. The same fix covers a lambda's tail inside a
+  demanded call and a function passed where a container return is expected.
 - **Refinements: a container that hides a type parameter inside another type no
   longer passes element checks vacuously.** For `type Wrap(k, v) = Wrap(List((k, v)))`,
   `fn mk() : Wrap(Int, {Int | _ > 0}) do Wrap([(1, 0 - 5)]) end` was counted

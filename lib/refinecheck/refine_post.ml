@@ -118,6 +118,49 @@ let rec tails_bound (path : (A.expr * bool) list) (bound : string list) (e : A.e
   | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> [ (path, e, pat_binders p @ bound) ]
   | _ -> [ (path, e, bound) ]
 
+(* ── A tail's inner binders, apart from the names its checker already knows ─
+   A tail is checked in an env built ABOVE it (a clause's parameters, a
+   lambda's), but its path conditions were collected on the way DOWN, under
+   whatever an inner `match` arm or `let` bound.  [tails_bound]'s
+   [path_shadow] drops the facts collected before such a binder, so every
+   mention of a [bound] name still in the path (or in the tail) is about the
+   INNER binding — but read in the outer env it lands on the same SMT name as
+   the parameter it shadows.  `fn g2(n : {Int | _ < 0}, p) : {Int | _ > 0}`
+   with `Some(n) -> if n > 5 do 0 - 7 else 1 end` put `n < 0` and `n > 5` on
+   one `n`, and the contradiction proved the false `-7` tail.  Renaming the
+   inner binding to a fresh name ([inner_name]) in both the path and the tail
+   keeps every fact about it (no precision lost) and never conflates.
+
+   [rename_free] renames free VALUE occurrences.  An application's head is left
+   alone (a local `fn`'s name is resolved by name, as [post_lookup] does), and
+   so is any binding form, which the SMT translation does not reflect anyway:
+   a fact or tail containing one is dropped or unreflectable, never read. *)
+let inner_name (n : string) : string = n ^ "$in"
+
+let rec rename_free (env : (string * string) list) (e : A.expr) : A.expr =
+  if env = [] then e
+  else
+    let go = rename_free env in
+    match e with
+    | A.EVar n -> (match List.assoc_opt n.A.txt env with Some m -> A.EVar { n with A.txt = m } | None -> e)
+    | A.EApp ((A.EVar _ as hd), args, sp) -> A.EApp (hd, List.map go args, sp)
+    | A.EApp (f, args, sp) -> A.EApp (go f, List.map go args, sp)
+    | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)
+    | A.ECon (c, es, sp) -> A.ECon (c, List.map go es, sp)
+    | A.EAtom (a, es, sp) -> A.EAtom (a, List.map go es, sp)
+    | A.EField (r, n, sp) -> A.EField (go r, n, sp)
+    | A.EAnnot (x, t, sp) -> A.EAnnot (go x, t, sp)
+    | A.EIf (c, t, el, sp) -> A.EIf (go c, go t, go el, sp)
+    | A.ERecord (fs, sp) -> A.ERecord (List.map (fun (n, v) -> (n, go v)) fs, sp)
+    | A.ERecordUpdate (r, fs, sp) -> A.ERecordUpdate (go r, List.map (fun (n, v) -> (n, go v)) fs, sp)
+    | _ -> e
+
+(* [names] (the [bound] names that clash with the checker's env) renamed apart
+   in a tail's path conditions. *)
+let rename_path (names : string list) (path : (A.expr * bool) list) : (A.expr * bool) list =
+  let env = List.map (fun n -> (n, inner_name n)) (List.sort_uniq compare names) in
+  if env = [] then path else List.map (fun (c, neg) -> (rename_free env c, neg)) path
+
 (* Return-position expressions of a body, each with the path reaching it. *)
 let tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A.expr) list =
   List.map (fun (p, t, _) -> (p, t)) (tails_bound path [] e)
@@ -326,6 +369,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(string_ret = false)
     ?(list_ret = false)
     ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of string ]) option)
+    ?(shown : A.expr option)
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -621,7 +665,8 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        `<predicate>` would read as if that were the user's own spelling, so
        fall back to the function name instead when it does. *)
     let tail_display =
-      let rendered = pred_str tail_e in
+      (* The user's spelling, not a renamed-apart one ([rename_free]). *)
+      let rendered = pred_str (Option.value shown ~default:tail_e) in
       if rendered <> "<predicate>" then Printf.sprintf "the return expression `%s`" rendered
       else
         Printf.sprintf "the return expression of `%s`"
@@ -1727,7 +1772,11 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                                     self n))
                             :: !verdicts;
                           false
-                        | None -> proved_tail ~mctx ~pat (path, t))
+                        | None ->
+                          (* The tail mentions none of [outer]'s rebound
+                             names; its path may, about the inner binding. *)
+                          proved_tail ~mctx ~pat
+                            (rename_path (List.filter (fun n -> List.mem n outer) bound) path, t))
                        && acc)
                      true ts
               in
@@ -1925,9 +1974,24 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
           c.A.fc_params
       in
       let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      let ts = tails_bound base [] c.A.fc_body in
+      (* A tail's inner binders that clash with a parameter are renamed apart
+         in its path and in the tail itself ([rename_free]): the VC reads the
+         parameters' facts from [sc] and the return predicate over the
+         parameters, so an inner `n` must not be the same SMT name. *)
+      let pnames = List.concat_map fnparam_binders c.A.fc_params in
+      let ts =
+        List.map
+          (fun (p, e, bound) ->
+            let clash = List.sort_uniq compare (List.filter (fun n -> List.mem n pnames) bound) in
+            let env = List.map (fun n -> (n, inner_name n)) clash in
+            ( rename_path clash p
+            , rename_free env e
+            , List.map (fun n -> if List.mem n clash then inner_name n else n) bound
+            , e ))
+          (tails_bound base [] c.A.fc_body)
+      in
       (* Only a plain scalar return reaches the scalar demand entry point. *)
-      let demand (path, _, bound) =
+      let demand (path, _, bound, _) =
         if record_sort <> None || string_ret || list_ret then None
         else
           Some
@@ -1941,10 +2005,10 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       in
       ts <> []
       && List.fold_left
-           (fun acc ((p, e, _) as t) ->
+           (fun acc ((p, e, _, shown) as t) ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env ~string_ret
-               ~list_ret ?demand:(demand t) ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit
-               ~fn_params sc binder ret_pred (p, e)
+               ~list_ret ?demand:(demand t) ~shown ~fn_name:(Some fd.A.fn_name.A.txt) ~emit
+               ~record:emit ~fn_params sc binder ret_pred (p, e)
              && acc)
            true ts
     in

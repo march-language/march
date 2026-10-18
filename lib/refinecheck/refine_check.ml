@@ -1925,6 +1925,9 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
                (fun (p, t, bound) ->
                  if lambda_tail_rebinds bound t <> None then `U
                  else
+                 (* The tail mentions no inner binder; its path may, and the
+                    lambda-level env would read it as the outer name. *)
+                 let p = rename_path bound p in
                  match want with
                  | `S r ->
                    (* The lambda's own env, in the hook too: a tail call
@@ -2194,6 +2197,7 @@ let check_pass_site_elements ~root errctx defs (ctx : rctx) path lets sc re (cb 
                         (Printf.sprintf
                            "the lambda's return expression mentions `%s`, bound inside the lambda" n)
                   | None ->
+                    let p = rename_path bound p in
                     ignore
                       (check_elements ~root errctx defs ctx' p (launder_shadow lets names) sc' re cb' ce'
                          ~span:lsp ~callee:"return of <lambda>" er t))
@@ -3721,10 +3725,18 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
                            fd.A.fn_name.A.txt n);
                     last_elem_return_proved := false;
                     None
-                  | None -> Some (p, t))
+                  | None ->
+                    (* For the fallback check, which runs in the parameters'
+                       env: inner binders clashing with a parameter are
+                       renamed apart in the path and the tail
+                       ([Refine_post.rename_free]). *)
+                    let pnames = List.concat_map fnparam_binders c.A.fc_params in
+                    let clash = List.filter (fun n -> List.mem n pnames) bound in
+                    let env = List.map (fun n -> (n, inner_name n)) (List.sort_uniq compare clash) in
+                    Some (p, t, (rename_path clash p, rename_free env t)))
                 (tails_bound base [] c.A.fc_body)
             in
-            Some (er, ts, ref (List.map snd ts))
+            Some (er, ts, ref (List.map (fun (_, t, _) -> t) ts))
           | None -> None
         in
         let outer_ctx = ctx in
@@ -3781,11 +3793,11 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         (match demand with
          | Some (er, ts, remaining) ->
            List.iter
-             (fun (p, t) ->
+             (fun (_, t, (p', t')) ->
                if List.exists (fun r -> r == t) !remaining then
                  if not
-                      (check_elements ~root errctx defs outer_ctx p [] sc re cb ce ~span:c.A.fc_span
-                         ~callee:label er t)
+                      (check_elements ~root errctx defs outer_ctx p' [] sc re cb ce ~span:c.A.fc_span
+                         ~callee:label er t')
                  then last_elem_return_proved := false)
              ts
          | None -> ()))

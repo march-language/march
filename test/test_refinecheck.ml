@@ -17152,6 +17152,129 @@ let elemflow_scalar_demand_suite =
                      \    fn h(q : Option({Int | _ > 0})) : {Int | _ > 0} do uor(q, 1) end\n\
                      \    0\n  end\n"))))) ]
 
+(* ── A tail's inner binders are not its function's parameters ──────────────
+   A return tail (and a lambda tail inside a demand) is checked in an env
+   built above it, with the path conditions collected on the way down.  An
+   inner `match` binder or `let` that reuses a parameter's name put the
+   parameter's refinement and the inner binding's guard on one SMT name:
+   `fn g2(n : {Int | _ < 0}, p) : {Int | _ > 0}` with `Some(n) -> if n > 5 do
+   0 - 7 else 1 end` read `n < 0 && n > 5`, a contradiction, and "proved" a
+   tail that returns -7 (`g2(0 - 1, Some(10))`).  Pre-existing for the direct
+   tail; widened by the scalar demand hooks to call tails and lambda tails.
+   The inner binding is now renamed apart in the path and the tail
+   ([Refine_post.rename_free]).  The triple each case had before is in its
+   comment (measured on 3d02bf5e7). *)
+let post_inner_binders_suite =
+  let m ?(verified = false) body =
+    "mod PB do\n" ^ (if verified then "  cap verified\n" else "")
+    ^ "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n\
+      \  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+      \  fn uor(o : Option(a), d : a) : a do\n\
+      \    match o do\n      Some(x) -> x\n      None -> d\n    end\n  end\n\
+      \  fn ap(x : b, f : b -> a) : a do f(x) end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let t3 = Alcotest.(triple int int int) in
+  (* Every case's triple counts each return tail: the `None -> 1` arm and
+     the `else 1` branch are proved tails of their own. *)
+  let arm body = "    match p do\n      Some(n) -> " ^ body ^ "\n      None -> 1\n    end\n" in
+  [ gated "h2: a direct tail under an inner binder named like a parameter" (fun () ->
+        (* Before: (1, 0, 0), a false proof; `g2(0 - 1, Some(10))` is -7. *)
+        Alcotest.check t3 "the -7 tail is violated, the two 1 tails proved" (2, 1, 0)
+          (l3
+             (m ("  fn g2(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do\n"
+                 ^ arm "if n > 5 do 0 - 7 else 1 end" ^ "  end\n")));
+        Alcotest.(check bool) "cap verified rejects it" true
+          (has_refine_error_typed
+             (m ~verified:true
+                ("  fn g2(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do\n"
+                 ^ arm "if n > 5 do 0 - 7 else 1 end" ^ "  end\n")));
+        (* The correct twin still proves: the inner fact `n > 5` is kept,
+           about the inner `n`. *)
+        Alcotest.check t3 "if n > 5 do n else 1 end proves" (3, 0, 0)
+          (l3
+             (m ("  fn g3(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do\n"
+                 ^ arm "if n > 5 do n else 1 end" ^ "  end\n")));
+        Alcotest.check t3 "if n > 5 do 7 else 1 end proves" (3, 0, 0)
+          (l3
+             (m ("  fn g4(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do\n"
+                 ^ arm "if n > 5 do 7 else 1 end" ^ "  end\n"))));
+
+    gated "an inner binder with no path condition is not the parameter" (fun () ->
+        (* `Some(n) -> n` returns the inner `n`, which nothing constrains;
+           read as the parameter `n > 0` it proved. *)
+        Alcotest.check t3 "Some(n) -> n: not proved" (1, 0, 1)
+          (l3 (m ("  fn g5(n : {Int | _ > 0}, p : Option(Int)) : {Int | _ > 0} do\n" ^ arm "n" ^ "  end\n")));
+        Alcotest.check t3 "control: a fresh binder falls back on the parameter" (3, 0, 0)
+          (l3
+             (m "  fn g6(n : {Int | _ > 0}, p : Option(Int)) : {Int | _ > 0} do\n\
+                 \    match p do\n      Some(m) -> if m > 0 do m else n end\n      None -> n\n    end\n  end\n")));
+
+    gated "h1: a call tail through the scalar demand hook" (fun () ->
+        (* Before: proved, through [tail_demand_impl] with `n < 0 && n > 5`. *)
+        let src d =
+          m ("  fn g1(n : {Int | _ < 0}, o : Option({Int | _ > 0}), p : Option(Int)) : {Int | _ > 0} do\n"
+             ^ arm ("if n > 5 do uor(o, " ^ d ^ ") else 1 end") ^ "  end\n")
+        in
+        Alcotest.check t3 "uor(o, 0 - 7) under the inner n > 5: not proved" (2, 0, 1) (l3 (src "0 - 7"));
+        Alcotest.check t3 "control: uor(o, 1) under the same guard proves" (3, 0, 0) (l3 (src "1")));
+
+    gated "the lambda-tail form, through demand_flow's discharge" (fun () ->
+        (* Before: both proved inside `ap(1, fn z -> …)`. *)
+        let src tl =
+          m ("  fn i1(n : {Int | _ < 0}, o : Option({Int | _ > 0}), p : Option(Int)) : Int do\n\
+              \    need_pos(ap(1, fn z -> match p do\n      Some(n) -> if n > 5 do " ^ tl
+             ^ " else 1 end\n      None -> 1\n    end))\n  end\n")
+        in
+        Alcotest.check t3 "a literal 0 - 7: not proved" (0, 0, 1) (l3 (src "0 - 7"));
+        Alcotest.check t3 "uor(o, 0 - 7): not proved" (0, 0, 1) (l3 (src "uor(o, 0 - 7)"));
+        Alcotest.check t3 "control: uor(o, 1) proves" (1, 0, 0) (l3 (src "uor(o, 1)")));
+
+    gated "the pass-site lambda tail of an element codomain" (fun () ->
+        let src tl =
+          m ("  fn hof(g : (Int) -> List({Int | _ > 0})) : Int do 0 end\n\
+              \  fn j(n : {Int | _ < 0}, p : Option(Int)) : Int do\n\
+              \    hof(fn y -> match p do\n      Some(n) -> if n > 5 do " ^ tl
+             ^ " else [1] end\n      None -> [1]\n    end)\n  end\n")
+        in
+        (* A real violation: `j(0 - 1, Some(10))` hands `hof` a function
+           returning `[0 - 7]`. *)
+        Alcotest.check t3 "[0 - 7] under the inner n > 5: violated" (2, 1, 0) (l3 (src "[0 - 7]"));
+        Alcotest.check t3 "control: [7] under the inner n > 5 proves" (3, 0, 0) (l3 (src "[7]")));
+
+    gated "multi-clause functions: clauses binding the same names" (fun () ->
+        (* Desugared to one clause matching on the parameters; each clause's
+           binders are inner binders of that match. *)
+        Alcotest.check t3 "correct clauses prove" (3, 0, 0)
+          (l3
+             (m "  fn mc(None) : {Int | _ > 0} do 1 end\n\
+                 \  fn mc(Some(n)) : {Int | _ > 0} do if n > 5 do n else 1 end end\n"));
+        Alcotest.check t3 "a clause returning -7 under n > 5: violated" (2, 1, 0)
+          (l3
+             (m "  fn mc(None) : {Int | _ > 0} do 1 end\n\
+                 \  fn mc(Some(n)) : {Int | _ > 0} do if n > 5 do 0 - 7 else 1 end end\n")));
+
+    gated "a match binder shadowing an option in the walk" (fun () ->
+        (* The walk shadows `o` at the arm: the inner `o` is unrefined. *)
+        Alcotest.check t3 "need_pos(uor(o, 1)) over the inner o: skipped" (0, 0, 1)
+          (l3
+             (m "  fn w(o : Option({Int | _ > 0}), p : Option(Option(Int))) : Int do\n\
+                 \    match p do\n      Some(o) -> need_pos(uor(o, 1))\n      None -> 1\n    end\n  end\n"));
+        Alcotest.check t3 "control: the outer o proves" (1, 0, 0)
+          (l3
+             (m "  fn w(o : Option({Int | _ > 0}), p : Option(Option(Int))) : Int do\n\
+                 \    match p do\n      Some(q) -> need_pos(uor(o, 1))\n      None -> 1\n    end\n  end\n")));
+
+    gated "a bare source that is not refined" (fun () ->
+        let src z =
+          m ("  fn pick(xs : List(a), z : a) : a do\n\
+              \    match xs do\n      Cons(h, _) -> h\n      Nil -> z\n    end\n  end\n\
+              \  fn go(xs : List({Int | _ > 0}), z : " ^ z ^ ") : Int do need_pos(pick(xs, z)) end\n")
+        in
+        Alcotest.check t3 "z : Int: skipped" (0, 0, 1) (l3 (src "Int"));
+        Alcotest.check t3 "z : {Int | _ > 0}: proves" (1, 0, 0) (l3 (src "{Int | _ > 0}"))) ]
+
 (* ── Datatype instances from declared types (plan steps 1.3 + 1.4) ──────
    Each datatype instance is declared as its own monomorphic datatype; a term's instance
    comes from the declared type it is checked against and from what
@@ -19966,6 +20089,7 @@ let () =
       ("elemflow-namespace", elemflow_namespace_suite);
       ("elemflow-multiparam", elemflow_multiparam_suite);
       ("elemflow-scalar-demand", elemflow_scalar_demand_suite);
+      ("post-inner-binders", post_inner_binders_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);

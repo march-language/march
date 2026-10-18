@@ -183,6 +183,75 @@ and are new to the march-lean oracle. The corpus is 458/458 (194 accept, 264 rej
   ran in 0.138 s against `demand-flow`'s 0.104 s (VC cache cleared before the pair),
   within the 2x budget.
 
+## Review follow-up: a tail's inner binders (third commit, same day)
+
+An independent review of `3d02bf5e7` found a false proof under `cap verified`
+whose root cause predates this phase (reproduced on `11fa2cdbf`) and which the
+new hooks widened:
+
+```march
+fn g2(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do
+  match p do
+    Some(n) -> if n > 5 do 0 - 7 else 1 end   -- proved; g2(0 - 1, Some(10)) = -7
+    None -> 1
+  end
+end
+```
+
+A return tail is checked in the parameters' env (`check_post`'s `sc`), with the
+path conditions collected on the way down. `tails_bound` path-shadows the facts
+collected BEFORE an inner binder, so every mention of a `bound` name still in the
+path or tail is about the inner binding, but it reached the solver under the
+parameter's SMT name: `n < 0` from `sc` and `n > 5` from the path, a
+contradiction. The plain walk was never affected (it shadows at the binder).
+Same flaw, three more places: `tail_demand_impl` (`Option.unwrap_or(o, 0 - 7)`
+as the tail), `discharge_pairs`' `lambda_ok` and `check_pass_site_elements`'
+lambda tails (path facts over a lambda-body binder named like a caller
+variable, read in the lambda-level env), and `visit_fn`'s element-return
+fallback. `Some(n) -> n` with a refined parameter `n` (no path condition at all)
+was a second false proof of the same cause, found while writing the controls.
+
+Fix (`Refine_post.rename_free` / `rename_path`): the inner binding is renamed
+apart (`n` → `n$in`) in the path and in the tail. No fact is dropped: the inner
+`n > 5` still constrains the inner `n`, so `if n > 5 do n else 1 end` keeps
+proving. Where the clash set comes from:
+
+- `check_fn_post_verdict_core`: the `bound` names that are clause parameters,
+  in the path and the tail (the tail displays as written, `?shown`); the demand
+  hook gets the renamed path and the renamed `bound`, so its "the tail mentions a
+  bound name" decline still fires.
+- `check_post_induction`'s `check_tails`: its `outer` names (parameters and the
+  arm's pattern binders), in the path only (a tail mentioning one is already a
+  skip). Other inner names are left alone, so structural sub-variables keep
+  their names for the induction hypothesis.
+- lambda tails: every `bound` name, in the path only (a tail mentioning one is
+  already declined).
+- the element fallback: clashing parameters, path and tail; the in-walk
+  identity match still uses the original tail.
+
+`rename_free` leaves application heads (a local `fn` is looked up by name) and
+binding forms alone; the SMT translation reflects no binding form, so a fact or
+tail containing one is dropped or unreflectable, never read.
+
+Tests: group `post-inner-binders` (8 cases). On `3d02bf5e7` (the group run with
+every assertion non-fatal), seven assertions were false proofs: h2 (3, 0, 0) and
+its `cap verified` acceptance, `Some(n) -> n` (2, 0, 0), the call tail h1
+(3, 0, 0), the two lambda-tail forms (1, 0, 0) each, and the pass-site element
+lambda (3, 0, 0). Now (2, 1, 0) / rejected / (1, 0, 1) / (2, 0, 1) / (0, 0, 1) /
+(0, 0, 1) / (2, 1, 0). Controls green on both: the correct twins (`do n`,
+`do 7`), a fresh binder, the call tail `uor(o, 1)`, the multi-clause pair
+(desugar gives the clauses fresh names, so it was never affected), a `match`
+binder shadowing an option in the walk, and `pick(xs, z)` with an unrefined /
+refined bare `z`. Perturbation: `rename_free` made the identity turns exactly
+those seven assertions red. Conformance: `reject/t363` (h2 under `cap verified`;
+accepted with 3 proved on `3d02bf5e7`). The corpus is 459/459.
+
+Verification: `test_refinecheck.exe -e` 1130 tests, all pass, 0 skipped
+(549 s); `scripts/run-tests.sh -q compiler` 1348 pass; `check_types.sh`
+459/459; `refine-oracle.sh check` against the `11fa2cdbf` baseline, staged
+stdlib set aside: identical (7786 lines, 549 fixtures). No corpus fixture binds
+an inner name that clashes with a parameter on a path the post engine reads.
+
 ## Left open
 
 - A relational scalar demand, at a call (`_ < len(xs)`) or a return

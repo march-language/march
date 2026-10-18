@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t360 accept, t01–t362 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (194 accept, 264 reject; see the Result line below) -->
+# Typing corpus index (t01–t360 accept, t01–t363 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (194 accept, 265 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -248,7 +248,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 458/458: 194 accept, 264
+Exit 0 iff every program behaves as declared (currently 459/459: 194 accept, 265
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -627,7 +627,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 458 / 458 (194 accept, 264 reject).** `accept/t296`–`t299` and
+**Result: 459 / 459 (194 accept, 265 reject).** `accept/t296`–`t299` and
 `reject/t300`–`t307` (2026-10-06, Part C, Phase C2 of
 `specs/plans/2026-09-25-send-data-race-freedom-plan.md`): `RingBuf` is
 `always_linear`. The eight rejects are the plan's holes H1–H8, each of which
@@ -772,6 +772,7 @@ their own table entries.
 | `t342_refine_multiparam_domain_fact_sibling_capture` | **Multi-parameter domain facts, sibling capture (2026-10-18, phase 1, guard G2-3):** `y`'s position fact `_ < n` names the CALLER's `n`, and the lambda binds its own `n`. Given anyway, the lambda's guard `n < 0` would prove `need_neg(y)`, which `f(5, [3], [0 - 1])` breaks. The fact is not given; the call is a skip, an error under `cap verified`. Accept twin: `t340` | ``cannot verify precondition `_ < 0` on `need_neg` `` |
 | `t361_refine_scalar_demand_refuted_default` | **Scalar demands on a single-element result, a refuted source (2026-10-18, phase 2):** `need_pos(Option.unwrap_or(o, 0))`: the default fails `_ > 0`, but whether it is returned depends on the caller's data, so it is a parametric-source skip, never a violation; an error under `cap verified`. Rejected before too (an unreflectable-subject skip); it pins the verdict, not a fixed bug. Accept twin: `t360` | ``cannot verify precondition `_ > 0` on `need_pos` `` |
 | `t362_refine_scalar_demand_lambda_shadow` | **Scalar demands on a single-element result, a shadowing lambda (2026-10-18, phase 2):** the tail `Option.unwrap_or(o, 1)` of `fn o -> …` is discharged over the LAMBDA's `o`, which nothing constrains. Discharged against the caller's `o : Option({Int \| _ > 0})`, it would prove, and `applied(None, Some(0 - 5))` returns -5. A skip, an error under `cap verified`. Accept twin: `t360` | ``cannot verify precondition `_ > 0` on `need_pos` `` |
+| `t363_refine_return_tail_inner_binder_shadows_param` | **A return tail under an inner binder named like a parameter (2026-10-18, element-flow phase 2 review follow-up):** in `fn g2(n : {Int \| _ < 0}, p) : {Int \| _ > 0}`, the arm `Some(n) -> if n > 5 do 0 - 7 else 1 end` binds a new `n`. The post engine put the parameter's `n < 0` and the guard `n > 5` on one SMT name, and the contradiction proved the `-7` tail: `cap verified` accepted it although `g2(0 - 1, Some(10))` returns -7. The inner binding is renamed apart; the tail is a violation | ``does not satisfy its return type constraint`` |
 | `t285_linear_param_rebound_then_dropped` | **A plain `let` rename can't launder a binding-linear value (2026-09-22).** `h` is linear only because of its binding (`linear h : Res`, a plain ADT), so `ELet`'s type-driven auto-promotion bound `let h2 = h` Unrestricted: the read of `h` was its one use and `h2` was then dropped silently — the named twin of `t283`. `h2` now inherits the tracked binding's linearity. Accepted before the fix | `` The linear value `h2` was never used. `` |
 | `t291_config_typed_key_read_as_pid` | **Config typed keys (2026-09-22): the `specs/progress/2026-09-22-config-typed-keys.md` witness, spelled with the typed API.** The untyped `Config.put(:ns, :name, 42)` / `Config.get(:ns, :name)` pair typechecked and handed the stored `Int` to `is_alive` as a `Pid`; `Config.get(key : Key(v)) : Option(v)` on a `Key(Int)` now yields `Option(Int)`. Accept twin `t292` | ``expected `Pid(`` |
 
