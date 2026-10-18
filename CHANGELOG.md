@@ -28,6 +28,10 @@ git log is authoritative for exact commits.
   construction is now a recorded `unreflectable-subject` skip naming the
   constructor and the hiding type (an error under `cap verified`), and the
   function's element return is no longer trusted at its call sites.
+  The same applies to a self-reference whose type arguments are permuted or
+  nested (`type T(a, b) = … | N(T(b, a))`). A `match` binder at such a field no
+  longer inherits the outer container's element facts, which had produced a
+  false proof.
 
 ### Documentation
 

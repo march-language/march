@@ -1441,15 +1441,17 @@ let ctor_param_fields : (string, field_role list) Hashtbl.t = Hashtbl.create 32
 let ctor_hidden_params : (string, int list) Hashtbl.t = Hashtbl.create 32
 
 (* Per constructor, per field (in declaration order): the container's type
-   parameters the field's declared type mentions, as (index, name), and the
-   field type rendered for a message.  Filled by [register_field_sorts] for
-   user variants only; a constructor absent here (the builtins) has no field
-   that mentions a parameter outside a [Param]/[Self] role.  The [ECon] arm of
-   [Refine_check.check_elements] reads it: an [Other] field that mentions a
-   DEMANDED parameter (`type Wrap(k, v) = Wrap(List((k, v)))`) holds values
-   of that parameter outside every element slot, so the construction is a
-   recorded skip rather than vacuously true (2026-10-18 multi-arg design,
-   phase 0). *)
+   parameters the field HIDES, as (index, name), and the field type rendered
+   for a message.  A [Param] field and an identity self-reference hide
+   nothing; any other field hides every parameter its type mentions (the
+   per-field view of [ctor_hidden_params]).  Filled by [register_field_sorts]
+   for user variants only; a constructor absent here (the builtins) hides
+   nothing.  The [ECon] arm of [Refine_check.check_elements] reads it: a field
+   that hides a DEMANDED parameter (`type Wrap(k, v) = Wrap(List((k, v)))`,
+   or a permuted self-reference `N(T(b, a))`) holds values of that parameter
+   outside every element slot, so the construction is a recorded skip rather
+   than vacuously true or checked against the wrong slots (2026-10-18
+   multi-arg design, phase 0). *)
 let ctor_field_params : (string, ((int * string) list * string) list) Hashtbl.t = Hashtbl.create 32
 
 (* Source-ish rendering of a declared field type, for [ctor_field_params]'
@@ -1820,21 +1822,23 @@ let rec register_field_sorts (decls : A.decl list) : unit =
           | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> tvars acc b
           | A.TyNat _ | A.TyChan _ -> acc
         in
+        (* The type-parameter names a field holds OUTSIDE its element role:
+           none for a [Param] field or an identity self-reference
+           (`T(a, b)` in `type T(a, b)`); every one it mentions otherwise. *)
+        let hidden_of (t : A.ty) : string list =
+          match role_of t, t with
+          | Param _, _ -> []
+          | Self, A.TyCon (_, args)
+            when List.length args = List.length pnames
+                 && List.for_all2
+                      (fun a n -> match a with A.TyVar v -> v.A.txt = n | _ -> false)
+                      args pnames ->
+            []
+          | _ -> tvars [] t
+        in
         let hidden =
           List.concat_map
-            (fun (v : A.variant) ->
-              List.concat_map
-                (fun (t : A.ty) ->
-                  match role_of t, t with
-                  | Param _, _ -> []
-                  | Self, A.TyCon (_, args)
-                    when List.length args = List.length pnames
-                         && List.for_all2
-                              (fun a n -> match a with A.TyVar v -> v.A.txt = n | _ -> false)
-                              args pnames ->
-                    []
-                  | _ -> tvars [] t)
-                v.A.var_args)
+            (fun (v : A.variant) -> List.concat_map hidden_of v.A.var_args)
             variants
           |> List.filter_map (fun n -> List.find_index (( = ) n) pnames)
           |> List.sort_uniq compare
@@ -1849,7 +1853,7 @@ let rec register_field_sorts (decls : A.decl list) : unit =
               (List.map
                  (fun (t : A.ty) ->
                    let ps =
-                     tvars [] t
+                     hidden_of t
                      |> List.filter_map (fun n ->
                             Option.map (fun i -> (i, n)) (List.find_index (( = ) n) pnames))
                      |> List.sort_uniq compare

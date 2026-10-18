@@ -1105,30 +1105,33 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
     let fparams = Hashtbl.find_opt ctor_field_params k.A.txt in
     if List.length roles <> List.length args then true
     else
+      let slot j = Option.join (List.nth_opt slots j) in
       List.fold_left2
         (fun (acc, fi) role e ->
+          (* SOUNDNESS (multi-arg design phase 0): a field that HIDES a
+             demanded parameter ([ctor_field_params]: an [Other] field
+             mentioning it, or a non-identity self-reference) holds values of
+             it outside every slot; it is a recorded skip, not vacuously true
+             and not a recursion against the wrong slots. *)
+          let hid =
+            match Option.bind fparams (fun fs -> List.nth_opt fs fi) with
+            | Some (ps, fty) -> (List.filter (fun (j, _) -> slot j <> None) ps, fty)
+            | None -> ([], "")
+          in
           let ok =
-            match role with
-            | Param i -> check_slot (Option.join (List.nth_opt slots i)) e
-            | Self -> recur e
-            | Other ->
-              (* SOUNDNESS (multi-arg design phase 0): an [Other] field whose
-                 type mentions a DEMANDED parameter holds values of it
-                 outside every slot; it is not vacuously true. *)
-              (match Option.bind fparams (fun fs -> List.nth_opt fs fi) with
-               | Some (ps, fty) ->
-                 (match List.filter (fun (j, _) -> Option.join (List.nth_opt slots j) <> None) ps with
-                  | [] -> true
-                  | hid ->
-                    let names = String.concat "`, `" (List.map snd hid) in
-                    record_elem_skip errctx ~span:(arg_span span e) ~callee
-                      ~predicate:(first_slot_pred (List.map (fun (j, _) -> Option.join (List.nth_opt slots j)) hid))
-                      ~what:
-                        (Printf.sprintf
-                           "`%s`'s field holds `%s` inside `%s`, which the element model does not see into"
-                           k.A.txt names fty);
-                    false)
-               | None -> true)
+            match role, hid with
+            | Param i, _ -> check_slot (slot i) e
+            | (Self | Other), (_ :: _ as hid, fty) ->
+              let names = String.concat "`, `" (List.map snd hid) in
+              record_elem_skip errctx ~span:(arg_span span e) ~callee
+                ~predicate:(first_slot_pred (List.map (fun (j, _) -> slot j) hid))
+                ~what:
+                  (Printf.sprintf
+                     "`%s`'s field holds `%s` inside `%s`, which the element model does not see into"
+                     k.A.txt names fty);
+              false
+            | Self, ([], _) -> recur e
+            | Other, ([], _) -> true
           in
           (acc && ok, fi + 1))
         (true, 0) roles args
@@ -2144,17 +2147,28 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                   field takes slot [i] — a refined slot as a scope fact, a
                   nested container as its own env entry — and a `PatVar` at
                   a [Self] field takes the whole entry. *)
-               List.fold_left2
-                 (fun (sc, ce) role sub ->
-                   match role, sub with
+               (* A [Self] binder takes the entry only at a field that hides
+                  nothing ([ctor_field_params]): at a permuted or non-parameter
+                  self-reference (`N(T(b, a))`) the outer slots are the wrong
+                  ones (multi-arg design phase 0). *)
+               let fparams = Hashtbl.find_opt ctor_field_params k.A.txt in
+               let hides fi =
+                 match Option.bind fparams (fun fs -> List.nth_opt fs fi) with
+                 | Some (_ :: _, _) -> true
+                 | _ -> false
+               in
+               fst
+               @@ List.fold_left2
+                 (fun ((sc, ce), fi) role sub ->
+                   (match role, sub with
                    | Param i, A.PatVar v ->
                      (match Option.join (List.nth_opt slots i) with
                       | Some (Refined r) -> ((v.A.txt, r) :: sc, ce)
                       | Some (Container (c', slots')) -> (sc, (v.A.txt, (c', slots')) :: ce)
                       | None -> (sc, ce))
-                   | Self, A.PatVar v -> (sc, (v.A.txt, entry) :: ce)
-                   | _ -> (sc, ce))
-                 (sc, ce) roles subpats
+                   | Self, A.PatVar v when not (hides fi) -> (sc, (v.A.txt, entry) :: ce)
+                   | _ -> (sc, ce)), fi + 1)
+                 ((sc, ce), 0) roles subpats
              | _ -> (sc, ce))
           | _ -> (sc, ce)
         in

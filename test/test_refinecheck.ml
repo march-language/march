@@ -18820,7 +18820,92 @@ let hidden_field_elements_suite =
             ("need_list", "proved", ""); ("need_list", "proved", "");
             ("need_list", "proved", ""); ("need_list", "violated", "");
             ("need_opt", "proved", ""); ("need_opt", "violated", "") ]
-          (typed_obligations src)) ]
+          (typed_obligations src));
+    (* Permuted / non-parameter self-reference (todo
+       2026-10-18-elem-permuted-self-field-unchecked): `N(T(b, a))` swaps the
+       slots, `UN(U(List(a)))` nests them; recursing with the outer slots
+       checked the wrong thing (0 obligations, accepted under cap verified). *)
+    gated "a permuted Self field is a recorded skip" (fun () ->
+        let src v =
+          "mod HP do\n" ^ (if v then "  cap verified\n" else "")
+          ^ "  type T(a, b) = L(a) | R(b) | N(T(b, a))\n\
+            \  fn needt(_t : T({Int | _ > 0}, Int)) : Int do 0 end\n\
+            \  fn go() : Int do needt(N(R(0 - 1))) end\nend\n"
+        in
+        Alcotest.check ts "ledger" [ ("needt", "skipped", "unreflectable-subject") ]
+          (typed_obligations (src false));
+        Alcotest.(check bool) "cap verified rejects" true
+          (Astring_contains.contains (refine_error_text_d (src true))
+             "`N`'s field holds `a` inside `T(b, a)`"));
+    (* The have side of the same hole: a `match` binder at a permuted Self
+       field took the OUTER entry, so `inner : T(Int, {Int | _ > 0})` was
+       believed to be `T({Int | _ > 0}, Int)`: a false proof. *)
+    gated "a match binder at a permuted Self field carries no element fact" (fun () ->
+        Alcotest.check ts "ledger" [ ("needt", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             "mod HPM do\n  type T(a, b) = L(a) | R(b) | N(T(b, a))\n\
+              \  fn needt(_t : T({Int | _ > 0}, Int)) : Int do 0 end\n\
+              \  fn go(t : T({Int | _ > 0}, Int)) : Int do\n    match t do\n    N(inner) -> needt(inner)\n    _ -> 0\n    end\n  end\nend\n"));
+    gated "control: a match binder at an identity Self field keeps the entry" (fun () ->
+        Alcotest.check ts "ledger" [ ("rest", "proved", "") ]
+          (typed_obligations
+             "mod HIM do\n  type L2(a) = N2 | C2(a, L2(a))\n\
+              \  fn needl(_l : L2({Int | _ > 0})) : Int do 0 end\n\
+              \  fn go(l : L2({Int | _ > 0})) : Int do\n    match l do\n    C2(_, rest) -> needl(rest)\n    N2 -> 0\n    end\n  end\nend\n"));
+    gated "a non-parameter Self field is a recorded skip" (fun () ->
+        Alcotest.check ts "ledger" [ ("needu", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             "mod HU do\n  type U(a) = UL(a) | UN(U(List(a)))\n\
+              \  fn needu(_u : U({Int | _ > 0})) : Int do 0 end\n\
+              \  fn go() : Int do needu(UN(UL([0 - 1]))) end\nend\n"));
+    gated "control: an identity Self field still recurses (proves and violates)" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needl", "proved", ""); ("needl", "proved", "");
+            ("needl", "proved", ""); ("needl", "violated", "") ]
+          (typed_obligations
+             "mod HI do\n  type L2(a) = N2 | C2(a, L2(a))\n\
+              \  fn needl(_l : L2({Int | _ > 0})) : Int do 0 end\n\
+              \  fn ok() : Int do needl(C2(1, C2(2, N2))) end\n\
+              \  fn bad() : Int do needl(C2(1, C2(0 - 2, N2))) end\nend\n"));
+    (* Paths the review confirmed by probing; pinned here. *)
+    gated "an if tail of hidden-field constructions: skips, return not trusted" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("return of mk", "skipped", "unreflectable-subject");
+            ("return of mk", "skipped", "unreflectable-subject");
+            ("need", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             (m "  fn mk(b : Bool) : Wrap(Int, {Int | _ > 0}) do if b do Wrap([(1, 0 - 5)]) else Wrap([]) end end\n\
+                 \  fn go(b : Bool) : Int do need(mk(b)) end\n")));
+    gated "a match tail of hidden-field constructions: skips, return not trusted" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("return of mk", "skipped", "unreflectable-subject");
+            ("return of mk", "skipped", "unreflectable-subject");
+            ("need", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             (m "  fn mk(n : Int) : Wrap(Int, {Int | _ > 0}) do\n    match n do\n    0 -> Wrap([(1, 0 - 5)])\n    _ -> Wrap([])\n    end\n  end\n\
+                 \  fn go() : Int do need(mk(3)) end\n")));
+    gated "Some(Wrap(..)) and [Wrap(..)]: the nested construction skips" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needo", "skipped", "unreflectable-subject");
+            ("needl", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             (m "  fn needo(_o : Option(Wrap(Int, {Int | _ > 0}))) : Int do 0 end\n\
+                 \  fn needl(_xs : List(Wrap(Int, {Int | _ > 0}))) : Int do 0 end\n\
+                 \  fn go() : Int do needo(Some(Wrap([(1, 0 - 5)]))) end\n\
+                 \  fn go2() : Int do needl([Wrap([(1, 0 - 5)])]) end\n")));
+    gated "mixed P(a, List(a)): the Param field is checked, the hiding field skips" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needp", "proved", ""); ("needp", "skipped", "unreflectable-subject");
+            ("needp", "violated", ""); ("needp", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             "mod HM do\n  type P(a) = P(a, List(a))\n\
+              \  fn needp(_p : P({Int | _ > 0})) : Int do 0 end\n\
+              \  fn ok() : Int do needp(P(1, [0 - 1])) end\n\
+              \  fn bad() : Int do needp(P(0 - 1, [1])) end\nend\n"));
+    gated "a let-bound hidden-field construction passed on skips" (fun () ->
+        Alcotest.check ts "ledger" [ ("need", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             (m "  fn go() : Int do\n    let w = Wrap([(1, 0 - 5)])\n    need(w)\n  end\n"))) ]
 
 let () =
   Alcotest.run "march-refinecheck"

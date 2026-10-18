@@ -93,15 +93,12 @@ precondition the design's phase 4 needed.
 ## Filed
 
 - `specs/todos/2026-10-18-elem-slot-naming-parameter-false-violation.md` (row r7).
-- `specs/todos/2026-10-18-elem-permuted-self-field-unchecked.md` (below).
+- The permuted-`Self` hole, filed and then fixed (see the follow-up section below).
 
-## Not covered (filed)
+## Follow-up: permuted and non-parameter self-references
 
-A `Self` field whose type arguments are not the declared parameters in order is still
-checked as the same container with the same slots (`recur`). `ctor_hidden_params` already
-counts such a field as hiding its parameters; the `ECon` arm does not. Measured on the
-phase-0 compiler: `type T(a, b) = L(a) | R(b) | N(T(b, a))` with
-`need(_t : T({Int | _ > 0}, Int))` and `need(N(R(0 - 1)))` under `cap verified` gives
-0 obligations and is accepted, which is the same silent hole one level down. It is filed
-as `specs/todos/2026-10-18-elem-permuted-self-field-unchecked.md` and was left out of this
-phase on purpose, to keep the diff minimal.
+A `Self` field whose type arguments are not the declared parameters in order
+(`N(T(b, a))`, `UN(U(List(a)))`) was still checked as the same container with the same
+slots. A `match` binder at such a field also took the outer entry, which gave a false
+proof. A follow-up commit closes both, the same way as phase 0:
+`specs/progress/2026-10-18-elem-permuted-self-field-unchecked.md`.
