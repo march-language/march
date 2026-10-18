@@ -19,6 +19,19 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Refinements: a lambda passed for an abstract refinement may now have a real
+  body.** `List.filter(ys, fn y -> is_pos(y) && y < 100)`, an `if` or a `match`
+  on a Bool, `fn y -> gt(y, 0)` (a several-parameter helper with a proved
+  `{Bool | _ == e}` return, its arguments substituted) and calls to `let`-bound
+  lambdas are read as the exact predicate they compute, so
+  `sum_pos(List.filter(ys, fn y -> is_pos(y) && y < 100))` is proved where it was
+  an `abstract-refinement-uninstantiated` skip. A too-weak skip now prints what
+  the lambda was read as (`` `fn y -> is_pos(y) || y < 100` (read as
+  `y > 0 || y < 100`) ``), and a declined body names the construct it could not
+  read.
+
 ### Fixed
 
 - **Refinements: a container that hides a type parameter inside another type no

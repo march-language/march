@@ -2236,6 +2236,31 @@ nothing. A `let`-bound lambda is read as the lambda itself (it shadows a
 top-level function of the same name), and stops counting once its name is
 rebound.
 
+**Lambda bodies.** A lambda's body is read as an exact predicate over its
+parameter, never a weaker one: `&&`, `||`, `!`/`not`, `if`, a `match` on a
+Bool (`true`/`false` arms, or one of them and `_`, no guards), a call to a
+`let`-bound lambda (its body, with the arguments substituted), and a call to a
+function or callback with a proved `{Bool | _ == e}` return over any number of
+parameters (`e` with the arguments substituted in order):
+
+```march
+fn gt(n : Int, m : Int) : {Bool | _ == (n > m)} do n > m end
+
+sum_pos(List.filter(ys, fn y -> is_pos(y) && y < 100))             -- proved
+sum_pos(List.filter(ys, fn y -> if y > 0 do y < 100 else false end)) -- proved
+sum_pos(List.filter(ys, fn y -> gt(y, 0)))                         -- proved: `y > 0`
+sum_pos(List.filter(ys, fn y -> gt(0, y)))                         -- skip: too weak
+sum_pos(List.filter(ys, fn y -> is_pos(y) || y < 100))             -- skip: too weak
+```
+
+A too-weak skip prints the lambda and what it was read as:
+`` `fn y -> is_pos(y) || y < 100` (read as `y > 0 || y < 100`) does not imply `_ > 0` ``.
+The result must mention nothing but the lambda's parameter: `fn y -> gt(y, k)`
+with `k` a caller's variable is declined, and so is a `let`-bound lambda that
+captures one. Calls to `let`-bound lambdas are inlined at most four deep
+(`f4` calling `f3` calling `f2` calling `f1` is read; one more is declined,
+naming the bound).
+
 **The standard library.** `List.filter`, `List.find`
 (`Option({a | p(_)})`), `List.take_while` and `Option.filter` all carry `p`:
 
@@ -2249,13 +2274,19 @@ sum_pos(List.take_while(ys, is_pos))          -- proved
 What it does not do (reason `abstract-refinement-uninstantiated` where a
 demand meets one of these):
 
-- **A predicate with no proved `{Bool | _ == …}` contract over one parameter**
-  instantiates nothing: no contract is inferred from a body, and a
-  two-parameter function (`gt(n, m)`, even as `fn y -> gt(y, 0)`) is declined.
-- **A lambda that mentions any name besides its parameter** (`fn y -> y > m`)
-  is declined rather than read with `m` unknown, and so is one whose body
-  calls a function other than as the single eta-reducible call
-  (`fn y -> is_pos(y) && y < 100`).
+- **A predicate with no proved `{Bool | _ == …}` contract** instantiates
+  nothing, by name or called inside a lambda: no contract is inferred from a
+  body. Passed by name, it must also take one parameter: a bare two-parameter
+  `gt` has no one-argument meaning (inside a lambda, `fn y -> gt(y, 0)` is
+  read).
+- **A lambda body the reader does not translate** is declined, naming the
+  construct: one that mentions a name besides its parameter (`fn y -> y > m`),
+  a block with `let`, a `match` on anything but a Bool (or with guards), an
+  `if` or Bool `match` used as a non-Bool value, a call to a function with no
+  proved contract or to the lambda's own parameter, a computed call head, a
+  `let`-bound lambda that names itself, or inlining deeper than four
+  `let`-bound lambdas. Int-valued helpers (`score(y) > 3` with
+  `score : {Int | _ == …}`) are not inlined.
 - **One argument only.** `Map.filter`'s `(k, v) -> Bool` and a `fold_left`
   accumulator invariant would need a two-argument `p(k, v)`.
 - **Not every combinator.** `List.partition` would need `p` inside a tuple and
@@ -2267,7 +2298,8 @@ demand meets one of these):
 ### What element refinements do not do
 
 - **Only four combinators carry an abstract refinement** (`List.filter`,
-  `List.find`, `List.take_while`, `Option.filter`), instantiated from a lambda,
+  `List.find`, `List.take_while`, `Option.filter`), instantiated from a lambda
+  (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
   a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
 - **Only a container demand is traced.** A single element flowing into a scalar

@@ -853,36 +853,234 @@ let abstract_slot_of_ty (t : A.ty) : (string * string) option =
 let abstract_return_slot (fd : A.fn_def) : (string * string) option =
   Option.bind fd.A.fn_ret_ty abstract_slot_of_ty
 
-(* A named callable as an abstract refinement's instantiation (phase 3): its
-   proved return `{Bool | _ == e}` (either orientation) over its ONE parameter,
-   as [(param, e)].  [sig_of] must return only PROVED returns — [callee_sig]
+(* A named callable as an abstract refinement's instantiation (phase 3), and
+   a helper call inside a lambda body (leftovers phase A): its proved return
+   `{Bool | _ == e}` (either orientation) over its parameters, as
+   [(params, e)].  [sig_of] must return only PROVED returns — [callee_sig]
    does (an unproved postcondition never reaches a caller; probe r5,
    2026-10-07) — so an assumed-but-unproved contract can never instantiate
    [p].  A callback parameter's signature names its parameter
    [callback_param_name] and its return was rewritten over it
-   ([callback_sig_of_ty]), so it needs no special case. *)
-let named_predicate (sig_of : string -> fn_sig option) (g : string) : (string * A.expr) option =
+   ([callback_sig_of_ty]), so it needs no special case.
+
+   [e] must be vocabulary over the parameters alone (design 2026-10-18 §2.4
+   C3): no mention of the result binder (or `_`), so `b == e` really defines
+   the result, and no application of anything the checker does not reflect,
+   so substituting it into a lambda's reading never smuggles an opaque call
+   into [q]. *)
+let named_predicate_n (sig_of : string -> fn_sig option) (g : string) : (string list * A.expr) option =
   match sig_of g with
   | Some
-      { param_names = [ n ]
+      { param_names = ns
       ; ret = Some (b, A.EApp (A.EVar { A.txt = "=="; _ }, [ l; r ], _))
       ; ret_sort
       ; _
       }
-    when ret_sort = Some bool_sort ->
+    when ret_sort = Some bool_sort && ns <> [] ->
     let is_b = function A.EVar { A.txt; _ } -> txt = b || txt = "_" | _ -> false in
     let e = if is_b l then Some r else if is_b r then Some l else None in
+    let rec reflected (e : A.expr) =
+      match e with
+      | A.EApp (A.EVar { A.txt = f; _ }, args, _) -> known_predicate_fn f && List.for_all reflected args
+      | A.EApp _ -> false
+      | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.for_all reflected es
+      | A.EAnnot (e, _, _) | A.EField (e, _, _) -> reflected e
+      | _ -> true
+    in
     Option.bind e (fun e ->
-        match classify_pred b [ n ] e with
-        | Closed | Relational [ _ ] -> Some (n, e)
+        (* A binder name no parameter can have: [classify_pred] then counts a
+           mention of [b] or `_` as foreign, which is C3. *)
+        match classify_pred "$no_result_binder" ns e with
+        | (Closed | Relational _)
+          when (not (List.mem b ns))
+               && (not (Refine_scope.expr_mentions_free b e))
+               && (not (Refine_scope.expr_mentions_free "_" e))
+               && reflected e ->
+          Some (ns, e)
         | _ -> None)
   | _ -> None
 
+(* ── Reading a lambda body as a predicate (design 2026-10-18 §2) ──────────
+   [inline_bool_body] translates the body of the lambda passed for an
+   abstract refinement into ordinary vocabulary [r] with `cb(y) = r(y)` for
+   every [y] — each arm an EQUIVALENCE, never an implication, because the
+   instantiation is assumed of kept elements (and, under a future `!p`, its
+   negation of rejected ones).  [Error construct] names what it declined.
+
+   - vocabulary (operators, measures, testers, constant functions) is
+     itself, its arguments read recursively;
+   - `if c do t else e end`, and `match s do true -> t  false -> e end`
+     (either order, or one Bool arm then `_`; no guards), in a Bool position
+     only, read as `(c && t) || (!c && e)`;
+   - a call `g(a⃗)` resolves as §2.2 says, the first hit deciding: [g] one
+     of the enclosing lambda's own parameters declines; a `let`-bound lambda
+     ([local_lambda], the shadow-disciplined [lets] channel at the call) is
+     β-reduced; otherwise [named] (a proved `{Bool | _ == e}` over [g]'s
+     parameters) has its actuals substituted; otherwise it declines.
+     Actuals are read first (C6), substitution is simultaneous (C2,
+     [subst_params]), and a let-bound lambda that names itself (C5) or
+     mentions anything but its own parameters (its captures) declines.  The
+     let-lambda row is the only one that recurses, bounded by
+     [inline_depth_max] (§2.3);
+   - anything else (a block with `let`, a nested lambda, a computed head)
+     declines.
+
+   The caller still requires the result to be [Closed] over the lambda's
+   parameter (C1). *)
+let inline_depth_max = 4
+
+let inline_bool_body ~(named : string -> (string list * A.expr) option)
+    ~(local_lambda : string -> A.expr option) ~(binders : string list) (body : A.expr)
+  : (A.expr, string) result =
+  let ( let* ) = Result.bind in
+  let var sp s = A.EVar { A.txt = s; A.span = sp } in
+  let is_lit b = function A.ELit (A.LitBool b', _) -> b = b' | _ -> false in
+  let and_ sp a b =
+    if is_lit true a then b else if is_lit true b then a else A.EApp (var sp "&&", [ a; b ], sp)
+  in
+  (* (c && t) || (!c && e), dropping a literally-false disjunct: an exact
+     equivalence, and it keeps the printed reading short. *)
+  let ite sp c t e =
+    let l = and_ sp c t and r = and_ sp (A.EApp (var sp "not", [ c ], sp)) e in
+    if is_lit false t then r
+    else if is_lit false e then l
+    else A.EApp (var sp "||", [ l; r ], sp)
+  in
+  let rec all f = function
+    | [] -> Ok []
+    | x :: xs ->
+      let* y = f x in
+      let* ys = all f xs in
+      Ok (y :: ys)
+  in
+  let rec tr ~depth ~bound ~boolctx (e : A.expr) : (A.expr, string) result =
+    let sub b = tr ~depth ~bound ~boolctx:b in
+    match e with
+    | A.ELit _ | A.EVar _ -> Ok e
+    | A.EAnnot (inner, t, sp) ->
+      let* i = tr ~depth ~bound ~boolctx inner in
+      Ok (A.EAnnot (i, t, sp))
+    | A.EBlock ([ inner ], _) -> tr ~depth ~bound ~boolctx inner
+    | A.EBlock _ -> Error "has a block body with `let` (not read yet)"
+    | A.EIf (c, t, f, sp) ->
+      if not boolctx then Error "has an `if` whose arms are not Bool"
+      else
+        let* c = sub true c in
+        let* t = sub true t in
+        let* f = sub true f in
+        Ok (ite sp c t f)
+    | A.EMatch (s, branches, sp) ->
+      let lit b = function A.PatLit (A.LitBool b', _) -> b = b' | _ -> false in
+      let wild = function A.PatWild _ -> true | _ -> false in
+      let arms =
+        match branches with
+        | [ b1; b2 ] when b1.A.branch_guard = None && b2.A.branch_guard = None ->
+          let p1 = b1.A.branch_pat and p2 = b2.A.branch_pat in
+          if lit true p1 && (lit false p2 || wild p2) then Some (b1.A.branch_body, b2.A.branch_body)
+          else if lit false p1 && (lit true p2 || wild p2) then Some (b2.A.branch_body, b1.A.branch_body)
+          else None
+        | _ -> None
+      in
+      (match arms with
+       | None -> Error "has a `match` that is not on `true`/`false` (without guards)"
+       | Some _ when not boolctx -> Error "has a `match` whose arms are not Bool"
+       | Some (t, f) ->
+         let* c = sub true s in
+         let* t = sub true t in
+         let* f = sub true f in
+         Ok (ite sp c t f))
+    | A.EApp ((A.EVar { A.txt = f; _ } as hd), args, sp) when known_predicate_fn f ->
+      let boolctx = List.mem f [ "&&"; "||"; "not" ] in
+      let* args = all (sub boolctx) args in
+      Ok (A.EApp (hd, args, sp))
+    | A.EApp (A.EVar { A.txt = g; _ }, args, _) ->
+      if List.mem g bound then Error (Printf.sprintf "calls its own parameter `%s`" g)
+      else
+        (match local_lambda g with
+         | Some (A.ELam (prms, lbody, _) as lam) ->
+           let zs = List.map (fun (p : A.param) -> p.A.param_name.A.txt) prms in
+           if List.length zs <> List.length args then
+             Error (Printf.sprintf "calls `%s` with the wrong number of arguments" g)
+           else if Refine_scope.expr_mentions_free g lam then
+             Error (Printf.sprintf "calls `%s`, a `let`-bound lambda that names itself" g)
+           else if depth >= inline_depth_max then
+             Error
+               (Printf.sprintf "calls `%s`: inlining it would exceed the depth bound (%d)" g
+                  inline_depth_max)
+           else
+             let* args = all (sub false) args in
+             let* r = tr ~depth:(depth + 1) ~bound:zs ~boolctx lbody in
+             (match classify_pred "$no_binder" zs r with
+              | Unusable ->
+                Error
+                  (Printf.sprintf "calls `%s`, a `let`-bound lambda that mentions a name besides its parameters" g)
+              | Closed | Relational _ -> Ok (subst_params (List.combine zs args) r))
+         | _ ->
+           (match named g with
+            | Some (xs, e) when List.length xs = List.length args ->
+              let* args = all (sub false) args in
+              Ok (subst_params (List.combine xs args) e)
+            | _ -> Error (Printf.sprintf "calls `%s`, whose result is not reflected there" g)))
+    | A.EApp _ -> Error "calls a computed function"
+    | A.ETuple (es, sp) ->
+      let* es = all (sub false) es in
+      Ok (A.ETuple (es, sp))
+    | A.ECon (c, es, sp) ->
+      let* es = all (sub false) es in
+      Ok (A.ECon (c, es, sp))
+    | A.EAtom (a, es, sp) ->
+      let* es = all (sub false) es in
+      Ok (A.EAtom (a, es, sp))
+    | A.EField (r, n, sp) ->
+      let* r = sub false r in
+      Ok (A.EField (r, n, sp))
+    | A.ELam _ -> Error "returns a lambda"
+    | _ -> Error "has a construct that is not read as a predicate"
+  in
+  tr ~depth:0 ~bound:binders ~boolctx:true body
+
+(* The lambda body as the user wrote it, for a too-weak message that also
+   prints its reading (§2.5).  Best-effort, like [pred_str]. *)
+let rec lambda_src_str (e : A.expr) : string =
+  match e with
+  | A.EBlock ([ e ], _) -> lambda_src_str e
+  | A.EIf (c, t, f, _) ->
+    Printf.sprintf "if %s do %s else %s end" (lambda_src_str c) (lambda_src_str t) (lambda_src_str f)
+  | A.EMatch (s, bs, _) ->
+    let pat = function
+      | A.PatLit (A.LitBool b, _) -> string_of_bool b
+      | A.PatWild _ -> "_"
+      | _ -> "…"
+    in
+    Printf.sprintf "match %s do %s end" (lambda_src_str s)
+      (String.concat "  "
+         (List.map (fun b -> pat b.A.branch_pat ^ " -> " ^ lambda_src_str b.A.branch_body) bs))
+  | _ -> pred_str e
+
+(* A reading of [inline_bool_body], parenthesised where [pred_str]'s flat
+   rendering would be ambiguous (`!y > 0`, an `||` under `&&`). *)
+let rec reading_str (e : A.expr) : string =
+  let is_binop = function
+    | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="); _ }, [ _; _ ], _) -> true
+    | _ -> false
+  in
+  match e with
+  | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> reading_str a ^ " || " ^ reading_str b
+  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
+    let side = function
+      | A.EApp (A.EVar { A.txt = "||"; _ }, [ _; _ ], _) as x -> "(" ^ reading_str x ^ ")"
+      | x -> reading_str x
+    in
+    side a ^ " && " ^ side b
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) ->
+    if is_binop a then "!(" ^ reading_str a ^ ")" else "!" ^ reading_str a
+  | _ -> pred_str e
+
 (* What the actual at [p]'s definer position instantiates it to (§3.1), as
    [(param, predicate)], or why not:
-   - an inline one-parameter lambda that mentions nothing but its parameter
-     and calls nothing unreflected;
-   - `fn y -> g(y)`, which is [g] (eta);
+   - an inline one-parameter lambda whose body [inline_bool_body] reads
+     exactly, closed over its parameter (`fn y -> g(y)`, eta, is the
+     one-argument instance of its proved-contract row);
    - a `let`-bound lambda ([local_lambda], from the [lets] channel), read as
      the lambda itself;
    - a name that [named] resolves: a named function or a callback parameter
@@ -892,13 +1090,15 @@ let named_predicate (sig_of : string -> fn_sig option) (g : string) : (string * 
 let local_lambda_of (lets : launder) (f : string) : A.expr option =
   match List.assoc_opt f lets with Some (A.ELam _ as l) -> Some l | _ -> None
 
-let instantiate_abstract ~(named : string -> (string * A.expr) option)
+let instantiate_abstract ~(named : string -> (string list * A.expr) option)
     ~(local_lambda : string -> A.expr option) (fd : A.fn_def) (p : string)
     (args : A.expr list) : (string * A.expr, string) result =
+  (* A callable passed BY NAME: one parameter only, since a bare
+     two-parameter name has no one-argument meaning. *)
   let by_name g =
     match named g with
-    | Some (n, e) -> Ok (n, e)
-    | None ->
+    | Some ([ n ], e) -> Ok (n, e)
+    | _ ->
       Error
         (Printf.sprintf
            "`%s`, passed for `%s`, has no proved `{Bool | _ == …}` return over one parameter" g p)
@@ -907,35 +1107,17 @@ let instantiate_abstract ~(named : string -> (string * A.expr) option)
     match lam with
     | A.ELam ([ prm ], body, _) ->
       let y = prm.A.param_name.A.txt in
-      (* A call to anything but an operator, a measure, a tester or a
-         constant function is not reflected where [q] is assumed (a scope
-         predicate does not inline a callee's contract), so the assumption
-         would silently drop and the discharge refute: a false "too weak". *)
-      let rec opaque_call (e : A.expr) : string option =
-        match e with
-        | A.EApp (A.EVar { A.txt = f; _ }, args, _) ->
-          if known_predicate_fn f then List.find_map opaque_call args else Some f
-        | A.EApp (f, args, _) -> List.find_map opaque_call (f :: args)
-        | A.ETuple (es, _) | A.ECon (_, es, _) -> List.find_map opaque_call es
-        | A.EAnnot (e, _, _) | A.EField (e, _, _) -> opaque_call e
-        | _ -> None
-      in
-      (match body with
-       (* `fn y -> g(y)` is `g` (eta). *)
-       | A.EApp (A.EVar { A.txt = g; _ }, [ A.EVar { A.txt = y'; _ } ], _)
-         when y' = y && not (known_predicate_fn g) ->
-         by_name g
-       | _ ->
-         if classify_pred y [] body <> Closed then
+      (* A call is read through [inline_bool_body] or declined: a scope
+         predicate does not inline a callee's contract, so an unread call
+         would silently drop the assumption and the discharge refute — a
+         false "too weak". *)
+      (match inline_bool_body ~named ~local_lambda ~binders:[ y ] body with
+       | Error w -> Error (Printf.sprintf "the lambda passed for `%s` %s" p w)
+       | Ok r ->
+         if classify_pred y [] r <> Closed then
            Error
              (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
-         else
-           (match opaque_call body with
-            | Some f ->
-              Error
-                (Printf.sprintf
-                   "the lambda passed for `%s` calls `%s`, whose result is not reflected there (yet)" p f)
-            | None -> Ok (y, body)))
+         else Ok (y, r))
     | A.ELam _ ->
       Error (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
     | _ -> Error (Printf.sprintf "the argument passed for `%s` is not a lambda" p)
@@ -946,7 +1128,13 @@ let instantiate_abstract ~(named : string -> (string * A.expr) option)
   | Some (A.ELam _ as lam) -> of_lambda lam
   (* A let-bound lambda first: it shadows a top-level function of the name. *)
   | Some (A.EVar { A.txt = g; _ }) ->
-    (match local_lambda g with Some lam -> of_lambda lam | None -> by_name g)
+    (match local_lambda g with
+     | Some lam when Refine_scope.expr_mentions_free g lam ->
+       (* C5: the body's [g] is an OUTER binding, but [lets] would answer
+          with this lambda. *)
+       Error (Printf.sprintf "`%s`, passed for `%s`, is a `let`-bound lambda that names itself" g p)
+     | Some lam -> of_lambda lam
+     | None -> by_name g)
   | Some _ ->
     Error
       (Printf.sprintf
@@ -980,7 +1168,7 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
              | Some a when not (parametric_ok ctx g [ a ]) ->
                uninst (Printf.sprintf "`%s` is not known to be parametric in `%s`" g a)
              | _ ->
-               (match instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) ~local_lambda:(local_lambda_of lets) fd p args with
+               (match instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb)) ~local_lambda:(local_lambda_of lets) fd p args with
                 | Error w -> uninst w
                 | Ok (y, body) ->
                   begin
@@ -1040,6 +1228,14 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
                              with
                              | Some (A.EVar { A.txt = g; _ }) ->
                                Printf.sprintf "`%s` (`%s`)" g (pred_str body)
+                             | Some (A.ELam ([ _ ], src, _)) ->
+                               (* §2.5: print the lambda as written and, when
+                                  the reader rewrote it, what it was read as. *)
+                               let written = lambda_src_str src in
+                               if written = pred_str body then Printf.sprintf "`fn %s -> %s`" y written
+                               else
+                                 Printf.sprintf "`fn %s -> %s` (read as `%s`)" y written
+                                   (reading_str body)
                              | _ -> Printf.sprintf "`fn %s -> %s`" y (pred_str body)
                            in
                            Printf.sprintf "%s does not imply `%s`" source (pred_str dpred)))
@@ -1435,7 +1631,7 @@ let abstract_param_entry (ctx : rctx) defs (cb : cbenv) (lets : launder) (g : st
      | None -> None
      | Some (_, fd) ->
        Some
-         (Result.bind (instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) ~local_lambda:(local_lambda_of lets) fd p args) (fun (y, body) ->
+         (Result.bind (instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb)) ~local_lambda:(local_lambda_of lets) fd p args) (fun (y, body) ->
               (* The demand's element sort is the ARGUMENT's: unlike a result
                  demand, nothing declared states it.  Defaulting to Int made a
                  correct `List(String)` call a false violation (probe q09b,
