@@ -120,6 +120,58 @@ A4, A18 and the non-Bool `match` control. Nothing else moved under either.
   **1.15 s**; branch 1.31 / 1.17 / 1.14 s, median **1.17 s** (102%, within the 110% budget).
   The inliner adds no query.
 
+## Review follow-up (second commit)
+
+An independent review of `a37092c83` found no false proof from the translation itself, but one
+Medium: `named_predicate_n` inlined a helper's `{Bool | _ == e}` even when the helper has
+refined PARAMETERS the inline site does not discharge. `fn weird(a : {Int | _ > 0}) : {Bool | _
+== (a > 0)} do true end` is a correct definition (proved under `a > 0`), yet `weird(-5)` is
+`true`, and `sum_pos(filt(ys, fn y -> weird(y)))` was reported PROVED (only a HINT for the
+precondition). The same held by name (`filt(ys, weird)`, phase 3's path), for n-ary helpers,
+through a `let`-bound lambda, and at a parameter slot.
+
+**Fix.** `named_predicate_n` also returns the callee's preconditions over its parameter names
+(literal `true` dropped). `inline_bool_body` threads the guards the lambda has decided on the
+way to each call (left of `&&`; negated left of `||`; an `if`/Bool-`match` condition, negated
+in the else arm) and returns each inlined callee's precondition at its actuals, under those
+guards, as an obligation; a `let`-bound lambda's obligations are moved into the caller's
+namespace with its body. `instantiate_abstract` discharges every obligation `guards ⇒ pre`
+with one scratch solver query (`scratch_implies`, the pattern `abstract_flow` already uses),
+from the definer's callback-domain fact (`definer_domain`; `true` for `a -> Bool[p]`), and
+declines otherwise: "calls `weird`, whose precondition `y > 0` is not known to hold there".
+The by-name path does the same. At a parameter slot an unknown element sort discharges
+nothing. The incoming element fact (§3.4) is deliberately NOT used: it is a fact about
+result elements, not about every value the combinator applies the callback to.
+
+**Tests (RED on `a37092c83`, GREEN after):** a helper whose precondition the lambda does not
+discharge (eta, inside `&&`, by name, through a `let`-bound lambda; the reason names the
+precondition); an n-ary helper (`wgt(a : {Int | _ > 10}, m : {Int | _ < 10})`, `fn y -> wgt(y,
+0)`); a precondition at a parameter slot. Controls, green on both: the lambda's own guard
+discharges it (`&&`, `if`, `||` (too-weak, so the obligation was discharged), through a
+`let`-bound lambda); a trivially `true` precondition still inlines. Also new, green on both:
+an `@[trusted]` helper under `cap verified` is not inlined, and a rebinding that retires an
+intermediate `let`-lambda of a chain declines. A new table test pins the whole-module ledger
+triple for every main row (RED on `a37092c83` only on the `weird` row).
+
+**Perturbation.** Treating every obligation as discharged reddens exactly the three RED tests;
+treating none as discharged reddens exactly the guard control.
+
+**Noted, not changed.** The ordinary body walk records the call `weird(y)` inside
+`fn y -> y > 0 && weird(y)` as an `unconstrained-subject` skip (it does not read the `&&`
+left side as a fact there), while the inliner proves the same precondition. A precision gap of
+the walk, not a soundness one; under `cap verified` that module is still an error for the skip.
+
+**Docs.** `specs/lang/refinement-types.md`: the precondition rule, and a limit that predates
+this phase: a callback parameter's codomain contract (`k : … -> {Bool | _ == (x > 0)}`)
+instantiates `p` inside its function but is only as good as the obligation at each call of that
+function, where passing a callable not known to meet it is a skip (measured:
+`unreflectable-subject`), not a violation.
+
+**Verification.** `test_refinecheck.exe -e`: 1077 tests, all passed, 0 `[SKIP]`.
+`scripts/run-tests.sh -q compiler`: 1348 passed. Refine oracle against the same `c0992ab13`
+baseline, same-location scratch worktree, private HOME: IDENTICAL (7786 lines over 549
+fixtures). `check_types.sh`: 446 passed.
+
 ## Still open (unchanged by this phase)
 
 Phases B–E of the design: `!p(_)` slots and concrete bases, tuple returns and

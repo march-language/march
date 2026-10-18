@@ -30,7 +30,8 @@ git log is authoritative for exact commits.
   an `abstract-refinement-uninstantiated` skip. A too-weak skip now prints what
   the lambda was read as (`` `fn y -> is_pos(y) || y < 100` (read as
   `y > 0 || y < 100`) ``), and a declined body names the construct it could not
-  read.
+  read. A helper with refined parameters is inlined only where those are proved
+  at the call (`fn y -> y > 0 && weird(y)` is read; `fn y -> weird(y)` is not).
 
 ### Fixed
 

@@ -18087,6 +18087,44 @@ let abstract_leftovers_a_suite =
         Alcotest.check ps "proved" proved (slugs body);
         let _, _, _, rs = typed_ledger (src body) in
         Alcotest.(check (list string)) "no skip anywhere in the module" [] rs);
+    (* The whole module's ledger for each row above, so a row cannot pass
+       through an extra obligation, a stray violation or a lost proof
+       elsewhere in the module.  The fixed part of every module is [filt]'s
+       own return obligations and the three helpers' postconditions; the
+       lambda's own body adds its calls' obligations where it has any: 6
+       proved is that fixed part, `k(y)` adds its (trivial) domain obligation
+       in L9, and `weird(y)` adds its own postcondition and an
+       `unconstrained-subject` skip for its precondition at the call (the
+       body walk does not read `y > 0 &&` as a fact there; the inliner does). *)
+    gated "every row's whole-module ledger triple" (fun () ->
+        let weird = "  fn weird(a : {Int | _ > 0}) : {Bool | _ == (a > 0)} do true end\n" in
+        let rows =
+          [ ("A1", go "fn y -> is_pos(y) && y < 100", (7, 0, 0));
+            ("A2", go "fn y -> is_pos(y) || y < 100", (6, 0, 1));
+            ("A3 if", go "fn y -> if y > 0 do y < 100 else false end", (7, 0, 0));
+            ("A3 match", go "fn y -> match y > 0 do\n    true -> y < 100\n    false -> false\n    end", (7, 0, 0));
+            ("A4", go "fn y -> if y > 0 do true else y > -5 end", (6, 0, 1));
+            ("A5 L3", go "fn y -> not(is_neg(y)) && y != 0", (7, 0, 0));
+            ("A5 L3c", go "fn y -> not(is_neg(y))", (6, 0, 1));
+            ("A6", go "fn y -> gt(y, 0)", (7, 0, 0));
+            ("A7", go "fn y -> gt(0, y)", (6, 0, 1));
+            ("A8", "  fn go(ys : List(Int), k : Int) : Int do sum_pos(filt(ys, fn y -> gt(y, k))) end\n", (6, 0, 1));
+            ("A9 L8", "  fn go(ys : List(Int)) : Int do\n    let f = fn y -> y > 0\n    sum_pos(filt(ys, fn y -> f(y) && y < 100))\n  end\n", (7, 0, 0));
+            ("A9 L9", "  fn go(ys : List(Int), k : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : Int do sum_pos(filt(ys, fn y -> k(y) && y < 100)) end\n", (8, 0, 0));
+            ("A10", go "fn y -> is_pos(y + 1)", (6, 0, 1));
+            ("A14", go "fn is_pos -> is_pos > 0", (7, 0, 0));
+            ("A15", "  fn go(ys : List(Int)) : Int do\n    let is_pos = fn y -> y >= 0\n    sum_pos(filt(ys, fn y -> is_pos(y) && y < 100))\n  end\n", (6, 0, 1));
+            ("A16", "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> gt(y, 0))) + sum_pos(filt(ys, fn y -> gt(y, -1))) end\n", (7, 0, 1));
+            ("A18", go "fn y -> if y != 0 do 10 / y > 0 else false end", (7, 0, 0));
+            ("non-Bool match", go "fn y -> match y do\n    0 -> false\n    _ -> y > 0\n    end", (6, 0, 1));
+            ("weird eta", weird ^ go "fn y -> weird(y)", (7, 0, 2));
+            ("weird guarded", weird ^ go "fn y -> y > 0 && weird(y)", (8, 0, 1)) ]
+        in
+        List.iter
+          (fun (name, body, want) ->
+            let p, v, s, _ = typed_ledger (src body) in
+            Alcotest.(check (triple int int int)) name want (p, v, s))
+          rows);
     (* Controls: what the reader does not translate declines, naming the
        construct, never the old "mentions a name" catch-all. *)
     gated "a match on a non-Bool declines, naming the construct" (fun () ->
@@ -18121,7 +18159,69 @@ let abstract_leftovers_a_suite =
 end|}
         in
         (* gt's own postcondition (1) + the element obligation (1). *)
-        Alcotest.(check (triple int int int)) "proved" (2, 0, 0) (p, v, s)) ]
+        Alcotest.(check (triple int int int)) "proved" (2, 0, 0) (p, v, s));
+    (* Review follow-up (2026-10-18): a helper's `{Bool | _ == e}` is proved
+       only under its own parameter refinements, so `weird(-5)` may be
+       anything.  It is inlined only where each refined parameter is
+       discharged at the call inside the lambda: under the definer's domain
+       fact and the guards the lambda itself evaluates first (`&&`, `||`,
+       `if`).  RED before: every row below but the controls was PROVED. *)
+    gated "a helper whose precondition the lambda does not discharge is not inlined" (fun () ->
+        let pre = "  fn weird(a : {Int | _ > 0}) : {Bool | _ == (a > 0)} do true end\n" in
+        Alcotest.check ps "eta" uninst (slugs (pre ^ go "fn y -> weird(y)"));
+        Alcotest.check ps "inside &&" uninst (slugs (pre ^ go "fn y -> weird(y) && y < 100"));
+        Alcotest.check ps "by name" uninst (slugs (pre ^ go "weird"));
+        Alcotest.check ps "through a let-bound lambda" uninst
+          (slugs
+             (pre
+            ^ "  fn go(ys : List(Int)) : Int do\n    let f = fn z -> weird(z)\n    sum_pos(filt(ys, fn y -> f(y) && y < 100))\n  end\n"));
+        let d = detail (pre ^ go "fn y -> weird(y) && y < 100") in
+        Alcotest.(check bool) ("names the precondition: " ^ d) true (contains d "precondition"));
+    gated "an n-ary helper's precondition is checked on its actuals" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (slugs
+             (* Proved under its preconditions (a > 10 > m), so `true`
+                is a correct body; `wgt(-5, 0)` is still `true`. *)
+             ("  fn wgt(a : {Int | _ > 10}, m : {Int | _ < 10}) : {Bool | _ == (a > m)} do true end\n"
+             ^ go "fn y -> wgt(y, 0)")));
+    gated "control: a precondition the lambda's own guard discharges" (fun () ->
+        let pre = "  fn weird(a : {Int | _ > 0}) : {Bool | _ == (a > 0)} do true end\n" in
+        Alcotest.check ps "&& guard" proved (slugs (pre ^ go "fn y -> y > 0 && weird(y)"));
+        Alcotest.check ps "if guard" proved
+          (slugs (pre ^ go "fn y -> if y > 0 do weird(y) else false end"));
+        Alcotest.check ps "|| guard" weak (slugs (pre ^ go "fn y -> y <= 0 || weird(y)"));
+        Alcotest.check ps "the guard travels through a let-bound lambda" proved
+          (slugs
+             (pre
+            ^ "  fn go(ys : List(Int)) : Int do\n    let f = fn z -> z > 0 && weird(z)\n    sum_pos(filt(ys, fn y -> f(y) && y < 100))\n  end\n")));
+    gated "control: a trivially true precondition still inlines" (fun () ->
+        Alcotest.check ps "proved" proved
+          (slugs
+             ("  fn tw(a : {Int | true}) : {Bool | _ == (a > 0)} do a > 0 end\n"
+             ^ go "fn y -> tw(y) && y < 100")));
+    gated "a precondition at a parameter slot" (fun () ->
+        let _, _, _, rs =
+          typed_ledger
+            {|mod LPP do
+  fn need(xs : List({a | p(_)}), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : Int do 0 end
+  fn w10(a : {Int | _ > 10}) : {Bool | _ == (a > 0)} do true end
+  fn go(pos : List({Int | _ > 0})) : Int do need(pos, fn y -> w10(y)) end
+end|}
+        in
+        Alcotest.(check bool) "uninstantiated" true
+          (List.mem "abstract-refinement-uninstantiated" rs));
+    gated "an @[trusted] helper is not inlined" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (List.map
+             (fun (v, r, _) -> (v, r))
+             (sum_pos_of
+                ("mod LT do\n  cap verified\n" ^ ar2_filt
+               ^ "  @[trusted]\n  fn tpos(n : Int) : {Bool | _ == (n > 0)} do true end\n"
+               ^ go "fn y -> tpos(y) && y < 100" ^ "end\n"))));
+    gated "a rebinding that retires an intermediate let-lambda declines the chain" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (slugs
+             "  fn go(ys : List(Int)) : Int do\n    let f1 = fn y -> y > 0\n    let f2 = fn y -> f1(y)\n    let f1 = fn y -> y >= 0\n    sum_pos(filt(ys, fn y -> f2(y) && y < 100))\n  end\n")) ]
 
 (* Phase 4 (plan specs/plans/2026-10-07-abstract-refinements-phase4-plan.md):
    the `a[p]` / `Bool[p]` shorthand must mean exactly the spelled-out form.

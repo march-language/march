@@ -2261,6 +2261,15 @@ captures one. Calls to `let`-bound lambdas are inlined at most four deep
 (`f4` calling `f3` calling `f2` calling `f1` is read; one more is declined,
 naming the bound).
 
+A helper's `{Bool | _ == e}` is proved only for arguments that satisfy its
+refined parameters, so it is inlined only where each of those is proved at the
+call: from what the combinator's callback domain promises (`true` for
+`a -> Bool[p]`) and from what the lambda has already decided on the way to the
+call (the left side of `&&` or `||`, an `if` condition). With
+`weird(a : {Int | _ > 0}) : {Bool | _ == (a > 0)}`, `fn y -> weird(y)` is
+declined, naming the precondition, while `fn y -> y > 0 && weird(y)` is read
+as `y > 0 && y > 0`.
+
 **The standard library.** `List.filter`, `List.find`
 (`Option({a | p(_)})`), `List.take_while` and `Option.filter` all carry `p`:
 
@@ -2286,7 +2295,14 @@ demand meets one of these):
   proved contract or to the lambda's own parameter, a computed call head, a
   `let`-bound lambda that names itself, or inlining deeper than four
   `let`-bound lambdas. Int-valued helpers (`score(y) > 3` with
-  `score : {Int | _ == …}`) are not inlined.
+  `score : {Int | _ == …}`) are not inlined, and neither is a helper whose
+  refined parameters are not proved at the call inside the lambda.
+- **A callback parameter's codomain contract is taken on trust from its
+  callers.** In `fn keep_pos(ys, k : ({x : Int | true}) -> {Bool | _ == (x > 0)})`,
+  `k`'s `_ == (x > 0)` instantiates `p` inside `keep_pos`, but it is only as
+  good as the obligation at each place `keep_pos` is called, and passing a
+  callable whose return is not known to meet it is a skip there today, not a
+  violation.
 - **One argument only.** `Map.filter`'s `(k, v) -> Bool` and a `fold_left`
   accumulator invariant would need a two-argument `p(k, v)`.
 - **Not every combinator.** `List.partition` would need `p` inside a tuple and
