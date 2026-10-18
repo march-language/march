@@ -21,12 +21,23 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Two nodes built from different versions of a protocol no longer form a session
+  through `<P>_Run.cluster_<Role>` and find the skew mid-session: each role registers
+  its protocol fingerprint beside its endpoint, and a peer with a different one, or
+  none (a node built before the check), is refused with `Err(Connect(...))` before the
+  session forms, as the direct runner already refused it at the hello.
 - `--hot-reload` programs built with `--cap-sandbox` now keep their reload and observe
   sockets when they withhold `IO.NetListen`: the reload server's listener is bound
   before the sandbox is installed instead of racing it on its own thread, and the
   observe socket starts before the install instead of after it (where its bind was
   always refused). An over-long reload socket path is now refused instead of silently
   truncated.
+
+### Changed
+
+- `SessionNode.run_cluster` and `SessionNode.run_cluster_hosted` take a `fingerprint`
+  argument after `session` (the generated `cluster_<Role>` runners pass the
+  protocol's); pass `""` to check nothing.
 
 ### Documentation
 
