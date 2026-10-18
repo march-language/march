@@ -2055,6 +2055,38 @@ a name the demand mentions is not read as that name. On a record field
 (`xs : List({Int | _ < n})` naming the sibling field `n`) or on an expected
 function codomain, such a refinement is a recorded skip, never checked.
 
+The same holds for a **return**. A call to a function whose container return
+names a parameter and was proved at its definition carries that return at the
+call's own arguments:
+
+```march
+fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end
+
+fn t(k : {Int | _ <= 10}) : Int do
+  sum_small(below(10)) + sum_small(below(k))   -- both proved (_ < 10)
+end
+sum_lt5(below(10))                              -- violated: _ < 10 does not imply _ < 5
+```
+
+Only an argument that is a variable, a literal, or `+`/`-`/literal-`*`
+arithmetic over them is substituted. `below(f(x))` carries nothing. A
+`let`-bound result (`let ys = below(k)`) keeps the fact until a name it
+mentions is rebound. A recursive call to the function being checked carries the
+return at its own arguments, so `clamp(t, n)` inside
+`fn clamp(xs, n) : List({Int | _ <= n})` is `_ <= n`. A tuple component works
+the same way, and so does a block-level `fn` whose return names only its own
+parameters. A function passed as a value carries nothing, because there are no
+arguments to substitute.
+
+When such a return fails to imply what a call demands, the result is a
+violation only if every caller variable it or the demand mentions is
+constrained by a refinement or a guard (`k` above). If no fact constrains the
+variable (`sum_small(below(n))` with `n : Int`), the call is a recorded skip,
+unless no value of it could work (`need_ge(below(n), n)` against
+`List({Int | _ >= n})` is violated for every `n`). A pattern binder spelled
+like a name the slot mentions (`Cons(n, _)` over `List({Int | _ < n})`) gets no
+fact from it.
+
 ### Through a polymorphic call
 
 A function that is generic in its element type cannot invent an element, so its
@@ -2467,17 +2499,16 @@ demand meets one of these):
   but `acc` assumes nothing, so `need_pos(acc)` is a skip: an invariant the
   accumulator keeps is not inferred. A curried lambda (`fn a -> fn x -> …`)
   gives a fact to its outer parameter only.
-- **A local `fn` with a container return lends it only when the entry is
-  closed and the `fn` does not recurse into it.** Its tails are checked like a
-  top-level function's, and a proved one is a fact at its later calls in the
-  block, but a return naming a captured variable or a parameter
-  (`List({Int | _ < k})`) lends nothing, and a recursive call inside the local
-  carries nothing (no structural self-call hypothesis), so `fn go(xs) : List({Int
-  | _ > 0})` whose tail is `go(t)` is a skip. A local returning a tuple of
-  element-refined containers has every component of every tail checked, but
-  lends nothing at its calls.
-- **An element refinement that names a parameter** (`: List({Int | _ < n})`) is
-  not a fact at the call site of the function that returns it.
+- **A local `fn` with a container return lends it only when the entry names
+  nothing but the `fn`'s own parameters, and the `fn` does not recurse into it.**
+  Its tails are checked like a top-level function's, and a proved one is a fact
+  at its later calls in the block (read at each call's arguments), but a return
+  naming a captured variable (`List({Int | _ < k})` with `k` from outside)
+  lends nothing, and a recursive call inside the local carries nothing (no
+  structural self-call hypothesis), so `fn go(xs) : List({Int | _ > 0})` whose
+  tail is `go(t)` is a skip. A local returning a tuple of element-refined
+  containers has every component of every tail checked, but lends nothing at
+  its calls.
 - **A predicate relating elements to each other** (sortedness, distinctness)
   cannot be written; see [Set Refinements](#set-refinements) for what a
   predicate can say about a collection's elements as a set.

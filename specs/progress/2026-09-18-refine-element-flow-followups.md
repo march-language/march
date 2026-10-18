@@ -29,9 +29,16 @@ not do"; remove the bullet there when closing one.
    `specs/progress/2026-10-18-element-flow-phase3-local-fn-returns.md`. Closed
    entries only, and no self-call hypothesis for a recursive local (both
    stated in `specs/lang/refinement-types.md`).
-4. **Relational element returns** (`: List({Int | _ < n})`) are not facts at a
+4. ~~**Relational element returns** (`: List({Int | _ < n})`) are not facts at a
    call site (`entry_is_closed`). Substitute the actuals as `postcond_of` does
-   for a scalar relational return.
+   for a scalar relational return.~~ **Closed 2026-10-18** by phase 4 of
+   `specs/2026-10-18-element-flow-followups-design.md`; see
+   `specs/progress/2026-10-18-element-flow-phase4-relational-returns.md`.
+   Stable actuals only (variables, literals, linear arithmetic); a function
+   passed as a value still lends only a closed entry.
+
+**All six items are closed (2026-10-18)**; this file moved from `specs/todos/`
+to `specs/progress/` with phase 4.
 5. ~~**Tier 2's induction hypothesis trusts component NAMES.**~~ **Closed
    2026-09-21**: it was a live soundness bug (a false relational postcondition
    proved), fixed at the source in `structural_subvars` for all three

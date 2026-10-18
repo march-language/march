@@ -168,9 +168,15 @@ let elem_ret_proved : (string, unit) Hashtbl.t = Hashtbl.create 16
    parameter, its position, its name and the [cbenv] entry the clause
    started with; the hypothesis applies only when each such position receives
    that very name with that very entry (physically: any rebinding of the name
-   retires or replaces it). *)
+   retires or replaces it).
+
+   The fifth is the function's formals (design 2026-10-18 element-flow
+   follow-ups, phase 4, §2.3): an entry relational over them is read at the
+   self-call's OWN actuals ([Refine_check.lend_entry]), so `clamp(t, n)`
+   carries `_ <= n`; a closed entry ignores it. *)
 let elem_ret_hyp
-  : (string * (string, unit) Hashtbl.t list * ret_elems * (int * string * fn_sig) list) option ref =
+  : (string * (string, unit) Hashtbl.t list * ret_elems * (int * string * fn_sig) list * string list)
+    option ref =
   ref None
 
 (* The LOCAL `fn`s whose declared container return had every tail PROVED

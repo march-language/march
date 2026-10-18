@@ -2470,6 +2470,33 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       List.iter
         (fun x -> if not (is_self x) && not (List.mem_assoc x name_pos) then load_scalar_name_fact x)
         (guard_names rp.pred);
+    (* …and so is a name an ACTUAL's own scope fact mentions (design
+       2026-10-18 element-flow follow-ups, phase 4): a relational element
+       return read at the call's actuals puts `$elem : {_ < k}` in scope for
+       `sum_small(below(k))`, and `k`'s own fact (`k <= 10`) is what
+       discharges it.  [subject_facts] keeps each such predicate with the
+       names that denote the actual itself, for the definite-failure rule
+       below. *)
+    let subject_facts =
+      if not goal_scope_facts then []
+      else
+        List.filter_map
+          (function
+            | A.EVar { A.txt = x; _ } ->
+              (match List.assoc_opt x sc with
+               | Some (b, q, _) -> Some ([ b; "_"; x ], q)
+               | None -> None)
+            | _ -> None)
+          args
+    in
+    List.iter
+      (fun (own, q) ->
+        List.iter
+          (fun x ->
+            if not (List.mem x own) && not (is_self x) && not (List.mem_assoc x name_pos) then
+              load_scalar_name_fact x)
+          (guard_names q))
+      subject_facts;
     List.iter
       (fun (cond, negated) ->
         match
@@ -2825,13 +2852,23 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             | A.EField (r, _, _) | A.EAnnot (r, _, _) -> value_names r
             | _ -> []
           in
+          let free_caller_name x =
+            (not (is_self x)) && (not (List.mem_assoc x name_pos))
+            && not (Hashtbl.mem constrained_names x)
+          in
+          (* The same holds of the SUBJECT's fact (phase 4): an instantiated
+             relational element return `$elem : {_ < n}` with a caller `n`
+             nothing constrains says nothing about the real `n`, so
+             `sum_small(below(n))` is not a definite failure because the
+             solver picked `n = 100`.  The `¬G` discharge still reports one
+             no value of `n` avoids (`need_ge(below(n), n)`). *)
           let free_goal_name =
             goal_scope_facts
-            && List.exists
-                 (fun x ->
-                   (not (is_self x)) && (not (List.mem_assoc x name_pos))
-                   && not (Hashtbl.mem constrained_names x))
-                 (value_names rp.pred)
+            && (List.exists free_caller_name (value_names rp.pred)
+                || List.exists
+                     (fun (own, q) ->
+                       List.exists (fun x -> (not (List.mem x own)) && free_caller_name x) (value_names q))
+                     subject_facts)
           in
           let definite =
             match subject, first with

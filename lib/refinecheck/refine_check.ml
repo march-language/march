@@ -709,7 +709,9 @@ let parametric_return ~(entry_of : A.expr -> (string * elem option list) option)
      the actuals resolved through this same function (`reverse(reverse(xs))`);
      failing that, the callee's DECLARED container return, when every one of
      its tails was proved to meet it ([elem_ret_proved]) and its element
-     predicates mention nothing but their own binder.
+     predicates mention nothing but their own binder, or (since 2026-10-18,
+     element-flow follow-ups phase 4) its parameters, read at the call's
+     actuals ([lend_entry]).
 
    Anything else carries nothing. *)
 (* Does an element entry's predicate apply any of [names]?  An entry naming a
@@ -727,111 +729,6 @@ let entry_mentions (names : string list) ((_, slots) : string * elem option list
     | Some (Container (_, inner)) -> List.exists slot inner
   in
   names <> [] && List.exists slot slots
-
-(* Does the structural induction hypothesis ([elem_ret_hyp]) cover the call
-   [fname(args)]?  It must be a call to the function being walked (not a
-   local or callback of the name), some argument must be a structural
-   subvariable of its parameter, and every DEFINER position of an abstract
-   refinement must receive the function's own parameter, unshadowed
-   (review of a2f9fb2a5: `filt(t, fn y -> true)` returned elements that
-   satisfy `true`, and the hypothesis read them as `p`; so did a swapped
-   pair of definers, a name rebound to another lambda, and an alias, which
-   is declined too). *)
-let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
-    ((self, sets, definers) : string * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
-  fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
-  && List.length sets = List.length args
-  && List.exists2
-       (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
-       args sets
-  && List.for_all
-       (fun (i, n, sg) ->
-         (match List.nth_opt args i with Some (A.EVar { A.txt = v; _ }) -> v = n | _ -> false)
-         && match List.assoc_opt n cb with Some sg' -> sg' == sg | None -> false)
-       definers
-
-let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
-  : (string * elem option list) option =
-  match e with
-  | A.EVar { A.txt = x; _ } -> List.assoc_opt x ce
-  | A.EAnnot (e', _, _) -> container_entry_of_expr ctx defs cb ce e'
-  | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
-    (match !elem_ret_hyp with
-     | Some (self, sets, Single entry, definers) when hyp_applies ctx cb fname args (self, sets, definers) ->
-       Some entry
-     | _ ->
-       (match
-          parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb fname args
-        with
-        | Some (`Container entry) -> Some entry
-        | _ -> declared_elem_return ctx cb fname))
-  | _ -> None
-
-(* The declared container return of [fname], as a fact at its call site.  A
-   callback parameter or local shadowing the name resolves to it, never to
-   the global ([resolve_key] honours [ctx.locals]); a name the definition
-   table does not know carries nothing. *)
-and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
-  : (string * elem option list) option =
-  match List.assoc_opt fname cb with
-  (* A refined callback PARAMETER's container codomain: every pass site was
-     obliged to meet it ([check_pass_site_elements]).  Only a signature
-     [callback_sig_of_ty] built carries this marker; a local `fn`, a
-     `let`-bound lambda or an alias does not, and carries nothing here. *)
-  | Some sg when sg.param_names = [ callback_param_name ] ->
-    (match elem_refinement sg.ret_ty with
-     | Some entry when entry_is_closed entry -> Some entry
-     | _ -> None)
-  (* A local `fn` whose every tail was proved to meet its declared container
-     return ([visit_local_fn], design 2026-10-18 element-flow follow-ups,
-     phase 3): exactly that signature, physically, so a same-named global
-     or another local never lends through it.  Only a closed entry was
-     registered; re-checked here. *)
-  | Some sg when List.memq sg !local_elem_ret_proved ->
-    (match elem_refinement sg.ret_ty with
-     | Some entry when entry_is_closed entry -> Some entry
-     | _ -> None)
-  | Some _ -> None
-  | None ->
-    match resolve_key ctx fname with
-    | Some key when Hashtbl.mem elem_ret_proved key ->
-      (match Hashtbl.find_opt fn_defs_tbl key with
-       | Some (_, fd) ->
-         (match elem_refinement fd.A.fn_ret_ty with
-          | Some entry
-            when entry_is_closed entry
-                 && not (entry_mentions (callee_abstracts ctx fname) entry) ->
-            Some entry
-          | _ -> None)
-       | None -> None)
-    | _ -> None
-
-(* The declared TUPLE element return of [fname] (leftovers design 2026-10-18
-   §5.2, §5.4), one entry per component, as a fact at a call site: only once
-   every tail was proved to meet it ([elem_ret_proved]), and per component
-   under [declared_elem_return]'s conditions (closed, free of the callee's
-   abstract refinements, which mean something different at every call).  A
-   callback parameter or local of the name carries nothing. *)
-let declared_tuple_return (ctx : rctx) (cb : cbenv) (fname : string)
-  : (string * elem option list) option list option =
-  if List.mem_assoc fname cb then None
-  else
-    match resolve_key ctx fname with
-    | Some key when Hashtbl.mem elem_ret_proved key ->
-      (match Hashtbl.find_opt fn_defs_tbl key with
-       | Some (_, fd) ->
-         (match ret_elems_of_ty fd.A.fn_ret_ty with
-          | Some (Tuple comps) ->
-            let abs = callee_abstracts ctx fname in
-            Some
-              (List.map
-                 (function
-                   | Some e when entry_is_closed e && not (entry_mentions abs e) -> Some e
-                   | _ -> None)
-                 comps)
-          | _ -> None)
-       | None -> None)
-    | _ -> None
 
 (* ── One namespace for a declared element slot (design 2026-10-18
    element-flow follow-ups, phase 0, §1.1) ───────────────────────────────
@@ -898,6 +795,189 @@ let instantiate_entry ~(mode : [ `Stable | `Any ]) ~(formals : string list) ~(ar
   match List.map slot slots with
   | slots' -> Ok (c, slots')
   | exception Stuck why -> Error why
+
+(* ── Relational element returns as call-site facts (design 2026-10-18
+   element-flow follow-ups, phase 4, §2) ─────────────────────────────────
+   A proved container return whose element refinement names a parameter
+   (`below(n) : List({Int | _ < n})`) is a fact at a call once the call's
+   actuals replace the parameters, exactly as [postcond_of]'s [Relational]
+   arm moves a scalar relational return.  [`Stable] only: the entry may be
+   STORED ([contenv], under a `let`) and read again later, and a stored
+   entry naming only variables and literals is retired by mention
+   ([cont_shadow]) the moment one of them is rebound.  Each top-level slot
+   moves on its own; one that cannot move (an unstable actual, a missing
+   argument) is [None], weaker and sound.  [None] when no slot survives, so
+   the caller's other routes still get their turn. *)
+let lend_entry ~(formals : string list) ~(args : A.expr list) ((c, slots) : string * elem option list)
+  : (string * elem option list) option =
+  let slots' =
+    List.map
+      (fun s ->
+        match instantiate_entry ~mode:`Stable ~formals ~args (c, [ s ]) with
+        | Ok (_, [ s' ]) -> s'
+        | _ -> None)
+      slots
+  in
+  if List.exists Option.is_some slots' then Some (c, slots') else None
+
+(* Can [entry] be moved to a call's namespace at all: every predicate
+   [Closed] or [Relational] over [formals] (a name that is no parameter, a
+   captured variable or a module-level name, is [Unusable]: never lent). *)
+let rec entry_movable ~(formals : string list) ((_, slots) : string * elem option list) : bool =
+  List.for_all
+    (function
+      | None -> true
+      | Some (Refined (b, p, _)) -> classify_pred b formals p <> Unusable
+      | Some (Container (c, inner)) -> entry_movable ~formals (c, inner))
+    slots
+
+(* The formals a top-level definition's declared return is read under: the
+   first clause's parameter names ([sig_of_fn]), but only when EVERY clause
+   names its parameters alike.  The definition side checks each clause's
+   tails against the one declared return under that clause's own names, so
+   with two spellings (`f(n, m)` / `f(m, n)`) "proved" would not be about
+   one namespace, and nothing relational is lent (conservative). *)
+let uniform_formals (fd : A.fn_def) : string list option =
+  match fd.A.fn_clauses with
+  | [] -> None
+  | c :: cs ->
+    let names (c : A.fn_clause) = List.map param_name_of c.A.fc_params in
+    let f0 = names c in
+    if List.for_all (fun c -> names c = f0) cs then Some f0 else None
+
+(* Does the structural induction hypothesis ([elem_ret_hyp]) cover the call
+   [fname(args)]?  It must be a call to the function being walked (not a
+   local or callback of the name), some argument must be a structural
+   subvariable of its parameter, and every DEFINER position of an abstract
+   refinement must receive the function's own parameter, unshadowed
+   (review of a2f9fb2a5: `filt(t, fn y -> true)` returned elements that
+   satisfy `true`, and the hypothesis read them as `p`; so did a swapped
+   pair of definers, a name rebound to another lambda, and an alias, which
+   is declined too). *)
+let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
+    ((self, sets, definers) : string * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
+  fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
+  && List.length sets = List.length args
+  && List.exists2
+       (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+       args sets
+  && List.for_all
+       (fun (i, n, sg) ->
+         (match List.nth_opt args i with Some (A.EVar { A.txt = v; _ }) -> v = n | _ -> false)
+         && match List.assoc_opt n cb with Some sg' -> sg' == sg | None -> false)
+       definers
+
+let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
+  : (string * elem option list) option =
+  match e with
+  | A.EVar { A.txt = x; _ } -> List.assoc_opt x ce
+  | A.EAnnot (e', _, _) -> container_entry_of_expr ctx defs cb ce e'
+  | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
+    let other () =
+      match
+        parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb fname args
+      with
+      | Some (`Container entry) -> Some entry
+      | _ -> declared_elem_return ~args ctx cb fname
+    in
+    (match !elem_ret_hyp with
+     | Some (self, sets, Single entry, definers, formals)
+       when hyp_applies ctx cb fname args (self, sets, definers) ->
+       (* A closed hypothesis is the entry itself (unchanged); a relational
+          one is read at THIS self-call's actuals (phase 4, §2.3), and one
+          whose actuals do not move falls through to the other routes. *)
+       if entry_is_closed entry then Some entry
+       else (match lend_entry ~formals ~args entry with Some e -> Some e | None -> other ())
+     | _ -> other ())
+  | _ -> None
+
+(* The declared container return of [fname], as a fact at its call site.  A
+   callback parameter or local shadowing the name resolves to it, never to
+   the global ([resolve_key] honours [ctx.locals]); a name the definition
+   table does not know carries nothing.
+
+   [?args]: the call's actuals (design 2026-10-18 element-flow follow-ups,
+   phase 4, §2.1).  With them a RELATIONAL entry is lent too, read at those
+   actuals ([lend_entry]); without them (a callable passed as a value, which
+   has no actuals) only a closed entry is, as before. *)
+and declared_elem_return ?(args : A.expr list option) (ctx : rctx) (cb : cbenv) (fname : string)
+  : (string * elem option list) option =
+  let relational ~formals entry =
+    match args with
+    | Some args when List.length args = List.length formals -> lend_entry ~formals ~args entry
+    | _ -> None
+  in
+  match List.assoc_opt fname cb with
+  (* A refined callback PARAMETER's container codomain: every pass site was
+     obliged to meet it ([check_pass_site_elements]).  Only a signature
+     [callback_sig_of_ty] built carries this marker; a local `fn`, a
+     `let`-bound lambda or an alias does not, and carries nothing here. *)
+  | Some sg when sg.param_names = [ callback_param_name ] ->
+    (match elem_refinement sg.ret_ty with
+     | Some entry when entry_is_closed entry -> Some entry
+     | _ -> None)
+  (* A local `fn` whose every tail was proved to meet its declared container
+     return ([visit_local_fn], design 2026-10-18 element-flow follow-ups,
+     phase 3): exactly that signature, physically, so a same-named global
+     or another local never lends through it.  Only an entry closed or
+     relational over the local's own parameters was registered (phase 4);
+     a relational one is read at the call's actuals. *)
+  | Some sg when List.memq sg !local_elem_ret_proved ->
+    (match elem_refinement sg.ret_ty with
+     | Some entry when entry_is_closed entry -> Some entry
+     | Some entry -> relational ~formals:sg.param_names entry
+     | _ -> None)
+  | Some _ -> None
+  | None ->
+    match resolve_key ctx fname with
+    | Some key when Hashtbl.mem elem_ret_proved key ->
+      (match Hashtbl.find_opt fn_defs_tbl key with
+       | Some (_, fd) ->
+         (match elem_refinement fd.A.fn_ret_ty with
+          | Some entry when entry_mentions (callee_abstracts ctx fname) entry -> None
+          | Some entry when entry_is_closed entry -> Some entry
+          | Some entry ->
+            (match uniform_formals fd with Some formals -> relational ~formals entry | None -> None)
+          | _ -> None)
+       | None -> None)
+    | _ -> None
+
+(* The declared TUPLE element return of [fname] (leftovers design 2026-10-18
+   §5.2, §5.4), one entry per component, as a fact at a call site: only once
+   every tail was proved to meet it ([elem_ret_proved]), and per component
+   under [declared_elem_return]'s conditions (closed, free of the callee's
+   abstract refinements, which mean something different at every call).  A
+   callback parameter or local of the name carries nothing.  [~args]: a
+   component relational over the parameters is read at those actuals, as
+   [declared_elem_return] reads a single container (phase 4). *)
+let declared_tuple_return ~(args : A.expr list) (ctx : rctx) (cb : cbenv) (fname : string)
+  : (string * elem option list) option list option =
+  if List.mem_assoc fname cb then None
+  else
+    match resolve_key ctx fname with
+    | Some key when Hashtbl.mem elem_ret_proved key ->
+      (match Hashtbl.find_opt fn_defs_tbl key with
+       | Some (_, fd) ->
+         (match ret_elems_of_ty fd.A.fn_ret_ty with
+          | Some (Tuple comps) ->
+            let abs = callee_abstracts ctx fname in
+            let formals =
+              match uniform_formals fd with
+              | Some fs when List.length fs = List.length args -> Some fs
+              | _ -> None
+            in
+            Some
+              (List.map
+                 (function
+                   | Some e when entry_mentions abs e -> None
+                   | Some e when entry_is_closed e -> Some e
+                   | Some e ->
+                     (match formals with Some formals -> lend_entry ~formals ~args e | None -> None)
+                   | None -> None)
+                 comps)
+          | _ -> None)
+       | None -> None)
+    | _ -> None
 
 (* A lambda tail is checked in the env at the LAMBDA, not at the tail
    ([demand_flow]'s [lambda_ok], [check_pass_site_elements]), so a name it
@@ -1802,9 +1882,17 @@ let tuple_arity (ctx : rctx) defs (cb : cbenv) (g : string) : int option =
 let tuple_self_hyp (ctx : rctx) (cb : cbenv) (g : string) (args : A.expr list) (n : int)
   : (string * elem option list) option list option =
   match !elem_ret_hyp with
-  | Some (self, sets, Tuple h, definers)
+  | Some (self, sets, Tuple h, definers, formals)
     when List.length h = n && hyp_applies ctx cb g args (self, sets, definers) ->
-    Some h
+    (* A relational component is read at this self-call's actuals (phase 4,
+       §2.3); one that does not move carries nothing. *)
+    Some
+      (List.map
+         (function
+           | Some e when entry_is_closed e -> Some e
+           | Some e -> lend_entry ~formals ~args e
+           | None -> None)
+         h)
   | _ -> None
 
 let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
@@ -1953,7 +2041,7 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
                  with
                  | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
                  | None ->
-                   (match declared_tuple_return ctx cb g with
+                   (match declared_tuple_return ~args ctx cb g with
                     | Some d when List.length d = n ->
                       (match List.nth_opt d i with Some (Some entry) -> as_entry entry | _ -> no_entry ())
                     | _ -> no_entry ())))
@@ -2323,7 +2411,7 @@ let rec check_ret_elems ~root errctx defs (ctx : rctx) path lets sc re (cb : cbe
      | Some h -> each (fun i er -> against er (Option.join (List.nth_opt h i)))
      | None ->
        let declared =
-         lazy (match declared_tuple_return ctx cb g with Some d when List.length d = n -> Some d | _ -> None)
+         lazy (match declared_tuple_return ~args ctx cb g with Some d when List.length d = n -> Some d | _ -> None)
        in
        each (fun i er ->
            match
@@ -3008,7 +3096,13 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                      parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb
                        fname args
                    with
-                   | Some (`Scalar r) -> (n.A.txt, r) :: sc'
+                   (* [scope_add_binding]'s self-rebinding guard, which this
+                      arm lacked: `let n = List.head(xs)` under `xs :
+                      List({Int | _ < n})` (or `List.head(below(n))`, since
+                      phase 4) would file `n : {_ < n}` about the NEW `n`,
+                      a contradiction that proves anything. *)
+                   | Some (`Scalar ((_, q, _) as r)) when not (self_mentioning b.A.bind_pat q) ->
+                     (n.A.txt, r) :: sc'
                    | _ -> sc')
                 | _ -> sc')
              | _ -> sc
@@ -3056,6 +3150,10 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                (match b.A.bind_pat with
                 | A.PatVar n when not (List.mem_assoc n.A.txt ce') ->
                   (match container_entry_of_expr ctx defs cb ce b.A.bind_expr with
+                   (* An instantiated relational entry naming the bound name
+                      itself (`let k = g(k)`) would be about the NEW `k`:
+                      not stored (phase 4; a closed entry names nothing). *)
+                   | Some entry when elem_entry_mentions [ n.A.txt ] entry -> ce'
                    | Some entry -> (n.A.txt, entry) :: ce'
                    | None -> ce')
                 | _ -> ce')
@@ -3323,16 +3421,31 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                  | Some (_ :: _, _) -> true
                  | _ -> false
                in
+               (* A slot naming one of THIS pattern's binders (`Cons(n, _)`
+                  under `List({Int | _ < n})`) is about the OUTER `n`; read
+                  under the binder it would say `n < n` and prove anything.
+                  Such a slot gives no fact (found with phase 4 of the
+                  2026-10-18 element-flow follow-ups, whose instantiated
+                  entries `below(k)` made it reachable from a call; it was
+                  live for a relational parameter's entry before). *)
+               let pb = pat_binders br.A.branch_pat in
+               let captures_binder (b : string) (q : A.expr) =
+                 expr_mentions (List.filter (fun n -> n <> b) pb) q
+               in
                fst
                @@ List.fold_left2
                  (fun ((sc, ce), fi) role sub ->
                    (match role, sub with
                    | Param i, A.PatVar v ->
                      (match Option.join (List.nth_opt slots i) with
-                      | Some (Refined r) -> ((v.A.txt, r) :: sc, ce)
-                      | Some (Container (c', slots')) -> (sc, (v.A.txt, (c', slots')) :: ce)
+                      | Some (Refined ((b, q, _) as r)) ->
+                        if captures_binder b q then (sc, ce) else ((v.A.txt, r) :: sc, ce)
+                      | Some (Container (c', slots')) ->
+                        if elem_entry_mentions pb (c', slots') then (sc, ce)
+                        else (sc, (v.A.txt, (c', slots')) :: ce)
                       | None -> (sc, ce))
-                   | Self, A.PatVar v when not (hides fi) -> (sc, (v.A.txt, entry) :: ce)
+                   | Self, A.PatVar v when not (hides fi) && not (elem_entry_mentions pb entry) ->
+                     (sc, (v.A.txt, entry) :: ce)
                    | _ -> (sc, ce)), fi + 1)
                  ((sc, ce), 0) roles subpats
              | _ -> (sc, ce))
@@ -3519,8 +3632,9 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
 
         On a proved verdict the signature the block puts into [cbenv] lends
         its entry to the later calls ([declared_elem_return], by physical
-        identity): only a closed entry (one naming a captured variable or a
-        parameter is not a fact at a call site, G3-5), and never one that
+        identity): only an entry closed or relational over the local's own
+        parameters (read at each call's actuals since phase 4; one naming a
+        captured variable is not a fact at a call site, G3-5), and never one that
         names the enclosing function's abstract refinements (G3-4).  No
         self-call hypothesis (G3-3): the signature is registered only after
         the walk, so a recursive call inside the body carries nothing, and an
@@ -3549,9 +3663,16 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         tail through [check_ret_shape], but lends nothing:
         [declared_tuple_return] never reads a [cbenv] entry, and a local's
         tuple lending is not built (conservative). *)
+     (* Since phase 4 an entry relational over the local's OWN parameters is
+        registered too, and read at each call's actuals; one naming a
+        captured variable is [Unusable] over them and still lends nothing
+        (G3-5). *)
      (match er with
       | Single e
-        when !verdict && entry_is_closed e && not (entry_mentions !current_abstracts e) ->
+        when !verdict
+             && (entry_is_closed e
+                 || entry_movable ~formals:(List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps) e)
+             && not (entry_mentions !current_abstracts e) ->
         local_elem_ret_proved := sg :: !local_elem_ret_proved
       | _ -> ()));
   entry
@@ -4306,8 +4427,19 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
                   | None -> None)
                 !current_abstracts
             in
-            if List.for_all entry_is_closed (ret_entries er) && List.for_all Option.is_some definers then
-              Some (fd.A.fn_name.A.txt, sets, er, List.filter_map Fun.id definers)
+            (* Closed, or (phase 4, §2.3) relational over the function's own
+               formals, read at each self-call's actuals ([lend_entry]).  A
+               definition whose clauses spell their parameters differently
+               gets no relational hypothesis ([uniform_formals]). *)
+            let formals = uniform_formals fd in
+            let usable e =
+              entry_is_closed e
+              || match formals with Some formals -> entry_movable ~formals e | None -> false
+            in
+            if List.for_all usable (ret_entries er) && List.for_all Option.is_some definers then
+              Some
+                ( fd.A.fn_name.A.txt, sets, er, List.filter_map Fun.id definers
+                , Option.value ~default:[] formals )
             else None
           | _ -> None
         in

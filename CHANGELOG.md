@@ -84,8 +84,28 @@ git log is authoritative for exact commits.
   (such a return used to be accepted and never checked), and a destructured call
   to it carries each component's fact. Only `let`/single-arm `match`
   destructuring carries a component; `partition`'s behaviour is unchanged.
+- **Refinements: a container return that names a parameter is a fact at the
+  call.** `fn below(n : Int) : List({Int | _ < n})`, once its tails are proved,
+  carries `_ < 10` at `below(10)` and `_ < k` at `below(k)`, so
+  `sum_small(below(10))` (or `let ys = below(k)` with `k : {Int | _ <= 10}`) is
+  proved, and `sum_lt5(below(10))` is a violation; before, every such call was an
+  `unreflectable-subject` skip, an error under `cap verified`. Only variables,
+  literals and linear arithmetic over them are substituted, and a stored fact is
+  dropped when a name it mentions is rebound. A recursive call is read at its own
+  arguments (`clamp(t, n)` inside `fn clamp(xs, n) : List({Int | _ <= n})`), and
+  tuple components and block-level `fn`s whose return names only their own
+  parameters work the same way. A call whose fact names a caller variable that
+  nothing constrains (`sum_small(below(n))`, `n : Int`) is a skip, not a
+  violation.
 
 ### Fixed
+
+- **Refinements: a pattern binder spelled like a name its element refinement
+  mentions no longer proves anything.** With `xs : List({Int | _ < n})`,
+  `match xs do Cons(n, _) -> need_neg(n)` gave the new `n` the fact `n < n`, a
+  contradiction, so `need_neg(n)` was proved (and accepted under `cap verified`)
+  although `g(5, [3])` passes 3. `let n = hd(xs)` through a parametric head had
+  the same hole. Such a binder now gets no fact from the slot.
 
 - **Refinements: a local `fn`'s container return is checked.** A block-level
   `fn bad(n : Int) : List({Int | _ > 0}) do [n, 0] end` filed no obligation for

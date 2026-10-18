@@ -17536,6 +17536,349 @@ let elemflow_local_fn_suite =
         Alcotest.(check bool) "an error" true (has_refine_error_typed src));
   ]
 
+(* ── Relational element returns as call-site facts (design 2026-10-18
+   element-flow follow-ups, phase 4, §2; rows r1-r6 of §0.4) ──────────────
+   A proved container return whose element refinement names a PARAMETER
+   (`below(n) : List({Int | _ < n})`) is a fact at a call once the call's
+   actuals are substituted for the parameters (`below(10)` carries `_ < 10`),
+   as a scalar relational return's postcondition always was.  Only STABLE
+   actuals (variables, literals, linear arithmetic over them) are
+   substituted, so a stored fact can be retired by mention when a name it
+   carries is rebound.  The structural self-call hypothesis is instantiated
+   at the self-call's own actuals, so `clamp(t, n)` carries `_ <= n`, and a
+   proved local `fn` lends a relational entry over its own parameters.
+
+   Verdicts (decision D2, and phase 0's rule for caller names): an
+   instantiated entry that fails to imply the demand is a VIOLATION when
+   every caller name it or the demand mentions is constrained by some user
+   assumption (a scope fact or a path condition), or names no caller
+   variable at all; an entry naming a caller variable no fact constrains is
+   a skip unless the demand fails for EVERY value of it.  The triple each
+   case had on the base (72c1eb52a) is in its comment. *)
+let elemflow_relational_return_suite =
+  let m ?(verified = false) body =
+    "mod RR do\n" ^ (if verified then "  cap verified\n" else "")
+    ^ "  fn sum_small(xs : List({Int | _ < 10})) : Int do 0 end\n\
+      \  fn sum_lt5(xs : List({Int | _ < 5})) : Int do 0 end\n\
+      \  fn sum_le10(xs : List({Int | _ <= 10})) : Int do 0 end\n\
+      \  fn need_lt(xs : List({Int | _ < n}), n : Int) : Int do 0 end\n\
+      \  fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let t3 = Alcotest.(triple int int int) in
+  let of_callee c src =
+    List.filter_map (fun (c', v, _) -> if c' = c then Some v else None) (typed_obligations src)
+  in
+  let vs = Alcotest.(list string) in
+  [ gated "r1: a proved relational return is a fact at the call's actuals" (fun () ->
+        (* Base: (2, 0, 1), the call unreflectable-subject. *)
+        let src = m "  fn go() : Int do sum_small(below(10)) end\n" in
+        Alcotest.check t3 "(3, 0, 0)" (3, 0, 0) (l3 src);
+        Alcotest.check vs "below(10) proves sum_small" [ "proved" ] (of_callee "below(…)" src));
+
+    gated "r2: an instantiated entry that does not imply the demand is a violation (D2)" (fun () ->
+        (* Base: (2, 0, 1). *)
+        let src = m "  fn go() : Int do sum_lt5(below(10)) end\n" in
+        Alcotest.check t3 "(2, 1, 0)" (2, 1, 0) (l3 src);
+        Alcotest.(check bool) "an error" true (has_refine_error_typed src);
+        (* VC-cache pin (design §2.5 item 9): the instantiated predicate is
+           part of the query, so a later call with another actual neither
+           inherits the first proof nor is inherited by it.  Base: (2, 0, 2). *)
+        Alcotest.check t3 "below(10) then below(50): proved, violated" (3, 1, 0)
+          (l3 (m "  fn go() : Int do sum_small(below(10)) + sum_small(below(50)) end\n")));
+
+    gated "r4: a let-bound result stores the instantiated entry" (fun () ->
+        (* Base: (2, 0, 1) each. *)
+        Alcotest.check t3 "let ys = below(k), k <= 10: proved" (3, 0, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 10}) : Int do\n    let ys = below(k)\n    sum_small(ys)\n  end\n"));
+        Alcotest.check t3 "inline below(k), k <= 10: proved" (3, 0, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 10}) : Int do sum_small(below(k)) end\n"));
+        Alcotest.check t3 "below(k + 1), k <= 8 (a linear actual): proved" (3, 0, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 8}) : Int do sum_small(below(k + 1)) end\n"));
+        (* A constrained caller name: k <= 100 admits 99 < 5 failing, so a
+           violation.  Base: (2, 0, 1). *)
+        Alcotest.check t3 "let ys = below(k), k <= 100, into _ < 5: violated" (2, 1, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 100}) : Int do\n    let ys = below(k)\n    sum_lt5(ys)\n  end\n"));
+        (* A guard constrains it too. *)
+        Alcotest.check t3 "if k <= 10: proved" (3, 0, 0)
+          (l3 (m "  fn go(k : Int) : Int do if k <= 10 do sum_small(below(k)) else 0 end end\n")));
+
+    gated "r5: an unconstrained caller name is a skip, unless no value of it satisfies the demand" (fun () ->
+        (* Base: (2, 0, 1).  `_ < n` against `_ < 10` holds for n = 5 and
+           fails for n = 100: not a definite violation. *)
+        Alcotest.check t3 "sum_small(below(n)), n unrefined: skipped" (2, 0, 1)
+          (l3 (m "  fn go(n : Int) : Int do sum_small(below(n)) end\n"));
+        (* `_ < n` never meets `_ >= n`: violated for every n.  Base: (2, 0, 1). *)
+        Alcotest.check t3 "need_ge(below(n), n): violated" (2, 1, 0)
+          (l3
+             (m "  fn need_ge(xs : List({Int | _ >= m}), m : Int) : Int do 0 end\n\
+                 \  fn go(n : Int) : Int do need_ge(below(n), n) end\n"));
+        (* The demand's own substitution, both namespaces at once: proved for
+           any n.  Base: (2, 0, 1). *)
+        Alcotest.check t3 "need_lt(below(n), n): proved" (3, 0, 0)
+          (l3 (m "  fn go(n : Int) : Int do need_lt(below(n), n) end\n"));
+        (* The rule reads the subject's fact, not where it came from, so a
+           PARAMETER's own relational entry naming an unrefined parameter is
+           a skip too (it was a violation; the conservative direction, as
+           phase 0 made `need_lt(ys, n - 1)` a skip).  Base: (2, 1, 0). *)
+        Alcotest.check t3 "f(n, xs : List({_ < n})) passing xs to sum_small: skipped" (2, 0, 1)
+          (l3 (m "  fn go(n : Int, xs : List({Int | _ < n})) : Int do sum_small(xs) end\n")));
+
+    gated "the entry is substituted, not read in the caller's namespace" (fun () ->
+        (* Design §2.5 item 4.  Read as the caller's `n`, `_ < n` would be
+           `_ < 3` and imply `_ < 5`.  Base: (2, 0, 1) each. *)
+        Alcotest.check t3 "let n = 3; sum_small(below(10)): proved" (3, 0, 0)
+          (l3 (m "  fn go() : Int do\n    let n = 3\n    sum_small(below(10))\n  end\n"));
+        Alcotest.check t3 "let n = 3; sum_lt5(below(10)): violated" (2, 1, 0)
+          (l3 (m "  fn go() : Int do\n    let n = 3\n    sum_lt5(below(10))\n  end\n"));
+        (* Simultaneous substitution: `mk(b, a)` carries `_ < a`.
+           Base: (3, 0, 1) each. *)
+        let mk = "  fn mk(a : Int, b : Int) : List({Int | _ < b}) do [b - 1] end\n" in
+        Alcotest.check t3 "mk(b, a) with a <= 10: proved" (4, 0, 0)
+          (l3 (m (mk ^ "  fn go(b : {Int | _ <= 100}, a : {Int | _ <= 10}) : Int do sum_small(mk(b, a)) end\n")));
+        Alcotest.check t3 "mk(a, b) with b <= 100: violated" (3, 1, 0)
+          (l3 (m (mk ^ "  fn go(b : {Int | _ <= 100}, a : {Int | _ <= 10}) : Int do sum_small(mk(a, b)) end\n"))));
+
+    gated "a named binder does not capture an actual" (fun () ->
+        (* Design §2.5 item 8.  Captured, `{x : Int | x < n}` at `below2(x)`
+           would read `x < x`.  Base: (3, 0, 1). *)
+        Alcotest.check t3 "below2(x), x <= 10: proved" (4, 0, 0)
+          (l3
+             (m "  fn below2(n : Int) : List({x : Int | x < n}) do [n - 1] end\n\
+                 \  fn go(x : {Int | _ <= 10}) : Int do sum_small(below2(x)) end\n")));
+
+    gated "an unstable actual carries nothing" (fun () ->
+        (* Design §2.5 item 6: a call actual is not a stable name.
+           Base: (2, 0, 1), unchanged. *)
+        Alcotest.check t3 "below(f(x)): skipped" (2, 0, 1)
+          (l3
+             (m "  fn f(x : Int) : Int do x end\n\
+                 \  fn go(x : Int) : Int do sum_small(below(f(x))) end\n"));
+        (* Even a call with a proved postcondition is not substituted (design
+           decision 7: a lent entry may be STORED, and only variables,
+           literals and linear arithmetic over them retire by mention).  A
+           pin of the conservative choice: `Any` would prove this.
+           Base: (3, 0, 1). *)
+        Alcotest.check t3 "below(inc(k)), inc = k + 1, k <= 8: skipped" (3, 0, 1)
+          (l3
+             (m "  fn inc(x : Int) : {Int | _ == x + 1} do x + 1 end\n\
+                 \  fn go(k : {Int | _ <= 8}) : Int do sum_small(below(inc(k))) end\n")));
+
+    gated "a stored entry retires when a name it mentions is rebound" (fun () ->
+        (* Design §2.5 item 7.  A stale `_ < k` would read as `_ < 5`.
+           The three "not proved" cases are guards: (2, 0, 1) on the base
+           too, where nothing was lent. *)
+        Alcotest.check t3 "let ys = below(k); let k = 5; sum_lt5(ys): not proved" (2, 0, 1)
+          (l3
+             (m "  fn go(k : {Int | _ <= 100}) : Int do\n\
+                 \    let ys = below(k)\n    let k = 5\n    sum_lt5(ys)\n  end\n"));
+        (* The task's shape: a stale `_ < n` read as `_ < 0` would PROVE
+           need_lt(r, 0). *)
+        Alcotest.check t3 "let r = below(n); let n = 0; need_lt(r, n): not proved" (2, 0, 1)
+          (l3
+             (m "  fn go(n : Int) : Int do\n    let r = below(n)\n    let n = 0\n    need_lt(r, n)\n  end\n"));
+        (* Control: no rebinding.  Base: (2, 0, 1). *)
+        Alcotest.check t3 "control: let r = below(n); need_lt(r, n): proved" (3, 0, 0)
+          (l3 (m "  fn go(n : Int) : Int do\n    let r = below(n)\n    need_lt(r, n)\n  end\n"));
+        (* A match binder rebinding the name retires it too. *)
+        Alcotest.check t3 "match binder k: not proved" (2, 0, 1)
+          (l3
+             (m "  fn go(k : {Int | _ <= 100}, o : Option(Int)) : Int do\n\
+                 \    let ys = below(k)\n\
+                 \    match o do\n      Some(k) -> if k == 5 do sum_lt5(ys) else 0 end\n      None -> 0\n    end\n  end\n")));
+
+    gated "an unproved relational return lends nothing" (fun () ->
+        (* Design §2.5 item 10, row r3's `bad`.  A guard: (3, 1, 1) on the
+           base too. *)
+        Alcotest.check t3 "sum_small(bad(10)): skipped" (3, 1, 1)
+          (l3
+             (m "  fn bad(n : Int) : List({Int | _ < n}) do [n - 1, n] end\n\
+                 \  fn go() : Int do sum_small(bad(10)) end\n")));
+
+    gated "r6: the self-call hypothesis at the self-call's actuals" (fun () ->
+        let clamp =
+          "  fn clamp(xs : List(Int), n : Int) : List({Int | _ <= n}) do\n\
+          \    match xs do\n\
+          \      Nil -> Nil\n\
+          \      Cons(h, t) -> if h <= n do Cons(h, clamp(t, n)) else Cons(n, clamp(t, n)) end\n\
+          \    end\n  end\n"
+        in
+        let src = m (clamp ^ "  fn go(ys : List(Int)) : Int do sum_le10(clamp(ys, 10)) end\n") in
+        (* Base: (4, 0, 3): both self-call tails and the caller skipped. *)
+        Alcotest.check t3 "(7, 0, 0)" (7, 0, 0) (l3 src);
+        Alcotest.check vs "both self-calls proved" [ "proved"; "proved" ] (of_callee "clamp(…)" src
+          |> fun l -> List.filteri (fun i _ -> i < 2) l);
+        (* A self-call at ANOTHER actual carries ITS actual's entry, which
+           does not imply the demand: `clamp(t, n + 1)` is `_ <= n + 1`.
+           Not proved, and the caller lends nothing.  A guard ((4, 0, 3) on
+           the base too): with the hypothesis read RAW, both cl1 and cl2
+           below prove (7, 0, 0). *)
+        let cl1 =
+          l3
+            (m "  fn cl1(xs : List(Int), n : Int) : List({Int | _ <= n}) do\n\
+                \    match xs do\n\
+                \      Nil -> Nil\n\
+                \      Cons(h, t) -> if h <= n do Cons(h, cl1(t, n + 1)) else Cons(n, cl1(t, n)) end\n\
+                \    end\n  end\n\
+                \  fn go(ys : List(Int)) : Int do sum_le10(cl1(ys, 10)) end\n")
+        in
+        (* The gate never admits cl1, so in the real walk no hypothesis is
+           active: h and n prove, both self-calls and the caller skip. *)
+        Alcotest.check t3 "cl1: not proved, the caller skips" (4, 0, 3) cl1;
+        (* Swapped actuals: `cl2(t, m, n)` carries `_ <= m`. *)
+        let cl2 =
+          l3
+            (m "  fn cl2(xs : List(Int), n : Int, m : Int) : List({Int | _ <= n}) do\n\
+                \    match xs do\n\
+                \      Nil -> Nil\n\
+                \      Cons(h, t) -> if h <= n do Cons(h, cl2(t, m, n)) else Cons(n, cl2(t, n, m)) end\n\
+                \    end\n  end\n\
+                \  fn go(ys : List(Int)) : Int do sum_le10(cl2(ys, 10, 10)) end\n")
+        in
+        Alcotest.check t3 "cl2: the swapped self-call does not prove, nor the caller" (4, 0, 3) cl2);
+
+    gated "a relational TUPLE component" (fun () ->
+        let split = "  fn split(n : Int) : (List({Int | _ < n}), List({Int | _ >= n})) do ([n - 1], [n]) end\n" in
+        (* Base: (4, 0, 1). *)
+        Alcotest.check t3 "let (lo, hi) = split(10); sum_small(lo): proved" (5, 0, 0)
+          (l3 (m (split ^ "  fn go() : Int do\n    let (lo, hi) = split(10)\n    sum_small(lo)\n  end\n")));
+        (* Base: (4, 0, 1). *)
+        Alcotest.check t3 "sum_lt5(lo): violated" (4, 1, 0)
+          (l3 (m (split ^ "  fn go() : Int do\n    let (lo, hi) = split(10)\n    sum_lt5(lo)\n  end\n")));
+        (* The destructured call is re-read at use: a rebinding of `k` in
+           between retires it.  Stale, `_ < k` would read as `_ < 5`.
+           A guard: (4, 0, 1) on the base too. *)
+        Alcotest.check t3 "let (lo, hi) = split(k); let k = 5; sum_lt5(lo): not proved" (4, 0, 1)
+          (l3
+             (m (split ^ "  fn go(k : {Int | _ <= 100}) : Int do\n\
+                          \    let (lo, hi) = split(k)\n    let k = 5\n    sum_lt5(lo)\n  end\n")));
+        (* A tuple tail through a proved relational tuple return.
+           Base: (4, 0, 2). *)
+        Alcotest.check t3 "a tail split(n) of a relational tuple return: proved" (6, 0, 0)
+          (l3
+             (m (split ^ "  fn split2(n : Int) : (List({Int | _ < n}), List({Int | _ >= n})) do split(n) end\n")));
+        (* The tuple self-hypothesis, instantiated.  Base: (4, 0, 5), the
+           four recursive-call components and the caller skipped. *)
+        let sp =
+          "  fn sp(xs : List(Int), n : Int) : (List({Int | _ < n}), List({Int | _ >= n})) do\n\
+          \    match xs do\n\
+          \      Nil -> (Nil, Nil)\n\
+          \      Cons(h, t) ->\n\
+          \        let (a, b) = sp(t, n)\n\
+          \        if h < n do (Cons(h, a), b) else (a, Cons(h, b)) end\n\
+          \    end\n  end\n"
+        in
+        Alcotest.check t3 "sp: every component proved, and the caller" (9, 0, 0)
+          (l3 (m (sp ^ "  fn go(ys : List(Int)) : Int do\n    let (lo, hi) = sp(ys, 10)\n    sum_small(lo)\n  end\n")));
+        (* The tuple self-call at ANOTHER actual (`sp1(t, n + 1)`) carries
+           `_ < n + 1`: the pushes onto it do not prove and the caller lends
+           nothing.  Read raw it would be `_ < n` and prove everything
+           (9, 0, 0).  A guard: (4, 0, 5) on the base too. *)
+        let sp1 =
+          "  fn sp1(xs : List(Int), n : Int) : (List({Int | _ < n}), List({Int | _ >= n})) do\n\
+          \    match xs do\n\
+          \      Nil -> (Nil, Nil)\n\
+          \      Cons(h, t) ->\n\
+          \        let (a, b) = sp1(t, n + 1)\n\
+          \        if h < n do (Cons(h, a), b) else (a, Cons(h, b)) end\n\
+          \    end\n  end\n"
+        in
+        let sp1r =
+          l3 (m (sp1 ^ "  fn go(ys : List(Int)) : Int do\n    let (lo, hi) = sp1(ys, 10)\n    sum_small(lo)\n  end\n"))
+        in
+        Alcotest.check t3 "sp1: the pushes onto the self-call and the caller skip" (4, 0, 5) sp1r);
+
+    gated "a proved local fn lends a relational entry over its own parameters" (fun () ->
+        (* Phase 3 lent only closed entries.  Base: (3, 0, 1). *)
+        Alcotest.check t3 "local bl(k), k <= 10: proved" (4, 0, 0)
+          (l3
+             (m "  fn go(k : {Int | _ <= 10}) : Int do\n\
+                 \    fn bl(n : Int) : List({Int | _ < n}) do [n - 1] end\n\
+                 \    sum_small(bl(k))\n  end\n"));
+        (* Base: (3, 0, 1). *)
+        Alcotest.check t3 "local bl(10) into _ < 5: violated" (3, 1, 0)
+          (l3
+             (m "  fn go() : Int do\n\
+                 \    fn bl(n : Int) : List({Int | _ < n}) do [n - 1] end\n\
+                 \    sum_lt5(bl(10))\n  end\n"));
+        (* Stale through a local.  A guard: (3, 0, 1) on the base too. *)
+        Alcotest.check t3 "let ys = bl(k); let k = 5; sum_lt5(ys): not proved" (3, 0, 1)
+          (l3
+             (m "  fn go(k : {Int | _ <= 100}) : Int do\n\
+                 \    fn bl(n : Int) : List({Int | _ < n}) do [n - 1] end\n\
+                 \    let ys = bl(k)\n    let k = 5\n    sum_lt5(ys)\n  end\n"));
+        (* A captured outer name is not the local's parameter (G3-5): it
+           lends nothing.  A guard: (3, 0, 1) on the base too. *)
+        Alcotest.check t3 "captured j: skipped" (3, 0, 1)
+          (l3
+             (m "  fn go(j : {Int | _ <= 10}) : Int do\n\
+                 \    fn bl(n : Int) : List({Int | _ < j}) do [j - 1] end\n\
+                 \    sum_small(bl(0))\n  end\n")));
+
+    gated "a binder named like a name the slot mentions gets no fact" (fun () ->
+        let neg = "  fn need_neg(k : {Int | _ < 0}) : Int do k end\n" in
+        (* A `match` binder: `Cons(k, _)` under `_ < k` read as `k < k`.
+           The call form is new with this phase (below(k) carried nothing
+           before, (2, 0, 1)); the parameter form was a live FALSE PROOF on
+           the base, (3, 0, 0). *)
+        Alcotest.check t3 "match xs, xs : List({_ < n}), Cons(n, _) -> need_neg(n): not proved" (2, 0, 1)
+          (l3
+             (m (neg ^ "  fn g(n : Int, xs : List({Int | _ < n})) : Int do\n\
+                        \    match xs do\n      Cons(n, _) -> need_neg(n)\n      Nil -> 0\n    end\n  end\n")));
+        Alcotest.check t3 "match below(k) do Cons(k, _) -> need_neg(k): not proved" (2, 0, 1)
+          (l3
+             (m (neg ^ "  fn g(k : Int) : Int do\n\
+                        \    match below(k) do\n      Cons(k, _) -> need_neg(k)\n      Nil -> 0\n    end\n  end\n")));
+        Alcotest.check t3 "let ys = below(k); match ys do Cons(k, _): not proved" (2, 0, 1)
+          (l3
+             (m (neg ^ "  fn g(k : Int) : Int do\n    let ys = below(k)\n\
+                        \    match ys do\n      Cons(k, _) -> need_neg(k)\n      Nil -> 0\n    end\n  end\n")));
+        (* Control: a fresh binder keeps the fact (h < k).  Base: (2, 0, 1). *)
+        Alcotest.check t3 "control: Cons(h, _) -> need_neg(h - k): proved" (3, 0, 0)
+          (l3
+             (m (neg ^ "  fn g(k : Int) : Int do\n\
+                        \    match below(k) do\n      Cons(h, _) -> need_neg(h - k)\n      Nil -> 0\n    end\n  end\n")));
+        (* A `let` of a single element (`let n = hd(xs)`, the parametric
+           rule's scalar half) filed `n : {_ < n}`: [scope_add_binding]'s
+           self-rebinding guard was missing from that arm.  The parameter
+           form was a live FALSE PROOF on the base: (4, 0, 0). *)
+        let hd =
+          "  fn hd(xs : {List(a) | len(_) > 0}) : a do\n\
+          \    match xs do\n      Cons(h, _) -> h\n      Nil -> panic(\"empty\")\n    end\n  end\n"
+        in
+        let nb = "  fn nbelow(n : Int) : {List({Int | _ < n}) | len(_) > 0} do [n - 1] end\n" in
+        Alcotest.check t3 "let n = hd(xs), xs : List({_ < n}): need_neg(n) not proved" (3, 0, 1)
+          (l3
+             (m (neg ^ hd ^ "  fn g(n : Int, xs : {List({Int | _ < n}) | len(_) > 0}) : Int do\n\
+                             \    let n = hd(xs)\n    need_neg(n)\n  end\n")));
+        (* The call form (new with this phase).  Base: (5, 0, 1). *)
+        Alcotest.check t3 "let n = hd(nbelow(n)): need_neg(n) not proved" (5, 0, 1)
+          (l3 (m (neg ^ hd ^ nb ^ "  fn g(n : Int) : Int do\n    let n = hd(nbelow(n))\n    need_neg(n)\n  end\n")));
+        (* Control: a fresh name keeps the fact.  Base: (5, 0, 1). *)
+        Alcotest.check t3 "control: let h = hd(nbelow(n)); need_neg(h - n): proved" (6, 0, 0)
+          (l3 (m (neg ^ hd ^ nb ^ "  fn g(n : Int) : Int do\n    let h = hd(nbelow(n))\n    need_neg(h - n)\n  end\n")));
+        (* A container `let` naming itself (`let k = mkl(k)`) stores nothing:
+           the entry would be about the new `k`.  No verdict depends on it
+           (the new `k` is a list), so this pins only that nothing breaks. *)
+        Alcotest.check t3 "let k = below(k); sum_small(k): not proved" (2, 0, 1)
+          (l3 (m "  fn g(k : Int) : Int do\n    let k = below(k)\n    sum_small(k)\n  end\n")));
+
+    gated "a relational return passed as a VALUE lends nothing (no actuals)" (fun () ->
+        (* [declared_elem_return] without actuals: closed entries only.
+           Base: (2, 0, 1). *)
+        Alcotest.check t3 "sum_small(apply1(below, 10)): skipped" (2, 0, 1)
+          (l3
+             (m "  fn apply1(f : (Int) -> List(a), x : Int) : List(a) do f(x) end\n\
+                 \  fn g() : Int do sum_small(apply1(below, 10)) end\n")));
+
+    gated "cap verified: r1 compiles, r2 does not" (fun () ->
+        Alcotest.(check bool) "r1 accepted" false
+          (has_refine_error_typed (m ~verified:true "  fn go() : Int do sum_small(below(10)) end\n"));
+        Alcotest.(check bool) "r2 rejected" true
+          (has_refine_error_typed (m ~verified:true "  fn go() : Int do sum_lt5(below(10)) end\n")));
+  ]
+
 let post_inner_binders_suite =
   let m ?(verified = false) body =
     "mod PB do\n" ^ (if verified then "  cap verified\n" else "")
@@ -21474,6 +21817,7 @@ let () =
       ("elemflow-multiparam", elemflow_multiparam_suite);
       ("elemflow-scalar-demand", elemflow_scalar_demand_suite);
       ("elemflow-local-fn", elemflow_local_fn_suite);
+      ("elemflow-relational-return", elemflow_relational_return_suite);
       ("post-inner-binders", post_inner_binders_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
