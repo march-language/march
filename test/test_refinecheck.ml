@@ -22532,7 +22532,10 @@ let fold_invariants_3_suite =
   in
   [ (* Map.fold: was `fold(m, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
     proof "Map.fold" "mp : Map(Int, Int)" "Map.fold(mp, 0, fn (a, _k, _v) -> a + 1)";
-    control "Map.fold" "mp : Map(Int, Int)" "Map.fold(mp, 0, fn (a, _k, _v) -> a - 1)" ]
+    control "Map.fold" "mp : Map(Int, Int)" "Map.fold(mp, 0, fn (a, _k, _v) -> a - 1)";
+    (* Set.fold: was `fold(s, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
+    proof "Set.fold" "st : Set(Int)" "Set.fold(st, 0, fn (a, _x) -> a + 1)";
+    control "Set.fold" "st : Set(Int)" "Set.fold(st, 0, fn (a, _x) -> a - 1)" ]
 
 let () =
   Alcotest.run "march-refinecheck"

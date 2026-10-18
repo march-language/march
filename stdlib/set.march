@@ -607,7 +607,7 @@ mod Set do
   second, callback last (uncurried-collection convention).  The
   callback `f` is called uncurried as `f(acc, elem) = new_acc`.
   """
-  fn fold(s, acc, f) do
+  fn fold(s : Set(a), acc : b, f : b -> a -> b) : b do
     match s do
     HamtSet(_, node) ->
       node_fold(acc, node, f)
