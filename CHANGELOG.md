@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `march --compile` no longer serves a cached binary that was linked under a different
+  host library probe: whether the build host has OpenSSL, zstd or brotli decides what
+  the binary links and whether its zstd/brotli codecs work, and is now part of the
+  build cache key.
 - A hot deploy that changed an actor's state no longer hands an actor spawned by
   not-yet-redeployed code (such as a closure `main` built) an old-layout state to run
   the new handlers on, which read garbage fields and could crash: the state is now

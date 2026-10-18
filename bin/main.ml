@@ -1593,6 +1593,71 @@ let cas_target_label (target : March_tir.Llvm_emit.target_config) : string =
     [target] and so cannot legitimately diverge between the layers either.
 
     [MARCH_DEBUG_CASFLAGS=1] prints the resulting key, from both sites. *)
+(* The host-library probes of a native link: the OpenSSL flags (Homebrew
+   prefixes, else pkg-config) and the compression flags (zlib always; zstd
+   and brotli when the build host has their headers, which also switches
+   their implementations on in march_compress.c).  Shared by the link
+   command and the CAS key: the probe result changes both the binary's
+   dependency set and, for zstd/brotli, what it does, so a binary linked
+   under one result must never be served for another (it was, measured:
+   specs/2026-09-23-static-compile-output-design.md §2.4).  Lazy: a probe
+   runs once per invocation, and pkg-config only when no Homebrew prefix
+   matched. *)
+(* MARCH_TEST_LIBPROBE_ROOT (test hook, test_compiler.ml's libprobe_cas_key
+   case): prefix every probed header path with it, and skip pkg-config, so a
+   test can make the probe find nothing without touching the host. *)
+let probe_test_root = Sys.getenv_opt "MARCH_TEST_LIBPROBE_ROOT"
+let probe_exists p =
+  Sys.file_exists (match probe_test_root with Some r -> r ^ p | None -> p)
+
+let openssl_probe_flags : string Lazy.t = lazy (
+  match find_runtime_file "march_tls.c" with
+  | None -> ""
+  | Some _ ->
+    let dirs = [
+      "/opt/homebrew/opt/openssl@3";
+      "/opt/homebrew/opt/openssl";
+      "/usr/local/opt/openssl@3";
+      "/usr/local/opt/openssl";
+    ] in
+    let found = List.find_opt (fun d ->
+        probe_exists (Filename.concat d "include/openssl/ssl.h")) dirs in
+    match found with
+    | Some d -> Printf.sprintf " -I%s/include -L%s/lib -lssl -lcrypto" d d
+    | None ->
+      if probe_test_root = None
+         && Sys.command "pkg-config --exists openssl 2>/dev/null" = 0
+      then " -lssl -lcrypto" else "")
+
+let compress_probe_flags : string Lazy.t = lazy (
+  match find_runtime_file "march_compress.c" with
+  | None -> ""
+  | Some _ ->
+    let zstd_flags =
+      if probe_exists "/opt/homebrew/include/zstd.h" then
+        " -DMARCH_HAVE_ZSTD -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
+      else if probe_exists "/usr/include/zstd.h" then
+        " -DMARCH_HAVE_ZSTD -lzstd"
+      else ""
+    in
+    let brotli_flags =
+      if probe_exists "/opt/homebrew/include/brotli/encode.h" then
+        " -DMARCH_HAVE_BROTLI -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
+      else if probe_exists "/usr/include/brotli/encode.h" then
+        " -DMARCH_HAVE_BROTLI -lbrotlienc -lbrotlidec"
+      else ""
+    in
+    Printf.sprintf " -lz%s%s" zstd_flags brotli_flags)
+
+(* The CAS tag for the probes above (a digest: the flag strings carry host
+   paths).  Cross builds link against the sysroot instead, which
+   [cross_sysroot_tag] already covers, so the host's probe is not theirs. *)
+let probe_cas_tag ~(cross : bool) : string list =
+  if cross then []
+  else
+    let s = Lazy.force openssl_probe_flags ^ "|" ^ Lazy.force compress_probe_flags in
+    ["libprobe:" ^ String.sub (Digest.to_hex (Digest.string s)) 0 16]
+
 let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
       ~(target_label : string) ~(src_hash : string) : string list * string =
   (* Cross-toolchain identity: the target OpenSSL/zlib .so live OUTSIDE the
@@ -1643,6 +1708,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            the plain build's entry. *)
         @ (if March_tir.Tir_verify.enabled () then ["verify-tir"] else [])
         @ cross_sysroot_tag
+        @ probe_cas_tag ~cross:(cross_sysroot_tag <> [] || linux_arch_str target <> None)
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
         (* --protocol-baseline: the previous protocol versions decide the
            generated `<P>_Msg.compat()` table, so they are part of the binary. *)
@@ -4531,30 +4597,7 @@ let compile filename =
               String.concat "" (List.rev_map (fun f -> " " ^ Filename.quote f) !ffi_c_files) in
             let extra_c_files = runtime_extra_c ^ user_ffi_c in
             (* OpenSSL flags for TLS *)
-            let tls_c2 = Filename.concat runtime_dir "march_tls.c" in
-            let openssl_flags2 =
-              if not (Sys.file_exists tls_c2) then ""
-              else
-                let dirs = [
-                  "/opt/homebrew/opt/openssl@3";
-                  "/opt/homebrew/opt/openssl";
-                  "/usr/local/opt/openssl@3";
-                  "/usr/local/opt/openssl";
-                ] in
-                let found = List.fold_left (fun acc d ->
-                  match acc with
-                  | Some _ -> acc
-                  | None ->
-                    let hdr = Filename.concat d "include/openssl/ssl.h" in
-                    if Sys.file_exists hdr then Some d else None
-                ) None dirs in
-                match found with
-                | Some d ->
-                  Printf.sprintf " -I%s/include -L%s/lib -lssl -lcrypto" d d
-                | None ->
-                  if Sys.command "pkg-config --exists openssl 2>/dev/null" = 0
-                  then " -lssl -lcrypto" else ""
-            in
+            let openssl_flags2 = Lazy.force openssl_probe_flags in
             let evloop_flag =
               let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
               (* Event-loop HTTP server is opt-in: it runs handlers on non-blocking
@@ -4566,26 +4609,7 @@ let compile filename =
          && (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
       then " -DMARCH_HTTP_USE_EVLOOP" else ""
             in
-            let compress_flags2 =
-              if not (Sys.file_exists compress_c2) then ""
-              else begin
-                let zstd_flags =
-                  if Sys.file_exists "/opt/homebrew/include/zstd.h" then
-                    " -DMARCH_HAVE_ZSTD -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
-                  else if Sys.file_exists "/usr/include/zstd.h" then
-                    " -DMARCH_HAVE_ZSTD -lzstd"
-                  else ""
-                in
-                let brotli_flags =
-                  if Sys.file_exists "/opt/homebrew/include/brotli/encode.h" then
-                    " -DMARCH_HAVE_BROTLI -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
-                  else if Sys.file_exists "/usr/include/brotli/encode.h" then
-                    " -DMARCH_HAVE_BROTLI -lbrotlienc -lbrotlidec"
-                  else ""
-                in
-                Printf.sprintf " -lz%s%s" zstd_flags brotli_flags
-              end
-            in
+            let compress_flags2 = Lazy.force compress_probe_flags in
             let math_flag = if Sys.unix then " -lm" else "" in
             (* musl needs an explicit -lucontext for the scheduler's green
                threads; glibc has them in libc. See ucontext_link_flags. *)
