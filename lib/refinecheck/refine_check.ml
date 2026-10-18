@@ -964,11 +964,22 @@ let lambda_domain_facts (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : s
    - G2-3: a fact [q] that mentions ANY of the lambda's parameter names (its
      binder aside, when the binder is the receiving parameter's own name) is
      not given: `xs : List({Int | _ < n})` zipped with `fn (y, n) -> …` would
-     read the caller's `n` as the lambda's (phase 0's row z4, per position). *)
-let lambda_domain_params (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : string)
-    (sg : fn_sig) (args : A.expr list) (i : int) : A.param list option =
-  match List.nth_opt args i, Option.join (List.nth_opt sg.param_tys i) with
-  | Some (A.ELam ((_ :: _ as ps), _, _)), Some t ->
+     read the caller's `n` as the lambda's (phase 0's row z4, per position).
+   [?peeled]: the parameters of a curried lambda read as one ([peel_lambda],
+   fold-invariants design phase 2): `fn a -> fn x -> …` against `b -> a ->
+   b` gives the INNER `x` position 1's fact, by the same argument (every
+   value the callee hands position 1 came from a source of its variable).
+   The guards above run over every peeled parameter. *)
+let lambda_domain_params ?(peeled : A.param list option) (ctx : rctx) defs (cb : cbenv) (ce : contenv)
+    (fname : string) (sg : fn_sig) (args : A.expr list) (i : int) : A.param list option =
+  let lam =
+    match List.nth_opt args i, peeled with
+    | Some (A.ELam (_ :: _, _, _)), Some (_ :: _ as ps) -> Some ps
+    | Some (A.ELam ((_ :: _ as ps), _, _)), _ -> Some ps
+    | _ -> None
+  in
+  match lam, Option.join (List.nth_opt sg.param_tys i) with
+  | Some ps, Some t ->
     let k = List.length ps in
     let chain = List.length (fst (arrow_chain t)) in
     let own_refined (p : A.param) =
@@ -1075,41 +1086,50 @@ let has_early_exit (e : A.expr) : bool =
 
 (* The invariant hypothesis (§2.1, §3.2): the parameters of the lambda passed
    as argument [i] (already peeled, [ps]) whose arrow-chain domain is EXACTLY
-   a type variable [v] with a scalar demand [Refined d] in [pairs] get [d] as
-   their annotation, spelled with the parameter's own name as the binder (a
-   wildcard sibling binding `_` would otherwise retire a default-binder
-   fact, as in [lambda_domain_params]).  [Ok (ps', used)]: [used] when some
-   parameter got it.  [Error why] declines the hypothesis for the whole
-   lambda (the tails are then checked without it):
+   a type variable [v] demanded in [pairs] assume that demand.
+   - A scalar demand [Refined d] becomes the parameter's annotation, spelled
+     with the parameter's own name as the binder (a wildcard sibling binding
+     `_` would otherwise retire a default-binder fact, as in
+     [lambda_domain_params]).
+   - A container demand [Container (c, slots)] (phase 2: a list-building
+     accumulator, `fn (acc, x) -> Cons(x, acc)` under `List({Int | _ > 0})`)
+     becomes a container-env entry [(name, (c, slots))] for the caller to
+     add after the parameters are bound: the element-refined accumulator
+     `b := List({Int | …})`, by the same induction (§2.2: every `b` the
+     callee hands the step is a value it already held, so it met the
+     demand).
+   [Ok (ps', entries, used)]: [used] when some parameter got either.
+   [Error why] declines the hypothesis for the whole lambda (the tails are
+   then checked without it):
 
    - a receiving parameter carrying its own refinement annotation: it is
      neither checked nor assumed today (f18), and two facts for one name is
      phase 4's business;
    - the body contains `let?` / `let*` ([has_early_exit]);
    - a lambda parameter's name is free in a demand it would assume (other than
-     that demand's own binder): read inside the lambda, the demand would name
-     the parameter, not the caller's value (f10's shape; [discharge_pairs]'s
+     a scalar demand's own binder): read inside the lambda, the demand would
+     name the parameter, not the caller's value (f10's shape; [discharge_pairs]'s
      capture guard covers the demand on the RESULT, this one the demand on
      every hypothesised parameter, which differ when two variables are
-     demanded at once).
+     demanded at once).  For a container demand every slot predicate counts
+     ([elem_entry_mentions]: a slot's binder is its element, never a lambda
+     parameter, so nothing is exempt).
 
    Only the caller may decide this is sound: [pairs] must be variables the
    callee is parametric in (P1/P2) and EVERY source of each must be
    discharged ([discharge_pairs]); the hypothesis is the induction step of
    §2.2's argument, never a fact on its own. *)
 let invariant_params (sg : fn_sig) (i : int) (pairs : (string * elem) list) (ps : A.param list)
-    (body : A.expr) : (A.param list * bool, string) result =
+    (body : A.expr)
+  : (A.param list * (string * (string * elem option list)) list * bool, string) result =
   match Option.join (List.nth_opt sg.param_tys i) with
-  | None -> Ok (ps, false)
+  | None -> Ok (ps, [], false)
   | Some t ->
     let doms, _ = arrow_chain t in
-    if List.length doms <> List.length ps then Ok (ps, false)
+    if List.length doms <> List.length ps then Ok (ps, [], false)
     else
       let hyp (dom : A.ty) =
-        match strip_ty dom with
-        | A.TyVar v ->
-          (match List.assoc_opt v.A.txt pairs with Some (Refined d) -> Some d | _ -> None)
-        | _ -> None
+        match strip_ty dom with A.TyVar v -> List.assoc_opt v.A.txt pairs | _ -> None
       in
       let targets =
         List.filter_map
@@ -1123,10 +1143,12 @@ let invariant_params (sg : fn_sig) (i : int) (pairs : (string * elem) list) (ps 
       let own_refined ((p : A.param), _) =
         match p.A.param_ty with Some pt -> ty_has_refinement pt | None -> false
       in
-      let shadowing ((_ : A.param), ((b0, q, _) : string * A.expr * string option)) =
-        List.find_opt (fun n -> n <> b0 && expr_mentions [ n ] q) names
+      let shadowing ((_ : A.param), (d : elem)) =
+        match d with
+        | Refined (b0, q, _) -> List.find_opt (fun n -> n <> b0 && expr_mentions [ n ] q) names
+        | Container (c, slots) -> List.find_opt (fun n -> elem_entry_mentions [ n ] (c, slots)) names
       in
-      if targets = [] then Ok (ps, false)
+      if targets = [] then Ok (ps, [], false)
       else
         match List.find_opt own_refined targets with
         | Some (p, _) ->
@@ -1142,11 +1164,12 @@ let invariant_params (sg : fn_sig) (i : int) (pairs : (string * elem) list) (ps 
                 (Printf.sprintf "its parameter `%s` shadows a name the demanded refinement mentions" n)
             | None ->
               let used = ref false in
+              let entries = ref [] in
               let ps' =
                 List.map
                   (fun (p : A.param) ->
                     match List.assq_opt p targets, p.A.param_ty with
-                    | Some (b0, q, srt), (None | Some (A.TyCon _)) ->
+                    | Some (Refined (b0, q, srt)), (None | Some (A.TyCon _)) ->
                       let x = p.A.param_name.A.txt in
                       let q' =
                         if b0 = x then q
@@ -1155,10 +1178,14 @@ let invariant_params (sg : fn_sig) (i : int) (pairs : (string * elem) list) (ps 
                       (match ty_of_refined (x, q', srt) with
                        | Some ty -> used := true; { p with A.param_ty = Some ty }
                        | None -> p)
+                    | Some (Container (c, slots)), (None | Some (A.TyCon _)) ->
+                      used := true;
+                      entries := (p.A.param_name.A.txt, (c, slots)) :: !entries;
+                      p
                     | _ -> p)
                   ps
               in
-              Ok (ps', !used))
+              Ok (ps', List.rev !entries, !used))
 
 (* A skip filed by the demand-driven element rule ([demand_flow]), with its
    own reason so `--refine-report` counts it apart from a plain unreflectable
@@ -2186,6 +2213,29 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
          (match discharge_pairs ~root defs ctx path lets sc re cb ce ~span ~callee g sg args !pairs with
           | `Proved -> `Proved
           | `Unproved w -> `Unproved w)
+     (* A BARE type variable return (fold-invariants design phase 2, §3.1's
+        last row): `sum_pos(fold_left(pos, Nil, fn (acc, x) -> Cons(x, acc)))`.
+        The call's value is a [container] here (this is a container
+        position, and the typechecker instantiated [b] to it), so the whole
+        demand is [b]'s: [(b, Container (container, slots))].  Same gates as
+        above (P1/P2) and the same discharge, every source of [b]; a callback
+        parameter typed [b] assumes the entry ([invariant_params]). *)
+     | Some (A.TyVar b) ->
+       if not (parametric_ok ctx g [ b.A.txt ]) then
+         `Unproved
+           (Obligation.Parametric_source_unproved
+              (Printf.sprintf
+                 "`%s` is not known to be parametric in its return type (its body may create \
+                  the value, or its declared type variables are not what it really takes), so \
+                  the demanded element refinement cannot be traced to its arguments"
+                 g))
+       else
+         (match
+            discharge_pairs ~root defs ctx path lets sc re cb ce ~span ~callee g sg args
+              [ (b.A.txt, Container (container, slots)) ]
+          with
+          | `Proved -> `Proved
+          | `Unproved w -> `Unproved w)
      | _ -> `Na)
   | _ -> `Na
 
@@ -2299,9 +2349,10 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
             its domain fact).  [ps0] are the outer lambda's own parameters,
             [ps] the peeled ones ([peel_lambda]; [ps0] itself when nothing was
             peeled) and [body] the innermost body.  The element facts are
-            [lambda_domain_params]' for the outer lambda, unchanged; the
-            peeled inner parameters get none.  Then every parameter typed
-            with a demanded variable assumes its demand ([invariant_params]).
+            [lambda_domain_params]', over every peeled parameter (phase 2).
+            Then every parameter typed with a demanded variable assumes its
+            demand ([invariant_params]): a scalar one as its annotation, a
+            container one as a container-env entry.
             Returns the verdict and, when the hypothesis was declined, why. *)
          let lambda_ok (i : int) (ps0 : A.param list) (ps : A.param list) (body : A.expr) (want : [ `S of string * A.expr * string option | `C of string * elem option list ]) =
            (* A parameter's OWN refinement annotation is not assumed: nothing
@@ -2311,35 +2362,44 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
               (false: `foldl([5], 1, …)` is -49).  Only the facts given below
               are. *)
            let orig = ps in
-           let outer =
-             match lambda_domain_params ctx defs cb ce g sg args i with
-             | Some ps' -> ps'
-             | None -> List.map erase_param_refinements ps0
-           in
+           (* Element facts for every parameter, peeled inner ones included
+              (phase 2: `fn a -> fn x -> …` gives `x` its position's fact). *)
            let ps =
-             outer
-             @ List.map erase_param_refinements (List.filteri (fun j _ -> j >= List.length ps0) ps)
+             match
+               lambda_domain_params
+                 ?peeled:(if List.length ps > List.length ps0 then Some ps else None)
+                 ctx defs cb ce g sg args i
+             with
+             | Some ps' -> ps'
+             | None -> List.map erase_param_refinements ps
            in
-           let ps, declined =
-             if not hyp_ok then (ps, None)
+           let ps, hyp_entries, declined =
+             if not hyp_ok then (ps, [], None)
              else
                match invariant_params sg i pairs orig body with
-               | Ok (hyp, _) ->
+               | Ok (hyp, entries, _) ->
                  (* Overlay: a parameter [invariant_params] annotated takes
                     the hypothesis; the rest keep their element fact or
                     nothing.  Disjoint by construction (a domain is a demanded
-                    variable or an element-agreed one, never both). *)
+                    variable or an element-agreed one, never both).  A
+                    container hypothesis is an entry, added below. *)
                  ( List.map2
                      (fun ((h : A.param), (o : A.param)) (p : A.param) -> if h != o then h else p)
                      (List.combine hyp orig) ps
+                 , entries
                  , None )
-               | Error why -> (ps, Some why)
+               | Error why -> (ps, [], Some why)
            in
            let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
            let ctx' = local_shadow ~spans:(param_spans ps) ctx names in
            let sc' = List.fold_left scope_add_param (scope_shadow sc names) ps in
            let cb' = List.fold_left cb_add_param (cb_shadow cb names) ps in
-           let ce' = cont_add_params ce ps in
+           (* A container hypothesis goes in AFTER the parameters are bound:
+              its slots are in the caller's namespace (no lambda parameter is
+              free in them, [invariant_params]' shadowing guard), and its key
+              is the parameter itself.  A hypothesised parameter is erased of
+              its own annotation, so [cont_add_params] gave it no entry. *)
+           let ce' = hyp_entries @ cont_add_params ce ps in
            let lets' = launder_shadow lets names in
            (* Every tail is checked in the LAMBDA-level env, so a tail naming
               something bound on the way down (`fn y -> let k = 0 - 5; k`)
@@ -2528,9 +2588,10 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
                     | None -> (`U, what, None))
                  | _ -> (`U, what, None)))
          in
-         (* An ACCUMULATOR: a variable with a scalar demand that some callback
-            source also consumes (a domain of its arrow chain is exactly the
-            variable).  Its unproved sources are reported as the base or the
+         (* An ACCUMULATOR: a demanded variable (a scalar demand, or since
+            phase 2 a container one) that some callback source also consumes
+            (a domain of its arrow chain is exactly the variable).  Its
+            unproved sources are reported as the base or the
             step (§3.4) rather than as a plain parametric source; only where
             the hypothesis was available at all ([hyp_ok]). *)
          let consumes (b : string) (i : int) =
@@ -2541,10 +2602,8 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
                (fst (arrow_chain t))
            | None -> false
          in
-         let accumulator (b : string) (d : elem) (srcs : source list) =
-           hyp_ok
-           && (match d with Refined _ -> true | Container _ -> false)
-           && List.exists (function Src_cod (i, _) -> consumes b i | _ -> false) srcs
+         let accumulator (b : string) (_ : elem) (srcs : source list) =
+           hyp_ok && List.exists (function Src_cod (i, _) -> consumes b i | _ -> false) srcs
          in
          let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
          let verdicts =

@@ -17,10 +17,14 @@ not do"; remove the bullet there when closing one.
    one parameter.~~ **Closed 2026-10-18** by phase 1 of
    `specs/2026-10-18-element-flow-followups-design.md`; see
    `specs/progress/2026-10-18-element-flow-phase1-multiparam-lambda-domains.md`.
-   `fold_left`'s accumulator is still where a demand on `b` would act as an
-   invariant (its negative occurrence), a separate soundness argument owned by
-   `specs/2026-10-18-fold-accumulator-invariants-design.md`; `acc` gets no
-   domain fact.
+   The accumulator half (`fold_left`'s accumulator, where a demand on `b`
+   acts as an invariant, its negative occurrence) is **closed 2026-10-18** by
+   phases 1-2 of `specs/2026-10-18-fold-accumulator-invariants-design.md`
+   (`specs/progress/2026-10-18-fold-invariants-phase1.md`,
+   `specs/progress/2026-10-18-fold-invariants-phase2.md`): a scalar or
+   container demand on the fold's result is assumed of `acc` while the step
+   is checked. `acc` still gets no domain fact WITHOUT a demand (phase 4,
+   the annotated accumulator).
 3. ~~**A local `fn` with a container return** has no tail checks
    (`ret_elem_demand` is suspended inside it) and lends nothing at its call
    sites. Give it a demand and a gate like `visit_fn` / `gate_elem_returns`.~~

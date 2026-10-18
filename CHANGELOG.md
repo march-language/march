@@ -98,6 +98,20 @@ git log is authoritative for exact commits.
   (`acc - x` for `_ >= 0`). A callee that can make a value of the variable
   itself, or is `@[trusted]`/`@[assume]` or an `impl` method, gets nothing. A
   relational return (`: {Int | _ >= lo}`) is not traced yet.
+- **Refinements: list-building fold accumulators.** An element demand on a
+  fold's result is now the accumulator's invariant too:
+  `sum_pos(List.fold_left(pos, [], fn (acc, x) -> Cons(x, acc)))` is proved
+  (the initial `[]` meets `List({Int | _ > 0})`, and the step, assuming `acc`
+  does, conses a positive `x` onto it), as are `List.fold_right`, the curried
+  `Enum.fold`, a nested fold and a declared `List({Int | _ > 0})` return; each
+  was an `unreflectable-subject` skip (an error under `cap verified`). It is not
+  specific to folds: any call whose declared return is a bare type variable
+  (`fn pick(c, x : b, y : b) : b`) is checked through its sources when its
+  value must meet an element refinement. A step pushing an unrefined element
+  is an `accumulator-step-unproved` skip, an initial list that fails it an
+  `accumulator-base-unproved` skip. A curried step's inner parameter
+  (`fn a -> fn x -> …`) now gets its element refinement while the step is
+  checked, so `need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))` is proved.
 
 ### Fixed
 

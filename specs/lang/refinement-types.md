@@ -2184,6 +2184,14 @@ fn g(o : Option({Int | _ > 0})) : {Int | _ > 0} do
 end
 ```
 
+An element demand on such a call works the same way: when the value the call
+returns is itself a container (`b` instantiated to `List(Int)` at the call),
+the whole demand is `b`'s, and each source must meet it as a container. With
+`fn pick(c : Bool, x : b, y : b) : b`, `sum_pos(pick(c, pos, [3]))` is proved
+and `sum_pos(pick(c, pos, zs))` with `zs : List(Int)` is a skip. A fold's
+list-building accumulator is the case that matters; see
+[Folds](#folds-an-accumulator-invariant).
+
 ### Callbacks and user-written combinators
 
 A callback's refined codomain is a fact wherever its result lands, including in
@@ -2506,6 +2514,37 @@ demand) and a fold you write yourself all work the same way. Nothing here is
 specific to the stdlib's folds: the rule applies to any function generic in its
 return variable with a callback that consumes it.
 
+The accumulator can be a container. An element demand on a fold's result
+(`List({Int | _ > 0})` here) instantiates `b` to that refined list: the
+initial list must meet it, and the step, assuming the list it is handed meets
+it, must build one that does.
+
+```march
+fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+
+fn reversed(pos : List({Int | _ > 0})) : Int do
+  sum_pos(List.fold_left(pos, [], fn (acc, x) -> Cons(x, acc)))       -- proved
+end
+
+fn kept(ys : List(Int)) : List({Int | _ > 0}) do
+  List.fold_left(ys, [1], fn (acc, x) -> if x > 0 do Cons(x, acc) else acc end) -- proved
+end
+
+fn copied(ys : List(Int)) : Int do
+  sum_pos(List.fold_left(ys, [], fn (acc, x) -> Cons(x, acc)))        -- skip: x is not known positive
+end
+
+fn seeded(pos : List({Int | _ > 0})) : Int do
+  sum_pos(List.fold_left(pos, [0], fn (acc, x) -> Cons(x, acc)))      -- skip: the base [0] fails it
+end
+```
+
+`List.fold_right`, the curried `Enum.fold` and a nested fold (the inner fold's
+initial value is the outer accumulator, which meets the demand by the outer
+assumption) prove the same way. A curried step's inner parameter (`x` in
+`fn a -> fn x -> …`) also gets its element refinement here, so
+`need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))` is proved.
+
 A refuted base or step is a **skip, never a violation**, with its own reason,
 `accumulator-base-unproved` or `accumulator-step-unproved`, so the report says
 which half failed. A failing base can be harmless on a non-empty list and a
@@ -2526,10 +2565,13 @@ assumed either: nothing checks it), a step using `let?`/`let*`, and a step
 whose parameter is spelled like a name the demand mentions.
 
 Only a demand the checker already traces reaches a fold: a closed scalar demand
-(a precondition, an annotated `let`, a closed return) or an element demand on a
-container result (`one_pos(Enum.reduce(pos, …))`). A relational return
+(a precondition, an annotated `let`, a closed return) or an element demand on
+the call (`one_pos(Enum.reduce(pos, …))`, `sum_pos(List.fold_left(pos, [], …))`,
+a declared `List({Int | _ > 0})` return). A relational scalar return
 (`: {Int | _ >= lo}`) is not traced yet, and a `let`-bound fold result used
-later carries nothing.
+later carries nothing. The step's tails are checked where the lambda is
+written, so a tail naming something bound inside the step (`match acc do
+Cons(h, _) -> Cons(h, acc) … end`) is not checked and the call is a skip.
 
 ### What element refinements do not do
 
@@ -2559,7 +2601,8 @@ later carries nothing.
   callback parameter of type `List(b)` and a hand-written accumulator
   recursion (`fn sum(xs, acc : {Int | _ >= 0}) : {Int | _ >= 0}`) are not
   covered. A curried lambda (`fn a -> fn x -> …`) gives an element fact to its
-  outer parameter only.
+  inner parameters only while its result is checked against a demand on the
+  call; inside its body otherwise, only the outer parameter gets one.
 - **A local `fn` with a container return lends it only when the entry is
   closed and the `fn` does not recurse into it.** Its tails are checked like a
   top-level function's, and a proved one is a fact at its later calls in the
