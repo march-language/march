@@ -42,9 +42,35 @@ git log is authoritative for exact commits.
   under `cap verified`). A fold's accumulator still gets no fact, a lambda with
   a refinement-annotated parameter gets none, and a fact naming one of the
   lambda's own parameters is not given.
+- **Refinements: an abstract refinement may be negated and combined in an element
+  slot.** `fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | !p(_)})` (also
+  spelled `not(p(_))`) is accepted where it was a hard
+  `abstract_refinement_misuse` error, its body is checked, and
+  `sum_nonpos(rej(ys, fn y -> y > 0))` is proved. A slot may combine `p(_)` with
+  `&&`, `||`, `!` and ordinary predicates (`{String | p(_) && len(_) > 0}`), sit at
+  a concrete base (`List(Int[p])` for `f : Int -> Bool[p]`), and an accumulator
+  helper's own `acc : List(a[p])` parameter is now checked inside the definition
+  that declares `p`.
 
 ### Fixed
 
+- **Refinements: a recursive helper's element return is no longer trusted when
+  its own recursive call skips a precondition.** A helper such as
+  `pfn go(lst, acc : List({Int | _ > 0})) : List({Int | _ > 0})` that recursed
+  as `go(t, Cons(f(h), acc))` with an unproved push recorded only a skip at that
+  push, yet its return (by structural induction) and every caller's demand were
+  reported proved. The induction now needs every element precondition of the
+  recursive call PROVED; a skip or a violation there leaves the return unproved
+  and its callers unproved with it. The same held for an abstract slot
+  (`acc : List(a[p])`, pushing without testing `pred`, or pushing an element of
+  another list): such a push is now an `unconstrained-subject` skip (or, on the
+  branch where `pred` rejected the element, a violation) and lends nothing.
+- **Refinements: a caller's own abstract refinement is no longer mistaken for the
+  callee's.** A caller declaring its own `p` that passed a list to a callee slot
+  such as `xs : List({Int | p(_) == false})` had the callee's `p` read as its
+  own, so the call was reported proved whatever predicate it passed; a slot shape
+  not read at a call is now an `abstract-refinement-uninstantiated` skip, and a
+  `!p(_)` slot is instantiated with the callee's predicate.
 - **Refinements: a container that hides a type parameter inside another type no
   longer passes element checks vacuously.** For `type Wrap(k, v) = Wrap(List((k, v)))`,
   `fn mk() : Wrap(Int, {Int | _ > 0}) do Wrap([(1, 0 - 5)]) end` was counted

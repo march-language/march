@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: does not satisfy precondition `!p(_)`
+-- Abstract refinements, the leftovers, phase B (row P3c): `rej` declares
+-- `List({a | !p(_)})` but keeps the elements `pred` ACCEPTS.  The body is
+-- checked against `!p` at every `Cons`, so this is a definite violation
+-- (before phase B the same body was also a hard `abstract_refinement_misuse`
+-- error on the signature).  Accept companion: accept/t350.
+mod AbsNegationWrong do
+  fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do List.length(xs) end
+  fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | !p(_)}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, rej(t, pred)) else rej(t, pred) end
+    end
+  end
+  fn go(ys : List(Int)) : Int do sum_nonpos(rej(ys, fn y -> y > 0)) end
+end

@@ -2254,6 +2254,40 @@ call to a function taking `List({Int | _ > 0})` — proved for
 `pos : List({Int | _ > 0})` or `[1, 2]`, a violation for `[0, 1]`, a skip for
 an unrefined list — and inside `need`, `xs`'s elements carry `p`.
 
+**Negation and combined slots.** An element slot may combine `p(_)` with
+`&&`, `||` and `!`/`not`, and with ordinary vocabulary over the element. The
+negation is spelled `{a | !p(_)}` or `{a | not(p(_))}`; `{a | not p(_)}` is a
+syntax error, because `not` is a function and needs parentheses. At a call the
+checker reads the slot with `p` replaced by the passed predicate:
+
+```march
+fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | !p(_)}) do
+  match xs do
+  Nil -> Nil
+  Cons(h, t) -> if pred(h) do rej(t, pred) else Cons(h, rej(t, pred)) end
+  end
+end
+
+fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do … end
+sum_nonpos(rej(ys, fn y -> y > 0))     -- proved: `!(y > 0)`
+sum_nonpos(rej(ys, fn y -> y > 5))     -- skip: `!(y > 5)` is too weak
+```
+
+A slot may also sit at a concrete base, `List(Int[p])` for
+`f : Int -> Bool[p]`. Inside a definition that declares `p`, an accumulator
+helper's own `acc : List(a[p])` parameter is checked like any other (a
+`Cons(h, acc)` pushed on the branch `pred(h)` rejected is a violation; one
+pushed without testing `pred` is a skip). A recursive helper's element return
+is proved by induction only when every element precondition of its recursive
+call is PROVED: a skip or a violation there leaves the return unproved, so the
+helper lends nothing to its callers. This holds for a concrete slot
+(`acc : List({Int | _ > 0})`) as well. A
+definition may also pass its own callback on to another combinator
+(`List.filter(xs, pred)` in `myfilter(xs, pred : a -> Bool[p]) : List(a[p])`).
+`p` applied under anything but `&&`, `||` and `!` (`p(_) == false`), or two
+abstract refinements in one slot, is not read at a call
+(`abstract-refinement-uninstantiated`); `p(q(_))` is still an error.
+
 **What can instantiate `p`.** Besides an inline lambda:
 
 ```march
@@ -2345,9 +2379,13 @@ demand meets one of these):
   violation.
 - **One argument only.** `Map.filter`'s `(k, v) -> Bool` and a `fold_left`
   accumulator invariant would need a two-argument `p(k, v)`.
-- **Not every combinator.** `List.partition` would need `p` inside a tuple and
-  under `not`; `drop_while` keeps no element fact; `Deque.filter` does not
-  declare one.
+- **Not every combinator.** `List.partition` would need `p` inside a tuple
+  (`!p(_)` itself is read, see above); `drop_while` keeps no element fact;
+  `Deque.filter` does not declare one.
+- **A String-sorted callback on the definition side.** Inside a combinator
+  over `List(String)`, `f(h)` with `f : String -> Bool[p]` does not yet
+  reflect as `p(h)`, so a natural-style body over strings does not prove its
+  `List(String[p])` return (delegating to `List.filter` does).
 - **`p` only in an element slot**, not on a bare scalar return
   (`(a) -> {a | p(_)}`), and not through `interface`/`impl` dispatch.
 
