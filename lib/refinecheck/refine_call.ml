@@ -677,6 +677,18 @@ type call_ctx = {
       (* Caller names -> their BINDING-site spans ([rctx.binds]), read with
          [caller_sort_at] to give a caller value its typechecked sort instead
          of the `Int` default.  Shadowed exactly like [sc]. *)
+  demand :
+    (call_ctx -> span:A.span -> A.expr -> string * A.expr * string option
+     -> [ `Na | `Proved | `Unproved of string ])
+    option;
+      (* A scalar demand on a CALL subject that did not reflect, discharged
+         over the callee's sources (design 2026-10-18 element-flow follow-ups,
+         phase 2, §3: `need_pos(Option.unwrap_or(o, 1))`).  [None] where no
+         container env exists (the pass-site checks, a unit fixture).  Takes
+         the [call_ctx] it is called with, so the closure reads the very
+         channels [check_call] was given: a shadowed context (a `let`
+         annotation, a lambda tail) must not be discharged against the
+         unshadowed one.  [`Na] leaves the obligation's skip as it was. *)
 }
 
 let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
@@ -685,7 +697,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
-  let { root; errctx; postcond; path; lets; sc; re; binds } = cx in
+  let { root; errctx; postcond; path; lets; sc; re; binds; demand = _ } = cx in
   let subject_noun =
     match subject with
     | Argument -> "argument"
@@ -2626,6 +2638,20 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              "the argument passed for `%s`%s, which the predicate `%s` depends on%s"
              pname actual (pred_str rp.pred) more
        in
+       (* The subject is a call with no postcondition: a closed scalar demand
+          on it may still hold of every value its callee can return
+          ([cx.demand], design 2026-10-18 element-flow follow-ups §3.2).  A
+          refuted source is a skip, never a violation (§3.4). *)
+       let from_sources =
+         match mode, cx.demand, self_actual with
+         | `Other, Some f, A.EApp (A.EVar _, _, _) when self_reflection_failed ->
+           f cx ~span self_actual (rp.binder, rp.pred, rp.sort)
+         | _ -> `Na
+       in
+       (match from_sources with
+       | `Proved -> note Obligation.Proved
+       | `Unproved what -> note (Obligation.Skipped (Obligation.Parametric_source_unproved what))
+       | `Na ->
        note
          (Obligation.Skipped
             (match mode with
@@ -2637,7 +2663,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              | `Other | `Record _ ->
                let leaf = Option.value !pred_fail_expr ~default:rp.pred in
                Obligation.Unreflectable_predicate
-                 (pred_str leaf, division_outside_fragment_hint leaf)))
+                 (pred_str leaf, division_outside_fragment_hint leaf))))
      | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
        note (Obligation.Skipped Obligation.Sort_conflict)
      | Some goal ->

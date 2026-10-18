@@ -1,0 +1,43 @@
+-- Element refinements, a scalar demand on a single-element result (2026-10-18,
+-- design specs/2026-10-18-element-flow-followups-design.md phase 2): a call
+-- whose declared return is a bare type variable (`Option.unwrap_or : (Option(a),
+-- a) -> a`) has no postcondition, but by parametricity every value it returns
+-- entered through a source of `a` (the option's elements, the default), so a
+-- demand on the result holds when every source meets it.  Nested calls, a
+-- callback's result, an element of a literal, a fold whose step returns the
+-- element, an annotated `let`, `List.head(xs) + 1` (the inline form of the
+-- `let h = List.head(xs)` fact) and a return tail all prove.  Before, each was
+-- an unreflectable-subject skip, so `cap verified` rejected this module.
+-- Under `cap verified`, exit 0 means every demand PROVED.  Reject twins:
+-- reject/t361 (a default that fails the demand) and reject/t362 (a lambda
+-- parameter shadowing the caller's option).
+mod ScalarDemandSources do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn defaulted(o : Option({Int | _ > 0})) : Int do
+    need_pos(Option.unwrap_or(o, 1))
+  end
+  fn nested(o : Option({Int | _ > 0}), p : Option({Int | _ > 0})) : Int do
+    need_pos(Option.unwrap_or(o, Option.unwrap_or(p, 2)))
+  end
+  fn on_demand(o : Option({Int | _ > 0})) : Int do
+    need_pos(Option.unwrap_or_else(o, fn () -> 1))
+  end
+  fn in_literal(o : Option({Int | _ > 0})) : Int do
+    sum_pos([Option.unwrap_or(o, 1)])
+  end
+  fn last_seen(xs : List({Int | _ > 0})) : Int do
+    need_pos(List.fold_left(xs, 1, fn (acc, x) -> x))
+  end
+  fn first_plus(xs : {List({Int | _ > 0}) | len(_) > 0}) : Int do
+    need_pos(List.head(xs) + 1)
+  end
+  fn annotated(o : Option({Int | _ > 0})) : Int do
+    let x : {Int | _ > 0} = Option.unwrap_or(o, 1)
+    need_pos(x)
+  end
+  fn returned(o : Option({Int | _ > 0})) : {Int | _ > 0} do
+    Option.unwrap_or(o, 1)
+  end
+end

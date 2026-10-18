@@ -263,6 +263,38 @@ let with_post_lookup lookup (f : unit -> 'a) : 'a =
   post_lookup := lookup;
   Fun.protect ~finally:(fun () -> post_lookup := saved) f
 
+(* ── A scalar demand at a return tail (design 2026-10-18 element-flow
+   follow-ups, phase 2; the hook specs/2026-10-18-fold-accumulator-invariants-design.md
+   §3.1 builds on) ────────────────────────────────────────────────────────
+   `fn go(o : Option({Int | _ > 0})) : {Int | _ > 0} do Option.unwrap_or(o, 1) end`:
+   the tail is a call with no postcondition, so it never reflects, but the
+   declared return may still hold of every value its callee can return
+   ([Refine_check.scalar_demand], the same entry point a precondition's
+   subject reaches through [call_ctx.demand]).  The post engine knows only the
+   clause's parameters, so the hook is handed the tail's [path], the names
+   bound on the way down to it ([tails_bound]'s [bound]) and the parameters,
+   and builds its env from those.  A cell rather than a parameter for the
+   reason [post_lookup] is one; set by [Refine_check] at module init, so the
+   [gate_unverified_posts] pre-pass (which lives here) installs the same hook
+   the walk does.  [`Na] leaves the tail's skip exactly as it was. *)
+type tail_demand =
+  path:(A.expr * bool) list -> bound:string list -> params:A.fn_param list -> sc:scope
+  -> string * A.expr * string option -> A.expr -> [ `Na | `Proved | `Unproved of string ]
+
+let no_tail_demand : tail_demand = fun ~path:_ ~bound:_ ~params:_ ~sc:_ _ _ -> `Na
+
+let tail_demand : tail_demand ref = ref no_tail_demand
+
+let with_tail_demand (d : tail_demand) (f : unit -> 'a) : 'a =
+  let saved = !tail_demand in
+  tail_demand := d;
+  Fun.protect ~finally:(fun () -> tail_demand := saved) f
+
+(* The hook for a module context; [Refine_check] replaces the default. *)
+let tail_demand_of :
+    (root:string -> rctx -> (string, fn_sig option) Hashtbl.t -> tail_demand) ref =
+  ref (fun ~root:_ _ _ -> no_tail_demand)
+
 (* [sg]'s postcondition instantiated at [args], in the caller's namespace
    (the same rule [postcond_of] applies to a resolved callee). *)
 let ret_instance (sg : fn_sig) (args : A.expr list) : (string * A.expr * string option) option =
@@ -293,6 +325,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(fn_params : (string * A.ty option) list = [])
     ?(string_ret = false)
     ?(list_ret = false)
+    ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of string ]) option)
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -594,9 +627,20 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
         Printf.sprintf "the return expression of `%s`"
           (Option.value ~default:"<anonymous>" fn_name)
     in
-    if enum_witness_error () then note Obligation.Violated
-    else note (Obligation.Skipped (Obligation.Unreflectable_subject tail_display));
-    false
+    (* A call tail with no postcondition: the declared return may still hold
+       of every value its callee returns ([tail_demand]).  A refuted source
+       stays a skip (design §3.4), unless the enumerative witness confirms a
+       real failing call, exactly as before. *)
+    (match (match demand with Some f -> f tail_e | None -> `Na) with
+     | `Proved -> note Obligation.Proved; true
+     | `Unproved what ->
+       if enum_witness_error () then note Obligation.Violated
+       else note (Obligation.Skipped (Obligation.Parametric_source_unproved what));
+       false
+     | `Na ->
+       if enum_witness_error () then note Obligation.Violated
+       else note (Obligation.Skipped (Obligation.Unreflectable_subject tail_display));
+       false)
   | Some tail_term ->
     let resolve_field = match record_sort with
       | Some sort_name -> make_field_resolver binder sort_name tail_term
@@ -1813,7 +1857,11 @@ let rec check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool
     let lookup =
       List.fold_left
         (fun lookup (n, lfd) ->
-          if with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false lfd)
+          (* A block-level fn's return tail gets no scalar demand hook in v1:
+             its env (sibling locals, captures) is not the clause's. *)
+          if
+            with_tail_demand no_tail_demand (fun () ->
+                with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false lfd))
           then
             let sg = sig_of_fn lfd in
             fun f args -> if f = n then ret_instance sg args else lookup f args
@@ -1877,7 +1925,15 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
           c.A.fc_params
       in
       let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      let ts = tails base c.A.fc_body in
+      let ts = tails_bound base [] c.A.fc_body in
+      (* Only a plain scalar return reaches the scalar demand entry point. *)
+      let demand (path, _, bound) =
+        if record_sort <> None || string_ret || list_ret then None
+        else
+          Some
+            (fun e ->
+              !tail_demand ~path ~bound ~params:c.A.fc_params ~sc (binder, ret_pred, marker) e)
+      in
       (* Fold (not List.for_all): every tail must be checked so every
          diagnostic is emitted — short-circuiting would hide errors. *)
       let fn_params =
@@ -1885,10 +1941,10 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       in
       ts <> []
       && List.fold_left
-           (fun acc t ->
+           (fun acc ((p, e, _) as t) ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env ~string_ret
-               ~list_ret ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit ~fn_params
-               sc binder ret_pred t
+               ~list_ret ?demand:(demand t) ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit
+               ~fn_params sc binder ret_pred (p, e)
              && acc)
            true ts
     in
@@ -1980,8 +2036,12 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
   in
   let short key = match String.rindex_opt key '.' with Some i -> String.sub key (i + 1) (String.length key - i - 1) | None -> key in
   let check (key, prefix, fd, sg) =
-    let lookup = postcond_of { rctx0 with modpath = prefix } defs in
-    if with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd) then begin
+    let ctx = { rctx0 with modpath = prefix } in
+    let lookup = postcond_of ctx defs in
+    if
+      with_tail_demand (!tail_demand_of ~root ctx defs) (fun () ->
+          with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd))
+    then begin
       Hashtbl.replace defs key (Some sg);
       true
     end

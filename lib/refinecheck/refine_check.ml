@@ -131,7 +131,7 @@ include Refine_param
    grants nothing.  That costs precision — an invariant the author knows but
    the checker cannot see is no longer usable — and the cost lands entirely in
    the safe direction, as more skips. *)
-let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
+let check_let_annotation ?ext ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (b : A.binding) : bool option =
   match b.A.bind_pat, refined_scope_ty b.A.bind_ty with
   | A.PatVar n, Some (binder, pred, sort) ->
@@ -149,17 +149,23 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
       }
     in
     let out = ref None in
+    (* [?ext]: the walk's postcondition lookup and scalar demand hook
+       ([cx_of]), built for the SHADOWED env from the bound names. *)
+    let postcond, demand =
+      match ext with Some f -> f names | None -> (postcond_of ctx defs, None)
+    in
     (* Every fact channel is shadowed by the names this binding introduces —
        see [call_ctx]'s note: all of them, or none. *)
     let cx =
       { root
       ; errctx
-      ; postcond = postcond_of ctx defs
+      ; postcond
       ; path = path_shadow path names
       ; lets = launder_shadow lets names
       ; sc = scope_shadow sc names
       ; re = recenv_shadow re names
       ; binds = List.filter (fun (n, _) -> not (List.mem n names)) ctx.binds
+      ; demand
       }
     in
     check_call cx ~span:n.A.span
@@ -368,7 +374,7 @@ let check_impl_dispatch ~root errctx defs (ctx : rctx) path lets sc re ~(span : 
     in
     (match chosen with
      | Some sg ->
-       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re; binds = ctx.binds } in
+       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re; binds = ctx.binds; demand = None } in
        List.iter (fun rp -> check_call cx ~span ~callee:fname sg args rp) sg.refined
      | None ->
        let reason =
@@ -458,7 +464,7 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
           | None -> ()
           | Some r ->
             let sc = (fresh_cb_arg, r) :: scope_shadow sc [ fresh_cb_arg ] in
-            let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+            let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds; demand = None } in
             let x = A.EVar { A.txt = fresh_cb_arg; A.span = asp } in
             List.iter
               (fun rp -> check_call cx ~span:asp ~callee:gname ~subject:Callback_domain gsg [ x ] rp)
@@ -546,7 +552,7 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
                      | _ -> rq
                    in
                    let sc = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
-                   let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+                   let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds; demand = None } in
                    check_call cx ~span:asp ~callee:g ~subject:Callback_codomain cod_sig
                      [ A.EVar { A.txt = "$r"; A.span = asp } ] rp
                  | _ ->
@@ -1424,7 +1430,7 @@ let scratch_implies ~root defs (ctx : rctx) path lets sc re (cb : cbenv) ~(span 
     let sc' = ("$inl", (y, fact, sort)) :: scope_shadow sc [ "$inl" ] in
     let cx =
       { root; errctx = Err.create (); postcond = postcond_of ~cb ctx defs; path; lets; sc = sc'; re
-      ; binds = ctx.binds }
+      ; binds = ctx.binds; demand = None }
     in
     let out = ref None in
     let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
@@ -1505,7 +1511,7 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
                     let sc' = ("$elem", (y, body', dsort)) :: scope_shadow sc [ "$elem" ] in
                     let cx =
                       { root; errctx = Err.create (); postcond = postcond_of ~cb ctx defs; path; lets
-                      ; sc = sc'; re; binds = ctx.binds }
+                      ; sc = sc'; re; binds = ctx.binds; demand = None }
                     in
                     let out = ref None in
                     let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
@@ -1571,6 +1577,23 @@ let record_abstract_verdict errctx ~(span : A.span) ~(callee : string) ~(predica
    | _ -> ());
   verdict = Obligation.Proved
 
+(* The postcondition lookup the walk hands [check_call] (design 2026-10-18
+   element-flow follow-ups §3.5): a callee's proved declared return wins;
+   failing that, a bare type-variable return whose every source is an element
+   agreeing on one slot carries that slot ([parametric_return]'s [`Scalar]).
+   The inline twin of the block walk's `let h = List.head(xs)` arm, with the
+   same soundness argument and no name in between: `need_pos(List.head(xs) +
+   1)`.  Solver-free, as [postcond_of] must be. *)
+let postcond_param ~(cb : cbenv) (ctx : rctx) defs (ce : contenv) :
+    string -> A.expr list -> (string * A.expr * string option) option =
+ fun g args ->
+  match postcond_of ~cb ctx defs g args with
+  | Some r -> Some r
+  | None ->
+    (match parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb g args with
+     | Some (`Scalar r) -> Some r
+     | _ -> None)
+
 let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
     (a : A.expr) : bool =
@@ -1578,7 +1601,7 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
      (`Cons(f(h), …)` with `f : Int -> {Int | p}`) carries its codomain here
      exactly as it does in a scalar argument position (2026-09-18 plan,
      Phase 2). *)
-  let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+  let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
   (* One element against one REFINED slot: as an argument. *)
   let check_one (r : string * A.expr * string option) (e : A.expr) : bool =
     let sg = elem_sig ~name:"$elem" r in
@@ -1783,6 +1806,65 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
      | _ -> `Na)
   | _ -> `Na
 
+(* The [call_ctx] the walk discharges a precondition in: [postcond_param]
+   for nested calls, and the scalar demand entry point ([scalar_demand]) for
+   a call subject that does not reflect.  Every site that has a container env
+   builds its context here; the closure captures [ctx]/[cb]/[ce], so a site
+   whose channels are shadowed (a lambda tail, a `let` annotation) builds its
+   own from the shadowed ones rather than reusing an outer context. *)
+and cx_of ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv) : call_ctx =
+  { root; errctx; postcond = postcond_param ~cb ctx defs ce; path; lets; sc; re; binds = ctx.binds
+  ; demand = Some (fun cx ~span e d -> scalar_demand ~root defs ctx cb ce cx ~span e d) }
+
+(* ── The scalar demand entry point (design 2026-10-18 element-flow
+   follow-ups, phase 2, §3) ─────────────────────────────────────────────
+   A scalar obligation [d] on a call subject `g(args)` that did not reflect
+   (no proved declared return; [check_call]'s unreflectable-subject arm).
+   When [g]'s declared return, refinement-stripped, is a bare type variable
+   [v] and [g] is parametric in it (P1/P2, [parametric_ok]), every value the
+   call can return entered through a source of [v]; [d] holds of the result
+   when it holds of every source ([discharge_pairs] with [(v, Refined d)],
+   the container rule's own discharge).  [`Na] (the skip stays as it was)
+   unless:
+
+   - [d] is CLOSED: a predicate naming another of the callee's parameters is
+     in the callee's namespace, not the subject's (design §3.1, v1);
+   - [g] resolves to a top-level definition ([resolve_key]): a callback or a
+     local has no body to read parametricity from, and keeps its old skip.
+
+   A source that does not meet [d] is [`Unproved], a skip, never a
+   violation (§3.4).  Recursion through a nested subject is structural: every
+   source is a strict subexpression of [e]. *)
+and scalar_demand ~root defs (ctx : rctx) (cb : cbenv) (ce : contenv) (cx : call_ctx)
+    ~(span : A.span) (e : A.expr) ((b0, p, _) as d : string * A.expr * string option)
+  : [ `Na | `Proved | `Unproved of string ] =
+  match e with
+  | A.EApp (A.EVar { A.txt = g; _ }, args, _)
+    when classify_pred b0 [] p = Closed && resolve_key ctx g <> None ->
+    (match callee_sig ctx defs cb g with
+     | Some sg when List.length sg.param_tys = List.length args ->
+       (match Option.map strip_ty sg.ret_ty with
+        | Some (A.TyVar v) when not (parametric_ok ctx g [ v.A.txt ]) ->
+          `Unproved
+            (Printf.sprintf
+               "`%s` is not known to be parametric in its return type (its body may create \
+                the value, or its declared type variables are not what it really takes), so \
+                the demanded refinement cannot be traced to its arguments"
+               g)
+        | Some (A.TyVar v) ->
+          (* The channels [check_call] was given, not the ones [ctx] was
+             built with. *)
+          let ctx = { ctx with binds = cx.binds } in
+          (match
+             discharge_pairs ~root defs ctx cx.path cx.lets cx.sc cx.re cb ce ~span ~callee:g g sg args
+               [ (v.A.txt, Refined d) ]
+           with
+           | `Proved -> `Proved
+           | `Unproved w -> `Unproved w)
+        | _ -> `Na)
+     | _ -> `Na)
+  | _ -> `Na
+
 (* [demand_flow]'s source discharge, given the demanded (type variable,
    demand) pairs of [g]'s declared return: every source of each variable
    ([sources_of]) must meet its demand.  Shared with the scalar entry point
@@ -1811,7 +1893,7 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
                    targs )
            | _ -> None
          in
-         let cx0 = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+         let cx0 = cx_of ~root errctx defs ctx path lets sc re cb ce in
          (* One scalar demand against one expression, in the environment given. *)
          let scalar_ok cx (r : string * A.expr * string option) (e : A.expr) : [ `P | `U | `V ] =
            let sg1 = elem_sig ~name:"$elem" r in
@@ -1845,7 +1927,10 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
                  else
                  match want with
                  | `S r ->
-                   scalar_ok { cx0 with path = p; lets = lets'; sc = sc'; binds = ctx'.binds } r t
+                   (* The lambda's own env, in the hook too: a tail call
+                      over the lambda's parameter must not read the caller's
+                      binding of that name. *)
+                   scalar_ok (cx_of ~root errctx defs ctx' p lets' sc' re cb' ce') r t
                  | `C entry ->
                    ok_of (check_elements ~root errctx defs ctx' p lets' sc' re cb' ce' ~span ~callee entry t))
                (tails_bound (path_shadow path names) [] body)
@@ -2194,7 +2279,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     in
     (match callee with
      | Some sg ->
-       let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+       let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
        check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp ~callee_name:fname sg args;
        check_arg_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:fname sg args;
@@ -2232,7 +2317,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      parameter refinements — see [Refine_scope.collect_handler_sigs].  A
      message constructor is checked exactly like a call to the handler. *)
   | A.ECon (c, args, sp) ->
-    let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+    let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
     (match handler_sig_of_ctor c.A.txt with
      | Some sg -> List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
      | None ->
@@ -2290,7 +2375,15 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               would let the annotation discharge itself. *)
            let annot_proved =
              match e with
-             | A.ELet (b, _) -> check_let_annotation ~root errctx defs ctx path lets sc re b
+             | A.ELet (b, _) ->
+               let ext names =
+                 let cx =
+                   cx_of ~root errctx defs (local_shadow ctx names) path lets sc re (cb_shadow cb names)
+                     (cont_shadow ce names)
+                 in
+                 (cx.postcond, cx.demand)
+               in
+               check_let_annotation ~ext ~root errctx defs ctx path lets sc re b
              | _ -> None
            in
            (* A container-typed annotation (`let ys : List({Int | p}) = …`)
@@ -2778,7 +2871,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      | Some ctor ->
        (match Hashtbl.find_opt !ctor_sigs.by_ctor ctor with
         | Some sg ->
-          let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+          let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
           check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:None;
           check_field_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:ctor sg fs
             ~only:None
@@ -2805,7 +2898,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                      (pn, A.EField (A.EVar { A.txt = x; A.span = xsp }, { A.txt = pn; A.span = xsp }, xsp)))
                  sg.param_names
              in
-             let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+             let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
              check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:(Some (List.map fst updated));
              check_field_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:ctor sg
                fs ~only:(Some (List.map fst updated))
@@ -3505,6 +3598,32 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
    §21 The declaration walk
    ================================================================= *)
 
+(* The scalar demand entry point at a top-level function's RETURN TAIL
+   ([Refine_post.tail_demand]; design 2026-10-18 element-flow follow-ups,
+   phase 2, and the fold-accumulator design's §3.1).  The post engine checks a
+   tail against the clause's parameters alone, so the env here is built from
+   those: [sc] is the post engine's own, the callback and container envs come
+   from the parameter list, and every parameter name is a local for name
+   resolution.  [`Na] (the tail's skip unchanged) when the tail mentions a
+   name bound on the way down to it ([bound]: an inner `let`, a `match`
+   binder, a local `fn`): read through the parameter env, that name would
+   mean the parameter or a global, not the binding the tail sees (phase 0's
+   z2 rule). *)
+let tail_demand_impl ~root (ctx : rctx) defs : Refine_post.tail_demand =
+ fun ~path ~bound ~params ~sc d e ->
+  match e with
+  | A.EApp (A.EVar _, _, sp) when not (List.exists (fun n -> expr_mentions [ n ] e) bound) ->
+    let names = List.concat_map fnparam_binders params in
+    let ctx = local_shadow ~spans:(List.concat_map fnparam_spans params) ctx names in
+    let re = List.fold_left recenv_add_fnparam [] params in
+    let cb = List.fold_left cb_add_fnparam [] params in
+    let ce = cont_of_fnparams params in
+    let cx = cx_of ~root (Err.create ()) defs ctx path [] sc re cb ce in
+    scalar_demand ~root defs ctx cb ce cx ~span:sp e d
+  | _ -> `Na
+
+let () = Refine_post.tail_demand_of := tail_demand_impl
+
 (* [assume_params:false] walks the body with the parameter refinements erased,
    so none of them can discharge anything.  Used for an `impl` method whose
    contract [collect_all_defs] could not adopt unambiguously: with no caller
@@ -3561,7 +3680,8 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
       enclosing_fn := saved_enclosing;
       current_abstracts := saved_abstracts)
     (fun () ->
-    with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd);
+    with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
+        with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
     let walked = if assume_params then fd else strip_param_refinements fd in
     last_elem_return_proved := elem_refinement fd.A.fn_ret_ty <> None;
     List.iter
@@ -3770,7 +3890,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
     let check_state_literal ~path (e : A.expr) =
       match actor_sig, e with
       | Some sg, A.ERecord (fields, sp) ->
-        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc = []; re = state_re; binds = ctx.binds } in
+        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc = []; re = state_re; binds = ctx.binds; demand = None } in
         check_ctor_fields cx ~span:sp ~callee:aname.A.txt sg
           (List.map (fun ((n : A.name), v) -> (n.A.txt, v)) fields) ~only:None
       | _ -> ()

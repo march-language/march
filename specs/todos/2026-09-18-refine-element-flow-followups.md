@@ -5,9 +5,14 @@ Filed 2026-09-18 when the parametric element-flow plan landed
 is stated in `specs/lang/refinement-types.md` "What element refinements do
 not do"; remove the bullet there when closing one.
 
-1. **A scalar demand on a single-element result.** `need_pos(Option.unwrap_or(o, 1))`
+1. ~~**A scalar demand on a single-element result.** `need_pos(Option.unwrap_or(o, 1))`
    and a `fold_left` result come through `check_call`, not `check_elements`, so
-   `demand_flow` never sees them. Same judgment, a scalar entry point.
+   `demand_flow` never sees them. Same judgment, a scalar entry point.~~
+   **Closed 2026-10-18** by phase 2 of
+   `specs/2026-10-18-element-flow-followups-design.md`; see
+   `specs/progress/2026-10-18-element-flow-phase2-scalar-demands.md`. Closed
+   demands only; a fold's accumulator still gets nothing (the
+   fold-accumulator design).
 2. ~~**Domain facts for multi-parameter lambdas.** `lambda_domain_params` admits
    one parameter.~~ **Closed 2026-10-18** by phase 1 of
    `specs/2026-10-18-element-flow-followups-design.md`; see

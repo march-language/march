@@ -42,6 +42,19 @@ git log is authoritative for exact commits.
   under `cap verified`). A fold's accumulator still gets no fact, a lambda with
   a refinement-annotated parameter gets none, and a fact naming one of the
   lambda's own parameters is not given.
+- **Refinements: a scalar demand on a call that returns one of its own inputs is
+  now checked through the callee's arguments.** `need_pos(Option.unwrap_or(o, 1))`
+  with `o : Option({Int | _ > 0})` is proved: by parametricity the result is
+  either an element of `o` or the default, and both are positive. The same holds
+  for a nested call, `Option.unwrap_or_else(o, fn () -> 1)`, an element of a
+  list literal, `List.fold_left(xs, 1, fn (acc, x) -> x)`, an annotated `let`,
+  `need_pos(List.head(xs) + 1)` and a return tail
+  (`fn f(o) : {Int | _ > 0} do Option.unwrap_or(o, 1) end`); each was an
+  `unreflectable-subject` skip (an error under `cap verified`). An argument that
+  fails the demand (`Option.unwrap_or(o, 0)`) is a `parametric-source-unproved`
+  skip, never a violation, since whether it is returned depends on the data. A
+  fold's accumulator still gets no fact, and a demand that names another
+  parameter (`_ < len(xs)`) is not traced.
 
 ### Fixed
 
