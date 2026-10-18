@@ -824,3 +824,10 @@ grep -n -E '^\s*fn \w+\(.*-> Bool' stdlib/{set,sorted_set,array,native_array,res
 ```
 
 Run 2026-10-18. Every hit is classified in §4.2.
+
+---
+
+## Decisions settled by the user (2026-10-18)
+
+1. **Phase E goes ahead**, last in this design's order. It also closes the silent-unenforcement hole for any user type with `List(a)` fields. (The multi-arg design's phase 0, landed 2026-10-18, already turns that hole into a recorded skip; phase E makes those fields checkable.)
+2. **Phase D rewrites** `Enum.filter`, `Enum.take_while`, `Iterable.filter` and `Prelude.filter` so a bare `filter(...)` carries the predicate.

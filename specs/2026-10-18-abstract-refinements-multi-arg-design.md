@@ -906,3 +906,11 @@ Open for the user, each with a recommendation, in the order they block:
   argument" half-measure the 2026-09-20 review rejected, and arity n makes it
   unnecessary (a `q` over `v` alone normalises to a slot fact). The phase 2
   oracle sweep shows whether anything outside the test suite uses either shape.
+
+---
+
+## Decisions settled by the user (2026-10-18)
+
+- **D1:** `Map.filter`'s per-entry fact ships under `@[assume]` with a runtime property test.
+- **D2:** user-written relations between slots (`Map({x : k | true}, {y : v | y > x})`) are a supported, user-facing feature.
+- **D3:** a curried definer applying `p` to only some of its arguments, and a two-argument `p` marking a single slot, become **hard errors**.

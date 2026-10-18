@@ -688,3 +688,10 @@ Plus `scripts/refine-oracle.sh check`'s total wall time within 10% of its baseli
   (§2.4, r2/r5.) Recommendation: **violation**, the same verdict a variable with the same entry gets
   today (`p4i`). The entry is a proved contract, unlike `demand_flow`'s inferred demand, where
   "refuted is skip" was decided (abstract design 9.2).
+
+---
+
+## Decisions settled by the user (2026-10-18)
+
+- **D1:** phase 0 ships in the next minor release, not as a patch (`stdlib/` has no relational element slots).
+- **D2:** a relational element return that fails to imply a call's demand is a **violation**, not a skip.

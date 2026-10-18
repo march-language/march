@@ -581,3 +581,11 @@ Open, for the user:
    `Array.fold_left`, `RRB`, `Deque`) in phase 3?** This is a public-signature
    change, though no behaviour changes. Recommendation: yes, one module per
    commit, each followed by the compiler suite.
+
+---
+
+## Decisions settled by the user (2026-10-18)
+
+1. **Phase 4 (the annotated accumulator) ships**, as its own PR after phases 1-3.
+2. **Wait for the element-flow design's scalar entry point** (its phase 2); absorb it into phase 1 only if that has not landed when phase 1 is ready.
+3. **Phase 3 changes the public signatures** of the unannotated stdlib folds, one module per commit, each followed by the compiler suite.
