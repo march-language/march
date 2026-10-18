@@ -252,6 +252,48 @@ Verification: `test_refinecheck.exe -e` 1130 tests, all pass, 0 skipped
 stdlib set aside: identical (7786 lines, 549 fixtures). No corpus fixture binds
 an inner name that clashes with a parameter on a path the post engine reads.
 
+## Second review follow-up: inner binders captured by a lambda in the tail (fourth commit)
+
+A targeted review of `b5da8ec13` found the renaming stopped at binding forms
+(`| _ -> e`), so a lambda in the tail kept its free inner-binder `n`, and the
+renamed `bound` list let the scalar demand hook run on it: `lambda_ok` read the
+lambda's `n` as the refined PARAMETER. `Some(n) -> ap(1, fn z -> n)` under
+`n : {Int | _ > 0}` was proved (`q1(1, Some(0 - 5))` returns -5); so were
+`let n = 0 - 5; ap(1, fn z -> n)` (r6) and `ap(1, fn z -> if n > 0 do 1 else
+n end)` (r7). A regression of the third commit: before it the hook declined any
+tail mentioning a bound name.
+
+Fix: `rename_free_checked` renames capture-avoidingly through every binding
+form: a lambda (stops at its parameters), a `match` (scrutinee renamed, each
+arm's guard and body under the arm's pattern), a block's `let`s and local
+`fn`s in order, `let?`/`let*`, plus `ECond`, records and record updates.
+Application heads are renamed too (a let-bound lambda reusing a callback
+parameter's name is the inner value). Any other form that still mentions a
+renamed name makes the result incomplete: such a path fact is dropped, such a
+tail gets no scalar demand hook, and the element-return fallback records a
+skip. The hook now declines only on a bound name that was NOT renamed (a
+renamed one is in no env), so the correct twin `if n > 0 do ap(1, fn z -> n)
+else 1 end` proves from the inner guard.
+
+One verdict text moves: `let o = p; uor(o, 1)` (a tail rebinding the parameter
+`o`) is now a `parametric-source-unproved` skip over the inner `o`, where it
+was the hook's `unreflectable-subject` decline; still (0, 0, 1). A new control
+pins the decline for a non-parameter name (`let q = p; uor(q, 1)`).
+
+Tests: `post-inner-binders` gains "an inner binder free in a lambda inside the
+tail". On `b5da8ec13`: q1 (2, 0, 0), r7 (2, 0, 0), r6 (1, 0, 0), three false
+proofs; now (1, 0, 1), (1, 0, 1), (0, 1, 0). Controls green on both: the
+correct twin (3, 0, 0), a lambda's own parameter `n` (`fn n -> n` (1, 0, 1),
+`fn n -> 1` (2, 0, 0)), `fn z -> z` (1, 0, 1), a `match` inside the lambda
+rebinding `n` (1, 0, 1). Perturbation: the lambda arm not descended turns
+exactly q1, r6, r7 red. Conformance: `reject/t364` (q1 under `cap verified`;
+accepted with 2 proved on `b5da8ec13`); corpus 460/460.
+
+Verification: `test_refinecheck.exe -e` 1131 tests, all pass, 0 skipped
+(499 s); `scripts/run-tests.sh -q compiler` 1348 pass; `check_types.sh`
+460/460; `refine-oracle.sh check` against `11fa2cdbf`, staged stdlib set
+aside: identical (7786 lines, 549 fixtures).
+
 ## Left open
 
 - A relational scalar demand, at a call (`_ < len(xs)`) or a return

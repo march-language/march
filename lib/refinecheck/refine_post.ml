@@ -131,35 +131,93 @@ let rec tails_bound (path : (A.expr * bool) list) (bound : string list) (e : A.e
    inner binding to a fresh name ([inner_name]) in both the path and the tail
    keeps every fact about it (no precision lost) and never conflates.
 
-   [rename_free] renames free VALUE occurrences.  An application's head is left
-   alone (a local `fn`'s name is resolved by name, as [post_lookup] does), and
-   so is any binding form, which the SMT translation does not reflect anyway:
-   a fact or tail containing one is dropped or unreflectable, never read. *)
+   Only names that clash are renamed, so a local `fn` the tail calls keeps
+   the name [post_lookup] resolves it by. *)
 let inner_name (n : string) : string = n ^ "$in"
 
-let rec rename_free (env : (string * string) list) (e : A.expr) : A.expr =
-  if env = [] then e
-  else
-    let go = rename_free env in
-    match e with
-    | A.EVar n -> (match List.assoc_opt n.A.txt env with Some m -> A.EVar { n with A.txt = m } | None -> e)
-    | A.EApp ((A.EVar _ as hd), args, sp) -> A.EApp (hd, List.map go args, sp)
-    | A.EApp (f, args, sp) -> A.EApp (go f, List.map go args, sp)
-    | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)
-    | A.ECon (c, es, sp) -> A.ECon (c, List.map go es, sp)
-    | A.EAtom (a, es, sp) -> A.EAtom (a, List.map go es, sp)
-    | A.EField (r, n, sp) -> A.EField (go r, n, sp)
-    | A.EAnnot (x, t, sp) -> A.EAnnot (go x, t, sp)
-    | A.EIf (c, t, el, sp) -> A.EIf (go c, go t, go el, sp)
-    | A.ERecord (fs, sp) -> A.ERecord (List.map (fun (n, v) -> (n, go v)) fs, sp)
-    | A.ERecordUpdate (r, fs, sp) -> A.ERecordUpdate (go r, List.map (fun (n, v) -> (n, go v)) fs, sp)
-    | _ -> e
+(* [rename_free_checked env e]: [e] with every FREE occurrence of a name in
+   [env] renamed, capture-avoiding: a lambda's parameters, a `match` arm's or
+   `let`'s pattern, a local `fn`'s name and parameters and a `let?`/`let*`
+   pattern stop the renaming of the names they rebind, for the scope they
+   bind.  Application heads are renamed too (a let-bound lambda reusing a
+   callback parameter's name is the inner value, not the parameter).  The
+   flag is false when a form this does not know still mentions a renamed name:
+   that occurrence was NOT renamed and must not be read ([rename_path] drops
+   such a fact; a tail with one gets no scalar demand hook). *)
+let rename_free_checked (env : (string * string) list) (e : A.expr) : A.expr * bool =
+  let complete = ref true in
+  let drop env ns = List.filter (fun (n, _) -> not (List.mem n ns)) env in
+  let pnames (ps : A.param list) = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+  let rec go env e =
+    if env = [] then e
+    else
+      match e with
+      | A.EVar n -> (match List.assoc_opt n.A.txt env with Some m -> A.EVar { n with A.txt = m } | None -> e)
+      | A.ELit _ | A.EHole _ | A.EResultRef _ -> e
+      | A.EApp (f, args, sp) -> A.EApp (go env f, List.map (go env) args, sp)
+      | A.ETuple (es, sp) -> A.ETuple (List.map (go env) es, sp)
+      | A.ECon (c, es, sp) -> A.ECon (c, List.map (go env) es, sp)
+      | A.EAtom (a, es, sp) -> A.EAtom (a, List.map (go env) es, sp)
+      | A.EField (r, n, sp) -> A.EField (go env r, n, sp)
+      | A.EAnnot (x, t, sp) -> A.EAnnot (go env x, t, sp)
+      | A.EIf (c, t, el, sp) -> A.EIf (go env c, go env t, go env el, sp)
+      | A.ECond (arms, sp) -> A.ECond (List.map (fun (c, b) -> (go env c, go env b)) arms, sp)
+      | A.ERecord (fs, sp) -> A.ERecord (List.map (fun (n, v) -> (n, go env v)) fs, sp)
+      | A.ERecordUpdate (r, fs, sp) ->
+        A.ERecordUpdate (go env r, List.map (fun (n, v) -> (n, go env v)) fs, sp)
+      | A.ELam (ps, body, sp) -> A.ELam (ps, go (drop env (pnames ps)) body, sp)
+      | A.EMatch (x, brs, sp) ->
+        A.EMatch
+          ( go env x
+          , List.map
+              (fun (br : A.branch) ->
+                let env' = drop env (pat_binders br.A.branch_pat) in
+                { br with
+                  A.branch_guard = Option.map (go env') br.A.branch_guard
+                ; A.branch_body = go env' br.A.branch_body })
+              brs
+          , sp )
+      | A.EBlock (es, sp) ->
+        let _, es' =
+          List.fold_left
+            (fun (env, acc) e ->
+              match e with
+              | A.ELet (b, lsp) ->
+                let b' = { b with A.bind_expr = go env b.A.bind_expr } in
+                (drop env (pat_binders b.A.bind_pat), A.ELet (b', lsp) :: acc)
+              | A.ELetFn (n, ps, rt, body, lsp) ->
+                (* The name is in scope in its own body (recursion). *)
+                let env = drop env [ n.A.txt ] in
+                (env, A.ELetFn (n, ps, rt, go (drop env (pnames ps)) body, lsp) :: acc)
+              | e -> (env, go env e :: acc))
+            (env, []) es
+        in
+        A.EBlock (List.rev es', sp)
+      | A.ELet (b, sp) -> A.ELet ({ b with A.bind_expr = go env b.A.bind_expr }, sp)
+      | A.ELetQ (p, e1, e2, sp) -> A.ELetQ (p, go env e1, go (drop env (pat_binders p)) e2, sp)
+      | A.ELetStar (p, e1, e2, sp) -> A.ELetStar (p, go env e1, go (drop env (pat_binders p)) e2, sp)
+      | _ ->
+        if expr_mentions (List.map fst env) e then complete := false;
+        e
+  in
+  let e' = go env e in
+  (e', !complete)
+
+let rename_free (env : (string * string) list) (e : A.expr) : A.expr = fst (rename_free_checked env e)
 
 (* [names] (the [bound] names that clash with the checker's env) renamed apart
-   in a tail's path conditions. *)
+   in a tail's path conditions.  A fact the renaming could not complete is
+   dropped: weaker, never conflated. *)
 let rename_path (names : string list) (path : (A.expr * bool) list) : (A.expr * bool) list =
   let env = List.map (fun n -> (n, inner_name n)) (List.sort_uniq compare names) in
-  if env = [] then path else List.map (fun (c, neg) -> (rename_free env c, neg)) path
+  if env = [] then path
+  else
+    List.filter_map
+      (fun (c, neg) ->
+        match rename_free_checked env c with
+        | c', true -> Some (c', neg)
+        | _, false -> None)
+      path
 
 (* Return-position expressions of a body, each with the path reaching it. *)
 let tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A.expr) list =
@@ -1984,14 +2042,22 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
           (fun (p, e, bound) ->
             let clash = List.sort_uniq compare (List.filter (fun n -> List.mem n pnames) bound) in
             let env = List.map (fun n -> (n, inner_name n)) clash in
+            let e', complete = rename_free_checked env e in
+            (* The hook declines a tail mentioning a [bound] name it would read
+               in the parameters' env; a renamed-apart one is in no env, so
+               only the names left as they are count.  A tail whose renaming
+               could not complete gets no hook at all. *)
             ( rename_path clash p
-            , rename_free env e
-            , List.map (fun n -> if List.mem n clash then inner_name n else n) bound
+            , e'
+            , (if complete then Some (List.filter (fun n -> not (List.mem n clash)) bound) else None)
             , e ))
           (tails_bound base [] c.A.fc_body)
       in
       (* Only a plain scalar return reaches the scalar demand entry point. *)
       let demand (path, _, bound, _) =
+        match bound with
+        | None -> None
+        | Some bound ->
         if record_sort <> None || string_ret || list_ret then None
         else
           Some

@@ -3733,7 +3733,8 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
                     let pnames = List.concat_map fnparam_binders c.A.fc_params in
                     let clash = List.filter (fun n -> List.mem n pnames) bound in
                     let env = List.map (fun n -> (n, inner_name n)) (List.sort_uniq compare clash) in
-                    Some (p, t, (rename_path clash p, rename_free env t)))
+                    let t', complete = rename_free_checked env t in
+                    Some (p, t, (rename_path clash p, t', complete)))
                 (tails_bound base [] c.A.fc_body)
             in
             Some (er, ts, ref (List.map (fun (_, t, _) -> t) ts))
@@ -3793,9 +3794,20 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         (match demand with
          | Some (er, ts, remaining) ->
            List.iter
-             (fun (_, t, (p', t')) ->
+             (fun (_, t, (p', t', complete)) ->
                if List.exists (fun r -> r == t) !remaining then
-                 if not
+                 if not complete then begin
+                   (* An inner binder the renaming could not reach is still
+                      under the parameter's name: not checked. *)
+                   record_elem_skip errctx ~span:(arg_span c.A.fc_span t) ~callee:label
+                     ~predicate:(first_slot_pred (snd er))
+                     ~what:
+                       (Printf.sprintf
+                          "the return expression of `%s` under an inner binding of a parameter's name"
+                          fd.A.fn_name.A.txt);
+                   last_elem_return_proved := false
+                 end
+                 else if not
                       (check_elements ~root errctx defs outer_ctx p' [] sc re cb ce ~span:c.A.fc_span
                          ~callee:label er t')
                  then last_elem_return_proved := false)

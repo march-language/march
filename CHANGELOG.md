@@ -67,7 +67,9 @@ git log is authoritative for exact commits.
   (`g(0 - 1, Some(10))` returns -7). `Some(n) -> n` with a refined parameter `n`
   was proved the same way. The inner binding is now kept apart: the first is a
   violation, the second a skip. The same fix covers a lambda's tail inside a
-  demanded call and a function passed where a container return is expected.
+  demanded call, a function passed where a container return is expected, and a
+  lambda inside the returned call that captures the inner binding
+  (`Some(n) -> ap(1, fn z -> n)`).
 - **Refinements: a container that hides a type parameter inside another type no
   longer passes element checks vacuously.** For `type Wrap(k, v) = Wrap(List((k, v)))`,
   `fn mk() : Wrap(Int, {Int | _ > 0}) do Wrap([(1, 0 - 5)]) end` was counted

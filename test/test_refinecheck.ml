@@ -17132,13 +17132,22 @@ let elemflow_scalar_demand_suite =
           (has_refine_error_typed (m ~verified:true ("  fn go(" ^ opos ^ ") : {Int | _ > 0} do uor(o, 1) end\n"))));
 
     gated "return position: the conservative declines" (fun () ->
-        (* A tail under a `let` that rebinds a name it mentions: the post
-           engine knows only the parameters, so `o` would be read as the
-           parameter.  Not checked: the unreflectable-subject skip. *)
+        (* A tail under a `let` that rebinds a parameter's name: the inner
+           `o` is renamed apart from the parameter (post-inner-binders), so
+           the hook sees an `o` nothing is known about, never the parameter's
+           elements.  A parametric-source skip. *)
         let src =
           m ("  fn go(" ^ opos ^ ", p : Option(Int)) : {Int | _ > 0} do\n    let o = p\n    uor(o, 1)\n  end\n")
         in
         Alcotest.check t3 "let o = p; uor(o, 1): skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "not the parameter's elements" [ "parametric-source-unproved" ]
+          (reasons src);
+        (* A bound name that is NOT a parameter is left as it is, and the hook
+           declines a tail mentioning it: the unreflectable-subject skip. *)
+        let src =
+          m ("  fn go(" ^ opos ^ ", p : Option(Int)) : {Int | _ > 0} do\n    let q = p\n    uor(q, 1)\n  end\n")
+        in
+        Alcotest.check t3 "let q = p; uor(q, 1): skipped" (0, 0, 1) (l3 src);
         Alcotest.(check (list string)) "unreflectable-subject" [ "unreflectable-subject" ] (reasons src);
         (* A relational return demand is v1's closed-only boundary. *)
         Alcotest.check t3 "{Int | _ >= lo}: skipped" (0, 0, 1)
@@ -17219,6 +17228,34 @@ let post_inner_binders_suite =
         in
         Alcotest.check t3 "uor(o, 0 - 7) under the inner n > 5: not proved" (2, 0, 1) (l3 (src "0 - 7"));
         Alcotest.check t3 "control: uor(o, 1) under the same guard proves" (3, 0, 0) (l3 (src "1")));
+
+    gated "an inner binder free in a lambda inside the tail" (fun () ->
+        (* The renaming must reach into the lambda's body: left there, `n`
+           was read by the scalar demand hook as the refined PARAMETER.
+           Before (b5da8ec13): q1 (2, 0, 0), r6 (1, 0, 0), r7 (2, 0, 0), all
+           false (`q1(1, Some(0 - 5))` returns -5). *)
+        let q body =
+          m ("  fn q(n : {Int | _ > 0}, p : Option(Int)) : {Int | _ > 0} do\n" ^ arm body ^ "  end\n")
+        in
+        Alcotest.check t3 "q1: ap(1, fn z -> n): not proved" (1, 0, 1) (l3 (q "ap(1, fn z -> n)"));
+        Alcotest.check t3 "r7: ap(1, fn z -> if n > 0 do 1 else n end): not proved" (1, 0, 1)
+          (l3 (q "ap(1, fn z -> if n > 0 do 1 else n end)"));
+        Alcotest.check t3 "r6: let n = 0 - 5; ap(1, fn z -> n): violated" (0, 1, 0)
+          (l3
+             (m "  fn r6(n : {Int | _ > 0}, p : Option(Int)) : {Int | _ > 0} do\n\
+                 \    let n = 0 - 5\n    ap(1, fn z -> n)\n  end\n"));
+        (* Controls.  The correct twin proves: the inner guard is kept, about
+           the inner `n`, inside the lambda too. *)
+        Alcotest.check t3 "if n > 0 do ap(1, fn z -> n) else 1 end proves" (3, 0, 0)
+          (l3 (q "if n > 0 do ap(1, fn z -> n) else 1 end"));
+        (* A lambda's own parameter named `n` is not renamed. *)
+        Alcotest.check t3 "ap(1, fn n -> n): not proved" (1, 0, 1) (l3 (q "ap(1, fn n -> n)"));
+        Alcotest.check t3 "ap(5, fn n -> 1) proves" (2, 0, 0) (l3 (q "ap(5, fn n -> 1)"));
+        Alcotest.check t3 "ap(1, fn z -> z): not proved" (1, 0, 1) (l3 (q "ap(1, fn z -> z)"));
+        (* An arm inside the lambda rebinding `n` again: its body's `n` is
+           that arm's. *)
+        Alcotest.check t3 "a match in the lambda rebinding n: not proved" (1, 0, 1)
+          (l3 (q "ap(1, fn z -> match p do\n        Some(n) -> n\n        None -> 1\n      end)")));
 
     gated "the lambda-tail form, through demand_flow's discharge" (fun () ->
         (* Before: both proved inside `ap(1, fn z -> …)`. *)
