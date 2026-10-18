@@ -2049,12 +2049,37 @@ let abstract_param_entry ~root (ctx : rctx) defs path sc re (cb : cbenv) (lets :
                   (Printf.sprintf
                      "the element type of the argument passed for `%s`'s parameter is not known here" p))))
 
+(* Whether every container-return tail [visit_fn] checked in its most recent
+   call was PROVED ([check_elements]' own verdict), and every element
+   obligation at a SELF-call's arguments too ([check_arg_elements]);
+   [gate_elem_returns] reads it straight after a scratch walk. *)
+let last_elem_return_proved : bool ref = ref false
+
 (* The element obligations a call's arguments owe the callee's declared
    parameter types.  An abstract slot is tried FIRST: read through
    [elem_refinement] by a caller that declares an abstract refinement of the
    same name, it would mean the caller's predicate, not the callee's. *)
 let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) (sg : fn_sig) (args : A.expr list) : unit =
+  (* A call to the function being walked: its result is trusted through the
+     structural induction hypothesis ([elem_ret_hyp]) only while the
+     recursive call's own element preconditions hold.  An argument slot that
+     is not PROVED (a skip as much as a violation) breaks the induction, so
+     the function's element return is not proved ([gate_elem_returns]).
+     Review of 0ddfcda45: `go_b(t, pred, Cons(h, acc))` with no `pred(h)`
+     test skipped its `acc : List(a[p])` slot, yet the hypothesis made
+     `go_b`'s return proved and every caller's demand with it; the same held
+     for a concrete slot (`acc : List({Int | _ > 0})`) since before
+     abstract refinements. *)
+  let self_call =
+    match !enclosing_fn with
+    | Some fd ->
+      fd.A.fn_name.A.txt = callee
+      && (not (List.mem callee ctx.locals))
+      && not (List.mem_assoc callee cb)
+    | None -> false
+  in
+  let note ok = if self_call && not ok then last_elem_return_proved := false in
   List.iteri
     (fun i a ->
       match List.nth_opt sg.param_tys i with
@@ -2064,9 +2089,9 @@ let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
                abstract_param_entry ~root ctx defs path sc re cb lets ~span:(arg_span span a) callee t args a)
          with
          | Some (Ok er) ->
-           ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
+           note (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
          | Some (Error why) ->
-           ignore
+           note
              (record_abstract_verdict errctx ~span:(arg_span span a) ~callee
                 ~predicate:"p(_)" (`Uninstantiated why))
          | None ->
@@ -2077,12 +2102,13 @@ let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
            (match elem_refinement t with
             | Some er ->
               (match instantiate_entry ~mode:`Any ~formals:sg.param_names ~args er with
-               | Ok er -> ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
+               | Ok er -> note (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
                | Error why ->
                  let pname = Option.value ~default:"_" (List.nth_opt sg.param_names i) in
                  record_elem_skip errctx ~span:(arg_span span a) ~callee
                    ~predicate:(first_slot_pred (snd er))
-                   ~what:(Printf.sprintf "the parameter `%s` cannot be read at this call: %s" pname why))
+                   ~what:(Printf.sprintf "the parameter `%s` cannot be read at this call: %s" pname why);
+                 note false)
             | None -> ()))
       | None -> ())
     args
@@ -2215,11 +2241,6 @@ let let_rhs_admitted (ctx : rctx) (e : A.expr) : bool =
    tail the walk never reached with the parameter-only env, as before. *)
 let ret_elem_demand : (string * (string * elem option list) * A.span * A.expr list ref) option ref =
   ref None
-
-(* Whether every container-return tail [visit_fn] checked in its most recent
-   call was PROVED ([check_elements]' own verdict); [gate_elem_returns] reads
-   it straight after a scratch walk. *)
-let last_elem_return_proved : bool ref = ref false
 
 let with_no_ret_demand (f : unit -> 'a) : 'a =
   let saved = !ret_elem_demand in

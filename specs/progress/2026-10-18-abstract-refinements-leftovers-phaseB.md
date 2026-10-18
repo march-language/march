@@ -131,6 +131,71 @@ and D2 with `List.reverse`, under `cap verified`; rejected on the base) and
   median **1.21 s**; branch 1.25 / 1.20 / 1.20 s, median **1.20 s** (99%). No new query
   outside a declaring definition's previously declined slots.
 
+## Review follow-up (second commit)
+
+An independent review of `0ddfcda45` found a false proof:
+
+```march
+pfn go_b(lst : List(a), pred : a -> Bool[p], acc : List(a[p])) : List(a[p]) do
+  match lst do
+  Nil -> acc
+  Cons(h, t) -> go_b(t, pred, Cons(h, acc))
+  end
+end
+fn fb(xs : List(Int)) : Int do sum_pos(go_b(xs, fn y -> y > 0, Nil)) end
+```
+
+`go_b` never calls `pred`, yet `fb`'s demand was proved (also with a literal
+`[0 - 1, 0 - 2]`, and with a push of an element of another list under `if pred(h)`).
+The push into the `acc` slot was only a skip, and nothing stopped `gate_elem_returns`
+from marking `go_b`'s return proved: its recursive tail took the structural induction
+hypothesis (`elem_ret_hyp`), which is valid only if the recursive call's own
+preconditions hold.
+
+**Not new in phase B.** Probed on `65fee4cc1` (a real build of the base, same
+worktree depth): `fb` was proved there too, the slot being an uninstantiated skip
+instead. And the same hole held for a CONCRETE slot:
+`pfn go_n(lst : List(Int), acc : List({Int | _ > 0}))` recursing as
+`go_n(t, Cons(triple3(h), acc))` (an unreflectable push) had its caller proved on the
+base. Phase B made the abstract shape reachable in more programs (the erased sort), so
+it is fixed here, by the same gate for both.
+
+**Fix.** (a) `check_arg_elements`: at a call to the function being walked (the
+enclosing `fn`, not shadowed by a local or a callback), an element obligation that is
+not PROVED (a skip, a violation, an unread abstract slot, an unreadable parameter)
+clears `last_elem_return_proved`, so the gate does not prove that function's element
+return and the final walk gives its recursive tails no hypothesis. A violated push
+(B6) now leaves the caller unproved as well. Only SELF-calls: a non-recursive call
+whose precondition is skipped is the checker's ordinary modular case (the skip is
+recorded and the result trusted), unchanged here. (b) `Undecided.known_head` knows the
+`$abs_` symbols, so an unconstrained `$abs_p(h)` goal is an `unconstrained-subject`
+skip ("no fact … constrains `h`"), no longer `opaque-application` ("no meaning for
+`$abs_p`"). A violation would also be justified (`p` is universally quantified, so a
+model with `$abs_p(h)` false is a real instantiation), but the checker only reports a
+definite failure for a constrained subject, so it stays a skip, which (a) makes
+blocking.
+
+**Tests (RED with (a) disabled, i.e. the behaviour of `0ddfcda45`; GREEN after):**
+I3 (`go_b`, a variable and a literal caller: neither proved, the push
+`unconstrained-subject`), I3u (an element of another list pushed under `if pred(h)`),
+I3n (the concrete slot; control: a push guarded by `if h > 0` proves everything), B6
+(now also asserts its caller is not proved). Control green on both: the correct
+accumulator called directly with a lambda still proves both callers.
+
+**Perturbation table, re-run** (indices shifted; listed by name): 1–3 and 6 redden
+exactly the cases listed above; 4 (no erased sort) reddens B5, B6, I3 (its push reason
+becomes uninstantiated) and the I3 control; 5 (no own abstracts in the vocabulary)
+reddens B5, D1, B6, B11, I3 and the I3 control; 7 (no self-call gate) reddens exactly
+B6, I3, I3u, I3n; 8 (`known_head` without `$abs_`) reddens exactly I3.
+
+**Verification.** `test_refinecheck.exe -e`: 1113 tests, all passed, 0 `[SKIP]`.
+`scripts/run-tests.sh -q compiler`: 1348 passed. Refine oracle against the same
+`65fee4cc1` baseline: IDENTICAL (7786 lines over 549 fixtures). A first check run
+differed by ~1000 `cap_needs`/`stdlib_internal` lines because `run-tests.sh` had
+materialised `_build/default/stdlib` in this worktree (the known artefact); with it
+removed the check is identical. `list.march` ratchet 37 (ceiling 37); `check_types.sh`
+454 passed; perf unchanged (base 1.21 s, branch 1.22 s median, load ~17).
+
 ## Still open
 
 Phases C–E of the design (tuple returns and `List.partition`, the stdlib sweep,

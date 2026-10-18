@@ -18675,7 +18675,11 @@ let abstract_leftovers_b_suite =
         Alcotest.(check bool) "no slot of filt_go is skipped" false
           (List.exists (fun (v, _) -> v = "skipped") (of_callee "filt_go" obs));
         Alcotest.check ps "the wrong push" [ ("violated", "") ] (of_callee "filt_go" obs);
-        Alcotest.check t3 "whole module" (7, 1, 0) (triple obs));
+        (* A violated self-call slot breaks the induction (review of
+           0ddfcda45), so `filt_go`'s return lends nothing: the caller is not
+           proved either. *)
+        Alcotest.(check bool) "the caller is not proved" false (List.mem proved (of_callee "sum_pos" obs));
+        Alcotest.check t3 "whole module" (3, 1, 4) (triple obs));
     (* §3.4 ordering: the callee's `!p(_)` is the CALLEE's `p`, instantiated
        here to `y > 0`.  The caller's own `ys : List({Int | !p(_)})` matches
        it textually; read as the caller's `p` it would PROVE (it did, on the
@@ -18818,6 +18822,90 @@ let abstract_leftovers_b_suite =
         Alcotest.check ps "uninstantiated" [ ("skipped", "abstract-refinement-uninstantiated") ]
           (of_callee "need_f" obs);
         Alcotest.check t3 "whole module" (0, 0, 1) (triple obs));
+    (* Review of 0ddfcda45: a self-call whose argument slot is not PROVED
+       breaks the structural induction, so the function's element return is
+       not proved and lends nothing to its callers.  Before the fix, each of
+       these callers' demands was PROVED. *)
+    gated "I3: a helper that pushes without testing pred lends nothing" (fun () ->
+        let src =
+          m "I3"
+            (sums
+           ^ {|  pfn go_b(lst : List(a), pred : a -> Bool[p], acc : List(a[p])) : List(a[p]) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> go_b(t, pred, Cons(h, acc))
+    end
+  end
+  fn fb(xs : List(Int)) : Int do sum_pos(go_b(xs, fn y -> y > 0, Nil)) end
+  fn fl() : Int do sum_pos(go_b([0 - 1, 0 - 2], fn y -> y > 0, Nil)) end
+|})
+        in
+        let _, obs = run src in
+        Alcotest.(check bool) "neither caller is proved" false (List.mem proved (of_callee "sum_pos" obs));
+        Alcotest.(check int) "both callers recorded" 2 (List.length (of_callee "sum_pos" obs));
+        Alcotest.(check bool) "go_b's recursive tail is not proved" false
+          (List.mem proved (of_callee "go_b(…)" obs));
+        (* Nothing constrains `$abs_p(h)`: a skip that names it, not
+           "opaque" (`$abs_p` is declared). *)
+        Alcotest.check ps "the unconditional push" [ ("skipped", "unconstrained-subject") ]
+          (of_callee "go_b" obs);
+        Alcotest.check t3 "whole module" (2, 0, 4) (triple obs));
+    gated "I3: pushing an element of another list under `if pred(h)` lends nothing" (fun () ->
+        let _, obs =
+          run
+            (m "I3u"
+               (sums
+              ^ {|  pfn go_u(lst : List(a), other : List(a), pred : a -> Bool[p], acc : List(a[p])) : List(a[p]) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) ->
+      match other do
+      Nil -> go_u(t, other, pred, acc)
+      Cons(o, _) -> if pred(h) do go_u(t, other, pred, Cons(o, acc)) else go_u(t, other, pred, acc) end
+      end
+    end
+  end
+  fn fu(xs : List(Int), ys : List(Int)) : Int do sum_pos(go_u(xs, ys, fn y -> y > 0, Nil)) end
+|}))
+        in
+        Alcotest.(check int) "the caller is recorded" 1 (List.length (of_callee "sum_pos" obs));
+        Alcotest.(check bool) "the caller is not proved" false (List.mem proved (of_callee "sum_pos" obs));
+        Alcotest.(check bool) "the push of `o` is not proved" false
+          (List.mem proved (of_callee "go_u" obs)));
+    gated "I3 control: the correct helper still proves when called directly" (fun () ->
+        let _, obs =
+          run
+            (m "I3c"
+               (sums ^ filt_go ~ok:true
+              ^ "  fn fd(ys : List(Int)) : Int do sum_pos(filt_go(ys, fn y -> y > 0, Nil)) end\n"))
+        in
+        Alcotest.check ps "both callers" [ proved; proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module" (9, 0, 0) (triple obs));
+    (* The same induction hole for a CONCRETE slot, live before abstract
+       refinements existed (probed on 65fee4cc1): the push of an unrefined
+       value is a skip at the slot, yet the caller was proved. *)
+    gated "I3n: a concrete-slot accumulator with an unproved push lends nothing" (fun () ->
+        let helper push =
+          m "I3n"
+            (sums
+           ^ Printf.sprintf
+               {|  fn triple3(n : Int) : Int do n * 3 end
+  pfn go_n(lst : List(Int), acc : List({Int | _ > 0})) : List({Int | _ > 0}) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> %s
+    end
+  end
+  fn caller_n(xs : List(Int)) : Int do sum_pos(go_n(xs, Nil)) end
+|}
+               push)
+        in
+        let _, obs = run (helper "go_n(t, Cons(triple3(h), acc))") in
+        Alcotest.(check int) "the caller is recorded" 1 (List.length (of_callee "sum_pos" obs));
+        Alcotest.(check bool) "the caller is not proved" false (List.mem proved (of_callee "sum_pos" obs));
+        let _, obs = run (helper "if h > 0 do go_n(t, Cons(h, acc)) else go_n(t, acc) end") in
+        (* Proved through the declared return, so recorded under `go_n(…)`. *)
+        Alcotest.check t3 "control: a guarded push proves everything" (7, 0, 0) (triple obs));
     Alcotest.test_case "audit: a `!p(_)` return slot is enforced" `Quick (fun () ->
         let md = March_desugar.Desugar.desugar_module (parse (m "BA" rej_ok)) in
         let ctx = March_errors.Errors.create () in

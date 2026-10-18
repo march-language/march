@@ -2248,8 +2248,13 @@ sum_nonpos(rej(ys, fn y -> y > 5))     -- skip: `!(y > 5)` is too weak
 A slot may also sit at a concrete base, `List(Int[p])` for
 `f : Int -> Bool[p]`. Inside a definition that declares `p`, an accumulator
 helper's own `acc : List(a[p])` parameter is checked like any other (a
-`Cons(h, acc)` pushed on the branch `pred(h)` rejected is a violation), and a
-definition may pass its own callback on to another combinator
+`Cons(h, acc)` pushed on the branch `pred(h)` rejected is a violation; one
+pushed without testing `pred` is a skip). A recursive helper's element return
+is proved by induction only when every element precondition of its recursive
+call is PROVED: a skip or a violation there leaves the return unproved, so the
+helper lends nothing to its callers. This holds for a concrete slot
+(`acc : List({Int | _ > 0})`) as well. A
+definition may also pass its own callback on to another combinator
 (`List.filter(xs, pred)` in `myfilter(xs, pred : a -> Bool[p]) : List(a[p])`).
 `p` applied under anything but `&&`, `||` and `!` (`p(_) == false`), or two
 abstract refinements in one slot, is not read at a call

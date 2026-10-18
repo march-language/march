@@ -84,6 +84,10 @@ let rec app_heads (t : Smt.term) : string list =
    opaque" for the pinned regression. *)
 let known_head (f : string) : bool =
   f = Refine_encode.strlen_fn
+  (* An abstract refinement is declared (by [abstract_preamble]); a goal
+     `$abs_p(h)` about an `h` nothing constrains is not opaque, it is
+     unknown for every instantiation of `p` (review of 0ddfcda45). *)
+  || Refine_encode.is_abs_sym f
   || Refine_encode.is_measure f
   || Hashtbl.mem Refine_encode.ctor_field_sorts f
   || Hashtbl.fold
