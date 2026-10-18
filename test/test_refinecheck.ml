@@ -20631,7 +20631,8 @@ let abstract_leftovers_d_suite =
   end
 |}
       ~call:(fun f -> "pfilter(ys, " ^ f ^ ")") ~bad_ret:"return of pfilter" ();
-    (* R2: a concrete base, through delegation to List.filter *)
+    (* R2: a concrete base, through a private natural-style helper
+       `filter_list` (its obligations sit in the same line range). *)
     gated "Range.filter: the demand proves; the definition side is proved" (fun () ->
         let errs, obs, defs =
           run ~defs:[ ("range.march", "fn filter(") ]
@@ -20640,7 +20641,8 @@ let abstract_leftovers_d_suite =
         Alcotest.(check (list string)) "no errors" [] errs;
         Alcotest.check ps "the demand" [ proved ] (of_callee "sum_pos" obs);
         Alcotest.check t3 "user module" (1, 0, 0) (triple obs);
-        Alcotest.check t3 "Range.filter's own definition side" (1, 0, 0) (triple (List.hd defs)));
+        Alcotest.check t3 "Range.filter's own definition side (with filter_list)" (8, 0, 0)
+          (triple (List.hd defs)));
     gated "Range.filter: a weaker lambda is too-weak, not proved" (fun () ->
         let _, obs, _ =
           run (m "RW" (sums ^ "  fn go(n : Int) : Int do sum_pos(Range.filter(Range.new(0, n), fn y -> y >= 0)) end\n"))
@@ -20661,7 +20663,20 @@ let abstract_leftovers_d_suite =
         Alcotest.check ps "the wrong return" [ weak ] (of_callee "return of rfilter" obs);
         let dv = of_callee "sum_pos" obs in
         Alcotest.(check int) "the demand is recorded" 1 (List.length dv);
-        Alcotest.(check bool) "the demand is not proved" false (List.mem proved dv)) ]
+        Alcotest.(check bool) "the demand is not proved" false (List.mem proved dv));
+    wrong_body ~name:"Range.filter's helper (keeps rejected elements)" ~demand:"sum_pos"
+      ~fn_src:
+        {|  fn rfl(xs : List(Int), f : Int -> Bool[p]) : List(Int[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> if f(h) do Cons(h, rfl(t, f)) else Cons(h, rfl(t, f)) end
+    end
+  end
+  fn rf(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool[p]) : List(Int[p]) do
+    rfl(Range.to_list(r), f)
+  end
+|}
+      ~call:(fun f -> "rf(Range.new(0, List.length(ys)), " ^ f ^ ")") ~bad_ret:"return of rfl" () ]
 
 (* Phase 4 (plan specs/plans/2026-10-07-abstract-refinements-phase4-plan.md):
    the `a[p]` / `Bool[p]` shorthand must mean exactly the spelled-out form.

@@ -28,7 +28,7 @@ Stdlib, tests and docs only. No OCaml in `lib/` changed.
 | `Enum.take_while` | `(xs : List(a), pred : a -> Bool[p]) : List(a[p])` | `List.take_while`'s natural body, copied | 2, proved |
 | `Iterable.filter` | `(xs : List(a), pred : a -> Bool[p]) : List(a[p])` | `List.filter`'s body, copied | 3, proved |
 | `Prelude.filter` | `(xs : List(a), pred : a -> Bool[p]) : List(a[p])` | `List.filter`'s body, copied (the prelude does not depend on `List`) | 3, proved |
-| `Range.filter` | `(r, f : Int -> Bool[p]) : List(Int[p])` | unchanged: `List.filter(to_list(r), f)` (delegation, a concrete base) | 1, proved |
+| `Range.filter` | `(r, f : Int -> Bool[p]) : List(Int[p])` | `filter_list(to_list(r), f)`, a private natural-style `pfn filter_list(xs : List(Int), f : Int -> Bool[p]) : List(Int[p])` (`List.filter`'s body over `Int`, a concrete base); see the follow-up below | 8, proved (with `filter_list`) |
 
 Every contract is proved on the definition side; nothing is `@[assume]`d. Every recursive body
 passes its own `pred` unchanged (phase C's own-predicate induction rule). `List.filter`'s
@@ -118,8 +118,8 @@ failed. INDEX counts updated (198 accept, 270 reject).
     prelude's (then non-recursive) `filter` first, so `List.filter` was never checked. The warning
     text is correct for it. No user program sees either: stdlib spans are not user files.
 - `stdlib/list.march` CI ratchet (`.github/workflows/ci.yml`, ceiling 42): **37 → 38** skipped
-  (user + stdlib), proved 77 → 92. The +1 is the entry-configuration skip above. Still under the
-  ceiling; flagged here because the design asks for "must not rise". Proved floor
+  (user + stdlib), proved 77 → 92, in this first commit. The +1 is the entry-configuration skip
+  above. **Fixed by the second commit (37 again)**, see the follow-up below. Proved floor
   (`accept/t118`): 1, unchanged.
 - `test/refine_audit` baselines regenerated: every fixture `145 → 166 enforced` (7 functions × 3
   sites: the `Bool[p]` domain and codomain and the return slot); `stdlib_enum` user `1 → 10`,
@@ -135,6 +135,36 @@ failed. INDEX counts updated (198 accept, 270 reject).
   pass-plus-reverse. `bench/list_ops.march` compiled: output identical (`333333666666`), 0.02 s on
   both.
 - Ecosystem repos (`conduit`, `depot`): not re-run.
+
+## Follow-up (second commit): `Range.filter` no longer delegates
+
+The first commit kept `Range.filter` as `List.filter(to_list(r), f)` (the design's route 2). That
+raised the `stdlib/list.march` CI skip ratchet from 37 to 38: with `list.march` as the entry the
+stdlib `List` is stripped and the call resolves to no definition, so the new return obligation was
+an `unreflectable-subject` skip there (proved everywhere else). Decision (coordinator): keep the
+ratchet non-increasing. `Range.filter` now calls a private `pfn filter_list(xs : List(Int),
+f : Int -> Bool[p]) : List(Int[p])` in the same module, `List.filter`'s natural TRMC body over
+`Int`, recursing with its own `f` unchanged. A same-module call resolves in every configuration.
+
+- `stdlib/list.march` ratchet: **37 skipped** (user + stdlib), 100 proved (base 77 / 37).
+- `stdlib/range.march` as the entry: 10 proved, 0 skipped (user code).
+- `abstract-leftovers-d`, 21 cases: the Range accept now pins the definition side at `(8, 0, 0)`
+  (`filter`'s tail plus `filter_list`'s pushes and tails); RED against the first commit's stdlib,
+  where it was `(1, 0, 0)` (exactly that case fails, the other 20 pass). New wrong-body case: a
+  `filter_list` copy that keeps rejected elements, a violation, and its caller not proved. The
+  wrong-delegation (`fn y -> true`) case is kept.
+- Runtime: the `Range.filter` block in `test_enum.march` (order, empty range, all pass, all fail)
+  passes on both.
+- `test/refine_audit` baselines: every fixture `166 → 169 enforced` (`filter_list`'s domain,
+  codomain and return slot), `stdlib_range` user `4 → 7`, `stdlib_prelude` `172 → 175`;
+  0 unenforced but the holes fixture's deliberate 1.
+- `check_types.sh`: 468 passed.
+- Compiled `Range.filter` (`Range.new(0, 200000)` filtered ×50, 7 interleaved warm runs, load
+  30-40, so noisy), median ms: base `72c1eb52a` 151, branch 157; the first commit's delegating
+  version measured 156 vs the branch's 157 in a separate interleaved run. Parity within the noise:
+  the same single-pass loop either way. A 5,000,000-element all-pass `Range.filter` completes
+  compiled. Identical output.
+- The refine oracle was not re-run for this commit; its section above describes the first.
 
 ## Still open
 
