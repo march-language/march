@@ -189,3 +189,76 @@ accepted on the base). `check_types.sh`: 469/469 (198 accept, 271 reject).
 - A function passed as a value lends only a closed entry (no actuals to substitute).
 - A local `fn`'s tuple return still lends nothing, and a recursive local still has no
   self-call hypothesis (G3-3).
+
+## Review follow-up: a definite violation needs a fully seen path (second commit)
+
+An independent review of `8e5c15c48` (no false proof) found a CORRECT program reported as
+a definite violation:
+
+```march
+fn small(k : Int) : Bool do k < 5 end
+fn r1(k : {Int | _ <= 100}) : Int do
+  if small(k) do need_lt5(below(k)) else 0 end   -- "violated (e.g. k = 6)"
+end
+```
+
+also through `let ys = below(k)`, a literal arm `match k do 3 -> …`, and (already on
+`72c1eb52a`) a parameter's own entry, `fn f(k : {Int | _ <= 100}, ys : List({Int | _ < k}))`
+with `if small(k) do need_lt5(ys)`. The element-subtyping arm took a solver model as a
+definite counterexample once every caller name was "constrained" (here by `k <= 100`),
+but the query did not contain the untranslated guard, so `k = 6` was a state the program
+never reaches. The scalar twin `n5(k)` never takes that shortcut and was a skip.
+
+**Rule now.** On the definite-failure shortcut (`Element_domain`, and the two callback
+subjects), when the goal or the subject's fact names a caller variable, the path to the
+call must be fully seen: no path condition that failed to translate exactly (dropped, or
+stood up as a call constant), and no opaque marker. Otherwise the `¬G` discharge decides
+(a violation only if no state satisfies the demand), else a skip, which is how the scalar
+path decides. A goal and fact naming no caller variable (`sum_lt5(below(10))`, phase 0's
+literal demands, the callback-domain pass sites) are decided by the contracts alone, as
+before.
+
+**The opaque marker** (`Refine_scope.opaque_path_marker`): a path entry that reads as
+`true` to every consumer and that `check_call` detects (`path_is_opaque`). The walk pushes
+it for a `match` arm whose reachability it does not record: a pattern other than a
+variable, wildcard, Bool or Int literal, all-irrefutable tuple, or a registered
+constructor with irrefutable fields over an unshadowed variable scrutinee; or an arm after
+an earlier one whose failure is not recorded (anything but an unguarded Bool/Int literal or
+a tag-only constructor arm over a variable scrutinee). Also every `match do` (cond) arm
+after the first, whose earlier conditions' negations were never pushed. `tails_bound`
+pushes it for every `match` arm but an irrefutable first one and every later cond arm, for
+the checks that read its paths (lambda tails, leftover return tails).
+
+**Int literal arms are now facts:** inside `3 ->` the path holds `subj == 3`, and past an
+unguarded `3 ->`, `subj != 3` (the Bool-literal arms' rule). So `match k do 3 ->
+need_lt5(below(k))` proves rather than skips, and `match k do 5 -> 0  _ ->
+need_lt4(below(k))` with `k <= 5` proves.
+
+Tests (group `elemflow-relational-return`, new case "a path the query does not fully see
+is never a definite violation"; each RED was `(2, 1, 0)` on `8e5c15c48`):
+
+| Shape | `8e5c15c48` | Now |
+|---|---|---|
+| `if small(k)`: `need_lt5(below(k))`; via `let ys` | (2, 1, 0) | (2, 0, 1) |
+| `match k do 3 -> need_lt5(below(k))` | (2, 1, 0) | (3, 0, 0) |
+| parameter entry under `if small(k)` (p6_param); under `Some(3) ->` | (2, 1, 0) | (2, 0, 1) |
+| `match k do 5 -> 0 _ -> need_lt4(below(k))`, `k <= 5` | (2, 1, 0) | (3, 0, 0) |
+| `match (k, 0) do (5, _) -> 0 _ -> …` (unrecorded earlier arm) | (2, 1, 0) | (2, 0, 1) |
+| `match do k >= 5 -> 0  true -> need_lt5(below(k))` | (2, 1, 0) | (2, 0, 1) |
+| controls: `if k < 10` (translated, still admits 9), no guard, closed `below(10)` under `if small(k)`: violated; `if k < 5`: proved | same | same |
+| a lambda tail under `(5, _) -> [0]` (guard: a refuted lambda source is a demand-flow skip by design) | (2, 0, 1) | (2, 0, 1) |
+
+Perturbations (the `elemflow*` groups, 80 cases): no path rule reddens every skip row
+above; no untranslated-condition tracking reddens the three `if small(k)` rows; no match
+marker reddens the `Some(3)` and `(5, _)` rows; no Int-literal fact reddens `3 ->`; no
+Int-literal exclusion reddens `5 -> 0 _ ->`; no cond marker reddens the cond row. Removing
+`tails_bound`'s marker reddens nothing: through `demand_flow` a refuted lambda tail is
+already a skip, and no test reaches a leftover return tail with a match path; it is kept
+as defence in depth.
+
+Verification: `test_refinecheck.exe -e` (stdlib re-staged with `dune build --root .
+@stdlib/default` and compared, `.march/cas/vc` cleared once): 1213 tests, all pass, 0
+skipped. `scripts/run-tests.sh -q compiler`: 1348 pass. `check_types.sh`: 469/469.
+`refine-oracle.sh check` against the same `72c1eb52a` baseline (staged stdlib set aside to
+match the baseline's environment): identical, 7786 lines over 549 fixtures, so neither the
+new Int-literal facts nor the marker moved any corpus or stdlib line.

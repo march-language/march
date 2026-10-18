@@ -1273,6 +1273,23 @@ let rec let_equality_operand (e : A.expr) : bool =
      | _ -> false)
   | _ -> false
 
+(* ── The opaque-path marker (review of 8e5c15c48) ──────────────────────
+   A program point whose reachability depends on something the path does
+   not record — a literal-pattern arm the walk cannot state, an EARLIER
+   arm's failure, a later `cond` arm (the earlier conditions' negations are
+   not pushed) — gets this entry in its path.  It reads as `true` to every
+   consumer (no fact, and nothing to mis-sort), and [Refine_call.check_call]
+   detects it: a solver model there may be a state the program never
+   reaches, so it is no definite counterexample.  Recognised by its span's
+   file, which no source file can be named. *)
+let opaque_path_file = "<opaque-path>"
+
+let opaque_path_marker : A.expr * bool =
+  (A.ELit (A.LitBool true, { A.dummy_span with A.file = opaque_path_file }), false)
+
+let path_is_opaque (path : (A.expr * bool) list) : bool =
+  List.exists (function A.ELit (_, sp), _ -> sp.A.file = opaque_path_file | _ -> false) path
+
 let let_equality_rhs (e : A.expr) : bool =
   match e with
   | A.EVar _ -> false

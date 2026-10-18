@@ -3357,6 +3357,55 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               | _ -> p)
             p earlier
         in
+        (* Int-literal arms (review of 8e5c15c48): reaching `3 ->` means the
+           scrutinee IS 3, and reaching a later arm past an unguarded `3 ->`
+           means it is not — the same facts the Bool-literal arms above
+           record, stated as `subj == 3` / its negation.  Then everything the
+           walk still cannot state about how this arm is reached (a nested or
+           other refutable pattern, a non-variable scrutinee's tag, an earlier
+           arm with a guard or a pattern whose failure is not recorded) puts
+           the opaque marker in the path ([opaque_path_marker]): no fact, but
+           [check_call] then takes no solver model as a definite
+           counterexample, since it may be unreachable. *)
+        let int_eq (n : int) (sp : A.span) =
+          A.EApp (A.EVar { A.txt = "=="; A.span = sp }, [ subj; A.ELit (A.LitInt n, sp) ], sp)
+        in
+        let p =
+          match br.A.branch_pat with
+          | A.PatLit (A.LitInt n, sp) -> (int_eq n sp, false) :: p
+          | _ -> p
+        in
+        let p =
+          List.fold_left
+            (fun p (prev : A.branch) ->
+              match prev.A.branch_pat, prev.A.branch_guard with
+              | A.PatLit (A.LitInt n, sp), None -> (int_eq n sp, true) :: p
+              | _ -> p)
+            p earlier
+        in
+        let subj_var = match subj with A.EVar s -> not (List.mem s.A.txt binders) | _ -> false in
+        let stated_here =
+          match br.A.branch_pat with
+          | A.PatVar _ | A.PatWild _ -> true
+          | A.PatLit ((A.LitBool _ | A.LitInt _), _) -> true
+          | A.PatTuple (subs, _) -> List.for_all irrefutable_pat subs
+          | A.PatCon (ctor, subs) ->
+            subj_var && sort_of_ctor ctor.A.txt <> None && List.for_all irrefutable_pat subs
+          | _ -> false
+        in
+        let excluded_before (prev : A.branch) =
+          prev.A.branch_guard = None
+          &&
+          match prev.A.branch_pat with
+          | A.PatLit ((A.LitBool _ | A.LitInt _), _) -> true
+          | A.PatCon (ctor, _) ->
+            subj_var
+            && (match arm_excludes_tag prev with Some c -> c = ctor.A.txt && sort_of_ctor c <> None | None -> false)
+          | _ -> false
+        in
+        let p =
+          if stated_here && List.for_all excluded_before earlier then p else opaque_path_marker :: p
+        in
         (* Nested-pattern exclusion over the CURRENT arm's binder.  An earlier
            unguarded arm with the same head and a single nullary refutable
            sub-pattern at index [i] ([arm_excludes_nested]) means that,
@@ -3459,7 +3508,14 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     go_path ((c, false) :: path) t;
     go_path ((c, true) :: path) e
   | A.ECond (arms, _) ->
-    List.iter (fun (c, b) -> go c; go_path ((c, false) :: path) b) arms
+    (* A later arm is reached only when every earlier condition failed,
+       which is not recorded: the opaque marker (review of 8e5c15c48). *)
+    List.iteri
+      (fun i (c, b) ->
+        go c;
+        let path = if i = 0 then path else opaque_path_marker :: path in
+        go_path ((c, false) :: path) b)
+      arms
   (* A record LITERAL is a construction: its type is the unique record (or
      actor state) with exactly this field set — two types of one shape make
      it ambiguous and the literal is not obliged (fail closed). *)

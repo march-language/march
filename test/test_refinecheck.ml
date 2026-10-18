@@ -17872,6 +17872,66 @@ let elemflow_relational_return_suite =
              (m "  fn apply1(f : (Int) -> List(a), x : Int) : List(a) do f(x) end\n\
                  \  fn g() : Int do sum_small(apply1(below, 10)) end\n")));
 
+    gated "a path the query does not fully see is never a definite violation" (fun () ->
+        (* Review of 8e5c15c48.  The element-subtyping arm takes a solver
+           model refuting the implication as a definite failure when every
+           caller name is "constrained".  But a guard the solver cannot read
+           (`small(k)`), a literal-pattern arm (`3 ->`), an earlier arm's
+           failure, or a later `cond` arm leaves states in the query the
+           program never reaches, so `k = 6` is no real counterexample.  A
+           correct program was reported violated.  The scalar twin
+           (`n5(k)`) is a skip there; so is this now.  Each was (_, 1, 0) on
+           8e5c15c48. *)
+        let ex =
+          "  fn need_lt5(xs : List({Int | _ < 5})) : Int do 0 end\n\
+          \  fn need_lt4(xs : List({Int | _ < 4})) : Int do 0 end\n\
+          \  fn small(k : Int) : Bool do k < 5 end\n"
+        in
+        let l3x body = l3 (m (ex ^ body)) in
+        Alcotest.check t3 "if small(k): need_lt5(below(k)) skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if small(k) do need_lt5(below(k)) else 0 end\n  end\n");
+        Alcotest.check t3 "if small(k): let ys = below(k); need_lt5(ys) skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if small(k) do\n      let ys = below(k)\n      need_lt5(ys)\n    else 0 end\n  end\n");
+        (* A literal-pattern arm now carries `k == 3` as a fact, so it
+           proves. *)
+        Alcotest.check t3 "match k do 3 -> need_lt5(below(k)): proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    match k do\n      3 -> need_lt5(below(k))\n      _ -> 0\n    end\n  end\n");
+        (* The parameter-entry route (p6_param, live on 72c1eb52a too). *)
+        Alcotest.check t3 "param entry under if small(k): skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}, ys : List({Int | _ < k})) : Int do\n    if small(k) do need_lt5(ys) else 0 end\n  end\n");
+        Alcotest.check t3 "param entry under a nested literal arm: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}, ys : List({Int | _ < k}), o : Option(Int)) : Int do\n\
+                \    match o do\n      Some(3) -> need_lt5(ys)\n      _ -> 0\n    end\n  end\n");
+        (* An earlier unguarded Int-literal arm's failure is recorded now
+           (`k != 5`), so the `_` arm proves (k <= 4). *)
+        Alcotest.check t3 "match k do 5 -> 0 _ -> need_lt4(below(k)), k <= 5: proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 5}) : Int do\n    match k do\n      5 -> 0\n      _ -> need_lt4(below(k))\n    end\n  end\n");
+        (* An earlier arm whose failure is NOT recorded (a nested literal):
+           `k = 5` is unreachable in the `_` arm but is in the query. *)
+        Alcotest.check t3 "match (k, 0) do (5, _) -> 0 _ -> need_lt4(below(k)): skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 5}) : Int do\n    match (k, 0) do\n      (5, _) -> 0\n      _ -> need_lt4(below(k))\n    end\n  end\n");
+        (* The same inside a lambda tail ([tails_bound]'s paths, which carry
+           the marker too).  A guard: a refuted lambda-tail source is a
+           demand-flow skip by design, so this was (2, 0, 1) on 8e5c15c48 as
+           well; it pins that nothing there turns definite. *)
+        Alcotest.check t3 "lambda tail under (5, _) -> [0]: below(k) not definite" (2, 0, 1)
+          (l3x "  fn ap(x : b, f : b -> a) : a do f(x) end\n\
+                \  fn g(k : {Int | _ <= 5}) : Int do\n\
+                \    need_lt4(ap(0, fn y -> match (k, y) do\n      (5, _) -> [0]\n      _ -> below(k)\n    end))\n  end\n");
+        (* A later `cond` arm does not see the earlier conditions' negation. *)
+        Alcotest.check t3 "match do (cond): k >= 5 -> 0, true -> need_lt5(below(k)): skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    match do\n      k >= 5 -> 0\n      true -> need_lt5(below(k))\n    end\n  end\n");
+        (* Controls: a TRANSLATED guard that still admits a failure, and no
+           guard, stay violations; a closed demand under an opaque arm too. *)
+        Alcotest.check t3 "control: if k < 10 do need_lt5(below(k)): violated" (2, 1, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if k < 10 do need_lt5(below(k)) else 0 end\n  end\n");
+        Alcotest.check t3 "control: no guard: violated" (2, 1, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do need_lt5(below(k)) end\n");
+        Alcotest.check t3 "control: closed below(10) under if small(k): violated" (2, 1, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if small(k) do need_lt5(below(10)) else 0 end\n  end\n");
+        Alcotest.check t3 "control: translated guard if k < 5: proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if k < 5 do need_lt5(below(k)) else 0 end\n  end\n"));
+
     gated "cap verified: r1 compiles, r2 does not" (fun () ->
         Alcotest.(check bool) "r1 accepted" false
           (has_refine_error_typed (m ~verified:true "  fn go() : Int do sum_small(below(10)) end\n"));

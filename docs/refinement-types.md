@@ -2080,7 +2080,13 @@ arguments to substitute.
 
 When such a return fails to imply what a call demands, the result is a
 violation only if every caller variable it or the demand mentions is
-constrained by a refinement or a guard (`k` above). If no fact constrains the
+constrained by a refinement or a guard (`k` above), and the checker can read
+every condition on the way to the call. Under a guard it cannot translate
+(`if small(k)`), a pattern it does not record (`Some(3) ->`), a `match` arm
+after one whose failure it does not record, or a later arm of a `match do`
+cond, the call is a recorded skip instead. An `Int` literal arm (`3 ->`) is
+recorded: inside it the scrutinee is `3`, and after an unguarded one it is
+not. If no fact constrains the
 variable (`sum_small(below(n))` with `n : Int`), the call is a recorded skip,
 unless no value of it could work (`need_ge(below(n), n)` against
 `List({Int | _ >= n})` is violated for every `n`). A pattern binder spelled

@@ -100,6 +100,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinements: a correct call under a condition the checker cannot read is no
+  longer a violation.** With `k : {Int | _ <= 100}` and
+  `xs : List({Int | _ < k})`, `if small(k) do need_lt5(xs) else 0 end` (where
+  `small(k)` is `k < 5`) was reported violated with the example `k = 6`, a value
+  that never reaches the call; so were a call inside a `Some(3) ->` arm, after an
+  arm whose failure the checker does not record, and in a later `match do` cond
+  arm. These are now skips, as the same call with a plain `Int` argument already
+  was. An `Int` literal arm (`3 ->`) now records that the scrutinee is 3 (and,
+  past an unguarded one, that it is not), so such a call can be proved.
 - **Refinements: a pattern binder spelled like a name its element refinement
   mentions no longer proves anything.** With `xs : List({Int | _ < n})`,
   `match xs do Cons(n, _) -> need_neg(n)` gave the new `n` the fact `n < n`, a
