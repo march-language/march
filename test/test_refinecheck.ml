@@ -17323,7 +17323,26 @@ let elemflow_local_fn_suite =
               \    let h = one\n    sum_pos(one(k))\n  end\n")
         in
         Alcotest.check vs "the tail skips" [ "skipped" ] (of_callee "return of one" src);
-        Alcotest.check vs "and lends nothing" [ "skipped" ] (of_callee "sum_pos" src));
+        Alcotest.check vs "and lends nothing" [ "skipped" ] (of_callee "sum_pos" src);
+        (* …and a CONTAINER parameter's element refinement is stripped the
+           same way: escaping, the tail `ys` cannot assume its elements. *)
+        let src2 =
+          m ("  fn go(zs : List(" ^ pos ^ ")) : Int do\n\
+              \    fn mk(ys : List(" ^ pos ^ ")) : List(" ^ pos ^ ") do ys end\n\
+              \    let h = mk\n    sum_pos(mk(zs))\n  end\n")
+        in
+        Alcotest.check vs "escaping: the tail ys skips" [ "skipped" ] (of_callee "return of mk" src2);
+        Alcotest.check vs "escaping: no proof of ys" [] (of_callee "ys" src2);
+        Alcotest.check vs "escaping: lends nothing" [ "skipped" ] (of_callee "sum_pos" src2);
+        (* Control: the same local, not escaping, proves and lends. *)
+        let src3 =
+          m ("  fn go(zs : List(" ^ pos ^ ")) : Int do\n\
+              \    fn mk(ys : List(" ^ pos ^ ")) : List(" ^ pos ^ ") do ys end\n\
+              \    sum_pos(mk(zs))\n  end\n")
+        in
+        (* A proved element obligation is labelled with its subject, `ys`. *)
+        Alcotest.check vs "control: the tail ys proves" [ "proved" ] (of_callee "ys" src3);
+        Alcotest.check vs "control: lent" [ "proved" ] (of_callee "mk(…)" src3));
 
     gated "a recursive local: no self-call hypothesis, lends nothing (G3-3)" (fun () ->
         let src =

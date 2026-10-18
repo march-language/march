@@ -162,3 +162,22 @@ hook; under `cap verified`; rejected on `6fcef2c9d` with 6 skips) and `reject/t3
 - A structural self-call hypothesis for a recursive local (G3-3).
 - Lending a relational entry over the local's own parameters (phase 4).
 - The post engine's pre-pass over a clause's locals still runs without the scalar hook.
+
+## Review follow-up: an escaping local's container parameters (second commit)
+
+A review of `f147461e4` (no false proof) noted that the escape rule stripped
+only a local's SCALAR parameter refinements: an escaping
+`fn mk(ys : List({Int | _ > 0})) : List({Int | _ > 0}) do ys end` (with
+`let h = mk`) still proved its tail from `ys`'s element fact and lent the
+entry, contradicting "checked under exactly the parameter facts every call
+establishes". Sound only because aliased calls are never lent. Now an
+escaping local's parameters enter the container env with no entry (their
+names still retire any outer entry they shadow), so G3-1 covers element
+facts too. This applies to every escaping local with a container parameter,
+not only to ones with a container return.
+
+Test: the G3-1 case gains the escaping `mk` (on `f147461e4`: the tail `ys`
+proved and `sum_pos(mk(zs))` lent; now both skip) and its non-escaping
+control (proved, lent). `elemflow-*` groups 63/63; `scripts/run-tests.sh -q
+compiler` 1348 pass; `refine-oracle.sh check` against the same `6fcef2c9d`
+baseline (staged stdlib set aside): identical, 7786 lines over 549 fixtures.

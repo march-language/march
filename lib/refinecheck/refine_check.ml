@@ -3257,7 +3257,15 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let sc = List.fold_left scope_add_param sc assumed in
   let re = List.fold_left recenv_add_param re ps in
   let cb = List.fold_left cb_add_param cb ps in
-  let ce = cont_add_params ce ps in
+  (* The escape rule covers a parameter's ELEMENT refinement too
+     (`ys : List({Int | _ > 0})`): when the local escapes, a call through an
+     alias is not obliged on its arguments, so the body may not assume the
+     elements either.  The names are still bound (an outer entry they shadow
+     is retired), with no entry of their own. *)
+  let ce =
+    cont_add_params ce
+      (if escapes then List.map (fun (p : A.param) -> { p with A.param_ty = None }) ps else ps)
+  in
   (match elem_refinement ret_ty with
    | None -> visit ~root errctx defs ctx path lets sc re cb ce body
    | Some er ->
