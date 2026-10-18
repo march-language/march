@@ -1102,18 +1102,37 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
     when sort_of_ctor k.A.txt = Some (adt_sort_name container)
          && Hashtbl.mem ctor_param_fields k.A.txt ->
     let roles = Hashtbl.find ctor_param_fields k.A.txt in
+    let fparams = Hashtbl.find_opt ctor_field_params k.A.txt in
     if List.length roles <> List.length args then true
     else
       List.fold_left2
-        (fun acc role e ->
+        (fun (acc, fi) role e ->
           let ok =
             match role with
             | Param i -> check_slot (Option.join (List.nth_opt slots i)) e
             | Self -> recur e
-            | Other -> true
+            | Other ->
+              (* SOUNDNESS (multi-arg design phase 0): an [Other] field whose
+                 type mentions a DEMANDED parameter holds values of it
+                 outside every slot; it is not vacuously true. *)
+              (match Option.bind fparams (fun fs -> List.nth_opt fs fi) with
+               | Some (ps, fty) ->
+                 (match List.filter (fun (j, _) -> Option.join (List.nth_opt slots j) <> None) ps with
+                  | [] -> true
+                  | hid ->
+                    let names = String.concat "`, `" (List.map snd hid) in
+                    record_elem_skip errctx ~span:(arg_span span e) ~callee
+                      ~predicate:(first_slot_pred (List.map (fun (j, _) -> Option.join (List.nth_opt slots j)) hid))
+                      ~what:
+                        (Printf.sprintf
+                           "`%s`'s field holds `%s` inside `%s`, which the element model does not see into"
+                           k.A.txt names fty);
+                    false)
+               | None -> true)
           in
-          acc && ok)
-        true roles args
+          (acc && ok, fi + 1))
+        (true, 0) roles args
+      |> fst
   (* Any other expression whose container entry is known — a variable in the
      container env, or (2026-09-18 plan, Phase 1) a call the parametric rule
      or a proved declared return resolves ([container_entry_of_expr]):
@@ -3225,6 +3244,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear ctor_field_sorts;
   Hashtbl.clear ctor_field_names;
   Hashtbl.clear ctor_param_fields;
+  Hashtbl.clear ctor_field_params;
   Hashtbl.clear axiom_measures;
   Hashtbl.clear measure_base_cases;
   Hashtbl.clear measure_scalar_field_dep;
@@ -4088,6 +4108,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset ctor_field_sorts;
   Hashtbl.reset ctor_field_names;
   Hashtbl.reset ctor_param_fields;
+  Hashtbl.reset ctor_field_params;
   Hashtbl.reset ctor_hidden_params;
   Hashtbl.reset axiom_measures;
   Hashtbl.reset measure_base_cases;

@@ -1440,6 +1440,33 @@ let ctor_param_fields : (string, field_role list) Hashtbl.t = Hashtbl.create 32
    treat slot [j] as covering them (2026-09-18 plan). *)
 let ctor_hidden_params : (string, int list) Hashtbl.t = Hashtbl.create 32
 
+(* Per constructor, per field (in declaration order): the container's type
+   parameters the field's declared type mentions, as (index, name), and the
+   field type rendered for a message.  Filled by [register_field_sorts] for
+   user variants only; a constructor absent here (the builtins) has no field
+   that mentions a parameter outside a [Param]/[Self] role.  The [ECon] arm of
+   [Refine_check.check_elements] reads it: an [Other] field that mentions a
+   DEMANDED parameter (`type Wrap(k, v) = Wrap(List((k, v)))`) holds values
+   of that parameter outside every element slot, so the construction is a
+   recorded skip rather than vacuously true (2026-10-18 multi-arg design,
+   phase 0). *)
+let ctor_field_params : (string, ((int * string) list * string) list) Hashtbl.t = Hashtbl.create 32
+
+(* Source-ish rendering of a declared field type, for [ctor_field_params]'
+   messages only. *)
+let rec field_ty_text (t : A.ty) : string =
+  match t with
+  | A.TyCon (n, []) -> n.A.txt
+  | A.TyCon (n, args) -> Printf.sprintf "%s(%s)" n.A.txt (String.concat ", " (List.map field_ty_text args))
+  | A.TyVar n -> n.A.txt
+  | A.TyTuple ts -> Printf.sprintf "(%s)" (String.concat ", " (List.map field_ty_text ts))
+  | A.TyArrow (a, b) -> Printf.sprintf "%s -> %s" (field_ty_text a) (field_ty_text b)
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> field_ty_text b
+  | A.TyRecord _ -> "a record"
+  | A.TyChan _ -> "a channel"
+  | A.TyNat n -> string_of_int n
+  | A.TyNatOp _ -> "a type-level number"
+
 (* The ADT sort a constructor belongs to, or [None]. *)
 let sort_of_ctor (ctor : string) : string option =
   Hashtbl.fold
@@ -1817,7 +1844,18 @@ let rec register_field_sorts (decls : A.decl list) : unit =
           (fun (v : A.variant) ->
             set_ctor_fields (adt_sort_name tname.A.txt) v.A.var_name.A.txt
               (List.map (smt_sort_of_field ~pnames) v.A.var_args);
-            Hashtbl.replace ctor_param_fields v.A.var_name.A.txt (List.map role_of v.A.var_args))
+            Hashtbl.replace ctor_param_fields v.A.var_name.A.txt (List.map role_of v.A.var_args);
+            Hashtbl.replace ctor_field_params v.A.var_name.A.txt
+              (List.map
+                 (fun (t : A.ty) ->
+                   let ps =
+                     tvars [] t
+                     |> List.filter_map (fun n ->
+                            Option.map (fun i -> (i, n)) (List.find_index (( = ) n) pnames))
+                     |> List.sort_uniq compare
+                   in
+                   (ps, field_ty_text t))
+                 v.A.var_args))
           variants
       | A.DType (_, name, tparams, A.TDRecord fields, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDRecord fields, _) ->
