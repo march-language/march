@@ -1,7 +1,9 @@
 # Design: accumulator invariants for fold-shaped combinators
 
 **Date:** 2026-10-18
-**Status:** design. Nothing is built. Probed on `ba8db5805` (0.6.0 + docs), z3 4.16.0.
+**Status:** phase 1 landed 2026-10-18 (`specs/progress/2026-10-18-fold-invariants-phase1.md`:
+`invariant_params`, the curried peel, the two reasons, the guards; f5 declined, see there);
+phases 2-4 open. Probed on `ba8db5805` (0.6.0 + docs), z3 4.16.0.
 Its dependency on sibling (a)'s scalar entry point has landed (2026-10-18, element-flow phase 2,
 `specs/progress/2026-10-18-element-flow-phase2-scalar-demands.md`): `Refine_check.scalar_demand`
 and `discharge_pairs` exist, `check_call` reaches them through `call_ctx.demand`, and a top-level

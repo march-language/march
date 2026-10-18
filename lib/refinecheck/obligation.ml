@@ -109,6 +109,19 @@ type reason =
      source ever runs depends on the caller's data (`List.map([], f)` is
      fine). *)
   | Parametric_source_unproved of string
+  (* The same discharge for a type variable a callback also CONSUMES (an
+     accumulator: `fold_left`'s `b`, design 2026-10-18 fold-accumulator
+     invariants §3.4), split by which half failed.  [Accumulator_base_unproved]:
+     a value the accumulator starts from (the initial value, or the elements
+     of a `reduce`) was not proved to meet the demand.
+     [Accumulator_step_unproved]: the callback, assuming the demand of every
+     parameter typed with the variable, was not proved to return a value
+     meeting it (or the rule declined that callback; the payload says why).
+     Never a violation: a failing base can be harmless on a non-empty list, a
+     failing step harmless on an empty one, and a true property need not be
+     inductive (§3.5).  Payload is the rendered account. *)
+  | Accumulator_base_unproved of string
+  | Accumulator_step_unproved of string
   (* The solver REFUTED the goal on some path (its negation was valid under
      the facts the checker built), but no concrete input could be found that
      makes the function actually return a value violating the predicate.  A
@@ -299,6 +312,8 @@ let reason_name = function
   | Opaque_application _ -> "opaque-application"
   | Partial_conjunct _ -> "partial-conjunct"
   | Parametric_source_unproved _ -> "parametric-source-unproved"
+  | Accumulator_base_unproved _ -> "accumulator-base-unproved"
+  | Accumulator_step_unproved _ -> "accumulator-step-unproved"
   | Refuted_unconfirmed -> "refuted-unconfirmed"
   | Abstract_too_weak _ -> "abstract-refinement-too-weak"
   | Abstract_uninstantiated _ -> "abstract-refinement-uninstantiated"
@@ -340,6 +355,8 @@ let reason_detail = function
       (String.concat " and " (List.map (Printf.sprintf "`%s`") held))
       (String.concat " and " (List.map (Printf.sprintf "`%s`") missing))
   | Parametric_source_unproved what -> what
+  | Accumulator_base_unproved what -> what
+  | Accumulator_step_unproved what -> what
   | Refuted_unconfirmed ->
     "the solver refuted the predicate on some path, but no concrete input was \
      found on which the function returns a value violating it"
