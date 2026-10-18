@@ -4,7 +4,9 @@
 **Status:** phase A (richer lambda bodies) landed 2026-10-18
 (`specs/progress/2026-10-18-abstract-refinements-leftovers-phaseA.md`); phase B (negation,
 generalized slots, concrete bases, the erased sort) landed 2026-10-18
-(`specs/progress/2026-10-18-abstract-refinements-leftovers-phaseB.md`); C–E not started.
+(`specs/progress/2026-10-18-abstract-refinements-leftovers-phaseB.md`); phase C (tuple element
+returns, destructuring, `List.partition`) landed 2026-10-18
+(`specs/progress/2026-10-18-abstract-refinements-leftovers-phaseC.md`); D–E not started.
 Five phases (§8), one PR each. Phase E was decided "go" (see the trailing user decisions).
 **Continues:** `specs/2026-09-20-abstract-refinements-design.md`. All four of its phases have
 landed (records: `specs/progress/2026-09-20-…-phase1.md`, `2026-10-06-…-phase2.md`,

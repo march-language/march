@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: in the element slot `!p(_)` (read as `!(y > 0)`), does not imply `_ > 0`
+-- Abstract refinements, the leftovers, phase C (row C5): the components of
+-- `List.partition`'s result swapped at the caller.  `neg` holds the elements
+-- `fn y -> y > 0` rejects, read through the slot `!p(_)` as `!(y > 0)`, which
+-- does not imply `_ > 0`: a too-weak skip (never a violation: an input with no
+-- non-positive element is fine), which `cap verified` makes this error.
+-- Accept companion: accept/t370.
+mod AbsPartitionSwap do
+  cap verified
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn go(ys : List(Int)) : Int do
+    let (pos, neg) = List.partition(ys, fn y -> y > 0)
+    sum_pos(neg) + List.length(pos)
+  end
+end

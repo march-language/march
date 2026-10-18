@@ -19492,6 +19492,558 @@ let abstract_leftovers_b_suite =
           (fun s -> Alcotest.(check string) "disposition" "Enforced" (disposition_tag (RAudit.classify s)))
           sites) ]
 
+(* Abstract refinements, the leftovers, phase C (design
+   specs/2026-10-18-abstract-refinements-leftovers-design.md §5, §9.3):
+   tuple element returns, one entry per component; a component reaches a
+   demand through `let (a, b) = g(…)` or a single-arm tuple `match` (the
+   `lets` channel, a `$tuple_proj` entry); the tuple self-hypothesis; and
+   `List.partition` as `(List(a[p]), List({a | !p(_)}))` over a top-level
+   accumulator helper.  Every case asserts the whole module's ledger triple
+   as well as the callees whose verdicts moved.  The critical class is the
+   wrong body: a partition that swaps its halves, puts an element in both,
+   or drops the negation must never be proved. *)
+let abstract_leftovers_c_suite =
+  let collect_errs (ctx : March_errors.Errors.ctx) ~(user_only : bool) : string list =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if
+          d.March_errors.Errors.severity = March_errors.Errors.Error
+          && ((not user_only)
+             || (let f = d.March_errors.Errors.span.March_ast.Ast.file in
+                 f = "" || f = "<unknown>"))
+        then Some d.March_errors.Errors.message
+        else None)
+      ctx.March_errors.Errors.diagnostics
+  in
+  let obs_of (keep : March_refinecheck.Obligation.t -> bool) =
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        if keep o then
+          Some (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> "")
+        else None)
+      (March_refinecheck.Obligation.all ())
+  in
+  (* Errors of a TYPED check, and its obligations as (callee, verdict, reason). *)
+  let run (src : string) : string list * (string * string * string) list =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    (collect_errs ctx ~user_only:false, obs_of (fun _ -> true))
+  in
+  (* The same with the REAL `stdlib/list.march` as a sibling module (the
+     claim under test is the shipped `List.partition`).  User-file errors and
+     obligations, then the stdlib's obligations inside `partition` and
+     `partition_go` (by line: from `fn partition(` to the next `doc`). *)
+  let run_list (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    let listmod, list_path = Lazy.force stdlib_list_mod in
+    let m = { m with March_ast.Ast.mod_decls = listmod :: m.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module m in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:[ list_path ] ctx m;
+    let user (o : March_refinecheck.Obligation.t) =
+      let f = o.March_refinecheck.Obligation.span.March_ast.Ast.file in
+      f = "" || f = "<unknown>"
+    in
+    let lines = String.split_on_char '\n' (In_channel.with_open_bin list_path In_channel.input_all) in
+    let find_from k pred =
+      let rec go i = function
+        | [] -> None
+        | l :: rest -> if i >= k && pred l then Some i else go (i + 1) rest
+      in
+      go 1 lines
+    in
+    let starts l = String.length l >= 3 && contains l "fn partition(" in
+    let lo = Option.get (find_from 1 starts) in
+    let hi = Option.value ~default:max_int (find_from (lo + 1) (fun l -> contains l "  doc ")) in
+    let in_partition (o : March_refinecheck.Obligation.t) =
+      let sp = o.March_refinecheck.Obligation.span in
+      (not (user o)) && sp.March_ast.Ast.file = list_path
+      && sp.March_ast.Ast.start_line >= lo && sp.March_ast.Ast.start_line < hi
+    in
+    (collect_errs ctx ~user_only:true, obs_of user, obs_of in_partition)
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let of_callee c obs = List.filter_map (fun (c', v, r) -> if c' = c then Some (v, r) else None) obs in
+  let all_proved c obs =
+    let vs = of_callee c obs in
+    vs <> [] && List.for_all (fun (v, _) -> v = "proved") vs
+  in
+  let ps = Alcotest.(list (pair string string)) in
+  let t3 = Alcotest.(triple int int int) in
+  let proved = ("proved", "") in
+  let weak = ("skipped", "abstract-refinement-too-weak") in
+  let unrefl = ("skipped", "unreflectable-subject") in
+  let m name body = "mod " ^ name ^ " do\n" ^ body ^ "end\n" in
+  let sums =
+    {|  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do 0 end
+|}
+  in
+  (* A one-parameter parametric reverse, so a tail `rev(yes)` carries `yes`'s
+     slot (the parametric rule needs a single source). *)
+  let rev =
+    {|  fn rev_go(lst : List(a), acc : List(a)) : List(a) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> rev_go(t, Cons(h, acc))
+    end
+  end
+  fn rev(xs : List(a)) : List(a) do rev_go(xs, Nil) end
+|}
+  in
+  (* §5.5's `partition_go`, and `part` delegating to it.  Each optional
+     argument replaces one piece with a WRONG one. *)
+  let part_go ?(no_slot = "List({a | !p(_)})") ?(ret = "(List(a[p]), List({a | !p(_)}))")
+      ?(nil = "(rev(yes), rev(no))") ?(pass = "part_go(t, pred, Cons(h, yes), no)")
+      ?(fail = "part_go(t, pred, yes, Cons(h, no))") () =
+    Printf.sprintf
+      {|  pfn part_go(lst : List(a), pred : a -> Bool[p], yes : List(a[p]), no : %s) : %s do
+    match lst do
+    Nil -> %s
+    Cons(h, t) -> if pred(h) do %s else %s end
+    end
+  end
+  fn part(xs : List(a), pred : a -> Bool[p]) : %s do part_go(xs, pred, Nil, Nil) end
+|}
+      no_slot ret nil pass fail ret
+  in
+  (* P2: the natural style, the recursive result destructured by a `let`. *)
+  let part_nat ?(call = "let (yes, no) = part(t, pred)") ?(pass = "(Cons(h, yes), no)")
+      ?(fail = "(yes, Cons(h, no))") () =
+    Printf.sprintf
+      {|  fn part(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)})) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+      %s
+      if pred(h) do %s else %s end
+    end
+  end
+|}
+      call pass fail
+  in
+  let go_let =
+    {|  fn go(ys : List(Int)) : Int do
+    let (pos, neg) = part(ys, fn y -> y > 0)
+    sum_pos(pos) + sum_nonpos(neg)
+  end
+|}
+  in
+  let go_body body = Printf.sprintf "  fn go(ys : List(Int)) : Int do\n%s\n  end\n" body in
+  let callers_proved obs =
+    Alcotest.check ps "sum_pos" [ proved ] (of_callee "sum_pos" obs);
+    Alcotest.check ps "sum_nonpos" [ proved ] (of_callee "sum_nonpos" obs)
+  in
+  (* Recorded, and not proved. *)
+  let not_proved c obs = of_callee c obs <> [] && not (List.mem proved (of_callee c obs)) in
+  [ gated "C1 (P1): `let (pos, neg) = part(…)` proves both halves" (fun () ->
+        let errs, obs = run (m "C1" (sums ^ rev ^ part_go () ^ go_let)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        callers_proved obs;
+        (* part_go: 2 pushes x 3 slots, the Nil tail's 2 components (under
+           `rev(…)`), the 2 recursive tails' 2 each (the tuple hypothesis,
+           under `part_go(…)`); part's tail, one per component. *)
+        Alcotest.check ps "part's return, one per component" [ proved; proved ]
+          (of_callee "return of part" obs);
+        Alcotest.check ps "the Nil tail" [ proved; proved ] (of_callee "rev(…)" obs);
+        Alcotest.check ps "the recursive tails" [ proved; proved; proved; proved ] (of_callee "part_go(…)" obs);
+        Alcotest.(check bool) "the pushes" true (all_proved "part_go" obs);
+        Alcotest.check t3 "whole module" (16, 0, 0) (triple obs));
+    gated "C1 (P1) against the shipped List.partition" (fun () ->
+        let errs, obs, std =
+          run_list
+            (m "C1L"
+               (sums
+              ^ "  fn go(ys : List(Int)) : Int do\n    let (pos, neg) = List.partition(ys, fn y -> y > 0)\n    sum_pos(pos) + sum_nonpos(neg)\n  end\n"
+              ))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        callers_proved obs;
+        Alcotest.check t3 "user module" (2, 0, 0) (triple obs);
+        (* partition_go: 2 pushes x 3 slots, the Nil tail's 2 components, the
+           2 recursive tails' 2 each; partition's tail: 2. *)
+        Alcotest.check t3 "List.partition's own definition side" (14, 0, 0) (triple std);
+        Alcotest.check ps "partition's tail" [ proved; proved ] (of_callee "return of partition" std));
+    gated "C2 (Z3): a single-arm tuple match carries a component" (fun () ->
+        let _, obs =
+          run
+            (m "C2"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    match part(ys, fn y -> y > 0) do\n    (pos, _) -> sum_pos(pos)\n    end"))
+        in
+        Alcotest.check ps "sum_pos" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module" (15, 0, 0) (triple obs));
+    gated "C3 (P2): the natural style proves through the tuple self-hypothesis" (fun () ->
+        let errs, obs = run (m "C3" (sums ^ part_nat () ^ go_let)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        callers_proved obs;
+        Alcotest.(check bool) "part's return" true (all_proved "return of part" obs);
+        Alcotest.check t3 "whole module" (8, 0, 0) (triple obs));
+    gated "C4: a partition with its halves swapped is not proved" (fun () ->
+        let _, obs =
+          run
+            (m "C4"
+               (sums ^ rev
+               ^ part_go ~pass:"part_go(t, pred, yes, Cons(h, no))" ~fail:"part_go(t, pred, Cons(h, yes), no)" ()
+               ^ go_let))
+        in
+        Alcotest.(check bool) "a violation at a push" true (List.mem ("violated", "") (of_callee "part_go" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        (* The 2 wrong pushes violate; nothing downstream is proved: the
+           self-call gate leaves part_go's return unproved, so its recursive
+           tails (4), part's tail (2) and both callers skip. *)
+        Alcotest.check t3 "whole module" (6, 2, 8) (triple obs));
+    gated "C4: a partition putting an element in both halves is not proved" (fun () ->
+        let _, obs =
+          run (m "C4b" (sums ^ rev ^ part_go ~pass:"part_go(t, pred, Cons(h, yes), Cons(h, no))" () ^ go_let))
+        in
+        Alcotest.(check bool) "a violation at the push" true (List.mem ("violated", "") (of_callee "part_go" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module" (8, 1, 8) (triple obs));
+    gated "C4: a partition dropping the negation is not proved" (fun () ->
+        (* Both halves declared `p`: the failing elements then violate. *)
+        let _, obs =
+          run
+            (m "C4c" (sums ^ rev ^ part_go ~no_slot:"List(a[p])" ~ret:"(List(a[p]), List(a[p]))" () ^ go_let))
+        in
+        Alcotest.(check bool) "a violation at the failing push" true
+          (List.mem ("violated", "") (of_callee "part_go" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (C4c)" (7, 1, 8) (triple obs);
+        (* Only the accumulator's slot dropped: `no`'s elements then do not
+           meet the declared `!p` return. *)
+        let _, obs = run (m "C4d" (sums ^ rev ^ part_go ~no_slot:"List(a[p])" () ^ go_let)) in
+        Alcotest.(check bool) "a violation at the failing push" true
+          (List.mem ("violated", "") (of_callee "part_go" obs));
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (C4d)" (6, 2, 8) (triple obs));
+    gated "C4: swapped components at the Nil tail are not proved" (fun () ->
+        let _, obs = run (m "C4e" (sums ^ rev ^ part_go ~nil:"(rev(no), rev(yes))" () ^ go_let)) in
+        Alcotest.(check bool) "a violation at the Nil tail" true (List.mem ("violated", "") (of_callee "rev(…)" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (C4e)" (6, 2, 8) (triple obs));
+    gated "C4: a wrong natural-style body is not proved" (fun () ->
+        let _, obs = run (m "C4f" (sums ^ part_nat ~pass:"(yes, Cons(h, no))" ~fail:"(Cons(h, yes), no)" () ^ go_let)) in
+        Alcotest.(check bool) "a violation at the return" true
+          (List.mem ("violated", "") (of_callee "return of part" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (C4f)" (0, 2, 6) (triple obs));
+    gated "C5: a component swap at the caller is too weak" (fun () ->
+        let _, obs =
+          run
+            (m "C5"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (pos, neg) = part(ys, fn y -> y > 0)\n    sum_pos(neg) + sum_nonpos(pos)"))
+        in
+        Alcotest.check ps "sum_pos" [ weak ] (of_callee "sum_pos" obs);
+        Alcotest.check ps "sum_nonpos" [ weak ] (of_callee "sum_nonpos" obs);
+        Alcotest.check t3 "whole module" (14, 0, 2) (triple obs));
+    gated "C6: rebinding a component's name retires its projection" (fun () ->
+        let _, obs =
+          run
+            (m "C6"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (pos, neg) = part(ys, fn y -> y > 0)\n    let pos = ys\n    sum_pos(pos) + sum_nonpos(neg)"))
+        in
+        Alcotest.check ps "sum_pos" [ unrefl ] (of_callee "sum_pos" obs);
+        Alcotest.check ps "sum_nonpos (untouched)" [ proved ] (of_callee "sum_nonpos" obs);
+        Alcotest.check t3 "whole module" (15, 0, 1) (triple obs));
+    gated "C7: rebinding a name the call mentions retires the projection" (fun () ->
+        let _, obs =
+          run
+            (m "C7"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (pos, _) = part(ys, fn y -> y > 0)\n    let ys = Cons(0 - 1, Nil)\n    sum_pos(pos) + List.length(ys)"))
+        in
+        Alcotest.check ps "sum_pos" [ unrefl ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module (C7)" (14, 0, 1) (triple obs));
+    gated "C8: a two-arm match on a partition carries nothing" (fun () ->
+        let _, obs =
+          run
+            (m "C8"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    match part(ys, fn y -> y > 0) do\n    (Nil, _) -> 0\n    (pos, _) -> sum_pos(pos)\n    end"))
+        in
+        Alcotest.check ps "sum_pos" [ unrefl ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module (C8)" (14, 0, 1) (triple obs);
+        (* …nor a single arm with a refutable component. *)
+        let _, obs =
+          run
+            (m "C8b"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    match part(ys, fn y -> y > 0) do\n    (Cons(_, pos), _) -> sum_pos(pos)\n    end"))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (C8b)" (14, 0, 1) (triple obs));
+    gated "C9: a declared, proved, non-abstract tuple return" (fun () ->
+        let split ~ok =
+          Printf.sprintf
+            {|  fn split_pos(xs : List(Int)) : (List({Int | _ > 0}), List(Int)) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+      let (a, b) = split_pos(t)
+      %s
+    end
+  end
+|}
+            (if ok then "if h > 0 do (Cons(h, a), b) else (a, Cons(h, b)) end" else "(Cons(0, a), b)")
+        in
+        let use = go_body "    let (pos, _) = split_pos(ys)\n    sum_pos(pos)" in
+        let _, obs = run (m "C9" (sums ^ split ~ok:true ^ use)) in
+        (* The proved component is an entry: the demand is compared
+           Refined-vs-Refined and recorded under the variable, as for any
+           container-env variable. *)
+        Alcotest.check ps "the demand on pos" [ proved ] (of_callee "pos" obs);
+        Alcotest.check ps "nothing recorded at sum_pos itself" [] (of_callee "sum_pos" obs);
+        (* `h` in `Cons(h, a)`; `a` there and in the else tail (the tuple
+           self-hypothesis through the `let`). *)
+        Alcotest.check ps "split_pos's head" [ proved ] (of_callee "return of split_pos" obs);
+        Alcotest.check ps "split_pos's recursive component" [ proved; proved ] (of_callee "a" obs);
+        Alcotest.check t3 "whole module" (4, 0, 0) (triple obs);
+        let _, obs = run (m "C9b" (sums ^ split ~ok:false ^ use)) in
+        Alcotest.(check bool) "a violation at the return" true
+          (List.mem ("violated", "") (of_callee "return of split_pos" obs));
+        Alcotest.check ps "sum_pos not proved" [ unrefl ] (of_callee "sum_pos" obs);
+        Alcotest.check ps "nothing proved about pos" [] (of_callee "pos" obs);
+        Alcotest.check t3 "whole module (C9b)" (0, 1, 2) (triple obs));
+    gated "C10: `cap verified` accepts a destructured partition" (fun () ->
+        let errs, obs = run ("mod C10 do\n  cap verified\n" ^ sums ^ rev ^ part_go () ^ go_let ^ "end\n") in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        callers_proved obs;
+        Alcotest.check t3 "whole module (C10)" (16, 0, 0) (triple obs);
+        let errs, obs, _ =
+          run_list
+            ("mod C10L do\n  cap verified\n" ^ sums
+           ^ "  fn go(ys : List(Int)) : Int do\n    let (pos, neg) = List.partition(ys, fn y -> y > 0)\n    sum_pos(pos) + sum_nonpos(neg)\n  end\nend\n")
+        in
+        Alcotest.(check (list string)) "no errors (shipped List.partition)" [] errs;
+        callers_proved obs;
+        Alcotest.check t3 "whole module (C10L)" (2, 0, 0) (triple obs);
+        (* …and a component swap is an error there. *)
+        let errs, _ =
+          run
+            ("mod C10c do\n  cap verified\n" ^ sums ^ rev ^ part_go ()
+           ^ go_body "    let (pos, _) = part(ys, fn y -> y > 0)\n    sum_nonpos(pos)" ^ "end\n")
+        in
+        Alcotest.(check bool) "an error" true (errs <> []));
+    gated "control: a component flows through an alias" (fun () ->
+        let _, obs =
+          run
+            (m "CA"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (pos, neg) = part(ys, fn y -> y > 0)\n    let p2 = pos\n    let n2 = neg\n    sum_pos(p2) + sum_nonpos(n2)"))
+        in
+        callers_proved obs;
+        Alcotest.check t3 "whole module (CA)" (16, 0, 0) (triple obs));
+    gated "control: the §3.4 input fact is conjoined outside the negation" (fun () ->
+        (* `neg` holds elements of `pos0` (> 0) that fail `y > 5`. *)
+        let _, obs =
+          run
+            (m "CI"
+               ({|  fn need_small_pos(xs : List({Int | _ > 0 && _ <= 5})) : Int do 0 end
+|}
+               ^ sums ^ rev ^ part_go ()
+               ^ "  fn go(pos0 : List({Int | _ > 0})) : Int do\n    let (big, small) = part(pos0, fn y -> y > 5)\n    need_small_pos(small) + sum_pos(big)\n  end\n"))
+        in
+        Alcotest.check ps "need_small_pos" [ proved ] (of_callee "need_small_pos" obs);
+        Alcotest.check ps "sum_pos" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module (CI)" (16, 0, 0) (triple obs));
+    gated "a destructuring whose call mentions a new binder carries nothing" (fun () ->
+        (* `let (ys, neg) = part(ys, …)`: a projection naming the NEW `ys`
+           would be read against the wrong list (conservative). *)
+        let _, obs =
+          run
+            (m "CB"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (ys, neg) = part(ys, fn y -> y > 0)\n    sum_nonpos(neg) + List.length(ys)"))
+        in
+        Alcotest.check ps "sum_nonpos" [ unrefl ] (of_callee "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (CB)" (14, 0, 1) (triple obs));
+    Alcotest.test_case "audit: a tuple return's element components and an accumulator's slots are enforced"
+      `Quick (fun () ->
+        (* Every signature site of the module: `part_go`'s `yes`/`no` slots,
+           both functions' two return components, and each `Bool[p]`'s
+           domain and codomain (2 + 2 + 2 + 4).  RED
+           before: the return components were "inside a type constructor's
+           argument" and the parameter slots were read without part_go's own
+           abstract refinements. *)
+        let md = March_desugar.Desugar.desugar_module (parse (m "CAU" (rev ^ part_go ()))) in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx md;
+        let sites = RAudit.sites md.March_ast.Ast.mod_decls in
+        Alcotest.(check int) "sites" 10 (List.length sites);
+        List.iter
+          (fun s -> Alcotest.(check string) "disposition" "Enforced" (disposition_tag (RAudit.classify s)))
+          sites;
+        (* Control: a component that is not an element return stays a hole,
+           even beside one that is. *)
+        let md =
+          March_desugar.Desugar.desugar_module
+            (parse
+               (m "CAU2"
+                  "  fn mixed(xs : List(Int)) : (List({Int | _ > 0}), Mystery({Int | _ > 0})) do mixed(xs) end\n"))
+        in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx md;
+        Alcotest.(check (list string)) "per site" [ "Enforced"; "Unenforced" ]
+          (List.map
+             (fun s -> disposition_tag (RAudit.classify s))
+             (List.sort
+                (fun (a : RAudit.site) (b : RAudit.site) -> compare a.RAudit.span b.RAudit.span)
+                (RAudit.sites md.March_ast.Ast.mod_decls))));
+    gated "C11: a caller declaring its own `p` never reads the callee's `!p` as its own" (fun () ->
+        (* `part(ys, keep)` instantiates part's `p` to the caller's `p`, so
+           `neg` holds `!p` elements: returning it as `List(a[p])` must not
+           prove; returning `pos` must. *)
+        let caller tail =
+          Printf.sprintf
+            "  fn sel(ys : List(a), keep : a -> Bool[p]) : List(a[p]) do\n    let (pos, neg) = part(ys, keep)\n    %s\n  end\n"
+            tail
+        in
+        let _, obs = run (m "C11" (rev ^ part_go () ^ caller "neg")) in
+        Alcotest.(check bool) "returning neg is not proved" true (not_proved "return of sel" obs);
+        Alcotest.check t3 "whole module (C11)" (14, 0, 1) (triple obs);
+        let _, obs = run (m "C11c" (rev ^ part_go () ^ caller "pos")) in
+        Alcotest.check ps "returning pos is proved" [ proved ] (of_callee "return of sel" obs);
+        Alcotest.check t3 "whole module (C11c)" (15, 0, 0) (triple obs));
+    (* Review of a2f9fb2a5 (CRITICAL): the structural induction hypothesis was
+       taken for a recursive call whatever it passed for the definer.  A
+       recursion that passes ANOTHER predicate (`fn y -> true`, a swapped
+       callback, a rebound name) returns elements that need not satisfy the
+       caller's `p`, so the hypothesis applies only when every definer
+       position receives the function's own parameter, unshadowed.  RED
+       before the fix: every row below was proved. *)
+    gated "H1 (e1): a single-container recursion passing another predicate is not proved" (fun () ->
+        let _, obs =
+          run
+            (m "H1"
+               ({|  fn filt(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, filt(t, fn y -> true)) else filt(t, fn y -> true) end
+    end
+  end
+|}
+               ^ sums ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "the recursive tails not proved" false (List.mem proved (of_callee "filt(…)" obs));
+        Alcotest.check t3 "whole module (H1)" (1, 0, 3) (triple obs));
+    gated "H2 (d1): a destructured recursion passing another predicate is not proved" (fun () ->
+        let src body =
+          Printf.sprintf
+            {|  fn part(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)})) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+%s
+    end
+  end
+|}
+            body
+        in
+        let row name body want =
+          let _, obs = run (m name (sums ^ src body ^ go_let)) in
+          Alcotest.(check bool) (name ^ ": sum_pos not proved") true (not_proved "sum_pos" obs);
+          Alcotest.(check bool) (name ^ ": sum_nonpos not proved") true (not_proved "sum_nonpos" obs);
+          Alcotest.check t3 ("whole module (" ^ name ^ ")") want (triple obs)
+        in
+        row "H2a"
+          "      let (yes, no) = part(t, fn y -> true)\n      if pred(h) do (Cons(h, yes), no) else (yes, Cons(h, no)) end"
+          (2, 0, 6);
+        (* d2: the same through a single-arm tuple match. *)
+        row "H2b"
+          "      match part(t, fn y -> true) do\n      (yes, no) -> if pred(h) do (Cons(h, yes), no) else (yes, Cons(h, no)) end\n      end"
+          (2, 0, 6);
+        (* d3: a direct recursive tail (run-confirmed wrong: `part([-5, 3],
+           fn y -> y > 0)` returns `-5` in the first half). *)
+        row "H2c" "      part(t, fn y -> true)" (0, 0, 4);
+        (* The definer's NAME rebound to another lambda before a direct
+           recursive tail (the d3 shape): the name alone would admit the
+           hypothesis; the clause's own [cbenv] entry does not. *)
+        row "H2d" "      let pred = fn y -> true\n      part(t, pred)" (0, 0, 4));
+    gated "H3 (d4): two definers passed swapped are not proved" (fun () ->
+        let _, obs =
+          run
+            (m "H3"
+               ({|  fn two(xs : List(a), q : a -> Bool[p], r : a -> Bool[s]) : (List(a[p]), List(a[s])) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+      let (ys, zs) = two(t, r, q)
+      if q(h) do (if r(h) do (Cons(h, ys), Cons(h, zs)) else (Cons(h, ys), zs) end)
+      else (if r(h) do (ys, Cons(h, zs)) else (ys, zs) end) end
+    end
+  end
+|}
+               ^ sums
+               ^ "  fn go(ys : List(Int)) : Int do\n    let (a, b) = two(ys, fn y -> y > 0, fn y -> y > 0 - 100)\n    sum_pos(a) + List.length(b)\n  end\n"))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (H3)" (4, 0, 9) (triple obs));
+    gated "H4 (d6): an accumulator recursing with another predicate is not proved" (fun () ->
+        (* The pushes prove (the callee's `p` instantiated to `true` at the
+           self-call holds of anything), so only the hypothesis stood between
+           this body and a false proof. *)
+        let _, obs =
+          run
+            (m "H4"
+               (sums ^ rev
+               ^ part_go ~pass:"part_go(t, fn y -> true, Cons(h, yes), no)"
+                   ~fail:"part_go(t, fn y -> false, yes, Cons(h, no))" ()
+               ^ go_let))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (H4)" (2, 0, 12) (triple obs));
+    gated "H5: passing `pred` through a let alias declines (conservative)" (fun () ->
+        let _, obs =
+          run
+            (m "H5"
+               (sums
+               ^ part_nat ~call:"let q = pred\n      let (yes, no) = part(t, q)" ()
+               ^ go_let))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (H5)" (2, 0, 6) (triple obs));
+    gated "control: recursion passing `pred` itself still proves (single and tuple)" (fun () ->
+        let _, obs =
+          run
+            (m "HC"
+               ({|  fn filt(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, filt(t, pred)) else filt(t, pred) end
+    end
+  end
+|}
+               ^ sums ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"))
+        in
+        Alcotest.check ps "sum_pos" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module (HC)" (4, 0, 0) (triple obs);
+        let _, obs = run (m "HC2" (sums ^ part_nat () ^ go_let)) in
+        callers_proved obs) ]
 (* Phase 4 (plan specs/plans/2026-10-07-abstract-refinements-phase4-plan.md):
    the `a[p]` / `Bool[p]` shorthand must mean exactly the spelled-out form.
    Equivalence is checked where it matters: [Refine_abstract.collect] (names
@@ -20579,6 +21131,7 @@ let () =
       ("abstract-phase3", abstract_phase3_suite);
       ("abstract-leftovers-a", abstract_leftovers_a_suite);
       ("abstract-leftovers-b", abstract_leftovers_b_suite);
+      ("abstract-leftovers-c", abstract_leftovers_c_suite);
       ("abstract-sugar", abstract_sugar_suite);
       ("hidden-field-elements", hidden_field_elements_suite);
       ("z3-well-formed", z3_wellformed_suite) ]
