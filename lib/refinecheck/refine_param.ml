@@ -162,6 +162,15 @@ let elem_ret_proved : (string, unit) Hashtbl.t = Hashtbl.create 16
 let elem_ret_hyp : (string * (string, unit) Hashtbl.t list * (string * elem option list)) option ref =
   ref None
 
+(* The LOCAL `fn`s whose declared container return had every tail PROVED
+   (design 2026-10-18 element-flow follow-ups, phase 3, §5.2): the signature
+   [Refine_check.visit_local_fn] put into the block's [cbenv], identified
+   PHYSICALLY ([List.memq]), never by name — a local shadowing a top-level
+   function, or another local of the same spelling, is a different
+   signature.  A stale entry from a finished block is unreachable: nothing
+   can name that signature again. *)
+let local_elem_ret_proved : fn_sig list ref = ref []
+
 (* Set while [Refine_check.gate_elem_returns] runs its scratch walks. *)
 let gating_elem_returns : bool ref = ref false
 
@@ -196,6 +205,7 @@ let reset_param_tables () =
   elem_ret_hyp := None;
   gating_elem_returns := false;
   Hashtbl.reset elem_ret_proved;
+  local_elem_ret_proved := [];
   Hashtbl.reset fn_defs_tbl;
   Hashtbl.reset safe_tbl;
   Hashtbl.reset iface_methods;

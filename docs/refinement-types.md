@@ -2419,16 +2419,22 @@ demand meets one of these):
   is checked through `unwrap_or`'s sources (the elements of `o` and the
   default), but a demand that names another parameter of its function
   (`List.nth(xs, Option.unwrap_or(o, 0))` against `_ < len(xs)`) is not, and
-  neither is a relational return (`: {Int | _ >= lo}`) or a block-level `fn`'s
-  return tail. A source that fails the demand makes the call a skip, never a
-  violation.
+  neither is a relational return (`: {Int | _ >= lo}`). A block-level `fn`'s
+  return tail is traced over that `fn`'s own parameters only: a captured
+  variable carries no fact there. A source that fails the demand makes the call
+  a skip, never a violation.
 - **A fold's accumulator receives no domain fact.** In
   `fold_left(xs, 1, fn (acc, x) -> …)`, `x` assumes `xs`'s element refinement
   but `acc` assumes nothing, so `need_pos(acc)` is a skip: an invariant the
   accumulator keeps is not inferred. A curried lambda (`fn a -> fn x -> …`)
   gives a fact to its outer parameter only.
-- **A local `fn` with a container return** has its tails checked by nothing and
-  lends no element fact at its call sites.
+- **A local `fn` with a container return lends it only when the entry is
+  closed and the `fn` does not recurse into it.** Its tails are checked like a
+  top-level function's, and a proved one is a fact at its later calls in the
+  block, but a return naming a captured variable or a parameter
+  (`List({Int | _ < k})`) lends nothing, and a recursive call inside the local
+  carries nothing (no structural self-call hypothesis), so `fn go(xs) : List({Int
+  | _ > 0})` whose tail is `go(t)` is a skip.
 - **An element refinement that names a parameter** (`: List({Int | _ < n})`) is
   not a fact at the call site of the function that returns it.
 - **A predicate relating elements to each other** (sortedness, distinctness)

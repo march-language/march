@@ -543,9 +543,18 @@ let classify (site : site) : disposition =
     when site.position = Type_arg
          && (let saved = !Refine_post.current_abstracts in
              Refine_post.current_abstracts :=
-               (match site.origin_fn with
-                | Some fd -> Refine_abstract.names ~is_known:Refine_post.known_predicate_fn fd
-                | None -> []);
+               (match site.origin_fn, site.fn_origin with
+                (* A block-level `fn`'s element slots are read by the checker
+                   under the ENCLOSING function's abstract refinements
+                   ([Refine_check.visit_local_fn]), which this site does not
+                   carry; asking under none is the conservative answer: a
+                   concrete slot (`List({Int | _ > 0})`, whose every tail is
+                   an element obligation since 2026-10-18, element-flow
+                   phase 3) is Enforced, an abstract one reports
+                   unenforced. *)
+                | _, Some Local_fn -> []
+                | Some fd, _ -> Refine_abstract.names ~is_known:Refine_post.known_predicate_fn fd
+                | None, _ -> []);
              Fun.protect ~finally:(fun () -> Refine_post.current_abstracts := saved)
                (fun () -> Refine_post.elem_refinement (Some site.origin_ty) <> None)) ->
     Enforced

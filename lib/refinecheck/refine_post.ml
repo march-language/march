@@ -1964,8 +1964,12 @@ let rec check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool
     let lookup =
       List.fold_left
         (fun lookup (n, lfd) ->
-          (* A block-level fn's return tail gets no scalar demand hook in v1:
-             its env (sibling locals, captures) is not the clause's. *)
+          (* No scalar demand hook in this PRE-pass: the module-level [ctx]
+             it would run under knows neither the sibling locals nor the
+             enclosing parameters a tail call may name.  The walk's own check
+             of the local ([Refine_check.visit_local_fn]) runs the hook under
+             the local's [ctx] (element-flow phase 3), so a proof there
+             reaches the block's later calls; here it only loses one. *)
           if
             with_tail_demand no_tail_demand (fun () ->
                 with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false lfd))

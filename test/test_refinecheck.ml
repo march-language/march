@@ -17152,9 +17152,11 @@ let elemflow_scalar_demand_suite =
         (* A relational return demand is v1's closed-only boundary. *)
         Alcotest.check t3 "{Int | _ >= lo}: skipped" (0, 0, 1)
           (l3 (m ("  fn go(" ^ opos ^ ", lo : Int) : {Int | _ >= lo} do uor(o, lo) end\n")));
-        (* A block-level fn's return tail is not covered in v1. *)
-        Alcotest.(check (list string)) "a local fn's return tail: unreflectable-subject"
-          [ "unreflectable-subject" ]
+        (* A block-level fn's return tail: not covered in phase 2 (it was an
+           unreflectable-subject skip), covered since phase 3 (the hook runs
+           over the local's own parameters; see elemflow-local-fn). *)
+        Alcotest.(check (list string)) "a local fn's return tail: proved since phase 3"
+          []
           (List.filter (( <> ) "")
              (reasons
                 (m ("  fn go(" ^ opos ^ ") : Int do\n\
@@ -17173,6 +17175,331 @@ let elemflow_scalar_demand_suite =
    The inner binding is now renamed apart in the path and the tail
    ([Refine_post.rename_free]).  The triple each case had before is in its
    comment (measured on 3d02bf5e7). *)
+(* ── A local `fn` with a container return (design 2026-10-18 element-flow
+   follow-ups, phase 3, §5; rows l1-l6 of §0.3) ──────────────────────────
+   A block-level `fn n(ps) : List({Int | p}) do … end` gets what a top-level
+   one gets: every tail is an element obligation, and a local whose every
+   tail PROVED (with a closed entry) lends that entry to its later calls in
+   the block.  Its verdict is its own: a local's proof never admits the
+   ENCLOSING function's element return (G3-2, row l5). *)
+let elemflow_local_fn_suite =
+  let m ?(verified = false) body =
+    "mod LF do\n" ^ (if verified then "  cap verified\n" else "")
+    ^ "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n\
+      \  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+      \  fn sum_neg(xs : List({Int | _ < 1})) : Int do 0 end\n\
+      \  fn uor(o : Option(a), d : a) : a do\n\
+      \    match o do\n      Some(x) -> x\n      None -> d\n    end\n  end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let t3 = Alcotest.(triple int int int) in
+  (* The verdicts of one callee's obligations, in record order. *)
+  let of_callee c src =
+    List.filter_map (fun (c', v, _) -> if c' = c then Some v else None) (typed_obligations src)
+  in
+  let vs = Alcotest.(list string) in
+  let pos = "{Int | _ > 0}" in
+  [ gated "l1: a proved local lends its return to a later call" (fun () ->
+        (* Before: (1, 0, 1): two(k)'s precondition proved, sum_pos
+           unreflectable-subject, the tails filed nothing. *)
+        let src =
+          m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn two(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n, n + 1] end\n\
+              \    sum_pos(two(k))\n  end\n")
+        in
+        Alcotest.check t3 "(4, 0, 0)" (4, 0, 0) (l3 src);
+        Alcotest.check vs "both tail elements, once each" [ "proved"; "proved" ]
+          (of_callee "return of two" src);
+        (* A proved element obligation is labelled with its subject. *)
+        Alcotest.check vs "sum_pos(two(k)) proves" [ "proved" ] (of_callee "two(…)" src);
+        Alcotest.check vs "no sum_pos skip" [] (of_callee "sum_pos" src));
+
+    gated "l2: a violating local tail is a violation" (fun () ->
+        (* Before: (0, 0, 0): no obligation was filed for the tails at all. *)
+        let src =
+          m "  fn go(k : Int) : Int do\n\
+            \    fn bad(n : Int) : List({Int | _ > 0}) do [n, 0] end\n\
+            \    let ys = bad(k)\n    0\n  end\n"
+        in
+        Alcotest.check t3 "(0, 1, 1)" (0, 1, 1) (l3 src);
+        Alcotest.check vs "n skips, 0 is violated" [ "skipped"; "violated" ]
+          (of_callee "return of bad" src));
+
+    gated "l2 under cap verified: rejected" (fun () ->
+        (* Before: accepted. *)
+        Alcotest.(check bool) "rejected" true
+          (has_refine_error_typed
+             (m ~verified:true
+                "  fn go(k : Int) : Int do\n\
+                \    fn bad(n : Int) : List({Int | _ > 0}) do [n, 0] end\n\
+                \    let ys = bad(k)\n    0\n  end\n"));
+        Alcotest.(check bool) "control: l1 accepted" false
+          (has_refine_error_typed
+             (m ~verified:true
+                ("  fn go(k : " ^ pos ^ ") : Int do\n\
+                  \    fn two(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n, n + 1] end\n\
+                  \    sum_pos(two(k))\n  end\n"))));
+
+    gated "l3: an unproved local lends nothing" (fun () ->
+        (* Before: (0, 0, 1). *)
+        let src =
+          m "  fn go(ys : List(Int)) : Int do\n\
+            \    fn pass(zs : List(Int)) : List({Int | _ > 0}) do zs end\n\
+            \    sum_pos(pass(ys))\n  end\n"
+        in
+        Alcotest.check t3 "(0, 0, 2)" (0, 0, 2) (l3 src);
+        Alcotest.check vs "the tail skips" [ "skipped" ] (of_callee "return of pass" src);
+        Alcotest.check vs "the call skips" [ "skipped" ] (of_callee "sum_pos" src));
+
+    gated "l4: in-walk tails see the local's lets; a let-bound result carries the entry" (fun () ->
+        (* Before: (1, 0, 1). *)
+        Alcotest.check t3 "(4, 0, 0)" (4, 0, 0)
+          (l3
+             (m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+                  \    fn two(n : " ^ pos ^ ") : List(" ^ pos ^ ") do\n\
+                  \      let m = n + 1\n      [n, m]\n    end\n\
+                  \    let ys = two(k)\n    sum_pos(ys)\n  end\n"))));
+
+    gated "l5: a local's proof never admits the enclosing function (G3-2)" (fun () ->
+        (* Before: (2, 1, 2): `[0]` violated, one(k)'s precondition and
+           outer(true, k)'s proved, the one(k) tail unreflectable-subject,
+           sum_pos skipped.  Now one(k) and the local's own tail prove, and
+           sum_pos(outer(true, k)) MUST stay a skip: outer's `[0]` failed. *)
+        let src =
+          m ("  fn outer(b : Bool, k : " ^ pos ^ ") : List(" ^ pos ^ ") do\n\
+              \    if b do [0] else\n\
+              \      fn one(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \      one(k)\n    end\n  end\n\
+              \  fn user(k : " ^ pos ^ ") : Int do sum_pos(outer(true, k)) end\n")
+        in
+        Alcotest.check vs "outer's [0] is violated" [ "violated" ] (of_callee "return of outer" src);
+        Alcotest.check vs "outer's tail one(k) proves" [ "proved" ] (of_callee "one(…)" src);
+        Alcotest.check vs "the local's tail proves" [ "proved" ] (of_callee "return of one" src);
+        Alcotest.check vs "sum_pos(outer(true, k)) stays a skip" [ "skipped" ]
+          (of_callee "sum_pos" src);
+        (* The order twin: the local's tail is checked AFTER outer's failing
+           tail was noted, so a local that reset the enclosing verdict to its
+           own would turn this one proved. *)
+        let src2 =
+          m ("  fn outer(b : Bool, k : " ^ pos ^ ") : List(" ^ pos ^ ") do\n\
+              \    let z = [0]\n\
+              \    if b do z else\n\
+              \      fn one(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \      one(k)\n    end\n  end\n\
+              \  fn user(k : " ^ pos ^ ") : Int do sum_pos(outer(true, k)) end\n")
+        in
+        Alcotest.check vs "order twin: sum_pos stays a skip" [ "skipped" ] (of_callee "sum_pos" src2);
+        (* Control: with no failing tail, outer is admitted through the
+           local's lent return. *)
+        let src3 =
+          m ("  fn outer(b : Bool, k : " ^ pos ^ ") : List(" ^ pos ^ ") do\n\
+              \    if b do [1] else\n\
+              \      fn one(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \      one(k)\n    end\n  end\n\
+              \  fn user(k : " ^ pos ^ ") : Int do sum_pos(outer(true, k)) end\n")
+        in
+        Alcotest.check vs "control: sum_pos(outer(true, k)) proves" [ "proved" ]
+          (of_callee "outer(…)" src3));
+
+    gated "the enclosing function's self-call inside a local still gates it" (fun () ->
+        (* `outer(t)` inside the local is a SELF-call of outer with an
+           unproved element argument: it must keep clearing outer's verdict
+           even though the local's own tail proves. *)
+        let src =
+          m ("  fn outer(xs : List(" ^ pos ^ ")) : List(" ^ pos ^ ") do\n\
+              \    fn helper(t : List(Int)) : List(" ^ pos ^ ") do\n\
+              \      let r = outer(t)\n      [1]\n    end\n\
+              \    helper([])\n  end\n\
+              \  fn user(ys : List(" ^ pos ^ ")) : Int do sum_pos(outer(ys)) end\n")
+        in
+        Alcotest.check vs "the local's tail proves" [ "proved" ] (of_callee "return of helper" src);
+        Alcotest.check vs "sum_pos(outer(ys)) stays a skip" [ "skipped" ] (of_callee "sum_pos" src));
+
+    gated "an escaping local's tail cannot assume its parameters (G3-1)" (fun () ->
+        let src =
+          m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn one(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \    let h = one\n    sum_pos(one(k))\n  end\n")
+        in
+        Alcotest.check vs "the tail skips" [ "skipped" ] (of_callee "return of one" src);
+        Alcotest.check vs "and lends nothing" [ "skipped" ] (of_callee "sum_pos" src));
+
+    gated "a recursive local: no self-call hypothesis, lends nothing (G3-3)" (fun () ->
+        let src =
+          m "  fn go(ys : List(Int)) : Int do\n\
+            \    fn keep(xs : List(Int)) : List({Int | _ > 0}) do\n\
+            \      match xs do\n        Nil -> []\n        Cons(h, t) -> keep(t)\n      end\n    end\n\
+            \    sum_pos(keep(ys))\n  end\n"
+        in
+        (* `[]` has no element to check; keep(t) carries nothing. *)
+        Alcotest.check vs "keep(t) skips" [ "skipped" ] (of_callee "return of keep" src);
+        Alcotest.check vs "sum_pos(keep(ys)) skips" [ "skipped" ] (of_callee "sum_pos" src));
+
+    gated "a recursive local with an unproved element argument at its self-call (the induction gate)"
+      (fun () ->
+        (* Every tail proves, but the self-call `keep(Cons(n, t), n)` does
+           not meet keep's own element parameter: the local is not proved. *)
+        let src =
+          m ("  fn go(ys : List(" ^ pos ^ "), j : Int) : Int do\n\
+              \    fn keep(xs : List(" ^ pos ^ "), n : Int) : List(" ^ pos ^ ") do\n\
+              \      match xs do\n        Nil -> [1]\n\
+              \        Cons(h, t) ->\n          let r = keep(Cons(n, t), n)\n          [h]\n\
+              \      end\n    end\n\
+              \    sum_pos(keep(ys, j))\n  end\n")
+        in
+        Alcotest.check vs "both tails prove" [ "proved"; "proved" ] (of_callee "return of keep" src);
+        Alcotest.check vs "sum_pos(keep(ys, j)) skips" [ "skipped" ] (of_callee "sum_pos" src);
+        (* Control: the self-call meets the parameter, so the local lends. *)
+        let src2 =
+          m ("  fn go(ys : List(" ^ pos ^ "), j : Int) : Int do\n\
+              \    fn keep(xs : List(" ^ pos ^ "), n : Int) : List(" ^ pos ^ ") do\n\
+              \      match xs do\n        Nil -> [1]\n\
+              \        Cons(h, t) ->\n          let r = keep(t, n)\n          [h]\n\
+              \      end\n    end\n\
+              \    sum_pos(keep(ys, j))\n  end\n")
+        in
+        Alcotest.check vs "control: sum_pos(keep(ys, j)) proves" [ "proved" ] (of_callee "keep(…)" src2));
+
+    gated "a local shadowing a top-level function never borrows its contract" (fun () ->
+        (* The top-level `mk` is proved; the local `mk` is not. *)
+        let src =
+          m ("  fn mk(k : " ^ pos ^ ") : List(" ^ pos ^ ") do [k] end\n\
+              \  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn mk(n : Int) : List(" ^ pos ^ ") do [n] end\n\
+              \    sum_pos(mk(k))\n  end\n")
+        in
+        Alcotest.check vs "the global's tail proves, the local's skips" [ "proved"; "skipped" ]
+          (of_callee "return of mk" src);
+        Alcotest.check vs "sum_pos(mk(k)) skips" [ "skipped" ] (of_callee "sum_pos" src);
+        (* …and the converse: a proved local shadowing an UNPROVED global
+           lends its own entry. *)
+        let src2 =
+          m ("  fn mk(k : Int) : List(" ^ pos ^ ") do [k] end\n\
+              \  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn mk(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \    sum_pos(mk(k))\n  end\n")
+        in
+        Alcotest.check vs "converse: sum_pos(mk(k)) proves" [ "proved" ] (of_callee "mk(…)" src2);
+        (* A proved local, then a second local of the SAME spelling that is
+           not proved: the later call reaches the second, which lends
+           nothing. *)
+        let src3 =
+          m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn mk(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \    let a = sum_pos(mk(k))\n\
+              \    fn mk(n : Int) : List(" ^ pos ^ ") do [n] end\n\
+              \    sum_pos(mk(k))\n  end\n")
+        in
+        Alcotest.check vs "the first proves" [ "proved" ] (of_callee "mk(…)" src3);
+        Alcotest.check vs "the second skips" [ "skipped" ] (of_callee "sum_pos" src3));
+
+    gated "a return naming a captured variable is checked in place and lends nothing (G3-5)" (fun () ->
+        (* `_ < k` names go's `k`.  The tail `[k - 1]` proves; read at the
+           call after `let k = 0`, the entry would claim every element is
+           below 0 (false: go(5) returns [4]). *)
+        let src =
+          m "  fn go(k : Int) : Int do\n\
+            \    fn f(u : Int) : List({Int | _ < k}) do [k - 1] end\n\
+            \    let k = 0\n    sum_neg(f(1))\n  end\n"
+        in
+        Alcotest.check vs "the tail proves" [ "proved" ] (of_callee "return of f" src);
+        Alcotest.check vs "sum_neg(f(1)) skips" [ "skipped" ] (of_callee "sum_neg" src));
+
+    gated "a local defined after a rebinding reads the CURRENT binding" (fun () ->
+        (* `k` is rebound to 0 before the local: `_ < k` means `_ < 0`, so
+           `[5]` is a violation (read as the parameter `k > 10` it would
+           prove). *)
+        let src =
+          m "  fn go(k : {Int | _ > 10}) : Int do\n\
+            \    let k = 0\n\
+            \    fn f(u : Int) : List({Int | _ < k}) do [5] end\n\
+            \    sum_neg(f(1))\n  end\n"
+        in
+        Alcotest.check vs "[5] is violated" [ "violated" ] (of_callee "return of f" src);
+        Alcotest.check vs "sum_neg(f(1)) skips" [ "skipped" ] (of_callee "sum_neg" src));
+
+    gated "a local's parameter shadowing a captured name in its return" (fun () ->
+        (* `_ < k` names the LOCAL's own parameter `k`, not go's. *)
+        let src =
+          m "  fn go(k : {Int | _ > 10}) : Int do\n\
+            \    fn f(k : Int) : List({Int | _ < k}) do [5] end\n\
+            \    0\n  end\n"
+        in
+        Alcotest.check vs "[5] < k (the parameter) skips" [ "skipped" ] (of_callee "return of f" src));
+
+    gated "a local's tail under an inner rebinding of a name its return mentions (G3-6)" (fun () ->
+        (* Phase 0's z2 rule inside the local: `_ < k` is about the
+           parameter `k`, the tail sees `let k = 100`.  Checked there it
+           would prove `f(1) = [50]`. *)
+        let src =
+          m "  fn go(j : Int) : Int do\n\
+            \    fn f(k : Int) : List({Int | _ < k}) do\n      let k = 100\n      [50]\n    end\n\
+            \    0\n  end\n"
+        in
+        Alcotest.check t3 "(0, 0, 1)" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "the rebinding reason" [ "unreflectable-subject" ]
+          (let (_, _, _, rs) = typed_ledger src in rs));
+
+    gated "a block-level fn's scalar return tail gets the scalar demand hook" (fun () ->
+        (* Phase 2's return-tail hook, now for a local.  Before: skip. *)
+        let opos = "Option(" ^ pos ^ ")" in
+        let src =
+          m ("  fn go(o : " ^ opos ^ ") : Int do\n\
+              \    fn f(p : " ^ opos ^ ") : " ^ pos ^ " do uor(p, 1) end\n\
+              \    f(o)\n  end\n")
+        in
+        (* f(o)'s element argument and f's return. *)
+        Alcotest.check t3 "(2, 0, 0)" (2, 0, 0) (l3 src);
+        (* Controls: a refuted default, a captured option (the hook's env is
+           the local's parameters alone), a sibling local shadowing `uor`. *)
+        Alcotest.check t3 "uor(p, 0) skips" (1, 0, 1)
+          (l3
+             (m ("  fn go(o : " ^ opos ^ ") : Int do\n\
+                  \    fn f(p : " ^ opos ^ ") : " ^ pos ^ " do uor(p, 0) end\n\
+                  \    f(o)\n  end\n")));
+        Alcotest.check t3 "a captured o skips" (0, 0, 1)
+          (l3
+             (m ("  fn go(o : " ^ opos ^ ") : Int do\n\
+                  \    fn f(u : Int) : " ^ pos ^ " do uor(o, 1) end\n\
+                  \    f(0)\n  end\n")));
+        Alcotest.check t3 "a sibling local uor skips" (2, 0, 1)
+          (l3
+             (m ("  fn go(o : " ^ opos ^ ") : Int do\n\
+                  \    fn uor(q : " ^ opos ^ ", d : Int) : Int do 0 - 5 end\n\
+                  \    fn f(p : " ^ opos ^ ") : " ^ pos ^ " do uor(p, 1) end\n\
+                  \    f(o)\n  end\n"))));
+    (* The audit (review note on the base: `--refine-audit` already called a
+       local's container return Enforced while nothing checked it).  It is
+       checked now, so Enforced is true: the audit says so, and a violating
+       tail is reported. *)
+    (let src =
+       {|mod M do
+          fn withloc(xs : List(Int)) : Int do
+            fn loc(ys : List(Int)) : List({Int | _ > 0}) do Cons(0 - 1, Nil) end
+            let r = loc(xs)
+            0
+          end
+        end|}
+     in
+     Alcotest.test_case "audit: a local's container return is Enforced" `Quick (fun () ->
+         let _, d = classify_only_site src in
+         Alcotest.(check string) "disposition" "Enforced" (disposition_tag d)));
+    gated "audit: …and its violating tail is reported" (fun () ->
+        (* Before: (0, 0, 0), no obligation filed. *)
+        let src =
+          {|mod M do
+             fn withloc(xs : List(Int)) : Int do
+               fn loc(ys : List(Int)) : List({Int | _ > 0}) do Cons(0 - 1, Nil) end
+               let r = loc(xs)
+               0
+             end
+           end|}
+        in
+        Alcotest.check t3 "violated" (0, 1, 0) (l3 src);
+        Alcotest.(check bool) "an error" true (has_refine_error_typed src));
+  ]
+
 let post_inner_binders_suite =
   let m ?(verified = false) body =
     "mod PB do\n" ^ (if verified then "  cap verified\n" else "")
@@ -20558,6 +20885,7 @@ let () =
       ("elemflow-namespace", elemflow_namespace_suite);
       ("elemflow-multiparam", elemflow_multiparam_suite);
       ("elemflow-scalar-demand", elemflow_scalar_demand_suite);
+      ("elemflow-local-fn", elemflow_local_fn_suite);
       ("post-inner-binders", post_inner_binders_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);

@@ -765,6 +765,15 @@ and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
     (match elem_refinement sg.ret_ty with
      | Some entry when entry_is_closed entry -> Some entry
      | _ -> None)
+  (* A local `fn` whose every tail was proved to meet its declared container
+     return ([visit_local_fn], design 2026-10-18 element-flow follow-ups,
+     phase 3): exactly that signature, physically, so a same-named global
+     or another local never lends through it.  Only a closed entry was
+     registered; re-checked here. *)
+  | Some sg when List.memq sg !local_elem_ret_proved ->
+    (match elem_refinement sg.ret_ty with
+     | Some entry when entry_is_closed entry -> Some entry
+     | _ -> None)
   | Some _ -> None
   | None ->
     match resolve_key ctx fname with
@@ -2231,6 +2240,15 @@ let abstract_param_entry ~root (ctx : rctx) defs path sc re (cb : cbenv) (lets :
    [gate_elem_returns] reads it straight after a scratch walk. *)
 let last_elem_return_proved : bool ref = ref false
 
+(* The LOCAL `fn` being walked with a declared container return, and its own
+   verdict cell ([visit_local_fn], design 2026-10-18 element-flow follow-ups,
+   phase 3): a call reaching exactly that signature through [cbenv] is a
+   self-call of the local, and an unproved element argument there clears the
+   LOCAL's verdict (the induction gate below), never the enclosing
+   function's — whose own self-calls inside the local keep clearing
+   [last_elem_return_proved]. *)
+let local_elem_self : (fn_sig * bool ref) option ref = ref None
+
 (* The element obligations a call's arguments owe the callee's declared
    parameter types.  An abstract slot is tried FIRST: read through
    [elem_refinement] by a caller that declares an abstract refinement of the
@@ -2255,7 +2273,17 @@ let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
       && not (List.mem_assoc callee cb)
     | None -> false
   in
-  let note ok = if self_call && not ok then last_elem_return_proved := false in
+  let local_self =
+    match !local_elem_self, List.assoc_opt callee cb with
+    | Some (lsg, cell), Some s when s == lsg -> Some cell
+    | _ -> None
+  in
+  let note ok =
+    if not ok then begin
+      if self_call then last_elem_return_proved := false;
+      Option.iter (fun cell -> cell := false) local_self
+    end
+  in
   List.iteri
     (fun i a ->
       match List.nth_opt sg.param_tys i with
@@ -2415,8 +2443,14 @@ let let_rhs_admitted (ctx : rctx) (e : A.expr) : bool =
    and container env AT that point, so a tail naming a block-local `let` sees
    the facts that `let` established.  Suspended ([None]) inside every nested
    lambda / local `fn`, which have returns of their own; [visit_fn] checks any
-   tail the walk never reached with the parameter-only env, as before. *)
-let ret_elem_demand : (string * (string * elem option list) * A.span * A.expr list ref) option ref =
+   tail the walk never reached with the parameter-only env, as before.  The
+   last component is the verdict cell a failing tail clears:
+   [last_elem_return_proved] for a top-level function, the local's own cell
+   for a block-level `fn` ([visit_local_fn]), so a local's tails never touch
+   the enclosing function's verdict (design 2026-10-18 element-flow
+   follow-ups, G3-2). *)
+let ret_elem_demand :
+    (string * (string * elem option list) * A.span * A.expr list ref * bool ref) option ref =
   ref None
 
 let with_no_ret_demand (f : unit -> 'a) : 'a =
@@ -2424,15 +2458,69 @@ let with_no_ret_demand (f : unit -> 'a) : 'a =
   ret_elem_demand := None;
   Fun.protect ~finally:(fun () -> ret_elem_demand := saved) f
 
+(* The tails of one clause [body] of [fname], which declares the container
+   return [er], for [ret_elem_demand] and the leftover check: each as
+   [(path, tail, (renamed path, renamed tail, complete))].  A tail reached
+   under an inner binding that REBINDS a name the entry mentions (`let n =
+   100` before `[50]` in a function returning `List({Int | _ < n})`) is not
+   about the declared parameter: checked there, `_ < n` meant the local and
+   proved `below(10) = [50]`.  A recorded skip, never checked, and [verdict]
+   is cleared — the scalar post engine's rule
+   ([Refine_post.check_post_induction]'s [check_tails]); design 2026-10-18
+   element-flow follow-ups, row z2.  For the fallback check, which runs in the
+   parameters' env, inner binders clashing with a parameter ([pnames]) are
+   renamed apart in the path and the tail ([Refine_post.rename_free]). *)
+let elem_return_tails errctx ~(label : string) ~(fname : string) ~(span : A.span)
+    ~(verdict : bool ref) ~(pnames : string list) (base : (A.expr * bool) list) (body : A.expr)
+    (er : string * elem option list) =
+  List.filter_map
+    (fun (p, t, bound) ->
+      match List.find_opt (fun n -> elem_entry_mentions [ n ] er) bound with
+      | Some n ->
+        record_elem_skip errctx ~span:(arg_span span t) ~callee:label
+          ~predicate:(first_slot_pred (snd er))
+          ~what:
+            (Printf.sprintf "the return expression of `%s` under an inner binding that rebinds `%s`"
+               fname n);
+        verdict := false;
+        None
+      | None ->
+        let clash = List.filter (fun n -> List.mem n pnames) bound in
+        let env = List.map (fun n -> (n, inner_name n)) (List.sort_uniq compare clash) in
+        let t', complete = rename_free_checked env t in
+        Some (p, t, (rename_path clash p, t', complete)))
+    (tails_bound base [] body)
+
+(* The tails of [ts] the walk never reached ([remaining]), checked under the
+   env given (the leftover check of [elem_return_tails]'s doc). *)
+let check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~(label : string) ~(fname : string)
+    ~(span : A.span) ~(verdict : bool ref) er ts (remaining : A.expr list ref) : unit =
+  List.iter
+    (fun (_, t, (p', t', complete)) ->
+      if List.exists (fun r -> r == t) !remaining then
+        if not complete then begin
+          (* An inner binder the renaming could not reach is still under the
+             parameter's name: not checked. *)
+          record_elem_skip errctx ~span:(arg_span span t) ~callee:label
+            ~predicate:(first_slot_pred (snd er))
+            ~what:
+              (Printf.sprintf
+                 "the return expression of `%s` under an inner binding of a parameter's name" fname);
+          verdict := false
+        end
+        else if not (check_elements ~root errctx defs ctx p' lets sc re cb ce ~span ~callee:label er t')
+        then verdict := false)
+    ts
+
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
   let go = visit ~root errctx defs ctx path lets sc re cb ce in
   let go_path p = visit ~root errctx defs ctx p lets sc re cb ce in
   (match !ret_elem_demand with
-   | Some (label, er, span, remaining) when List.exists (fun t -> t == e) !remaining ->
+   | Some (label, er, span, remaining, verdict) when List.exists (fun t -> t == e) !remaining ->
      remaining := List.filter (fun t -> t != e) !remaining;
      if not (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee:label er e) then
-       last_elem_return_proved := false
+       verdict := false
    | _ -> ());
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
@@ -3139,8 +3227,17 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let proved =
     match ret_ty with
     | Some (A.TyRefine _) ->
-      with_post_lookup (postcond_of ~cb ctx defs) (fun () ->
-          check_fn_post_verdict ~root errctx (if escapes then strip_param_refinements fd else fd))
+      (* A scalar return tail gets phase 2's scalar demand hook
+         ([Refine_post.tail_demand]), as a top-level function's does: the
+         hook's env is the local's own parameters (stripped when it
+         escapes), and the local's name, its siblings and the enclosing
+         function's parameters are locals for name resolution ([ctx]), so a
+         tail call to one of them never resolves to a same-named global.  A
+         captured variable is in no env there, so it only ever loses a
+         proof. *)
+      with_tail_demand (!tail_demand_of ~root (local_shadow ctx [ n.A.txt ]) defs) (fun () ->
+          with_post_lookup (postcond_of ~cb ctx defs) (fun () ->
+              check_fn_post_verdict ~root errctx (if escapes then strip_param_refinements fd else fd)))
     | _ -> false
   in
   let sg = if proved then sg else { sg with ret = None; ret_sort = None } in
@@ -3156,12 +3253,58 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let ctx = local_shadow ~spans:(param_spans ps) ctx names in
   let assumed = if escapes then strip_params_refinements ps else ps in
   let path = path_shadow path names @ params_field_facts ~span:sp ps in
-  visit ~root errctx defs ctx path (launder_shadow lets names)
-    (List.fold_left scope_add_param sc assumed)
-    (List.fold_left recenv_add_param re ps)
-    (List.fold_left cb_add_param cb ps)
-    (cont_add_params ce ps)
-    body;
+  let lets = launder_shadow lets names in
+  let sc = List.fold_left scope_add_param sc assumed in
+  let re = List.fold_left recenv_add_param re ps in
+  let cb = List.fold_left cb_add_param cb ps in
+  let ce = cont_add_params ce ps in
+  (match elem_refinement ret_ty with
+   | None -> visit ~root errctx defs ctx path lets sc re cb ce body
+   | Some er ->
+     (* A declared CONTAINER return (design 2026-10-18 element-flow
+        follow-ups, phase 3, §5): every tail is an element obligation,
+        checked in the walk with the facts in scope there and, if the walk
+        never reached it, afterwards in the body's env — [visit_fn]'s rule.
+        The tails are checked under exactly the parameter facts every call
+        establishes ([assumed], the escape rule above; G3-1).
+
+        The verdict is the local's OWN cell, never [last_elem_return_proved]
+        (the enclosing top-level function's, read by [gate_elem_returns]):
+        sharing it would let a local whose tails prove reset the flag after
+        an earlier failing tail of the enclosing function and admit that
+        function falsely (G3-2, row l5).  The enclosing function's self-calls
+        inside the local still clear the global cell ([check_arg_elements]).
+
+        On a proved verdict the signature the block puts into [cbenv] lends
+        its entry to the later calls ([declared_elem_return], by physical
+        identity): only a closed entry (one naming a captured variable or a
+        parameter is not a fact at a call site, G3-5), and never one that
+        names the enclosing function's abstract refinements (G3-4).  No
+        self-call hypothesis (G3-3): the signature is registered only after
+        the walk, so a recursive call inside the body carries nothing, and an
+        unproved element argument at that self-call clears the verdict
+        ([local_elem_self], the induction gate). *)
+     let label = Printf.sprintf "return of %s" n.A.txt in
+     let verdict = ref true in
+     let ts =
+       elem_return_tails errctx ~label ~fname:n.A.txt ~span:sp ~verdict
+         ~pnames:(List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps)
+         path body er
+     in
+     let remaining = ref (List.map (fun (_, t, _) -> t) ts) in
+     let saved_self = !local_elem_self in
+     ret_elem_demand := Some (label, er, sp, remaining, verdict);
+     local_elem_self := Some (sg, verdict);
+     Fun.protect
+       ~finally:(fun () ->
+         ret_elem_demand := None;
+         local_elem_self := saved_self)
+       (fun () ->
+         visit ~root errctx defs ctx path lets sc re cb ce body;
+         check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~label ~fname:n.A.txt ~span:sp
+           ~verdict er ts remaining);
+     if !verdict && entry_is_closed er && not (entry_mentions !current_abstracts er) then
+       local_elem_ret_proved := sg :: !local_elem_ret_proved);
   entry
 
 (* A lambda's body.  [assume] says whether its own parameter refinements may
@@ -3863,38 +4006,11 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
           match elem_refinement fd.A.fn_ret_ty with
           | Some er ->
             let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-            (* A tail reached under an inner binding that REBINDS a name the
-               entry mentions (`let n = 100` before `[50]` in a function
-               returning `List({Int | _ < n})`) is not about the declared
-               parameter: checked there, `_ < n` meant the local and proved
-               `below(10) = [50]`.  A recorded skip, never checked — the
-               scalar post engine's rule ([Refine_post.check_post_induction]'s
-               [check_tails]); design 2026-10-18 element-flow follow-ups,
-               row z2. *)
             let ts =
-              List.filter_map
-                (fun (p, t, bound) ->
-                  match List.find_opt (fun n -> elem_entry_mentions [ n ] er) bound with
-                  | Some n ->
-                    record_elem_skip errctx ~span:(arg_span c.A.fc_span t) ~callee:label
-                      ~predicate:(first_slot_pred (snd er))
-                      ~what:
-                        (Printf.sprintf
-                           "the return expression of `%s` under an inner binding that rebinds `%s`"
-                           fd.A.fn_name.A.txt n);
-                    last_elem_return_proved := false;
-                    None
-                  | None ->
-                    (* For the fallback check, which runs in the parameters'
-                       env: inner binders clashing with a parameter are
-                       renamed apart in the path and the tail
-                       ([Refine_post.rename_free]). *)
-                    let pnames = List.concat_map fnparam_binders c.A.fc_params in
-                    let clash = List.filter (fun n -> List.mem n pnames) bound in
-                    let env = List.map (fun n -> (n, inner_name n)) (List.sort_uniq compare clash) in
-                    let t', complete = rename_free_checked env t in
-                    Some (p, t, (rename_path clash p, t', complete)))
-                (tails_bound base [] c.A.fc_body)
+              elem_return_tails errctx ~label ~fname:fd.A.fn_name.A.txt ~span:c.A.fc_span
+                ~verdict:last_elem_return_proved
+                ~pnames:(List.concat_map fnparam_binders c.A.fc_params)
+                base c.A.fc_body er
             in
             Some (er, ts, ref (List.map (fun (_, t, _) -> t) ts))
           | None -> None
@@ -3939,7 +4055,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         let saved_demand = !ret_elem_demand and saved_hyp = !elem_ret_hyp in
         ret_elem_demand :=
           (match demand with
-           | Some (er, _, remaining) -> Some (label, er, c.A.fc_span, remaining)
+           | Some (er, _, remaining) -> Some (label, er, c.A.fc_span, remaining, last_elem_return_proved)
            | None -> None);
         elem_ret_hyp := hyp;
         Fun.protect
@@ -3952,25 +4068,9 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         Fun.protect ~finally:(fun () -> elem_ret_hyp := saved_hyp) @@ fun () ->
         (match demand with
          | Some (er, ts, remaining) ->
-           List.iter
-             (fun (_, t, (p', t', complete)) ->
-               if List.exists (fun r -> r == t) !remaining then
-                 if not complete then begin
-                   (* An inner binder the renaming could not reach is still
-                      under the parameter's name: not checked. *)
-                   record_elem_skip errctx ~span:(arg_span c.A.fc_span t) ~callee:label
-                     ~predicate:(first_slot_pred (snd er))
-                     ~what:
-                       (Printf.sprintf
-                          "the return expression of `%s` under an inner binding of a parameter's name"
-                          fd.A.fn_name.A.txt);
-                   last_elem_return_proved := false
-                 end
-                 else if not
-                      (check_elements ~root errctx defs outer_ctx p' [] sc re cb ce ~span:c.A.fc_span
-                         ~callee:label er t')
-                 then last_elem_return_proved := false)
-             ts
+           check_leftover_tails ~root errctx defs outer_ctx [] sc re cb ce ~label
+             ~fname:fd.A.fn_name.A.txt ~span:c.A.fc_span ~verdict:last_elem_return_proved er ts
+             remaining
          | None -> ()))
       walked.A.fn_clauses)
 

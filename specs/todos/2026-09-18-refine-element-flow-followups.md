@@ -21,9 +21,14 @@ not do"; remove the bullet there when closing one.
    invariant (its negative occurrence), a separate soundness argument owned by
    `specs/2026-10-18-fold-accumulator-invariants-design.md`; `acc` gets no
    domain fact.
-3. **A local `fn` with a container return** has no tail checks
+3. ~~**A local `fn` with a container return** has no tail checks
    (`ret_elem_demand` is suspended inside it) and lends nothing at its call
-   sites. Give it a demand and a gate like `visit_fn` / `gate_elem_returns`.
+   sites. Give it a demand and a gate like `visit_fn` / `gate_elem_returns`.~~
+   **Closed 2026-10-18** by phase 3 of
+   `specs/2026-10-18-element-flow-followups-design.md`; see
+   `specs/progress/2026-10-18-element-flow-phase3-local-fn-returns.md`. Closed
+   entries only, and no self-call hypothesis for a recursive local (both
+   stated in `specs/lang/refinement-types.md`).
 4. **Relational element returns** (`: List({Int | _ < n})`) are not facts at a
    call site (`entry_is_closed`). Substitute the actuals as `postcond_of` does
    for a scalar relational return.

@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: an element passed to `return of bad` does not satisfy precondition `_ > 0`
+-- Element refinements, a local `fn` with a container return (2026-10-18,
+-- design specs/2026-10-18-element-flow-followups-design.md phase 3): the
+-- local `bad` declares `List({Int | _ > 0})` and returns `[n, 0]`.  Before,
+-- no obligation was filed for a local's tails at all, so `cap verified`
+-- ACCEPTED this module although `bad(5)` returns a list holding 0.  The `0` is
+-- now a violation (and `n`, unconstrained, a skip).  Accept twin: accept/t390.
+mod LocalContainerReturnViolated do
+  cap verified
+  fn first(xs : List(Int)) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil -> 1
+    end
+  end
+  fn go(k : Int) : Int do
+    fn bad(n : Int) : List({Int | _ > 0}) do [n, 0] end
+    first(bad(k))
+  end
+end

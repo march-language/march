@@ -64,9 +64,25 @@ git log is authoritative for exact commits.
   skip, never a violation, since whether it is returned depends on the data. A
   fold's accumulator still gets no fact, and a demand that names another
   parameter (`_ < len(xs)`) is not traced.
+- **Refinements: a local `fn` with a container return now lends it to its later
+  calls.** Inside a block, `fn two(n : {Int | _ > 0}) : List({Int | _ > 0}) do
+  [n, n + 1] end` followed by `sum_pos(two(k))` is proved, as is a `let ys =
+  two(k)` used later and a top-level function whose tail is the local's call:
+  once every tail of the local is proved, its declared element refinement is a
+  fact at each later call in the block (the same rule a top-level function
+  follows). A local that is not proved, is shadowed by another of the same name,
+  or whose return names a captured variable lends nothing. A local's scalar
+  return tail (`fn f(p) : {Int | _ > 0} do Option.unwrap_or(p, 1) end`) is now
+  checked through its sources, as a top-level one's is.
 
 ### Fixed
 
+- **Refinements: a local `fn`'s container return is checked.** A block-level
+  `fn bad(n : Int) : List({Int | _ > 0}) do [n, 0] end` filed no obligation for
+  its tails, so it was accepted silently, even under `cap verified`, although
+  `bad(5)` returns a list holding 0. Every tail element is now an obligation, as
+  for a top-level function: the `0` is a violation. `--refine-audit` already
+  called this position enforced; it now is.
 - **Refinements: a recursive helper's element return is no longer trusted when
   its own recursive call skips a precondition.** A helper such as
   `pfn go(lst, acc : List({Int | _ > 0})) : List({Int | _ > 0})` that recursed
