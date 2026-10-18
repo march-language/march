@@ -2224,8 +2224,66 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
            in
            ((if List.mem `V results then `V else if List.for_all (( = ) `P) results then `P else `U), declined)
          in
+         (* A NAMED callable passed as argument [i] contributes its declared
+            return (scalar, or proved element return) only when each of its
+            refined parameters is met by what [g] hands it there (review of
+            the fold phase 1 commit): its return is proved ASSUMING those
+            refinements, and at a type-variable domain no pass site obliges
+            them.  `need_pos(fold_left(ys, 1, dec2))` with `dec2(a : {Int | _
+            > 100}, _x) : {Int | _ > 0} do a - 50 end` was proved; it is -49
+            on `[5]`.  A position may assume: the demand [D] of a demanded
+            variable (the invariant hypothesis, [hyp_ok] only; the same
+            induction step a lambda's parameter takes), or the agreed element
+            refinement of its variable ([lambda_domain_facts]).  Anything
+            else, a precondition naming another parameter, or an arity that
+            does not match the chain, declines. *)
+         let named_preconds (i : int) (f : string) (fsg : fn_sig) : (unit, string) result =
+           if fsg.refined = [] then Ok ()
+           else
+             match Option.join (List.nth_opt sg.param_tys i) with
+             | None -> Error (Printf.sprintf "`%s`'s parameters cannot be matched to what `%s` passes" f g)
+             | Some t ->
+               let doms, _ = arrow_chain t in
+               if List.length doms <> List.length fsg.param_names then
+                 Error (Printf.sprintf "`%s`'s parameters cannot be matched to what `%s` passes" f g)
+               else
+                 let efacts = lambda_domain_facts ctx defs cb ce g sg args i in
+                 let pname (rp : rparam) =
+                   match List.nth_opt fsg.param_names rp.idx with
+                   | Some n when n <> callback_param_name -> Printf.sprintf " on `%s`" n
+                   | _ -> ""
+                 in
+                 let unmet (rp : rparam) =
+                   Printf.sprintf "the precondition `%s` of `%s`%s is not known to hold of what `%s` passes it"
+                     (pred_str rp.pred) f (pname rp) g
+                 in
+                 let check (rp : rparam) : (unit, string) result =
+                   if classify_pred rp.binder [] rp.pred <> Closed then Error (unmet rp)
+                   else
+                     let fact =
+                       match Option.map strip_ty (List.nth_opt doms rp.idx) with
+                       | Some (A.TyVar v) ->
+                         (match List.assoc_opt v.A.txt pairs with
+                          | Some (Refined dq) when hyp_ok -> Some dq
+                          | _ -> List.assoc_opt rp.idx efacts)
+                       | _ -> None
+                     in
+                     match fact with
+                     | None -> Error (unmet rp)
+                     | Some q ->
+                       let sc' = ("$p", q) :: scope_shadow sc [ "$p" ] in
+                       (match
+                          scalar_ok { cx0 with sc = sc' } (rp.binder, rp.pred, rp.sort)
+                            (A.EVar { A.txt = "$p"; A.span = A.dummy_span })
+                        with
+                        | `P -> Ok ()
+                        | `U | `V -> Error (unmet rp))
+                 in
+                 List.fold_left (fun acc rp -> match acc with Ok () -> check rp | e -> e) (Ok ()) fsg.refined
+         in
          let discharge (b : string) (d : elem) (src : source)
-             : [ `P | `U | `V ] * string * [ `Captured of string | `Declined of string ] option =
+             : [ `P | `U | `V ] * string
+               * [ `Captured of string | `Declined of string | `Precond of string ] option =
            let describe i = Printf.sprintf "argument %d of `%s`" (i + 1) g in
            match src with
            | Src_bare i ->
@@ -2303,10 +2361,13 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
                 (match e with
                  | A.EVar { A.txt = f; A.span = fsp } ->
                    (match callee_sig ctx defs cb f with
-                    | Some { ret = Some (rb, rq); ret_sort = rsrt; param_names; _ }
+                    | Some ({ ret = Some (rb, rq); ret_sort = rsrt; param_names; _ } as fsg)
                       when classify_pred rb [] rq = Closed || param_names = [ callback_param_name ] ->
-                      let sc' = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
-                      (scalar_ok { cx0 with sc = sc' } r (A.EVar { A.txt = "$r"; A.span = fsp }), what, None)
+                      (match named_preconds i f fsg with
+                       | Error why -> (`U, what, Some (`Precond why))
+                       | Ok () ->
+                         let sc' = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
+                         (scalar_ok { cx0 with sc = sc' } r (A.EVar { A.txt = "$r"; A.span = fsp }), what, None))
                     | _ -> (`U, what, None))
                  | _ -> (`U, what, None))
               | Some (`C entry), None ->
@@ -2314,8 +2375,15 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
                  | A.EVar { A.txt = f; A.span = fsp } ->
                    (match declared_elem_return ctx cb f with
                     | Some fe ->
-                      let ce' = (f, fe) :: cont_shadow ce [ f ] in
-                      (ok_of (check_elements ~root errctx defs ctx path lets sc re cb ce' ~span:fsp ~callee entry e), what, None)
+                      (match
+                         match callee_sig ctx defs cb f with
+                         | Some fsg -> named_preconds i f fsg
+                         | None -> Error (Printf.sprintf "`%s` has no signature to read its preconditions from" f)
+                       with
+                       | Error why -> (`U, what, Some (`Precond why))
+                       | Ok () ->
+                         let ce' = (f, fe) :: cont_shadow ce [ f ] in
+                         (ok_of (check_elements ~root errctx defs ctx path lets sc re cb ce' ~span:fsp ~callee entry e), what, None))
                     | None -> (`U, what, None))
                  | _ -> (`U, what, None)))
          in
@@ -2385,6 +2453,7 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
                     (match declined with
                      | Some (`Declined why) ->
                        Printf.sprintf "%s; no invariant was assumed of it, because %s" (plain what) why
+                     | Some (`Precond why) -> Printf.sprintf "%s: %s" (plain what) why
                      | Some (`Captured _) | None -> plain what))
              | `Base i ->
                (* The initial value named and rendered: "the initial value `0`
@@ -2406,6 +2475,7 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
                `Unproved
                  (Obligation.Accumulator_step_unproved
                     (match declined with
+                     | Some (`Precond why) -> Printf.sprintf "%s: %s" (plain fn) why
                      | Some (`Declined why | `Captured why) ->
                        Printf.sprintf "%s; no invariant was assumed of it, because %s" (plain fn) why
                      | None when v = `V ->

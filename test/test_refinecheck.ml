@@ -17691,6 +17691,119 @@ let fold_invariants_1_suite =
              (m "  fn k9(z : b, f : b -> b, g : Int -> b) : b do f(g(3)) end\n\
                  \  fn go(n : Int) : Int do need_nn(k9(0, fn a -> a + 1, fn _w -> 5)) end\n"))) ]
 
+(* ── A named callback's declared return needs its preconditions ─────────
+   (review of the fold phase 1 commit, 2026-10-18).  [discharge_pairs]
+   discharged a `Src_cod` source passed as a NAMED function through that
+   function's declared return refinement, which is proved only ASSUMING its
+   own parameter refinements; nothing checked that what the callee hands the
+   function meets them (a type-variable domain has no pass-site obligation).
+   `need_pos(foldl(ys, 1, dec2))` with `dec2(a : {Int | _ > 100}, _x) :
+   {Int | _ > 0} do a - 50 end` was proved; `foldl([5], 1, dec2)` is -49.
+   Now each refined parameter at a type-variable position must follow from
+   what the callee guarantees there (the accumulator demand, by the
+   invariant rule; the elements' agreed refinement); otherwise the source is
+   not proved.  Each case pins the verdict of the DEMANDING call only (the
+   named functions' own return obligations prove either way). *)
+let named_callback_preconds_suite =
+  let prelude =
+    {|  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn foldl(xs : List(a), acc : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> foldl(t, f(acc, h), f)
+    end
+  end
+  fn mapl(xs : List(a), f : a -> b) : List(b) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> Cons(f(h), mapl(t, f))
+    end
+  end
+|}
+  in
+  let m body = "mod NC do\n" ^ prelude ^ body ^ "end\n" in
+  let mv body = "mod NC do\n  cap verified\n" ^ prelude ^ body ^ "end\n" in
+  (* (verdict, reason) of every obligation on [callee]. *)
+  let on callee src =
+    List.filter_map
+      (fun (c, v, r) -> if c = callee then Some (v ^ (if r = "" then "" else ":" ^ r)) else None)
+      (typed_obligations src)
+  in
+  let details src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r -> Some (March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let ls = Alcotest.(list string) in
+  let pos = "pos : List({Int | _ > 0})" in
+  let dec2 = "  fn dec2(a : {Int | _ > 100}, _x : Int) : {Int | _ > 0} do a - 50 end\n" in
+  let g = "  fn g(_a : Int, x : {Int | _ > 0}) : {Int | _ > 0} do x end\n" in
+  let dbl = "  fn dbl(x : {Int | _ > 0}) : {Int | _ > 0} do x + x end\n" in
+  [ gated "p10: the accumulator position's precondition is not met by the demand" (fun () ->
+        (* 6fcef2c9d and 32a847506: proved. *)
+        let src = m (dec2 ^ "  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, dec2)) end\n") in
+        Alcotest.check ls "need_pos skipped" [ "skipped:accumulator-step-unproved" ] (on "need_pos" src);
+        Alcotest.(check bool) "naming dec2's precondition" true
+          (List.exists (mentions "precondition `_ > 100` of `dec2`") (details src));
+        Alcotest.(check bool) "cap verified rejects" true
+          (has_refine_error_typed
+             (mv (dec2 ^ "  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, dec2)) end\n"))));
+
+    gated "p11: the element position's precondition is not met by unrefined elements" (fun () ->
+        (* 6fcef2c9d and 32a847506: proved; `foldl([0 - 5], 1, g)` is -5. *)
+        let src = m (g ^ "  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, g)) end\n") in
+        Alcotest.check ls "need_pos skipped" [ "skipped:accumulator-step-unproved" ] (on "need_pos" src));
+
+    gated "map: a named element function's precondition" (fun () ->
+        (* `sum_pos(mapl(ys, dbl))` with unrefined `ys`: was proved;
+           `mapl([0 - 1], dbl)` is `[-2]`. *)
+        let src = m (dbl ^ "  fn go(ys : List(Int)) : Int do sum_pos(mapl(ys, dbl)) end\n") in
+        Alcotest.check ls "sum_pos skipped" [ "skipped:parametric-source-unproved" ] (on "sum_pos" src);
+        Alcotest.check ls "control: refined elements prove" [ "proved" ]
+          (on "sum_pos" (m (dbl ^ "  fn go(" ^ pos ^ ") : Int do sum_pos(mapl(pos, dbl)) end\n"))));
+
+    gated "a callback parameter passed on: its domain refinement is a precondition too" (fun () ->
+        let src =
+          m "  fn go(ys : List(Int), k : ({x : Int | x > 100}) -> {Int | _ > 0}) : Int do sum_pos(mapl(ys, k)) end\n"
+        in
+        Alcotest.check ls "sum_pos skipped" [ "skipped:parametric-source-unproved" ] (on "sum_pos" src);
+        Alcotest.check ls "control: an unrefined domain proves" [ "proved" ]
+          (on "sum_pos"
+             (m "  fn go(ys : List(Int), k : (Int) -> {Int | _ > 0}) : Int do sum_pos(mapl(ys, k)) end\n")));
+
+    gated "control: a named step with no refined parameter still proves" (fun () ->
+        Alcotest.check ls "proved" [ "proved" ]
+          (on "need_pos"
+             (m "  fn one(_a : Int, _x : Int) : {Int | _ > 0} do 1 end\n\
+                 \  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, one)) end\n")));
+
+    gated "control: the accumulator demand discharges the step's precondition" (fun () ->
+        (* D = `_ > 0`, the base 1 meets it, and `keep`'s `a > 0` follows. *)
+        Alcotest.check ls "proved" [ "proved" ]
+          (on "need_pos"
+             (m "  fn keep(a : {Int | _ > 0}, _x : Int) : {Int | _ > 0} do a end\n\
+                 \  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, keep)) end\n")));
+
+    gated "control: the elements' refinement discharges the step's precondition" (fun () ->
+        Alcotest.check ls "proved" [ "proved" ]
+          (on "need_pos" (m (g ^ "  fn go(" ^ pos ^ ") : Int do need_pos(foldl(pos, 1, g)) end\n"))));
+
+    gated "a precondition the demand does not imply is still not met" (fun () ->
+        (* D = `_ > 0` does not give `_ > 100`, even with the base `200`. *)
+        Alcotest.check ls "skipped" [ "skipped:accumulator-step-unproved" ]
+          (on "need_pos" (m (dec2 ^ "  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 200, dec2)) end\n")))) ]
+
 (* ── Datatype instances from declared types (plan steps 1.3 + 1.4) ──────
    Each datatype instance is declared as its own monomorphic datatype; a term's instance
    comes from the declared type it is checked against and from what
@@ -20939,6 +21052,7 @@ let () =
       ("elemflow-scalar-demand", elemflow_scalar_demand_suite);
       ("post-inner-binders", post_inner_binders_suite);
       ("fold-invariants-1", fold_invariants_1_suite);
+      ("named-callback-preconds", named_callback_preconds_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);

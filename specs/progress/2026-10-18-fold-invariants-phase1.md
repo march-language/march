@@ -167,3 +167,65 @@ The corpus is 468/468 (196 accept, 272 reject).
 - Phases 2-4 of the design (container accumulators f17, element facts for peeled curried
   parameters, stdlib fold signatures, the annotated accumulator). §7's other out-of-scope
   todos are filed at phase 2 as the design says.
+
+## Review follow-up: a named step's preconditions (second commit, same day)
+
+An independent review of `32a847506` found no false proof introduced by the rule, but one
+pre-existing one beside it (also on `6fcef2c9d`), runtime-confirmed: `discharge_pairs`'
+named-callable arm (`Src_cod` passed as a bare `EVar f`) took `f`'s declared return
+refinement as the source's result without checking that what the callee hands `f` meets
+`f`'s own parameter refinements, and a type-variable domain has no pass-site obligation.
+
+```march
+fn dec2(a : {Int | _ > 100}, _x : Int) : {Int | _ > 0} do a - 50 end
+need_pos(List.fold_left(ys, 1, dec2))     -- was PROVED; go([5]) is -49
+fn g(_a : Int, x : {Int | _ > 0}) : {Int | _ > 0} do x end
+need_pos(List.fold_left(ys, 1, g))        -- was PROVED; go([0 - 5]) is -5
+```
+
+Fix (`named_preconds`, inside `discharge_pairs`, used by both the scalar `` `S `` and the
+container `` `C `` named-callable arms): a named callable with refined parameters
+contributes its return only when its arity matches the callee's arrow chain and every
+refined parameter is CLOSED and implied, at its position, by what the callee guarantees
+there: the demand of a demanded variable (the invariant hypothesis, `hyp_ok` only; the same
+induction step a lambda parameter takes) or the agreed element refinement of the position's
+variable (`lambda_domain_facts`). Each implication is one `scalar_ok` query over a fresh
+`$p` carrying the fact. Anything else declines; the skip's detail names the precondition
+("the precondition `_ > 100` of `dec2` on `a` is not known to hold of what
+`List.fold_left` passes it"). Phase A's helper-inlining rule
+(`specs/progress/2026-10-18-abstract-refinements-leftovers-phaseA.md`) is the same stance:
+a helper's contract only where its refined parameters are proved at the call.
+
+Other routes checked: `List.map(ys, dbl)` with a named `dbl(x : {Int | _ > 0})` and a caller's
+callback parameter `k : ({x : Int | x > 100}) -> {Int | _ > 0}` passed on to `map` went
+through the same arm and were proved too (both fixed, both pinned). A single-parameter named
+callable passed at a type-variable domain IS obliged at the pass site
+(`ap(n, dec)`, `Option.map(o, dec)` report a violation), so the scalar codomain pass site and
+`check_pass_site_elements` do not have this hole for one parameter. They do for TWO or more:
+`pass_site_obligation` returns `None` for a multi-parameter callable, so
+`List.fold_left(ys, 1, dec2)` with no demand on its result files no obligation at all under
+`cap verified`. No false proof follows from it any more (the demand route is fixed), but the
+contract is unenforced: filed as
+`specs/todos/2026-10-18-multi-param-callable-domain-unobliged.md`, not fixed here (it obliges
+new stdlib call sites and needs its own sweep). `Option.unwrap_or_else(o, mk)` takes a
+zero-parameter `mk`, so it has no precondition to miss.
+
+Tests: group `named-callback-preconds` (8 cases, the demanding call's verdict and reason
+only, since the named functions' own return obligations prove either way). On `32a847506`
+five were RED, each a (proved) false proof: p10, p11, `map` over an unrefined list, the
+callback parameter passed on, and `dec2` with the base `200` (the demand `_ > 0` does not
+give `_ > 100`). Green on both: a named step with no refined parameter, `keep(a : {Int | _
+> 0})` discharged by the demand, `g` over a refined list. Perturbations: `named_preconds`
+always `Ok` turns exactly the five red; the demand route removed (element facts only) turns
+exactly "the accumulator demand discharges the step's precondition" red.
+
+Conformance: `reject/t386_refine_named_step_accumulator_precondition` (p10) and
+`reject/t387_refine_named_step_element_precondition` (p11), both ACCEPTED under `cap
+verified` on `32a847506`; `accept/t388_refine_named_step_precondition_discharged` (the three
+controls with the stdlib `List.fold_left`). The corpus is 471/471 (197 accept, 274 reject).
+
+Verification: `test_refinecheck.exe -e` (private `HOME`, VC cache cleared once, three parts):
+426 + 328 + 426 = 1180 tests, all pass; `scripts/run-tests.sh -q compiler` 1348 pass;
+`check_types.sh` 471/471; `refine-oracle.sh` baseline at `32a847506` (detached worktree,
+same depth), check here, staged stdlib set aside: identical, 7786 lines over 549 fixtures
+(blind to it, as before); `scripts/check-docs.sh` passes.

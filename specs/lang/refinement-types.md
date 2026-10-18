@@ -2121,6 +2121,15 @@ As `b` shows, a one-parameter lambda passed where the callee's function
 argument takes the element type receives its source's element refinement as a
 fact, both for this check and for every obligation inside the lambda body.
 
+A *named* function passed there contributes its declared return refinement,
+but only when each of its own refined parameters is met by what the callee
+hands it at that position: the element refinement of the source there, or (for
+a fold's accumulator) the demand itself, see
+[Folds](#folds-an-accumulator-invariant). With
+`fn dbl(x : {Int | _ > 0}) : {Int | _ > 0}`, `sum_pos(List.map(pos, dbl))`
+proves and `sum_pos(List.map(ys, dbl))` over an unrefined `ys` is a skip naming
+`dbl`'s unmet precondition.
+
 A lambda with several parameters gets the same fact position by position: each
 parameter assumes the element refinement of the type variable at its place in
 the callee's function type, when every source of that variable is an element.

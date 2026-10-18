@@ -95,7 +95,18 @@ git log is authoritative for exact commits.
   `need_pos(List.fold_left(pos, 1, fn (acc : {Int | _ > 100}, x) -> acc - 50))`
   was proved from the unchecked annotation (`List.fold_left([5], 1, …)` is
   -49); it is now a skip.
-
+- **Refinements: a named function passed as a callback lends its declared
+  return only when its own preconditions are met.** With
+  `fn dec2(a : {Int | _ > 100}, _x : Int) : {Int | _ > 0} do a - 50 end`,
+  `need_pos(List.fold_left(ys, 1, dec2))` was proved (and `cap verified`
+  compiled it) although `List.fold_left([5], 1, dec2)` is -49: `dec2`'s return
+  holds only when `a > 100`, and nothing checked what `fold_left` passes it.
+  The same held for an element position (`fn g(_a : Int, x : {Int | _ > 0})`
+  over an unrefined list), for `List.map` with a named function, and for a
+  callback parameter passed on. A refined parameter of the named function must
+  now follow from what the callee guarantees at that position (the demand on
+  the accumulator, or the list's element refinement); otherwise the demand is
+  a skip naming the unmet precondition.
 - **Refinements: a recursive helper's element return is no longer trusted when
   its own recursive call skips a precondition.** A helper such as
   `pfn go(lst, acc : List({Int | _ > 0})) : List({Int | _ > 0})` that recursed
