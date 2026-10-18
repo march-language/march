@@ -22456,6 +22456,84 @@ let hidden_field_elements_suite =
           (typed_obligations
              (m "  fn go() : Int do\n    let w = Wrap([(1, 0 - 5)])\n    need(w)\n  end\n"))) ]
 
+(* Fold accumulator invariants, phase 3 (design
+   specs/2026-10-18-fold-accumulator-invariants-design.md §6, §8): the
+   stdlib folds whose public signatures were unannotated now declare the
+   generic arrow shape, so the phase-1/2 rule (P1/P2 parametricity, then the
+   base and the step under the demand) applies to them.  Each module gets a
+   proof (a caller demand through the REAL stdlib fold) and a control whose
+   step breaks the demand (a step skip, never a violation).  Loaded from
+   `stdlib/` relative to the cwd, as [abstract_leftovers_d_suite] does, so a
+   proof row is RED on a base whose stdlib lacks the annotation. *)
+let fold_invariants_3_suite =
+  let load_mod name =
+    let m, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (m.March_ast.Ast.mod_name, March_ast.Ast.Public, m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods =
+         List.map load_mod
+           [ "list.march"; "map.march"; "set.march"; "hash_map.march"; "array.march";
+             "rrb_vec.march"; "deque.march"; "native_array.march"; "seq.march" ]
+       in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  (* The user module's obligations as (callee, verdict, reason). *)
+  let run (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let m = { m with March_ast.Ast.mod_decls = mods @ prelude_decls @ m.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module m in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx m;
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        let f = o.span.March_ast.Ast.file in
+        if f = "" || f = "<unknown>" then
+          Some (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> "")
+        else None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let reasons obs = List.filter_map (fun (_, v, r) -> if v = "skipped" then Some r else None) obs in
+  let t3 = Alcotest.(triple int int int) in
+  let m body =
+    "mod FK do\n\
+    \  fn need_nn(k : {Int | _ >= 0}) : Int do k end\n"
+    ^ body ^ "end\n"
+  in
+  (* [proof name param call]: `need_nn(call)` proves.  [control]: the same
+     fold with a decreasing step is a step skip, not a violation. *)
+  let go param call = m ("  fn go(" ^ param ^ ") : Int do need_nn(" ^ call ^ ") end\n") in
+  let proof name param call =
+    gated (name ^ ": a demand through the fold proves") (fun () ->
+        Alcotest.check t3 call (1, 0, 0) (triple (run (go param call))))
+  in
+  let control name param call =
+    gated (name ^ ": control, a step that breaks the demand stays a skip") (fun () ->
+        let obs = run (go param call) in
+        Alcotest.check t3 call (0, 0, 1) (triple obs);
+        Alcotest.(check (list string)) "step" [ "accumulator-step-unproved" ] (reasons obs))
+  in
+  [ (* Map.fold: was `fold(m, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
+    proof "Map.fold" "mp : Map(Int, Int)" "Map.fold(mp, 0, fn (a, _k, _v) -> a + 1)";
+    control "Map.fold" "mp : Map(Int, Int)" "Map.fold(mp, 0, fn (a, _k, _v) -> a - 1)" ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -22572,6 +22650,7 @@ let () =
       ("fold-invariants-1", fold_invariants_1_suite);
       ("named-callback-preconds", named_callback_preconds_suite);
       ("fold-invariants-2", fold_invariants_2_suite);
+      ("fold-invariants-3", fold_invariants_3_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);
