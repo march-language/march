@@ -730,7 +730,7 @@ typedef struct {
 /* Set the dispatch-table NAME_ID for a hot-reload actor.  Must be called
  * immediately after march_spawn().  name_id is the slot ID registered for
  * the actor's _dispatch function.  No-op if actor has no meta entry. */
-void march_actor_set_dispatch_id(void *actor, uint32_t name_id);
+void march_actor_set_dispatch_id(void *actor, uint32_t name_id, uint32_t build_epoch);
 
 /* Register the global tag of the actor's FIRST message constructor (its
  * "call tag base").  Emitted by codegen right after the actor record's

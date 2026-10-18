@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A hot deploy that changed an actor's state no longer hands an actor spawned by
+  not-yet-redeployed code (such as a closure `main` built) an old-layout state to run
+  the new handlers on, which read garbage fields and could crash: the state is now
+  migrated from the version of the code that built it before the actor's first
+  message.
+- On macOS, `forge deploy hot` now finds a patch's `migrate_state`: it looked for the
+  `__migrate_<Actor>` symbol with `nm -D`, which lists nothing for a Mach-O library,
+  so every deploy that changed an actor's state was refused as missing its migration.
 - Two nodes built from different versions of a protocol no longer form a session
   through `<P>_Run.cluster_<Role>` and find the skew mid-session: each role registers
   its protocol fingerprint beside its endpoint, and a peer with a different one, or

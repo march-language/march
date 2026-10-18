@@ -319,3 +319,11 @@
     (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (run %{exe:test_release_build.exe})))))))
+
+; test_so_exports_symbol.ml: Cmd_deploy_hot.so_exports_symbol, the check
+; `forge deploy hot` uses to find a patch's migrate_state, on a real
+; cc-built .so (macOS's `nm -D` printed nothing, so it was always false).
+(test
+ (name test_so_exports_symbol)
+ (modules test_so_exports_symbol)
+ (libraries march_forge alcotest unix))

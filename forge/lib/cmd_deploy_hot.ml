@@ -1356,10 +1356,18 @@ let get_epoch_from_server ~ssh_host ~remote_socket : int =
 
 (* ─── Main deploy flow ───────────────────────────────────────────────────── *)
 
-(* Check if a symbol is exported from a shared library (for migrate_state presence check). *)
+(* Check if a symbol is exported from a shared library (for migrate_state presence check).
+   `nm -D` reads an ELF's dynamic symbol table and prints NOTHING for a
+   Mach-O image, so on macOS this was always false: every deploy that changed
+   an actor's state was refused for want of the migrate_state it carried, and
+   the sig_hash exemption for a migrating dispatch never applied.  So `nm -g`
+   (the external symbols) is asked too, and Mach-O's leading underscore
+   (`___migrate_C` for `__migrate_C`) is accepted. *)
 let so_exports_symbol (so_path : string) (sym : string) : bool =
-  let cmd = Printf.sprintf "nm -D %s 2>/dev/null | grep -q ' T %s$'"
-    (Filename.quote so_path) (Filename.quote sym) in
+  let pat = Filename.quote (Printf.sprintf " T _?%s$" sym) in
+  let cmd = Printf.sprintf
+    "{ nm -D %s 2>/dev/null; nm -g %s 2>/dev/null; } | grep -Eq %s"
+    (Filename.quote so_path) (Filename.quote so_path) pat in
   Sys.command cmd = 0
 
 let deploy_connected (_conn : conn) ~signing_pubkey:_ ~sk:_ ~manifest:_
