@@ -4174,6 +4174,18 @@ void march_sandbox_install(void) { /* not built with --cap-sandbox */ }
 static void march_register_sched_callbacks(void);
 
 static void spawn_main_impl(void (*fn)(void), int force_pin) {
+    /* The observe socket reads its environment (getenv) when it starts.
+     * Start it here, before `main` is runnable: march_run_scheduler starts it
+     * too, but when a scheduler is already running in the background
+     * (march_ensure_sched_started) `main` is executing by then, and its
+     * Process.set_env (setenv frees the old environ) racing that getenv on
+     * this thread is a SIGSEGV in getenv.  Both calls are once-only.
+     * And before the sandbox install: the listener is the runtime's, not the
+     * program's, and a --cap-sandbox program that withholds IO.NetListen
+     * (Linux: IO.Network too) would have its bind refused, as the reload
+     * server's was (march_reload.c, reload_listen). */
+    march_observe_snapshot_install();
+    march_observe_maybe_start();
     /* Drop privileges before the scheduler starts and before any user code
      * runs.  No-op unless built with --cap-sandbox. */
     march_sandbox_install();
@@ -4219,14 +4231,6 @@ static void spawn_main_impl(void (*fn)(void), int force_pin) {
        it: a program compiled --pin-main needs the main thread to run at all
        (Cocoa/GLFW), so honouring MARCH_PIN_MAIN=0 there would break it in a
        way the user cannot diagnose from the message they would not get. */
-    /* The observe socket reads its environment (getenv) when it starts.
-     * Start it here, before `main` is runnable: march_run_scheduler starts it
-     * too, but when a scheduler is already running in the background
-     * (march_ensure_sched_started) `main` is executing by then, and its
-     * Process.set_env (setenv frees the old environ) racing that getenv on
-     * this thread is a SIGSEGV in getenv.  Both calls are once-only. */
-    march_observe_snapshot_install();
-    march_observe_maybe_start();
     /* `main` is the one unit that follows the current code version instead
      * of pinning an epoch (march_proc.code_epoch): it runs for the process
      * lifetime and never reaches a marker, so a pinned main would keep its

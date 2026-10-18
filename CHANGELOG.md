@@ -19,6 +19,15 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- `--hot-reload` programs built with `--cap-sandbox` now keep their reload and observe
+  sockets when they withhold `IO.NetListen`: the reload server's listener is bound
+  before the sandbox is installed instead of racing it on its own thread, and the
+  observe socket starts before the install instead of after it (where its bind was
+  always refused). An over-long reload socket path is now refused instead of silently
+  truncated.
+
 ### Documentation
 
 - **An upgrade guide for 0.6.0.** `docs/upgrading-to-0-6-0.md` covers the two
