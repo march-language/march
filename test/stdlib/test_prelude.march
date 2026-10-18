@@ -118,6 +118,25 @@ describe "filter" do
     let xs = Cons(2, Cons(4, Cons(6, Nil)))
     assert (length(filter(xs, fn x -> x % 2 == 0)) == 3)
   end
+
+  test "filter preserves order" do
+    assert (filter([5, 1, 4, 2, 3, 6], fn x -> x > 2) == [5, 4, 3, 6])
+  end
+
+  test "filter on empty list" do
+    let empty : List(Int) = Nil
+    assert is_nil(filter(empty, fn x -> x > 0))
+  end
+
+  test "filter where all pass is the input" do
+    assert (filter([9, 2, 7], fn x -> x > 0) == [9, 2, 7])
+  end
+
+  test "filter a long list" do
+    let xs = List.range(0, 100000)
+    let ys = filter(xs, fn x -> x >= 99997)
+    assert (ys == [99997, 99998, 99999])
+  end
 end
 
 describe "map" do

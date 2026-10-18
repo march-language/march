@@ -68,18 +68,16 @@ mod Iterable do
     go(xs, Nil)
   end
 
-  doc "Returns only the elements for which pred returns true."
-  fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-    fn go(lst : List(a), acc : List(a)) : List(a) do
-      match lst do
-      Nil        -> rev(acc)
-      Cons(h, t) -> do
-        if pred(h) do go(t, Cons(h, acc))
-        else go(t, acc) end
-      end
-      end
+  doc "Returns only the elements for which pred returns true, in order. Every element of the result is known to satisfy `pred` (an abstract refinement `p`, as for `List.filter`)."
+  fn filter(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    -- List.filter's natural body, copied rather than called. TRMC makes it
+    -- a single-traversal loop, and the element contract is proved through
+    -- the self-call.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do Cons(h, filter(t, pred)) else filter(t, pred) end
     end
-    go(xs, Nil)
   end
 
   -- ---- Reduction ----
@@ -133,8 +131,8 @@ mod Iterable do
     end
   end
 
-  doc "Returns the first element satisfying pred, or None."
-  fn find(xs : List(a), pred : a -> Bool) : Option(a) do
+  doc "Returns the first element satisfying pred, or None. The element, when present, is known to satisfy `pred` (an abstract refinement `p`, as for `List.filter`)."
+  fn find(xs : List(a), pred : a -> Bool[p]) : Option(a[p]) do
     match xs do
     Nil        -> None
     Cons(h, t) -> do

@@ -85,8 +85,8 @@ mod Range do
     List.map(to_list(r), f)
   end
 
-  doc "Returns a list of elements satisfying predicate f."
-  fn filter(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool) : List(Int) do
+  doc "Returns a list of elements satisfying predicate f, in order. Every element of the result is known to satisfy `f` (an abstract refinement `p`, as for `List.filter`)."
+  fn filter(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool[p]) : List(Int[p]) do
     List.filter(to_list(r), f)
   end
 

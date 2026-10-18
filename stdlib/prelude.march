@@ -130,15 +130,23 @@ mod Prelude do
     end
   end
 
-  doc "Returns only the elements satisfying `pred`."
-  fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-    fn go(acc : List(a), remaining : List(a)) : List(a) do
-      match remaining do
-      Nil        -> reverse(acc)
-      Cons(h, t) -> if pred(h) do go(Cons(h, acc), t) else go(acc, t) end
-      end
+  doc """
+  Returns only the elements satisfying `pred`, in order.
+
+  Every element of the result is known to satisfy `pred` (an abstract
+  refinement `p`, as for `List.filter`): with
+  `sum_pos(xs : List({Int | _ > 0}))`, `sum_pos(filter(ys, fn y -> y > 0))`
+  is proved.
+  """
+  fn filter(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    -- List.filter's natural body, copied rather than called (the prelude
+    -- does not depend on List). TRMC makes it a single-traversal loop, and
+    -- the element contract is proved through the self-call.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do Cons(h, filter(t, pred)) else filter(t, pred) end
     end
-    go(Nil, xs)
   end
 
   doc "Applies `f` to every element of the list."
