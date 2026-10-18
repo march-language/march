@@ -917,18 +917,38 @@ let lambda_domain_params (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : 
     in
     if (if k = 1 then chain < 1 else chain <> k) || List.exists own_refined ps then None
     else
-      let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+      (* A wildcard parameter binds nothing, so it captures nothing; kept,
+         it would match every fact's default `_` binder and decline the
+         sibling's fact (`fn (_, y) -> need_pos(y)`). *)
+      let names =
+        List.filter_map
+          (fun (p : A.param) -> match p.A.param_name.A.txt with "_" -> None | n -> Some n)
+          ps
+      in
+      let wild = List.length names < k in
       let facts = lambda_domain_facts ctx defs cb ce fname sg args i in
       let given = ref false in
       let ps' =
         List.mapi
           (fun j (p : A.param) ->
             match List.assoc_opt j facts, p.A.param_ty with
-            | Some ((b, qp, _) as q), (None | Some (A.TyCon _))
-              when not
+            | Some ((b, qp, srt) as q), (None | Some (A.TyCon _))
+              when p.A.param_name.A.txt <> "_"
+                   && not
                      (expr_mentions
                         (List.filter (fun n -> not (n = b && n = p.A.param_name.A.txt)) names)
                         qp) ->
+              (* With a wildcard sibling, the fact is spelled with the
+                 parameter's own name as its binder: binding `_` shadows
+                 every scope entry that mentions `_` ([scope_add_param]), so a
+                 default-binder `{Int | _ > 0}` on `x` in `fn (x, _)` would
+                 be retired the moment `_` is bound. *)
+              let q =
+                if b = "_" && wild then
+                  let x = p.A.param_name.A.txt in
+                  (x, subst_params [ ("_", A.EVar { A.txt = x; A.span = A.dummy_span }) ] qp, srt)
+                else q
+              in
               (match ty_of_refined q with
                | Some ty -> given := true; { p with A.param_ty = Some ty }
                | None -> p)

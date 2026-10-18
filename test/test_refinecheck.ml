@@ -16880,6 +16880,20 @@ let elemflow_multiparam_suite =
              (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
                  \    if n <= 0 do zipw(xs, ys, fn (y, m) -> need_neg(y)) else Nil end\n  end\n")));
 
+    gated "G2-3: a wildcard parameter binds nothing, so it captures nothing" (fun () ->
+        (* `_` is the default binder of every `{Int | _ > 0}`; a wildcard
+           sibling must not count as a name the fact mentions.  bcdaba5f5:
+           (0, 0, 1), an over-rejection. *)
+        Alcotest.check t3 "fn (_, y) -> need_pos(y) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (_, y) -> need_pos(y)) end\n")));
+        Alcotest.check t3 "fn (x, _) -> need_pos(x) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (x, _) -> need_pos(x)) end\n")));
+        (* Control: a NAMED sibling capture still declines. *)
+        Alcotest.check t3 "fn (n, y) -> if n < 0 do need_neg(y) …: still not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    zipw(ys, xs, fn (n, y) -> if n < 0 do need_neg(y) else 0 end)\n  end\n")));
+
     gated "a violating step still violates" (fun () ->
         (* A fact never hides a real failure. *)
         Alcotest.check t3 "need_pos(0 - 1) in a fold step is violated" (0, 1, 0)

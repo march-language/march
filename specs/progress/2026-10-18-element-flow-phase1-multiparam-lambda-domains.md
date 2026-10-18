@@ -132,6 +132,31 @@ rejected on the base as well; they pin the guards, not a fixed bug. The corpus i
   before the first of three runs, two rounds each, load average ~10: base medians
   1.146 / 1.185 s, this change 1.112 / 1.123 s. Within the design's 5% budget (noise).
 
+## Review follow-up: wildcard parameters (second commit, same day)
+
+An independent review (~10 attack shapes, no unsound result) found one over-rejection:
+G2-3's name list kept a wildcard parameter `_`, which matched the default `_` binder of
+every fact, so `zipw(xs, ys, fn (_, y) -> need_pos(y))` gave `y` nothing. Fixing that
+exposed a second cause for the mirror shape `fn (x, _) -> need_pos(x)`: binding the
+wildcard runs `scope_add_param`'s `scope_shadow ["_"]`, which retires every scope entry
+whose predicate mentions `_`, including `x`'s default-binder fact bound just before it.
+
+- A wildcard parameter is dropped from the capture check (it binds nothing) and receives
+  no fact itself.
+- When the lambda has a wildcard parameter, a default-binder fact is spelled with the
+  receiving parameter's own name as binder (`{x : Int | x > 0}`), which the wildcard's
+  shadowing does not touch. Lambdas without a wildcard keep the exact spelling of the
+  first commit, and `scope_add_param` (shared) is unchanged.
+
+Test: the `elemflow-multiparam` case "a wildcard parameter binds nothing". `fn (_, y)` was
+(0, 0, 1) on `bcdaba5f5`, (1, 0, 0) now; `fn (x, _)` was still (0, 0, 1) with only the
+name-list fix, (1, 0, 0) with the binder spelling; control: the named `(n, y)` sibling
+capture still declines, (0, 0, 1). Each half of the fix, removed, turns exactly its own
+assertion red. The wildcard-retires-`_`-entries behaviour of `scope_add_param` is
+pre-existing and general (any lambda or function with a `_` parameter after a
+default-binder refined one); it is conservative (facts lost, never gained) and left
+alone here.
+
 ## Left open
 
 - Peeling a curried lambda (`fn a -> fn x -> …`) for an inner parameter's fact, and a
