@@ -380,7 +380,7 @@ let with_post_lookup lookup (f : unit -> 'a) : 'a =
    the walk does.  [`Na] leaves the tail's skip exactly as it was. *)
 type tail_demand =
   path:(A.expr * bool) list -> bound:string list -> params:A.fn_param list -> sc:scope
-  -> string * A.expr * string option -> A.expr -> [ `Na | `Proved | `Unproved of string ]
+  -> string * A.expr * string option -> A.expr -> [ `Na | `Proved | `Unproved of Obligation.reason ]
 
 let no_tail_demand : tail_demand = fun ~path:_ ~bound:_ ~params:_ ~sc:_ _ _ -> `Na
 
@@ -426,7 +426,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(fn_params : (string * A.ty option) list = [])
     ?(string_ret = false)
     ?(list_ret = false)
-    ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of string ]) option)
+    ?(demand : (A.expr -> [ `Na | `Proved | `Unproved of Obligation.reason ]) option)
     ?(shown : A.expr option)
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
@@ -736,9 +736,9 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        real failing call, exactly as before. *)
     (match (match demand with Some f -> f tail_e | None -> `Na) with
      | `Proved -> note Obligation.Proved; true
-     | `Unproved what ->
+     | `Unproved r ->
        if enum_witness_error () then note Obligation.Violated
-       else note (Obligation.Skipped (Obligation.Parametric_source_unproved what));
+       else note (Obligation.Skipped r);
        false
      | `Na ->
        if enum_witness_error () then note Obligation.Violated

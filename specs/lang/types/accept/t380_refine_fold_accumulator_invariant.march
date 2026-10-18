@@ -1,0 +1,49 @@
+-- Accumulator invariants for fold-shaped calls (2026-10-18, design
+-- specs/2026-10-18-fold-accumulator-invariants-design.md phase 1).  A demand
+-- on the result of a call to a function parametric in its return variable `b`
+-- is read as instantiating `b := {b | demand}`: it holds when the initial
+-- value meets it (the base) and the step, ASSUMING it of every parameter
+-- typed `b`, returns a value meeting it (the step).  A length counter, the
+-- running max at a return tail, `fold_right` (accumulator second), the
+-- curried `Enum.fold`, `Enum.reduce` (no initial value: the elements are the
+-- base), a refined capture and a user-written fold all prove.  Each was a
+-- parametric-source-unproved skip before, so `cap verified` rejected this
+-- module.  Under `cap verified`, exit 0 means every demand PROVED.  Reject
+-- twins: reject/t381 (a step that breaks it), reject/t382 (a base that fails
+-- it), reject/t383 (a "fold" that is not parametric).
+mod FoldAccumulatorInvariant do
+  cap verified
+  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn one_pos(o : Option({Int | _ > 0})) : Int do 0 end
+  fn count(ys : List(Int)) : Int do
+    need_nn(List.fold_left(ys, 0, fn (acc, _x) -> acc + 1))
+  end
+  fn running_max(ys : List(Int)) : {Int | _ >= 0} do
+    List.fold_left(ys, 0, fn (a, x) -> if x > a do x else a end)
+  end
+  fn count_right(ys : List(Int)) : Int do
+    need_nn(List.fold_right(ys, 0, fn (_x, a) -> a + 1))
+  end
+  fn count_curried(ys : List(Int)) : Int do
+    need_nn(Enum.fold(ys, 0, fn a -> fn _x -> a + 1))
+  end
+  fn total(pos : List({Int | _ > 0})) : Int do
+    one_pos(Enum.reduce(pos, fn a -> fn x -> a + x))
+  end
+  fn product_free(pos : List({Int | _ > 0})) : Int do
+    need_pos(List.fold_left(pos, 1, fn (acc, x) -> acc + x))
+  end
+  fn stepped(pos : List({Int | _ > 0}), m : {Int | _ > 0}) : Int do
+    need_pos(List.fold_left(pos, 1, fn (acc, _x) -> acc + m))
+  end
+  fn my_fold(xs : List(a), acc : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> my_fold(t, f(acc, h), f)
+    end
+  end
+  fn count_mine(ys : List(Int)) : Int do
+    need_nn(my_fold(ys, 0, fn (a, _x) -> a + 1))
+  end
+end

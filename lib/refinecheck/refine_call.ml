@@ -679,7 +679,7 @@ type call_ctx = {
          of the `Int` default.  Shadowed exactly like [sc]. *)
   demand :
     (call_ctx -> span:A.span -> A.expr -> string * A.expr * string option
-     -> [ `Na | `Proved | `Unproved of string ])
+     -> [ `Na | `Proved | `Unproved of Obligation.reason ])
     option;
       (* A scalar demand on a CALL subject that did not reflect, discharged
          over the callee's sources (design 2026-10-18 element-flow follow-ups,
@@ -868,6 +868,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _
                | Obligation.Parametric_source_unproved _
+               | Obligation.Accumulator_base_unproved _
+               | Obligation.Accumulator_step_unproved _
                | Obligation.Abstract_too_weak _
                | Obligation.Abstract_uninstantiated _
                | Obligation.Unreflectable_subject _
@@ -897,6 +899,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
        | Obligation.Parametric_source_unproved _
+       | Obligation.Accumulator_base_unproved _
+       | Obligation.Accumulator_step_unproved _
        | Obligation.Abstract_too_weak _
        | Obligation.Abstract_uninstantiated _
        | Obligation.Unreflectable_subject _
@@ -908,6 +912,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _
         | Obligation.Parametric_source_unproved _
+        | Obligation.Accumulator_base_unproved _
+        | Obligation.Accumulator_step_unproved _
         | Obligation.Abstract_too_weak _
         | Obligation.Abstract_uninstantiated _
         | Obligation.Unreflectable_subject _
@@ -2650,7 +2656,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        in
        (match from_sources with
        | `Proved -> note Obligation.Proved
-       | `Unproved what -> note (Obligation.Skipped (Obligation.Parametric_source_unproved what))
+       | `Unproved r -> note (Obligation.Skipped r)
        | `Na ->
        note
          (Obligation.Skipped

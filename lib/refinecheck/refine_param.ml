@@ -124,6 +124,25 @@ let method_creates (t : A.ty) : bool =
   let pvs = List.fold_left ty_vars [] params in
   List.exists (fun v -> not (List.mem v pvs)) (ty_vars [] result)
 
+(* A user interface method whose RESULT mentions any type variable, created or
+   not.  A call to it runs some `impl`'s body, which is written at ONE type:
+   `impl Dflt(Int) do fn dflt(n) do 0 - 5 end end` behind `fn dflt : Int -> t`,
+   or `fn norm(x) do 0 - 5 end` behind `fn norm : t -> t`, hands back a value
+   of the caller's type variable that came from no argument.  Before
+   2026-10-18 only a CREATING signature tainted, and only when no impl was
+   adopted: `fn pick(o : Option(a), d : a) : a` returning `dflt(1)` passed P2
+   through the adopted impl's (head-free) body, and
+   `need_pos(pick(Some(3), 1))` was proved (it returns -5).  Found by the
+   fold-accumulator design's impostor controls. *)
+let method_returns_var (t : A.ty) : bool =
+  let rec result t =
+    match t with
+    | A.TyArrow (_, b) -> result b
+    | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> result b
+    | r -> r
+  in
+  ty_vars [] (result t) <> []
+
 (* ── Per-module tables ────────────────────────────────────────────────── *)
 
 (* Every function definition, keyed exactly as [collect_all_defs] keys
@@ -133,7 +152,8 @@ let fn_defs_tbl : (string, string * A.fn_def) Hashtbl.t = Hashtbl.create 256
 (* [parametric_safe]'s answers, filled once per module by [compute_safety]. *)
 let safe_tbl : (string, bool) Hashtbl.t = Hashtbl.create 256
 
-(* Names bound as interface methods: [true] when that method creates. *)
+(* Names bound as interface methods: [true] when that method returns a type
+   variable ([method_returns_var]; it was "creates" before 2026-10-18). *)
 let iface_methods : (string, bool) Hashtbl.t = Hashtbl.create 32
 
 (* FFI extern function names. *)
@@ -142,6 +162,13 @@ let extern_names : (string, unit) Hashtbl.t = Hashtbl.create 16
 (* Key -> key, so [resolve_call_gen] can answer WHICH definition a call
    resolves to, by the very rule [resolve_call] uses. *)
 let key_tbl : (string, string) Hashtbl.t = Hashtbl.create 256
+
+(* Keys of the [fn_defs_tbl] entries that are ADOPTED `impl` methods
+   ([adoptable_impl_methods]): a call to one dispatches on its receiver's
+   type, so the body recorded is one candidate, not necessarily the one that
+   runs.  The accumulator-invariant rule ([invariant_callee_ok]) declines
+   them. *)
+let impl_keys : (string, unit) Hashtbl.t = Hashtbl.create 16
 
 (* Definitions whose declared CONTAINER return (`: List({Int | p})`) had every
    tail's element obligation PROVED — the element-flow counterpart of
@@ -221,7 +248,8 @@ let reset_param_tables () =
   Hashtbl.reset safe_tbl;
   Hashtbl.reset iface_methods;
   Hashtbl.reset extern_names;
-  Hashtbl.reset key_tbl
+  Hashtbl.reset key_tbl;
+  Hashtbl.reset impl_keys
 
 let collect_param_tables (decls : A.decl list) : unit =
   let qualify prefix n = if prefix = "" then n else prefix ^ "." ^ n in
@@ -238,13 +266,16 @@ let collect_param_tables (decls : A.decl list) : unit =
         | A.DImpl (idf, _) ->
           List.iter
             (fun ((mn : A.name), (fd : A.fn_def)) ->
-              if List.mem mn.A.txt adoptable then add prefix { fd with A.fn_name = mn })
+              if List.mem mn.A.txt adoptable then begin
+                add prefix { fd with A.fn_name = mn };
+                Hashtbl.replace impl_keys (qualify prefix mn.A.txt) ()
+              end)
             idf.A.impl_methods
         | A.DInterface (idf, _) ->
           List.iter
             (fun (md : A.method_decl) ->
               let prev = Option.value ~default:false (Hashtbl.find_opt iface_methods md.A.md_name.A.txt) in
-              Hashtbl.replace iface_methods md.A.md_name.A.txt (prev || method_creates md.A.md_ty))
+              Hashtbl.replace iface_methods md.A.md_name.A.txt (prev || method_returns_var md.A.md_ty))
             idf.A.iface_methods
         | A.DExtern (ed, _) ->
           List.iter (fun (ef : A.extern_fn) -> Hashtbl.replace extern_names ef.A.ef_name.A.txt ())
@@ -348,6 +379,10 @@ let classify_head (ctx : rctx) (locals : string list) (h : string) =
   if List.mem h locals then `Ok
   else
     match resolve_key ctx h with
+    | Some k when Hashtbl.mem impl_keys k && Hashtbl.find_opt iface_methods h = Some true ->
+      (* An adopted impl method behind a signature returning a type variable
+         ([method_returns_var]): its body is one instance, not parametric. *)
+      `Taint
     | Some k ->
       (match Hashtbl.find_opt fn_defs_tbl k with
        | Some (_, fd) when returns_concrete fd -> `Ok
@@ -490,6 +525,26 @@ let parametric_ok (ctx : rctx) (fname : string) (vs : string list) : bool =
      | Some (_, fd) ->
        (not (List.exists (fun ((b : A.name), _) -> List.mem b.A.txt vs) fd.A.fn_bounds))
        && parametric_safe key && generic_in_inferred fd vs)
+
+(* The accumulator-invariant rule's extra callee gate (design 2026-10-18
+   fold-accumulator invariants §2.2): the hypothesis a callback parameter may
+   assume is justified by the callee's BODY being parametric, so on top of
+   [parametric_ok] the callee must be an ordinary definition whose recorded
+   body is the one that runs and is not marked as taken on trust: not an
+   adopted `impl` method (dispatch may pick another), not `@[assume]` or
+   `@[trusted]` (the marker says its contract is not the body's).  The
+   existing source discharge still runs for those; only the hypothesis is
+   withheld. *)
+let invariant_callee_ok (ctx : rctx) (fname : string) : bool =
+  match resolve_key ctx fname with
+  | None -> false
+  | Some key ->
+    (match Hashtbl.find_opt fn_defs_tbl key with
+     | None -> false
+     | Some (_, fd) ->
+       (not (Hashtbl.mem impl_keys key))
+       && (not (List.mem "assume" fd.A.fn_attrs))
+       && not (List.mem "trusted" fd.A.fn_attrs))
 
 (* ── Sources of a type variable (2026-09-18 plan, Phase 3; design §4.2) ──
    Where can a value of type variable [v] ENTER a function?  By

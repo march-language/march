@@ -84,6 +84,20 @@ git log is authoritative for exact commits.
   (such a return used to be accepted and never checked), and a destructured call
   to it carries each component's fact. Only `let`/single-arm `match`
   destructuring carries a component; `partition`'s behaviour is unchanged.
+- **Refinements: a demand on a fold's result is checked as the accumulator's
+  invariant.** `need_nn(List.fold_left(ys, 0, fn (acc, _x) -> acc + 1))` is
+  proved: the initial value meets `_ >= 0`, and the step, assuming it of `acc`,
+  keeps it. The same holds at a return tail (a running maximum
+  `: {Int | _ >= 0}`), for `List.fold_right`, the curried `Enum.fold`,
+  `Enum.reduce` (its elements are the base), a step using a refined capture or
+  the element's own refinement, and any user-written function generic in its
+  return variable with a callback that consumes it; each was a
+  `parametric-source-unproved` skip (an error under `cap verified`). A failing
+  half is a skip, never a violation, with its own reason:
+  `accumulator-base-unproved` (`0` for `_ > 0`) or `accumulator-step-unproved`
+  (`acc - x` for `_ >= 0`). A callee that can make a value of the variable
+  itself, or is `@[trusted]`/`@[assume]` or an `impl` method, gets nothing. A
+  relational return (`: {Int | _ >= lo}`) is not traced yet.
 
 ### Fixed
 
@@ -104,6 +118,32 @@ git log is authoritative for exact commits.
   alias such as `let q = pred` is declined too). The hole predates the tuple
   returns above for single-container returns; the tuple form had it from the
   start.
+- **Refinements: an interface method's result no longer counts as parametric.**
+  `fn pick(o : Option(a), d : a) : a` returning `dflt(1)`, where the only impl of
+  `dflt : Int -> t` is written at `Int` and returns -5, was accepted as generic
+  in `a`, so `need_pos(pick(o, 1))` was proved (and `cap verified` compiled it)
+  although `pick(Some(3), 1)` returns -5; the element rule had the same hole
+  (`sum_pos(mk(pos))` with `mk` consing `dflt(1)`). A call to an interface
+  method whose result mentions a type variable, including a non-creating
+  `t -> t` and one adopted from a single `impl`, now makes the caller
+  non-parametric: those demands are skips.
+- **Refinements: a callback parameter's own refinement annotation is no longer
+  assumed when a demand on the call's result is checked.**
+  `need_pos(List.fold_left(pos, 1, fn (acc : {Int | _ > 100}, x) -> acc - 50))`
+  was proved from the unchecked annotation (`List.fold_left([5], 1, …)` is
+  -49); it is now a skip.
+- **Refinements: a named function passed as a callback lends its declared
+  return only when its own preconditions are met.** With
+  `fn dec2(a : {Int | _ > 100}, _x : Int) : {Int | _ > 0} do a - 50 end`,
+  `need_pos(List.fold_left(ys, 1, dec2))` was proved (and `cap verified`
+  compiled it) although `List.fold_left([5], 1, dec2)` is -49: `dec2`'s return
+  holds only when `a > 100`, and nothing checked what `fold_left` passes it.
+  The same held for an element position (`fn g(_a : Int, x : {Int | _ > 0})`
+  over an unrefined list), for `List.map` with a named function, and for a
+  callback parameter passed on. A refined parameter of the named function must
+  now follow from what the callee guarantees at that position (the demand on
+  the accumulator, or the list's element refinement); otherwise the demand is
+  a skip naming the unmet precondition.
 - **Refinements: a recursive helper's element return is no longer trusted when
   its own recursive call skips a precondition.** A helper such as
   `pfn go(lst, acc : List({Int | _ > 0})) : List({Int | _ > 0})` that recursed

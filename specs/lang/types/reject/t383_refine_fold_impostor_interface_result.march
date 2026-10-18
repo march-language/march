@@ -1,0 +1,28 @@
+-- EXPECT-ERROR: cannot verify precondition `_ >= 0` on `need_nn`
+-- Accumulator invariants (2026-10-18, design
+-- specs/2026-10-18-fold-accumulator-invariants-design.md phase 1), a "fold"
+-- that is not parametric: `k13` hands its step the result of an interface
+-- method, and the only impl of `dflt : Int -> t` is written at `Int` and
+-- returns -5.  The accumulator hypothesis is justified by the callee being
+-- unable to make a `b` of its own; this one can, so it gets none
+-- (`k13([5], 0, fn (a, x) -> a)` is -5).  The parametricity gate used to
+-- accept such a body through the adopted impl's head-free body; with the new
+-- rule that would have been a false proof.  A skip, an error under
+-- `cap verified`.
+mod FoldImpostorInterfaceResult do
+  cap verified
+  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  interface Dflt(t) do
+    fn dflt : Int -> t
+  end
+  impl Dflt(Int) do
+    fn dflt(_n) do 0 - 5 end
+  end
+  fn k13(xs : List(a), z : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> z
+      Cons(h, _) -> f(dflt(1), h)
+    end
+  end
+  fn go(ys : List(Int)) : Int do need_nn(k13(ys, 0, fn (a, _x) -> a)) end
+end
