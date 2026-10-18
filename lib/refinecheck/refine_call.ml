@@ -680,6 +680,7 @@ type call_ctx = {
 }
 
 let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
+    ?(goal_scope_facts = false)
     ?(verdict_out : Obligation.verdict option ref option)
     (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
   (* Destructured to the names the body has always used: this is a signature
@@ -2418,31 +2419,41 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       | A.EField (r, _, _) | A.EAnnot (r, _, _) -> guard_names r
       | _ -> []
     in
-    List.iter
-      (fun (cond, _) ->
-        List.iter
-          (fun x ->
-            if not (Hashtbl.mem scalar_path_facts_loaded x) then begin
-              Hashtbl.replace scalar_path_facts_loaded x ();
-              match List.assoc_opt x sc with
-              | Some (b, q, m) when scalar_sort_of_marker m <> None
-                                 && not (Hashtbl.mem str_names x) && not (is_recvar x) ->
-                let srt = scalar_sort_or_int m in
-                if srt <> Smt.SInt then Hashtbl.replace caller_scalar x srt;
-                let xc = Smt.Const x in
-                decls := (x, srt) :: !decls;
-                let rv n =
-                  if n = b || n = "_" || n = x then Some xc
-                  else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
-                in
-                (match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure
-                         ~resolve_str_lit:str_lit_const q with
-                 | Some qa -> push_user qa
-                 | None -> ())
-              | _ -> ()
-            end)
-          (guard_names cond))
-      path;
+    let load_scalar_name_fact x =
+      if not (Hashtbl.mem scalar_path_facts_loaded x) then begin
+        Hashtbl.replace scalar_path_facts_loaded x ();
+        match List.assoc_opt x sc with
+        | Some (b, q, m) when scalar_sort_of_marker m <> None
+                           && not (Hashtbl.mem str_names x) && not (is_recvar x) ->
+          let srt = scalar_sort_or_int m in
+          if srt <> Smt.SInt then Hashtbl.replace caller_scalar x srt;
+          let xc = Smt.Const x in
+          decls := (x, srt) :: !decls;
+          let rv n =
+            if n = b || n = "_" || n = x then Some xc
+            else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
+          in
+          (match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure
+                   ~resolve_str_lit:str_lit_const q with
+           | Some qa -> push_user qa
+           | None -> ())
+        | _ -> ()
+      end
+    in
+    List.iter (fun (cond, _) -> List.iter load_scalar_name_fact (guard_names cond)) path;
+    (* [~goal_scope_facts]: the GOAL is in the caller's namespace (an element
+       demand moved there by [Refine_check.instantiate_entry], `_ < k` for
+       `need_lt(ys, k)`), so a name it mentions that is neither the subject
+       nor a parameter of [sg] is a caller-scope variable exactly as a
+       guard's name is ([resolve_var]'s caller-scope arm), and carries its
+       scope fact the same way.  Off for every other caller: a scalar
+       contract's goal is in the CALLEE's namespace, where such a name has
+       no business being read as the caller's (design 2026-10-18
+       element-flow follow-ups, phase 0). *)
+    if goal_scope_facts then
+      List.iter
+        (fun x -> if not (is_self x) && not (List.mem_assoc x name_pos) then load_scalar_name_fact x)
+        (guard_names rp.pred);
     List.iter
       (fun (cond, negated) ->
         match

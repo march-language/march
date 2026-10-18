@@ -16475,6 +16475,207 @@ let demand_flow_suite =
                    \  fn g(k : Int) : Int do f(two((1, 2))) end\n")
            in (p, v, s))) ]
 
+(* ── One namespace for relational element predicates (design
+   specs/2026-10-18-element-flow-followups-design.md, phase 0) ──────────────
+   An element slot that names a PARAMETER (`List({Int | _ < n})`) is in the
+   namespace of the declaration it came from.  Before 2026-10-18 it was read
+   in whatever scope it landed in, and five shapes proved something false
+   (rows z1-z5 of the design's §0.5).  Every case below was RED on the
+   unfixed checker; the triple each one had there is in its comment.  The
+   controls are correct programs that must keep proving, so the fix cannot
+   pass by declining everything. *)
+let elemflow_namespace_suite =
+  let m body =
+    "mod Z do\n\
+    \  fn need_lt(xs : List({Int | _ < n}), n : Int) : Int do 0 end\n\
+    \  fn need_neg(k : {Int | _ < 0}) : Int do k end\n\
+    \  fn mapl(xs : List(a), g : a -> b) : List(b) do\n\
+    \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> Cons(g(h), mapl(t, g))\n    end\n  end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let reasons src = let (_, _, _, rs) = typed_ledger src in rs in
+  let details src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r -> Some (March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let t3 = Alcotest.(triple int int int) in
+  [ gated "z1: a parameter's element demand is read at the call's actuals" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `_ < n` resolved against the caller's
+           `let n = 1000`, so `_ < 60` "implied" it. *)
+        Alcotest.check t3 "z1: caller let n = 1000, need_lt(ys, 10) is violated" (0, 1, 0)
+          (l3 (m "  fn go(ys : List({Int | _ < 60})) : Int do\n    let n = 1000\n    need_lt(ys, 10)\n  end\n"));
+        (* Unfixed: (1, 0, 0) -- the caller's parameter `n` and its guard. *)
+        Alcotest.check t3 "z1': a guarded caller parameter n, need_lt(ys, 10) is violated" (0, 1, 0)
+          (l3
+             (m "  fn go(n : {Int | _ > 100}, ys : List({Int | _ < 60})) : Int do\n\
+                 \    if n > 1000 do need_lt(ys, 10) else 0 end\n  end\n")));
+
+    gated "z1'': a true call is no longer a false violation" (fun () ->
+        (* Unfixed: (0, 1, 0) -- `n` was free, witness n = 0. *)
+        Alcotest.check t3 "need_lt(ys, 200) with ys < 5 proves" (1, 0, 0)
+          (l3 (m "  fn go(ys : List({Int | _ < 5})) : Int do need_lt(ys, 200) end\n")));
+
+    gated "z1''': a literal argument is checked against the substituted demand" (fun () ->
+        (* Unfixed: both (0, 0, 1), solver-undecided. *)
+        Alcotest.check t3 "need_lt([5], 10) proves" (1, 0, 0)
+          (l3 (m "  fn go() : Int do need_lt([5], 10) end\n"));
+        Alcotest.check t3 "need_lt([50], 10) is violated" (0, 1, 0)
+          (l3 (m "  fn go() : Int do need_lt([50], 10) end\n")));
+
+    gated "controls: relational actuals still prove (no over-correction)" (fun () ->
+        Alcotest.check t3 "need_lt(ys, k) with k >= 60 and ys < 60 proves" (1, 0, 0)
+          (l3 (m "  fn go(k : {Int | _ >= 60}, ys : List({Int | _ < 60})) : Int do need_lt(ys, k) end\n"));
+        Alcotest.check t3 "the caller's own n: need_lt(ys, n) with ys < n proves" (1, 0, 0)
+          (l3 (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n) end\n"));
+        Alcotest.check t3 "need_lt(ys, n + 1) with ys < n proves" (1, 0, 0)
+          (l3 (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n + 1) end\n"));
+        Alcotest.check t3 "need_lt(ys, n - 1) with ys < n is violated" (0, 1, 0)
+          (l3 (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n - 1) end\n"));
+        (* A named binder is renamed before the substitution: the actual `x`
+           (the caller's) must not be captured by the slot's binder `x`.
+           Captured, the demand would read `x < x` and be violated. *)
+        Alcotest.check t3 "a named binder does not capture an actual of the same name" (1, 0, 0)
+          (l3
+             (m "  fn need_lt2(xs : List({x : Int | x < n}), n : Int) : Int do 0 end\n\
+                 \  fn go(x : Int, ys : List({Int | _ < x})) : Int do need_lt2(ys, x) end\n")));
+
+    gated "z2: a return tail under a rebinding of a demanded name is a skip" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `[50]` checked against `_ < n` with the
+           LOCAL `n == 100`, so `below(10) = [50]` "met" `_ < 10`. *)
+        let src = m "  fn below(n : Int) : List({Int | _ < n}) do\n    let n = 100\n    [50]\n  end\n" in
+        Alcotest.check t3 "skipped, never proved" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "an unreflectable-subject skip" [ "unreflectable-subject" ] (reasons src);
+        Alcotest.(check bool) "naming the rebound parameter" true
+          (List.exists (mentions "rebinds `n`") (details src));
+        (* The same through a `match` arm whose pattern rebinds `n`.
+           Unfixed: (1, 0, 0) -- `n - 1 < n` about the pattern's `n`. *)
+        Alcotest.check t3 "a match-arm binder: skipped" (0, 0, 1)
+          (l3
+             (m "  fn below(n : Int, xs : List(Int)) : List({Int | _ < n}) do\n\
+                 \    match xs do\n      Cons(n, _) -> [n - 1]\n      Nil -> Nil\n    end\n  end\n")));
+
+    gated "z2 controls: the definition side is otherwise unchanged" (fun () ->
+        Alcotest.check t3 "[n - 1, n - 2] proves" (2, 0, 0)
+          (l3 (m "  fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end\n"));
+        Alcotest.check t3 "[n - 1, n] is violated at n" (1, 1, 0)
+          (l3 (m "  fn below(n : Int) : List({Int | _ < n}) do [n - 1, n] end\n"));
+        (* A `let` of an unrelated name keeps the in-walk check and its fact. *)
+        Alcotest.check t3 "let m = n - 1 then [m] proves" (1, 0, 0)
+          (l3 (m "  fn below(n : Int) : List({Int | _ < n}) do\n    let m = n - 1\n    [m]\n  end\n")));
+
+    gated "z3: a stored element fact retires when a name it mentions is rebound" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `xs : _ < n` survived `let n = 0` and was
+           read as `h < 0`. *)
+        Alcotest.check t3 "let n = 0 then need_neg(h): not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n})) : Int do\n\
+                 \    let n = 0\n\
+                 \    match xs do\n    Cons(h, _) -> need_neg(h)\n    Nil -> 0\n    end\n  end\n"));
+        Alcotest.check t3 "control: without the let, the same skip" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n})) : Int do\n\
+                 \    match xs do\n    Cons(h, _) -> need_neg(h)\n    Nil -> 0\n    end\n  end\n"));
+        Alcotest.check t3 "control: under a guard n <= 0, no rebinding, proves" (1, 0, 0)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n})) : Int do\n\
+                 \    if n <= 0 do\n    match xs do\n    Cons(h, _) -> need_neg(h)\n    Nil -> 0\n    end\n\
+                 \    else 0 end\n  end\n")));
+
+    gated "z4: a lambda parameter is not given a fact about itself" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `fn n` got `{Int | _ < n}`, i.e. `n < n`. *)
+        Alcotest.check t3 "fn n -> need_neg(n): not proved" (0, 0, 1)
+          (l3 (m "  fn f(n : Int, xs : List({Int | _ < n})) : List(Int) do mapl(xs, fn n -> need_neg(n)) end\n"));
+        Alcotest.check t3 "control: fn y -> need_neg(y), the same skip" (0, 0, 1)
+          (l3 (m "  fn f(n : Int, xs : List({Int | _ < n})) : List(Int) do mapl(xs, fn y -> need_neg(y)) end\n"));
+        Alcotest.check t3 "control: under a guard n <= 0, fn y -> need_neg(y) proves" (1, 0, 0)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n})) : List(Int) do\n\
+                 \    if n <= 0 do mapl(xs, fn y -> need_neg(y)) else Nil end\n  end\n")));
+
+    gated "z5: a demand is not read under a lambda's parameter" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `_ < n` read under `fn n`: `n - 1 < n`. *)
+        let src = m "  fn go(ys : List(Int)) : Int do need_lt(mapl(ys, fn n -> n - 1), 10) end\n" in
+        Alcotest.check t3 "need_lt(mapl(ys, fn n -> n - 1), 10): not proved" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a parametric-source skip" [ "parametric-source-unproved" ] (reasons src);
+        Alcotest.check t3 "control: fn y -> y - 1, the same skip" (0, 0, 1)
+          (l3 (m "  fn go(ys : List(Int)) : Int do need_lt(mapl(ys, fn y -> y - 1), 10) end\n"));
+        (* The capture guard proper: substituted, the demand is `_ < n` about
+           the CALLER's `n`, and the lambda binds its own `n`.  Unfixed:
+           (1, 0, 0). *)
+        let cap = m "  fn go(n : Int, ys : List(Int)) : Int do need_lt(mapl(ys, fn n -> n - 1), n) end\n" in
+        Alcotest.check t3 "the caller's n under fn n: not proved" (0, 0, 1) (l3 cap);
+        Alcotest.(check bool) "naming the shadowing parameter" true
+          (List.exists (mentions "shadows") (details cap));
+        Alcotest.check t3 "control: fn y -> y - 1 over ys < n, demand n: proves" (1, 0, 0)
+          (l3
+             (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do\n\
+                 \    need_lt(mapl(ys, fn y -> y - 1), n)\n  end\n")));
+
+    gated "z2's lambda twin: a lambda tail naming an inner binding is not checked" (fun () ->
+        (* Not in the design's table: found while fixing z2.  A lambda's tails
+           are checked in the env at the LAMBDA, so `k` below read the
+           caller's `k > 0`.  Unfixed: both (1, 0, 0), with a closed demand. *)
+        let src =
+          m "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+            \  fn go(k : {Int | _ > 0}, ys : List(Int)) : Int do\n\
+            \    sum_pos(mapl(ys, fn y ->\n      let k = 0 - 5\n      k))\n  end\n"
+        in
+        Alcotest.check t3 "a demand_flow source: not proved" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a parametric-source skip" [ "parametric-source-unproved" ] (reasons src);
+        Alcotest.check t3 "a pass-site codomain: not proved" (0, 0, 1)
+          (l3
+             (m "  fn hof(f : (Int) -> List({Int | _ > 0})) : Int do 0 end\n\
+                 \  fn go(k : {Int | _ > 0}) : Int do\n    hof(fn y ->\n      let k = 0 - 5\n      [k])\n  end\n"));
+        Alcotest.check t3 "control: an inner let the tail does not mention still proves" (1, 0, 0)
+          (l3
+             (m "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+                 \  fn go(k : {Int | _ > 0}, ys : List(Int)) : Int do\n\
+                 \    sum_pos(mapl(ys, fn y ->\n      let j = 0 - 5\n      k))\n  end\n")));
+
+    gated "a record field's element slot naming another field is a recorded skip" (fun () ->
+        (* The design's §1.2 call.  The slot `_ < n` names the record's OWN
+           field `n`, here 10, but was read as the CALLER's `n`, which the
+           guard says is > 1000.  Unfixed: (2, 0, 0) -- `k` and the guarded
+           `[500]` proved (the unguarded twin was a solver-undecided skip). *)
+        let src =
+          m "  type Box = { k : {Int | _ > 0}, n : Int, xs : List({Int | _ < n}) }\n\
+            \  fn go(n : Int) : Int do\n    if n > 1000 do\n      let b = { k: 1, n: 10, xs: [500] }\n      0\n    else 0 end\n  end\n"
+        in
+        Alcotest.check t3 "k proves, xs is a skip" (1, 0, 1) (l3 src);
+        Alcotest.(check bool) "naming the reason" true
+          (List.exists (mentions "names another field") (details src));
+        Alcotest.check t3 "control: a closed field slot is still checked" (1, 1, 0)
+          (l3
+             (m "  type Box = { k : {Int | _ > 0}, xs : List({Int | _ < 5}) }\n\
+                 \  fn go() : Box do { k: 1, xs: [500] } end\n")));
+
+    gated "a pass-site codomain naming a parameter is a recorded skip" (fun () ->
+        (* The design's §1.2 call.  The lambda's `[50]` was checked against
+           `_ < n` with the CALLER's guarded `n > 100`, although `hof` was
+           given 10.  Unfixed: (1, 0, 0) (the unguarded twin was a
+           solver-undecided skip). *)
+        let src =
+          m "  fn hof(n : Int, g : (Int) -> List({Int | _ < n})) : Int do 0 end\n\
+            \  fn go(n : Int) : Int do\n    if n > 100 do hof(10, fn y -> [50]) else 0 end\n  end\n"
+        in
+        Alcotest.check t3 "skipped, never proved" (0, 0, 1) (l3 src);
+        Alcotest.check t3 "control: a closed codomain is still checked" (0, 1, 0)
+          (l3
+             (m "  fn hof(n : Int, g : (Int) -> List({Int | _ < 5})) : Int do 0 end\n\
+                 \  fn go() : Int do hof(10, fn y -> [50]) end\n"))) ]
+
 (* ── Datatype instances from declared types (plan steps 1.3 + 1.4) ──────
    Each datatype instance is declared as its own monomorphic datatype; a term's instance
    comes from the declared type it is checked against and from what
@@ -18863,6 +19064,7 @@ let () =
       ("element-flow", element_flow_suite);
       ("callback-elements", callback_elements_suite);
       ("demand-flow", demand_flow_suite);
+      ("elemflow-namespace", elemflow_namespace_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);

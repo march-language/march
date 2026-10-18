@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: cannot verify precondition `_ < 0` on `need_neg`
+-- Relational element refinements, z4 (2026-10-18, design
+-- specs/2026-10-18-element-flow-followups-design.md phase 0): the lambda's
+-- parameter `n` was given `xs`'s element fact `_ < n` about ITSELF (`n < n`,
+-- false, so everything followed) and `need_neg(n)` proved.  The domain fact
+-- is now declined, the call is a skip, and `cap verified` makes it this
+-- error.  Accept companion: accept/t325.
+mod LambdaDomainSelf do
+  cap verified
+  fn need_neg(k : {Int | _ < 0}) : Int do k end
+  fn f(n : Int, xs : List({Int | _ < n})) : List(Int) do
+    List.map(xs, fn n -> need_neg(n))
+  end
+end

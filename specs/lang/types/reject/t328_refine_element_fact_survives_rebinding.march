@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: cannot verify precondition `_ < 0` on `need_neg`
+-- Relational element refinements, z3 (2026-10-18, design
+-- specs/2026-10-18-element-flow-followups-design.md phase 0): `xs`'s stored
+-- element fact `_ < n` survived `let n = 0` and was read as `h < 0` when the
+-- `match` handed `h` its slot: `need_neg(h)` proved, although `f(5, [3])`
+-- breaks it.  The fact now retires with the name, the call is a skip, and
+-- `cap verified` makes it this error.  Accept companion: accept/t325.
+mod ElemFactRebound do
+  cap verified
+  fn need_neg(k : {Int | _ < 0}) : Int do k end
+  fn f(n : Int, xs : List({Int | _ < n})) : Int do
+    let n = 0
+    match xs do
+      Cons(h, _) -> need_neg(h)
+      Nil -> 0
+    end
+  end
+end

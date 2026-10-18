@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: under an inner binding that rebinds `n`
+-- Relational element refinements, z2 (2026-10-18, design
+-- specs/2026-10-18-element-flow-followups-design.md phase 0): the return
+-- tail `[50]` sits under `let n = 100`, which rebinds the parameter the
+-- declared `List({Int | _ < n})` is about.  Checked there, `_ < n` meant the
+-- local and proved `below(10) = [50]`.  Now a recorded skip, which
+-- `cap verified` makes this error.  Accept companion: accept/t325.
+mod ElemReturnRebound do
+  cap verified
+  fn below(n : Int) : List({Int | _ < n}) do
+    let n = 100
+    [50]
+  end
+end

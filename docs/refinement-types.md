@@ -2043,6 +2043,18 @@ Anything else is a recorded skip. Every element a `match` takes out of such a
 value carries the fact, whether the scrutinee is a variable or a call
 (`match List.head_opt(xs) do Some(h) -> …`).
 
+**An element refinement that names a parameter** means that parameter, at the
+call. `fn need_lt(xs : List({Int | _ < n}), n : Int)` called as
+`need_lt(ys, 10)` demands `_ < 10` of every element of `ys`, whatever the
+caller happens to call `n`; a demand naming a parameter the call does not
+supply is a recorded skip. Inside a function, such a fact is about the
+binding it names: after `let n = 0`, `xs`'s elements are no longer known to be
+`< n`, and a return tail under a binding that rebinds `n` is a recorded skip
+rather than checked against the local. A lambda whose parameter is spelled like
+a name the demand mentions is not read as that name. On a record field
+(`xs : List({Int | _ < n})` naming the sibling field `n`) or on an expected
+function codomain, such a refinement is a recorded skip, never checked.
+
 ### Through a polymorphic call
 
 A function that is generic in its element type cannot invent an element, so its

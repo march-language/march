@@ -1392,8 +1392,27 @@ type elem = Refined of (string * A.expr * string option) | Container of string *
 
 type contenv = (string * (string * elem option list)) list
 
+(* Does any element predicate of [entry] mention one of [names] (other than
+   that slot's own binder)?  Over-approximate exactly as [expr_mentions]. *)
+let rec elem_entry_mentions (names : string list) ((_, slots) : string * elem option list) : bool =
+  names <> []
+  && List.exists
+       (function
+         | None -> false
+         | Some (Refined (b, p, _)) -> expr_mentions (List.filter (( <> ) b) names) p
+         | Some (Container (c, inner)) -> elem_entry_mentions names (c, inner))
+       slots
+
+(* Retires an entry by its KEY and also any entry one of whose slot
+   predicates MENTIONS a rebound name — the same rule as [scope_shadow].
+   Until 2026-10-18 only the key retired, so `xs : List({Int | _ < n})`
+   survived `let n = 0` and was read as a fact about the NEW `n` the moment a
+   `match` handed an element its slot (design 2026-10-18 element-flow
+   follow-ups, row z3: `need_neg(h)` "proved"). *)
 let cont_shadow (ce : contenv) (names : string list) : contenv =
-  if names = [] then ce else List.filter (fun (n, _) -> not (List.mem n names)) ce
+  if names = [] then ce
+  else
+    List.filter (fun (n, entry) -> (not (List.mem n names)) && not (elem_entry_mentions names entry)) ce
 
 (* A registered container: any ADT whose constructors' field roles are known
    ([ctor_param_fields]) — the builtins `List` / `Option`
@@ -1455,6 +1474,34 @@ let cont_add_param (ce : contenv) (p : A.param) : contenv =
 let cont_add_fnparam (ce : contenv) : A.fn_param -> contenv = function
   | A.FPNamed p | A.FPDefault (p, _) -> cont_add_param ce p
   | A.FPPat pat -> cont_shadow ce (pat_binders pat)
+
+(* A parameter LIST binds simultaneously: an entry naming a sibling parameter
+   (`fn f(xs : List({Int | _ < n}), n : Int)`) is about that very parameter,
+   so it must not be retired by the sibling's own binding the way a later
+   rebinding retires it ([cont_add_param] folded left would drop `xs` when it
+   reaches `n`).  The outer env is shadowed by every name first, by mention;
+   the parameters' own entries then go in by key only. *)
+let cont_add_params (ce : contenv) (ps : A.param list) : contenv =
+  let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+  List.fold_left
+    (fun ce (p : A.param) ->
+      let n = p.A.param_name.A.txt in
+      let ce = List.filter (fun (k, _) -> k <> n) ce in
+      match elem_refinement p.A.param_ty with Some e -> (n, e) :: ce | None -> ce)
+    (cont_shadow ce names) ps
+
+(* The same for a function's clause parameters, into an EMPTY env. *)
+let cont_of_fnparams (ps : A.fn_param list) : contenv =
+  List.fold_left
+    (fun ce -> function
+      | A.FPNamed p | A.FPDefault (p, _) ->
+        let n = p.A.param_name.A.txt in
+        let ce = List.filter (fun (k, _) -> k <> n) ce in
+        (match elem_refinement p.A.param_ty with Some e -> (n, e) :: ce | None -> ce)
+      | A.FPPat pat ->
+        let bs = pat_binders pat in
+        List.filter (fun (k, _) -> not (List.mem k bs)) ce)
+    [] ps
 
 (* A `let` enters the channel through an ANNOTATION only when its element
    obligations were PROVED (the caller passes [~proved]; the same rule
