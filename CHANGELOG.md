@@ -31,6 +31,8 @@ git log is authoritative for exact commits.
   lambda parameter of the same name. The slot is now read at the call's
   arguments (`need_lt(ys, 10)` demands `_ < 10`, so a correct
   `need_lt(ys, 200)` with `ys : List({Int | _ < 5})` is no longer a false
+  violation; a demand naming a caller variable no fact constrains, such as
+  `need_lt(ys, k)` after `k`'s fact was retired, is a skip rather than a
   violation), and each of the other shapes is a recorded skip. Two related
   shapes are skips too: a record field's or an expected codomain's element
   refinement naming another field or parameter, and a lambda return expression

@@ -2419,6 +2419,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       | A.EField (r, _, _) | A.EAnnot (r, _, _) -> guard_names r
       | _ -> []
     in
+    (* Caller names some USER assumption actually constrains: a scope fact
+       loaded over the name, or a translated path condition mentioning it.
+       Read by the definite-failure rule under [~goal_scope_facts]. *)
+    let constrained_names : (string, unit) Hashtbl.t = Hashtbl.create 4 in
     let load_scalar_name_fact x =
       if not (Hashtbl.mem scalar_path_facts_loaded x) then begin
         Hashtbl.replace scalar_path_facts_loaded x ();
@@ -2435,7 +2439,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           in
           (match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure
                    ~resolve_str_lit:str_lit_const q with
-           | Some qa -> push_user qa
+           | Some qa -> Hashtbl.replace constrained_names x (); push_user qa
            | None -> ())
         | _ -> ()
       end
@@ -2462,7 +2466,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             ~resolve_measure_app ~resolve_tester:path_resolve_tester
             ~resolve_str_lit:str_lit_const cond
         with
-        | Some t -> push_user (if negated then Smt.Not t else t)
+        | Some t ->
+          List.iter (fun x -> Hashtbl.replace constrained_names x ()) (guard_names cond);
+          push_user (if negated then Smt.Not t else t)
         | None ->
           (* A guard that IS a call (`if Set.contains(s, x, cmp) do …`, or its
              negation): stand the call up as a Bool constant carrying the
@@ -2486,6 +2492,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               | Some (t, ds, asms) ->
                 List.iter (fun d -> decls := d :: !decls) ds;
                 List.iter push_user asms;
+                List.iter (fun x -> Hashtbl.replace constrained_names x ()) (guard_names cond);
                 let t = if inner_neg then Smt.Not t else t in
                 push_user (if negated then Smt.Not t else t)
               | None -> ())
@@ -2773,9 +2780,37 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              pred fail for ALL of them (the `¬G` discharge below) would let
              `apply(take_n, -3)` through whenever `_ >= 0` merely SOMETIMES
              holds, which is always. *)
+          (* …but only when every name the goal mentions is the subject, a
+             parameter, or a caller name some user assumption constrains.  A
+             substituted element demand (`_ < k`, [~goal_scope_facts]) can
+             name a caller variable whose fact was retired or never existed
+             (`let k = x; let x = 0; need_lt(ys, k)`): the solver then picks
+             `k` freely, and "some `k` refutes it" says nothing about the
+             real one.  Such a goal falls through to the `¬G` discharge,
+             which only reports a failure no value of `k` can avoid, and is
+             otherwise a skip, as a scalar `big(k)` is. *)
+          let rec value_names (e : A.expr) : string list =
+            match e with
+            | A.EVar { A.txt; _ } -> [ txt ]
+            (* An application's head names a function or operator, not a value. *)
+            | A.EApp (A.EVar _, xs, _) -> List.concat_map value_names xs
+            | A.EApp (f, xs, _) -> value_names f @ List.concat_map value_names xs
+            | A.ECon (_, xs, _) | A.ETuple (xs, _) | A.EAtom (_, xs, _) -> List.concat_map value_names xs
+            | A.EField (r, _, _) | A.EAnnot (r, _, _) -> value_names r
+            | _ -> []
+          in
+          let free_goal_name =
+            goal_scope_facts
+            && List.exists
+                 (fun x ->
+                   (not (is_self x)) && (not (List.mem_assoc x name_pos))
+                   && not (Hashtbl.mem constrained_names x))
+                 (value_names rp.pred)
+          in
           let definite =
             match subject, first with
-            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ -> true
+            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ ->
+              not free_goal_name
             | _ -> false
           in
           (match

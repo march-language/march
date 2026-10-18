@@ -41,7 +41,7 @@ with only the test file copied in, every assertion made non-fatal so each one re
 | z1′ | same, caller parameter `n` and `if n > 1000` | (1, 0, 0) **false proof** | (0, 1, 0) | same |
 | z1″ | `need_lt(ys, 200)`, `ys < 5` | (0, 1, 0) false violation (witness `n = 0`) | (1, 0, 0) | same |
 | z1‴ | `need_lt([5], 10)` / `need_lt([50], 10)` | (0, 0, 1) / (0, 0, 1) | (1, 0, 0) / (0, 1, 0) | same |
-| extra | `need_lt(ys, n - 1)` with `ys : List({Int \| _ < n})` | (1, 0, 0) **false proof** | (0, 1, 0) | same |
+| extra | `need_lt(ys, n - 1)` with `ys : List({Int \| _ < n})` | (1, 0, 0) **false proof** | (0, 0, 1) (first commit: (0, 1, 0); see the follow-ups) | same |
 | extra | `need_lt(ys, k)` with `k : {Int \| _ >= 60}`, `ys < 60` | (0, 1, 0) false violation | (1, 0, 0) | same, plus `check_call ~goal_scope_facts` (below) |
 | extra | named binder `{x : Int \| x < n}` called with an actual `x` | (0, 1, 0) false violation | (1, 0, 0) | binder renamed to `_` before the substitution |
 | z2 | `below(n)` with `let n = 100; [50]` | (1, 0, 0) **false proof** | (0, 0, 1), "under an inner binding that rebinds `n`" | `visit_fn` builds the tail list with `tails_bound`; a tail whose `bound` list holds a name the entry mentions is a recorded skip, never checked in-walk or in the fallback |
@@ -141,10 +141,55 @@ and codomain slots (still checked, still violated).
   rounds each, load average ~8-11: base medians 1.14 / 1.15 s, this change 1.13 / 1.12 s.
   Within noise, as the design's 2% budget expects (no new solver work).
 
+## Review follow-ups (second commit, same day)
+
+An independent review (~70 adversarial probes) found no false proof. Its follow-ups:
+
+1. **A false violation from `~goal_scope_facts`.** `let k = x; let x = 0; need_lt(ys, k)`
+   with `x : {Int | _ > 60}`, `ys : List({Int | _ < 50})` was a hard `refinement_violated`
+   (`k = 0`), even without `cap verified`: `k`'s only fact (`k == x`) retired with `let x`,
+   so the substituted goal `_ < k` named a free caller variable and the
+   element-subtyping definite-failure rule took the solver's `k = 0` as a real argument.
+   Now `check_call` tracks which caller names a user assumption constrains (a loaded scope
+   fact, or a translated path condition mentioning them); under `~goal_scope_facts`, a goal
+   naming any other caller name (by value, not as an application head) does not take the
+   definite-failure shortcut. It falls through to the `¬G` discharge, which reports only a
+   failure no value of the name avoids, and is otherwise a skip, as a scalar `big(k)` is.
+   Before → after: (0, 1, 0) → (0, 0, 1). The same rule moves two cases of the first
+   commit: an unrefined caller `k` in `need_lt(ys, k)` is a skip, not a violation, and
+   `need_lt(ys, n - 1)` with `ys : List({Int | _ < n})` and `n : Int` is a skip, not the
+   violation the first commit reported (it was a false PROOF before phase 0; now it is
+   "not proved", which is the conservative reading of "no fact constrains `n`").
+   Controls: `let k = x` with `x > 60` proves, `k : {Int | _ <= 10}` against `ys < 60`
+   and a guard `if k < 20` both stay violations.
+2. **The negative direction of `~goal_scope_facts`, pinned.** With an outer `k : {Int | _ >
+   60}`: `let k = 0` is violated (the new `k` really is 0); a `match` binder `k`, a
+   lambda parameter `k`, a local `fn`'s parameter `k`, and `let k = x; let x = 100` are not
+   proved. On the first commit those four were (0, 1, 0) false violations; now (0, 0, 1).
+3. **`tails_bound` records `let?`/`let*` binders.** A `let?` or `let*` stays one whole
+   tail (its early `Err` exit, or the `flat_map` callback, is not a syntactic tail), and
+   its pattern's binders now go into `bound`. Reachable: `fn f(n : Int, r : Result(Int,
+   String)) : Result(List({Int | _ < n}), String) do let? n = r; Ok([n - 1]) end` was a
+   skip only because the whole `let?` is unreflectable; it is now the z2 skip naming `n`.
+4. Filed `specs/todos/2026-10-18-callback-param-element-demands-unchecked.md` (the
+   reviewer's H9: an element demand on a callback-typed parameter files nothing).
+
+Verification after the follow-ups: `test_refinecheck.exe -e` 1044 tests, all pass, 0
+skipped (the group is 15 cases; 8 assertions of the new ones were red on the first
+commit); `scripts/run-tests.sh -q compiler` 1348 pass; the six corpus files behave as
+declared. `refine-oracle.sh check` against the `75bca856d` baseline: identical (7786 lines,
+549 fixtures) once the environment matches. A first check run showed ~1,700 phantom lines
+(`stdlib_internal`, `trusted_linear_reserved` errors in stdlib files): a full
+`dune build --root .` had staged `_build/default/stdlib`, so the compiler no longer
+recognised the source `stdlib/*.march` as its own stdlib, while the baseline worktree had
+no staged copy. With the staged copy set aside the check is identical.
+
 ## Left open
 
 - A record whose only refinements are element slots is never obliged:
   `specs/todos/2026-10-18-record-element-slot-refinements-unchecked.md`.
+- An element demand on a callback-typed parameter is never checked:
+  `specs/todos/2026-10-18-callback-param-element-demands-unchecked.md`.
 - Phases 1-4 of the design (multi-parameter domain facts, the scalar demand entry point,
   local `fn` container returns, relational element returns as call-site facts) are
   untouched; `specs/todos/2026-09-18-refine-element-flow-followups.md` still lists items

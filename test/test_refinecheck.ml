@@ -16541,7 +16541,10 @@ let elemflow_namespace_suite =
           (l3 (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n) end\n"));
         Alcotest.check t3 "need_lt(ys, n + 1) with ys < n proves" (1, 0, 0)
           (l3 (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n + 1) end\n"));
-        Alcotest.check t3 "need_lt(ys, n - 1) with ys < n is violated" (0, 1, 0)
+        (* Unfixed: (1, 0, 0), a false proof.  Not a violation either: no
+           user fact constrains `n`, and a goal naming an unconstrained
+           caller variable is a skip (see "goal names" below). *)
+        Alcotest.check t3 "need_lt(ys, n - 1) with ys < n is not proved" (0, 0, 1)
           (l3 (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n - 1) end\n"));
         (* A named binder is renamed before the substitution: the actual `x`
            (the caller's) must not be captured by the slot's binder `x`.
@@ -16643,6 +16646,63 @@ let elemflow_namespace_suite =
              (m "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
                  \  fn go(k : {Int | _ > 0}, ys : List(Int)) : Int do\n\
                  \    sum_pos(mapl(ys, fn y ->\n      let j = 0 - 5\n      k))\n  end\n")));
+
+    gated "goal names: a caller name no user fact constrains is a skip, never a violation" (fun () ->
+        (* Review follow-up 1 (2026-10-18).  The substituted demand `_ < k`
+           names the caller's `k`, whose only fact (`k == x`) retired with
+           `let x = 0`; the solver picked `k = 0` and the element-subtyping
+           definite-failure rule reported a hard violation of a correct
+           program.  Unfixed (a33248f93): (0, 1, 0). *)
+        Alcotest.check t3 "let k = x; let x = 0; need_lt(ys, k): skipped" (0, 0, 1)
+          (l3
+             (m "  fn go(x : {Int | _ > 60}, ys : List({Int | _ < 50})) : Int do\n\
+                 \    let k = x\n    let x = 0\n    need_lt(ys, k)\n  end\n"));
+        Alcotest.check t3 "an unrefined caller k: skipped" (0, 0, 1)
+          (l3 (m "  fn go(k : Int, ys : List({Int | _ < 50})) : Int do need_lt(ys, k) end\n"));
+        (* Controls: a constrained name still decides both ways. *)
+        Alcotest.check t3 "control: let k = x with x > 60 proves" (1, 0, 0)
+          (l3
+             (m "  fn go(x : {Int | _ > 60}, ys : List({Int | _ < 50})) : Int do\n\
+                 \    let k = x\n    need_lt(ys, k)\n  end\n"));
+        Alcotest.check t3 "control: k <= 10 against ys < 60 is violated" (0, 1, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 10}, ys : List({Int | _ < 60})) : Int do need_lt(ys, k) end\n"));
+        Alcotest.check t3 "control: a guard k < 20 against ys < 60 is violated" (0, 1, 0)
+          (l3
+             (m "  fn go(k : Int, ys : List({Int | _ < 60})) : Int do\n\
+                 \    if k < 20 do need_lt(ys, k) else 0 end\n  end\n")));
+
+    gated "goal names: a rebound caller name lends no stale fact" (fun () ->
+        (* Review follow-up 2: the negative direction of [~goal_scope_facts].
+           Each `k` below is a NEW binding, so the outer `k > 60` must not be
+           read for it.  Correct on a33248f93 as well; pinned here. *)
+        let pre = "  fn go(k : {Int | _ > 60}, ys : List({Int | _ < 50}), o : Option(Int), zs : List(Int)) : Int do\n" in
+        Alcotest.check t3 "let k = 0: violated (k really is 0)" (0, 1, 0)
+          (l3 (m (pre ^ "    let k = 0\n    need_lt(ys, k)\n  end\n")));
+        Alcotest.check t3 "a match binder k: not proved" (0, 0, 1)
+          (l3 (m (pre ^ "    match o do\n      Some(k) -> need_lt(ys, k)\n      None -> 0\n    end\n  end\n")));
+        Alcotest.check t3 "a lambda parameter k: not proved" (0, 0, 1)
+          (l3
+             (m (pre ^ "    let r = mapl(zs, fn k -> need_lt(ys, k))\n    0\n  end\n")));
+        Alcotest.check t3 "a local fn parameter k: not proved" (0, 0, 1)
+          (l3
+             (m (pre ^ "    fn h(k : Int) : Int do need_lt(ys, k) end\n    h(1)\n  end\n")));
+        Alcotest.check t3 "let k = x; let x = 100: not proved" (0, 0, 1)
+          (l3
+             (m "  fn go(x : Int, ys : List({Int | _ < 50})) : Int do\n\
+                 \    let k = x\n    let x = 100\n    need_lt(ys, k)\n  end\n")));
+
+    gated "a `let?` tail records its binders" (fun () ->
+        (* Review follow-up 3: [tails_bound] keeps a `let?` as one whole tail
+           (its early `Err` exit is not a syntactic tail) and now records its
+           pattern's binders, so the z2 rule sees the rebinding of `n`.
+           Unfixed: a skip for the generic reason. *)
+        let src =
+          m "  fn f(n : Int, r : Result(Int, String)) : Result(List({Int | _ < n}), String) do\n\
+            \    let? n = r\n    Ok([n - 1])\n  end\n"
+        in
+        Alcotest.check t3 "not proved" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "naming the rebound parameter" true
+          (List.exists (mentions "rebinds `n`") (details src)));
 
     gated "a record field's element slot naming another field is a recorded skip" (fun () ->
         (* The design's §1.2 call.  The slot `_ < n` names the record's OWN
