@@ -2345,7 +2345,8 @@ declined, naming the precondition, while `fn y -> y > 0 && weird(y)` is read
 as `y > 0 && y > 0`.
 
 **The standard library.** `List.filter`, `List.find`
-(`Option({a | p(_)})`), `List.take_while` and `Option.filter` all carry `p`:
+(`Option({a | p(_)})`), `List.take_while`, `Option.filter` and
+`List.partition` all carry `p`:
 
 ```march
 fn one_pos(o : Option({Int | _ > 0})) : Int do … end
@@ -2353,6 +2354,35 @@ one_pos(List.find(ys, fn y -> y > 0))         -- proved
 one_pos(Option.filter(o, is_pos))             -- proved
 sum_pos(List.take_while(ys, is_pos))          -- proved
 ```
+
+**Tuples: `List.partition`.** A return that is a tuple of containers carries
+one element slot per component:
+
+```march
+fn partition(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)}))
+
+let (pos, neg) = List.partition(ys, fn y -> y > 0)
+sum_pos(pos)                                  -- proved: `y > 0`
+sum_nonpos(neg)                               -- proved: `!(y > 0)`
+sum_pos(neg)                                  -- skip: too weak (`!(y > 0)`)
+match List.partition(ys, fn y -> y > 0) do
+(pos, _) -> sum_pos(pos)                      -- proved
+end
+```
+
+A component reaches a demand only through destructuring: `let (a, b) = g(…)`
+or a `match` with exactly one arm that is a tuple of names and `_`, with no
+guard, over a direct call. Each name then stands for its component of that
+call, through an alias (`let p2 = pos`) too, until it or a name the call
+mentions is rebound. A user function may declare such a return, abstract or
+not (`split_pos(xs) : (List({Int | _ > 0}), List(Int))`): every tail is
+checked component by component (a tuple literal, a recursive call through the
+structural induction hypothesis, a call to another proved tuple return), and
+a recursive result destructured in the body (`let (yes, no) = part(t, pred)`)
+carries the hypothesis as well. `List.partition` keeps a tail-recursive
+accumulator: a top-level `partition_go` whose `yes : List(a[p])` and
+`no : List({a | !p(_)})` parameters are checked at every push, so both halves
+are proved on its definition side.
 
 What it does not do (reason `abstract-refinement-uninstantiated` where a
 demand meets one of these):
@@ -2379,9 +2409,14 @@ demand meets one of these):
   violation.
 - **One argument only.** `Map.filter`'s `(k, v) -> Bool` and a `fold_left`
   accumulator invariant would need a two-argument `p(k, v)`.
-- **Not every combinator.** `List.partition` would need `p` inside a tuple
-  (`!p(_)` itself is read, see above); `drop_while` keeps no element fact;
+- **Not every combinator.** `drop_while` keeps no element fact;
   `Deque.filter` does not declare one.
+- **A tuple component only through destructuring.** `Tuple.first(g(…))`, a
+  tuple bound whole and taken apart later (`let r = g(…)` then
+  `match r do …`), a `match` with more than one arm or a refutable component
+  (`(Cons(_, pos), _) -> …`), a `let (xs, b) = g(xs)` whose call mentions one
+  of its own binders, a nested tuple and a tuple inside a container carry no
+  component fact; a tuple flowing into another function carries none either.
 - **A String-sorted callback on the definition side.** Inside a combinator
   over `List(String)`, `f(h)` with `f : String -> Bool[p]` does not yet
   reflect as `p(h)`, so a natural-style body over strings does not prove its
@@ -2391,8 +2426,9 @@ demand meets one of these):
 
 ### What element refinements do not do
 
-- **Only four combinators carry an abstract refinement** (`List.filter`,
-  `List.find`, `List.take_while`, `Option.filter`), instantiated from a lambda
+- **Only five combinators carry an abstract refinement** (`List.filter`,
+  `List.find`, `List.take_while`, `Option.filter`, and `List.partition`, per
+  component), instantiated from a lambda
   (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
   a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).

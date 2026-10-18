@@ -51,6 +51,16 @@ git log is authoritative for exact commits.
   a concrete base (`List(Int[p])` for `f : Int -> Bool[p]`), and an accumulator
   helper's own `acc : List(a[p])` parameter is now checked inside the definition
   that declares `p`.
+- **Refinements: `List.partition` carries its predicate into both halves.** It
+  now declares `(List(a[p]), List({a | !p(_)}))`, proved on its own definition
+  side, so after `let (pos, neg) = List.partition(ys, fn y -> y > 0)` both
+  `sum_pos(pos)` and `sum_nonpos(neg)` are proved (a single-arm tuple `match`
+  works the same way); before, each was an `unreflectable-subject` skip, an
+  error under `cap verified`. Any function may declare a tuple of element-refined
+  containers as its return: every tail is now checked component by component
+  (such a return used to be accepted and never checked), and a destructured call
+  to it carries each component's fact. Only `let`/single-arm `match`
+  destructuring carries a component; `partition`'s behaviour is unchanged.
 
 ### Fixed
 

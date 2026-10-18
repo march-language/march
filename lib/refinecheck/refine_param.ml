@@ -158,8 +158,10 @@ let elem_ret_proved : (string, unit) Hashtbl.t = Hashtbl.create 16
    — the same rule Tier 2 applies to a datatype return.  One set per
    parameter position.  Active only while the function's element return is
    being gated, or once it has been proved ([elem_ret_proved]): a fact from an
-   unproved hypothesis must never discharge another obligation. *)
-let elem_ret_hyp : (string * (string, unit) Hashtbl.t list * (string * elem option list)) option ref =
+   unproved hypothesis must never discharge another obligation.  A TUPLE
+   return (leftovers design 2026-10-18 §5.2) carries one entry per
+   component; only [Refine_check]'s tuple paths read that shape. *)
+let elem_ret_hyp : (string * (string, unit) Hashtbl.t list * ret_elems) option ref =
   ref None
 
 (* Set while [Refine_check.gate_elem_returns] runs its scratch walks. *)
