@@ -32,9 +32,27 @@ git log is authoritative for exact commits.
   `y > 0 || y < 100`) ``), and a declined body names the construct it could not
   read. A helper with refined parameters is inlined only where those are proved
   at the call (`fn y -> y > 0 && weird(y)` is read; `fn y -> weird(y)` is not).
+- **Refinements: an abstract refinement may be negated and combined in an element
+  slot.** `fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | !p(_)})` (also
+  spelled `not(p(_))`) is accepted where it was a hard
+  `abstract_refinement_misuse` error, its body is checked, and
+  `sum_nonpos(rej(ys, fn y -> y > 0))` is proved. A slot may combine `p(_)` with
+  `&&`, `||`, `!` and ordinary predicates (`{String | p(_) && len(_) > 0}`), sit at
+  a concrete base (`List(Int[p])` for `f : Int -> Bool[p]`), and an accumulator
+  helper's own `acc : List(a[p])` parameter is now checked inside the definition
+  that declares `p`.
 
 ### Fixed
 
+- **Refinements: two abstract-refinement false proofs.** A caller declaring its
+  own `p` that passed a list to a callee parameter slot such as
+  `xs : List({Int | p(_) == false})` had the callee's `p` read as its own, so the
+  call was reported proved whatever predicate it passed; a slot shape that is not
+  read at a call is now an `abstract-refinement-uninstantiated` skip, and a
+  `!p(_)` slot is instantiated with the callee's predicate. An accumulator helper
+  with an `acc : List(a[p])` parameter had that slot skipped inside its own
+  definition, so a helper pushing elements on the wrong branch still let its
+  caller's demand prove; the push is now a violation.
 - **Refinements: a container that hides a type parameter inside another type no
   longer passes element checks vacuously.** For `type Wrap(k, v) = Wrap(List((k, v)))`,
   `fn mk() : Wrap(Int, {Int | _ > 0}) do Wrap([(1, 0 - 5)]) end` was counted

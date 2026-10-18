@@ -523,6 +523,13 @@ let rec pred_str (e : A.expr) : string =
                              | "+" | "-" | "*" | "/" | "%" | "+." | "-." | "*." | "/.") as op; _ },
             [ a; b ], _) ->
     binop op a b
+  (* `!` binds tighter than any infix operator, so `!(y > 0)` printed flat
+     as `!y > 0` would name a different predicate (an instantiated `!p(_)`
+     slot is the common producer, leftovers design §3.2). *)
+  | A.EApp (A.EVar { A.txt = "not"; _ },
+            [ (A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
+                                       | "+" | "-" | "*" | "/" | "%"); _ }, [ _; _ ], _) as a) ], _) ->
+    "!(" ^ pred_str a ^ ")"
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> "-" ^ pred_str a
   (* Any other application of a plain IDENTIFIER — an unrecognised predicate

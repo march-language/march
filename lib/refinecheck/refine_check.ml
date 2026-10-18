@@ -914,27 +914,98 @@ let rec first_slot_pred (slots : elem option list) : string =
   | None :: rest -> first_slot_pred rest
 
 (* ── Abstract refinements at a call (design 2026-09-20 §3) ─────────────────
-   [abstract_return_slot fd] is [fd]'s return element slot when it is exactly
-   an abstract-refinement application: `List({a | p(_)})`, possibly under a
-   refinement of the container itself.  Read from the declared type directly:
-   [elem_refinement] admits such a slot only inside [fd]'s own walk
-   ([abstract_tyvar_slot]), and this is asked at its call sites. *)
-let abstract_slot_of_ty (t : A.ty) : (string * string) option =
+   [abstract_return_slot fd] is [fd]'s return element slot when it applies
+   one of [fd]'s abstract refinements: `List({a | p(_)})`, `List({a |
+   !p(_)})`, `List(Int[p])`, possibly under a refinement of the container
+   itself.  Read from the declared type directly: [elem_refinement] admits
+   such a slot only inside [fd]'s own walk ([abstract_tyvar_slot]), and this
+   is asked at its call sites.
+
+   Leftovers design 2026-10-18 §3.2: the slot is `C({τ | S})` where
+   - [C] is a registered one-parameter container;
+   - [τ] is a type variable ([`Tyvar]: the element sort is the demand's or
+     the argument's) or a scalar base with an SMT sort ([`Concrete s]: `Int`,
+     `Bool`, `Float`, `String`, a registered ADT, the sort [refined_param_ty]
+     gives it);
+   - [S] applies exactly one of the callee's abstract refinements [abs], only
+     as `p(binder)`, possibly under `&&`, `||` and `not`, and is otherwise
+     closed over its binder (ordinary vocabulary over the element).
+   [Some (Error why)]: the slot applies one of [abs] in a shape not read here
+   (two of them, `p(_) == false`, a computed argument, a base with no sort,
+   a mention of another name).  [None]: the slot applies none of [abs]. *)
+type abstract_slot = {
+  sl_container : string;
+  sl_binder : string;     (* the slot's binder, `_` when unnamed *)
+  sl_pred : A.expr;       (* [S], in the callee's namespace *)
+  sl_abs : string;        (* the one abstract refinement [S] applies *)
+  sl_base : [ `Tyvar | `Concrete of string option ];
+}
+
+let abstract_slot_of_ty ~(abs : string list) (t : A.ty) : (abstract_slot, string) result option =
   let rec strip (t : A.ty) =
     match unlinear t with
     | A.TyRefine ((A.TyCon _ as base), _, _) -> strip base
     | t -> t
   in
   match strip t with
-  | A.TyCon
-      ( { A.txt = c; _ }
-      , [ A.TyRefine (A.TyVar _, b, A.EApp (A.EVar { A.txt = p; _ }, [ A.EVar { A.txt = v; _ } ], _)) ] )
-    when is_container_type c && (v = binder_name b || v = "_") ->
-    Some (c, p)
+  | A.TyCon ({ A.txt = c; _ }, [ arg ]) when abs <> [] && is_container_type c ->
+    (match unlinear arg with
+     | A.TyRefine (base, b, s) ->
+       let used =
+         List.sort_uniq compare
+           (List.filter_map
+              (fun (n, _, _) -> if List.mem n abs then Some n else None)
+              (Refine_abstract.applications s))
+       in
+       let bn = binder_name b in
+       (match used with
+        | [] -> None
+        | _ :: _ :: _ ->
+          Some (Error (Printf.sprintf "its element refinement `%s` applies more than one abstract refinement" (pred_str s)))
+        | [ p ] ->
+          let base_sort =
+            match unlinear base with
+            | A.TyVar _ -> Some `Tyvar
+            | _ -> Option.map (fun (_, _, srt) -> `Concrete srt) (refined_param_ty (Some arg))
+          in
+          (match base_sort with
+           | None ->
+             Some (Error (Printf.sprintf "its element refinement `%s` is over a type with no SMT sort here" (pred_str s)))
+           | Some _ when not (Refine_abstract.slot_mentions_only_applied [ p ] bn s) ->
+             Some
+               (Error
+                  (Printf.sprintf
+                     "its element refinement `%s` uses `%s` other than as `%s(_)` under `&&`, `||` and `!`"
+                     (pred_str s) p p))
+           | Some sl_base ->
+             let tt = A.ELit (A.LitBool true, A.dummy_span) in
+             let rest = Refine_abstract.subst_abstract ~subst:subst_params p ("$v", tt) s in
+             if classify_pred bn [] rest <> Closed then
+               Some
+                 (Error
+                    (Printf.sprintf "its element refinement `%s` mentions a name other than its binder"
+                       (pred_str s)))
+             else Some (Ok { sl_container = c; sl_binder = bn; sl_pred = s; sl_abs = p; sl_base })))
+     | _ -> None)
   | _ -> None
 
-let abstract_return_slot (fd : A.fn_def) : (string * string) option =
-  Option.bind fd.A.fn_ret_ty abstract_slot_of_ty
+let abstract_return_slot (fd : A.fn_def) : (abstract_slot, string) result option =
+  Option.bind fd.A.fn_ret_ty
+    (abstract_slot_of_ty ~abs:(Refine_abstract.names ~is_known:known_predicate_fn fd))
+
+(* [inst(S, p ↦ (y, q))] over [y]: the slot's binder renamed to [y] (the slot
+   is closed over its binder, so this captures nothing), then every `p(v)`
+   replaced by [q[y := v]] (§3.2). *)
+let instantiate_slot (sl : abstract_slot) ((y, q) : string * A.expr) : A.expr =
+  let v = A.EVar { A.txt = y; A.span = A.dummy_span } in
+  let s = subst_params [ (sl.sl_binder, v); ("_", v) ] sl.sl_pred in
+  Refine_abstract.subst_abstract ~subst:subst_params sl.sl_abs (y, q) s
+
+(* Is the slot exactly `p(_)` (today's shape, whose messages stay as they were)? *)
+let slot_is_exact (sl : abstract_slot) : bool =
+  match sl.sl_pred with
+  | A.EApp (A.EVar { A.txt; _ }, [ A.EVar _ ], _) -> txt = sl.sl_abs
+  | _ -> false
 
 (* A named callable as an abstract refinement's instantiation (phase 3), and
    a helper call inside a lambda body (leftovers phase A): its proved return
@@ -983,8 +1054,15 @@ let named_predicate_n (sig_of : string -> fn_sig option) (g : string)
     in
     let is_b = function A.EVar { A.txt; _ } -> txt = b || txt = "_" | _ -> false in
     let e = if is_b l then Some r else if is_b r then Some l else None in
+    (* An abstract refinement of the function being checked is reflected too
+       (as the uninterpreted `$abs_p`, [current_abstracts]): a callback
+       parameter `pred : a -> Bool[p]` reads as `p($cb_arg)`, which is how a
+       definition passes its own `p` on (design §0, D1 delegation; §5.5's
+       accumulator helper).  Phase A's C3 check rejected it, which silently
+       turned D1 from proved into uninstantiated. *)
     let rec reflected (e : A.expr) =
       match e with
+      | A.EApp (A.EVar { A.txt = f; _ }, [ a ], _) when List.mem f !current_abstracts -> reflected a
       | A.EApp (A.EVar { A.txt = f; _ }, args, _) -> known_predicate_fn f && List.for_all reflected args
       | A.EApp _ -> false
       | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.for_all reflected es
@@ -1383,37 +1461,49 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
      | None -> None
      | Some (_, fd) ->
        (match abstract_return_slot fd with
-        | Some (_, p) when List.mem p abs ->
+        | Some (Ok sl) when List.mem sl.sl_abs abs ->
+          let p = sl.sl_abs in
           let is_known = known_predicate_fn in
           let uninst w = Some (`Uninstantiated w) in
+          (* A concrete base (`List(Int[p])`, §3.2) skips the parametric gate
+             and §3.4: both are about a TYPE VARIABLE's provenance.  The fact
+             comes from the callee's proved body alone, at the declared
+             base's sort, never the demand's. *)
+          let tyvar = sl.sl_base = `Tyvar in
           if not (Hashtbl.mem elem_ret_proved key) then
             uninst
-              (Printf.sprintf "`%s`'s own body is not proved to return elements satisfying `%s`" g p)
+              (Printf.sprintf "`%s`'s own body is not proved to return elements satisfying `%s`" g
+                 (if slot_is_exact sl then p else pred_str sl.sl_pred))
           else
-            (match Refine_abstract.positive_base ~is_known fd p with
+            (match if tyvar then Refine_abstract.positive_base ~is_known fd p else None with
              | Some a when not (parametric_ok ctx g [ a ]) ->
                uninst (Printf.sprintf "`%s` is not known to be parametric in `%s`" g a)
              | _ ->
-               let discharge =
-                 let (_, _, dsort) = demand in
-                 scratch_implies ~root defs ctx path lets sc re cb ~span ~callee dsort
+               let esort =
+                 match sl.sl_base with `Concrete s -> s | `Tyvar -> (let (_, _, ds) = demand in ds)
                in
+               let discharge = scratch_implies ~root defs ctx path lets sc re cb ~span ~callee esort in
                (match
                   instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb))
                     ~local_lambda:(local_lambda_of lets) ~discharge fd p args
                 with
                 | Error w -> uninst w
-                | Ok (y, body) ->
+                | Ok (y, q) ->
                   begin
+                    let body = instantiate_slot sl (y, q) in
                     (* §3.4: an element of the result is an element of the
                        input it came from, so the input's own element fact
                        holds of it as well.  Only through the single source
                        the parametric rule traces (gated above), and only a
-                       single refined slot. *)
+                       single refined slot.  Conjoined OUTSIDE [inst]: under
+                       `!p` substituting `incoming && q` for `p` would give
+                       `!(incoming && q)`, far weaker than what holds. *)
                     let body' =
                       match
-                        Option.bind (callee_sig ctx defs cb g) (fun sg ->
-                            Option.bind (Refine_abstract.positive_base ~is_known fd p) (sources_of sg))
+                        if not tyvar then None
+                        else
+                          Option.bind (callee_sig ctx defs cb g) (fun sg ->
+                              Option.bind (Refine_abstract.positive_base ~is_known fd p) (sources_of sg))
                       with
                       | Some [ Src_elem (j, [ _ ]) ] ->
                         (match
@@ -1427,7 +1517,8 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
                          | _ -> body)
                       | _ -> body
                     in
-                    let ((_, dpred, dsort) as d) = demand in
+                    let (dbinder, dpred, _) = demand in
+                    let ((_, dpred, dsort) as d) = (dbinder, dpred, esort) in
                     let sg = elem_sig ~name:"$elem" d in
                     let rp = List.hd sg.refined in
                     let sc' = ("$elem", (y, body', dsort)) :: scope_shadow sc [ "$elem" ] in
@@ -1460,16 +1551,24 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
                                  (List.nth_opt args)
                              with
                              | Some (A.EVar { A.txt = g; _ }) ->
-                               Printf.sprintf "`%s` (`%s`)" g (pred_str body)
+                               Printf.sprintf "`%s` (`%s`)" g (pred_str q)
                              | Some (A.ELam ([ _ ], src, _)) ->
                                (* §2.5: print the lambda as written and, when
                                   the reader rewrote it, what it was read as. *)
                                let written = lambda_src_str src in
-                               if written = pred_str body then Printf.sprintf "`fn %s -> %s`" y written
+                               if written = pred_str q then Printf.sprintf "`fn %s -> %s`" y written
                                else
                                  Printf.sprintf "`fn %s -> %s` (read as `%s`)" y written
-                                   (reading_str body)
-                             | _ -> Printf.sprintf "`fn %s -> %s`" y (pred_str body)
+                                   (reading_str q)
+                             | _ -> Printf.sprintf "`fn %s -> %s`" y (pred_str q)
+                           in
+                           (* A generalized slot (`!p(_)`) names the slot and
+                              what it became, which is what was assumed. *)
+                           let source =
+                             if slot_is_exact sl then source
+                             else
+                               Printf.sprintf "%s, in the element slot `%s` (read as `%s`)," source
+                                 (pred_str sl.sl_pred) (reading_str body)
                            in
                            Printf.sprintf "%s does not imply `%s`" source (pred_str dpred)))
                     | _ -> Some `Undecided
@@ -1858,12 +1957,27 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
    span table ([None] marker = Int): [Some m] when known, [None] when the
    table is absent or the element type has no SMT sort here (a type variable,
    a record, a tuple). *)
-let elem_marker_of_arg (a : A.expr) : string option option =
+(* [~erased_for]: leftovers design §3.3.  Inside a definition that declares
+   abstract refinements, an argument whose elements are an unresolved type
+   variable (`Cons(h, acc)` with `acc : List(a)`) gets the ERASED sort (Int,
+   marker [None]) when the predicate it is checked against applies one of
+   that definition's own abstract refinements: that is the sort
+   [Refine_scope.abstract_tyvar_slot] gives the very same elements, so the
+   obligation and the elements' facts agree.  Anything else keeps the decline
+   (probe q09b: never default a sort at a call site). *)
+let elem_marker_of_arg ?(erased_for : A.expr option) (a : A.expr) : string option option =
   match !call_type_map with
   | None -> None
   | Some tm ->
     let module T = March_typecheck.Typecheck in
     let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
+    let erased_ok () =
+      !current_abstracts <> []
+      && (match erased_for with
+          | Some pred ->
+            List.exists (fun (n, _, _) -> List.mem n !current_abstracts) (Refine_abstract.applications pred)
+          | None -> false)
+    in
     (match Option.map strip (Hashtbl.find_opt tm (T.span_of_expr a)) with
      | Some (T.TCon (_, [ e ])) ->
        (match sort_of_tc_ty e with
@@ -1871,7 +1985,10 @@ let elem_marker_of_arg (a : A.expr) : string option option =
         | Some Smt.SBool -> Some (Some bool_sort)
         | Some Smt.SFloat -> Some (Some float_sort)
         | Some (Smt.SData (n, _)) -> Some (Some n)
-        | _ -> None)
+        | _ ->
+          (match strip e with
+           | T.TVar { contents = T.Unbound _ } when erased_ok () -> Some None
+           | _ -> None))
      | _ -> None)
 
 (* §3.5: a parameter whose element slot applies one of the callee's abstract
@@ -1883,33 +2000,54 @@ let elem_marker_of_arg (a : A.expr) : string option option =
 let abstract_param_entry ~root (ctx : rctx) defs path sc re (cb : cbenv) (lets : launder) ~(span : A.span)
     (g : string) (t : A.ty) (args : A.expr list) (a : A.expr)
   : (string * elem option list, string) result option =
-  match abstract_slot_of_ty t with
-  | Some (c, p) when List.mem p (callee_abstracts ctx g) ->
+  match abstract_slot_of_ty ~abs:(callee_abstracts ctx g) t with
+  | None -> None
+  (* A slot that applies one of the callee's abstract refinements in a shape
+     not read here is a recorded skip, never a fall-through: read through
+     [elem_refinement] by a caller declaring a refinement of the same name,
+     it would mean the caller's predicate (§3.4). *)
+  | Some (Error why) -> Some (Error (Printf.sprintf "the parameter's element slot is not read here: %s" why))
+  | Some (Ok sl) ->
+    let p = sl.sl_abs and c = sl.sl_container in
     (match Option.bind (resolve_key ctx g) (Hashtbl.find_opt fn_defs_tbl) with
      | None -> None
      | Some (_, fd) ->
+       (* A concrete base states the elements' sort; a type variable's is the
+          ARGUMENT's (or, §3.3, the erased one). *)
+       let marker ?erased_for () =
+         match sl.sl_base with `Concrete s -> Some s | `Tyvar -> elem_marker_of_arg ?erased_for a
+       in
        Some
          (let discharge ~y ~fact goal =
             (* An unknown element sort discharges nothing (and the demand
-               below declines for the same reason). *)
-            match elem_marker_of_arg a with
+               below declines for the same reason).  The §3.3 erased sort is
+               not used here: it depends on the reading being discharged. *)
+            match marker () with
             | Some m -> scratch_implies ~root defs ctx path lets sc re cb ~span ~callee:g m ~y ~fact goal
             | None -> false
           in
           Result.bind
             (instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb))
-               ~local_lambda:(local_lambda_of lets) ~discharge fd p args) (fun (y, body) ->
+               ~local_lambda:(local_lambda_of lets) ~discharge fd p args) (fun (y, q) ->
+              let body = instantiate_slot sl (y, q) in
               (* The demand's element sort is the ARGUMENT's: unlike a result
                  demand, nothing declared states it.  Defaulting to Int made a
                  correct `List(String)` call a false violation (probe q09b,
                  2026-10-07), so an unknown sort declines instead. *)
-              match elem_marker_of_arg a with
-              | Some m -> Ok (c, [ Some (Refined (y, body, m)) ])
+              match marker ~erased_for:body () with
+              | Some m ->
+                (* A by-name callback's reading is over `$cb_arg`; name the
+                   element `_` instead, so a diagnostic reads `p(_)`. *)
+                let y, body =
+                  if String.length y > 0 && y.[0] = '$' then
+                    ("_", subst_params [ (y, A.EVar { A.txt = "_"; A.span = A.dummy_span }) ] body)
+                  else (y, body)
+                in
+                Ok (c, [ Some (Refined (y, body, m)) ])
               | None ->
                 Error
                   (Printf.sprintf
                      "the element type of the argument passed for `%s`'s parameter is not known here" p))))
-  | _ -> None
 
 (* The element obligations a call's arguments owe the callee's declared
    parameter types.  An abstract slot is tried FIRST: read through

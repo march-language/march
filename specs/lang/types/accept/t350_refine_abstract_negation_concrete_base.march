@@ -1,0 +1,34 @@
+-- Abstract refinements, the leftovers, phase B
+-- (specs/2026-10-18-abstract-refinements-leftovers-design.md §3): a slot
+-- predicate may negate `p` (`{a | !p(_)}`), a slot may sit at a concrete
+-- base (`List(Int[p])`), and an accumulator helper's own `List(a[p])`
+-- parameter slot is checked at the erased element sort.  Rows P3, R1 and D2
+-- of the design.  Under `cap verified`, exit 0 means every obligation,
+-- definition side and call side, PROVED.  Reject companion: reject/t351.
+mod AbsNegation do
+  cap verified
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do List.length(xs) end
+  fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | !p(_)}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do rej(t, pred) else Cons(h, rej(t, pred)) end
+    end
+  end
+  fn ifilter(xs : List(Int), f : Int -> Bool[p]) : List(Int[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if f(h) do Cons(h, ifilter(t, f)) else ifilter(t, f) end
+    end
+  end
+  pfn filt_go(lst : List(a), pred : a -> Bool[p], acc : List(a[p])) : List(a[p]) do
+    match lst do
+    Nil -> List.reverse(acc)
+    Cons(h, t) -> if pred(h) do filt_go(t, pred, Cons(h, acc)) else filt_go(t, pred, acc) end
+    end
+  end
+  fn filt2(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do filt_go(xs, pred, Nil) end
+  fn p3(ys : List(Int)) : Int do sum_nonpos(rej(ys, fn y -> y > 0)) end
+  fn r1(ys : List(Int)) : Int do sum_pos(ifilter(ys, fn y -> y > 0)) end
+  fn d2(ys : List(Int)) : Int do sum_pos(filt2(ys, fn y -> y > 0)) end
+end
