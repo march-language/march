@@ -858,32 +858,84 @@ let lambda_tail_rebinds (bound : string list) (t : A.expr) : string option =
    every source is an element whose slot is the same refinement `q` (here
    `pos`'s), the lambda's parameter may assume `q`.  Same preconditions as the
    element rule ([agreed_elem_slot]: P1/P2 and agreeing element sources).
-   Returns the lambda's parameters with that refinement put back on the one
-   parameter, or [None].  Only a one-parameter lambda whose parameter carries
-   no refinement of its own, at a parameter typed `a -> …`. *)
+   Since 2026-10-18 (element-flow follow-ups design, phase 1, §4) every
+   parameter of a multi-parameter lambda gets the fact of ITS arrow-chain
+   position: `zip_with(xs, ys, fn (x, y) -> …)` with `f : a -> b -> c` gives
+   `x` `xs`'s slot and `y` `ys`'s; `sort_by`'s `a -> a -> Bool` gives both
+   parameters `a`'s.  The argument never used the parameter count: every `aj`
+   value the callee hands position `j` came from a source of `aj`.
+
+   [lambda_domain_facts]: the positions [j] of parameter [i]'s arrow chain
+   whose domain is a bare type variable with an agreed SCALAR element slot,
+   as [(j, q)].  Only [agreed_elem_slot], which needs EVERY source of the
+   variable to be an element: a variable a callback can produce or the
+   caller hands over bare (`fold_left`'s accumulator `b`, with its bare
+   `acc` and the callback's `b` result) never qualifies.  That is the line
+   with specs/2026-10-18-fold-accumulator-invariants-design.md: assuming a
+   DEMAND on `acc` is an inductive invariant, not a domain fact. *)
+let lambda_domain_facts (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : string)
+    (sg : fn_sig) (args : A.expr list) (i : int) : (int * (string * A.expr * string option)) list =
+  match Option.join (List.nth_opt sg.param_tys i) with
+  | None -> []
+  | Some t ->
+    let doms, _ = arrow_chain t in
+    List.concat
+      (List.mapi
+         (fun j dom ->
+           match strip_ty dom with
+           | A.TyVar a ->
+             (match
+                agreed_elem_slot ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx fname sg args a.A.txt
+              with
+              | Some (Refined q) -> [ (j, q) ]
+              | _ -> [])
+           | _ -> [])
+         doms)
+
+(* Returns the lambda's parameters with those facts put back, or [None] when
+   no parameter gets one.  Guards (design §4.3):
+   - G2-1: a one-parameter lambda takes position 0 of any chain (the
+     pre-2026-10-18 rule, unchanged); a lambda of [k >= 2] parameters needs a
+     chain of exactly [k] domains.  A nested `fn a -> fn b -> …` is not
+     peeled.
+   - G2-2: a parameter annotated with a refinement anywhere declines the
+     WHOLE lambda: [visit_lambda ~assume:true] assumes every parameter's
+     annotation, and nobody checked that one.  A fact replaces only an
+     unannotated or plainly typed ([TyCon]) parameter's annotation.
+   - G2-3: a fact [q] that mentions ANY of the lambda's parameter names (its
+     binder aside, when the binder is the receiving parameter's own name) is
+     not given: `xs : List({Int | _ < n})` zipped with `fn (y, n) -> …` would
+     read the caller's `n` as the lambda's (phase 0's row z4, per position). *)
 let lambda_domain_params (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : string)
     (sg : fn_sig) (args : A.expr list) (i : int) : A.param list option =
   match List.nth_opt args i, Option.join (List.nth_opt sg.param_tys i) with
-  | Some (A.ELam ([ p ], _, _)), Some t ->
-    (match strip_ty t, p.A.param_ty with
-     | A.TyArrow (dom, _), (None | Some (A.TyCon _)) ->
-       (match strip_ty dom with
-        | A.TyVar a ->
-          (match
-             agreed_elem_slot ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx fname sg args a.A.txt
-           with
-           (* A [q] naming the lambda's own parameter (`xs : List({Int | _ <
-              n})` mapped with `fn n -> …`) would be a fact about the lambda's
-              `n`, not the caller's: `n < n`, false, so everything followed
-              (design 2026-10-18 element-flow follow-ups, row z4). *)
-           | Some (Refined ((b, qp, _) as q))
-             when not (expr_mentions (List.filter (( <> ) b) [ p.A.param_name.A.txt ]) qp) ->
-             (match ty_of_refined q with
-              | Some ty -> Some [ { p with A.param_ty = Some ty } ]
-              | None -> None)
-           | _ -> None)
-        | _ -> None)
-     | _ -> None)
+  | Some (A.ELam ((_ :: _ as ps), _, _)), Some t ->
+    let k = List.length ps in
+    let chain = List.length (fst (arrow_chain t)) in
+    let own_refined (p : A.param) =
+      match p.A.param_ty with Some pt -> ty_has_refinement pt | None -> false
+    in
+    if (if k = 1 then chain < 1 else chain <> k) || List.exists own_refined ps then None
+    else
+      let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+      let facts = lambda_domain_facts ctx defs cb ce fname sg args i in
+      let given = ref false in
+      let ps' =
+        List.mapi
+          (fun j (p : A.param) ->
+            match List.assoc_opt j facts, p.A.param_ty with
+            | Some ((b, qp, _) as q), (None | Some (A.TyCon _))
+              when not
+                     (expr_mentions
+                        (List.filter (fun n -> not (n = b && n = p.A.param_name.A.txt)) names)
+                        qp) ->
+              (match ty_of_refined q with
+               | Some ty -> given := true; { p with A.param_ty = Some ty }
+               | None -> p)
+            | _ -> p)
+          ps
+      in
+      if !given then Some ps' else None
   | _ -> None
 
 (* A skip filed by the demand-driven element rule ([demand_flow]), with its

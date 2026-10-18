@@ -2117,6 +2117,34 @@ As `b` shows, a one-parameter lambda passed where the callee's function
 argument takes the element type receives its source's element refinement as a
 fact, both for this check and for every obligation inside the lambda body.
 
+A lambda with several parameters gets the same fact position by position: each
+parameter assumes the element refinement of the type variable at its place in
+the callee's function type, when every source of that variable is an element.
+
+```march
+fn need_pos(k : {Int | _ > 0}) : Int do k end
+
+fn d(xs : List({Int | _ > 0}), ys : List({Int | _ > 0})) : Int do
+  sum_pos(List.zip_with(xs, ys, fn (x, y) -> x + y))       -- proved: x from xs, y from ys
+end
+
+fn e(xs : List({Int | _ > 0})) : Int do
+  List.fold_left(xs, 0, fn (acc, x) -> acc + need_pos(x))  -- proved: x comes from xs
+end
+
+fn s(xs : List({Int | _ > 0})) : List({Int | _ > 0}) do
+  List.sort_by(xs, fn (a, b) -> need_pos(a) < need_pos(b)) -- proved: a -> a -> Bool, both from xs
+end
+```
+
+`fold_left`'s accumulator gets nothing: its type variable also enters through
+the bare initial value and the callback's own result, so
+`fn (acc, x) -> need_pos(acc) + x` is a skip. A lambda in which any parameter
+carries a refinement annotation of its own receives no fact at all, a fact
+that names one of the lambda's own parameters is not given to any of them,
+and a lambda with fewer parameters than the function type takes arguments (other
+than a one-parameter lambda) gets nothing.
+
 A source that does not meet the demand gives a **skip**, never a violation, with
 the reason `parametric-source-unproved`. `sum_pos(List.map(ys, fn y -> 0))` is
 fine when `ys` is empty, and whether it is empty is the caller's data. Under
@@ -2285,8 +2313,11 @@ demand meets one of these):
 - **Only a container demand is traced.** A single element flowing into a scalar
   position (`need_pos(Option.unwrap_or(o, 1))`, the result of `fold_left`) is
   not checked through the callee's sources.
-- **Only a one-parameter lambda receives a domain fact.** `fold_left`'s
-  two-parameter callback does not.
+- **A fold's accumulator receives no domain fact.** In
+  `fold_left(xs, 1, fn (acc, x) -> …)`, `x` assumes `xs`'s element refinement
+  but `acc` assumes nothing, so `need_pos(acc)` is a skip: an invariant the
+  accumulator keeps is not inferred. A curried lambda (`fn a -> fn x -> …`)
+  gives a fact to its outer parameter only.
 - **A local `fn` with a container return** has its tails checked by nothing and
   lends no element fact at its call sites.
 - **An element refinement that names a parameter** (`: List({Int | _ < n})`) is
