@@ -1750,9 +1750,9 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
 and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
     (g : string) (args : A.expr list) : [ `Na | `Proved | `Unproved of string ] =
-  (* Every sub-check reports into a throwaway context: the caller records the
-     one obligation this call owes. *)
-  let errctx = (ignore errctx; Err.create ()) in
+  (* Every sub-check reports into a throwaway context ([discharge_pairs]'):
+     the caller records the one obligation this call owes. *)
+  ignore errctx;
   match callee_sig ctx defs cb g with
   | Some sg when List.length sg.param_tys = List.length args ->
     (match Option.map strip_ty sg.ret_ty with
@@ -1777,6 +1777,24 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
                the demanded element refinement cannot be traced to its arguments"
               g)
        else
+         (match discharge_pairs ~root defs ctx path lets sc re cb ce ~span ~callee g sg args !pairs with
+          | `Proved -> `Proved
+          | `Unproved w -> `Unproved w)
+     | _ -> `Na)
+  | _ -> `Na
+
+(* [demand_flow]'s source discharge, given the demanded (type variable,
+   demand) pairs of [g]'s declared return: every source of each variable
+   ([sources_of]) must meet its demand.  Shared with the scalar entry point
+   (design 2026-10-18 element-flow follow-ups §3.2), so both run one
+   discharge under one scratch-ledger discipline.  The caller has already
+   checked P1/P2 ([parametric_ok]) for the variables in [pairs]. *)
+and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) ~(callee : string) (g : string) (sg : fn_sig) (args : A.expr list)
+    (pairs : (string * elem) list) : [ `Proved | `Unproved of string ] =
+  (* Every sub-check reports into a throwaway context: the caller records the
+     one obligation this call owes. *)
+  let errctx = Err.create () in
          (* The entry a parameter type carries when [b] is demanded to meet [d]. *)
          let rec entry_with (t : A.ty) (b : string) (d : elem) : (string * elem option list) option =
            match strip_ty t with
@@ -1916,15 +1934,13 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
                        | None | Some [] ->
                          [ (`U, Printf.sprintf "some way a value of `%s` enters `%s` cannot be traced" b g) ]
                        | Some srcs -> List.map (discharge b d) srcs)
-                     !pairs))
+                     pairs))
          in
          (match List.find_opt (fun (v, _) -> v <> `P) verdicts with
           | None -> `Proved
           | Some (`V, what) ->
             `Unproved (Printf.sprintf "%s can fail it for some input" what)
           | Some (_, what) -> `Unproved (Printf.sprintf "%s is not known to satisfy it" what))
-     | _ -> `Na)
-  | _ -> `Na
 
 (* The sort marker of a container argument's ELEMENTS, from the typechecker's
    span table ([None] marker = Int): [Some m] when known, [None] when the
