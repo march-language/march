@@ -680,6 +680,7 @@ type call_ctx = {
 }
 
 let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
+    ?(goal_scope_facts = false)
     ?(verdict_out : Obligation.verdict option ref option)
     (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
   (* Destructured to the names the body has always used: this is a signature
@@ -2418,31 +2419,45 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       | A.EField (r, _, _) | A.EAnnot (r, _, _) -> guard_names r
       | _ -> []
     in
-    List.iter
-      (fun (cond, _) ->
-        List.iter
-          (fun x ->
-            if not (Hashtbl.mem scalar_path_facts_loaded x) then begin
-              Hashtbl.replace scalar_path_facts_loaded x ();
-              match List.assoc_opt x sc with
-              | Some (b, q, m) when scalar_sort_of_marker m <> None
-                                 && not (Hashtbl.mem str_names x) && not (is_recvar x) ->
-                let srt = scalar_sort_or_int m in
-                if srt <> Smt.SInt then Hashtbl.replace caller_scalar x srt;
-                let xc = Smt.Const x in
-                decls := (x, srt) :: !decls;
-                let rv n =
-                  if n = b || n = "_" || n = x then Some xc
-                  else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
-                in
-                (match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure
-                         ~resolve_str_lit:str_lit_const q with
-                 | Some qa -> push_user qa
-                 | None -> ())
-              | _ -> ()
-            end)
-          (guard_names cond))
-      path;
+    (* Caller names some USER assumption actually constrains: a scope fact
+       loaded over the name, or a translated path condition mentioning it.
+       Read by the definite-failure rule under [~goal_scope_facts]. *)
+    let constrained_names : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+    let load_scalar_name_fact x =
+      if not (Hashtbl.mem scalar_path_facts_loaded x) then begin
+        Hashtbl.replace scalar_path_facts_loaded x ();
+        match List.assoc_opt x sc with
+        | Some (b, q, m) when scalar_sort_of_marker m <> None
+                           && not (Hashtbl.mem str_names x) && not (is_recvar x) ->
+          let srt = scalar_sort_or_int m in
+          if srt <> Smt.SInt then Hashtbl.replace caller_scalar x srt;
+          let xc = Smt.Const x in
+          decls := (x, srt) :: !decls;
+          let rv n =
+            if n = b || n = "_" || n = x then Some xc
+            else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
+          in
+          (match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure
+                   ~resolve_str_lit:str_lit_const q with
+           | Some qa -> Hashtbl.replace constrained_names x (); push_user qa
+           | None -> ())
+        | _ -> ()
+      end
+    in
+    List.iter (fun (cond, _) -> List.iter load_scalar_name_fact (guard_names cond)) path;
+    (* [~goal_scope_facts]: the GOAL is in the caller's namespace (an element
+       demand moved there by [Refine_check.instantiate_entry], `_ < k` for
+       `need_lt(ys, k)`), so a name it mentions that is neither the subject
+       nor a parameter of [sg] is a caller-scope variable exactly as a
+       guard's name is ([resolve_var]'s caller-scope arm), and carries its
+       scope fact the same way.  Off for every other caller: a scalar
+       contract's goal is in the CALLEE's namespace, where such a name has
+       no business being read as the caller's (design 2026-10-18
+       element-flow follow-ups, phase 0). *)
+    if goal_scope_facts then
+      List.iter
+        (fun x -> if not (is_self x) && not (List.mem_assoc x name_pos) then load_scalar_name_fact x)
+        (guard_names rp.pred);
     List.iter
       (fun (cond, negated) ->
         match
@@ -2451,7 +2466,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             ~resolve_measure_app ~resolve_tester:path_resolve_tester
             ~resolve_str_lit:str_lit_const cond
         with
-        | Some t -> push_user (if negated then Smt.Not t else t)
+        | Some t ->
+          List.iter (fun x -> Hashtbl.replace constrained_names x ()) (guard_names cond);
+          push_user (if negated then Smt.Not t else t)
         | None ->
           (* A guard that IS a call (`if Set.contains(s, x, cmp) do …`, or its
              negation): stand the call up as a Bool constant carrying the
@@ -2475,6 +2492,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               | Some (t, ds, asms) ->
                 List.iter (fun d -> decls := d :: !decls) ds;
                 List.iter push_user asms;
+                List.iter (fun x -> Hashtbl.replace constrained_names x ()) (guard_names cond);
                 let t = if inner_neg then Smt.Not t else t in
                 push_user (if negated then Smt.Not t else t)
               | None -> ())
@@ -2762,9 +2780,37 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              pred fail for ALL of them (the `¬G` discharge below) would let
              `apply(take_n, -3)` through whenever `_ >= 0` merely SOMETIMES
              holds, which is always. *)
+          (* …but only when every name the goal mentions is the subject, a
+             parameter, or a caller name some user assumption constrains.  A
+             substituted element demand (`_ < k`, [~goal_scope_facts]) can
+             name a caller variable whose fact was retired or never existed
+             (`let k = x; let x = 0; need_lt(ys, k)`): the solver then picks
+             `k` freely, and "some `k` refutes it" says nothing about the
+             real one.  Such a goal falls through to the `¬G` discharge,
+             which only reports a failure no value of `k` can avoid, and is
+             otherwise a skip, as a scalar `big(k)` is. *)
+          let rec value_names (e : A.expr) : string list =
+            match e with
+            | A.EVar { A.txt; _ } -> [ txt ]
+            (* An application's head names a function or operator, not a value. *)
+            | A.EApp (A.EVar _, xs, _) -> List.concat_map value_names xs
+            | A.EApp (f, xs, _) -> value_names f @ List.concat_map value_names xs
+            | A.ECon (_, xs, _) | A.ETuple (xs, _) | A.EAtom (_, xs, _) -> List.concat_map value_names xs
+            | A.EField (r, _, _) | A.EAnnot (r, _, _) -> value_names r
+            | _ -> []
+          in
+          let free_goal_name =
+            goal_scope_facts
+            && List.exists
+                 (fun x ->
+                   (not (is_self x)) && (not (List.mem_assoc x name_pos))
+                   && not (Hashtbl.mem constrained_names x))
+                 (value_names rp.pred)
+          in
           let definite =
             match subject, first with
-            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ -> true
+            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ ->
+              not free_goal_name
             | _ -> false
           in
           (match

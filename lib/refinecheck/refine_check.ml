@@ -774,6 +774,84 @@ and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
        | None -> None)
     | _ -> None
 
+(* ── One namespace for a declared element slot (design 2026-10-18
+   element-flow follow-ups, phase 0, §1.1) ───────────────────────────────
+   An element slot's predicate is in the namespace of the DECLARATION it came
+   from: `xs : List({Int | _ < n})` talks about the callee's `n`.  Before it
+   is used at a call, it is moved into the caller's namespace by the rule
+   [postcond_of] applies to a scalar relational return: a named binder is
+   renamed to `_` first (so an actual mentioning a caller `x` cannot be
+   captured by a binder `x`), then [classify_pred] over the formals —
+   [Closed]: unchanged (byte-identical to the pre-2026-10-18 path);
+   [Relational ps]: every [ps] needs a positional actual (a formal recorded
+   as "_" never counts) and the actuals are substituted simultaneously;
+   [Unusable]: not movable.
+
+   [`Stable] additionally requires every substituted actual to be a
+   variable, a literal, or a [let_equality_rhs] shape (an entry that may be
+   STORED and read again later); [`Any] admits any actual (a demand, used
+   once, here, where each actual denotes exactly the value the callee
+   receives).  [Error why] names the first slot that could not be moved. *)
+let instantiate_entry ~(mode : [ `Stable | `Any ]) ~(formals : string list) ~(args : A.expr list)
+    (entry : string * elem option list) : (string * elem option list, string) result =
+  let env =
+    List.mapi (fun i n -> (n, List.nth_opt args i)) formals
+    |> List.filter_map (function "_", _ | _, None -> None | n, Some a -> Some (n, a))
+  in
+  let stable (a : A.expr) =
+    match a with A.EVar _ | A.ELit _ -> true | _ -> let_equality_rhs a
+  in
+  let exception Stuck of string in
+  let rec slot (s : elem option) : elem option =
+    match s with
+    | None -> None
+    | Some (Container (c, inner)) -> Some (Container (c, List.map slot inner))
+    | Some (Refined (b, p, srt)) ->
+      (match classify_pred b formals p with
+       | Closed -> s
+       | Unusable ->
+         raise
+           (Stuck
+              (Printf.sprintf "its element refinement `%s` mentions a name that is not a parameter"
+                 (pred_str p)))
+       | Relational ps ->
+         (match List.find_opt (fun n -> not (List.mem_assoc n env)) ps with
+          | Some n ->
+            raise
+              (Stuck
+                 (Printf.sprintf "its element refinement `%s` mentions `%s`, which has no argument here"
+                    (pred_str p) n))
+          | None ->
+            let sub = List.filter (fun (n, _) -> List.mem n ps) env in
+            (match mode, List.find_opt (fun (_, a) -> not (stable a)) sub with
+             | `Stable, Some (n, _) ->
+               raise
+                 (Stuck
+                    (Printf.sprintf "the argument for `%s` is not a variable or a literal" n))
+             | _ ->
+               let p =
+                 if b = "_" then p
+                 else subst_params [ (b, A.EVar { A.txt = "_"; A.span = A.dummy_span }) ] p
+               in
+               Some (Refined ("_", subst_params sub p, srt)))))
+  in
+  let c, slots = entry in
+  match List.map slot slots with
+  | slots' -> Ok (c, slots')
+  | exception Stuck why -> Error why
+
+(* A lambda tail is checked in the env at the LAMBDA, not at the tail
+   ([demand_flow]'s [lambda_ok], [check_pass_site_elements]), so a name it
+   mentions that was bound on the way down ([tails_bound]'s [bound]: an inner
+   `let`, a `match` arm's pattern, a local `fn`) would be read as the
+   caller's.  `sum_pos(map(ys, fn y -> let k = 0 - 5; k))` with a caller `k
+   : {Int | _ > 0}` was proved.  [Some n]: the tail is not checked.  The
+   scalar post engine's rule ([Refine_post.check_post_induction]'s
+   [check_tails]); found while fixing design 2026-10-18 element-flow
+   follow-ups row z2, of which it is the lambda twin. *)
+let lambda_tail_rebinds (bound : string list) (t : A.expr) : string option =
+  List.find_opt (fun n -> expr_mentions [ n ] t) bound
+
 (* ── Domain facts for an inline lambda (2026-09-18 plan, Phase 3, §4.4) ──
    `List.map(pos, fn y -> …)` with `map(xs : List(a), f : a -> b)`: every `a`
    the callee can hand the lambda came from one of `a`'s sources, and when
@@ -794,7 +872,12 @@ let lambda_domain_params (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : 
           (match
              agreed_elem_slot ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx fname sg args a.A.txt
            with
-           | Some (Refined q) ->
+           (* A [q] naming the lambda's own parameter (`xs : List({Int | _ <
+              n})` mapped with `fn n -> …`) would be a fact about the lambda's
+              `n`, not the caller's: `n < n`, false, so everything followed
+              (design 2026-10-18 element-flow follow-ups, row z4). *)
+           | Some (Refined ((b, qp, _) as q))
+             when not (expr_mentions (List.filter (( <> ) b) [ p.A.param_name.A.txt ]) qp) ->
              (match ty_of_refined q with
               | Some ty -> Some [ { p with A.param_ty = Some ty } ]
               | None -> None)
@@ -1083,7 +1166,7 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
     let sg = elem_sig ~name:"$elem" r in
     let rp = List.hd sg.refined in
     let out = ref None in
-    check_call cx ~span ~callee ~verdict_out:out sg [ e ] rp;
+    check_call cx ~span ~callee ~goal_scope_facts:true ~verdict_out:out sg [ e ] rp;
     !out = Some Obligation.Proved
   in
   (* One expression against one slot, whatever it holds. *)
@@ -1167,7 +1250,7 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
                let sc = ("$elem", q) :: scope_shadow sc [ "$elem" ] in
                let cx = { cx with sc } in
                let out = ref None in
-               check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~verdict_out:out sg
+               check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~goal_scope_facts:true ~verdict_out:out sg
                  [ A.EVar { A.txt = "$elem"; A.span = xsp } ] rp;
                !out = Some Obligation.Proved
              | Some (Refined (_, p, _)), _ ->
@@ -1297,7 +1380,7 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
          let scalar_ok cx (r : string * A.expr * string option) (e : A.expr) : [ `P | `U | `V ] =
            let sg1 = elem_sig ~name:"$elem" r in
            let out = ref None in
-           check_call cx ~span ~callee:g ~verdict_out:out sg1 [ e ] (List.hd sg1.refined);
+           check_call cx ~span ~callee:g ~goal_scope_facts:true ~verdict_out:out sg1 [ e ] (List.hd sg1.refined);
            match !out with
            | Some Obligation.Proved -> `P
            | Some Obligation.Violated -> `V
@@ -1313,17 +1396,23 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
            let ctx' = local_shadow ~spans:(param_spans ps) ctx names in
            let sc' = List.fold_left scope_add_param (scope_shadow sc names) ps in
            let cb' = List.fold_left cb_add_param (cb_shadow cb names) ps in
-           let ce' = List.fold_left cont_add_param (cont_shadow ce names) ps in
+           let ce' = cont_add_params ce ps in
            let lets' = launder_shadow lets names in
+           (* Every tail is checked in the LAMBDA-level env, so a tail naming
+              something bound on the way down (`fn y -> let k = 0 - 5; k`)
+              would read the CALLER's `k`: not checked, never proved
+              ([lambda_tail_rebinds]). *)
            let results =
              List.map
-               (fun (p, t) ->
+               (fun (p, t, bound) ->
+                 if lambda_tail_rebinds bound t <> None then `U
+                 else
                  match want with
                  | `S r ->
                    scalar_ok { cx0 with path = p; lets = lets'; sc = sc'; binds = ctx'.binds } r t
                  | `C entry ->
                    ok_of (check_elements ~root errctx defs ctx' p lets' sc' re cb' ce' ~span ~callee entry t))
-               (tails (path_shadow path names) body)
+               (tails_bound (path_shadow path names) [] body)
            in
            if List.mem `V results then `V else if List.for_all (( = ) `P) results then `P else `U
          in
@@ -1358,8 +1447,26 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
                | _ -> None
              in
              let what = Printf.sprintf "the results of the function passed as %s" (describe i) in
+             (* The capture guard: the demand is in the caller's namespace,
+                and a lambda parameter spelled like a name it mentions would
+                read it as the parameter (`need_lt(map(ys, fn n -> n - 1), n)`
+                proved `n - 1 < n`; design 2026-10-18 element-flow
+                follow-ups, row z5). *)
+             let captured (ps : A.param list) w =
+               let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+               List.find_opt
+                 (fun n ->
+                   match w with
+                   | `S (b, p, _) -> n <> b && expr_mentions [ n ] p
+                   | `C entry -> elem_entry_mentions [ n ] entry)
+                 names
+             in
              (match want, e with
               | None, _ -> (`U, what)
+              | Some w, A.ELam (ps, _, _) when captured ps w <> None ->
+                ( `U
+                , Printf.sprintf "%s (the lambda's parameter `%s` shadows a name the demanded refinement mentions)"
+                    what (Option.get (captured ps w)) )
               | Some w, A.ELam (ps, body, _) -> (lambda_ok i ps body w, what)
               | Some (`S r), A.EVar { A.txt = f; A.span = fsp } ->
                 (match callee_sig ctx defs cb f with
@@ -1466,9 +1573,19 @@ let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
              (record_abstract_verdict errctx ~span:(arg_span span a) ~callee
                 ~predicate:"p(_)" (`Uninstantiated why))
          | None ->
+           (* The slot names the CALLEE's parameters: read at this call's
+              actuals, never in the caller's namespace (design 2026-10-18
+              element-flow follow-ups, rows z1-z1''': `need_lt(ys, 10)` was
+              proved against the caller's `let n = 1000`). *)
            (match elem_refinement t with
             | Some er ->
-              ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
+              (match instantiate_entry ~mode:`Any ~formals:sg.param_names ~args er with
+               | Ok er -> ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
+               | Error why ->
+                 let pname = Option.value ~default:"_" (List.nth_opt sg.param_names i) in
+                 record_elem_skip errctx ~span:(arg_span span a) ~callee
+                   ~predicate:(first_slot_pred (snd er))
+                   ~what:(Printf.sprintf "the parameter `%s` cannot be read at this call: %s" pname why))
             | None -> ()))
       | None -> ())
     args
@@ -1486,6 +1603,14 @@ let check_field_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cb
         match List.nth_opt sg.param_tys i, List.assoc_opt pn fields with
         | Some t, Some e ->
           (match elem_refinement t with
+           (* A slot naming a sibling FIELD (`xs : List({Int | _ < n})`) has
+              no formal/actual pairing here, and read in the constructing
+              scope it would mean the caller's `n`: a recorded skip, never
+              read (design 2026-10-18 element-flow follow-ups §1.2). *)
+           | Some er when not (entry_is_closed er) ->
+             record_elem_skip errctx ~span:(arg_span span e) ~callee
+               ~predicate:(first_slot_pred (snd er))
+               ~what:(Printf.sprintf "the element refinement of field `%s` names another field" pn)
            | Some er ->
              ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er e)
            | None -> ())
@@ -1511,6 +1636,14 @@ let check_pass_site_elements ~root errctx defs (ctx : rctx) path lets sc re (cb 
       | Some (Some (A.TyArrow (_, cod))) ->
         (match elem_refinement (Some cod) with
          | None -> ()
+         (* An expected codomain naming a parameter (the callee's, or the
+            domain's binder) has no single meaning at this pass site: read in
+            the caller's namespace it named the caller's variable.  A
+            recorded skip (design 2026-10-18 element-flow follow-ups §1.2). *)
+         | Some er when not (entry_is_closed er) ->
+           record_elem_skip errctx ~span:(arg_span span a) ~callee:"<callable>"
+             ~predicate:(first_slot_pred (snd er))
+             ~what:"the expected codomain's element refinement names a parameter, which has no single meaning at the pass site"
          | Some er ->
            (match a with
             | A.ELam (ps, body, lsp) ->
@@ -1518,13 +1651,21 @@ let check_pass_site_elements ~root errctx defs (ctx : rctx) path lets sc re (cb 
               let ctx' = local_shadow ~spans:(param_spans ps) ctx names in
               let sc' = scope_shadow sc names in
               let cb' = List.fold_left cb_add_param (cb_shadow cb names) ps in
-              let ce' = List.fold_left cont_add_param (cont_shadow ce names) ps in
+              let ce' = cont_add_params ce ps in
               List.iter
-                (fun (p, t) ->
-                  ignore
-                    (check_elements ~root errctx defs ctx' p (launder_shadow lets names) sc' re cb' ce'
-                       ~span:lsp ~callee:"return of <lambda>" er t))
-                (tails (path_shadow path names) body)
+                (fun (p, t, bound) ->
+                  match lambda_tail_rebinds bound t with
+                  | Some n ->
+                    record_elem_skip errctx ~span:(arg_span lsp t) ~callee:"return of <lambda>"
+                      ~predicate:(first_slot_pred (snd er))
+                      ~what:
+                        (Printf.sprintf
+                           "the lambda's return expression mentions `%s`, bound inside the lambda" n)
+                  | None ->
+                    ignore
+                      (check_elements ~root errctx defs ctx' p (launder_shadow lets names) sc' re cb' ce'
+                         ~span:lsp ~callee:"return of <lambda>" er t))
+                (tails_bound (path_shadow path names) [] body)
             | A.EVar { A.txt = g; A.span = gsp } ->
               (* The callable's element return stands in for its result under
                  its own name, so the implication reads like a variable's. *)
@@ -1931,7 +2072,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
       (List.fold_left scope_add_param sc (strip_params_refinements ps))
       (List.fold_left recenv_add_param re ps)
       (List.fold_left cb_add_param cb ps)
-      (List.fold_left cont_add_param (cont_shadow ce [ n.A.txt ]) ps)
+      (cont_add_params (cont_shadow ce [ n.A.txt ]) ps)
       body
   | A.EMatch (subj, branches, _) ->
     go subj;
@@ -2316,7 +2457,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (List.fold_left scope_add_param sc assumed)
     (List.fold_left recenv_add_param re ps)
     (List.fold_left cb_add_param cb ps)
-    (List.fold_left cont_add_param ce ps)
+    (cont_add_params ce ps)
     body;
   entry
 
@@ -2339,7 +2480,7 @@ and visit_lambda ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (List.fold_left scope_add_param sc assumed)
     (List.fold_left recenv_add_param re ps)
     (List.fold_left cb_add_param cb ps)
-    (List.fold_left cont_add_param ce ps)
+    (cont_add_params ce ps)
     body
 
 (* =================================================================
@@ -2981,7 +3122,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
         let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
         let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
-        let ce = List.fold_left cont_add_fnparam [] c.A.fc_params in
+        let ce = cont_of_fnparams c.A.fc_params in
         (* A container-typed RETURN (`: List({Int | p})`) is an element
            obligation on every tail.  [visit] checks each tail when it
            reaches it, with the facts in scope there ([ret_elem_demand]); a
@@ -2992,7 +3133,30 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
           match elem_refinement fd.A.fn_ret_ty with
           | Some er ->
             let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-            let ts = tails base c.A.fc_body in
+            (* A tail reached under an inner binding that REBINDS a name the
+               entry mentions (`let n = 100` before `[50]` in a function
+               returning `List({Int | _ < n})`) is not about the declared
+               parameter: checked there, `_ < n` meant the local and proved
+               `below(10) = [50]`.  A recorded skip, never checked — the
+               scalar post engine's rule ([Refine_post.check_post_induction]'s
+               [check_tails]); design 2026-10-18 element-flow follow-ups,
+               row z2. *)
+            let ts =
+              List.filter_map
+                (fun (p, t, bound) ->
+                  match List.find_opt (fun n -> elem_entry_mentions [ n ] er) bound with
+                  | Some n ->
+                    record_elem_skip errctx ~span:(arg_span c.A.fc_span t) ~callee:label
+                      ~predicate:(first_slot_pred (snd er))
+                      ~what:
+                        (Printf.sprintf
+                           "the return expression of `%s` under an inner binding that rebinds `%s`"
+                           fd.A.fn_name.A.txt n);
+                    last_elem_return_proved := false;
+                    None
+                  | None -> Some (p, t))
+                (tails_bound base [] c.A.fc_body)
+            in
             Some (er, ts, ref (List.map snd ts))
           | None -> None
         in
@@ -3179,7 +3343,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
       local_shadow ~spans:(List.concat_map fnparam_spans init_ps) ctx
         (List.concat_map fnparam_binders init_ps)
     in
-    let init_cont = List.fold_left cont_add_fnparam [] init_ps in
+    let init_cont = cont_of_fnparams init_ps in
     let visit_init e = visit ~root errctx defs init_ctx [] [] init_sc init_re init_cb init_cont e in
     visit_init ad.A.actor_init;
     Option.iter (fun (sc : A.supervise_config) ->
@@ -3212,7 +3376,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         (* (2): a fresh state literal at a tail is a construction of THIS
            actor's state, whatever other record shares its field set. *)
         List.iter (fun (p, t) -> check_state_literal ~path:p t) (tails path h.A.ah_body);
-        visit ~root errctx defs ctx path [] sc re cb (List.fold_left cont_add_fnparam [] ps) h.A.ah_body)
+        visit ~root errctx defs ctx path [] sc re cb (cont_of_fnparams ps) h.A.ah_body)
       ad.A.actor_handlers;
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)

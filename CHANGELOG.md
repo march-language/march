@@ -32,6 +32,23 @@ git log is authoritative for exact commits.
   nested (`type T(a, b) = … | N(T(b, a))`). A `match` binder at such a field no
   longer inherits the outer container's element facts, which had produced a
   false proof.
+- **Element refinements that name a parameter no longer prove false contracts.**
+  A slot like `xs : List({Int | _ < n})` was read in whatever scope it reached,
+  so the refinement checker proved calls and functions that break it, and
+  `cap verified` compiled them: `need_lt(ys, 10)` was proved from a caller's
+  unrelated `let n = 1000`; a return tail under `let n = 100` was checked
+  against the local `n`; `xs`'s fact survived `let n = 0`; `List.map(xs, fn n ->
+  …)` gave the lambda's `n` a fact about itself; and a demand was read under a
+  lambda parameter of the same name. The slot is now read at the call's
+  arguments (`need_lt(ys, 10)` demands `_ < 10`, so a correct
+  `need_lt(ys, 200)` with `ys : List({Int | _ < 5})` is no longer a false
+  violation; a demand naming a caller variable no fact constrains, such as
+  `need_lt(ys, k)` after `k`'s fact was retired, is a skip rather than a
+  violation), and each of the other shapes is a recorded skip. Two related
+  shapes are skips too: a record field's or an expected codomain's element
+  refinement naming another field or parameter, and a lambda return expression
+  that mentions a name bound inside the lambda (`fn y -> let k = 0 - 5; k`
+  was proved against a caller's `k : {Int | _ > 0}`).
 
 ### Documentation
 

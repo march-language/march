@@ -108,6 +108,14 @@ let rec tails_bound (path : (A.expr * bool) list) (bound : string list) (e : A.e
         let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
         tails_bound p (ns @ bound) br.A.branch_body)
       branches
+  (* A `let?` / `let*` stays ONE tail: its early `Err` exit (or the
+     `flat_map` callback a `let*` becomes) is not a syntactic tail, so its
+     continuation must not be walked as if it were the only return.  Its
+     pattern's binders are recorded all the same, so a rule consulting
+     [bound] (a rebinding of a name the contract mentions) treats the tail as
+     under them rather than relying on the whole expression being
+     unreflectable. *)
+  | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> [ (path, e, pat_binders p @ bound) ]
   | _ -> [ (path, e, bound) ]
 
 (* Return-position expressions of a body, each with the path reaching it. *)
