@@ -22541,7 +22541,13 @@ let fold_invariants_3_suite =
     control "HashMap.fold" "hm : HashMap.HashMap(Int, Int)" "HashMap.fold(hm, 0, fn (a, _k, _v) -> a - 1)";
     (* Array.fold_left: was `fold_left(v, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
     proof "Array.fold_left" "av : Array.PVec(Int)" "Array.fold_left(av, 0, fn (a, _x) -> a + 1)";
-    control "Array.fold_left" "av : Array.PVec(Int)" "Array.fold_left(av, 0, fn (a, _x) -> a - 1)" ]
+    control "Array.fold_left" "av : Array.PVec(Int)" "Array.fold_left(av, 0, fn (a, _x) -> a - 1)";
+    (* RRB.fold / fold_left: `f` was unannotated, so P1 rejected `b`;
+       0d2afa8f6: (0, 0, 1), parametric-source-unproved. *)
+    proof "RRB.fold" "rs : RRB.Slice(Int)" "RRB.fold(rs, 0, fn (a, _x) -> a + 1)";
+    control "RRB.fold" "rs : RRB.Slice(Int)" "RRB.fold(rs, 0, fn (a, _x) -> a - 1)";
+    proof "RRB.fold_left" "rv : RRB.Vec(Int)" "RRB.fold_left(rv, 0, fn (a, _x) -> a + 1)";
+    control "RRB.fold_left" "rv : RRB.Vec(Int)" "RRB.fold_left(rv, 0, fn (a, _x) -> a - 1)" ]
 
 let () =
   Alcotest.run "march-refinecheck"
