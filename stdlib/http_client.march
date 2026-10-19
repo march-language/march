@@ -9,6 +9,8 @@
 --     |> HttpClient.add_request_step("auth", HttpClient.Steps.bearer_auth("my-token"))
 --     |> HttpClient.with_redirects(5)
 --   let resp = HttpClient.get(client, "http://api.example.com/users")
+--
+-- doc: try
 
 mod HttpClient do
 
@@ -48,7 +50,14 @@ mod HttpClient do
   -- Client construction
   -- -----------------------------------------------------------------------
 
-  doc "Create a new bare client with no steps and no redirect/retry."
+  doc """
+  Create a new bare client with no steps and no redirect/retry.
+
+  ## Examples
+
+      march> HttpClient.list_steps(HttpClient.new_client())
+      []
+  """
   fn new_client() do
     Client(Nil, Nil, Nil, 0, 0, 0)
   end
@@ -57,6 +66,15 @@ mod HttpClient do
   -- Step registration (pipeable)
   -- -----------------------------------------------------------------------
 
+  doc """
+  Append `x` to the end of `xs` (O(n)); used to keep steps in registration
+  order.
+
+  ## Examples
+
+      march> HttpClient.append_to_list([1, 2], 3)
+      [1, 2, 3]
+  """
   fn append_to_list(xs, x) do
     match xs do
     Nil -> Cons(x, Nil)
@@ -64,6 +82,16 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Append a named request step. A request step is `fn req -> Result(req, HttpError)`;
+  steps run in the order they were added, before the request is sent.
+  Names are only labels (see `list_steps`); duplicates are allowed.
+
+  ## Examples
+
+      march> HttpClient.list_steps(HttpClient.add_request_step(HttpClient.new_client(), "auth", HttpClient.step_bearer_auth("t")))
+      ["request:auth"]
+  """
   fn add_request_step(client, name, step) do
     match client do
     Client(req_steps, resp_steps, err_steps, redir, retries, backoff) ->
@@ -71,6 +99,16 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Append a named response step. A response step is
+  `fn (req, resp) -> Result((req, resp), HttpError)`; steps run in order
+  after the response (and any redirects) arrive.
+
+  ## Examples
+
+      march> HttpClient.list_steps(HttpClient.add_response_step(HttpClient.new_client(), "check", HttpClient.step_raise_on_error))
+      ["response:check"]
+  """
   fn add_response_step(client, name, step) do
     match client do
     Client(req_steps, resp_steps, err_steps, redir, retries, backoff) ->
@@ -78,6 +116,17 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Append a named error step. An error step is
+  `fn (req, err) -> ErrorRecovery`: return `Recover(resp)` to turn the error
+  into a successful response, or `Fail(err2)` to pass a (possibly new)
+  error on to the next error step.
+
+  ## Examples
+
+      march> HttpClient.list_steps(HttpClient.add_error_step(HttpClient.new_client(), "fallback", fn (_, e) -> HttpClient.Fail(e)))
+      ["error:fallback"]
+  """
   fn add_error_step(client, name, step) do
     match client do
     Client(req_steps, resp_steps, err_steps, redir, retries, backoff) ->
@@ -89,6 +138,16 @@ mod HttpClient do
   -- Pipeline behaviors
   -- -----------------------------------------------------------------------
 
+  doc """
+  Follow up to `max` redirects (0, the default, disables following).
+  Every redirect is re-issued as a body-less GET; exceeding the limit
+  yields `TooManyRedirects(max)`.
+
+  ## Examples
+
+      march> HttpClient.with_redirects(HttpClient.new_client(), 5) == HttpClient.Client(Nil, Nil, Nil, 5, 0, 0)
+      true
+  """
   fn with_redirects(client, max) do
     match client do
     Client(rq, rs, es, _, retries, backoff) ->
@@ -96,6 +155,17 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Retry a failed transport call up to `max_attempts` extra times
+  (0 disables). Only transport errors are retried, not HTTP error statuses.
+  `backoff_ms` is stored but `run` currently retries immediately without
+  sleeping.
+
+  ## Examples
+
+      march> HttpClient.with_retry(HttpClient.new_client(), 3, 100) == HttpClient.Client(Nil, Nil, Nil, 0, 3, 100)
+      true
+  """
   fn with_retry(client, max_attempts, backoff_ms) do
     match client do
     Client(rq, rs, es, redir, _, _) ->
@@ -107,6 +177,15 @@ mod HttpClient do
   -- Step introspection
   -- -----------------------------------------------------------------------
 
+  doc """
+  List the client's step names in execution order, each prefixed by its
+  phase: `"request:"`, then `"response:"`, then `"error:"`.
+
+  ## Examples
+
+      march> HttpClient.new_client() |> HttpClient.add_error_step("e", fn (_, e) -> HttpClient.Fail(e)) |> HttpClient.add_request_step("a", HttpClient.step_default_headers) |> HttpClient.list_steps
+      ["request:a", "error:e"]
+  """
   fn list_steps(client) do
     fn list_concat(a, b) do
       match a do
@@ -142,6 +221,17 @@ mod HttpClient do
   -- Internal pipeline execution
   -- -----------------------------------------------------------------------
 
+  doc """
+  Thread `req` through a list of `RequestStepEntry` values left-to-right;
+  stops at the first `Err` and returns it.
+
+  ## Examples
+
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
+      march> let ct = HttpClient.step_content_type("application/json")
+      march> HttpClient.run_request_steps([HttpClient.RequestStepEntry("ct", ct)], req) |> Result.map(fn r -> Http.get_request_header(r, "content-type"))
+      Ok(Some("application/json"))
+  """
   fn run_request_steps(steps, req) do
     match steps do
     Nil -> Ok(req)
@@ -154,6 +244,15 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Thread `(req, resp)` through a list of `ResponseStepEntry` values
+  left-to-right; stops at the first `Err` and returns it.
+
+  ## Examples
+
+      march> HttpClient.run_response_steps([HttpClient.ResponseStepEntry("raise", HttpClient.step_raise_on_error)], req, Http.Response(Http.Status(500), [], ""))
+      Err(StepError("step_raise_on_error", "500"))
+  """
   fn run_response_steps(steps, req, resp) do
     match steps do
     Nil -> Ok((req, resp))
@@ -166,6 +265,18 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Offer `err` to each `ErrorStepEntry` in order. The first `Recover(resp)`
+  wins and gives `Ok(resp)`; a `Fail(e2)` replaces the error for the next
+  step. With no step recovering, returns `Err` of the last error.
+
+  ## Examples
+
+      march> HttpClient.run_error_steps([], req, HttpClient.TooManyRedirects(3))
+      Err(TooManyRedirects(3))
+      march> HttpClient.run_error_steps([HttpClient.ErrorStepEntry("x", fn (_, _) -> HttpClient.Recover(42))], req, HttpClient.TooManyRedirects(3))
+      Ok(42)
+  """
   fn run_error_steps(steps, req, err) do
     match steps do
     Nil -> Err(err)
@@ -178,6 +289,11 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Send `req` with `HttpTransport.request` (a fresh connection each time),
+  retrying immediately up to `retries_left` more times on any transport
+  error. Returns the last error if every attempt fails.
+  """
   fn transport_with_retry(req, retries_left) do
     match HttpTransport.request(req) do
     Ok(resp) -> Ok(resp)
@@ -191,6 +307,10 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Open a new connection for `req` and continue `transport_keepalive` on it
+  with `retries_left - 1`. Returns the connect error if that fails.
+  """
   fn reconnect_and_retry(req, retries_left) do
     match HttpTransport.connect(req) do
     Err(ce) -> Err(ce)
@@ -198,6 +318,13 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Send `req` on the open connection `fd`. Returns `Ok((fd, resp))` on
+  success. On failure, closes `fd` and, while `retries_left > 0`,
+  reconnects and tries again (each reconnect consumes two from
+  `retries_left`); otherwise returns `Err(Closed)`, discarding the original
+  transport error. After a reconnect the returned `fd` is the new one.
+  """
   fn transport_keepalive(fd, req, retries_left) do
     match HttpTransport.request_on(fd, req) do
     Ok(resp) -> Ok((fd, resp))
@@ -215,6 +342,18 @@ mod HttpClient do
   -- Header names that must be dropped when a redirect crosses origins:
   -- they carry caller credentials and must not leak to third-party hosts.
   -- Matched case-insensitively.
+  doc """
+  True for header names that carry credentials and are dropped on a
+  cross-origin redirect: `Authorization`, `Cookie`, `Proxy-Authorization`
+  (case-insensitive).
+
+  ## Examples
+
+      march> HttpClient.hc_is_sensitive_header_name("COOKIE")
+      true
+      march> HttpClient.hc_is_sensitive_header_name("Accept")
+      false
+  """
   fn hc_is_sensitive_header_name(name) do
     let lower = string_to_lowercase(name)
     lower == "authorization"
@@ -222,6 +361,15 @@ mod HttpClient do
     || lower == "proxy-authorization"
   end
 
+  doc """
+  Remove every credential-bearing header (see `hc_is_sensitive_header_name`)
+  from a header list, keeping the order of the rest.
+
+  ## Examples
+
+      march> HttpClient.hc_strip_sensitive_headers([Http.Header("Cookie", "a"), Http.Header("Accept", "*/*")])
+      [Header("Accept", "*/*")]
+  """
   fn hc_strip_sensitive_headers(headers) do
     match headers do
     Nil -> Nil
@@ -237,6 +385,17 @@ mod HttpClient do
 
   -- Two requests share an origin iff scheme, host, and port all match.
   -- A missing port is treated as the scheme default (80 for http, 443 for https).
+  doc """
+  The port a request actually uses: the explicit port, or the scheme default
+  (80 for http, 443 for https).
+
+  ## Examples
+
+      march> HttpClient.hc_effective_port(Http.SchemeHttps, None)
+      443
+      march> HttpClient.hc_effective_port(Http.SchemeHttp, Some(8080))
+      8080
+  """
   fn hc_effective_port(sch, port_opt) do
     match port_opt do
     Some(p) -> p
@@ -247,6 +406,17 @@ mod HttpClient do
     end
   end
 
+  doc """
+  True when two requests share an origin: same scheme, same host
+  (case-insensitive) and same effective port.
+
+  ## Examples
+
+      march> HttpClient.hc_same_origin(Result.unwrap(Http.get("http://Example.com/a")), Result.unwrap(Http.get("http://example.com:80/b")))
+      true
+      march> HttpClient.hc_same_origin(Result.unwrap(Http.get("http://example.com/a")), Result.unwrap(Http.get("https://example.com/b")))
+      false
+  """
   fn hc_same_origin(req_a, req_b) do
     let sa = Http.scheme(req_a)
     let sb = Http.scheme(req_b)
@@ -260,6 +430,23 @@ mod HttpClient do
     same_scheme && same_host && same_port
   end
 
+  doc """
+  Follow redirects for `resp`, the answer to `req`. Returns `Ok(resp)`
+  unchanged when `max == 0`, when `resp` is not a 3xx, or when it has no
+  `Location` header; `Err(TooManyRedirects(count))` once `count >= max`.
+  Otherwise re-issues the request as a body-less GET (whatever the original
+  method and redirect code) over a new connection and recurses. An absolute
+  `Location` that crosses origins drops credential headers; a relative one
+  keeps all headers and replaces only the path.
+
+  ## Examples
+
+      march> let sreq = Http.set_body(req, "")
+      march> HttpClient.handle_redirects(sreq, Http.Response(Http.Status(302), [Http.Header("Location", "/x")], ""), 2, 2)
+      Err(TooManyRedirects(2))
+      march> HttpClient.handle_redirects(sreq, Http.Response(Http.Status(302), [], ""), 3, 0) |> Result.map(fn r -> Http.response_status_code(r))
+      Ok(302)
+  """
   fn handle_redirects(req, resp, max, count) do
     if max == 0 do Ok(resp)
     else if not(Http.response_is_redirect(resp)) do Ok(resp)
@@ -302,14 +489,15 @@ mod HttpClient do
   -- -----------------------------------------------------------------------
 
   doc """
-  Run a request through the full step pipeline.
-  1. Run request steps left-to-right
-  2. Send via HttpTransport.request (with retry if configured)
-  3. Handle redirects if configured
-  4. Run response steps left-to-right
-  5. On error, run error steps (first Recover wins)
+  Run `req` through the pipeline on an already-open connection `fd`.
+  This is the engine behind the `do_request` callback of `with_connection`.
+
+  Same phases as `run`, except that the request is sent with
+  `transport_keepalive(fd, req, max_retries + 1)`: on a send/receive
+  failure the connection is closed and a fresh one opened. Redirects still
+  go over new connections (`handle_redirects`). Returns `Ok(response)` or
+  the result of the error steps.
   """
-  -- Internal: run a single request through steps + transport on an fd
   fn run_on_fd(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req) do
     match run_request_steps(req_steps, req) do
     Err(e) -> run_error_steps(err_steps, req, e)
@@ -331,6 +519,27 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Run a request through the client's full step pipeline:
+
+  1. Run request steps left-to-right; the first `Err` short-circuits.
+  2. Send with `HttpTransport.request` (a new connection per attempt),
+     retrying up to `max_retries` extra times on transport errors
+     (the configured backoff is currently not applied between attempts).
+  3. Follow redirects if `with_redirects` set a non-zero limit.
+  4. Run response steps left-to-right.
+  5. Any `Err` from steps 1-4 is fed to the error steps in order; the first
+     `Recover(resp)` turns it into `Ok(resp)`, otherwise the last error is
+     returned. Transport errors arrive wrapped in `HttpTransportError`.
+
+  ## Examples
+
+      let req = Result.unwrap(Http.get("http://api.example.com/users"))
+      match HttpClient.run(client, Http.set_body(req, "")) do
+        Ok(resp) -> Http.response_body(resp)
+        Err(e) -> "request failed"
+      end
+  """
   fn run(client, req) do
     match client do
     Client(req_steps, resp_steps, err_steps, max_redir, max_retries, _) -> do
@@ -360,13 +569,24 @@ mod HttpClient do
   The function receives a `do_request` callback that sends requests
   on the shared connection. Connection is closed when done.
 
-  Example:
-    HttpClient.with_connection(client, "http://api.example.com", fn(do_request) -> do
-      let r1 = do_request(Http.get_request("/users"))
-      let r2 = do_request(Http.get_request("/posts"))
-      (r1, r2)
-    end
-    end)
+  Returns `Ok(result)` where `result` is whatever the callback returned
+  (each `do_request(req)` itself returns `Result(Response, HttpError)`),
+  `Err(StepError("url", ...))` if `url` does not parse, or
+  `Err(HttpTransportError(e))` if the connection cannot be opened. Only the
+  scheme, host and port of `url` are used to connect; each request carries
+  its own path. If the callback panics the connection is not closed.
+
+  ## Examples
+
+      HttpClient.with_connection(client, "http://api.example.com", fn do_request ->
+        let users = Result.unwrap(Http.get("http://api.example.com/users"))
+        let posts = Result.unwrap(Http.get("http://api.example.com/posts"))
+        let r1 = do_request(Http.set_body(users, ""))
+        let r2 = do_request(Http.set_body(posts, ""))
+        (r1, r2))
+
+      march> HttpClient.with_connection(HttpClient.new_client(), "bad", fn d -> 1)
+      Err(StepError("url", "invalid url: bad"))
   """
   fn with_connection(client, url, callback) do
     match Http.parse_url(url) do
@@ -392,14 +612,23 @@ mod HttpClient do
   end
 
   doc """
-  Stream a GET response body. Calls on_chunk(chunk_string) for each
-  chunk as it arrives over the wire. Returns Ok((status, headers, last_result))
-  where last_result is the return value of the final on_chunk call.
+  Stream a GET response body. Calls `on_chunk(chunk_string)` for each
+  chunk as it arrives over the wire. Returns `Ok((status, headers, ()))`;
+  the values returned by `on_chunk` are discarded (`HttpTransport` streams
+  for side effects only).
 
-  Example:
-    HttpClient.stream_get(client, "http://example.com/bigfile", fn(chunk) ->
-      print("got " ++ int_to_string(string_length(chunk)) ++ " bytes")
-    end)
+  Only the client's request steps are applied; response steps, error
+  steps, redirects and retries are not. An invalid URL gives
+  `Err(StepError("url", ...))`; a failing request step's `Err` is returned
+  as is.
+
+  ## Examples
+
+      HttpClient.stream_get(client, "http://example.com/bigfile", fn chunk ->
+        println("got " ++ int_to_string(string_length(chunk)) ++ " bytes"))
+
+      march> HttpClient.stream_get(HttpClient.new_client(), "bad", fn c -> c)
+      Err(StepError("url", "invalid url: bad"))
   """
   fn stream_get(client, url, on_chunk) do
     match Http.get(url) do
@@ -432,6 +661,18 @@ mod HttpClient do
   -- Convenience methods
   -- -----------------------------------------------------------------------
 
+  doc """
+  Build a GET request for `url` (empty String body) and `run` it through
+  the client. An unparseable URL gives `Err(StepError("url", "invalid url: ..."))`
+  without running any step.
+
+  ## Examples
+
+      HttpClient.get(HttpClient.new_client(), "http://api.example.com/users")
+
+      march> HttpClient.get(HttpClient.new_client(), "not a url")
+      Err(StepError("url", "invalid url: not a url"))
+  """
   fn get(client, url) do
     match Http.get(url) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
@@ -439,6 +680,19 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Build a POST request for `url` with body `bdy` and `run` it. An
+  unparseable URL gives `Err(StepError("url", ...))`.
+
+  ## Examples
+
+      let client = HttpClient.new_client()
+        |> HttpClient.add_request_step("json", HttpClient.step_content_type("application/json"))
+      HttpClient.post(client, "http://api.example.com/users", json_body)
+
+      march> HttpClient.post(HttpClient.new_client(), "ftp://x", "body")
+      Err(StepError("url", "invalid url: ftp://x"))
+  """
   fn post(client, url, bdy) do
     match Http.post(url, bdy) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
@@ -446,6 +700,14 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Build a PUT request for `url` with body `bdy` and `run` it. An
+  unparseable URL gives `Err(StepError("url", ...))`.
+
+  ## Examples
+
+      HttpClient.put_request(client, "http://api.example.com/users/1", body)
+  """
   fn put_request(client, url, bdy) do
     match Http.put(url, bdy) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
@@ -453,6 +715,15 @@ mod HttpClient do
     end
   end
 
+  doc """
+  Build a DELETE request for `url` (empty String body) and `run` it. An
+  unparseable URL gives `Err(StepError("url", ...))`.
+
+  ## Examples
+
+      march> HttpClient.delete(HttpClient.new_client(), "bad")
+      Err(StepError("url", "invalid url: bad"))
+  """
   fn delete(client, url) do
     match Http.delete(url) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
@@ -464,14 +735,32 @@ mod HttpClient do
   -- Built-in Steps (prefixed with step_ to avoid name collisions)
   -- -----------------------------------------------------------------------
 
-  doc "Request step: add default User-Agent and Accept headers."
+  doc """
+  Request step: set `User-Agent: march/0.1` and `Accept: */*`, replacing any
+  existing values. Never fails. Register it with
+  `add_request_step(client, "defaults", HttpClient.step_default_headers)`.
+
+  ## Examples
+
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
+      march> Result.map(HttpClient.step_default_headers(req), fn r -> Http.get_request_header(r, "User-Agent"))
+      Ok(Some("march/0.1"))
+  """
   fn step_default_headers(req) do
     let req = Http.set_header(req, "User-Agent", "march/0.1")
     let req = Http.set_header(req, "Accept", "*/*")
     Ok(req)
   end
 
-  doc "Returns a request step that adds a Bearer token authorization header."
+  doc """
+  Returns a request step that sets `Authorization: Bearer <token>`.
+
+  ## Examples
+
+      march> let auth = HttpClient.step_bearer_auth("tok")
+      march> Result.map(auth(req), fn r -> Http.get_request_header(r, "Authorization"))
+      Ok(Some("Bearer tok"))
+  """
   fn step_bearer_auth(token) do
     fn step(req) do
       Ok(Http.set_header(req, "Authorization", "Bearer " ++ token))
@@ -479,7 +768,18 @@ mod HttpClient do
     step
   end
 
-  doc "Returns a request step that adds HTTP Basic authorization header."
+  doc """
+  Returns a request step that sets `Authorization: Basic <user>:<pass>`.
+
+  Note: the credentials are sent as the literal `user:pass` text, NOT
+  base64-encoded as RFC 7617 requires, so most servers will reject them.
+
+  ## Examples
+
+      march> let basic = HttpClient.step_basic_auth("ann", "pw")
+      march> Result.map(basic(req), fn r -> Http.get_request_header(r, "Authorization"))
+      Ok(Some("Basic ann:pw"))
+  """
   fn step_basic_auth(user, pass) do
     fn step(req) do
       Ok(Http.set_header(req, "Authorization", "Basic " ++ user ++ ":" ++ pass))
@@ -487,7 +787,21 @@ mod HttpClient do
     step
   end
 
-  doc "Returns a request step that sets a base URL on requests."
+  doc """
+  Returns a request step that re-targets a request at `base ++ path`: the
+  scheme, host, port and path come from parsing that string, while the
+  method, query, headers and body are kept from the request. Fails with
+  `StepError("step_base_url", ...)` if the combined URL does not parse.
+
+  ## Examples
+
+      march> let base = HttpClient.step_base_url("https://api.example.com:8443/v1")
+      march> Result.map(base(req), fn r -> (Http.host(r), Http.port(r), Http.path(r), Http.query(r)))
+      Ok(("api.example.com", Some(8443), "/v1/users", Some("page=2")))
+      march> let bad = HttpClient.step_base_url("nope")
+      march> Result.is_err(bad(req))
+      true
+  """
   fn step_base_url(base) do
     fn step(req) do
       match Http.parse_url(base ++ Http.path(req)) do
@@ -509,7 +823,15 @@ mod HttpClient do
     step
   end
 
-  doc "Returns a request step that sets the Content-Type header."
+  doc """
+  Returns a request step that sets the `Content-Type` header to `ct`.
+
+  ## Examples
+
+      march> let ct = HttpClient.step_content_type("application/json")
+      march> Result.map(ct(req), fn r -> Http.get_request_header(r, "Content-Type"))
+      Ok(Some("application/json"))
+  """
   fn step_content_type(ct) do
     fn step(req) do
       Ok(Http.set_header(req, "Content-Type", ct))
@@ -517,7 +839,17 @@ mod HttpClient do
     step
   end
 
-  doc "Response step: return Err for 4xx/5xx status codes."
+  doc """
+  Response step: return `Err(StepError("step_raise_on_error", "<code>"))`
+  for any status >= 400, otherwise pass `(req, resp)` through unchanged.
+
+  ## Examples
+
+      march> HttpClient.step_raise_on_error(req, Http.Response(Http.Status(404), [], ""))
+      Err(StepError("step_raise_on_error", "404"))
+      march> HttpClient.step_raise_on_error(req, Http.Response(Http.Status(204), [], "")) |> Result.is_ok
+      true
+  """
   fn step_raise_on_error(req, resp) do
     let code = Http.response_status_code(resp)
     if code >= 400 do

@@ -1,9 +1,10 @@
 -- File module: filesystem I/O.
--- All I/O functions return Result(value, FileError).
+-- All I/O functions except `exists` return Result(value, FileError).
 -- Use with_lines / with_chunks for streaming.  The file handle is
 -- closed when the callback returns *and* if the callback panics —
 -- these wrappers delegate to the runtime `try_finally` primitive to
--- guarantee cleanup even on unhandled exceptions.
+-- guarantee cleanup even on unhandled exceptions.  (each_line /
+-- each_chunk close the handle only on normal return.)
 
 mod File do
   needs IO.FileRead
@@ -20,10 +21,34 @@ mod File do
 
   -- Read
 
+  doc """
+  Read the whole file at `path` into a String. Returns `Ok(contents)` or
+  `Err(FileError)`, e.g. `NotFound(path)`, `Permission(path)` or
+  `IsDirectory(path)`.
+
+  ## Examples
+
+      match File.read("config.toml") do
+        Ok(text) -> parse(text)
+        Err(NotFound(p)) -> defaults()
+        Err(e) -> panic("cannot read config")
+      end
+  """
   fn read(path) do
     file_read(path)
   end
 
+  doc """
+  Read the file at `path` and split it on `\n`. Returns `Ok(lines)` without
+  the newline characters; ALL trailing empty lines are dropped (so a final
+  newline, or several, adds no empty element, and an empty file gives
+  `Ok([])`). A `\r` before each `\n` is kept. Errors as for `read`.
+
+  ## Examples
+
+      -- file contents "a\nb\n\n"
+      File.read_lines("notes.txt")   -- Ok(["a", "b"])
+  """
   fn read_lines(path) do
     match file_read(path) do
     Err(e) -> Err(e)
@@ -42,17 +67,38 @@ mod File do
     end
   end
 
-  -- Returns true for any filesystem entry including directories.
-  -- Use Dir.exists to test specifically for directories.
+  doc """
+  True if any filesystem entry exists at `path`, including directories.
+  Use `Dir.exists` to test specifically for directories. Never fails.
+
+  ## Examples
+
+      if File.exists("out.log") do File.delete("out.log") else Ok(:ok) end
+  """
   fn exists(path) do
     file_exists(path)
   end
 
+  doc """
+  Metadata for `path`: `Ok(FileStat(size_bytes, kind, modified, accessed))`
+  where `kind` is a `FileKind` and the times are Unix timestamps in whole
+  seconds. Returns `Err(NotFound(path))` if nothing exists there.
+
+  ## Examples
+
+      match File.stat("data.bin") do
+        Ok(FileStat(size, RegularFile, _, _)) -> size
+        _ -> 0
+      end
+  """
   fn stat(path) do
     file_stat(path)
   end
 
-  -- Returns Ok(mtime_int) or Err(file_error) for the given path.
+  doc """
+  The modification time of `path` as a Unix timestamp in seconds
+  (`Ok(mtime)`), or the `FileError` from `stat`.
+  """
   fn mtime(path) do
     match file_stat(path) do
     Err(e) -> Err(e)
@@ -62,10 +108,40 @@ mod File do
 
   -- Write
 
+  doc """
+  Write `data` to `path`, creating the file or truncating an existing one.
+  Returns `Ok(:ok)` or `Err(FileError)` (e.g. the parent directory does
+  not exist).
+
+  ## Examples
+
+      File.write("out.txt", "hello\n")
+  """
   fn write(path, data) do file_write(path, data) end
+  doc """
+  Append `data` to the end of `path`, creating the file if it does not
+  exist. Returns `Ok(:ok)` or `Err(FileError)`.
+
+  ## Examples
+
+      File.append("app.log", "started\n")
+  """
   fn append(path, data) do file_append(path, data) end
+  doc """
+  Delete the file at `path`. Returns `Ok(:ok)`, or `Err(FileError)` if it
+  does not exist or cannot be removed. Use `Dir.rmdir` / `Dir.rm_rf` for
+  directories.
+  """
   fn delete(path) do file_delete(path) end
+  doc """
+  Copy the contents of `src` to `dest`, creating or overwriting `dest`.
+  Returns `Ok(:ok)` or `Err(FileError)` (reported as `IoError(msg)`).
+  """
   fn copy(src, dest) do file_copy(src, dest) end
+  doc """
+  Rename (move) `src` to `dest`, replacing `dest` if it exists. Returns
+  `Ok(:ok)` or `Err(IoError("<src>: <reason>"))`.
+  """
   fn rename(src, dest) do file_rename(src, dest) end
 
   -- Streaming: closed when callback returns OR panics (via try_finally).
@@ -73,10 +149,21 @@ mod File do
   -- Seq wraps a church-encoded fold closure. Single-pass.
   ptype Seq(a) = Seq(a)
 
-  -- Streaming: opens path, creates a single-pass Seq(String) of lines, calls callback,
-  -- then closes the file handle. The Seq is single-pass -- consuming it twice yields
-  -- empty results on the second pass.  `try_finally` guarantees the fd is
-  -- closed even if `callback` panics.
+  doc """
+  Open `path`, pass the callback a single-pass `Seq(String)` of its lines
+  (line terminators stripped), then close the file. Returns
+  `Ok(callback_result)`, or `Err(FileError)` if the file cannot be opened.
+  Lines are read lazily as the Seq is folded, so memory stays bounded.
+  The Seq is single-pass: consuming it twice yields nothing the second
+  time, and it must not escape the callback (the file is closed after).
+  `try_finally` guarantees the fd is closed even if `callback` panics.
+
+  ## Examples
+
+      File.with_lines("big.log", fn lines ->
+        Seq.fold(lines, 0, fn (n, line) ->
+          if String.contains(line, "ERROR") do n + 1 else n end))
+  """
   fn with_lines(path, callback) do
     match file_open(path) do
     Err(e) -> Err(e)
@@ -97,6 +184,16 @@ mod File do
     end
   end
 
+  doc """
+  Like `with_lines`, but the Seq yields raw chunks of at most `size` bytes
+  (the last one may be shorter). Returns `Ok(callback_result)` or
+  `Err(FileError)`. The file is closed even if `callback` panics.
+
+  ## Examples
+
+      File.with_chunks("blob.bin", 65536, fn chunks ->
+        Seq.fold(chunks, 0, fn (n, c) -> n + string_byte_length(c)))
+  """
   fn with_chunks(path, size, callback) do
     match file_open(path) do
     Err(e) -> Err(e)
@@ -130,6 +227,15 @@ mod File do
     end
   end
 
+  doc """
+  Call `f(line)` for each line of `path` (terminators stripped), for side
+  effects. Returns `Ok(:ok)`, or `Err(FileError)` if the file cannot be
+  opened. Unlike `with_lines`, the file is NOT closed if `f` panics.
+
+  ## Examples
+
+      File.each_line("names.txt", fn name -> println("hello " ++ name))
+  """
   fn each_line(path, f) do
     match file_open(path) do
     Err(e) -> Err(e)
@@ -152,6 +258,11 @@ mod File do
     end
   end
 
+  doc """
+  Call `f(chunk)` for each chunk of at most `size` bytes of `path`, for side
+  effects. Returns `Ok(:ok)` or `Err(FileError)` if the file cannot be
+  opened. The file is NOT closed if `f` panics (use `with_chunks` for that).
+  """
   fn each_chunk(path, size, f) do
     match file_open(path) do
     Err(e) -> Err(e)

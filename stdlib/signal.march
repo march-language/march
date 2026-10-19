@@ -24,7 +24,7 @@
 --
 -- Example:
 --
---     Signal.watch(Signal.Term, fn ->
+--     Signal.watch(Signal.Term, fn -> do
 --       Log.info("shutting down gracefully")
 --       drain_connections()
 --     end)
@@ -54,9 +54,10 @@ mod Signal do
   end
 
   doc """
-  Register `handler` to run when `sig` is delivered.
+  Register `handler` (a zero-argument function) to run when `sig` is
+  delivered. Returns `()` immediately.
 
-      Signal.watch(Signal.Usr1, fn -> reload_config() end)
+      Signal.watch(Signal.Usr1, fn -> reload_config())
 
   The handler runs later, from the scheduler drain, on a normal stack.  At
   most one watcher exists per signal; a second `watch` replaces the first.
