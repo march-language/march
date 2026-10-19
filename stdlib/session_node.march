@@ -657,9 +657,19 @@ mod SessionNode do
     end
   end
 
-  -- Run the continuation installed on [ep] with [msg] from [from], then drain
-  -- whatever the new continuation is now willing to take. A delivery nobody
-  -- expects yet is parked, not dropped.
+  doc """
+  Deliver [msg] from role [from] to local endpoint [ep]: run the
+  continuation installed on [ep] with it, then drain whatever parked
+  messages the new continuation is now willing to take. Returns [ep].
+
+  A delivery nobody expects yet (no continuation installed, the installed
+  one waits on a different role, or an older message from the same sender is
+  still parked) is parked, not dropped. If [ep] has already closed or been
+  cancelled the message is discarded, except on a drained endpoint, where it
+  goes back to its sender. Normally called from the party's endpoint actor
+  when a "SessionNode.Deliver" frame arrives; it must run in that actor's
+  turn.
+  """
   fn deliver(p : Party, ep : Int, from : Int, msg : Bytes) : Int do
     let want = Vault.get_or(p.waiting, ekey(ep), 0)
     if ep_done(p) do
@@ -1672,6 +1682,12 @@ mod SessionNode do
   --   own certificate does not let it offer [role].
   type RunError = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String) | NoOffer(Int, String) | AlreadyOffered(Int) | Unauthorized(Int, String)
 
+  doc """
+  A one-line, human-readable description of [e], prefixed
+  `"session_node: "`, with roles shown as their numbers (see
+  `run_error_message_named` for role names). For example
+  `Connect(2, "refused")` gives `"session_node: connect to role 2: refused"`.
+  """
   fn run_error_message(e : RunError) : String do
     run_error_message_named(e, fn i -> int_to_string(i))
   end
@@ -1705,6 +1721,7 @@ mod SessionNode do
     List.filter(peers, fn r -> r > my_role)
   end
 
+  doc "The first entry in [addrs] for [role], or `None` if it has none."
   fn addr_of(addrs : List(Addr), role : Int) : Option(Addr) do
     List.find(addrs, fn a -> a.role == role)
   end

@@ -21,6 +21,10 @@ mod ClusterAuth do
 
   type Auth = Secret(String) | Certified(NodeCert.Credentials)
 
+  doc """
+  The handshake mode name for [a]: `"shared-secret"` for `Secret(_)`,
+  `"certificate"` for `Certified(_)`. Used in logs and mode-mismatch errors.
+  """
   fn mode_name(a : Auth) : String do
     match a do
       Secret(_) -> "shared-secret"
@@ -28,16 +32,22 @@ mod ClusterAuth do
     end
   end
 
-  -- Proof that the prover holds the cluster secret, bound to this challenge
-  -- nonce: HMAC-SHA256(secret, nonce) as a lowercase hex string. The secret
-  -- itself never goes on the wire.
+  doc """
+  Shared-secret proof that the prover holds the cluster secret, bound to the
+  challenge [nonce]: HMAC-SHA256(secret, nonce) as a lowercase hex string.
+  The secret itself never goes on the wire. Deterministic: the same secret
+  and nonce always give the same proof.
+  """
   fn prove(secret : String, nonce : String) : String do
     Crypto.hmac(:sha256, secret, nonce)
   end
 
-  -- Verify a peer's [proof] for a nonce we issued. Recomputes the expected
-  -- HMAC and compares; a mismatch means the peer lacks the secret or replayed
-  -- a proof for a different nonce.
+  doc """
+  Verify a peer's [proof] for a [nonce] we issued: true exactly when [proof]
+  equals `prove(secret, nonce)`. False means the peer lacks the secret or
+  replayed a proof for a different nonce. The comparison is plain string
+  equality (not constant-time).
+  """
   fn verify(secret : String, nonce : String, proof : String) : Bool do
     prove(secret, nonce) == proof
   end
@@ -50,8 +60,17 @@ mod ClusterAuth do
   -- it and so get no MAC. It cannot be stripped in transit: each side's proof
   -- is an HMAC of the nonce exactly as the other side sent it.
 
+  doc """
+  The nonce suffix, `"~mac1"`, by which a shared-secret node offers to MAC
+  every frame after the handshake.
+  """
   fn mac_suffix() : String do "~mac1" end
 
+  doc """
+  True when [nonce] ends with `mac_suffix()`, i.e. its sender offers to seal
+  frames with a MAC after the handshake. The MAC is used only when both
+  sides' nonces carry the offer.
+  """
   fn offers_mac(nonce : String) : Bool do String.ends_with(nonce, mac_suffix()) end
 
   -- ── key derivation ─────────────────────────────────────────────────────
@@ -105,10 +124,20 @@ mod ClusterAuth do
     Bytes.concat(Bytes.from_string("march-cluster-handshake-v1 " ++ challenge ++ " "), th)
   end
 
+  doc """
+  Certificate-mode proof: the ed25519 signature, under [secret_key], of
+  `cert_proof_message(challenge, th)`, where [challenge] is the PEER's nonce
+  and [th] the handshake transcript.
+  """
   fn cert_prove(secret_key : Bytes, challenge : String, th : Bytes) : Bytes do
     ed25519_sign(secret_key, cert_proof_message(challenge, th))
   end
 
+  doc """
+  Check a peer's certificate-mode [proof]: true when it is a valid ed25519
+  signature by [pubkey] (the key in the peer's verified certificate) over
+  `cert_proof_message(challenge, th)`, with [challenge] the nonce WE sent.
+  """
   fn cert_verify(pubkey : Bytes, challenge : String, th : Bytes, proof : Bytes) : Bool do
     ed25519_verify(pubkey, cert_proof_message(challenge, th), proof)
   end
