@@ -24,7 +24,7 @@ end
 - Records with functional update syntax (`{ r with field: value }`)
 - Polymorphic functions monomorphized at compile time (no boxing overhead)
 - Linear and affine types for ownership, safe mutation, and actor message-passing isolation
-- Refinement types checked by an SMT solver (z3): `{Int | _ > 0}`, set measures over collections (`elts`, `keys`, `card`), and abstract refinements, so `List.filter` keeps what its predicate proves
+- Refinement types checked by an SMT solver (z3): `{Int | _ > 0}`, set measures over collections (`elts`, `keys`, `card`), and abstract refinements, so `List.filter`, `List.partition`, `Deque.filter` and friends keep what their predicate proves; element facts flow through lambdas, local functions, tuple components and relational returns (`List({Int | _ < n})`), and a demand on a fold's result is checked as the accumulator's invariant
 - Capabilities: effects are values (`Cap(IO.FileRead)`), declared with `needs` and checked as a ceiling on the whole program
 
 **Syntax**
