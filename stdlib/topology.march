@@ -285,7 +285,16 @@ mod Topology do
     "topo:" ++ role_name ++ "/" ++ node_id
   end
 
-  -- The node ids behind every marker of [role_name] in [names].
+  doc """
+  The node ids behind every `marker(role_name, id)` in [names], in [names]
+  order; names that are not markers of [role_name] are ignored (duplicates
+  are kept).
+
+  ## Examples
+
+      Topology.marked("P.Db", ["topo:P.Db/n1", "other", "topo:P.Web/n2", "topo:P.Db/n3"])
+      -- ["n1", "n3"]
+  """
   fn marked(role_name : String, names : List(String)) : List(String) do
     let prefix = "topo:" ++ role_name ++ "/"
     let k = String.byte_size(prefix)
@@ -813,7 +822,8 @@ mod Topology do
   What the digest [text] asks of this process: for each role one of
   [pools] serves, its placement and capacity (a role no such pool serves is
   absent); the drain deadlines; and an error for text that is not a
-  version-1 digest.
+  version-1 digest. Defaults for missing fields: capacity 64, soft drain
+  30000 ms, hard drain 120000 ms.
   """
   fn desired_of(text : String, pools : String -> Bool) : Result((List(TopoDesired), Int, Int), String) do
     match Json.parse(text) do
@@ -1212,6 +1222,13 @@ mod Topology do
   The node's configuration from the environment (`ClusterNode.config_from_env`),
   with defaults for a lone local run: MARCH_NODE_NAME defaults to `local-1`
   and MARCH_NODE_PORT to 7946.
+
+  Without MARCH_NODE_CERT (shared-secret mode) it also reads the seeds from
+  MARCH_CLUSTER_NODES (comma-separated), MARCH_NODE_ADVERTISE, the secret
+  from MARCH_CLUSTER_SECRET (default `march-cluster`) and MARCH_NODE_CREATION
+  (default: the current Unix ms). With MARCH_NODE_CERT set, certificate mode
+  is read by `ClusterNode.config_from_env` instead, and a configuration it
+  rejects stops the program via `start_failed`.
   """
   fn config_from_env() : ClusterNode.CnConfig do
     if Env.is_set("MARCH_NODE_CERT") do
@@ -1248,7 +1265,8 @@ mod Topology do
   doc """
   Whether this process runs pool [pool]: MARCH_POOLS (comma-separated) names
   the pools a process of a shared build runs; unset, it runs every pool the
-  build contains (`forge run`'s one process, D9).
+  build contains (`forge run`'s one process, D9), as it does when MARCH_POOLS
+  names no pool at all (empty or only commas).
   """
   fn runs_pool(pool : String) : Bool do
     match process_env("MARCH_POOLS") do
