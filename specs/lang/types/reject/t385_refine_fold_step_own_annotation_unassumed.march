@@ -5,8 +5,10 @@
 -- although nothing checks that annotation (the callee's domain is the type
 -- variable `b`), so `acc - 50 > 0` proved and `cap verified` accepted this
 -- module; `List.fold_left([5], 1, …)` is -49.  The annotation is now erased
--- there, and it is not read as the accumulator invariant either (that is
--- the design's phase 4).  A skip, an error under `cap verified`.
+-- there.  Since phase 4 it is read as the accumulator invariant and checked:
+-- its base `1 > 100` fails, so it is still not assumed (its own obligation
+-- is a second skip; reject/t451 and t452 pin that message).  A skip, an
+-- error under `cap verified`.
 mod FoldStepOwnAnnotationUnassumed do
   cap verified
   fn need_pos(k : {Int | _ > 0}) : Int do k end
