@@ -2386,8 +2386,11 @@ as `y > 0 && y > 0`.
 `List.partition` all carry `p`, and so do the same combinators elsewhere:
 the bare `filter` (`Prelude.filter`), `Enum.filter`, `Enum.take_while` and
 `Iterable.filter` (`List(a[p])`), `Enum.find` and `Iterable.find`
-(`Option(a[p])`), and `Range.filter`, whose predicate is over `Int`
-(`f : Int -> Bool[p]`, returning `List(Int[p])`):
+(`Option(a[p])`), `Range.filter`, whose predicate is over `Int`
+(`f : Int -> Bool[p]`, returning `List(Int[p])`), and `Deque.filter`
+(`Deque(a[p])`; see the last bullet of
+[What element refinements do not do](#what-element-refinements-do-not-do) for
+how a type whose elements sit in `List` fields is checked):
 
 ```march
 fn one_pos(o : Option({Int | _ > 0})) : Int do … end
@@ -2397,6 +2400,7 @@ sum_pos(List.take_while(ys, is_pos))          -- proved
 sum_pos(filter(ys, fn y -> y > 0))            -- proved: Prelude.filter
 one_pos(Enum.find(ys, fn y -> y > 0))         -- proved
 sum_pos(Range.filter(Range.new(0, n), fn y -> y > 0))  -- proved
+sum_pos(Deque.to_list(Deque.filter(d, fn y -> y > 0))) -- proved
 ```
 
 Each proves its own contract on the definition side; none is assumed.
@@ -2460,7 +2464,7 @@ demand meets one of these):
   fact: its result starts at the first element that FAILS `pred`, so nothing
   holds of all of it. `List.filter_map`'s callback returns an `Option`, not a
   `Bool`, so nothing defines `p`. `List.find_index` returns an index, not an
-  element. `Deque.filter` does not declare one yet.
+  element.
 - **A tuple component only through destructuring.** `Tuple.first(g(…))`, a
   tuple bound whole and taken apart later (`let r = g(…)` then
   `match r do …`), a `match` with more than one arm or a refutable component
@@ -2548,8 +2552,8 @@ later carries nothing.
 - **Only these combinators carry an abstract refinement:** `List.filter`,
   `List.find`, `List.take_while`, `Option.filter`, `List.partition` (per
   component), `Prelude.filter` (the bare `filter`), `Enum.filter`,
-  `Enum.find`, `Enum.take_while`, `Iterable.filter`, `Iterable.find` and
-  `Range.filter`. Each is instantiated from a lambda
+  `Enum.find`, `Enum.take_while`, `Iterable.filter`, `Iterable.find`,
+  `Range.filter` and `Deque.filter`. Each is instantiated from a lambda
   (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
   a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
@@ -2588,13 +2592,24 @@ later carries nothing.
 - **A predicate relating elements to each other** (sortedness, distinctness)
   cannot be written; see [Set Refinements](#set-refinements) for what a
   predicate can say about a collection's elements as a set.
-- **A container whose constructor hides a parameter inside another type**
-  (`type Box(b) = Box(Int -> b)`, `type Wrap(k, v) = Wrap(List((k, v)))`) has
-  its element refinement checked at no construction. `Wrap([(1, 0 - 5)])`
-  against `Wrap(Int, {Int | _ > 0})` is a recorded `unreflectable-subject`
-  skip naming the constructor and the hiding type (an error under
-  `cap verified`), and a function returning such a construction lends no
-  element fact at its call sites.
+- **A parameter inside another container is followed one level, and only
+  as a bare argument.** A constructor field `C(…)` of another registered
+  container (`List`, `Option`, `Result`, or a variant type of the program)
+  whose every argument is a bare type parameter or mentions none is checked
+  as that container: in `type Dq(a) = Dq(Int, List(a), List(a))`,
+  `Dq(1, [0 - 1], [])` against `Dq({Int | _ > 0})` is a violation, and
+  `match d do Dq(_, f, b) -> …` gives `f` and `b` the element refinement. That
+  is what lets `Deque.filter` declare `Deque(a[p])`. Any other field that
+  holds a parameter (`type Box(b) = Box(Int -> b)`,
+  `type Wrap(k, v) = Wrap(List((k, v)))`, a `List(List(a))` field, a field of
+  a container that itself hides the parameter, a self-reference with the
+  parameters permuted) has its element refinement checked at no construction:
+  `Wrap([(1, 0 - 5)])` against `Wrap(Int, {Int | _ > 0})` is a recorded
+  `unreflectable-subject` skip naming the constructor and the hiding type (an
+  error under `cap verified`), a function returning such a construction lends
+  no element fact at its call sites, and a `match` binder at that field gets
+  none. Element refinements say nothing about order or size: a `Dq(a[p])`
+  with its two lists swapped is still one.
 
 ---
 

@@ -108,6 +108,20 @@ git log is authoritative for exact commits.
   `parametric-source-unproved` skip (an error under `cap verified`). The four
   rewritten filters keep their order and results; they now share
   `List.filter`'s single-pass body and run about 35% faster compiled.
+- **Refinements: element refinements see into `List(a)` (and other container)
+  constructor fields, and `Deque.filter` carries its predicate.** In
+  `type Dq(a) = Dq(Int, List(a), List(a))`, `Dq(1, [0 - 1], [])` against
+  `Dq({Int | _ > 0})` is now a refinement violation (it was an
+  `unreflectable-subject` skip), a positive construction is proved, and
+  `match d do Dq(_, f, b) -> …` gives `f` and `b` the element refinement. The
+  same holds for a field `Option(a)`, `Result(a, Int)` or any other variant
+  type whose arguments are bare parameters. `Deque.filter` now declares
+  `pred : a -> Bool[p]` and returns `Deque(a[p])`, so
+  `sum_pos(Deque.to_list(Deque.filter(d, fn y -> y > 0)))` is proved where it was
+  a `parametric-source-unproved` skip. It filters the deque's two lists in
+  place instead of rebuilding it from a list: same elements, same order, about
+  2x faster compiled. A field that holds a parameter any other way
+  (`List(List(a))`, `List((k, v))`, `Int -> a`) is still a recorded skip.
 
 ### Fixed
 
