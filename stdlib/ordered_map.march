@@ -5,8 +5,14 @@
 --   cmp(a, b) = 0  means a = b
 --   cmp(a, b) > 0  means a > b
 --
+-- The built-in `compare` is a ready-made comparator for Int, String and
+-- other ordered values.  Lookup, put and delete are O(log n); keys, values,
+-- to_list and fold visit entries in ascending key order.
+--
 -- The map itself is a record holding the comparator and the tree root.
 -- Type: {cmp: (k,k)->Int, tree: Tree(k,v)}
+--
+-- doc: try
 
 mod OrderedMap do
 
@@ -208,27 +214,75 @@ mod OrderedMap do
 
   -- ---- Public API ----
 
-  doc "Creates a new empty ordered map with the given comparator."
+  doc """
+  Creates a new empty ordered map with the given comparator
+  (`cmp(a, b)` negative, zero or positive as `a` is less than, equal to or
+  greater than `b`).
+
+  ## Examples
+
+      march> OrderedMap.is_empty(OrderedMap.new(compare))
+      true
+  """
   fn new(cmp : k -> k -> Int) : {cmp: k -> k -> Int, tree: Tree(k, v)} do
     {cmp: cmp, tree: Leaf}
   end
 
-  doc "Inserts or updates key k with value v in map m."
+  doc """
+  Inserts or updates key k with value v in map m.  A key that compares
+  equal to an existing one replaces both its key and its value.  O(log n).
+
+  ## Examples
+
+      march> OrderedMap.to_list(OrderedMap.put(OrderedMap.put(OrderedMap.new(compare), 2, "b"), 1, "a"))
+      [(1, "a"), (2, "b")]
+      march> OrderedMap.get(OrderedMap.put(OrderedMap.from_list([(1, "a")], compare), 1, "z"), 1)
+      Some("z")
+  """
   fn put(m : {cmp: k -> k -> Int, tree: Tree(k, v)}, k : k, v : v) : {cmp: k -> k -> Int, tree: Tree(k, v)} do
     {cmp: m.cmp, tree: tree_insert(m.tree, m.cmp, k, v)}
   end
 
-  doc "Looks up key k in map m. Returns Some(v) or None."
+  doc """
+  Looks up key k in map m. Returns Some(v) or None.  O(log n).
+
+  ## Examples
+
+      march> let m = OrderedMap.from_list([(3, "c"), (1, "a"), (2, "b")], compare)
+      march> OrderedMap.get(m, 2)
+      Some("b")
+      march> OrderedMap.get(m, 9)
+      None
+  """
   fn get(m : {cmp: k -> k -> Int, tree: Tree(k, v)}, k : k) : Option(v) do
     tree_get(m.tree, m.cmp, k)
   end
 
-  doc "Deletes key k from map m. No-op if key not present."
+  doc """
+  Deletes key k from map m. No-op if key not present.  O(log n).
+
+  ## Examples
+
+      march> let m = OrderedMap.from_list([(3, "c"), (1, "a"), (2, "b")], compare)
+      march> OrderedMap.keys(OrderedMap.delete(m, 2))
+      [1, 3]
+      march> OrderedMap.size(OrderedMap.delete(m, 9))
+      3
+  """
   fn delete(m : {cmp: k -> k -> Int, tree: Tree(k, v)}, k : k) : {cmp: k -> k -> Int, tree: Tree(k, v)} do
     {cmp: m.cmp, tree: tree_delete(m.tree, m.cmp, k)}
   end
 
-  doc "Returns true if key k is present in map m."
+  doc """
+  Returns true if key k is present in map m.
+
+  ## Examples
+
+      march> OrderedMap.member(OrderedMap.from_list([("a", 1)], compare), "a")
+      true
+      march> OrderedMap.member(OrderedMap.new(compare), "a")
+      false
+  """
   fn member(m : {cmp: k -> k -> Int, tree: Tree(k, v)}, k : k) : Bool do
     match tree_get(m.tree, m.cmp, k) do
     Some(_) -> true
@@ -236,7 +290,14 @@ mod OrderedMap do
     end
   end
 
-  doc "Returns an in-order list of all keys."
+  doc """
+  Returns all keys in ascending order.
+
+  ## Examples
+
+      march> OrderedMap.keys(OrderedMap.from_list([("b", 2), ("a", 1)], compare))
+      ["a", "b"]
+  """
   fn keys(m : {cmp: k -> k -> Int, tree: Tree(k, v)}) : List(k) do
     List.map(tree_to_list(m.tree, Nil), fn pair ->
       match pair do
@@ -245,7 +306,14 @@ mod OrderedMap do
     )
   end
 
-  doc "Returns an in-order list of all values."
+  doc """
+  Returns all values, in ascending order of their keys.
+
+  ## Examples
+
+      march> OrderedMap.values(OrderedMap.from_list([("b", 2), ("a", 1)], compare))
+      [1, 2]
+  """
   fn values(m : {cmp: k -> k -> Int, tree: Tree(k, v)}) : List(v) do
     List.map(tree_to_list(m.tree, Nil), fn pair ->
       match pair do
@@ -254,12 +322,29 @@ mod OrderedMap do
     )
   end
 
-  doc "Returns an in-order list of (key, value) pairs."
+  doc """
+  Returns all (key, value) pairs in ascending key order.
+
+  ## Examples
+
+      march> OrderedMap.to_list(OrderedMap.from_list([(3, "c"), (1, "a")], compare))
+      [(1, "a"), (3, "c")]
+      march> OrderedMap.to_list(OrderedMap.new(compare))
+      []
+  """
   fn to_list(m : {cmp: k -> k -> Int, tree: Tree(k, v)}) : List((k, v)) do
     tree_to_list(m.tree, Nil)
   end
 
-  doc "Builds a map from a list of (key, value) pairs."
+  doc """
+  Builds a map from a list of (key, value) pairs.  Later pairs overwrite
+  earlier ones with an equal key.  O(n log n).
+
+  ## Examples
+
+      march> OrderedMap.to_list(OrderedMap.from_list([(2, "b"), (1, "a"), (2, "z")], compare))
+      [(1, "a"), (2, "z")]
+  """
   fn from_list(pairs : List((k, v)), cmp : k -> k -> Int) : {cmp: k -> k -> Int, tree: Tree(k, v)} do
     List.fold_left(pairs, new(cmp), fn (m, pair) ->
       match pair do
@@ -268,12 +353,28 @@ mod OrderedMap do
     )
   end
 
-  doc "Returns the number of entries in the map."
+  doc """
+  Returns the number of entries in the map.  O(n): the count is not cached.
+
+  ## Examples
+
+      march> OrderedMap.size(OrderedMap.from_list([(1, "a"), (2, "b"), (1, "c")], compare))
+      2
+  """
   fn size(m : {cmp: k -> k -> Int, tree: Tree(k, v)}) : Int do
     tree_size(m.tree)
   end
 
-  doc "Returns the smallest key, or None if empty."
+  doc """
+  Returns the smallest key, or None if empty.  O(log n).
+
+  ## Examples
+
+      march> OrderedMap.min_key(OrderedMap.from_list([(3, "c"), (1, "a")], compare))
+      Some(1)
+      march> OrderedMap.min_key(OrderedMap.new(compare))
+      None
+  """
   fn min_key(m : {cmp: k -> k -> Int, tree: Tree(k, v)}) : Option(k) do
     match tree_min(m.tree) do
     Some((k, _)) -> Some(k)
@@ -281,7 +382,16 @@ mod OrderedMap do
     end
   end
 
-  doc "Returns the largest key, or None if empty."
+  doc """
+  Returns the largest key, or None if empty.  O(log n).
+
+  ## Examples
+
+      march> OrderedMap.max_key(OrderedMap.from_list([(3, "c"), (1, "a")], compare))
+      Some(3)
+      march> OrderedMap.max_key(OrderedMap.new(compare))
+      None
+  """
   fn max_key(m : {cmp: k -> k -> Int, tree: Tree(k, v)}) : Option(k) do
     match tree_max(m.tree) do
     Some((k, _)) -> Some(k)
@@ -289,22 +399,53 @@ mod OrderedMap do
     end
   end
 
-  doc "Folds over the map in key order: f(acc, key, value) -> acc."
+  doc """
+  Folds over the map in ascending key order: f(acc, key, value) -> acc.
+
+  ## Examples
+
+      march> OrderedMap.fold(OrderedMap.from_list([(2, "b"), (1, "a")], compare), "", fn (acc, k, v) -> acc ++ v)
+      "ab"
+  """
   fn fold(m : {cmp: k -> k -> Int, tree: Tree(k, v)}, acc : b, f : b -> k -> v -> b) : b do
     tree_fold(m.tree, acc, f)
   end
 
-  doc "Maps f over all values, preserving keys and order."
+  doc """
+  Maps f over all values, preserving keys and order.  `f` receives both
+  the key and the value: f(key, value) -> new_value.
+
+  ## Examples
+
+      march> OrderedMap.to_list(OrderedMap.map(OrderedMap.from_list([(1, 10), (2, 20)], compare), fn (k, v) -> k + v))
+      [(1, 11), (2, 22)]
+  """
   fn map(m : {cmp: k -> k -> Int, tree: Tree(k, v)}, f : k -> v -> w) : {cmp: k -> k -> Int, tree: Tree(k, w)} do
     {cmp: m.cmp, tree: tree_map(m.tree, f)}
   end
 
-  doc "Returns a new map containing only entries where f(k, v) is true."
+  doc """
+  Returns a new map containing only entries where f(k, v) is true.
+
+  ## Examples
+
+      march> OrderedMap.to_list(OrderedMap.filter(OrderedMap.from_list([(1, "a"), (2, "b"), (3, "c")], compare), fn (k, v) -> k != 2))
+      [(1, "a"), (3, "c")]
+  """
   fn filter(m : {cmp: k -> k -> Int, tree: Tree(k, v)}, f : k -> v -> Bool) : {cmp: k -> k -> Int, tree: Tree(k, v)} do
     {cmp: m.cmp, tree: tree_filter(m.tree, m.cmp, f)}
   end
 
-  doc "Returns true if the map is empty."
+  doc """
+  Returns true if the map is empty.  O(1).
+
+  ## Examples
+
+      march> OrderedMap.is_empty(OrderedMap.delete(OrderedMap.from_list([(1, "a")], compare), 1))
+      true
+      march> OrderedMap.is_empty(OrderedMap.from_list([(1, "a")], compare))
+      false
+  """
   fn is_empty(m : {cmp: k -> k -> Int, tree: Tree(k, v)}) : Bool do
     match m.tree do
     Leaf -> true
@@ -312,7 +453,16 @@ mod OrderedMap do
     end
   end
 
-  doc "Returns the value for key k, or default if not present."
+  doc """
+  Returns the value for key k, or default if not present.
+
+  ## Examples
+
+      march> OrderedMap.get_or(OrderedMap.from_list([(1, "a")], compare), 1, "?")
+      "a"
+      march> OrderedMap.get_or(OrderedMap.from_list([(1, "a")], compare), 5, "?")
+      "?"
+  """
   fn get_or(m : {cmp: k -> k -> Int, tree: Tree(k, v)}, k : k, default : v) : v do
     match tree_get(m.tree, m.cmp, k) do
     Some(v) -> v

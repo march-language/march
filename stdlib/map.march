@@ -13,8 +13,13 @@
 --   eq(a, b) = not cmp(a)(b) and not cmp(b)(a)
 --
 -- Standard comparators:
---   fn(a) -> fn(b) -> a < b      for Int keys
---   fn(a) -> fn(b) -> a < b      for String keys (lexicographic)
+--   fn a -> fn b -> a < b        for Int or String keys (String: lexicographic)
+--   Map.int_cmp / Map.str_cmp    the same, as named functions
+--
+-- Keys are located by `hash`, and the comparator only decides equality among
+-- keys whose hashes match, so it must agree with `==` (a comparator that
+-- treats two `==`-different keys as equal, e.g. case-insensitively, does not
+-- merge them).
 --
 -- Iteration order is hash-traversal order (not sorted by key).
 -- Use to_list then sort externally if sorted order is needed.
@@ -23,6 +28,8 @@
 --   Lookup / insert / delete  O(log₃₂ n) ≈ O(1)
 --   size                      O(n)
 --   Traversals (fold / keys)  O(n)
+--
+-- doc: try
 
 mod Map do
 
@@ -414,6 +421,13 @@ mod Map do
   doc """
   Returns an empty map.
 
+  ## Examples
+
+      march> Map.is_empty(Map.empty())
+      true
+      march> Map.size(Map.empty())
+      0
+
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
   only when `cmp` is a strict total order consistent with `==` on the key
@@ -425,7 +439,12 @@ mod Map do
   end
 
   doc """
-  Returns a map containing exactly one key-value pair.
+  Returns a map containing exactly one key-value pair.  Needs no comparator.
+
+  ## Examples
+
+      march> Map.to_list(Map.singleton("a", 1))
+      [("a", 1)]
 
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
@@ -443,15 +462,43 @@ mod Map do
   -- write `fn a -> fn b -> a < b` at every Map.insert / Map.get / Map.from_list
   -- call site.
 
-  doc "Curried less-than comparator for Int keys.  Pass to Map.* functions."
+  doc """
+  Curried less-than comparator for Int keys: `int_cmp(a)(b)` is `a < b`.
+  Pass to Map.* functions.
+
+  ## Examples
+
+      march> let lt1 = Map.int_cmp(1)
+      march> lt1(2)
+      true
+      march> lt1(1)
+      false
+  """
   fn int_cmp(a) do fn b -> a < b end
 
-  doc "Curried less-than comparator for String keys.  Pass to Map.* functions."
+  doc """
+  Curried less-than comparator for String keys (lexicographic):
+  `str_cmp(a)(b)` is `a < b`.  Pass to Map.* functions.
+
+  ## Examples
+
+      march> let lt_b = Map.str_cmp("b")
+      march> lt_b("a")
+      false
+      march> lt_b("c")
+      true
+  """
   fn str_cmp(a) do fn b -> a < b end
 
   doc """
   Build a `Map(String, v)` from a list of pairs using the default String
-  comparator.  Equivalent to `Map.from_list(pairs, Map.str_cmp)`.
+  comparator.  Equivalent to `Map.from_list(pairs, Map.str_cmp)`; later pairs
+  overwrite earlier ones with the same key.
+
+  ## Examples
+
+      march> Map.get(Map.from_list_string([("a", 1), ("b", 2)]), "b", fn a -> fn b -> a < b)
+      Some(2)
   """
   fn from_list_string(pairs) do
     from_list(pairs, str_cmp)
@@ -459,7 +506,13 @@ mod Map do
 
   doc """
   Build a `Map(Int, v)` from a list of pairs using the default Int
-  comparator.  Equivalent to `Map.from_list(pairs, Map.int_cmp)`.
+  comparator.  Equivalent to `Map.from_list(pairs, Map.int_cmp)`; later pairs
+  overwrite earlier ones with the same key.
+
+  ## Examples
+
+      march> Map.size(Map.from_list_int([(1, "a"), (2, "b")]))
+      2
   """
   fn from_list_int(pairs) do
     from_list(pairs, int_cmp)
@@ -468,7 +521,14 @@ mod Map do
   -- ---- Query ----
 
   doc """
-  Returns true if the map contains no entries.
+  Returns true if the map contains no entries.  O(1).
+
+  ## Examples
+
+      march> Map.is_empty(Map.singleton(1, "a"))
+      false
+      march> Map.is_empty(Map.remove(Map.singleton(1, "a"), 1, fn a -> fn b -> a < b))
+      true
 
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
@@ -484,7 +544,13 @@ mod Map do
   end
 
   doc """
-  Returns the number of key-value pairs in the map. O(n).
+  Returns the number of key-value pairs in the map. O(n): the count is not
+  cached, every call walks the trie.
+
+  ## Examples
+
+      march> Map.size(Map.from_list([(1, "a"), (2, "b"), (1, "c")], fn a -> fn b -> a < b))
+      2
 
   This contract is ASSUMED, not proved: the pair count is a fact about the
   abstract map (`card(keys(m))`) the refinement checker takes on faith, and it
@@ -502,6 +568,14 @@ mod Map do
   Returns Some(value) if key is present, or None.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 
+  ## Examples
+
+      march> let m = Map.from_list([("a", 1), ("b", 2)], fn a -> fn b -> a < b)
+      march> Map.get(m, "b", fn a -> fn b -> a < b)
+      Some(2)
+      march> Map.get(m, "z", fn a -> fn b -> a < b)
+      None
+
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
   only when `cmp` is a strict total order consistent with `==` on the key
@@ -518,7 +592,17 @@ mod Map do
     end
   end
 
-  doc "Returns the value for key, or default if the key is absent."
+  doc """
+  Returns the value for key, or default if the key is absent.
+  cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> Map.get_or(Map.singleton("a", 1), "a", 0, fn a -> fn b -> a < b)
+      1
+      march> Map.get_or(Map.singleton("a", 1), "z", 0, fn a -> fn b -> a < b)
+      0
+  """
   fn get_or(m, key, default, cmp) do
     match get(m, key, cmp) do
     Some(v) -> v
@@ -528,6 +612,14 @@ mod Map do
 
   doc """
   Returns true if key is present in the map.
+  cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> Map.contains_key(Map.singleton(1, "a"), 1, fn a -> fn b -> a < b)
+      true
+      march> Map.contains_key(Map.empty(), 1, fn a -> fn b -> a < b)
+      false
 
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
@@ -549,6 +641,14 @@ mod Map do
   If the key is already present its value is replaced.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 
+  ## Examples
+
+      march> let m1 = Map.insert(Map.singleton("a", 1), "a", 5, fn a -> fn b -> a < b)
+      march> Map.to_list(m1)
+      [("a", 5)]
+      march> Map.size(Map.insert(m1, "b", 2, fn a -> fn b -> a < b))
+      2
+
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
   only when `cmp` is a strict total order consistent with `==` on the key
@@ -568,6 +668,14 @@ mod Map do
   doc """
   Removes a key from the map. Returns the map unchanged if the key is absent.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> let m2 = Map.from_list([(1, "a"), (2, "b")], fn a -> fn b -> a < b)
+      march> Map.to_list(Map.remove(m2, 1, fn a -> fn b -> a < b))
+      [(2, "b")]
+      march> Map.size(Map.remove(m2, 9, fn a -> fn b -> a < b))
+      2
 
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
@@ -591,6 +699,15 @@ mod Map do
   Left fold over all entries.  Argument order: collection first, init
   second, callback last (uncurried-collection convention).
   The callback `f` is called uncurried as `f(acc, key, val) = new_acc`.
+  Entries are visited in hash-traversal order, so `f` should not depend on
+  the order.
+
+  ## Examples
+
+      march> Map.fold(Map.from_list([(1, 10), (2, 20)], fn a -> fn b -> a < b), 0, fn (acc, k, v) -> acc + k + v)
+      33
+      march> Map.fold(Map.empty(), 7, fn (acc, k, v) -> acc + k + v)
+      7
   """
   fn fold(m, acc, f) do
     match m do
@@ -599,7 +716,12 @@ mod Map do
   end
 
   doc """
-  Returns all keys as a list (hash-traversal order).
+  Returns all keys as a list (hash-traversal order, not sorted).
+
+  ## Examples
+
+      march> List.sort_by(Map.keys(Map.from_list([("b", 2), ("a", 1)], fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      ["a", "b"]
 
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
@@ -612,13 +734,29 @@ mod Map do
     lst_rev(pairs)
   end
 
-  doc "Returns all values as a list (hash-traversal order)."
+  doc """
+  Returns all values as a list (hash-traversal order, the same order as
+  `keys`).
+
+  ## Examples
+
+      march> List.sort_by(Map.values(Map.from_list([("b", 2), ("a", 1)], fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      [1, 2]
+  """
   fn values(m) do
     let vals = fold(m, Nil, fn (acc, _k, v) -> Cons(v, acc))
     lst_rev(vals)
   end
 
-  doc "Returns all (key, value) pairs as a list (hash-traversal order)."
+  doc """
+  Returns all (key, value) pairs as a list (hash-traversal order).  Same as
+  `to_list`.
+
+  ## Examples
+
+      march> List.sort_by(Map.entries(Map.from_list([("b", 2), ("a", 1)], fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      [("a", 1), ("b", 2)]
+  """
   fn entries(m) do
     let es = fold(m, Nil, fn (acc, k, v) -> Cons((k, v), acc))
     lst_rev(es)
@@ -630,6 +768,14 @@ mod Map do
   Builds a map from a list of (key, value) pairs.
   Later entries overwrite earlier ones for duplicate keys.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> let m3 = Map.from_list([(1, "a"), (2, "b"), (1, "c")], fn a -> fn b -> a < b)
+      march> Map.get(m3, 1, fn a -> fn b -> a < b)
+      Some("c")
+      march> Map.is_empty(Map.from_list([], fn a -> fn b -> a < b))
+      true
   """
   fn from_list(pairs, cmp) do
     fn go(lst, acc) do
@@ -644,7 +790,17 @@ mod Map do
     go(pairs, empty())
   end
 
-  doc "Converts a map to a list of (key, value) pairs (hash-traversal order)."
+  doc """
+  Converts a map to a list of (key, value) pairs (hash-traversal order, not
+  sorted; sort the result if order matters).
+
+  ## Examples
+
+      march> Map.to_list(Map.empty())
+      []
+      march> List.sort_by(Map.to_list(Map.from_list([(2, "b"), (1, "a")], fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      [(1, "a"), (2, "b")]
+  """
   fn to_list(m) do
     entries(m)
   end
@@ -652,7 +808,13 @@ mod Map do
   -- ---- Transformation ----
 
   doc """
-  Applies f to each value, returning a new map with the same keys.
+  Applies f to each value, returning a new map with the same keys.  `f`
+  takes the value only (not the key).  Needs no comparator.
+
+  ## Examples
+
+      march> Map.to_list(Map.map_values(Map.singleton("a", 2), fn v -> v * 10))
+      [("a", 20)]
 
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
@@ -702,7 +864,14 @@ mod Map do
   doc """
   Returns a map containing only entries where pred(key)(value) is true.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
-  pred : k -> v -> Bool (curried).
+  pred : k -> v -> Bool (curried).  Rebuilds the map by re-inserting the
+  kept entries, O(n log n).
+
+  ## Examples
+
+      march> let m4 = Map.from_list([(1, 10), (2, 20), (3, 30)], fn a -> fn b -> a < b)
+      march> List.sort_by(Map.keys(Map.filter(m4, fn k -> fn v -> v > 15, fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      [2, 3]
 
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
@@ -730,6 +899,13 @@ mod Map do
   precedence. O(n log n) in the size of b.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 
+  ## Examples
+
+      march> let ma = Map.from_list([(1, "a"), (2, "b")], fn a -> fn b -> a < b)
+      march> let mb = Map.from_list([(2, "B"), (3, "C")], fn a -> fn b -> a < b)
+      march> List.sort_by(Map.to_list(Map.merge(ma, mb, fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      [(1, "a"), (2, "B"), (3, "C")]
+
   This contract is ASSUMED, not proved: the set of keys is a fact about the
   abstract map (`keys`) the refinement checker takes on faith, and it holds
   only when `cmp` is a strict total order consistent with `==` on the key
@@ -752,7 +928,16 @@ mod Map do
   doc """
   Merges two maps with a combining function for conflicting keys.
   merge_with(a, b, f, cmp): when key exists in both, value: f(val_a)(val_b).
-  cmp : k -> k -> Bool; f : v -> v -> v (curried).
+  Keys present in only one map keep their value.
+  cmp : k -> k -> Bool; f : v -> v -> v (curried).  O(n log n) in the size
+  of b.
+
+  ## Examples
+
+      march> let ca = Map.from_list([("x", 1), ("y", 2)], fn a -> fn b -> a < b)
+      march> let cb = Map.from_list([("y", 10), ("z", 5)], fn a -> fn b -> a < b)
+      march> List.sort_by(Map.to_list(Map.merge_with(ca, cb, fn x -> fn y -> x + y, fn a -> fn b -> a < b)), fn (p, q) -> p < q)
+      [("x", 1), ("y", 12), ("z", 5)]
   """
   fn merge_with(a, b, f, cmp) do
     fn go(lst, acc) do

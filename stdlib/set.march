@@ -8,11 +8,17 @@
 --   cmp : a -> a -> Bool    where cmp(a)(b) = true means a < b
 --
 -- Standard comparators:
---   fn(a) -> fn(b) -> a < b      for Int elements
---   fn(a) -> fn(b) -> a < b      for String elements (lexicographic)
+--   fn a -> fn b -> a < b        for Int or String elements (String: lexicographic)
+--   Map.int_cmp / Map.str_cmp    the same, as named functions
+--
+-- Elements are located by `hash`; the comparator only decides equality among
+-- elements whose hashes match, so it must agree with `==`.
 --
 -- Iteration order is hash-traversal order (not sorted).
 -- Use to_list then sort externally if sorted order is needed.
+-- For a set kept in sorted order, see SortedSet.
+--
+-- doc: try
 
 mod Set do
 
@@ -360,6 +366,11 @@ mod Set do
   doc """
   Returns an empty set.
 
+  ## Examples
+
+      march> Set.size(Set.empty())
+      0
+
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
   holds only when `cmp` is a strict total order consistent with `==` on the
@@ -372,6 +383,11 @@ mod Set do
 
   doc """
   Returns a set containing exactly one element.
+
+  ## Examples
+
+      march> Set.to_list(Set.singleton("a"))
+      ["a"]
 
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
@@ -389,6 +405,13 @@ mod Set do
   doc """
   Returns true if the set contains no elements.
 
+  ## Examples
+
+      march> Set.is_empty(Set.empty())
+      true
+      march> Set.is_empty(Set.from_list([1], fn a -> fn b -> a < b))
+      false
+
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
   holds only when `cmp` is a strict total order consistent with `==` on the
@@ -402,7 +425,12 @@ mod Set do
   end
 
   doc """
-  Returns the number of elements in the set. O(1).
+  Returns the number of elements in the set. O(1): the count is cached.
+
+  ## Examples
+
+      march> Set.size(Set.from_list([1, 2, 2, 3], fn a -> fn b -> a < b))
+      3
 
   This contract is ASSUMED, not proved: the element count is a fact about the
   abstract set (`card(elts(s))`) the refinement checker takes on faith, and it
@@ -419,6 +447,14 @@ mod Set do
   doc """
   Returns true if the set contains elem.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> let s1 = Set.from_list(["a", "b"], fn a -> fn b -> a < b)
+      march> Set.contains(s1, "a", fn a -> fn b -> a < b)
+      true
+      march> Set.contains(s1, "z", fn a -> fn b -> a < b)
+      false
 
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
@@ -442,6 +478,14 @@ mod Set do
   Inserts elem into the set. Returns the set unchanged if elem is already present.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 
+  ## Examples
+
+      march> let s2 = Set.insert(Set.singleton(1), 2, fn a -> fn b -> a < b)
+      march> Set.size(s2)
+      2
+      march> Set.size(Set.insert(s2, 1, fn a -> fn b -> a < b))
+      2
+
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
   holds only when `cmp` is a strict total order consistent with `==` on the
@@ -462,6 +506,14 @@ mod Set do
   doc """
   Removes elem from the set. Returns the set unchanged if elem is absent.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> let s3 = Set.from_list([1, 2], fn a -> fn b -> a < b)
+      march> Set.to_list(Set.remove(s3, 1, fn a -> fn b -> a < b))
+      [2]
+      march> Set.size(Set.remove(s3, 9, fn a -> fn b -> a < b))
+      2
 
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
@@ -484,7 +536,15 @@ mod Set do
 
   doc """
   Returns the union of two sets (all elements in either set).
+  Inserts each element of b into a: O(m) inserts for m = size(b).
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> let ua = Set.from_list([1, 2], fn a -> fn b -> a < b)
+      march> let ub = Set.from_list([2, 3], fn a -> fn b -> a < b)
+      march> List.sort_by(Set.to_list(Set.union(ua, ub, fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      [1, 2, 3]
 
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
@@ -504,6 +564,14 @@ mod Set do
   doc """
   Returns the intersection of two sets (elements in both sets).
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> let ia = Set.from_list([1, 2, 3], fn a -> fn b -> a < b)
+      march> List.sort_by(Set.to_list(Set.intersection(ia, Set.from_list([2, 3, 4], fn a -> fn b -> a < b), fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      [2, 3]
+      march> Set.is_empty(Set.intersection(ia, Set.from_list([9], fn a -> fn b -> a < b), fn a -> fn b -> a < b))
+      true
 
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
@@ -526,6 +594,12 @@ mod Set do
   Returns elements in a that are not in b (set difference a \\ b).
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 
+  ## Examples
+
+      march> let da = Set.from_list([1, 2, 3], fn a -> fn b -> a < b)
+      march> List.sort_by(Set.to_list(Set.difference(da, Set.from_list([2, 9], fn a -> fn b -> a < b), fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      [1, 3]
+
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
   holds only when `cmp` is a strict total order consistent with `==` on the
@@ -544,7 +618,19 @@ mod Set do
   end
 
   doc """
-  Returns true if a is a subset of b.
+  Returns true if a is a subset of b (every element of a is in b).  The
+  empty set is a subset of every set.
+  cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> let sb = Set.from_list([1, 2, 3], fn a -> fn b -> a < b)
+      march> Set.is_subset(Set.from_list([1, 3], fn a -> fn b -> a < b), sb, fn a -> fn b -> a < b)
+      true
+      march> Set.is_subset(Set.from_list([1, 4], fn a -> fn b -> a < b), sb, fn a -> fn b -> a < b)
+      false
+      march> Set.is_subset(Set.empty(), sb, fn a -> fn b -> a < b)
+      true
 
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
@@ -565,7 +651,12 @@ mod Set do
   -- ---- Traversal ----
 
   doc """
-  Returns all elements as a list (hash-traversal order).
+  Returns all elements as a list (hash-traversal order, not sorted).
+
+  ## Examples
+
+      march> List.sort_by(Set.to_list(Set.from_list(["b", "a", "b"], fn a -> fn b -> a < b)), fn (x, y) -> x < y)
+      ["a", "b"]
 
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
@@ -583,8 +674,15 @@ mod Set do
   end
 
   doc """
-  Builds a set from a list of elements.
+  Builds a set from a list of elements; duplicates are kept once.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> Set.size(Set.from_list([3, 1, 3, 2, 1], fn a -> fn b -> a < b))
+      3
+      march> Set.is_empty(Set.from_list([], fn a -> fn b -> a < b))
+      true
 
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it
@@ -605,7 +703,13 @@ mod Set do
   doc """
   Left fold over all elements.  Argument order: collection first, init
   second, callback last (uncurried-collection convention).  The
-  callback `f` is called uncurried as `f(acc, elem) = new_acc`.
+  callback `f` is called uncurried as `f(acc, elem) = new_acc`.  Elements
+  are visited in hash-traversal order.
+
+  ## Examples
+
+      march> Set.fold(Set.from_list([1, 2, 3], fn a -> fn b -> a < b), 0, fn (acc, x) -> acc + x)
+      6
   """
   fn fold(s, acc, f) do
     match s do
@@ -615,8 +719,16 @@ mod Set do
   end
 
   doc """
-  Returns true if the two sets contain the same elements.
+  Returns true if the two sets contain the same elements, regardless of
+  the order they were inserted in.  O(n) membership checks.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  ## Examples
+
+      march> Set.eq(Set.from_list([1, 2], fn a -> fn b -> a < b), Set.from_list([2, 1], fn a -> fn b -> a < b), fn a -> fn b -> a < b)
+      true
+      march> Set.eq(Set.from_list([1, 2], fn a -> fn b -> a < b), Set.from_list([1], fn a -> fn b -> a < b), fn a -> fn b -> a < b)
+      false
 
   This contract is ASSUMED, not proved: the set of elements is a fact about
   the abstract set (`elts`) the refinement checker takes on faith, and it

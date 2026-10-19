@@ -24,7 +24,15 @@
 --
 -- Hash / equality convention used by callers:
 --   hash_fn : k -> Int     (must be deterministic; wrap with int_and(h, 1073741823) for safety)
---   eq_fn   : k -> k -> Bool
+--   eq_fn   : (k, k) -> Bool, called with two arguments as eq_fn(a, b)
+-- The same hash_fn and eq_fn must be passed to every call on one trie.
+-- Only the low 35 bits of the hash pick a path (7 levels of 5 bits).  Keep
+-- hashes non-negative and below 2^35 (the 30-bit mask above does this): two
+-- keys whose hashes agree on the low 35 bits but differ above them land in
+-- one collision bucket tagged with the first hash, and `get` then misses the
+-- second key.
+--
+-- doc: try
 
 mod Hamt do
 
@@ -413,7 +421,14 @@ mod Hamt do
 
   -- ── Public API ─────────────────────────────────────────────────────────────
 
-  doc "Returns an empty HAMT node."
+  doc """
+  Returns an empty HAMT node (`HEmpty`).
+
+  ## Examples
+
+      march> Hamt.size(Hamt.empty())
+      0
+  """
   fn empty() do
     HEmpty
   end
@@ -421,7 +436,15 @@ mod Hamt do
   doc """
   Look up a key.  Returns Some(value) if found, None otherwise.
   hash_fn  : k -> Int
-  eq_fn    : k -> k -> Bool
+  eq_fn    : two-argument equality, called as eq_fn(a, b)
+
+  ## Examples
+
+      march> let h = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", fn k -> k, fn (a, b) -> a == b), 2, "b", fn k -> k, fn (a, b) -> a == b)
+      march> Hamt.get(h, 2, fn k -> k, fn (a, b) -> a == b)
+      Some("b")
+      march> Hamt.get(h, 3, fn k -> k, fn (a, b) -> a == b)
+      None
   """
   fn get(node, key, hash_fn, eq_fn) do
     let h = hash_fn(key)
@@ -429,9 +452,20 @@ mod Hamt do
   end
 
   doc """
-  Insert or update key→val.
+  Insert or update key→val.  Returns the new trie; an existing key has its
+  value replaced.  Keys whose hashes are equal but which are not `eq_fn`-equal
+  are kept side by side in a collision bucket.
   hash_fn  : k -> Int
-  eq_fn    : k -> k -> Bool
+  eq_fn    : two-argument equality, called as eq_fn(a, b)
+
+  ## Examples
+
+      march> let h1 = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", fn k -> k, fn (a, b) -> a == b), 1, "z", fn k -> k, fn (a, b) -> a == b)
+      march> Hamt.get(h1, 1, fn k -> k, fn (a, b) -> a == b)
+      Some("z")
+      march> let hc = Hamt.insert(Hamt.insert(Hamt.empty(), "x", 1, fn _ -> 0, fn (a, b) -> a == b), "y", 2, fn _ -> 0, fn (a, b) -> a == b)
+      march> Hamt.get(hc, "y", fn _ -> 0, fn (a, b) -> a == b)
+      Some(2)
   """
   fn insert(node, key, val, hash_fn, eq_fn) do
     let h = hash_fn(key)
@@ -441,7 +475,15 @@ mod Hamt do
   doc """
   Remove a key.  Returns the trie unchanged if the key is absent.
   hash_fn  : k -> Int
-  eq_fn    : k -> k -> Bool
+  eq_fn    : two-argument equality, called as eq_fn(a, b)
+
+  ## Examples
+
+      march> let h2 = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", fn k -> k, fn (a, b) -> a == b), 2, "b", fn k -> k, fn (a, b) -> a == b)
+      march> Hamt.get(Hamt.remove(h2, 1, fn k -> k, fn (a, b) -> a == b), 1, fn k -> k, fn (a, b) -> a == b)
+      None
+      march> Hamt.size(Hamt.remove(h2, 9, fn k -> k, fn (a, b) -> a == b))
+      2
   """
   fn remove(node, key, hash_fn, eq_fn) do
     let h = hash_fn(key)
@@ -452,13 +494,27 @@ mod Hamt do
   Left fold over all (key, value) pairs.  Argument order: collection
   first, init second, callback last (uncurried-collection convention).
   Note: the callback `f` is still curried as `f(acc)(key)(val)` because
-  HAMT internals expect that shape.
+  HAMT internals expect that shape.  Entries are visited in trie order
+  (by hash bits), not insertion order.
+
+  ## Examples
+
+      march> let h3 = Hamt.insert(Hamt.insert(Hamt.empty(), 1, 10, fn k -> k, fn (a, b) -> a == b), 2, 20, fn k -> k, fn (a, b) -> a == b)
+      march> Hamt.fold(h3, 0, fn acc -> fn k -> fn v -> acc + k + v)
+      33
   """
   fn fold(node, acc, f) do
     hamt_fold(acc, node, f)
   end
 
-  doc "Count entries in O(n)."
+  doc """
+  Count entries in O(n) (the count is not cached).
+
+  ## Examples
+
+      march> Hamt.size(Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", fn k -> k, fn (a, b) -> a == b), 2, "b", fn k -> k, fn (a, b) -> a == b))
+      2
+  """
   fn size(node) do
     hamt_size(node)
   end
