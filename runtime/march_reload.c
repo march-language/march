@@ -3125,36 +3125,46 @@ static int peer_uid_ok(int fd) {
 #endif
 }
 
-static void *reload_server_thread(void *arg) {
-    (void)arg;
-
-#if HAVE_SIGNING_KEY
-    load_pubkey_from_hex();
-#endif
-    /* Phase 9: restore epoch counter from disk (g_cas_root already set). */
-    atomic_store_explicit(&g_next_epoch, load_next_epoch(), memory_order_relaxed);
-
+/* Create, bind and listen on the reload socket.  Called by
+ * march_reload_server_start on @main's thread, so before march_sandbox_install
+ * (spawn_main_impl): a --cap-sandbox program that withholds IO.NetListen (on
+ * Linux also IO.Network, which denies socket()) or IO.FileWrite (unlink,
+ * chmod) still gets its reload listener.  Bound on the server thread instead,
+ * it raced the install (todo 2026-09-30-hcr-reload-listener-races-cap-
+ * sandbox-install, owner decision 2026-10-11).  -1 on failure. */
+static int reload_listen(void) {
     int srv = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (srv < 0) { perror("march_reload: socket"); return NULL; }
+    if (srv < 0) { perror("march_reload: socket"); return -1; }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, g_socket_path, sizeof(addr.sun_path) - 1);
+    memcpy(addr.sun_path, g_socket_path, strlen(g_socket_path) + 1);
 
     unlink(g_socket_path);
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("march_reload: bind"); close(srv); return NULL;
+        perror("march_reload: bind"); close(srv); return -1;
     }
     /* Owner-only, whatever the inherited umask (review 2026-10-04-dd12-
      * review-reload-socket-permissions): connecting needs write permission
      * on the socket inode, and nothing can connect before listen(), so
      * setting the mode here leaves no window. */
     if (chmod(g_socket_path, 0600) != 0) {
-        perror("march_reload: chmod"); close(srv); unlink(g_socket_path); return NULL;
+        perror("march_reload: chmod"); close(srv); unlink(g_socket_path); return -1;
     }
-    listen(srv, RELOAD_BACKLOG);
+    if (listen(srv, RELOAD_BACKLOG) != 0) {
+        perror("march_reload: listen"); close(srv); unlink(g_socket_path); return -1;
+    }
     fprintf(stderr, "[hcr] reload server listening on %s\n", g_socket_path);
+    return srv;
+}
+
+static void *reload_server_thread(void *arg) {
+    int srv = (int)(intptr_t)arg;
+    {   /* test hook: start late (test_cap_sandbox_runtime.ml) */
+        const char *d = getenv("MARCH_TEST_RELOAD_BIND_DELAY_MS");
+        if (d && *d) usleep((useconds_t)atoi(d) * 1000);
+    }
 
     while (1) {
         int cli = accept(srv, NULL, NULL);
@@ -3179,8 +3189,14 @@ __attribute__((weak)) void march_shell_server_start(const char *reload_socket_pa
 
 void march_reload_server_start(const char *socket_path) {
     if (!socket_path || socket_path[0] == '\0') return;
-    strncpy(g_socket_path, socket_path, sizeof(g_socket_path) - 1);
-    g_socket_path[sizeof(g_socket_path) - 1] = '\0';
+    /* A longer path used to be cut to fit and bound at the truncated name.
+     * Refuse it, as the shell and observe listeners do. */
+    if (strlen(socket_path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        fprintf(stderr, "march_reload: socket path too long (max %zu bytes): %s\n",
+                sizeof(((struct sockaddr_un *)0)->sun_path) - 1, socket_path);
+        return;
+    }
+    memcpy(g_socket_path, socket_path, strlen(socket_path) + 1);
 
     /* Build CAS root path: ~/.march/cas */
     snprintf(g_cas_root, sizeof(g_cas_root), "%s", march_cas_root());
@@ -3216,6 +3232,12 @@ void march_reload_server_start(const char *socket_path) {
     g_booting = 0;
 #endif
 
+    /* Phase 9: restore epoch counter from disk (g_cas_root already set). */
+    atomic_store_explicit(&g_next_epoch, load_next_epoch(), memory_order_relaxed);
+
+    int srv = reload_listen();
+    if (srv < 0) { march_shell_server_start(g_socket_path); return; }
+
     pthread_t tid;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -3223,7 +3245,11 @@ void march_reload_server_start(const char *socket_path) {
     /* The handler frame holds a 256-entry batch array and 16 KiB lines;
      * macOS gives secondary threads 512 KiB by default. */
     pthread_attr_setstacksize(&attr, 4u << 20);
-    pthread_create(&tid, &attr, reload_server_thread, NULL);
+    if (pthread_create(&tid, &attr, reload_server_thread, (void *)(intptr_t)srv) != 0) {
+        perror("march_reload: pthread_create");
+        close(srv);
+        unlink(g_socket_path);
+    }
     pthread_attr_destroy(&attr);
     march_shell_server_start(g_socket_path);
 }

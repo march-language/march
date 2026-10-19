@@ -21,6 +21,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- `march --compile --static` builds a self-contained executable: on Linux a fully
+  static binary that runs in a `scratch` image (musl hosts such as Alpine; refused on
+  glibc), on macOS one that loads nothing outside `/usr/lib` and `/System`. A missing
+  static library is an error naming the package to install, and the compiler checks
+  the finished binary before keeping it. See "Static binaries" in the tooling docs,
+  including how a static binary finds TLS certificates.
 - **Refinements: a lambda passed for an abstract refinement may now have a real
   body.** `List.filter(ys, fn y -> is_pos(y) && y < 100)`, an `if` or a `match`
   on a Bool, `fn y -> gt(y, 0)` (a several-parameter helper with a proved
@@ -177,6 +183,17 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- A compiled program that uses `Compress.Zstd` or `Compress.Brotli` on a build host
+  without that library now fails to compile with a message naming the package to
+  install, instead of building a binary whose codec returns `Err("... not available")`
+  at run time. Each codec is linked only when the program uses it, so a gzip program
+  loads zlib alone.
+- A compiled program now loads OpenSSL only when it uses TLS, and zlib/zstd/brotli
+  only when it uses `Compress`: a hello-world depends on libc alone, where it used to
+  need six libraries. `--hot-reload` builds still link the whole runtime.
+- `SessionNode.run_cluster` and `SessionNode.run_cluster_hosted` take a `fingerprint`
+  argument after `session` (the generated `cluster_<Role>` runners pass the
+  protocol's); pass `""` to check nothing.
 - **Stdlib: the collection folds declare their types.** `Map.fold(m : Map(k, v),
   acc : b, f : b -> k -> v -> b) : b`, likewise `HashMap.fold`; `Set.fold(s :
   Set(a), acc : b, f : b -> a -> b) : b`; `Array.fold_left(v : PVec(a), acc : b,
@@ -187,6 +204,29 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `march --compile` no longer serves a cached binary that was linked under a different
+  host library probe: whether the build host has OpenSSL, zstd or brotli decides what
+  the binary links and whether its zstd/brotli codecs work, and is now part of the
+  build cache key.
+- A hot deploy that changed an actor's state no longer hands an actor spawned by
+  not-yet-redeployed code (such as a closure `main` built) an old-layout state to run
+  the new handlers on, which read garbage fields and could crash: the state is now
+  migrated from the version of the code that built it before the actor's first
+  message.
+- On macOS, `forge deploy hot` now finds a patch's `migrate_state`: it looked for the
+  `__migrate_<Actor>` symbol with `nm -D`, which lists nothing for a Mach-O library,
+  so every deploy that changed an actor's state was refused as missing its migration.
+- Two nodes built from different versions of a protocol no longer form a session
+  through `<P>_Run.cluster_<Role>` and find the skew mid-session: each role registers
+  its protocol fingerprint beside its endpoint, and a peer with a different one, or
+  none (a node built before the check), is refused with `Err(Connect(...))` before the
+  session forms, as the direct runner already refused it at the hello.
+- `--hot-reload` programs built with `--cap-sandbox` now keep their reload and observe
+  sockets when they withhold `IO.NetListen`: the reload server's listener is bound
+  before the sandbox is installed instead of racing it on its own thread, and the
+  observe socket starts before the install instead of after it (where its bind was
+  always refused). An over-long reload socket path is now refused instead of silently
+  truncated.
 - **Refinements: a correct call under a condition the checker cannot read is no
   longer a violation.** With `k : {Int | _ <= 100}` and
   `xs : List({Int | _ < k})`, `if small(k) do need_lt5(xs) else 0 end` (where

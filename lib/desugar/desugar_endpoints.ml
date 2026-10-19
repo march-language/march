@@ -1835,7 +1835,9 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
      cluster node (`ClusterNode.start`) instead of connections of its own --
      `SessionNode.run_cluster`: peers found by name under the session id,
      frames over the node's shared connections, SWIM as the failure
-     detector. Design: specs/progress/2026-09-18-cluster-node-service.md. *)
+     detector, and the role's fingerprint registered beside its endpoint so
+     a peer from another protocol version is refused before the session
+     forms. Design: specs/progress/2026-09-18-cluster-node-service.md. *)
   let clusters =
     List.map
       (fun (role, entry) ->
@@ -1845,7 +1847,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
-                var "session"; lam [ "_ep" ] unit; call_body role ]))
+                var "session"; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+                lam [ "_ep" ] unit; call_body role ]))
       roles
   in
   (* `offer_<Role>(io, node, capacity, body)`: an ACCESS POINT -- this node
@@ -1984,6 +1987,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster_hosted"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "session";
+                app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                 lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
                 lam [ "s" ] (app "start" (var "session" :: var "s" :: narrowed role));
                 lam [ "s"; "from"; "m"; "ep" ] (app "deliver" [ var "session"; var "s"; var "from"; var "m"; var "ep" ]);

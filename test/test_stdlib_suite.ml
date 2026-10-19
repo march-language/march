@@ -12705,9 +12705,13 @@ let test_concat_chain_values () =
    from two different C shims: runtime/march_compress.c compiled,
    lib/eval/compress_stubs.c interpreted). Also covers the streaming path,
    whose Seq annotations could never typecheck, and a round-trip so the Ok arm
-   of the mapping is exercised compiled. zstd/brotli may be built without their
-   library, in which case the decoder reports Io("... not available ..."),
-   which is folded into the expected line rather than failing the test. *)
+   of the mapping is exercised compiled. The interpreter's zstd/brotli may be
+   built without their library, in which case the decoder reports
+   Io("... not available ..."), which is folded into the expected line rather
+   than failing the test. A compiled program that reaches a codec the host
+   lacks no longer builds at all (static-output design, Stage 3), so on such a
+   host the compiled half fails to compile rather than printing "unavailable";
+   every CI leg installs both libraries. *)
 let test_compress_decode_error_structured_both_backends () =
   let src =
     "mod CompressErr do\n\

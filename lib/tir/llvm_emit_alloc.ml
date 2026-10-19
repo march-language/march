@@ -343,8 +343,20 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
            (* 1-based; 0 = "not set" sentinel.  By name in a patch .so
               (Llvm_ctx.hr_slot_id): an actor new in the patch gets 0. *)
            let slot_id = Llvm_ctx.hr_slot_id ctx dispatch_fn id0 in
+           (* The epoch of the code building this state: a patch's own
+              (@__march_hcr_epoch, stamped by its __march_init), 0 for the
+              base image.  The runtime migrates a state built older than
+              the actor's proc epoch before its first message
+              (march_actor_meta.build_epoch). *)
+           let build_epoch =
+             if ctx.Llvm_ctx.compile_so then begin
+               let e = Llvm_ctx.fresh ctx "hr_build_ep" in
+               emit ctx (Printf.sprintf "%s = load i32, ptr @__march_hcr_epoch" e);
+               e
+             end else "0"
+           in
            emit ctx (Printf.sprintf
-             "call void @march_actor_set_dispatch_id(ptr %s, i32 %s)" ptr slot_id)
+             "call void @march_actor_set_dispatch_id(ptr %s, i32 %s, i32 %s)" ptr slot_id build_epoch)
          | None -> ()
        end;
        (* Actor.call tag-table registration. F19 (build_ctor_info) gives

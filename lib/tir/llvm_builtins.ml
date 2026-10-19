@@ -1296,7 +1296,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_dispatch_register_name", "declare void @march_dispatch_register_name(i32, ptr)");
   ("march_dispatch_name_to_id", "declare i32  @march_dispatch_name_to_id(ptr, ptr)");
   ("march_reload_server_start", "declare void @march_reload_server_start(ptr)");
-  ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)");
+  ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id, i32 %build_epoch)");
   ("march_actor_set_call_tags", "declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)");
   ("getenv", "declare ptr  @getenv(ptr)");
   ("march_alloc", "declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)");

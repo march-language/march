@@ -3426,6 +3426,16 @@ typedef struct march_actor_meta {
      * Used by actor_green_thread for dispatch-table lookup (enabling function
      * hot-swap) and by march_actor_broadcast_migrate to target only the right actors. */
     uint32_t                    dispatch_name_id;
+    /* The epoch of the code that built the actor's `init` state (set with
+     * dispatch_name_id, at the record's alloc): MARCH_EPOCH_BASE for the
+     * base image, a patch's own epoch for code in a patch .so.  The spawn
+     * site is inlined into its caller, so it is the caller's version that
+     * picks the layout, while the proc's epoch comes from the spawner's proc
+     * -- and an unpinned spawner (the compiled main, running a closure the
+     * base built) gives the CURRENT epoch.  actor_green_thread runs the
+     * migrations between the two before the first message
+     * (hcr_catch_up_init_state).  0 = not recorded. */
+    uint32_t                    build_epoch;
     /* The epoch model (plan II.4.4-II.4.6).  The actor's code epoch is its
      * proc's (march_proc.code_epoch); these fields are the actor loop's
      * bookkeeping around it, touched only by the actor's own green thread
@@ -4174,6 +4184,18 @@ void march_sandbox_install(void) { /* not built with --cap-sandbox */ }
 static void march_register_sched_callbacks(void);
 
 static void spawn_main_impl(void (*fn)(void), int force_pin) {
+    /* The observe socket reads its environment (getenv) when it starts.
+     * Start it here, before `main` is runnable: march_run_scheduler starts it
+     * too, but when a scheduler is already running in the background
+     * (march_ensure_sched_started) `main` is executing by then, and its
+     * Process.set_env (setenv frees the old environ) racing that getenv on
+     * this thread is a SIGSEGV in getenv.  Both calls are once-only.
+     * And before the sandbox install: the listener is the runtime's, not the
+     * program's, and a --cap-sandbox program that withholds IO.NetListen
+     * (Linux: IO.Network too) would have its bind refused, as the reload
+     * server's was (march_reload.c, reload_listen). */
+    march_observe_snapshot_install();
+    march_observe_maybe_start();
     /* Drop privileges before the scheduler starts and before any user code
      * runs.  No-op unless built with --cap-sandbox. */
     march_sandbox_install();
@@ -4219,14 +4241,6 @@ static void spawn_main_impl(void (*fn)(void), int force_pin) {
        it: a program compiled --pin-main needs the main thread to run at all
        (Cocoa/GLFW), so honouring MARCH_PIN_MAIN=0 there would break it in a
        way the user cannot diagnose from the message they would not get. */
-    /* The observe socket reads its environment (getenv) when it starts.
-     * Start it here, before `main` is runnable: march_run_scheduler starts it
-     * too, but when a scheduler is already running in the background
-     * (march_ensure_sched_started) `main` is executing by then, and its
-     * Process.set_env (setenv frees the old environ) racing that getenv on
-     * this thread is a SIGSEGV in getenv.  Both calls are once-only. */
-    march_observe_snapshot_install();
-    march_observe_maybe_start();
     /* `main` is the one unit that follows the current code version instead
      * of pinning an epoch (march_proc.code_epoch): it runs for the process
      * lifetime and never reaches a marker, so a pinned main would keep its
@@ -5317,6 +5331,46 @@ int64_t march_epoch_draining(void) {
 
 /* ── Advancing ───────────────────────────────────────────────────────────── */
 
+/* Run, on the actor's state, every state migration slot [slot]'s deploys
+ * after epoch [from] up to [to] made, in epoch order. */
+static void hcr_migrate_state(uint32_t slot, int64_t *a, uint32_t from, uint32_t to) {
+    hcr_mig *m = NULL;
+    int k = hcr_log_state_migrations(slot, from, to, &m);
+    for (int i = 0; i < k; i++) {
+        uint32_t v;
+        void *held = march_dispatch_enter_version(
+            slot, (uint32_t)m[i].ring_idx, &v);
+        if (held && march_dispatch_epoch(slot, (uint32_t)m[i].ring_idx)
+                    == m[i].epoch) {
+            /* a[4] is the state record (state indirection layout). */
+            a[4] = (int64_t)(uintptr_t)m[i].state_fn((void *)(uintptr_t)a[4]);
+            march_dispatch_leave(slot, v);
+        } else {
+            if (held) march_dispatch_leave(slot, v);
+            fprintf(stderr, "[hcr] migrate: slot %u lost the epoch-%u "
+                    "version before its migration ran\n", slot, m[i].epoch);
+        }
+    }
+    free(m);
+}
+
+/* A new actor whose `init` state was built by code OLDER than the epoch its
+ * proc runs at (march_actor_meta.build_epoch): bring the state up to the
+ * proc's epoch before the first message, or the new handlers read the old
+ * layout.  The case: the compiled main (unpinned, so its spawns take the
+ * current epoch) running a closure the base image built, after a deploy that
+ * changed the actor's state.  An older proc epoch than the build is the
+ * other way round and cannot happen: code of epoch E only runs in a unit at
+ * E or later.  specs/progress/2026-09-21-hcr-spawn-site-state-layout.md */
+static void hcr_catch_up_init_state(march_actor_meta *meta, int64_t *a,
+                                    march_proc *self) {
+    uint32_t slot = meta->dispatch_name_id;
+    uint32_t built = __atomic_load_n(&meta->build_epoch, __ATOMIC_RELAXED);
+    uint32_t ce = self ? atomic_load_explicit(&self->code_epoch, memory_order_relaxed) : 0;
+    if (!slot || !built || !ce || built >= ce) return;
+    hcr_migrate_state(slot, a, built, ce);
+}
+
 /* Move this actor from its epoch to [target] (> current): apply the state
  * migration of every deploy in between, then move the pin.  [have_pin]: the
  * caller already holds a pin on [target] (a marker's), which the actor takes
@@ -5338,26 +5392,7 @@ static void hcr_advance(march_actor_meta *meta, int64_t *a, march_proc *self,
         }
     }
     uint32_t slot = meta->dispatch_name_id;
-    if (alive && slot) {
-        hcr_mig *m = NULL;
-        int k = hcr_log_state_migrations(slot, cur, target, &m);
-        for (int i = 0; i < k; i++) {
-            uint32_t v;
-            void *held = march_dispatch_enter_version(
-                slot, (uint32_t)m[i].ring_idx, &v);
-            if (held && march_dispatch_epoch(slot, (uint32_t)m[i].ring_idx)
-                        == m[i].epoch) {
-                /* a[4] is the state record (state indirection layout). */
-                a[4] = (int64_t)(uintptr_t)m[i].state_fn((void *)(uintptr_t)a[4]);
-                march_dispatch_leave(slot, v);
-            } else {
-                if (held) march_dispatch_leave(slot, v);
-                fprintf(stderr, "[hcr] migrate: slot %u lost the epoch-%u "
-                        "version before its migration ran\n", slot, m[i].epoch);
-            }
-        }
-        free(m);
-    }
+    if (alive && slot) hcr_migrate_state(slot, a, cur, target);
     atomic_store_explicit(&self->code_epoch, target, memory_order_release);
     march_epoch_unpin(cur);
     if (meta->hcr_pending_epoch && meta->hcr_pending_epoch <= target) {
@@ -5808,6 +5843,10 @@ static void actor_green_thread(void *arg) {
         meta_put(meta);   /* this thread's; nothing here touches it after */
         return;
     }
+
+    /* `init`'s state may be older than this proc's epoch (see
+     * hcr_catch_up_init_state): migrate it before anything reads it. */
+    if (self && actor_alive_load(actor)) hcr_catch_up_init_state(meta, a, self);
 
     while (actor_alive_load(actor)) {  /* while alive */
         /* Graceful shutdown (march_actor_stop): keep serving the queue, but
@@ -7713,12 +7752,18 @@ void *march_spawn_supervised(void *actor) {
     return march_spawn_common(actor, 1);
 }
 
-void march_actor_set_dispatch_id(void *actor, uint32_t name_id) {
+void march_actor_set_dispatch_id(void *actor, uint32_t name_id, uint32_t build_epoch) {
     /* Called before march_spawn, so find_or_create_meta to ensure the entry
-     * exists; march_spawn will find the same entry and attach the green thread. */
+     * exists; march_spawn will find the same entry and attach the green thread.
+     * [build_epoch]: the epoch of the code making this call, 0 from the base
+     * image (see march_actor_meta.build_epoch). */
     march_reclaim_enter();   /* meta: resolved and used inside */
     march_actor_meta *meta = find_or_create_meta(actor);
-    if (meta) __atomic_store_n(&meta->dispatch_name_id, name_id, __ATOMIC_RELAXED);
+    if (meta) {
+        __atomic_store_n(&meta->dispatch_name_id, name_id, __ATOMIC_RELAXED);
+        __atomic_store_n(&meta->build_epoch,
+                         build_epoch ? build_epoch : MARCH_EPOCH_BASE, __ATOMIC_RELAXED);
+    }
     march_reclaim_exit();
 }
 
