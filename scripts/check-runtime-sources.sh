@@ -44,7 +44,7 @@ for p in runtime/*.c; do
 done
 for f in $(all_files); do
   [[ -e "runtime/$f" ]] || problem "STALE: $manifest lists $f but runtime/$f does not exist"
-  case "$(role_of "$f")" in core|http|hcr|unit-test-only|wasm) ;; *) problem "MANIFEST: $f has unknown role '$(role_of "$f")'";; esac
+  case "$(role_of "$f")" in core|codec|http|hcr|unit-test-only|wasm) ;; *) problem "MANIFEST: $f has unknown role '$(role_of "$f")'";; esac
 done
 [[ $fail -eq 0 ]] && echo "  ok — $nfiles files classified"
 
@@ -57,7 +57,7 @@ for drv in bin/main.ml bin/toolchain.ml; do
   for f in $(all_files); do
     r=$(role_of "$f")
     case "$r" in
-      core|http|hcr)
+      core|codec|http|hcr)
         grep -qx "$f" <<<"$named" || { problem "$drv does not name $r file $f"; c2=1; } ;;
       unit-test-only)
         grep -qx "$f" <<<"$named" && { problem "$drv names unit-test-only file $f (the driver must not link the arena)"; c2=1; } ;;
@@ -79,7 +79,7 @@ done
 [[ $c3 -eq 0 ]] && echo "  ok — JIT link list covers every jit-tagged file"
 
 echo "== Check 4: test/dune and demo/dune rule blocks =="
-required=$( { files_with_role core; files_with_role http; files_with_role hcr; } )
+required=$( { files_with_role core; files_with_role codec; files_with_role http; files_with_role hcr; } )
 c4=0; nrules=0
 for dunefile in test/dune demo/dune; do
   # Emit one line per (rule ...) block: "<target>|<kind>|<glob>|<deps files>|<action files>".

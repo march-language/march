@@ -1593,6 +1593,106 @@ let cas_target_label (target : March_tir.Llvm_emit.target_config) : string =
     [target] and so cannot legitimately diverge between the layers either.
 
     [MARCH_DEBUG_CASFLAGS=1] prints the resulting key, from both sites. *)
+(* The host-library probes of a native link: the OpenSSL flags (Homebrew
+   prefixes, else pkg-config) and the compression flags (zlib always; zstd
+   and brotli when the build host has their headers, which also switches
+   their implementations on in march_compress.c).  Shared by the link
+   command and the CAS key: the probe result changes both the binary's
+   dependency set and, for zstd/brotli, what it does, so a binary linked
+   under one result must never be served for another (it was, measured:
+   specs/2026-09-23-static-compile-output-design.md §2.4).  Lazy: a probe
+   runs once per invocation, and pkg-config only when no Homebrew prefix
+   matched. *)
+(* MARCH_TEST_LIBPROBE_ROOT (test hook, test_compiler.ml's libprobe_cas_key
+   case): prefix every probed header path with it, and skip pkg-config, so a
+   test can make the probe find nothing without touching the host. *)
+let probe_test_root = Sys.getenv_opt "MARCH_TEST_LIBPROBE_ROOT"
+let probe_exists p =
+  Sys.file_exists (match probe_test_root with Some r -> r ^ p | None -> p)
+
+let openssl_probe_flags : string Lazy.t = lazy (
+  match find_runtime_file "march_tls.c" with
+  | None -> ""
+  | Some _ ->
+    let dirs = [
+      "/opt/homebrew/opt/openssl@3";
+      "/opt/homebrew/opt/openssl";
+      "/usr/local/opt/openssl@3";
+      "/usr/local/opt/openssl";
+    ] in
+    let found = List.find_opt (fun d ->
+        probe_exists (Filename.concat d "include/openssl/ssl.h")) dirs in
+    match found with
+    | Some d -> Printf.sprintf " -I%s/include -L%s/lib -lssl -lcrypto" d d
+    | None ->
+      if probe_test_root = None
+         && Sys.command "pkg-config --exists openssl 2>/dev/null" = 0
+      then " -lssl -lcrypto" else "")
+
+(* zstd and brotli, each [Some link-flags] when the build host has the
+   library's header, else [None].  Since the per-codec split (static-output
+   design, Stage 3) this decides only whether march_compress_zstd.c /
+   march_compress_brotli.c are compiled at all; a program that reaches a
+   codec whose library is [None] is refused ([check_codecs_available]), so
+   what a binary DOES no longer depends on the host. *)
+let zstd_probe : string option Lazy.t = lazy (
+  if probe_exists "/opt/homebrew/include/zstd.h" then
+    Some " -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
+  else if probe_exists "/usr/include/zstd.h" then Some " -lzstd"
+  else None)
+
+let brotli_probe : string option Lazy.t = lazy (
+  if probe_exists "/opt/homebrew/include/brotli/encode.h" then
+    Some " -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
+  else if probe_exists "/usr/include/brotli/encode.h" then Some " -lbrotlienc -lbrotlidec"
+  else None)
+
+let compress_probe_flags : string Lazy.t = lazy (
+  match find_runtime_file "march_compress.c" with
+  | None -> ""
+  | Some _ ->
+    " -lz" ^ Option.value ~default:"" (Lazy.force zstd_probe)
+    ^ Option.value ~default:"" (Lazy.force brotli_probe))
+
+(* A program that reaches Compress.Zstd / Compress.Brotli on a host (or a
+   target) without that library is a compile error naming the package, not a
+   binary that answers Err("... not available") at run time (static-output
+   design, decision D3).  Read from the C symbols the emitted code calls
+   (Llvm_builtins.called_c_symbols), so a program that never calls a codec
+   is never refused for lacking it.  [cross]: cross targets link zlib from
+   the sysroot and neither of the others. *)
+let check_codecs_available ~(cross : bool) : unit =
+  let called = March_tir.Llvm_builtins.called_c_symbols () in
+  let uses prefix = List.exists (fun s ->
+      String.length s >= String.length prefix
+      && String.sub s 0 (String.length prefix) = prefix) called in
+  let missing =
+    (if uses "march_zstd_" && (cross || Lazy.force zstd_probe = None) then
+       [ ("Compress.Zstd", "libzstd",
+          "apk add zstd-dev | apt install libzstd-dev | brew install zstd") ] else [])
+    @ (if uses "march_brotli_" && (cross || Lazy.force brotli_probe = None) then
+         [ ("Compress.Brotli", "libbrotlienc/libbrotlidec",
+            "apk add brotli-dev | apt install libbrotli-dev | brew install brotli") ] else [])
+  in
+  if missing <> [] then begin
+    List.iter (fun (m, lib, pkgs) ->
+        if cross then
+          Printf.eprintf "march: %s is used, but %s is not available for cross targets\n" m lib
+        else
+          Printf.eprintf "march: %s is used, but %s was not found on this host (%s)\n" m lib pkgs)
+      missing;
+    exit 1
+  end
+
+(* The CAS tag for the probes above (a digest: the flag strings carry host
+   paths).  Cross builds link against the sysroot instead, which
+   [cross_sysroot_tag] already covers, so the host's probe is not theirs. *)
+let probe_cas_tag ~(cross : bool) : string list =
+  if cross then []
+  else
+    let s = Lazy.force openssl_probe_flags ^ "|" ^ Lazy.force compress_probe_flags in
+    ["libprobe:" ^ String.sub (Digest.to_hex (Digest.string s)) 0 16]
+
 let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
       ~(target_label : string) ~(src_hash : string) : string list * string =
   (* Cross-toolchain identity: the target OpenSSL/zlib .so live OUTSIDE the
@@ -1625,6 +1725,8 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
         (* --cap-sandbox changes the emitted binary (a -D define), so a
            non-sandboxed cached artifact must never satisfy it. *)
         @ (if !cap_sandbox then ["capsandbox"] else [])
+        (* --static links different archives and checks the result. *)
+        @ (if !static_build then ["static"] else [])
         @ (if !cap_strict then ["capstrict"] else [])
         (* --target-cpu changes the instructions clang emits (SIMD width),
            so a baseline-ISA cached binary must never satisfy it. *)
@@ -1643,6 +1745,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            the plain build's entry. *)
         @ (if March_tir.Tir_verify.enabled () then ["verify-tir"] else [])
         @ cross_sysroot_tag
+        @ probe_cas_tag ~cross:(cross_sysroot_tag <> [] || linux_arch_str target <> None)
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
         (* --protocol-baseline: the previous protocol versions decide the
            generated `<P>_Msg.compat()` table, so they are part of the binary. *)
@@ -4405,6 +4508,28 @@ let compile filename =
             end
           end else begin
             (* ── Native compilation path ────────────────────────────────── *)
+            (* Before any runtime C is compiled: a program that reaches a codec
+               this host (or target) lacks stops here with the package name,
+               not at a link error (or, before Stage 3, a run-time Err). *)
+            check_codecs_available ~cross:(linux_arch_str (parse_target !target_str) <> None);
+            if !static_build then
+              Static_link.check_supported ~hot_reload:(!hot_reload_prefix <> None)
+                ~compile_so:!compile_so
+                ~cross:(linux_arch_str (parse_target !target_str) <> None)
+                ~macos:(host_is_darwin ()) ~musl:(Static_link.cc_targets_musl (native_cc ()));
+            (* --static: the archives the program needs, resolved now, before
+               any runtime C is compiled, so a missing one is the named-package
+               error and nothing else. *)
+            let static_libs_for r =
+              if host_is_darwin () then
+                Static_link.macos_link_args ~r ~openssl_flags:(Lazy.force openssl_probe_flags)
+                  ~zstd_flags:(Option.value ~default:"" (Lazy.force zstd_probe))
+                  ~brotli_flags:(Option.value ~default:"" (Lazy.force brotli_probe))
+              else Static_link.musl_link_args ~r in
+            let static_reached =
+              Static_link.reached (March_tir.Llvm_builtins.called_c_symbols ()) in
+            let static_libs_reached =
+              if !static_build then static_libs_for static_reached else "" in
             let runtime = match find_runtime_file "march_runtime.c" with
               | Some p -> p
               | None ->
@@ -4432,6 +4557,14 @@ let compile filename =
                 ^ macro "MARCH_HCR_PREFIX" prefix
               | _ -> "" in
             let opt_file2 f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
+            (* One file per optional codec, compiled only when its library
+               resolves (cross targets: never); see check_codecs_available. *)
+            let codec_c2 =
+              let is_cross = linux_arch_str (parse_target !target_str) <> None in
+              (if not is_cross && Lazy.force zstd_probe <> None then
+                 opt_file2 (Filename.concat runtime_dir "march_compress_zstd.c") else "")
+              ^ (if not is_cross && Lazy.force brotli_probe <> None then
+                   opt_file2 (Filename.concat runtime_dir "march_compress_brotli.c") else "") in
             let sched_c2  = Filename.concat runtime_dir "march_scheduler.c" in
             let ffi_c2    = Filename.concat runtime_dir "march_ffi.c" in
             let sha1_c2   = Filename.concat runtime_dir "sha1.c" in
@@ -4496,14 +4629,14 @@ let compile filename =
                 Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c2 base64_c2
                   (opt_file2 simd_c) (opt_file2 sched_c2) (opt_file2 resp_c)
                   (opt_file2 io_c) (opt_file2 evloop_c)
-                  (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2)
+                  (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2 ^ codec_c2)
               else
                 (* march_extras.c references base64_encode (base64.c) and sha1
                    (sha1.c), so link them whenever extras is linked — independent
                    of the HTTP stack (else an extras-but-no-http build tree fails
                    with undefined _base64_encode / _sha1). opt_file2-guarded. *)
                 Printf.sprintf "%s%s%s%s%s" (opt_file2 sched_c2) (opt_file2 extras_c2)
-                  (opt_file2 compress_c2) (opt_file2 base64_c2) (opt_file2 sha1_c2))
+                  (opt_file2 compress_c2 ^ codec_c2) (opt_file2 base64_c2) (opt_file2 sha1_c2))
               ^ (opt_file2 ffi_c2)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_trace.c") else "")  (* R8 trace sessions *)
@@ -4531,30 +4664,7 @@ let compile filename =
               String.concat "" (List.rev_map (fun f -> " " ^ Filename.quote f) !ffi_c_files) in
             let extra_c_files = runtime_extra_c ^ user_ffi_c in
             (* OpenSSL flags for TLS *)
-            let tls_c2 = Filename.concat runtime_dir "march_tls.c" in
-            let openssl_flags2 =
-              if not (Sys.file_exists tls_c2) then ""
-              else
-                let dirs = [
-                  "/opt/homebrew/opt/openssl@3";
-                  "/opt/homebrew/opt/openssl";
-                  "/usr/local/opt/openssl@3";
-                  "/usr/local/opt/openssl";
-                ] in
-                let found = List.fold_left (fun acc d ->
-                  match acc with
-                  | Some _ -> acc
-                  | None ->
-                    let hdr = Filename.concat d "include/openssl/ssl.h" in
-                    if Sys.file_exists hdr then Some d else None
-                ) None dirs in
-                match found with
-                | Some d ->
-                  Printf.sprintf " -I%s/include -L%s/lib -lssl -lcrypto" d d
-                | None ->
-                  if Sys.command "pkg-config --exists openssl 2>/dev/null" = 0
-                  then " -lssl -lcrypto" else ""
-            in
+            let openssl_flags2 = Lazy.force openssl_probe_flags in
             let evloop_flag =
               let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
               (* Event-loop HTTP server is opt-in: it runs handlers on non-blocking
@@ -4566,26 +4676,7 @@ let compile filename =
          && (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
       then " -DMARCH_HTTP_USE_EVLOOP" else ""
             in
-            let compress_flags2 =
-              if not (Sys.file_exists compress_c2) then ""
-              else begin
-                let zstd_flags =
-                  if Sys.file_exists "/opt/homebrew/include/zstd.h" then
-                    " -DMARCH_HAVE_ZSTD -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
-                  else if Sys.file_exists "/usr/include/zstd.h" then
-                    " -DMARCH_HAVE_ZSTD -lzstd"
-                  else ""
-                in
-                let brotli_flags =
-                  if Sys.file_exists "/opt/homebrew/include/brotli/encode.h" then
-                    " -DMARCH_HAVE_BROTLI -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
-                  else if Sys.file_exists "/usr/include/brotli/encode.h" then
-                    " -DMARCH_HAVE_BROTLI -lbrotlienc -lbrotlidec"
-                  else ""
-                in
-                Printf.sprintf " -lz%s%s" zstd_flags brotli_flags
-              end
-            in
+            let compress_flags2 = Lazy.force compress_probe_flags in
             let math_flag = if Sys.unix then " -lm" else "" in
             (* musl needs an explicit -lucontext for the scheduler's green
                threads; glibc has them in libc. See ucontext_link_flags. *)
@@ -5031,8 +5122,7 @@ let compile filename =
                     opt_flag dbg_flag san_flag arch_cflags section_cflags
                     openssl_flags2 compress_flags2 blake3_flags2 cap_sandbox_define in
                 match March_cas.Runtime_archive.ensure ~cc:cc_driver ~cflags ~sources:srcs with
-                | Ok objs ->
-                  Some (String.concat "" (List.map (fun o -> " " ^ Filename.quote o) objs))
+                | Ok objs -> Some objs
                 | Error msg ->
                   (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                      Printf.eprintf
@@ -5041,13 +5131,80 @@ let compile filename =
                   None
               end
             in
+            (* Static-output design Stage 2 (specs/2026-09-23-static-compile-
+               output-design.md §5.1): the members that alone need a library
+               (march_tls.o: OpenSSL; march_compress.o: zlib/zstd/brotli) go
+               into an archive linked AFTER the program's object, so a program
+               that never reaches TLS or Compress links neither member and,
+               with as-needed, records neither library.  Executables only, with
+               the cached objects (runtime_objs' own eligibility: native, no
+               hot reload, no --compile-so, no event-loop or signing build):
+               a hot-reload server keeps the whole runtime, because a patch
+               .so resolves every runtime symbol against it (design D6).
+               Every other member stays a loose object; see
+               Runtime_archive.ensure_opt_archive for why. *)
+            let opt_archive =
+              match runtime_objs with
+              | Some objs when rdynamic_flag = ""
+                            && Sys.getenv_opt "MARCH_NO_RUNTIME_ARCHIVE" = None ->
+                let members = List.filter (fun o ->
+                    List.mem (Filename.basename o) March_cas.Runtime_archive.archived_members) objs in
+                (match March_cas.Runtime_archive.ensure_opt_archive ~objs:members with
+                 | Ok a -> Some (members, a)
+                 | Error msg ->
+                   (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
+                      Printf.eprintf "march: runtime archive unavailable (%s); \
+                                      linking every member\n%!" msg);
+                   None)
+              | _ -> None
+            in
             (* Objects go exactly where their sources used to sit, in the same
-               order, so the link is object-for-object identical either way. *)
+               order; under [opt_archive], minus the archived members. *)
             let runtime_inputs =
               if !compile_so then patch_inputs
               else match runtime_objs with
-                | Some objs -> String.trim objs ^ user_ffi_c
+                | Some objs ->
+                  let loose = match opt_archive with
+                    | Some (members, _) -> List.filter (fun o -> not (List.mem o members)) objs
+                    | None -> objs in
+                  String.trim (String.concat "" (List.map (fun o -> " " ^ Filename.quote o) loose))
+                  ^ user_ffi_c
                 | None      -> runtime ^ extra_c_files
+            in
+            (* Under [opt_archive] the runtime's libraries follow the archive
+               (GNU ld with --as-needed records a library only for symbols
+               already undefined when it reaches it), bracketed by
+               --as-needed / --no-as-needed so a user's --ffi-link libraries
+               keep today's semantics.  ld64's -dead_strip_dylibs is global, so
+               it is passed only when there is no --ffi-link. *)
+            let static_reach =
+              match opt_archive with
+              | Some _ -> static_reached
+              | None -> Static_link.everything   (* every member is linked loose *)
+            in
+            let pre_ll_libs, post_ll_libs =
+              if !static_build then begin
+                (* Only the -I part of the probes: their -L/-l would link the
+                   dylibs.  The archives come from Static_link. *)
+                let includes flags =
+                  String.split_on_char ' ' flags
+                  |> List.filter (fun t -> String.length t > 2 && String.sub t 0 2 = "-I")
+                  |> List.map (fun t -> " " ^ t) |> String.concat "" in
+                let libs =
+                  if opt_archive <> None then static_libs_reached
+                  else static_libs_for static_reach in
+                (includes openssl_flags2 ^ includes compress_flags2,
+                 (match opt_archive with Some (_, a) -> " " ^ Filename.quote a | None -> "") ^ libs)
+              end else
+              match opt_archive with
+              | None -> (openssl_flags2 ^ compress_flags2, "")
+              | Some (_, a) ->
+                let libs = openssl_flags2 ^ compress_flags2 in
+                let bracketed =
+                  if link_is_linux then " -Wl,--as-needed" ^ libs ^ " -Wl,--no-as-needed"
+                  else if !ffi_link_flags = [] then " -Wl,-dead_strip_dylibs" ^ libs
+                  else libs in
+                ("", " " ^ Filename.quote a ^ bracketed)
             in
             (* [ffi_link] goes AFTER the program's own object ([ll_tmp]).
                GNU ld resolves an archive only against symbols already
@@ -5057,8 +5214,8 @@ let compile filename =
                Linux, while macOS's ld64, which is order-insensitive, linked
                fine.  Measured 2026-09-28, Ubuntu 24.04 arm64. *)
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s%s %s%s -o %s%s%s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ll_tmp ffi_link out_bin math_flag ucontext_flag reload_ldl strip_flag in
+              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s %s%s%s -o %s%s%s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs pre_ll_libs blake3_flags2 ll_tmp post_ll_libs ffi_link out_bin math_flag ucontext_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
@@ -5066,6 +5223,11 @@ let compile filename =
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
             end else begin
+              (* --static: the binary must prove it, before it is cached. *)
+              if !static_build then begin
+                Static_link.verify ~macos:(host_is_darwin ()) out_bin;
+                Static_link.openssl_notice static_reach
+              end;
               stamp "clang";
               March_cas.Cas.store_artifact store ch out_bin;
               (match source_cas_state with
@@ -6294,6 +6456,7 @@ let () =
     ("--stdlib-source", Arg.Set stdlib_source, " The entry file(s) are standard-library sources checked under a path outside the resolved stdlib root (e.g. `march --check --stdlib-source stdlib/actor.march` from the repo root): exempt them from the stdlib-only builtin gate. Never inferred from the file name");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
+    ("--static", Arg.Set static_build, " With --compile: a self-contained executable (Linux: static, musl hosts only; macOS: no library outside /usr/lib and /System)");
     ("--verify-tir", Arg.Set March_tir.Tir_verify.enabled_flag,
      " Check TIR well-formedness after every pass (scoping and references); a finding is an internal compiler error. Same as MARCH_VERIFY_TIR=1");
     ("--disable-pass", Arg.String (fun s ->

@@ -403,7 +403,7 @@ let is_shipped_stdlib_file filename =
     MARCH_RUNTIME_DIR overrides the search, mirroring MARCH_STDLIB.
 
     A candidate is preferred only when it is COMPLETE: it has a sources.list
-    and every `core` file that manifest names.  Having march_runtime.c is not
+    and every `core` and `codec` file that manifest names.  Having march_runtime.c is not
     enough.  A dune rule that lists individual runtime files as deps (the
     @vault-scale runners in test/dune) stages a partial _build/default/runtime,
     and every link list here guards optional files with an existence check, so
@@ -422,7 +422,7 @@ let runtime_dir_complete d =
      |> List.for_all (fun line ->
          match String.split_on_char ' ' (String.trim line)
                |> List.filter (( <> ) "") with
-         | file :: "core" :: _ when file.[0] <> '#' ->
+         | file :: ("core" | "codec") :: _ when file.[0] <> '#' ->
            Sys.file_exists (Filename.concat d file)
          | _ -> true)
    with Sys_error _ -> false)
@@ -844,6 +844,16 @@ let ensure_runtime_so () =
     let http_c     = Filename.concat runtime_dir "march_http.c" in
     let extras_c   = Filename.concat runtime_dir "march_extras.c" in
     let compress_c = Filename.concat runtime_dir "march_compress.c" in
+    (* Every codec member, always: this .so serves any program the REPL
+       runs, so a codec whose library is missing is built as its
+       not-available stub (-DMARCH_ZSTD_STUB / -DMARCH_BROTLI_STUB below),
+       which the compiled driver never does (static-output design, D3). *)
+    let codec_files =
+      Printf.sprintf "%s%s"
+        (if Sys.file_exists (Filename.concat runtime_dir "march_compress_zstd.c")
+         then " " ^ Filename.concat runtime_dir "march_compress_zstd.c" else "")
+        (if Sys.file_exists (Filename.concat runtime_dir "march_compress_brotli.c")
+         then " " ^ Filename.concat runtime_dir "march_compress_brotli.c" else "") in
     let opt_file f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
     let sched_c   = Filename.concat runtime_dir "march_scheduler.c" in
     let ffi_c     = Filename.concat runtime_dir "march_ffi.c" in
@@ -859,7 +869,7 @@ let ensure_runtime_so () =
         Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c base64_c
           (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
           (opt_file io_c) (opt_file evloop_c) (opt_file tls_c) (opt_file extras_c)
-          (opt_file compress_c)
+          (opt_file compress_c ^ codec_files)
       else
         (* march_extras.c unconditionally references base64_encode (base64.c) and
            sha1 (sha1.c), so they must be linked whenever march_extras.c is —
@@ -868,7 +878,7 @@ let ensure_runtime_so () =
            lists extras as a dep but not http) fails to link with undefined
            _base64_encode / _sha1. opt_file-guarded so absent files are skipped. *)
         Printf.sprintf "%s%s%s%s%s" (opt_file sched_c) (opt_file extras_c)
-          (opt_file compress_c) (opt_file base64_c) (opt_file sha1_c))
+          (opt_file compress_c ^ codec_files) (opt_file base64_c) (opt_file sha1_c))
       ^ (opt_file ffi_c)
       ^ (opt_file (Filename.concat runtime_dir "march_hcr_identity.c")) (* HCR target identity *)
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
@@ -933,17 +943,17 @@ let ensure_runtime_so () =
       else begin
         let zstd_flags =
           if Sys.file_exists "/opt/homebrew/include/zstd.h" then
-            " -DMARCH_HAVE_ZSTD -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
+            " -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
           else if Sys.file_exists "/usr/include/zstd.h" then
-            " -DMARCH_HAVE_ZSTD -lzstd"
-          else ""
+            " -lzstd"
+          else " -DMARCH_ZSTD_STUB"
         in
         let brotli_flags =
           if Sys.file_exists "/opt/homebrew/include/brotli/encode.h" then
-            " -DMARCH_HAVE_BROTLI -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
+            " -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
           else if Sys.file_exists "/usr/include/brotli/encode.h" then
-            " -DMARCH_HAVE_BROTLI -lbrotlienc -lbrotlidec"
-          else ""
+            " -lbrotlienc -lbrotlidec"
+          else " -DMARCH_BROTLI_STUB"
         in
         Printf.sprintf " -lz%s%s" zstd_flags brotli_flags
       end

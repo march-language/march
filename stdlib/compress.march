@@ -15,8 +15,11 @@
 --     Compress.Zstd.encode_level(data, Zstd.Fast(3))
 --
 -- Implementation note: the underlying work is done by zlib (gzip/deflate),
--- libzstd (zstd), and libbrotlienc/libbrotlidec (brotli) via C FFI.  Each
--- algorithm shim lives in runtime/march_compress.c.
+-- libzstd (zstd), and libbrotlienc/libbrotlidec (brotli) via C FFI, one shim
+-- per library (runtime/march_compress.c, march_compress_zstd.c,
+-- march_compress_brotli.c).  A compiled program links only the codecs it
+-- calls; one that calls Zstd or Brotli on a build host without that library
+-- is a compile error naming the package to install.
 
 mod Compress do
 

@@ -919,8 +919,158 @@ let test_early_thread_filtered () =
     check_field "early" 1 out
   end
 
+(* ── --hot-reload --cap-sandbox: the runtime's own listeners survive ──────
+   A hot-reloadable program serves its reload socket ($MARCH_HOT_RELOAD_SOCKET)
+   and the observe socket beside it (`<socket>.observe`).  Both are the
+   runtime's, not the program's, so they must be listening even when the
+   program withholds IO.NetListen (and, on Linux, IO.Network, which denies
+   socket()): they have to be bound before march_sandbox_install runs.  The
+   reload server used to bind on its own thread, racing the install, and the
+   observe socket started after it, so it never came up at all.
+   specs/progress/2026-09-30-hcr-reload-listener-races-cap-sandbox-install.md
+
+   The program holds only IO.Console and IO.Foreign, prints "up", then blocks
+   reading stdin; the test connects to both sockets meanwhile and releases it.
+   MARCH_TEST_RELOAD_BIND_DELAY_MS (read by the reload thread) widens the race
+   window: with the bind back on that thread the case goes red at once. *)
+let reload_wait_shim_src =
+  {|
+#include <unistd.h>
+#include <errno.h>
+#include <stdint.h>
+
+int64_t sbx_wait_stdin(void) {
+    char c;
+    ssize_t n;
+    do { n = read(0, &c, 1); } while (n < 0 && errno == EINTR);
+    return (int64_t)n;
+}
+|}
+
+let reload_wait_src =
+  {|
+mod SbxReload do
+  needs IO.Console
+  needs IO.Foreign
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn wait_stdin() : Int = "sbx_wait_stdin"
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+    println("up")
+    println("waited=" ++ int_to_string(wait_stdin()))
+  end
+end
+|}
+
+(* Connect to a Unix socket and return the first reply line ("" when [req] is
+   None: connecting at all is the check). *)
+let unix_request (path : string) (req : string option) : (string, string) result =
+  let s = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> try Unix.close s with _ -> ()) (fun () ->
+      try
+        Unix.setsockopt_float s Unix.SO_RCVTIMEO 5.0;
+        Unix.connect s (Unix.ADDR_UNIX path);
+        match req with
+        | None -> Ok ""
+        | Some r ->
+          ignore (Unix.write_substring s r 0 (String.length r));
+          let buf = Bytes.create 256 in
+          let n = Unix.read s buf 0 256 in
+          Ok (String.trim (Bytes.sub_string buf 0 n))
+      with Unix.Unix_error (e, fn, _) ->
+        Error (Printf.sprintf "%s: %s" fn (Unix.error_message e)))
+
+let test_hot_reload_listeners_under_sandbox () =
+  if not (is_linux || is_macos) then Alcotest.skip ()
+  else begin
+    require_compiler ();
+    let write_tmp suffix text =
+      let f = Filename.temp_file "sbx_reload" suffix in
+      let oc = open_out f in
+      output_string oc text;
+      close_out oc;
+      f
+    in
+    let march_src = write_tmp ".march" reload_wait_src in
+    let shim_c = write_tmp ".c" reload_wait_shim_src in
+    let bin = Filename.temp_file "sbx_reload" ".bin" in
+    let log = Filename.temp_file "sbx_reload" ".log" in
+    let out_f = Filename.temp_file "sbx_reload_out" ".txt" in
+    (* sun_path holds 104 bytes on macOS: $TMPDIR there is too long for it. *)
+    let sock = Printf.sprintf "/tmp/sbx-hr-%d.sock" (Unix.getpid ()) in
+    let observe = sock ^ ".observe" in
+    let rm f = try Sys.remove f with Sys_error _ -> () in
+    Fun.protect
+      ~finally:(fun () ->
+          List.iter rm [ march_src; shim_c; bin; log; out_f; sock; observe;
+                         sock ^ ".shell" ])
+      (fun () ->
+         let rc =
+           Sys.command
+             (Printf.sprintf
+                "%s --cap-sandbox --hot-reload SbxReload --compile --ffi-c %s -o %s %s > %s 2>&1"
+                (Filename.quote compiler_exe) (Filename.quote shim_c)
+                (Filename.quote bin) (Filename.quote march_src) (Filename.quote log))
+         in
+         if rc <> 0 then begin
+           let ic = open_in log in
+           let s = really_input_string ic (in_channel_length ic) in
+           close_in ic;
+           Alcotest.failf "--cap-sandbox --hot-reload compile failed (%d):\n%s" rc s
+         end;
+         let env =
+           Array.append
+             [| "MARCH_HOT_RELOAD_SOCKET=" ^ sock;
+                "MARCH_TEST_RELOAD_BIND_DELAY_MS=300" |]
+             (Unix.environment ())
+         in
+         let stdin_r, stdin_w = Unix.pipe ~cloexec:true () in
+         let out_fd = Unix.openfile out_f [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
+         let pid = Unix.create_process_env bin [| bin |] env stdin_r out_fd out_fd in
+         Unix.close stdin_r;
+         Unix.close out_fd;
+         let read_out () =
+           let ic = open_in out_f in
+           let s = really_input_string ic (in_channel_length ic) in
+           close_in ic;
+           s
+         in
+         (* Wait until main has printed "up": it runs after the install, so by
+            then any listener that was going to be refused has been. *)
+         let deadline = Unix.gettimeofday () +. 20.0 in
+         let rec wait_up () =
+           let o = read_out () in
+           if List.mem "up" (String.split_on_char '\n' o) then ()
+           else if Unix.gettimeofday () > deadline then begin
+             (try Unix.kill pid Sys.sigkill with _ -> ());
+             ignore (Unix.waitpid [] pid);
+             Alcotest.failf "program never printed \"up\":\n%s" o
+           end else (Unix.sleepf 0.05; wait_up ())
+         in
+         wait_up ();
+         (* The delayed reload thread, were it still binding, would try now. *)
+         Unix.sleepf 0.6;
+         let reload = unix_request sock (Some "PING\n") in
+         let obs = unix_request observe None in
+         ignore (Unix.write_substring stdin_w "x" 0 1);
+         Unix.close stdin_w;
+         let _, status = Unix.waitpid [] pid in
+         let out = read_out () in
+         let show = function Ok s -> s | Error e -> "error: " ^ e in
+         Alcotest.(check string)
+           (Printf.sprintf "reload socket answers PING (output:\n%s)" out)
+           "PONG" (show reload);
+         Alcotest.(check string)
+           (Printf.sprintf "observe socket accepts (output:\n%s)" out)
+           "" (show obs);
+         Alcotest.(check bool) "program exited 0" true (status = Unix.WEXITED 0))
+  end
+
 let tests : unit Alcotest.test_case list =
-  [ Alcotest.test_case "linux: NET withheld denies socket, EXEC/WRITE still allowed" `Slow test_linux_deny_net;
+  [ Alcotest.test_case "linux+macos: --hot-reload under --cap-sandbox keeps the reload and observe sockets" `Slow test_hot_reload_listeners_under_sandbox;
+ Alcotest.test_case "linux: NET withheld denies socket, EXEC/WRITE still allowed" `Slow test_linux_deny_net;
     Alcotest.test_case "linux: PROCESS withheld denies execve, NET/WRITE still allowed" `Slow test_linux_deny_exec;
     Alcotest.test_case "linux: FILEWRITE withheld denies write-open, NET/EXEC still allowed" `Slow test_linux_deny_write;
     Alcotest.test_case "linux: NETLISTEN withheld (NetConnect held) denies bind/listen, connect still works" `Slow test_linux_deny_listen;

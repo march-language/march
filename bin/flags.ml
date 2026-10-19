@@ -74,6 +74,11 @@ let topology_isolate_foreign = ref false
    that is not `isolate = true` (the opt-in check of plan section 4). *)
 
 let cap_sandbox    = ref false   (* --cap-sandbox: embed a self-imposed capability sandbox profile *)
+(* --static: a self-contained executable (static-output design, Stages 4 and 6:
+   specs/2026-09-23-static-compile-output-design.md).  Linux: musl only, a
+   fully static ELF.  macOS: no load command outside /usr/lib and /System.
+   See Static_link. *)
+let static_build   = ref false
 (* `needs` is a hard ceiling, checked against attributed use.  ON by default
    since 2026-08-08; `--no-cap-strict` opts out.
 
