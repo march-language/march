@@ -22538,7 +22538,10 @@ let fold_invariants_3_suite =
     control "Set.fold" "st : Set(Int)" "Set.fold(st, 0, fn (a, _x) -> a - 1)";
     (* HashMap.fold: was `fold(m, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
     proof "HashMap.fold" "hm : HashMap.HashMap(Int, Int)" "HashMap.fold(hm, 0, fn (a, _k, _v) -> a + 1)";
-    control "HashMap.fold" "hm : HashMap.HashMap(Int, Int)" "HashMap.fold(hm, 0, fn (a, _k, _v) -> a - 1)" ]
+    control "HashMap.fold" "hm : HashMap.HashMap(Int, Int)" "HashMap.fold(hm, 0, fn (a, _k, _v) -> a - 1)";
+    (* Array.fold_left: was `fold_left(v, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
+    proof "Array.fold_left" "av : Array.PVec(Int)" "Array.fold_left(av, 0, fn (a, _x) -> a + 1)";
+    control "Array.fold_left" "av : Array.PVec(Int)" "Array.fold_left(av, 0, fn (a, _x) -> a - 1)" ]
 
 let () =
   Alcotest.run "march-refinecheck"
