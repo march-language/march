@@ -190,6 +190,21 @@ let verify ~(macos : bool) (out : string) : unit =
     exit 1
   end
 
+(* Does the C compiler target musl?  Asked of the compiler (its target
+   triple, e.g. x86_64-alpine-linux-musl vs x86_64-pc-linux-gnu), not of
+   the filesystem: a glibc host can have a musl loader installed
+   (/lib/ld-musl-*, from musl-tools), which Toolchain.is_musl_host takes for
+   a musl host; CI's Ubuntu runners do. *)
+let cc_targets_musl (cc : string) : bool =
+  try
+    let ic = Unix.open_process_in (cc ^ " -dumpmachine 2>/dev/null") in
+    let l = try input_line ic with End_of_file -> "" in
+    ignore (Unix.close_process_in ic);
+    let n = String.length l in
+    let rec has i = i + 4 <= n && (String.sub l i 4 = "musl" || has (i + 1)) in
+    has 0
+  with _ -> false
+
 (* Refusals that need nothing but the flags and the host. *)
 let check_supported ~(hot_reload : bool) ~(compile_so : bool) ~(cross : bool)
     ~(macos : bool) ~(musl : bool) : unit =

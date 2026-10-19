@@ -4516,7 +4516,7 @@ let compile filename =
               Static_link.check_supported ~hot_reload:(!hot_reload_prefix <> None)
                 ~compile_so:!compile_so
                 ~cross:(linux_arch_str (parse_target !target_str) <> None)
-                ~macos:(host_is_darwin ()) ~musl:(is_musl_host ());
+                ~macos:(host_is_darwin ()) ~musl:(Static_link.cc_targets_musl (native_cc ()));
             (* --static: the archives the program needs, resolved now, before
                any runtime C is compiled, so a missing one is the named-package
                error and nothing else. *)

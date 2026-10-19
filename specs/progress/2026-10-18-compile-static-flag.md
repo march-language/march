@@ -26,6 +26,9 @@ open until the Linux scratch-container check below has run green in CI and for S
   OCaml (no `PT_INTERP`, no `DT_NEEDED`), Mach-O through `otool -L` (every load command under
   `/usr/lib` or `/System`). A failing binary is deleted and the build fails, so "silently
   still dynamic" cannot ship.
+- **musl is read from the C compiler** (`clang -dumpmachine`, `Static_link.cc_targets_musl`),
+  not from `/lib/ld-musl-*`: CI's Ubuntu runners have a musl loader installed, which made the
+  glibc refusal fall through to the archive check on the first CI run.
 - `static` is a CAS tag; a TLS-reaching static build prints the OpenSSL license reminder.
 - CA certificates (D7): no embedded bundle; `docs/tooling.md` "Static binaries" documents
   `SSL_CERT_FILE` / `SSL_CERT_DIR` and the `scratch` Dockerfile line.

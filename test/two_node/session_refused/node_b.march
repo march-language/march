@@ -46,6 +46,17 @@ mod SessionRefusedB do
         println("node-b: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
         let stale = spawn(Stale)
+        -- A party that ended leaves both of its names behind until the
+        -- unregistration arrives: the role's and, since cluster sessions
+        -- carry the protocol fingerprint (2026-10-18), its fingerprint's
+        -- companion "<role name>#<fingerprint>". Registered first, as a
+        -- party does, so node-a's fingerprint check passes and its message
+        -- reaches the refusal this scenario is about.
+        let fp_name = "session:refused-1/2#" ++ Echo_Msg.role_fingerprint(Echo_Msg.role_B())
+        match ClusterNode.register(h, fp_name, stale) do
+          Ok(_) -> ()
+          Err(_) -> panic("node-b: could not register the stale fingerprint name")
+        end
         match ClusterNode.register(h, "session:refused-1/2", stale) do
           Ok(_) -> ()
           Err(_) -> panic("node-b: could not register the stale name")
