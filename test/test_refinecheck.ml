@@ -22477,7 +22477,8 @@ let fold_invariants_3_suite =
       (let mods =
          List.map load_mod
            [ "list.march"; "map.march"; "set.march"; "hash_map.march"; "array.march";
-             "rrb_vec.march"; "deque.march"; "native_array.march"; "seq.march" ]
+             "rrb_vec.march"; "deque.march"; "native_array.march"; "seq.march";
+             "sorted_set.march"; "ordered_map.march" ]
        in
        let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
        (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
@@ -22514,7 +22515,8 @@ let fold_invariants_3_suite =
   let t3 = Alcotest.(triple int int int) in
   let m body =
     "mod FK do\n\
-    \  fn need_nn(k : {Int | _ >= 0}) : Int do k end\n"
+    \  fn need_nn(k : {Int | _ >= 0}) : Int do k end\n\
+    \  fn icmp(a : Int, b : Int) : Int do a - b end\n"
     ^ body ^ "end\n"
   in
   (* [proof name param call]: `need_nn(call)` proves.  [control]: the same
@@ -22529,6 +22531,12 @@ let fold_invariants_3_suite =
         let obs = run (go param call) in
         Alcotest.check t3 call (0, 0, 1) (triple obs);
         Alcotest.(check (list string)) "step" [ "accumulator-step-unproved" ] (reasons obs))
+  in
+  let skip_pin name param call reason =
+    gated (name ^ ": stays a skip (" ^ reason ^ ")") (fun () ->
+        let obs = run (go param call) in
+        Alcotest.check t3 call (0, 0, 1) (triple obs);
+        Alcotest.(check (list string)) "reason" [ reason ] (reasons obs))
   in
   [ (* Map.fold: was `fold(m, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
     proof "Map.fold" "mp : Map(Int, Int)" "Map.fold(mp, 0, fn (a, _k, _v) -> a + 1)";
@@ -22553,7 +22561,26 @@ let fold_invariants_3_suite =
     proof "Deque.fold_left" "dq : Deque.Deque(Int)" "Deque.fold_left(dq, 0, fn (a, _x) -> a + 1)";
     control "Deque.fold_left" "dq : Deque.Deque(Int)" "Deque.fold_left(dq, 0, fn (a, _x) -> a - 1)";
     proof "Deque.fold_right" "dq : Deque.Deque(Int)" "Deque.fold_right(dq, 0, fn (_x, a) -> a + 1)";
-    control "Deque.fold_right" "dq : Deque.Deque(Int)" "Deque.fold_right(dq, 0, fn (_x, a) -> a - 1)" ]
+    control "Deque.fold_right" "dq : Deque.Deque(Int)" "Deque.fold_right(dq, 0, fn (_x, a) -> a - 1)";
+    (* ── The folds that stay a skip (design §6, decision 5), pinned ────── *)
+    (* NativeArray: the body is one creating builtin (`native_int_arr_fold`),
+       and the signature is unannotated; no `@[assume]`. *)
+    skip_pin "NativeArray.fold_int" "xs : List(Int)"
+      "NativeArray.fold_int(NativeArray.from_list_int(xs), 0, fn (a, _x) -> a + 1)"
+      "unreflectable-subject";
+    (* Seq: church-encoded, `b` flows through a closure stored in data. *)
+    skip_pin "Seq.fold" "xs : List(Int)" "Seq.fold(Seq.from_list(xs), 0, fn (a, _x) -> a + 1)"
+      "unreflectable-subject";
+    (* SortedSet / OrderedMap are annotated, but their collection parameter is
+       a RECORD type, which P1's `align` does not walk, so `b` is not shown
+       generic (a lost proof, never a false one).  Filed:
+       specs/todos/2026-10-18-refine-p1-record-typed-parameter.md. *)
+    skip_pin "SortedSet.fold" "xs : List(Int)"
+      "SortedSet.fold(SortedSet.from_list(xs, icmp), 0, fn (a, _x) -> a + 1)"
+      "parametric-source-unproved";
+    skip_pin "OrderedMap.fold" "xs : List((Int, Int))"
+      "OrderedMap.fold(OrderedMap.from_list(xs, icmp), 0, fn (a, _k, _v) -> a + 1)"
+      "parametric-source-unproved" ]
 
 let () =
   Alcotest.run "march-refinecheck"

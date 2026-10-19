@@ -169,6 +169,8 @@ mod RRB do
 
   This is the hot path inside each parallel worker: it visits only the
   elements in the slice's range without copying or allocating.
+  Generic in the accumulator `b`, so a refinement demanded of the result
+  is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
 
   ## Examples
 
@@ -284,6 +286,8 @@ mod RRB do
 
   doc """
   Left fold over all elements. `f(acc, elem) = new_acc`. O(n).
+  Generic in the accumulator `b`, so a refinement demanded of the result
+  is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
 
   ## Examples
 

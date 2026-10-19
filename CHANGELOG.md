@@ -122,6 +122,26 @@ git log is authoritative for exact commits.
   `accumulator-base-unproved` skip. A curried step's inner parameter
   (`fn a -> fn x -> …`) now gets its element refinement while the step is
   checked, so `need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))` is proved.
+- **Refinements: the collection folds carry the accumulator invariant.** A
+  demand on the result of `Map.fold`, `Set.fold`, `HashMap.fold`,
+  `Array.fold_left`, `RRB.fold`, `RRB.fold_left`, `Deque.fold_left` or
+  `Deque.fold_right` is now checked as the accumulator's invariant, as for
+  `List.fold_left`: `need_nn(Map.fold(m, 0, fn (acc, _k, _v) -> acc + 1))` is
+  proved (it was an `unreflectable-subject` or `parametric-source-unproved`
+  skip, an error under `cap verified`), and a step that can break the demand is
+  an `accumulator-step-unproved` skip. `NativeArray`'s and `Seq`'s folds stay
+  skips, as do `SortedSet.fold` and `OrderedMap.fold` for now (their record-typed
+  collection parameter is not yet seen through).
+
+### Changed
+
+- **Stdlib: the collection folds declare their types.** `Map.fold(m : Map(k, v),
+  acc : b, f : b -> k -> v -> b) : b`, likewise `HashMap.fold`; `Set.fold(s :
+  Set(a), acc : b, f : b -> a -> b) : b`; `Array.fold_left(v : PVec(a), acc : b,
+  f : b -> a -> b) : b`; and the callback of `RRB.fold` / `RRB.fold_left` (`f : b
+  -> a -> b`), `Deque.fold_left` (`f : b -> a -> b`) and `Deque.fold_right` (`f :
+  a -> b -> b`), which were unannotated. These are the types the folds already
+  inferred, so well-typed callers are unaffected and nothing runs differently.
 
 ### Fixed
 

@@ -2557,6 +2557,34 @@ assumption) prove the same way. A curried step's inner parameter (`x` in
 `fn a -> fn x -> …`) also gets its element refinement here, so
 `need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))` is proved.
 
+**Which stdlib folds carry it.** `List.fold_left`, `List.fold_right`, the
+prelude's `fold_left`, `Enum.fold`, `Iterable.fold`, `Enum.reduce`,
+`Range.reduce`, `Map.fold`, `Set.fold`, `HashMap.fold`, `Array.fold_left`,
+`RRB.fold`, `RRB.fold_left`, `Deque.fold_left` and `Deque.fold_right`. Each
+declares its accumulator `b` and its callback's arrow (`f : b -> k -> v -> b`
+for the map folds, `f : b -> a -> b` or `f : a -> b -> b` for the rest), which
+is what the parametricity checks read:
+
+```march
+fn entries(m : Map(String, Int)) : Int do
+  need_nn(Map.fold(m, 0, fn (acc, _k, _v) -> acc + 1))         -- proved
+end
+
+fn shrink(d : Deque.Deque(Int)) : Int do
+  need_nn(Deque.fold_left(d, 0, fn (acc, _x) -> acc - 1))      -- skip: the step can break it
+end
+```
+
+These do **not**, and a demand through them stays a skip: the `NativeArray`
+folds (`fold_int` and the other element kinds; the body is one builtin, which
+the checks cannot see through), `Seq.fold` / `Seq.fold_while` and the folds
+built on them (`JsonStream.fold`, `Flow.reduce`; the accumulator travels
+through a closure stored in data), `Hamt.fold` (unannotated, curried callback),
+and, for now, `SortedSet.fold` and `OrderedMap.fold`: they are annotated, but
+their collection parameter is a record type, which the parametricity check does
+not yet walk. None of these is `@[assume]`d: parametricity is checked, never
+taken on trust.
+
 A refuted base or step is a **skip, never a violation**, with its own reason,
 `accumulator-base-unproved` or `accumulator-step-unproved`, so the report says
 which half failed. A failing base can be harmless on a non-empty list and a
