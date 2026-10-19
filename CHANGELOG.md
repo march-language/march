@@ -47,6 +47,9 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- A compiled program now loads OpenSSL only when it uses TLS, and zlib/zstd/brotli
+  only when it uses `Compress`: a hello-world depends on libc alone, where it used to
+  need six libraries. `--hot-reload` builds still link the whole runtime.
 - `SessionNode.run_cluster` and `SessionNode.run_cluster_hosted` take a `fingerprint`
   argument after `session` (the generated `cluster_<Role>` runners pass the
   protocol's); pass `""` to check nothing.

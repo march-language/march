@@ -5055,8 +5055,7 @@ let compile filename =
                     opt_flag dbg_flag san_flag arch_cflags section_cflags
                     openssl_flags2 compress_flags2 blake3_flags2 cap_sandbox_define in
                 match March_cas.Runtime_archive.ensure ~cc:cc_driver ~cflags ~sources:srcs with
-                | Ok objs ->
-                  Some (String.concat "" (List.map (fun o -> " " ^ Filename.quote o) objs))
+                | Ok objs -> Some objs
                 | Error msg ->
                   (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                      Printf.eprintf
@@ -5065,13 +5064,62 @@ let compile filename =
                   None
               end
             in
+            (* Static-output design Stage 2 (specs/2026-09-23-static-compile-
+               output-design.md §5.1): the members that alone need a library
+               (march_tls.o: OpenSSL; march_compress.o: zlib/zstd/brotli) go
+               into an archive linked AFTER the program's object, so a program
+               that never reaches TLS or Compress links neither member and,
+               with as-needed, records neither library.  Executables only, with
+               the cached objects (runtime_objs' own eligibility: native, no
+               hot reload, no --compile-so, no event-loop or signing build):
+               a hot-reload server keeps the whole runtime, because a patch
+               .so resolves every runtime symbol against it (design D6).
+               Every other member stays a loose object; see
+               Runtime_archive.ensure_opt_archive for why. *)
+            let opt_archive =
+              match runtime_objs with
+              | Some objs when rdynamic_flag = ""
+                            && Sys.getenv_opt "MARCH_NO_RUNTIME_ARCHIVE" = None ->
+                let members = List.filter (fun o ->
+                    List.mem (Filename.basename o) March_cas.Runtime_archive.archived_members) objs in
+                (match March_cas.Runtime_archive.ensure_opt_archive ~objs:members with
+                 | Ok a -> Some (members, a)
+                 | Error msg ->
+                   (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
+                      Printf.eprintf "march: runtime archive unavailable (%s); \
+                                      linking every member\n%!" msg);
+                   None)
+              | _ -> None
+            in
             (* Objects go exactly where their sources used to sit, in the same
-               order, so the link is object-for-object identical either way. *)
+               order; under [opt_archive], minus the archived members. *)
             let runtime_inputs =
               if !compile_so then patch_inputs
               else match runtime_objs with
-                | Some objs -> String.trim objs ^ user_ffi_c
+                | Some objs ->
+                  let loose = match opt_archive with
+                    | Some (members, _) -> List.filter (fun o -> not (List.mem o members)) objs
+                    | None -> objs in
+                  String.trim (String.concat "" (List.map (fun o -> " " ^ Filename.quote o) loose))
+                  ^ user_ffi_c
                 | None      -> runtime ^ extra_c_files
+            in
+            (* Under [opt_archive] the runtime's libraries follow the archive
+               (GNU ld with --as-needed records a library only for symbols
+               already undefined when it reaches it), bracketed by
+               --as-needed / --no-as-needed so a user's --ffi-link libraries
+               keep today's semantics.  ld64's -dead_strip_dylibs is global, so
+               it is passed only when there is no --ffi-link. *)
+            let pre_ll_libs, post_ll_libs =
+              match opt_archive with
+              | None -> (openssl_flags2 ^ compress_flags2, "")
+              | Some (_, a) ->
+                let libs = openssl_flags2 ^ compress_flags2 in
+                let bracketed =
+                  if link_is_linux then " -Wl,--as-needed" ^ libs ^ " -Wl,--no-as-needed"
+                  else if !ffi_link_flags = [] then " -Wl,-dead_strip_dylibs" ^ libs
+                  else libs in
+                ("", " " ^ Filename.quote a ^ bracketed)
             in
             (* [ffi_link] goes AFTER the program's own object ([ll_tmp]).
                GNU ld resolves an archive only against symbols already
@@ -5081,8 +5129,8 @@ let compile filename =
                Linux, while macOS's ld64, which is order-insensitive, linked
                fine.  Measured 2026-09-28, Ubuntu 24.04 arm64. *)
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s%s %s%s -o %s%s%s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ll_tmp ffi_link out_bin math_flag ucontext_flag reload_ldl strip_flag in
+              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s %s%s%s -o %s%s%s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs pre_ll_libs blake3_flags2 ll_tmp post_ll_libs ffi_link out_bin math_flag ucontext_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in

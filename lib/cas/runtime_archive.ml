@@ -34,7 +34,8 @@
     paths in the same order the [.c] files were given.  Stage B then passes
     those objects positionally exactly where the sources used to sit, so the
     resulting link is object-for-object identical to the old single-command
-    build — no static-archive member-selection semantics are introduced.
+    build, except for the members [ensure_opt_archive] (below) puts in an
+    archive so a program links them only when it reaches them.
 
     Concurrency
     ───────────
@@ -281,3 +282,54 @@ let ensure ~(cc : string) ~(cflags : string) ~(sources : string list)
   : (string list, string) result =
   try ensure_exn ~cc ~cflags ~sources
   with e -> Error (Printexc.to_string e)
+
+(** The runtime members a program links only when it reaches them, as one
+    static archive (static-output design, Stage 2:
+    specs/2026-09-23-static-compile-output-design.md §5.1).
+
+    Everything above links the runtime object-for-object, so every program
+    loads every library any member needs: [march_tls.o] made a pure-compute
+    program depend on libssl/libcrypto, [march_compress.o] on zlib, zstd and
+    brotli.  Those two members are referenced only from generated code (the
+    stdlib's TLS and Compress builtins), never from other runtime C, so the
+    driver passes them through this archive, after the program's object:
+    the linker pulls a member only for a symbol the program left undefined,
+    and with [-Wl,--as-needed] / [-Wl,-dead_strip_dylibs] a library nothing
+    pulled is not recorded either.
+
+    Only these members, deliberately: a member that strongly defines a
+    symbol another member defines weakly (the trace, observe-debug and epoch
+    hooks in march_scheduler.c / march_observe_snapshot.c) must stay a loose
+    object, because an archive member is pulled only for an UNDEFINED symbol
+    and the weak default already defines it: the override would silently
+    never link.  [archived_members] is the list the driver partitions on.
+
+    Built beside the objects it holds (same cache entry, same key), into a
+    per-pid temp file renamed into place, so racing builds are as safe as
+    the per-object publish above.  [Error] rather than raise: the caller
+    falls back to linking the members as loose objects. *)
+let archived_members = [ "march_tls.o"; "march_compress.o" ]
+
+let ensure_opt_archive ~(objs : string list) : (string, string) result =
+  match objs with
+  | [] -> Error "no members"
+  | first :: _ ->
+    let dir = Filename.dirname first in
+    let ar_path = Filename.concat dir "libmarch_rt_opt.a" in
+    if Sys.file_exists ar_path then Ok ar_path
+    else
+      try
+        let tmp = Filename.concat dir
+            (Printf.sprintf "libmarch_rt_opt.%d.tmp.a" (Unix.getpid ())) in
+        (try Sys.remove tmp with Sys_error _ -> ());
+        let ar = match Sys.getenv_opt "MARCH_AR" with Some a when a <> "" -> a | _ -> "ar" in
+        let cmd = Printf.sprintf "%s rcs %s %s > /dev/null 2>&1" ar (Filename.quote tmp)
+            (String.concat " " (List.map Filename.quote objs)) in
+        if Sys.command cmd <> 0 then begin
+          (try Sys.remove tmp with Sys_error _ -> ());
+          Error (Printf.sprintf "`%s` failed" cmd)
+        end else begin
+          Unix.rename tmp ar_path;
+          Ok ar_path
+        end
+      with e -> Error (Printexc.to_string e)
