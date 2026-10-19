@@ -162,11 +162,13 @@ mod Math do
   end
 
   doc """
-  Cube root. Defined for negative `x` too.
+  Cube root. Defined for negative `x` too. The result comes from the
+  platform's C library and need not be exact: glibc's `cbrt(27.0)` is one
+  unit in the last place above 3.0, so compare with a tolerance.
 
   ## Examples
 
-      march> (Math.cbrt(27.0)) == 3.0
+      march> Math.abs(Math.cbrt(27.0) - 3.0) < 0.000000001
       true
       march> (Math.cbrt(-8.0)) == -2.0
       true
