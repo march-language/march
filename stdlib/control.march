@@ -472,10 +472,13 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.check(rel)
       Ok(())
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.check({ rel with seq: 0 })
       Err("seq must be positive")
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.check({ rel with builds: [] })
       Err("step 1: activates build `web`, which the release does not ship")
   """
@@ -550,6 +553,7 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.signed_text(rel)
       "release v1\nseq 1\nparent none\nenv prod\ntopology t1\nbuild web base:b1 manifest:m1\nstep 1 pools:web hosts:canary(1) do:activate(web) gate:healthy(30s)\nstep 2 pools:web hosts:rest do:activate(web) gate:none\n"
   """
@@ -581,6 +585,7 @@ mod Control do
 
   Using `rel` from `parse`:
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.serialize(rel)
       "release v1\nseq 1\nparent none\nenv prod\ntopology t1\nbuild web base:b1 manifest:m1\nstep 1 pools:web hosts:canary(1) do:activate(web) gate:healthy(30s)\nstep 2 pools:web hosts:rest do:activate(web) gate:none\nsig -\n"
   """
@@ -640,14 +645,19 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.accept(None, rel)
       Ok(())
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.accept(Some(rel), rel)
       Ok(())
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.accept(Some(rel), { rel with seq: 2, parent: Control.digest(rel) })
       Ok(())
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.accept(Some(rel), { rel with seq: 2, parent: "x" })
       Err("parent mismatch: release 2 does not follow the head 1")
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> Control.accept(Some({ rel with seq: 5 }), rel)
       Err("stale: release 1 is older than the head 5")
   """
@@ -730,6 +740,7 @@ mod Control do
       march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> List.map(Control.report_versions({ rep with versions: "api=m2 web=m1" }), fn v -> v.build)
       ["api", "web"]
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> Control.report_versions({ rep with versions: "" })
       []
   """
@@ -766,8 +777,10 @@ mod Control do
 
   ## Examples
 
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> Control.report_serial(rep)
       "42"
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> Control.report_serial({ rep with certs: "" })
       ""
   """
@@ -783,8 +796,10 @@ mod Control do
 
   ## Examples
 
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> Control.report_failure(rep)
       None
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> Option.map(Control.report_failure({ rep with failed_seq: 1, failed_step: 2, failed_why: "refused" }), fn f -> f.why)
       Some("refused")
   """
@@ -798,7 +813,9 @@ mod Control do
 
   ## Examples
 
-      march> (Control.with_failure(rep, { seq: 1, step: 2, why: "refused" })).failed_step
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let res = Control.with_failure(rep, { seq: 1, step: 2, why: "refused" })
+      march> res.failed_step
       2
   """
   fn with_failure(rep : AgentReport, f : CtlFailure) : AgentReport do
@@ -826,6 +843,7 @@ mod Control do
       march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
       march> Control.order_artifacts(ord)
       ["m1"]
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
       march> Control.order_artifacts({ ord with artifacts: "" })
       []
   """
@@ -836,8 +854,10 @@ mod Control do
 
   ## Examples
 
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
       march> Control.order_lines({ ord with lines: "L1\n\nL2" })
       ["L1", "L2"]
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
       march> Control.order_lines(ord)
       []
   """
@@ -870,11 +890,16 @@ mod Control do
 
   `obs0` (node "a" healthy since t=1000) is reused by the examples further down:
 
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> let obs0 = Control.observe([], rep, 1000)
       march> List.map(Control.observe(obs0, rep, 5000), fn o -> o.healthy_since)
       [Some(1000)]
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let obs0 = Control.observe([], rep, 1000)
       march> List.map(Control.observe(obs0, { rep with versions: "web=m2" }, 5000), fn o -> o.healthy_since)
       [Some(5000)]
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let obs0 = Control.observe([], rep, 1000)
       march> List.map(Control.observe(obs0, { rep with healthy: false }, 5000), fn o -> o.healthy_since)
       [None]
   """
@@ -919,11 +944,15 @@ mod Control do
 
   `members`, `step1` and `step2` are reused by the examples further down:
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
       march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
       march> let step1 = List.head(rel.steps)
       march> let step2 = List.nth(rel.steps, 1)
       march> Control.targets(step1, members)
       ["a", "b", "c"]
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let step1 = List.head(rel.steps)
       march> Control.targets({ step1 with pools: ["*"] }, members)
       ["a", "b", "c", "db1"]
   """
@@ -948,8 +977,15 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let step1 = List.head(rel.steps)
       march> Control.select(step1, members, [])
       ["a"]
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let step1 = List.head(rel.steps)
+      march> let step2 = List.nth(rel.steps, 1)
       march> Control.select(step2, members, [(step1, ["a"])])
       ["b", "c"]
   """
@@ -971,8 +1007,12 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
       march> Control.want(rel, step1)
       "m1"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
       march> Control.want(rel, { step1 with action: Control.DoTopology })
       "t1"
   """
@@ -1018,6 +1058,8 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
       march> Control.want_for(rel, step1, "a")
       "m1"
   """
@@ -1041,12 +1083,16 @@ mod Control do
 
   ## Examples
 
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> Control.reports_state(rep, "activate(web)", "m1")
       true
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> Control.reports_state(rep, "activate(web)", "m2")
       false
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> Control.reports_state(rep, "drain", "1")
       false
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> Control.reports_state(rep, "certs", "cert:42")
       true
   """
@@ -1101,9 +1147,14 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
       march> let o1 = Control.order(rel, step1, "a")
       march> Control.order_artifacts(o1)
       ["m1"]
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
+      march> let o1 = Control.order(rel, step1, "a")
       march> o1.want
       "m1"
   """
@@ -1249,14 +1300,29 @@ mod Control do
 
   Node "a" is the canary; once it reports `m1` the 30 s gate holds step 2 back:
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
       march> Control.show_decision(Control.pass(rel, members, [], [], 0))
       "step 1: apply to [a]"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
       march> Control.show_decision(Control.pass(rel, members, [], ["a"], 0))
       "step 1: apply to []"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let obs0 = Control.observe([], rep, 1000)
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
       march> Control.show_decision(Control.pass(rel, members, obs0, [], 2000))
       "step 1: waiting, gate healthy(30s): a healthy for 1000ms of 30000ms"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let obs0 = Control.observe([], rep, 1000)
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
       march> Control.show_decision(Control.pass(rel, members, obs0, [], 31000))
       "step 2: apply to [b, c]"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
       march> Control.show_decision(Control.pass(rel, members, Control.observe([], { rep with seq: 4 }, 0), [], 0))
       "behind: a node holds release 4"
   """
@@ -1291,6 +1357,8 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let ldr0 = Control.leader_new()
       march> let ldr1 = Result.unwrap(Control.leader_release(ldr0, rel))
       march> Control.leader_release(ldr1, { rel with seq: 0 })
       Err("seq must be positive")
@@ -1312,6 +1380,7 @@ mod Control do
 
   ## Examples
 
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> let ldr2 = Control.leader_report(Control.leader_new(), rep, 1000)
       march> List.length(ldr2.obs)
       1
@@ -1344,6 +1413,10 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let ldr2 = Control.leader_report(Control.leader_new(), rep, 1000)
       march> let ldr3 = Control.leader_result(Result.unwrap(Control.leader_release(ldr2, rel)), { seq: 1, step: 1, node: "a", ok: false, detail: "ERR refused" }, 1500)
       march> Option.map(Tuple.second(Control.leader_pass(ldr3, members, 2000)), Control.show_decision)
       Some("step 1: HALTED on a: ERR refused")
@@ -1367,8 +1440,14 @@ mod Control do
 
   ## Examples
 
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let ldr0 = Control.leader_new()
+      march> let ldr1 = Result.unwrap(Control.leader_release(ldr0, rel))
       march> Option.map(Tuple.second(Control.leader_pass(ldr1, members, 0)), Control.show_decision)
       Some("step 1: apply to [a]")
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let ldr0 = Control.leader_new()
       march> Tuple.second(Control.leader_pass(ldr0, members, 0))
       None
   """
@@ -1426,9 +1505,14 @@ mod Control do
   `ops` simulates a node: it reports `rep`, holds artifact `m1`, and accepts every line.
   It is reused by the examples further down:
 
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
       march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
       march> Control.missing(ops, ord)
       []
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
       march> Control.missing({ ops with has: fn h -> false }, ord)
       ["m1"]
   """
@@ -1459,11 +1543,23 @@ mod Control do
 
   ## Examples
 
-      march> (Control.agent_apply(ops, ord)).detail
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply(ops, ord)
+      march> res.detail
       "already applied"
-      march> (Control.agent_apply({ ops with has: fn h -> false }, { ord with want: "m2" })).detail
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply({ ops with has: fn h -> false }, { ord with want: "m2" })
+      march> res.detail
       "missing artifacts: m1"
-      march> (Control.agent_apply({ ops with request: fn l -> "ERR bad signature" }, { ord with want: "m2", lines: "SEQ 1 x" })).detail
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply({ ops with request: fn l -> "ERR bad signature" }, { ord with want: "m2", lines: "SEQ 1 x" })
+      march> res.detail
       "ERR bad signature"
   """
   fn agent_apply(ops : AgentOps, o : StepOrder) : StepResult do agent_apply_ticked(ops, o, 200) end
@@ -1477,7 +1573,11 @@ mod Control do
 
   ## Examples
 
-      march> (Control.agent_apply_ticked(ops, ord, 50)).ok
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply_ticked(ops, ord, 50)
+      march> res.ok
       true
   """
   fn agent_apply_ticked(ops : AgentOps, o : StepOrder, tick_ms : Int) : StepResult do
@@ -1516,7 +1616,11 @@ mod Control do
 
   Every line accepted, but the node never reports the new manifest:
 
-      march> (Control.agent_apply_within(ops, { ord with want: "m2" }, 0, 10)).detail
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply_within(ops, { ord with want: "m2" }, 0, 10)
+      march> res.detail
       "the node accepted every line but does not report activate(web) at m2"
   """
   fn agent_apply_within(ops : AgentOps, o : StepOrder, wait_ms : Int, poll_ms : Int) : StepResult do
@@ -1682,10 +1786,19 @@ mod Control do
 
   ## Examples
 
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
       march> let mem = Vault.new("doc_control_memory")
-      march> (Control.agent_apply_recording({ ops with has: fn h -> false }, mem, { ord with want: "m2" }, 200)).ok
+      march> let res = Control.agent_apply_recording({ ops with has: fn h -> false }, mem, { ord with want: "m2" }, 200)
+      march> res.ok
       false
-      march> (Control.agent_apply_recording(ops, mem, ord, 200)).ok
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let mem = Vault.new("doc_control_memory")
+      march> let res = Control.agent_apply_recording(ops, mem, ord, 200)
+      march> res.ok
       true
 
   After the failure `mem` holds `"failure"` = `"1 1 missing artifacts: m1"` (`seq step
@@ -1934,6 +2047,7 @@ mod Control do
 
   ## Examples
 
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
       march> Control.audit_order(1000, "n1", ord)
       "{\"ts\":1000,\"type\":\"order\",\"leader\":\"n1\",\"seq\":1,\"release\":\"abc\",\"step\":1,\"node\":\"a\",\"action\":\"activate(web)\",\"artifacts\":\"m1\"}\n"
   """

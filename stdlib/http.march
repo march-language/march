@@ -329,6 +329,7 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.port(req)
       Some(8080)
       march> match Http.get("https://example.com/") do Ok(r) -> Http.port(r) == None | Err(_) -> false end
@@ -359,6 +360,7 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.query(req)
       Some("x=1")
       march> match Http.get("http://example.com/a%20b?q=a%20b") do Ok(r) -> Http.query(r) == Some("q=a%20b") | Err(_) -> false end
@@ -376,8 +378,10 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.headers(req)
       []
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.headers(Http.set_header(Http.set_header(req, "Accept", "*/*"), "X-Id", "7"))
       [Header("X-Id", "7"), Header("Accept", "*/*")]
   """
@@ -392,6 +396,7 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.body(req)
       ()
       march> match Http.post("http://example.com/api", "{}") do Ok(r) -> Http.body(r) | Err(_) -> "" end
@@ -410,8 +415,10 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.method_to_string(Http.method(Http.set_method(req, Delete)))
       "DELETE"
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.method_to_string(Http.method(Http.set_method(req, Other("PROPFIND"))))
       "PROPFIND"
   """
@@ -426,8 +433,10 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.scheme(Http.set_scheme(req, SchemeHttps))
       SchemeHttps
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.port(Http.set_scheme(req, SchemeHttps))
       Some(8080)
   """
@@ -442,6 +451,7 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.host(Http.set_host(req, "api.example.org"))
       "api.example.org"
   """
@@ -456,8 +466,10 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.port(Http.set_port(req, 443))
       Some(443)
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.port(Http.set_port(req, 70000))
       Some(70000)
   """
@@ -472,8 +484,10 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.path(Http.set_path(req, "/v2/items"))
       "/v2/items"
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.query(Http.set_path(req, "/v2/items"))
       Some("x=1")
   """
@@ -488,8 +502,10 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.body(Http.set_body(req, "payload"))
       "payload"
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.body(Http.set_body(req, [1, 2, 3]))
       [1, 2, 3]
   """
@@ -546,8 +562,10 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.get_request_header(Http.set_header(req, "Accept", "text/html"), "accept")
       Some("text/html")
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.headers(Http.set_header(req, "X-Evil", "a\r\nSet-Cookie: x"))
       [Header("X-Evil", "aSet-Cookie: x")]
   """
@@ -582,6 +600,7 @@ mod Http do
 
   ## Examples
 
+      march> let resp = Response(Status(301), [Header("Location", "/new")], "moved")
       march> Http.response_headers(resp)
       [Header("Location", "/new")]
   """
@@ -596,6 +615,7 @@ mod Http do
 
   ## Examples
 
+      march> let resp = Response(Status(301), [Header("Location", "/new")], "moved")
       march> Http.response_body(resp)
       "moved"
   """
@@ -610,6 +630,7 @@ mod Http do
 
   ## Examples
 
+      march> let resp = Response(Status(301), [Header("Location", "/new")], "moved")
       march> Http.response_status_code(resp)
       301
   """
@@ -624,6 +645,7 @@ mod Http do
 
       march> Http.response_is_success(Response(Status(204), [], ()))
       true
+      march> let resp = Response(Status(301), [Header("Location", "/new")], "moved")
       march> Http.response_is_success(resp)
       false
   """
@@ -636,6 +658,7 @@ mod Http do
 
   ## Examples
 
+      march> let resp = Response(Status(301), [Header("Location", "/new")], "moved")
       march> Http.response_is_redirect(resp)
       true
       march> Http.response_is_redirect(Response(Status(200), [], ()))
@@ -654,8 +677,10 @@ mod Http do
 
   ## Examples
 
+      march> let resp = Response(Status(301), [Header("Location", "/new")], "moved")
       march> Http.get_header(resp, "LOCATION")
       Some("/new")
+      march> let resp = Response(Status(301), [Header("Location", "/new")], "moved")
       march> Http.get_header(resp, "content-type")
       None
       march> Http.get_header(Response(Status(200), [Header("A", "1"), Header("a", "2")], ()), "a")
@@ -682,8 +707,10 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.get_request_header(Http.set_header(Http.set_header(req, "X-Id", "1"), "x-id", "2"), "X-ID")
       Some("2")
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.get_request_header(req, "Accept")
       None
   """
@@ -922,8 +949,10 @@ mod Http do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.query(Http.set_query(req, [("page", "3"), ("sort", "asc")]))
       Some("page=3&sort=asc")
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
       march> Http.query(Http.set_query(req, []))
       None
   """

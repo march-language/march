@@ -112,6 +112,8 @@ mod Merkle do
       march> let mt2 = Option.unwrap(Merkle.build([1, 2, 30, 4], int_to_string))
       march> Merkle.diff(mt1, mt1)
       []
+      march> let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
+      march> let mt2 = Option.unwrap(Merkle.build([1, 2, 30, 4], int_to_string))
       march> Merkle.diff(mt1, mt2) == [Merkle.root_hash(Merkle.leaf(3, int_to_string))]
       true
   """
@@ -141,6 +143,7 @@ mod Merkle do
 
   ## Examples
 
+      march> let mt2 = Option.unwrap(Merkle.build([1, 2, 30, 4], int_to_string))
       march> Merkle.leaves(mt2)
       [1, 2, 30, 4]
   """
@@ -156,6 +159,7 @@ mod Merkle do
 
   ## Examples
 
+      march> let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
       march> Merkle.leaf_hashes(mt1) == List.map([1, 2, 3, 4], fn x -> Crypto.sha256(int_to_string(x)))
       true
   """
@@ -173,10 +177,13 @@ mod Merkle do
 
   ## Examples
 
+      march> let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
       march> Merkle.contains_hash(mt1, Crypto.sha256("2"))
       true
+      march> let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
       march> Merkle.contains_hash(mt1, Merkle.root_hash(mt1))
       true
+      march> let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
       march> Merkle.contains_hash(mt1, "nope")
       false
   """
@@ -195,6 +202,7 @@ mod Merkle do
 
   ## Examples
 
+      march> let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
       march> Merkle.size(mt1)
       4
   """

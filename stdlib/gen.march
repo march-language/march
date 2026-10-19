@@ -135,6 +135,7 @@ mod Gen do
       march> let t = Gen.tree_map(Gen.int_tree_toward(0, 4), fn n -> n * 10)
       march> Gen.tree_root(t)
       40
+      march> let t = Gen.tree_map(Gen.int_tree_toward(0, 4), fn n -> n * 10)
       march> List.map(Gen.tree_children(t), fn c -> Gen.tree_root(c))
       [0, 20, 30]
   """
@@ -161,6 +162,7 @@ mod Gen do
       march> let t = Gen.tree_bind(Gen.int_tree_toward(0, 2), fn n -> Gen.int_tree_toward(0, n + 1))
       march> Gen.tree_root(t)
       3
+      march> let t = Gen.tree_bind(Gen.int_tree_toward(0, 2), fn n -> Gen.int_tree_toward(0, n + 1))
       march> List.map(Gen.tree_children(t), fn c -> Gen.tree_root(c))
       [1, 2, 0, 1, 2]
   """
@@ -190,8 +192,10 @@ mod Gen do
       march> let t = Gen.int_tree_toward(0, 6)
       march> List.map(Gen.tree_children(t), fn c -> Gen.tree_root(c))
       [0, 3, 4, 5]
+      march> let t = Gen.int_tree_toward(0, 6)
       march> Option.map(Gen.tree_filter(t, fn n -> n > 2), fn f -> List.map(Gen.tree_children(f), fn c -> Gen.tree_root(c)))
       Some([3, 4, 5])
+      march> let t = Gen.int_tree_toward(0, 6)
       march> Option.is_none(Gen.tree_filter(t, fn n -> n > 9))
       true
   """
@@ -223,6 +227,8 @@ mod Gen do
       march> let (t_run, rng2) = Gen.run(Gen.constant(42), rng, 10)
       march> Gen.tree_root(t_run)
       42
+      march> let rng = { s0: 1, s1: 2, s2: 3, s3: 4 }
+      march> let (t_run, rng2) = Gen.run(Gen.constant(42), rng, 10)
       march> rng2 == rng
       true
   """

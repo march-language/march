@@ -861,6 +861,7 @@ mod Yaml do
       march> let cfg = Yaml.parse_exn("server:\n  host: example.com\n  port: 8080")
       march> Yaml.get_in(cfg, ["server", "port"])
       Some(YInt(8080))
+      march> let cfg = Yaml.parse_exn("server:\n  host: example.com\n  port: 8080")
       march> Yaml.get_in(cfg, ["server", "user"])
       None
   """

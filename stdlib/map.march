@@ -471,6 +471,7 @@ mod Map do
       march> let lt1 = Map.int_cmp(1)
       march> lt1(2)
       true
+      march> let lt1 = Map.int_cmp(1)
       march> lt1(1)
       false
   """
@@ -485,6 +486,7 @@ mod Map do
       march> let lt_b = Map.str_cmp("b")
       march> lt_b("a")
       false
+      march> let lt_b = Map.str_cmp("b")
       march> lt_b("c")
       true
   """
@@ -573,6 +575,7 @@ mod Map do
       march> let m = Map.from_list([("a", 1), ("b", 2)], fn a -> fn b -> a < b)
       march> Map.get(m, "b", fn a -> fn b -> a < b)
       Some(2)
+      march> let m = Map.from_list([("a", 1), ("b", 2)], fn a -> fn b -> a < b)
       march> Map.get(m, "z", fn a -> fn b -> a < b)
       None
 
@@ -646,6 +649,7 @@ mod Map do
       march> let m1 = Map.insert(Map.singleton("a", 1), "a", 5, fn a -> fn b -> a < b)
       march> Map.to_list(m1)
       [("a", 5)]
+      march> let m1 = Map.insert(Map.singleton("a", 1), "a", 5, fn a -> fn b -> a < b)
       march> Map.size(Map.insert(m1, "b", 2, fn a -> fn b -> a < b))
       2
 
@@ -674,6 +678,7 @@ mod Map do
       march> let m2 = Map.from_list([(1, "a"), (2, "b")], fn a -> fn b -> a < b)
       march> Map.to_list(Map.remove(m2, 1, fn a -> fn b -> a < b))
       [(2, "b")]
+      march> let m2 = Map.from_list([(1, "a"), (2, "b")], fn a -> fn b -> a < b)
       march> Map.size(Map.remove(m2, 9, fn a -> fn b -> a < b))
       2
 

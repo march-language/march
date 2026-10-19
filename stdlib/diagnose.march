@@ -300,8 +300,11 @@ mod Diagnose do
       march> let looping = Result.unwrap_or(Json.parse("{\"at_ms\": 1000, \"data\": {\"crashes\": {\"total\": 5, \"crashes\": [{\"supervisor\": 7, \"at_ms\": 900}, {\"supervisor\": 7, \"at_ms\": 950}, {\"supervisor\": 7, \"at_ms\": 990}]}}}"), Json.Null)
       march> Diagnose.ids_of(Diagnose.findings(quiet, looping))
       ["crash.loop/critical"]
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> let looping = Result.unwrap_or(Json.parse("{\"at_ms\": 1000, \"data\": {\"crashes\": {\"total\": 5, \"crashes\": [{\"supervisor\": 7, \"at_ms\": 900}, {\"supervisor\": 7, \"at_ms\": 950}, {\"supervisor\": 7, \"at_ms\": 990}]}}}"), Json.Null)
       march> List.map(Diagnose.findings(quiet, looping), fn f -> f.rows)
       [[7]]
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
       march> List.length(Diagnose.findings(quiet, quiet))
       0
   """
@@ -321,8 +324,11 @@ mod Diagnose do
 
   Using `quiet` and `looping` from `findings` (the crash ring shows 3 of 5):
 
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> let looping = Result.unwrap_or(Json.parse("{\"at_ms\": 1000, \"data\": {\"crashes\": {\"total\": 5, \"crashes\": [{\"supervisor\": 7, \"at_ms\": 900}, {\"supervisor\": 7, \"at_ms\": 950}, {\"supervisor\": 7, \"at_ms\": 990}]}}}"), Json.Null)
       march> Diagnose.coverage(quiet, looping)
       ["crashes: shown 3 of 5"]
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
       march> Diagnose.coverage(quiet, quiet)
       []
   """

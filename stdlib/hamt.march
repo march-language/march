@@ -443,6 +443,7 @@ mod Hamt do
       march> let h = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", fn k -> k, fn (a, b) -> a == b), 2, "b", fn k -> k, fn (a, b) -> a == b)
       march> Hamt.get(h, 2, fn k -> k, fn (a, b) -> a == b)
       Some("b")
+      march> let h = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", fn k -> k, fn (a, b) -> a == b), 2, "b", fn k -> k, fn (a, b) -> a == b)
       march> Hamt.get(h, 3, fn k -> k, fn (a, b) -> a == b)
       None
   """
@@ -482,6 +483,7 @@ mod Hamt do
       march> let h2 = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", fn k -> k, fn (a, b) -> a == b), 2, "b", fn k -> k, fn (a, b) -> a == b)
       march> Hamt.get(Hamt.remove(h2, 1, fn k -> k, fn (a, b) -> a == b), 1, fn k -> k, fn (a, b) -> a == b)
       None
+      march> let h2 = Hamt.insert(Hamt.insert(Hamt.empty(), 1, "a", fn k -> k, fn (a, b) -> a == b), 2, "b", fn k -> k, fn (a, b) -> a == b)
       march> Hamt.size(Hamt.remove(h2, 9, fn k -> k, fn (a, b) -> a == b))
       2
   """

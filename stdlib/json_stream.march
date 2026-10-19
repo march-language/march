@@ -309,6 +309,7 @@ mod JsonStream do
       march> let r1 = JsonStream.feed(JsonStream.start(), "[1, tr")
       march> Result.map(r1, Tuple.first) == Ok([EvArrStart, EvNum(1.0)])
       true
+      march> let r1 = JsonStream.feed(JsonStream.start(), "[1, tr")
       march> let r2 = JsonStream.feed(Tuple.second(Result.unwrap(r1)), "ue]")
       march> Result.map(r2, Tuple.first) == Ok([EvBool(true), EvArrEnd])
       true

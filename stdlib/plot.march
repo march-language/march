@@ -106,6 +106,7 @@ mod Plot do
       march> let p = Plot.new()
       march> p.width
       640
+      march> let p = Plot.new()
       march> List.length(p.series)
       0
   """
@@ -190,6 +191,7 @@ mod Plot do
       march> let bars = Plot.bar_series(["a", "b", "c"], [3.0, 1.0, 2.0])
       march> bars.xs == [0.0, 1.0, 2.0]
       true
+      march> let bars = Plot.bar_series(["a", "b", "c"], [3.0, 1.0, 2.0])
       march> bars.ys == [3.0, 1.0, 2.0]
       true
   """
@@ -305,6 +307,7 @@ mod Plot do
 
   ## Examples
 
+      march> let bars = Plot.bar_series(["a", "b", "c"], [3.0, 1.0, 2.0])
       march> let two = Plot.new() |> Plot.add_series(Plot.line_series([0.0], [1.0])) |> Plot.add_series(bars)
       march> List.map(two.series, fn s -> s.style.line_color.r)
       [31, 255]
@@ -321,6 +324,7 @@ mod Plot do
 
   ## Examples
 
+      march> let bars = Plot.bar_series(["a", "b", "c"], [3.0, 1.0, 2.0])
       march> let lp = Plot.new() |> Plot.add_labeled_series(bars, "sales")
       march> List.map(lp.series, fn s -> s.label)
       [Some("sales")]
@@ -336,6 +340,7 @@ mod Plot do
 
   ## Examples
 
+      march> let p = Plot.new()
       march> (Plot.set_title(p, "Revenue")).title
       Some("Revenue")
   """
@@ -348,6 +353,7 @@ mod Plot do
 
   ## Examples
 
+      march> let p = Plot.new()
       march> (Plot.set_xlabel(p, "time")).x_axis.label
       Some("time")
   """
@@ -361,6 +367,7 @@ mod Plot do
 
   ## Examples
 
+      march> let p = Plot.new()
       march> (Plot.set_ylabel(p, "count")).y_axis.label
       Some("count")
   """
@@ -377,8 +384,9 @@ mod Plot do
 
   ## Examples
 
-      march> (Plot.set_x_range(p, 0.0, 10.0)).x_axis.data_max
-      Some(10.0)
+      march> let p = Plot.new()
+      march> ((Plot.set_x_range(p, 0.0, 10.0)).x_axis.data_max) == Some(10.0)
+      true
   """
   fn set_x_range(p : Plot, lo : Float, hi : Float) : Plot do
     let ax = p.x_axis
@@ -391,8 +399,9 @@ mod Plot do
 
   ## Examples
 
-      march> (Plot.set_y_range(p, 0.0, 1.0)).y_axis.data_min
-      Some(0.0)
+      march> let p = Plot.new()
+      march> ((Plot.set_y_range(p, 0.0, 1.0)).y_axis.data_min) == Some(0.0)
+      true
   """
   fn set_y_range(p : Plot, lo : Float, hi : Float) : Plot do
     let ay = p.y_axis
@@ -404,6 +413,7 @@ mod Plot do
 
   ## Examples
 
+      march> let p = Plot.new()
       march> let sized = Plot.set_size(p, 320, 240)
       march> (sized.width, sized.height)
       (320, 240)
@@ -417,6 +427,7 @@ mod Plot do
 
   ## Examples
 
+      march> let p = Plot.new()
       march> (Plot.with_grid(p)).show_grid
       true
   """
@@ -430,6 +441,7 @@ mod Plot do
 
   ## Examples
 
+      march> let p = Plot.new()
       march> (Plot.with_legend(p)).show_legend
       true
   """
@@ -813,8 +825,10 @@ mod Plot do
 
   ## Examples
 
+      march> let p = Plot.new()
       march> String.starts_with(Plot.to_svg(p), "<svg")
       true
+      march> let p = Plot.new()
       march> String.contains(Plot.to_svg(Plot.set_title(p, "a<b")), "a&lt;b")
       true
   """

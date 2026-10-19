@@ -168,6 +168,7 @@ mod NodeCert do
       march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.has_role(c, "Chat.Server:offer")
       true
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.has_role(c, "Chat.Server:initiate")
       false
   """
@@ -179,8 +180,10 @@ mod NodeCert do
 
   ## Examples
 
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.has_flag(c, "raw_send")
       true
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.has_flag(c, "debug")
       false
   """
@@ -313,8 +316,10 @@ mod NodeCert do
 
   ## Examples
 
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.expired(c, 2000000000)
       false
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.expired(c, 2000000001)
       true
   """
@@ -352,8 +357,10 @@ mod NodeCert do
 
   ## Examples
 
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.issued_ms(c)
       Some(1000)
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.issued_ms({ c with serial: "f00d" })
       None
   """
@@ -373,8 +380,10 @@ mod NodeCert do
 
   ## Examples
 
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.supersedes({ c with serial: "999-cd" }, c)
       false
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.supersedes(c, { c with serial: "f00d" })
       true
   """
@@ -392,8 +401,10 @@ mod NodeCert do
 
   ## Examples
 
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.order_problem({ c with serial: "999-cd" }, c)
       Some("certificate 999-cd was issued before 1000-ab, the certificate in use")
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.order_problem({ c with serial: "2000-cd" }, c)
       None
   """
@@ -484,8 +495,10 @@ mod NodeCert do
 
   ## Examples
 
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.revokes({ node: "spiffe://example.org/pool/web/node/n1", serial: "", issued_at: 5 }, c)
       true
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.revokes({ node: "spiffe://example.org/pool/web/node/n1", serial: "999-cd", issued_at: 5 }, c)
       false
   """
@@ -498,8 +511,10 @@ mod NodeCert do
 
   ## Examples
 
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.is_revoked(c, [{ node: "other", serial: "1000-ab", issued_at: 5 }])
       true
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
       march> NodeCert.is_revoked(c, [])
       false
   """

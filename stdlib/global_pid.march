@@ -20,6 +20,7 @@ mod GlobalPid do
       march> let gp = GlobalPid.make("n1", 7, 2)
       march> gp.local_pid
       7
+      march> let gp = GlobalPid.make("n1", 7, 2)
       march> gp.node_id
       "n1"
   """

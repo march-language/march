@@ -677,8 +677,10 @@ mod Json do
       march> let jv = Json.encode_object([("items", Json.encode_array([Json.encode_object([("name", Json.encode_string("pen"))])]))])
       march> Json.get_path(jv, [JsonPath.Key("items"), Index(0), JsonPath.Key("name")]) == Some(Json.encode_string("pen"))
       true
+      march> let jv = Json.encode_object([("items", Json.encode_array([Json.encode_object([("name", Json.encode_string("pen"))])]))])
       march> Json.get_path(jv, [JsonPath.Key("items"), Index(3)])
       None
+      march> let jv = Json.encode_object([("items", Json.encode_array([Json.encode_object([("name", Json.encode_string("pen"))])]))])
       march> Json.get_path(jv, []) == Some(jv)
       true
   """

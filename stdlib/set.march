@@ -453,6 +453,7 @@ mod Set do
       march> let s1 = Set.from_list(["a", "b"], fn a -> fn b -> a < b)
       march> Set.contains(s1, "a", fn a -> fn b -> a < b)
       true
+      march> let s1 = Set.from_list(["a", "b"], fn a -> fn b -> a < b)
       march> Set.contains(s1, "z", fn a -> fn b -> a < b)
       false
 
@@ -483,6 +484,7 @@ mod Set do
       march> let s2 = Set.insert(Set.singleton(1), 2, fn a -> fn b -> a < b)
       march> Set.size(s2)
       2
+      march> let s2 = Set.insert(Set.singleton(1), 2, fn a -> fn b -> a < b)
       march> Set.size(Set.insert(s2, 1, fn a -> fn b -> a < b))
       2
 
@@ -512,6 +514,7 @@ mod Set do
       march> let s3 = Set.from_list([1, 2], fn a -> fn b -> a < b)
       march> Set.to_list(Set.remove(s3, 1, fn a -> fn b -> a < b))
       [2]
+      march> let s3 = Set.from_list([1, 2], fn a -> fn b -> a < b)
       march> Set.size(Set.remove(s3, 9, fn a -> fn b -> a < b))
       2
 
@@ -570,6 +573,7 @@ mod Set do
       march> let ia = Set.from_list([1, 2, 3], fn a -> fn b -> a < b)
       march> List.sort_by(Set.to_list(Set.intersection(ia, Set.from_list([2, 3, 4], fn a -> fn b -> a < b), fn a -> fn b -> a < b)), fn (x, y) -> x < y)
       [2, 3]
+      march> let ia = Set.from_list([1, 2, 3], fn a -> fn b -> a < b)
       march> Set.is_empty(Set.intersection(ia, Set.from_list([9], fn a -> fn b -> a < b), fn a -> fn b -> a < b))
       true
 
@@ -627,8 +631,10 @@ mod Set do
       march> let sb = Set.from_list([1, 2, 3], fn a -> fn b -> a < b)
       march> Set.is_subset(Set.from_list([1, 3], fn a -> fn b -> a < b), sb, fn a -> fn b -> a < b)
       true
+      march> let sb = Set.from_list([1, 2, 3], fn a -> fn b -> a < b)
       march> Set.is_subset(Set.from_list([1, 4], fn a -> fn b -> a < b), sb, fn a -> fn b -> a < b)
       false
+      march> let sb = Set.from_list([1, 2, 3], fn a -> fn b -> a < b)
       march> Set.is_subset(Set.empty(), sb, fn a -> fn b -> a < b)
       true
 

@@ -73,6 +73,7 @@ mod Channel do
 
   ## Examples
 
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
       march> Channel.socket_channel_pid(sock)
       10
   """
@@ -85,6 +86,7 @@ mod Channel do
 
   ## Examples
 
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
       march> Channel.socket_transport_pid(sock)
       11
   """
@@ -98,8 +100,10 @@ mod Channel do
 
   ## Examples
 
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
       march> Channel.socket_assigns(sock)
       []
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
       march> Channel.socket_assigns(Channel.assign(Channel.assign(sock, "user", "alice"), "role", "admin"))
       [("role", "admin"), ("user", "alice")]
   """
@@ -113,6 +117,7 @@ mod Channel do
 
   ## Examples
 
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
       march> Channel.socket_join_ref(sock)
       "0"
   """
@@ -126,10 +131,13 @@ mod Channel do
 
   ## Examples
 
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
       march> Channel.get_assign(Channel.assign(sock, "user", "alice"), "user")
       Some("alice")
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
       march> Channel.get_assign(Channel.assign(Channel.assign(sock, "user", "alice"), "user", "bob"), "user")
       Some("bob")
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
       march> Channel.get_assign(sock, "user")
       None
   """
@@ -151,6 +159,7 @@ mod Channel do
 
   ## Examples
 
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
       march> Channel.get_assign(Channel.assign(sock, "user", "alice"), "user")
       Some("alice")
   """
@@ -375,6 +384,7 @@ mod Channel do
 
   ## Examples
 
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
       march> Channel.msg_join_ref(cm)
       "0"
   """
@@ -387,6 +397,7 @@ mod Channel do
 
   ## Examples
 
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
       march> Channel.msg_ref(cm)
       "1"
   """
@@ -399,6 +410,7 @@ mod Channel do
 
   ## Examples
 
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
       march> Channel.msg_topic(cm)
       "room:lobby"
   """
@@ -423,6 +435,7 @@ mod Channel do
 
   ## Examples
 
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
       march> Channel.msg_payload(cm)
       "{}"
   """
@@ -496,6 +509,7 @@ mod Channel do
 
       march> Channel.parse("{\"join_ref\":\"0\",\"ref\":\"1\",\"topic\":\"room:lobby\",\"event\":\"new_msg\",\"payload\":{\"body\":\"hi\"}}")
       Some(ChannelMsg("0", "1", "room:lobby", "new_msg", "{\"body\":\"hi\"}"))
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
       march> Channel.parse(Channel.serialize(cm)) == Some(cm)
       true
       march> Channel.parse("{\"join_ref\": \"0\"}")

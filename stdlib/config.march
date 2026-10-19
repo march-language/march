@@ -122,6 +122,8 @@ mod Config do
       march> let s = Config.new_store("codec_int_demo")
       march> let k = Config.key(:myapp, :workers, Config.int())
       march> Config.store_put(s, k, 4)
+      march> let s = Config.new_store("codec_int_demo")
+      march> let k = Config.key(:myapp, :workers, Config.int())
       march> Config.store_get(s, k)
       Some(4)
   """
@@ -135,6 +137,8 @@ mod Config do
       march> let s = Config.new_store("codec_float_demo")
       march> let k = Config.key(:myapp, :ratio, Config.float())
       march> Config.store_put(s, k, 0.5)
+      march> let s = Config.new_store("codec_float_demo")
+      march> let k = Config.key(:myapp, :ratio, Config.float())
       march> Config.store_get(s, k)
       Some(0.5)
   """
@@ -148,6 +152,8 @@ mod Config do
       march> let s = Config.new_store("codec_string_demo")
       march> let k = Config.key(:myapp, :name, Config.string())
       march> Config.store_put(s, k, "demo")
+      march> let s = Config.new_store("codec_string_demo")
+      march> let k = Config.key(:myapp, :name, Config.string())
       march> Config.store_get(s, k)
       Some("demo")
   """
@@ -161,6 +167,8 @@ mod Config do
       march> let s = Config.new_store("codec_bool_demo")
       march> let k = Config.key(:myapp, :debug, Config.bool())
       march> Config.store_put(s, k, true)
+      march> let s = Config.new_store("codec_bool_demo")
+      march> let k = Config.key(:myapp, :debug, Config.bool())
       march> Config.store_get(s, k)
       Some(true)
   """
@@ -174,6 +182,8 @@ mod Config do
       march> let s = Config.new_store("codec_atom_demo")
       march> let k = Config.key(:myapp, :mode, Config.atom())
       march> Config.store_put(s, k, :fast)
+      march> let s = Config.new_store("codec_atom_demo")
+      march> let k = Config.key(:myapp, :mode, Config.atom())
       march> Config.store_get(s, k)
       Some(:fast)
   """
@@ -199,6 +209,8 @@ mod Config do
       march> let s = Config.new_store("codec_list_demo")
       march> let k = Config.key(:myapp, :tags, Config.list(Config.atom()))
       march> Config.store_put(s, k, [:a, :b])
+      march> let s = Config.new_store("codec_list_demo")
+      march> let k = Config.key(:myapp, :tags, Config.list(Config.atom()))
       march> Config.store_get(s, k)
       Some([:a, :b])
   """
@@ -381,6 +393,7 @@ mod Config do
 
       march> let port = Config.key(:myapp, :port, Config.int())
       march> Config.put(port, 4000)
+      march> let port = Config.key(:myapp, :port, Config.int())
       march> Config.get_with_default(port, 0)
       4000
   """
@@ -397,8 +410,10 @@ mod Config do
 
       march> let host = Config.key(:myapp, :host, Config.string())
       march> Config.put(host, "localhost")
+      march> let host = Config.key(:myapp, :host, Config.string())
       march> Option.unwrap_or(Config.get(host), "unset")
       "localhost"
+      march> let host = Config.key(:myapp, :host, Config.string())
       march> Config.get(Config.key(:myapp, :host, Config.int()))
       None
   """
@@ -415,12 +430,18 @@ mod Config do
 
   ## Examples
 
+      march> let port = Config.key(:myapp, :port, Config.int())
       march> let k = Config.key(:test, :port, Config.int())
       march> Config.fetch(k)
       Err(KeyMissing(":test/:port"))
+      march> let k = Config.key(:test, :port, Config.int())
+      march> let port = Config.key(:myapp, :port, Config.int())
       march> Config.put(k, 8080)
+      march> let k = Config.key(:test, :port, Config.int())
+      march> let port = Config.key(:myapp, :port, Config.int())
       march> Result.unwrap_or(Config.fetch(k), 0)
       8080
+      march> let port = Config.key(:myapp, :port, Config.int())
       march> Result.is_err(Config.fetch(Config.key(:test, :port, Config.string())))
       true
   """
@@ -450,8 +471,11 @@ mod Config do
 
   ## Examples
 
+      march> let host = Config.key(:myapp, :host, Config.string())
       march> let db = Config.key(:test, :host, Config.string())
       march> Config.put(db, "db.local")
+      march> let host = Config.key(:myapp, :host, Config.string())
+      march> let db = Config.key(:test, :host, Config.string())
       march> Config.require(db)
       "db.local"
   """
@@ -475,6 +499,7 @@ mod Config do
       march> let secret = Config.key(:myapp, :secret, Config.string())
       march> Config.from_env(secret, "MARCH_DOCTEST_NEVER_SET", "dev-secret")
       "dev-secret"
+      march> let secret = Config.key(:myapp, :secret, Config.string())
       march> Config.get_with_default(secret, "")
       "dev-secret"
   """
@@ -587,10 +612,15 @@ mod Config do
 
   ## Examples
 
+      march> let port = Config.key(:myapp, :port, Config.int())
       march> let p = Config.key_in(:myapp, :http, :port, Config.int())
       march> Config.put(p, 8080)
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> let p = Config.key_in(:myapp, :http, :port, Config.int())
       march> Config.validate(p, fn n -> n > 0 && n < 65536)
       Ok(8080)
+      march> let port = Config.key(:myapp, :port, Config.int())
+      march> let p = Config.key_in(:myapp, :http, :port, Config.int())
       march> Result.is_err(Config.validate(p, fn n -> n < 1024))
       true
   """
@@ -704,9 +734,12 @@ mod Config do
 
   ## Examples
 
+      march> let port = Config.key(:myapp, :port, Config.int())
       march> let k = Config.key(:myapp, :port, Config.int())
       march> let store = Config.new_store("new_store_demo")
       march> Config.store_put(store, k, 1)
+      march> let k = Config.key(:myapp, :port, Config.int())
+      march> let port = Config.key(:myapp, :port, Config.int())
       march> Option.unwrap_or(Config.store_get(Config.new_store("new_store_demo"), k), 0)
       1
   """
@@ -726,8 +759,11 @@ mod Config do
       march> let k = Config.key(:myapp, :retries, Config.int())
       march> let store = Config.new_store("store_put_demo")
       march> Config.store_put(store, k, 3)
+      march> let k = Config.key(:myapp, :retries, Config.int())
+      march> let store = Config.new_store("store_put_demo")
       march> Option.unwrap_or(Config.store_get(store, k), 0)
       3
+      march> let k = Config.key(:myapp, :retries, Config.int())
       march> Option.is_none(Config.get(k))
       true
   """
@@ -754,6 +790,7 @@ mod Config do
 
   ## Examples
 
+      march> let host = Config.key(:myapp, :host, Config.string())
       march> let store = Config.new_store("store_fetch_demo")
       march> Config.store_fetch(store, Config.key(:test, :host, Config.string()))
       Err(KeyMissing(":test/:host"))

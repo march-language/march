@@ -26,10 +26,10 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.sum([1.5, 2.5, 4.0])
-      8.0
-      march> Stats.sum([])
-      0.0
+      march> (Stats.sum([1.5, 2.5, 4.0])) == 8.0
+      true
+      march> (Stats.sum([])) == 0.0
+      true
   """
   fn sum(xs : List(Float)) : Float do
     List.fold_left(xs, 0.0, fn (acc, x) -> acc +. x)
@@ -86,8 +86,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.max_val([3.0, -1.5, 2.0])
-      3.0
+      march> (Stats.max_val([3.0, -1.5, 2.0])) == 3.0
+      true
   """
   fn max_val(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
@@ -112,12 +112,12 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.percentile([1.0, 2.0, 3.0, 4.0, 5.0], 25.0)
-      2.0
+      march> (Stats.percentile([1.0, 2.0, 3.0, 4.0, 5.0], 25.0)) == 2.0
+      true
       march> Stats.percentile([10.0, 20.0], 25.0)
       12.5
-      march> Stats.percentile([5.0, 1.0, 3.0], 100.0)
-      5.0
+      march> (Stats.percentile([5.0, 1.0, 3.0], 100.0)) == 5.0
+      true
   """
   fn percentile(xs : {List(Float) | len(_) > 0}, p : {Float | _ >= 0.0 && _ <= 100.0}) : Float do
     match xs do
@@ -149,8 +149,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.median([3.0, 1.0, 2.0])
-      2.0
+      march> (Stats.median([3.0, 1.0, 2.0])) == 2.0
+      true
       march> Stats.median([4.0, 1.0, 3.0, 2.0])
       2.5
   """
@@ -318,8 +318,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.quantile([1.0, 2.0, 3.0, 4.0], 0.5, Stats.InvertedCdf)
-      2.0
+      march> (Stats.quantile([1.0, 2.0, 3.0, 4.0], 0.5, Stats.InvertedCdf)) == 2.0
+      true
       march> Stats.quantile([1.0, 2.0, 3.0, 4.0], 0.5, Stats.AveragedInvertedCdf)
       2.5
       march> Stats.quantile([1.0, 2.0, 3.0, 4.0], 0.25, Stats.Linear)
@@ -349,8 +349,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.quantile_default([1.0, 2.0, 3.0, 4.0, 5.0], 0.75)
-      4.0
+      march> (Stats.quantile_default([1.0, 2.0, 3.0, 4.0, 5.0], 0.75)) == 4.0
+      true
   """
   fn quantile_default(xs : {List(Float) | len(_) > 0}, q : {Float | _ >= 0.0 && _ <= 1.0}) : Float do
     quantile(xs, q, Linear)
@@ -390,10 +390,10 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.iqr([1.0, 2.0, 3.0, 4.0, 5.0], Stats.Linear)
-      2.0
-      march> Stats.iqr([7.0], Stats.Linear)
-      0.0
+      march> (Stats.iqr([1.0, 2.0, 3.0, 4.0, 5.0], Stats.Linear)) == 2.0
+      true
+      march> (Stats.iqr([7.0], Stats.Linear)) == 0.0
+      true
   """
   fn iqr(xs : {List(Float) | len(_) > 0}, method : QuantileMethod) : Float do
     match quantiles(xs, [0.25, 0.75], method) do
@@ -408,8 +408,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.iqr_default([1.0, 2.0, 3.0, 4.0, 5.0])
-      2.0
+      march> (Stats.iqr_default([1.0, 2.0, 3.0, 4.0, 5.0])) == 2.0
+      true
   """
   fn iqr_default(xs : {List(Float) | len(_) > 0}) : Float do
     iqr(xs, Linear)
@@ -421,8 +421,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.five_number_summary([5.0, 1.0, 4.0, 2.0, 3.0], Stats.Linear)
-      (1.0, 2.0, 3.0, 4.0, 5.0)
+      march> (Stats.five_number_summary([5.0, 1.0, 4.0, 2.0, 3.0], Stats.Linear)) == (1.0, 2.0, 3.0, 4.0, 5.0)
+      true
   """
   fn five_number_summary(xs : {List(Float) | len(_) > 0}, method : QuantileMethod) : (Float, Float, Float, Float, Float) do
     match xs do
@@ -484,10 +484,10 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.variance([1.0, 3.0, 5.0])
-      4.0
-      march> Stats.variance([3.0])
-      0.0
+      march> (Stats.variance([1.0, 3.0, 5.0])) == 4.0
+      true
+      march> (Stats.variance([3.0])) == 0.0
+      true
   """
   fn variance(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
@@ -508,10 +508,10 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.variance_pop([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
-      4.0
-      march> Stats.variance_pop([])
-      0.0
+      march> (Stats.variance_pop([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])) == 4.0
+      true
+      march> (Stats.variance_pop([])) == 0.0
+      true
   """
   fn variance_pop(xs : List(Float)) : Float do
     match xs do
@@ -532,8 +532,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.std_dev([1.0, 3.0, 5.0])
-      2.0
+      march> (Stats.std_dev([1.0, 3.0, 5.0])) == 2.0
+      true
   """
   fn std_dev(xs : {List(Float) | len(_) > 0}) : Float do
     math_sqrt(variance(xs))
@@ -545,8 +545,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.std_dev_pop([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
-      2.0
+      march> (Stats.std_dev_pop([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])) == 2.0
+      true
   """
   fn std_dev_pop(xs : List(Float)) : Float do
     math_sqrt(variance_pop(xs))
@@ -561,10 +561,10 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.mode([3.0, 1.0, 3.0, 2.0])
-      3.0
-      march> Stats.mode([2.0, 1.0, 2.0, 1.0])
-      1.0
+      march> (Stats.mode([3.0, 1.0, 3.0, 2.0])) == 3.0
+      true
+      march> (Stats.mode([2.0, 1.0, 2.0, 1.0])) == 1.0
+      true
   """
   fn mode(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
@@ -609,8 +609,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.covariance([1.0, 2.0, 3.0], [2.0, 4.0, 6.0])
-      2.0
+      march> (Stats.covariance([1.0, 2.0, 3.0], [2.0, 4.0, 6.0])) == 2.0
+      true
   """
   fn covariance(xs : {List(Float) | len(_) >= 2},
                 ys : {List(Float) | len(_) == len(xs)}) : Float do
@@ -648,8 +648,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.correlation([1.0, 2.0, 3.0], [6.0, 4.0, 2.0])
-      -1.0
+      march> (Stats.correlation([1.0, 2.0, 3.0], [6.0, 4.0, 2.0])) == -1.0
+      true
   """
   fn correlation(xs : {List(Float) | len(_) >= 2},
                  ys : {List(Float) | len(_) == len(xs)}) : Float do
@@ -692,8 +692,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.linear_regression([0.0, 1.0, 2.0], [1.0, 3.0, 5.0])
-      (2.0, 1.0)
+      march> (Stats.linear_regression([0.0, 1.0, 2.0], [1.0, 3.0, 5.0])) == (2.0, 1.0)
+      true
   """
   fn linear_regression(xs : {List(Float) | len(_) >= 2},
                        ys : {List(Float) | len(_) == len(xs)}) : (Float, Float) do
@@ -748,10 +748,10 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.variance_safe([1.0, 3.0, 5.0])
-      Ok(4.0)
-      march> Stats.variance_safe([5.0])
-      Ok(0.0)
+      march> (Stats.variance_safe([1.0, 3.0, 5.0])) == Ok(4.0)
+      true
+      march> (Stats.variance_safe([5.0])) == Ok(0.0)
+      true
   """
   fn variance_safe(xs : List(Float)) : Result(Float, String) do
     match xs do
@@ -765,8 +765,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.std_dev_safe([1.0, 3.0, 5.0])
-      Ok(2.0)
+      march> (Stats.std_dev_safe([1.0, 3.0, 5.0])) == Ok(2.0)
+      true
       march> Stats.std_dev_safe([5.0])
       Err("Stats.std_dev_safe: need at least 2 elements")
   """
@@ -783,8 +783,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.min_safe([2.0, -1.0])
-      Ok(-1.0)
+      march> (Stats.min_safe([2.0, -1.0])) == Ok(-1.0)
+      true
       march> Stats.min_safe([])
       Err("Stats.min_safe: empty list")
   """
@@ -800,8 +800,8 @@ mod Stats do
 
   ## Examples
 
-      march> Stats.max_safe([2.0, -1.0])
-      Ok(2.0)
+      march> (Stats.max_safe([2.0, -1.0])) == Ok(2.0)
+      true
       march> Stats.max_safe([])
       Err("Stats.max_safe: empty list")
   """

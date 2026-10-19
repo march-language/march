@@ -62,6 +62,7 @@ mod Vault do
 
       march> let visits = Vault.new("visits")
       march> Vault.set(visits, "home", 1)
+      march> let visits = Vault.new("visits")
       march> Vault.get_or(visits, "home", 0)  -- Vault.get gives Some(1)
       1
 
@@ -115,7 +116,9 @@ mod Vault do
 
       march> let vp = Vault.new("doc_put")
       march> Vault.put(vp, "k", 1)
+      march> let vp = Vault.new("doc_put")
       march> Vault.put(vp, "k", 2)
+      march> let vp = Vault.new("doc_put")
       march> Vault.get_or(vp, "k", 0)  -- Vault.get gives Some(2)
       2
   """
@@ -130,9 +133,12 @@ mod Vault do
 
       march> let vdel = Vault.new("doc_delete")
       march> Vault.put(vdel, "k", 1)
+      march> let vdel = Vault.new("doc_delete")
       march> Vault.delete(vdel, "k")
+      march> let vdel = Vault.new("doc_delete")
       march> Vault.get(vdel, "k")
       None
+      march> let vdel = Vault.new("doc_delete")
       march> Vault.delete(vdel, "never_set")
       ()
   """
@@ -149,8 +155,11 @@ mod Vault do
 
       march> let vc = Vault.new("doc_clear")
       march> Vault.set(vc, "a", 1)
+      march> let vc = Vault.new("doc_clear")
       march> Vault.set(vc, "b", 2)
+      march> let vc = Vault.new("doc_clear")
       march> Vault.clear(vc)
+      march> let vc = Vault.new("doc_clear")
       march> Vault.size(vc)
       0
   """
@@ -173,7 +182,9 @@ mod Vault do
 
       march> let req = Vault.new("request_42")
       march> Vault.set(req, "user", "ada")
+      march> let req = Vault.new("request_42")
       march> Vault.close(req)
+      march> let req = Vault.new("request_42")
       march> Vault.get_or(req, "user", "gone")  -- the handle still works, on an empty table
       "gone"
       march> Vault.has(Vault.open("request_42"), "user")  -- open now makes a fresh table
@@ -211,9 +222,12 @@ mod Vault do
 
       march> let vs = Vault.new("doc_set")
       march> Vault.set(vs, 1, "int key")
+      march> let vs = Vault.new("doc_set")
       march> Vault.set(vs, "1", "string key")
+      march> let vs = Vault.new("doc_set")
       march> Vault.get(vs, 1)
       Some("int key")
+      march> let vs = Vault.new("doc_set")
       march> Vault.size(vs)
       2
   """
@@ -231,6 +245,7 @@ mod Vault do
 
       march> let vt = Vault.new("doc_ttl")
       march> Vault.set_ttl(vt, "session", "abc", 3600)
+      march> let vt = Vault.new("doc_ttl")
       march> Vault.get_or(vt, "session", "expired")  -- Vault.get gives Some("abc")
       "abc"
   """
@@ -246,8 +261,10 @@ mod Vault do
 
       march> let vg = Vault.new("doc_get")
       march> Vault.set(vg, "x", 10)
+      march> let vg = Vault.new("doc_get")
       march> Option.is_some(Vault.get(vg, "x"))  -- Vault.get gives Some(10)
       true
+      march> let vg = Vault.new("doc_get")
       march> Vault.get(vg, "missing")
       None
   """
@@ -262,7 +279,9 @@ mod Vault do
 
       march> let vd = Vault.new("doc_drop")
       march> Vault.set(vd, "x", 1)
+      march> let vd = Vault.new("doc_drop")
       march> Vault.drop(vd, "x")
+      march> let vd = Vault.new("doc_drop")
       march> Vault.has(vd, "x")
       false
   """
@@ -282,10 +301,14 @@ mod Vault do
 
       march> let vu = Vault.new("doc_update")
       march> Vault.set(vu, "n", 10)
+      march> let vu = Vault.new("doc_update")
       march> Vault.update(vu, "n", fn x -> x * 2)
+      march> let vu = Vault.new("doc_update")
       march> Vault.get_or(vu, "n", 0)  -- Vault.get gives Some(20)
       20
+      march> let vu = Vault.new("doc_update")
       march> Vault.update(vu, "absent", fn x -> x * 2)
+      march> let vu = Vault.new("doc_update")
       march> Vault.has(vu, "absent")
       false
   """
@@ -308,8 +331,10 @@ mod Vault do
       march> let vn = Vault.new("doc_put_new")
       march> Vault.put_new(vn, "lock", "a")
       true
+      march> let vn = Vault.new("doc_put_new")
       march> Vault.put_new(vn, "lock", "b")
       false
+      march> let vn = Vault.new("doc_put_new")
       march> Vault.get_or(vn, "lock", "")  -- the first claim is kept
       "a"
   """
@@ -328,6 +353,7 @@ mod Vault do
       march> let vj = Vault.new("doc_put_new_ttl")
       march> Vault.put_new_ttl(vj, "job", "worker1", 60)
       true
+      march> let vj = Vault.new("doc_put_new_ttl")
       march> Vault.put_new_ttl(vj, "job", "worker2", 60)
       false
   """
@@ -350,8 +376,10 @@ mod Vault do
       march> let vi = Vault.new("doc_incr")
       march> Vault.incr(vi, "hits", 1)
       1
+      march> let vi = Vault.new("doc_incr")
       march> Vault.incr(vi, "hits", 5)
       6
+      march> let vi = Vault.new("doc_incr")
       march> Vault.incr(vi, "hits", -2)
       4
   """
@@ -372,8 +400,11 @@ mod Vault do
 
       march> let vb = Vault.new("doc_push_capped")
       march> Vault.push_capped(vb, "log", 1, 2)
+      march> let vb = Vault.new("doc_push_capped")
       march> Vault.push_capped(vb, "log", 2, 2)
+      march> let vb = Vault.new("doc_push_capped")
       march> Vault.push_capped(vb, "log", 3, 2)
+      march> let vb = Vault.new("doc_push_capped")
       march> Vault.get(vb, "log")
       Some([2, 3])
   """
@@ -396,8 +427,11 @@ mod Vault do
       march> let vz = Vault.new("doc_size")
       march> Vault.size(vz)
       0
+      march> let vz = Vault.new("doc_size")
       march> Vault.set(vz, "a", 1)
+      march> let vz = Vault.new("doc_size")
       march> Vault.set(vz, "a", 2)
+      march> let vz = Vault.new("doc_size")
       march> Vault.size(vz)
       1
   """
@@ -412,8 +446,10 @@ mod Vault do
 
       march> let vo = Vault.new("doc_get_or")
       march> Vault.set(vo, "x", 5)
+      march> let vo = Vault.new("doc_get_or")
       march> Vault.get_or(vo, "x", 0)
       5
+      march> let vo = Vault.new("doc_get_or")
       march> Vault.get_or(vo, "y", 0)
       0
   """
@@ -453,8 +489,10 @@ mod Vault do
 
       march> let vh = Vault.new("doc_has")
       march> Vault.set(vh, "x", 1)
+      march> let vh = Vault.new("doc_has")
       march> Vault.has(vh, "x")
       true
+      march> let vh = Vault.new("doc_has")
       march> Vault.has(vh, "y")
       false
   """
@@ -473,11 +511,14 @@ mod Vault do
 
       march> let ex = Vault.new("ex")
       march> Vault.set(ex, "a", 1)
+      march> let ex = Vault.new("ex")
       march> Vault.set(ex, "b", 2)
+      march> let ex = Vault.new("ex")
       march> List.length(Vault.keys(ex))
       2
       march> let ints = Vault.new("ints")
       march> Vault.set(ints, 2, 20)  -- an Int key: not the same entry as "2"
+      march> let ints = Vault.new("ints")
       march> Vault.get_or(ints, "2", 0)
       0
 
@@ -498,6 +539,7 @@ mod Vault do
 
       march> let va = Vault.new("doc_all")
       march> Vault.set(va, "x", 1)
+      march> let va = Vault.new("doc_all")
       march> Vault.all(va)
       [("x", 1)]
       march> Vault.all(Vault.new("doc_all_empty"))

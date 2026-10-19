@@ -45,8 +45,10 @@ mod Check do
       march> let cfg = Check.default_config()
       march> cfg.num_runs
       100
+      march> let cfg = Check.default_config()
       march> cfg.seed
       None
+      march> let cfg = Check.default_config()
       march> { cfg with num_runs: 10 }.num_runs
       10
   """

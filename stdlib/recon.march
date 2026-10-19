@@ -350,6 +350,7 @@ mod Recon do
       march> let row = { pid: 12, type_name: "Worker", names: ["billing"], status: "running", value: 40, mbox: 40, stack_bytes: 8192, link: "supervised", parent: Some(3), parent_type: "AppSup", spawned_by: Some(3), children: 0, crashes: 1, child_crashes: 0, supervision: None }
       march> List.length(String.split(Recon.format_top([row, row]), "\n"))
       3
+      march> let row = { pid: 12, type_name: "Worker", names: ["billing"], status: "running", value: 40, mbox: 40, stack_bytes: 8192, link: "supervised", parent: Some(3), parent_type: "AppSup", spawned_by: Some(3), children: 0, crashes: 1, child_crashes: 0, supervision: None }
       march> List.nth(String.split(Recon.format_top([row]), "\n"), 1)
       "     12  billing          running       40     8192       40       1  supervised 3 (AppSup)            -"
       march> List.length(String.split(Recon.format_top([]), "\n"))

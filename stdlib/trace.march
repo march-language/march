@@ -309,6 +309,7 @@ mod Trace do
       march> let tc = Trace.calls(["Billing.charge"])
       march> tc.fns
       ["Billing.charge"]
+      march> let tc = Trace.calls(["Billing.charge"])
       march> List.length(tc.events)
       0
   """
@@ -326,6 +327,7 @@ mod Trace do
       march> let ta = Trace.actors([Trace.Sent, Trace.Received], [3, 5])
       march> ta.pids
       [3, 5]
+      march> let ta = Trace.actors([Trace.Sent, Trace.Received], [3, 5])
       march> ta.fns
       []
   """
@@ -342,6 +344,7 @@ mod Trace do
       march> let tw = Trace.with_calls(Trace.actors([Trace.Sent], [3]), ["Billing.charge"])
       march> tw.fns
       ["Billing.charge"]
+      march> let tw = Trace.with_calls(Trace.actors([Trace.Sent], [3]), ["Billing.charge"])
       march> tw.pids
       [3]
   """

@@ -98,6 +98,7 @@ mod ChannelServer do
 
   ## Examples
 
+      march> let cfg = ChannelServer.make_config(Channel.new_socket("room:lobby", 10, 11, "0"), fn (_t, _p, _s) -> Ok(0), fn (_r, _e, _p, st, _s) -> Channel.noreply(st), fn (_m, st, _s) -> Channel.noreply(st), fn (_r, _st, _s) -> (), 99)
       march> Channel.socket_topic(ChannelServer.config_socket(cfg))
       "room:lobby"
   """
@@ -110,6 +111,7 @@ mod ChannelServer do
 
   ## Examples
 
+      march> let cfg = ChannelServer.make_config(Channel.new_socket("room:lobby", 10, 11, "0"), fn (_t, _p, _s) -> Ok(0), fn (_r, _e, _p, st, _s) -> Channel.noreply(st), fn (_m, st, _s) -> Channel.noreply(st), fn (_r, _st, _s) -> (), 99)
       march> ChannelServer.config_shard(cfg)
       99
   """

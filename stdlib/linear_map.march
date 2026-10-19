@@ -136,6 +136,7 @@ mod LinearMap do
       march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
       march> match LinearMap.take(two(0), 1) do (v, m) -> (v, LinearMap.to_list(m)) end
       (Some(10), [(2, 20)])
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
       march> match LinearMap.take(two(0), 9) do (v, m) -> (v, LinearMap.drain(m, 0, fn (acc, k, x) -> acc + x)) end
       (None, 30)
   """
@@ -168,6 +169,7 @@ mod LinearMap do
       march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
       march> match LinearMap.take_slot(two(0), 1) do (v, s) -> (v, List.sort_by(LinearMap.to_list(LinearMap.fill(s, 99)), fn (x, y) -> x < y)) end
       (Some(10), [(1, 99), (2, 20)])
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
       march> match LinearMap.take_slot(two(0), 7) do (v, s) -> (v, LinearMap.drain(LinearMap.fill(s, 70), 0, fn (acc, k, x) -> acc + x)) end
       (None, 100)
   """
@@ -244,6 +246,7 @@ mod LinearMap do
       march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
       march> match LinearMap.member(two(0), 2) do (b, m) -> (b, LinearMap.drain(m, 0, fn (acc, k, x) -> acc + x)) end
       (true, 30)
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
       march> match LinearMap.member(two(0), 5) do (b, m) -> (b, LinearMap.drain(m, 0, fn (acc, k, x) -> acc + x)) end
       (false, 30)
   """

@@ -250,6 +250,7 @@ mod HttpClient do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> HttpClient.run_response_steps([HttpClient.ResponseStepEntry("raise", HttpClient.step_raise_on_error)], req, Http.Response(Http.Status(500), [], ""))
       Err(StepError("step_raise_on_error", "500"))
   """
@@ -272,8 +273,10 @@ mod HttpClient do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> HttpClient.run_error_steps([], req, HttpClient.TooManyRedirects(3))
       Err(TooManyRedirects(3))
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> HttpClient.run_error_steps([HttpClient.ErrorStepEntry("x", fn (_, _) -> HttpClient.Recover(42))], req, HttpClient.TooManyRedirects(3))
       Ok(42)
   """
@@ -441,9 +444,12 @@ mod HttpClient do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> let sreq = Http.set_body(req, "")
       march> HttpClient.handle_redirects(sreq, Http.Response(Http.Status(302), [Http.Header("Location", "/x")], ""), 2, 2)
       Err(TooManyRedirects(2))
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
+      march> let sreq = Http.set_body(req, "")
       march> HttpClient.handle_redirects(sreq, Http.Response(Http.Status(302), [], ""), 3, 0) |> Result.map(fn r -> Http.response_status_code(r))
       Ok(302)
   """
@@ -757,6 +763,7 @@ mod HttpClient do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> let auth = HttpClient.step_bearer_auth("tok")
       march> Result.map(auth(req), fn r -> Http.get_request_header(r, "Authorization"))
       Ok(Some("Bearer tok"))
@@ -776,6 +783,7 @@ mod HttpClient do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> let basic = HttpClient.step_basic_auth("ann", "pw")
       march> Result.map(basic(req), fn r -> Http.get_request_header(r, "Authorization"))
       Ok(Some("Basic ann:pw"))
@@ -795,9 +803,11 @@ mod HttpClient do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> let base = HttpClient.step_base_url("https://api.example.com:8443/v1")
       march> Result.map(base(req), fn r -> (Http.host(r), Http.port(r), Http.path(r), Http.query(r)))
       Ok(("api.example.com", Some(8443), "/v1/users", Some("page=2")))
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> let bad = HttpClient.step_base_url("nope")
       march> Result.is_err(bad(req))
       true
@@ -828,6 +838,7 @@ mod HttpClient do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> let ct = HttpClient.step_content_type("application/json")
       march> Result.map(ct(req), fn r -> Http.get_request_header(r, "Content-Type"))
       Ok(Some("application/json"))
@@ -845,8 +856,10 @@ mod HttpClient do
 
   ## Examples
 
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> HttpClient.step_raise_on_error(req, Http.Response(Http.Status(404), [], ""))
       Err(StepError("step_raise_on_error", "404"))
+      march> let req = Result.unwrap(Http.get("http://example.com/users?page=2"))
       march> HttpClient.step_raise_on_error(req, Http.Response(Http.Status(204), [], "")) |> Result.is_ok
       true
   """
