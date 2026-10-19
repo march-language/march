@@ -333,9 +333,15 @@ let walk_fn (sites : site list ref) ~(fn_origin : fn_origin) (fd : A.fn_def) : u
       List.iteri
         (fun idx (p : A.fn_param) ->
           match p with
-          | A.FPNamed p -> Option.iter (start sites ~fn_origin:(Some fn_origin) (Param (fn_name, idx))) p.A.param_ty
+          (* [~origin_fn] at a parameter too, for one reason only: the
+             [Type_arg] rule reads an abstract-refinement slot
+             (`acc : List(a[p])`, an accumulator helper's) under the
+             function's own abstract refinements, as the checker does at a
+             self-call; no other rule consults it for a [Param] site. *)
+          | A.FPNamed p ->
+            Option.iter (start sites ~origin_fn:(Some fd) ~fn_origin:(Some fn_origin) (Param (fn_name, idx))) p.A.param_ty
           | A.FPDefault (p, default_expr) ->
-            Option.iter (start sites ~fn_origin:(Some fn_origin) (Param (fn_name, idx))) p.A.param_ty;
+            Option.iter (start sites ~origin_fn:(Some fd) ~fn_origin:(Some fn_origin) (Param (fn_name, idx))) p.A.param_ty;
             walk_expr sites default_expr
           | A.FPPat _ -> ())
         c.A.fc_params;
@@ -512,6 +518,30 @@ let inert_signature_verdict (warning_name : string) (subject : string) (site : s
           for %s -- this is itself a finding, not a guess"
          warning_name subject)
 
+(* Does [t] hold the refinement whose predicate sits at [sp]? *)
+let rec ty_holds_pred_at (sp : A.span) (t : A.ty) : bool =
+  match t with
+  | A.TyRefine (b, _, pred) -> expr_span pred = sp || ty_holds_pred_at sp b
+  | A.TyCon (_, ts) | A.TyTuple ts -> List.exists (ty_holds_pred_at sp) ts
+  | A.TyArrow (a, b) -> ty_holds_pred_at sp a || ty_holds_pred_at sp b
+  | A.TyRecord fs -> List.exists (fun (_, t) -> ty_holds_pred_at sp t) fs
+  | A.TyLinear (_, t) -> ty_holds_pred_at sp t
+  | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> false
+
+(* The declared type the [Type_arg] rule asks [elem_refinement] about: the
+   site's origin type, except that a TUPLE return is modelled per component
+   ([Refine_scope.ret_elems_of_ty], leftovers design 2026-10-18 §5.1), so a
+   site there is asked about its OWN component.  A refinement in a component
+   that is not an element return (`(Task({Int | p}), …)`) stays unenforced. *)
+let type_arg_subject (site : site) : A.ty =
+  let rec strip (t : A.ty) =
+    match t with A.TyRefine (b, _, _) | A.TyLinear (_, b) -> strip b | t -> t
+  in
+  match site.origin, strip site.origin_ty with
+  | Return _, A.TyTuple ts ->
+    (match List.find_opt (ty_holds_pred_at site.span) ts with Some c -> c | None -> site.origin_ty)
+  | _ -> site.origin_ty
+
 let classify (site : site) : disposition =
   match site.origin with
   (* Rule 2, tried FIRST: a `sig` / `extern` / `interface` entry's WHOLE
@@ -543,11 +573,20 @@ let classify (site : site) : disposition =
     when site.position = Type_arg
          && (let saved = !Refine_post.current_abstracts in
              Refine_post.current_abstracts :=
-               (match site.origin_fn with
-                | Some fd -> Refine_abstract.names ~is_known:Refine_post.known_predicate_fn fd
-                | None -> []);
+               (match site.origin_fn, site.fn_origin with
+                (* A block-level `fn`'s element slots are read by the checker
+                   under the ENCLOSING function's abstract refinements
+                   ([Refine_check.visit_local_fn]), which this site does not
+                   carry; asking under none is the conservative answer: a
+                   concrete slot (`List({Int | _ > 0})`, whose every tail is
+                   an element obligation since 2026-10-18, element-flow
+                   phase 3) is Enforced, an abstract one reports
+                   unenforced. *)
+                | _, Some Local_fn -> []
+                | Some fd, _ -> Refine_abstract.names ~is_known:Refine_post.known_predicate_fn fd
+                | None, _ -> []);
              Fun.protect ~finally:(fun () -> Refine_post.current_abstracts := saved)
-               (fun () -> Refine_post.elem_refinement (Some site.origin_ty) <> None)) ->
+               (fun () -> Refine_post.elem_refinement (Some (type_arg_subject site)) <> None)) ->
     Enforced
   (* Arrow DOMAIN at a function or lambda parameter (P3 design §1a): a call
      through the parameter is checked against the domain refinement via the

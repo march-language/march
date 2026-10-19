@@ -16475,6 +16475,2850 @@ let demand_flow_suite =
                    \  fn g(k : Int) : Int do f(two((1, 2))) end\n")
            in (p, v, s))) ]
 
+(* ── One namespace for relational element predicates (design
+   specs/2026-10-18-element-flow-followups-design.md, phase 0) ──────────────
+   An element slot that names a PARAMETER (`List({Int | _ < n})`) is in the
+   namespace of the declaration it came from.  Before 2026-10-18 it was read
+   in whatever scope it landed in, and five shapes proved something false
+   (rows z1-z5 of the design's §0.5).  Every case below was RED on the
+   unfixed checker; the triple each one had there is in its comment.  The
+   controls are correct programs that must keep proving, so the fix cannot
+   pass by declining everything. *)
+let elemflow_namespace_suite =
+  let m body =
+    "mod Z do\n\
+    \  fn need_lt(xs : List({Int | _ < n}), n : Int) : Int do 0 end\n\
+    \  fn need_neg(k : {Int | _ < 0}) : Int do k end\n\
+    \  fn mapl(xs : List(a), g : a -> b) : List(b) do\n\
+    \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> Cons(g(h), mapl(t, g))\n    end\n  end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let reasons src = let (_, _, _, rs) = typed_ledger src in rs in
+  let details src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r -> Some (March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let t3 = Alcotest.(triple int int int) in
+  [ gated "z1: a parameter's element demand is read at the call's actuals" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `_ < n` resolved against the caller's
+           `let n = 1000`, so `_ < 60` "implied" it. *)
+        Alcotest.check t3 "z1: caller let n = 1000, need_lt(ys, 10) is violated" (0, 1, 0)
+          (l3 (m "  fn go(ys : List({Int | _ < 60})) : Int do\n    let n = 1000\n    need_lt(ys, 10)\n  end\n"));
+        (* Unfixed: (1, 0, 0) -- the caller's parameter `n` and its guard. *)
+        Alcotest.check t3 "z1': a guarded caller parameter n, need_lt(ys, 10) is violated" (0, 1, 0)
+          (l3
+             (m "  fn go(n : {Int | _ > 100}, ys : List({Int | _ < 60})) : Int do\n\
+                 \    if n > 1000 do need_lt(ys, 10) else 0 end\n  end\n")));
+
+    gated "z1'': a true call is no longer a false violation" (fun () ->
+        (* Unfixed: (0, 1, 0) -- `n` was free, witness n = 0. *)
+        Alcotest.check t3 "need_lt(ys, 200) with ys < 5 proves" (1, 0, 0)
+          (l3 (m "  fn go(ys : List({Int | _ < 5})) : Int do need_lt(ys, 200) end\n")));
+
+    gated "z1''': a literal argument is checked against the substituted demand" (fun () ->
+        (* Unfixed: both (0, 0, 1), solver-undecided. *)
+        Alcotest.check t3 "need_lt([5], 10) proves" (1, 0, 0)
+          (l3 (m "  fn go() : Int do need_lt([5], 10) end\n"));
+        Alcotest.check t3 "need_lt([50], 10) is violated" (0, 1, 0)
+          (l3 (m "  fn go() : Int do need_lt([50], 10) end\n")));
+
+    gated "controls: relational actuals still prove (no over-correction)" (fun () ->
+        Alcotest.check t3 "need_lt(ys, k) with k >= 60 and ys < 60 proves" (1, 0, 0)
+          (l3 (m "  fn go(k : {Int | _ >= 60}, ys : List({Int | _ < 60})) : Int do need_lt(ys, k) end\n"));
+        Alcotest.check t3 "the caller's own n: need_lt(ys, n) with ys < n proves" (1, 0, 0)
+          (l3 (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n) end\n"));
+        Alcotest.check t3 "need_lt(ys, n + 1) with ys < n proves" (1, 0, 0)
+          (l3 (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n + 1) end\n"));
+        (* Unfixed: (1, 0, 0), a false proof.  Not a violation either: no
+           user fact constrains `n`, and a goal naming an unconstrained
+           caller variable is a skip (see "goal names" below). *)
+        Alcotest.check t3 "need_lt(ys, n - 1) with ys < n is not proved" (0, 0, 1)
+          (l3 (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do need_lt(ys, n - 1) end\n"));
+        (* A named binder is renamed before the substitution: the actual `x`
+           (the caller's) must not be captured by the slot's binder `x`.
+           Captured, the demand would read `x < x` and be violated. *)
+        Alcotest.check t3 "a named binder does not capture an actual of the same name" (1, 0, 0)
+          (l3
+             (m "  fn need_lt2(xs : List({x : Int | x < n}), n : Int) : Int do 0 end\n\
+                 \  fn go(x : Int, ys : List({Int | _ < x})) : Int do need_lt2(ys, x) end\n")));
+
+    gated "z2: a return tail under a rebinding of a demanded name is a skip" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `[50]` checked against `_ < n` with the
+           LOCAL `n == 100`, so `below(10) = [50]` "met" `_ < 10`. *)
+        let src = m "  fn below(n : Int) : List({Int | _ < n}) do\n    let n = 100\n    [50]\n  end\n" in
+        Alcotest.check t3 "skipped, never proved" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "an unreflectable-subject skip" [ "unreflectable-subject" ] (reasons src);
+        Alcotest.(check bool) "naming the rebound parameter" true
+          (List.exists (mentions "rebinds `n`") (details src));
+        (* The same through a `match` arm whose pattern rebinds `n`.
+           Unfixed: (1, 0, 0) -- `n - 1 < n` about the pattern's `n`. *)
+        Alcotest.check t3 "a match-arm binder: skipped" (0, 0, 1)
+          (l3
+             (m "  fn below(n : Int, xs : List(Int)) : List({Int | _ < n}) do\n\
+                 \    match xs do\n      Cons(n, _) -> [n - 1]\n      Nil -> Nil\n    end\n  end\n")));
+
+    gated "z2 controls: the definition side is otherwise unchanged" (fun () ->
+        Alcotest.check t3 "[n - 1, n - 2] proves" (2, 0, 0)
+          (l3 (m "  fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end\n"));
+        Alcotest.check t3 "[n - 1, n] is violated at n" (1, 1, 0)
+          (l3 (m "  fn below(n : Int) : List({Int | _ < n}) do [n - 1, n] end\n"));
+        (* A `let` of an unrelated name keeps the in-walk check and its fact. *)
+        Alcotest.check t3 "let m = n - 1 then [m] proves" (1, 0, 0)
+          (l3 (m "  fn below(n : Int) : List({Int | _ < n}) do\n    let m = n - 1\n    [m]\n  end\n")));
+
+    gated "z3: a stored element fact retires when a name it mentions is rebound" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `xs : _ < n` survived `let n = 0` and was
+           read as `h < 0`. *)
+        Alcotest.check t3 "let n = 0 then need_neg(h): not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n})) : Int do\n\
+                 \    let n = 0\n\
+                 \    match xs do\n    Cons(h, _) -> need_neg(h)\n    Nil -> 0\n    end\n  end\n"));
+        Alcotest.check t3 "control: without the let, the same skip" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n})) : Int do\n\
+                 \    match xs do\n    Cons(h, _) -> need_neg(h)\n    Nil -> 0\n    end\n  end\n"));
+        Alcotest.check t3 "control: under a guard n <= 0, no rebinding, proves" (1, 0, 0)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n})) : Int do\n\
+                 \    if n <= 0 do\n    match xs do\n    Cons(h, _) -> need_neg(h)\n    Nil -> 0\n    end\n\
+                 \    else 0 end\n  end\n")));
+
+    gated "z4: a lambda parameter is not given a fact about itself" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `fn n` got `{Int | _ < n}`, i.e. `n < n`. *)
+        Alcotest.check t3 "fn n -> need_neg(n): not proved" (0, 0, 1)
+          (l3 (m "  fn f(n : Int, xs : List({Int | _ < n})) : List(Int) do mapl(xs, fn n -> need_neg(n)) end\n"));
+        Alcotest.check t3 "control: fn y -> need_neg(y), the same skip" (0, 0, 1)
+          (l3 (m "  fn f(n : Int, xs : List({Int | _ < n})) : List(Int) do mapl(xs, fn y -> need_neg(y)) end\n"));
+        Alcotest.check t3 "control: under a guard n <= 0, fn y -> need_neg(y) proves" (1, 0, 0)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n})) : List(Int) do\n\
+                 \    if n <= 0 do mapl(xs, fn y -> need_neg(y)) else Nil end\n  end\n")));
+
+    gated "z5: a demand is not read under a lambda's parameter" (fun () ->
+        (* Unfixed: (1, 0, 0) -- `_ < n` read under `fn n`: `n - 1 < n`. *)
+        let src = m "  fn go(ys : List(Int)) : Int do need_lt(mapl(ys, fn n -> n - 1), 10) end\n" in
+        Alcotest.check t3 "need_lt(mapl(ys, fn n -> n - 1), 10): not proved" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a parametric-source skip" [ "parametric-source-unproved" ] (reasons src);
+        Alcotest.check t3 "control: fn y -> y - 1, the same skip" (0, 0, 1)
+          (l3 (m "  fn go(ys : List(Int)) : Int do need_lt(mapl(ys, fn y -> y - 1), 10) end\n"));
+        (* The capture guard proper: substituted, the demand is `_ < n` about
+           the CALLER's `n`, and the lambda binds its own `n`.  Unfixed:
+           (1, 0, 0). *)
+        let cap = m "  fn go(n : Int, ys : List(Int)) : Int do need_lt(mapl(ys, fn n -> n - 1), n) end\n" in
+        Alcotest.check t3 "the caller's n under fn n: not proved" (0, 0, 1) (l3 cap);
+        Alcotest.(check bool) "naming the shadowing parameter" true
+          (List.exists (mentions "shadows") (details cap));
+        Alcotest.check t3 "control: fn y -> y - 1 over ys < n, demand n: proves" (1, 0, 0)
+          (l3
+             (m "  fn go(n : Int, ys : List({Int | _ < n})) : Int do\n\
+                 \    need_lt(mapl(ys, fn y -> y - 1), n)\n  end\n")));
+
+    gated "z2's lambda twin: a lambda tail naming an inner binding is not checked" (fun () ->
+        (* Not in the design's table: found while fixing z2.  A lambda's tails
+           are checked in the env at the LAMBDA, so `k` below read the
+           caller's `k > 0`.  Unfixed: both (1, 0, 0), with a closed demand. *)
+        let src =
+          m "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+            \  fn go(k : {Int | _ > 0}, ys : List(Int)) : Int do\n\
+            \    sum_pos(mapl(ys, fn y ->\n      let k = 0 - 5\n      k))\n  end\n"
+        in
+        Alcotest.check t3 "a demand_flow source: not proved" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a parametric-source skip" [ "parametric-source-unproved" ] (reasons src);
+        Alcotest.check t3 "a pass-site codomain: not proved" (0, 0, 1)
+          (l3
+             (m "  fn hof(f : (Int) -> List({Int | _ > 0})) : Int do 0 end\n\
+                 \  fn go(k : {Int | _ > 0}) : Int do\n    hof(fn y ->\n      let k = 0 - 5\n      [k])\n  end\n"));
+        Alcotest.check t3 "control: an inner let the tail does not mention still proves" (1, 0, 0)
+          (l3
+             (m "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+                 \  fn go(k : {Int | _ > 0}, ys : List(Int)) : Int do\n\
+                 \    sum_pos(mapl(ys, fn y ->\n      let j = 0 - 5\n      k))\n  end\n")));
+
+    gated "goal names: a caller name no user fact constrains is a skip, never a violation" (fun () ->
+        (* Review follow-up 1 (2026-10-18).  The substituted demand `_ < k`
+           names the caller's `k`, whose only fact (`k == x`) retired with
+           `let x = 0`; the solver picked `k = 0` and the element-subtyping
+           definite-failure rule reported a hard violation of a correct
+           program.  Unfixed (a33248f93): (0, 1, 0). *)
+        Alcotest.check t3 "let k = x; let x = 0; need_lt(ys, k): skipped" (0, 0, 1)
+          (l3
+             (m "  fn go(x : {Int | _ > 60}, ys : List({Int | _ < 50})) : Int do\n\
+                 \    let k = x\n    let x = 0\n    need_lt(ys, k)\n  end\n"));
+        Alcotest.check t3 "an unrefined caller k: skipped" (0, 0, 1)
+          (l3 (m "  fn go(k : Int, ys : List({Int | _ < 50})) : Int do need_lt(ys, k) end\n"));
+        (* Controls: a constrained name still decides both ways. *)
+        Alcotest.check t3 "control: let k = x with x > 60 proves" (1, 0, 0)
+          (l3
+             (m "  fn go(x : {Int | _ > 60}, ys : List({Int | _ < 50})) : Int do\n\
+                 \    let k = x\n    need_lt(ys, k)\n  end\n"));
+        Alcotest.check t3 "control: k <= 10 against ys < 60 is violated" (0, 1, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 10}, ys : List({Int | _ < 60})) : Int do need_lt(ys, k) end\n"));
+        Alcotest.check t3 "control: a guard k < 20 against ys < 60 is violated" (0, 1, 0)
+          (l3
+             (m "  fn go(k : Int, ys : List({Int | _ < 60})) : Int do\n\
+                 \    if k < 20 do need_lt(ys, k) else 0 end\n  end\n")));
+
+    gated "goal names: a rebound caller name lends no stale fact" (fun () ->
+        (* Review follow-up 2: the negative direction of [~goal_scope_facts].
+           Each `k` below is a NEW binding, so the outer `k > 60` must not be
+           read for it.  Correct on a33248f93 as well; pinned here. *)
+        let pre = "  fn go(k : {Int | _ > 60}, ys : List({Int | _ < 50}), o : Option(Int), zs : List(Int)) : Int do\n" in
+        Alcotest.check t3 "let k = 0: violated (k really is 0)" (0, 1, 0)
+          (l3 (m (pre ^ "    let k = 0\n    need_lt(ys, k)\n  end\n")));
+        Alcotest.check t3 "a match binder k: not proved" (0, 0, 1)
+          (l3 (m (pre ^ "    match o do\n      Some(k) -> need_lt(ys, k)\n      None -> 0\n    end\n  end\n")));
+        Alcotest.check t3 "a lambda parameter k: not proved" (0, 0, 1)
+          (l3
+             (m (pre ^ "    let r = mapl(zs, fn k -> need_lt(ys, k))\n    0\n  end\n")));
+        Alcotest.check t3 "a local fn parameter k: not proved" (0, 0, 1)
+          (l3
+             (m (pre ^ "    fn h(k : Int) : Int do need_lt(ys, k) end\n    h(1)\n  end\n")));
+        Alcotest.check t3 "let k = x; let x = 100: not proved" (0, 0, 1)
+          (l3
+             (m "  fn go(x : Int, ys : List({Int | _ < 50})) : Int do\n\
+                 \    let k = x\n    let x = 100\n    need_lt(ys, k)\n  end\n")));
+
+    gated "a `let?` tail records its binders" (fun () ->
+        (* Review follow-up 3: [tails_bound] keeps a `let?` as one whole tail
+           (its early `Err` exit is not a syntactic tail) and now records its
+           pattern's binders, so the z2 rule sees the rebinding of `n`.
+           Unfixed: a skip for the generic reason. *)
+        let src =
+          m "  fn f(n : Int, r : Result(Int, String)) : Result(List({Int | _ < n}), String) do\n\
+            \    let? n = r\n    Ok([n - 1])\n  end\n"
+        in
+        Alcotest.check t3 "not proved" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "naming the rebound parameter" true
+          (List.exists (mentions "rebinds `n`") (details src)));
+
+    gated "a record field's element slot naming another field is a recorded skip" (fun () ->
+        (* The design's §1.2 call.  The slot `_ < n` names the record's OWN
+           field `n`, here 10, but was read as the CALLER's `n`, which the
+           guard says is > 1000.  Unfixed: (2, 0, 0) -- `k` and the guarded
+           `[500]` proved (the unguarded twin was a solver-undecided skip). *)
+        let src =
+          m "  type Box = { k : {Int | _ > 0}, n : Int, xs : List({Int | _ < n}) }\n\
+            \  fn go(n : Int) : Int do\n    if n > 1000 do\n      let b = { k: 1, n: 10, xs: [500] }\n      0\n    else 0 end\n  end\n"
+        in
+        Alcotest.check t3 "k proves, xs is a skip" (1, 0, 1) (l3 src);
+        Alcotest.(check bool) "naming the reason" true
+          (List.exists (mentions "names another field") (details src));
+        Alcotest.check t3 "control: a closed field slot is still checked" (1, 1, 0)
+          (l3
+             (m "  type Box = { k : {Int | _ > 0}, xs : List({Int | _ < 5}) }\n\
+                 \  fn go() : Box do { k: 1, xs: [500] } end\n")));
+
+    gated "a pass-site codomain naming a parameter is a recorded skip" (fun () ->
+        (* The design's §1.2 call.  The lambda's `[50]` was checked against
+           `_ < n` with the CALLER's guarded `n > 100`, although `hof` was
+           given 10.  Unfixed: (1, 0, 0) (the unguarded twin was a
+           solver-undecided skip). *)
+        let src =
+          m "  fn hof(n : Int, g : (Int) -> List({Int | _ < n})) : Int do 0 end\n\
+            \  fn go(n : Int) : Int do\n    if n > 100 do hof(10, fn y -> [50]) else 0 end\n  end\n"
+        in
+        Alcotest.check t3 "skipped, never proved" (0, 0, 1) (l3 src);
+        Alcotest.check t3 "control: a closed codomain is still checked" (0, 1, 0)
+          (l3
+             (m "  fn hof(n : Int, g : (Int) -> List({Int | _ < 5})) : Int do 0 end\n\
+                 \  fn go() : Int do hof(10, fn y -> [50]) end\n"))) ]
+
+(* ── Domain facts for every parameter of a multi-parameter lambda (design
+   specs/2026-10-18-element-flow-followups-design.md, phase 1, §4) ────────
+   `zipw(xs, ys, fn (x, y) -> …)` with `f : a -> b -> c`: every `a` the
+   callee hands position 0 came from a source of `a`, every `b` at position 1
+   from a source of `b`, so each parameter assumes its own position's element
+   fact (the design's §0.2 rows m1-m7).  Before phase 1 only a one-parameter
+   lambda got one; the triple each case had on the unfixed checker is in its
+   comment.  The controls pin the guards (§4.3): a variable with a
+   non-element source gives nothing (G2-4, the fold-accumulator boundary), an
+   own-annotated parameter declines the whole lambda (G2-2), and a fact that
+   names any of the lambda's parameters is not given (G2-3, phase 0's z4 per
+   position). *)
+let elemflow_multiparam_suite =
+  let m body =
+    "mod MP do\n\
+    \  fn need_pos(k : {Int | _ > 0}) : Int do k end\n\
+    \  fn need_neg(k : {Int | _ < 0}) : Int do k end\n\
+    \  fn need_big(k : {Int | _ > 100}) : Int do k end\n\
+    \  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+    \  fn mapl(xs : List(a), g : a -> b) : List(b) do\n\
+    \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> Cons(g(h), mapl(t, g))\n    end\n  end\n\
+    \  fn zipw(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do\n\
+    \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> do\n        match ys do\n\
+    \          Nil -> Nil\n          Cons(k, u) -> Cons(f(h, k), zipw(t, u, f))\n        end\n      end\n    end\n  end\n\
+    \  fn foldl(xs : List(a), acc : b, f : b -> a -> b) : b do\n\
+    \    match xs do\n      Nil -> acc\n      Cons(h, t) -> foldl(t, f(acc, h), f)\n    end\n  end\n\
+    \  fn sortb(xs : List(a), cmp : a -> a -> Bool) : List(a) do xs end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let reasons src = let (_, _, _, rs) = typed_ledger src in rs in
+  let t3 = Alcotest.(triple int int int) in
+  let pos2 = "xs : List({Int | _ > 0}), ys : List({Int | _ > 0})" in
+  [ gated "m1: a tail over both parameters proves an element demand" (fun () ->
+        (* Unfixed: (0, 0, 1), parametric-source-unproved. *)
+        Alcotest.check t3 "sum_pos(zipw(xs, ys, fn (x, y) -> x + y)) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : Int do sum_pos(zipw(xs, ys, fn (x, y) -> x + y)) end\n"))));
+
+    gated "m2: a refutable tail is still a skip, never a violation" (fun () ->
+        (* Unfixed: (0, 0, 1), the same reason. *)
+        let src = m ("  fn go(" ^ pos2 ^ ") : Int do sum_pos(zipw(xs, ys, fn (x, y) -> x - y)) end\n") in
+        Alcotest.check t3 "fn (x, y) -> x - y: skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a parametric-source skip" [ "parametric-source-unproved" ] (reasons src));
+
+    gated "m3: body obligations on both parameters prove" (fun () ->
+        (* Unfixed: (0, 0, 2), unconstrained-subject twice. *)
+        Alcotest.check t3 "need_pos(x) + need_pos(y) proves" (2, 0, 0)
+          (l3
+             (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (x, y) -> need_pos(x) + need_pos(y)) end\n"))));
+
+    gated "m4: a fold's element parameter gets its fact" (fun () ->
+        (* Unfixed: (0, 0, 1). *)
+        Alcotest.check t3 "foldl(xs, 0, fn (acc, x) -> acc + need_pos(x)) proves" (1, 0, 0)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : Int do foldl(xs, 0, fn (acc, x) -> acc + need_pos(x)) end\n")));
+
+    gated "m5: the accumulator gets no fact (boundary with the fold-accumulator design)" (fun () ->
+        (* `acc : b` has a bare source (the initial value) and a codomain
+           source (the callback's own result), so no agreed element slot.
+           Assuming anything about it is the inductive accumulator invariant
+           of specs/2026-10-18-fold-accumulator-invariants-design.md, not a
+           domain fact.  Unfixed: (0, 0, 1); must stay so. *)
+        Alcotest.check t3 "need_pos(acc): skipped" (0, 0, 1)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : Int do foldl(xs, 1, fn (acc, x) -> need_pos(acc) + x) end\n"));
+        (* Both at once: x proves, acc does not.  Unfixed: (0, 0, 2). *)
+        Alcotest.check t3 "need_pos(acc) + need_pos(x): x proves, acc skips" (1, 0, 1)
+          (l3
+             (m "  fn go(xs : List({Int | _ > 0})) : Int do foldl(xs, 1, fn (acc, x) -> need_pos(acc) + need_pos(x)) end\n")));
+
+    gated "m6: one variable at two positions gives both its fact" (fun () ->
+        (* Unfixed: (1, 0, 2) -- the return proves, both need_pos skip. *)
+        Alcotest.check t3 "sortb(xs, fn (a, b) -> need_pos(a) < need_pos(b)) proves" (3, 0, 0)
+          (l3
+             (m "  fn go(xs : List({Int | _ > 0})) : List({Int | _ > 0}) do\n\
+                 \    sortb(xs, fn (a, b) -> need_pos(a) < need_pos(b))\n  end\n")));
+
+    gated "m7: the one-parameter baseline is unchanged" (fun () ->
+        Alcotest.check t3 "mapl(xs, fn x -> need_pos(x)) proves" (1, 0, 0)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : List(Int) do mapl(xs, fn x -> need_pos(x)) end\n")));
+
+    gated "one refined, one unrefined container: only the refined position gets a fact" (fun () ->
+        (* Unfixed: (0, 0, 2). *)
+        Alcotest.check t3 "need_pos(x) proves, need_pos(y) skips" (1, 0, 1)
+          (l3
+             (m "  fn go(xs : List({Int | _ > 0}), us : List(Int)) : List(Int) do\n\
+                 \    zipw(xs, us, fn (x, y) -> need_pos(x) + need_pos(y))\n  end\n")));
+
+    gated "a variable with a bare source as well as an element one gives nothing" (fun () ->
+        (* `a` enters `pick` through `xs`'s elements AND the bare `d`: no
+           agreed element slot, so neither lambda parameter assumes `_ > 0`,
+           even though both sources happen to be positive here. *)
+        Alcotest.check t3 "need_pos(p) + need_pos(q): both skip" (0, 0, 2)
+          (l3
+             (m "  fn pick(xs : List(a), d : a, f : a -> a -> Int) : Int do\n\
+                 \    match xs do\n      Nil -> f(d, d)\n      Cons(h, _) -> f(h, d)\n    end\n  end\n\
+                 \  fn go(xs : List({Int | _ > 0})) : Int do pick(xs, 5, fn (p, q) -> need_pos(p) + need_pos(q)) end\n")));
+
+    gated "G2-2: an own-annotated parameter declines the whole lambda" (fun () ->
+        (* `visit_lambda ~assume:true` would assume `x`'s annotation, which
+           nobody checked: neither parameter is given anything. *)
+        Alcotest.check t3 "need_big(x) + need_pos(y): both skip" (0, 0, 2)
+          (l3
+             (m ("  fn go(" ^ pos2 ^ ") : List(Int) do\n\
+                  \    zipw(xs, ys, fn (x : {Int | _ > 100}, y) -> need_big(x) + need_pos(y))\n  end\n")));
+        (* A plainly typed parameter is fine, as in the one-parameter rule.
+           Unfixed: (0, 0, 2). *)
+        Alcotest.check t3 "fn (x : Int, y) -> need_pos(x) + need_pos(y) proves" (2, 0, 0)
+          (l3
+             (m ("  fn go(" ^ pos2 ^ ") : List(Int) do\n\
+                  \    zipw(xs, ys, fn (x : Int, y) -> need_pos(x) + need_pos(y))\n  end\n"))));
+
+    gated "G2-3: a fact naming one of the lambda's parameters is not given" (fun () ->
+        (* z4's multi-parameter twin: `n` would be given `_ < n` about itself. *)
+        Alcotest.check t3 "fn (n, y) -> need_neg(n): not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    zipw(xs, ys, fn (n, y) -> need_neg(n))\n  end\n"));
+        (* Capture by a SIBLING: `y`'s fact `_ < n` names the CALLER's `n`,
+           and the lambda binds its own `n`.  Given anyway, `y < n` would be
+           read about the lambda's `n`, and the lambda's own guard `n < 0`
+           would prove need_neg(y): a false proof (`f(5, [3], [0 - 1])`
+           hands the lambda y = 3, n = -1).  Both binding orders; with the
+           guard disabled only the (n, y) order proves (perturbation, phase 1
+           progress note): binding `n` after `y` already drops `y`'s fact. *)
+        Alcotest.check t3 "fn (y, n) -> if n < 0 do need_neg(y) …: not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    zipw(xs, ys, fn (y, n) -> if n < 0 do need_neg(y) else 0 end)\n  end\n"));
+        Alcotest.check t3 "fn (n, y) -> if n < 0 do need_neg(y) …: not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    zipw(ys, xs, fn (n, y) -> if n < 0 do need_neg(y) else 0 end)\n  end\n"));
+        (* …while the uncaptured position still gets its own fact.
+           Unfixed: (0, 0, 1). *)
+        Alcotest.check t3 "fn (y, n) -> need_neg(n): proves" (1, 0, 0)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List({Int | _ < 0})) : List(Int) do\n\
+                 \    zipw(xs, ys, fn (y, n) -> need_neg(n))\n  end\n"));
+        (* Control: a fresh name, under a guard that makes the fact useful.
+           Unfixed: (0, 0, 1). *)
+        Alcotest.check t3 "fn (y, m) -> need_neg(y) under n <= 0 proves" (1, 0, 0)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    if n <= 0 do zipw(xs, ys, fn (y, m) -> need_neg(y)) else Nil end\n  end\n")));
+
+    gated "G2-3: a wildcard parameter binds nothing, so it captures nothing" (fun () ->
+        (* `_` is the default binder of every `{Int | _ > 0}`; a wildcard
+           sibling must not count as a name the fact mentions.  bcdaba5f5:
+           (0, 0, 1), an over-rejection. *)
+        Alcotest.check t3 "fn (_, y) -> need_pos(y) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (_, y) -> need_pos(y)) end\n")));
+        Alcotest.check t3 "fn (x, _) -> need_pos(x) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (x, _) -> need_pos(x)) end\n")));
+        (* Control: a NAMED sibling capture still declines. *)
+        Alcotest.check t3 "fn (n, y) -> if n < 0 do need_neg(y) …: still not proved" (0, 0, 1)
+          (l3
+             (m "  fn f(n : Int, xs : List({Int | _ < n}), ys : List(Int)) : List(Int) do\n\
+                 \    zipw(ys, xs, fn (n, y) -> if n < 0 do need_neg(y) else 0 end)\n  end\n")));
+
+    gated "a violating step still violates" (fun () ->
+        (* A fact never hides a real failure. *)
+        Alcotest.check t3 "need_pos(0 - 1) in a fold step is violated" (0, 1, 0)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : Int do foldl(xs, 0, fn (acc, x) -> need_pos(0 - 1)) end\n"));
+        (* …and a fact that contradicts the step is a violation, the
+           one-parameter rule's verdict for the same shape.  Unfixed: the
+           two-parameter form was (0, 0, 1). *)
+        Alcotest.check t3 "one parameter: mapl(xs, fn x -> need_neg(x)) is violated" (0, 1, 0)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : List(Int) do mapl(xs, fn x -> need_neg(x)) end\n"));
+        Alcotest.check t3 "two parameters: zipw(xs, ys, fn (x, y) -> need_neg(x)) is violated" (0, 1, 0)
+          (l3 (m ("  fn go(" ^ pos2 ^ ") : List(Int) do zipw(xs, ys, fn (x, y) -> need_neg(x)) end\n"))));
+
+    gated "G2-1: a lambda shorter than its arrow chain gets no facts" (fun () ->
+        (* No position map for a partial application in v1: `fn (x, y) ->
+           fn w -> …` against `a -> b -> Int -> c`. *)
+        Alcotest.check t3 "need_pos(y) in the nested lambda: skipped" (0, 0, 1)
+          (l3
+             (m ("  fn z3w(xs : List(a), ys : List(b), f : a -> b -> Int -> c) : List(c) do Nil end\n\
+                  \  fn go(" ^ pos2 ^ ") : List(Int) do z3w(xs, ys, fn (x, y) -> fn w -> need_pos(y)) end\n")))) ]
+
+(* ── A scalar demand on a single-element result (design
+   specs/2026-10-18-element-flow-followups-design.md, phase 2, §3) ─────────
+   `need_pos(uor(o, 1))` with `uor : (Option(a), a) -> a`: the call has no
+   postcondition, so its result never reflected, and the obligation was an
+   `unreflectable-subject` skip.  By parametricity every `a` the call returns
+   entered through a SOURCE of `a` (the elements of `o`, the bare default), so
+   the demand holds when every source meets it ([scalar_demand], the same
+   discharge [demand_flow] runs for a container demand).  A refuted source is a
+   SKIP, never a violation (§3.4): whether it runs depends on the caller's
+   data.  §3.5's assumption route covers the inline form of `let h = hd(xs)`
+   (`need_pos(hd(xs) + 1)`).  The same entry point is reached from a return
+   tail (`fn go(o) : {Int | _ > 0} do uor(o, 1) end`), the hook the
+   fold-accumulator design (specs/2026-10-18-fold-accumulator-invariants-design.md
+   §3.1) builds on.  The triple each case had before phase 2 is in its
+   comment. *)
+let elemflow_scalar_demand_suite =
+  let m ?(verified = false) body =
+    "mod SD do\n" ^ (if verified then "  cap verified\n" else "")
+    ^ "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n\
+      \  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+      \  fn at(xs : List(Int), i : {Int | _ < len(xs)}) : Int do 0 end\n\
+      \  fn uor(o : Option(a), d : a) : a do\n\
+      \    match o do\n      Some(x) -> x\n      None -> d\n    end\n  end\n\
+      \  fn uore(o : Option(a), f : () -> a) : a do\n\
+      \    match o do\n      Some(x) -> x\n      None -> f()\n    end\n  end\n\
+      \  fn foldl(xs : List(a), acc : b, f : b -> a -> b) : b do\n\
+      \    match xs do\n      Nil -> acc\n      Cons(h, t) -> foldl(t, f(acc, h), f)\n    end\n  end\n\
+      \  fn hd(xs : {List(a) | len(_) > 0}) : a do\n\
+      \    match xs do\n      Cons(h, _) -> h\n      Nil -> panic(\"empty\")\n    end\n  end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let reasons src = let (_, _, _, rs) = typed_ledger src in rs in
+  let details src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r -> Some (March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let t3 = Alcotest.(triple int int int) in
+  let opos = "o : Option({Int | _ > 0})" in
+  let param = [ "parametric-source-unproved" ] in
+  [ gated "s1: a default that meets the demand proves" (fun () ->
+        (* Before: (0, 0, 1), unreflectable-subject. *)
+        Alcotest.check t3 "need_pos(uor(o, 1)) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ opos ^ ") : Int do need_pos(uor(o, 1)) end\n"))));
+
+    gated "s2: a refuted source is a skip, never a violation" (fun () ->
+        (* Before: (0, 0, 1), unreflectable-subject.  `uor(Some(5), 0)` is
+           fine, so the failing default is not a definite failure. *)
+        let src = m ("  fn go(" ^ opos ^ ") : Int do need_pos(uor(o, 0)) end\n") in
+        Alcotest.check t3 "need_pos(uor(o, 0)): skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a parametric-source skip" param (reasons src);
+        Alcotest.(check bool) "naming the default" true
+          (List.exists (mentions "argument 2 of `uor` can fail it for some input") (details src));
+        Alcotest.check t3 "need_pos(uor(o, 0 - 1)): skipped" (0, 0, 1)
+          (l3 (m ("  fn go(" ^ opos ^ ") : Int do need_pos(uor(o, 0 - 1)) end\n"))));
+
+    gated "s3: an unrefined container lends nothing" (fun () ->
+        (* Before: (0, 0, 1), unreflectable-subject. *)
+        let src = m "  fn go(o : Option(Int)) : Int do need_pos(uor(o, 1)) end\n" in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a parametric-source skip" param (reasons src);
+        Alcotest.(check bool) "naming the elements" true
+          (List.exists (mentions "the elements of argument 1 of `uor`") (details src)));
+
+    gated "s4: a refined variable as the default" (fun () ->
+        (* Before: (0, 0, 1) for both. *)
+        Alcotest.check t3 "k : {Int | _ > 0} proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ opos ^ ", k : {Int | _ > 0}) : Int do need_pos(uor(o, k)) end\n")));
+        Alcotest.check t3 "control: k : Int is a skip" (0, 0, 1)
+          (l3 (m ("  fn go(" ^ opos ^ ", k : Int) : Int do need_pos(uor(o, k)) end\n"))));
+
+    gated "s5: a nested call recurses through the hook, one obligation" (fun () ->
+        (* Before: (0, 0, 1).  The inner discharge is scratch: exactly one
+           ledger entry for the outer need_pos. *)
+        Alcotest.check t3 "need_pos(uor(o, uor(p, 2))) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ opos ^ ", p : Option({Int | _ > 0})) : Int do need_pos(uor(o, uor(p, 2))) end\n")));
+        Alcotest.check t3 "control: an inner default 0 is a skip" (0, 0, 1)
+          (l3 (m ("  fn go(" ^ opos ^ ", p : Option({Int | _ > 0})) : Int do need_pos(uor(o, uor(p, 0))) end\n"))));
+
+    gated "s6: an element of a literal" (fun () ->
+        (* Before: (0, 0, 1), unreflectable-subject. *)
+        Alcotest.check t3 "sum_pos([uor(o, 1)]) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ opos ^ ") : Int do sum_pos([uor(o, 1)]) end\n")));
+        Alcotest.check t3 "control: sum_pos([uor(o, 0)]) is a skip" (0, 0, 1)
+          (l3 (m ("  fn go(" ^ opos ^ ") : Int do sum_pos([uor(o, 0)]) end\n"))));
+
+    gated "s7: a callback-codomain source" (fun () ->
+        (* Before: (0, 0, 1) for both. *)
+        Alcotest.check t3 "need_pos(uore(o, fn () -> 1)) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ opos ^ ") : Int do need_pos(uore(o, fn () -> 1)) end\n")));
+        Alcotest.check t3 "control: fn () -> 0 is a skip" (0, 0, 1)
+          (l3 (m ("  fn go(" ^ opos ^ ") : Int do need_pos(uore(o, fn () -> 0)) end\n"))));
+
+    gated "s8/s9: a fold whose step returns the element; the accumulator stays unconstrained" (fun () ->
+        (* s8, before: (0, 0, 1).  Phase 1 gives `x` the elements' fact. *)
+        Alcotest.check t3 "need_pos(foldl(xs, 1, fn (acc, x) -> x)) proves" (1, 0, 0)
+          (l3 (m "  fn go(xs : List({Int | _ > 0})) : Int do need_pos(foldl(xs, 1, fn (acc, x) -> x)) end\n"));
+        (* s9: the boundary with the fold-accumulator design, now crossed by
+           its phase 1 (specs/2026-10-18-fold-accumulator-invariants-design.md):
+           `acc` may assume the demand `_ > 0` (the base `1` meets it) and `x`
+           has the elements' fact, so the step proves.  Was (0, 0, 1),
+           parametric-source-unproved; group fold-invariants-1 pins the rest. *)
+        let src = m "  fn go(xs : List({Int | _ > 0})) : Int do need_pos(foldl(xs, 1, fn (acc, x) -> acc + x)) end\n" in
+        Alcotest.check t3 "need_pos(foldl(xs, 1, fn (acc, x) -> acc + x)): proved (accumulator invariant)" (1, 0, 0) (l3 src));
+
+    gated "s10-s12: the inline form of `let h = hd(xs)`" (fun () ->
+        let xs = "xs : {List({Int | _ > 0}) | len(_) > 0}" in
+        (* s10, before: (1, 0, 1) -- the `len` precondition proves. *)
+        Alcotest.check t3 "need_pos(hd(xs)) proves" (2, 0, 0)
+          (l3 (m ("  fn go(" ^ xs ^ ") : Int do need_pos(hd(xs)) end\n")));
+        (* s11: already proved through the `let` arm. *)
+        Alcotest.check t3 "let h = hd(xs); need_pos(h) proves" (2, 0, 0)
+          (l3 (m ("  fn go(" ^ xs ^ ") : Int do\n    let h = hd(xs)\n    need_pos(h)\n  end\n")));
+        (* s12, the assumption route (§3.5).  Before: (1, 0, 1). *)
+        Alcotest.check t3 "need_pos(hd(xs) + 1) proves" (2, 0, 0)
+          (l3 (m ("  fn go(" ^ xs ^ ") : Int do need_pos(hd(xs) + 1) end\n")));
+        Alcotest.check t3 "control: unrefined elements, need_pos(hd(ys) + 1) is a skip" (1, 0, 1)
+          (l3 (m "  fn go(ys : {List(Int) | len(_) > 0}) : Int do need_pos(hd(ys) + 1) end\n")));
+
+    gated "s13: an annotated let" (fun () ->
+        (* Before: (0, 0, 2). *)
+        Alcotest.check t3 "let x : {Int | _ > 0} = uor(o, 1) proves, and so does need_pos(x)" (2, 0, 0)
+          (l3 (m ("  fn go(" ^ opos ^ ") : Int do\n    let x : {Int | _ > 0} = uor(o, 1)\n    need_pos(x)\n  end\n")));
+        Alcotest.check t3 "control: default 0 proves neither" (0, 0, 2)
+          (l3 (m ("  fn go(" ^ opos ^ ") : Int do\n    let x : {Int | _ > 0} = uor(o, 0)\n    need_pos(x)\n  end\n"))));
+
+    gated "a callee that is not parametric lends nothing" (fun () ->
+        (* P1: the body makes its `a` through a builtin. *)
+        let src =
+          m ("  fn mk(o : Option(a), d : a) : a do from_json(0) end\n\
+              \  fn go(" ^ opos ^ ") : Int do need_pos(mk(o, 1)) end\n")
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "naming parametricity" true
+          (List.exists (mentions "is not known to be parametric") (details src));
+        (* P2: an interface bound on `a`. *)
+        Alcotest.check t3 "a bounded variable: skipped" (0, 0, 1)
+          (l3
+             (m ("  fn mkb[a : Eq](o : Option(a), d : a) : a do uor(o, d) end\n\
+                  \  fn go(" ^ opos ^ ") : Int do need_pos(mkb(o, 1)) end\n"))));
+
+    gated "a relational demand keeps today's skip" (fun () ->
+        (* v1 is closed demands only (§3.1).  Before and after: the same
+           unreflectable-subject skip. *)
+        let src = m ("  fn go(" ^ opos ^ ", ys : List(Int)) : Int do at(ys, uor(o, 0)) end\n") in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "unreflectable-subject" [ "unreflectable-subject" ] (reasons src);
+        Alcotest.(check bool) "the same detail" true
+          (List.exists (mentions "the argument `uor(o, 0)`") (details src)));
+
+    gated "rebinding and shadowing still decline" (fun () ->
+        (* A lambda tail naming a name bound inside the lambda reads the
+           caller's binding of it (phase 0's lambda-tail rule): not checked. *)
+        Alcotest.check t3 "fn () -> let k = 0 - 5; k under a caller k > 0: skipped" (0, 0, 1)
+          (l3
+             (m ("  fn go(" ^ opos ^ ", k : {Int | _ > 0}) : Int do\n\
+                  \    need_pos(uore(o, fn () ->\n      let k = 0 - 5\n      k))\n  end\n")));
+        (* A lambda parameter named like a caller variable is the lambda's
+           own accumulator.  Since the fold-accumulator design's phase 1 it
+           may assume the demand `_ > 0` (the base, the caller's `k`, meets
+           it), so `k` proves; the demand mentions no name it could capture.
+           Was (0, 0, 1). *)
+        Alcotest.check t3 "fn (k, x) -> k under a caller k > 0: proved (accumulator invariant)" (1, 0, 0)
+          (l3
+             (m "  fn go(xs : List({Int | _ > 0}), k : {Int | _ > 0}) : Int do\n\
+                 \    need_pos(foldl(xs, k, fn (k, x) -> k))\n  end\n"));
+        (* A lambda parameter that shadows a caller variable: the tail's own
+           scalar demand must run in the LAMBDA's env.  Read in the caller's,
+           `uor(o, 1)` would use the caller's `o` and prove `ap(p, …) > 0`,
+           false for `p = Some(0 - 5)`. *)
+        Alcotest.check t3 "fn o -> uor(o, 1) under a caller o: skipped" (0, 0, 1)
+          (l3
+             (m ("  fn ap(x : b, f : b -> a) : a do f(x) end\n\
+                  \  fn go(" ^ opos ^ ", p : Option(Int)) : Int do need_pos(ap(p, fn o -> uor(o, 1))) end\n")));
+        Alcotest.check t3 "control: fn q -> uor(o, 1) proves" (1, 0, 0)
+          (l3
+             (m ("  fn ap(x : b, f : b -> a) : a do f(x) end\n\
+                  \  fn go(" ^ opos ^ ", p : Option(Int)) : Int do need_pos(ap(p, fn q -> uor(o, 1))) end\n")));
+        (* An Option whose binding was rebound after a fact was stored. *)
+        Alcotest.check t3 "let o = p before the call: skipped" (0, 0, 1)
+          (l3
+             (m ("  fn go(" ^ opos ^ ", p : Option(Int)) : Int do\n    let o = p\n    need_pos(uor(o, 1))\n  end\n"))));
+
+    gated "cap verified: s1 compiles, s2 is an error" (fun () ->
+        Alcotest.(check bool) "s1 accepted" false
+          (has_refine_error_typed (m ~verified:true ("  fn go(" ^ opos ^ ") : Int do need_pos(uor(o, 1)) end\n")));
+        Alcotest.(check bool) "s2 rejected" true
+          (has_refine_error_typed (m ~verified:true ("  fn go(" ^ opos ^ ") : Int do need_pos(uor(o, 0)) end\n"))));
+
+    gated "return position: a tail meets the declared return through its sources" (fun () ->
+        (* s14 (the fold-accumulator design's §3.1 hook).  Before: (0, 0, 1),
+           unreflectable-subject, a postcondition. *)
+        Alcotest.check t3 "uor(o, 1) as the return tail proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ opos ^ ") : {Int | _ > 0} do uor(o, 1) end\n")));
+        let src = m ("  fn go(" ^ opos ^ ") : {Int | _ > 0} do uor(o, 0) end\n") in
+        Alcotest.check t3 "control: uor(o, 0) is a skip" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a parametric-source skip" param (reasons src);
+        (* Under a branch, with the other tail a literal. *)
+        Alcotest.check t3 "if b do uor(o, 1) else 5 end proves" (2, 0, 0)
+          (l3 (m ("  fn go(" ^ opos ^ ", b : Bool) : {Int | _ > 0} do if b do uor(o, 1) else 5 end end\n")));
+        (* The proved return is a fact at a call site (the gate pre-pass sees
+           the same hook).  Three obligations: go's return, go(o)'s element
+           argument, need_pos.  Before: (1, 0, 2). *)
+        Alcotest.check t3 "need_pos(go(o)) proves too" (3, 0, 0)
+          (l3
+             (m ("  fn go(" ^ opos ^ ") : {Int | _ > 0} do uor(o, 1) end\n\
+                  \  fn user(" ^ opos ^ ") : Int do need_pos(go(o)) end\n")));
+        Alcotest.(check bool) "cap verified accepts it" false
+          (has_refine_error_typed (m ~verified:true ("  fn go(" ^ opos ^ ") : {Int | _ > 0} do uor(o, 1) end\n"))));
+
+    gated "return position: the conservative declines" (fun () ->
+        (* A tail under a `let` that rebinds a parameter's name: the inner
+           `o` is renamed apart from the parameter (post-inner-binders), so
+           the hook sees an `o` nothing is known about, never the parameter's
+           elements.  A parametric-source skip. *)
+        let src =
+          m ("  fn go(" ^ opos ^ ", p : Option(Int)) : {Int | _ > 0} do\n    let o = p\n    uor(o, 1)\n  end\n")
+        in
+        Alcotest.check t3 "let o = p; uor(o, 1): skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "not the parameter's elements" [ "parametric-source-unproved" ]
+          (reasons src);
+        (* A bound name that is NOT a parameter is left as it is, and the hook
+           declines a tail mentioning it: the unreflectable-subject skip. *)
+        let src =
+          m ("  fn go(" ^ opos ^ ", p : Option(Int)) : {Int | _ > 0} do\n    let q = p\n    uor(q, 1)\n  end\n")
+        in
+        Alcotest.check t3 "let q = p; uor(q, 1): skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "unreflectable-subject" [ "unreflectable-subject" ] (reasons src);
+        (* A relational return demand is v1's closed-only boundary. *)
+        Alcotest.check t3 "{Int | _ >= lo}: skipped" (0, 0, 1)
+          (l3 (m ("  fn go(" ^ opos ^ ", lo : Int) : {Int | _ >= lo} do uor(o, lo) end\n")));
+        (* A block-level fn's return tail: not covered in phase 2 (it was an
+           unreflectable-subject skip), covered since phase 3 (the hook runs
+           over the local's own parameters; see elemflow-local-fn). *)
+        Alcotest.(check (list string)) "a local fn's return tail: proved since phase 3"
+          []
+          (List.filter (( <> ) "")
+             (reasons
+                (m ("  fn go(" ^ opos ^ ") : Int do\n\
+                     \    fn h(q : Option({Int | _ > 0})) : {Int | _ > 0} do uor(q, 1) end\n\
+                     \    0\n  end\n"))))) ]
+
+(* ── A tail's inner binders are not its function's parameters ──────────────
+   A return tail (and a lambda tail inside a demand) is checked in an env
+   built above it, with the path conditions collected on the way down.  An
+   inner `match` binder or `let` that reuses a parameter's name put the
+   parameter's refinement and the inner binding's guard on one SMT name:
+   `fn g2(n : {Int | _ < 0}, p) : {Int | _ > 0}` with `Some(n) -> if n > 5 do
+   0 - 7 else 1 end` read `n < 0 && n > 5`, a contradiction, and "proved" a
+   tail that returns -7 (`g2(0 - 1, Some(10))`).  Pre-existing for the direct
+   tail; widened by the scalar demand hooks to call tails and lambda tails.
+   The inner binding is now renamed apart in the path and the tail
+   ([Refine_post.rename_free]).  The triple each case had before is in its
+   comment (measured on 3d02bf5e7). *)
+(* ── A local `fn` with a container return (design 2026-10-18 element-flow
+   follow-ups, phase 3, §5; rows l1-l6 of §0.3) ──────────────────────────
+   A block-level `fn n(ps) : List({Int | p}) do … end` gets what a top-level
+   one gets: every tail is an element obligation, and a local whose every
+   tail PROVED (with a closed entry) lends that entry to its later calls in
+   the block.  Its verdict is its own: a local's proof never admits the
+   ENCLOSING function's element return (G3-2, row l5). *)
+let elemflow_local_fn_suite =
+  let m ?(verified = false) body =
+    "mod LF do\n" ^ (if verified then "  cap verified\n" else "")
+    ^ "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n\
+      \  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+      \  fn sum_neg(xs : List({Int | _ < 1})) : Int do 0 end\n\
+      \  fn uor(o : Option(a), d : a) : a do\n\
+      \    match o do\n      Some(x) -> x\n      None -> d\n    end\n  end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let t3 = Alcotest.(triple int int int) in
+  (* The verdicts of one callee's obligations, in record order. *)
+  let of_callee c src =
+    List.filter_map (fun (c', v, _) -> if c' = c then Some v else None) (typed_obligations src)
+  in
+  let vs = Alcotest.(list string) in
+  let pos = "{Int | _ > 0}" in
+  [ gated "l1: a proved local lends its return to a later call" (fun () ->
+        (* Before: (1, 0, 1): two(k)'s precondition proved, sum_pos
+           unreflectable-subject, the tails filed nothing. *)
+        let src =
+          m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn two(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n, n + 1] end\n\
+              \    sum_pos(two(k))\n  end\n")
+        in
+        Alcotest.check t3 "(4, 0, 0)" (4, 0, 0) (l3 src);
+        Alcotest.check vs "both tail elements, once each" [ "proved"; "proved" ]
+          (of_callee "return of two" src);
+        (* A proved element obligation is labelled with its subject. *)
+        Alcotest.check vs "sum_pos(two(k)) proves" [ "proved" ] (of_callee "two(…)" src);
+        Alcotest.check vs "no sum_pos skip" [] (of_callee "sum_pos" src));
+
+    gated "l2: a violating local tail is a violation" (fun () ->
+        (* Before: (0, 0, 0): no obligation was filed for the tails at all. *)
+        let src =
+          m "  fn go(k : Int) : Int do\n\
+            \    fn bad(n : Int) : List({Int | _ > 0}) do [n, 0] end\n\
+            \    let ys = bad(k)\n    0\n  end\n"
+        in
+        Alcotest.check t3 "(0, 1, 1)" (0, 1, 1) (l3 src);
+        Alcotest.check vs "n skips, 0 is violated" [ "skipped"; "violated" ]
+          (of_callee "return of bad" src));
+
+    gated "l2 under cap verified: rejected" (fun () ->
+        (* Before: accepted. *)
+        Alcotest.(check bool) "rejected" true
+          (has_refine_error_typed
+             (m ~verified:true
+                "  fn go(k : Int) : Int do\n\
+                \    fn bad(n : Int) : List({Int | _ > 0}) do [n, 0] end\n\
+                \    let ys = bad(k)\n    0\n  end\n"));
+        Alcotest.(check bool) "control: l1 accepted" false
+          (has_refine_error_typed
+             (m ~verified:true
+                ("  fn go(k : " ^ pos ^ ") : Int do\n\
+                  \    fn two(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n, n + 1] end\n\
+                  \    sum_pos(two(k))\n  end\n"))));
+
+    gated "l3: an unproved local lends nothing" (fun () ->
+        (* Before: (0, 0, 1). *)
+        let src =
+          m "  fn go(ys : List(Int)) : Int do\n\
+            \    fn pass(zs : List(Int)) : List({Int | _ > 0}) do zs end\n\
+            \    sum_pos(pass(ys))\n  end\n"
+        in
+        Alcotest.check t3 "(0, 0, 2)" (0, 0, 2) (l3 src);
+        Alcotest.check vs "the tail skips" [ "skipped" ] (of_callee "return of pass" src);
+        Alcotest.check vs "the call skips" [ "skipped" ] (of_callee "sum_pos" src));
+
+    gated "l4: in-walk tails see the local's lets; a let-bound result carries the entry" (fun () ->
+        (* Before: (1, 0, 1). *)
+        Alcotest.check t3 "(4, 0, 0)" (4, 0, 0)
+          (l3
+             (m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+                  \    fn two(n : " ^ pos ^ ") : List(" ^ pos ^ ") do\n\
+                  \      let m = n + 1\n      [n, m]\n    end\n\
+                  \    let ys = two(k)\n    sum_pos(ys)\n  end\n"))));
+
+    gated "l5: a local's proof never admits the enclosing function (G3-2)" (fun () ->
+        (* Before: (2, 1, 2): `[0]` violated, one(k)'s precondition and
+           outer(true, k)'s proved, the one(k) tail unreflectable-subject,
+           sum_pos skipped.  Now one(k) and the local's own tail prove, and
+           sum_pos(outer(true, k)) MUST stay a skip: outer's `[0]` failed. *)
+        let src =
+          m ("  fn outer(b : Bool, k : " ^ pos ^ ") : List(" ^ pos ^ ") do\n\
+              \    if b do [0] else\n\
+              \      fn one(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \      one(k)\n    end\n  end\n\
+              \  fn user(k : " ^ pos ^ ") : Int do sum_pos(outer(true, k)) end\n")
+        in
+        Alcotest.check vs "outer's [0] is violated" [ "violated" ] (of_callee "return of outer" src);
+        Alcotest.check vs "outer's tail one(k) proves" [ "proved" ] (of_callee "one(…)" src);
+        Alcotest.check vs "the local's tail proves" [ "proved" ] (of_callee "return of one" src);
+        Alcotest.check vs "sum_pos(outer(true, k)) stays a skip" [ "skipped" ]
+          (of_callee "sum_pos" src);
+        (* The order twin: the local's tail is checked AFTER outer's failing
+           tail was noted, so a local that reset the enclosing verdict to its
+           own would turn this one proved. *)
+        let src2 =
+          m ("  fn outer(b : Bool, k : " ^ pos ^ ") : List(" ^ pos ^ ") do\n\
+              \    let z = [0]\n\
+              \    if b do z else\n\
+              \      fn one(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \      one(k)\n    end\n  end\n\
+              \  fn user(k : " ^ pos ^ ") : Int do sum_pos(outer(true, k)) end\n")
+        in
+        Alcotest.check vs "order twin: sum_pos stays a skip" [ "skipped" ] (of_callee "sum_pos" src2);
+        (* Control: with no failing tail, outer is admitted through the
+           local's lent return. *)
+        let src3 =
+          m ("  fn outer(b : Bool, k : " ^ pos ^ ") : List(" ^ pos ^ ") do\n\
+              \    if b do [1] else\n\
+              \      fn one(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \      one(k)\n    end\n  end\n\
+              \  fn user(k : " ^ pos ^ ") : Int do sum_pos(outer(true, k)) end\n")
+        in
+        Alcotest.check vs "control: sum_pos(outer(true, k)) proves" [ "proved" ]
+          (of_callee "outer(…)" src3));
+
+    gated "the enclosing function's self-call inside a local still gates it" (fun () ->
+        (* `outer(t)` inside the local is a SELF-call of outer with an
+           unproved element argument: it must keep clearing outer's verdict
+           even though the local's own tail proves. *)
+        let src =
+          m ("  fn outer(xs : List(" ^ pos ^ ")) : List(" ^ pos ^ ") do\n\
+              \    fn helper(t : List(Int)) : List(" ^ pos ^ ") do\n\
+              \      let r = outer(t)\n      [1]\n    end\n\
+              \    helper([])\n  end\n\
+              \  fn user(ys : List(" ^ pos ^ ")) : Int do sum_pos(outer(ys)) end\n")
+        in
+        Alcotest.check vs "the local's tail proves" [ "proved" ] (of_callee "return of helper" src);
+        Alcotest.check vs "sum_pos(outer(ys)) stays a skip" [ "skipped" ] (of_callee "sum_pos" src));
+
+    gated "an escaping local's tail cannot assume its parameters (G3-1)" (fun () ->
+        let src =
+          m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn one(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \    let h = one\n    sum_pos(one(k))\n  end\n")
+        in
+        Alcotest.check vs "the tail skips" [ "skipped" ] (of_callee "return of one" src);
+        Alcotest.check vs "and lends nothing" [ "skipped" ] (of_callee "sum_pos" src);
+        (* …and a CONTAINER parameter's element refinement is stripped the
+           same way: escaping, the tail `ys` cannot assume its elements. *)
+        let src2 =
+          m ("  fn go(zs : List(" ^ pos ^ ")) : Int do\n\
+              \    fn mk(ys : List(" ^ pos ^ ")) : List(" ^ pos ^ ") do ys end\n\
+              \    let h = mk\n    sum_pos(mk(zs))\n  end\n")
+        in
+        Alcotest.check vs "escaping: the tail ys skips" [ "skipped" ] (of_callee "return of mk" src2);
+        Alcotest.check vs "escaping: no proof of ys" [] (of_callee "ys" src2);
+        Alcotest.check vs "escaping: lends nothing" [ "skipped" ] (of_callee "sum_pos" src2);
+        (* Control: the same local, not escaping, proves and lends. *)
+        let src3 =
+          m ("  fn go(zs : List(" ^ pos ^ ")) : Int do\n\
+              \    fn mk(ys : List(" ^ pos ^ ")) : List(" ^ pos ^ ") do ys end\n\
+              \    sum_pos(mk(zs))\n  end\n")
+        in
+        (* A proved element obligation is labelled with its subject, `ys`. *)
+        Alcotest.check vs "control: the tail ys proves" [ "proved" ] (of_callee "ys" src3);
+        Alcotest.check vs "control: lent" [ "proved" ] (of_callee "mk(…)" src3));
+
+    gated "a recursive local: no self-call hypothesis, lends nothing (G3-3)" (fun () ->
+        let src =
+          m "  fn go(ys : List(Int)) : Int do\n\
+            \    fn keep(xs : List(Int)) : List({Int | _ > 0}) do\n\
+            \      match xs do\n        Nil -> []\n        Cons(h, t) -> keep(t)\n      end\n    end\n\
+            \    sum_pos(keep(ys))\n  end\n"
+        in
+        (* `[]` has no element to check; keep(t) carries nothing. *)
+        Alcotest.check vs "keep(t) skips" [ "skipped" ] (of_callee "return of keep" src);
+        Alcotest.check vs "sum_pos(keep(ys)) skips" [ "skipped" ] (of_callee "sum_pos" src));
+
+    gated "a recursive local with an unproved element argument at its self-call (the induction gate)"
+      (fun () ->
+        (* Every tail proves, but the self-call `keep(Cons(n, t), n)` does
+           not meet keep's own element parameter: the local is not proved. *)
+        let src =
+          m ("  fn go(ys : List(" ^ pos ^ "), j : Int) : Int do\n\
+              \    fn keep(xs : List(" ^ pos ^ "), n : Int) : List(" ^ pos ^ ") do\n\
+              \      match xs do\n        Nil -> [1]\n\
+              \        Cons(h, t) ->\n          let r = keep(Cons(n, t), n)\n          [h]\n\
+              \      end\n    end\n\
+              \    sum_pos(keep(ys, j))\n  end\n")
+        in
+        Alcotest.check vs "both tails prove" [ "proved"; "proved" ] (of_callee "return of keep" src);
+        Alcotest.check vs "sum_pos(keep(ys, j)) skips" [ "skipped" ] (of_callee "sum_pos" src);
+        (* Control: the self-call meets the parameter, so the local lends. *)
+        let src2 =
+          m ("  fn go(ys : List(" ^ pos ^ "), j : Int) : Int do\n\
+              \    fn keep(xs : List(" ^ pos ^ "), n : Int) : List(" ^ pos ^ ") do\n\
+              \      match xs do\n        Nil -> [1]\n\
+              \        Cons(h, t) ->\n          let r = keep(t, n)\n          [h]\n\
+              \      end\n    end\n\
+              \    sum_pos(keep(ys, j))\n  end\n")
+        in
+        Alcotest.check vs "control: sum_pos(keep(ys, j)) proves" [ "proved" ] (of_callee "keep(…)" src2));
+
+    gated "a local shadowing a top-level function never borrows its contract" (fun () ->
+        (* The top-level `mk` is proved; the local `mk` is not. *)
+        let src =
+          m ("  fn mk(k : " ^ pos ^ ") : List(" ^ pos ^ ") do [k] end\n\
+              \  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn mk(n : Int) : List(" ^ pos ^ ") do [n] end\n\
+              \    sum_pos(mk(k))\n  end\n")
+        in
+        Alcotest.check vs "the global's tail proves, the local's skips" [ "proved"; "skipped" ]
+          (of_callee "return of mk" src);
+        Alcotest.check vs "sum_pos(mk(k)) skips" [ "skipped" ] (of_callee "sum_pos" src);
+        (* …and the converse: a proved local shadowing an UNPROVED global
+           lends its own entry. *)
+        let src2 =
+          m ("  fn mk(k : Int) : List(" ^ pos ^ ") do [k] end\n\
+              \  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn mk(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \    sum_pos(mk(k))\n  end\n")
+        in
+        Alcotest.check vs "converse: sum_pos(mk(k)) proves" [ "proved" ] (of_callee "mk(…)" src2);
+        (* A proved local, then a second local of the SAME spelling that is
+           not proved: the later call reaches the second, which lends
+           nothing. *)
+        let src3 =
+          m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn mk(n : " ^ pos ^ ") : List(" ^ pos ^ ") do [n] end\n\
+              \    let a = sum_pos(mk(k))\n\
+              \    fn mk(n : Int) : List(" ^ pos ^ ") do [n] end\n\
+              \    sum_pos(mk(k))\n  end\n")
+        in
+        Alcotest.check vs "the first proves" [ "proved" ] (of_callee "mk(…)" src3);
+        Alcotest.check vs "the second skips" [ "skipped" ] (of_callee "sum_pos" src3));
+
+    gated "a return naming a captured variable is checked in place and lends nothing (G3-5)" (fun () ->
+        (* `_ < k` names go's `k`.  The tail `[k - 1]` proves; read at the
+           call after `let k = 0`, the entry would claim every element is
+           below 0 (false: go(5) returns [4]). *)
+        let src =
+          m "  fn go(k : Int) : Int do\n\
+            \    fn f(u : Int) : List({Int | _ < k}) do [k - 1] end\n\
+            \    let k = 0\n    sum_neg(f(1))\n  end\n"
+        in
+        Alcotest.check vs "the tail proves" [ "proved" ] (of_callee "return of f" src);
+        Alcotest.check vs "sum_neg(f(1)) skips" [ "skipped" ] (of_callee "sum_neg" src));
+
+    gated "a local defined after a rebinding reads the CURRENT binding" (fun () ->
+        (* `k` is rebound to 0 before the local: `_ < k` means `_ < 0`, so
+           `[5]` is a violation (read as the parameter `k > 10` it would
+           prove). *)
+        let src =
+          m "  fn go(k : {Int | _ > 10}) : Int do\n\
+            \    let k = 0\n\
+            \    fn f(u : Int) : List({Int | _ < k}) do [5] end\n\
+            \    sum_neg(f(1))\n  end\n"
+        in
+        Alcotest.check vs "[5] is violated" [ "violated" ] (of_callee "return of f" src);
+        Alcotest.check vs "sum_neg(f(1)) skips" [ "skipped" ] (of_callee "sum_neg" src));
+
+    gated "a local's parameter shadowing a captured name in its return" (fun () ->
+        (* `_ < k` names the LOCAL's own parameter `k`, not go's. *)
+        let src =
+          m "  fn go(k : {Int | _ > 10}) : Int do\n\
+            \    fn f(k : Int) : List({Int | _ < k}) do [5] end\n\
+            \    0\n  end\n"
+        in
+        Alcotest.check vs "[5] < k (the parameter) skips" [ "skipped" ] (of_callee "return of f" src));
+
+    gated "a local's tail under an inner rebinding of a name its return mentions (G3-6)" (fun () ->
+        (* Phase 0's z2 rule inside the local: `_ < k` is about the
+           parameter `k`, the tail sees `let k = 100`.  Checked there it
+           would prove `f(1) = [50]`. *)
+        let src =
+          m "  fn go(j : Int) : Int do\n\
+            \    fn f(k : Int) : List({Int | _ < k}) do\n      let k = 100\n      [50]\n    end\n\
+            \    0\n  end\n"
+        in
+        Alcotest.check t3 "(0, 0, 1)" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "the rebinding reason" [ "unreflectable-subject" ]
+          (let (_, _, _, rs) = typed_ledger src in rs));
+
+    gated "a block-level fn's scalar return tail gets the scalar demand hook" (fun () ->
+        (* Phase 2's return-tail hook, now for a local.  Before: skip. *)
+        let opos = "Option(" ^ pos ^ ")" in
+        let src =
+          m ("  fn go(o : " ^ opos ^ ") : Int do\n\
+              \    fn f(p : " ^ opos ^ ") : " ^ pos ^ " do uor(p, 1) end\n\
+              \    f(o)\n  end\n")
+        in
+        (* f(o)'s element argument and f's return. *)
+        Alcotest.check t3 "(2, 0, 0)" (2, 0, 0) (l3 src);
+        (* Controls: a refuted default, a captured option (the hook's env is
+           the local's parameters alone), a sibling local shadowing `uor`. *)
+        Alcotest.check t3 "uor(p, 0) skips" (1, 0, 1)
+          (l3
+             (m ("  fn go(o : " ^ opos ^ ") : Int do\n\
+                  \    fn f(p : " ^ opos ^ ") : " ^ pos ^ " do uor(p, 0) end\n\
+                  \    f(o)\n  end\n")));
+        Alcotest.check t3 "a captured o skips" (0, 0, 1)
+          (l3
+             (m ("  fn go(o : " ^ opos ^ ") : Int do\n\
+                  \    fn f(u : Int) : " ^ pos ^ " do uor(o, 1) end\n\
+                  \    f(0)\n  end\n")));
+        Alcotest.check t3 "a sibling local uor skips" (2, 0, 1)
+          (l3
+             (m ("  fn go(o : " ^ opos ^ ") : Int do\n\
+                  \    fn uor(q : " ^ opos ^ ", d : Int) : Int do 0 - 5 end\n\
+                  \    fn f(p : " ^ opos ^ ") : " ^ pos ^ " do uor(p, 1) end\n\
+                  \    f(o)\n  end\n"))));
+    gated "a local with a TUPLE container return: checked per component, lends nothing" (fun () ->
+        (* Leftovers phase C's tuple returns, through the local path. *)
+        let src =
+          m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn pr(n : " ^ pos ^ ") : (List(" ^ pos ^ "), List(" ^ pos ^ ")) do ([n], [0]) end\n\
+              \    0\n  end\n")
+        in
+        let (_, v, _) = l3 src in
+        Alcotest.(check int) "the [0] component is violated" 1 v;
+        let src2 =
+          m ("  fn go(k : " ^ pos ^ ") : Int do\n\
+              \    fn pr(n : " ^ pos ^ ") : (List(" ^ pos ^ "), List(" ^ pos ^ ")) do ([n], [n]) end\n\
+              \    let (a, b) = pr(k)\n    sum_pos(a)\n  end\n")
+        in
+        let (_, v2, _) = l3 src2 in
+        Alcotest.(check int) "control: no violation" 0 v2;
+        Alcotest.check vs "sum_pos(a) is not lent" [ "skipped" ] (of_callee "sum_pos" src2));
+    (* The audit (review note on the base: `--refine-audit` already called a
+       local's container return Enforced while nothing checked it).  It is
+       checked now, so Enforced is true: the audit says so, and a violating
+       tail is reported. *)
+    (let src =
+       {|mod M do
+          fn withloc(xs : List(Int)) : Int do
+            fn loc(ys : List(Int)) : List({Int | _ > 0}) do Cons(0 - 1, Nil) end
+            let r = loc(xs)
+            0
+          end
+        end|}
+     in
+     Alcotest.test_case "audit: a local's container return is Enforced" `Quick (fun () ->
+         let _, d = classify_only_site src in
+         Alcotest.(check string) "disposition" "Enforced" (disposition_tag d)));
+    gated "audit: …and its violating tail is reported" (fun () ->
+        (* Before: (0, 0, 0), no obligation filed. *)
+        let src =
+          {|mod M do
+             fn withloc(xs : List(Int)) : Int do
+               fn loc(ys : List(Int)) : List({Int | _ > 0}) do Cons(0 - 1, Nil) end
+               let r = loc(xs)
+               0
+             end
+           end|}
+        in
+        Alcotest.check t3 "violated" (0, 1, 0) (l3 src);
+        Alcotest.(check bool) "an error" true (has_refine_error_typed src));
+  ]
+
+(* ── Relational element returns as call-site facts (design 2026-10-18
+   element-flow follow-ups, phase 4, §2; rows r1-r6 of §0.4) ──────────────
+   A proved container return whose element refinement names a PARAMETER
+   (`below(n) : List({Int | _ < n})`) is a fact at a call once the call's
+   actuals are substituted for the parameters (`below(10)` carries `_ < 10`),
+   as a scalar relational return's postcondition always was.  Only STABLE
+   actuals (variables, literals, linear arithmetic over them) are
+   substituted, so a stored fact can be retired by mention when a name it
+   carries is rebound.  The structural self-call hypothesis is instantiated
+   at the self-call's own actuals, so `clamp(t, n)` carries `_ <= n`, and a
+   proved local `fn` lends a relational entry over its own parameters.
+
+   Verdicts (decision D2, and phase 0's rule for caller names): an
+   instantiated entry that fails to imply the demand is a VIOLATION when
+   every caller name it or the demand mentions is constrained by some user
+   assumption (a scope fact or a path condition), or names no caller
+   variable at all; an entry naming a caller variable no fact constrains is
+   a skip unless the demand fails for EVERY value of it.  The triple each
+   case had on the base (72c1eb52a) is in its comment. *)
+let elemflow_relational_return_suite =
+  let m ?(verified = false) body =
+    "mod RR do\n" ^ (if verified then "  cap verified\n" else "")
+    ^ "  fn sum_small(xs : List({Int | _ < 10})) : Int do 0 end\n\
+      \  fn sum_lt5(xs : List({Int | _ < 5})) : Int do 0 end\n\
+      \  fn sum_le10(xs : List({Int | _ <= 10})) : Int do 0 end\n\
+      \  fn need_lt(xs : List({Int | _ < n}), n : Int) : Int do 0 end\n\
+      \  fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let t3 = Alcotest.(triple int int int) in
+  let of_callee c src =
+    List.filter_map (fun (c', v, _) -> if c' = c then Some v else None) (typed_obligations src)
+  in
+  let vs = Alcotest.(list string) in
+  [ gated "r1: a proved relational return is a fact at the call's actuals" (fun () ->
+        (* Base: (2, 0, 1), the call unreflectable-subject. *)
+        let src = m "  fn go() : Int do sum_small(below(10)) end\n" in
+        Alcotest.check t3 "(3, 0, 0)" (3, 0, 0) (l3 src);
+        Alcotest.check vs "below(10) proves sum_small" [ "proved" ] (of_callee "below(…)" src));
+
+    gated "r2: an instantiated entry that does not imply the demand is a violation (D2)" (fun () ->
+        (* Base: (2, 0, 1). *)
+        let src = m "  fn go() : Int do sum_lt5(below(10)) end\n" in
+        Alcotest.check t3 "(2, 1, 0)" (2, 1, 0) (l3 src);
+        Alcotest.(check bool) "an error" true (has_refine_error_typed src);
+        (* VC-cache pin (design §2.5 item 9): the instantiated predicate is
+           part of the query, so a later call with another actual neither
+           inherits the first proof nor is inherited by it.  Base: (2, 0, 2). *)
+        Alcotest.check t3 "below(10) then below(50): proved, violated" (3, 1, 0)
+          (l3 (m "  fn go() : Int do sum_small(below(10)) + sum_small(below(50)) end\n")));
+
+    gated "r4: a let-bound result stores the instantiated entry" (fun () ->
+        (* Base: (2, 0, 1) each. *)
+        Alcotest.check t3 "let ys = below(k), k <= 10: proved" (3, 0, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 10}) : Int do\n    let ys = below(k)\n    sum_small(ys)\n  end\n"));
+        Alcotest.check t3 "inline below(k), k <= 10: proved" (3, 0, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 10}) : Int do sum_small(below(k)) end\n"));
+        Alcotest.check t3 "below(k + 1), k <= 8 (a linear actual): proved" (3, 0, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 8}) : Int do sum_small(below(k + 1)) end\n"));
+        (* A constrained caller name: k <= 100 admits 99 < 5 failing, so a
+           violation.  Base: (2, 0, 1). *)
+        Alcotest.check t3 "let ys = below(k), k <= 100, into _ < 5: violated" (2, 1, 0)
+          (l3 (m "  fn go(k : {Int | _ <= 100}) : Int do\n    let ys = below(k)\n    sum_lt5(ys)\n  end\n"));
+        (* A guard constrains it too. *)
+        Alcotest.check t3 "if k <= 10: proved" (3, 0, 0)
+          (l3 (m "  fn go(k : Int) : Int do if k <= 10 do sum_small(below(k)) else 0 end end\n")));
+
+    gated "r5: an unconstrained caller name is a skip, unless no value of it satisfies the demand" (fun () ->
+        (* Base: (2, 0, 1).  `_ < n` against `_ < 10` holds for n = 5 and
+           fails for n = 100: not a definite violation. *)
+        Alcotest.check t3 "sum_small(below(n)), n unrefined: skipped" (2, 0, 1)
+          (l3 (m "  fn go(n : Int) : Int do sum_small(below(n)) end\n"));
+        (* `_ < n` never meets `_ >= n`: violated for every n.  Base: (2, 0, 1). *)
+        Alcotest.check t3 "need_ge(below(n), n): violated" (2, 1, 0)
+          (l3
+             (m "  fn need_ge(xs : List({Int | _ >= m}), m : Int) : Int do 0 end\n\
+                 \  fn go(n : Int) : Int do need_ge(below(n), n) end\n"));
+        (* The demand's own substitution, both namespaces at once: proved for
+           any n.  Base: (2, 0, 1). *)
+        Alcotest.check t3 "need_lt(below(n), n): proved" (3, 0, 0)
+          (l3 (m "  fn go(n : Int) : Int do need_lt(below(n), n) end\n"));
+        (* The rule reads the subject's fact, not where it came from, so a
+           PARAMETER's own relational entry naming an unrefined parameter is
+           a skip too (it was a violation; the conservative direction, as
+           phase 0 made `need_lt(ys, n - 1)` a skip).  Base: (2, 1, 0). *)
+        Alcotest.check t3 "f(n, xs : List({_ < n})) passing xs to sum_small: skipped" (2, 0, 1)
+          (l3 (m "  fn go(n : Int, xs : List({Int | _ < n})) : Int do sum_small(xs) end\n")));
+
+    gated "the entry is substituted, not read in the caller's namespace" (fun () ->
+        (* Design §2.5 item 4.  Read as the caller's `n`, `_ < n` would be
+           `_ < 3` and imply `_ < 5`.  Base: (2, 0, 1) each. *)
+        Alcotest.check t3 "let n = 3; sum_small(below(10)): proved" (3, 0, 0)
+          (l3 (m "  fn go() : Int do\n    let n = 3\n    sum_small(below(10))\n  end\n"));
+        Alcotest.check t3 "let n = 3; sum_lt5(below(10)): violated" (2, 1, 0)
+          (l3 (m "  fn go() : Int do\n    let n = 3\n    sum_lt5(below(10))\n  end\n"));
+        (* Simultaneous substitution: `mk(b, a)` carries `_ < a`.
+           Base: (3, 0, 1) each. *)
+        let mk = "  fn mk(a : Int, b : Int) : List({Int | _ < b}) do [b - 1] end\n" in
+        Alcotest.check t3 "mk(b, a) with a <= 10: proved" (4, 0, 0)
+          (l3 (m (mk ^ "  fn go(b : {Int | _ <= 100}, a : {Int | _ <= 10}) : Int do sum_small(mk(b, a)) end\n")));
+        Alcotest.check t3 "mk(a, b) with b <= 100: violated" (3, 1, 0)
+          (l3 (m (mk ^ "  fn go(b : {Int | _ <= 100}, a : {Int | _ <= 10}) : Int do sum_small(mk(a, b)) end\n"))));
+
+    gated "a named binder does not capture an actual" (fun () ->
+        (* Design §2.5 item 8.  Captured, `{x : Int | x < n}` at `below2(x)`
+           would read `x < x`.  Base: (3, 0, 1). *)
+        Alcotest.check t3 "below2(x), x <= 10: proved" (4, 0, 0)
+          (l3
+             (m "  fn below2(n : Int) : List({x : Int | x < n}) do [n - 1] end\n\
+                 \  fn go(x : {Int | _ <= 10}) : Int do sum_small(below2(x)) end\n")));
+
+    gated "an unstable actual carries nothing" (fun () ->
+        (* Design §2.5 item 6: a call actual is not a stable name.
+           Base: (2, 0, 1), unchanged. *)
+        Alcotest.check t3 "below(f(x)): skipped" (2, 0, 1)
+          (l3
+             (m "  fn f(x : Int) : Int do x end\n\
+                 \  fn go(x : Int) : Int do sum_small(below(f(x))) end\n"));
+        (* Even a call with a proved postcondition is not substituted (design
+           decision 7: a lent entry may be STORED, and only variables,
+           literals and linear arithmetic over them retire by mention).  A
+           pin of the conservative choice: `Any` would prove this.
+           Base: (3, 0, 1). *)
+        Alcotest.check t3 "below(inc(k)), inc = k + 1, k <= 8: skipped" (3, 0, 1)
+          (l3
+             (m "  fn inc(x : Int) : {Int | _ == x + 1} do x + 1 end\n\
+                 \  fn go(k : {Int | _ <= 8}) : Int do sum_small(below(inc(k))) end\n")));
+
+    gated "a stored entry retires when a name it mentions is rebound" (fun () ->
+        (* Design §2.5 item 7.  A stale `_ < k` would read as `_ < 5`.
+           The three "not proved" cases are guards: (2, 0, 1) on the base
+           too, where nothing was lent. *)
+        Alcotest.check t3 "let ys = below(k); let k = 5; sum_lt5(ys): not proved" (2, 0, 1)
+          (l3
+             (m "  fn go(k : {Int | _ <= 100}) : Int do\n\
+                 \    let ys = below(k)\n    let k = 5\n    sum_lt5(ys)\n  end\n"));
+        (* The task's shape: a stale `_ < n` read as `_ < 0` would PROVE
+           need_lt(r, 0). *)
+        Alcotest.check t3 "let r = below(n); let n = 0; need_lt(r, n): not proved" (2, 0, 1)
+          (l3
+             (m "  fn go(n : Int) : Int do\n    let r = below(n)\n    let n = 0\n    need_lt(r, n)\n  end\n"));
+        (* Control: no rebinding.  Base: (2, 0, 1). *)
+        Alcotest.check t3 "control: let r = below(n); need_lt(r, n): proved" (3, 0, 0)
+          (l3 (m "  fn go(n : Int) : Int do\n    let r = below(n)\n    need_lt(r, n)\n  end\n"));
+        (* A match binder rebinding the name retires it too. *)
+        Alcotest.check t3 "match binder k: not proved" (2, 0, 1)
+          (l3
+             (m "  fn go(k : {Int | _ <= 100}, o : Option(Int)) : Int do\n\
+                 \    let ys = below(k)\n\
+                 \    match o do\n      Some(k) -> if k == 5 do sum_lt5(ys) else 0 end\n      None -> 0\n    end\n  end\n")));
+
+    gated "an unproved relational return lends nothing" (fun () ->
+        (* Design §2.5 item 10, row r3's `bad`.  A guard: (3, 1, 1) on the
+           base too. *)
+        Alcotest.check t3 "sum_small(bad(10)): skipped" (3, 1, 1)
+          (l3
+             (m "  fn bad(n : Int) : List({Int | _ < n}) do [n - 1, n] end\n\
+                 \  fn go() : Int do sum_small(bad(10)) end\n")));
+
+    gated "r6: the self-call hypothesis at the self-call's actuals" (fun () ->
+        let clamp =
+          "  fn clamp(xs : List(Int), n : Int) : List({Int | _ <= n}) do\n\
+          \    match xs do\n\
+          \      Nil -> Nil\n\
+          \      Cons(h, t) -> if h <= n do Cons(h, clamp(t, n)) else Cons(n, clamp(t, n)) end\n\
+          \    end\n  end\n"
+        in
+        let src = m (clamp ^ "  fn go(ys : List(Int)) : Int do sum_le10(clamp(ys, 10)) end\n") in
+        (* Base: (4, 0, 3): both self-call tails and the caller skipped. *)
+        Alcotest.check t3 "(7, 0, 0)" (7, 0, 0) (l3 src);
+        Alcotest.check vs "both self-calls proved" [ "proved"; "proved" ] (of_callee "clamp(…)" src
+          |> fun l -> List.filteri (fun i _ -> i < 2) l);
+        (* A self-call at ANOTHER actual carries ITS actual's entry, which
+           does not imply the demand: `clamp(t, n + 1)` is `_ <= n + 1`.
+           Not proved, and the caller lends nothing.  A guard ((4, 0, 3) on
+           the base too): with the hypothesis read RAW, both cl1 and cl2
+           below prove (7, 0, 0). *)
+        let cl1 =
+          l3
+            (m "  fn cl1(xs : List(Int), n : Int) : List({Int | _ <= n}) do\n\
+                \    match xs do\n\
+                \      Nil -> Nil\n\
+                \      Cons(h, t) -> if h <= n do Cons(h, cl1(t, n + 1)) else Cons(n, cl1(t, n)) end\n\
+                \    end\n  end\n\
+                \  fn go(ys : List(Int)) : Int do sum_le10(cl1(ys, 10)) end\n")
+        in
+        (* The gate never admits cl1, so in the real walk no hypothesis is
+           active: h and n prove, both self-calls and the caller skip. *)
+        Alcotest.check t3 "cl1: not proved, the caller skips" (4, 0, 3) cl1;
+        (* Swapped actuals: `cl2(t, m, n)` carries `_ <= m`. *)
+        let cl2 =
+          l3
+            (m "  fn cl2(xs : List(Int), n : Int, m : Int) : List({Int | _ <= n}) do\n\
+                \    match xs do\n\
+                \      Nil -> Nil\n\
+                \      Cons(h, t) -> if h <= n do Cons(h, cl2(t, m, n)) else Cons(n, cl2(t, n, m)) end\n\
+                \    end\n  end\n\
+                \  fn go(ys : List(Int)) : Int do sum_le10(cl2(ys, 10, 10)) end\n")
+        in
+        Alcotest.check t3 "cl2: the swapped self-call does not prove, nor the caller" (4, 0, 3) cl2);
+
+    gated "a relational TUPLE component" (fun () ->
+        let split = "  fn split(n : Int) : (List({Int | _ < n}), List({Int | _ >= n})) do ([n - 1], [n]) end\n" in
+        (* Base: (4, 0, 1). *)
+        Alcotest.check t3 "let (lo, hi) = split(10); sum_small(lo): proved" (5, 0, 0)
+          (l3 (m (split ^ "  fn go() : Int do\n    let (lo, hi) = split(10)\n    sum_small(lo)\n  end\n")));
+        (* Base: (4, 0, 1). *)
+        Alcotest.check t3 "sum_lt5(lo): violated" (4, 1, 0)
+          (l3 (m (split ^ "  fn go() : Int do\n    let (lo, hi) = split(10)\n    sum_lt5(lo)\n  end\n")));
+        (* The destructured call is re-read at use: a rebinding of `k` in
+           between retires it.  Stale, `_ < k` would read as `_ < 5`.
+           A guard: (4, 0, 1) on the base too. *)
+        Alcotest.check t3 "let (lo, hi) = split(k); let k = 5; sum_lt5(lo): not proved" (4, 0, 1)
+          (l3
+             (m (split ^ "  fn go(k : {Int | _ <= 100}) : Int do\n\
+                          \    let (lo, hi) = split(k)\n    let k = 5\n    sum_lt5(lo)\n  end\n")));
+        (* A tuple tail through a proved relational tuple return.
+           Base: (4, 0, 2). *)
+        Alcotest.check t3 "a tail split(n) of a relational tuple return: proved" (6, 0, 0)
+          (l3
+             (m (split ^ "  fn split2(n : Int) : (List({Int | _ < n}), List({Int | _ >= n})) do split(n) end\n")));
+        (* The tuple self-hypothesis, instantiated.  Base: (4, 0, 5), the
+           four recursive-call components and the caller skipped. *)
+        let sp =
+          "  fn sp(xs : List(Int), n : Int) : (List({Int | _ < n}), List({Int | _ >= n})) do\n\
+          \    match xs do\n\
+          \      Nil -> (Nil, Nil)\n\
+          \      Cons(h, t) ->\n\
+          \        let (a, b) = sp(t, n)\n\
+          \        if h < n do (Cons(h, a), b) else (a, Cons(h, b)) end\n\
+          \    end\n  end\n"
+        in
+        Alcotest.check t3 "sp: every component proved, and the caller" (9, 0, 0)
+          (l3 (m (sp ^ "  fn go(ys : List(Int)) : Int do\n    let (lo, hi) = sp(ys, 10)\n    sum_small(lo)\n  end\n")));
+        (* The tuple self-call at ANOTHER actual (`sp1(t, n + 1)`) carries
+           `_ < n + 1`: the pushes onto it do not prove and the caller lends
+           nothing.  Read raw it would be `_ < n` and prove everything
+           (9, 0, 0).  A guard: (4, 0, 5) on the base too. *)
+        let sp1 =
+          "  fn sp1(xs : List(Int), n : Int) : (List({Int | _ < n}), List({Int | _ >= n})) do\n\
+          \    match xs do\n\
+          \      Nil -> (Nil, Nil)\n\
+          \      Cons(h, t) ->\n\
+          \        let (a, b) = sp1(t, n + 1)\n\
+          \        if h < n do (Cons(h, a), b) else (a, Cons(h, b)) end\n\
+          \    end\n  end\n"
+        in
+        let sp1r =
+          l3 (m (sp1 ^ "  fn go(ys : List(Int)) : Int do\n    let (lo, hi) = sp1(ys, 10)\n    sum_small(lo)\n  end\n"))
+        in
+        Alcotest.check t3 "sp1: the pushes onto the self-call and the caller skip" (4, 0, 5) sp1r);
+
+    gated "a proved local fn lends a relational entry over its own parameters" (fun () ->
+        (* Phase 3 lent only closed entries.  Base: (3, 0, 1). *)
+        Alcotest.check t3 "local bl(k), k <= 10: proved" (4, 0, 0)
+          (l3
+             (m "  fn go(k : {Int | _ <= 10}) : Int do\n\
+                 \    fn bl(n : Int) : List({Int | _ < n}) do [n - 1] end\n\
+                 \    sum_small(bl(k))\n  end\n"));
+        (* Base: (3, 0, 1). *)
+        Alcotest.check t3 "local bl(10) into _ < 5: violated" (3, 1, 0)
+          (l3
+             (m "  fn go() : Int do\n\
+                 \    fn bl(n : Int) : List({Int | _ < n}) do [n - 1] end\n\
+                 \    sum_lt5(bl(10))\n  end\n"));
+        (* Stale through a local.  A guard: (3, 0, 1) on the base too. *)
+        Alcotest.check t3 "let ys = bl(k); let k = 5; sum_lt5(ys): not proved" (3, 0, 1)
+          (l3
+             (m "  fn go(k : {Int | _ <= 100}) : Int do\n\
+                 \    fn bl(n : Int) : List({Int | _ < n}) do [n - 1] end\n\
+                 \    let ys = bl(k)\n    let k = 5\n    sum_lt5(ys)\n  end\n"));
+        (* A captured outer name is not the local's parameter (G3-5): it
+           lends nothing.  A guard: (3, 0, 1) on the base too. *)
+        Alcotest.check t3 "captured j: skipped" (3, 0, 1)
+          (l3
+             (m "  fn go(j : {Int | _ <= 10}) : Int do\n\
+                 \    fn bl(n : Int) : List({Int | _ < j}) do [j - 1] end\n\
+                 \    sum_small(bl(0))\n  end\n")));
+
+    gated "a binder named like a name the slot mentions gets no fact" (fun () ->
+        let neg = "  fn need_neg(k : {Int | _ < 0}) : Int do k end\n" in
+        (* A `match` binder: `Cons(k, _)` under `_ < k` read as `k < k`.
+           The call form is new with this phase (below(k) carried nothing
+           before, (2, 0, 1)); the parameter form was a live FALSE PROOF on
+           the base, (3, 0, 0). *)
+        Alcotest.check t3 "match xs, xs : List({_ < n}), Cons(n, _) -> need_neg(n): not proved" (2, 0, 1)
+          (l3
+             (m (neg ^ "  fn g(n : Int, xs : List({Int | _ < n})) : Int do\n\
+                        \    match xs do\n      Cons(n, _) -> need_neg(n)\n      Nil -> 0\n    end\n  end\n")));
+        Alcotest.check t3 "match below(k) do Cons(k, _) -> need_neg(k): not proved" (2, 0, 1)
+          (l3
+             (m (neg ^ "  fn g(k : Int) : Int do\n\
+                        \    match below(k) do\n      Cons(k, _) -> need_neg(k)\n      Nil -> 0\n    end\n  end\n")));
+        Alcotest.check t3 "let ys = below(k); match ys do Cons(k, _): not proved" (2, 0, 1)
+          (l3
+             (m (neg ^ "  fn g(k : Int) : Int do\n    let ys = below(k)\n\
+                        \    match ys do\n      Cons(k, _) -> need_neg(k)\n      Nil -> 0\n    end\n  end\n")));
+        (* Control: a fresh binder keeps the fact (h < k).  Base: (2, 0, 1). *)
+        Alcotest.check t3 "control: Cons(h, _) -> need_neg(h - k): proved" (3, 0, 0)
+          (l3
+             (m (neg ^ "  fn g(k : Int) : Int do\n\
+                        \    match below(k) do\n      Cons(h, _) -> need_neg(h - k)\n      Nil -> 0\n    end\n  end\n")));
+        (* A `let` of a single element (`let n = hd(xs)`, the parametric
+           rule's scalar half) filed `n : {_ < n}`: [scope_add_binding]'s
+           self-rebinding guard was missing from that arm.  The parameter
+           form was a live FALSE PROOF on the base: (4, 0, 0). *)
+        let hd =
+          "  fn hd(xs : {List(a) | len(_) > 0}) : a do\n\
+          \    match xs do\n      Cons(h, _) -> h\n      Nil -> panic(\"empty\")\n    end\n  end\n"
+        in
+        let nb = "  fn nbelow(n : Int) : {List({Int | _ < n}) | len(_) > 0} do [n - 1] end\n" in
+        Alcotest.check t3 "let n = hd(xs), xs : List({_ < n}): need_neg(n) not proved" (3, 0, 1)
+          (l3
+             (m (neg ^ hd ^ "  fn g(n : Int, xs : {List({Int | _ < n}) | len(_) > 0}) : Int do\n\
+                             \    let n = hd(xs)\n    need_neg(n)\n  end\n")));
+        (* The call form (new with this phase).  Base: (5, 0, 1). *)
+        Alcotest.check t3 "let n = hd(nbelow(n)): need_neg(n) not proved" (5, 0, 1)
+          (l3 (m (neg ^ hd ^ nb ^ "  fn g(n : Int) : Int do\n    let n = hd(nbelow(n))\n    need_neg(n)\n  end\n")));
+        (* Control: a fresh name keeps the fact.  Base: (5, 0, 1). *)
+        Alcotest.check t3 "control: let h = hd(nbelow(n)); need_neg(h - n): proved" (6, 0, 0)
+          (l3 (m (neg ^ hd ^ nb ^ "  fn g(n : Int) : Int do\n    let h = hd(nbelow(n))\n    need_neg(h - n)\n  end\n")));
+        (* A container `let` naming itself (`let k = mkl(k)`) stores nothing:
+           the entry would be about the new `k`.  No verdict depends on it
+           (the new `k` is a list), so this pins only that nothing breaks. *)
+        Alcotest.check t3 "let k = below(k); sum_small(k): not proved" (2, 0, 1)
+          (l3 (m "  fn g(k : Int) : Int do\n    let k = below(k)\n    sum_small(k)\n  end\n")));
+
+    gated "a relational return passed as a VALUE lends nothing (no actuals)" (fun () ->
+        (* [declared_elem_return] without actuals: closed entries only.
+           Base: (2, 0, 1). *)
+        Alcotest.check t3 "sum_small(apply1(below, 10)): skipped" (2, 0, 1)
+          (l3
+             (m "  fn apply1(f : (Int) -> List(a), x : Int) : List(a) do f(x) end\n\
+                 \  fn g() : Int do sum_small(apply1(below, 10)) end\n")));
+
+    gated "a path the query does not fully see is never a definite violation" (fun () ->
+        (* Review of 8e5c15c48.  The element-subtyping arm takes a solver
+           model refuting the implication as a definite failure when every
+           caller name is "constrained".  But a guard the solver cannot read
+           (`small(k)`), a literal-pattern arm (`3 ->`), an earlier arm's
+           failure, or a later `cond` arm leaves states in the query the
+           program never reaches, so `k = 6` is no real counterexample.  A
+           correct program was reported violated.  The scalar twin
+           (`n5(k)`) is a skip there; so is this now.  Each was (_, 1, 0) on
+           8e5c15c48. *)
+        let ex =
+          "  fn need_lt5(xs : List({Int | _ < 5})) : Int do 0 end\n\
+          \  fn need_lt4(xs : List({Int | _ < 4})) : Int do 0 end\n\
+          \  fn small(k : Int) : Bool do k < 5 end\n"
+        in
+        let l3x body = l3 (m (ex ^ body)) in
+        Alcotest.check t3 "if small(k): need_lt5(below(k)) skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if small(k) do need_lt5(below(k)) else 0 end\n  end\n");
+        Alcotest.check t3 "if small(k): let ys = below(k); need_lt5(ys) skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if small(k) do\n      let ys = below(k)\n      need_lt5(ys)\n    else 0 end\n  end\n");
+        (* A literal-pattern arm now carries `k == 3` as a fact, so it
+           proves. *)
+        Alcotest.check t3 "match k do 3 -> need_lt5(below(k)): proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    match k do\n      3 -> need_lt5(below(k))\n      _ -> 0\n    end\n  end\n");
+        (* The parameter-entry route (p6_param, live on 72c1eb52a too). *)
+        Alcotest.check t3 "param entry under if small(k): skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}, ys : List({Int | _ < k})) : Int do\n    if small(k) do need_lt5(ys) else 0 end\n  end\n");
+        Alcotest.check t3 "param entry under a nested literal arm: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}, ys : List({Int | _ < k}), o : Option(Int)) : Int do\n\
+                \    match o do\n      Some(3) -> need_lt5(ys)\n      _ -> 0\n    end\n  end\n");
+        (* An earlier unguarded Int-literal arm's failure is recorded now
+           (`k != 5`), so the `_` arm proves (k <= 4). *)
+        Alcotest.check t3 "match k do 5 -> 0 _ -> need_lt4(below(k)), k <= 5: proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 5}) : Int do\n    match k do\n      5 -> 0\n      _ -> need_lt4(below(k))\n    end\n  end\n");
+        (* An earlier arm whose failure is NOT recorded (a nested literal):
+           `k = 5` is unreachable in the `_` arm but is in the query. *)
+        Alcotest.check t3 "match (k, 0) do (5, _) -> 0 _ -> need_lt4(below(k)): skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 5}) : Int do\n    match (k, 0) do\n      (5, _) -> 0\n      _ -> need_lt4(below(k))\n    end\n  end\n");
+        (* The same inside a lambda tail ([tails_bound]'s paths, which carry
+           the marker too).  A guard: a refuted lambda-tail source is a
+           demand-flow skip by design, so this was (2, 0, 1) on 8e5c15c48 as
+           well; it pins that nothing there turns definite. *)
+        Alcotest.check t3 "lambda tail under (5, _) -> [0]: below(k) not definite" (2, 0, 1)
+          (l3x "  fn ap(x : b, f : b -> a) : a do f(x) end\n\
+                \  fn g(k : {Int | _ <= 5}) : Int do\n\
+                \    need_lt4(ap(0, fn y -> match (k, y) do\n      (5, _) -> [0]\n      _ -> below(k)\n    end))\n  end\n");
+        (* A later `cond` arm does not see the earlier conditions' negation. *)
+        Alcotest.check t3 "match do (cond): k >= 5 -> 0, true -> need_lt5(below(k)): skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    match do\n      k >= 5 -> 0\n      true -> need_lt5(below(k))\n    end\n  end\n");
+        (* Controls: a TRANSLATED guard that still admits a failure, and no
+           guard, stay violations; a closed demand under an opaque arm too. *)
+        Alcotest.check t3 "control: if k < 10 do need_lt5(below(k)): violated" (2, 1, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if k < 10 do need_lt5(below(k)) else 0 end\n  end\n");
+        Alcotest.check t3 "control: no guard: violated" (2, 1, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do need_lt5(below(k)) end\n");
+        Alcotest.check t3 "control: closed below(10) under if small(k): violated" (2, 1, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if small(k) do need_lt5(below(10)) else 0 end\n  end\n");
+        Alcotest.check t3 "control: translated guard if k < 5: proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if k < 5 do need_lt5(below(k)) else 0 end\n  end\n"));
+
+    gated "a let-bound Bool guard is read through its definition, or is opaque" (fun () ->
+        (* Re-review of fece9d212: `let ok = k < 5; if ok do …` translated
+           the guard `ok` exactly, but nothing tied `ok` to `k`, so the model
+           `ok = true, k = 6` was taken as a definite counterexample.  The
+           triple each case had on fece9d212 is in its comment. *)
+        let ex =
+          "  fn need_lt5(xs : List({Int | _ < 5})) : Int do 0 end\n\
+          \  fn n5(x : {Int | _ < 5}) : Int do 0 end\n\
+          \  fn small(k : Int) : Bool do k < 5 end\n"
+        in
+        let l3x body = l3 (m (ex ^ body)) in
+        (* A comparison is read through [lets]: `if ok` is `if k < 5`.
+           fece9d212: (2, 1, 0) each. *)
+        Alcotest.check t3 "c1: let ok = k < 5; if ok do need_lt5(below(k)): proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = k < 5\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        Alcotest.check t3 "the parameter-entry twin: proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}, ys : List({Int | _ < k})) : Int do\n\
+                \    let ok = k < 5\n    if ok do need_lt5(ys) else 0 end\n  end\n");
+        (* The scalar twin was a skip; the same reading proves it.
+           fece9d212: (2, 0, 1). *)
+        Alcotest.check t3 "scalar twin: let ok = k < 5; if ok do n5(k): proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = k < 5\n    if ok do n5(k) else 0 end\n  end\n");
+        (* Control: the definition is recorded, so a guard that still admits
+           k = 9 is a DEFINITE violation.  fece9d212: (2, 1, 0). *)
+        Alcotest.check t3 "control: let ok = k < 10; if ok do need_lt5(below(k)): violated" (2, 1, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = k < 10\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        (* Rebinding `k` after the let retires the definition (by mention):
+           the old fact does not prove, and `ok` is opaque, so no definite
+           verdict either.  fece9d212: (2, 1, 0). *)
+        Alcotest.check t3 "let ok = k < 5; let k = 7; if ok: not proved, not definite" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = k < 5\n    let k = 7\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        (* An unpinned Bool local is opaque.  fece9d212: (2, 1, 0) each. *)
+        Alcotest.check t3 "let ok = small(k): skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = small(k)\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        Alcotest.check t3 "let ok = if k < 5 do true else false end: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = if k < 5 do true else false end\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        (* An unpinned local in the DEMAND: `m` is 200 at run time, but the
+           query only knows `m > 0`, so the model `m = 1` is no
+           counterexample. *)
+        Alcotest.check t3 "need_lt(below(k), m), m = two100(k): skipped" (3, 0, 1)
+          (l3x "  fn two100(x : Int) : {Int | _ > 0} do 200 end\n\
+                \  fn g(k : {Int | _ <= 100}) : Int do\n    let m = two100(k)\n    need_lt(below(k), m)\n  end\n");
+        (* A binder destructured from an unpinned local is opaque too: `j`
+           IS `k`, but the query does not know it. *)
+        Alcotest.check t3 "let o = Some(k); Some(j) -> if j < 5: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let o = Some(k)\n\
+                \    match o do\n      Some(j) -> if j < 5 do need_lt5(below(k)) else 0 end\n      None -> 0\n    end\n  end\n");
+        (* An irrefutable pattern puts no tester on the path, so only the
+           binder's own tag stops this one. *)
+        Alcotest.check t3 "let t = (k, 0); (j, _) -> if j < 5: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let t = (k, 0)\n\
+                \    match t do\n      (j, _) -> if j < 5 do need_lt5(below(k)) else 0 end\n    end\n  end\n");
+        Alcotest.check t3 "let o = Some(k < 5); Some(b) -> if b: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let o = Some(k < 5)\n\
+                \    match o do\n      Some(b) -> if b do need_lt5(below(k)) else 0 end\n      None -> 0\n    end\n  end\n"));
+
+    gated "cap verified: r1 compiles, r2 does not" (fun () ->
+        Alcotest.(check bool) "r1 accepted" false
+          (has_refine_error_typed (m ~verified:true "  fn go() : Int do sum_small(below(10)) end\n"));
+        Alcotest.(check bool) "r2 rejected" true
+          (has_refine_error_typed (m ~verified:true "  fn go() : Int do sum_lt5(below(10)) end\n")));
+  ]
+
+let post_inner_binders_suite =
+  let m ?(verified = false) body =
+    "mod PB do\n" ^ (if verified then "  cap verified\n" else "")
+    ^ "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n\
+      \  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n\
+      \  fn uor(o : Option(a), d : a) : a do\n\
+      \    match o do\n      Some(x) -> x\n      None -> d\n    end\n  end\n\
+      \  fn ap(x : b, f : b -> a) : a do f(x) end\n"
+    ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let t3 = Alcotest.(triple int int int) in
+  (* Every case's triple counts each return tail: the `None -> 1` arm and
+     the `else 1` branch are proved tails of their own. *)
+  let arm body = "    match p do\n      Some(n) -> " ^ body ^ "\n      None -> 1\n    end\n" in
+  [ gated "h2: a direct tail under an inner binder named like a parameter" (fun () ->
+        (* Before: (1, 0, 0), a false proof; `g2(0 - 1, Some(10))` is -7. *)
+        Alcotest.check t3 "the -7 tail is violated, the two 1 tails proved" (2, 1, 0)
+          (l3
+             (m ("  fn g2(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do\n"
+                 ^ arm "if n > 5 do 0 - 7 else 1 end" ^ "  end\n")));
+        Alcotest.(check bool) "cap verified rejects it" true
+          (has_refine_error_typed
+             (m ~verified:true
+                ("  fn g2(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do\n"
+                 ^ arm "if n > 5 do 0 - 7 else 1 end" ^ "  end\n")));
+        (* The correct twin still proves: the inner fact `n > 5` is kept,
+           about the inner `n`. *)
+        Alcotest.check t3 "if n > 5 do n else 1 end proves" (3, 0, 0)
+          (l3
+             (m ("  fn g3(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do\n"
+                 ^ arm "if n > 5 do n else 1 end" ^ "  end\n")));
+        Alcotest.check t3 "if n > 5 do 7 else 1 end proves" (3, 0, 0)
+          (l3
+             (m ("  fn g4(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do\n"
+                 ^ arm "if n > 5 do 7 else 1 end" ^ "  end\n"))));
+
+    gated "an inner binder with no path condition is not the parameter" (fun () ->
+        (* `Some(n) -> n` returns the inner `n`, which nothing constrains;
+           read as the parameter `n > 0` it proved. *)
+        Alcotest.check t3 "Some(n) -> n: not proved" (1, 0, 1)
+          (l3 (m ("  fn g5(n : {Int | _ > 0}, p : Option(Int)) : {Int | _ > 0} do\n" ^ arm "n" ^ "  end\n")));
+        Alcotest.check t3 "control: a fresh binder falls back on the parameter" (3, 0, 0)
+          (l3
+             (m "  fn g6(n : {Int | _ > 0}, p : Option(Int)) : {Int | _ > 0} do\n\
+                 \    match p do\n      Some(m) -> if m > 0 do m else n end\n      None -> n\n    end\n  end\n")));
+
+    gated "h1: a call tail through the scalar demand hook" (fun () ->
+        (* Before: proved, through [tail_demand_impl] with `n < 0 && n > 5`. *)
+        let src d =
+          m ("  fn g1(n : {Int | _ < 0}, o : Option({Int | _ > 0}), p : Option(Int)) : {Int | _ > 0} do\n"
+             ^ arm ("if n > 5 do uor(o, " ^ d ^ ") else 1 end") ^ "  end\n")
+        in
+        Alcotest.check t3 "uor(o, 0 - 7) under the inner n > 5: not proved" (2, 0, 1) (l3 (src "0 - 7"));
+        Alcotest.check t3 "control: uor(o, 1) under the same guard proves" (3, 0, 0) (l3 (src "1")));
+
+    gated "an inner binder free in a lambda inside the tail" (fun () ->
+        (* The renaming must reach into the lambda's body: left there, `n`
+           was read by the scalar demand hook as the refined PARAMETER.
+           Before (b5da8ec13): q1 (2, 0, 0), r6 (1, 0, 0), r7 (2, 0, 0), all
+           false (`q1(1, Some(0 - 5))` returns -5). *)
+        let q body =
+          m ("  fn q(n : {Int | _ > 0}, p : Option(Int)) : {Int | _ > 0} do\n" ^ arm body ^ "  end\n")
+        in
+        Alcotest.check t3 "q1: ap(1, fn z -> n): not proved" (1, 0, 1) (l3 (q "ap(1, fn z -> n)"));
+        Alcotest.check t3 "r7: ap(1, fn z -> if n > 0 do 1 else n end): not proved" (1, 0, 1)
+          (l3 (q "ap(1, fn z -> if n > 0 do 1 else n end)"));
+        Alcotest.check t3 "r6: let n = 0 - 5; ap(1, fn z -> n): violated" (0, 1, 0)
+          (l3
+             (m "  fn r6(n : {Int | _ > 0}, p : Option(Int)) : {Int | _ > 0} do\n\
+                 \    let n = 0 - 5\n    ap(1, fn z -> n)\n  end\n"));
+        (* Controls.  The correct twin proves: the inner guard is kept, about
+           the inner `n`, inside the lambda too. *)
+        Alcotest.check t3 "if n > 0 do ap(1, fn z -> n) else 1 end proves" (3, 0, 0)
+          (l3 (q "if n > 0 do ap(1, fn z -> n) else 1 end"));
+        (* A lambda's own parameter named `n` is not renamed. *)
+        Alcotest.check t3 "ap(1, fn n -> n): not proved" (1, 0, 1) (l3 (q "ap(1, fn n -> n)"));
+        Alcotest.check t3 "ap(5, fn n -> 1) proves" (2, 0, 0) (l3 (q "ap(5, fn n -> 1)"));
+        Alcotest.check t3 "ap(1, fn z -> z): not proved" (1, 0, 1) (l3 (q "ap(1, fn z -> z)"));
+        (* An arm inside the lambda rebinding `n` again: its body's `n` is
+           that arm's. *)
+        Alcotest.check t3 "a match in the lambda rebinding n: not proved" (1, 0, 1)
+          (l3 (q "ap(1, fn z -> match p do\n        Some(n) -> n\n        None -> 1\n      end)")));
+
+    gated "the lambda-tail form, through demand_flow's discharge" (fun () ->
+        (* Before: both proved inside `ap(1, fn z -> …)`. *)
+        let src tl =
+          m ("  fn i1(n : {Int | _ < 0}, o : Option({Int | _ > 0}), p : Option(Int)) : Int do\n\
+              \    need_pos(ap(1, fn z -> match p do\n      Some(n) -> if n > 5 do " ^ tl
+             ^ " else 1 end\n      None -> 1\n    end))\n  end\n")
+        in
+        Alcotest.check t3 "a literal 0 - 7: not proved" (0, 0, 1) (l3 (src "0 - 7"));
+        Alcotest.check t3 "uor(o, 0 - 7): not proved" (0, 0, 1) (l3 (src "uor(o, 0 - 7)"));
+        Alcotest.check t3 "control: uor(o, 1) proves" (1, 0, 0) (l3 (src "uor(o, 1)")));
+
+    gated "the pass-site lambda tail of an element codomain" (fun () ->
+        let src tl =
+          m ("  fn hof(g : (Int) -> List({Int | _ > 0})) : Int do 0 end\n\
+              \  fn j(n : {Int | _ < 0}, p : Option(Int)) : Int do\n\
+              \    hof(fn y -> match p do\n      Some(n) -> if n > 5 do " ^ tl
+             ^ " else [1] end\n      None -> [1]\n    end)\n  end\n")
+        in
+        (* A real violation: `j(0 - 1, Some(10))` hands `hof` a function
+           returning `[0 - 7]`. *)
+        Alcotest.check t3 "[0 - 7] under the inner n > 5: violated" (2, 1, 0) (l3 (src "[0 - 7]"));
+        Alcotest.check t3 "control: [7] under the inner n > 5 proves" (3, 0, 0) (l3 (src "[7]")));
+
+    gated "multi-clause functions: clauses binding the same names" (fun () ->
+        (* Desugared to one clause matching on the parameters; each clause's
+           binders are inner binders of that match. *)
+        Alcotest.check t3 "correct clauses prove" (3, 0, 0)
+          (l3
+             (m "  fn mc(None) : {Int | _ > 0} do 1 end\n\
+                 \  fn mc(Some(n)) : {Int | _ > 0} do if n > 5 do n else 1 end end\n"));
+        Alcotest.check t3 "a clause returning -7 under n > 5: violated" (2, 1, 0)
+          (l3
+             (m "  fn mc(None) : {Int | _ > 0} do 1 end\n\
+                 \  fn mc(Some(n)) : {Int | _ > 0} do if n > 5 do 0 - 7 else 1 end end\n")));
+
+    gated "a match binder shadowing an option in the walk" (fun () ->
+        (* The walk shadows `o` at the arm: the inner `o` is unrefined. *)
+        Alcotest.check t3 "need_pos(uor(o, 1)) over the inner o: skipped" (0, 0, 1)
+          (l3
+             (m "  fn w(o : Option({Int | _ > 0}), p : Option(Option(Int))) : Int do\n\
+                 \    match p do\n      Some(o) -> need_pos(uor(o, 1))\n      None -> 1\n    end\n  end\n"));
+        Alcotest.check t3 "control: the outer o proves" (1, 0, 0)
+          (l3
+             (m "  fn w(o : Option({Int | _ > 0}), p : Option(Option(Int))) : Int do\n\
+                 \    match p do\n      Some(q) -> need_pos(uor(o, 1))\n      None -> 1\n    end\n  end\n")));
+
+    gated "a bare source that is not refined" (fun () ->
+        let src z =
+          m ("  fn pick(xs : List(a), z : a) : a do\n\
+              \    match xs do\n      Cons(h, _) -> h\n      Nil -> z\n    end\n  end\n\
+              \  fn go(xs : List({Int | _ > 0}), z : " ^ z ^ ") : Int do need_pos(pick(xs, z)) end\n")
+        in
+        Alcotest.check t3 "z : Int: skipped" (0, 0, 1) (l3 (src "Int"));
+        Alcotest.check t3 "z : {Int | _ > 0}: proves" (1, 0, 0) (l3 (src "{Int | _ > 0}"))) ]
+
+(* ── Accumulator invariants for fold-shaped calls (design
+   specs/2026-10-18-fold-accumulator-invariants-design.md, phase 1) ────────
+   A demand D on the result of a call to a callee parametric in its return
+   variable `b` (P1/P2) is read as instantiating `b := {b | D}`: it holds when
+   every source of `b` meets D (the base, `init`), and every callback's
+   result meets D ASSUMING D of each of its parameters whose declared domain
+   is exactly `b` (the step).  The new rule is that assumption
+   ([invariant_params], in [discharge_pairs]' [lambda_ok]); curried lambdas
+   are peeled to the chain ([peel_lambda]).  A refuted base or step is a
+   skip, never a violation, with its own reason.  Row names (f3, f6, …) are
+   the design's §0 table; the triple each case had on 6fcef2c9d (before this
+   phase) is in its comment.  The prelude's folds are local copies of the
+   stdlib shapes (`List.fold_left`, a recursive `fold_right`, `Enum.fold`'s
+   curried call through a local binding, `Enum.reduce`): a string fixture
+   prepends no stdlib.  The conformance pair t380/t381 runs the real ones. *)
+let fold_invariants_1_suite =
+  let prelude =
+    {|  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn one_pos(o : Option({Int | _ > 0})) : Int do 0 end
+  fn need_lt_opt(o : Option({Int | _ < n}), n : Int) : Int do 0 end
+  type P(x, y) = P(x, y)
+  fn need_p(p : P({Int | _ > 0}, {Int | _ < n}), n : Int) : Int do 0 end
+  fn foldl(xs : List(a), acc : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> foldl(t, f(acc, h), f)
+    end
+  end
+  fn foldr(xs : List(a), acc : b, f : a -> b -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> f(h, foldr(t, acc, f))
+    end
+  end
+  fn efold(xs : List(a), acc : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) ->
+        let g = f(acc)
+        efold(t, g(h), f)
+    end
+  end
+  fn ereduce(xs : List(a), f : a -> a -> a) : Option(a) do
+    match xs do
+      Nil -> None
+      Cons(h, t) -> Some(efold(t, h, f))
+    end
+  end
+|}
+  in
+  let m ?(verified = false) body =
+    "mod FI do\n" ^ (if verified then "  cap verified\n" else "") ^ prelude ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let reasons src = let (_, _, _, rs) = typed_ledger src in rs in
+  let details src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r -> Some (March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let has_detail sub src = List.exists (mentions sub) (details src) in
+  let t3 = Alcotest.(triple int int int) in
+  let step = [ "accumulator-step-unproved" ] and base = [ "accumulator-base-unproved" ] in
+  let param = [ "parametric-source-unproved" ] in
+  let pos = "pos : List({Int | _ > 0})" in
+  (* Each case is its own test, so a perturbation reports every case it moves. *)
+  let case name f = gated name f in
+  [ (* ── Proofs (all (0, 0, 1) parametric-source-unproved on 6fcef2c9d) ── *)
+    case "f3: a length counter is nonnegative" (fun () ->
+        Alcotest.check t3 "need_nn(foldl(ys, 0, fn (acc, _x) -> acc + 1)) proves" (1, 0, 0)
+          (l3 (m "  fn go(ys : List(Int)) : Int do need_nn(foldl(ys, 0, fn (acc, _x) -> acc + 1)) end\n")));
+
+    case "f4: max >= init, at a return tail" (fun () ->
+        (* Before: (0, 0, 1), parametric-source-unproved, a postcondition. *)
+        Alcotest.check t3 "fn h(ys) : {Int | _ >= 0} do foldl(ys, 0, max-step) end proves" (1, 0, 0)
+          (l3
+             (m "  fn h(ys : List(Int)) : {Int | _ >= 0} do foldl(ys, 0, fn (a, x) -> if x > a do x else a end) end\n")));
+
+    case "f4': the proved return reaches a caller" (fun () ->
+        (* Before: (0, 0, 2). *)
+        Alcotest.check t3 "need_nn(h(ys)) proves too" (2, 0, 0)
+          (l3
+             (m "  fn h(ys : List(Int)) : {Int | _ >= 0} do foldl(ys, 0, fn (a, x) -> if x > a do x else a end) end\n\
+                 \  fn go(ys : List(Int)) : Int do need_nn(h(ys)) end\n")));
+
+    case "s9: the step uses the element fact of x and the hypothesis on acc" (fun () ->
+        (* The fold boundary elemflow-scalar-demand pinned as a skip. *)
+        Alcotest.check t3 "need_pos(foldl(pos, 1, fn (acc, x) -> acc + x)) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos ^ ") : Int do need_pos(foldl(pos, 1, fn (acc, x) -> acc + x)) end\n"))));
+
+    case "f9: a refined capture is read in place" (fun () ->
+        Alcotest.check t3 "acc + m with m : {Int | _ > 0} proves" (1, 0, 0)
+          (l3
+             (m ("  fn go(" ^ pos ^ ", m : {Int | _ > 0}) : Int do need_pos(foldl(pos, 1, fn (acc, x) -> acc + m)) end\n"))));
+
+    case "f12: fold_right's accumulator is the second parameter" (fun () ->
+        Alcotest.check t3 "need_nn(foldr(ys, 0, fn (x, a) -> a + 1)) proves" (1, 0, 0)
+          (l3 (m "  fn go(ys : List(Int)) : Int do need_nn(foldr(ys, 0, fn (x, a) -> a + 1)) end\n")));
+
+    case "f13: a curried step is peeled" (fun () ->
+        Alcotest.check t3 "need_nn(efold(ys, 0, fn a -> fn _x -> a + 1)) proves" (1, 0, 0)
+          (l3 (m "  fn go(ys : List(Int)) : Int do need_nn(efold(ys, 0, fn a -> fn _x -> a + 1)) end\n")));
+
+    case "f14: reduce, through the container path, both parameters assume it" (fun () ->
+        Alcotest.check t3 "one_pos(ereduce(pos, fn a -> fn x -> a + x)) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos ^ ") : Int do one_pos(ereduce(pos, fn a -> fn x -> a + x)) end\n"))));
+
+    case "an annotated but unrefined accumulator is fine" (fun () ->
+        Alcotest.check t3 "fn (acc : Int, x) -> acc + 1 proves" (1, 0, 0)
+          (l3 (m "  fn go(ys : List(Int)) : Int do need_nn(foldl(ys, 0, fn (acc : Int, x) -> acc + 1)) end\n")));
+
+    case "a step whose every tail preserves it" (fun () ->
+        Alcotest.check t3 "if x > 0 do acc + x else acc end proves" (1, 0, 0)
+          (l3
+             (m "  fn go(ys : List(Int)) : Int do need_nn(foldl(ys, 0, fn (acc, x) -> if x > 0 do acc + x else acc end)) end\n")));
+
+    case "f20: cap verified accepts f3, rejects f6" (fun () ->
+        (* Before: both rejected. *)
+        Alcotest.(check bool) "f3 accepted" false
+          (has_refine_error_typed
+             (m ~verified:true "  fn go(ys : List(Int)) : Int do need_nn(foldl(ys, 0, fn (acc, _x) -> acc + 1)) end\n"));
+        Alcotest.(check bool) "f6 rejected" true
+          (has_refine_error_typed
+             (m ~verified:true ("  fn go(" ^ pos ^ ") : Int do need_nn(foldl(pos, 0, fn (acc, x) -> acc - x)) end\n"))));
+
+    (* ── Controls: skips with the half that failed ─────────────────────── *)
+    case "f6: a step that breaks it is a step skip, not a violation" (fun () ->
+        let src = m ("  fn go(" ^ pos ^ ") : Int do need_nn(foldl(pos, 0, fn (acc, x) -> acc - x)) end\n") in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "accumulator-step-unproved" step (reasons src);
+        Alcotest.(check bool) "naming the step" true
+          (has_detail "the function passed as argument 3 of `foldl`" src));
+
+    case "f7: a base that fails it is a base skip" (fun () ->
+        let src = m ("  fn go(" ^ pos ^ ") : Int do need_pos(foldl(pos, 0, fn (acc, x) -> acc + x)) end\n") in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "accumulator-base-unproved" base (reasons src);
+        Alcotest.(check bool) "naming the initial value" true
+          (has_detail "the initial value `0` (argument 2 of `foldl`)" src));
+
+    case "f8: an unrefined capture lends nothing" (fun () ->
+        let src = m ("  fn go(" ^ pos ^ ", m : Int) : Int do need_pos(foldl(pos, 1, fn (acc, x) -> acc + m)) end\n") in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "accumulator-step-unproved" step (reasons src));
+
+    case "reduce: a step or a base that fails" (fun () ->
+        let s1 = m ("  fn go(" ^ pos ^ ") : Int do one_pos(ereduce(pos, fn a -> fn x -> a - x)) end\n") in
+        Alcotest.check t3 "a - x: skipped" (0, 0, 1) (l3 s1);
+        Alcotest.(check (list string)) "step" step (reasons s1);
+        let s2 = m "  fn go(ys : List(Int)) : Int do one_pos(ereduce(ys, fn a -> fn x -> a + x)) end\n" in
+        Alcotest.check t3 "unrefined elements: skipped" (0, 0, 1) (l3 s2);
+        Alcotest.(check (list string)) "base" base (reasons s2);
+        Alcotest.(check bool) "naming the first values" true
+          (has_detail "the accumulator's first values (the elements of argument 1 of `ereduce`)" s2));
+
+    case "the VC cache keeps two demands on one lambda apart" (fun () ->
+        (* The same step `a + 1` and base `0` under two demands: `_ >= 0` is
+           inductive, `_ <= 100` is not (the hypothesis is in the query
+           text, so the second must not inherit the first's proof).  Before:
+           (0, 0, 2). *)
+        Alcotest.check t3 "need_nn proves, need_le100 does not" (1, 0, 1)
+          (l3
+             (m "  fn need_le100(k : {Int | _ <= 100}) : Int do k end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    need_nn(foldl(ys, 0, fn (a, x) -> a + 1)) + need_le100(foldl(ys, 0, fn (a, x) -> a + 1))\n  end\n")));
+
+    case "f10: the shadowing relational contract stays violated (fall-through pin)" (fun () ->
+        (* The relational return demand is not reached in phase 1 (the
+           scalar hook is closed-only); the witness path still reports it. *)
+        Alcotest.check t3 "violated" (0, 1, 0)
+          (l3 (m "  fn sh(ys : List(Int), lo : Int) : {Int | _ >= lo} do foldl(ys, lo, fn (lo, x) -> lo - 1) end\n")));
+
+    case "f5: a relational return demand is declined in phase 1" (fun () ->
+        (* Needs the scalar hook to trace a relational demand (`_ >= lo`),
+           which it does not yet: recorded, not built. *)
+        let src =
+          m "  fn h(ys : List(Int), lo : Int) : {Int | _ >= lo} do foldl(ys, lo, fn (a, x) -> if x > a do x else a end) end\n"
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "unreflectable-subject" [ "unreflectable-subject" ] (reasons src));
+
+    (* ── Guards: each blocks a specific proof ──────────────────────────── *)
+    case "guard: an accumulator's own refinement is not assumed when it does not hold" (fun () ->
+        (* On 6fcef2c9d this was (1, 0, 0), a FALSE proof: [lambda_ok]
+           assumed the unchecked annotation, and `foldl([5], 1, …)` is -49.
+           Phase 1 declined the hypothesis on the annotation (0, 0, 1).
+           Since phase 4 the annotation IS read as the invariant and checked:
+           its base `1 > 100` fails (its own skip), so it is not assumed, and
+           the demand falls back to `_ > 0` as the invariant on its own,
+           whose step `acc - 50` fails (fold-invariants-4 pins the rest). *)
+        let src =
+          m ("  fn go(" ^ pos ^ ") : Int do need_pos(foldl(pos, 1, fn (acc : {Int | _ > 100}, x) -> acc - 50)) end\n")
+        in
+        Alcotest.check t3 "skipped twice" (0, 0, 2) (l3 src);
+        Alcotest.(check (list string)) "the demand's step, the annotation's base"
+          (step @ base) (reasons src));
+
+    case "guard: a step using let? declines" (fun () ->
+        let src =
+          m "  fn go(ys : List(Int)) : Int do\n\
+             \    need_nn(foldl(ys, 0, fn (acc, x) ->\n\
+             \      let g = fn r ->\n        let? v = r\n        Ok(v + x)\n      acc + 1))\n  end\n"
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "declined, naming let?" true (has_detail "its body uses `let?` or `let*`" src));
+
+    case "guard: an inner curried parameter shadowing a demanded name" (fun () ->
+        (* `cr` hands its callback `1000` at the Int position; with the
+           capture guard over the OUTER parameters only, the peeled `fn n`
+           read `_ < n` as the lambda's `n` and proved `n - 1 < n`
+           (false: `go([5], 101)` passes `Some(999)`). *)
+        let src =
+          m "  fn cr(xs : List(a), f : a -> Int -> a) : Option(a) do\n\
+             \    match xs do\n      Nil -> None\n      Cons(h, _) ->\n        let g = f(h)\n        Some(g(1000))\n    end\n  end\n\
+             \  fn go(ys : List({Int | _ < 10}), n : Int) : Int do\n\
+             \    if n > 100 do need_lt_opt(cr(ys, fn a -> fn n -> n - 1), n) else 0 end\n  end\n"
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "naming the shadowing parameter" true
+          (has_detail "the lambda's parameter `n` shadows a name the demanded refinement mentions" src));
+
+    case "guard: a hypothesised parameter shadowing a name its OWN demand mentions" (fun () ->
+        (* Two variables demanded at once: `f : Int -> c -> b` must return
+           `_ > 0` (mentions nothing, so the result's capture guard passes)
+           and may assume `_ < n` of its `c` parameter.  With the lambda's
+           FIRST parameter spelled `n`, that hypothesis reads `m < n` of the
+           LAMBDA's `n`, and `n - m > 0` proves (false: `pf2` passes `0`, so
+           `go(101)` builds `P(0 - 4, 5)`).  Spelled after `m`, binding `n`
+           would retire the hypothesis ([scope_add_param] shadows by
+           mention), so only this order is a live false proof. *)
+        let src =
+          m "  fn pf2(z : c, g : c -> c, f : Int -> c -> b) : P(b, c) do P(f(0, g(z)), z) end\n\
+             \  fn go(n : Int) : Int do\n\
+             \    if n > 100 do need_p(pf2(5, fn k -> k - 1, fn (n, m) -> n - m), n) else 0 end\n  end\n"
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "declined, naming the parameter" true
+          (has_detail "its parameter `n` shadows a name the demanded refinement mentions" src));
+
+    case "control: two variables at once, no shadowing, proves" (fun () ->
+        Alcotest.check t3 "need_p(pf(5, fn m -> m - 1, fn q -> 7), n) proves" (1, 0, 0)
+          (l3
+             (m "  fn pf(z : c, g : c -> c, f : c -> b) : P(b, c) do P(f(g(z)), z) end\n\
+                 \  fn go(n : Int) : Int do\n\
+                 \    if n > 100 do need_p(pf(5, fn m -> m - 1, fn q -> 7), n) else 0 end\n  end\n")));
+
+    case "guard: a repeated name across curried levels is not peeled" (fun () ->
+        Alcotest.check t3 "fn a -> fn a -> a + 1: skipped" (0, 0, 1)
+          (l3 (m "  fn go(ys : List(Int)) : Int do need_nn(efold(ys, 0, fn a -> fn a -> a + 1)) end\n")));
+
+    (* ── Non-parametric "folds" get nothing (the soundness controls) ───── *)
+    case "impostor: a fold that returns a constant" (fun () ->
+        (* P1: the body fixes `b` to Int.  With the hypothesis the step
+           `a + 1` and the base `0` would both pass, and `k1` returns -5. *)
+        let src =
+          m "  fn k1(xs : List(a), z : b, f : b -> a -> b) : b do 0 - 5 end\n\
+             \  fn go(ys : List(Int)) : Int do need_nn(k1(ys, 0, fn (a, x) -> a + 1)) end\n"
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "not parametric" param (reasons src);
+        Alcotest.(check bool) "naming parametricity" true (has_detail "is not known to be parametric" src));
+
+    case "impostor: a fold that hands the step a b it built" (fun () ->
+        let src =
+          m "  fn k2(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+             \    match xs do\n      Nil -> z\n      Cons(h, t) -> f(0 - 5, h)\n    end\n  end\n\
+             \  fn go(ys : List(Int)) : Int do need_nn(k2(ys, 0, fn (a, x) -> a)) end\n"
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "naming parametricity" true (has_detail "is not known to be parametric" src));
+
+    case "impostor: a fold whose b comes from a creating builtin, directly or through a helper" (fun () ->
+        Alcotest.check t3 "from_json in the body: skipped" (0, 0, 1)
+          (l3
+             (m "  fn k7(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+                 \    match xs do\n      Nil -> z\n      Cons(h, t) -> f(from_json(0), h)\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do need_nn(k7(ys, 0, fn (a, x) -> a)) end\n"));
+        (* P2's closure: `mk` is generic in its type but its body creates. *)
+        Alcotest.check t3 "from_json in a helper: skipped" (0, 0, 1)
+          (l3
+             (m "  fn mk(v : b) : b do from_json(0) end\n\
+                 \  fn k12(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+                 \    match xs do\n      Nil -> z\n      Cons(h, t) -> f(mk(z), h)\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do need_nn(k12(ys, 0, fn (a, x) -> a)) end\n")));
+
+    case "impostor: an unannotated step parameter" (fun () ->
+        (* P1: `f`'s inferred type mentions `b`, so `b` may be fed from it. *)
+        Alcotest.check t3 "skipped" (0, 0, 1)
+          (l3
+             (m "  fn k6(xs : List(a), z : b, f) : b do foldl(xs, z, f) end\n\
+                 \  fn go(ys : List(Int)) : Int do need_nn(k6(ys, 0, fn (a, x) -> a + 1)) end\n")));
+
+    case "impostor: b also arrives inside a tuple (sources untraceable)" (fun () ->
+        Alcotest.check t3 "skipped" (0, 0, 1)
+          (l3
+             (m "  fn k8(xs : List(a), z : (b, Int), f : b -> a -> b) : b do\n\
+                 \    match z do\n      (w, _) -> foldl(xs, w, f)\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do need_nn(k8(ys, (0, 0), fn (a, x) -> a + 1)) end\n")));
+
+    case "impostor: trusted, assumed and impl-dispatched folds get no hypothesis" (fun () ->
+        (* Their bodies are parametric here, so these are policy, not false
+           proofs: a marker that says a contract is not the body's, or a
+           dispatch that may run another body, withholds the hypothesis. *)
+        let src attr =
+          m (attr ^ "  fn k3(xs : List(a), z : b, f : b -> a -> b) : b do foldl(xs, z, f) end\n\
+                    \  fn go(ys : List(Int)) : Int do need_nn(k3(ys, 0, fn (a, x) -> a + 1)) end\n")
+        in
+        Alcotest.check t3 "@[trusted]: skipped" (0, 0, 1) (l3 (src "  @[trusted]\n"));
+        Alcotest.(check (list string)) "@[trusted]: a plain parametric skip" param (reasons (src "  @[trusted]\n"));
+        Alcotest.check t3 "@[assume]: skipped" (0, 0, 1) (l3 (src "  @[assume]\n"));
+        Alcotest.check t3 "control: unmarked proves" (1, 0, 0) (l3 (src ""));
+        Alcotest.check t3 "impl method: skipped" (0, 0, 1)
+          (l3
+             (m "  type Box = Box(Int)\n\
+                 \  interface Folder(t) do\n    fn ifold : t -> Int -> (Int -> Int -> Int) -> Int\n  end\n\
+                 \  impl Folder(Box) do\n    fn ifold(bx : Box, z : b, f : b -> Int -> b) : b do z end\n  end\n\
+                 \  fn go(bx : Box) : Int do need_nn(ifold(bx, 0, fn (a, x) -> a + 1)) end\n")));
+
+    case "impostor: an interface method's result handed to the step (P2)" (fun () ->
+        (* The impl behind `dflt : Int -> t` is written at Int and returns
+           -5.  On 6fcef2c9d P2 accepted `k13` through the adopted impl's
+           head-free body; with the hypothesis, `fn (a, x) -> a` proved
+           (false: `k13([5], 0, …)` is -5). *)
+        let iface =
+          "  interface Dflt(t) do\n    fn dflt : Int -> t\n  end\n\
+           \  impl Dflt(Int) do\n    fn dflt(n) do 0 - 5 end\n  end\n"
+        in
+        Alcotest.check t3 "fold: skipped" (0, 0, 1)
+          (l3
+             (m (iface
+                 ^ "  fn k13(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+                    \    match xs do\n      Nil -> z\n      Cons(h, t) -> f(dflt(1), h)\n    end\n  end\n\
+                    \  fn go(ys : List(Int)) : Int do need_nn(k13(ys, 0, fn (a, x) -> a)) end\n")));
+        (* The same hole under the element-flow rules, no fold involved: on
+           6fcef2c9d both were (1, 0, 0), false (`pick(Some(3), 1)` is -5). *)
+        Alcotest.check t3 "scalar demand: skipped" (0, 0, 1)
+          (l3
+             (m (iface
+                 ^ "  fn pick(o : Option(a), d : a) : a do\n\
+                    \    match o do\n      Some(_) -> dflt(1)\n      None -> d\n    end\n  end\n\
+                    \  fn go(o : Option({Int | _ > 0})) : Int do need_pos(pick(o, 1)) end\n")));
+        Alcotest.check t3 "container demand: not proved" (0, 0, 1)
+          (l3
+             (m ("  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n" ^ iface
+                 ^ "  fn mk(xs : List(a)) : List(a) do Cons(dflt(1), xs) end\n\
+                    \  fn go(" ^ pos ^ ") : Int do sum_pos(mk(pos)) end\n")));
+        (* A NON-creating signature `t -> t` is no better: the impl is still
+           written at one type. *)
+        Alcotest.check t3 "t -> t: skipped" (0, 0, 1)
+          (l3
+             (m "  interface Norm(t) do\n    fn norm : t -> t\n  end\n\
+                 \  impl Norm(Int) do\n    fn norm(x) do 0 - 5 end\n  end\n\
+                 \  fn k15(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+                 \    match xs do\n      Nil -> z\n      Cons(h, t) -> f(norm(z), h)\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do need_nn(k15(ys, 0, fn (a, x) -> a)) end\n")));
+
+    case "control: a callback that does not consume b is a base, refuted" (fun () ->
+        (* `g : Int -> b` is a source the step never sees. *)
+        let src =
+          m "  fn k9(z : b, f : b -> b, g : Int -> b) : b do f(g(3)) end\n\
+             \  fn go(n : Int) : Int do need_nn(k9(0, fn a -> a + 1, fn _w -> 0 - 5)) end\n"
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "a base skip" base (reasons src);
+        Alcotest.check t3 "control: fn _w -> 5 proves" (1, 0, 0)
+          (l3
+             (m "  fn k9(z : b, f : b -> b, g : Int -> b) : b do f(g(3)) end\n\
+                 \  fn go(n : Int) : Int do need_nn(k9(0, fn a -> a + 1, fn _w -> 5)) end\n"))) ]
+
+(* ── A named callback's declared return needs its preconditions ─────────
+   (review of the fold phase 1 commit, 2026-10-18).  [discharge_pairs]
+   discharged a `Src_cod` source passed as a NAMED function through that
+   function's declared return refinement, which is proved only ASSUMING its
+   own parameter refinements; nothing checked that what the callee hands the
+   function meets them (a type-variable domain has no pass-site obligation).
+   `need_pos(foldl(ys, 1, dec2))` with `dec2(a : {Int | _ > 100}, _x) :
+   {Int | _ > 0} do a - 50 end` was proved; `foldl([5], 1, dec2)` is -49.
+   Now each refined parameter at a type-variable position must follow from
+   what the callee guarantees there (the accumulator demand, by the
+   invariant rule; the elements' agreed refinement); otherwise the source is
+   not proved.  Each case pins the verdict of the DEMANDING call only (the
+   named functions' own return obligations prove either way). *)
+let named_callback_preconds_suite =
+  let prelude =
+    {|  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn foldl(xs : List(a), acc : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> foldl(t, f(acc, h), f)
+    end
+  end
+  fn mapl(xs : List(a), f : a -> b) : List(b) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> Cons(f(h), mapl(t, f))
+    end
+  end
+|}
+  in
+  let m body = "mod NC do\n" ^ prelude ^ body ^ "end\n" in
+  let mv body = "mod NC do\n  cap verified\n" ^ prelude ^ body ^ "end\n" in
+  (* (verdict, reason) of every obligation on [callee]. *)
+  let on callee src =
+    List.filter_map
+      (fun (c, v, r) -> if c = callee then Some (v ^ (if r = "" then "" else ":" ^ r)) else None)
+      (typed_obligations src)
+  in
+  let details src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r -> Some (March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let ls = Alcotest.(list string) in
+  let pos = "pos : List({Int | _ > 0})" in
+  let dec2 = "  fn dec2(a : {Int | _ > 100}, _x : Int) : {Int | _ > 0} do a - 50 end\n" in
+  let g = "  fn g(_a : Int, x : {Int | _ > 0}) : {Int | _ > 0} do x end\n" in
+  let dbl = "  fn dbl(x : {Int | _ > 0}) : {Int | _ > 0} do x + x end\n" in
+  [ gated "p10: the accumulator position's precondition is not met by the demand" (fun () ->
+        (* 6fcef2c9d and 32a847506: proved. *)
+        let src = m (dec2 ^ "  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, dec2)) end\n") in
+        Alcotest.check ls "need_pos skipped" [ "skipped:accumulator-step-unproved" ] (on "need_pos" src);
+        Alcotest.(check bool) "naming dec2's precondition" true
+          (List.exists (mentions "precondition `_ > 100` of `dec2`") (details src));
+        Alcotest.(check bool) "cap verified rejects" true
+          (has_refine_error_typed
+             (mv (dec2 ^ "  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, dec2)) end\n"))));
+
+    gated "p11: the element position's precondition is not met by unrefined elements" (fun () ->
+        (* 6fcef2c9d and 32a847506: proved; `foldl([0 - 5], 1, g)` is -5. *)
+        let src = m (g ^ "  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, g)) end\n") in
+        Alcotest.check ls "need_pos skipped" [ "skipped:accumulator-step-unproved" ] (on "need_pos" src));
+
+    gated "map: a named element function's precondition" (fun () ->
+        (* `sum_pos(mapl(ys, dbl))` with unrefined `ys`: was proved;
+           `mapl([0 - 1], dbl)` is `[-2]`. *)
+        let src = m (dbl ^ "  fn go(ys : List(Int)) : Int do sum_pos(mapl(ys, dbl)) end\n") in
+        Alcotest.check ls "sum_pos skipped" [ "skipped:parametric-source-unproved" ] (on "sum_pos" src);
+        Alcotest.check ls "control: refined elements prove" [ "proved" ]
+          (on "sum_pos" (m (dbl ^ "  fn go(" ^ pos ^ ") : Int do sum_pos(mapl(pos, dbl)) end\n"))));
+
+    gated "a callback parameter passed on: its domain refinement is a precondition too" (fun () ->
+        let src =
+          m "  fn go(ys : List(Int), k : ({x : Int | x > 100}) -> {Int | _ > 0}) : Int do sum_pos(mapl(ys, k)) end\n"
+        in
+        Alcotest.check ls "sum_pos skipped" [ "skipped:parametric-source-unproved" ] (on "sum_pos" src);
+        Alcotest.check ls "control: an unrefined domain proves" [ "proved" ]
+          (on "sum_pos"
+             (m "  fn go(ys : List(Int), k : (Int) -> {Int | _ > 0}) : Int do sum_pos(mapl(ys, k)) end\n")));
+
+    gated "control: a named step with no refined parameter still proves" (fun () ->
+        Alcotest.check ls "proved" [ "proved" ]
+          (on "need_pos"
+             (m "  fn one(_a : Int, _x : Int) : {Int | _ > 0} do 1 end\n\
+                 \  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, one)) end\n")));
+
+    gated "control: the accumulator demand discharges the step's precondition" (fun () ->
+        (* D = `_ > 0`, the base 1 meets it, and `keep`'s `a > 0` follows. *)
+        Alcotest.check ls "proved" [ "proved" ]
+          (on "need_pos"
+             (m "  fn keep(a : {Int | _ > 0}, _x : Int) : {Int | _ > 0} do a end\n\
+                 \  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 1, keep)) end\n")));
+
+    gated "control: the elements' refinement discharges the step's precondition" (fun () ->
+        Alcotest.check ls "proved" [ "proved" ]
+          (on "need_pos" (m (g ^ "  fn go(" ^ pos ^ ") : Int do need_pos(foldl(pos, 1, g)) end\n"))));
+
+    gated "a precondition the demand does not imply is still not met" (fun () ->
+        (* D = `_ > 0` does not give `_ > 100`, even with the base `200`. *)
+        Alcotest.check ls "skipped" [ "skipped:accumulator-step-unproved" ]
+          (on "need_pos" (m (dec2 ^ "  fn go(ys : List(Int)) : Int do need_pos(foldl(ys, 200, dec2)) end\n")))) ]
+
+(* ── Accumulator invariants, phase 2 (design
+   specs/2026-10-18-fold-accumulator-invariants-design.md §8 phase 2) ─────
+   Element facts on the step, and CONTAINER accumulators.  Rows f1 / f2 (the
+   positive product, the nonnegative sum) already proved after phase 1,
+   because element-flow phase 1's multi-parameter domain facts give `x` its
+   element fact: pinned here.  New in phase 2:
+
+   - a container demand on a call whose declared return is a bare type
+     variable (`sum_pos(foldl(pos, Nil, fn (acc, x) -> Cons(x, acc)))`, f17)
+     pairs the whole demand with that variable ([demand_flow]); before, the
+     return had to be a container [TyCon] and the call was `Na`;
+   - a callback parameter typed exactly a container-demanded variable assumes
+     the demand as a container-env entry ([invariant_params]), the same
+     induction step as the scalar hypothesis;
+   - a peeled (curried) inner parameter gets the element fact of its
+     arrow-chain position, as an uncurried one does.
+
+   The prelude is fold-invariants-1's (local copies of the stdlib fold
+   shapes); the conformance pair t420/t421 runs the real stdlib folds.  The
+   triple each case had on 9beb7a5e8 (before this phase) is in its comment. *)
+let fold_invariants_2_suite =
+  let prelude =
+    {|  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn sum_lt(xs : List({Int | _ < n}), n : Int) : Int do 0 end
+  type P(x, y) = P(x, y)
+  fn need_p4(p : P(List({Int | _ > n}), List({Int | _ > 0})), n : Int) : Int do 0 end
+  fn foldl(xs : List(a), acc : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> foldl(t, f(acc, h), f)
+    end
+  end
+  fn foldr(xs : List(a), acc : b, f : a -> b -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> f(h, foldr(t, acc, f))
+    end
+  end
+  fn efold(xs : List(a), acc : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) ->
+        let g = f(acc)
+        efold(t, g(h), f)
+    end
+  end
+|}
+  in
+  let m ?(verified = false) body =
+    "mod FJ do\n" ^ (if verified then "  cap verified\n" else "") ^ prelude ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let reasons src = let (_, _, _, rs) = typed_ledger src in rs in
+  let details src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r -> Some (March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let has_detail sub src = List.exists (mentions sub) (details src) in
+  let t3 = Alcotest.(triple int int int) in
+  let step = [ "accumulator-step-unproved" ] and base = [ "accumulator-base-unproved" ] in
+  let param = [ "parametric-source-unproved" ] in
+  let pos = "pos : List({Int | _ > 0})" and nn = "nn : List({Int | _ >= 0})" in
+  let case name f = gated name f in
+  [ (* ── Scalar rows already proved after phase 1 (pins) ─────────────── *)
+    case "f2: a nonnegative sum (proved since phase 1)" (fun () ->
+        (* 9beb7a5e8: (1, 0, 0). *)
+        Alcotest.check t3 "need_nn(foldl(nn, 0, fn (acc, x) -> acc + x)) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ nn ^ ") : Int do need_nn(foldl(nn, 0, fn (acc, x) -> acc + x)) end\n"))));
+
+    case "f1: a positive product is never violated" (fun () ->
+        (* 9beb7a5e8: (1, 0, 0) on z3 4.16.  Non-linear (§4.2): CI's z3
+           4.8.12 could not be probed locally, so the verdict is pinned as
+           "proved, or a non-linear / undecided skip", never a violation or
+           an accumulator skip (the step does preserve `_ > 0`). *)
+        let src = m ("  fn go(" ^ pos ^ ") : Int do need_pos(foldl(pos, 1, fn (acc, x) -> acc * x)) end\n") in
+        let p, v, s = l3 src in
+        Alcotest.(check int) "never violated" 0 v;
+        Alcotest.(check int) "one obligation" 1 (p + s);
+        if s = 1 then
+          Alcotest.(check bool) "a solver-incompleteness skip" true
+            (List.for_all (fun r -> r = "nonlinear-goal" || r = "solver-undecided") (reasons src)));
+
+    case "f1 control: a zero-capable element into a positive product" (fun () ->
+        (* `_ >= 0` elements into `_ > 0`: `x = 0` breaks the step.  9beb7a5e8:
+           (0, 0, 1) step skip; pinned. *)
+        let src = m ("  fn go(" ^ nn ^ ") : Int do need_pos(foldl(nn, 1, fn (acc, x) -> acc * x)) end\n") in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "not an accumulator proof" true
+          (List.for_all
+             (fun r -> r = "accumulator-step-unproved" || r = "nonlinear-goal" || r = "solver-undecided")
+             (reasons src)));
+
+    case "a curried step's inner parameter gets its element fact" (fun () ->
+        (* `fn a -> fn x -> a + x` through `efold`: `x` is position 1 of `b ->
+           a -> b`.  9beb7a5e8: (0, 0, 1), step skip (peeled parameters got no
+           element fact). *)
+        Alcotest.check t3 "need_pos(efold(pos, 1, fn a -> fn x -> a + x)) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos ^ ") : Int do need_pos(efold(pos, 1, fn a -> fn x -> a + x)) end\n"))));
+
+    case "control: a curried inner parameter over unrefined elements" (fun () ->
+        let src = m "  fn go(ys : List(Int)) : Int do need_pos(efold(ys, 1, fn a -> fn x -> a + x)) end\n" in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "step" step (reasons src));
+
+    case "guard: a curried inner parameter with its own refinement gets no fact" (fun () ->
+        (* `fn a -> fn (x : {Int | _ > 100}) -> …`: the annotation is not
+           checked (a type-variable domain), so it declines the element fact
+           (G2-2) and is erased. *)
+        let src =
+          m ("  fn go(" ^ pos ^ ") : Int do need_pos(efold(pos, 1, fn a -> fn (x : {Int | _ > 100}) -> a + x - 100)) end\n")
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src));
+
+    (* ── Container accumulators (f17) ───────────────────────────────────── *)
+    case "f17: a list-building accumulator meets an element demand" (fun () ->
+        (* 9beb7a5e8: (0, 0, 1), unreflectable-subject. *)
+        Alcotest.check t3 "sum_pos(foldl(pos, Nil, fn (acc, x) -> Cons(x, acc))) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos ^ ") : Int do sum_pos(foldl(pos, Nil, fn (acc, x) -> Cons(x, acc))) end\n"))));
+
+    case "f17: the [] literal as the base" (fun () ->
+        (* 9beb7a5e8: (0, 0, 1). *)
+        Alcotest.check t3 "sum_pos(foldl(pos, [], …)) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos ^ ") : Int do sum_pos(foldl(pos, [], fn (acc, x) -> Cons(x, acc))) end\n"))));
+
+    case "f17: a refined base list and a guarded step" (fun () ->
+        (* 9beb7a5e8: (0, 0, 1). *)
+        Alcotest.check t3 "base [1, 2], step keeps x only when positive" (1, 0, 0)
+          (l3
+             (m "  fn go(ys : List(Int)) : Int do\n\
+                 \    sum_pos(foldl(ys, [1, 2], fn (acc, x) -> if x > 0 do Cons(x, acc) else acc end))\n  end\n")));
+
+    case "f17: fold_right builds the list (accumulator second)" (fun () ->
+        (* 9beb7a5e8: (0, 0, 1). *)
+        Alcotest.check t3 "sum_pos(foldr(pos, Nil, fn (x, acc) -> Cons(x, acc))) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos ^ ") : Int do sum_pos(foldr(pos, Nil, fn (x, acc) -> Cons(x, acc))) end\n"))));
+
+    case "f17: curried, both halves" (fun () ->
+        (* 9beb7a5e8: (0, 0, 1). *)
+        Alcotest.check t3 "sum_pos(efold(pos, Nil, fn acc -> fn x -> Cons(x, acc))) proves" (1, 0, 0)
+          (l3 (m ("  fn go(" ^ pos ^ ") : Int do sum_pos(efold(pos, Nil, fn acc -> fn x -> Cons(x, acc))) end\n"))));
+
+    case "f17: at a return tail" (fun () ->
+        (* The declared container return of `rev_pos` is the demand.
+           9beb7a5e8: (0, 0, 1). *)
+        Alcotest.check t3 "fn rev_pos(pos) : List({Int | _ > 0}) proves" (1, 0, 0)
+          (l3
+             (m ("  fn rev_pos(" ^ pos ^ ") : List({Int | _ > 0}) do foldl(pos, Nil, fn (acc, x) -> Cons(x, acc)) end\n"))));
+
+    case "f17: a relational element demand with a refined capture" (fun () ->
+        (* `List({Int | _ < n})` demanded, `n` the caller's; elements below
+           `n` and the step keeps only those.  9beb7a5e8: (0, 0, 1). *)
+        Alcotest.check t3 "sum_lt(foldl(ys, Nil, fn (acc, x) -> if x < n …), n) proves" (1, 0, 0)
+          (l3
+             (m "  fn go(ys : List(Int), n : Int) : Int do\n\
+                 \    sum_lt(foldl(ys, Nil, fn (acc, x) -> if x < n do Cons(x, acc) else acc end), n)\n  end\n")));
+
+    case "f17: cap verified accepts it" (fun () ->
+        Alcotest.(check bool) "accepted" false
+          (has_refine_error_typed
+             (m ~verified:true
+                ("  fn go(" ^ pos ^ ") : Int do sum_pos(foldl(pos, Nil, fn (acc, x) -> Cons(x, acc))) end\n"))));
+
+    (* ── Controls ──────────────────────────────────────────────────────── *)
+    case "control: the step pushes an unrefined element" (fun () ->
+        let src = m "  fn go(ys : List(Int)) : Int do sum_pos(foldl(ys, Nil, fn (acc, x) -> Cons(x, acc))) end\n" in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "step" step (reasons src);
+        Alcotest.(check bool) "naming the step" true
+          (has_detail "the function passed as argument 3 of `foldl`" src));
+
+    case "control: the step pushes a violating element" (fun () ->
+        let src = m ("  fn go(" ^ pos ^ ") : Int do sum_pos(foldl(pos, Nil, fn (acc, x) -> Cons(0 - x, acc))) end\n") in
+        Alcotest.check t3 "skipped, never violated" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "step" step (reasons src));
+
+    case "control: the step drops the hypothesis and builds a bad list" (fun () ->
+        let src = m ("  fn go(" ^ pos ^ ") : Int do sum_pos(foldl(pos, [1], fn (acc, x) -> [0 - x])) end\n") in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "step" step (reasons src));
+
+    case "control: a base list that fails it" (fun () ->
+        let src = m ("  fn go(" ^ pos ^ ") : Int do sum_pos(foldl(pos, [0], fn (acc, x) -> Cons(x, acc))) end\n") in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "base" base (reasons src);
+        Alcotest.(check bool) "naming the initial value" true
+          (has_detail "the initial value" src));
+
+    case "control: an unrefined base list" (fun () ->
+        let src =
+          m ("  fn go(" ^ pos ^ ", zs : List(Int)) : Int do sum_pos(foldl(pos, zs, fn (acc, x) -> Cons(x, acc))) end\n")
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "base" base (reasons src));
+
+    case "nested fold: the inner fold's base is the outer hypothesis" (fun () ->
+        (* The inner `foldl(pos, acc, …)` is the outer step's tail: its base
+           `acc` meets the demand by the OUTER hypothesis, its step by its own.
+           9beb7a5e8: (0, 0, 1). *)
+        Alcotest.check t3 "proves" (1, 0, 0)
+          (l3
+             (m ("  fn go(" ^ pos ^ ", ys : List(Int)) : Int do\n\
+                  \    sum_pos(foldl(ys, Nil, fn (acc, y) -> foldl(pos, acc, fn (a, x) -> Cons(x, a))))\n  end\n"))));
+
+    case "nested fold control: the inner step pushes the outer's unrefined element" (fun () ->
+        let src =
+          m ("  fn go(" ^ pos ^ ", ys : List(Int)) : Int do\n\
+              \    sum_pos(foldl(ys, Nil, fn (acc, y) -> foldl(pos, acc, fn (a, x) -> Cons(y, a))))\n  end\n")
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "step" step (reasons src));
+
+    case "nested fold control: the inner accumulator shadows the outer one" (fun () ->
+        (* The inner lambda's `acc` is the INNER accumulator; the inner base
+           is the outer `acc`.  Proves for the right reason: both hypotheses
+           hold, each of its own `acc`. *)
+        Alcotest.check t3 "proves" (1, 0, 0)
+          (l3
+             (m ("  fn go(" ^ pos ^ ", ys : List(Int)) : Int do\n\
+                  \    sum_pos(foldl(ys, Nil, fn (acc, y) -> foldl(pos, acc, fn (acc, x) -> Cons(x, acc))))\n  end\n"))));
+
+    (* ── Guards on the container hypothesis ───────────────────────────── *)
+    case "guard: a container accumulator's own refinement is not assumed" (fun () ->
+        (* `acc : List({Int | _ > 100})` is checked by nobody; assumed, the
+           step `Cons(h - 100, acc)` would prove for the head of `acc`. *)
+        let src =
+          m ("  fn go(" ^ pos ^ ") : Int do\n\
+              \    sum_pos(foldl(pos, Nil, fn (acc : List({Int | _ > 100}), x) -> match acc do\n\
+              \      Cons(h, t) -> Cons(h - 100, acc)\n      Nil -> Cons(x, acc)\n    end))\n  end\n")
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "declined, naming the annotation" true
+          (has_detail "its parameter `acc` carries its own refinement annotation" src));
+
+    case "guard: an accumulator parameter shadowing a name the demand mentions" (fun () ->
+        (* `sum_lt(…, n)` demands `_ < n` of the caller's `n`; the lambda's
+           accumulator is spelled `n`.  `go([5], 3)` returns [5]. *)
+        let src =
+          m "  fn go(ys : List(Int), n : Int) : Int do\n\
+             \    sum_lt(foldl(ys, Nil, fn (n, x) -> n), n)\n  end\n"
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "naming the shadowing parameter" true
+          (has_detail "shadows a name the demanded refinement mentions" src));
+
+    case "guard: a container hypothesis naming a sibling lambda parameter" (fun () ->
+        (* Two variables at once: `b` must be a `List({Int | _ > n})` (the
+           caller's `n`), `c` a `List({Int | _ > 0})`.  The step `fn (k, n)
+           -> if n > 0 do k else [1] end` may assume `b`'s demand of `k`;
+           read inside the lambda, `_ > n` names the lambda's OWN `n`, and
+           under its guard `n > 0` the tail `k` would be a positive list
+           (false: `go([1], 0 - 5)` builds `P([0 - 4], [0 - 4])`).  The
+           result's capture guard does not see it (`c`'s demand mentions
+           nothing).  With this guard removed it is (1, 0, 0). *)
+        let src =
+          m "  fn pf4(ns : List(a), z : b, f : b -> a -> c, w : c) : P(b, c) do\n\
+             \    match ns do\n      Cons(h, _) -> P(z, f(z, h))\n      Nil -> P(z, w)\n    end\n  end\n\
+             \  fn go(ns : List({Int | _ > 0}), n : Int) : Int do\n\
+             \    need_p4(pf4(ns, [n + 1], fn (k, n) -> if n > 0 do k else [1] end, [1]), n)\n  end\n"
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "declined, naming the parameter" true
+          (has_detail "its parameter `n` shadows a name the demanded refinement mentions" src));
+
+    case "control: the same two-variable step, no shadowing" (fun () ->
+        let src guard =
+          m ("  fn pf4(ns : List(a), z : b, f : b -> a -> c, w : c) : P(b, c) do\n\
+              \    match ns do\n      Cons(h, _) -> P(z, f(z, h))\n      Nil -> P(z, w)\n    end\n  end\n\
+              \  fn go(ns : List({Int | _ > 0}), n : Int) : Int do\n\
+              \    if " ^ guard ^ " do need_p4(pf4(ns, [n + 1], fn (k, m) -> if m > 0 do k else [1] end, [1]), n) else 0 end\n  end\n")
+        in
+        Alcotest.check t3 "under n > 0 the hypothesis proves the step" (1, 0, 0) (l3 (src "n > 0"));
+        Alcotest.check t3 "under n > 0 - 9 it does not" (0, 0, 1) (l3 (src "n > 0 - 9")));
+
+    case "guard: a step using let? declines (container)" (fun () ->
+        let src =
+          m ("  fn go(" ^ pos ^ ") : Int do\n\
+              \    sum_pos(foldl(pos, Nil, fn (acc, x) ->\n\
+              \      let g = fn r ->\n        let? v = r\n        Ok(v + x)\n      Cons(x, acc)))\n  end\n")
+        in
+        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
+        Alcotest.(check bool) "declined, naming let?" true (has_detail "its body uses `let?` or `let*`" src));
+
+    case "impostor: a fold whose body fixes b to a list (P1)" (fun () ->
+        (* March signature variables are not rigid: `Cons(0 - 1, z)` makes
+           `b` a `List(Int)`.  With the hypothesis the base `Nil` and the step
+           would pass, and `kc(pos, Nil, …)` returns [-1].  (`march --check`
+           also rejects `kc` as `annotated_tyvar_fixed`; this pins the
+           refinement gate on its own, as fold-invariants-1's impostors do.
+           With P1 forced true in the bare-variable arm it is (1, 0, 0).) *)
+        let src =
+          m ("  fn kc(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+              \    match xs do\n      Nil -> Cons(0 - 1, z)\n      Cons(h, t) -> kc(t, f(z, h), f)\n    end\n  end\n\
+              \  fn go(" ^ pos ^ ") : Int do sum_pos(kc(pos, Nil, fn (acc, x) -> Cons(x, acc))) end\n")
+        in
+        Alcotest.check t3 "not proved" (0, 0, 1) (l3 src);
+        Alcotest.(check (list string)) "not parametric" param (reasons src));
+
+    case "impostor: a trusted fold gets no container hypothesis" (fun () ->
+        let src attr =
+          m (attr ^ "  fn k3(xs : List(a), z : b, f : b -> a -> b) : b do foldl(xs, z, f) end\n\
+                    \  fn go(" ^ pos ^ ") : Int do sum_pos(k3(pos, Nil, fn (acc, x) -> Cons(x, acc))) end\n")
+        in
+        Alcotest.check t3 "@[trusted]: skipped" (0, 0, 1) (l3 (src "  @[trusted]\n"));
+        Alcotest.check t3 "control: unmarked proves" (1, 0, 0) (l3 (src "")));
+
+    (* ── The bare-variable container route without a fold ─────────────── *)
+    case "a bare-b return with two bare container sources" (fun () ->
+        (* `pick(a, b) : b` returns one of its arguments; both are positive
+           lists.  9beb7a5e8: (0, 0, 1). *)
+        let src arg =
+          m ("  fn pick(c : Bool, x : b, y : b) : b do if c do x else y end end\n\
+              \  fn go(c : Bool, " ^ pos ^ ", zs : List(Int)) : Int do sum_pos(pick(c, pos, " ^ arg ^ ")) end\n")
+        in
+        Alcotest.check t3 "pick(c, pos, [3]) proves" (1, 0, 0) (l3 (src "[3]"));
+        let s2 = src "zs" in
+        Alcotest.check t3 "pick(c, pos, zs) skips" (0, 0, 1) (l3 s2);
+        Alcotest.(check (list string)) "a plain parametric source skip" param (reasons s2)) ]
+
+(* ── Accumulator invariants, phase 4: the annotated accumulator (design
+   specs/2026-10-18-fold-accumulator-invariants-design.md §8, option iii)
+   ───────────────────────────────────────────────────────────────────────
+   `g(…, fn (acc : {T | I}, x) -> step)` with [g] parametric in its bare
+   return variable `b` (P1/P2, not trusted/assumed/impl) and `acc`'s domain
+   exactly `b`: the annotation is the invariant.  Its obligation (on the
+   parameter, callee [g]) is the phase-1 judgment with I for the demand
+   (base: the initial value meets I; step: I of the accumulator gives I of
+   the result).  Proved: the body assumes I of `acc`, and the call's result
+   carries I (a `let` binding it gets the fact, with no demand anywhere).
+   Not proved: a skip with the accumulator reason, never a violation, and
+   neither the body nor the result gets anything.  A demand on the result
+   is met by I => D; failing that, by D as the invariant on its own (phase
+   1), the annotation ignored.  The prelude is fold-invariants-1's local
+   fold shapes; the conformance trio t450-t452 runs the stdlib folds.  The
+   triple each case had on 56be54964 (before this phase) is in its
+   comment. *)
+let fold_invariants_4_suite =
+  let prelude =
+    {|  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn need_ge(k : {Int | _ >= n}, n : Int) : Int do k end
+  fn foldl(xs : List(a), acc : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> foldl(t, f(acc, h), f)
+    end
+  end
+  fn foldr(xs : List(a), acc : b, f : a -> b -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> f(h, foldr(t, acc, f))
+    end
+  end
+|}
+  in
+  let m ?(verified = false) body =
+    "mod FI4 do\n" ^ (if verified then "  cap verified\n" else "") ^ prelude ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let reasons src = let (_, _, _, rs) = typed_ledger src in rs in
+  let details src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r -> Some (March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  (* (callee, verdict, reason) of every obligation, in record order. *)
+  let obls = typed_obligations in
+  let t3s = Alcotest.(list (triple string string string)) in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let has_detail sub src = List.exists (mentions sub) (details src) in
+  let t3 = Alcotest.(triple int int int) in
+  let pos = "pos : List({Int | _ > 0})" in
+  let case name f = gated name f in
+  let go_ys body = m ("  fn go(ys : List(Int)) : Int do\n" ^ body ^ "\n  end\n") in
+  [ (* ── Proofs ─────────────────────────────────────────────────────────── *)
+    case "f18: the annotation is checked and assumed in the body" (fun () ->
+        (* 56be54964: (0, 0, 1), `need_pos(acc)` unconstrained-subject; the
+           annotation itself was no obligation at all. *)
+        let src =
+          go_ys "    foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc + 1)"
+        in
+        Alcotest.check t3 "annotation proved, need_pos(acc) proved" (2, 0, 0) (l3 src);
+        Alcotest.check t3s "the annotation is foldl's obligation"
+          [ ("foldl", "proved", ""); ("need_pos", "proved", "") ] (obls src));
+
+    case "a let-bound result carries the invariant, with no demand on the call" (fun () ->
+        (* The design's motivating case.  56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "need_pos(s) proves" (2, 0, 0)
+          (l3 (go_ys "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n    need_pos(s)")));
+
+    case "the result fact is used twice" (fun () ->
+        (* 56be54964: (0, 0, 2). *)
+        Alcotest.check t3 "both uses prove" (3, 0, 0)
+          (l3
+             (go_ys
+                "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n\
+                 \    need_pos(s) + need_nn(s)")));
+
+    case "an inline demand equal to the annotation" (fun () ->
+        (* 56be54964: (0, 0, 1), the hypothesis declined on the own
+           annotation. *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3 (go_ys "    need_pos(foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1))")));
+
+    case "an inline demand the annotation implies" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "I = _ > 0 gives D = _ >= 0" (2, 0, 0)
+          (l3 (go_ys "    need_nn(foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1))")));
+
+    case "a demand the annotation does not imply falls back to the demand as the invariant" (fun () ->
+        (* I = `_ >= 0` holds but does not give `_ > 0`; D on its own is
+           inductive (base 1, `acc + 1`).  56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves through D" (2, 0, 0)
+          (l3 (go_ys "    need_pos(foldl(ys, 1, fn (acc : {Int | _ >= 0}, _x) -> acc + 1))")));
+
+    case "an annotation that holds but does not give the demand" (fun () ->
+        (* I = `_ >= 0` proves (base 0), and does not give `_ > 0`; nor does
+           D on its own (its base 0 fails): `foldl([], 0, …)` is 0, so
+           `need_pos` of it is a real failure.  56be54964: (0, 0, 1). *)
+        let src = go_ys "    need_pos(foldl(ys, 0, fn (acc : {Int | _ >= 0}, _x) -> acc + 1))" in
+        Alcotest.check t3 "the annotation proved, the demand not" (1, 0, 1) (l3 src);
+        Alcotest.check t3s "the demand is the skip"
+          [ ("need_pos", "skipped", "accumulator-base-unproved"); ("foldl", "proved", "") ] (obls src));
+
+    case "a return tail" (fun () ->
+        (* 56be54964: (0, 0, 1), a postcondition. *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3
+             (m "  fn h(ys : List(Int)) : {Int | _ > 0} do foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1) end\n")));
+
+    case "the step uses the element fact of x" (fun () ->
+        (* `x` keeps its element fact beside the annotated accumulator.
+           56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3
+             (m ("  fn go(" ^ pos ^ ") : Int do\n\
+                  \    let s = foldl(pos, 1, fn (acc : {Int | _ > 0}, x) -> acc + x)\n    need_pos(s)\n  end\n"))));
+
+    case "fold_right: the accumulator is the second parameter" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3 (go_ys "    let s = foldr(ys, 1, fn (_x, a : {Int | _ > 0}) -> a + 1)\n    need_pos(s)")));
+
+    case "a curried step whose inner parameter is the accumulator" (fun () ->
+        (* A fold_right-shaped curried callee puts `b` second; the outer
+           one-parameter lambda is unannotated, so no pass site obliges it.
+           56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3
+             (m "  fn cfr(xs : List(a), acc : b, f : a -> b -> b) : b do\n\
+                 \    match xs do\n      Nil -> acc\n      Cons(h, t) ->\n        let g = f(h)\n        g(cfr(t, acc, f))\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = cfr(ys, 1, fn _x -> fn (a : {Int | _ > 0}) -> a + 1)\n    need_pos(s)\n  end\n")));
+
+    case "a relational invariant over a capture" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "need_ge(s, lo) proves" (2, 0, 0)
+          (l3
+             (m "  fn go(ys : List(Int), lo : Int) : Int do\n\
+                 \    let s = foldl(ys, lo, fn (acc : {Int | _ >= lo}, _x) -> acc + 1)\n    need_ge(s, lo)\n  end\n")));
+
+    case "a sibling b-typed parameter assumes the invariant too" (fun () ->
+        (* `pairf` hands its step two values of `b`, both sources: the
+           invariant (one annotation) is assumed of both (§2.2).
+           56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3
+             (m "  fn pairf(x : b, y : b, f : b -> b -> b) : b do f(x, y) end\n\
+                 \  fn go(n : Int) : Int do\n\
+                 \    let s = pairf(1, 2, fn (a : {Int | _ > 0}, c) -> a + c)\n    need_pos(s)\n  end\n")));
+
+    case "f18 under cap verified is accepted" (fun () ->
+        (* 56be54964: rejected (`need_pos(acc)` unconstrained). *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_typed
+             (m ~verified:true
+                "  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc + 1)\n\
+                 \    need_pos(s)\n  end\n")));
+
+    (* ── Controls: an annotation that does not hold is not assumed ───────── *)
+    case "t385's shape: the base fails, the demand falls back and fails too" (fun () ->
+        (* 56be54964: (0, 0, 1), the step declined on the own annotation. *)
+        let body = "  fn go(" ^ pos ^ ") : Int do need_pos(foldl(pos, 1, fn (acc : {Int | _ > 100}, x) -> acc - 50)) end\n" in
+        let src = m body in
+        Alcotest.check t3 "two skips" (0, 0, 2) (l3 src);
+        Alcotest.check t3s "demand: the step; annotation: the base"
+          [ ("need_pos", "skipped", "accumulator-step-unproved")
+          ; ("foldl", "skipped", "accumulator-base-unproved") ]
+          (obls src);
+        Alcotest.(check bool) "the base detail names the initial value" true
+          (has_detail "the initial value `1`" src);
+        Alcotest.(check bool) "under cap verified: rejected" true (has_refine_error_typed (m ~verified:true body)));
+
+    case "an annotation whose base fails is neither assumed nor carried" (fun () ->
+        (* 56be54964: (0, 0, 2). *)
+        let src =
+          go_ys
+            "    let s = foldl(ys, 0, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc + 1)\n\
+             \    need_pos(s)"
+        in
+        Alcotest.check t3 "three skips" (0, 0, 3) (l3 src);
+        Alcotest.(check (list string)) "the base; then nothing on acc or s"
+          [ "accumulator-base-unproved"; "unconstrained-subject"; "unconstrained-subject" ] (reasons src));
+
+    case "a step that breaks the annotation" (fun () ->
+        (* 56be54964: (0, 0, 2). *)
+        let src =
+          go_ys
+            "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc - 1)\n\
+             \    need_pos(s)"
+        in
+        Alcotest.check t3 "three skips" (0, 0, 3) (l3 src);
+        Alcotest.(check (list string)) "the step; then nothing on acc or s"
+          [ "accumulator-step-unproved"; "unconstrained-subject"; "unconstrained-subject" ] (reasons src);
+        Alcotest.(check bool) "the step detail" true
+          (has_detail "the function passed as argument 3 of `foldl` is not known to preserve it" src);
+        Alcotest.(check bool) "under cap verified: rejected" true
+          (has_refine_error_typed
+             (m ~verified:true "  fn go(ys : List(Int)) : Int do foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc - 1) end\n")));
+
+    case "a step that needs an element fact it does not have" (fun () ->
+        (* `x` is an unrefined Int: `acc + x` can break `_ > 0`.
+           56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "two skips" (0, 0, 2)
+          (l3 (go_ys "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, x) -> acc + x)\n    need_pos(s)")));
+
+    case "an annotation on the ELEMENT parameter is not an invariant, nor assumed" (fun () ->
+        (* `x`'s domain is `a`: the annotation would be a claim about `ys`'s
+           elements, which nobody checks.  Unchanged from 56be54964. *)
+        let src =
+          go_ys
+            "    let s = foldl(ys, 1, fn (acc, x : {Int | _ > 0}) ->\n      let _u = need_pos(x)\n      acc + x)\n\
+             \    need_pos(s)"
+        in
+        Alcotest.check t3 "two skips, no obligation for the annotation" (0, 0, 2) (l3 src);
+        Alcotest.(check (list string)) "nothing on x or s"
+          [ "unconstrained-subject"; "unconstrained-subject" ] (reasons src));
+
+    case "an element annotation beside a proved accumulator annotation stays unassumed" (fun () ->
+        (* 56be54964: (0, 0, 2). *)
+        let src =
+          go_ys
+            "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, x : {Int | _ > 0}) ->\n      let _u = need_pos(x)\n      acc + 1)\n\
+             \    need_pos(s)"
+        in
+        Alcotest.check t3 "annotation and s proved, x not" (2, 0, 1) (l3 src);
+        Alcotest.check t3s "x's obligation is the skip"
+          [ ("foldl", "proved", ""); ("need_pos", "skipped", "unconstrained-subject"); ("need_pos", "proved", "") ]
+          (obls src));
+
+    case "the result fact retires when the result is rebound" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "not proved" (1, 0, 1)
+          (l3
+             (go_ys
+                "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n\
+                 \    let s = s - 5\n    need_pos(s)")));
+
+    case "a relational result fact retires when its capture is rebound" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "not proved" (1, 0, 1)
+          (l3
+             (m "  fn go(ys : List(Int), lo : Int) : Int do\n\
+                 \    let s = foldl(ys, lo, fn (acc : {Int | _ >= lo}, _x) -> acc + 1)\n\
+                 \    let lo = lo + 100\n    need_ge(s, lo)\n  end\n")));
+
+    case "the fact belongs to its call, not to the callee" (fun () ->
+        (* Another `foldl` call, unannotated, gets nothing from the first.
+           56be54964: (0, 0, 2). *)
+        Alcotest.check t3 "t not proved" (2, 0, 1)
+          (l3
+             (go_ys
+                "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n\
+                 \    let t = foldl(ys, 0, fn (acc, _x) -> acc - 1)\n    need_pos(s) + need_pos(t)")));
+
+    case "the same lambda under two annotations: the second does not inherit the first" (fun () ->
+        (* VC cache: `_ >= 0` proves with base 0, `_ > 0` must not. *)
+        let src i = go_ys ("    let s = foldl(ys, 0, fn (acc : {Int | " ^ i ^ "}, _x) -> acc + 1)\n    need_nn(s)") in
+        Alcotest.check t3 "_ >= 0: proves" (2, 0, 0) (l3 (src "_ >= 0"));
+        Alcotest.check t3 "_ > 0: the base fails, need_nn(s) unconstrained" (0, 0, 2) (l3 (src "_ > 0")));
+
+    case "guard: a lambda parameter shadowing a name the annotation mentions" (fun () ->
+        (* `fn (lo : {Int | _ >= lo}, …)`: the annotation's `lo` is not the
+           parameter.  Declined, not assumed. *)
+        let src =
+          m "  fn go(ys : List(Int), lo : Int) : Int do\n\
+             \    let s = foldl(ys, lo, fn (lo : {Int | _ >= lo}, _x) -> lo - 1)\n    need_ge(s, lo)\n  end\n"
+        in
+        Alcotest.check t3 "two skips" (0, 0, 2) (l3 src);
+        Alcotest.(check bool) "the shadowing named" true
+          (has_detail "shadows a name the demanded refinement mentions" src));
+
+    case "guard: two annotated b-typed parameters decline (the annotations stay inert)" (fun () ->
+        (* Conservative: which one is the invariant?  Unchanged from
+           56be54964. *)
+        Alcotest.check t3 "one skip, no annotation obligation" (0, 0, 1)
+          (l3
+             (m "  fn pairf(x : b, y : b, f : b -> b -> b) : b do f(x, y) end\n\
+                 \  fn go(n : Int) : Int do\n\
+                 \    let s = pairf(1, 2, fn (a : {Int | _ > 0}, c : {Int | _ > 0}) -> a + c)\n    need_pos(s)\n  end\n")));
+
+    case "a one-parameter lambda keeps the pass-site rule" (fun () ->
+        (* `iter1(n, x : b, f : b -> b)`: a refined one-parameter callable at
+           a type-variable domain is obliged at the pass site (and reported
+           violated there: `b` does not imply it).  Unchanged from
+           56be54964. *)
+        Alcotest.check t3 "violated at the pass site" (0, 1, 1)
+          (l3
+             (m "  fn iter1(n : Int, x : b, f : b -> b) : b do\n\
+                 \    if n > 0 do iter1(n - 1, f(x), f) else x end\n  end\n\
+                 \  fn go(n : Int) : Int do\n\
+                 \    let s = iter1(n, 1, fn (k : {Int | _ > 0}) -> k + 1)\n    need_pos(s)\n  end\n")));
+
+    case "a let-bound lambda is not read" (fun () ->
+        (* Only an inline lambda argument is the call's own.  Unchanged. *)
+        Alcotest.check t3 "s not proved" (0, 0, 1)
+          (l3
+             (go_ys
+                "    let f = fn (acc : {Int | _ > 0}, _x) -> acc + 1\n\
+                 \    let s = foldl(ys, 1, f)\n    need_pos(s)")));
+
+    (* ── Impostors: a non-parametric or trusted "fold" gets nothing ──────── *)
+    case "impostor: a fold that returns a constant" (fun () ->
+        (* P1.  `k1` returns -5 whatever the step does. *)
+        Alcotest.check t3 "no annotation obligation, s not proved" (0, 0, 1)
+          (l3
+             (m "  fn k1(xs : List(a), z : b, f : b -> a -> b) : b do 0 - 5 end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = k1(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n    need_pos(s)\n  end\n")));
+
+    case "impostor: a fold that hands the step a b it built" (fun () ->
+        (* P1.  `k2([5], 1, f)` hands `f` the accumulator -5. *)
+        Alcotest.check t3 "acc not assumed" (0, 0, 1)
+          (l3
+             (m "  fn k2(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+                 \    match xs do\n      Nil -> z\n      Cons(h, t) -> f(0 - 5, h)\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    k2(ys, 1, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc + 1)\n  end\n")));
+
+    case "impostor: an unannotated step parameter (P1)" (fun () ->
+        Alcotest.check t3 "s not proved" (0, 0, 1)
+          (l3
+             (m "  fn k6(xs : List(a), z : b, f) : b do foldl(xs, z, f) end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = k6(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n    need_pos(s)\n  end\n")));
+
+    case "impostor: trusted and assumed folds get nothing" (fun () ->
+        let src attr =
+          m (attr ^ "  fn k3(xs : List(a), z : b, f : b -> a -> b) : b do foldl(xs, z, f) end\n\
+                    \  fn go(ys : List(Int)) : Int do\n\
+                    \    let s = k3(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n    need_pos(s)\n  end\n")
+        in
+        Alcotest.check t3 "@[trusted]: s not proved" (0, 0, 1) (l3 (src "  @[trusted]\n"));
+        Alcotest.check t3 "@[assume]: s not proved" (0, 0, 1) (l3 (src "  @[assume]\n"));
+        Alcotest.check t3 "control: unmarked proves" (2, 0, 0) (l3 (src "")));
+
+    case "impostor: an interface method's result handed to the step (P2)" (fun () ->
+        Alcotest.check t3 "s not proved" (0, 0, 1)
+          (l3
+             (m "  interface Dflt(t) do\n    fn dflt : Int -> t\n  end\n\
+                 \  impl Dflt(Int) do\n    fn dflt(n) do 0 - 5 end\n  end\n\
+                 \  fn k13(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+                 \    match xs do\n      Nil -> z\n      Cons(h, t) -> f(dflt(1), h)\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = k13(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc)\n    need_pos(s)\n  end\n"))) ]
+
 (* ── Datatype instances from declared types (plan steps 1.3 + 1.4) ──────
    Each datatype instance is declared as its own monomorphic datatype; a term's instance
    comes from the declared type it is checked against and from what
@@ -17863,12 +20707,13 @@ end|}
         let _, v, _, rs =
           typed_ledger
             ("mod NCL do\n" ^ ar2_filt
-           ^ {|  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
-  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> is_pos(y) && y < 100)) end
+           ^ {|  fn mystery(n : Int) : Bool do n > 0 end
+  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> mystery(y) && y < 100)) end
 end|})
         in
-        (* Phase 3 reads a bare `fn y -> is_pos(y)` as `is_pos` (eta), so the
-           call here is deliberately not the whole body. *)
+        (* Re-pointed by the leftovers design's phase A (§9.1): a call to a
+           helper with a proved `{Bool | _ == e}` contract is now inlined, so
+           the guard uses `mystery`, which has no contract at all. *)
         Alcotest.(check int) "not violated" 0 v;
         Alcotest.(check bool) "uninstantiated" true (List.mem "abstract-refinement-uninstantiated" rs);
         Alcotest.(check bool) "not too weak" false (List.mem "abstract-refinement-too-weak" rs));
@@ -17918,8 +20763,10 @@ let abstract_phase3_suite =
     gated "q07: fn y -> g(y) is g" (fun () ->
         Alcotest.check ps "proved" proved
           (sumpos "  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> is_pos(y))) end\n"));
-    gated "q06: a two-parameter call stays uninstantiated" (fun () ->
-        Alcotest.check ps "uninstantiated" uninst
+    (* Flipped by the leftovers design's phase A (A6): a call inside a
+       lambda substitutes its actuals into the helper's proved contract. *)
+    gated "q06: a two-parameter call inside a lambda is inlined" (fun () ->
+        Alcotest.check ps "proved" proved
           (sumpos "  fn gt(n : Int, m : Int) : {Bool | _ == (n > m)} do n > m end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> gt(y, 0))) end\n"));
     (* §3.5 through a named predicate: the parameter path uses the same
        instantiation. *)
@@ -17951,6 +20798,1529 @@ end|}
     gated "a let-bound lambda shadows a named predicate" (fun () ->
         Alcotest.check ps "too weak" [ ("skipped", "abstract-refinement-too-weak") ]
           (sumpos "  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end\n  fn go(ys : List(Int)) : Int do\n    let is_pos = fn y -> y >= 0\n    sum_pos(filt(ys, is_pos))\n  end\n")) ]
+
+(* Abstract refinements, the leftovers, phase A
+   (specs/2026-10-18-abstract-refinements-leftovers-design.md §2, tests §9.1):
+   a lambda body is read into the instantiated predicate `q` as an exact
+   equivalence — `&&`/`||`/`not`, `if`, a `match` on a Bool, a `let`-bound
+   lambda's call, an n-ary helper's proved `{Bool | _ == e}` — or declined.
+   Each row is a §0.1 probe; every assertion is on `sum_pos`'s verdicts (or
+   the whole ledger where stated). *)
+let abstract_leftovers_a_suite =
+  let helpers =
+    {|  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
+  fn is_neg(n : Int) : {Bool | _ == (n < 0)} do n < 0 end
+  fn gt(n : Int, m : Int) : {Bool | _ == (n > m)} do n > m end
+|}
+  in
+  let src body = "mod LA do\n" ^ ar2_filt ^ helpers ^ body ^ "end\n" in
+  (* (verdict, reason slug, reason detail) for each `sum_pos` obligation of a
+     whole module. *)
+  let sum_pos_of (m : string) =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed m);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        if o.callee <> "sum_pos" then None
+        else
+          Some
+            (match o.verdict with
+             | Skipped r -> (verdict_name o.verdict, reason_name r, reason_detail r)
+             | v -> (verdict_name v, "", "")))
+      (March_refinecheck.Obligation.all ())
+  in
+  let at body = sum_pos_of (src body) in
+  let slugs body = List.map (fun (v, r, _) -> (v, r)) (at body) in
+  let go lam = Printf.sprintf "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, %s)) end\n" lam in
+  let ps = Alcotest.(list (pair string string)) in
+  let proved = [ ("proved", "") ] in
+  let weak = [ ("skipped", "abstract-refinement-too-weak") ] in
+  let uninst = [ ("skipped", "abstract-refinement-uninstantiated") ] in
+  let contains hay needle =
+    let n = String.length needle and h = String.length hay in
+    let rec scan i = i + n <= h && (String.sub hay i n = needle || scan (i + 1)) in
+    scan 0
+  in
+  let detail body =
+    match at body with [ (_, _, d) ] -> d | _ -> Alcotest.fail "expected one sum_pos obligation"
+  in
+  [ gated "A1 (L1): a proved helper inside && is inlined" (fun () ->
+        Alcotest.check ps "proved" proved (slugs (go "fn y -> is_pos(y) && y < 100")));
+    gated "A2 (L1c): || is too weak, and the message shows the reading" (fun () ->
+        let body = go "fn y -> is_pos(y) || y < 100" in
+        Alcotest.check ps "too weak" weak (slugs body);
+        let d = detail body in
+        Alcotest.(check bool) ("names the source lambda: " ^ d) true
+          (contains d "fn y -> is_pos(y) || y < 100");
+        Alcotest.(check bool) ("prints the reading: " ^ d) true (contains d "y > 0 || y < 100"));
+    gated "A3 (L2, L4): if and a Bool match are exact" (fun () ->
+        Alcotest.check ps "if" proved (slugs (go "fn y -> if y > 0 do y < 100 else false end"));
+        Alcotest.check ps "match" proved
+          (slugs (go "fn y -> match y > 0 do\n    true -> y < 100\n    false -> false\n    end"));
+        Alcotest.check ps "match, arms swapped" proved
+          (slugs (go "fn y -> match y > 0 do\n    false -> false\n    true -> y < 100\n    end"));
+        Alcotest.check ps "match, a wildcard arm" proved
+          (slugs (go "fn y -> match y > 0 do\n    true -> y < 100\n    _ -> false\n    end")));
+    gated "A4 (L2c): an if whose else admits non-positives is too weak" (fun () ->
+        Alcotest.check ps "too weak" weak (slugs (go "fn y -> if y > 0 do true else y > -5 end")));
+    gated "A5 (L3/L3c): not of a proved helper" (fun () ->
+        Alcotest.check ps "L3 proved" proved (slugs (go "fn y -> not(is_neg(y)) && y != 0"));
+        Alcotest.check ps "L3c too weak (admits 0)" weak (slugs (go "fn y -> not(is_neg(y))")));
+    gated "A7 (L5c): actuals are substituted in order" (fun () ->
+        Alcotest.check ps "too weak" weak (slugs (go "fn y -> gt(0, y)")));
+    gated "A8 (L5k, C1): a captured caller parameter declines" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (slugs "  fn go(ys : List(Int), k : Int) : Int do sum_pos(filt(ys, fn y -> gt(y, k))) end\n"));
+    gated "A9 (L8, L9): a let-bound lambda and a callback inside &&" (fun () ->
+        Alcotest.check ps "L8 proved" proved
+          (slugs
+             "  fn go(ys : List(Int)) : Int do\n    let f = fn y -> y > 0\n    sum_pos(filt(ys, fn y -> f(y) && y < 100))\n  end\n");
+        Alcotest.check ps "L9 proved" proved
+          (slugs
+             "  fn go(ys : List(Int), k : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : Int do sum_pos(filt(ys, fn y -> k(y) && y < 100)) end\n"));
+    gated "A10 (L10): a computed actual is substituted, not assumed" (fun () ->
+        Alcotest.check ps "too weak" weak (slugs (go "fn y -> is_pos(y + 1)")));
+    gated "A11 (C5): a let-bound lambda that names itself declines" (fun () ->
+        let body =
+          "  fn go(ys : List(Int)) : Int do\n    let f = fn y -> y > 0\n    let f = fn y -> f(y) && y < 5\n    sum_pos(filt(ys, f))\n  end\n"
+        in
+        Alcotest.check ps "uninstantiated" uninst (slugs body);
+        let d = detail body in
+        Alcotest.(check bool) ("names the self-reference: " ^ d) true (contains d "itself"));
+    gated "A12: four chained let-lambdas inline, five exceed the depth bound" (fun () ->
+        let chain n =
+          let b = Buffer.create 256 in
+          Buffer.add_string b "  fn go(ys : List(Int)) : Int do\n    let f1 = fn y -> y > 0\n";
+          for i = 2 to n do
+            Buffer.add_string b (Printf.sprintf "    let f%d = fn y -> f%d(y)\n" i (i - 1))
+          done;
+          Buffer.add_string b
+            (Printf.sprintf "    sum_pos(filt(ys, fn y -> f%d(y) && y < 100))\n  end\n" n);
+          Buffer.contents b
+        in
+        Alcotest.check ps "four: proved" proved (slugs (chain 4));
+        Alcotest.check ps "five: uninstantiated" uninst (slugs (chain 5));
+        let d = detail (chain 5) in
+        Alcotest.(check bool) ("names the bound: " ^ d) true (contains d "depth bound (4)"));
+    gated "A13: a helper whose contract is not proved is not inlined" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (List.map
+             (fun (v, r, _) -> (v, r))
+             (sum_pos_of
+                ("mod LB do\n" ^ ar2_filt
+               ^ "  fn helper(n : Int) : Bool do n > 0 end\n  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do helper(n) end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> is_pos(y) && y < 100)) end\nend\n"))));
+    gated "A14: a lambda parameter shadowing a predicate is the parameter" (fun () ->
+        Alcotest.check ps "proved" proved (slugs (go "fn is_pos -> is_pos > 0")));
+    gated "A15: a let-bound lambda shadows the top-level helper inside a body" (fun () ->
+        Alcotest.check ps "too weak (the local is read)" weak
+          (slugs
+             "  fn go(ys : List(Int)) : Int do\n    let is_pos = fn y -> y >= 0\n    sum_pos(filt(ys, fn y -> is_pos(y) && y < 100))\n  end\n"));
+    gated "A16: two inlinings in one module never share a verdict" (fun () ->
+        Alcotest.check ps "proved, then too weak" (proved @ weak)
+          (slugs
+             "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> gt(y, 0))) + sum_pos(filt(ys, fn y -> gt(y, -1))) end\n"));
+    gated "A17: cap verified — A1 compiles, A2 is an error" (fun () ->
+        let m body = "mod CVA do\n  cap verified\n" ^ ar2_filt ^ helpers ^ body ^ "end\n" in
+        Alcotest.(check bool) "A1 compiles" false
+          (has_refine_error_typed (m (go "fn y -> is_pos(y) && y < 100")));
+        Alcotest.(check bool) "A2 errors" true
+          (has_refine_error_typed (m (go "fn y -> is_pos(y) || y < 100"))));
+    gated "A18: an if guarding a division instantiates, defined everywhere" (fun () ->
+        let body = go "fn y -> if y != 0 do 10 / y > 0 else false end" in
+        Alcotest.check ps "proved" proved (slugs body);
+        let _, _, _, rs = typed_ledger (src body) in
+        Alcotest.(check (list string)) "no skip anywhere in the module" [] rs);
+    (* The whole module's ledger for each row above, so a row cannot pass
+       through an extra obligation, a stray violation or a lost proof
+       elsewhere in the module.  The fixed part of every module is [filt]'s
+       own return obligations and the three helpers' postconditions; the
+       lambda's own body adds its calls' obligations where it has any: 6
+       proved is that fixed part, `k(y)` adds its (trivial) domain obligation
+       in L9, and `weird(y)` adds its own postcondition and an
+       `unconstrained-subject` skip for its precondition at the call (the
+       body walk does not read `y > 0 &&` as a fact there; the inliner does). *)
+    gated "every row's whole-module ledger triple" (fun () ->
+        let weird = "  fn weird(a : {Int | _ > 0}) : {Bool | _ == (a > 0)} do true end\n" in
+        let rows =
+          [ ("A1", go "fn y -> is_pos(y) && y < 100", (7, 0, 0));
+            ("A2", go "fn y -> is_pos(y) || y < 100", (6, 0, 1));
+            ("A3 if", go "fn y -> if y > 0 do y < 100 else false end", (7, 0, 0));
+            ("A3 match", go "fn y -> match y > 0 do\n    true -> y < 100\n    false -> false\n    end", (7, 0, 0));
+            ("A4", go "fn y -> if y > 0 do true else y > -5 end", (6, 0, 1));
+            ("A5 L3", go "fn y -> not(is_neg(y)) && y != 0", (7, 0, 0));
+            ("A5 L3c", go "fn y -> not(is_neg(y))", (6, 0, 1));
+            ("A6", go "fn y -> gt(y, 0)", (7, 0, 0));
+            ("A7", go "fn y -> gt(0, y)", (6, 0, 1));
+            ("A8", "  fn go(ys : List(Int), k : Int) : Int do sum_pos(filt(ys, fn y -> gt(y, k))) end\n", (6, 0, 1));
+            ("A9 L8", "  fn go(ys : List(Int)) : Int do\n    let f = fn y -> y > 0\n    sum_pos(filt(ys, fn y -> f(y) && y < 100))\n  end\n", (7, 0, 0));
+            ("A9 L9", "  fn go(ys : List(Int), k : ({x : Int | true}) -> {Bool | _ == (x > 0)}) : Int do sum_pos(filt(ys, fn y -> k(y) && y < 100)) end\n", (8, 0, 0));
+            ("A10", go "fn y -> is_pos(y + 1)", (6, 0, 1));
+            ("A14", go "fn is_pos -> is_pos > 0", (7, 0, 0));
+            ("A15", "  fn go(ys : List(Int)) : Int do\n    let is_pos = fn y -> y >= 0\n    sum_pos(filt(ys, fn y -> is_pos(y) && y < 100))\n  end\n", (6, 0, 1));
+            ("A16", "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> gt(y, 0))) + sum_pos(filt(ys, fn y -> gt(y, -1))) end\n", (7, 0, 1));
+            ("A18", go "fn y -> if y != 0 do 10 / y > 0 else false end", (7, 0, 0));
+            ("non-Bool match", go "fn y -> match y do\n    0 -> false\n    _ -> y > 0\n    end", (6, 0, 1));
+            ("weird eta", weird ^ go "fn y -> weird(y)", (7, 0, 2));
+            ("weird guarded", weird ^ go "fn y -> y > 0 && weird(y)", (8, 0, 1)) ]
+        in
+        List.iter
+          (fun (name, body, want) ->
+            let p, v, s, _ = typed_ledger (src body) in
+            Alcotest.(check (triple int int int)) name want (p, v, s))
+          rows);
+    (* Controls: what the reader does not translate declines, naming the
+       construct, never the old "mentions a name" catch-all. *)
+    gated "a match on a non-Bool declines, naming the construct" (fun () ->
+        let body = go "fn y -> match y do\n    0 -> false\n    _ -> y > 0\n    end" in
+        Alcotest.check ps "uninstantiated" uninst (slugs body);
+        let d = detail body in
+        Alcotest.(check bool) ("names the match: " ^ d) true (contains d "match"));
+    gated "a block body with a let declines" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst (slugs (go "fn y ->\n      let z = y * 2\n      z > 0")));
+    gated "an if in a non-Bool position declines" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (slugs (go "fn y -> (if y > 0 do y else 1 end) > 0")));
+    gated "a helper contract mentioning its result binder is not inlined (C3)" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (slugs
+             "  fn odd(n : Int) : {Bool | _ == (_ && n > 0)} do false end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> odd(y) && y < 100)) end\n"));
+    gated "a let-bound lambda capturing a caller name declines (C1)" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (slugs
+             "  fn go(ys : List(Int), m : Int) : Int do\n    let f = fn z -> z > m\n    sum_pos(filt(ys, fn y -> f(y) && y > 0))\n  end\n"));
+    gated "a let-bound lambda capturing a name equal to the binder declines" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (slugs
+             "  fn go(ys : List(Int), y : Int) : Int do\n    let f = fn z -> z > y\n    sum_pos(filt(ys, fn y -> f(y) && y > 0))\n  end\n"));
+    gated "a parameter-slot demand reads the lambda the same way" (fun () ->
+        let p, v, s, _ =
+          typed_ledger
+            {|mod LP do
+  fn need(xs : List({a | p(_)}), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : Int do 0 end
+  fn gt(n : Int, m : Int) : {Bool | _ == (n > m)} do n > m end
+  fn go(pos : List({Int | _ > 0})) : Int do need(pos, fn y -> gt(y, 0) || y > 5) end
+end|}
+        in
+        (* gt's own postcondition (1) + the element obligation (1). *)
+        Alcotest.(check (triple int int int)) "proved" (2, 0, 0) (p, v, s));
+    (* Review follow-up (2026-10-18): a helper's `{Bool | _ == e}` is proved
+       only under its own parameter refinements, so `weird(-5)` may be
+       anything.  It is inlined only where each refined parameter is
+       discharged at the call inside the lambda: under the definer's domain
+       fact and the guards the lambda itself evaluates first (`&&`, `||`,
+       `if`).  RED before: every row below but the controls was PROVED. *)
+    gated "a helper whose precondition the lambda does not discharge is not inlined" (fun () ->
+        let pre = "  fn weird(a : {Int | _ > 0}) : {Bool | _ == (a > 0)} do true end\n" in
+        Alcotest.check ps "eta" uninst (slugs (pre ^ go "fn y -> weird(y)"));
+        Alcotest.check ps "inside &&" uninst (slugs (pre ^ go "fn y -> weird(y) && y < 100"));
+        Alcotest.check ps "by name" uninst (slugs (pre ^ go "weird"));
+        Alcotest.check ps "through a let-bound lambda" uninst
+          (slugs
+             (pre
+            ^ "  fn go(ys : List(Int)) : Int do\n    let f = fn z -> weird(z)\n    sum_pos(filt(ys, fn y -> f(y) && y < 100))\n  end\n"));
+        let d = detail (pre ^ go "fn y -> weird(y) && y < 100") in
+        Alcotest.(check bool) ("names the precondition: " ^ d) true (contains d "precondition"));
+    gated "an n-ary helper's precondition is checked on its actuals" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (slugs
+             (* Proved under its preconditions (a > 10 > m), so `true`
+                is a correct body; `wgt(-5, 0)` is still `true`. *)
+             ("  fn wgt(a : {Int | _ > 10}, m : {Int | _ < 10}) : {Bool | _ == (a > m)} do true end\n"
+             ^ go "fn y -> wgt(y, 0)")));
+    gated "control: a precondition the lambda's own guard discharges" (fun () ->
+        let pre = "  fn weird(a : {Int | _ > 0}) : {Bool | _ == (a > 0)} do true end\n" in
+        Alcotest.check ps "&& guard" proved (slugs (pre ^ go "fn y -> y > 0 && weird(y)"));
+        Alcotest.check ps "if guard" proved
+          (slugs (pre ^ go "fn y -> if y > 0 do weird(y) else false end"));
+        Alcotest.check ps "|| guard" weak (slugs (pre ^ go "fn y -> y <= 0 || weird(y)"));
+        Alcotest.check ps "the guard travels through a let-bound lambda" proved
+          (slugs
+             (pre
+            ^ "  fn go(ys : List(Int)) : Int do\n    let f = fn z -> z > 0 && weird(z)\n    sum_pos(filt(ys, fn y -> f(y) && y < 100))\n  end\n")));
+    gated "control: a trivially true precondition still inlines" (fun () ->
+        Alcotest.check ps "proved" proved
+          (slugs
+             ("  fn tw(a : {Int | true}) : {Bool | _ == (a > 0)} do a > 0 end\n"
+             ^ go "fn y -> tw(y) && y < 100")));
+    gated "a precondition at a parameter slot" (fun () ->
+        let _, _, _, rs =
+          typed_ledger
+            {|mod LPP do
+  fn need(xs : List({a | p(_)}), keep : ({x : a | true}) -> {Bool | _ == p(x)}) : Int do 0 end
+  fn w10(a : {Int | _ > 10}) : {Bool | _ == (a > 0)} do true end
+  fn go(pos : List({Int | _ > 0})) : Int do need(pos, fn y -> w10(y)) end
+end|}
+        in
+        Alcotest.(check bool) "uninstantiated" true
+          (List.mem "abstract-refinement-uninstantiated" rs));
+    gated "an @[trusted] helper is not inlined" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (List.map
+             (fun (v, r, _) -> (v, r))
+             (sum_pos_of
+                ("mod LT do\n  cap verified\n" ^ ar2_filt
+               ^ "  @[trusted]\n  fn tpos(n : Int) : {Bool | _ == (n > 0)} do true end\n"
+               ^ go "fn y -> tpos(y) && y < 100" ^ "end\n"))));
+    gated "a rebinding that retires an intermediate let-lambda declines the chain" (fun () ->
+        Alcotest.check ps "uninstantiated" uninst
+          (slugs
+             "  fn go(ys : List(Int)) : Int do\n    let f1 = fn y -> y > 0\n    let f2 = fn y -> f1(y)\n    let f1 = fn y -> y >= 0\n    sum_pos(filt(ys, fn y -> f2(y) && y < 100))\n  end\n")) ]
+
+(* Abstract refinements, the leftovers, phase B (design
+   specs/2026-10-18-abstract-refinements-leftovers-design.md §3, §9.2):
+   `!p(_)` slots (rule 5 exempts `not`), a slot predicate that is a Boolean
+   combination of `p(_)` with concrete parts, a concrete base (`Int[p]`), and
+   the erased element sort at a parameter slot inside a declaring
+   definition.  Every case asserts the whole module's ledger triple as well
+   as the one callee whose verdict moved. *)
+let abstract_leftovers_b_suite =
+  (* Errors of a TYPED check, and its obligations as (callee, verdict, reason). *)
+  let run (src : string) : string list * (string * string * string) list =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let errs =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          if d.March_errors.Errors.severity = March_errors.Errors.Error then
+            Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> ""))
+        (March_refinecheck.Obligation.all ())
+    in
+    (errs, obs)
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let of_callee c obs = List.filter_map (fun (c', v, r) -> if c' = c then Some (v, r) else None) obs in
+  let misuse errs = List.exists (fun m -> contains m "abstract refinement `") errs in
+  let ps = Alcotest.(list (pair string string)) in
+  let t3 = Alcotest.(triple int int int) in
+  let proved = ("proved", "") in
+  let sums =
+    {|  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do 0 end
+|}
+  in
+  let rej_ok =
+    {|  fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | !p(_)}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do rej(t, pred) else Cons(h, rej(t, pred)) end
+    end
+  end
+|}
+  in
+  let rej_bad =
+    {|  fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | !p(_)}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, rej(t, pred)) else rej(t, pred) end
+    end
+  end
+|}
+  in
+  let m name body = "mod " ^ name ^ " do\n" ^ body ^ "end\n" in
+  let go_rej lam = Printf.sprintf "  fn go(ys : List(Int)) : Int do sum_nonpos(rej(ys, %s)) end\n" lam in
+  (* D2: an accumulator helper carrying the definer, its `List(a[p])` slot
+     at a parameter, and a delegating caller. [ok]: push on the passing
+     branch; otherwise on the failing one (D2c). *)
+  let filt_go ~ok =
+    let pass, fail =
+      if ok then ("filt_go(t, pred, Cons(h, acc))", "filt_go(t, pred, acc)")
+      else ("filt_go(t, pred, acc)", "filt_go(t, pred, Cons(h, acc))")
+    in
+    Printf.sprintf
+      {|  pfn filt_go(lst : List(a), pred : a -> Bool[p], acc : List(a[p])) : List(a[p]) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> if pred(h) do %s else %s end
+    end
+  end
+  fn filt2(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do filt_go(xs, pred, Nil) end
+  fn go(ys : List(Int)) : Int do sum_pos(filt2(ys, fn y -> y > 0)) end
+|}
+      pass fail
+  in
+  let ifilter =
+    {|  fn ifilter(xs : List(Int), f : Int -> Bool[p]) : List(Int[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if f(h) do Cons(h, ifilter(t, f)) else ifilter(t, f) end
+    end
+  end
+|}
+  in
+  [ gated "B1 (P3): `!p(_)` is accepted, its body proves, and a call proves" (fun () ->
+        let errs, obs = run (m "B1" (sums ^ rej_ok ^ go_rej "fn y -> y > 0")) in
+        Alcotest.(check bool) "no abstract_refinement_misuse" false (misuse errs);
+        Alcotest.check ps "the call" [ proved ] (of_callee "sum_nonpos" obs);
+        Alcotest.check ps "rej's own return" [ proved ] (of_callee "return of rej" obs);
+        Alcotest.check ps "rej's recursive tails" [ proved; proved ] (of_callee "rej(…)" obs);
+        Alcotest.check t3 "whole module" (4, 0, 0) (triple obs));
+    gated "B2 (P3c): a wrong `!p` body is a violation, with no rule-5 error" (fun () ->
+        let errs, obs = run (m "B2" (sums ^ rej_bad ^ go_rej "fn y -> y > 0")) in
+        Alcotest.(check bool) "no abstract_refinement_misuse" false (misuse errs);
+        Alcotest.(check bool) "a violation at rej's return" true
+          (List.mem ("violated", "") (of_callee "return of rej" obs));
+        Alcotest.check ps "the call is not proved"
+          [ ("skipped", "abstract-refinement-uninstantiated") ]
+          (of_callee "sum_nonpos" obs);
+        Alcotest.check t3 "whole module" (0, 1, 3) (triple obs));
+    gated "B3 (Z2): the `not(p(_))` spelling is the same" (fun () ->
+        let rej_not =
+          {|  fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | not(p(_))}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do rej(t, pred) else Cons(h, rej(t, pred)) end
+    end
+  end
+|}
+        in
+        let errs, obs = run (m "B3" (sums ^ rej_not ^ go_rej "fn y -> y > 0")) in
+        Alcotest.(check bool) "no abstract_refinement_misuse" false (misuse errs);
+        Alcotest.check ps "the call" [ proved ] (of_callee "sum_nonpos" obs);
+        Alcotest.check t3 "whole module" (4, 0, 0) (triple obs));
+    Alcotest.test_case "B4: `not` does not exempt what is nested under it, nor a computed argument"
+      `Quick (fun () ->
+        let msgs =
+          refine_diagnostics
+            (m "B4"
+               "  fn g(xs : List(a), keep : a -> Bool[p], k2 : a -> Bool[q]) : List({a | not(p(q(_)))}) do xs end\n")
+        in
+        Alcotest.(check bool) "`q` inside `p` under `not`: rule 5" true
+          (List.exists (fun s -> contains s "abstract refinement `q` is applied inside another application") msgs);
+        let msgs =
+          refine_diagnostics
+            (m "B4b" "  fn g(xs : List(a), keep : a -> Bool[p]) : List({a | !p(y + 1)}) do xs end\n")
+        in
+        Alcotest.(check bool) "`!p(y + 1)`: rule 2" true
+          (List.exists (fun s -> contains s "abstract refinement `p` is applied to an expression") msgs);
+        (* The exemption is for `not` alone: another one-argument head still nests. *)
+        let msgs =
+          refine_diagnostics
+            (m "B4c"
+               "  fn g(xs : List(a), keep : a -> Bool[p], k2 : a -> Bool[q]) : List({a | len(q(_)) > 0 && p(_)}) do xs end\n")
+        in
+        Alcotest.(check bool) "`q` under a measure: rule 5" true
+          (List.exists (fun s -> contains s "abstract refinement `q` is applied inside another application") msgs));
+    gated "B5 (D2): an accumulator helper's parameter slot proves, and so does its caller" (fun () ->
+        let errs, obs = run (m "B5" (sums ^ filt_go ~ok:true)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        (* `Cons(h, acc)` against the helper's own `acc` slot (the §3.3
+           erased sort), the passed-on `acc`s and the return. *)
+        Alcotest.check ps "the pushed Cons" [ proved ] (of_callee "filt_go" obs);
+        Alcotest.check ps "the passed-on acc" [ proved; proved; proved ] (of_callee "acc" obs);
+        Alcotest.check ps "filt2's return" [ proved ] (of_callee "return of filt2" obs);
+        Alcotest.check ps "the caller" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module" (8, 0, 0) (triple obs));
+    (* Design §0 D1, measured proved before leftovers phase A: a definition
+       passing its own callback on (`p` instantiated to `p($cb_arg)`, the
+       caller's uninterpreted `$abs_p`).  Phase A's C3 vocabulary check
+       declined it; B5 needs it for `filt2`. *)
+    gated "D1: delegation passes a definition's own p on" (fun () ->
+        let _, obs =
+          run
+            (m "BD1"
+               (ar2_filt
+              ^ {|  fn myfilter(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do filt(xs, pred) end
+  fn go(ys : List(Int)) : Int do sum_pos(myfilter(ys, fn y -> y > 0)) end
+|}))
+        in
+        Alcotest.check ps "myfilter's return" [ proved ] (of_callee "return of myfilter" obs);
+        Alcotest.check ps "the caller" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module" (5, 0, 0) (triple obs));
+    (* The false-proof shape the design names (§0 D2c): on the base the
+       helper's slot was skipped (no element sort) while the caller's demand
+       still proved, so the bug sat behind the skips. *)
+    gated "B6 (D2c): a helper pushing on the failing branch is a violation at its slot" (fun () ->
+        let errs, obs = run (m "B6" (sums ^ filt_go ~ok:false)) in
+        Alcotest.(check bool) "an error is reported" true (errs <> []);
+        Alcotest.(check bool) "the wrong push is violated" true
+          (List.mem ("violated", "") (of_callee "filt_go" obs));
+        Alcotest.(check bool) "no slot of filt_go is skipped" false
+          (List.exists (fun (v, _) -> v = "skipped") (of_callee "filt_go" obs));
+        Alcotest.check ps "the wrong push" [ ("violated", "") ] (of_callee "filt_go" obs);
+        (* A violated self-call slot breaks the induction (review of
+           0ddfcda45), so `filt_go`'s return lends nothing: the caller is not
+           proved either. *)
+        Alcotest.(check bool) "the caller is not proved" false (List.mem proved (of_callee "sum_pos" obs));
+        Alcotest.check t3 "whole module" (3, 1, 4) (triple obs));
+    (* §3.4 ordering: the callee's `!p(_)` is the CALLEE's `p`, instantiated
+       here to `y > 0`.  The caller's own `ys : List({Int | !p(_)})` matches
+       it textually; read as the caller's `p` it would PROVE (it did, on the
+       base, alongside the rule-5 error). *)
+    gated "B7: a generalized slot at a parameter is the callee's p, never the caller's" (fun () ->
+        let errs, obs =
+          run
+            (m "B7"
+               {|  fn need_not(xs : List({a | !p(_)}), keep : a -> Bool[p]) : Int do 0 end
+  fn caller(ys : List({Int | !p(_)}), f : Int -> Bool[p]) : Int do need_not(ys, fn y -> y > 0) end
+|})
+        in
+        Alcotest.(check bool) "no abstract_refinement_misuse" false (misuse errs);
+        Alcotest.(check bool) "not proved" false (List.mem proved (of_callee "need_not" obs));
+        Alcotest.check ps "the callee's p instantiated: a violation" [ ("violated", "") ]
+          (of_callee "ys" obs);
+        Alcotest.check t3 "whole module" (0, 1, 0) (triple obs));
+    gated "B8 (R1): a concrete base `List(Int[p])` proves at a call; a weaker lambda is too weak" (fun () ->
+        let _, obs = run (m "B8" (sums ^ ifilter ^ "  fn go(ys : List(Int)) : Int do sum_pos(ifilter(ys, fn y -> y > 0)) end\n")) in
+        Alcotest.check ps "proved" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module" (7, 0, 0) (triple obs);
+        let _, obs = run (m "B8c" (sums ^ ifilter ^ "  fn go(ys : List(Int)) : Int do sum_pos(ifilter(ys, fn y -> y >= 0)) end\n")) in
+        Alcotest.check ps "too weak" [ ("skipped", "abstract-refinement-too-weak") ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module" (6, 0, 1) (triple obs));
+    (* §3.4 under `not`: the incoming `_ > 0` is conjoined OUTSIDE the
+       instantiation, `y > 0 && !(y > 5)`.  Substituted inside (`!(y > 0 &&
+       y > 5)`) it would not prove `_ > 0`. *)
+    gated "B9: the input's element fact is conjoined outside `!p`" (fun () ->
+        let _, obs =
+          run
+            (m "B9"
+               ("  fn sum_small(xs : List({Int | _ > 0 && _ <= 5})) : Int do 0 end\n" ^ rej_ok
+              ^ "  fn go(pos : List({Int | _ > 0})) : Int do sum_small(rej(pos, fn y -> y > 5)) end\n"))
+        in
+        Alcotest.check ps "proved" [ proved ] (of_callee "sum_small" obs);
+        Alcotest.check t3 "whole module" (4, 0, 0) (triple obs));
+    gated "B10: the erased sort does not leak outside a declaring definition" (fun () ->
+        let _, obs =
+          run
+            (m "B10"
+               {|  fn need(xs : List(a[p]), keep : a -> Bool[p]) : Int do 0 end
+  fn outside(zs : List(a)) : Int do need(zs, fn y -> true) end
+|})
+        in
+        Alcotest.check ps "uninstantiated" [ ("skipped", "abstract-refinement-uninstantiated") ]
+          (of_callee "need" obs);
+        Alcotest.check t3 "whole module" (0, 0, 1) (triple obs);
+        (* ...nor inside one, for a reading that is not about its own `p`. *)
+        let _, obs =
+          run
+            (m "B10b"
+               {|  fn need(xs : List(a[p]), keep : a -> Bool[p]) : Int do 0 end
+  fn inside(zs : List(a[p]), f : a -> Bool[p]) : Int do need(zs, fn y -> true) end
+|})
+        in
+        Alcotest.check ps "uninstantiated" [ ("skipped", "abstract-refinement-uninstantiated") ]
+          (of_callee "need" obs);
+        Alcotest.check t3 "whole module" (0, 0, 1) (triple obs));
+    (* B11: a mixed slot at a String base (rule 4: one sort, `String`).  The
+       definition proves by delegation (`filt`'s `p` instantiated to this
+       `p`, the input's `len(_) > 0` conjoined by §3.4); the call reads
+       `s != "ab" && len(s) > 0` at the String sort. *)
+    gated "B11: a mixed slot `{String | p(_) && len(_) > 0}` proves with the String sort" (fun () ->
+        let body lam =
+          m "B11"
+            (ar2_filt
+           ^ {|  fn need_ne(xs : List({String | len(_) > 0 && _ != "ab"})) : Int do 0 end
+  fn ne(xs : List(String)) : List({String | len(_) > 0}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if len(h) > 0 do Cons(h, ne(t)) else ne(t) end
+    end
+  end
+  fn sfilt(xs : List(String), f : String -> Bool[p]) : List({String | p(_) && len(_) > 0}) do
+    filt(ne(xs), f)
+  end
+|}
+           ^ Printf.sprintf "  fn go(ys : List(String)) : Int do need_ne(sfilt(ys, %s)) end\n" lam)
+        in
+        let _, obs = run (body "fn s -> s != \"ab\"") in
+        Alcotest.check ps "sfilt's own return" [ proved ] (of_callee "return of sfilt" obs);
+        Alcotest.check ps "the call" [ proved ] (of_callee "need_ne" obs);
+        Alcotest.check t3 "whole module" (8, 0, 0) (triple obs);
+        let _, obs = run (body "fn s -> s != \"abc\"") in
+        Alcotest.check ps "a different string: too weak"
+          [ ("skipped", "abstract-refinement-too-weak") ] (of_callee "need_ne" obs);
+        Alcotest.check t3 "whole module" (7, 0, 1) (triple obs));
+    gated "a slot combining `p(_)` with `||` instantiates" (fun () ->
+        let _, obs =
+          run
+            (m "BOr"
+               {|  fn need_nn(xs : List({Int | _ >= 0})) : Int do 0 end
+  fn keep0(xs : List(Int), f : Int -> Bool[p]) : List({Int | p(_) || _ == 0}) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) ->
+      if f(h) do Cons(h, keep0(t, f))
+      else if h == 0 do Cons(h, keep0(t, f)) else keep0(t, f) end end
+    end
+  end
+  fn go(ys : List(Int)) : Int do need_nn(keep0(ys, fn y -> y > 0)) end
+  fn go2(ys : List(Int)) : Int do need_nn(keep0(ys, fn y -> y > -3)) end
+|})
+        in
+        Alcotest.check ps "proved, then too weak"
+          [ proved; ("skipped", "abstract-refinement-too-weak") ]
+          (of_callee "need_nn" obs);
+        Alcotest.check t3 "whole module" (10, 0, 1) (triple obs));
+    gated "control: the negation of a too-weak predicate stays too weak" (fun () ->
+        let _, obs = run (m "BW" (sums ^ rej_ok ^ go_rej "fn y -> y > 5")) in
+        Alcotest.check ps "too weak" [ ("skipped", "abstract-refinement-too-weak") ]
+          (of_callee "sum_nonpos" obs);
+        Alcotest.check t3 "whole module" (3, 0, 1) (triple obs));
+    gated "a too-weak `!p` message names the slot and its reading" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_typed (m "BWm" (sums ^ rej_ok ^ go_rej "fn y -> y > 5")));
+        let d =
+          List.find_map
+            (fun (o : March_refinecheck.Obligation.t) ->
+              let open March_refinecheck.Obligation in
+              match o.verdict with
+              | Skipped r when o.callee = "sum_nonpos" -> Some (reason_detail r)
+              | _ -> None)
+            (March_refinecheck.Obligation.all ())
+          |> Option.value ~default:""
+        in
+        Alcotest.(check bool) ("names the slot: " ^ d) true (contains d "!p(_)");
+        Alcotest.(check bool) ("prints its reading: " ^ d) true (contains d "!(y > 5)"));
+    (* A slot applying the callee's `p` in a shape not read (`== false`) is
+       a recorded skip at the call, never handed to [elem_refinement], where
+       a caller declaring its own `p` would read it as the caller's. *)
+    gated "a slot shape not read is uninstantiated, never the caller's p" (fun () ->
+        let _, obs =
+          run
+            (m "BEq"
+               {|  fn need_f(xs : List({Int | p(_) == false}), keep : Int -> Bool[p]) : Int do 0 end
+  fn caller(ys : List({Int | p(_) == false}), f : Int -> Bool[p]) : Int do need_f(ys, fn y -> y > 0) end
+|})
+        in
+        Alcotest.check ps "uninstantiated" [ ("skipped", "abstract-refinement-uninstantiated") ]
+          (of_callee "need_f" obs);
+        Alcotest.check t3 "whole module" (0, 0, 1) (triple obs));
+    (* Review of 0ddfcda45: a self-call whose argument slot is not PROVED
+       breaks the structural induction, so the function's element return is
+       not proved and lends nothing to its callers.  Before the fix, each of
+       these callers' demands was PROVED. *)
+    gated "I3: a helper that pushes without testing pred lends nothing" (fun () ->
+        let src =
+          m "I3"
+            (sums
+           ^ {|  pfn go_b(lst : List(a), pred : a -> Bool[p], acc : List(a[p])) : List(a[p]) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> go_b(t, pred, Cons(h, acc))
+    end
+  end
+  fn fb(xs : List(Int)) : Int do sum_pos(go_b(xs, fn y -> y > 0, Nil)) end
+  fn fl() : Int do sum_pos(go_b([0 - 1, 0 - 2], fn y -> y > 0, Nil)) end
+|})
+        in
+        let _, obs = run src in
+        Alcotest.(check bool) "neither caller is proved" false (List.mem proved (of_callee "sum_pos" obs));
+        Alcotest.(check int) "both callers recorded" 2 (List.length (of_callee "sum_pos" obs));
+        Alcotest.(check bool) "go_b's recursive tail is not proved" false
+          (List.mem proved (of_callee "go_b(…)" obs));
+        (* Nothing constrains `$abs_p(h)`: a skip that names it, not
+           "opaque" (`$abs_p` is declared). *)
+        Alcotest.check ps "the unconditional push" [ ("skipped", "unconstrained-subject") ]
+          (of_callee "go_b" obs);
+        Alcotest.check t3 "whole module" (2, 0, 4) (triple obs));
+    gated "I3: pushing an element of another list under `if pred(h)` lends nothing" (fun () ->
+        let _, obs =
+          run
+            (m "I3u"
+               (sums
+              ^ {|  pfn go_u(lst : List(a), other : List(a), pred : a -> Bool[p], acc : List(a[p])) : List(a[p]) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) ->
+      match other do
+      Nil -> go_u(t, other, pred, acc)
+      Cons(o, _) -> if pred(h) do go_u(t, other, pred, Cons(o, acc)) else go_u(t, other, pred, acc) end
+      end
+    end
+  end
+  fn fu(xs : List(Int), ys : List(Int)) : Int do sum_pos(go_u(xs, ys, fn y -> y > 0, Nil)) end
+|}))
+        in
+        Alcotest.(check int) "the caller is recorded" 1 (List.length (of_callee "sum_pos" obs));
+        Alcotest.(check bool) "the caller is not proved" false (List.mem proved (of_callee "sum_pos" obs));
+        Alcotest.(check bool) "the push of `o` is not proved" false
+          (List.mem proved (of_callee "go_u" obs)));
+    gated "I3 control: the correct helper still proves when called directly" (fun () ->
+        let _, obs =
+          run
+            (m "I3c"
+               (sums ^ filt_go ~ok:true
+              ^ "  fn fd(ys : List(Int)) : Int do sum_pos(filt_go(ys, fn y -> y > 0, Nil)) end\n"))
+        in
+        Alcotest.check ps "both callers" [ proved; proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module" (9, 0, 0) (triple obs));
+    (* The same induction hole for a CONCRETE slot, live before abstract
+       refinements existed (probed on 65fee4cc1): the push of an unrefined
+       value is a skip at the slot, yet the caller was proved. *)
+    gated "I3n: a concrete-slot accumulator with an unproved push lends nothing" (fun () ->
+        let helper push =
+          m "I3n"
+            (sums
+           ^ Printf.sprintf
+               {|  fn triple3(n : Int) : Int do n * 3 end
+  pfn go_n(lst : List(Int), acc : List({Int | _ > 0})) : List({Int | _ > 0}) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> %s
+    end
+  end
+  fn caller_n(xs : List(Int)) : Int do sum_pos(go_n(xs, Nil)) end
+|}
+               push)
+        in
+        let _, obs = run (helper "go_n(t, Cons(triple3(h), acc))") in
+        Alcotest.(check int) "the caller is recorded" 1 (List.length (of_callee "sum_pos" obs));
+        Alcotest.(check bool) "the caller is not proved" false (List.mem proved (of_callee "sum_pos" obs));
+        let _, obs = run (helper "if h > 0 do go_n(t, Cons(h, acc)) else go_n(t, acc) end") in
+        (* Proved through the declared return, so recorded under `go_n(…)`. *)
+        Alcotest.check t3 "control: a guarded push proves everything" (7, 0, 0) (triple obs));
+    Alcotest.test_case "audit: a `!p(_)` return slot is enforced" `Quick (fun () ->
+        let md = March_desugar.Desugar.desugar_module (parse (m "BA" rej_ok)) in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx md;
+        let sites = RAudit.sites md.March_ast.Ast.mod_decls in
+        Alcotest.(check bool) "some site" true (sites <> []);
+        List.iter
+          (fun s -> Alcotest.(check string) "disposition" "Enforced" (disposition_tag (RAudit.classify s)))
+          sites) ]
+
+(* Abstract refinements, the leftovers, phase C (design
+   specs/2026-10-18-abstract-refinements-leftovers-design.md §5, §9.3):
+   tuple element returns, one entry per component; a component reaches a
+   demand through `let (a, b) = g(…)` or a single-arm tuple `match` (the
+   `lets` channel, a `$tuple_proj` entry); the tuple self-hypothesis; and
+   `List.partition` as `(List(a[p]), List({a | !p(_)}))` over a top-level
+   accumulator helper.  Every case asserts the whole module's ledger triple
+   as well as the callees whose verdicts moved.  The critical class is the
+   wrong body: a partition that swaps its halves, puts an element in both,
+   or drops the negation must never be proved. *)
+let abstract_leftovers_c_suite =
+  let collect_errs (ctx : March_errors.Errors.ctx) ~(user_only : bool) : string list =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if
+          d.March_errors.Errors.severity = March_errors.Errors.Error
+          && ((not user_only)
+             || (let f = d.March_errors.Errors.span.March_ast.Ast.file in
+                 f = "" || f = "<unknown>"))
+        then Some d.March_errors.Errors.message
+        else None)
+      ctx.March_errors.Errors.diagnostics
+  in
+  let obs_of (keep : March_refinecheck.Obligation.t -> bool) =
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        if keep o then
+          Some (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> "")
+        else None)
+      (March_refinecheck.Obligation.all ())
+  in
+  (* Errors of a TYPED check, and its obligations as (callee, verdict, reason). *)
+  let run (src : string) : string list * (string * string * string) list =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    (collect_errs ctx ~user_only:false, obs_of (fun _ -> true))
+  in
+  (* The same with the REAL `stdlib/list.march` as a sibling module (the
+     claim under test is the shipped `List.partition`).  User-file errors and
+     obligations, then the stdlib's obligations inside `partition` and
+     `partition_go` (by line: from `fn partition(` to the next `doc`). *)
+  let run_list (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    let listmod, list_path = Lazy.force stdlib_list_mod in
+    let m = { m with March_ast.Ast.mod_decls = listmod :: m.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module m in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:[ list_path ] ctx m;
+    let user (o : March_refinecheck.Obligation.t) =
+      let f = o.March_refinecheck.Obligation.span.March_ast.Ast.file in
+      f = "" || f = "<unknown>"
+    in
+    let lines = String.split_on_char '\n' (In_channel.with_open_bin list_path In_channel.input_all) in
+    let find_from k pred =
+      let rec go i = function
+        | [] -> None
+        | l :: rest -> if i >= k && pred l then Some i else go (i + 1) rest
+      in
+      go 1 lines
+    in
+    let starts l = String.length l >= 3 && contains l "fn partition(" in
+    let lo = Option.get (find_from 1 starts) in
+    let hi = Option.value ~default:max_int (find_from (lo + 1) (fun l -> contains l "  doc ")) in
+    let in_partition (o : March_refinecheck.Obligation.t) =
+      let sp = o.March_refinecheck.Obligation.span in
+      (not (user o)) && sp.March_ast.Ast.file = list_path
+      && sp.March_ast.Ast.start_line >= lo && sp.March_ast.Ast.start_line < hi
+    in
+    (collect_errs ctx ~user_only:true, obs_of user, obs_of in_partition)
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let of_callee c obs = List.filter_map (fun (c', v, r) -> if c' = c then Some (v, r) else None) obs in
+  let all_proved c obs =
+    let vs = of_callee c obs in
+    vs <> [] && List.for_all (fun (v, _) -> v = "proved") vs
+  in
+  let ps = Alcotest.(list (pair string string)) in
+  let t3 = Alcotest.(triple int int int) in
+  let proved = ("proved", "") in
+  let weak = ("skipped", "abstract-refinement-too-weak") in
+  let unrefl = ("skipped", "unreflectable-subject") in
+  let m name body = "mod " ^ name ^ " do\n" ^ body ^ "end\n" in
+  let sums =
+    {|  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do 0 end
+|}
+  in
+  (* A one-parameter parametric reverse, so a tail `rev(yes)` carries `yes`'s
+     slot (the parametric rule needs a single source). *)
+  let rev =
+    {|  fn rev_go(lst : List(a), acc : List(a)) : List(a) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> rev_go(t, Cons(h, acc))
+    end
+  end
+  fn rev(xs : List(a)) : List(a) do rev_go(xs, Nil) end
+|}
+  in
+  (* §5.5's `partition_go`, and `part` delegating to it.  Each optional
+     argument replaces one piece with a WRONG one. *)
+  let part_go ?(no_slot = "List({a | !p(_)})") ?(ret = "(List(a[p]), List({a | !p(_)}))")
+      ?(nil = "(rev(yes), rev(no))") ?(pass = "part_go(t, pred, Cons(h, yes), no)")
+      ?(fail = "part_go(t, pred, yes, Cons(h, no))") () =
+    Printf.sprintf
+      {|  pfn part_go(lst : List(a), pred : a -> Bool[p], yes : List(a[p]), no : %s) : %s do
+    match lst do
+    Nil -> %s
+    Cons(h, t) -> if pred(h) do %s else %s end
+    end
+  end
+  fn part(xs : List(a), pred : a -> Bool[p]) : %s do part_go(xs, pred, Nil, Nil) end
+|}
+      no_slot ret nil pass fail ret
+  in
+  (* P2: the natural style, the recursive result destructured by a `let`. *)
+  let part_nat ?(call = "let (yes, no) = part(t, pred)") ?(pass = "(Cons(h, yes), no)")
+      ?(fail = "(yes, Cons(h, no))") () =
+    Printf.sprintf
+      {|  fn part(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)})) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+      %s
+      if pred(h) do %s else %s end
+    end
+  end
+|}
+      call pass fail
+  in
+  let go_let =
+    {|  fn go(ys : List(Int)) : Int do
+    let (pos, neg) = part(ys, fn y -> y > 0)
+    sum_pos(pos) + sum_nonpos(neg)
+  end
+|}
+  in
+  let go_body body = Printf.sprintf "  fn go(ys : List(Int)) : Int do\n%s\n  end\n" body in
+  let callers_proved obs =
+    Alcotest.check ps "sum_pos" [ proved ] (of_callee "sum_pos" obs);
+    Alcotest.check ps "sum_nonpos" [ proved ] (of_callee "sum_nonpos" obs)
+  in
+  (* Recorded, and not proved. *)
+  let not_proved c obs = of_callee c obs <> [] && not (List.mem proved (of_callee c obs)) in
+  [ gated "C1 (P1): `let (pos, neg) = part(…)` proves both halves" (fun () ->
+        let errs, obs = run (m "C1" (sums ^ rev ^ part_go () ^ go_let)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        callers_proved obs;
+        (* part_go: 2 pushes x 3 slots, the Nil tail's 2 components (under
+           `rev(…)`), the 2 recursive tails' 2 each (the tuple hypothesis,
+           under `part_go(…)`); part's tail, one per component. *)
+        Alcotest.check ps "part's return, one per component" [ proved; proved ]
+          (of_callee "return of part" obs);
+        Alcotest.check ps "the Nil tail" [ proved; proved ] (of_callee "rev(…)" obs);
+        Alcotest.check ps "the recursive tails" [ proved; proved; proved; proved ] (of_callee "part_go(…)" obs);
+        Alcotest.(check bool) "the pushes" true (all_proved "part_go" obs);
+        Alcotest.check t3 "whole module" (16, 0, 0) (triple obs));
+    gated "C1 (P1) against the shipped List.partition" (fun () ->
+        let errs, obs, std =
+          run_list
+            (m "C1L"
+               (sums
+              ^ "  fn go(ys : List(Int)) : Int do\n    let (pos, neg) = List.partition(ys, fn y -> y > 0)\n    sum_pos(pos) + sum_nonpos(neg)\n  end\n"
+              ))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        callers_proved obs;
+        Alcotest.check t3 "user module" (2, 0, 0) (triple obs);
+        (* partition_go: 2 pushes x 3 slots, the Nil tail's 2 components, the
+           2 recursive tails' 2 each; partition's tail: 2. *)
+        Alcotest.check t3 "List.partition's own definition side" (14, 0, 0) (triple std);
+        Alcotest.check ps "partition's tail" [ proved; proved ] (of_callee "return of partition" std));
+    gated "C2 (Z3): a single-arm tuple match carries a component" (fun () ->
+        let _, obs =
+          run
+            (m "C2"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    match part(ys, fn y -> y > 0) do\n    (pos, _) -> sum_pos(pos)\n    end"))
+        in
+        Alcotest.check ps "sum_pos" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module" (15, 0, 0) (triple obs));
+    gated "C3 (P2): the natural style proves through the tuple self-hypothesis" (fun () ->
+        let errs, obs = run (m "C3" (sums ^ part_nat () ^ go_let)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        callers_proved obs;
+        Alcotest.(check bool) "part's return" true (all_proved "return of part" obs);
+        Alcotest.check t3 "whole module" (8, 0, 0) (triple obs));
+    gated "C4: a partition with its halves swapped is not proved" (fun () ->
+        let _, obs =
+          run
+            (m "C4"
+               (sums ^ rev
+               ^ part_go ~pass:"part_go(t, pred, yes, Cons(h, no))" ~fail:"part_go(t, pred, Cons(h, yes), no)" ()
+               ^ go_let))
+        in
+        Alcotest.(check bool) "a violation at a push" true (List.mem ("violated", "") (of_callee "part_go" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        (* The 2 wrong pushes violate; nothing downstream is proved: the
+           self-call gate leaves part_go's return unproved, so its recursive
+           tails (4), part's tail (2) and both callers skip. *)
+        Alcotest.check t3 "whole module" (6, 2, 8) (triple obs));
+    gated "C4: a partition putting an element in both halves is not proved" (fun () ->
+        let _, obs =
+          run (m "C4b" (sums ^ rev ^ part_go ~pass:"part_go(t, pred, Cons(h, yes), Cons(h, no))" () ^ go_let))
+        in
+        Alcotest.(check bool) "a violation at the push" true (List.mem ("violated", "") (of_callee "part_go" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module" (8, 1, 8) (triple obs));
+    gated "C4: a partition dropping the negation is not proved" (fun () ->
+        (* Both halves declared `p`: the failing elements then violate. *)
+        let _, obs =
+          run
+            (m "C4c" (sums ^ rev ^ part_go ~no_slot:"List(a[p])" ~ret:"(List(a[p]), List(a[p]))" () ^ go_let))
+        in
+        Alcotest.(check bool) "a violation at the failing push" true
+          (List.mem ("violated", "") (of_callee "part_go" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (C4c)" (7, 1, 8) (triple obs);
+        (* Only the accumulator's slot dropped: `no`'s elements then do not
+           meet the declared `!p` return. *)
+        let _, obs = run (m "C4d" (sums ^ rev ^ part_go ~no_slot:"List(a[p])" () ^ go_let)) in
+        Alcotest.(check bool) "a violation at the failing push" true
+          (List.mem ("violated", "") (of_callee "part_go" obs));
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (C4d)" (6, 2, 8) (triple obs));
+    gated "C4: swapped components at the Nil tail are not proved" (fun () ->
+        let _, obs = run (m "C4e" (sums ^ rev ^ part_go ~nil:"(rev(no), rev(yes))" () ^ go_let)) in
+        Alcotest.(check bool) "a violation at the Nil tail" true (List.mem ("violated", "") (of_callee "rev(…)" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (C4e)" (6, 2, 8) (triple obs));
+    gated "C4: a wrong natural-style body is not proved" (fun () ->
+        let _, obs = run (m "C4f" (sums ^ part_nat ~pass:"(yes, Cons(h, no))" ~fail:"(Cons(h, yes), no)" () ^ go_let)) in
+        Alcotest.(check bool) "a violation at the return" true
+          (List.mem ("violated", "") (of_callee "return of part" obs));
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (C4f)" (0, 2, 6) (triple obs));
+    gated "C5: a component swap at the caller is too weak" (fun () ->
+        let _, obs =
+          run
+            (m "C5"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (pos, neg) = part(ys, fn y -> y > 0)\n    sum_pos(neg) + sum_nonpos(pos)"))
+        in
+        Alcotest.check ps "sum_pos" [ weak ] (of_callee "sum_pos" obs);
+        Alcotest.check ps "sum_nonpos" [ weak ] (of_callee "sum_nonpos" obs);
+        Alcotest.check t3 "whole module" (14, 0, 2) (triple obs));
+    gated "C6: rebinding a component's name retires its projection" (fun () ->
+        let _, obs =
+          run
+            (m "C6"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (pos, neg) = part(ys, fn y -> y > 0)\n    let pos = ys\n    sum_pos(pos) + sum_nonpos(neg)"))
+        in
+        Alcotest.check ps "sum_pos" [ unrefl ] (of_callee "sum_pos" obs);
+        Alcotest.check ps "sum_nonpos (untouched)" [ proved ] (of_callee "sum_nonpos" obs);
+        Alcotest.check t3 "whole module" (15, 0, 1) (triple obs));
+    gated "C7: rebinding a name the call mentions retires the projection" (fun () ->
+        let _, obs =
+          run
+            (m "C7"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (pos, _) = part(ys, fn y -> y > 0)\n    let ys = Cons(0 - 1, Nil)\n    sum_pos(pos) + List.length(ys)"))
+        in
+        Alcotest.check ps "sum_pos" [ unrefl ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module (C7)" (14, 0, 1) (triple obs));
+    gated "C8: a two-arm match on a partition carries nothing" (fun () ->
+        let _, obs =
+          run
+            (m "C8"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    match part(ys, fn y -> y > 0) do\n    (Nil, _) -> 0\n    (pos, _) -> sum_pos(pos)\n    end"))
+        in
+        Alcotest.check ps "sum_pos" [ unrefl ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module (C8)" (14, 0, 1) (triple obs);
+        (* …nor a single arm with a refutable component. *)
+        let _, obs =
+          run
+            (m "C8b"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    match part(ys, fn y -> y > 0) do\n    (Cons(_, pos), _) -> sum_pos(pos)\n    end"))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (C8b)" (14, 0, 1) (triple obs));
+    gated "C9: a declared, proved, non-abstract tuple return" (fun () ->
+        let split ~ok =
+          Printf.sprintf
+            {|  fn split_pos(xs : List(Int)) : (List({Int | _ > 0}), List(Int)) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+      let (a, b) = split_pos(t)
+      %s
+    end
+  end
+|}
+            (if ok then "if h > 0 do (Cons(h, a), b) else (a, Cons(h, b)) end" else "(Cons(0, a), b)")
+        in
+        let use = go_body "    let (pos, _) = split_pos(ys)\n    sum_pos(pos)" in
+        let _, obs = run (m "C9" (sums ^ split ~ok:true ^ use)) in
+        (* The proved component is an entry: the demand is compared
+           Refined-vs-Refined and recorded under the variable, as for any
+           container-env variable. *)
+        Alcotest.check ps "the demand on pos" [ proved ] (of_callee "pos" obs);
+        Alcotest.check ps "nothing recorded at sum_pos itself" [] (of_callee "sum_pos" obs);
+        (* `h` in `Cons(h, a)`; `a` there and in the else tail (the tuple
+           self-hypothesis through the `let`). *)
+        Alcotest.check ps "split_pos's head" [ proved ] (of_callee "return of split_pos" obs);
+        Alcotest.check ps "split_pos's recursive component" [ proved; proved ] (of_callee "a" obs);
+        Alcotest.check t3 "whole module" (4, 0, 0) (triple obs);
+        let _, obs = run (m "C9b" (sums ^ split ~ok:false ^ use)) in
+        Alcotest.(check bool) "a violation at the return" true
+          (List.mem ("violated", "") (of_callee "return of split_pos" obs));
+        Alcotest.check ps "sum_pos not proved" [ unrefl ] (of_callee "sum_pos" obs);
+        Alcotest.check ps "nothing proved about pos" [] (of_callee "pos" obs);
+        Alcotest.check t3 "whole module (C9b)" (0, 1, 2) (triple obs));
+    gated "C10: `cap verified` accepts a destructured partition" (fun () ->
+        let errs, obs = run ("mod C10 do\n  cap verified\n" ^ sums ^ rev ^ part_go () ^ go_let ^ "end\n") in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        callers_proved obs;
+        Alcotest.check t3 "whole module (C10)" (16, 0, 0) (triple obs);
+        let errs, obs, _ =
+          run_list
+            ("mod C10L do\n  cap verified\n" ^ sums
+           ^ "  fn go(ys : List(Int)) : Int do\n    let (pos, neg) = List.partition(ys, fn y -> y > 0)\n    sum_pos(pos) + sum_nonpos(neg)\n  end\nend\n")
+        in
+        Alcotest.(check (list string)) "no errors (shipped List.partition)" [] errs;
+        callers_proved obs;
+        Alcotest.check t3 "whole module (C10L)" (2, 0, 0) (triple obs);
+        (* …and a component swap is an error there. *)
+        let errs, _ =
+          run
+            ("mod C10c do\n  cap verified\n" ^ sums ^ rev ^ part_go ()
+           ^ go_body "    let (pos, _) = part(ys, fn y -> y > 0)\n    sum_nonpos(pos)" ^ "end\n")
+        in
+        Alcotest.(check bool) "an error" true (errs <> []));
+    gated "control: a component flows through an alias" (fun () ->
+        let _, obs =
+          run
+            (m "CA"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (pos, neg) = part(ys, fn y -> y > 0)\n    let p2 = pos\n    let n2 = neg\n    sum_pos(p2) + sum_nonpos(n2)"))
+        in
+        callers_proved obs;
+        Alcotest.check t3 "whole module (CA)" (16, 0, 0) (triple obs));
+    gated "control: the §3.4 input fact is conjoined outside the negation" (fun () ->
+        (* `neg` holds elements of `pos0` (> 0) that fail `y > 5`. *)
+        let _, obs =
+          run
+            (m "CI"
+               ({|  fn need_small_pos(xs : List({Int | _ > 0 && _ <= 5})) : Int do 0 end
+|}
+               ^ sums ^ rev ^ part_go ()
+               ^ "  fn go(pos0 : List({Int | _ > 0})) : Int do\n    let (big, small) = part(pos0, fn y -> y > 5)\n    need_small_pos(small) + sum_pos(big)\n  end\n"))
+        in
+        Alcotest.check ps "need_small_pos" [ proved ] (of_callee "need_small_pos" obs);
+        Alcotest.check ps "sum_pos" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module (CI)" (16, 0, 0) (triple obs));
+    gated "a destructuring whose call mentions a new binder carries nothing" (fun () ->
+        (* `let (ys, neg) = part(ys, …)`: a projection naming the NEW `ys`
+           would be read against the wrong list (conservative). *)
+        let _, obs =
+          run
+            (m "CB"
+               (sums ^ rev ^ part_go ()
+               ^ go_body "    let (ys, neg) = part(ys, fn y -> y > 0)\n    sum_nonpos(neg) + List.length(ys)"))
+        in
+        Alcotest.check ps "sum_nonpos" [ unrefl ] (of_callee "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (CB)" (14, 0, 1) (triple obs));
+    Alcotest.test_case "audit: a tuple return's element components and an accumulator's slots are enforced"
+      `Quick (fun () ->
+        (* Every signature site of the module: `part_go`'s `yes`/`no` slots,
+           both functions' two return components, and each `Bool[p]`'s
+           domain and codomain (2 + 2 + 2 + 4).  RED
+           before: the return components were "inside a type constructor's
+           argument" and the parameter slots were read without part_go's own
+           abstract refinements. *)
+        let md = March_desugar.Desugar.desugar_module (parse (m "CAU" (rev ^ part_go ()))) in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx md;
+        let sites = RAudit.sites md.March_ast.Ast.mod_decls in
+        Alcotest.(check int) "sites" 10 (List.length sites);
+        List.iter
+          (fun s -> Alcotest.(check string) "disposition" "Enforced" (disposition_tag (RAudit.classify s)))
+          sites;
+        (* Control: a component that is not an element return stays a hole,
+           even beside one that is. *)
+        let md =
+          March_desugar.Desugar.desugar_module
+            (parse
+               (m "CAU2"
+                  "  fn mixed(xs : List(Int)) : (List({Int | _ > 0}), Mystery({Int | _ > 0})) do mixed(xs) end\n"))
+        in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx md;
+        Alcotest.(check (list string)) "per site" [ "Enforced"; "Unenforced" ]
+          (List.map
+             (fun s -> disposition_tag (RAudit.classify s))
+             (List.sort
+                (fun (a : RAudit.site) (b : RAudit.site) -> compare a.RAudit.span b.RAudit.span)
+                (RAudit.sites md.March_ast.Ast.mod_decls))));
+    gated "C11: a caller declaring its own `p` never reads the callee's `!p` as its own" (fun () ->
+        (* `part(ys, keep)` instantiates part's `p` to the caller's `p`, so
+           `neg` holds `!p` elements: returning it as `List(a[p])` must not
+           prove; returning `pos` must. *)
+        let caller tail =
+          Printf.sprintf
+            "  fn sel(ys : List(a), keep : a -> Bool[p]) : List(a[p]) do\n    let (pos, neg) = part(ys, keep)\n    %s\n  end\n"
+            tail
+        in
+        let _, obs = run (m "C11" (rev ^ part_go () ^ caller "neg")) in
+        Alcotest.(check bool) "returning neg is not proved" true (not_proved "return of sel" obs);
+        Alcotest.check t3 "whole module (C11)" (14, 0, 1) (triple obs);
+        let _, obs = run (m "C11c" (rev ^ part_go () ^ caller "pos")) in
+        Alcotest.check ps "returning pos is proved" [ proved ] (of_callee "return of sel" obs);
+        Alcotest.check t3 "whole module (C11c)" (15, 0, 0) (triple obs));
+    (* Review of a2f9fb2a5 (CRITICAL): the structural induction hypothesis was
+       taken for a recursive call whatever it passed for the definer.  A
+       recursion that passes ANOTHER predicate (`fn y -> true`, a swapped
+       callback, a rebound name) returns elements that need not satisfy the
+       caller's `p`, so the hypothesis applies only when every definer
+       position receives the function's own parameter, unshadowed.  RED
+       before the fix: every row below was proved. *)
+    gated "H1 (e1): a single-container recursion passing another predicate is not proved" (fun () ->
+        let _, obs =
+          run
+            (m "H1"
+               ({|  fn filt(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, filt(t, fn y -> true)) else filt(t, fn y -> true) end
+    end
+  end
+|}
+               ^ sums ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "the recursive tails not proved" false (List.mem proved (of_callee "filt(…)" obs));
+        Alcotest.check t3 "whole module (H1)" (1, 0, 3) (triple obs));
+    gated "H2 (d1): a destructured recursion passing another predicate is not proved" (fun () ->
+        let src body =
+          Printf.sprintf
+            {|  fn part(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)})) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+%s
+    end
+  end
+|}
+            body
+        in
+        let row name body want =
+          let _, obs = run (m name (sums ^ src body ^ go_let)) in
+          Alcotest.(check bool) (name ^ ": sum_pos not proved") true (not_proved "sum_pos" obs);
+          Alcotest.(check bool) (name ^ ": sum_nonpos not proved") true (not_proved "sum_nonpos" obs);
+          Alcotest.check t3 ("whole module (" ^ name ^ ")") want (triple obs)
+        in
+        row "H2a"
+          "      let (yes, no) = part(t, fn y -> true)\n      if pred(h) do (Cons(h, yes), no) else (yes, Cons(h, no)) end"
+          (2, 0, 6);
+        (* d2: the same through a single-arm tuple match. *)
+        row "H2b"
+          "      match part(t, fn y -> true) do\n      (yes, no) -> if pred(h) do (Cons(h, yes), no) else (yes, Cons(h, no)) end\n      end"
+          (2, 0, 6);
+        (* d3: a direct recursive tail (run-confirmed wrong: `part([-5, 3],
+           fn y -> y > 0)` returns `-5` in the first half). *)
+        row "H2c" "      part(t, fn y -> true)" (0, 0, 4);
+        (* The definer's NAME rebound to another lambda before a direct
+           recursive tail (the d3 shape): the name alone would admit the
+           hypothesis; the clause's own [cbenv] entry does not. *)
+        row "H2d" "      let pred = fn y -> true\n      part(t, pred)" (0, 0, 4));
+    gated "H3 (d4): two definers passed swapped are not proved" (fun () ->
+        let _, obs =
+          run
+            (m "H3"
+               ({|  fn two(xs : List(a), q : a -> Bool[p], r : a -> Bool[s]) : (List(a[p]), List(a[s])) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+      let (ys, zs) = two(t, r, q)
+      if q(h) do (if r(h) do (Cons(h, ys), Cons(h, zs)) else (Cons(h, ys), zs) end)
+      else (if r(h) do (ys, Cons(h, zs)) else (ys, zs) end) end
+    end
+  end
+|}
+               ^ sums
+               ^ "  fn go(ys : List(Int)) : Int do\n    let (a, b) = two(ys, fn y -> y > 0, fn y -> y > 0 - 100)\n    sum_pos(a) + List.length(b)\n  end\n"))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (H3)" (4, 0, 9) (triple obs));
+    gated "H4 (d6): an accumulator recursing with another predicate is not proved" (fun () ->
+        (* The pushes prove (the callee's `p` instantiated to `true` at the
+           self-call holds of anything), so only the hypothesis stood between
+           this body and a false proof. *)
+        let _, obs =
+          run
+            (m "H4"
+               (sums ^ rev
+               ^ part_go ~pass:"part_go(t, fn y -> true, Cons(h, yes), no)"
+                   ~fail:"part_go(t, fn y -> false, yes, Cons(h, no))" ()
+               ^ go_let))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.(check bool) "sum_nonpos not proved" true (not_proved "sum_nonpos" obs);
+        Alcotest.check t3 "whole module (H4)" (2, 0, 12) (triple obs));
+    gated "H5: passing `pred` through a let alias declines (conservative)" (fun () ->
+        let _, obs =
+          run
+            (m "H5"
+               (sums
+               ^ part_nat ~call:"let q = pred\n      let (yes, no) = part(t, q)" ()
+               ^ go_let))
+        in
+        Alcotest.(check bool) "sum_pos not proved" true (not_proved "sum_pos" obs);
+        Alcotest.check t3 "whole module (H5)" (2, 0, 6) (triple obs));
+    gated "control: recursion passing `pred` itself still proves (single and tuple)" (fun () ->
+        let _, obs =
+          run
+            (m "HC"
+               ({|  fn filt(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, filt(t, pred)) else filt(t, pred) end
+    end
+  end
+|}
+               ^ sums ^ "  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"))
+        in
+        Alcotest.check ps "sum_pos" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "whole module (HC)" (4, 0, 0) (triple obs);
+        let _, obs = run (m "HC2" (sums ^ part_nat () ^ go_let)) in
+        callers_proved obs) ]
+
+(* Abstract refinements, the leftovers, phase D (design
+   specs/2026-10-18-abstract-refinements-leftovers-design.md §4.2, §6.4,
+   §9.4): the stdlib sweep.  `Enum.find`/`Iterable.find` gain
+   `Option(a[p])`; `Enum.filter`, `Enum.take_while`, `Iterable.filter` and
+   `Prelude.filter` are rewritten to `List.filter`'s / `List.take_while`'s
+   natural body and gain `List(a[p])`; `Range.filter` gains
+   `f : Int -> Bool[p]` and `List(Int[p])` over its `List.filter` delegation
+   (a concrete base, phase B).  Each case runs against the REAL stdlib files
+   (loaded from `stdlib/` relative to the cwd, as `stdlib_list_mod` is), so
+   it is RED on a base whose stdlib lacks the signature: run from the base
+   checkout's root.  Per function: the caller's demand proved through it,
+   the function's own definition side all PROVED (no `@[assume]`), a
+   too-weak control, and a copy of the function with a deliberate bug that
+   is NOT proved. *)
+let abstract_leftovers_d_suite =
+  let load_mod name =
+    let m, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (m.March_ast.Ast.mod_name, March_ast.Ast.Public, m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods = List.map load_mod [ "list.march"; "enum.march"; "iterable.march"; "range.march" ] in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  let user_file (o : March_refinecheck.Obligation.t) =
+    let f = o.March_refinecheck.Obligation.span.March_ast.Ast.file in
+    f = "" || f = "<unknown>"
+  in
+  let obs_of keep =
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        if keep o then
+          Some (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> "")
+        else None)
+      (March_refinecheck.Obligation.all ())
+  in
+  (* The lines of [file] from the one starting with [header] (after
+     indentation) to the next doc string, i.e. that one function. *)
+  let fn_range path header =
+    let lines = String.split_on_char '\n' (In_channel.with_open_bin path In_channel.input_all) in
+    let rec find_from k pred i = function
+      | [] -> None
+      | l :: rest -> if i >= k && pred l then Some i else find_from k pred (i + 1) rest
+    in
+    let starts l = String.length (String.trim l) >= String.length header
+                   && String.sub (String.trim l) 0 (String.length header) = header in
+    match find_from 1 starts 1 lines with
+    | None -> Alcotest.failf "no `%s` in %s" header path
+    | Some lo ->
+      let hi = Option.value ~default:max_int (find_from (lo + 1) (fun l -> contains l "  doc ") 1 lines) in
+      (lo, hi)
+  in
+  (* Typecheck and refine-check [src] with the stdlib modules beside it.
+     Returns the user module's error messages, its obligations, and the
+     obligations inside each requested stdlib function ([(file, header)]). *)
+  let run ?(defs = []) (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let m = { m with March_ast.Ast.mod_decls = mods @ prelude_decls @ m.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module m in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx m;
+    let errs =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          let f = d.March_errors.Errors.span.March_ast.Ast.file in
+          if d.March_errors.Errors.severity = March_errors.Errors.Error && (f = "" || f = "<unknown>")
+          then Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    let def_obs =
+      List.map
+        (fun (file, header) ->
+          let path = List.find (fun p -> Filename.basename p = file) paths in
+          let lo, hi = fn_range path header in
+          obs_of (fun o ->
+              let sp = o.March_refinecheck.Obligation.span in
+              sp.March_ast.Ast.file = path && sp.March_ast.Ast.start_line >= lo
+              && sp.March_ast.Ast.start_line < hi))
+        defs
+    in
+    (errs, obs_of user_file, def_obs)
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let of_callee c obs = List.filter_map (fun (c', v, r) -> if c' = c then Some (v, r) else None) obs in
+  let ps = Alcotest.(list (pair string string)) in
+  let t3 = Alcotest.(triple int int int) in
+  let proved = ("proved", "") in
+  let weak = ("skipped", "abstract-refinement-too-weak") in
+  let m name body = "mod " ^ name ^ " do\n" ^ body ^ "end\n" in
+  let sums =
+    {|  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+  fn one_pos(x : Option({Int | _ > 0})) : Int do 0 end
+|}
+  in
+  let caller ~demand ~call = Printf.sprintf "  fn go(ys : List(Int)) : Int do %s(%s) end\n" demand call in
+  (* One row: the demand proves through the shipped function, whose own
+     definition side is entirely PROVED, with [def_n] obligations. *)
+  let accept ~name ~demand ~call ~file ~header ~def_n =
+    gated (Printf.sprintf "%s: the demand proves; the definition side is proved" name) (fun () ->
+        let errs, obs, defs =
+          run ~defs:[ (file, header) ] (m "D" (sums ^ caller ~demand ~call:(call "fn y -> y > 0")))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check ps "the demand" [ proved ] (of_callee demand obs);
+        Alcotest.check t3 "user module" (1, 0, 0) (triple obs);
+        Alcotest.check t3 (name ^ "'s own definition side") (def_n, 0, 0) (triple (List.hd defs)))
+  in
+  let too_weak ~name ~demand ~call =
+    gated (Printf.sprintf "%s: a weaker lambda is too-weak, not proved" name) (fun () ->
+        let _, obs, _ = run (m "W" (sums ^ caller ~demand ~call:(call "fn y -> y >= 0"))) in
+        Alcotest.check ps "the demand" [ weak ] (of_callee demand obs);
+        Alcotest.check t3 "user module" (0, 0, 1) (triple obs))
+  in
+  (* A copy of the function with a bug, in the user module: its return is
+     not proved, and neither is the caller's demand. *)
+  let wrong_body ?(violation = true) ~name ~demand ~fn_src ~call ~bad_ret () =
+    gated (Printf.sprintf "%s: a wrong body is not proved" name) (fun () ->
+        let _, obs, _ = run (m "X" (sums ^ fn_src ^ caller ~demand ~call:(call "fn y -> y > 0"))) in
+        let rv = of_callee bad_ret obs in
+        Alcotest.(check bool) "the wrong return is recorded" true (rv <> []);
+        (* The `Nil` tail may prove; some other tail must not. *)
+        Alcotest.(check bool) "the wrong return is not all proved" true
+          (List.exists (fun x -> x <> proved) rv);
+        Alcotest.(check bool) "a violation in the wrong body" violation
+          (List.exists (fun (_, v, _) -> v = "violated") obs);
+        let dv = of_callee demand obs in
+        Alcotest.(check int) "the demand is recorded" 1 (List.length dv);
+        Alcotest.(check bool) "the demand is not proved" false (List.mem proved dv))
+  in
+  let bad_filter =
+    {|  fn bfilter(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do Cons(h, bfilter(t, pred)) else Cons(h, bfilter(t, pred)) end
+    end
+  end
+|}
+  in
+  [ (* B2 *)
+    accept ~name:"Enum.filter" ~demand:"sum_pos" ~call:(fun f -> "Enum.filter(ys, " ^ f ^ ")")
+      ~file:"enum.march" ~header:"fn filter(" ~def_n:3;
+    too_weak ~name:"Enum.filter" ~demand:"sum_pos" ~call:(fun f -> "Enum.filter(ys, " ^ f ^ ")");
+    wrong_body ~name:"Enum.filter" ~demand:"sum_pos" ~fn_src:bad_filter
+      ~call:(fun f -> "bfilter(ys, " ^ f ^ ")") ~bad_ret:"return of bfilter" ();
+    (* E1 *)
+    accept ~name:"Enum.find" ~demand:"one_pos" ~call:(fun f -> "Enum.find(ys, " ^ f ^ ")")
+      ~file:"enum.march" ~header:"fn find(" ~def_n:2;
+    too_weak ~name:"Enum.find" ~demand:"one_pos" ~call:(fun f -> "Enum.find(ys, " ^ f ^ ")");
+    wrong_body ~name:"Enum.find" ~demand:"one_pos"
+      ~fn_src:
+        {|  fn bfind(xs : List(a), pred : a -> Bool[p]) : Option(a[p]) do
+    match xs do
+    Nil        -> None
+    Cons(h, t) -> if pred(h) do bfind(t, pred) else Some(h) end
+    end
+  end
+|}
+      ~call:(fun f -> "bfind(ys, " ^ f ^ ")") ~bad_ret:"return of bfind" ();
+    (* §9.4: Enum.take_while *)
+    accept ~name:"Enum.take_while" ~demand:"sum_pos" ~call:(fun f -> "Enum.take_while(ys, " ^ f ^ ")")
+      ~file:"enum.march" ~header:"fn take_while(" ~def_n:2;
+    too_weak ~name:"Enum.take_while" ~demand:"sum_pos" ~call:(fun f -> "Enum.take_while(ys, " ^ f ^ ")");
+    wrong_body ~name:"Enum.take_while" ~demand:"sum_pos"
+      ~fn_src:
+        {|  fn btw(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, btw(t, pred)) else Cons(h, Nil) end
+    end
+  end
+|}
+      ~call:(fun f -> "btw(ys, " ^ f ^ ")") ~bad_ret:"return of btw" ();
+    (* B2 *)
+    accept ~name:"Iterable.filter" ~demand:"sum_pos" ~call:(fun f -> "Iterable.filter(ys, " ^ f ^ ")")
+      ~file:"iterable.march" ~header:"fn filter(" ~def_n:3;
+    too_weak ~name:"Iterable.filter" ~demand:"sum_pos" ~call:(fun f -> "Iterable.filter(ys, " ^ f ^ ")");
+    accept ~name:"Iterable.find" ~demand:"one_pos" ~call:(fun f -> "Iterable.find(ys, " ^ f ^ ")")
+      ~file:"iterable.march" ~header:"fn find(" ~def_n:2;
+    too_weak ~name:"Iterable.find" ~demand:"one_pos" ~call:(fun f -> "Iterable.find(ys, " ^ f ^ ")");
+    (* `Some(h)` with no test of `pred`: nothing constrains `$abs_p(h)`, so an
+       `unconstrained-subject` skip rather than a violation (phase B's I3). *)
+    wrong_body ~violation:false ~name:"Iterable.find" ~demand:"one_pos"
+      ~fn_src:
+        {|  fn bifind(xs : List(a), pred : a -> Bool[p]) : Option(a[p]) do
+    match xs do
+    Nil        -> None
+    Cons(h, _) -> Some(h)
+    end
+  end
+|}
+      ~call:(fun f -> "bifind(ys, " ^ f ^ ")") ~bad_ret:"return of bifind" ();
+    (* B1: the bare `filter` IS Prelude.filter *)
+    accept ~name:"Prelude.filter (bare `filter`)" ~demand:"sum_pos" ~call:(fun f -> "filter(ys, " ^ f ^ ")")
+      ~file:"prelude.march" ~header:"fn filter(" ~def_n:3;
+    too_weak ~name:"Prelude.filter (bare `filter`)" ~demand:"sum_pos" ~call:(fun f -> "filter(ys, " ^ f ^ ")");
+    wrong_body ~name:"Prelude.filter (branches swapped)" ~demand:"sum_pos"
+      ~fn_src:
+        {|  fn pfilter(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do pfilter(t, pred) else Cons(h, pfilter(t, pred)) end
+    end
+  end
+|}
+      ~call:(fun f -> "pfilter(ys, " ^ f ^ ")") ~bad_ret:"return of pfilter" ();
+    (* R2: a concrete base, through a private natural-style helper
+       `filter_list` (its obligations sit in the same line range). *)
+    gated "Range.filter: the demand proves; the definition side is proved" (fun () ->
+        let errs, obs, defs =
+          run ~defs:[ ("range.march", "fn filter(") ]
+            (m "R" (sums ^ "  fn go(n : Int) : Int do sum_pos(Range.filter(Range.new(0, n), fn y -> y > 0)) end\n"))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check ps "the demand" [ proved ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "user module" (1, 0, 0) (triple obs);
+        Alcotest.check t3 "Range.filter's own definition side (with filter_list)" (8, 0, 0)
+          (triple (List.hd defs)));
+    gated "Range.filter: a weaker lambda is too-weak, not proved" (fun () ->
+        let _, obs, _ =
+          run (m "RW" (sums ^ "  fn go(n : Int) : Int do sum_pos(Range.filter(Range.new(0, n), fn y -> y >= 0)) end\n"))
+        in
+        Alcotest.check ps "the demand" [ weak ] (of_callee "sum_pos" obs);
+        Alcotest.check t3 "user module" (0, 0, 1) (triple obs));
+    gated "Range.filter: a wrong delegation is not proved" (fun () ->
+        let _, obs, _ =
+          run
+            (m "RX"
+               (sums
+              ^ {|  fn rfilter(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool[p]) : List(Int[p]) do
+    List.filter(Range.to_list(r), fn y -> true)
+  end
+  fn go(n : Int) : Int do sum_pos(rfilter(Range.new(0, n), fn y -> y > 0)) end
+|}))
+        in
+        Alcotest.check ps "the wrong return" [ weak ] (of_callee "return of rfilter" obs);
+        let dv = of_callee "sum_pos" obs in
+        Alcotest.(check int) "the demand is recorded" 1 (List.length dv);
+        Alcotest.(check bool) "the demand is not proved" false (List.mem proved dv));
+    wrong_body ~name:"Range.filter's helper (keeps rejected elements)" ~demand:"sum_pos"
+      ~fn_src:
+        {|  fn rfl(xs : List(Int), f : Int -> Bool[p]) : List(Int[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> if f(h) do Cons(h, rfl(t, f)) else Cons(h, rfl(t, f)) end
+    end
+  end
+  fn rf(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool[p]) : List(Int[p]) do
+    rfl(Range.to_list(r), f)
+  end
+|}
+      ~call:(fun f -> "rf(Range.new(0, List.length(ys)), " ^ f ^ ")") ~bad_ret:"return of rfl" () ]
 
 (* Phase 4 (plan specs/plans/2026-10-07-abstract-refinements-phase4-plan.md):
    the `a[p]` / `Bool[p]` shorthand must mean exactly the spelled-out form.
@@ -18755,6 +23125,557 @@ let wrapper_contracts_suite =
             "cannot verify precondition `_ > 0` on `Flow.batch`";
             "cannot verify precondition `len(_) > 0` on `Gen.frequency`" ]) ]
 
+(* Multi-arg design (specs/2026-10-18-abstract-refinements-multi-arg-design.md)
+   phase 0: a constructor field that holds a DEMANDED type parameter inside
+   another type (`Wrap(List((k, v)))`, stdlib Map's `HamtMap(HEntry(k, v))`)
+   is outside every element slot, so a construction is a recorded
+   `unreflectable-subject` skip, never vacuously true.  Before the fix h1 was
+   `proved` (a false proof: the Wrap holds -5) and h2 filed no obligation. *)
+let hidden_field_elements_suite =
+  let wrap = "  type Wrap(k, v) = Wrap(List((k, v)))\n  fn need(_w : Wrap(Int, {Int | _ > 0})) : Int do 0 end\n" in
+  let m ?(verified = false) body =
+    "mod HF do\n" ^ (if verified then "  cap verified\n" else "") ^ wrap ^ body ^ "end\n"
+  in
+  let h1 = "  fn mk() : Wrap(Int, {Int | _ > 0}) do Wrap([(1, 0 - 5)]) end\n  fn use_mk() : Int do need(mk()) end\n" in
+  let h2 = "  fn use_lit() : Int do need(Wrap([(1, 0 - 5)])) end\n" in
+  let ts = Alcotest.(list (triple string string string)) in
+  [ gated "h1: a hidden-field return is a skip, not a proof" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("return of mk", "skipped", "unreflectable-subject");
+            ("need", "skipped", "unreflectable-subject") ]
+          (typed_obligations (m h1)));
+    gated "h1 under cap verified is an error naming the constructor and the hiding type" (fun () ->
+        let t = refine_error_text_d (m ~verified:true h1) in
+        Alcotest.(check bool) "names Wrap's field" true
+          (Astring_contains.contains t
+             "`Wrap`'s field holds `v` inside `List((k, v))`, which the element model does not see into"));
+    gated "h2: a hidden-field literal files an obligation and skips" (fun () ->
+        Alcotest.check ts "ledger" [ ("need", "skipped", "unreflectable-subject") ]
+          (typed_obligations (m h2));
+        Alcotest.(check bool) "cap verified rejects" true
+          (Astring_contains.contains (refine_error_text_d (m ~verified:true h2)) "`Wrap`'s field holds `v`"));
+    (* Only a DEMANDED parameter counts: a demand on neither slot files nothing. *)
+    gated "an undemanded hidden parameter owes nothing" (fun () ->
+        Alcotest.check ts "ledger" []
+          (typed_obligations
+             "mod HF2 do\n  type Wrap(k, v) = Wrap(List((k, v)))\n  fn need(_w : Wrap(Int, Int)) : Int do 0 end\n  fn go() : Int do need(Wrap([(1, 0 - 5)])) end\nend\n"));
+    (* Leftovers design row Q4: the same ECon path, silently unenforced
+       before phase 0, one skip per hiding field after it; since leftovers
+       phase E a `List(a)` field is a modelled [Within] field and the -1 is a
+       VIOLATION (group `abstract-leftovers-e` has the rest). *)
+    gated "Q4: Dq(Int, List(a), List(a)) construction is checked (phase E: a violation)" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("return of mk_bad", "violated", "") ]
+          (typed_obligations
+             "mod HQ do\n  type Dq(a) = Dq(Int, List(a), List(a))\n  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [0 - 1], []) end\nend\n"));
+    (* Controls: Param-field constructions are untouched. *)
+    gated "controls: Assoc / Cons / Some literals still prove and still violate" (fun () ->
+        let src =
+          String.concat "\n"
+            [ "mod HC do";
+              "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))";
+              "  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end";
+              "  fn need_list(_xs : List({Int | _ > 0})) : Int do 0 end";
+              "  fn need_opt(_o : Option({Int | _ > 0})) : Int do 0 end";
+              "  fn a_ok() : Int do need_pos(ACons(1, 2, ANil)) end";
+              "  fn a_bad() : Int do need_pos(ACons(1, 0 - 2, ANil)) end";
+              "  fn l_ok() : Int do need_list([1, 2]) end";
+              "  fn l_bad() : Int do need_list([1, 0 - 2]) end";
+              "  fn o_ok() : Int do need_opt(Some(3)) end";
+              "  fn o_bad() : Int do need_opt(Some(0 - 3)) end";
+              "end";
+              "" ]
+        in
+        Alcotest.check ts "ledger"
+          [ ("need_pos", "proved", ""); ("need_pos", "violated", "");
+            ("need_list", "proved", ""); ("need_list", "proved", "");
+            ("need_list", "proved", ""); ("need_list", "violated", "");
+            ("need_opt", "proved", ""); ("need_opt", "violated", "") ]
+          (typed_obligations src));
+    (* Permuted / non-parameter self-reference (todo
+       2026-10-18-elem-permuted-self-field-unchecked): `N(T(b, a))` swaps the
+       slots, `UN(U(List(a)))` nests them; recursing with the outer slots
+       checked the wrong thing (0 obligations, accepted under cap verified). *)
+    gated "a permuted Self field is a recorded skip" (fun () ->
+        let src v =
+          "mod HP do\n" ^ (if v then "  cap verified\n" else "")
+          ^ "  type T(a, b) = L(a) | R(b) | N(T(b, a))\n\
+            \  fn needt(_t : T({Int | _ > 0}, Int)) : Int do 0 end\n\
+            \  fn go() : Int do needt(N(R(0 - 1))) end\nend\n"
+        in
+        Alcotest.check ts "ledger" [ ("needt", "skipped", "unreflectable-subject") ]
+          (typed_obligations (src false));
+        Alcotest.(check bool) "cap verified rejects" true
+          (Astring_contains.contains (refine_error_text_d (src true))
+             "`N`'s field holds `a` inside `T(b, a)`"));
+    (* The have side of the same hole: a `match` binder at a permuted Self
+       field took the OUTER entry, so `inner : T(Int, {Int | _ > 0})` was
+       believed to be `T({Int | _ > 0}, Int)`: a false proof. *)
+    gated "a match binder at a permuted Self field carries no element fact" (fun () ->
+        Alcotest.check ts "ledger" [ ("needt", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             "mod HPM do\n  type T(a, b) = L(a) | R(b) | N(T(b, a))\n\
+              \  fn needt(_t : T({Int | _ > 0}, Int)) : Int do 0 end\n\
+              \  fn go(t : T({Int | _ > 0}, Int)) : Int do\n    match t do\n    N(inner) -> needt(inner)\n    _ -> 0\n    end\n  end\nend\n"));
+    gated "control: a match binder at an identity Self field keeps the entry" (fun () ->
+        Alcotest.check ts "ledger" [ ("rest", "proved", "") ]
+          (typed_obligations
+             "mod HIM do\n  type L2(a) = N2 | C2(a, L2(a))\n\
+              \  fn needl(_l : L2({Int | _ > 0})) : Int do 0 end\n\
+              \  fn go(l : L2({Int | _ > 0})) : Int do\n    match l do\n    C2(_, rest) -> needl(rest)\n    N2 -> 0\n    end\n  end\nend\n"));
+    gated "a non-parameter Self field is a recorded skip" (fun () ->
+        Alcotest.check ts "ledger" [ ("needu", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             "mod HU do\n  type U(a) = UL(a) | UN(U(List(a)))\n\
+              \  fn needu(_u : U({Int | _ > 0})) : Int do 0 end\n\
+              \  fn go() : Int do needu(UN(UL([0 - 1]))) end\nend\n"));
+    gated "control: an identity Self field still recurses (proves and violates)" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needl", "proved", ""); ("needl", "proved", "");
+            ("needl", "proved", ""); ("needl", "violated", "") ]
+          (typed_obligations
+             "mod HI do\n  type L2(a) = N2 | C2(a, L2(a))\n\
+              \  fn needl(_l : L2({Int | _ > 0})) : Int do 0 end\n\
+              \  fn ok() : Int do needl(C2(1, C2(2, N2))) end\n\
+              \  fn bad() : Int do needl(C2(1, C2(0 - 2, N2))) end\nend\n"));
+    (* Paths the review confirmed by probing; pinned here. *)
+    gated "an if tail of hidden-field constructions: skips, return not trusted" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("return of mk", "skipped", "unreflectable-subject");
+            ("return of mk", "skipped", "unreflectable-subject");
+            ("need", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             (m "  fn mk(b : Bool) : Wrap(Int, {Int | _ > 0}) do if b do Wrap([(1, 0 - 5)]) else Wrap([]) end end\n\
+                 \  fn go(b : Bool) : Int do need(mk(b)) end\n")));
+    gated "a match tail of hidden-field constructions: skips, return not trusted" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("return of mk", "skipped", "unreflectable-subject");
+            ("return of mk", "skipped", "unreflectable-subject");
+            ("need", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             (m "  fn mk(n : Int) : Wrap(Int, {Int | _ > 0}) do\n    match n do\n    0 -> Wrap([(1, 0 - 5)])\n    _ -> Wrap([])\n    end\n  end\n\
+                 \  fn go() : Int do need(mk(3)) end\n")));
+    gated "Some(Wrap(..)) and [Wrap(..)]: the nested construction skips" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needo", "skipped", "unreflectable-subject");
+            ("needl", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             (m "  fn needo(_o : Option(Wrap(Int, {Int | _ > 0}))) : Int do 0 end\n\
+                 \  fn needl(_xs : List(Wrap(Int, {Int | _ > 0}))) : Int do 0 end\n\
+                 \  fn go() : Int do needo(Some(Wrap([(1, 0 - 5)]))) end\n\
+                 \  fn go2() : Int do needl([Wrap([(1, 0 - 5)])]) end\n")));
+    (* Since leftovers phase E the `List(a)` field is modelled too ([Within]):
+       both fields are checked, each one's literal proving or violating. *)
+    gated "mixed P(a, List(a)): the Param field and the List(a) field are both checked" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needp", "proved", ""); ("needp", "violated", "");
+            ("needp", "violated", ""); ("needp", "proved", "") ]
+          (typed_obligations
+             "mod HM do\n  type P(a) = P(a, List(a))\n\
+              \  fn needp(_p : P({Int | _ > 0})) : Int do 0 end\n\
+              \  fn ok() : Int do needp(P(1, [0 - 1])) end\n\
+              \  fn bad() : Int do needp(P(0 - 1, [1])) end\nend\n"));
+    gated "a let-bound hidden-field construction passed on skips" (fun () ->
+        Alcotest.check ts "ledger" [ ("need", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             (m "  fn go() : Int do\n    let w = Wrap([(1, 0 - 5)])\n    need(w)\n  end\n"))) ]
+
+(* Leftovers design (specs/2026-10-18-abstract-refinements-leftovers-design.md)
+   phase E, §6.5 / §9.5: a constructor field of type `C(args)`, `C` a
+   registered container whose arguments are bare parameters or
+   parameter-free, has the field role [Within].  Its element refinement is
+   checked at every construction (Q4 becomes a VIOLATION, not a skip),
+   reaches `match` binders at that field (Q5), and lets a field-wise
+   `Deque.filter` prove `Deque(a[p])`.  Every shape the role does not model
+   stays phase 0's hidden-field skip. *)
+let abstract_leftovers_e_suite =
+  let ts = Alcotest.(list (triple string string string)) in
+  let dq = "  type Dq(a) = Dq(Int, List(a), List(a))\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n" in
+  let m ?(verified = false) name body =
+    "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ dq ^ body ^ "end\n"
+  in
+  (* The real stdlib (list, deque, prelude) beside a user module, as phase
+     D's runner: the user module's obligations, and those inside the named
+     stdlib functions. *)
+  let load_mod name =
+    let md, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (md.March_ast.Ast.mod_name, March_ast.Ast.Public, md.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods = List.map load_mod [ "list.march"; "deque.march" ] in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  let obs_of keep =
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        if keep o then
+          Some (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> "")
+        else None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let user_file (o : March_refinecheck.Obligation.t) =
+    let f = o.March_refinecheck.Obligation.span.March_ast.Ast.file in
+    f = "" || f = "<unknown>"
+  in
+  let in_file base (o : March_refinecheck.Obligation.t) =
+    Filename.basename o.March_refinecheck.Obligation.span.March_ast.Ast.file = base
+  in
+  let in_lines base lo hi (o : March_refinecheck.Obligation.t) =
+    let sp = o.March_refinecheck.Obligation.span in
+    in_file base o && sp.March_ast.Ast.start_line >= lo && sp.March_ast.Ast.start_line < hi
+  in
+  let run (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let md = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let md = { md with March_ast.Ast.mod_decls = mods @ prelude_decls @ md.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module md in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx md;
+    let errs =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          let f = d.March_errors.Errors.span.March_ast.Ast.file in
+          if d.March_errors.Errors.severity = March_errors.Errors.Error && (f = "" || f = "<unknown>")
+          then Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    (errs, paths)
+  in
+  (* [Deque.filter]'s line range in the real deque.march: from its `fn
+     filter(` line to the next `doc`. *)
+  let deque_filter_range paths =
+    let path = List.find (fun p -> Filename.basename p = "deque.march") paths in
+    let lines = String.split_on_char '\n' (In_channel.with_open_bin path In_channel.input_all) in
+    let idx = List.mapi (fun i l -> (i + 1, String.trim l)) lines in
+    let starts pre s = String.length s >= String.length pre && String.sub s 0 (String.length pre) = pre in
+    match List.find_opt (fun (_, l) -> starts "fn filter(" l) idx with
+    | None -> Alcotest.fail "no `fn filter(` in deque.march"
+    | Some (lo, _) ->
+      let hi =
+        match List.find_opt (fun (i, l) -> i > lo && starts "doc " l) idx with
+        | Some (i, _) -> i
+        | None -> max_int
+      in
+      (lo, hi)
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let t3 = Alcotest.(triple int int int) in
+  let dfilter body =
+    "  fn dfilter(d : Dq(a), pred : a -> Bool[p]) : Dq(a[p]) do\n    match d do\n    Dq(_, f, b) ->\n\
+    \      let f2 = List.filter(f, pred)\n      let b2 = List.filter(b, pred)\n      " ^ body
+    ^ "\n    end\n  end\n\
+      \  fn need_dq(_d : Dq({Int | _ > 0})) : Int do 0 end\n\
+      \  fn go(ys : List(Int)) : Int do need_dq(dfilter(Dq(0, ys, ys), fn y -> y > 0)) end\n"
+  in
+  [ (* Q4, RED: a violating element in either List(a) field is a VIOLATION. *)
+    gated "Q4: a violating element in the front list is a violation" (fun () ->
+        Alcotest.check ts "ledger" [ ("return of mk_bad", "violated", "") ]
+          (typed_obligations (m "E1" "  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [0 - 1], []) end\n")));
+    gated "Q4: a violating element in the back list is a violation" (fun () ->
+        Alcotest.check ts "ledger" [ ("return of mk_bad", "violated", "") ]
+          (typed_obligations (m "E2" "  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [], [0 - 1]) end\n")));
+    gated "mk_ok: positive elements in both lists prove" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("return of mk_ok", "proved", ""); ("return of mk_ok", "proved", "") ]
+          (typed_obligations (m "E3" "  fn mk_ok() : Dq({Int | _ > 0}) do Dq(2, [1], [2]) end\n")));
+    gated "Q4 under cap verified is an error at the element" (fun () ->
+        let t = refine_error_text_d (m ~verified:true "E4" "  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [5], [0 - 1]) end\n") in
+        Alcotest.(check bool) ("an error: " ^ t) true (t <> "");
+        Alcotest.(check bool) "not the hidden-field skip text" false
+          (Astring_contains.contains t "which the element model does not see into"));
+    (* Q5, RED: match binders at a List(a) field carry the element fact. *)
+    (* The subtyping arm labels an obligation with the argument's name. *)
+    gated "Q5: match binders at both List(a) fields carry the element fact" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("f", "proved", ""); ("b", "proved", "") ]
+          (typed_obligations
+             (m "E5"
+                "  fn q5(d : Dq({Int | _ > 0})) : Int do\n    match d do\n    Dq(_, f, b) -> sum_pos(f) + sum_pos(b)\n    end\n  end\n")));
+    (* Controls: the binder fact comes from the scrutinee's entry only. *)
+    gated "control: an unrefined scrutinee gives its binders no fact" (fun () ->
+        Alcotest.(check (list string)) "verdicts" [ "skipped" ]
+          (verdicts_of
+             (m "E6" "  fn q5(d : Dq(Int)) : Int do\n    match d do\n    Dq(_, f, _) -> sum_pos(f)\n    end\n  end\n")
+             "sum_pos"));
+    gated "control: a scrutinee from a VIOLATED return gives its binders no fact" (fun () ->
+        let src =
+          m "E7"
+            "  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [0 - 1], []) end\n\
+            \  fn q5() : Int do\n    match mk_bad() do\n    Dq(_, f, _) -> sum_pos(f)\n    end\n  end\n"
+        in
+        Alcotest.(check (list string)) "mk_bad" [ "violated" ] (verdicts_of src "return of mk_bad");
+        Alcotest.(check bool) "sum_pos is not proved" false (List.mem "proved" (verdicts_of src "sum_pos")));
+    gated "control: rebinding the scrutinee's refinement variable retires the binder fact" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem "proved"
+             (verdicts_of
+                "mod E8 do\n  type Dq(a) = Dq(Int, List(a), List(a))\n\
+                 \  fn need_lt(_xs : List({Int | _ < 5})) : Int do 0 end\n\
+                 \  fn q(n : Int, d : Dq({Int | _ < n})) : Int do\n    let n = 100\n    match d do\n    Dq(_, f, _) -> if n == 100 do need_lt(f) else 0 end\n    end\n  end\nend\n"
+                "need_lt")));
+    (* Other registered containers, and a parameter-free argument. *)
+    gated "an Option(a) field and a Result(a, Int) field are modelled" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needo", "violated", ""); ("needo", "proved", "");
+            ("needr", "violated", ""); ("needr", "proved", "") ]
+          (typed_obligations
+             "mod E9 do\n  type Ob(a) = Ob(Option(a))\n  type Rb(a) = Rb(Result(a, Int))\n\
+              \  fn needo(_o : Ob({Int | _ > 0})) : Int do 0 end\n\
+              \  fn needr(_r : Rb({Int | _ > 0})) : Int do 0 end\n\
+              \  fn a() : Int do needo(Ob(Some(0 - 1))) end\n\
+              \  fn b() : Int do needo(Ob(Some(1))) end\n\
+              \  fn c() : Int do needr(Rb(Ok(0 - 1))) end\n\
+              \  fn d() : Int do needr(Rb(Ok(1))) + needr(Rb(Err(0 - 1))) end\nend\n"));
+    (* Declaration order does not matter: the roles are a fixpoint. *)
+    gated "a field of a user container declared LATER is modelled" (fun () ->
+        Alcotest.check ts "ledger" [ ("needo", "violated", ""); ("needo", "proved", "") ]
+          (typed_obligations
+             "mod E10 do\n  type Outer(a) = O(Inner(a))\n  type Inner(a) = I(a)\n\
+              \  fn needo(_o : Outer({Int | _ > 0})) : Int do 0 end\n\
+              \  fn a() : Int do needo(O(I(0 - 1))) end\n  fn b() : Int do needo(O(I(1))) end\nend\n"));
+    gated "a user container whose own field is Within nests (Outer(Dq(a)))" (fun () ->
+        Alcotest.check ts "ledger" [ ("needo", "violated", "") ]
+          (typed_obligations
+             (m "E11" "  type Outer(a) = O(Dq(a))\n  fn needo(_o : Outer({Int | _ > 0})) : Int do 0 end\n\
+                       \  fn a() : Int do needo(O(Dq(1, [], [0 - 1]))) end\n")));
+    (* The floor: every unmodelled shape is still the hidden-field skip. *)
+    gated "floor: a function field, a List(List(a)) field, a hiding inner container, a mixed argument" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needb", "skipped", "unreflectable-subject");
+            ("needl", "skipped", "unreflectable-subject");
+            ("needh", "skipped", "unreflectable-subject");
+            ("needq", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             "mod E12 do\n  type Box(b) = Box(Int -> b)\n  type LL(a) = LL(List(List(a)))\n\
+              \  type Hid(a) = Hid(Int -> a)\n  type Hw(a) = Hw(Hid(a))\n  type Mq(a) = Mq(Result(a, List(a)))\n\
+              \  fn needb(_b : Box({Int | _ > 0})) : Int do 0 end\n\
+              \  fn needl(_l : LL({Int | _ > 0})) : Int do 0 end\n\
+              \  fn needh(_h : Hw({Int | _ > 0})) : Int do 0 end\n\
+              \  fn needq(_q : Mq({Int | _ > 0})) : Int do 0 end\n\
+              \  fn a() : Int do needb(Box(fn _x -> 0 - 1)) end\n\
+              \  fn b() : Int do needl(LL([[0 - 1]])) end\n\
+              \  fn c() : Int do needh(Hw(Hid(fn _x -> 0 - 1))) end\n\
+              \  fn d() : Int do needq(Mq(Ok(1))) end\nend\n"));
+    (* A field `Hid(a)` whose container HIDES its slot stays hidden, so the
+       parametric rule still refuses `Hw` as a source (without the check in
+       [within_of], `need_pos(get(h))` read `h`'s slot and was proved). *)
+    gated "floor: a field of a container that hides the slot keeps the parametric rule off" (fun () ->
+        Alcotest.(check (list string)) "verdicts" [ "skipped" ]
+          (verdicts_of
+             "mod E12b do\n  type Hid(a) = Hid(Int -> a)\n  type Hw(a) = Hw(Hid(a))\n\
+              \  fn get(h : Hw(a)) : a do\n    match h do\n    Hw(Hid(f)) -> f(0)\n    end\n  end\n\
+              \  fn need_pos(_x : {Int | _ > 0}) : Int do 0 end\n\
+              \  fn go(h : Hw({Int | _ > 0})) : Int do need_pos(get(h)) end\nend\n"
+             "need_pos"));
+    gated "floor: a match binder at an unmodelled field gets no fact" (fun () ->
+        Alcotest.(check (list string)) "verdicts" [ "skipped" ]
+          (verdicts_of
+             "mod E13 do\n  type LL(a) = LL(List(List(a)))\n\
+              \  fn need_ll(_x : List(List({Int | _ > 0}))) : Int do 0 end\n\
+              \  fn q(l : LL({Int | _ > 0})) : Int do\n    match l do\n    LL(x) -> need_ll(x)\n    end\n  end\nend\n"
+             "need_ll"));
+    (* A field-wise filter over a user Dq: the correct body proves; wrong
+       bodies do not. *)
+    gated "a field-wise dfilter proves Dq(a[p]), and its caller's binder fact" (fun () ->
+        let errs, _ = run (m "E14" (dfilter "Dq(0, f2, b2)")) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        let obs = obs_of user_file in
+        Alcotest.check ts "ledger"
+          [ ("return of dfilter", "proved", ""); ("return of dfilter", "proved", "");
+            ("need_dq", "proved", "") ]
+          (List.filter (fun (c, _, _) -> c = "return of dfilter" || c = "need_dq") obs));
+    gated "a dfilter keeping rejected elements in the back list is not proved" (fun () ->
+        let _ = run (m "E15" (dfilter "Dq(0, f2, b)")) in
+        let obs = obs_of user_file in
+        let rv = List.filter_map (fun (c, v, _) -> if c = "return of dfilter" then Some v else None) obs in
+        Alcotest.(check bool) "the return is not all proved" true (List.exists (( <> ) "proved") rv);
+        Alcotest.(check bool) "the caller is not proved" false
+          (List.exists (fun (c, v, _) -> c = "need_dq" && v = "proved") obs));
+    gated "a dfilter putting the unfiltered back list in front is not proved" (fun () ->
+        let _ = run (m "E16" (dfilter "Dq(0, b, f2)")) in
+        let obs = obs_of user_file in
+        let rv = List.filter_map (fun (c, v, _) -> if c = "return of dfilter" then Some v else None) obs in
+        Alcotest.(check bool) "the return is not all proved" true (List.exists (( <> ) "proved") rv);
+        Alcotest.(check bool) "the caller is not proved" false
+          (List.exists (fun (c, v, _) -> c = "need_dq" && v = "proved") obs));
+    (* The refinement says nothing about ORDER: swapping the two FILTERED
+       lists is still a Dq(a[p]) (order is pinned by test_deque.march). *)
+    gated "a dfilter swapping the two filtered lists still proves (order is not an element fact)" (fun () ->
+        let _ = run (m "E17" (dfilter "Dq(0, b2, f2)")) in
+        Alcotest.check ts "ledger"
+          [ ("return of dfilter", "proved", ""); ("return of dfilter", "proved", "") ]
+          (List.filter (fun (c, _, _) -> c = "return of dfilter") (obs_of user_file)));
+    (* The shipped Deque.filter. *)
+    gated "Deque.filter's definition side is proved" (fun () ->
+        let errs, paths =
+          run "mod E18 do\n  fn go() : Int do Deque.size(Deque.filter(Deque.empty(), fn y -> y > 0)) end\nend\n"
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        let lo, hi = deque_filter_range paths in
+        let obs = obs_of (in_lines "deque.march" lo hi) in
+        Alcotest.(check bool) "has obligations" true (obs <> []);
+        Alcotest.check t3 "Deque.filter" (List.length obs, 0, 0) (triple obs));
+    gated "Q1: sum_pos(Deque.to_list(Deque.filter(d, fn y -> y > 0)))" (fun () ->
+        let errs, _ =
+          run
+            "mod E19 do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n\
+             \  fn go(d : Deque.Deque(Int)) : Int do sum_pos(Deque.to_list(Deque.filter(d, fn y -> y > 0))) end\nend\n"
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check ts "the demand" [ ("sum_pos", "proved", "") ]
+          (List.filter (fun (c, _, _) -> c = "sum_pos") (obs_of user_file)));
+    gated "Q1 control: a weaker lambda is not proved" (fun () ->
+        let _ =
+          run
+            "mod E20 do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n\
+             \  fn go(d : Deque.Deque(Int)) : Int do sum_pos(Deque.to_list(Deque.filter(d, fn y -> y >= 0))) end\nend\n"
+        in
+        Alcotest.(check bool) "not proved" false
+          (List.exists (fun (c, v, _) -> c = "sum_pos" && v = "proved") (obs_of user_file))) ]
+
+(* Fold accumulator invariants, phase 3 (design
+   specs/2026-10-18-fold-accumulator-invariants-design.md §6, §8): the
+   stdlib folds whose public signatures were unannotated now declare the
+   generic arrow shape, so the phase-1/2 rule (P1/P2 parametricity, then the
+   base and the step under the demand) applies to them.  Each module gets a
+   proof (a caller demand through the REAL stdlib fold) and a control whose
+   step breaks the demand (a step skip, never a violation).  Loaded from
+   `stdlib/` relative to the cwd, as [abstract_leftovers_d_suite] does, so a
+   proof row is RED on a base whose stdlib lacks the annotation. *)
+let fold_invariants_3_suite =
+  let load_mod name =
+    let m, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (m.March_ast.Ast.mod_name, March_ast.Ast.Public, m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods =
+         List.map load_mod
+           [ "list.march"; "map.march"; "set.march"; "hash_map.march"; "array.march";
+             "rrb_vec.march"; "deque.march"; "native_array.march"; "seq.march";
+             "sorted_set.march"; "ordered_map.march" ]
+       in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  (* The user module's obligations as (callee, verdict, reason). *)
+  let run (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let m = { m with March_ast.Ast.mod_decls = mods @ prelude_decls @ m.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module m in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx m;
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        let f = o.span.March_ast.Ast.file in
+        if f = "" || f = "<unknown>" then
+          Some (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> "")
+        else None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let reasons obs = List.filter_map (fun (_, v, r) -> if v = "skipped" then Some r else None) obs in
+  let t3 = Alcotest.(triple int int int) in
+  let m body =
+    "mod FK do\n\
+    \  fn need_nn(k : {Int | _ >= 0}) : Int do k end\n\
+    \  fn icmp(a : Int, b : Int) : Int do a - b end\n"
+    ^ body ^ "end\n"
+  in
+  (* [proof name param call]: `need_nn(call)` proves.  [control]: the same
+     fold with a decreasing step is a step skip, not a violation. *)
+  let go param call = m ("  fn go(" ^ param ^ ") : Int do need_nn(" ^ call ^ ") end\n") in
+  let proof name param call =
+    gated (name ^ ": a demand through the fold proves") (fun () ->
+        Alcotest.check t3 call (1, 0, 0) (triple (run (go param call))))
+  in
+  let control name param call =
+    gated (name ^ ": control, a step that breaks the demand stays a skip") (fun () ->
+        let obs = run (go param call) in
+        Alcotest.check t3 call (0, 0, 1) (triple obs);
+        Alcotest.(check (list string)) "step" [ "accumulator-step-unproved" ] (reasons obs))
+  in
+  let skip_pin name param call reason =
+    gated (name ^ ": stays a skip (" ^ reason ^ ")") (fun () ->
+        let obs = run (go param call) in
+        Alcotest.check t3 call (0, 0, 1) (triple obs);
+        Alcotest.(check (list string)) "reason" [ reason ] (reasons obs))
+  in
+  [ (* Map.fold: was `fold(m, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
+    proof "Map.fold" "mp : Map(Int, Int)" "Map.fold(mp, 0, fn (a, _k, _v) -> a + 1)";
+    control "Map.fold" "mp : Map(Int, Int)" "Map.fold(mp, 0, fn (a, _k, _v) -> a - 1)";
+    (* Set.fold: was `fold(s, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
+    proof "Set.fold" "st : Set(Int)" "Set.fold(st, 0, fn (a, _x) -> a + 1)";
+    control "Set.fold" "st : Set(Int)" "Set.fold(st, 0, fn (a, _x) -> a - 1)";
+    (* HashMap.fold: was `fold(m, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
+    proof "HashMap.fold" "hm : HashMap.HashMap(Int, Int)" "HashMap.fold(hm, 0, fn (a, _k, _v) -> a + 1)";
+    control "HashMap.fold" "hm : HashMap.HashMap(Int, Int)" "HashMap.fold(hm, 0, fn (a, _k, _v) -> a - 1)";
+    (* Array.fold_left: was `fold_left(v, acc, f)`; 0d2afa8f6: (0, 0, 1), unreflectable-subject. *)
+    proof "Array.fold_left" "av : Array.PVec(Int)" "Array.fold_left(av, 0, fn (a, _x) -> a + 1)";
+    control "Array.fold_left" "av : Array.PVec(Int)" "Array.fold_left(av, 0, fn (a, _x) -> a - 1)";
+    (* RRB.fold / fold_left: `f` was unannotated, so P1 rejected `b`;
+       0d2afa8f6: (0, 0, 1), parametric-source-unproved. *)
+    proof "RRB.fold" "rs : RRB.Slice(Int)" "RRB.fold(rs, 0, fn (a, _x) -> a + 1)";
+    control "RRB.fold" "rs : RRB.Slice(Int)" "RRB.fold(rs, 0, fn (a, _x) -> a - 1)";
+    proof "RRB.fold_left" "rv : RRB.Vec(Int)" "RRB.fold_left(rv, 0, fn (a, _x) -> a + 1)";
+    control "RRB.fold_left" "rv : RRB.Vec(Int)" "RRB.fold_left(rv, 0, fn (a, _x) -> a - 1)";
+    (* Deque.fold_left / fold_right: `f` was unannotated (design §0: P1
+       rejects `b`); 0d2afa8f6: (0, 0, 1), parametric-source-unproved. *)
+    proof "Deque.fold_left" "dq : Deque.Deque(Int)" "Deque.fold_left(dq, 0, fn (a, _x) -> a + 1)";
+    control "Deque.fold_left" "dq : Deque.Deque(Int)" "Deque.fold_left(dq, 0, fn (a, _x) -> a - 1)";
+    proof "Deque.fold_right" "dq : Deque.Deque(Int)" "Deque.fold_right(dq, 0, fn (_x, a) -> a + 1)";
+    control "Deque.fold_right" "dq : Deque.Deque(Int)" "Deque.fold_right(dq, 0, fn (_x, a) -> a - 1)";
+    (* ── The folds that stay a skip (design §6, decision 5), pinned ────── *)
+    (* NativeArray: the body is one creating builtin (`native_int_arr_fold`),
+       and the signature is unannotated; no `@[assume]`. *)
+    skip_pin "NativeArray.fold_int" "xs : List(Int)"
+      "NativeArray.fold_int(NativeArray.from_list_int(xs), 0, fn (a, _x) -> a + 1)"
+      "unreflectable-subject";
+    (* Seq: church-encoded, `b` flows through a closure stored in data. *)
+    skip_pin "Seq.fold" "xs : List(Int)" "Seq.fold(Seq.from_list(xs), 0, fn (a, _x) -> a + 1)"
+      "unreflectable-subject";
+    (* SortedSet / OrderedMap are annotated, but their collection parameter is
+       a RECORD type, which P1's `align` does not walk, so `b` is not shown
+       generic (a lost proof, never a false one).  Filed:
+       specs/todos/2026-10-18-refine-p1-record-typed-parameter.md. *)
+    skip_pin "SortedSet.fold" "xs : List(Int)"
+      "SortedSet.fold(SortedSet.from_list(xs, icmp), 0, fn (a, _x) -> a + 1)"
+      "parametric-source-unproved";
+    skip_pin "OrderedMap.fold" "xs : List((Int, Int))"
+      "OrderedMap.fold(OrderedMap.from_list(xs, icmp), 0, fn (a, _k, _v) -> a + 1)"
+      "parametric-source-unproved" ]
+
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -18863,6 +23784,16 @@ let () =
       ("element-flow", element_flow_suite);
       ("callback-elements", callback_elements_suite);
       ("demand-flow", demand_flow_suite);
+      ("elemflow-namespace", elemflow_namespace_suite);
+      ("elemflow-multiparam", elemflow_multiparam_suite);
+      ("elemflow-scalar-demand", elemflow_scalar_demand_suite);
+      ("elemflow-local-fn", elemflow_local_fn_suite);
+      ("elemflow-relational-return", elemflow_relational_return_suite);
+      ("post-inner-binders", post_inner_binders_suite);
+      ("fold-invariants-1", fold_invariants_1_suite);
+      ("named-callback-preconds", named_callback_preconds_suite);
+      ("fold-invariants-2", fold_invariants_2_suite);
+      ("fold-invariants-4", fold_invariants_4_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);
@@ -18881,5 +23812,12 @@ let () =
       ("abstract-pass-sites", abstract_pass_sites_suite);
       ("abstract-phase2", abstract_phase2_suite);
       ("abstract-phase3", abstract_phase3_suite);
+      ("abstract-leftovers-a", abstract_leftovers_a_suite);
+      ("abstract-leftovers-b", abstract_leftovers_b_suite);
+      ("abstract-leftovers-c", abstract_leftovers_c_suite);
+      ("abstract-leftovers-d", abstract_leftovers_d_suite);
       ("abstract-sugar", abstract_sugar_suite);
+      ("hidden-field-elements", hidden_field_elements_suite);
+      ("fold-invariants-3", fold_invariants_3_suite);
+      ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

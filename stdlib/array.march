@@ -601,6 +601,8 @@ mod Array do
   doc """
   Left fold over all elements in index order: collection first, init
   second, callback last (uncurried).  `f(acc, elem) = new_acc`. O(n).
+  Generic in the accumulator `b`, so a refinement demanded of the result
+  is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
 
   ## Examples
 
@@ -609,7 +611,7 @@ mod Array do
       march> Array.fold_left(Array.from_list(List.range(1, 101)), 0, fn (acc, x) -> acc + x)
       5050
   """
-  fn fold_left(v, acc, f) do
+  fn fold_left(v : PVec(a), acc : b, f : b -> a -> b) : b do
     match v do
     PVec(_, shift, root, tail) -> do
       let acc2 = trie_fold(acc, root, f)

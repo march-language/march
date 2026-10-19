@@ -1,0 +1,16 @@
+-- A named function passed as a fold's step whose preconditions ARE met
+-- (2026-10-18, review of the fold-accumulator invariants phase 1): `keep`'s
+-- `a > 0` follows from the demand `_ > 0` the accumulator may assume (the
+-- invariant rule), and `g`'s `x > 0` from `pos`'s element refinement; a step
+-- with no refined parameter needs nothing.  Under `cap verified`, exit 0 means
+-- every demand PROVED.  Reject twins: reject/t386, reject/t387.
+mod NamedStepPreconditionDischarged do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn keep(a : {Int | _ > 0}, _x : Int) : {Int | _ > 0} do a end
+  fn g(_a : Int, x : {Int | _ > 0}) : {Int | _ > 0} do x end
+  fn one(_a : Int, _x : Int) : {Int | _ > 0} do 1 end
+  fn by_demand(ys : List(Int)) : Int do need_pos(List.fold_left(ys, 1, keep)) end
+  fn by_elements(pos : List({Int | _ > 0})) : Int do need_pos(List.fold_left(pos, 1, g)) end
+  fn unrefined(ys : List(Int)) : Int do need_pos(List.fold_left(ys, 1, one)) end
+end

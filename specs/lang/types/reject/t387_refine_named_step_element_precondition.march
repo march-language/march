@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: the precondition `_ > 0` of `g`
+-- A named function passed as a fold's step, its ELEMENT parameter refined
+-- (2026-10-18, review of the fold-accumulator invariants phase 1): `g`'s
+-- `{Int | _ > 0}` return is proved assuming `x > 0`, but `ys` is an unrefined
+-- list, so nothing says what `List.fold_left` hands `g` meets it.  The demand
+-- was PROVED and `cap verified` accepted this module, although `go([0 - 5])`
+-- is -5.  A skip naming the unmet precondition, an error under
+-- `cap verified`.  Accept twin: accept/t388 (the same `g` over a refined list).
+mod NamedStepElementPrecondition do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn g(_a : Int, x : {Int | _ > 0}) : {Int | _ > 0} do x end
+  fn go(ys : List(Int)) : Int do need_pos(List.fold_left(ys, 1, g)) end
+end

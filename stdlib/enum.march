@@ -93,23 +93,23 @@ mod Enum do
   Returns only the elements for which pred returns true. O(n).
 
   Preserves order and is stable (equal elements stay in original relative order).
+  Every element of the result is known to satisfy `pred` (an abstract
+  refinement `p`, as for `List.filter`).
 
   ## Examples
 
       march> Enum.filter([1, 2, 3, 4], fn x -> x > 2)
       [3, 4]
   """
-  fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-    fn go(lst : List(a), acc : List(a)) : List(a) do
-      match lst do
-      Nil        -> rev(acc)
-      Cons(h, t) -> do
-        if pred(h) do go(t, Cons(h, acc))
-        else go(t, acc) end
-      end
-      end
+  fn filter(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    -- List.filter's natural body, copied rather than called (this module
+    -- avoids depending on List). TRMC makes it a single-traversal loop, and
+    -- the element contract is proved through the self-call.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do Cons(h, filter(t, pred)) else filter(t, pred) end
     end
-    go(xs, Nil)
   end
 
   doc """
@@ -266,7 +266,9 @@ mod Enum do
   Returns the first element satisfying pred, or None if none does. O(n).
 
   Use find when you need one element that matches a condition. If you
-  need all matching elements, use filter instead.
+  need all matching elements, use filter instead. The element, when
+  present, is known to satisfy `pred` (an abstract refinement `p`, as for
+  `List.filter`).
 
   ## Examples
 
@@ -275,7 +277,7 @@ mod Enum do
       march> Enum.find([1, 2, 3], fn x -> x > 5)
       None
   """
-  fn find(xs : List(a), pred : a -> Bool) : Option(a) do
+  fn find(xs : List(a), pred : a -> Bool[p]) : Option(a[p]) do
     match xs do
     Nil        -> None
     Cons(h, t) -> do
@@ -731,22 +733,22 @@ mod Enum do
 
   doc """
   Return the longest prefix for which pred returns true. O(n).
+  Every element of the result is known to satisfy `pred` (an abstract
+  refinement `p`, as for `List.filter`).
 
   ## Examples
 
       march> Enum.take_while([1, 2, 3, 1], fn x -> x < 3)
       [1, 2]
   """
-  fn take_while(xs : List(a), pred : a -> Bool) : List(a) do
-    fn go(lst : List(a), acc : List(a)) : List(a) do
-      match lst do
-      Nil        -> rev(acc)
-      Cons(h, t) ->
-        if pred(h) do go(t, Cons(h, acc))
-        else rev(acc) end
-      end
+  fn take_while(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    -- List.take_while's natural body, copied rather than called (this
+    -- module avoids depending on List). TRMC makes it a single-traversal
+    -- loop, and the element contract is proved through the self-call.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> if pred(h) do Cons(h, take_while(t, pred)) else Nil end
     end
-    go(xs, Nil)
   end
 
   doc """

@@ -131,7 +131,7 @@ include Refine_param
    grants nothing.  That costs precision — an invariant the author knows but
    the checker cannot see is no longer usable — and the cost lands entirely in
    the safe direction, as more skips. *)
-let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
+let check_let_annotation ?ext ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (b : A.binding) : bool option =
   match b.A.bind_pat, refined_scope_ty b.A.bind_ty with
   | A.PatVar n, Some (binder, pred, sort) ->
@@ -149,17 +149,23 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
       }
     in
     let out = ref None in
+    (* [?ext]: the walk's postcondition lookup and scalar demand hook
+       ([cx_of]), built for the SHADOWED env from the bound names. *)
+    let postcond, demand =
+      match ext with Some f -> f names | None -> (postcond_of ctx defs, None)
+    in
     (* Every fact channel is shadowed by the names this binding introduces —
        see [call_ctx]'s note: all of them, or none. *)
     let cx =
       { root
       ; errctx
-      ; postcond = postcond_of ctx defs
+      ; postcond
       ; path = path_shadow path names
       ; lets = launder_shadow lets names
       ; sc = scope_shadow sc names
       ; re = recenv_shadow re names
       ; binds = List.filter (fun (n, _) -> not (List.mem n names)) ctx.binds
+      ; demand
       }
     in
     check_call cx ~span:n.A.span
@@ -368,7 +374,7 @@ let check_impl_dispatch ~root errctx defs (ctx : rctx) path lets sc re ~(span : 
     in
     (match chosen with
      | Some sg ->
-       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re; binds = ctx.binds } in
+       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re; binds = ctx.binds; demand = None } in
        List.iter (fun rp -> check_call cx ~span ~callee:fname sg args rp) sg.refined
      | None ->
        let reason =
@@ -458,7 +464,7 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
           | None -> ()
           | Some r ->
             let sc = (fresh_cb_arg, r) :: scope_shadow sc [ fresh_cb_arg ] in
-            let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+            let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds; demand = None } in
             let x = A.EVar { A.txt = fresh_cb_arg; A.span = asp } in
             List.iter
               (fun rp -> check_call cx ~span:asp ~callee:gname ~subject:Callback_domain gsg [ x ] rp)
@@ -546,7 +552,7 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
                      | _ -> rq
                    in
                    let sc = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
-                   let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+                   let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds; demand = None } in
                    check_call cx ~span:asp ~callee:g ~subject:Callback_codomain cod_sig
                      [ A.EVar { A.txt = "$r"; A.span = asp } ] rp
                  | _ ->
@@ -703,7 +709,9 @@ let parametric_return ~(entry_of : A.expr -> (string * elem option list) option)
      the actuals resolved through this same function (`reverse(reverse(xs))`);
      failing that, the callee's DECLARED container return, when every one of
      its tails was proved to meet it ([elem_ret_proved]) and its element
-     predicates mention nothing but their own binder.
+     predicates mention nothing but their own binder, or (since 2026-10-18,
+     element-flow follow-ups phase 4) its parameters, read at the call's
+     actuals ([lend_entry]).
 
    Anything else carries nothing. *)
 (* Does an element entry's predicate apply any of [names]?  An entry naming a
@@ -722,34 +730,183 @@ let entry_mentions (names : string list) ((_, slots) : string * elem option list
   in
   names <> [] && List.exists slot slots
 
+(* ── One namespace for a declared element slot (design 2026-10-18
+   element-flow follow-ups, phase 0, §1.1) ───────────────────────────────
+   An element slot's predicate is in the namespace of the DECLARATION it came
+   from: `xs : List({Int | _ < n})` talks about the callee's `n`.  Before it
+   is used at a call, it is moved into the caller's namespace by the rule
+   [postcond_of] applies to a scalar relational return: a named binder is
+   renamed to `_` first (so an actual mentioning a caller `x` cannot be
+   captured by a binder `x`), then [classify_pred] over the formals —
+   [Closed]: unchanged (byte-identical to the pre-2026-10-18 path);
+   [Relational ps]: every [ps] needs a positional actual (a formal recorded
+   as "_" never counts) and the actuals are substituted simultaneously;
+   [Unusable]: not movable.
+
+   [`Stable] additionally requires every substituted actual to be a
+   variable, a literal, or a [let_equality_rhs] shape (an entry that may be
+   STORED and read again later); [`Any] admits any actual (a demand, used
+   once, here, where each actual denotes exactly the value the callee
+   receives).  [Error why] names the first slot that could not be moved. *)
+let instantiate_entry ~(mode : [ `Stable | `Any ]) ~(formals : string list) ~(args : A.expr list)
+    (entry : string * elem option list) : (string * elem option list, string) result =
+  let env =
+    List.mapi (fun i n -> (n, List.nth_opt args i)) formals
+    |> List.filter_map (function "_", _ | _, None -> None | n, Some a -> Some (n, a))
+  in
+  let stable (a : A.expr) =
+    match a with A.EVar _ | A.ELit _ -> true | _ -> let_equality_rhs a
+  in
+  let exception Stuck of string in
+  let rec slot (s : elem option) : elem option =
+    match s with
+    | None -> None
+    | Some (Container (c, inner)) -> Some (Container (c, List.map slot inner))
+    | Some (Refined (b, p, srt)) ->
+      (match classify_pred b formals p with
+       | Closed -> s
+       | Unusable ->
+         raise
+           (Stuck
+              (Printf.sprintf "its element refinement `%s` mentions a name that is not a parameter"
+                 (pred_str p)))
+       | Relational ps ->
+         (match List.find_opt (fun n -> not (List.mem_assoc n env)) ps with
+          | Some n ->
+            raise
+              (Stuck
+                 (Printf.sprintf "its element refinement `%s` mentions `%s`, which has no argument here"
+                    (pred_str p) n))
+          | None ->
+            let sub = List.filter (fun (n, _) -> List.mem n ps) env in
+            (match mode, List.find_opt (fun (_, a) -> not (stable a)) sub with
+             | `Stable, Some (n, _) ->
+               raise
+                 (Stuck
+                    (Printf.sprintf "the argument for `%s` is not a variable or a literal" n))
+             | _ ->
+               let p =
+                 if b = "_" then p
+                 else subst_params [ (b, A.EVar { A.txt = "_"; A.span = A.dummy_span }) ] p
+               in
+               Some (Refined ("_", subst_params sub p, srt)))))
+  in
+  let c, slots = entry in
+  match List.map slot slots with
+  | slots' -> Ok (c, slots')
+  | exception Stuck why -> Error why
+
+(* ── Relational element returns as call-site facts (design 2026-10-18
+   element-flow follow-ups, phase 4, §2) ─────────────────────────────────
+   A proved container return whose element refinement names a parameter
+   (`below(n) : List({Int | _ < n})`) is a fact at a call once the call's
+   actuals replace the parameters, exactly as [postcond_of]'s [Relational]
+   arm moves a scalar relational return.  [`Stable] only: the entry may be
+   STORED ([contenv], under a `let`) and read again later, and a stored
+   entry naming only variables and literals is retired by mention
+   ([cont_shadow]) the moment one of them is rebound.  Each top-level slot
+   moves on its own; one that cannot move (an unstable actual, a missing
+   argument) is [None], weaker and sound.  [None] when no slot survives, so
+   the caller's other routes still get their turn. *)
+let lend_entry ~(formals : string list) ~(args : A.expr list) ((c, slots) : string * elem option list)
+  : (string * elem option list) option =
+  let slots' =
+    List.map
+      (fun s ->
+        match instantiate_entry ~mode:`Stable ~formals ~args (c, [ s ]) with
+        | Ok (_, [ s' ]) -> s'
+        | _ -> None)
+      slots
+  in
+  if List.exists Option.is_some slots' then Some (c, slots') else None
+
+(* Can [entry] be moved to a call's namespace at all: every predicate
+   [Closed] or [Relational] over [formals] (a name that is no parameter, a
+   captured variable or a module-level name, is [Unusable]: never lent). *)
+let rec entry_movable ~(formals : string list) ((_, slots) : string * elem option list) : bool =
+  List.for_all
+    (function
+      | None -> true
+      | Some (Refined (b, p, _)) -> classify_pred b formals p <> Unusable
+      | Some (Container (c, inner)) -> entry_movable ~formals (c, inner))
+    slots
+
+(* The formals a top-level definition's declared return is read under: the
+   first clause's parameter names ([sig_of_fn]), but only when EVERY clause
+   names its parameters alike.  The definition side checks each clause's
+   tails against the one declared return under that clause's own names, so
+   with two spellings (`f(n, m)` / `f(m, n)`) "proved" would not be about
+   one namespace, and nothing relational is lent (conservative). *)
+let uniform_formals (fd : A.fn_def) : string list option =
+  match fd.A.fn_clauses with
+  | [] -> None
+  | c :: cs ->
+    let names (c : A.fn_clause) = List.map param_name_of c.A.fc_params in
+    let f0 = names c in
+    if List.for_all (fun c -> names c = f0) cs then Some f0 else None
+
+(* Does the structural induction hypothesis ([elem_ret_hyp]) cover the call
+   [fname(args)]?  It must be a call to the function being walked (not a
+   local or callback of the name), some argument must be a structural
+   subvariable of its parameter, and every DEFINER position of an abstract
+   refinement must receive the function's own parameter, unshadowed
+   (review of a2f9fb2a5: `filt(t, fn y -> true)` returned elements that
+   satisfy `true`, and the hypothesis read them as `p`; so did a swapped
+   pair of definers, a name rebound to another lambda, and an alias, which
+   is declined too). *)
+let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
+    ((self, sets, definers) : string * (string, unit) Hashtbl.t list * (int * string * fn_sig) list) : bool =
+  fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
+  && List.length sets = List.length args
+  && List.exists2
+       (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
+       args sets
+  && List.for_all
+       (fun (i, n, sg) ->
+         (match List.nth_opt args i with Some (A.EVar { A.txt = v; _ }) -> v = n | _ -> false)
+         && match List.assoc_opt n cb with Some sg' -> sg' == sg | None -> false)
+       definers
+
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
   : (string * elem option list) option =
   match e with
   | A.EVar { A.txt = x; _ } -> List.assoc_opt x ce
   | A.EAnnot (e', _, _) -> container_entry_of_expr ctx defs cb ce e'
   | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
+    let other () =
+      match
+        parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb fname args
+      with
+      | Some (`Container entry) -> Some entry
+      | _ -> declared_elem_return ~args ctx cb fname
+    in
     (match !elem_ret_hyp with
-     | Some (self, sets, entry)
-       when fname = self && (not (List.mem fname ctx.locals)) && (not (List.mem_assoc fname cb))
-            && List.length sets = List.length args
-            && List.exists2
-                 (fun a set -> match a with A.EVar { A.txt = v; _ } -> Hashtbl.mem set v | _ -> false)
-                 args sets ->
-       Some entry
-     | _ ->
-       (match
-          parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb fname args
-        with
-        | Some (`Container entry) -> Some entry
-        | _ -> declared_elem_return ctx cb fname))
+     | Some (self, sets, Single entry, definers, formals)
+       when hyp_applies ctx cb fname args (self, sets, definers) ->
+       (* A closed hypothesis is the entry itself (unchanged); a relational
+          one is read at THIS self-call's actuals (phase 4, §2.3), and one
+          whose actuals do not move falls through to the other routes. *)
+       if entry_is_closed entry then Some entry
+       else (match lend_entry ~formals ~args entry with Some e -> Some e | None -> other ())
+     | _ -> other ())
   | _ -> None
 
 (* The declared container return of [fname], as a fact at its call site.  A
    callback parameter or local shadowing the name resolves to it, never to
    the global ([resolve_key] honours [ctx.locals]); a name the definition
-   table does not know carries nothing. *)
-and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
+   table does not know carries nothing.
+
+   [?args]: the call's actuals (design 2026-10-18 element-flow follow-ups,
+   phase 4, §2.1).  With them a RELATIONAL entry is lent too, read at those
+   actuals ([lend_entry]); without them (a callable passed as a value, which
+   has no actuals) only a closed entry is, as before. *)
+and declared_elem_return ?(args : A.expr list option) (ctx : rctx) (cb : cbenv) (fname : string)
   : (string * elem option list) option =
+  let relational ~formals entry =
+    match args with
+    | Some args when List.length args = List.length formals -> lend_entry ~formals ~args entry
+    | _ -> None
+  in
   match List.assoc_opt fname cb with
   (* A refined callback PARAMETER's container codomain: every pass site was
      obliged to meet it ([check_pass_site_elements]).  Only a signature
@@ -759,6 +916,17 @@ and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
     (match elem_refinement sg.ret_ty with
      | Some entry when entry_is_closed entry -> Some entry
      | _ -> None)
+  (* A local `fn` whose every tail was proved to meet its declared container
+     return ([visit_local_fn], design 2026-10-18 element-flow follow-ups,
+     phase 3): exactly that signature, physically, so a same-named global
+     or another local never lends through it.  Only an entry closed or
+     relational over the local's own parameters was registered (phase 4);
+     a relational one is read at the call's actuals. *)
+  | Some sg when List.memq sg !local_elem_ret_proved ->
+    (match elem_refinement sg.ret_ty with
+     | Some entry when entry_is_closed entry -> Some entry
+     | Some entry -> relational ~formals:sg.param_names entry
+     | _ -> None)
   | Some _ -> None
   | None ->
     match resolve_key ctx fname with
@@ -766,13 +934,62 @@ and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
       (match Hashtbl.find_opt fn_defs_tbl key with
        | Some (_, fd) ->
          (match elem_refinement fd.A.fn_ret_ty with
-          | Some entry
-            when entry_is_closed entry
-                 && not (entry_mentions (callee_abstracts ctx fname) entry) ->
-            Some entry
+          | Some entry when entry_mentions (callee_abstracts ctx fname) entry -> None
+          | Some entry when entry_is_closed entry -> Some entry
+          | Some entry ->
+            (match uniform_formals fd with Some formals -> relational ~formals entry | None -> None)
           | _ -> None)
        | None -> None)
     | _ -> None
+
+(* The declared TUPLE element return of [fname] (leftovers design 2026-10-18
+   §5.2, §5.4), one entry per component, as a fact at a call site: only once
+   every tail was proved to meet it ([elem_ret_proved]), and per component
+   under [declared_elem_return]'s conditions (closed, free of the callee's
+   abstract refinements, which mean something different at every call).  A
+   callback parameter or local of the name carries nothing.  [~args]: a
+   component relational over the parameters is read at those actuals, as
+   [declared_elem_return] reads a single container (phase 4). *)
+let declared_tuple_return ~(args : A.expr list) (ctx : rctx) (cb : cbenv) (fname : string)
+  : (string * elem option list) option list option =
+  if List.mem_assoc fname cb then None
+  else
+    match resolve_key ctx fname with
+    | Some key when Hashtbl.mem elem_ret_proved key ->
+      (match Hashtbl.find_opt fn_defs_tbl key with
+       | Some (_, fd) ->
+         (match ret_elems_of_ty fd.A.fn_ret_ty with
+          | Some (Tuple comps) ->
+            let abs = callee_abstracts ctx fname in
+            let formals =
+              match uniform_formals fd with
+              | Some fs when List.length fs = List.length args -> Some fs
+              | _ -> None
+            in
+            Some
+              (List.map
+                 (function
+                   | Some e when entry_mentions abs e -> None
+                   | Some e when entry_is_closed e -> Some e
+                   | Some e ->
+                     (match formals with Some formals -> lend_entry ~formals ~args e | None -> None)
+                   | None -> None)
+                 comps)
+          | _ -> None)
+       | None -> None)
+    | _ -> None
+
+(* A lambda tail is checked in the env at the LAMBDA, not at the tail
+   ([demand_flow]'s [lambda_ok], [check_pass_site_elements]), so a name it
+   mentions that was bound on the way down ([tails_bound]'s [bound]: an inner
+   `let`, a `match` arm's pattern, a local `fn`) would be read as the
+   caller's.  `sum_pos(map(ys, fn y -> let k = 0 - 5; k))` with a caller `k
+   : {Int | _ > 0}` was proved.  [Some n]: the tail is not checked.  The
+   scalar post engine's rule ([Refine_post.check_post_induction]'s
+   [check_tails]); found while fixing design 2026-10-18 element-flow
+   follow-ups row z2, of which it is the lambda twin. *)
+let lambda_tail_rebinds (bound : string list) (t : A.expr) : string option =
+  List.find_opt (fun n -> expr_mentions [ n ] t) bound
 
 (* ── Domain facts for an inline lambda (2026-09-18 plan, Phase 3, §4.4) ──
    `List.map(pos, fn y -> …)` with `map(xs : List(a), f : a -> b)`: every `a`
@@ -780,35 +997,414 @@ and declared_elem_return (ctx : rctx) (cb : cbenv) (fname : string)
    every source is an element whose slot is the same refinement `q` (here
    `pos`'s), the lambda's parameter may assume `q`.  Same preconditions as the
    element rule ([agreed_elem_slot]: P1/P2 and agreeing element sources).
-   Returns the lambda's parameters with that refinement put back on the one
-   parameter, or [None].  Only a one-parameter lambda whose parameter carries
-   no refinement of its own, at a parameter typed `a -> …`. *)
-let lambda_domain_params (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : string)
-    (sg : fn_sig) (args : A.expr list) (i : int) : A.param list option =
-  match List.nth_opt args i, Option.join (List.nth_opt sg.param_tys i) with
-  | Some (A.ELam ([ p ], _, _)), Some t ->
-    (match strip_ty t, p.A.param_ty with
-     | A.TyArrow (dom, _), (None | Some (A.TyCon _)) ->
-       (match strip_ty dom with
-        | A.TyVar a ->
-          (match
-             agreed_elem_slot ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx fname sg args a.A.txt
-           with
-           | Some (Refined q) ->
-             (match ty_of_refined q with
-              | Some ty -> Some [ { p with A.param_ty = Some ty } ]
-              | None -> None)
-           | _ -> None)
-        | _ -> None)
-     | _ -> None)
+   Since 2026-10-18 (element-flow follow-ups design, phase 1, §4) every
+   parameter of a multi-parameter lambda gets the fact of ITS arrow-chain
+   position: `zip_with(xs, ys, fn (x, y) -> …)` with `f : a -> b -> c` gives
+   `x` `xs`'s slot and `y` `ys`'s; `sort_by`'s `a -> a -> Bool` gives both
+   parameters `a`'s.  The argument never used the parameter count: every `aj`
+   value the callee hands position `j` came from a source of `aj`.
+
+   [lambda_domain_facts]: the positions [j] of parameter [i]'s arrow chain
+   whose domain is a bare type variable with an agreed SCALAR element slot,
+   as [(j, q)].  Only [agreed_elem_slot], which needs EVERY source of the
+   variable to be an element: a variable a callback can produce or the
+   caller hands over bare (`fold_left`'s accumulator `b`, with its bare
+   `acc` and the callback's `b` result) never qualifies.  That is the line
+   with specs/2026-10-18-fold-accumulator-invariants-design.md: assuming a
+   DEMAND on `acc` is an inductive invariant, not a domain fact. *)
+let lambda_domain_facts (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : string)
+    (sg : fn_sig) (args : A.expr list) (i : int) : (int * (string * A.expr * string option)) list =
+  match Option.join (List.nth_opt sg.param_tys i) with
+  | None -> []
+  | Some t ->
+    let doms, _ = arrow_chain t in
+    List.concat
+      (List.mapi
+         (fun j dom ->
+           match strip_ty dom with
+           | A.TyVar a ->
+             (match
+                agreed_elem_slot ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx fname sg args a.A.txt
+              with
+              | Some (Refined q) -> [ (j, q) ]
+              | _ -> [])
+           | _ -> [])
+         doms)
+
+(* Returns the lambda's parameters with those facts put back, or [None] when
+   no parameter gets one.  Guards (design §4.3):
+   - G2-1: a one-parameter lambda takes position 0 of any chain (the
+     pre-2026-10-18 rule, unchanged); a lambda of [k >= 2] parameters needs a
+     chain of exactly [k] domains.  A nested `fn a -> fn b -> …` is not
+     peeled.
+   - G2-2: a parameter annotated with a refinement anywhere declines the
+     WHOLE lambda: [visit_lambda ~assume:true] assumes every parameter's
+     annotation, and nobody checked that one.  A fact replaces only an
+     unannotated or plainly typed ([TyCon]) parameter's annotation.
+   - G2-3: a fact [q] that mentions ANY of the lambda's parameter names (its
+     binder aside, when the binder is the receiving parameter's own name) is
+     not given: `xs : List({Int | _ < n})` zipped with `fn (y, n) -> …` would
+     read the caller's `n` as the lambda's (phase 0's row z4, per position).
+   [?peeled]: the parameters of a curried lambda read as one ([peel_lambda],
+   fold-invariants design phase 2): `fn a -> fn x -> …` against `b -> a ->
+   b` gives the INNER `x` position 1's fact, by the same argument (every
+   value the callee hands position 1 came from a source of its variable).
+   The guards above run over every peeled parameter. *)
+let lambda_domain_params ?(peeled : A.param list option) (ctx : rctx) defs (cb : cbenv) (ce : contenv)
+    (fname : string) (sg : fn_sig) (args : A.expr list) (i : int) : A.param list option =
+  let lam =
+    match List.nth_opt args i, peeled with
+    | Some (A.ELam (_ :: _, _, _)), Some (_ :: _ as ps) -> Some ps
+    | Some (A.ELam ((_ :: _ as ps), _, _)), _ -> Some ps
+    | _ -> None
+  in
+  match lam, Option.join (List.nth_opt sg.param_tys i) with
+  | Some ps, Some t ->
+    let k = List.length ps in
+    let chain = List.length (fst (arrow_chain t)) in
+    let own_refined (p : A.param) =
+      match p.A.param_ty with Some pt -> ty_has_refinement pt | None -> false
+    in
+    if (if k = 1 then chain < 1 else chain <> k) || List.exists own_refined ps then None
+    else
+      (* A wildcard parameter binds nothing, so it captures nothing; kept,
+         it would match every fact's default `_` binder and decline the
+         sibling's fact (`fn (_, y) -> need_pos(y)`). *)
+      let names =
+        List.filter_map
+          (fun (p : A.param) -> match p.A.param_name.A.txt with "_" -> None | n -> Some n)
+          ps
+      in
+      let wild = List.length names < k in
+      let facts = lambda_domain_facts ctx defs cb ce fname sg args i in
+      let given = ref false in
+      let ps' =
+        List.mapi
+          (fun j (p : A.param) ->
+            match List.assoc_opt j facts, p.A.param_ty with
+            | Some ((b, qp, srt) as q), (None | Some (A.TyCon _))
+              when p.A.param_name.A.txt <> "_"
+                   && not
+                     (expr_mentions
+                        (List.filter (fun n -> not (n = b && n = p.A.param_name.A.txt)) names)
+                        qp) ->
+              (* With a wildcard sibling, the fact is spelled with the
+                 parameter's own name as its binder: binding `_` shadows
+                 every scope entry that mentions `_` ([scope_add_param]), so a
+                 default-binder `{Int | _ > 0}` on `x` in `fn (x, _)` would
+                 be retired the moment `_` is bound. *)
+              let q =
+                if b = "_" && wild then
+                  let x = p.A.param_name.A.txt in
+                  (x, subst_params [ ("_", A.EVar { A.txt = x; A.span = A.dummy_span }) ] qp, srt)
+                else q
+              in
+              (match ty_of_refined q with
+               | Some ty -> given := true; { p with A.param_ty = Some ty }
+               | None -> p)
+            | _ -> p)
+          ps
+      in
+      if !given then Some ps' else None
   | _ -> None
+
+(* ── Accumulator invariants (design specs/2026-10-18-fold-accumulator-
+   invariants-design.md, phase 1) ─────────────────────────────────────────
+
+   [peel_lambda]: a curried lambda `fn a -> fn x -> body` passed where the
+   callee's parameter is an arrow chain of [chain] domains (`Enum.fold`'s
+   `b -> a -> b`, which it calls as `f(acc)(x)`) is read as the
+   [chain]-parameter lambda `fn (a, x) -> body` (§3.3): applying the whole
+   chain returns [body], with every parameter bound in order.  [Some (all,
+   inner)] only when nested lambdas add up to EXACTLY [chain] parameters and
+   their non-wildcard names are distinct (a repeated name would make an outer
+   position's fact land on the inner binder); [None] otherwise, and the
+   lambda is checked as written. *)
+let peel_lambda (chain : int) (ps : A.param list) (body : A.expr) : (A.param list * A.expr) option =
+  let rec go acc body =
+    if List.length acc >= chain then (acc, body)
+    else
+      match body with
+      | A.ELam ((_ :: _ as ps'), b, _) | A.EBlock ([ A.ELam ((_ :: _ as ps'), b, _) ], _) ->
+        go (acc @ ps') b
+      | _ -> (acc, body)
+  in
+  if List.length ps >= chain then None
+  else
+    let all, inner = go ps body in
+    let names =
+      List.filter (( <> ) "_") (List.map (fun (p : A.param) -> p.A.param_name.A.txt) all)
+    in
+    if List.length all = chain && List.length (List.sort_uniq compare names) = List.length names
+    then Some (all, inner)
+    else None
+
+(* A lambda parameter with every refinement in its annotation erased, at any
+   depth (an element slot too: [cont_add_params] would otherwise assume it). *)
+let erase_param_refinements (p : A.param) : A.param =
+  let rec erase (t : A.ty) : A.ty =
+    match t with
+    | A.TyRefine (t, _, _) -> erase t
+    | A.TyLinear (l, t) -> A.TyLinear (l, erase t)
+    | A.TyCon (c, ts) -> A.TyCon (c, List.map erase ts)
+    | A.TyArrow (a, b) -> A.TyArrow (erase a, erase b)
+    | A.TyTuple ts -> A.TyTuple (List.map erase ts)
+    | A.TyRecord fs -> A.TyRecord (List.map (fun (n, t) -> (n, erase t)) fs)
+    | t -> t
+  in
+  match p.A.param_ty with
+  | Some t when ty_has_refinement t -> { p with A.param_ty = Some (erase t) }
+  | _ -> p
+
+(* Does [e] contain a `let?` / `let*` anywhere?  Their early exit (the `Err`
+   short-circuit, the `flat_map` callback) is not one of [tails]' return
+   positions, so a step using one has a return value nobody checks (§4). *)
+let has_early_exit (e : A.expr) : bool =
+  let found = ref false in
+  iter_all (function A.ELetQ _ | A.ELetStar _ -> found := true | _ -> ()) e;
+  !found
+
+(* The invariant hypothesis (§2.1, §3.2): the parameters of the lambda passed
+   as argument [i] (already peeled, [ps]) whose arrow-chain domain is EXACTLY
+   a type variable [v] demanded in [pairs] assume that demand.
+   - A scalar demand [Refined d] becomes the parameter's annotation, spelled
+     with the parameter's own name as the binder (a wildcard sibling binding
+     `_` would otherwise retire a default-binder fact, as in
+     [lambda_domain_params]).
+   - A container demand [Container (c, slots)] (phase 2: a list-building
+     accumulator, `fn (acc, x) -> Cons(x, acc)` under `List({Int | _ > 0})`)
+     becomes a container-env entry [(name, (c, slots))] for the caller to
+     add after the parameters are bound: the element-refined accumulator
+     `b := List({Int | …})`, by the same induction (§2.2: every `b` the
+     callee hands the step is a value it already held, so it met the
+     demand).
+   [Ok (ps', entries, used)]: [used] when some parameter got either.
+   [Error why] declines the hypothesis for the whole lambda (the tails are
+   then checked without it):
+
+   - a receiving parameter carrying its own refinement annotation: two facts
+     for one name.  Phase 4 reads a scalar one as the invariant itself
+     ([annotated_acc_of]), calling this over the arguments with it ERASED;
+     every other own annotation (a container one, a shape phase 4 declines)
+     reaches here and declines;
+   - the body contains `let?` / `let*` ([has_early_exit]);
+   - a lambda parameter's name is free in a demand it would assume (other than
+     a scalar demand's own binder): read inside the lambda, the demand would
+     name the parameter, not the caller's value (f10's shape; [discharge_pairs]'s
+     capture guard covers the demand on the RESULT, this one the demand on
+     every hypothesised parameter, which differ when two variables are
+     demanded at once).  For a container demand every slot predicate counts
+     ([elem_entry_mentions]: a slot's binder is its element, never a lambda
+     parameter, so nothing is exempt).
+
+   Only the caller may decide this is sound: [pairs] must be variables the
+   callee is parametric in (P1/P2) and EVERY source of each must be
+   discharged ([discharge_pairs]); the hypothesis is the induction step of
+   §2.2's argument, never a fact on its own. *)
+let invariant_params (sg : fn_sig) (i : int) (pairs : (string * elem) list) (ps : A.param list)
+    (body : A.expr)
+  : (A.param list * (string * (string * elem option list)) list * bool, string) result =
+  match Option.join (List.nth_opt sg.param_tys i) with
+  | None -> Ok (ps, [], false)
+  | Some t ->
+    let doms, _ = arrow_chain t in
+    if List.length doms <> List.length ps then Ok (ps, [], false)
+    else
+      let hyp (dom : A.ty) =
+        match strip_ty dom with A.TyVar v -> List.assoc_opt v.A.txt pairs | _ -> None
+      in
+      let targets =
+        List.filter_map
+          (fun ((p : A.param), dom) ->
+            match hyp dom with Some d when p.A.param_name.A.txt <> "_" -> Some (p, d) | _ -> None)
+          (List.combine ps doms)
+      in
+      let names =
+        List.filter (( <> ) "_") (List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps)
+      in
+      let own_refined ((p : A.param), _) =
+        match p.A.param_ty with Some pt -> ty_has_refinement pt | None -> false
+      in
+      let shadowing ((_ : A.param), (d : elem)) =
+        match d with
+        | Refined (b0, q, _) -> List.find_opt (fun n -> n <> b0 && expr_mentions [ n ] q) names
+        | Container (c, slots) -> List.find_opt (fun n -> elem_entry_mentions [ n ] (c, slots)) names
+      in
+      if targets = [] then Ok (ps, [], false)
+      else
+        match List.find_opt own_refined targets with
+        | Some (p, _) ->
+          Error
+            (Printf.sprintf "its parameter `%s` carries its own refinement annotation"
+               p.A.param_name.A.txt)
+        | None ->
+          if has_early_exit body then Error "its body uses `let?` or `let*`"
+          else (
+            match List.find_map shadowing targets with
+            | Some n ->
+              Error
+                (Printf.sprintf "its parameter `%s` shadows a name the demanded refinement mentions" n)
+            | None ->
+              let used = ref false in
+              let entries = ref [] in
+              let ps' =
+                List.map
+                  (fun (p : A.param) ->
+                    match List.assq_opt p targets, p.A.param_ty with
+                    | Some (Refined (b0, q, srt)), (None | Some (A.TyCon _)) ->
+                      let x = p.A.param_name.A.txt in
+                      let q' =
+                        if b0 = x then q
+                        else subst_params [ (b0, A.EVar { A.txt = x; A.span = A.dummy_span }) ] q
+                      in
+                      (match ty_of_refined (x, q', srt) with
+                       | Some ty -> used := true; { p with A.param_ty = Some ty }
+                       | None -> p)
+                    | Some (Container (c, slots)), (None | Some (A.TyCon _)) ->
+                      used := true;
+                      entries := (p.A.param_name.A.txt, (c, slots)) :: !entries;
+                      p
+                    | _ -> p)
+                  ps
+              in
+              Ok (ps', List.rev !entries, !used))
+
+(* ── The annotated accumulator (design 2026-10-18 fold-accumulator
+   invariants, phase 4, option iii) ──────────────────────────────────────
+   `g(…, fn (acc : {T | I}, x) -> step)` where [g]'s declared return is a
+   bare type variable [b] and [acc]'s arrow-chain domain is exactly [b]: the
+   annotation states the invariant [I] directly.  It is checked as the
+   phase-1 judgment with [I] for the demand (base: every source of [b] meets
+   [I]; step: [I] of every parameter typed [b] gives [I] of the result), by
+   the same [discharge_pairs] on the arguments with the annotation ERASED
+   (so [invariant_params] hypothesises [I] rather than declining on an own
+   annotation).  [annotated_acc_of] only finds the shape; the gates are:
+
+   - [g] resolves to a top-level definition, parametric in [b] (P1/P2,
+     [parametric_ok]) and not taken on trust ([invariant_callee_ok]);
+   - exactly one lambda argument has a [b]-typed parameter carrying a
+     refinement, exactly one such parameter, a scalar one
+     ([refined_param_ty]); a second annotated [b] parameter, a container or
+     nested annotation, or a wildcard declines (the annotation stays inert,
+     as before phase 4);
+   - the lambda is one no pass site obliges ([pass_site_obligation] is
+     [None]): a one-parameter lambda at a type-variable domain is already
+     checked there (contravariantly, and reported), and that rule wins.
+
+   The element parameter's own annotation (`fn (acc, x : {Int | _ > 0})`)
+   is not an invariant of anything: it is not [b]-typed, stays erased in the
+   discharge ([lambda_ok]) and unassumed in the walk, exactly as before. *)
+type annotated_acc =
+  { aa_arg : int  (* the lambda's argument position *)
+  ; aa_lam : A.expr  (* the lambda, as written *)
+  ; aa_param : A.param  (* the annotated parameter, as written *)
+  ; aa_var : string  (* the type variable its domain is *)
+  ; aa_inv : string * A.expr * string option  (* I *)
+  ; aa_args : A.expr list  (* the arguments, that one annotation erased *)
+  }
+
+let annotated_acc_of (ctx : rctx) defs (cb : cbenv) ~(span : A.span) (g : string) (sg : fn_sig)
+    (args : A.expr list) : annotated_acc option =
+  if resolve_key ctx g = None || List.length sg.param_tys <> List.length args then None
+  else
+    match Option.map strip_ty sg.ret_ty with
+    | Some (A.TyVar bv) when parametric_ok ctx g [ bv.A.txt ] && invariant_callee_ok ctx g ->
+      let b = bv.A.txt in
+      let refined (p : A.param) =
+        match p.A.param_ty with Some pt -> ty_has_refinement pt | None -> false
+      in
+      (* Per lambda argument: [`None] (nothing annotated at a [b] position),
+         [`One c] or [`Bad] (an annotated [b] position the rule declines). *)
+      let per_arg =
+        List.mapi
+          (fun i a ->
+            match a, Option.join (List.nth_opt sg.param_tys i) with
+            | A.ELam (ps, body, _), Some t ->
+              let doms, _ = arrow_chain t in
+              let chain = List.length doms in
+              let all =
+                if List.length ps = chain then Some ps
+                else Option.map fst (peel_lambda chain ps body)
+              in
+              (match all with
+               | Some all when List.length all = chain ->
+                 let at_b =
+                   List.filter_map
+                     (fun ((p : A.param), dom) ->
+                       match strip_ty dom with
+                       | A.TyVar v when v.A.txt = b && refined p -> Some p
+                       | _ -> None)
+                     (List.combine all doms)
+                 in
+                 (match at_b with
+                  | [] -> `None
+                  | [ p ] ->
+                    let obliged =
+                      match callable_sig_of_actual ctx defs cb a with
+                      | Some (_, gsg) -> pass_site_obligation sg i gsg ~span <> None
+                      | None -> false
+                    in
+                    (match refined_param_ty p.A.param_ty with
+                     | Some r when p.A.param_name.A.txt <> "_" && not obliged ->
+                       let erased = erase_param_refinements p in
+                       (* The same parameter, wherever the peel found it. *)
+                       let rec erase_in (e : A.expr) =
+                         match e with
+                         | A.ELam (qs, body, sp) ->
+                           if List.memq p qs then
+                             A.ELam (List.map (fun q -> if q == p then erased else q) qs, body, sp)
+                           else A.ELam (qs, erase_in body, sp)
+                         | A.EBlock ([ inner ], sp) -> A.EBlock ([ erase_in inner ], sp)
+                         | e -> e
+                       in
+                       `One
+                         { aa_arg = i; aa_lam = a; aa_param = p; aa_var = b; aa_inv = r
+                         ; aa_args = List.mapi (fun j x -> if j = i then erase_in x else x) args }
+                     | _ -> `Bad)
+                  | _ -> `Bad)
+               | _ ->
+                 if List.exists refined ps then `Bad else `None)
+            | _ -> `None)
+          args
+      in
+      if List.exists (function `Bad -> true | _ -> false) per_arg then None
+      else (
+        match List.filter_map (function `One c -> Some c | _ -> None) per_arg with
+        | [ c ] -> Some c
+        | _ -> None)
+    | _ -> None
+
+(* The annotated accumulator's obligation, on the parameter's name: proved,
+   or a skip with the accumulator reason [discharge_pairs] classified (an
+   error under `cap verified`, like every skip). *)
+let record_acc_invariant errctx ~(callee : string) (aa : annotated_acc)
+    (v : [ `Proved | `Unproved of Obligation.reason ]) : unit =
+  let span = aa.aa_param.A.param_name.A.span in
+  let _, q, _ = aa.aa_inv in
+  let predicate = pred_str q in
+  match v with
+  | `Proved ->
+    Obligation.record
+      { Obligation.span; callee; predicate; verdict = Obligation.Proved; kind = Obligation.Precondition }
+  | `Unproved reason ->
+    Obligation.record
+      { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
+      ; kind = Obligation.Precondition };
+    if !strict_verified then
+      Err.error ~code:Err.Code.refinement_unverified errctx ~span
+        (Printf.sprintf
+           "`cap verified` module: cannot verify the accumulator invariant `%s` annotated on `%s` \
+            (passed to `%s`) (%s: %s)\n\
+            note: make the initial value meet it and every step preserve it, or remove the \
+            annotation (or `cap verified`)"
+           predicate aa.aa_param.A.param_name.A.txt callee (Obligation.reason_name reason)
+           (Obligation.reason_detail reason))
 
 (* A skip filed by the demand-driven element rule ([demand_flow]), with its
    own reason so `--refine-report` counts it apart from a plain unreflectable
    container; escalated under `cap verified` like every skip. *)
 let record_param_skip errctx ~(span : A.span) ~(callee : string) ~(predicate : string)
-    ~(what : string) : unit =
-  let reason = Obligation.Parametric_source_unproved what in
+    ~(reason : Obligation.reason) : unit =
   Obligation.record
     { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
     ; kind = Obligation.Precondition };
@@ -831,58 +1427,395 @@ let rec first_slot_pred (slots : elem option list) : string =
   | None :: rest -> first_slot_pred rest
 
 (* ── Abstract refinements at a call (design 2026-09-20 §3) ─────────────────
-   [abstract_return_slot fd] is [fd]'s return element slot when it is exactly
-   an abstract-refinement application: `List({a | p(_)})`, possibly under a
-   refinement of the container itself.  Read from the declared type directly:
-   [elem_refinement] admits such a slot only inside [fd]'s own walk
-   ([abstract_tyvar_slot]), and this is asked at its call sites. *)
-let abstract_slot_of_ty (t : A.ty) : (string * string) option =
+   [abstract_return_slot fd] is [fd]'s return element slot when it applies
+   one of [fd]'s abstract refinements: `List({a | p(_)})`, `List({a |
+   !p(_)})`, `List(Int[p])`, possibly under a refinement of the container
+   itself.  Read from the declared type directly: [elem_refinement] admits
+   such a slot only inside [fd]'s own walk ([abstract_tyvar_slot]), and this
+   is asked at its call sites.
+
+   Leftovers design 2026-10-18 §3.2: the slot is `C({τ | S})` where
+   - [C] is a registered one-parameter container;
+   - [τ] is a type variable ([`Tyvar]: the element sort is the demand's or
+     the argument's) or a scalar base with an SMT sort ([`Concrete s]: `Int`,
+     `Bool`, `Float`, `String`, a registered ADT, the sort [refined_param_ty]
+     gives it);
+   - [S] applies exactly one of the callee's abstract refinements [abs], only
+     as `p(binder)`, possibly under `&&`, `||` and `not`, and is otherwise
+     closed over its binder (ordinary vocabulary over the element).
+   [Some (Error why)]: the slot applies one of [abs] in a shape not read here
+   (two of them, `p(_) == false`, a computed argument, a base with no sort,
+   a mention of another name).  [None]: the slot applies none of [abs]. *)
+type abstract_slot = {
+  sl_container : string;
+  sl_binder : string;     (* the slot's binder, `_` when unnamed *)
+  sl_pred : A.expr;       (* [S], in the callee's namespace *)
+  sl_abs : string;        (* the one abstract refinement [S] applies *)
+  sl_base : [ `Tyvar | `Concrete of string option ];
+}
+
+let abstract_slot_of_ty ~(abs : string list) (t : A.ty) : (abstract_slot, string) result option =
   let rec strip (t : A.ty) =
     match unlinear t with
     | A.TyRefine ((A.TyCon _ as base), _, _) -> strip base
     | t -> t
   in
   match strip t with
-  | A.TyCon
-      ( { A.txt = c; _ }
-      , [ A.TyRefine (A.TyVar _, b, A.EApp (A.EVar { A.txt = p; _ }, [ A.EVar { A.txt = v; _ } ], _)) ] )
-    when is_container_type c && (v = binder_name b || v = "_") ->
-    Some (c, p)
+  | A.TyCon ({ A.txt = c; _ }, [ arg ]) when abs <> [] && is_container_type c ->
+    (match unlinear arg with
+     | A.TyRefine (base, b, s) ->
+       let used =
+         List.sort_uniq compare
+           (List.filter_map
+              (fun (n, _, _) -> if List.mem n abs then Some n else None)
+              (Refine_abstract.applications s))
+       in
+       let bn = binder_name b in
+       (match used with
+        | [] -> None
+        | _ :: _ :: _ ->
+          Some (Error (Printf.sprintf "its element refinement `%s` applies more than one abstract refinement" (pred_str s)))
+        | [ p ] ->
+          let base_sort =
+            match unlinear base with
+            | A.TyVar _ -> Some `Tyvar
+            | _ -> Option.map (fun (_, _, srt) -> `Concrete srt) (refined_param_ty (Some arg))
+          in
+          (match base_sort with
+           | None ->
+             Some (Error (Printf.sprintf "its element refinement `%s` is over a type with no SMT sort here" (pred_str s)))
+           | Some _ when not (Refine_abstract.slot_mentions_only_applied [ p ] bn s) ->
+             Some
+               (Error
+                  (Printf.sprintf
+                     "its element refinement `%s` uses `%s` other than as `%s(_)` under `&&`, `||` and `!`"
+                     (pred_str s) p p))
+           | Some sl_base ->
+             let tt = A.ELit (A.LitBool true, A.dummy_span) in
+             let rest = Refine_abstract.subst_abstract ~subst:subst_params p ("$v", tt) s in
+             if classify_pred bn [] rest <> Closed then
+               Some
+                 (Error
+                    (Printf.sprintf "its element refinement `%s` mentions a name other than its binder"
+                       (pred_str s)))
+             else Some (Ok { sl_container = c; sl_binder = bn; sl_pred = s; sl_abs = p; sl_base })))
+     | _ -> None)
   | _ -> None
 
-let abstract_return_slot (fd : A.fn_def) : (string * string) option =
-  Option.bind fd.A.fn_ret_ty abstract_slot_of_ty
+(* [~component:i]: the slot of component [i] of a TUPLE return (leftovers
+   design 2026-10-18 §5.3); without it a tuple return has no slot. *)
+let abstract_return_slot ?component (fd : A.fn_def) : (abstract_slot, string) result option =
+  let rec strip (t : A.ty) = match unlinear t with A.TyRefine (b, _, _) -> strip b | t -> t in
+  let ret =
+    match component, fd.A.fn_ret_ty with
+    | None, t -> t
+    | Some i, Some t -> (match strip t with A.TyTuple ts -> List.nth_opt ts i | _ -> None)
+    | Some _, None -> None
+  in
+  Option.bind ret (abstract_slot_of_ty ~abs:(Refine_abstract.names ~is_known:known_predicate_fn fd))
 
-(* A named callable as an abstract refinement's instantiation (phase 3): its
-   proved return `{Bool | _ == e}` (either orientation) over its ONE parameter,
-   as [(param, e)].  [sig_of] must return only PROVED returns — [callee_sig]
+(* [inst(S, p ↦ (y, q))] over [y]: the slot's binder renamed to [y] (the slot
+   is closed over its binder, so this captures nothing), then every `p(v)`
+   replaced by [q[y := v]] (§3.2). *)
+let instantiate_slot (sl : abstract_slot) ((y, q) : string * A.expr) : A.expr =
+  let v = A.EVar { A.txt = y; A.span = A.dummy_span } in
+  let s = subst_params [ (sl.sl_binder, v); ("_", v) ] sl.sl_pred in
+  Refine_abstract.subst_abstract ~subst:subst_params sl.sl_abs (y, q) s
+
+(* Is the slot exactly `p(_)` (today's shape, whose messages stay as they were)? *)
+let slot_is_exact (sl : abstract_slot) : bool =
+  match sl.sl_pred with
+  | A.EApp (A.EVar { A.txt; _ }, [ A.EVar _ ], _) -> txt = sl.sl_abs
+  | _ -> false
+
+(* A named callable as an abstract refinement's instantiation (phase 3), and
+   a helper call inside a lambda body (leftovers phase A): its proved return
+   `{Bool | _ == e}` (either orientation) over its parameters, as
+   [(params, e)].  [sig_of] must return only PROVED returns — [callee_sig]
    does (an unproved postcondition never reaches a caller; probe r5,
    2026-10-07) — so an assumed-but-unproved contract can never instantiate
    [p].  A callback parameter's signature names its parameter
    [callback_param_name] and its return was rewritten over it
-   ([callback_sig_of_ty]), so it needs no special case. *)
-let named_predicate (sig_of : string -> fn_sig option) (g : string) : (string * A.expr) option =
+   ([callback_sig_of_ty]), so it needs no special case.
+
+   [e] must be vocabulary over the parameters alone (design 2026-10-18 §2.4
+   C3): no mention of the result binder (or `_`), so `b == e` really defines
+   the result, and no application of anything the checker does not reflect,
+   so substituting it into a lambda's reading never smuggles an opaque call
+   into [q].
+
+   The third component is the callee's PRECONDITIONS, one per refined
+   parameter, each rewritten over the parameter names (a literally `true` one
+   is dropped).  `g(x⃗) = e` was proved only under them, so outside them
+   [g] may return anything: a caller must discharge each one wherever it
+   relies on the equality (review of a37092c83: `weird(a : {Int | _ > 0}) :
+   {Bool | _ == (a > 0)} do true end` read as `y > 0` for every `y`). *)
+let named_predicate_n (sig_of : string -> fn_sig option) (g : string)
+  : (string list * A.expr * A.expr list) option =
   match sig_of g with
   | Some
-      { param_names = [ n ]
+      { param_names = ns
       ; ret = Some (b, A.EApp (A.EVar { A.txt = "=="; _ }, [ l; r ], _))
       ; ret_sort
+      ; refined
       ; _
       }
-    when ret_sort = Some bool_sort ->
+    when ret_sort = Some bool_sort && ns <> [] ->
+    let pres =
+      List.filter_map
+        (fun (rp : rparam) ->
+          match List.nth_opt ns rp.idx, rp.pred with
+          | _, A.ELit (A.LitBool true, _) -> None
+          | Some n, pred ->
+            let v = A.EVar { A.txt = n; A.span = A.dummy_span } in
+            Some (subst_params [ (rp.binder, v); ("_", v) ] pred)
+          (* A refined parameter we cannot name: never assume it holds. *)
+          | None, _ -> Some (A.ELit (A.LitBool false, A.dummy_span)))
+        refined
+    in
     let is_b = function A.EVar { A.txt; _ } -> txt = b || txt = "_" | _ -> false in
     let e = if is_b l then Some r else if is_b r then Some l else None in
+    (* An abstract refinement of the function being checked is reflected too
+       (as the uninterpreted `$abs_p`, [current_abstracts]): a callback
+       parameter `pred : a -> Bool[p]` reads as `p($cb_arg)`, which is how a
+       definition passes its own `p` on (design §0, D1 delegation; §5.5's
+       accumulator helper).  Phase A's C3 check rejected it, which silently
+       turned D1 from proved into uninstantiated. *)
+    let rec reflected (e : A.expr) =
+      match e with
+      | A.EApp (A.EVar { A.txt = f; _ }, [ a ], _) when List.mem f !current_abstracts -> reflected a
+      | A.EApp (A.EVar { A.txt = f; _ }, args, _) -> known_predicate_fn f && List.for_all reflected args
+      | A.EApp _ -> false
+      | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.for_all reflected es
+      | A.EAnnot (e, _, _) | A.EField (e, _, _) -> reflected e
+      | _ -> true
+    in
     Option.bind e (fun e ->
-        match classify_pred b [ n ] e with
-        | Closed | Relational [ _ ] -> Some (n, e)
+        (* A binder name no parameter can have: [classify_pred] then counts a
+           mention of [b] or `_` as foreign, which is C3. *)
+        match classify_pred "$no_result_binder" ns e with
+        | (Closed | Relational _)
+          when (not (List.mem b ns))
+               && (not (Refine_scope.expr_mentions_free b e))
+               && (not (Refine_scope.expr_mentions_free "_" e))
+               && reflected e ->
+          Some (ns, e, pres)
         | _ -> None)
   | _ -> None
 
+(* ── Reading a lambda body as a predicate (design 2026-10-18 §2) ──────────
+   [inline_bool_body] translates the body of the lambda passed for an
+   abstract refinement into ordinary vocabulary [r] with `cb(y) = r(y)` for
+   every [y] — each arm an EQUIVALENCE, never an implication, because the
+   instantiation is assumed of kept elements (and, under a future `!p`, its
+   negation of rejected ones).  [Error construct] names what it declined.
+
+   - vocabulary (operators, measures, testers, constant functions) is
+     itself, its arguments read recursively;
+   - `if c do t else e end`, and `match s do true -> t  false -> e end`
+     (either order, or one Bool arm then `_`; no guards), in a Bool position
+     only, read as `(c && t) || (!c && e)`;
+   - a call `g(a⃗)` resolves as §2.2 says, the first hit deciding: [g] one
+     of the enclosing lambda's own parameters declines; a `let`-bound lambda
+     ([local_lambda], the shadow-disciplined [lets] channel at the call) is
+     β-reduced; otherwise [named] (a proved `{Bool | _ == e}` over [g]'s
+     parameters) has its actuals substituted; otherwise it declines.
+     Actuals are read first (C6), substitution is simultaneous (C2,
+     [subst_params]), and a let-bound lambda that names itself (C5) or
+     mentions anything but its own parameters (its captures) declines.  The
+     let-lambda row is the only one that recurses, bounded by
+     [inline_depth_max] (§2.3);
+   - anything else (a block with `let`, a nested lambda, a computed head)
+     declines.
+
+   Alongside the reading it returns the obligations the reading relies on
+   ([inline_obligation]): each inlined callee's preconditions at its actuals,
+   under the guards that reach the call.  The caller discharges them (or
+   declines); it still requires the result to be [Closed] over the lambda's
+   parameter (C1). *)
+let inline_depth_max = 4
+
+(* An obligation the reading relies on: [ob_pre], a callee's precondition at
+   its actuals, must hold whenever the lambda evaluates that call, i.e. under
+   [ob_guards] (what `&&`, `||`, `if` and a Bool `match` have already decided
+   on the way to it).  Both are in the namespace of the body being read. *)
+type inline_obligation = { ob_callee : string; ob_guards : A.expr list; ob_pre : A.expr }
+
+let inline_bool_body ~(named : string -> (string list * A.expr * A.expr list) option)
+    ~(local_lambda : string -> A.expr option) ~(binders : string list) (body : A.expr)
+  : (A.expr * inline_obligation list, string) result =
+  let ( let* ) = Result.bind in
+  let var sp s = A.EVar { A.txt = s; A.span = sp } in
+  let not_ sp c = A.EApp (var sp "not", [ c ], sp) in
+  let is_lit b = function A.ELit (A.LitBool b', _) -> b = b' | _ -> false in
+  let and_ sp a b =
+    if is_lit true a then b else if is_lit true b then a else A.EApp (var sp "&&", [ a; b ], sp)
+  in
+  (* (c && t) || (!c && e), dropping a literally-false disjunct: an exact
+     equivalence, and it keeps the printed reading short. *)
+  let ite sp c t e =
+    let l = and_ sp c t and r = and_ sp (not_ sp c) e in
+    if is_lit false t then r
+    else if is_lit false e then l
+    else A.EApp (var sp "||", [ l; r ], sp)
+  in
+  let rec all f = function
+    | [] -> Ok ([], [])
+    | x :: xs ->
+      let* y, o1 = f x in
+      let* ys, o2 = all f xs in
+      Ok (y :: ys, o1 @ o2)
+  in
+  let rec tr ~depth ~bound ~boolctx ~guards (e : A.expr)
+    : (A.expr * inline_obligation list, string) result =
+    let sub gs b = tr ~depth ~bound ~boolctx:b ~guards:gs in
+    match e with
+    | A.ELit _ | A.EVar _ -> Ok (e, [])
+    | A.EAnnot (inner, t, sp) ->
+      let* i, o = tr ~depth ~bound ~boolctx ~guards inner in
+      Ok (A.EAnnot (i, t, sp), o)
+    | A.EBlock ([ inner ], _) -> tr ~depth ~bound ~boolctx ~guards inner
+    | A.EBlock _ -> Error "has a block body with `let` (not read yet)"
+    | A.EIf (c, t, f, sp) ->
+      if not boolctx then Error "has an `if` whose arms are not Bool"
+      else
+        let* c, oc = sub guards true c in
+        let* t, ot = sub (guards @ [ c ]) true t in
+        let* f, ofs = sub (guards @ [ not_ sp c ]) true f in
+        Ok (ite sp c t f, oc @ ot @ ofs)
+    | A.EMatch (s, branches, sp) ->
+      let lit b = function A.PatLit (A.LitBool b', _) -> b = b' | _ -> false in
+      let wild = function A.PatWild _ -> true | _ -> false in
+      let arms =
+        match branches with
+        | [ b1; b2 ] when b1.A.branch_guard = None && b2.A.branch_guard = None ->
+          let p1 = b1.A.branch_pat and p2 = b2.A.branch_pat in
+          if lit true p1 && (lit false p2 || wild p2) then Some (b1.A.branch_body, b2.A.branch_body)
+          else if lit false p1 && (lit true p2 || wild p2) then Some (b2.A.branch_body, b1.A.branch_body)
+          else None
+        | _ -> None
+      in
+      (match arms with
+       | None -> Error "has a `match` that is not on `true`/`false` (without guards)"
+       | Some _ when not boolctx -> Error "has a `match` whose arms are not Bool"
+       | Some (t, f) ->
+         let* c, oc = sub guards true s in
+         let* t, ot = sub (guards @ [ c ]) true t in
+         let* f, ofs = sub (guards @ [ not_ sp c ]) true f in
+         Ok (ite sp c t f, oc @ ot @ ofs))
+    (* `&&` / `||` evaluate their right operand only after the left one has
+       decided: that is a guard for any precondition on the right. *)
+    | A.EApp ((A.EVar { A.txt = ("&&" | "||") as op; _ } as hd), [ a; b ], sp) ->
+      let* a, oa = sub guards true a in
+      let* b, ob = sub (guards @ [ (if op = "&&" then a else not_ sp a) ]) true b in
+      Ok (A.EApp (hd, [ a; b ], sp), oa @ ob)
+    | A.EApp ((A.EVar { A.txt = f; _ } as hd), args, sp) when known_predicate_fn f ->
+      let boolctx = List.mem f [ "&&"; "||"; "not" ] in
+      let* args, o = all (sub guards boolctx) args in
+      Ok (A.EApp (hd, args, sp), o)
+    | A.EApp (A.EVar { A.txt = g; _ }, args, _) ->
+      if List.mem g bound then Error (Printf.sprintf "calls its own parameter `%s`" g)
+      else
+        (match local_lambda g with
+         | Some (A.ELam (prms, lbody, _) as lam) ->
+           let zs = List.map (fun (p : A.param) -> p.A.param_name.A.txt) prms in
+           if List.length zs <> List.length args then
+             Error (Printf.sprintf "calls `%s` with the wrong number of arguments" g)
+           else if Refine_scope.expr_mentions_free g lam then
+             Error (Printf.sprintf "calls `%s`, a `let`-bound lambda that names itself" g)
+           else if depth >= inline_depth_max then
+             Error
+               (Printf.sprintf "calls `%s`: inlining it would exceed the depth bound (%d)" g
+                  inline_depth_max)
+           else
+             let* args, oa = all (sub guards false) args in
+             (* The lambda's body is read in ITS namespace (its own guards
+                start empty), then moved into ours with its obligations. *)
+             let* r, ol = tr ~depth:(depth + 1) ~bound:zs ~boolctx ~guards:[] lbody in
+             (match classify_pred "$no_binder" zs r with
+              | Unusable ->
+                Error
+                  (Printf.sprintf "calls `%s`, a `let`-bound lambda that mentions a name besides its parameters" g)
+              | Closed | Relational _ ->
+                let env = List.combine zs args in
+                let move (o : inline_obligation) =
+                  { o with
+                    ob_guards = guards @ List.map (subst_params env) o.ob_guards
+                  ; ob_pre = subst_params env o.ob_pre }
+                in
+                Ok (subst_params env r, oa @ List.map move ol))
+         | _ ->
+           (match named g with
+            | Some (xs, e, pres) when List.length xs = List.length args ->
+              let* args, oa = all (sub guards false) args in
+              let env = List.combine xs args in
+              let ours =
+                List.map
+                  (fun pre -> { ob_callee = g; ob_guards = guards; ob_pre = subst_params env pre })
+                  pres
+              in
+              Ok (subst_params env e, oa @ ours)
+            | _ -> Error (Printf.sprintf "calls `%s`, whose result is not reflected there" g)))
+    | A.EApp _ -> Error "calls a computed function"
+    | A.ETuple (es, sp) ->
+      let* es, o = all (sub guards false) es in
+      Ok (A.ETuple (es, sp), o)
+    | A.ECon (c, es, sp) ->
+      let* es, o = all (sub guards false) es in
+      Ok (A.ECon (c, es, sp), o)
+    | A.EAtom (a, es, sp) ->
+      let* es, o = all (sub guards false) es in
+      Ok (A.EAtom (a, es, sp), o)
+    | A.EField (r, n, sp) ->
+      let* r, o = sub guards false r in
+      Ok (A.EField (r, n, sp), o)
+    | A.ELam _ -> Error "returns a lambda"
+    | _ -> Error "has a construct that is not read as a predicate"
+  in
+  tr ~depth:0 ~bound:binders ~boolctx:true ~guards:[] body
+
+(* The lambda body as the user wrote it, for a too-weak message that also
+   prints its reading (§2.5).  Best-effort, like [pred_str]. *)
+let rec lambda_src_str (e : A.expr) : string =
+  match e with
+  | A.EBlock ([ e ], _) -> lambda_src_str e
+  | A.EIf (c, t, f, _) ->
+    Printf.sprintf "if %s do %s else %s end" (lambda_src_str c) (lambda_src_str t) (lambda_src_str f)
+  | A.EMatch (s, bs, _) ->
+    let pat = function
+      | A.PatLit (A.LitBool b, _) -> string_of_bool b
+      | A.PatWild _ -> "_"
+      | _ -> "…"
+    in
+    Printf.sprintf "match %s do %s end" (lambda_src_str s)
+      (String.concat "  "
+         (List.map (fun b -> pat b.A.branch_pat ^ " -> " ^ lambda_src_str b.A.branch_body) bs))
+  | _ -> pred_str e
+
+(* A reading of [inline_bool_body], parenthesised where [pred_str]'s flat
+   rendering would be ambiguous (`!y > 0`, an `||` under `&&`). *)
+let rec reading_str (e : A.expr) : string =
+  let is_binop = function
+    | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="); _ }, [ _; _ ], _) -> true
+    | _ -> false
+  in
+  match e with
+  | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> reading_str a ^ " || " ^ reading_str b
+  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
+    let side = function
+      | A.EApp (A.EVar { A.txt = "||"; _ }, [ _; _ ], _) as x -> "(" ^ reading_str x ^ ")"
+      | x -> reading_str x
+    in
+    side a ^ " && " ^ side b
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) ->
+    if is_binop a then "!(" ^ reading_str a ^ ")" else "!" ^ reading_str a
+  | _ -> pred_str e
+
 (* What the actual at [p]'s definer position instantiates it to (§3.1), as
    [(param, predicate)], or why not:
-   - an inline one-parameter lambda that mentions nothing but its parameter
-     and calls nothing unreflected;
-   - `fn y -> g(y)`, which is [g] (eta);
+   - an inline one-parameter lambda whose body [inline_bool_body] reads
+     exactly, closed over its parameter (`fn y -> g(y)`, eta, is the
+     one-argument instance of its proved-contract row);
    - a `let`-bound lambda ([local_lambda], from the [lets] channel), read as
      the lambda itself;
    - a name that [named] resolves: a named function or a callback parameter
@@ -892,13 +1825,73 @@ let named_predicate (sig_of : string -> fn_sig option) (g : string) : (string * 
 let local_lambda_of (lets : launder) (f : string) : A.expr option =
   match List.assoc_opt f lets with Some (A.ELam _ as l) -> Some l | _ -> None
 
-let instantiate_abstract ~(named : string -> (string * A.expr) option)
-    ~(local_lambda : string -> A.expr option) (fd : A.fn_def) (p : string)
+(* The definer's domain refinement (`keep : ({v : Int | v > 0}) -> Bool[p]`)
+   as [(binder, predicate)]: what the combinator promises of every value it
+   applies the callback to.  [None] (no refinement, or a shape not read
+   here) is the fact `true`. *)
+let definer_domain (fd : A.fn_def) (p : string) : (string * A.expr) option =
+  let rec strip (t : A.ty) =
+    match t with A.TyLinear (_, t) -> strip t | A.TyTuple [ t ] -> strip t | t -> t
+  in
+  match Refine_abstract.definer_index ~is_known:known_predicate_fn fd p with
+  | None -> None
+  | Some i ->
+    (match List.nth_opt (sig_of_fn fd).param_tys i with
+     | Some (Some t) ->
+       (match strip t with
+        | A.TyArrow (d, _) ->
+          (match strip d with
+           | A.TyRefine (_, b, pred) -> Some (binder_name b, pred)
+           | _ -> None)
+        | _ -> None)
+     | _ -> None)
+
+let instantiate_abstract ~(named : string -> (string list * A.expr * A.expr list) option)
+    ~(local_lambda : string -> A.expr option)
+    ~(discharge : y:string -> fact:A.expr -> A.expr -> bool) (fd : A.fn_def) (p : string)
     (args : A.expr list) : (string * A.expr, string) result =
+  (* The fact every argument of the callback satisfies, over [y]. *)
+  let fact_over y =
+    match definer_domain fd p with
+    | Some (b, pred) ->
+      let v = A.EVar { A.txt = y; A.span = A.dummy_span } in
+      subst_params [ (b, v); ("_", v) ] pred
+    | None -> A.ELit (A.LitBool true, A.dummy_span)
+  in
+  (* Each obligation, as `guards ⇒ pre`, must be PROVED from the domain fact
+     (one scratch query each); otherwise the reading is not exact. *)
+  let undischarged y (obs : inline_obligation list) : inline_obligation option =
+    List.find_opt
+      (fun (o : inline_obligation) ->
+        let sp = A.dummy_span in
+        let goal =
+          match o.ob_guards with
+          | [] -> o.ob_pre
+          | g :: gs ->
+            let conj = List.fold_left (fun acc x -> A.EApp (A.EVar { A.txt = "&&"; A.span = sp }, [ acc; x ], sp)) g gs in
+            A.EApp
+              ( A.EVar { A.txt = "||"; A.span = sp }
+              , [ A.EApp (A.EVar { A.txt = "not"; A.span = sp }, [ conj ], sp); o.ob_pre ]
+              , sp )
+        in
+        not (classify_pred y [] goal = Closed && discharge ~y ~fact:(fact_over y) goal))
+      obs
+  in
+  let pre_error (o : inline_obligation) =
+    Printf.sprintf "calls `%s`, whose precondition `%s` is not known to hold there" o.ob_callee
+      (reading_str o.ob_pre)
+  in
+  (* A callable passed BY NAME: one parameter only, since a bare
+     two-parameter name has no one-argument meaning. *)
   let by_name g =
     match named g with
-    | Some (n, e) -> Ok (n, e)
-    | None ->
+    | Some ([ n ], e, pres) ->
+      (match
+         undischarged n (List.map (fun pre -> { ob_callee = g; ob_guards = []; ob_pre = pre }) pres)
+       with
+       | None -> Ok (n, e)
+       | Some o -> Error (Printf.sprintf "`%s`, passed for `%s`, %s" g p (pre_error o)))
+    | _ ->
       Error
         (Printf.sprintf
            "`%s`, passed for `%s`, has no proved `{Bool | _ == …}` return over one parameter" g p)
@@ -907,35 +1900,20 @@ let instantiate_abstract ~(named : string -> (string * A.expr) option)
     match lam with
     | A.ELam ([ prm ], body, _) ->
       let y = prm.A.param_name.A.txt in
-      (* A call to anything but an operator, a measure, a tester or a
-         constant function is not reflected where [q] is assumed (a scope
-         predicate does not inline a callee's contract), so the assumption
-         would silently drop and the discharge refute: a false "too weak". *)
-      let rec opaque_call (e : A.expr) : string option =
-        match e with
-        | A.EApp (A.EVar { A.txt = f; _ }, args, _) ->
-          if known_predicate_fn f then List.find_map opaque_call args else Some f
-        | A.EApp (f, args, _) -> List.find_map opaque_call (f :: args)
-        | A.ETuple (es, _) | A.ECon (_, es, _) -> List.find_map opaque_call es
-        | A.EAnnot (e, _, _) | A.EField (e, _, _) -> opaque_call e
-        | _ -> None
-      in
-      (match body with
-       (* `fn y -> g(y)` is `g` (eta). *)
-       | A.EApp (A.EVar { A.txt = g; _ }, [ A.EVar { A.txt = y'; _ } ], _)
-         when y' = y && not (known_predicate_fn g) ->
-         by_name g
-       | _ ->
-         if classify_pred y [] body <> Closed then
+      (* A call is read through [inline_bool_body] or declined: a scope
+         predicate does not inline a callee's contract, so an unread call
+         would silently drop the assumption and the discharge refute — a
+         false "too weak". *)
+      (match inline_bool_body ~named ~local_lambda ~binders:[ y ] body with
+       | Error w -> Error (Printf.sprintf "the lambda passed for `%s` %s" p w)
+       | Ok (r, obs) ->
+         if classify_pred y [] r <> Closed then
            Error
              (Printf.sprintf "the lambda passed for `%s` mentions a name other than its own parameter" p)
          else
-           (match opaque_call body with
-            | Some f ->
-              Error
-                (Printf.sprintf
-                   "the lambda passed for `%s` calls `%s`, whose result is not reflected there (yet)" p f)
-            | None -> Ok (y, body)))
+           (match undischarged y obs with
+            | None -> Ok (y, r)
+            | Some o -> Error (Printf.sprintf "the lambda passed for `%s` %s" p (pre_error o))))
     | A.ELam _ ->
       Error (Printf.sprintf "the lambda passed for `%s` does not take exactly one parameter" p)
     | _ -> Error (Printf.sprintf "the argument passed for `%s` is not a lambda" p)
@@ -946,12 +1924,47 @@ let instantiate_abstract ~(named : string -> (string * A.expr) option)
   | Some (A.ELam _ as lam) -> of_lambda lam
   (* A let-bound lambda first: it shadows a top-level function of the name. *)
   | Some (A.EVar { A.txt = g; _ }) ->
-    (match local_lambda g with Some lam -> of_lambda lam | None -> by_name g)
+    (match local_lambda g with
+     | Some lam when Refine_scope.expr_mentions_free g lam ->
+       (* C5: the body's [g] is an OUTER binding, but [lets] would answer
+          with this lambda. *)
+       Error (Printf.sprintf "`%s`, passed for `%s`, is a `let`-bound lambda that names itself" g p)
+     | Some lam -> of_lambda lam
+     | None -> by_name g)
   | Some _ ->
     Error
       (Printf.sprintf
          "the argument passed for `%s` is neither a lambda nor a name with a proved predicate contract" p)
   | None -> Error (Printf.sprintf "no argument at the position that defines `%s`" p)
+
+(* Is [goal] (over [y]) PROVED for an arbitrary [y] of [sort] satisfying
+   [fact], in the caller's scope?  One query in a scratch ledger, so nothing
+   is recorded and no diagnostic escapes; any verdict but [Proved] is
+   [false].  [instantiate_abstract]'s [~discharge]. *)
+let scratch_implies ~root defs (ctx : rctx) path lets sc re (cb : cbenv) ~(span : A.span)
+    ~(callee : string) (sort : string option) ~(y : string) ~(fact : A.expr) (goal : A.expr) : bool =
+  match goal with
+  | A.ELit (A.LitBool true, _) -> true
+  | _ ->
+    let sg = elem_sig ~name:"$inl" (y, goal, sort) in
+    let rp = List.hd sg.refined in
+    let sc' = ("$inl", (y, fact, sort)) :: scope_shadow sc [ "$inl" ] in
+    let cx =
+      { root; errctx = Err.create (); postcond = postcond_of ~cb ctx defs; path; lets; sc = sc'; re
+      ; binds = ctx.binds; demand = None }
+    in
+    let out = ref None in
+    let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
+    Fun.protect
+      ~finally:(fun () ->
+        strict_verified := saved_strict;
+        unverified_hinted := saved_hinted)
+      (fun () ->
+        Obligation.with_scratch (fun () ->
+            strict_verified := false;
+            check_call cx ~span ~callee ~subject:Element_domain ~verdict_out:out sg
+              [ A.EVar { A.txt = "$inl"; A.span = span } ] rp));
+    !out = Some Obligation.Proved
 
 (* A call [g(args)] to a combinator whose return is `List({a | p(_)})`, with a
    demand [slots] on its result.  Instantiate `p` from the actual at its
@@ -959,8 +1972,9 @@ let instantiate_abstract ~(named : string -> (string * A.expr) option)
    query, in a scratch ledger, so a refutation is reported as too-weak rather
    than as a definite violation (§3.3, decision 9.2).  [None]: [g] declares no
    abstract element return; the caller falls through to [demand_flow]. *)
-let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv) ~(span : A.span)
-    ~(callee : string) ((_, slots) : string * elem option list) (g : string) (args : A.expr list)
+let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) ~(callee : string) ((_, slots) : string * elem option list) (g : string)
+    (args : A.expr list)
   : [ `Proved | `Too_weak of string | `Uninstantiated of string | `Undecided ] option =
   let abs = callee_abstracts ctx g in
   match resolve_key ctx g, slots with
@@ -968,31 +1982,50 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
     (match Hashtbl.find_opt fn_defs_tbl key with
      | None -> None
      | Some (_, fd) ->
-       (match abstract_return_slot fd with
-        | Some (_, p) when List.mem p abs ->
+       (match abstract_return_slot ?component fd with
+        | Some (Ok sl) when List.mem sl.sl_abs abs ->
+          let p = sl.sl_abs in
           let is_known = known_predicate_fn in
           let uninst w = Some (`Uninstantiated w) in
+          (* A concrete base (`List(Int[p])`, §3.2) skips the parametric gate
+             and §3.4: both are about a TYPE VARIABLE's provenance.  The fact
+             comes from the callee's proved body alone, at the declared
+             base's sort, never the demand's. *)
+          let tyvar = sl.sl_base = `Tyvar in
           if not (Hashtbl.mem elem_ret_proved key) then
             uninst
-              (Printf.sprintf "`%s`'s own body is not proved to return elements satisfying `%s`" g p)
+              (Printf.sprintf "`%s`'s own body is not proved to return elements satisfying `%s`" g
+                 (if slot_is_exact sl then p else pred_str sl.sl_pred))
           else
-            (match Refine_abstract.positive_base ~is_known fd p with
+            (match if tyvar then Refine_abstract.positive_base ~is_known fd p else None with
              | Some a when not (parametric_ok ctx g [ a ]) ->
                uninst (Printf.sprintf "`%s` is not known to be parametric in `%s`" g a)
              | _ ->
-               (match instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) ~local_lambda:(local_lambda_of lets) fd p args with
+               let esort =
+                 match sl.sl_base with `Concrete s -> s | `Tyvar -> (let (_, _, ds) = demand in ds)
+               in
+               let discharge = scratch_implies ~root defs ctx path lets sc re cb ~span ~callee esort in
+               (match
+                  instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb))
+                    ~local_lambda:(local_lambda_of lets) ~discharge fd p args
+                with
                 | Error w -> uninst w
-                | Ok (y, body) ->
+                | Ok (y, q) ->
                   begin
+                    let body = instantiate_slot sl (y, q) in
                     (* §3.4: an element of the result is an element of the
                        input it came from, so the input's own element fact
                        holds of it as well.  Only through the single source
                        the parametric rule traces (gated above), and only a
-                       single refined slot. *)
+                       single refined slot.  Conjoined OUTSIDE [inst]: under
+                       `!p` substituting `incoming && q` for `p` would give
+                       `!(incoming && q)`, far weaker than what holds. *)
                     let body' =
                       match
-                        Option.bind (callee_sig ctx defs cb g) (fun sg ->
-                            Option.bind (Refine_abstract.positive_base ~is_known fd p) (sources_of sg))
+                        if not tyvar then None
+                        else
+                          Option.bind (callee_sig ctx defs cb g) (fun sg ->
+                              Option.bind (Refine_abstract.positive_base ~is_known fd p) (sources_of sg))
                       with
                       | Some [ Src_elem (j, [ _ ]) ] ->
                         (match
@@ -1006,13 +2039,14 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
                          | _ -> body)
                       | _ -> body
                     in
-                    let ((_, dpred, dsort) as d) = demand in
+                    let (dbinder, dpred, _) = demand in
+                    let ((_, dpred, dsort) as d) = (dbinder, dpred, esort) in
                     let sg = elem_sig ~name:"$elem" d in
                     let rp = List.hd sg.refined in
                     let sc' = ("$elem", (y, body', dsort)) :: scope_shadow sc [ "$elem" ] in
                     let cx =
                       { root; errctx = Err.create (); postcond = postcond_of ~cb ctx defs; path; lets
-                      ; sc = sc'; re; binds = ctx.binds }
+                      ; sc = sc'; re; binds = ctx.binds; demand = None }
                     in
                     let out = ref None in
                     let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
@@ -1039,8 +2073,24 @@ let abstract_flow ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : con
                                  (List.nth_opt args)
                              with
                              | Some (A.EVar { A.txt = g; _ }) ->
-                               Printf.sprintf "`%s` (`%s`)" g (pred_str body)
-                             | _ -> Printf.sprintf "`fn %s -> %s`" y (pred_str body)
+                               Printf.sprintf "`%s` (`%s`)" g (pred_str q)
+                             | Some (A.ELam ([ _ ], src, _)) ->
+                               (* §2.5: print the lambda as written and, when
+                                  the reader rewrote it, what it was read as. *)
+                               let written = lambda_src_str src in
+                               if written = pred_str q then Printf.sprintf "`fn %s -> %s`" y written
+                               else
+                                 Printf.sprintf "`fn %s -> %s` (read as `%s`)" y written
+                                   (reading_str q)
+                             | _ -> Printf.sprintf "`fn %s -> %s`" y (pred_str q)
+                           in
+                           (* A generalized slot (`!p(_)`) names the slot and
+                              what it became, which is what was assumed. *)
+                           let source =
+                             if slot_is_exact sl then source
+                             else
+                               Printf.sprintf "%s, in the element slot `%s` (read as `%s`)," source
+                                 (pred_str sl.sl_pred) (reading_str body)
                            in
                            Printf.sprintf "%s does not imply `%s`" source (pred_str dpred)))
                     | _ -> Some `Undecided
@@ -1070,6 +2120,83 @@ let record_abstract_verdict errctx ~(span : A.span) ~(callee : string) ~(predica
    | _ -> ());
   verdict = Obligation.Proved
 
+(* The postcondition lookup the walk hands [check_call] (design 2026-10-18
+   element-flow follow-ups §3.5): a callee's proved declared return wins;
+   failing that, a bare type-variable return whose every source is an element
+   agreeing on one slot carries that slot ([parametric_return]'s [`Scalar]).
+   The inline twin of the block walk's `let h = List.head(xs)` arm, with the
+   same soundness argument and no name in between: `need_pos(List.head(xs) +
+   1)`.  Solver-free, as [postcond_of] must be. *)
+let postcond_param ~(cb : cbenv) (ctx : rctx) defs (ce : contenv) :
+    string -> A.expr list -> (string * A.expr * string option) option =
+ fun g args ->
+  match postcond_of ~cb ctx defs g args with
+  | Some r -> Some r
+  | None ->
+    (match parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb g args with
+     | Some (`Scalar r) -> Some r
+     | _ -> None)
+
+(* `$tuple_proj(i, n, g(args))`: component [i] of the [n]-tuple a call
+   returns, as a [launder] entry.  The `$` prefix cannot be a March
+   identifier, so no program can spell it and nothing resolves it: the other
+   readers of [lets] ([local_lambda_of]: lambdas only;
+   [Refine_call.alias_withdrawal_cause]: a head equal to a measure spelling)
+   pass it by.  The arity rides along so a reader can check it against the
+   callee's declared tuple. *)
+let tuple_proj (i : int) (n : int) (call : A.expr) : A.expr =
+  let lit k = A.ELit (A.LitInt k, A.dummy_span) in
+  A.EApp (A.EVar { A.txt = "$tuple_proj"; A.span = A.dummy_span }, [ lit i; lit n; call ], A.dummy_span)
+
+(* Push the projections a destructuring pattern binds, [lets] already
+   shadowed by [names] (every binder of the construct).  Only a flat tuple of
+   variables and wildcards over a direct call qualifies, and only when the
+   call mentions none of the new binders (`let (xs, b) = g(xs)`: the entry
+   would name the NEW `xs`). *)
+let push_tuple_projs (lets : launder) ~(names : string list) (pat : A.pattern) (rhs : A.expr) : launder =
+  match pat, rhs with
+  | A.PatTuple (ps, _), A.EApp (A.EVar _, _, _)
+    when List.for_all (function A.PatVar _ | A.PatWild _ -> true | _ -> false) ps
+         && not (expr_mentions names rhs) ->
+    let n = List.length ps in
+    fst
+      (List.fold_left
+         (fun (lets, i) p ->
+           match p with
+           | A.PatVar x -> ((x.A.txt, tuple_proj i n rhs) :: lets, i + 1)
+           | _ -> (lets, i + 1))
+         (lets, 0) ps)
+  | _ -> lets
+
+(* The arity of [g]'s declared tuple return, if it declares one. *)
+let tuple_arity (ctx : rctx) defs (cb : cbenv) (g : string) : int option =
+  let rec strip (t : A.ty) = match unlinear t with A.TyRefine (b, _, _) -> strip b | t -> t in
+  match Option.bind (callee_sig ctx defs cb g) (fun sg -> sg.ret_ty) with
+  | Some t -> (match strip t with A.TyTuple ts -> Some (List.length ts) | _ -> None)
+  | None -> None
+
+(* The tuple structural induction hypothesis (leftovers design 2026-10-18
+   §5.2, §5.4): a call [g(args)] to the function being walked, whose TUPLE
+   element return of arity [n] is being gated (or was proved), with some
+   argument a structural subvariable of its parameter — the condition
+   [container_entry_of_expr]'s hypothesis arm applies to a container
+   return.  Its per-component entries. *)
+let tuple_self_hyp (ctx : rctx) (cb : cbenv) (g : string) (args : A.expr list) (n : int)
+  : (string * elem option list) option list option =
+  match !elem_ret_hyp with
+  | Some (self, sets, Tuple h, definers, formals)
+    when List.length h = n && hyp_applies ctx cb g args (self, sets, definers) ->
+    (* A relational component is read at this self-call's actuals (phase 4,
+       §2.3); one that does not move carries nothing. *)
+    Some
+      (List.map
+         (function
+           | Some e when entry_is_closed e -> Some e
+           | Some e -> lend_entry ~formals ~args e
+           | None -> None)
+         h)
+  | _ -> None
+
 let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
     (a : A.expr) : bool =
@@ -1077,13 +2204,13 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
      (`Cons(f(h), …)` with `f : Int -> {Int | p}`) carries its codomain here
      exactly as it does in a scalar argument position (2026-09-18 plan,
      Phase 2). *)
-  let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+  let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
   (* One element against one REFINED slot: as an argument. *)
   let check_one (r : string * A.expr * string option) (e : A.expr) : bool =
     let sg = elem_sig ~name:"$elem" r in
     let rp = List.hd sg.refined in
     let out = ref None in
-    check_call cx ~span ~callee ~verdict_out:out sg [ e ] rp;
+    check_call cx ~span ~callee ~goal_scope_facts:true ~verdict_out:out sg [ e ] rp;
     !out = Some Obligation.Proved
   in
   (* One expression against one slot, whatever it holds. *)
@@ -1102,18 +2229,50 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
     when sort_of_ctor k.A.txt = Some (adt_sort_name container)
          && Hashtbl.mem ctor_param_fields k.A.txt ->
     let roles = Hashtbl.find ctor_param_fields k.A.txt in
+    let fparams = Hashtbl.find_opt ctor_field_params k.A.txt in
     if List.length roles <> List.length args then true
     else
+      let slot j = Option.join (List.nth_opt slots j) in
       List.fold_left2
-        (fun acc role e ->
-          let ok =
-            match role with
-            | Param i -> check_slot (Option.join (List.nth_opt slots i)) e
-            | Self -> recur e
-            | Other -> true
+        (fun (acc, fi) role e ->
+          (* SOUNDNESS (multi-arg design phase 0): a field that HIDES a
+             demanded parameter ([ctor_field_params]: an [Other] field
+             mentioning it, or a non-identity self-reference) holds values of
+             it outside every slot; it is a recorded skip, not vacuously true
+             and not a recursion against the wrong slots. *)
+          let hid =
+            match Option.bind fparams (fun fs -> List.nth_opt fs fi) with
+            | Some (ps, fty) -> (List.filter (fun (j, _) -> slot j <> None) ps, fty)
+            | None -> ([], "")
           in
-          acc && ok)
-        true roles args
+          let ok =
+            match role, hid with
+            | Param i, _ -> check_slot (slot i) e
+            | (Self | Other), (_ :: _ as hid, fty) ->
+              let names = String.concat "`, `" (List.map snd hid) in
+              record_elem_skip errctx ~span:(arg_span span e) ~callee
+                ~predicate:(first_slot_pred (List.map (fun (j, _) -> slot j) hid))
+                ~what:
+                  (Printf.sprintf
+                     "`%s`'s field holds `%s` inside `%s`, which the element model does not see into"
+                     k.A.txt names fty);
+              false
+            | Self, ([], _) -> recur e
+            (* A field `C(args)` with role [Within] (leftovers phase E): the
+               nested container's entry, its slot [k] the demand on this
+               type's parameter [m.(k)].  New obligations, not only facts:
+               this is where `Dq(1, [0 - 1], [])` against `Dq({Int | _ > 0})`
+               becomes a violation. *)
+            | Within (c, m), _ ->
+              let inner = List.map (function Some j -> slot j | None -> None) m in
+              if List.for_all Option.is_none inner then true
+              else
+                check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee (c, inner) e
+            | Other, ([], _) -> true
+          in
+          (acc && ok, fi + 1))
+        (true, 0) roles args
+      |> fst
   (* Any other expression whose container entry is known — a variable in the
      container env, or (2026-09-18 plan, Phase 1) a call the parametric rule
      or a proved declared return resolves ([container_entry_of_expr]):
@@ -1145,7 +2304,7 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
                let sc = ("$elem", q) :: scope_shadow sc [ "$elem" ] in
                let cx = { cx with sc } in
                let out = ref None in
-               check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~verdict_out:out sg
+               check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~goal_scope_facts:true ~verdict_out:out sg
                  [ A.EVar { A.txt = "$elem"; A.span = xsp } ] rp;
                !out = Some Obligation.Proved
              | Some (Refined (_, p, _)), _ ->
@@ -1166,18 +2325,45 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
              (`let zs = List.filter(ys, fn y -> y > 0)`): re-examine that call
              here.  [lets] retires the record when [xv] or any name the call
              mentions is rebound, so the call still denotes [xv]'s value. *)
-          let via_let =
-            match List.assoc_opt xv lets with
-            | Some (A.EApp (A.EVar { A.txt = g; _ }, args, _)) ->
-              abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
-            | _ -> None
+          let no_entry () =
+            record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots)
+              ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
+            false
           in
-          (match via_let with
-           | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
-           | None ->
-             record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots)
-               ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
-             false)
+          (* [xv] as an entry: Refined-vs-Refined against the demand, exactly
+             as a [contenv] variable. *)
+          let as_entry (entry : string * elem option list) : bool =
+            check_elements ~root errctx defs ctx path lets sc re cb ((xv, entry) :: ce) ~span ~callee
+              (container, slots) a
+          in
+          (match List.assoc_opt xv lets with
+           (* A component of a destructured call (`let (yes, no) = g(…)`, or a
+              single-arm tuple `match`; leftovers design 2026-10-18 §5.4):
+              the tuple self-hypothesis, then the abstract instantiation of
+              that component, then the callee's proved declared tuple return. *)
+           | Some (A.EApp (A.EVar { A.txt = "$tuple_proj"; _ }, [ A.ELit (A.LitInt i, _); A.ELit (A.LitInt n, _); A.EApp (A.EVar { A.txt = g; _ }, args, _) ], _))
+             when tuple_arity ctx defs cb g = Some n ->
+             (match tuple_self_hyp ctx cb g args n with
+              | Some h ->
+                (match List.nth_opt h i with Some (Some entry) -> as_entry entry | _ -> no_entry ())
+              | None ->
+                (match
+                   abstract_flow ~component:i ~root defs ctx path lets sc re cb ce ~span:xsp ~callee
+                     (container, slots) g args
+                 with
+                 | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
+                 | None ->
+                   (match declared_tuple_return ~args ctx cb g with
+                    | Some d when List.length d = n ->
+                      (match List.nth_opt d i with Some (Some entry) -> as_entry entry | _ -> no_entry ())
+                    | _ -> no_entry ())))
+           | Some (A.EApp (A.EVar { A.txt = g; _ }, args, _)) ->
+             (match
+                abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
+              with
+              | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
+              | None -> no_entry ())
+           | _ -> no_entry ())
         | A.EApp (A.EVar { A.txt = g; _ }, args, _) ->
           (match
              abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
@@ -1193,8 +2379,8 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
                { Obligation.span = xsp; callee; predicate = first_slot_pred slots
                ; verdict = Obligation.Proved; kind = Obligation.Precondition };
              true
-           | `Unproved what ->
-             record_param_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) ~what;
+           | `Unproved reason ->
+             record_param_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) ~reason;
              false
            | `Na ->
              record_elem_skip errctx ~span ~callee ~predicate:(first_slot_pred slots)
@@ -1226,10 +2412,10 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
    prove — never a violation (design §4.3). *)
 and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
-    (g : string) (args : A.expr list) : [ `Na | `Proved | `Unproved of string ] =
-  (* Every sub-check reports into a throwaway context: the caller records the
-     one obligation this call owes. *)
-  let errctx = (ignore errctx; Err.create ()) in
+    (g : string) (args : A.expr list) : [ `Na | `Proved | `Unproved of Obligation.reason ] =
+  (* Every sub-check reports into a throwaway context ([discharge_pairs]'):
+     the caller records the one obligation this call owes. *)
+  ignore errctx;
   match callee_sig ctx defs cb g with
   | Some sg when List.length sg.param_tys = List.length args ->
     (match Option.map strip_ty sg.ret_ty with
@@ -1248,12 +2434,165 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
        if (not !shape_ok) || !pairs = [] then `Na
        else if not (parametric_ok ctx g (List.sort_uniq compare (List.map fst !pairs))) then
          `Unproved
+           (Obligation.Parametric_source_unproved
            (Printf.sprintf
               "`%s` is not known to be parametric in its element type (its body may create \
                elements, or its declared type variables are not what it really takes), so \
                the demanded element refinement cannot be traced to its arguments"
-              g)
+              g))
        else
+         (match discharge_pairs ~root defs ctx path lets sc re cb ce ~span ~callee g sg args !pairs with
+          | `Proved -> `Proved
+          | `Unproved w -> `Unproved w)
+     (* A BARE type variable return (fold-invariants design phase 2, §3.1's
+        last row): `sum_pos(fold_left(pos, Nil, fn (acc, x) -> Cons(x, acc)))`.
+        The call's value is a [container] here (this is a container
+        position, and the typechecker instantiated [b] to it), so the whole
+        demand is [b]'s: [(b, Container (container, slots))].  Same gates as
+        above (P1/P2) and the same discharge, every source of [b]; a callback
+        parameter typed [b] assumes the entry ([invariant_params]). *)
+     | Some (A.TyVar b) ->
+       if not (parametric_ok ctx g [ b.A.txt ]) then
+         `Unproved
+           (Obligation.Parametric_source_unproved
+              (Printf.sprintf
+                 "`%s` is not known to be parametric in its return type (its body may create \
+                  the value, or its declared type variables are not what it really takes), so \
+                  the demanded element refinement cannot be traced to its arguments"
+                 g))
+       else
+         (match
+            discharge_pairs ~root defs ctx path lets sc re cb ce ~span ~callee g sg args
+              [ (b.A.txt, Container (container, slots)) ]
+          with
+          | `Proved -> `Proved
+          | `Unproved w -> `Unproved w)
+     | _ -> `Na)
+  | _ -> `Na
+
+(* The [call_ctx] the walk discharges a precondition in: [postcond_param]
+   for nested calls, and the scalar demand entry point ([scalar_demand]) for
+   a call subject that does not reflect.  Every site that has a container env
+   builds its context here; the closure captures [ctx]/[cb]/[ce], so a site
+   whose channels are shadowed (a lambda tail, a `let` annotation) builds its
+   own from the shadowed ones rather than reusing an outer context. *)
+and cx_of ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv) : call_ctx =
+  { root; errctx; postcond = postcond_param ~cb ctx defs ce; path; lets; sc; re; binds = ctx.binds
+  ; demand = Some (fun cx ~span e d -> scalar_demand ~root defs ctx cb ce cx ~span e d) }
+
+(* ── The scalar demand entry point (design 2026-10-18 element-flow
+   follow-ups, phase 2, §3) ─────────────────────────────────────────────
+   A scalar obligation [d] on a call subject `g(args)` that did not reflect
+   (no proved declared return; [check_call]'s unreflectable-subject arm).
+   When [g]'s declared return, refinement-stripped, is a bare type variable
+   [v] and [g] is parametric in it (P1/P2, [parametric_ok]), every value the
+   call can return entered through a source of [v]; [d] holds of the result
+   when it holds of every source ([discharge_pairs] with [(v, Refined d)],
+   the container rule's own discharge).  [`Na] (the skip stays as it was)
+   unless:
+
+   - [d] is CLOSED: a predicate naming another of the callee's parameters is
+     in the callee's namespace, not the subject's (design §3.1, v1);
+   - [g] resolves to a top-level definition ([resolve_key]): a callback or a
+     local has no body to read parametricity from, and keeps its old skip.
+
+   A source that does not meet [d] is [`Unproved], a skip, never a
+   violation (§3.4).  Recursion through a nested subject is structural: every
+   source is a strict subexpression of [e]. *)
+and scalar_demand ~root defs (ctx : rctx) (cb : cbenv) (ce : contenv) (cx : call_ctx)
+    ~(span : A.span) (e : A.expr) ((b0, p, _) as d : string * A.expr * string option)
+  : [ `Na | `Proved | `Unproved of Obligation.reason ] =
+  match e with
+  | A.EApp (A.EVar { A.txt = g; _ }, args, _)
+    when classify_pred b0 [] p = Closed && resolve_key ctx g <> None ->
+    (match callee_sig ctx defs cb g with
+     | Some sg when List.length sg.param_tys = List.length args ->
+       (match Option.map strip_ty sg.ret_ty with
+        | Some (A.TyVar v) when not (parametric_ok ctx g [ v.A.txt ]) ->
+          `Unproved
+            (Obligation.Parametric_source_unproved
+            (Printf.sprintf
+               "`%s` is not known to be parametric in its return type (its body may create \
+                the value, or its declared type variables are not what it really takes), so \
+                the demanded refinement cannot be traced to its arguments"
+               g))
+        | Some (A.TyVar v) ->
+          (* The channels [check_call] was given, not the ones [ctx] was
+             built with. *)
+          let ctx = { ctx with binds = cx.binds } in
+          let by_demand args =
+            match
+              discharge_pairs ~root defs ctx cx.path cx.lets cx.sc cx.re cb ce ~span ~callee:g g sg args
+                [ (v.A.txt, Refined d) ]
+            with
+            | `Proved -> `Proved
+            | `Unproved w -> `Unproved w
+          in
+          (* An annotated accumulator (fold-invariants phase 4): check its
+             invariant [I], then [I] => [d].  Failing either, [d] is tried as
+             the invariant on its own (phase 1) over the arguments with the
+             annotation erased: the annotation is not assumed, and [d]'s
+             hypothesis needs nothing from it. *)
+          (match annotated_acc_of ctx defs cb ~span g sg args with
+           | None -> by_demand args
+           | Some aa ->
+             let via_inv =
+               match annotated_invariant ~root defs ctx cx.path cx.lets cx.sc cx.re cb ce ~span g sg aa with
+               | `Proved -> implied_by ~root defs ctx cx cb ce ~span ~callee:g aa.aa_inv d
+               | `Unproved _ -> false
+             in
+             if via_inv then `Proved else by_demand aa.aa_args)
+        | _ -> `Na)
+     | _ -> `Na)
+  | _ -> `Na
+
+(* The annotated accumulator's own obligation (phase 4): its invariant [I]
+   is the demand on [b], discharged by the phase-1 judgment over the
+   arguments with the annotation erased ([annotated_acc_of]: base, and the
+   step with [I] hypothesised of every [b]-typed parameter).  A refuted base
+   or step is a skip with the accumulator reasons, never a violation (§3.5:
+   the base is data dependent, the method incomplete). *)
+and annotated_invariant ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) (g : string) (sg : fn_sig) (aa : annotated_acc)
+  : [ `Proved | `Unproved of Obligation.reason ] =
+  discharge_pairs ~root defs ctx path lets sc re cb ce ~span ~callee:g g sg aa.aa_args
+    [ (aa.aa_var, Refined aa.aa_inv) ]
+
+(* Does a value known only to meet [inv] meet [d]?  One query over a fresh
+   `$r` carrying [inv], against a scratch ledger and a throwaway error
+   context, like [discharge_pairs]' sub-checks. *)
+and implied_by ~root defs (ctx : rctx) (cx : call_ctx) (cb : cbenv) (ce : contenv) ~(span : A.span)
+    ~(callee : string) (inv : string * A.expr * string option) (d : string * A.expr * string option) : bool =
+  let errctx = Err.create () in
+  let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
+  Fun.protect
+    ~finally:(fun () ->
+      strict_verified := saved_strict;
+      unverified_hinted := saved_hinted)
+    (fun () ->
+      Obligation.with_scratch (fun () ->
+          strict_verified := false;
+          let cx0 = cx_of ~root errctx defs ctx cx.path cx.lets cx.sc cx.re cb ce in
+          let cx' = { cx0 with sc = ("$r", inv) :: scope_shadow cx.sc [ "$r" ] } in
+          let sg1 = elem_sig ~name:"$elem" d in
+          let out = ref None in
+          check_call cx' ~span ~callee ~goal_scope_facts:true ~verdict_out:out sg1
+            [ A.EVar { A.txt = "$r"; A.span = A.dummy_span } ]
+            (List.hd sg1.refined);
+          !out = Some Obligation.Proved))
+
+(* [demand_flow]'s source discharge, given the demanded (type variable,
+   demand) pairs of [g]'s declared return: every source of each variable
+   ([sources_of]) must meet its demand.  Shared with the scalar entry point
+   (design 2026-10-18 element-flow follow-ups §3.2), so both run one
+   discharge under one scratch-ledger discipline.  The caller has already
+   checked P1/P2 ([parametric_ok]) for the variables in [pairs]. *)
+and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) ~(callee : string) (g : string) (sg : fn_sig) (args : A.expr list)
+    (pairs : (string * elem) list) : [ `Proved | `Unproved of Obligation.reason ] =
+  (* Every sub-check reports into a throwaway context: the caller records the
+     one obligation this call owes. *)
+  let errctx = Err.create () in
          (* The entry a parameter type carries when [b] is demanded to meet [d]. *)
          let rec entry_with (t : A.ty) (b : string) (d : elem) : (string * elem option list) option =
            match strip_ty t with
@@ -1270,63 +2609,190 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
                    targs )
            | _ -> None
          in
-         let cx0 = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+         let cx0 = cx_of ~root errctx defs ctx path lets sc re cb ce in
          (* One scalar demand against one expression, in the environment given. *)
          let scalar_ok cx (r : string * A.expr * string option) (e : A.expr) : [ `P | `U | `V ] =
            let sg1 = elem_sig ~name:"$elem" r in
            let out = ref None in
-           check_call cx ~span ~callee:g ~verdict_out:out sg1 [ e ] (List.hd sg1.refined);
+           check_call cx ~span ~callee:g ~goal_scope_facts:true ~verdict_out:out sg1 [ e ] (List.hd sg1.refined);
            match !out with
            | Some Obligation.Proved -> `P
            | Some Obligation.Violated -> `V
            | _ -> `U
          in
          let ok_of b = if b then `P else `U in
+         (* The accumulator-invariant rule (design 2026-10-18 fold-accumulator
+            invariants) may assume a demand of a callback's parameters only
+            for a callee whose recorded body is what runs
+            ([invariant_callee_ok]); its callers have checked P1/P2. *)
+         let hyp_ok = invariant_callee_ok ctx g in
          (* A lambda's tails against a demand on its result, with its
             parameter shadowing (and, where the element rule allows, carrying
-            its domain fact). *)
-         let lambda_ok (i : int) (ps : A.param list) (body : A.expr) (want : [ `S of string * A.expr * string option | `C of string * elem option list ]) =
-           let ps = match lambda_domain_params ctx defs cb ce g sg args i with Some ps' -> ps' | None -> ps in
+            its domain fact).  [ps0] are the outer lambda's own parameters,
+            [ps] the peeled ones ([peel_lambda]; [ps0] itself when nothing was
+            peeled) and [body] the innermost body.  The element facts are
+            [lambda_domain_params]', over every peeled parameter (phase 2).
+            Then every parameter typed with a demanded variable assumes its
+            demand ([invariant_params]): a scalar one as its annotation, a
+            container one as a container-env entry.
+            Returns the verdict and, when the hypothesis was declined, why. *)
+         let lambda_ok (i : int) (ps0 : A.param list) (ps : A.param list) (body : A.expr) (want : [ `S of string * A.expr * string option | `C of string * elem option list ]) =
+           (* A parameter's OWN refinement annotation is not assumed: nothing
+              checks it here (the callee's domain is a type variable, so no
+              pass-site obligation exists), and assuming it proved
+              `need_pos(foldl(xs, 1, fn (acc : {Int | _ > 100}, x) -> acc - 50))`
+              (false: `foldl([5], 1, …)` is -49).  Only the facts given below
+              are. *)
+           let orig = ps in
+           (* Element facts for every parameter, peeled inner ones included
+              (phase 2: `fn a -> fn x -> …` gives `x` its position's fact). *)
+           let ps =
+             match
+               lambda_domain_params
+                 ?peeled:(if List.length ps > List.length ps0 then Some ps else None)
+                 ctx defs cb ce g sg args i
+             with
+             | Some ps' -> ps'
+             | None -> List.map erase_param_refinements ps
+           in
+           let ps, hyp_entries, declined =
+             if not hyp_ok then (ps, [], None)
+             else
+               match invariant_params sg i pairs orig body with
+               | Ok (hyp, entries, _) ->
+                 (* Overlay: a parameter [invariant_params] annotated takes
+                    the hypothesis; the rest keep their element fact or
+                    nothing.  Disjoint by construction (a domain is a demanded
+                    variable or an element-agreed one, never both).  A
+                    container hypothesis is an entry, added below. *)
+                 ( List.map2
+                     (fun ((h : A.param), (o : A.param)) (p : A.param) -> if h != o then h else p)
+                     (List.combine hyp orig) ps
+                 , entries
+                 , None )
+               | Error why -> (ps, [], Some why)
+           in
            let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
            let ctx' = local_shadow ~spans:(param_spans ps) ctx names in
            let sc' = List.fold_left scope_add_param (scope_shadow sc names) ps in
            let cb' = List.fold_left cb_add_param (cb_shadow cb names) ps in
-           let ce' = List.fold_left cont_add_param (cont_shadow ce names) ps in
+           (* A container hypothesis goes in AFTER the parameters are bound:
+              its slots are in the caller's namespace (no lambda parameter is
+              free in them, [invariant_params]' shadowing guard), and its key
+              is the parameter itself.  A hypothesised parameter is erased of
+              its own annotation, so [cont_add_params] gave it no entry. *)
+           let ce' = hyp_entries @ cont_add_params ce ps in
            let lets' = launder_shadow lets names in
+           (* Every tail is checked in the LAMBDA-level env, so a tail naming
+              something bound on the way down (`fn y -> let k = 0 - 5; k`)
+              would read the CALLER's `k`: not checked, never proved
+              ([lambda_tail_rebinds]). *)
            let results =
              List.map
-               (fun (p, t) ->
+               (fun (p, t, bound) ->
+                 if lambda_tail_rebinds bound t <> None then `U
+                 else
+                 (* The tail mentions no inner binder; its path may, and the
+                    lambda-level env would read it as the outer name. *)
+                 let p = rename_path bound p in
                  match want with
                  | `S r ->
-                   scalar_ok { cx0 with path = p; lets = lets'; sc = sc'; binds = ctx'.binds } r t
+                   (* The lambda's own env, in the hook too: a tail call
+                      over the lambda's parameter must not read the caller's
+                      binding of that name. *)
+                   scalar_ok (cx_of ~root errctx defs ctx' p lets' sc' re cb' ce') r t
                  | `C entry ->
                    ok_of (check_elements ~root errctx defs ctx' p lets' sc' re cb' ce' ~span ~callee entry t))
-               (tails (path_shadow path names) body)
+               (tails_bound (path_shadow path names) [] body)
            in
-           if List.mem `V results then `V else if List.for_all (( = ) `P) results then `P else `U
+           ((if List.mem `V results then `V else if List.for_all (( = ) `P) results then `P else `U), declined)
          in
-         let discharge (b : string) (d : elem) (src : source) : [ `P | `U | `V ] * string =
+         (* A NAMED callable passed as argument [i] contributes its declared
+            return (scalar, or proved element return) only when each of its
+            refined parameters is met by what [g] hands it there (review of
+            the fold phase 1 commit): its return is proved ASSUMING those
+            refinements, and at a type-variable domain no pass site obliges
+            them.  `need_pos(fold_left(ys, 1, dec2))` with `dec2(a : {Int | _
+            > 100}, _x) : {Int | _ > 0} do a - 50 end` was proved; it is -49
+            on `[5]`.  A position may assume: the demand [D] of a demanded
+            variable (the invariant hypothesis, [hyp_ok] only; the same
+            induction step a lambda's parameter takes), or the agreed element
+            refinement of its variable ([lambda_domain_facts]).  Anything
+            else, a precondition naming another parameter, or an arity that
+            does not match the chain, declines. *)
+         let named_preconds (i : int) (f : string) (fsg : fn_sig) : (unit, string) result =
+           if fsg.refined = [] then Ok ()
+           else
+             match Option.join (List.nth_opt sg.param_tys i) with
+             | None -> Error (Printf.sprintf "`%s`'s parameters cannot be matched to what `%s` passes" f g)
+             | Some t ->
+               let doms, _ = arrow_chain t in
+               if List.length doms <> List.length fsg.param_names then
+                 Error (Printf.sprintf "`%s`'s parameters cannot be matched to what `%s` passes" f g)
+               else
+                 let efacts = lambda_domain_facts ctx defs cb ce g sg args i in
+                 let pname (rp : rparam) =
+                   match List.nth_opt fsg.param_names rp.idx with
+                   | Some n when n <> callback_param_name -> Printf.sprintf " on `%s`" n
+                   | _ -> ""
+                 in
+                 let unmet (rp : rparam) =
+                   Printf.sprintf "the precondition `%s` of `%s`%s is not known to hold of what `%s` passes it"
+                     (pred_str rp.pred) f (pname rp) g
+                 in
+                 let check (rp : rparam) : (unit, string) result =
+                   if classify_pred rp.binder [] rp.pred <> Closed then Error (unmet rp)
+                   else
+                     let fact =
+                       match Option.map strip_ty (List.nth_opt doms rp.idx) with
+                       | Some (A.TyVar v) ->
+                         (match List.assoc_opt v.A.txt pairs with
+                          | Some (Refined dq) when hyp_ok -> Some dq
+                          | _ -> List.assoc_opt rp.idx efacts)
+                       | _ -> None
+                     in
+                     match fact with
+                     | None -> Error (unmet rp)
+                     | Some q ->
+                       let sc' = ("$p", q) :: scope_shadow sc [ "$p" ] in
+                       (match
+                          scalar_ok { cx0 with sc = sc' } (rp.binder, rp.pred, rp.sort)
+                            (A.EVar { A.txt = "$p"; A.span = A.dummy_span })
+                        with
+                        | `P -> Ok ()
+                        | `U | `V -> Error (unmet rp))
+                 in
+                 List.fold_left (fun acc rp -> match acc with Ok () -> check rp | e -> e) (Ok ()) fsg.refined
+         in
+         let discharge (b : string) (d : elem) (src : source)
+             : [ `P | `U | `V ] * string
+               * [ `Captured of string | `Declined of string | `Precond of string ] option =
            let describe i = Printf.sprintf "argument %d of `%s`" (i + 1) g in
            match src with
            | Src_bare i ->
              let e = List.nth args i in
              (match d with
-              | Refined r -> (scalar_ok cx0 r e, describe i)
+              | Refined r -> (scalar_ok cx0 r e, describe i, None)
               | Container (c, ss) ->
-                (ok_of (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee (c, ss) e), describe i))
+                (ok_of (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee (c, ss) e), describe i, None))
            | Src_elem (i, _) ->
              let e = List.nth args i in
              (match Option.bind (Option.join (List.nth_opt sg.param_tys i)) (fun t -> entry_with t b d) with
               | Some entry ->
                 (ok_of (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee entry e),
-                 Printf.sprintf "the elements of %s" (describe i))
-              | None -> (`U, describe i))
+                 Printf.sprintf "the elements of %s" (describe i), None)
+              | None -> (`U, describe i, None))
            | Src_cod (i, path_in_cod) ->
              let e = List.nth args i in
              let cod =
                match Option.map arrow_chain (Option.join (List.nth_opt sg.param_tys i)) with
                | Some (_ :: _, res) -> Some res
                | _ -> None
+             in
+             let chain =
+               match Option.map arrow_chain (Option.join (List.nth_opt sg.param_tys i)) with
+               | Some (doms, _) -> List.length doms
+               | None -> 0
              in
              let want =
                match path_in_cod, d, cod with
@@ -1336,23 +2802,90 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
                | _ -> None
              in
              let what = Printf.sprintf "the results of the function passed as %s" (describe i) in
-             (match want, e with
-              | None, _ -> (`U, what)
-              | Some w, A.ELam (ps, body, _) -> (lambda_ok i ps body w, what)
-              | Some (`S r), A.EVar { A.txt = f; A.span = fsp } ->
-                (match callee_sig ctx defs cb f with
-                 | Some { ret = Some (rb, rq); ret_sort = rsrt; param_names; _ }
-                   when classify_pred rb [] rq = Closed || param_names = [ callback_param_name ] ->
-                   let sc' = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
-                   (scalar_ok { cx0 with sc = sc' } r (A.EVar { A.txt = "$r"; A.span = fsp }), what)
-                 | _ -> (`U, what))
-              | Some (`C entry), A.EVar { A.txt = f; A.span = fsp } ->
-                (match declared_elem_return ctx cb f with
-                 | Some fe ->
-                   let ce' = (f, fe) :: cont_shadow ce [ f ] in
-                   (ok_of (check_elements ~root errctx defs ctx path lets sc re cb ce' ~span:fsp ~callee entry e), what)
-                 | None -> (`U, what))
-              | Some _, _ -> (`U, what))
+             (* The capture guard: the demand is in the caller's namespace,
+                and a lambda parameter spelled like a name it mentions would
+                read it as the parameter (`need_lt(map(ys, fn n -> n - 1), n)`
+                proved `n - 1 < n`; design 2026-10-18 element-flow
+                follow-ups, row z5).  Over EVERY peeled parameter: an inner
+                `fn a -> fn n -> …` binds `n` around the innermost body. *)
+             let captured (ps : A.param list) w =
+               let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+               List.find_opt
+                 (fun n ->
+                   match w with
+                   | `S (b, p, _) -> n <> b && expr_mentions [ n ] p
+                   | `C entry -> elem_entry_mentions [ n ] entry)
+                 names
+             in
+             (* A curried lambda whose nesting adds up to the chain is read as
+                one lambda of all its parameters (§3.3). *)
+             let peeled =
+               match e with
+               | A.ELam (ps, body, _) ->
+                 (match peel_lambda chain ps body with
+                  | Some (all, inner) -> Some (ps, all, inner)
+                  | None -> Some (ps, ps, body))
+               | _ -> None
+             in
+             (match want, peeled with
+              | None, _ -> (`U, what, None)
+              | Some w, Some (_, all, _) when captured all w <> None ->
+                let n = Option.get (captured all w) in
+                ( `U
+                , Printf.sprintf "%s (the lambda's parameter `%s` shadows a name the demanded refinement mentions)"
+                    what n
+                , Some
+                    (`Captured
+                       (Printf.sprintf "the lambda's parameter `%s` shadows a name the demanded refinement mentions" n)) )
+              | Some w, Some (ps0, all, inner) ->
+                let v, declined = lambda_ok i ps0 all inner w in
+                (v, what, Option.map (fun why -> `Declined why) declined)
+              | Some (`S r), None ->
+                (match e with
+                 | A.EVar { A.txt = f; A.span = fsp } ->
+                   (match callee_sig ctx defs cb f with
+                    | Some ({ ret = Some (rb, rq); ret_sort = rsrt; param_names; _ } as fsg)
+                      when classify_pred rb [] rq = Closed || param_names = [ callback_param_name ] ->
+                      (match named_preconds i f fsg with
+                       | Error why -> (`U, what, Some (`Precond why))
+                       | Ok () ->
+                         let sc' = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
+                         (scalar_ok { cx0 with sc = sc' } r (A.EVar { A.txt = "$r"; A.span = fsp }), what, None))
+                    | _ -> (`U, what, None))
+                 | _ -> (`U, what, None))
+              | Some (`C entry), None ->
+                (match e with
+                 | A.EVar { A.txt = f; A.span = fsp } ->
+                   (match declared_elem_return ctx cb f with
+                    | Some fe ->
+                      (match
+                         match callee_sig ctx defs cb f with
+                         | Some fsg -> named_preconds i f fsg
+                         | None -> Error (Printf.sprintf "`%s` has no signature to read its preconditions from" f)
+                       with
+                       | Error why -> (`U, what, Some (`Precond why))
+                       | Ok () ->
+                         let ce' = (f, fe) :: cont_shadow ce [ f ] in
+                         (ok_of (check_elements ~root errctx defs ctx path lets sc re cb ce' ~span:fsp ~callee entry e), what, None))
+                    | None -> (`U, what, None))
+                 | _ -> (`U, what, None)))
+         in
+         (* An ACCUMULATOR: a demanded variable (a scalar demand, or since
+            phase 2 a container one) that some callback source also consumes
+            (a domain of its arrow chain is exactly the variable).  Its
+            unproved sources are reported as the base or the
+            step (§3.4) rather than as a plain parametric source; only where
+            the hypothesis was available at all ([hyp_ok]). *)
+         let consumes (b : string) (i : int) =
+           match Option.join (List.nth_opt sg.param_tys i) with
+           | Some t ->
+             List.exists
+               (fun dom -> match strip_ty dom with A.TyVar v -> v.A.txt = b | _ -> false)
+               (fst (arrow_chain t))
+           | None -> false
+         in
+         let accumulator (b : string) (_ : elem) (srcs : source list) =
+           hyp_ok && List.exists (function Src_cod (i, _) -> consumes b i | _ -> false) srcs
          in
          let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
          let verdicts =
@@ -1367,28 +2900,179 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
                      (fun (b, d) ->
                        match sources_of sg b with
                        | None | Some [] ->
-                         [ (`U, Printf.sprintf "some way a value of `%s` enters `%s` cannot be traced" b g) ]
-                       | Some srcs -> List.map (discharge b d) srcs)
-                     !pairs))
+                         [ (`U, Printf.sprintf "some way a value of `%s` enters `%s` cannot be traced" b g, None, `Plain) ]
+                       | Some srcs ->
+                         let acc = accumulator b d srcs in
+                         List.map
+                           (fun src ->
+                             let v, what, declined = discharge b d src in
+                             let kind =
+                               if not acc then `Plain
+                               else
+                                 match src with
+                                 | Src_cod (i, _) when consumes b i -> `Step i
+                                 | Src_cod _ -> `Base `Cod
+                                 | Src_bare i -> `Base (`Arg i)
+                                 | Src_elem _ -> `Base `Elems
+                             in
+                             (v, what, declined, kind))
+                           srcs)
+                     pairs))
          in
-         (match List.find_opt (fun (v, _) -> v <> `P) verdicts with
+         (match List.find_opt (fun (v, _, _, _) -> v <> `P) verdicts with
           | None -> `Proved
-          | Some (`V, what) ->
-            `Unproved (Printf.sprintf "%s can fail it for some input" what)
-          | Some (_, what) -> `Unproved (Printf.sprintf "%s is not known to satisfy it" what))
-     | _ -> `Na)
-  | _ -> `Na
+          | Some (v, what, declined, kind) ->
+            let plain what =
+              if v = `V then Printf.sprintf "%s can fail it for some input" what
+              else Printf.sprintf "%s is not known to satisfy it" what
+            in
+            (match kind with
+             | `Plain ->
+               (* A declined hypothesis is named; a capture is already in
+                  [what], as it was before the hypothesis existed. *)
+               `Unproved
+                 (Obligation.Parametric_source_unproved
+                    (match declined with
+                     | Some (`Declined why) ->
+                       Printf.sprintf "%s; no invariant was assumed of it, because %s" (plain what) why
+                     | Some (`Precond why) -> Printf.sprintf "%s: %s" (plain what) why
+                     | Some (`Captured _) | None -> plain what))
+             | `Base i ->
+               (* The initial value named and rendered: "the initial value `0`
+                  (argument 2 of `List.fold_left`)"; a `reduce`'s base is its
+                  elements. *)
+               let base =
+                 match i with
+                 | `Arg i ->
+                   let shown = pred_str (List.nth args i) in
+                   if shown <> "<predicate>" then
+                     Printf.sprintf "the initial value `%s` (%s)" shown what
+                   else Printf.sprintf "the initial value (%s)" what
+                 | `Elems -> Printf.sprintf "the accumulator's first values (%s)" what
+                 | `Cod -> Printf.sprintf "a starting value of the accumulator (%s)" what
+               in
+               `Unproved (Obligation.Accumulator_base_unproved (plain base))
+             | `Step i ->
+               let fn = Printf.sprintf "the function passed as argument %d of `%s`" (i + 1) g in
+               `Unproved
+                 (Obligation.Accumulator_step_unproved
+                    (match declined with
+                     | Some (`Precond why) -> Printf.sprintf "%s: %s" (plain fn) why
+                     | Some (`Declined why | `Captured why) ->
+                       Printf.sprintf "%s; no invariant was assumed of it, because %s" (plain fn) why
+                     | None when v = `V ->
+                       Printf.sprintf
+                         "%s can break it: given an accumulator that satisfies it, some result does not"
+                         fn
+                     | None ->
+                       Printf.sprintf
+                         "%s is not known to preserve it: given an accumulator that satisfies it, its \
+                          result was not proved to"
+                         fn))))
+
+(* One TAIL of a function whose return is a TUPLE of element-refined
+   components (leftovers design 2026-10-18 §5.2), against those components:
+   - a tuple of the right arity: each component by [check_elements];
+   - a call: per component, the tuple self-hypothesis ([tuple_self_hyp]),
+     else the abstract instantiation of that component ([abstract_flow
+     ~component]), else the callee's proved declared tuple return;
+   - anything else (a variable, a `match` result bound earlier): a recorded
+     skip.  Returns whether every component was proved. *)
+let rec check_ret_elems ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) ~(callee : string) (comps : (string * elem option list) option list)
+    (t : A.expr) : bool =
+  let n = List.length comps in
+  let first_pred () =
+    match List.find_map Fun.id comps with Some (_, slots) -> first_slot_pred slots | None -> "<element refinement>"
+  in
+  let untraced what =
+    record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_pred ()) ~what;
+    false
+  in
+  let each (f : int -> string * elem option list -> bool) : bool =
+    List.fold_left
+      (fun (acc, i) c ->
+        match c with
+        | None -> (acc, i + 1)
+        | Some er ->
+          let ok = f i er in
+          (acc && ok, i + 1))
+      (true, 0) comps
+    |> fst
+  in
+  match t with
+  | A.EAnnot (e, _, _) -> check_ret_elems ~root errctx defs ctx path lets sc re cb ce ~span ~callee comps e
+  | A.ETuple (es, _) when List.length es = n ->
+    each (fun i er ->
+        check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er (List.nth es i))
+  | A.EApp (A.EVar { A.txt = g; A.span = gsp }, args, _) ->
+    let label = g ^ "(…)" in
+    (* A component entry stands in for the call under a name no program can
+       spell, so the comparison reads like a variable's. *)
+    let against (er : string * elem option list) (have : (string * elem option list) option) : bool =
+      match have with
+      | Some entry ->
+        check_elements ~root errctx defs ctx path lets sc re cb ((label, entry) :: ce) ~span ~callee er
+          (A.EVar { A.txt = label; A.span = gsp })
+      | None ->
+        record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred (snd er))
+          ~what:(Printf.sprintf "this component of `%s` is not known to satisfy it" label);
+        false
+    in
+    (match tuple_self_hyp ctx cb g args n with
+     | Some h -> each (fun i er -> against er (Option.join (List.nth_opt h i)))
+     | None ->
+       let declared =
+         lazy (match declared_tuple_return ~args ctx cb g with Some d when List.length d = n -> Some d | _ -> None)
+       in
+       each (fun i er ->
+           match
+             abstract_flow ~component:i ~root defs ctx path lets sc re cb ce ~span:(arg_span span t) ~callee er g
+               args
+           with
+           | Some v ->
+             record_abstract_verdict errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred (snd er)) v
+           | None ->
+             (match Lazy.force declared with
+              | Some d -> against er (Option.join (List.nth_opt d i))
+              | None ->
+                record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred (snd er))
+                  ~what:(Printf.sprintf "`%s` declares no proved tuple element return" g);
+                false)))
+  | _ -> untraced "the tuple's components are not traced here"
+
+(* A tail against a function's element return, whichever shape it has. *)
+let check_ret_shape ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) ~(callee : string) (er : ret_elems) (t : A.expr) : bool =
+  match er with
+  | Single er -> check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er t
+  | Tuple comps -> check_ret_elems ~root errctx defs ctx path lets sc re cb ce ~span ~callee comps t
 
 (* The sort marker of a container argument's ELEMENTS, from the typechecker's
    span table ([None] marker = Int): [Some m] when known, [None] when the
    table is absent or the element type has no SMT sort here (a type variable,
    a record, a tuple). *)
-let elem_marker_of_arg (a : A.expr) : string option option =
+(* [~erased_for]: leftovers design §3.3.  Inside a definition that declares
+   abstract refinements, an argument whose elements are an unresolved type
+   variable (`Cons(h, acc)` with `acc : List(a)`) gets the ERASED sort (Int,
+   marker [None]) when the predicate it is checked against applies one of
+   that definition's own abstract refinements: that is the sort
+   [Refine_scope.abstract_tyvar_slot] gives the very same elements, so the
+   obligation and the elements' facts agree.  Anything else keeps the decline
+   (probe q09b: never default a sort at a call site). *)
+let elem_marker_of_arg ?(erased_for : A.expr option) (a : A.expr) : string option option =
   match !call_type_map with
   | None -> None
   | Some tm ->
     let module T = March_typecheck.Typecheck in
     let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
+    let erased_ok () =
+      !current_abstracts <> []
+      && (match erased_for with
+          | Some pred ->
+            List.exists (fun (n, _, _) -> List.mem n !current_abstracts) (Refine_abstract.applications pred)
+          | None -> false)
+    in
     (match Option.map strip (Hashtbl.find_opt tm (T.span_of_expr a)) with
      | Some (T.TCon (_, [ e ])) ->
        (match sort_of_tc_ty e with
@@ -1396,7 +3080,10 @@ let elem_marker_of_arg (a : A.expr) : string option option =
         | Some Smt.SBool -> Some (Some bool_sort)
         | Some Smt.SFloat -> Some (Some float_sort)
         | Some (Smt.SData (n, _)) -> Some (Some n)
-        | _ -> None)
+        | _ ->
+          (match strip e with
+           | T.TVar { contents = T.Unbound _ } when erased_ok () -> Some None
+           | _ -> None))
      | _ -> None)
 
 (* §3.5: a parameter whose element slot applies one of the callee's abstract
@@ -1405,26 +3092,72 @@ let elem_marker_of_arg (a : A.expr) : string option option =
    entry)]: the demand, ready for [check_elements] (ordinary element
    subtyping, as for a declared `List({Int | …})`); [Some (Error why)]: [p]
    could not be instantiated here; [None]: not such a slot. *)
-let abstract_param_entry (ctx : rctx) defs (cb : cbenv) (lets : launder) (g : string) (t : A.ty) (args : A.expr list) (a : A.expr)
+let abstract_param_entry ~root (ctx : rctx) defs path sc re (cb : cbenv) (lets : launder) ~(span : A.span)
+    (g : string) (t : A.ty) (args : A.expr list) (a : A.expr)
   : (string * elem option list, string) result option =
-  match abstract_slot_of_ty t with
-  | Some (c, p) when List.mem p (callee_abstracts ctx g) ->
+  match abstract_slot_of_ty ~abs:(callee_abstracts ctx g) t with
+  | None -> None
+  (* A slot that applies one of the callee's abstract refinements in a shape
+     not read here is a recorded skip, never a fall-through: read through
+     [elem_refinement] by a caller declaring a refinement of the same name,
+     it would mean the caller's predicate (§3.4). *)
+  | Some (Error why) -> Some (Error (Printf.sprintf "the parameter's element slot is not read here: %s" why))
+  | Some (Ok sl) ->
+    let p = sl.sl_abs and c = sl.sl_container in
     (match Option.bind (resolve_key ctx g) (Hashtbl.find_opt fn_defs_tbl) with
      | None -> None
      | Some (_, fd) ->
+       (* A concrete base states the elements' sort; a type variable's is the
+          ARGUMENT's (or, §3.3, the erased one). *)
+       let marker ?erased_for () =
+         match sl.sl_base with `Concrete s -> Some s | `Tyvar -> elem_marker_of_arg ?erased_for a
+       in
        Some
-         (Result.bind (instantiate_abstract ~named:(named_predicate (callee_sig ctx defs cb)) ~local_lambda:(local_lambda_of lets) fd p args) (fun (y, body) ->
+         (let discharge ~y ~fact goal =
+            (* An unknown element sort discharges nothing (and the demand
+               below declines for the same reason).  The §3.3 erased sort is
+               not used here: it depends on the reading being discharged. *)
+            match marker () with
+            | Some m -> scratch_implies ~root defs ctx path lets sc re cb ~span ~callee:g m ~y ~fact goal
+            | None -> false
+          in
+          Result.bind
+            (instantiate_abstract ~named:(named_predicate_n (callee_sig ctx defs cb))
+               ~local_lambda:(local_lambda_of lets) ~discharge fd p args) (fun (y, q) ->
+              let body = instantiate_slot sl (y, q) in
               (* The demand's element sort is the ARGUMENT's: unlike a result
                  demand, nothing declared states it.  Defaulting to Int made a
                  correct `List(String)` call a false violation (probe q09b,
                  2026-10-07), so an unknown sort declines instead. *)
-              match elem_marker_of_arg a with
-              | Some m -> Ok (c, [ Some (Refined (y, body, m)) ])
+              match marker ~erased_for:body () with
+              | Some m ->
+                (* A by-name callback's reading is over `$cb_arg`; name the
+                   element `_` instead, so a diagnostic reads `p(_)`. *)
+                let y, body =
+                  if String.length y > 0 && y.[0] = '$' then
+                    ("_", subst_params [ (y, A.EVar { A.txt = "_"; A.span = A.dummy_span }) ] body)
+                  else (y, body)
+                in
+                Ok (c, [ Some (Refined (y, body, m)) ])
               | None ->
                 Error
                   (Printf.sprintf
                      "the element type of the argument passed for `%s`'s parameter is not known here" p))))
-  | _ -> None
+
+(* Whether every container-return tail [visit_fn] checked in its most recent
+   call was PROVED ([check_elements]' own verdict), and every element
+   obligation at a SELF-call's arguments too ([check_arg_elements]);
+   [gate_elem_returns] reads it straight after a scratch walk. *)
+let last_elem_return_proved : bool ref = ref false
+
+(* The LOCAL `fn` being walked with a declared container return, and its own
+   verdict cell ([visit_local_fn], design 2026-10-18 element-flow follow-ups,
+   phase 3): a call reaching exactly that signature through [cbenv] is a
+   self-call of the local, and an unproved element argument there clears the
+   LOCAL's verdict (the induction gate below), never the enclosing
+   function's — whose own self-calls inside the local keep clearing
+   [last_elem_return_proved]. *)
+let local_elem_self : (fn_sig * bool ref) option ref = ref None
 
 (* The element obligations a call's arguments owe the callee's declared
    parameter types.  An abstract slot is tried FIRST: read through
@@ -1432,21 +3165,64 @@ let abstract_param_entry (ctx : rctx) defs (cb : cbenv) (lets : launder) (g : st
    same name, it would mean the caller's predicate, not the callee's. *)
 let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
     ~(span : A.span) ~(callee : string) (sg : fn_sig) (args : A.expr list) : unit =
+  (* A call to the function being walked: its result is trusted through the
+     structural induction hypothesis ([elem_ret_hyp]) only while the
+     recursive call's own element preconditions hold.  An argument slot that
+     is not PROVED (a skip as much as a violation) breaks the induction, so
+     the function's element return is not proved ([gate_elem_returns]).
+     Review of 0ddfcda45: `go_b(t, pred, Cons(h, acc))` with no `pred(h)`
+     test skipped its `acc : List(a[p])` slot, yet the hypothesis made
+     `go_b`'s return proved and every caller's demand with it; the same held
+     for a concrete slot (`acc : List({Int | _ > 0})`) since before
+     abstract refinements. *)
+  let self_call =
+    match !enclosing_fn with
+    | Some fd ->
+      fd.A.fn_name.A.txt = callee
+      && (not (List.mem callee ctx.locals))
+      && not (List.mem_assoc callee cb)
+    | None -> false
+  in
+  let local_self =
+    match !local_elem_self, List.assoc_opt callee cb with
+    | Some (lsg, cell), Some s when s == lsg -> Some cell
+    | _ -> None
+  in
+  let note ok =
+    if not ok then begin
+      if self_call then last_elem_return_proved := false;
+      Option.iter (fun cell -> cell := false) local_self
+    end
+  in
   List.iteri
     (fun i a ->
       match List.nth_opt sg.param_tys i with
       | Some t ->
-        (match Option.bind t (fun t -> abstract_param_entry ctx defs cb lets callee t args a) with
+        (match
+           Option.bind t (fun t ->
+               abstract_param_entry ~root ctx defs path sc re cb lets ~span:(arg_span span a) callee t args a)
+         with
          | Some (Ok er) ->
-           ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
+           note (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
          | Some (Error why) ->
-           ignore
+           note
              (record_abstract_verdict errctx ~span:(arg_span span a) ~callee
                 ~predicate:"p(_)" (`Uninstantiated why))
          | None ->
+           (* The slot names the CALLEE's parameters: read at this call's
+              actuals, never in the caller's namespace (design 2026-10-18
+              element-flow follow-ups, rows z1-z1''': `need_lt(ys, 10)` was
+              proved against the caller's `let n = 1000`). *)
            (match elem_refinement t with
             | Some er ->
-              ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
+              (match instantiate_entry ~mode:`Any ~formals:sg.param_names ~args er with
+               | Ok er -> note (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er a)
+               | Error why ->
+                 let pname = Option.value ~default:"_" (List.nth_opt sg.param_names i) in
+                 record_elem_skip errctx ~span:(arg_span span a) ~callee
+                   ~predicate:(first_slot_pred (snd er))
+                   ~what:(Printf.sprintf "the parameter `%s` cannot be read at this call: %s" pname why);
+                 note false)
             | None -> ()))
       | None -> ())
     args
@@ -1464,6 +3240,14 @@ let check_field_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cb
         match List.nth_opt sg.param_tys i, List.assoc_opt pn fields with
         | Some t, Some e ->
           (match elem_refinement t with
+           (* A slot naming a sibling FIELD (`xs : List({Int | _ < n})`) has
+              no formal/actual pairing here, and read in the constructing
+              scope it would mean the caller's `n`: a recorded skip, never
+              read (design 2026-10-18 element-flow follow-ups §1.2). *)
+           | Some er when not (entry_is_closed er) ->
+             record_elem_skip errctx ~span:(arg_span span e) ~callee
+               ~predicate:(first_slot_pred (snd er))
+               ~what:(Printf.sprintf "the element refinement of field `%s` names another field" pn)
            | Some er ->
              ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er e)
            | None -> ())
@@ -1489,6 +3273,14 @@ let check_pass_site_elements ~root errctx defs (ctx : rctx) path lets sc re (cb 
       | Some (Some (A.TyArrow (_, cod))) ->
         (match elem_refinement (Some cod) with
          | None -> ()
+         (* An expected codomain naming a parameter (the callee's, or the
+            domain's binder) has no single meaning at this pass site: read in
+            the caller's namespace it named the caller's variable.  A
+            recorded skip (design 2026-10-18 element-flow follow-ups §1.2). *)
+         | Some er when not (entry_is_closed er) ->
+           record_elem_skip errctx ~span:(arg_span span a) ~callee:"<callable>"
+             ~predicate:(first_slot_pred (snd er))
+             ~what:"the expected codomain's element refinement names a parameter, which has no single meaning at the pass site"
          | Some er ->
            (match a with
             | A.ELam (ps, body, lsp) ->
@@ -1496,13 +3288,22 @@ let check_pass_site_elements ~root errctx defs (ctx : rctx) path lets sc re (cb 
               let ctx' = local_shadow ~spans:(param_spans ps) ctx names in
               let sc' = scope_shadow sc names in
               let cb' = List.fold_left cb_add_param (cb_shadow cb names) ps in
-              let ce' = List.fold_left cont_add_param (cont_shadow ce names) ps in
+              let ce' = cont_add_params ce ps in
               List.iter
-                (fun (p, t) ->
-                  ignore
-                    (check_elements ~root errctx defs ctx' p (launder_shadow lets names) sc' re cb' ce'
-                       ~span:lsp ~callee:"return of <lambda>" er t))
-                (tails (path_shadow path names) body)
+                (fun (p, t, bound) ->
+                  match lambda_tail_rebinds bound t with
+                  | Some n ->
+                    record_elem_skip errctx ~span:(arg_span lsp t) ~callee:"return of <lambda>"
+                      ~predicate:(first_slot_pred (snd er))
+                      ~what:
+                        (Printf.sprintf
+                           "the lambda's return expression mentions `%s`, bound inside the lambda" n)
+                  | None ->
+                    let p = rename_path bound p in
+                    ignore
+                      (check_elements ~root errctx defs ctx' p (launder_shadow lets names) sc' re cb' ce'
+                         ~span:lsp ~callee:"return of <lambda>" er t))
+                (tails_bound (path_shadow path names) [] body)
             | A.EVar { A.txt = g; A.span = gsp } ->
               (* The callable's element return stands in for its result under
                  its own name, so the implication reads like a variable's. *)
@@ -1545,6 +3346,24 @@ let let_rhs_admitted (ctx : rctx) (e : A.expr) : bool =
      | None -> false)
   | _ -> let_equality_rhs e
 
+(* A binding of [names] that leaves them UNPINNED (a lambda's or local
+   `fn`'s parameter, a `let?` binder): tag them, and every name whose
+   defining fact the rebinding retires, as opaque (re-review of fece9d212;
+   see [opaque_name_marker]).  Returns the path to continue with, already
+   [path_shadow]ed. *)
+let rebind_opaque (path : (A.expr * bool) list) (lets : launder) (sc : scope) (names : string list)
+  : (A.expr * bool) list =
+  let untied =
+    untied_by_rebinding path names
+    @ List.filter_map
+        (fun (k, rhs) -> if (not (List.mem k names)) && expr_mentions names rhs then Some k else None)
+        lets
+    @ List.filter_map
+        (fun (k, (_, q, _)) -> if (not (List.mem k names)) && expr_mentions names q then Some k else None)
+        sc
+  in
+  tag_opaque (path_shadow path names) (untied @ names)
+
 (* The container-return demand of the function whose body [visit] is walking
    (2026-09-18 plan, Phase 1): its callee label, element entry, clause span,
    and the TAIL expressions not yet checked, identified physically.  [visit]
@@ -1552,29 +3371,97 @@ let let_rhs_admitted (ctx : rctx) (e : A.expr) : bool =
    and container env AT that point, so a tail naming a block-local `let` sees
    the facts that `let` established.  Suspended ([None]) inside every nested
    lambda / local `fn`, which have returns of their own; [visit_fn] checks any
-   tail the walk never reached with the parameter-only env, as before. *)
-let ret_elem_demand : (string * (string * elem option list) * A.span * A.expr list ref) option ref =
+   tail the walk never reached with the parameter-only env, as before.  The
+   last component is the verdict cell a failing tail clears:
+   [last_elem_return_proved] for a top-level function, the local's own cell
+   for a block-level `fn` ([visit_local_fn]), so a local's tails never touch
+   the enclosing function's verdict (design 2026-10-18 element-flow
+   follow-ups, G3-2). *)
+let ret_elem_demand :
+    (string * ret_elems * A.span * A.expr list ref * bool ref) option ref =
   ref None
-
-(* Whether every container-return tail [visit_fn] checked in its most recent
-   call was PROVED ([check_elements]' own verdict); [gate_elem_returns] reads
-   it straight after a scratch walk. *)
-let last_elem_return_proved : bool ref = ref false
 
 let with_no_ret_demand (f : unit -> 'a) : 'a =
   let saved = !ret_elem_demand in
   ret_elem_demand := None;
   Fun.protect ~finally:(fun () -> ret_elem_demand := saved) f
 
+(* The tails of one clause [body] of [fname], which declares the container
+   return [er], for [ret_elem_demand] and the leftover check: each as
+   [(path, tail, (renamed path, renamed tail, complete))].  A tail reached
+   under an inner binding that REBINDS a name the entry mentions (`let n =
+   100` before `[50]` in a function returning `List({Int | _ < n})`) is not
+   about the declared parameter: checked there, `_ < n` meant the local and
+   proved `below(10) = [50]`.  A recorded skip, never checked, and [verdict]
+   is cleared — the scalar post engine's rule
+   ([Refine_post.check_post_induction]'s [check_tails]); design 2026-10-18
+   element-flow follow-ups, row z2.  For the fallback check, which runs in the
+   parameters' env, inner binders clashing with a parameter ([pnames]) are
+   renamed apart in the path and the tail ([Refine_post.rename_free]). *)
+(* The predicate a skip about a container return names: the first slot of
+   its first entry (a [Tuple] has at least one). *)
+let ret_elems_pred (er : ret_elems) : string =
+  match er with
+  | Single e -> first_slot_pred (snd e)
+  | Tuple cs ->
+    (match List.find_map Fun.id cs with
+     | Some e -> first_slot_pred (snd e)
+     | None -> "<element refinement>")
+
+let elem_return_tails errctx ~(label : string) ~(fname : string) ~(span : A.span)
+    ~(verdict : bool ref) ~(pnames : string list) (base : (A.expr * bool) list) (body : A.expr)
+    (er : ret_elems) =
+  List.filter_map
+    (fun (p, t, bound) ->
+      (* Every component of a tuple return counts (leftovers phase C). *)
+      match
+        List.find_opt (fun n -> List.exists (elem_entry_mentions [ n ]) (ret_entries er)) bound
+      with
+      | Some n ->
+        record_elem_skip errctx ~span:(arg_span span t) ~callee:label
+          ~predicate:(ret_elems_pred er)
+          ~what:
+            (Printf.sprintf "the return expression of `%s` under an inner binding that rebinds `%s`"
+               fname n);
+        verdict := false;
+        None
+      | None ->
+        let clash = List.filter (fun n -> List.mem n pnames) bound in
+        let env = List.map (fun n -> (n, inner_name n)) (List.sort_uniq compare clash) in
+        let t', complete = rename_free_checked env t in
+        Some (p, t, (rename_path clash p, t', complete)))
+    (tails_bound base [] body)
+
+(* The tails of [ts] the walk never reached ([remaining]), checked under the
+   env given (the leftover check of [elem_return_tails]'s doc). *)
+let check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~(label : string) ~(fname : string)
+    ~(span : A.span) ~(verdict : bool ref) (er : ret_elems) ts (remaining : A.expr list ref) : unit =
+  List.iter
+    (fun (_, t, (p', t', complete)) ->
+      if List.exists (fun r -> r == t) !remaining then
+        if not complete then begin
+          (* An inner binder the renaming could not reach is still under the
+             parameter's name: not checked. *)
+          record_elem_skip errctx ~span:(arg_span span t) ~callee:label
+            ~predicate:(ret_elems_pred er)
+            ~what:
+              (Printf.sprintf
+                 "the return expression of `%s` under an inner binding of a parameter's name" fname);
+          verdict := false
+        end
+        else if not (check_ret_shape ~root errctx defs ctx p' lets sc re cb ce ~span ~callee:label er t')
+        then verdict := false)
+    ts
+
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
   let go = visit ~root errctx defs ctx path lets sc re cb ce in
   let go_path p = visit ~root errctx defs ctx p lets sc re cb ce in
   (match !ret_elem_demand with
-   | Some (label, er, span, remaining) when List.exists (fun t -> t == e) !remaining ->
+   | Some (label, er, span, remaining, verdict) when List.exists (fun t -> t == e) !remaining ->
      remaining := List.filter (fun t -> t != e) !remaining;
-     if not (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee:label er e) then
-       last_elem_return_proved := false
+     if not (check_ret_shape ~root errctx defs ctx path lets sc re cb ce ~span ~callee:label er e) then
+       verdict := false
    | _ -> ());
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
@@ -1584,7 +3471,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     in
     (match callee with
      | Some sg ->
-       let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+       let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
        check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp ~callee_name:fname sg args;
        check_arg_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:fname sg args;
@@ -1595,6 +3482,31 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      | None when resolved = None && not (List.mem fname ctx.locals) ->
        check_impl_dispatch ~root errctx defs ctx path lets sc re ~span:sp fname args
      | None -> ());
+    (* An annotated accumulator (fold-invariants design phase 4): its
+       invariant is checked here, once per call, and recorded as an
+       obligation on the parameter.  Proved, the lambda's body assumes it of
+       that parameter (below), and the call's result carries it
+       ([Refine_resolve.annotated_acc_facts], read by [postcond_of] for a
+       `let` binding the call).  Not proved: neither, and the entry of an
+       earlier walk is withdrawn. *)
+    let acc_inv =
+      match callee with
+      | Some csg ->
+        (match annotated_acc_of ctx defs cb ~span:sp fname csg args with
+         | Some aa ->
+           let lam_span = match aa.aa_lam with A.ELam (_, _, lsp) -> lsp | _ -> sp in
+           let v = annotated_invariant ~root defs ctx path lets sc re cb ce ~span:sp fname csg aa in
+           record_acc_invariant errctx ~callee:fname aa v;
+           (match v with
+            | `Proved ->
+              Hashtbl.replace annotated_acc_facts lam_span (aa.aa_lam, aa.aa_inv);
+              Some aa
+            | `Unproved _ ->
+              Hashtbl.remove annotated_acc_facts lam_span;
+              None)
+         | None -> None)
+      | None -> None
+    in
     (* An INLINE lambda at a pass site the check above obliged may assume its
        own parameter refinements: the only way to call it is through the
        callee's domain, which was just proved (or reported) to imply them.
@@ -1602,6 +3514,23 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     List.iteri
       (fun i a ->
         match a, callee with
+        (* A proved annotated accumulator: that parameter assumes its
+           annotation (every value [g] hands it met the invariant, design
+           §2.2); the others take their element fact or nothing, as for any
+           lambda argument ([lambda_domain_params], over the arguments with
+           the annotation erased, so its own-annotation guard does not
+           decline the siblings).  An annotated parameter a curried peel
+           found inside is not in [ps]: its inner lambda takes the ordinary
+           walk. *)
+        | A.ELam (ps, body, _), Some csg when (match acc_inv with Some aa -> aa.aa_arg = i | None -> false) ->
+          let aa = Option.get acc_inv in
+          let others =
+            match lambda_domain_params ctx defs cb ce fname csg aa.aa_args i with
+            | Some ps' when List.length ps' = List.length ps -> ps'
+            | _ -> strip_params_refinements ps
+          in
+          let ps' = List.map2 (fun (o : A.param) (q : A.param) -> if o == aa.aa_param then o else q) ps others in
+          visit_lambda ~root errctx defs ctx path lets sc re cb ce ~assume:true ps' body
         | A.ELam (ps, body, _), Some csg
           when (match callable_sig_of_actual ctx defs cb a with
                 | Some (_, gsg) -> pass_site_obligation csg i gsg ~span:sp <> None
@@ -1622,7 +3551,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      parameter refinements — see [Refine_scope.collect_handler_sigs].  A
      message constructor is checked exactly like a call to the handler. *)
   | A.ECon (c, args, sp) ->
-    let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+    let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
     (match handler_sig_of_ctor c.A.txt with
      | Some sg -> List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
      | None ->
@@ -1680,7 +3609,15 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               would let the annotation discharge itself. *)
            let annot_proved =
              match e with
-             | A.ELet (b, _) -> check_let_annotation ~root errctx defs ctx path lets sc re b
+             | A.ELet (b, _) ->
+               let ext names =
+                 let cx =
+                   cx_of ~root errctx defs (local_shadow ctx names) path lets sc re (cb_shadow cb names)
+                     (cont_shadow ce names)
+                 in
+                 (cx.postcond, cx.demand)
+               in
+               check_let_annotation ~ext ~root errctx defs ctx path lets sc re b
              | _ -> None
            in
            (* A container-typed annotation (`let ys : List({Int | p}) = …`)
@@ -1777,6 +3714,43 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
              | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
              | _ -> path
            in
+           (* Opaque names (re-review of fece9d212): the binder of a `let`
+              whose value the path does not pin down, and every name whose
+              defining fact this rebinding retires, are tagged
+              ([opaque_name_marker]), so no solver model naming them is taken
+              as a definite counterexample.  Pinned down: a literal, an
+              admitted equality (pushed above), and a comparison or connective
+              ([predicate_shaped], read through [lets] by [check_call]), each
+              not mentioning its own binder or a name already tagged. *)
+           let path' =
+             match e with
+             | A.ELet (b, _) ->
+               let names = pat_binders b.A.bind_pat in
+               let tagged = path_opaque_names path in
+               let untied =
+                 untied_by_rebinding path names
+                 @ List.filter_map
+                     (fun (k, rhs) ->
+                       if (not (List.mem k names)) && expr_mentions names rhs then Some k else None)
+                     lets
+                 @ List.filter_map
+                     (fun (k, (_, q, _)) ->
+                       if (not (List.mem k names)) && expr_mentions names q then Some k else None)
+                     sc
+               in
+               let pinned =
+                 match b.A.bind_pat, b.A.bind_expr with
+                 | A.PatVar _, rhs when expr_mentions names rhs || expr_mentions tagged rhs -> false
+                 | A.PatVar _, A.ELit _ -> true
+                 | A.PatVar _, rhs when let_rhs_admitted ctx rhs -> true
+                 | A.PatVar _, A.EIf (_, a, b', _) -> let_rhs_admitted ctx a && let_rhs_admitted ctx b'
+                 | A.PatVar _, rhs -> predicate_shaped rhs
+                 | _ -> false
+               in
+               tag_opaque path' (untied @ if pinned then [] else names)
+             | A.ELetFn (n, _, _, _, _) -> tag_opaque path' [ n.A.txt ]
+             | _ -> path'
+           in
            (* The laundering channel: retire first (both the key and any entry
               whose RHS mentions a rebound name — see [launder]), then record a
               single-name binding whose RHS is a direct application, so a later
@@ -1792,6 +3766,9 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                let lets = launder_shadow lets names in
                (match b.A.bind_pat, b.A.bind_expr with
                 | A.PatVar n, (A.EApp _ as rhs) -> (n.A.txt, rhs) :: lets
+                (* `let (yes, no) = g(…)`: each component, as a projection of
+                   the call (leftovers design 2026-10-18 §5.4). *)
+                | A.PatTuple _, _ -> push_tuple_projs lets ~names b.A.bind_pat b.A.bind_expr
                 (* A lambda, for an abstract refinement instantiated from the
                    name (`let f = fn y -> y > 0` then `filter(ys, f)`); the
                    alias arm below copies it forward like an application. *)
@@ -1828,7 +3805,13 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                      parametric_return ~entry_of:(container_entry_of_expr ctx defs cb ce) ctx defs cb
                        fname args
                    with
-                   | Some (`Scalar r) -> (n.A.txt, r) :: sc'
+                   (* [scope_add_binding]'s self-rebinding guard, which this
+                      arm lacked: `let n = List.head(xs)` under `xs :
+                      List({Int | _ < n})` (or `List.head(below(n))`, since
+                      phase 4) would file `n : {_ < n}` about the NEW `n`,
+                      a contradiction that proves anything. *)
+                   | Some (`Scalar ((_, q, _) as r)) when not (self_mentioning b.A.bind_pat q) ->
+                     (n.A.txt, r) :: sc'
                    | _ -> sc')
                 | _ -> sc')
              | _ -> sc
@@ -1876,6 +3859,10 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                (match b.A.bind_pat with
                 | A.PatVar n when not (List.mem_assoc n.A.txt ce') ->
                   (match container_entry_of_expr ctx defs cb ce b.A.bind_expr with
+                   (* An instantiated relational entry naming the bound name
+                      itself (`let k = g(k)`) would be about the NEW `k`:
+                      not stored (phase 4; a closed entry names nothing). *)
+                   | Some entry when elem_entry_mentions [ n.A.txt ] entry -> ce'
                    | Some entry -> (n.A.txt, entry) :: ce'
                    | None -> ce')
                 | _ -> ce')
@@ -1909,7 +3896,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
       (List.fold_left scope_add_param sc (strip_params_refinements ps))
       (List.fold_left recenv_add_param re ps)
       (List.fold_left cb_add_param cb ps)
-      (List.fold_left cont_add_param (cont_shadow ce [ n.A.txt ]) ps)
+      (cont_add_params (cont_shadow ce [ n.A.txt ]) ps)
       body
   | A.EMatch (subj, branches, _) ->
     go subj;
@@ -1917,12 +3904,42 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     @@ List.fold_left
       (fun (earlier : A.branch list) (br : A.branch) ->
         let binders = pat_binders br.A.branch_pat in
+        (* Opaque names (re-review of fece9d212): names whose defining fact
+           this rebinding retires, and the binders themselves unless they
+           destructure an untagged variable (a parameter or a pinned
+           local), whose components are as free as it is. *)
+        let opaque_here =
+          let tagged = path_opaque_names path in
+          let untied =
+            untied_by_rebinding path binders
+            @ List.filter_map
+                (fun (k, rhs) -> if (not (List.mem k binders)) && expr_mentions binders rhs then Some k else None)
+                lets
+            @ List.filter_map
+                (fun (k, (_, q, _)) -> if (not (List.mem k binders)) && expr_mentions binders q then Some k else None)
+                sc
+          in
+          let free_subj =
+            match subj with
+            | A.EVar s -> (not (List.mem s.A.txt tagged)) && not (List.mem s.A.txt binders)
+            | _ -> false
+          in
+          untied @ if free_subj then [] else binders
+        in
         (* A pattern binder shadows a same-named refined outer local. *)
         let sc = scope_shadow sc binders in
         (* …and a same-named fact in the path context, for the same reason. *)
-        let path = path_shadow path binders in
+        let path = tag_opaque (path_shadow path binders) opaque_here in
         (* …and a same-named laundered-guard fact — see [launder]. *)
         let lets = launder_shadow lets binders in
+        (* A SINGLE-arm, guard-free, irrefutable tuple `match` on a call binds
+           its components exactly as `let (a, b) = g(…)` does (leftovers
+           design 2026-10-18 §5.4); any other `match` binds none. *)
+        let lets =
+          match branches, br.A.branch_guard with
+          | [ _ ], None -> push_tuple_projs lets ~names:binders br.A.branch_pat subj
+          | _ -> lets
+        in
         (* …and a same-named callback/alias fact — see [cbenv]. *)
         let cb = cb_shadow cb binders in
         (* …and a same-named container fact — see [contenv]; the OUTER env is
@@ -2071,6 +4088,55 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               | _ -> p)
             p earlier
         in
+        (* Int-literal arms (review of 8e5c15c48): reaching `3 ->` means the
+           scrutinee IS 3, and reaching a later arm past an unguarded `3 ->`
+           means it is not — the same facts the Bool-literal arms above
+           record, stated as `subj == 3` / its negation.  Then everything the
+           walk still cannot state about how this arm is reached (a nested or
+           other refutable pattern, a non-variable scrutinee's tag, an earlier
+           arm with a guard or a pattern whose failure is not recorded) puts
+           the opaque marker in the path ([opaque_path_marker]): no fact, but
+           [check_call] then takes no solver model as a definite
+           counterexample, since it may be unreachable. *)
+        let int_eq (n : int) (sp : A.span) =
+          A.EApp (A.EVar { A.txt = "=="; A.span = sp }, [ subj; A.ELit (A.LitInt n, sp) ], sp)
+        in
+        let p =
+          match br.A.branch_pat with
+          | A.PatLit (A.LitInt n, sp) -> (int_eq n sp, false) :: p
+          | _ -> p
+        in
+        let p =
+          List.fold_left
+            (fun p (prev : A.branch) ->
+              match prev.A.branch_pat, prev.A.branch_guard with
+              | A.PatLit (A.LitInt n, sp), None -> (int_eq n sp, true) :: p
+              | _ -> p)
+            p earlier
+        in
+        let subj_var = match subj with A.EVar s -> not (List.mem s.A.txt binders) | _ -> false in
+        let stated_here =
+          match br.A.branch_pat with
+          | A.PatVar _ | A.PatWild _ -> true
+          | A.PatLit ((A.LitBool _ | A.LitInt _), _) -> true
+          | A.PatTuple (subs, _) -> List.for_all irrefutable_pat subs
+          | A.PatCon (ctor, subs) ->
+            subj_var && sort_of_ctor ctor.A.txt <> None && List.for_all irrefutable_pat subs
+          | _ -> false
+        in
+        let excluded_before (prev : A.branch) =
+          prev.A.branch_guard = None
+          &&
+          match prev.A.branch_pat with
+          | A.PatLit ((A.LitBool _ | A.LitInt _), _) -> true
+          | A.PatCon (ctor, _) ->
+            subj_var
+            && (match arm_excludes_tag prev with Some c -> c = ctor.A.txt && sort_of_ctor c <> None | None -> false)
+          | _ -> false
+        in
+        let p =
+          if stated_here && List.for_all excluded_before earlier then p else opaque_path_marker :: p
+        in
         (* Nested-pattern exclusion over the CURRENT arm's binder.  An earlier
            unguarded arm with the same head and a single nullary refutable
            sub-pattern at index [i] ([arm_excludes_nested]) means that,
@@ -2125,17 +4191,52 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                   field takes slot [i] — a refined slot as a scope fact, a
                   nested container as its own env entry — and a `PatVar` at
                   a [Self] field takes the whole entry. *)
-               List.fold_left2
-                 (fun (sc, ce) role sub ->
-                   match role, sub with
+               (* A [Self] binder takes the entry only at a field that hides
+                  nothing ([ctor_field_params]): at a permuted or non-parameter
+                  self-reference (`N(T(b, a))`) the outer slots are the wrong
+                  ones (multi-arg design phase 0). *)
+               let fparams = Hashtbl.find_opt ctor_field_params k.A.txt in
+               let hides fi =
+                 match Option.bind fparams (fun fs -> List.nth_opt fs fi) with
+                 | Some (_ :: _, _) -> true
+                 | _ -> false
+               in
+               (* A slot naming one of THIS pattern's binders (`Cons(n, _)`
+                  under `List({Int | _ < n})`) is about the OUTER `n`; read
+                  under the binder it would say `n < n` and prove anything.
+                  Such a slot gives no fact (found with phase 4 of the
+                  2026-10-18 element-flow follow-ups, whose instantiated
+                  entries `below(k)` made it reachable from a call; it was
+                  live for a relational parameter's entry before). *)
+               let pb = pat_binders br.A.branch_pat in
+               let captures_binder (b : string) (q : A.expr) =
+                 expr_mentions (List.filter (fun n -> n <> b) pb) q
+               in
+               fst
+               @@ List.fold_left2
+                 (fun ((sc, ce), fi) role sub ->
+                   (match role, sub with
                    | Param i, A.PatVar v ->
                      (match Option.join (List.nth_opt slots i) with
-                      | Some (Refined r) -> ((v.A.txt, r) :: sc, ce)
-                      | Some (Container (c', slots')) -> (sc, (v.A.txt, (c', slots')) :: ce)
+                      | Some (Refined ((b, q, _) as r)) ->
+                        if captures_binder b q then (sc, ce) else ((v.A.txt, r) :: sc, ce)
+                      | Some (Container (c', slots')) ->
+                        if elem_entry_mentions pb (c', slots') then (sc, ce)
+                        else (sc, (v.A.txt, (c', slots')) :: ce)
                       | None -> (sc, ce))
-                   | Self, A.PatVar v -> (sc, (v.A.txt, entry) :: ce)
-                   | _ -> (sc, ce))
-                 (sc, ce) roles subpats
+                   | Self, A.PatVar v when not (hides fi) && not (elem_entry_mentions pb entry) ->
+                     (sc, (v.A.txt, entry) :: ce)
+                   (* A [Within (c, m)] field (leftovers phase E): the
+                      binder is a [c] whose slot [k] carries this
+                      scrutinee's slot [m.(k)].  Like the [Self] arm, no
+                      entry when it mentions one of this pattern's own
+                      binders (element-flow phase 4). *)
+                   | Within (c, m), A.PatVar v ->
+                     let inner = List.map (function Some j -> Option.join (List.nth_opt slots j) | None -> None) m in
+                     if List.for_all Option.is_none inner || elem_entry_mentions pb (c, inner) then (sc, ce)
+                     else (sc, (v.A.txt, (c, inner)) :: ce)
+                   | _ -> (sc, ce)), fi + 1)
+                 ((sc, ce), 0) roles subpats
              | _ -> (sc, ce))
           | _ -> (sc, ce)
         in
@@ -2147,7 +4248,14 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     go_path ((c, false) :: path) t;
     go_path ((c, true) :: path) e
   | A.ECond (arms, _) ->
-    List.iter (fun (c, b) -> go c; go_path ((c, false) :: path) b) arms
+    (* A later arm is reached only when every earlier condition failed,
+       which is not recorded: the opaque marker (review of 8e5c15c48). *)
+    List.iteri
+      (fun i (c, b) ->
+        go c;
+        let path = if i = 0 then path else opaque_path_marker :: path in
+        go_path ((c, false) :: path) b)
+      arms
   (* A record LITERAL is a construction: its type is the unique record (or
      actor state) with exactly this field set — two types of one shape make
      it ambiguous and the literal is not obliged (fail closed). *)
@@ -2157,7 +4265,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      | Some ctor ->
        (match Hashtbl.find_opt !ctor_sigs.by_ctor ctor with
         | Some sg ->
-          let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+          let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
           check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:None;
           check_field_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:ctor sg fs
             ~only:None
@@ -2184,7 +4292,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                      (pn, A.EField (A.EVar { A.txt = x; A.span = xsp }, { A.txt = pn; A.span = xsp }, xsp)))
                  sg.param_names
              in
-             let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
+             let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
              check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:(Some (List.map fst updated));
              check_field_elements ~root errctx defs ctx path lets sc re cb ce ~span:sp ~callee:ctor sg
                fs ~only:(Some (List.map fst updated))
@@ -2204,11 +4312,12 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
        construct exactly like ELet/ELam/EMatch, so it must shadow any
        same-named outer refined local before e2 is visited. *)
     let binders = pat_binders p in
+    let sc_outer = sc in
     let sc = scope_shadow sc binders in
     let re = recenv_shadow re binders in
     let cb = cb_shadow cb binders in
     let ctx = local_shadow ~spans:(pat_binder_spans p) ctx binders in
-    visit ~root errctx defs ctx (path_shadow path binders) (launder_shadow lets binders)
+    visit ~root errctx defs ctx (rebind_opaque path lets sc_outer binders) (launder_shadow lets binders)
       sc re cb (cont_shadow ce binders) e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
@@ -2262,8 +4371,17 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let proved =
     match ret_ty with
     | Some (A.TyRefine _) ->
-      with_post_lookup (postcond_of ~cb ctx defs) (fun () ->
-          check_fn_post_verdict ~root errctx (if escapes then strip_param_refinements fd else fd))
+      (* A scalar return tail gets phase 2's scalar demand hook
+         ([Refine_post.tail_demand]), as a top-level function's does: the
+         hook's env is the local's own parameters (stripped when it
+         escapes), and the local's name, its siblings and the enclosing
+         function's parameters are locals for name resolution ([ctx]), so a
+         tail call to one of them never resolves to a same-named global.  A
+         captured variable is in no env there, so it only ever loses a
+         proof. *)
+      with_tail_demand (!tail_demand_of ~root (local_shadow ctx [ n.A.txt ]) defs) (fun () ->
+          with_post_lookup (postcond_of ~cb ctx defs) (fun () ->
+              check_fn_post_verdict ~root errctx (if escapes then strip_param_refinements fd else fd)))
     | _ -> false
   in
   let sg = if proved then sg else { sg with ret = None; ret_sort = None } in
@@ -2278,13 +4396,82 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   in
   let ctx = local_shadow ~spans:(param_spans ps) ctx names in
   let assumed = if escapes then strip_params_refinements ps else ps in
-  let path = path_shadow path names @ params_field_facts ~span:sp ps in
-  visit ~root errctx defs ctx path (launder_shadow lets names)
-    (List.fold_left scope_add_param sc assumed)
-    (List.fold_left recenv_add_param re ps)
-    (List.fold_left cb_add_param cb ps)
-    (List.fold_left cont_add_param ce ps)
-    body;
+  let path = rebind_opaque path lets sc names @ params_field_facts ~span:sp ps in
+  let lets = launder_shadow lets names in
+  let sc = List.fold_left scope_add_param sc assumed in
+  let re = List.fold_left recenv_add_param re ps in
+  let cb = List.fold_left cb_add_param cb ps in
+  (* The escape rule covers a parameter's ELEMENT refinement too
+     (`ys : List({Int | _ > 0})`): when the local escapes, a call through an
+     alias is not obliged on its arguments, so the body may not assume the
+     elements either.  The names are still bound (an outer entry they shadow
+     is retired), with no entry of their own. *)
+  let ce =
+    cont_add_params ce
+      (if escapes then List.map (fun (p : A.param) -> { p with A.param_ty = None }) ps else ps)
+  in
+  (match ret_elems_of_ty ret_ty with
+   | None -> visit ~root errctx defs ctx path lets sc re cb ce body
+   | Some er ->
+     (* A declared CONTAINER return (design 2026-10-18 element-flow
+        follow-ups, phase 3, §5): every tail is an element obligation,
+        checked in the walk with the facts in scope there and, if the walk
+        never reached it, afterwards in the body's env — [visit_fn]'s rule.
+        The tails are checked under exactly the parameter facts every call
+        establishes ([assumed], the escape rule above; G3-1).
+
+        The verdict is the local's OWN cell, never [last_elem_return_proved]
+        (the enclosing top-level function's, read by [gate_elem_returns]):
+        sharing it would let a local whose tails prove reset the flag after
+        an earlier failing tail of the enclosing function and admit that
+        function falsely (G3-2, row l5).  The enclosing function's self-calls
+        inside the local still clear the global cell ([check_arg_elements]).
+
+        On a proved verdict the signature the block puts into [cbenv] lends
+        its entry to the later calls ([declared_elem_return], by physical
+        identity): only an entry closed or relational over the local's own
+        parameters (read at each call's actuals since phase 4; one naming a
+        captured variable is not a fact at a call site, G3-5), and never one that
+        names the enclosing function's abstract refinements (G3-4).  No
+        self-call hypothesis (G3-3): the signature is registered only after
+        the walk, so a recursive call inside the body carries nothing, and an
+        unproved element argument at that self-call clears the verdict
+        ([local_elem_self], the induction gate). *)
+     let label = Printf.sprintf "return of %s" n.A.txt in
+     let verdict = ref true in
+     let ts =
+       elem_return_tails errctx ~label ~fname:n.A.txt ~span:sp ~verdict
+         ~pnames:(List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps)
+         path body er
+     in
+     let remaining = ref (List.map (fun (_, t, _) -> t) ts) in
+     let saved_self = !local_elem_self in
+     ret_elem_demand := Some (label, er, sp, remaining, verdict);
+     local_elem_self := Some (sg, verdict);
+     Fun.protect
+       ~finally:(fun () ->
+         ret_elem_demand := None;
+         local_elem_self := saved_self)
+       (fun () ->
+         visit ~root errctx defs ctx path lets sc re cb ce body;
+         check_leftover_tails ~root errctx defs ctx lets sc re cb ce ~label ~fname:n.A.txt ~span:sp
+           ~verdict er ts remaining);
+     (* A TUPLE return (leftovers phase C) is checked the same way, tail by
+        tail through [check_ret_shape], but lends nothing:
+        [declared_tuple_return] never reads a [cbenv] entry, and a local's
+        tuple lending is not built (conservative). *)
+     (* Since phase 4 an entry relational over the local's OWN parameters is
+        registered too, and read at each call's actuals; one naming a
+        captured variable is [Unusable] over them and still lends nothing
+        (G3-5). *)
+     (match er with
+      | Single e
+        when !verdict
+             && (entry_is_closed e
+                 || entry_movable ~formals:(List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps) e)
+             && not (entry_mentions !current_abstracts e) ->
+        local_elem_ret_proved := sg :: !local_elem_ret_proved
+      | _ -> ()));
   entry
 
 (* A lambda's body.  [assume] says whether its own parameter refinements may
@@ -2301,12 +4488,12 @@ and visit_lambda ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let ctx = local_shadow ~spans:(param_spans ps) ctx names in
   let assumed = if assume then ps else strip_params_refinements ps in
   let span = match body with A.EVar n -> n.A.span | _ -> A.dummy_span in
-  let path = path_shadow path names @ params_field_facts ~span ps in
+  let path = rebind_opaque path lets sc names @ params_field_facts ~span ps in
   visit ~root errctx defs ctx path (launder_shadow lets names)
     (List.fold_left scope_add_param sc assumed)
     (List.fold_left recenv_add_param re ps)
     (List.fold_left cb_add_param cb ps)
-    (List.fold_left cont_add_param ce ps)
+    (cont_add_params ce ps)
     body
 
 (* =================================================================
@@ -2884,6 +5071,32 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
    §21 The declaration walk
    ================================================================= *)
 
+(* The scalar demand entry point at a top-level function's RETURN TAIL
+   ([Refine_post.tail_demand]; design 2026-10-18 element-flow follow-ups,
+   phase 2, and the fold-accumulator design's §3.1).  The post engine checks a
+   tail against the clause's parameters alone, so the env here is built from
+   those: [sc] is the post engine's own, the callback and container envs come
+   from the parameter list, and every parameter name is a local for name
+   resolution.  [`Na] (the tail's skip unchanged) when the tail mentions a
+   name bound on the way down to it ([bound]: an inner `let`, a `match`
+   binder, a local `fn`): read through the parameter env, that name would
+   mean the parameter or a global, not the binding the tail sees (phase 0's
+   z2 rule). *)
+let tail_demand_impl ~root (ctx : rctx) defs : Refine_post.tail_demand =
+ fun ~path ~bound ~params ~sc d e ->
+  match e with
+  | A.EApp (A.EVar _, _, sp) when not (List.exists (fun n -> expr_mentions [ n ] e) bound) ->
+    let names = List.concat_map fnparam_binders params in
+    let ctx = local_shadow ~spans:(List.concat_map fnparam_spans params) ctx names in
+    let re = List.fold_left recenv_add_fnparam [] params in
+    let cb = List.fold_left cb_add_fnparam [] params in
+    let ce = cont_of_fnparams params in
+    let cx = cx_of ~root (Err.create ()) defs ctx path [] sc re cb ce in
+    scalar_demand ~root defs ctx cb ce cx ~span:sp e d
+  | _ -> `Na
+
+let () = Refine_post.tail_demand_of := tail_demand_impl
+
 (* [assume_params:false] walks the body with the parameter refinements erased,
    so none of them can discharge anything.  Used for an `impl` method whose
    contract [collect_all_defs] could not adopt unambiguously: with no caller
@@ -2940,15 +5153,19 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
       enclosing_fn := saved_enclosing;
       current_abstracts := saved_abstracts)
     (fun () ->
-    with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd);
+    (* Annotated-accumulator facts are read only by the walk that proved
+       them ([Refine_resolve.annotated_acc_facts]). *)
+    Hashtbl.reset annotated_acc_facts;
+    with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
+        with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
     let walked = if assume_params then fd else strip_param_refinements fd in
-    last_elem_return_proved := elem_refinement fd.A.fn_ret_ty <> None;
+    last_elem_return_proved := ret_elems_of_ty fd.A.fn_ret_ty <> None;
     List.iter
       (fun (c : A.fn_clause) ->
         let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
         let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
         let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
-        let ce = List.fold_left cont_add_fnparam [] c.A.fc_params in
+        let ce = cont_of_fnparams c.A.fc_params in
         (* A container-typed RETURN (`: List({Int | p})`) is an element
            obligation on every tail.  [visit] checks each tail when it
            reaches it, with the facts in scope there ([ret_elem_demand]); a
@@ -2956,11 +5173,16 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
            computes and the parameter-only env, the pre-2026-09-18 rule. *)
         let label = Printf.sprintf "return of %s" fd.A.fn_name.A.txt in
         let demand =
-          match elem_refinement fd.A.fn_ret_ty with
+          match ret_elems_of_ty fd.A.fn_ret_ty with
           | Some er ->
             let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-            let ts = tails base c.A.fc_body in
-            Some (er, ts, ref (List.map snd ts))
+            let ts =
+              elem_return_tails errctx ~label ~fname:fd.A.fn_name.A.txt ~span:c.A.fc_span
+                ~verdict:last_elem_return_proved
+                ~pnames:(List.concat_map fnparam_binders c.A.fc_params)
+                base c.A.fc_body er
+            in
+            Some (er, ts, ref (List.map (fun (_, t, _) -> t) ts))
           | None -> None
         in
         let outer_ctx = ctx in
@@ -2987,7 +5209,38 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
                   | A.FPPat _ -> Hashtbl.create 1)
                 c.A.fc_params
             in
-            if entry_is_closed er then Some (fd.A.fn_name.A.txt, sets, er) else None
+            (* Each abstract refinement's definer parameter, with the
+               [cbenv] entry this clause starts with ([hyp_applies]).  A
+               definer the env does not hold (no callback signature)
+               leaves no way to tell it apart from a rebinding: no
+               hypothesis at all. *)
+            let definers =
+              List.map
+                (fun p ->
+                  match Refine_abstract.definer_index ~is_known:known_predicate_fn fd p with
+                  | Some i ->
+                    (match List.nth_opt c.A.fc_params i with
+                     | Some (A.FPNamed prm | A.FPDefault (prm, _)) ->
+                       let n = prm.A.param_name.A.txt in
+                       Option.map (fun sg -> (i, n, sg)) (List.assoc_opt n cb)
+                     | _ -> None)
+                  | None -> None)
+                !current_abstracts
+            in
+            (* Closed, or (phase 4, §2.3) relational over the function's own
+               formals, read at each self-call's actuals ([lend_entry]).  A
+               definition whose clauses spell their parameters differently
+               gets no relational hypothesis ([uniform_formals]). *)
+            let formals = uniform_formals fd in
+            let usable e =
+              entry_is_closed e
+              || match formals with Some formals -> entry_movable ~formals e | None -> false
+            in
+            if List.for_all usable (ret_entries er) && List.for_all Option.is_some definers then
+              Some
+                ( fd.A.fn_name.A.txt, sets, er, List.filter_map Fun.id definers
+                , Option.value ~default:[] formals )
+            else None
           | _ -> None
         in
         (* A PARAMETER named like a module-level function shadows it for callee
@@ -3003,7 +5256,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         let saved_demand = !ret_elem_demand and saved_hyp = !elem_ret_hyp in
         ret_elem_demand :=
           (match demand with
-           | Some (er, _, remaining) -> Some (label, er, c.A.fc_span, remaining)
+           | Some (er, _, remaining) -> Some (label, er, c.A.fc_span, remaining, last_elem_return_proved)
            | None -> None);
         elem_ret_hyp := hyp;
         Fun.protect
@@ -3016,14 +5269,9 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         Fun.protect ~finally:(fun () -> elem_ret_hyp := saved_hyp) @@ fun () ->
         (match demand with
          | Some (er, ts, remaining) ->
-           List.iter
-             (fun (p, t) ->
-               if List.exists (fun r -> r == t) !remaining then
-                 if not
-                      (check_elements ~root errctx defs outer_ctx p [] sc re cb ce ~span:c.A.fc_span
-                         ~callee:label er t)
-                 then last_elem_return_proved := false)
-             ts
+           check_leftover_tails ~root errctx defs outer_ctx [] sc re cb ce ~label
+             ~fname:fd.A.fn_name.A.txt ~span:c.A.fc_span ~verdict:last_elem_return_proved er ts
+             remaining
          | None -> ()))
       walked.A.fn_clauses)
 
@@ -3126,7 +5374,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
     let check_state_literal ~path (e : A.expr) =
       match actor_sig, e with
       | Some sg, A.ERecord (fields, sp) ->
-        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc = []; re = state_re; binds = ctx.binds } in
+        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc = []; re = state_re; binds = ctx.binds; demand = None } in
         check_ctor_fields cx ~span:sp ~callee:aname.A.txt sg
           (List.map (fun ((n : A.name), v) -> (n.A.txt, v)) fields) ~only:None
       | _ -> ()
@@ -3146,7 +5394,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
       local_shadow ~spans:(List.concat_map fnparam_spans init_ps) ctx
         (List.concat_map fnparam_binders init_ps)
     in
-    let init_cont = List.fold_left cont_add_fnparam [] init_ps in
+    let init_cont = cont_of_fnparams init_ps in
     let visit_init e = visit ~root errctx defs init_ctx [] [] init_sc init_re init_cb init_cont e in
     visit_init ad.A.actor_init;
     Option.iter (fun (sc : A.supervise_config) ->
@@ -3179,7 +5427,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         (* (2): a fresh state literal at a tail is a construction of THIS
            actor's state, whatever other record shares its field set. *)
         List.iter (fun (p, t) -> check_state_literal ~path:p t) (tails path h.A.ah_body);
-        visit ~root errctx defs ctx path [] sc re cb (List.fold_left cont_add_fnparam [] ps) h.A.ah_body)
+        visit ~root errctx defs ctx path [] sc re cb (cont_of_fnparams ps) h.A.ah_body)
       ad.A.actor_handlers;
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)
@@ -3225,6 +5473,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear ctor_field_sorts;
   Hashtbl.clear ctor_field_names;
   Hashtbl.clear ctor_param_fields;
+  Hashtbl.clear ctor_field_params;
   Hashtbl.clear axiom_measures;
   Hashtbl.clear measure_base_cases;
   Hashtbl.clear measure_scalar_field_dep;
@@ -3960,7 +6209,7 @@ let has_elem_return (fd : A.fn_def) : bool =
   let saved = !current_abstracts in
   current_abstracts := Refine_abstract.names ~is_known:known_predicate_fn fd;
   Fun.protect ~finally:(fun () -> current_abstracts := saved)
-    (fun () -> elem_refinement fd.A.fn_ret_ty <> None)
+    (fun () -> ret_elems_of_ty fd.A.fn_ret_ty <> None)
 
 let gate_elem_returns ~root defs (decls : A.decl list) : unit =
   let candidates = ref [] in
@@ -4056,6 +6305,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      this module's promotion checks. *)
   enclosing_fn := None;
   Hashtbl.reset abstracts_tbl;
+  Hashtbl.reset annotated_acc_facts;
   stdlib_source_files := stdlib_files;
   let mod_name = m.A.mod_name.A.txt in
   (* Each gate answers "is the alias still safe?"; a `false` is a WITHDRAWAL,
@@ -4088,6 +6338,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset ctor_field_sorts;
   Hashtbl.reset ctor_field_names;
   Hashtbl.reset ctor_param_fields;
+  Hashtbl.reset ctor_field_params;
   Hashtbl.reset ctor_hidden_params;
   Hashtbl.reset axiom_measures;
   Hashtbl.reset measure_base_cases;

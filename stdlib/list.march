@@ -938,7 +938,10 @@ mod List do
 
   doc """
   Splits into (elements satisfying `pred`, elements not satisfying `pred`),
-  each keeping the original order.
+  each keeping the original order.  Every element of the first list satisfies
+  `pred` and none of the second does: an abstract refinement `p`, as for
+  `filter`, so `let (pos, neg) = List.partition(ys, fn y -> y > 0)` gives `pos`
+  the element refinement `y > 0` and `neg` the refinement `!(y > 0)`.
 
   ## Examples
 
@@ -947,17 +950,21 @@ mod List do
       march> List.partition([], fn x -> x > 0)
       ([], [])
   """
-  fn partition(xs : List(a), pred : a -> Bool) : (List(a), List(a)) do
-    fn go(lst : List(a), yes : List(a), no : List(a)) : (List(a), List(a)) do
-      match lst do
-      Nil        -> (reverse(yes), reverse(no))
-      Cons(h, t) -> do
-        if pred(h) do go(t, Cons(h, yes), no)
-        else go(t, yes, Cons(h, no)) end
-      end
-      end
+  fn partition(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)})) do
+    partition_go(xs, pred, Nil, Nil)
+  end
+
+  -- One pass, two accumulators, two reverses: tail-recursive.  `pred` is a
+  -- parameter (not captured by a local `fn`) so the element slots of `yes`
+  -- and `no` are checked at every push and proved on every return.
+  pfn partition_go(lst : List(a), pred : a -> Bool[p], yes : List(a[p]), no : List({a | !p(_)}))
+      : (List(a[p]), List({a | !p(_)})) do
+    match lst do
+    Nil        -> (reverse(yes), reverse(no))
+    Cons(h, t) ->
+      if pred(h) do partition_go(t, pred, Cons(h, yes), no)
+      else partition_go(t, pred, yes, Cons(h, no)) end
     end
-    go(xs, Nil, Nil)
   end
 
   doc """

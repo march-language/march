@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: cannot verify element refinement `_ < 10` on `need_lt`
+-- Relational element refinements, z5 (2026-10-18, design
+-- specs/2026-10-18-element-flow-followups-design.md phase 0): the demand
+-- `_ < n` on `need_lt`'s argument was read under the lambda's own `n`, so
+-- `n - 1 < n` proved `need_lt(List.map(ys, fn n -> n - 1), 10)`, although
+-- `ys = [100]` breaks it.  The demand is now `_ < 10`, the lambda source is
+-- unproved, and `cap verified` makes the skip this error.  Accept
+-- companion: accept/t325.
+mod ElemDemandLambdaCapture do
+  cap verified
+  fn need_lt(xs : List({Int | _ < n}), n : Int) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    need_lt(List.map(ys, fn n -> n - 1), 10)
+  end
+end

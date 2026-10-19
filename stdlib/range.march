@@ -164,14 +164,29 @@ mod Range do
 
   doc """
   Returns the list of elements satisfying predicate `f`, in iteration order.
+  Every element of the result is known to satisfy `f` (an abstract
+  refinement `p`, as for `List.filter`).
 
   ## Examples
 
       march> Range.filter(Range.new(0, 10), fn x -> x % 4 == 0)
       [0, 4, 8]
   """
-  fn filter(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool) : List(Int) do
-    List.filter(to_list(r), f)
+  fn filter(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool[p]) : List(Int[p]) do
+    filter_list(to_list(r), f)
+  end
+
+  -- List.filter's natural body over Int, kept in this module rather than
+  -- delegated: the element contract is proved through the self-call, and a
+  -- same-module call resolves for the checker in every configuration (a
+  -- `List.filter` call does not when stdlib/list.march is itself the entry).
+  -- TRMC makes it a single-traversal loop.
+  pfn filter_list(xs : List(Int), f : Int -> Bool[p]) : List(Int[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if f(h) do Cons(h, filter_list(t, f)) else filter_list(t, f) end
+    end
   end
 
   doc """

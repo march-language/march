@@ -1,6 +1,6 @@
 -- types (1) --
 type Bytes.Bytes = Bytes(String)
--- fns (125) --
+-- fns (126) --
 ## Bytes.b64_alphabet
 fn Bytes.b64_alphabet() : '_ =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -705,7 +705,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 805);
+  Nil() -> __panic_site("stdlib/list.march", 815);
 panic("List.maximum_int: empty list")
   Cons($f755, $f756) -> let t : '_ = $f756 in
 let h : '_ = $f755 in
@@ -723,7 +723,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 791);
+  Nil() -> __panic_site("stdlib/list.march", 801);
 panic("List.minimum_int: empty list")
   Cons($f742, $f743) -> let t : '_ = $f743 in
 let h : '_ = $f742 in
@@ -759,11 +759,25 @@ List.nth_opt(t, $t331)
 
 ## List.partition
 fn List.partition(xs : List('a), pred : ('a) -> Bool) : (List('a), List('a)) =
-  let go : (List('a), List('a), List('a)) -> (List('a), List('a)) = letrec [go] in
-go in
-let $t650 : '_ = alloc Nil() in
-let $t651 : '_ = alloc Nil() in
-go(xs, $t650, $t651)
+  let $t639 : '_ = alloc Nil() in
+let $t640 : '_ = alloc Nil() in
+List.partition_go(xs, pred, $t639, $t640)
+
+## List.partition_go
+fn List.partition_go(lst : List('a), pred : ('a) -> Bool, yes : List('a), no : List('a)) : (List('a), List('a)) =
+  case lst of
+  Nil() -> let $t641 : '_ = List.reverse(yes) in
+let $t642 : '_ = List.reverse(no) in
+($t641, $t642)
+  Cons($f646, $f647) -> let t : '_ = $f647 in
+let h : '_ = $f646 in
+let $t643 : '_ = pred(h) in
+case $t643 of
+  True() -> let $t644 : '_ = alloc Cons(h, yes) in
+List.partition_go(t, pred, $t644, no)
+  _ -> let $t645 : '_ = alloc Cons(h, no) in
+List.partition_go(t, pred, yes, $t645)
+  _ -> panic("non-exhaustive pattern match")
 
 ## List.pfilter
 fn List.pfilter(xs : List('a), pred : ('a) -> Bool) : List('a) =

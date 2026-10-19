@@ -1,0 +1,26 @@
+-- Abstract refinements, the leftovers, phase A
+-- (specs/2026-10-18-abstract-refinements-leftovers-design.md §2): a lambda
+-- passed for `p` is read as an exact predicate through `&&`/`||`/`not`, `if`,
+-- a `match` on a Bool, a let-bound lambda's call and an n-ary helper's
+-- proved `{Bool | _ == e}` return (actuals substituted).  Rows L1, L2, L4,
+-- L5 and L8 of the design.  Under `cap verified`, exit 0 means every demand
+-- PROVED.  Reject companion: reject/t332.
+mod AbsLambdaBodies do
+  cap verified
+  fn is_pos(n : Int) : {Bool | _ == (n > 0)} do n > 0 end
+  fn gt(n : Int, m : Int) : {Bool | _ == (n > m)} do n > m end
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn l1(ys : List(Int)) : Int do sum_pos(List.filter(ys, fn y -> is_pos(y) && y < 100)) end
+  fn l2(ys : List(Int)) : Int do sum_pos(List.filter(ys, fn y -> if y > 0 do y < 100 else false end)) end
+  fn l4(ys : List(Int)) : Int do
+    sum_pos(List.filter(ys, fn y -> match y > 0 do
+      true -> y < 100
+      false -> false
+      end))
+  end
+  fn l5(ys : List(Int)) : Int do sum_pos(List.filter(ys, fn y -> gt(y, 0))) end
+  fn l8(ys : List(Int)) : Int do
+    let f = fn y -> y > 0
+    sum_pos(List.filter(ys, fn y -> f(y) && y < 100))
+  end
+end

@@ -499,6 +499,8 @@ mod HashMap do
   doc """
   Left fold over all entries. `f` is called as `f(acc, key, value) -> new_acc`.
   Iteration order is hash-traversal order (not sorted, not insertion order).
+  Generic in the accumulator `b`, so a refinement demanded of the result
+  is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
 
   ## Examples
 
@@ -507,7 +509,7 @@ mod HashMap do
       march> HashMap.fold(HashMap.new(), "init", fn (acc, k, v) -> acc ++ k)
       "init"
   """
-  fn fold(m, acc, f) do
+  fn fold(m : HashMap(k, v), acc : b, f : b -> k -> v -> b) : b do
     match m do
     HamtHashMap(node) -> node_fold(acc, node, f)
     end

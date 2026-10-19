@@ -1,0 +1,40 @@
+-- Accumulator invariants, phase 4 (2026-10-18, design
+-- specs/2026-10-18-fold-accumulator-invariants-design.md phase 4): the
+-- annotated accumulator.  `fn (acc : {Int | _ > 0}, x) -> step` passed to a
+-- fold-shaped callee parametric in its return variable `b` states the
+-- invariant directly: it is CHECKED (the initial value meets it, and the step
+-- keeps it given an accumulator that does), then ASSUMED of `acc` in the
+-- body, and the call's result carries it, so a `let`-bound fold result
+-- proves a demand with no demand on the call itself.  `List.fold_left`, a
+-- relational invariant over a capture, `List.fold_right` (accumulator
+-- second), an inline demand the annotation implies, and a return tail.
+-- Before phase 4 the annotation was neither checked nor assumed, so every
+-- obligation below was a skip and `cap verified` rejected this module.
+-- Under `cap verified`, exit 0 means every obligation PROVED.  Reject twins:
+-- reject/t451 (the initial value fails it), reject/t452 (the step breaks it).
+mod FoldAnnotatedAccumulator do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  fn need_ge(k : {Int | _ >= n}, n : Int) : Int do k end
+  fn count(ys : List(Int)) : Int do
+    let s = List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) ->
+      let _u = need_pos(acc)
+      acc + 1)
+    need_pos(s) + need_nn(s)
+  end
+  fn above(ys : List(Int), lo : Int) : Int do
+    let s = List.fold_left(ys, lo, fn (acc : {Int | _ >= lo}, _x) -> acc + 1)
+    need_ge(s, lo)
+  end
+  fn total(pos : List({Int | _ > 0})) : Int do
+    let s = List.fold_right(pos, 1, fn (x, acc : {Int | _ > 0}) -> acc + x)
+    need_pos(s)
+  end
+  fn inline(ys : List(Int)) : Int do
+    need_nn(List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1))
+  end
+  fn tail(ys : List(Int)) : {Int | _ > 0} do
+    List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)
+  end
+end

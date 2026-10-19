@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: (accumulator-step-unproved:
+-- Accumulator invariants, phase 2 (2026-10-18, design
+-- specs/2026-10-18-fold-accumulator-invariants-design.md phase 2), a
+-- list-building step that pushes an element nobody refined: assuming the
+-- accumulator is a `List({Int | _ > 0})`, `Cons(x, acc)` with `x` from an
+-- unrefined `ys` is not one.  A skip, never a violation (`ys` may hold only
+-- positives), and an error under `cap verified`.  Rejected before too (an
+-- unreflectable-subject skip); it pins the reason.  Accept twin: accept/t420.
+mod FoldContainerStepUnrefined do
+  cap verified
+  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end
+  fn rev(ys : List(Int)) : Int do
+    sum_pos(List.fold_left(ys, Nil, fn (acc, x) -> Cons(x, acc)))
+  end
+end
