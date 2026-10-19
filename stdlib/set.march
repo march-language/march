@@ -606,8 +606,10 @@ mod Set do
   Left fold over all elements.  Argument order: collection first, init
   second, callback last (uncurried-collection convention).  The
   callback `f` is called uncurried as `f(acc, elem) = new_acc`.
+  Generic in the accumulator `b`, so a refinement demanded of the result
+  is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
   """
-  fn fold(s, acc, f) do
+  fn fold(s : Set(a), acc : b, f : b -> a -> b) : b do
     match s do
     HamtSet(_, node) ->
       node_fold(acc, node, f)

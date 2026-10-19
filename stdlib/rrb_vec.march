@@ -169,6 +169,8 @@ mod RRB do
 
   This is the hot path inside each parallel worker: it visits only the
   elements in the slice's range without copying or allocating.
+  Generic in the accumulator `b`, so a refinement demanded of the result
+  is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
 
   ## Examples
 
@@ -176,7 +178,7 @@ mod RRB do
       march> RRB.fold(s, 0, fn (acc, x) -> acc + x)
       6
   """
-  fn fold(s: Slice(a), zero: b, f): b do
+  fn fold(s: Slice(a), zero: b, f: b -> a -> b): b do
     match s do Slice(arr, lo, hi) ->
       fn go(i: Int, acc: b): b do
         if i >= hi do acc
@@ -284,13 +286,15 @@ mod RRB do
 
   doc """
   Left fold over all elements. `f(acc, elem) = new_acc`. O(n).
+  Generic in the accumulator `b`, so a refinement demanded of the result
+  is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
 
   ## Examples
 
       march> RRB.fold_left(RRB.from_list([1, 2, 3]), 0, fn (acc, x) -> acc + x)
       6
   """
-  fn fold_left(v: Vec(a), zero: b, f): b do
+  fn fold_left(v: Vec(a), zero: b, f: b -> a -> b): b do
     let s = slice(v, 0, length(v))
     fold(s, zero, f)
   end

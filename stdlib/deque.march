@@ -157,12 +157,12 @@ mod Deque do
   end
 
   doc "Left fold over elements from front to back. O(n)."
-  fn fold_left(d : Deque(a), acc : b, f) : b do
+  fn fold_left(d : Deque(a), acc : b, f : b -> a -> b) : b do
     List.fold_left(to_list(d), acc, f)
   end
 
   doc "Right fold over elements from back to front. O(n)."
-  fn fold_right(d : Deque(a), acc : b, f) : b do
+  fn fold_right(d : Deque(a), acc : b, f : a -> b -> b) : b do
     List.fold_right(to_list(d), acc, f)
   end
 
