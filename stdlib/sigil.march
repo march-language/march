@@ -1,11 +1,18 @@
--- Sigil module: handlers for sigil expressions (~R, ~J, etc.)
+-- Sigil module: handlers for sigil expressions (~H, ~toml, ~xml, ~yaml).
 --
--- Most sigils ~X"..." desugar to a call to Sigil.x(content).
--- Handlers receive the interpolated string and return an appropriate type.
+-- Most sigils ~X"..." desugar to a call to Sigil.x(content), with the sigil
+-- name lowercased (~toml"..." -> Sigil.toml("...")). There is no handler for
+-- any other name (e.g. ~R or ~J), so such a sigil fails to resolve.
+-- Handlers receive the literal string and return an appropriate type.
+-- Interpolation (${...}) into a parsed sigil (~toml, ~xml, ~yaml) is a
+-- compile error: the value would be spliced into the source text and could
+-- change the parsed structure.
 --
 -- The ~H sigil for HTML templates is special: it desugars directly to
 -- IOList.from_strings([...]) with separate segments for static and
 -- dynamic parts, avoiding intermediate string concatenation.
+--
+-- doc: try
 
 mod Sigil do
 
@@ -15,20 +22,58 @@ mod Sigil do
   The ~H sigil now desugars directly to IOList.from_strings([...]) at
   compile time, producing multi-segment IOLists without an intermediate
   concatenated string.  This function is retained for backward compatibility
-  with code that calls Sigil.h() explicitly.
+  with code that calls Sigil.h() explicitly. It wraps `content` in a
+  one-segment IOList verbatim: nothing is escaped.
+
+  ## Examples
+
+      march> IOList.to_string(Sigil.h("<p>hi</p>"))
+      "<p>hi</p>"
   """
   fn h(content : String) do
     IOList.from_string(content)
   end
 
+  doc """
+  Handler for `~toml"..."`: parse `content` as a TOML document with
+  `Toml.parse_exn`. Panics with the parse error (and its line and column)
+  on invalid TOML; use `Toml.parse` for a `Result`.
+
+  ## Examples
+
+      march> Sigil.toml("a = 1") == TTable([("a", TInt(1))])
+      true
+      march> Toml.get(Sigil.toml("[server]\nport = 8080"), "server")
+      Some(TTable([("port", TInt(8080))]))
+  """
   fn toml(content : String) do
     Toml.parse_exn(content)
   end
 
+  doc """
+  Handler for `~xml"..."`: parse `content` as an XML document with
+  `Xml.parse_exn`. Panics with the parse error (and its line and column)
+  on malformed XML; use `Xml.parse` for a `Result`.
+
+  ## Examples
+
+      march> Xml.root(Sigil.xml("<a>hi</a>"))
+      Element("a", [], [Text("hi")])
+  """
   fn xml(content : String) do
     Xml.parse_exn(content)
   end
 
+  doc """
+  Handler for `~yaml"..."`: parse `content` as a YAML document with
+  `Yaml.parse_exn`. Panics with the parse error on invalid YAML or an
+  empty document; use `Yaml.parse` for a `Result`.
+
+  ## Examples
+
+      march> Yaml.get_str(Sigil.yaml("name: ada"), "name")
+      Some("ada")
+  """
   fn yaml(content : String) do
     Yaml.parse_exn(content)
   end

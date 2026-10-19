@@ -9,6 +9,7 @@
 --   v5  — name-based using SHA-1 (RFC 4122 §4.3)
 --         NOTE: v5 uses the first 16 bytes of a SHA-1 hash with version/
 --         variant bits set; the resulting UUID is RFC-compliant.
+--   v7  — Unix-millisecond timestamp + random bits (RFC 9562)
 --
 -- The nil UUID ("00000000-0000-0000-0000-000000000000") is the all-zeros UUID.
 -- version/1 returns 0 for the nil UUID.
@@ -150,7 +151,8 @@ mod UUID do
       UUID.v4()  -- e.g. UUID("f47ac10b-58cc-4372-a567-0e02b2c3d479")
 
   Uses the runtime's CSPRNG.  Version bits (4) and variant bits (RFC 4122)
-  are set correctly.
+  are set correctly; the string is lowercase.  The result is random, so
+  there is no executable example; `UUID.version(UUID.v4())` is `4`.
   """
   fn v4() do
     UUID(uuid_v4())
@@ -167,7 +169,9 @@ mod UUID do
 
   v7 UUIDs are sortable by generation time, which dramatically improves
   B-tree locality when used as database primary keys versus v4.  Prefer
-  v7 over v4 for new schemas.
+  v7 over v4 for new schemas.  Two UUIDs made in the same millisecond are
+  not ordered relative to each other (there is no monotonic counter).
+  Reads the clock and the CSPRNG, so there is no executable example.
   """
   fn v7() do
     UUID(uuid_v7())
@@ -180,7 +184,10 @@ mod UUID do
 
   Useful for backfilling historical records with time-ordered UUIDs and
   for deterministic tests that want to control the timestamp portion.
-  The random bits are still CSPRNG-generated on every call.
+  The random bits are still CSPRNG-generated on every call, so two calls
+  with the same timestamp give different UUIDs (no executable example for
+  that reason). Only the low 48 bits of `unix_ms` are encoded: a value of
+  2^48 or more wraps silently. Panics if `unix_ms` is negative.
   """
   fn v7_at(unix_ms : Int) : UUID do
     UUID(uuid_v7_at(unix_ms))

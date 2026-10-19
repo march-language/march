@@ -102,34 +102,104 @@ mod Http do
     end
   end
 
-  doc "Status `200 OK`."
+  doc """
+  Status `200 OK`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_ok())
+      200
+  """
   fn status_ok() : Status do Status(200) end
 
-  doc "Status `201 Created`."
+  doc """
+  Status `201 Created`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_created())
+      201
+  """
   fn status_created() : Status do Status(201) end
 
-  doc "Status `204 No Content`."
+  doc """
+  Status `204 No Content`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_no_content())
+      204
+  """
   fn status_no_content() : Status do Status(204) end
 
-  doc "Status `301 Moved Permanently`."
+  doc """
+  Status `301 Moved Permanently`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_moved())
+      301
+  """
   fn status_moved() : Status do Status(301) end
 
-  doc "Status `302 Found`."
+  doc """
+  Status `302 Found`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_found())
+      302
+  """
   fn status_found() : Status do Status(302) end
 
-  doc "Status `400 Bad Request`."
+  doc """
+  Status `400 Bad Request`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_bad_request())
+      400
+  """
   fn status_bad_request() : Status do Status(400) end
 
-  doc "Status `401 Unauthorized`."
+  doc """
+  Status `401 Unauthorized`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_unauthorized())
+      401
+  """
   fn status_unauthorized() : Status do Status(401) end
 
-  doc "Status `403 Forbidden`."
+  doc """
+  Status `403 Forbidden`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_forbidden())
+      403
+  """
   fn status_forbidden() : Status do Status(403) end
 
-  doc "Status `404 Not Found`."
+  doc """
+  Status `404 Not Found`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_not_found())
+      404
+  """
   fn status_not_found() : Status do Status(404) end
 
-  doc "Status `500 Internal Server Error`."
+  doc """
+  Status `500 Internal Server Error`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_server_error())
+      500
+  """
   fn status_server_error() : Status do Status(500) end
 
   doc """
@@ -223,7 +293,17 @@ mod Http do
     end
   end
 
-  doc "The request scheme, `SchemeHttp` or `SchemeHttps`."
+  doc """
+  The request scheme, `SchemeHttp` or `SchemeHttps`.
+
+  ## Examples
+
+      march> let req = Result.unwrap(Http.get("http://example.com:8080/a/b?x=1"))
+      march> Http.scheme(req)
+      SchemeHttp
+      march> match Http.get("https://example.com/") do Ok(r) -> Http.scheme(r) == SchemeHttps | Err(_) -> false end
+      true
+  """
   fn scheme(req : Request(b)) : Scheme do
     match req do
     Request(_, s, _, _, _, _, _, _) -> s
@@ -244,7 +324,16 @@ mod Http do
     end
   end
 
-  doc "The explicit port, or `None` when the URL named none (the scheme default, 80 or 443, applies)."
+  doc """
+  The explicit port, or `None` when the URL named none (the scheme default, 80 or 443, applies).
+
+  ## Examples
+
+      march> Http.port(req)
+      Some(8080)
+      march> match Http.get("https://example.com/") do Ok(r) -> Http.port(r) == None | Err(_) -> false end
+      true
+  """
   fn port(req : Request(b)) : Option(Int) do
     match req do
     Request(_, _, _, p, _, _, _, _) -> p
@@ -265,21 +354,49 @@ mod Http do
     end
   end
 
-  doc "The raw query string after `?` (without the `?`), or `None` when the URL had none. Not decoded."
+  doc """
+  The raw query string after `?` (without the `?`), or `None` when the URL had none. Not decoded.
+
+  ## Examples
+
+      march> Http.query(req)
+      Some("x=1")
+      march> match Http.get("http://example.com/a%20b?q=a%20b") do Ok(r) -> Http.query(r) == Some("q=a%20b") | Err(_) -> false end
+      true
+  """
   fn query(req : Request(b)) : Option(String) do
     match req do
     Request(_, _, _, _, _, q, _, _) -> q
     end
   end
 
-  doc "All request headers, most recently added first (`set_header` prepends)."
+  doc """
+  All request headers, most recently added first (`set_header` prepends).
+  A request built by `parse_url`/`get` has none.
+
+  ## Examples
+
+      march> Http.headers(req)
+      []
+      march> Http.headers(Http.set_header(Http.set_header(req, "Accept", "*/*"), "X-Id", "7"))
+      [Header("X-Id", "7"), Header("Accept", "*/*")]
+  """
   fn headers(req : Request(b)) : List(Header) do
     match req do
     Request(_, _, _, _, _, _, h, _) -> h
     end
   end
 
-  doc "The request body."
+  doc """
+  The request body: `()` for a request built by `get`/`parse_url`.
+
+  ## Examples
+
+      march> Http.body(req)
+      ()
+      march> match Http.post("http://example.com/api", "{}") do Ok(r) -> Http.body(r) | Err(_) -> "" end
+      "{}"
+  """
   fn body(req : Request(b)) : b do
     match req do
     Request(_, _, _, _, _, _, _, b) -> b
@@ -288,42 +405,94 @@ mod Http do
 
   -- Request transforms
 
-  doc "Replace the request method, keeping every other field."
+  doc """
+  Replace the request method, keeping every other field.
+
+  ## Examples
+
+      march> Http.method_to_string(Http.method(Http.set_method(req, Delete)))
+      "DELETE"
+      march> Http.method_to_string(Http.method(Http.set_method(req, Other("PROPFIND"))))
+      "PROPFIND"
+  """
   fn set_method(req : Request(b), m : Method) : Request(b) do
     match req do
     Request(_, sc, h, p, pa, q, hd, bd) -> Request(m, sc, h, p, pa, q, hd, bd)
     end
   end
 
-  doc "Replace the request scheme. The port is left alone, so switching to `SchemeHttps` does not change an explicit `:80`."
+  doc """
+  Replace the request scheme. The port is left alone, so switching to `SchemeHttps` does not change an explicit `:80`.
+
+  ## Examples
+
+      march> Http.scheme(Http.set_scheme(req, SchemeHttps))
+      SchemeHttps
+      march> Http.port(Http.set_scheme(req, SchemeHttps))
+      Some(8080)
+  """
   fn set_scheme(req : Request(b), s : Scheme) : Request(b) do
     match req do
     Request(m, _, h, p, pa, q, hd, bd) -> Request(m, s, h, p, pa, q, hd, bd)
     end
   end
 
-  doc "Replace the host name."
+  doc """
+  Replace the host name. The value is stored verbatim (not validated).
+
+  ## Examples
+
+      march> Http.host(Http.set_host(req, "api.example.org"))
+      "api.example.org"
+  """
   fn set_host(req : Request(b), new_host : String) : Request(b) do
     match req do
     Request(m, sc, _, p, pa, q, hd, bd) -> Request(m, sc, new_host, p, pa, q, hd, bd)
     end
   end
 
-  doc "Set an explicit port (stored as `Some(new_port)`). The value is not range-checked."
+  doc """
+  Set an explicit port (stored as `Some(new_port)`). The value is not range-checked.
+
+  ## Examples
+
+      march> Http.port(Http.set_port(req, 443))
+      Some(443)
+      march> Http.port(Http.set_port(req, 70000))
+      Some(70000)
+  """
   fn set_port(req : Request(b), new_port : Int) : Request(b) do
     match req do
     Request(m, sc, h, _, pa, q, hd, bd) -> Request(m, sc, h, Some(new_port), pa, q, hd, bd)
     end
   end
 
-  doc "Replace the path. The query string is separate and is left unchanged; pass a path beginning with `/`."
+  doc """
+  Replace the path. The query string is separate and is left unchanged; pass a path beginning with `/`.
+
+  ## Examples
+
+      march> Http.path(Http.set_path(req, "/v2/items"))
+      "/v2/items"
+      march> Http.query(Http.set_path(req, "/v2/items"))
+      Some("x=1")
+  """
   fn set_path(req : Request(b), new_path : String) : Request(b) do
     match req do
     Request(m, sc, h, p, _, q, hd, bd) -> Request(m, sc, h, p, new_path, q, hd, bd)
     end
   end
 
-  doc "Replace the body. The body type may change: a `Request(Unit)` from `get` becomes a `Request(String)` after `set_body(req, \"...\")`."
+  doc """
+  Replace the body. The body type may change: a `Request(Unit)` from `get` becomes a `Request(String)` after `set_body(req, "...")`.
+
+  ## Examples
+
+      march> Http.body(Http.set_body(req, "payload"))
+      "payload"
+      march> Http.body(Http.set_body(req, [1, 2, 3]))
+      [1, 2, 3]
+  """
   fn set_body(req : Request(a), new_body : b) : Request(b) do
     match req do
     Request(m, sc, h, p, pa, q, hd, _) -> Request(m, sc, h, p, pa, q, hd, new_body)
@@ -371,7 +540,16 @@ mod Http do
   doc """
   Prepend a header to `req`.  The name and value are sanitized: NUL, CR,
   and LF bytes are removed to block CRLF-injection attacks even when the
-  inputs come from untrusted sources.  See `sanitize_header_part/1`.
+  inputs come from untrusted sources (a name or value may become empty).
+  An existing header of the same name is not removed; the new one shadows
+  it for `get_request_header`.
+
+  ## Examples
+
+      march> Http.get_request_header(Http.set_header(req, "Accept", "text/html"), "accept")
+      Some("text/html")
+      march> Http.headers(Http.set_header(req, "X-Evil", "a\r\nSet-Cookie: x"))
+      [Header("X-Evil", "aSet-Cookie: x")]
   """
   fn set_header(req : Request(b), name : String, value : String) : Request(b) do
     let safe_name = sanitize_header_part(name)
@@ -384,38 +562,85 @@ mod Http do
 
   -- Response accessors
 
-  doc "The response status."
+  doc """
+  The response status.
+
+  ## Examples
+
+      march> let resp = Response(Status(301), [Header("Location", "/new")], "moved")
+      march> Http.response_status(resp)
+      Status(301)
+  """
   fn response_status(resp : Response(b)) : Status do
     match resp do
     Response(s, _, _) -> s
     end
   end
 
-  doc "All response headers, in the order they were stored."
+  doc """
+  All response headers, in the order they were stored.
+
+  ## Examples
+
+      march> Http.response_headers(resp)
+      [Header("Location", "/new")]
+  """
   fn response_headers(resp : Response(b)) : List(Header) do
     match resp do
     Response(_, h, _) -> h
     end
   end
 
-  doc "The response body."
+  doc """
+  The response body.
+
+  ## Examples
+
+      march> Http.response_body(resp)
+      "moved"
+  """
   fn response_body(resp : Response(b)) : b do
     match resp do
     Response(_, _, b) -> b
     end
   end
 
-  doc "The response status as an integer, e.g. `200`. Shorthand for `status_code(response_status(resp))`."
+  doc """
+  The response status as an integer, e.g. `200`. Shorthand for `status_code(response_status(resp))`.
+
+  ## Examples
+
+      march> Http.response_status_code(resp)
+      301
+  """
   fn response_status_code(resp : Response(b)) : Int do
     status_code(response_status(resp))
   end
 
-  doc "True when the response status is `2xx`."
+  doc """
+  True when the response status is `2xx`.
+
+  ## Examples
+
+      march> Http.response_is_success(Response(Status(204), [], ()))
+      true
+      march> Http.response_is_success(resp)
+      false
+  """
   fn response_is_success(resp : Response(b)) : Bool do
     is_success(response_status(resp))
   end
 
-  doc "True when the response status is `3xx`. Read the target with `get_header(resp, \"location\")`."
+  doc """
+  True when the response status is `3xx`. Read the target with `get_header(resp, "location")`.
+
+  ## Examples
+
+      march> Http.response_is_redirect(resp)
+      true
+      march> Http.response_is_redirect(Response(Status(200), [], ()))
+      false
+  """
   fn response_is_redirect(resp : Response(b)) : Bool do
     is_redirect(response_status(resp))
   end
@@ -426,6 +651,15 @@ mod Http do
   The value of the first response header named `name`, compared
   case-insensitively, or `None`. When a header repeats, only the first is returned;
   scan `response_headers` to see them all.
+
+  ## Examples
+
+      march> Http.get_header(resp, "LOCATION")
+      Some("/new")
+      march> Http.get_header(resp, "content-type")
+      None
+      march> Http.get_header(Response(Status(200), [Header("A", "1"), Header("a", "2")], ()), "a")
+      Some("1")
   """
   fn get_header(resp : Response(b), name : String) : Option(String) do
     let lower_name = string_to_lowercase(name)
@@ -445,6 +679,13 @@ mod Http do
   The value of the first request header named `name`, compared
   case-insensitively, or `None`. `set_header` prepends, so after setting the same
   name twice this returns the most recent value.
+
+  ## Examples
+
+      march> Http.get_request_header(Http.set_header(Http.set_header(req, "X-Id", "1"), "x-id", "2"), "X-ID")
+      Some("2")
+      march> Http.get_request_header(req, "Accept")
+      None
   """
   fn get_request_header(req : Request(b), name : String) : Option(String) do
     let lower_name = string_to_lowercase(name)
@@ -537,12 +778,30 @@ mod Http do
 
   -- Convenience constructors
 
-  doc "A `GET` request for `url`. The same as `parse_url`, named for symmetry with `post`, `put`, ..."
+  doc """
+  A `GET` request for `url`. The same as `parse_url`, named for symmetry with `post`, `put`, ...
+
+  ## Examples
+
+      march> match Http.get("http://example.com/x") do Ok(r) -> Http.method_to_string(Http.method(r)) | Err(_) -> "" end
+      "GET"
+      march> Http.get("example.com") == Err(InvalidScheme("example.com"))
+      true
+  """
   fn get(url : String) : Result(Request(Unit), UrlError) do
     parse_url(url)
   end
 
-  doc "A `POST` request for `url` carrying `bdy`. Fails exactly when `parse_url(url)` does. No `Content-Type` header is added; set one with `set_header`."
+  doc """
+  A `POST` request for `url` carrying `bdy`. Fails exactly when `parse_url(url)` does. No `Content-Type` header is added; set one with `set_header`.
+
+  ## Examples
+
+      march> match Http.post("https://example.com/api", "{}") do Ok(r) -> (Http.method_to_string(Http.method(r)), Http.body(r), Http.headers(r)) | Err(_) -> ("", "", []) end
+      ("POST", "{}", [])
+      march> match Http.post("https://:443/api", "{}") do Ok(_) -> "ok" | Err(MissingHost) -> "missing host" | Err(_) -> "other" end
+      "missing host"
+  """
   fn post(url : String, bdy : b) : Result(Request(b), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(set_body(req, bdy), Post))
@@ -550,7 +809,14 @@ mod Http do
     end
   end
 
-  doc "A `PUT` request for `url` carrying `bdy`. Fails exactly when `parse_url(url)` does."
+  doc """
+  A `PUT` request for `url` carrying `bdy`. Fails exactly when `parse_url(url)` does.
+
+  ## Examples
+
+      march> match Http.put("http://example.com/items/1", "data") do Ok(r) -> (Http.method_to_string(Http.method(r)), Http.body(r)) | Err(_) -> ("", "") end
+      ("PUT", "data")
+  """
   fn put(url : String, bdy : b) : Result(Request(b), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(set_body(req, bdy), Put))
@@ -558,7 +824,14 @@ mod Http do
     end
   end
 
-  doc "A `PATCH` request for `url` carrying `bdy`. Fails exactly when `parse_url(url)` does."
+  doc """
+  A `PATCH` request for `url` carrying `bdy`. Fails exactly when `parse_url(url)` does.
+
+  ## Examples
+
+      march> match Http.patch("http://example.com/items/1", "data") do Ok(r) -> (Http.method_to_string(Http.method(r)), Http.body(r)) | Err(_) -> ("", "") end
+      ("PATCH", "data")
+  """
   fn patch(url : String, bdy : b) : Result(Request(b), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(set_body(req, bdy), Patch))
@@ -566,7 +839,16 @@ mod Http do
     end
   end
 
-  doc "A `DELETE` request for `url`, with a `Unit` body. Fails exactly when `parse_url(url)` does."
+  doc """
+  A `DELETE` request for `url`, with a `Unit` body. Fails exactly when `parse_url(url)` does.
+
+  ## Examples
+
+      march> match Http.delete("http://example.com/items/1") do Ok(r) -> Http.method_to_string(Http.method(r)) | Err(_) -> "" end
+      "DELETE"
+      march> Http.delete("http://example.com:x/") == Err(InvalidPort("example.com:x"))
+      true
+  """
   fn delete(url : String) : Result(Request(Unit), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(req, Delete))
@@ -574,7 +856,14 @@ mod Http do
     end
   end
 
-  doc "A `HEAD` request for `url`. Fails exactly when `parse_url(url)` does."
+  doc """
+  A `HEAD` request for `url`, with a `Unit` body. Fails exactly when `parse_url(url)` does.
+
+  ## Examples
+
+      march> match Http.head("http://example.com/") do Ok(r) -> Http.method_to_string(Http.method(r)) | Err(_) -> "" end
+      "HEAD"
+  """
   fn head(url : String) : Result(Request(Unit), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(req, Head))
@@ -582,7 +871,14 @@ mod Http do
     end
   end
 
-  doc "An `OPTIONS` request for `url`. Fails exactly when `parse_url(url)` does."
+  doc """
+  An `OPTIONS` request for `url`, with a `Unit` body. Fails exactly when `parse_url(url)` does.
+
+  ## Examples
+
+      march> match Http.options("http://example.com/") do Ok(r) -> Http.method_to_string(Http.method(r)) | Err(_) -> "" end
+      "OPTIONS"
+  """
   fn options(url : String) : Result(Request(Unit), UrlError) do
     match parse_url(url) do
     Ok(req) -> Ok(set_method(req, Options))
@@ -623,6 +919,13 @@ mod Http do
   doc """
   Replace the query string with `encode_query(params)`; an empty list removes
   it (`query` becomes `None`). Like `encode_query`, this does not percent-encode.
+
+  ## Examples
+
+      march> Http.query(Http.set_query(req, [("page", "3"), ("sort", "asc")]))
+      Some("page=3&sort=asc")
+      march> Http.query(Http.set_query(req, []))
+      None
   """
   fn set_query(req : Request(b), params : List((String, String))) : Request(b) do
     match req do
