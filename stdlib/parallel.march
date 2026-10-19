@@ -47,10 +47,10 @@ mod Parallel do
 
   ## Examples
 
-      let doubled = Parallel.pmap(RRB.range(1, 6), fn n -> n * 2)
-      -- Vec [2, 4, 6, 8, 10], same order as input
-
-      let rows = Parallel.pmap(records, fn r -> render(r))
+      march> RRB.to_list(Parallel.pmap(RRB.range(1, 6), fn n -> n * 2))
+      [2, 4, 6, 8, 10]
+      march> RRB.to_list(Parallel.pmap(RRB.empty(), fn n -> n * 2))
+      []
   """
   fn pmap(input, f) do
     pmap_n(input, f, System.cpu_count())
@@ -58,7 +58,16 @@ mod Parallel do
 
   doc """
   Like `pmap` but with an explicit `workers` count. Passing a larger value
-  creates finer chunks for heterogeneous per-element workloads.
+  creates finer chunks for heterogeneous per-element workloads. The count is
+  clamped to between 1 and the input length, so `0`, a negative count or one
+  larger than the input is accepted; an empty input spawns no task.
+
+  ## Examples
+
+      march> RRB.to_list(Parallel.pmap_n(RRB.range(1, 6), fn n -> n * n, 2))
+      [1, 4, 9, 16, 25]
+      march> RRB.to_list(Parallel.pmap_n(RRB.from_list([1, 2]), fn n -> n + 1, 0))
+      [2, 3]
   """
   fn pmap_n(input, f, workers: Int) do
     let chunks = RRB.chunk(input, workers)
@@ -83,20 +92,35 @@ mod Parallel do
   `preduce`. Integer merges (`+`, `max`, `||`) are exactly associative and are
   reproducible.
 
+  An empty input returns `zero`.
+
   ## Examples
 
-      -- Parallel sum of squares
-      let sum_sq = Parallel.preduce(RRB.range(1, 1001), 0, fn n -> n * n, fn (a, b) -> a + b)
+  Sum of squares, and a maximum (over non-negative values, so `0` is the
+  identity):
 
-      -- Parallel max (identity = Int.min_value)
-      let mx = Parallel.preduce(scores, -2147483648, fn n -> n, fn (a, b) -> if a > b do a else b end)
+      march> Parallel.preduce(RRB.range(1, 11), 0, fn n -> n * n, fn (a, b) -> a + b)
+      385
+      march> Parallel.preduce(RRB.from_list([3, 9, 4]), 0, fn n -> n, fn (a, b) -> if a > b do a else b end)
+      9
+      march> Parallel.preduce(RRB.empty(), 0, fn n -> n, fn (a, b) -> a + b)
+      0
   """
   fn preduce(input, zero, f, merge) do
     preduce_n(input, zero, f, merge, System.cpu_count())
   end
 
   doc """
-  Like `preduce` but with an explicit `workers` count.
+  Like `preduce` but with an explicit `workers` count, clamped as in
+  `pmap_n`. `zero` seeds every chunk, so it must be the identity of `merge`
+  or it is counted once per chunk.
+
+  ## Examples
+
+      march> Parallel.preduce_n(RRB.range(1, 101), 0, fn n -> n, fn (a, b) -> a + b, 4)
+      5050
+      march> Parallel.preduce_n(RRB.from_list(["a", "b", "c"]), "", fn s -> s, fn (a, b) -> a ++ b, 2)
+      "abc"
   """
   fn preduce_n(input, zero, f, merge, workers: Int) do
     let chunks = RRB.chunk(input, workers)
@@ -134,7 +158,7 @@ mod Parallel do
   ## Examples
 
       march> Parallel.psum_float(RRB.from_list([1.0, 2.5, 3.5]))
-      7.
+      7.0
   """
   fn psum_float(v): Float do
     preduce(v, 0.0, fn n -> n, fn (a, b) -> a +. b)

@@ -108,17 +108,52 @@ mod Vault do
     ()
   end
 
-  doc "Insert or overwrite a key-value pair. Alias for `set`.  Removes any previous TTL."
+  doc """
+  Insert or overwrite a key-value pair. Alias for `set`.  Removes any previous TTL.
+
+  ## Examples
+
+      march> let vp = Vault.new("doc_put")
+      march> Vault.put(vp, "k", 1)
+      march> Vault.put(vp, "k", 2)
+      march> Vault.get_or(vp, "k", 0)  -- Vault.get gives Some(2)
+      2
+  """
   fn put(table, key, value) do
     set(table, key, value)
   end
 
-  doc "Remove a key from the table. Alias for `drop`.  No-op if the key does not exist."
+  doc """
+  Remove a key from the table. Alias for `drop`.  No-op if the key does not exist.
+
+  ## Examples
+
+      march> let vdel = Vault.new("doc_delete")
+      march> Vault.put(vdel, "k", 1)
+      march> Vault.delete(vdel, "k")
+      march> Vault.get(vdel, "k")
+      None
+      march> Vault.delete(vdel, "never_set")
+      ()
+  """
   fn delete(table, key) do
     drop(table, key)
   end
 
-  doc "Remove all entries from the table, leaving it empty."
+  doc """
+  Remove all entries from the table, leaving it empty.  The table stays
+  registered under its name (contrast `close`).  O(n) in the number of
+  entries.
+
+  ## Examples
+
+      march> let vc = Vault.new("doc_clear")
+      march> Vault.set(vc, "a", 1)
+      march> Vault.set(vc, "b", 2)
+      march> Vault.clear(vc)
+      march> Vault.size(vc)
+      0
+  """
   fn clear(table) do
     let ks = vault_keys(table)
     List.each(ks, fn k -> drop(table, k))
@@ -154,12 +189,34 @@ mod Vault do
   A leak gauge: a long-running program whose count keeps rising is making
   tables it never `close`s.  Always counts what the runtime holds, so a
   closed table still counts until its last handle is dropped.
+
+  ## Examples
+
+  The count depends on everything else the process has created, so compare
+  it rather than pinning it:
+
+      march> Vault.live_tables() > 0
+      true
   """
   fn live_tables() : Int do
     vault_live_tables()
   end
 
-  doc "Insert or overwrite a key-value pair.  Removes any previous TTL."
+  doc """
+  Insert or overwrite a key-value pair.  Removes any previous TTL.  Keys keep
+  their kind, so an Int key and a String key that print alike are two
+  entries (see the module header for the compiled-code caveats).
+
+  ## Examples
+
+      march> let vs = Vault.new("doc_set")
+      march> Vault.set(vs, 1, "int key")
+      march> Vault.set(vs, "1", "string key")
+      march> Vault.get(vs, 1)
+      Some("int key")
+      march> Vault.size(vs)
+      2
+  """
   fn set(table, key, value) do
     vault_set(table, key, value)
     reap(table, key)
@@ -169,18 +226,46 @@ mod Vault do
   Insert or overwrite a key-value pair with a TTL (time-to-live).
   The entry expires automatically after `ttl_secs` seconds.
   Expiry is checked lazily — no background thread required.
+
+  ## Examples
+
+      march> let vt = Vault.new("doc_ttl")
+      march> Vault.set_ttl(vt, "session", "abc", 3600)
+      march> Vault.get_or(vt, "session", "expired")  -- Vault.get gives Some("abc")
+      "abc"
   """
   fn set_ttl(table, key, value, ttl_secs) do
     vault_set_ttl(table, key, value, ttl_secs)
     reap(table, key)
   end
 
-  doc "Look up a key.  Returns Some(value) if present and not expired, None otherwise."
+  doc """
+  Look up a key.  Returns Some(value) if present and not expired, None otherwise.
+
+  ## Examples
+
+      march> let vg = Vault.new("doc_get")
+      march> Vault.set(vg, "x", 10)
+      march> Option.is_some(Vault.get(vg, "x"))  -- Vault.get gives Some(10)
+      true
+      march> Vault.get(vg, "missing")
+      None
+  """
   fn get(table, key) do
     vault_get(table, key)
   end
 
-  doc "Remove a key from the table.  No-op if the key does not exist."
+  doc """
+  Remove a key from the table.  No-op if the key does not exist.
+
+  ## Examples
+
+      march> let vd = Vault.new("doc_drop")
+      march> Vault.set(vd, "x", 1)
+      march> Vault.drop(vd, "x")
+      march> Vault.has(vd, "x")
+      false
+  """
   fn drop(table, key) do
     vault_drop(table, key)
     reap(table, key)
@@ -192,6 +277,17 @@ mod Vault do
 
   `f` must be `(v) -> v` for a `Vault(v)` — an update cannot change the
   table's element type.
+
+  ## Examples
+
+      march> let vu = Vault.new("doc_update")
+      march> Vault.set(vu, "n", 10)
+      march> Vault.update(vu, "n", fn x -> x * 2)
+      march> Vault.get_or(vu, "n", 0)  -- Vault.get gives Some(20)
+      20
+      march> Vault.update(vu, "absent", fn x -> x * 2)
+      march> Vault.has(vu, "absent")
+      false
   """
   fn update(table, key, f) do
     vault_update(table, key, f)
@@ -206,6 +302,16 @@ mod Vault do
   Unlike `set`, the check-and-insert is a single atomic step under the shard
   lock, so concurrent callers racing on the same key cannot both succeed —
   exactly one receives `true`. Use it as a lock or an idempotency claim.
+
+  ## Examples
+
+      march> let vn = Vault.new("doc_put_new")
+      march> Vault.put_new(vn, "lock", "a")
+      true
+      march> Vault.put_new(vn, "lock", "b")
+      false
+      march> Vault.get_or(vn, "lock", "")  -- the first claim is kept
+      "a"
   """
   fn put_new(table, key, value) : Bool do
     let won = vault_put_new(table, key, value, 0)
@@ -216,6 +322,14 @@ mod Vault do
   doc """
   Like `put_new`, but the claimed entry expires after `ttl_secs` seconds so a
   caller that crashes after claiming the key does not hold it forever.
+
+  ## Examples
+
+      march> let vj = Vault.new("doc_put_new_ttl")
+      march> Vault.put_new_ttl(vj, "job", "worker1", 60)
+      true
+      march> Vault.put_new_ttl(vj, "job", "worker2", 60)
+      false
   """
   fn put_new_ttl(table, key, value, ttl_secs) : Bool do
     let won = vault_put_new(table, key, value, ttl_secs)
@@ -230,6 +344,16 @@ mod Vault do
   A missing or non-integer entry is treated as 0. Any existing TTL on
   the key is preserved. Concurrent increments do not lose updates (unlike a
   `get` + `set` pair).
+
+  ## Examples
+
+      march> let vi = Vault.new("doc_incr")
+      march> Vault.incr(vi, "hits", 1)
+      1
+      march> Vault.incr(vi, "hits", 5)
+      6
+      march> Vault.incr(vi, "hits", -2)
+      4
   """
   fn incr(table, key, delta) : Int do
     vault_incr(table, key, delta)
@@ -243,6 +367,15 @@ mod Vault do
   clobber each other (unlike a `get` + `List.append` + `set`). A missing or
   non-list entry starts from the empty list; `max <= 0` keeps everything. Any
   existing TTL is preserved. Ideal for fixed-size ring buffers and inboxes.
+
+  ## Examples
+
+      march> let vb = Vault.new("doc_push_capped")
+      march> Vault.push_capped(vb, "log", 1, 2)
+      march> Vault.push_capped(vb, "log", 2, 2)
+      march> Vault.push_capped(vb, "log", 3, 2)
+      march> Vault.get(vb, "log")
+      Some([2, 3])
   """
   fn push_capped(table, key, value, max) : Unit do
     vault_push_capped(table, key, value, max)
@@ -257,12 +390,33 @@ mod Vault do
   shard while a later one is being counted is not included. Concurrent writers
   could always change the answer, so treat it as a recent count, not a
   guarantee.
+
+  ## Examples
+
+      march> let vz = Vault.new("doc_size")
+      march> Vault.size(vz)
+      0
+      march> Vault.set(vz, "a", 1)
+      march> Vault.set(vz, "a", 2)
+      march> Vault.size(vz)
+      1
   """
   fn size(table) : Int do
     vault_size(table)
   end
 
-  doc "Return the value at `key`, or `default` if absent or expired."
+  doc """
+  Return the value at `key`, or `default` if absent or expired.
+
+  ## Examples
+
+      march> let vo = Vault.new("doc_get_or")
+      march> Vault.set(vo, "x", 5)
+      march> Vault.get_or(vo, "x", 0)
+      5
+      march> Vault.get_or(vo, "y", 0)
+      0
+  """
   fn get_or(table, key, default) do
     match vault_get(table, key) do
     Some(v) -> v
@@ -277,12 +431,33 @@ mod Vault do
 
   Mints a handle from a string, so like `new`/`open` it chooses the element
   type rather than checking it.
+
+  ## Examples
+
+  A handle has no printable form, so test for presence:
+
+      march> let vw = Vault.new("doc_whereis")
+      march> Option.is_some(Vault.whereis("doc_whereis"))
+      true
+      march> Option.is_some(Vault.whereis("doc_never_created"))
+      false
   """
   fn whereis(name) : Option(Vault(v)) do
     vault_whereis(name)
   end
 
-  doc "Return true if `key` exists in the table and has not expired."
+  doc """
+  Return true if `key` exists in the table and has not expired.
+
+  ## Examples
+
+      march> let vh = Vault.new("doc_has")
+      march> Vault.set(vh, "x", 1)
+      march> Vault.has(vh, "x")
+      true
+      march> Vault.has(vh, "y")
+      false
+  """
   fn has(table, key) : Bool do
     match vault_get(table, key) do
     Some(_) -> true
@@ -314,7 +489,20 @@ mod Vault do
     vault_keys(table)
   end
 
-  doc "Return all key-value pairs in the table as a list of (String, a) tuples."
+  doc """
+  Return all key-value pairs in the table as a list of (String, a) tuples,
+  in unspecified order.  Built from `keys`, so it carries the same caveat:
+  non-String keys come back encoded in compiled code.  O(n).
+
+  ## Examples
+
+      march> let va = Vault.new("doc_all")
+      march> Vault.set(va, "x", 1)
+      march> Vault.all(va)
+      [("x", 1)]
+      march> Vault.all(Vault.new("doc_all_empty"))
+      []
+  """
   fn all(table) do
     let ks = keys(table)
     List.filter_map(ks, fn k ->
@@ -357,7 +545,19 @@ mod Vault do
     vault_ns_get(ns, key)
   end
 
-  doc "Remove a key from a named vault namespace.  No-op if the namespace or key is absent."
+  doc """
+  Remove a key from a named vault namespace.  No-op if the namespace or key is
+  absent; unlike `ns_set` it never creates the namespace.
+
+  ## Examples
+
+      march> Vault.ns_set("doc_ns_drop", "k", 7)
+      march> Vault.ns_drop("doc_ns_drop", "k")
+      march> Vault.ns_get("doc_ns_drop", "k")
+      None
+      march> Vault.ns_drop("doc_ns_absent", "k")
+      ()
+  """
   fn ns_drop(ns, key) do
     match vault_whereis(ns) do
     Some(t) -> drop(t, key)
