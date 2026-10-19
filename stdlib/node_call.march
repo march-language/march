@@ -16,11 +16,28 @@ mod NodeCall do
 
   -- ── Caller side ─────────────────────────────────────────────────────────────
 
-  -- Send one RPC request on [fd] and wait for the matching reply.
-  -- [now_ms] is compared against [deadline_ms] for an up-front timeout check
-  -- (pass `unix_time_ms(())` at call time). If the deadline has already passed,
-  -- returns Err(DeadlineExceeded) immediately without sending.
-  -- Returns Ok(payload_bytes) on success or Err(CallError) on failure.
+  doc """
+  Send one RPC request for [fref] with MessagePack-encoded [args] on [fd]
+  and block until the reply carrying [correlation] arrives. Frames that are
+  not that reply are skipped. [now_ms] is compared against [deadline_ms]
+  once, up front (pass the current unix time in ms): when
+  `now_ms >= deadline_ms` it returns `Err(DeadlineExceeded)` without
+  sending. After the request is sent the deadline is only carried to the
+  peer, not enforced here: the call waits until a matching reply or a
+  socket error.
+
+  Returns `Ok(payload)` (the MessagePack-encoded return value), or `Err`:
+  `DeadlineExceeded`; `Forbidden` when certificate mode refuses raw frames
+  on [fd] (counted, nothing sent); `NoConnection` when the send or a read
+  fails; or the error the peer replied with (`NoTarget`, `TypeMismatch`,
+  `VersionSkew`, `RemoteExit(reason)`, `Forbidden`).
+
+      let fref = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
+      match NodeCall.call(fd, fref, Msgpack.encode(args), me, deadline, 1, now) do
+        Ok(bytes) -> Msgpack.decode(bytes)
+        Err(e) -> Err(RemoteCall.error_message(e))
+      end
+  """
   fn call(fd : Int, fref : RemoteRef, args : List(Int),
           my_pid : Pid, deadline_ms : Int, correlation : Int,
           now_ms : Int) : Result(List(Int), CallError) do
@@ -65,10 +82,16 @@ mod NodeCall do
 
   -- ── Server side ──────────────────────────────────────────────────────────────
 
-  -- Read one RPC request frame from [fd], dispatch it against [targets], and
-  -- send the reply frame back. Malformed request frames (None from handle_frame)
-  -- are silently dropped — no reply is sent (there is no valid correlation to
-  -- echo back). Returns Err on I/O error.
+  doc """
+  Read one RPC request frame from [fd], dispatch it against [targets]
+  (`NodeRpc.handle_frame`, which falls back to the compiler-registered
+  remote stubs), and send the reply frame back. A frame that does not decode
+  as a request is dropped with no reply (there is no correlation to echo
+  back), and is still `Ok`. On a connection that refuses raw frames
+  (certificate mode without `raw_send`) the request is not dispatched: it is
+  counted and answered `Forbidden`. Returns `Err` with the message on a read
+  or write failure.
+  """
   fn serve_one(targets : Targets, fd : Int) : Result((), String) do
     match NetKernel.recv_frame(fd, Nil) do
       Err(e) -> Err(e)
@@ -99,7 +122,13 @@ mod NodeCall do
     end
   end
 
-  -- Serve RPC requests on [fd] until the connection closes or an I/O error occurs.
+  doc """
+  Serve RPC requests on [fd] (`serve_one`, repeatedly) until the connection
+  closes or an I/O error occurs, then return `()`. Blocks the calling task;
+  run it in its own task per connection.
+
+      NodeCall.serve_loop(NodeRpc.empty(), fd)
+  """
   fn serve_loop(targets : Targets, fd : Int) : () do
     match serve_one(targets, fd) do
       Err(_) -> ()

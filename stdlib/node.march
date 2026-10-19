@@ -19,8 +19,8 @@
 -- reached: the typechecker records, per `Node.send` call site, the resolved
 -- message type (Typecheck_caps.check_node_send_sites, after the whole module
 -- is solved -- the argument's type is usually pinned later than the call),
--- and both backends rewrite the call to `send_tagged(peer, to, "<tag>",
--- JsonTo$T.to_json(msg))` -- the interpreter in Eval's EApp arm, the compiler
+-- and both backends rewrite the call to `send_tagged_schema(peer, to, "<tag>",
+-- "<schema>", JsonTo$T.to_json(msg))` -- the interpreter in Eval's EApp arm, the compiler
 -- in Lower_expr, both off the March_ast.Json_dispatch table that `from_json`
 -- already uses. An UNCHECKED interpreter run (the stdlib March test
 -- harness never typechecks) has no table; there the interpreter names the
@@ -30,7 +30,8 @@
 --
 -- `Node.enqueue(q, to, msg, policy)` is the same contract through a peer's
 -- NodeQueue (credit-based flow control): same codec check, same minted tag,
--- rewritten to `enqueue_tagged(q, to, "<tag>", JsonTo$T.to_json(msg), policy)`.
+-- rewritten to `enqueue_tagged_schema(q, to, "<tag>", "<schema>",
+-- JsonTo$T.to_json(msg), policy)`.
 --
 -- Receiving is the caller's: read the ACTOR_MSG (`NodeSend.serve_one` or a
 -- PeerReader), compare `d.type_tag` with the tag the sender's compiler minted
@@ -67,8 +68,21 @@ mod Node do
     if PeerRegistry.has_data(peer) do peer.data_fd else peer.fd end
   end
 
-  -- The explicit form: the tag and the JSON value in hand. `send` lowers to
-  -- this; a receiver-side helper or a test may call it directly.
+  doc """
+  The explicit form of `send`: the tag and the JSON value in hand. `send`
+  lowers to this; a receiver-side helper or a test may call it directly.
+  Takes the next number of this process's send sequence, serializes [json]
+  as the payload and writes one ACTOR_MSG with `NodeSend.cast` on the
+  peer's data connection (its only connection when it has no data one).
+  Returns `Ok(seq)` once the frame is written (a later DELIVERY_FAILED
+  echoes the seq), or `NodeSend.cast`'s error: `NoConnection` when the
+  write fails, `Refused` when certificate mode forbids the raw send.
+
+      match Node.send_tagged(peer, to, "Chat.Msg", Json.Str("hi")) do
+        Ok(seq) -> seq
+        Err(_) -> -1
+      end
+  """
   fn send_tagged(peer : Peer, to : Pid, type_tag : String, json) : Result(Int, SendError) do
     let seq = next_seq()
     let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
@@ -78,9 +92,12 @@ mod Node do
     end
   end
 
-  -- The form a typed send lowers to (build step 9): [schema] is the message
-  -- type's schema hash, which the compiler computes; it rides the frame so a
-  -- receiver can tell a same-named type of another shape.
+  doc """
+  `send_tagged` with the message type's schema hash: the form a typed send
+  lowers to (build step 9). [schema] is computed by the compiler; it rides
+  the frame (`NodeSend.cast_schema`) so a receiver can tell a same-named type
+  of another shape. `""` sends no schema, exactly as `send_tagged`.
+  """
   fn send_tagged_schema(peer : Peer, to : Pid, type_tag : String, schema : String, json) : Result(Int, SendError) do
     let seq = next_seq()
     let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
@@ -90,8 +107,20 @@ mod Node do
     end
   end
 
-  -- The typed send. `msg`'s type must `derive Json`; see the module comment
-  -- for what the compiler does with this call. Returns the message's seq.
+  doc """
+  The typed remote send: deliver [msg] to the process [to] on [peer].
+  `msg`'s type must `derive Json` (a typecheck error at the call site
+  otherwise); the compiler rewrites every call to `send_tagged_schema` with
+  the type's qualified name as the tag (see the module comment). Returns
+  `Ok(seq)` once the frame is written, the seq a later DELIVERY_FAILED
+  echoes; a failed write is `Err(NoConnection)`. Panics if reached at run
+  time: only a pipeline that skipped the compiler's rewrite gets here.
+
+      match Node.send(peer, to, Ping({ n: 1 })) do
+        Ok(seq) -> seq
+        Err(_) -> -1
+      end
+  """
   fn send(peer : Peer, to : Pid, msg) : Result(Int, SendError) do
     let _ = peer
     let _ = to
@@ -99,12 +128,14 @@ mod Node do
     panic("Node.send: this call was not resolved by the compiler -- the typechecker records every Node.send site and both backends rewrite it to send_tagged; a pipeline entry point skipped that table")
   end
 
-  -- The same send through a peer's outbound queue (NodeQueue, credit-based
-  -- flow control): the frame is admitted under [policy] and written by the
-  -- queue's writer when the receiver's credit covers it. `Ok(seq)` means
-  -- admitted, not written; `Err(Backpressure)` / `Err(NoConnection)` are the
-  -- queue's. `enqueue` lowers to this exactly as `send` lowers to
-  -- `send_tagged`.
+  doc """
+  `send_tagged` through a peer's outbound queue [q] (`NodeQueue`,
+  credit-based flow control): the frame is admitted under [policy] and
+  written by the queue's writer when the receiver's credit covers it.
+  `Ok(seq)` means admitted, not written, and counts as one message sent;
+  `Err(Backpressure)` / `Err(NoConnection)` are the queue's. `enqueue`
+  lowers to this exactly as `send` lowers to `send_tagged`.
+  """
   fn enqueue_tagged(q, to : Pid, type_tag : String, json, policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
     let seq = next_seq()
     let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
@@ -118,7 +149,7 @@ mod Node do
     end
   end
 
-  -- `enqueue_tagged` with the schema hash (what `enqueue` lowers to).
+  doc "`enqueue_tagged` with the message type's schema hash [schema] in the frame (what `enqueue` lowers to; `\"\"` sends none)."
   fn enqueue_tagged_schema(q, to : Pid, type_tag : String, schema : String, json, policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
     let seq = next_seq()
     let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
@@ -132,8 +163,19 @@ mod Node do
     end
   end
 
-  -- The typed send through a queue: `msg`'s type must `derive Json`, the
-  -- compiler mints the tag, exactly as for `send`. Returns the message's seq.
+  doc """
+  The typed send through a peer's queue [q] under [policy]: `msg`'s type
+  must `derive Json` and the compiler mints the tag, exactly as for `send`,
+  rewriting the call to `enqueue_tagged_schema`. Returns `Ok(seq)` once the
+  frame is admitted to the queue (not yet written). Panics if reached at
+  run time (a pipeline that skipped the compiler's rewrite).
+
+      match Node.enqueue(q, to, Ping({ n: 1 }), NodeQueue.DropNew) do
+        Ok(seq) -> seq
+        Err(NodeQueue.Backpressure) -> -1
+        Err(_) -> -2
+      end
+  """
   fn enqueue(q, to : Pid, msg, policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
     let _ = q
     let _ = to
@@ -142,59 +184,78 @@ mod Node do
     panic("Node.enqueue: this call was not resolved by the compiler -- the typechecker records every Node.enqueue site and both backends rewrite it to enqueue_tagged; a pipeline entry point skipped that table")
   end
 
-  -- `@[remote]`'s tag test (a generated `<Actor>_Remote.dispatch` calls it):
-  -- does [d] carry a message of the witness's parameter type? The compiler
-  -- rewrites the call to `tag_is(d, "<tag>")` with the tag `Node.send` mints
-  -- for that type; the body is reached only if an entry point skipped that.
+  doc """
+  `@[remote]`'s tag test (a generated `<Actor>_Remote.dispatch` calls it):
+  does [d] carry a message of the type of [witness]'s parameter, as in
+  `Node.accepts(d, fn (_ : T) -> ())`? The compiler rewrites the call to
+  `tag_is_schema(d, "<tag>", "<schema>")` with the tag and schema hash
+  `Node.send` mints for that type. Panics if reached at run time (an entry
+  point skipped that rewrite).
+  """
   fn accepts(d : Delivery, witness) : Bool do
     let _ = d
     let _ = witness
     panic("Node.accepts: this call was not resolved by the compiler -- the typechecker records it and both backends rewrite it to tag_is")
   end
 
-  -- The tag alone: what `accepts_tag` resolves to.
+  doc "Does [d] carry type tag [tag], exactly? (What `accepts_tag` resolves to; the schema is not looked at.)"
   fn tag_is(d : Delivery, tag : String) : Bool do
     d.type_tag == tag
   end
 
-  -- The resolved form of `accepts` (build step 9): the tag, and the schema
-  -- hash when the sender sent one. A sender built before schema hashes sends
-  -- none and is taken at its tag.
+  doc """
+  The resolved form of `accepts` (build step 9): [d]'s tag must equal [tag],
+  and its schema hash must equal [schema] unless either is `""`. A sender
+  built before schema hashes sends none and is taken at its tag.
+  """
   fn tag_is_schema(d : Delivery, tag : String, schema : String) : Bool do
     d.type_tag == tag && (schema == "" || d.schema == "" || d.schema == schema)
   end
 
-  -- The resolved form of `schema_matches`: the delivery carries exactly this
-  -- schema hash.
+  doc "The resolved form of `schema_matches`: does [d] carry exactly schema hash [schema]? (A delivery with no schema carries `\"\"`.)"
   fn schema_is(d : Delivery, schema : String) : Bool do
     d.schema == schema
   end
 
-  -- `@[remote]`'s other tests (build step 9), resolved like `accepts`:
-  -- `accepts_tag(d, fn (_ : T) -> ())` is T's tag alone (to tell a
-  -- same-named type of ANOTHER shape), `schema_matches(d, fn (_ : T) -> ())`
-  -- is T's schema hash alone (to pick the `migrate_msg` input type an old
-  -- shape decodes as), and `schema_of(fn (_ : T) -> ())` is T's schema hash
-  -- as a String.
+  -- `@[remote]`'s other tests (build step 9), resolved like `accepts`.
+  doc """
+  Does [d] carry T's tag, ignoring the schema, for `accepts_tag(d, fn (_ : T)
+  -> ())`? Tells a same-named type of ANOTHER shape. The compiler rewrites it
+  to `tag_is`; panics if reached at run time.
+  """
   fn accepts_tag(d : Delivery, witness) : Bool do
     let _ = d
     let _ = witness
     panic("Node.accepts_tag: this call was not resolved by the compiler")
   end
 
+  doc """
+  Does [d] carry T's schema hash, for `schema_matches(d, fn (_ : T) -> ())`?
+  Picks the `migrate_msg` input type an old shape decodes as. The compiler
+  rewrites it to `schema_is`; panics if reached at run time.
+  """
   fn schema_matches(d : Delivery, witness) : Bool do
     let _ = d
     let _ = witness
     panic("Node.schema_matches: this call was not resolved by the compiler")
   end
 
+  doc "T's schema hash as a String, for `schema_of(fn (_ : T) -> ())`. The compiler replaces the call with the hash; panics if reached at run time."
   fn schema_of(witness) : String do
     let _ = witness
     panic("Node.schema_of: this call was not resolved by the compiler")
   end
 
-  -- The receiver's half of the codec: the delivery's payload as JSON, ready
-  -- for a `from_json` pinned to the hosted type.
+  doc """
+  The receiver's half of the codec: [d]'s payload parsed as JSON, ready for
+  a `from_json` pinned to the hosted type. `Err` with the parser's message
+  when the payload is not valid JSON.
+
+      match Node.payload(d) do
+        Ok(j) -> handle(j)
+        Err(e) -> println("bad payload: " ++ e)
+      end
+  """
   fn payload(d : Delivery) : Result(JsonValue, String) do
     Json.parse(Bytes.to_string(Bytes.from_list(d.payload)))
   end

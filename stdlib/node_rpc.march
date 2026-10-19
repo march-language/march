@@ -25,12 +25,20 @@ mod NodeRpc do
   -- name (module.fn) -> Target.
   type Targets = Targets(Map(String, Target))
 
+  doc "A target table with nothing enrolled (`handle_request` then serves only the compiler-registered remote stubs)."
   fn empty() : Targets do Targets(Map.empty()) end
 
   pfn target_key(module_name : String, fn_name : String) : String do
     module_name ++ "." ++ fn_name
   end
 
+  doc """
+  [t] with [target] enrolled under "<module_name>.<fn_name>", replacing any
+  target already enrolled under that name.
+
+      let t = NodeRpc.enroll(NodeRpc.empty(), "Math", "double",
+        { sig_hash: sh, impl_hash: ih, invoke: fn args -> Ok(args) })
+  """
   fn enroll(t : Targets, module_name : String, fn_name : String, target : Target) : Targets do
     match t do
       Targets(m) -> Targets(Map.insert(m, target_key(module_name, fn_name), target, Map.str_cmp))
@@ -39,14 +47,20 @@ mod NodeRpc do
 
   -- ── Responder side ────────────────────────────────────────────────────────
 
-  -- Run an inbound request against the local target table and produce the reply
-  -- to frame back. No target -> NoTarget; CAS mismatch -> TypeMismatch/VersionSkew;
-  -- a crash inside the target body -> RemoteExit.
-  --
-  -- When the injected Targets table has no entry, falls back to the C-level remote
-  -- registry populated by compiler-emitted march_remote_register calls at @main.
-  -- This makes NodeCall.serve_one(NodeRpc.empty(), fd) work automatically for any
-  -- module that defines __rpc_stub functions.
+  doc """
+  Run an inbound request [req] against the local target table [t] and
+  produce the reply to frame back, carrying the request's correlation. An
+  enrolled target is checked with `RemoteCall.verify` (sig_hash mismatch:
+  `TypeMismatch`; impl_hash mismatch: `VersionSkew`) and then invoked; its
+  `Ok(payload)` is the reply's result, its `Err(reason)` (a crash inside the
+  target body) is `RemoteExit(reason)`.
+
+  When [t] has no entry for the reference, falls back to the runtime's
+  remote registry, populated by compiler-emitted `march_remote_register`
+  calls at startup: no stub under the impl_hash is `NoTarget`, a sig_hash
+  mismatch `TypeMismatch`. This makes `NodeCall.serve_one(NodeRpc.empty(),
+  fd)` work for any module that defines remote stubs.
+  """
   fn handle_request(t : Targets, req : CallRequest) : CallReply do
     match t do
       Targets(m) ->
@@ -79,8 +93,11 @@ mod NodeRpc do
     end
   end
 
-  -- Decode an inbound request frame and dispatch it; a malformed frame yields no
-  -- reply (the sender framed garbage — nothing well-formed to answer to).
+  doc """
+  Decode an inbound request frame [bytes] and dispatch it
+  (`handle_request`). None for a frame that does not decode as a
+  `CallRequest`: the sender framed garbage, so there is nothing to answer.
+  """
   fn handle_frame(t : Targets, bytes : List(Int)) : Option(CallReply) do
     match RemoteCall.decode_request(bytes) do
       Err(_)  -> None
@@ -90,12 +107,12 @@ mod NodeRpc do
 
   -- ── Caller side ───────────────────────────────────────────────────────────
 
-  -- Does this reply answer this request? (replies on one connection interleave)
+  doc "Does [reply] answer [req]: do their correlation numbers agree? (Replies on one connection interleave.)"
   fn matches(req : CallRequest, reply : CallReply) : Bool do
     req.correlation == reply.correlation
   end
 
-  -- Interpret a reply into the caller's Result.
+  doc "A reply as the caller's Result: `Ok(payload)` for `Returned(payload)`, `Err(e)` for `Failed(e)`."
   fn interpret(reply : CallReply) : Result(List(Int), CallError) do
     match reply.result do
       Returned(payload) -> Ok(payload)
@@ -103,11 +120,10 @@ mod NodeRpc do
     end
   end
 
-  -- Failure isolation: has the deadline passed with no reply yet?
+  doc "Failure isolation: has [deadline] passed at [now] (both in the same unit, ms)? True when `now >= deadline`, so a deadline equal to now has passed."
   fn timed_out(now : Int, deadline : Int) : Bool do now >= deadline end
 
-  -- The error a caller synthesizes when the failure detector has declared the
-  -- target's node dead (a pending call cannot complete).
+  doc "The error a caller synthesizes when the failure detector has declared the target's node dead (a pending call cannot complete): `NoConnection`."
   fn peer_down_error() : CallError do NoConnection end
 
 end
