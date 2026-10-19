@@ -22339,11 +22339,12 @@ let hidden_field_elements_suite =
           (typed_obligations
              "mod HF2 do\n  type Wrap(k, v) = Wrap(List((k, v)))\n  fn need(_w : Wrap(Int, Int)) : Int do 0 end\n  fn go() : Int do need(Wrap([(1, 0 - 5)])) end\nend\n"));
     (* Leftovers design row Q4: the same ECon path, silently unenforced
-       before; now one skip per hiding field. *)
-    gated "Q4: Dq(Int, List(a), List(a)) construction is a recorded skip" (fun () ->
+       before phase 0, one skip per hiding field after it; since leftovers
+       phase E a `List(a)` field is a modelled [Within] field and the -1 is a
+       VIOLATION (group `abstract-leftovers-e` has the rest). *)
+    gated "Q4: Dq(Int, List(a), List(a)) construction is checked (phase E: a violation)" (fun () ->
         Alcotest.check ts "ledger"
-          [ ("return of mk_bad", "skipped", "unreflectable-subject");
-            ("return of mk_bad", "skipped", "unreflectable-subject") ]
+          [ ("return of mk_bad", "violated", "") ]
           (typed_obligations
              "mod HQ do\n  type Dq(a) = Dq(Int, List(a), List(a))\n  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [0 - 1], []) end\nend\n"));
     (* Controls: Param-field constructions are untouched. *)
@@ -22442,10 +22443,12 @@ let hidden_field_elements_suite =
                  \  fn needl(_xs : List(Wrap(Int, {Int | _ > 0}))) : Int do 0 end\n\
                  \  fn go() : Int do needo(Some(Wrap([(1, 0 - 5)]))) end\n\
                  \  fn go2() : Int do needl([Wrap([(1, 0 - 5)])]) end\n")));
-    gated "mixed P(a, List(a)): the Param field is checked, the hiding field skips" (fun () ->
+    (* Since leftovers phase E the `List(a)` field is modelled too ([Within]):
+       both fields are checked, each one's literal proving or violating. *)
+    gated "mixed P(a, List(a)): the Param field and the List(a) field are both checked" (fun () ->
         Alcotest.check ts "ledger"
-          [ ("needp", "proved", ""); ("needp", "skipped", "unreflectable-subject");
-            ("needp", "violated", ""); ("needp", "skipped", "unreflectable-subject") ]
+          [ ("needp", "proved", ""); ("needp", "violated", "");
+            ("needp", "violated", ""); ("needp", "proved", "") ]
           (typed_obligations
              "mod HM do\n  type P(a) = P(a, List(a))\n\
               \  fn needp(_p : P({Int | _ > 0})) : Int do 0 end\n\
@@ -22455,6 +22458,275 @@ let hidden_field_elements_suite =
         Alcotest.check ts "ledger" [ ("need", "skipped", "unreflectable-subject") ]
           (typed_obligations
              (m "  fn go() : Int do\n    let w = Wrap([(1, 0 - 5)])\n    need(w)\n  end\n"))) ]
+
+(* Leftovers design (specs/2026-10-18-abstract-refinements-leftovers-design.md)
+   phase E, §6.5 / §9.5: a constructor field of type `C(args)`, `C` a
+   registered container whose arguments are bare parameters or
+   parameter-free, has the field role [Within].  Its element refinement is
+   checked at every construction (Q4 becomes a VIOLATION, not a skip),
+   reaches `match` binders at that field (Q5), and lets a field-wise
+   `Deque.filter` prove `Deque(a[p])`.  Every shape the role does not model
+   stays phase 0's hidden-field skip. *)
+let abstract_leftovers_e_suite =
+  let ts = Alcotest.(list (triple string string string)) in
+  let dq = "  type Dq(a) = Dq(Int, List(a), List(a))\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n" in
+  let m ?(verified = false) name body =
+    "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ dq ^ body ^ "end\n"
+  in
+  (* The real stdlib (list, deque, prelude) beside a user module, as phase
+     D's runner: the user module's obligations, and those inside the named
+     stdlib functions. *)
+  let load_mod name =
+    let md, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (md.March_ast.Ast.mod_name, March_ast.Ast.Public, md.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods = List.map load_mod [ "list.march"; "deque.march" ] in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  let obs_of keep =
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        let open March_refinecheck.Obligation in
+        if keep o then
+          Some (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> "")
+        else None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let user_file (o : March_refinecheck.Obligation.t) =
+    let f = o.March_refinecheck.Obligation.span.March_ast.Ast.file in
+    f = "" || f = "<unknown>"
+  in
+  let in_file base (o : March_refinecheck.Obligation.t) =
+    Filename.basename o.March_refinecheck.Obligation.span.March_ast.Ast.file = base
+  in
+  let in_lines base lo hi (o : March_refinecheck.Obligation.t) =
+    let sp = o.March_refinecheck.Obligation.span in
+    in_file base o && sp.March_ast.Ast.start_line >= lo && sp.March_ast.Ast.start_line < hi
+  in
+  let run (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let md = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let md = { md with March_ast.Ast.mod_decls = mods @ prelude_decls @ md.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module md in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx md;
+    let errs =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          let f = d.March_errors.Errors.span.March_ast.Ast.file in
+          if d.March_errors.Errors.severity = March_errors.Errors.Error && (f = "" || f = "<unknown>")
+          then Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    (errs, paths)
+  in
+  (* [Deque.filter]'s line range in the real deque.march: from its `fn
+     filter(` line to the next `doc`. *)
+  let deque_filter_range paths =
+    let path = List.find (fun p -> Filename.basename p = "deque.march") paths in
+    let lines = String.split_on_char '\n' (In_channel.with_open_bin path In_channel.input_all) in
+    let idx = List.mapi (fun i l -> (i + 1, String.trim l)) lines in
+    let starts pre s = String.length s >= String.length pre && String.sub s 0 (String.length pre) = pre in
+    match List.find_opt (fun (_, l) -> starts "fn filter(" l) idx with
+    | None -> Alcotest.fail "no `fn filter(` in deque.march"
+    | Some (lo, _) ->
+      let hi =
+        match List.find_opt (fun (i, l) -> i > lo && starts "doc " l) idx with
+        | Some (i, _) -> i
+        | None -> max_int
+      in
+      (lo, hi)
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let t3 = Alcotest.(triple int int int) in
+  let dfilter body =
+    "  fn dfilter(d : Dq(a), pred : a -> Bool[p]) : Dq(a[p]) do\n    match d do\n    Dq(_, f, b) ->\n\
+    \      let f2 = List.filter(f, pred)\n      let b2 = List.filter(b, pred)\n      " ^ body
+    ^ "\n    end\n  end\n\
+      \  fn need_dq(_d : Dq({Int | _ > 0})) : Int do 0 end\n\
+      \  fn go(ys : List(Int)) : Int do need_dq(dfilter(Dq(0, ys, ys), fn y -> y > 0)) end\n"
+  in
+  [ (* Q4, RED: a violating element in either List(a) field is a VIOLATION. *)
+    gated "Q4: a violating element in the front list is a violation" (fun () ->
+        Alcotest.check ts "ledger" [ ("return of mk_bad", "violated", "") ]
+          (typed_obligations (m "E1" "  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [0 - 1], []) end\n")));
+    gated "Q4: a violating element in the back list is a violation" (fun () ->
+        Alcotest.check ts "ledger" [ ("return of mk_bad", "violated", "") ]
+          (typed_obligations (m "E2" "  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [], [0 - 1]) end\n")));
+    gated "mk_ok: positive elements in both lists prove" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("return of mk_ok", "proved", ""); ("return of mk_ok", "proved", "") ]
+          (typed_obligations (m "E3" "  fn mk_ok() : Dq({Int | _ > 0}) do Dq(2, [1], [2]) end\n")));
+    gated "Q4 under cap verified is an error at the element" (fun () ->
+        let t = refine_error_text_d (m ~verified:true "E4" "  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [5], [0 - 1]) end\n") in
+        Alcotest.(check bool) ("an error: " ^ t) true (t <> "");
+        Alcotest.(check bool) "not the hidden-field skip text" false
+          (Astring_contains.contains t "which the element model does not see into"));
+    (* Q5, RED: match binders at a List(a) field carry the element fact. *)
+    (* The subtyping arm labels an obligation with the argument's name. *)
+    gated "Q5: match binders at both List(a) fields carry the element fact" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("f", "proved", ""); ("b", "proved", "") ]
+          (typed_obligations
+             (m "E5"
+                "  fn q5(d : Dq({Int | _ > 0})) : Int do\n    match d do\n    Dq(_, f, b) -> sum_pos(f) + sum_pos(b)\n    end\n  end\n")));
+    (* Controls: the binder fact comes from the scrutinee's entry only. *)
+    gated "control: an unrefined scrutinee gives its binders no fact" (fun () ->
+        Alcotest.(check (list string)) "verdicts" [ "skipped" ]
+          (verdicts_of
+             (m "E6" "  fn q5(d : Dq(Int)) : Int do\n    match d do\n    Dq(_, f, _) -> sum_pos(f)\n    end\n  end\n")
+             "sum_pos"));
+    gated "control: a scrutinee from a VIOLATED return gives its binders no fact" (fun () ->
+        let src =
+          m "E7"
+            "  fn mk_bad() : Dq({Int | _ > 0}) do Dq(1, [0 - 1], []) end\n\
+            \  fn q5() : Int do\n    match mk_bad() do\n    Dq(_, f, _) -> sum_pos(f)\n    end\n  end\n"
+        in
+        Alcotest.(check (list string)) "mk_bad" [ "violated" ] (verdicts_of src "return of mk_bad");
+        Alcotest.(check bool) "sum_pos is not proved" false (List.mem "proved" (verdicts_of src "sum_pos")));
+    gated "control: rebinding the scrutinee's refinement variable retires the binder fact" (fun () ->
+        Alcotest.(check bool) "not proved" false
+          (List.mem "proved"
+             (verdicts_of
+                "mod E8 do\n  type Dq(a) = Dq(Int, List(a), List(a))\n\
+                 \  fn need_lt(_xs : List({Int | _ < 5})) : Int do 0 end\n\
+                 \  fn q(n : Int, d : Dq({Int | _ < n})) : Int do\n    let n = 100\n    match d do\n    Dq(_, f, _) -> if n == 100 do need_lt(f) else 0 end\n    end\n  end\nend\n"
+                "need_lt")));
+    (* Other registered containers, and a parameter-free argument. *)
+    gated "an Option(a) field and a Result(a, Int) field are modelled" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needo", "violated", ""); ("needo", "proved", "");
+            ("needr", "violated", ""); ("needr", "proved", "") ]
+          (typed_obligations
+             "mod E9 do\n  type Ob(a) = Ob(Option(a))\n  type Rb(a) = Rb(Result(a, Int))\n\
+              \  fn needo(_o : Ob({Int | _ > 0})) : Int do 0 end\n\
+              \  fn needr(_r : Rb({Int | _ > 0})) : Int do 0 end\n\
+              \  fn a() : Int do needo(Ob(Some(0 - 1))) end\n\
+              \  fn b() : Int do needo(Ob(Some(1))) end\n\
+              \  fn c() : Int do needr(Rb(Ok(0 - 1))) end\n\
+              \  fn d() : Int do needr(Rb(Ok(1))) + needr(Rb(Err(0 - 1))) end\nend\n"));
+    (* Declaration order does not matter: the roles are a fixpoint. *)
+    gated "a field of a user container declared LATER is modelled" (fun () ->
+        Alcotest.check ts "ledger" [ ("needo", "violated", ""); ("needo", "proved", "") ]
+          (typed_obligations
+             "mod E10 do\n  type Outer(a) = O(Inner(a))\n  type Inner(a) = I(a)\n\
+              \  fn needo(_o : Outer({Int | _ > 0})) : Int do 0 end\n\
+              \  fn a() : Int do needo(O(I(0 - 1))) end\n  fn b() : Int do needo(O(I(1))) end\nend\n"));
+    gated "a user container whose own field is Within nests (Outer(Dq(a)))" (fun () ->
+        Alcotest.check ts "ledger" [ ("needo", "violated", "") ]
+          (typed_obligations
+             (m "E11" "  type Outer(a) = O(Dq(a))\n  fn needo(_o : Outer({Int | _ > 0})) : Int do 0 end\n\
+                       \  fn a() : Int do needo(O(Dq(1, [], [0 - 1]))) end\n")));
+    (* The floor: every unmodelled shape is still the hidden-field skip. *)
+    gated "floor: a function field, a List(List(a)) field, a hiding inner container, a mixed argument" (fun () ->
+        Alcotest.check ts "ledger"
+          [ ("needb", "skipped", "unreflectable-subject");
+            ("needl", "skipped", "unreflectable-subject");
+            ("needh", "skipped", "unreflectable-subject");
+            ("needq", "skipped", "unreflectable-subject") ]
+          (typed_obligations
+             "mod E12 do\n  type Box(b) = Box(Int -> b)\n  type LL(a) = LL(List(List(a)))\n\
+              \  type Hid(a) = Hid(Int -> a)\n  type Hw(a) = Hw(Hid(a))\n  type Mq(a) = Mq(Result(a, List(a)))\n\
+              \  fn needb(_b : Box({Int | _ > 0})) : Int do 0 end\n\
+              \  fn needl(_l : LL({Int | _ > 0})) : Int do 0 end\n\
+              \  fn needh(_h : Hw({Int | _ > 0})) : Int do 0 end\n\
+              \  fn needq(_q : Mq({Int | _ > 0})) : Int do 0 end\n\
+              \  fn a() : Int do needb(Box(fn _x -> 0 - 1)) end\n\
+              \  fn b() : Int do needl(LL([[0 - 1]])) end\n\
+              \  fn c() : Int do needh(Hw(Hid(fn _x -> 0 - 1))) end\n\
+              \  fn d() : Int do needq(Mq(Ok(1))) end\nend\n"));
+    (* A field `Hid(a)` whose container HIDES its slot stays hidden, so the
+       parametric rule still refuses `Hw` as a source (without the check in
+       [within_of], `need_pos(get(h))` read `h`'s slot and was proved). *)
+    gated "floor: a field of a container that hides the slot keeps the parametric rule off" (fun () ->
+        Alcotest.(check (list string)) "verdicts" [ "skipped" ]
+          (verdicts_of
+             "mod E12b do\n  type Hid(a) = Hid(Int -> a)\n  type Hw(a) = Hw(Hid(a))\n\
+              \  fn get(h : Hw(a)) : a do\n    match h do\n    Hw(Hid(f)) -> f(0)\n    end\n  end\n\
+              \  fn need_pos(_x : {Int | _ > 0}) : Int do 0 end\n\
+              \  fn go(h : Hw({Int | _ > 0})) : Int do need_pos(get(h)) end\nend\n"
+             "need_pos"));
+    gated "floor: a match binder at an unmodelled field gets no fact" (fun () ->
+        Alcotest.(check (list string)) "verdicts" [ "skipped" ]
+          (verdicts_of
+             "mod E13 do\n  type LL(a) = LL(List(List(a)))\n\
+              \  fn need_ll(_x : List(List({Int | _ > 0}))) : Int do 0 end\n\
+              \  fn q(l : LL({Int | _ > 0})) : Int do\n    match l do\n    LL(x) -> need_ll(x)\n    end\n  end\nend\n"
+             "need_ll"));
+    (* A field-wise filter over a user Dq: the correct body proves; wrong
+       bodies do not. *)
+    gated "a field-wise dfilter proves Dq(a[p]), and its caller's binder fact" (fun () ->
+        let errs, _ = run (m "E14" (dfilter "Dq(0, f2, b2)")) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        let obs = obs_of user_file in
+        Alcotest.check ts "ledger"
+          [ ("return of dfilter", "proved", ""); ("return of dfilter", "proved", "");
+            ("need_dq", "proved", "") ]
+          (List.filter (fun (c, _, _) -> c = "return of dfilter" || c = "need_dq") obs));
+    gated "a dfilter keeping rejected elements in the back list is not proved" (fun () ->
+        let _ = run (m "E15" (dfilter "Dq(0, f2, b)")) in
+        let obs = obs_of user_file in
+        let rv = List.filter_map (fun (c, v, _) -> if c = "return of dfilter" then Some v else None) obs in
+        Alcotest.(check bool) "the return is not all proved" true (List.exists (( <> ) "proved") rv);
+        Alcotest.(check bool) "the caller is not proved" false
+          (List.exists (fun (c, v, _) -> c = "need_dq" && v = "proved") obs));
+    gated "a dfilter putting the unfiltered back list in front is not proved" (fun () ->
+        let _ = run (m "E16" (dfilter "Dq(0, b, f2)")) in
+        let obs = obs_of user_file in
+        let rv = List.filter_map (fun (c, v, _) -> if c = "return of dfilter" then Some v else None) obs in
+        Alcotest.(check bool) "the return is not all proved" true (List.exists (( <> ) "proved") rv);
+        Alcotest.(check bool) "the caller is not proved" false
+          (List.exists (fun (c, v, _) -> c = "need_dq" && v = "proved") obs));
+    (* The refinement says nothing about ORDER: swapping the two FILTERED
+       lists is still a Dq(a[p]) (order is pinned by test_deque.march). *)
+    gated "a dfilter swapping the two filtered lists still proves (order is not an element fact)" (fun () ->
+        let _ = run (m "E17" (dfilter "Dq(0, b2, f2)")) in
+        Alcotest.check ts "ledger"
+          [ ("return of dfilter", "proved", ""); ("return of dfilter", "proved", "") ]
+          (List.filter (fun (c, _, _) -> c = "return of dfilter") (obs_of user_file)));
+    (* The shipped Deque.filter. *)
+    gated "Deque.filter's definition side is proved" (fun () ->
+        let errs, paths =
+          run "mod E18 do\n  fn go() : Int do Deque.size(Deque.filter(Deque.empty(), fn y -> y > 0)) end\nend\n"
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        let lo, hi = deque_filter_range paths in
+        let obs = obs_of (in_lines "deque.march" lo hi) in
+        Alcotest.(check bool) "has obligations" true (obs <> []);
+        Alcotest.check t3 "Deque.filter" (List.length obs, 0, 0) (triple obs));
+    gated "Q1: sum_pos(Deque.to_list(Deque.filter(d, fn y -> y > 0)))" (fun () ->
+        let errs, _ =
+          run
+            "mod E19 do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n\
+             \  fn go(d : Deque.Deque(Int)) : Int do sum_pos(Deque.to_list(Deque.filter(d, fn y -> y > 0))) end\nend\n"
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check ts "the demand" [ ("sum_pos", "proved", "") ]
+          (List.filter (fun (c, _, _) -> c = "sum_pos") (obs_of user_file)));
+    gated "Q1 control: a weaker lambda is not proved" (fun () ->
+        let _ =
+          run
+            "mod E20 do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n\
+             \  fn go(d : Deque.Deque(Int)) : Int do sum_pos(Deque.to_list(Deque.filter(d, fn y -> y >= 0))) end\nend\n"
+        in
+        Alcotest.(check bool) "not proved" false
+          (List.exists (fun (c, v, _) -> c = "sum_pos" && v = "proved") (obs_of user_file))) ]
 
 let () =
   Alcotest.run "march-refinecheck"
@@ -22596,4 +22868,5 @@ let () =
       ("abstract-leftovers-d", abstract_leftovers_d_suite);
       ("abstract-sugar", abstract_sugar_suite);
       ("hidden-field-elements", hidden_field_elements_suite);
+      ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

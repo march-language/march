@@ -126,9 +126,34 @@ mod Deque do
     end
   end
 
-  doc "Keep only elements satisfying pred. O(n)."
-  fn filter(d : Deque(a), pred : a -> Bool) : Deque(a) do
-    from_list(List.filter(to_list(d), pred))
+  doc """
+  Keep only elements satisfying pred, in the same order. O(n).
+  Every element of the result satisfies `pred` (an abstract refinement `p`,
+  as for `List.filter`): `Deque.to_list(Deque.filter(d, fn y -> y > 0))` is a
+  `List({Int | _ > 0})`.
+  """
+  fn filter(d : Deque(a), pred : a -> Bool[p]) : Deque(a[p]) do
+    match d do
+    Deque(_, f, b) ->
+      let f2 = filter_list(f, pred)
+      let b2 = filter_list(b, pred)
+      Deque(List.length(f2) + List.length(b2), f2, b2)
+    end
+  end
+
+  -- List.filter's natural body, kept in this module rather than delegated
+  -- (as Range.filter's helper is): the element contract proves through the
+  -- self-call, and a same-module call resolves for the checker in every
+  -- configuration (a `List.filter` call does not when stdlib/list.march is
+  -- itself the entry). TRMC makes it a single-traversal loop. Filtering each
+  -- list keeps the order: to_list is front ++ reverse(back), and filtering
+  -- commutes with both.
+  pfn filter_list(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do Cons(h, filter_list(t, pred)) else filter_list(t, pred) end
+    end
   end
 
   doc "Left fold over elements from front to back. O(n)."

@@ -2037,6 +2037,16 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
                      k.A.txt names fty);
               false
             | Self, ([], _) -> recur e
+            (* A field `C(args)` with role [Within] (leftovers phase E): the
+               nested container's entry, its slot [k] the demand on this
+               type's parameter [m.(k)].  New obligations, not only facts:
+               this is where `Dq(1, [0 - 1], [])` against `Dq({Int | _ > 0})`
+               becomes a violation. *)
+            | Within (c, m), _ ->
+              let inner = List.map (function Some j -> slot j | None -> None) m in
+              if List.for_all Option.is_none inner then true
+              else
+                check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee (c, inner) e
             | Other, ([], _) -> true
           in
           (acc && ok, fi + 1))
@@ -3751,6 +3761,13 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                       | Some (Container (c', slots')) -> (sc, (v.A.txt, (c', slots')) :: ce)
                       | None -> (sc, ce))
                    | Self, A.PatVar v when not (hides fi) -> (sc, (v.A.txt, entry) :: ce)
+                   (* A [Within (c, m)] field (leftovers phase E): the
+                      binder is a [c] whose slot [k] carries this
+                      scrutinee's slot [m.(k)]. *)
+                   | Within (c, m), A.PatVar v ->
+                     let inner = List.map (function Some j -> Option.join (List.nth_opt slots j) | None -> None) m in
+                     if List.for_all Option.is_none inner then (sc, ce)
+                     else (sc, (v.A.txt, (c, inner)) :: ce)
                    | _ -> (sc, ce)), fi + 1)
                  ((sc, ce), 0) roles subpats
              | _ -> (sc, ce))
