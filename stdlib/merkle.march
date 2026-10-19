@@ -6,25 +6,56 @@
 -- any difference in O(1), while diff() localises changes in O(k log n)
 -- by recursing only into subtrees whose hashes differ.
 --
--- build/3 constructs a balanced tree from a list of items in O(n).
+-- build/2 constructs a balanced tree from a list of items in O(n).
 -- The caller supplies a `to_bytes : a -> String` function for leaf hashing.
+-- Hashes are lowercase hex SHA-256 strings (Crypto.sha256).
+--
+-- doc: try
 
 mod Merkle do
 
   -- A node: MLeaf(sha256_hex, value) or MBranch(sha256_hex, left, right).
   type MerkleTree(a) = MLeaf(String, a) | MBranch(String, MerkleTree(a), MerkleTree(a))
 
-  doc "Construct a leaf, hashing the value with to_bytes."
+  doc """
+  A single-leaf tree holding `x`, whose hash is `Crypto.sha256(to_bytes(x))`.
+
+  ## Examples
+
+      march> Merkle.leaves(Merkle.leaf(42, int_to_string))
+      [42]
+      march> Merkle.root_hash(Merkle.leaf("abc", fn s -> s)) == Crypto.sha256("abc")
+      true
+  """
   fn leaf(x : a, to_bytes : a -> String) : MerkleTree(a) do
     MLeaf(Crypto.sha256(to_bytes(x)), x)
   end
 
-  doc "Construct a branch, hashing the concatenation of the children's root hashes."
+  doc """
+  A branch over `l` and `r`, whose hash is the SHA-256 of the two children's
+  root hashes concatenated (left first, as hex strings).
+
+  ## Examples
+
+      march> Merkle.size(Merkle.branch(Merkle.leaf(1, int_to_string), Merkle.leaf(2, int_to_string)))
+      2
+      march> Merkle.root_hash(Merkle.branch(Merkle.leaf("a", fn s -> s), Merkle.leaf("b", fn s -> s))) == Crypto.sha256(Crypto.sha256("a") ++ Crypto.sha256("b"))
+      true
+  """
   fn branch(l : MerkleTree(a), r : MerkleTree(a)) : MerkleTree(a) do
     MBranch(Crypto.sha256(root_hash(l) ++ root_hash(r)), l, r)
   end
 
-  doc "Return the hash stored at the root of the tree."
+  doc """
+  The hash stored at the root: the leaf's hash for a leaf, the branch hash
+  otherwise. Two trees built the same way from equal leaves have equal root
+  hashes. O(1).
+
+  ## Examples
+
+      march> String.byte_size(Merkle.root_hash(Merkle.leaf("abc", fn s -> s)))
+      64
+  """
   fn root_hash(t : MerkleTree(a)) : String do
     match t do
     MLeaf(h, _)      -> h
@@ -32,7 +63,18 @@ mod Merkle do
     end
   end
 
-  doc "Build a balanced Merkle tree from a non-empty list. Returns None for an empty list."
+  doc """
+  Build a tree from `items`, hashing each with `to_bytes`. Leaves are paired
+  left to right, layer by layer; an odd node at the end of a layer is carried
+  up unpaired. Returns `None` for an empty list. O(n).
+
+  ## Examples
+
+      march> Merkle.build([], int_to_string)
+      None
+      march> Option.map(Merkle.build([1, 2, 3], int_to_string), Merkle.leaves)
+      Some([1, 2, 3])
+  """
   fn build(items : List(a), to_bytes : a -> String) : Option(MerkleTree(a)) do
     match items do
     Nil -> None
@@ -57,7 +99,22 @@ mod Merkle do
     end
   end
 
-  doc "Return the leaf hashes that differ between two trees with the same structure."
+  doc """
+  The hashes, taken from `t1`, of the leaves where `t1` and `t2` differ, left
+  to right. Subtrees whose hashes match are skipped, so for k changed leaves
+  this is O(k log n). Meant for trees of the same shape (built from lists of
+  the same length); where the shapes diverge it reports `t1`'s node at that
+  point, which for a branch is a branch hash, not a leaf hash.
+
+  ## Examples
+
+      march> let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
+      march> let mt2 = Option.unwrap(Merkle.build([1, 2, 30, 4], int_to_string))
+      march> Merkle.diff(mt1, mt1)
+      []
+      march> Merkle.diff(mt1, mt2) == [Merkle.root_hash(Merkle.leaf(3, int_to_string))]
+      true
+  """
   fn diff(t1 : MerkleTree(a), t2 : MerkleTree(a)) : List(String) do
     diff_work(Cons((t1, t2), Nil), Nil)
   end
@@ -79,7 +136,14 @@ mod Merkle do
     end
   end
 
-  doc "Collect all values stored at the leaves, left to right."
+  doc """
+  All values stored at the leaves, left to right (the order given to `build`).
+
+  ## Examples
+
+      march> Merkle.leaves(mt2)
+      [1, 2, 30, 4]
+  """
   fn leaves(t : MerkleTree(a)) : List(a) do
     match t do
     MLeaf(_, x)      -> Cons(x, Nil)
@@ -87,7 +151,14 @@ mod Merkle do
     end
   end
 
-  doc "Collect all leaf hashes, left to right."
+  doc """
+  All leaf hashes, left to right.
+
+  ## Examples
+
+      march> Merkle.leaf_hashes(mt1) == List.map([1, 2, 3, 4], fn x -> Crypto.sha256(int_to_string(x)))
+      true
+  """
   fn leaf_hashes(t : MerkleTree(a)) : List(String) do
     match t do
     MLeaf(h, _)      -> Cons(h, Nil)
@@ -95,7 +166,20 @@ mod Merkle do
     end
   end
 
-  doc "True when the tree contains a leaf whose hash equals h."
+  doc """
+  True when any node of the tree, leaf or branch, has hash `h`. A branch
+  match stops the search, so this also answers "is this subtree present".
+  O(n) in the worst case.
+
+  ## Examples
+
+      march> Merkle.contains_hash(mt1, Crypto.sha256("2"))
+      true
+      march> Merkle.contains_hash(mt1, Merkle.root_hash(mt1))
+      true
+      march> Merkle.contains_hash(mt1, "nope")
+      false
+  """
   fn contains_hash(t : MerkleTree(a), h : String) : Bool do
     match t do
     MLeaf(lh, _)     -> lh == h
@@ -106,7 +190,14 @@ mod Merkle do
     end
   end
 
-  doc "Number of leaves in the tree."
+  doc """
+  Number of leaves in the tree. O(n).
+
+  ## Examples
+
+      march> Merkle.size(mt1)
+      4
+  """
   fn size(t : MerkleTree(a)) : Int do
     match t do
     MLeaf(_, _)      -> 1

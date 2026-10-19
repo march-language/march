@@ -1,3 +1,10 @@
+-- Session: the session-type transport capability (`Cap(Session.Live)`) that
+-- generated choreography/session code runs on, plus `in_process`, a
+-- deterministic in-process transport for tests. See the comment block below
+-- for the transport dictionary's contract.
+--
+-- doc: try
+
 mod Session do
   needs IO
 
@@ -81,7 +88,13 @@ mod Session do
 
   proof cap Live with Ops
 
-  doc "Attach a transport. The only way to obtain a `Cap(Session.Live)`."
+  doc """
+  Attach a transport. The only way to obtain a `Cap(Session.Live)`; every
+  other operation here dispatches through the `ops` given.
+
+      let t = Session.in_process()
+      let s = Session.attach(io, t.ops)
+  """
   fn attach(io : Cap(IO), ops : Ops) : Cap(Session.Live) do
     cap_impl(mint_cap(io), ops)
   end
@@ -90,7 +103,13 @@ mod Session do
     panic("Session: no transport attached to this capability")
   end
 
-  doc "Join a session at access point `ap` in role `role`; returns the endpoint."
+  doc """
+  Join a session at access point `ap` in role `role`; returns the endpoint.
+  What the handle means is the transport's: `in_process` returns the role
+  number itself and panics if that role registers twice. Like every
+  dispatcher here, panics if `c` carries no transport (which `attach` rules
+  out).
+  """
   fn register(c : Cap(Session.Live), ap : Int, role : Int) : Int do
     match cap_dict(c) do
       Some(d) -> d.register(ap, role)
@@ -98,7 +117,11 @@ mod Session do
     end
   end
 
-  doc "Send `msg` from `ep` to role `to`; returns the continuation endpoint."
+  doc """
+  Send `msg` from `ep` to role `to`; returns the continuation endpoint. The
+  transport decides delivery: `in_process` only enqueues (its `drain`
+  delivers), and drops messages from or to a role that is gone.
+  """
   fn emit(c : Cap(Session.Live), ep : Int, to : Int, msg : Bytes) : Int do
     match cap_dict(c) do
       Some(d) -> d.emit(ep, to, msg)
@@ -176,12 +199,21 @@ mod Session do
   doc """
   How many epoch holds the running actor has (0 outside a hosted session).
   A read-only count, for tests of the hosting patterns.
+
+  ## Examples
+
+      march> Session.epoch_holds_here()
+      0
   """
   fn epoch_holds_here() : Int do
     epoch_holds()
   end
 
-  doc "Close endpoint `ep`."
+  doc """
+  Close endpoint `ep`: it has finished its part of the protocol. Under
+  `in_process` the role is gone from then on ("closed"), so a peer still
+  waiting on it is cancelled or takes its crash branch.
+  """
   fn close(c : Cap(Session.Live), ep : Int) : () do
     match cap_dict(c) do
       Some(d) -> d.close(ep)
@@ -257,6 +289,11 @@ mod Session do
   The delivery payload that carries a crash of the sending role, with `cause`
   as the transport knows it. A transport that hosts a role in an actor sends
   this on the delivery route; nothing else produces it.
+
+  ## Examples
+
+      march> Bytes.to_string(Session.crash_payload("node down"))
+      "!session-crash!node down"
   """
   fn crash_payload(cause : String) : Bytes do
     Bytes.from_string(crash_marker() ++ cause)
@@ -266,6 +303,15 @@ mod Session do
   `Some(cause)` if `msg` is a forwarded crash rather than a protocol message,
   `None` otherwise. The generated `resume` of an actor-hosted role asks this
   before decoding.
+
+  ## Examples
+
+      march> Session.crash_cause(Session.crash_payload("node down"))
+      Some("node down")
+      march> Session.crash_cause(Session.crash_payload(""))
+      Some("")
+      march> Session.crash_cause(Bytes.from_string("{}"))
+      None
   """
   fn crash_cause(msg : Bytes) : Option(String) do
     let s = Bytes.to_string(msg)
@@ -714,7 +760,13 @@ mod Session do
   line per event: `close <ep>`, `cancel <ep>: <cause>`, `crash <role>:
   <cause>`, `crash branch <ep>: role <role>: <cause>`, `dropped <from> ->
   <to>`, and `stalled: <n> queued` when a `drain` stops with deliveries no
-  endpoint is waiting for. A test asserts on the failure paths through it.
+  endpoint is waiting for. Drains (D27) add `draining <role>`,
+  `undelivered <sender> -> <role>`, and `drained <ep> at its boundary` or
+  `drained <ep> waiting on role <role>`. A test asserts on the failure paths
+  through it.
+
+      let lines = Vault.new("trace")
+      let t = Session.in_process_with(fn line -> Vault.set(lines, line, 1))
   """
   fn in_process_with(trace : String -> ()) : InProcess do
     let tag = int_to_string(Vault.incr(Vault.open("session_in_process_ids"), "n", 1))

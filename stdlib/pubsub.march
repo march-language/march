@@ -23,6 +23,8 @@
 --   let subs = PubSub.get_subscribers(s1, "room:lobby")   -- [my_pid]
 --   let s2 = PubSub.unsubscribe_state(s1, "room:lobby", my_pid)
 --   let subs2 = PubSub.get_subscribers(s2, "room:lobby")  -- []
+--
+-- doc: try
 
 mod PubSub do
 
@@ -64,7 +66,14 @@ mod PubSub do
   -- Immutable PubSub state: Map(topic, List(subscriber_pid)).
   type PubSubState = PubSubState(Map(String, List(Int)))
 
-  doc "Create an empty PubSub state."
+  doc """
+  An empty PubSub state: no topic has subscribers.
+
+  ## Examples
+
+      march> PubSub.get_subscribers(PubSub.new_state(), "room:lobby")
+      []
+  """
   fn new_state() do
     PubSubState(Map.empty())
   end
@@ -72,9 +81,14 @@ mod PubSub do
   -- ── Pure subscription operations ──────────────────────────────────────────
 
   doc """
-  Subscribe `pid` to `topic`.  Returns the updated state.
-  If the pid is already subscribed, adds a duplicate (no-op semantically since
-  broadcasts are once-per-pid after deduplication at send time).
+  Subscribe `pid` to `topic`.  Returns the updated state. The pid is
+  prepended, so `get_subscribers` lists the newest subscriber first.
+  Subscribing a pid that is already subscribed adds a DUPLICATE entry:
+  nothing deduplicates at send time, so `broadcast_to` then delivers to it
+  twice, and it takes two `unsubscribe_state` calls to remove.
+
+      let s = PubSub.subscribe_state(PubSub.new_state(), "room:lobby", 7)
+      PubSub.get_subscribers(s, "room:lobby")   -- [7]
   """
   fn subscribe_state(ps, topic, pid) do
     match ps do
@@ -90,7 +104,19 @@ mod PubSub do
     end
   end
 
-  doc "Unsubscribe `pid` from `topic`.  Removes the first matching entry."
+  doc """
+  Unsubscribe `pid` from `topic`, removing only its first (newest) entry.
+  When no subscriber is left the topic is dropped from the state. A pid or
+  topic that is not subscribed leaves the state unchanged.
+
+      let s = PubSub.subscribe_state(PubSub.new_state(), "room:lobby", 7)
+      PubSub.has_subscribers(PubSub.unsubscribe_state(s, "room:lobby", 7), "room:lobby")   -- false
+
+  ## Examples
+
+      march> PubSub.get_subscribers(PubSub.unsubscribe_state(PubSub.new_state(), "room:lobby", 7), "room:lobby")
+      []
+  """
   fn unsubscribe_state(ps, topic, pid) do
     match ps do
     PubSubState(m) ->
@@ -110,7 +136,15 @@ mod PubSub do
     end
   end
 
-  doc "Return the list of subscriber pids for `topic`.  Empty list if none."
+  doc """
+  The subscriber pids for `topic`, newest first (duplicates included).
+  Empty list if none. Topics are matched exactly; patterns are not expanded.
+
+  ## Examples
+
+      march> PubSub.get_subscribers(PubSub.new_state(), "room:*")
+      []
+  """
   fn get_subscribers(ps, topic) do
     match ps do
     PubSubState(m) ->
@@ -121,7 +155,14 @@ mod PubSub do
     end
   end
 
-  doc "True when at least one pid is subscribed to `topic`."
+  doc """
+  True when at least one pid is subscribed to `topic`.
+
+  ## Examples
+
+      march> PubSub.has_subscribers(PubSub.new_state(), "room:lobby")
+      false
+  """
   fn has_subscribers(ps, topic) do
     match get_subscribers(ps, topic) do
     Nil -> false
@@ -129,7 +170,15 @@ mod PubSub do
     end
   end
 
-  doc "Number of subscribers currently registered for `topic`."
+  doc """
+  Number of subscription entries for `topic` (a pid subscribed twice counts
+  twice). O(n).
+
+  ## Examples
+
+      march> PubSub.subscriber_count(PubSub.new_state(), "room:lobby")
+      0
+  """
   fn subscriber_count(ps, topic) do
     list_length(get_subscribers(ps, topic))
   end
@@ -138,8 +187,16 @@ mod PubSub do
 
   doc """
   Hash-based shard index for `topic` given `num_shards` shards.
-  Uses the built-in hash() function (same primitive the HAMT uses).
-  Returns a value in [0, num_shards).
+  Uses the built-in hash() function (same primitive the HAMT uses), masked
+  to its low 31 bits. Returns a value in [0, num_shards). The index depends
+  on the platform's hash, so do not persist it or share it between nodes
+  built for different targets. Panics (division by zero) if `num_shards`
+  is 0.
+
+  ## Examples
+
+      march> PubSub.topic_shard("room:lobby", 1)
+      0
   """
   fn topic_shard(topic, num_shards) do
     let h = int_and(hash(topic), 2147483647)
@@ -153,14 +210,27 @@ mod PubSub do
   or end-of-string.  This prevents `"user*"` from matching `"users"`
   or `"user_other"` — Phoenix's pubsub convention.
 
-  Examples:
-    topic_matches("room:*",   "room:lobby")  -> true
-    topic_matches("room:*",   "room:1:x")    -> true  (multi-segment ok)
-    topic_matches("room:*",   "game:42")     -> false
-    topic_matches("room:lobby","room:lobby") -> true
-    topic_matches("user*",    "user:1")      -> true  (separator follows)
-    topic_matches("user*",    "user")        -> true  (end-of-string ok)
-    topic_matches("user*",    "users")       -> false (no separator)
+  A bare `"*"` matches every topic, including `""`; an empty pattern matches
+  only the empty topic. A `*` anywhere but the end is a literal character.
+
+  ## Examples
+
+      march> PubSub.topic_matches("room:*", "room:lobby")
+      true
+      march> PubSub.topic_matches("room:*", "room:1:x")
+      true
+      march> PubSub.topic_matches("room:*", "game:42")
+      false
+      march> PubSub.topic_matches("room:lobby", "room:lobby")
+      true
+      march> PubSub.topic_matches("user*", "user:1")
+      true
+      march> PubSub.topic_matches("user*", "user")
+      true
+      march> PubSub.topic_matches("user*", "users")
+      false
+      march> PubSub.topic_matches("*", "")
+      true
   """
   fn topic_matches(pattern, topic) do
     let plen = string_byte_length(pattern)
@@ -199,8 +269,11 @@ mod PubSub do
   doc """
   Send a broadcast message to all subscribers in `pids` except `excluded_pid`.
   When `excluded_pid` is None, all subscribers receive the message.
-  Uses actor_cast to deliver BroadcastMsg to each pid.
+  Uses actor_cast to deliver `BroadcastMsg(event, payload)` to each pid, in
+  list order; a pid listed twice receives it twice. Returns `()`.
   Requires actor runtime.
+
+      PubSub.broadcast_to(PubSub.get_subscribers(state, topic), Some(self()), "new_msg", payload)
   """
   fn broadcast_to(pids, excluded_pid, event, payload) do
     match pids do
@@ -225,8 +298,10 @@ mod PubSub do
 
   doc """
   Subscribe `subscriber_pid` to `topic` in the shard `shard_pid`.
-  Sends a PubSubSubscribe message to the shard actor.
+  Sends a PubSubSubscribe message to the shard actor (fire and forget).
   Requires actor runtime.
+
+      PubSub.subscribe_in_shard(ChannelServer.select_shard(shards, topic), topic, self())
   """
   fn subscribe_in_shard(shard_pid, topic, subscriber_pid) do
     actor_cast(shard_pid, PubSubSubscribe(topic, subscriber_pid))
@@ -234,8 +309,10 @@ mod PubSub do
 
   doc """
   Unsubscribe `subscriber_pid` from `topic` in the shard `shard_pid`.
-  Sends a PubSubUnsubscribe message to the shard actor.
+  Sends a PubSubUnsubscribe message to the shard actor (fire and forget).
   Requires actor runtime.
+
+      PubSub.unsubscribe_in_shard(shard_pid, "room:lobby", self())
   """
   fn unsubscribe_in_shard(shard_pid, topic, subscriber_pid) do
     actor_cast(shard_pid, PubSubUnsubscribe(topic, subscriber_pid))
@@ -243,8 +320,12 @@ mod PubSub do
 
   doc """
   Broadcast `event` + `payload` to all subscribers of `topic` in shard `shard_pid`.
-  Pass `Some(sender_pid)` to exclude the sender (broadcast_from behaviour).
+  Pass `Some(sender_pid)` to exclude the sender (broadcast_from behaviour),
+  `None` to reach everyone. Sends a PubSubBroadcast message to the shard
+  actor (fire and forget).
   Requires actor runtime.
+
+      PubSub.broadcast_in_shard(shard_pid, "room:lobby", None, "new_msg", "{}")
   """
   fn broadcast_in_shard(shard_pid, topic, excluded_pid, event, payload) do
     actor_cast(shard_pid, PubSubBroadcast(topic, excluded_pid, event, payload))
