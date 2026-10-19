@@ -99,15 +99,30 @@ let rec tails_bound (path : (A.expr * bool) list) (bound : string list) (e : A.e
      | [] -> [ (path, e, bound) ])
   | A.EIf (c, t, el, _) ->
     tails_bound ((c, false) :: path) bound t @ tails_bound ((c, true) :: path) bound el
-  | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> tails_bound ((c, false) :: path) bound b) arms
+  (* A later `cond` arm, and any `match` arm but an irrefutable first one,
+     is reached under conditions this path does not record (the earlier
+     conditions' failure, the pattern itself): the opaque marker, which is
+     `true` to the solver and tells [check_call] not to take a model as a
+     definite counterexample (review of 8e5c15c48). *)
+  | A.ECond (arms, _) ->
+    List.concat
+      (List.mapi
+         (fun i (c, b) ->
+           let path = if i = 0 then path else opaque_path_marker :: path in
+           tails_bound ((c, false) :: path) bound b)
+         arms)
   | A.EMatch (_, branches, _) ->
-    List.concat_map
-      (fun (br : A.branch) ->
-        let ns = pat_binders br.A.branch_pat in
-        let path = path_shadow path ns in
-        let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
-        tails_bound p (ns @ bound) br.A.branch_body)
-      branches
+    List.concat
+      (List.mapi
+         (fun i (br : A.branch) ->
+           let ns = pat_binders br.A.branch_pat in
+           let path = path_shadow path ns in
+           let path =
+             if i = 0 && irrefutable_pat br.A.branch_pat then path else opaque_path_marker :: path
+           in
+           let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
+           tails_bound p (ns @ bound) br.A.branch_body)
+         branches)
   (* A `let?` / `let*` stays ONE tail: its early `Err` exit (or the
      `flat_map` callback a `let*` becomes) is not a syntactic tail, so its
      continuation must not be walked as if it were the only return.  Its

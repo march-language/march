@@ -136,8 +136,41 @@ git log is authoritative for exact commits.
   place instead of rebuilding it from a list: same elements, same order, about
   2x faster compiled. A field that holds a parameter any other way
   (`List(List(a))`, `List((k, v))`, `Int -> a`) is still a recorded skip.
+- **Refinements: a container return that names a parameter is a fact at the
+  call.** `fn below(n : Int) : List({Int | _ < n})`, once its tails are proved,
+  carries `_ < 10` at `below(10)` and `_ < k` at `below(k)`, so
+  `sum_small(below(10))` (or `let ys = below(k)` with `k : {Int | _ <= 10}`) is
+  proved, and `sum_lt5(below(10))` is a violation; before, every such call was an
+  `unreflectable-subject` skip, an error under `cap verified`. Only variables,
+  literals and linear arithmetic over them are substituted, and a stored fact is
+  dropped when a name it mentions is rebound. A recursive call is read at its own
+  arguments (`clamp(t, n)` inside `fn clamp(xs, n) : List({Int | _ <= n})`), and
+  tuple components and block-level `fn`s whose return names only their own
+  parameters work the same way. A call whose fact names a caller variable that
+  nothing constrains (`sum_small(below(n))`, `n : Int`) is a skip, not a
+  violation.
 
 ### Fixed
+
+- **Refinements: a correct call under a condition the checker cannot read is no
+  longer a violation.** With `k : {Int | _ <= 100}` and
+  `xs : List({Int | _ < k})`, `if small(k) do need_lt5(xs) else 0 end` (where
+  `small(k)` is `k < 5`) was reported violated with the example `k = 6`, a value
+  that never reaches the call; so were a call inside a `Some(3) ->` arm, after an
+  arm whose failure the checker does not record, and in a later `match do` cond
+  arm. These are now skips, as the same call with a plain `Int` argument already
+  was. An `Int` literal arm (`3 ->`) now records that the scrutinee is 3 (and,
+  past an unguarded one, that it is not), so such a call can be proved. The
+  same false violation through a `Bool` local (`let ok = k < 5; if ok do …`) is
+  fixed too: such a local is read as its comparison in a guard (so the call,
+  and the plain `Int` twin `if ok do n5(k)`, are now proved), and a local the
+  checker cannot pin down (`let ok = small(k)`) makes the call a skip.
+- **Refinements: a pattern binder spelled like a name its element refinement
+  mentions no longer proves anything.** With `xs : List({Int | _ < n})`,
+  `match xs do Cons(n, _) -> need_neg(n)` gave the new `n` the fact `n < n`, a
+  contradiction, so `need_neg(n)` was proved (and accepted under `cap verified`)
+  although `g(5, [3])` passes 3. `let n = hd(xs)` through a parametric head had
+  the same hole. Such a binder now gets no fact from the slot.
 
 - **Refinements: a local `fn`'s container return is checked.** A block-level
   `fn bad(n : Int) : List({Int | _ > 0}) do [n, 0] end` filed no obligation for

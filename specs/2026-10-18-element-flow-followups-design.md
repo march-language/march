@@ -9,10 +9,14 @@ it departs from §4); phase 2 landed 2026-10-18
 from §3 and §7: it also hooks return tails); phase 3 landed 2026-10-18
 (`specs/progress/2026-10-18-element-flow-phase3-local-fn-returns.md`, which records where it
 departs from §5: the local's verdict is its own cell rather than a save/restore of the global
-one); phase 4 is design only. Probed on `ba8db5805` (0.6.0 + docs), z3 4.16.0, with the
+one); phase 4 landed 2026-10-18
+(`specs/progress/2026-10-18-element-flow-phase4-relational-returns.md`, which records where it
+departs from §2: the verdict rule for unconstrained caller names, and two binder-capture holes
+it fixed on the way). **All phases landed.** Probed on `ba8db5805` (0.6.0 + docs), z3 4.16.0, with the
 compiler already built in this worktree (`_build/default/bin/main.exe`, Oct 18 10:12).
-**Closes, when phase 4 lands:** items 1-4 of `specs/todos/2026-09-18-refine-element-flow-followups.md`
-(items 5 and 6 are already closed). Each phase strikes its item there and removes its bullet from
+**Closes:** items 1-4 of `specs/todos/2026-09-18-refine-element-flow-followups.md`
+(items 5 and 6 were already closed; the file is now
+`specs/progress/2026-09-18-refine-element-flow-followups.md`). Each phase strikes its item there and removes its bullet from
 `specs/lang/refinement-types.md`, "What element refinements do not do" (`:2267-2276`).
 **Prior designs this continues:** `specs/2026-09-18-parametric-element-flow-design.md` (§4: sources,
 P1/P2, `demand_flow`; its §4.5 deferred items 1 and 2) and its plan

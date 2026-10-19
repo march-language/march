@@ -698,6 +698,26 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
   let { root; errctx; postcond; path; lets; sc; re; binds; demand = _ } = cx in
+  (* A Bool local bound to a comparison or connective (`let ok = k < 5`,
+     recorded in [lets], which retires it when `ok` or anything it mentions
+     is rebound) is read as that predicate in a path condition, so `if ok`
+     constrains `k` exactly as `if k < 5` does (re-review of fece9d212).  A
+     self-mentioning entry is skipped: its RHS names the OLD binding. *)
+  let path =
+    let rec unlaunder (depth : int) (e : A.expr) : A.expr =
+      if depth > 8 then e
+      else
+        match e with
+        | A.EVar { A.txt = x; _ } ->
+          (match List.assoc_opt x lets with
+           | Some rhs when predicate_shaped rhs && not (expr_mentions [ x ] rhs) -> unlaunder (depth + 1) rhs
+           | _ -> e)
+        | A.EApp ((A.EVar { A.txt = ("&&" | "||" | "not"); _ } as hd), xs, sp) ->
+          A.EApp (hd, List.map (unlaunder depth) xs, sp)
+        | _ -> e
+    in
+    List.map (fun (c, neg) -> (unlaunder 0 c, neg)) path
+  in
   let subject_noun =
     match subject with
     | Argument -> "argument"
@@ -2476,8 +2496,44 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       List.iter
         (fun x -> if not (is_self x) && not (List.mem_assoc x name_pos) then load_scalar_name_fact x)
         (guard_names rp.pred);
+    (* …and so is a name an ACTUAL's own scope fact mentions (design
+       2026-10-18 element-flow follow-ups, phase 4): a relational element
+       return read at the call's actuals puts `$elem : {_ < k}` in scope for
+       `sum_small(below(k))`, and `k`'s own fact (`k <= 10`) is what
+       discharges it.  [subject_facts] keeps each such predicate with the
+       names that denote the actual itself, for the definite-failure rule
+       below. *)
+    let subject_facts =
+      if not goal_scope_facts then []
+      else
+        List.filter_map
+          (function
+            | A.EVar { A.txt = x; _ } ->
+              (match List.assoc_opt x sc with
+               | Some (b, q, _) -> Some ([ b; "_"; x ], q)
+               | None -> None)
+            | _ -> None)
+          args
+    in
+    List.iter
+      (fun (own, q) ->
+        List.iter
+          (fun x ->
+            if not (List.mem x own) && not (is_self x) && not (List.mem_assoc x name_pos) then
+              load_scalar_name_fact x)
+          (guard_names q))
+      subject_facts;
+    (* Does the query see the whole path to this call?  Not when a
+       condition did not translate exactly (dropped, or stood up as a call
+       constant carrying at most a postcondition), nor under the walk's
+       opaque marker ([opaque_path_marker]).  Read by the definite-failure
+       rule below: a model of an incomplete path may be a state the program
+       never reaches (review of 8e5c15c48). *)
+    let path_incomplete = ref (path_is_opaque path) in
+    let opaque_names = path_opaque_names path in
     List.iter
       (fun (cond, negated) ->
+        if List.exists (fun x -> List.mem x opaque_names) (guard_names cond) then path_incomplete := true;
         match
           smt_of ~vocab:false ~resolve_var:path_resolve_var ~resolve_measure:path_resolve_measure
             ~resolve_field:path_resolve_field
@@ -2488,6 +2544,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           List.iter (fun x -> Hashtbl.replace constrained_names x ()) (guard_names cond);
           push_user (if negated then Smt.Not t else t)
         | None ->
+          path_incomplete := true;
           (* A guard that IS a call (`if Set.contains(s, x, cmp) do …`, or its
              negation): stand the call up as a Bool constant carrying the
              callee's postcondition, exactly as an ACTUAL in Bool position
@@ -2831,18 +2888,43 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             | A.EField (r, _, _) | A.EAnnot (r, _, _) -> value_names r
             | _ -> []
           in
-          let free_goal_name =
-            goal_scope_facts
-            && List.exists
-                 (fun x ->
-                   (not (is_self x)) && (not (List.mem_assoc x name_pos))
-                   && not (Hashtbl.mem constrained_names x))
-                 (value_names rp.pred)
+          let free_caller_name x =
+            (not (is_self x)) && (not (List.mem_assoc x name_pos))
+            && not (Hashtbl.mem constrained_names x)
           in
+          (* The same holds of the SUBJECT's fact (phase 4): an instantiated
+             relational element return `$elem : {_ < n}` with a caller `n`
+             nothing constrains says nothing about the real `n`, so
+             `sum_small(below(n))` is not a definite failure because the
+             solver picked `n = 100`.  The `¬G` discharge still reports one
+             no value of `n` avoids (`need_ge(below(n), n)`). *)
+          let goal_caller_names =
+            if not goal_scope_facts then []
+            else
+              List.filter (fun x -> (not (is_self x)) && not (List.mem_assoc x name_pos)) (value_names rp.pred)
+              @ List.concat_map
+                  (fun (own, q) ->
+                    List.filter
+                      (fun x -> (not (List.mem x own)) && (not (is_self x)) && not (List.mem_assoc x name_pos))
+                      (value_names q))
+                  subject_facts
+          in
+          let free_goal_name = List.exists free_caller_name goal_caller_names in
+          (* A model that picks a CALLER variable's value is a real
+             counterexample only if the query saw every condition on the way
+             here: under an untranslated guard (`if small(k)`), a literal arm,
+             an earlier arm's failure or a later `cond` arm, `k = 6` may be
+             unreachable (review of 8e5c15c48: a correct program reported
+             violated; the scalar path, which never takes this shortcut,
+             skipped it).  A goal and fact naming no caller variable are
+             decided by the contracts alone, as before. *)
           let definite =
             match subject, first with
             | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ ->
-              not free_goal_name
+              (not free_goal_name)
+              && (goal_caller_names = []
+                  || ((not !path_incomplete)
+                      && not (List.exists (fun x -> List.mem x opaque_names) goal_caller_names)))
             | _ -> false
           in
           (match

@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: an element of the container passed as `below(…)` does not satisfy the expected element refinement `_ < 5`
+-- Element refinements, a relational element return that does not imply a
+-- call's demand (2026-10-18, design
+-- specs/2026-10-18-element-flow-followups-design.md phase 4, decision D2):
+-- `below(10)` carries `_ < 10`, which does not imply `sum_lt5`'s `_ < 5`
+-- (`below(10) = [9, 8]`).  A violation, the verdict a variable holding the
+-- same entry gets, not a skip: the entry is a PROVED contract read at the
+-- call's literal actuals.  Before, the call was an unreflectable-subject
+-- skip.  Accept twin: accept/t400.
+mod RelationalElementReturnViolated do
+  fn sum_lt5(xs : List({Int | _ < 5})) : Int do 0 end
+  fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end
+  fn go() : Int do sum_lt5(below(10)) end
+end
