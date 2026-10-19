@@ -14,22 +14,47 @@
 --
 -- Design: all sorting uses List.sort_by with Float comparison.
 -- Variance uses Welford's online algorithm for numerical stability.
+--
+-- doc: try
 
 mod Stats do
 
   -- ---- Basic aggregates ----
 
-  doc "Sum of all elements. Returns 0.0 for empty list."
+  doc """
+  Sum of all elements. Returns 0.0 for an empty list.
+
+  ## Examples
+
+      march> Stats.sum([1.5, 2.5, 4.0])
+      8.0
+      march> Stats.sum([])
+      0.0
+  """
   fn sum(xs : List(Float)) : Float do
     List.fold_left(xs, 0.0, fn (acc, x) -> acc +. x)
   end
 
-  doc "Number of elements."
+  doc """
+  Number of elements.
+
+  ## Examples
+
+      march> Stats.count([1.0, 2.0, 2.0])
+      3
+  """
   fn count(xs : List(Float)) : Int do
     List.length(xs)
   end
 
-  doc "Arithmetic mean. Panics on empty list."
+  doc """
+  Arithmetic mean. Panics on an empty list.
+
+  ## Examples
+
+      march> Stats.mean([1.0, 2.0, 4.5])
+      2.5
+  """
   fn mean(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
     Nil -> panic("Stats.mean: empty list")
@@ -40,7 +65,14 @@ mod Stats do
     end
   end
 
-  doc "Minimum value. Panics on empty list."
+  doc """
+  Minimum value. Panics on an empty list.
+
+  ## Examples
+
+      march> Stats.min_val([3.0, -1.5, 2.0])
+      -1.5
+  """
   fn min_val(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
     Nil -> panic("Stats.min_val: empty list")
@@ -49,7 +81,14 @@ mod Stats do
     end
   end
 
-  doc "Maximum value. Panics on empty list."
+  doc """
+  Maximum value. Panics on an empty list.
+
+  ## Examples
+
+      march> Stats.max_val([3.0, -1.5, 2.0])
+      3.0
+  """
   fn max_val(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
     Nil -> panic("Stats.max_val: empty list")
@@ -67,8 +106,18 @@ mod Stats do
   -- ---- Order statistics ----
 
   doc """
-  Percentile using linear interpolation.
-  p must be in [0.0, 100.0]. Panics on empty list or out-of-range p.
+  Percentile using linear interpolation between the two nearest ranks of
+  the sorted data (the same rule as `quantile(xs, p / 100.0, Linear)`).
+  p must be in [0.0, 100.0]. Panics on an empty list or out-of-range p.
+
+  ## Examples
+
+      march> Stats.percentile([1.0, 2.0, 3.0, 4.0, 5.0], 25.0)
+      2.0
+      march> Stats.percentile([10.0, 20.0], 25.0)
+      12.5
+      march> Stats.percentile([5.0, 1.0, 3.0], 100.0)
+      5.0
   """
   fn percentile(xs : {List(Float) | len(_) > 0}, p : {Float | _ >= 0.0 && _ <= 100.0}) : Float do
     match xs do
@@ -93,9 +142,17 @@ mod Stats do
   end
 
   doc """
-  Median (50th percentile).
+  Median (50th percentile): the middle value, or the mean of the two
+  middle values for an even-length list.
   Precondition: `xs` is non-empty (`{List(Float) | len(_) > 0}`, checked at
   compile time); panics on an empty list if the checker could not decide it.
+
+  ## Examples
+
+      march> Stats.median([3.0, 1.0, 2.0])
+      2.0
+      march> Stats.median([4.0, 1.0, 3.0, 2.0])
+      2.5
   """
   fn median(xs : {List(Float) | len(_) > 0}) : Float do
     percentile(xs, 50.0)
@@ -251,12 +308,24 @@ mod Stats do
   end
 
   doc """
-  Quantile at probability q ∈ [0.0, 1.0] using the given interpolation
-  method.  Panics on empty list or out-of-range q.
+  Quantile at probability q in [0.0, 1.0] using the given interpolation
+  method (`QuantileMethod`, Hyndman & Fan Types 1-9). Panics on an empty
+  list or out-of-range q. Sorts the input: O(n log n).
 
-  For a percentile-style API (q in 0..100), see `percentile`.  The
+  For a percentile-style API (q in 0..100), see `percentile`. The
   existing `percentile(xs, p)` is equivalent to
   `quantile(xs, p / 100.0, Linear)`.
+
+  ## Examples
+
+      march> Stats.quantile([1.0, 2.0, 3.0, 4.0], 0.5, Stats.InvertedCdf)
+      2.0
+      march> Stats.quantile([1.0, 2.0, 3.0, 4.0], 0.5, Stats.AveragedInvertedCdf)
+      2.5
+      march> Stats.quantile([1.0, 2.0, 3.0, 4.0], 0.25, Stats.Linear)
+      1.75
+      march> Stats.quantile([1.0, 2.0, 3.0, 4.0], 0.25, Stats.Weibull)
+      1.25
   """
   fn quantile(xs : {List(Float) | len(_) > 0}, q : {Float | _ >= 0.0 && _ <= 1.0}, method : QuantileMethod) : Float do
     match xs do
@@ -277,14 +346,27 @@ mod Stats do
   Quantile with `Linear` interpolation (Type 7, R/numpy default).
   Convenience alias for `quantile(xs, q, Linear)`, and carries the same
   preconditions: `xs` is non-empty and `q` is in [0.0, 1.0].
+
+  ## Examples
+
+      march> Stats.quantile_default([1.0, 2.0, 3.0, 4.0, 5.0], 0.75)
+      4.0
   """
   fn quantile_default(xs : {List(Float) | len(_) > 0}, q : {Float | _ >= 0.0 && _ <= 1.0}) : Float do
     quantile(xs, q, Linear)
   end
 
   doc """
-  Batched quantiles: returns `[quantile(xs, q, method) for q in qs]`.
-  Sorts the input once and reuses it for each q.
+  Batched quantiles: returns `[quantile(xs, q, method) for q in qs]`, in
+  the order of `qs`. Sorts the input once and reuses it for each q.
+  Panics on an empty `xs` or if any q is outside [0.0, 1.0].
+
+  ## Examples
+
+      march> Stats.quantiles([4.0, 1.0, 3.0, 2.0], [0.25, 0.5, 0.75], Stats.Linear)
+      [1.75, 2.5, 3.25]
+      march> Stats.quantiles([1.0, 2.0], [], Stats.Linear)
+      []
   """
   fn quantiles(xs : {List(Float) | len(_) > 0}, qs : List(Float), method : QuantileMethod) : List(Float) do
     match xs do
@@ -300,11 +382,18 @@ mod Stats do
   end
 
   doc """
-  Interquartile range: Q3 − Q1 using the given method.
+  Interquartile range: Q3 - Q1 using the given method.
 
   Uses the same sorted list for both quartiles (one sort, not two).
   Precondition: `xs` is non-empty (`{List(Float) | len(_) > 0}`); panics on
   empty input.
+
+  ## Examples
+
+      march> Stats.iqr([1.0, 2.0, 3.0, 4.0, 5.0], Stats.Linear)
+      2.0
+      march> Stats.iqr([7.0], Stats.Linear)
+      0.0
   """
   fn iqr(xs : {List(Float) | len(_) > 0}, method : QuantileMethod) : Float do
     match quantiles(xs, [0.25, 0.75], method) do
@@ -316,6 +405,11 @@ mod Stats do
   doc """
   Interquartile range using `Linear` (Type 7) interpolation.
   Precondition: `xs` is non-empty (`{List(Float) | len(_) > 0}`).
+
+  ## Examples
+
+      march> Stats.iqr_default([1.0, 2.0, 3.0, 4.0, 5.0])
+      2.0
   """
   fn iqr_default(xs : {List(Float) | len(_) > 0}) : Float do
     iqr(xs, Linear)
@@ -323,7 +417,12 @@ mod Stats do
 
   doc """
   Five-number summary with selectable method: (min, Q1, median, Q3, max).
-  Panics on empty list.
+  Sorts once. Panics on an empty list.
+
+  ## Examples
+
+      march> Stats.five_number_summary([5.0, 1.0, 4.0, 2.0, 3.0], Stats.Linear)
+      (1.0, 2.0, 3.0, 4.0, 5.0)
   """
   fn five_number_summary(xs : {List(Float) | len(_) > 0}, method : QuantileMethod) : (Float, Float, Float, Float, Float) do
     match xs do
@@ -382,6 +481,13 @@ mod Stats do
   Uses Welford's online algorithm for numerical stability on inputs
   where the naive two-pass sum-of-squares would suffer catastrophic
   cancellation (near-constant data, shifted distributions).
+
+  ## Examples
+
+      march> Stats.variance([1.0, 3.0, 5.0])
+      4.0
+      march> Stats.variance([3.0])
+      0.0
   """
   fn variance(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
@@ -396,9 +502,16 @@ mod Stats do
 
   doc """
   Population variance (denominator n).
-  Returns 0.0 for a single element or empty list.
+  Returns 0.0 for a single element or an empty list.
 
   Uses Welford's online algorithm (same stability benefit as `variance`).
+
+  ## Examples
+
+      march> Stats.variance_pop([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
+      4.0
+      march> Stats.variance_pop([])
+      0.0
   """
   fn variance_pop(xs : List(Float)) : Float do
     match xs do
@@ -412,15 +525,29 @@ mod Stats do
   end
 
   doc """
-  Sample standard deviation. Returns 0.0 for a single element.
+  Sample standard deviation (square root of `variance`). Returns 0.0 for
+  a single element.
   Precondition: `xs` is non-empty (`{List(Float) | len(_) > 0}`); panics on an
   empty list.
+
+  ## Examples
+
+      march> Stats.std_dev([1.0, 3.0, 5.0])
+      2.0
   """
   fn std_dev(xs : {List(Float) | len(_) > 0}) : Float do
     math_sqrt(variance(xs))
   end
 
-  doc "Population standard deviation."
+  doc """
+  Population standard deviation (square root of `variance_pop`). Returns
+  0.0 for a single element or an empty list.
+
+  ## Examples
+
+      march> Stats.std_dev_pop([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
+      2.0
+  """
   fn std_dev_pop(xs : List(Float)) : Float do
     math_sqrt(variance_pop(xs))
   end
@@ -428,9 +555,16 @@ mod Stats do
   -- ---- Mode ----
 
   doc """
-  Mode: the most frequently occurring value.
-  When there are ties, returns the first value encountered (in sorted order).
-  Panics on empty list.
+  Mode: the most frequently occurring value (compared with `==`).
+  When there are ties, returns the smallest of the tied values (the first
+  encountered in sorted order). Panics on an empty list.
+
+  ## Examples
+
+      march> Stats.mode([3.0, 1.0, 3.0, 2.0])
+      3.0
+      march> Stats.mode([2.0, 1.0, 2.0, 1.0])
+      1.0
   """
   fn mode(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
@@ -464,14 +598,19 @@ mod Stats do
   -- ---- Bivariate ----
 
   doc """
-  Sample covariance of two equal-length lists.
+  Sample covariance (denominator n-1) of two equal-length lists.
   Panics if lengths differ or if either list has fewer than 2 elements.
 
-  Both structural preconditions are declared in the signature — `xs` must have
-  at least 2 elements and `ys` must have exactly as many as `xs` — so a call the
+  Both structural preconditions are declared in the signature: `xs` must have
+  at least 2 elements and `ys` must have exactly as many as `xs`, so a call the
   compiler can prove violates either is a compile error rather than a runtime
   panic. Lengths it cannot relate are accepted in silence (March reports only
   definite failures) and the `panic`s below remain the runtime backstop.
+
+  ## Examples
+
+      march> Stats.covariance([1.0, 2.0, 3.0], [2.0, 4.0, 6.0])
+      2.0
   """
   fn covariance(xs : {List(Float) | len(_) >= 2},
                 ys : {List(Float) | len(_) == len(xs)}) : Float do
@@ -497,15 +636,20 @@ mod Stats do
 
   doc """
   Pearson correlation coefficient.
-  Returns value in [-1, 1].
+  Returns a value in [-1, 1].
   Panics if lists have different lengths, fewer than 2 elements,
   or if either list has zero standard deviation.
 
   The two *structural* preconditions are declared in the signature (`xs` has at
   least 2 elements; `ys` has exactly as many as `xs`), so a provable violation
   of either is a compile error. The zero-standard-deviation panic is
-  data-dependent — it turns on the `Float` *values* in the lists, not on their
-  shape — so no measure can express it and it stays a runtime check.
+  data-dependent (it turns on the `Float` *values* in the lists, not on their
+  shape), so no measure can express it and it stays a runtime check.
+
+  ## Examples
+
+      march> Stats.correlation([1.0, 2.0, 3.0], [6.0, 4.0, 2.0])
+      -1.0
   """
   fn correlation(xs : {List(Float) | len(_) >= 2},
                  ys : {List(Float) | len(_) == len(xs)}) : Float do
@@ -535,16 +679,21 @@ mod Stats do
   -- ---- Linear regression ----
 
   doc """
-  Simple linear regression: y = slope * x + intercept.
+  Simple least-squares linear regression: y = slope * x + intercept.
   Returns (slope, intercept).
   Panics if lists have different lengths or fewer than 2 elements,
   or if xs has zero variance (vertical line).
 
   The two *structural* preconditions are declared in the signature (`xs` has at
   least 2 points; `ys` has exactly as many as `xs`), so a provable violation of
-  either is a compile error. The zero-variance panic is data-dependent — it
-  turns on the `Float` *values* in `xs`, not on their shape — so no measure can
+  either is a compile error. The zero-variance panic is data-dependent (it
+  turns on the `Float` *values* in `xs`, not on their shape), so no measure can
   express it and it stays a runtime check.
+
+  ## Examples
+
+      march> Stats.linear_regression([0.0, 1.0, 2.0], [1.0, 3.0, 5.0])
+      (2.0, 1.0)
   """
   fn linear_regression(xs : {List(Float) | len(_) >= 2},
                        ys : {List(Float) | len(_) == len(xs)}) : (Float, Float) do
@@ -576,7 +725,16 @@ mod Stats do
 
   -- ---- Result-returning (safe) variants ----
 
-  doc "Mean, returning Err on empty list instead of panicking."
+  doc """
+  Mean, returning `Err` on an empty list instead of panicking.
+
+  ## Examples
+
+      march> Stats.mean_safe([1.0, 2.0])
+      Ok(1.5)
+      march> Stats.mean_safe([])
+      Err("Stats.mean_safe: empty list")
+  """
   fn mean_safe(xs : List(Float)) : Result(Float, String) do
     match xs do
     Nil -> Err("Stats.mean_safe: empty list")
@@ -584,7 +742,17 @@ mod Stats do
     end
   end
 
-  doc "Sample variance, returning Err on empty list."
+  doc """
+  Sample variance, returning `Err` on an empty list. A single element
+  gives `Ok(0.0)` (unlike `std_dev_safe`).
+
+  ## Examples
+
+      march> Stats.variance_safe([1.0, 3.0, 5.0])
+      Ok(4.0)
+      march> Stats.variance_safe([5.0])
+      Ok(0.0)
+  """
   fn variance_safe(xs : List(Float)) : Result(Float, String) do
     match xs do
     Nil -> Err("Stats.variance_safe: empty list")
@@ -592,7 +760,16 @@ mod Stats do
     end
   end
 
-  doc "Sample standard deviation, returning Err on empty or single-element list."
+  doc """
+  Sample standard deviation, returning `Err` on an empty or single-element list.
+
+  ## Examples
+
+      march> Stats.std_dev_safe([1.0, 3.0, 5.0])
+      Ok(2.0)
+      march> Stats.std_dev_safe([5.0])
+      Err("Stats.std_dev_safe: need at least 2 elements")
+  """
   fn std_dev_safe(xs : List(Float)) : Result(Float, String) do
     match xs do
     Nil -> Err("Stats.std_dev_safe: empty list")
@@ -601,7 +778,16 @@ mod Stats do
     end
   end
 
-  doc "Minimum value, returning Err on empty list."
+  doc """
+  Minimum value, returning `Err` on an empty list.
+
+  ## Examples
+
+      march> Stats.min_safe([2.0, -1.0])
+      Ok(-1.0)
+      march> Stats.min_safe([])
+      Err("Stats.min_safe: empty list")
+  """
   fn min_safe(xs : List(Float)) : Result(Float, String) do
     match xs do
     Nil -> Err("Stats.min_safe: empty list")
@@ -609,7 +795,16 @@ mod Stats do
     end
   end
 
-  doc "Maximum value, returning Err on empty list."
+  doc """
+  Maximum value, returning `Err` on an empty list.
+
+  ## Examples
+
+      march> Stats.max_safe([2.0, -1.0])
+      Ok(2.0)
+      march> Stats.max_safe([])
+      Err("Stats.max_safe: empty list")
+  """
   fn max_safe(xs : List(Float)) : Result(Float, String) do
     match xs do
     Nil -> Err("Stats.max_safe: empty list")
