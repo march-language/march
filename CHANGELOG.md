@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Every public stdlib function is documented, and about 1,500 doc examples have a Try it
+  button.** 468 undocumented public functions now have docs, and 1,240 more functions gained
+  `march>` examples that are checked natively and in the browser REPL. 87 modules (was 32)
+  opt into Try it. Functions that do IO, use the network or actors, or live in modules the
+  browser cannot load get plain usage snippets instead. Several wrong docs were corrected
+  along the way, such as the stability claims for the sorts.
+
 - **An upgrade guide for 0.6.0.** `docs/upgrading-to-0-6-0.md` covers the two
   security fixes, the `send_wrong_actor` check and the RFC 3986 `Uri` changes. The
   landing page and the toolchain examples now name v0.6.0.
