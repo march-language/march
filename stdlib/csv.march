@@ -45,9 +45,18 @@ mod Csv do
   …); `mode` is `:simple` (split-only, no quoting) or `:rfc4180`
   (full RFC 4180 with quoted fields, `""` escapes, embedded newlines).
 
-  The file handle is closed when iteration reaches EOF or when the
-  callback panics.  Returns `Ok(:ok)` on success, `Err(file_error)`
-  if the file cannot be opened.
+  Only the first character of `delimiter` is used.  Each row's fields
+  are passed in order; trailing CR/LF is stripped.
+
+  The file handle is closed when iteration reaches EOF.  It is NOT
+  closed if the callback panics (there is no cleanup on that path).
+  Returns `Ok(:ok)` on success, `Err(FileError(message))` if the file
+  cannot be opened.
+
+  ## Examples
+
+      Csv.each_row("data.tsv", "\t", :simple, fn fields ->
+        println(String.join(fields, " | ")))
   """
   fn each_row(path, delimiter, mode, callback) do
     match csv_open(path, delimiter, mode) do
@@ -70,8 +79,15 @@ mod Csv do
 
   doc """
   Eagerly read every row of `path` into a `List(List(String))`.
-  Returns `Ok(rows)` or `Err(file_error)`.  Use `each_row/4` for files
-  that don't comfortably fit in memory.
+  Returns `Ok(rows)` (in file order, one list of fields per record) or
+  `Err(FileError(message))` if the file cannot be opened.  Use
+  `each_row/4` for files that don't comfortably fit in memory.
+
+  ## Examples
+
+      -- data.csv:  name,qty\n"pen, blue",3
+      Csv.read_all("data.csv", ",", :rfc4180)
+      -- Ok([["name", "qty"], ["pen, blue", "3"]])
   """
   fn read_all(path, delimiter, mode) do
     match csv_open(path, delimiter, mode) do
@@ -98,8 +114,15 @@ mod Csv do
   doc """
   Stream rows treating the first row as a header.  Invokes
   `callback(header, fields)` for every subsequent row, where `header`
-  is the parsed first row.  An empty file yields `Ok(:ok)` without
-  invoking the callback.  Closes the file on EOF or on callback panic.
+  is the parsed first row.  An empty file (or a header-only file)
+  yields `Ok(:ok)` without invoking the callback.  Closes the file on
+  EOF, but not if the callback panics.  `Err(FileError(message))` if
+  the file cannot be opened.
+
+  ## Examples
+
+      Csv.each_row_with_header("users.csv", ",", :rfc4180, fn (header, fields) ->
+        println(int_to_string(List.length(fields)) ++ " of " ++ int_to_string(List.length(header)) ++ " columns"))
   """
   fn each_row_with_header(path, delimiter, mode, callback) do
     match csv_open(path, delimiter, mode) do
@@ -123,6 +146,13 @@ mod Csv do
   doc """
   Convenience: comma-delimited, RFC 4180, eager.
   Equivalent to `read_all(path, ",", :rfc4180)`.
+
+  ## Examples
+
+      match Csv.read_csv("data.csv") do
+      Ok(rows) -> println(int_to_string(List.length(rows)) ++ " rows")
+      Err(_) -> println("cannot open data.csv")
+      end
   """
   fn read_csv(path) do
     read_all(path, ",", :rfc4180)
@@ -131,6 +161,10 @@ mod Csv do
   doc """
   Convenience: comma-delimited, RFC 4180, streaming.
   Equivalent to `each_row(path, ",", :rfc4180, callback)`.
+
+  ## Examples
+
+      Csv.each_csv_row("data.csv", fn fields -> println(String.join(fields, ";")))
   """
   fn each_csv_row(path, callback) do
     each_row(path, ",", :rfc4180, callback)

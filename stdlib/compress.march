@@ -16,7 +16,11 @@
 --
 -- Implementation note: the underlying work is done by zlib (gzip/deflate),
 -- libzstd (zstd), and libbrotlienc/libbrotlidec (brotli) via C FFI.  Each
--- algorithm shim lives in runtime/march_compress.c.
+-- algorithm shim lives in runtime/march_compress.c.  The codecs are not
+-- available in the in-browser REPL (only the pure HTTP helpers are), so
+-- codec examples below are plain code blocks.
+--
+-- doc: try
 
 mod Compress do
 
@@ -116,7 +120,9 @@ mod Compress do
     end
 
     doc """
-    Compress bytes with gzip at the default compression level.
+    Compress bytes with gzip (zlib, with gzip header) at the default
+    compression level. Errors: `InvalidInput(msg)` if the input is too
+    large for the codec, `Io(msg)` on an environment failure.
 
         let b = Bytes.from_string("hello, world!")
         match Compress.Gzip.encode(b) do
@@ -129,7 +135,8 @@ mod Compress do
     end
 
     doc """
-    Compress bytes with gzip at an explicit level.
+    Compress bytes with gzip at an explicit level. Panics if the level
+    is `Custom(n)` with `n` outside 1-9.
 
         Compress.Gzip.encode_level(data, Gzip.BestSpeed)
         Compress.Gzip.encode_level(data, Gzip.Custom(6))
@@ -139,7 +146,10 @@ mod Compress do
     end
 
     doc """
-    Decompress gzip-compressed bytes.
+    Decompress gzip-compressed bytes. Errors: `InvalidInput(msg)` for
+    data that is not a valid gzip stream (corrupt or truncated),
+    `InsufficientOutput` if the decompressed size exceeds the runtime's
+    output cap, `Io(msg)` on an environment failure.
 
         match Compress.Gzip.decode(compressed) do
         Ok(original) -> original
@@ -152,8 +162,10 @@ mod Compress do
 
     doc """
     Compress a sequence of byte chunks, producing a lazy sequence of
-    Result values.  Each chunk is compressed independently; errors are
-    surfaced per-chunk rather than silently dropped.
+    Result values, at the default level.  Each chunk is compressed
+    independently into its own complete gzip member (this is a per-chunk
+    map, not one continuous stream); errors are surfaced per-chunk
+    rather than silently dropped.
 
         let chunks = Seq.from_list([chunk1, chunk2])   -- a Seq of Bytes
         let compressed =                              -- a Seq of Result(Bytes, Compress.Error)
@@ -168,8 +180,11 @@ mod Compress do
     end
 
     doc """
-    Decompress a sequence of gzip-compressed byte chunks.  Errors are
-    surfaced per-chunk rather than silently dropped.
+    Decompress a sequence of gzip-compressed byte chunks.  Each chunk is
+    decoded independently and must be a complete gzip stream (as produced
+    by `encode_stream`); a single stream split at arbitrary byte
+    boundaries does not decode.  Errors are surfaced per-chunk rather than
+    silently dropped.
 
         let decompressed =                            -- a Seq of Result(Bytes, Compress.Error)
           Compress.Gzip.decode_stream(compressed_chunks)
@@ -185,7 +200,8 @@ mod Compress do
   mod Deflate do
 
     doc """
-    Compress bytes with raw deflate (no gzip header).
+    Compress bytes with raw deflate (no gzip or zlib header). Errors as
+    for `Compress.Gzip.encode`.
 
         match Compress.Deflate.encode(data) do
         Ok(compressed) -> compressed
@@ -198,6 +214,7 @@ mod Compress do
 
     doc """
     Decompress raw deflate-compressed bytes (no gzip header expected).
+    Errors as for `Compress.Gzip.decode`.
 
         match Compress.Deflate.decode(compressed) do
         Ok(original) -> original
@@ -230,7 +247,9 @@ mod Compress do
     end
 
     doc """
-    Compress bytes with zstd at the default level (3).
+    Compress bytes with zstd at the default level (3). Errors:
+    `InvalidInput(msg)` if the input is too large, `Io(msg)` on an
+    environment failure.
 
         match Compress.Zstd.encode(data) do
         Ok(compressed) -> compressed
@@ -243,7 +262,9 @@ mod Compress do
     end
 
     doc """
-    Compress bytes with zstd at an explicit level.
+    Compress bytes with zstd at an explicit level: `Fast(n)` passes `n`
+    to zstd unchanged (negative levels are ultra-fast), `Default` is 3 and
+    `Best` is 22.
 
         Compress.Zstd.encode_level(data, Zstd.Best)
         Compress.Zstd.encode_level(data, Zstd.Fast(1))
@@ -253,7 +274,9 @@ mod Compress do
     end
 
     doc """
-    Decompress zstd-compressed bytes.
+    Decompress zstd-compressed bytes. Errors: `InvalidInput(msg)` for an
+    invalid or truncated frame, `InsufficientOutput` if the output size
+    cap is hit, `Io(msg)` on an environment failure.
 
         match Compress.Zstd.decode(compressed) do
         Ok(original) -> original
@@ -267,15 +290,25 @@ mod Compress do
 
     doc """
     Compress a sequence of byte chunks with zstd at the default level.
-    Errors are surfaced per-chunk rather than silently dropped.
+    Each chunk becomes its own independent zstd frame (a per-chunk map,
+    not one continuous stream). Errors are surfaced per-chunk rather than
+    silently dropped.
+
+        let compressed =                              -- a Seq of Result(Bytes, Compress.Error)
+          Compress.Zstd.encode_stream(Seq.from_list([chunk1, chunk2]))
     """
     fn encode_stream(input) do
       Seq.map(input, fn chunk -> lift_encode_error(stdlib_zstd_encode(chunk, 3)))
     end
 
     doc """
-    Decompress a sequence of zstd-compressed byte chunks.
-    Errors are surfaced per-chunk rather than silently dropped.
+    Decompress a sequence of zstd-compressed byte chunks. Each chunk is
+    decoded independently and must be a complete frame (as produced by
+    `encode_stream`). Errors are surfaced per-chunk rather than silently
+    dropped.
+
+        let restored =                                -- a Seq of Result(Bytes, Compress.Error)
+          Compress.Zstd.decode_stream(compressed)
     """
     fn decode_stream(input) do
       Seq.map(input, fn chunk -> lift_decode_error(stdlib_zstd_decode(chunk)))
@@ -315,6 +348,8 @@ mod Compress do
 
     doc """
     Compress bytes with brotli at the default level (6) in Generic mode.
+    Errors: `InvalidInput(msg)` if the input is too large, `Io(msg)` on an
+    environment failure.
 
         match Compress.Brotli.encode(data) do
         Ok(compressed) -> compressed
@@ -327,7 +362,8 @@ mod Compress do
     end
 
     doc """
-    Compress bytes with brotli at an explicit mode and level.
+    Compress bytes with brotli at an explicit mode and level. Panics if
+    the level is outside 0-11.
 
         Compress.Brotli.encode_mode(data, Brotli.Text, Brotli.Level(9))
     """
@@ -336,7 +372,9 @@ mod Compress do
     end
 
     doc """
-    Decompress brotli-compressed bytes.
+    Decompress brotli-compressed bytes. Errors: `InvalidInput(msg)` for
+    corrupt or truncated data, `InsufficientOutput` if the output size cap
+    is hit, `Io(msg)` on an environment failure.
 
         match Compress.Brotli.decode(compressed) do
         Ok(original) -> original
@@ -354,19 +392,21 @@ mod Compress do
 
   doc """
   List the content-encoding tokens from an Accept-Encoding header value.
-  Strips quality parameters (`q=`) and excludes encodings with `q=0`
-  (which the client explicitly rejects).
+  Strips quality parameters (`q=`) and excludes encodings with `q=0`,
+  `q=0.0` or `q=0.00` (which the client explicitly rejects). Tokens keep
+  header order and their original case; other q-values do not reorder
+  them. Empty entries are skipped, so an empty header gives `[]`.
 
-      Compress.accept_encoding("gzip, deflate, br")
-      -- ["gzip", "deflate", "br"]
+  ## Examples
 
-      Compress.accept_encoding("gzip;q=0.9, br;q=0.5")
-      -- ["gzip", "br"]
-
-      Compress.accept_encoding("gzip;q=0, br")
-      -- ["br"]
-
-  Returns an empty list if the header is absent or empty.
+      march> Compress.accept_encoding("gzip, deflate, br")
+      ["gzip", "deflate", "br"]
+      march> Compress.accept_encoding("gzip;q=0.9, br;q=0.5")
+      ["gzip", "br"]
+      march> Compress.accept_encoding(" , gzip ;q=0 ,zstd")
+      ["zstd"]
+      march> Compress.accept_encoding("")
+      []
   """
   fn accept_encoding(header_value : String) : List(String) do
     let parts = string_split(header_value, ",")
@@ -407,14 +447,19 @@ mod Compress do
 
   doc """
   Choose the best compression encoding supported by the client, given the
-  parsed Accept-Encoding tokens.  Prefers zstd > br > gzip in that order.
-  Returns None if no supported encoding was advertised.
+  parsed Accept-Encoding tokens.  Prefers zstd > br > gzip in that order,
+  regardless of the order (or q-values) the client gave. Matching is exact
+  and case-sensitive; `deflate` and `*` are never chosen. Returns None if
+  no supported encoding was advertised.
 
-      Compress.best_encoding(["gzip", "br"])
-      -- Some("br")
+  ## Examples
 
-      Compress.best_encoding(["identity"])
-      -- None
+      march> Compress.best_encoding(["gzip", "br"])
+      Some("br")
+      march> Compress.best_encoding(Compress.accept_encoding("gzip, zstd;q=0.1"))
+      Some("zstd")
+      march> Compress.best_encoding(["identity", "deflate"])
+      None
   """
   fn best_encoding(tokens : List(String)) : Option(String) do
     fn has(tok) do

@@ -17,6 +17,8 @@
 --   Yaml.get_int(v, key)     : Option(Int)
 --   Yaml.get_bool(v, key)    : Option(Bool)
 --   Yaml.get_seq(v)          : Option(List(YamlValue))
+--
+-- doc: try
 
 mod Yaml do
 
@@ -767,10 +769,24 @@ mod Yaml do
   -- ── Public parse API ──────────────────────────────────────────────────────
 
   doc """
-  Parse a YAML string. Returns Ok(YamlValue) or Err(YamlError).
-  Supports: block mappings, block sequences, scalars, flow {}/[], comments.
+  Parse a YAML string. Returns Ok(YamlValue) or
+  Err(YamlError(message, line, col)). Supports block mappings, block
+  sequences, scalars, flow `{}`/`[]`, quoted strings and comments; an
+  optional leading `---` is skipped. Plain scalars are typed: integers
+  become `YInt`, floats `YFloat`; `true`/`True`/`TRUE`/`yes`/`Yes`/`on`
+  and `false`/`False`/`FALSE`/`no`/`No`/`off` become `YBool`;
+  `null`/`Null`/`NULL`/`~`/empty become `YNull`; anything else `YStr`. Duplicate
+  keys are kept; lookups return the first. An empty (or comment-only)
+  document is an error.
 
-      Yaml.parse("name: alice\\nage: 30")
+  ## Examples
+
+      march> Yaml.parse("name: alice\nage: 30")
+      Ok(YMap([("name", YStr("alice")), ("age", YInt(30))]))
+      march> Yaml.parse("---\n- 1\n- two\n- ~")
+      Ok(YSeq([YInt(1), YStr("two"), YNull]))
+      march> Yaml.parse("")
+      Err(YamlError("empty document", 1, 0))
   """
   fn parse(src : String) : Result(YamlValue, YamlError) do
     let st = make_state(src)
@@ -791,7 +807,16 @@ mod Yaml do
     end
   end
 
-  doc "Parse YAML, panicking on error."
+  doc """
+  Parse YAML like `parse`, returning the value directly. Panics with
+  `YAML parse error at LINE:COL: MESSAGE` if the input is invalid (or
+  empty), so use it only for trusted, known-good input.
+
+  ## Examples
+
+      march> Yaml.parse_exn("a: {b: 1, c: [x, y]}")
+      YMap([("a", YMap([("b", YInt(1)), ("c", YSeq([YStr("x"), YStr("y")]))]))])
+  """
   fn parse_exn(src : String) : YamlValue do
     match parse(src) do
     Ok(v) -> v
@@ -805,7 +830,17 @@ mod Yaml do
 
   -- ── Navigation ────────────────────────────────────────────────────────────
 
-  doc "Get a key from a YMap value."
+  doc """
+  Get a key from a YMap value (the first entry with that key). Returns
+  None if the key is absent or `v` is not a YMap.
+
+  ## Examples
+
+      march> Yaml.get(Yaml.parse_exn("a: 1\na: 2"), "a")
+      Some(YInt(1))
+      march> Yaml.get(Yaml.parse_exn("- a"), "a")
+      None
+  """
   fn get(v : YamlValue, key : String) : Option(YamlValue) do
     match v do
     YMap(pairs) ->
@@ -817,7 +852,18 @@ mod Yaml do
     end
   end
 
-  doc "Navigate nested YMap values by a list of keys."
+  doc """
+  Navigate nested YMap values by a list of keys. An empty key list
+  returns `Some(v)`; None if any step is missing or not a YMap.
+
+  ## Examples
+
+      march> let cfg = Yaml.parse_exn("server:\n  host: example.com\n  port: 8080")
+      march> Yaml.get_in(cfg, ["server", "port"])
+      Some(YInt(8080))
+      march> Yaml.get_in(cfg, ["server", "user"])
+      None
+  """
   fn get_in(v : YamlValue, keys : List(String)) : Option(YamlValue) do
     match keys do
     Nil -> Some(v)
@@ -829,7 +875,18 @@ mod Yaml do
     end
   end
 
-  doc "Get a string value from a YMap."
+  doc """
+  Get a string value from a YMap, or None if the key is absent or its
+  value is not a YStr (a plain scalar that parsed as a number or boolean
+  is not converted back).
+
+  ## Examples
+
+      march> Yaml.get_str(Yaml.parse_exn("name: alice\nage: 30"), "name")
+      Some("alice")
+      march> Yaml.get_str(Yaml.parse_exn("name: alice\nage: 30"), "age")
+      None
+  """
   fn get_str(v : YamlValue, key : String) : Option(String) do
     match get(v, key) do
     None -> None
@@ -838,7 +895,17 @@ mod Yaml do
     end
   end
 
-  doc "Get an integer value from a YMap."
+  doc """
+  Get an integer value from a YMap, or None if the key is absent or its
+  value is not a YInt.
+
+  ## Examples
+
+      march> Yaml.get_int(Yaml.parse_exn("name: alice\nage: 30"), "age")
+      Some(30)
+      march> Yaml.get_int(Yaml.parse_exn("ratio: 0.5"), "ratio")
+      None
+  """
   fn get_int(v : YamlValue, key : String) : Option(Int) do
     match get(v, key) do
     None -> None
@@ -847,7 +914,18 @@ mod Yaml do
     end
   end
 
-  doc "Get a boolean value from a YMap."
+  doc """
+  Get a boolean value from a YMap, or None if the key is absent or its
+  value is not a YBool. YAML 1.1 spellings such as `yes`/`no` parse as
+  booleans.
+
+  ## Examples
+
+      march> Yaml.get_bool(Yaml.parse_exn("tls: yes"), "tls")
+      Some(true)
+      march> Yaml.get_bool(Yaml.parse_exn("tls: maybe"), "tls")
+      None
+  """
   fn get_bool(v : YamlValue, key : String) : Option(Bool) do
     match get(v, key) do
     None -> None
@@ -856,7 +934,16 @@ mod Yaml do
     end
   end
 
-  doc "Get the list from a YSeq value."
+  doc """
+  Get the elements of a YSeq value, or None if `v` is not a YSeq.
+
+  ## Examples
+
+      march> Yaml.get_seq(Yaml.parse_exn("- 1\n- 2"))
+      Some([YInt(1), YInt(2)])
+      march> Yaml.get_seq(Yaml.parse_exn("a: 1"))
+      None
+  """
   fn get_seq(v : YamlValue) : Option(List(YamlValue)) do
     match v do
     YSeq(xs) -> Some(xs)
@@ -950,7 +1037,24 @@ mod Yaml do
     end
   end
 
-  doc "Serialize a YamlValue to a YAML string."
+  doc """
+  Serialize a YamlValue to a block-style YAML string, two spaces per
+  nesting level, with no trailing newline. Strings that would otherwise
+  re-parse as another type, or that contain flow/comment characters, are
+  double-quoted and escaped; empty sequences and maps render as `[]` and
+  `{}`. Known limitations: a sequence nested under a key is emitted at
+  the key's own indentation, which `parse` does not read back; a YMap
+  inside a YSeq is misindented; a top-level YSeq starts with a newline;
+  and a string containing a newline but no other special character is
+  emitted unquoted.
+
+  ## Examples
+
+      march> Yaml.to_string(Yaml.parse_exn("name: alice\nage: 30"))
+      "name: alice\nage: 30"
+      march> Yaml.to_string(YMap([("a", YMap([("b", YInt(1))])), ("k", YStr("true"))]))
+      "a:\n  b: 1\nk: \"true\""
+  """
   fn to_string(v : YamlValue) : String do
     value_to_yaml(v, 0)
   end
