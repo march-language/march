@@ -43,7 +43,8 @@ mod Dns do
   Resolve hostname to a list of IPv4 address strings.
   Returns Ok(addrs) where addrs is non-empty, holds each address once, and
   keeps the resolver's order; or Err on failure (NotFound when the host has
-  no IPv4 address).
+  no IPv4 address, ResolveError for any other resolver failure).  Performs
+  a network lookup, so there is no runnable example.
 
       match Dns.resolve("example.com") do
       Ok(ips)  -> List.head_opt(ips)
@@ -63,8 +64,10 @@ mod Dns do
   end
 
   doc """
-  Resolve hostname to its primary IPv4 address.
-  Returns Ok(ip_string) or Err.
+  Resolve hostname to its primary IPv4 address: the first address
+  `resolve` returns, in the resolver's order.  Returns Ok(ip_string), or
+  the same Err as `resolve`.  Performs a network lookup, so there is no
+  runnable example.
 
       match Dns.resolve_one("example.com") do
       Ok(ip) -> ip
