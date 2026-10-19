@@ -2734,6 +2734,24 @@ let let_rhs_admitted (ctx : rctx) (e : A.expr) : bool =
      | None -> false)
   | _ -> let_equality_rhs e
 
+(* A binding of [names] that leaves them UNPINNED (a lambda's or local
+   `fn`'s parameter, a `let?` binder): tag them, and every name whose
+   defining fact the rebinding retires, as opaque (re-review of fece9d212;
+   see [opaque_name_marker]).  Returns the path to continue with, already
+   [path_shadow]ed. *)
+let rebind_opaque (path : (A.expr * bool) list) (lets : launder) (sc : scope) (names : string list)
+  : (A.expr * bool) list =
+  let untied =
+    untied_by_rebinding path names
+    @ List.filter_map
+        (fun (k, rhs) -> if (not (List.mem k names)) && expr_mentions names rhs then Some k else None)
+        lets
+    @ List.filter_map
+        (fun (k, (_, q, _)) -> if (not (List.mem k names)) && expr_mentions names q then Some k else None)
+        sc
+  in
+  tag_opaque (path_shadow path names) (untied @ names)
+
 (* The container-return demand of the function whose body [visit] is walking
    (2026-09-18 plan, Phase 1): its callee label, element entry, clause span,
    and the TAIL expressions not yet checked, identified physically.  [visit]
@@ -3042,6 +3060,43 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
              | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
              | _ -> path
            in
+           (* Opaque names (re-review of fece9d212): the binder of a `let`
+              whose value the path does not pin down, and every name whose
+              defining fact this rebinding retires, are tagged
+              ([opaque_name_marker]), so no solver model naming them is taken
+              as a definite counterexample.  Pinned down: a literal, an
+              admitted equality (pushed above), and a comparison or connective
+              ([predicate_shaped], read through [lets] by [check_call]), each
+              not mentioning its own binder or a name already tagged. *)
+           let path' =
+             match e with
+             | A.ELet (b, _) ->
+               let names = pat_binders b.A.bind_pat in
+               let tagged = path_opaque_names path in
+               let untied =
+                 untied_by_rebinding path names
+                 @ List.filter_map
+                     (fun (k, rhs) ->
+                       if (not (List.mem k names)) && expr_mentions names rhs then Some k else None)
+                     lets
+                 @ List.filter_map
+                     (fun (k, (_, q, _)) ->
+                       if (not (List.mem k names)) && expr_mentions names q then Some k else None)
+                     sc
+               in
+               let pinned =
+                 match b.A.bind_pat, b.A.bind_expr with
+                 | A.PatVar _, rhs when expr_mentions names rhs || expr_mentions tagged rhs -> false
+                 | A.PatVar _, A.ELit _ -> true
+                 | A.PatVar _, rhs when let_rhs_admitted ctx rhs -> true
+                 | A.PatVar _, A.EIf (_, a, b', _) -> let_rhs_admitted ctx a && let_rhs_admitted ctx b'
+                 | A.PatVar _, rhs -> predicate_shaped rhs
+                 | _ -> false
+               in
+               tag_opaque path' (untied @ if pinned then [] else names)
+             | A.ELetFn (n, _, _, _, _) -> tag_opaque path' [ n.A.txt ]
+             | _ -> path'
+           in
            (* The laundering channel: retire first (both the key and any entry
               whose RHS mentions a rebound name — see [launder]), then record a
               single-name binding whose RHS is a direct application, so a later
@@ -3195,10 +3250,32 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     @@ List.fold_left
       (fun (earlier : A.branch list) (br : A.branch) ->
         let binders = pat_binders br.A.branch_pat in
+        (* Opaque names (re-review of fece9d212): names whose defining fact
+           this rebinding retires, and the binders themselves unless they
+           destructure an untagged variable (a parameter or a pinned
+           local), whose components are as free as it is. *)
+        let opaque_here =
+          let tagged = path_opaque_names path in
+          let untied =
+            untied_by_rebinding path binders
+            @ List.filter_map
+                (fun (k, rhs) -> if (not (List.mem k binders)) && expr_mentions binders rhs then Some k else None)
+                lets
+            @ List.filter_map
+                (fun (k, (_, q, _)) -> if (not (List.mem k binders)) && expr_mentions binders q then Some k else None)
+                sc
+          in
+          let free_subj =
+            match subj with
+            | A.EVar s -> (not (List.mem s.A.txt tagged)) && not (List.mem s.A.txt binders)
+            | _ -> false
+          in
+          untied @ if free_subj then [] else binders
+        in
         (* A pattern binder shadows a same-named refined outer local. *)
         let sc = scope_shadow sc binders in
         (* …and a same-named fact in the path context, for the same reason. *)
-        let path = path_shadow path binders in
+        let path = tag_opaque (path_shadow path binders) opaque_here in
         (* …and a same-named laundered-guard fact — see [launder]. *)
         let lets = launder_shadow lets binders in
         (* A SINGLE-arm, guard-free, irrefutable tuple `match` on a call binds
@@ -3572,11 +3649,12 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
        construct exactly like ELet/ELam/EMatch, so it must shadow any
        same-named outer refined local before e2 is visited. *)
     let binders = pat_binders p in
+    let sc_outer = sc in
     let sc = scope_shadow sc binders in
     let re = recenv_shadow re binders in
     let cb = cb_shadow cb binders in
     let ctx = local_shadow ~spans:(pat_binder_spans p) ctx binders in
-    visit ~root errctx defs ctx (path_shadow path binders) (launder_shadow lets binders)
+    visit ~root errctx defs ctx (rebind_opaque path lets sc_outer binders) (launder_shadow lets binders)
       sc re cb (cont_shadow ce binders) e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
@@ -3655,7 +3733,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   in
   let ctx = local_shadow ~spans:(param_spans ps) ctx names in
   let assumed = if escapes then strip_params_refinements ps else ps in
-  let path = path_shadow path names @ params_field_facts ~span:sp ps in
+  let path = rebind_opaque path lets sc names @ params_field_facts ~span:sp ps in
   let lets = launder_shadow lets names in
   let sc = List.fold_left scope_add_param sc assumed in
   let re = List.fold_left recenv_add_param re ps in
@@ -3747,7 +3825,7 @@ and visit_lambda ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let ctx = local_shadow ~spans:(param_spans ps) ctx names in
   let assumed = if assume then ps else strip_params_refinements ps in
   let span = match body with A.EVar n -> n.A.span | _ -> A.dummy_span in
-  let path = path_shadow path names @ params_field_facts ~span ps in
+  let path = rebind_opaque path lets sc names @ params_field_facts ~span ps in
   visit ~root errctx defs ctx path (launder_shadow lets names)
     (List.fold_left scope_add_param sc assumed)
     (List.fold_left recenv_add_param re ps)

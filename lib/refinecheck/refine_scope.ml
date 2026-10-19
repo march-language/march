@@ -1290,6 +1290,64 @@ let opaque_path_marker : A.expr * bool =
 let path_is_opaque (path : (A.expr * bool) list) : bool =
   List.exists (function A.ELit (_, sp), _ -> sp.A.file = opaque_path_file | _ -> false) path
 
+(* ── Opaque NAMES (re-review of fece9d212) ───────────────────────────────
+   The same marker, about one name: a local whose value the query does not
+   pin down although the program does — `let ok = small(k)`, a lambda's or
+   local `fn`'s parameter, a binder destructured from a computed value, or a
+   name whose defining fact (`ok == …`, `j == k + 1`) was retired when
+   something it mentions was rebound.  A solver model may give such a name a
+   value it never has at this point (`ok = true` with `k = 6` after `let ok =
+   k < 5`), so [check_call] takes no model naming it as a definite
+   counterexample.  Like the path marker it reads as `true` to every consumer;
+   the name rides in the span's file.  It is never retired (a rebinding
+   leaves the tag behind): conservative, it only ever loses a violation. *)
+let opaque_name_prefix = "<opaque-name>:"
+
+let opaque_name_marker (n : string) : A.expr * bool =
+  (A.ELit (A.LitBool true, { A.dummy_span with A.file = opaque_name_prefix ^ n }), false)
+
+let path_opaque_names (path : (A.expr * bool) list) : string list =
+  let k = String.length opaque_name_prefix in
+  List.filter_map
+    (function
+      | A.ELit (_, sp), _
+        when String.length sp.A.file > k && String.sub sp.A.file 0 k = opaque_name_prefix ->
+        Some (String.sub sp.A.file k (String.length sp.A.file - k))
+      | _ -> None)
+    path
+
+let tag_opaque (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
+  List.fold_left (fun p n -> opaque_name_marker n :: p) path names
+
+(* A Bool-valued application the path translator reads exactly: a
+   comparison or a connective.  [let ok = k < 5] binds such a value, and
+   [check_call] reads a later `if ok` as `if k < 5` through [lets]. *)
+let predicate_shaped (e : A.expr) : bool =
+  match e with
+  | A.EApp (A.EVar { A.txt = ("<" | "<=" | ">" | ">=" | "==" | "!=" | "&&" | "||" | "not"); _ }, _, _) -> true
+  | _ -> false
+
+(* The names a rebinding of [names] leaves UNTIED: every value name of a
+   path fact about to be retired by mention (`j == k + 1` when `k` is
+   rebound loses `j`'s definition), other than [names] themselves. *)
+let untied_by_rebinding (path : (A.expr * bool) list) (names : string list) : string list =
+  if names = [] then []
+  else
+    let rec value_names (e : A.expr) : string list =
+      match e with
+      | A.EVar { A.txt; _ } -> [ txt ]
+      | A.EApp (A.EVar _, xs, _) -> List.concat_map value_names xs
+      | A.EApp (f, xs, _) -> value_names f @ List.concat_map value_names xs
+      | A.ECon (_, xs, _) | A.ETuple (xs, _) | A.EAtom (_, xs, _) -> List.concat_map value_names xs
+      | A.EField (r, _, _) | A.EAnnot (r, _, _) -> value_names r
+      | _ -> []
+    in
+    List.concat_map
+      (fun (c, _) -> if expr_mentions names c then value_names c else [])
+      path
+    |> List.filter (fun n -> not (List.mem n names))
+    |> List.sort_uniq compare
+
 let let_equality_rhs (e : A.expr) : bool =
   match e with
   | A.EVar _ -> false

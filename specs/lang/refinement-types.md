@@ -2086,7 +2086,11 @@ every condition on the way to the call. Under a guard it cannot translate
 after one whose failure it does not record, or a later arm of a `match do`
 cond, the call is a recorded skip instead. An `Int` literal arm (`3 ->`) is
 recorded: inside it the scrutinee is `3`, and after an unguarded one it is
-not. If no fact constrains the
+not. A `Bool` local bound to a comparison or connective (`let ok = k < 5`) is
+read as that comparison in a guard, until `ok` or a name it mentions is
+rebound. Any other local the guard or the demand mentions (`let ok =
+small(k)`, a value destructured from a computed local, a lambda's parameter)
+makes the call a skip rather than a violation. If no fact constrains the
 variable (`sum_small(below(n))` with `n : Int`), the call is a recorded skip,
 unless no value of it could work (`need_ge(below(n), n)` against
 `List({Int | _ >= n})` is violated for every `n`). A pattern binder spelled

@@ -698,6 +698,26 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
   let { root; errctx; postcond; path; lets; sc; re; binds; demand = _ } = cx in
+  (* A Bool local bound to a comparison or connective (`let ok = k < 5`,
+     recorded in [lets], which retires it when `ok` or anything it mentions
+     is rebound) is read as that predicate in a path condition, so `if ok`
+     constrains `k` exactly as `if k < 5` does (re-review of fece9d212).  A
+     self-mentioning entry is skipped: its RHS names the OLD binding. *)
+  let path =
+    let rec unlaunder (depth : int) (e : A.expr) : A.expr =
+      if depth > 8 then e
+      else
+        match e with
+        | A.EVar { A.txt = x; _ } ->
+          (match List.assoc_opt x lets with
+           | Some rhs when predicate_shaped rhs && not (expr_mentions [ x ] rhs) -> unlaunder (depth + 1) rhs
+           | _ -> e)
+        | A.EApp ((A.EVar { A.txt = ("&&" | "||" | "not"); _ } as hd), xs, sp) ->
+          A.EApp (hd, List.map (unlaunder depth) xs, sp)
+        | _ -> e
+    in
+    List.map (fun (c, neg) -> (unlaunder 0 c, neg)) path
+  in
   let subject_noun =
     match subject with
     | Argument -> "argument"
@@ -2504,8 +2524,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        rule below: a model of an incomplete path may be a state the program
        never reaches (review of 8e5c15c48). *)
     let path_incomplete = ref (path_is_opaque path) in
+    let opaque_names = path_opaque_names path in
     List.iter
       (fun (cond, negated) ->
+        if List.exists (fun x -> List.mem x opaque_names) (guard_names cond) then path_incomplete := true;
         match
           smt_of ~vocab:false ~resolve_var:path_resolve_var ~resolve_measure:path_resolve_measure
             ~resolve_field:path_resolve_field
@@ -2893,7 +2915,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           let definite =
             match subject, first with
             | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ ->
-              (not free_goal_name) && (goal_caller_names = [] || not !path_incomplete)
+              (not free_goal_name)
+              && (goal_caller_names = []
+                  || ((not !path_incomplete)
+                      && not (List.exists (fun x -> List.mem x opaque_names) goal_caller_names)))
             | _ -> false
           in
           (match

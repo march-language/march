@@ -17932,6 +17932,62 @@ let elemflow_relational_return_suite =
         Alcotest.check t3 "control: translated guard if k < 5: proved" (3, 0, 0)
           (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    if k < 5 do need_lt5(below(k)) else 0 end\n  end\n"));
 
+    gated "a let-bound Bool guard is read through its definition, or is opaque" (fun () ->
+        (* Re-review of fece9d212: `let ok = k < 5; if ok do …` translated
+           the guard `ok` exactly, but nothing tied `ok` to `k`, so the model
+           `ok = true, k = 6` was taken as a definite counterexample.  The
+           triple each case had on fece9d212 is in its comment. *)
+        let ex =
+          "  fn need_lt5(xs : List({Int | _ < 5})) : Int do 0 end\n\
+          \  fn n5(x : {Int | _ < 5}) : Int do 0 end\n\
+          \  fn small(k : Int) : Bool do k < 5 end\n"
+        in
+        let l3x body = l3 (m (ex ^ body)) in
+        (* A comparison is read through [lets]: `if ok` is `if k < 5`.
+           fece9d212: (2, 1, 0) each. *)
+        Alcotest.check t3 "c1: let ok = k < 5; if ok do need_lt5(below(k)): proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = k < 5\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        Alcotest.check t3 "the parameter-entry twin: proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}, ys : List({Int | _ < k})) : Int do\n\
+                \    let ok = k < 5\n    if ok do need_lt5(ys) else 0 end\n  end\n");
+        (* The scalar twin was a skip; the same reading proves it.
+           fece9d212: (2, 0, 1). *)
+        Alcotest.check t3 "scalar twin: let ok = k < 5; if ok do n5(k): proved" (3, 0, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = k < 5\n    if ok do n5(k) else 0 end\n  end\n");
+        (* Control: the definition is recorded, so a guard that still admits
+           k = 9 is a DEFINITE violation.  fece9d212: (2, 1, 0). *)
+        Alcotest.check t3 "control: let ok = k < 10; if ok do need_lt5(below(k)): violated" (2, 1, 0)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = k < 10\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        (* Rebinding `k` after the let retires the definition (by mention):
+           the old fact does not prove, and `ok` is opaque, so no definite
+           verdict either.  fece9d212: (2, 1, 0). *)
+        Alcotest.check t3 "let ok = k < 5; let k = 7; if ok: not proved, not definite" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = k < 5\n    let k = 7\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        (* An unpinned Bool local is opaque.  fece9d212: (2, 1, 0) each. *)
+        Alcotest.check t3 "let ok = small(k): skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = small(k)\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        Alcotest.check t3 "let ok = if k < 5 do true else false end: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let ok = if k < 5 do true else false end\n    if ok do need_lt5(below(k)) else 0 end\n  end\n");
+        (* An unpinned local in the DEMAND: `m` is 200 at run time, but the
+           query only knows `m > 0`, so the model `m = 1` is no
+           counterexample. *)
+        Alcotest.check t3 "need_lt(below(k), m), m = two100(k): skipped" (3, 0, 1)
+          (l3x "  fn two100(x : Int) : {Int | _ > 0} do 200 end\n\
+                \  fn g(k : {Int | _ <= 100}) : Int do\n    let m = two100(k)\n    need_lt(below(k), m)\n  end\n");
+        (* A binder destructured from an unpinned local is opaque too: `j`
+           IS `k`, but the query does not know it. *)
+        Alcotest.check t3 "let o = Some(k); Some(j) -> if j < 5: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let o = Some(k)\n\
+                \    match o do\n      Some(j) -> if j < 5 do need_lt5(below(k)) else 0 end\n      None -> 0\n    end\n  end\n");
+        (* An irrefutable pattern puts no tester on the path, so only the
+           binder's own tag stops this one. *)
+        Alcotest.check t3 "let t = (k, 0); (j, _) -> if j < 5: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let t = (k, 0)\n\
+                \    match t do\n      (j, _) -> if j < 5 do need_lt5(below(k)) else 0 end\n    end\n  end\n");
+        Alcotest.check t3 "let o = Some(k < 5); Some(b) -> if b: skipped" (2, 0, 1)
+          (l3x "  fn g(k : {Int | _ <= 100}) : Int do\n    let o = Some(k < 5)\n\
+                \    match o do\n      Some(b) -> if b do need_lt5(below(k)) else 0 end\n      None -> 0\n    end\n  end\n"));
+
     gated "cap verified: r1 compiles, r2 does not" (fun () ->
         Alcotest.(check bool) "r1 accepted" false
           (has_refine_error_typed (m ~verified:true "  fn go() : Int do sum_small(below(10)) end\n"));

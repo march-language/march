@@ -108,7 +108,11 @@ git log is authoritative for exact commits.
   arm whose failure the checker does not record, and in a later `match do` cond
   arm. These are now skips, as the same call with a plain `Int` argument already
   was. An `Int` literal arm (`3 ->`) now records that the scrutinee is 3 (and,
-  past an unguarded one, that it is not), so such a call can be proved.
+  past an unguarded one, that it is not), so such a call can be proved. The
+  same false violation through a `Bool` local (`let ok = k < 5; if ok do …`) is
+  fixed too: such a local is read as its comparison in a guard (so the call,
+  and the plain `Int` twin `if ok do n5(k)`, are now proved), and a local the
+  checker cannot pin down (`let ok = small(k)`) makes the call a skip.
 - **Refinements: a pattern binder spelled like a name its element refinement
   mentions no longer proves anything.** With `xs : List({Int | _ < n})`,
   `match xs do Cons(n, _) -> need_neg(n)` gave the new `n` the fact `n < n`, a

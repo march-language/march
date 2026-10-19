@@ -262,3 +262,59 @@ skipped. `scripts/run-tests.sh -q compiler`: 1348 pass. `check_types.sh`: 469/46
 `refine-oracle.sh check` against the same `72c1eb52a` baseline (staged stdlib set aside to
 match the baseline's environment): identical, 7786 lines over 549 fixtures, so neither the
 new Int-literal facts nor the marker moved any corpus or stdlib line.
+
+## Second review follow-up: let-bound locals in a guard (third commit)
+
+A re-review of `fece9d212` (no false proof, ~40 Int-literal attack shapes) found one more
+false violation:
+
+```march
+fn c1(k : {Int | _ <= 100}) : Int do
+  let ok = k < 5
+  if ok do need_lt5(below(k)) else 0 end      -- "violated (e.g. ok = true, k = 6)"
+end
+```
+
+and its parameter-entry twin. The guard `ok` translated exactly, so the path counted as
+fully seen, but nothing tied `ok` to `k < 5`.
+
+**Fix, two parts.**
+
+1. **A Bool local bound to a comparison or connective is read as it.** `check_call` rewrites
+   a path condition's `ok` to `k < 5` through `lets` (the laundering channel, which already
+   records `ok -> k < 5` and retires it when `ok` or anything it mentions is rebound). A
+   self-mentioning entry (`let k = k < 5`) is not used. This is a new exact fact for every
+   check, so the scalar twin `let ok = k < 5; if ok do n5(k)`, a skip before, is now proved.
+2. **Opaque names** (`Refine_scope.opaque_name_marker`, a path entry reading `true` that
+   carries one name). The walk tags a local whose value the query does not pin down: a
+   `let` binder unless its RHS is a literal, an admitted equality, an `if` of admitted
+   arms, or a comparison/connective (each not mentioning its own binder or a tagged name);
+   every name whose defining fact (a path equality, a `lets` entry, a scope fact) a
+   rebinding retires by mention; a `match` arm's binders unless the scrutinee is an
+   untagged variable; a lambda's and a local `fn`'s parameters and a `let?`/`let*` binder
+   (`rebind_opaque`). `check_call` then takes no model as a definite counterexample when
+   a path condition (after part 1) or the demand/subject fact names a tagged name. Tags
+   are never retired, so a later rebinding only loses violations.
+
+Tests (same group, new case "a let-bound Bool guard is read through its definition, or is
+opaque"; `fece9d212` value first): c1 (2, 1, 0) → (3, 0, 0); the parameter twin (2, 1, 0)
+→ (3, 0, 0); the scalar twin (2, 0, 1) → (3, 0, 0); `let k = 7` after `let ok` (2, 1, 0) →
+(2, 0, 1) (the old fact neither proves nor gives a definite verdict); `let ok = small(k)`,
+`let ok = if k < 5 do true else false end`, `need_lt(below(k), m)` with `m = two100(k)`
+(post `_ > 0`, really 200), `Some(j)` out of `let o = Some(k)`, `(j, _)` out of `let t =
+(k, 0)`, `Some(b)` out of `let o = Some(k < 5)`: each a false violation → a skip.
+Control: `let ok = k < 10; if ok do need_lt5(below(k))` is a **definite violation** (the
+definition is recorded, so `k = 9` is a real counterexample); unchanged.
+
+Perturbations (each reddens the case; first failing assertion shown by alcotest): no
+`lets` read-through (c1); every `let` binder treated as pinned (`small(k)`); no tagging of
+names a rebinding unties (`let k = 7`); no match-binder tags (the tuple case, the only
+shape where no tester on the scrutinee catches it); no path-name check (c1's rebinding
+case); no demand-name check (`m = two100(k)`). Not observable: the lambda / local `fn` /
+`let?` tags (`rebind_opaque`); no test reaches a definite element violation whose demand
+or path names such a binder with a constraining fact, so they are defence in depth.
+
+Verification: `elemflow*` groups 81 pass; `test_refinecheck.exe -e` (stdlib re-staged and
+compared, VC cleared once) 1214 pass, 0 skipped; `scripts/run-tests.sh -q compiler` 1348
+pass; `check_types.sh` 469/469; `refine-oracle.sh check` against the `72c1eb52a` baseline
+(staged stdlib set aside to match it): identical, 7786 lines over 549 fixtures.
