@@ -52,7 +52,16 @@ mod String do
   """
   fn slice_bytes(s, start, len) do string_slice(s, start, len) end
 
-  doc "Alias for slice_bytes: extract len bytes starting at start."
+  doc """
+  Alias for `slice_bytes`: extracts `len` bytes starting at byte offset
+  `start`, with the same clamping. Offsets are bytes, not codepoints, so a
+  slice can split a multi-byte character.
+
+      march> String.slice("hello world", 0, 5)
+      "hello"
+      march> String.slice("hello", 3, 100)
+      "lo"
+  """
   fn slice(s, start, len) do string_slice(s, start, len) end
 
   doc """
@@ -353,6 +362,11 @@ mod String do
   Legacy alias for `codepoint_count`.  Despite the name, this function
   counts codepoints, not grapheme clusters; new code should call
   `codepoint_count` directly.  Retained for backward compatibility.
+
+      march> String.grapheme_count("héllo")
+      5
+      march> String.grapheme_count("e" ++ Option.unwrap(String.from_codepoint(769)))  -- one grapheme, two codepoints
+      2
   """
   fn grapheme_count(s) do codepoint_count(s) end
 
@@ -546,25 +560,6 @@ mod String do
     end end end
   end
 
-  doc """
-  Extract all Unicode codepoints from a string as an Int list.
-  Each codepoint is yielded as a separate integer in the range 0x0 to 0x10FFFF.
-
-  Returns a list ordered left-to-right. Invalid UTF-8 sequences are treated
-  as individual byte values (0x0 to 0xFF); well-formed March strings will not
-  encounter this case.
-
-      march> String.to_codepoints("A")
-      [65]
-      march> String.to_codepoints("é")
-      [233]
-      march> String.to_codepoints("AB")
-      [65, 66]
-      march> String.to_codepoints("😀")
-      [128512]
-
-  Cost: O(n) where n is the byte length of the string.
-  """
   -- Decode UTF-8 bytes to codepoints, accumulating in reverse (tail-recursive
   -- so the top-level pfn gets TCO). A truncated multi-byte sequence at the end
   -- falls back to the lead byte's raw value (mirrors the interpreter builtin).
@@ -603,6 +598,25 @@ mod String do
   -- Pure-March UTF-8 decode. Same story as `from_codepoint` above: written
   -- around a `string_to_codepoints` builtin that did not link when compiled,
   -- which was fixed on 2026-08-22.
+  doc """
+  Extract all Unicode codepoints from a string as an Int list.
+  Each codepoint is yielded as a separate integer in the range 0x0 to 0x10FFFF.
+
+  Returns a list ordered left-to-right. Invalid UTF-8 sequences are treated
+  as individual byte values (0x0 to 0xFF); well-formed March strings will not
+  encounter this case.
+
+      march> String.to_codepoints("A")
+      [65]
+      march> String.to_codepoints("é")
+      [233]
+      march> String.to_codepoints("AB")
+      [65, 66]
+      march> String.to_codepoints("😀")
+      [128512]
+
+  Cost: O(n) where n is the byte length of the string.
+  """
   fn to_codepoints(s : String) : List(Int) do
     let b = Bytes.from_string(s)
     decode_go(b, Bytes.length(b), 0, Nil)
