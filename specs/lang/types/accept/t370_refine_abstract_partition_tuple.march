@@ -1,0 +1,35 @@
+-- Abstract refinements, the leftovers, phase C
+-- (specs/2026-10-18-abstract-refinements-leftovers-design.md §5): a tuple
+-- element return, one entry per component.  `List.partition` declares
+-- `(List(a[p]), List({a | !p(_)}))`; a `let (pos, neg) = …` or a single-arm
+-- tuple `match` carries each component to a demand, `p` instantiated from the
+-- lambda.  A user `split_pos` declares and proves a non-abstract tuple return
+-- through the tuple self-hypothesis.  Rows P1, Z3 and C9 of the design.
+-- Under `cap verified`, exit 0 means every obligation PROVED.  Reject
+-- companion: reject/t371.
+mod AbsPartition do
+  cap verified
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do List.length(xs) end
+  fn split_pos(xs : List(Int)) : (List({Int | _ > 0}), List(Int)) do
+    match xs do
+    Nil -> (Nil, Nil)
+    Cons(h, t) ->
+      let (a, b) = split_pos(t)
+      if h > 0 do (Cons(h, a), b) else (a, Cons(h, b)) end
+    end
+  end
+  fn p1(ys : List(Int)) : Int do
+    let (pos, neg) = List.partition(ys, fn y -> y > 0)
+    sum_pos(pos) + sum_nonpos(neg)
+  end
+  fn z3(ys : List(Int)) : Int do
+    match List.partition(ys, fn y -> y > 0) do
+    (pos, _) -> sum_pos(pos)
+    end
+  end
+  fn c9(ys : List(Int)) : Int do
+    let (pos, rest) = split_pos(ys)
+    sum_pos(pos) + List.length(rest)
+  end
+end

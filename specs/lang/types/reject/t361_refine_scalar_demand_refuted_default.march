@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: cannot verify precondition `_ > 0` on `need_pos`
+-- Element refinements, a scalar demand on a single-element result (2026-10-18,
+-- design specs/2026-10-18-element-flow-followups-design.md phase 2), a refuted
+-- source: the default `0` does not meet `_ > 0`.  Whether it is returned
+-- depends on the caller's data (`Option.unwrap_or(Some(5), 0)` is fine), so
+-- this is a parametric-source skip, never a violation, and `cap verified`
+-- makes it this error.  Accept twin: accept/t360.
+mod ScalarDemandRefutedDefault do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn defaulted(o : Option({Int | _ > 0})) : Int do
+    need_pos(Option.unwrap_or(o, 0))
+  end
+end

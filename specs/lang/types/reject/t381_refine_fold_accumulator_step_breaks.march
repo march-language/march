@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: (accumulator-step-unproved:
+-- Accumulator invariants (2026-10-18, design
+-- specs/2026-10-18-fold-accumulator-invariants-design.md phase 1), a step that
+-- breaks the demand: assuming `acc >= 0` and `x > 0`, `acc - x` can be
+-- negative, so `_ >= 0` is not an invariant of the fold.  A skip, never a
+-- violation (`List.fold_left([], 0, …)` is 0), and an error under
+-- `cap verified`.  Rejected before too (a parametric-source skip); it pins
+-- the reason, not a fixed bug.  Accept twin: accept/t380.
+mod FoldAccumulatorStepBreaks do
+  cap verified
+  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  fn drained(pos : List({Int | _ > 0})) : Int do
+    need_nn(List.fold_left(pos, 0, fn (acc, x) -> acc - x))
+  end
+end

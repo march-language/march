@@ -1,0 +1,24 @@
+-- Abstract refinements, the leftovers, phase E
+-- (specs/2026-10-18-abstract-refinements-leftovers-design.md §6.5): a
+-- constructor field of type `List(a)` is a modelled nested-container field.
+-- A `Dq({Int | _ > 0})` built from positive lists proves its element
+-- refinement at the construction, a `match` binder at either list field
+-- carries `{Int | _ > 0}`, and `Deque.filter` (rewritten field-wise) declares
+-- `Deque(a[p])`, so `Deque.to_list(Deque.filter(d, fn y -> y > 0))` proves a
+-- `List({Int | _ > 0})` demand.  Rows Q1 and Q5 of the design.  Under
+-- `cap verified`, exit 0 means every obligation PROVED.  Reject companion:
+-- reject/t431.
+mod WithinListFields do
+  cap verified
+  type Dq(a) = Dq(Int, List(a), List(a))
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn mk_ok() : Dq({Int | _ > 0}) do Dq(2, [1], [2]) end
+  fn q5(d : Dq({Int | _ > 0})) : Int do
+    match d do
+    Dq(_, f, b) -> sum_pos(f) + sum_pos(b)
+    end
+  end
+  fn q1(d : Deque.Deque(Int)) : Int do
+    sum_pos(Deque.to_list(Deque.filter(d, fn y -> y > 0)))
+  end
+end

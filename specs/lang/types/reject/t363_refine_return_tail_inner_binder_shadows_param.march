@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: does not satisfy its return type constraint
+-- Refinements, a return tail under an inner binder named like a parameter
+-- (2026-10-18, specs/progress/2026-10-18-element-flow-phase2-scalar-demands.md,
+-- "Review follow-up"): the arm's `n` is the option's payload, not the
+-- parameter `n`.  The post engine read the parameter's `n < 0` and the arm's
+-- guard `n > 5` on one name, and the contradiction proved the `0 - 7` tail, so
+-- `cap verified` accepted this although `g2(0 - 1, Some(10))` returns -7.  The
+-- inner binding is now renamed apart, and the tail is a violation.
+mod ReturnTailInnerBinder do
+  cap verified
+  fn g2(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do
+    match p do
+      Some(n) -> if n > 5 do 0 - 7 else 1 end
+      None -> 1
+    end
+  end
+end

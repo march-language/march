@@ -2043,6 +2043,60 @@ Anything else is a recorded skip. Every element a `match` takes out of such a
 value carries the fact, whether the scrutinee is a variable or a call
 (`match List.head_opt(xs) do Some(h) -> …`).
 
+**An element refinement that names a parameter** means that parameter, at the
+call. `fn need_lt(xs : List({Int | _ < n}), n : Int)` called as
+`need_lt(ys, 10)` demands `_ < 10` of every element of `ys`, whatever the
+caller happens to call `n`; a demand naming a parameter the call does not
+supply is a recorded skip. Inside a function, such a fact is about the
+binding it names: after `let n = 0`, `xs`'s elements are no longer known to be
+`< n`, and a return tail under a binding that rebinds `n` is a recorded skip
+rather than checked against the local. A lambda whose parameter is spelled like
+a name the demand mentions is not read as that name. On a record field
+(`xs : List({Int | _ < n})` naming the sibling field `n`) or on an expected
+function codomain, such a refinement is a recorded skip, never checked.
+
+The same holds for a **return**. A call to a function whose container return
+names a parameter and was proved at its definition carries that return at the
+call's own arguments:
+
+```march
+fn below(n : Int) : List({Int | _ < n}) do [n - 1, n - 2] end
+
+fn t(k : {Int | _ <= 10}) : Int do
+  sum_small(below(10)) + sum_small(below(k))   -- both proved (_ < 10)
+end
+sum_lt5(below(10))                              -- violated: _ < 10 does not imply _ < 5
+```
+
+Only an argument that is a variable, a literal, or `+`/`-`/literal-`*`
+arithmetic over them is substituted. `below(f(x))` carries nothing. A
+`let`-bound result (`let ys = below(k)`) keeps the fact until a name it
+mentions is rebound. A recursive call to the function being checked carries the
+return at its own arguments, so `clamp(t, n)` inside
+`fn clamp(xs, n) : List({Int | _ <= n})` is `_ <= n`. A tuple component works
+the same way, and so does a block-level `fn` whose return names only its own
+parameters. A function passed as a value carries nothing, because there are no
+arguments to substitute.
+
+When such a return fails to imply what a call demands, the result is a
+violation only if every caller variable it or the demand mentions is
+constrained by a refinement or a guard (`k` above), and the checker can read
+every condition on the way to the call. Under a guard it cannot translate
+(`if small(k)`), a pattern it does not record (`Some(3) ->`), a `match` arm
+after one whose failure it does not record, or a later arm of a `match do`
+cond, the call is a recorded skip instead. An `Int` literal arm (`3 ->`) is
+recorded: inside it the scrutinee is `3`, and after an unguarded one it is
+not. A `Bool` local bound to a comparison or connective (`let ok = k < 5`) is
+read as that comparison in a guard, until `ok` or a name it mentions is
+rebound. Any other local the guard or the demand mentions (`let ok =
+small(k)`, a value destructured from a computed local, a lambda's parameter)
+makes the call a skip rather than a violation. If no fact constrains the
+variable (`sum_small(below(n))` with `n : Int`), the call is a recorded skip,
+unless no value of it could work (`need_ge(below(n), n)` against
+`List({Int | _ >= n})` is violated for every `n`). A pattern binder spelled
+like a name the slot mentions (`Cons(n, _)` over `List({Int | _ < n})`) gets no
+fact from it.
+
 ### Through a polymorphic call
 
 A function that is generic in its element type cannot invent an element, so its
@@ -2072,9 +2126,13 @@ that the signature tells the truth about the callee:
   another, or let in through an unannotated parameter carries nothing.
 - **The body must not be able to create one.** A function that reaches a builtin
   returning a type variable it was not given (a decoder such as `from_json`, a
-  typed global lookup, an actor call), an FFI extern, or an interface method of
-  that shape, directly or through another function, carries nothing. The
-  builtin classification is computed from the typechecker's own builtin table.
+  typed global lookup, an actor call), an FFI extern, or an interface method
+  whose result mentions a type variable, directly or through another function,
+  carries nothing. The builtin classification is computed from the
+  typechecker's own builtin table. An interface method counts even when its
+  result is one of its arguments' types (`fn norm : t -> t`) and even when the
+  module has a single `impl` of it: that `impl` is written at one type and may
+  return any value of it.
 - **A callee with a bound on the variable carries nothing.**
 
 When any of these fails, the call's element obligation is a recorded skip:
@@ -2105,10 +2163,78 @@ As `b` shows, a one-parameter lambda passed where the callee's function
 argument takes the element type receives its source's element refinement as a
 fact, both for this check and for every obligation inside the lambda body.
 
+A *named* function passed there contributes its declared return refinement,
+but only when each of its own refined parameters is met by what the callee
+hands it at that position: the element refinement of the source there, or (for
+a fold's accumulator) the demand itself, see
+[Folds](#folds-an-accumulator-invariant). With
+`fn dbl(x : {Int | _ > 0}) : {Int | _ > 0}`, `sum_pos(List.map(pos, dbl))`
+proves and `sum_pos(List.map(ys, dbl))` over an unrefined `ys` is a skip naming
+`dbl`'s unmet precondition.
+
+A lambda with several parameters gets the same fact position by position: each
+parameter assumes the element refinement of the type variable at its place in
+the callee's function type, when every source of that variable is an element.
+
+```march
+fn need_pos(k : {Int | _ > 0}) : Int do k end
+
+fn d(xs : List({Int | _ > 0}), ys : List({Int | _ > 0})) : Int do
+  sum_pos(List.zip_with(xs, ys, fn (x, y) -> x + y))       -- proved: x from xs, y from ys
+end
+
+fn e(xs : List({Int | _ > 0})) : Int do
+  List.fold_left(xs, 0, fn (acc, x) -> acc + need_pos(x))  -- proved: x comes from xs
+end
+
+fn s(xs : List({Int | _ > 0})) : List({Int | _ > 0}) do
+  List.sort_by(xs, fn (a, b) -> need_pos(a) < need_pos(b)) -- proved: a -> a -> Bool, both from xs
+end
+```
+
+`fold_left`'s accumulator gets no *domain* fact: its type variable also enters
+through the bare initial value and the callback's own result, so
+`fn (acc, x) -> need_pos(acc) + x` is a skip. (A demand on the fold's *result*
+is different: the accumulator may then assume it, see
+[Folds](#folds-an-accumulator-invariant).) A lambda in which any parameter
+carries a refinement annotation of its own receives no fact at all (an
+[annotated accumulator](#an-annotated-accumulator) whose annotation was proved
+aside: its siblings keep theirs), a fact
+that names one of the lambda's own parameters is not given to any of them,
+and a lambda with fewer parameters than the function type takes arguments (other
+than a one-parameter lambda) gets nothing.
+
 A source that does not meet the demand gives a **skip**, never a violation, with
 the reason `parametric-source-unproved`. `sum_pos(List.map(ys, fn y -> 0))` is
 fine when `ys` is empty, and whether it is empty is the caller's data. Under
 `cap verified` the skip is an error, as always.
+
+The same rule applies when the callee returns a single value of the type
+variable rather than a container of them, and the demand is a scalar
+refinement: a precondition, an annotated `let`, an element of a literal, or a
+function's declared return.
+
+```march
+fn f(o : Option({Int | _ > 0}), xs : {List({Int | _ > 0}) | len(_) > 0}) : Int do
+  need_pos(Option.unwrap_or(o, 1))                         -- proved: an element of o, or 1
+  need_pos(Option.unwrap_or_else(o, fn () -> 1))           -- proved
+  need_pos(List.fold_left(xs, 1, fn (acc, x) -> x))        -- proved: x comes from xs
+  need_pos(List.head(xs) + 1)                              -- proved: List.head(xs) > 0
+  need_pos(Option.unwrap_or(o, 0))                         -- skip: the default can fail it
+end
+
+fn g(o : Option({Int | _ > 0})) : {Int | _ > 0} do
+  Option.unwrap_or(o, 1)                                   -- proved
+end
+```
+
+An element demand on such a call works the same way: when the value the call
+returns is itself a container (`b` instantiated to `List(Int)` at the call),
+the whole demand is `b`'s, and each source must meet it as a container. With
+`fn pick(c : Bool, x : b, y : b) : b`, `sum_pos(pick(c, pos, [3]))` is proved
+and `sum_pos(pick(c, pos, zs))` with `zs : List(Int)` is a skip. A fold's
+list-building accumulator is the case that matters; see
+[Folds](#folds-an-accumulator-invariant).
 
 ### Callbacks and user-written combinators
 
@@ -2214,6 +2340,43 @@ call to a function taking `List({Int | _ > 0})` — proved for
 `pos : List({Int | _ > 0})` or `[1, 2]`, a violation for `[0, 1]`, a skip for
 an unrefined list — and inside `need`, `xs`'s elements carry `p`.
 
+**Negation and combined slots.** An element slot may combine `p(_)` with
+`&&`, `||` and `!`/`not`, and with ordinary vocabulary over the element. The
+negation is spelled `{a | !p(_)}` or `{a | not(p(_))}`; `{a | not p(_)}` is a
+syntax error, because `not` is a function and needs parentheses. At a call the
+checker reads the slot with `p` replaced by the passed predicate:
+
+```march
+fn rej(xs : List(a), pred : a -> Bool[p]) : List({a | !p(_)}) do
+  match xs do
+  Nil -> Nil
+  Cons(h, t) -> if pred(h) do rej(t, pred) else Cons(h, rej(t, pred)) end
+  end
+end
+
+fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do … end
+sum_nonpos(rej(ys, fn y -> y > 0))     -- proved: `!(y > 0)`
+sum_nonpos(rej(ys, fn y -> y > 5))     -- skip: `!(y > 5)` is too weak
+```
+
+A slot may also sit at a concrete base, `List(Int[p])` for
+`f : Int -> Bool[p]`. Inside a definition that declares `p`, an accumulator
+helper's own `acc : List(a[p])` parameter is checked like any other (a
+`Cons(h, acc)` pushed on the branch `pred(h)` rejected is a violation; one
+pushed without testing `pred` is a skip). A recursive helper's element return
+is proved by induction only when every element precondition of its recursive
+call is PROVED: a skip or a violation there leaves the return unproved, so the
+helper lends nothing to its callers. This holds for a concrete slot
+(`acc : List({Int | _ > 0})`) as well. The recursive call must also pass the
+function's own callback, unchanged, for each abstract refinement: `filt(t, pred)`
+is covered, while `filt(t, fn y -> true)`, two callbacks passed swapped, a
+rebound `pred` or an alias (`let q = pred`) leave the return unproved. A
+definition may also pass its own callback on to another combinator
+(`List.filter(xs, pred)` in `myfilter(xs, pred : a -> Bool[p]) : List(a[p])`).
+`p` applied under anything but `&&`, `||` and `!` (`p(_) == false`), or two
+abstract refinements in one slot, is not read at a call
+(`abstract-refinement-uninstantiated`); `p(q(_))` is still an error.
+
 **What can instantiate `p`.** Besides an inline lambda:
 
 ```march
@@ -2236,52 +2399,405 @@ nothing. A `let`-bound lambda is read as the lambda itself (it shadows a
 top-level function of the same name), and stops counting once its name is
 rebound.
 
+**Lambda bodies.** A lambda's body is read as an exact predicate over its
+parameter, never a weaker one: `&&`, `||`, `!`/`not`, `if`, a `match` on a
+Bool (`true`/`false` arms, or one of them and `_`, no guards), a call to a
+`let`-bound lambda (its body, with the arguments substituted), and a call to a
+function or callback with a proved `{Bool | _ == e}` return over any number of
+parameters (`e` with the arguments substituted in order):
+
+```march
+fn gt(n : Int, m : Int) : {Bool | _ == (n > m)} do n > m end
+
+sum_pos(List.filter(ys, fn y -> is_pos(y) && y < 100))             -- proved
+sum_pos(List.filter(ys, fn y -> if y > 0 do y < 100 else false end)) -- proved
+sum_pos(List.filter(ys, fn y -> gt(y, 0)))                         -- proved: `y > 0`
+sum_pos(List.filter(ys, fn y -> gt(0, y)))                         -- skip: too weak
+sum_pos(List.filter(ys, fn y -> is_pos(y) || y < 100))             -- skip: too weak
+```
+
+A too-weak skip prints the lambda and what it was read as:
+`` `fn y -> is_pos(y) || y < 100` (read as `y > 0 || y < 100`) does not imply `_ > 0` ``.
+The result must mention nothing but the lambda's parameter: `fn y -> gt(y, k)`
+with `k` a caller's variable is declined, and so is a `let`-bound lambda that
+captures one. Calls to `let`-bound lambdas are inlined at most four deep
+(`f4` calling `f3` calling `f2` calling `f1` is read; one more is declined,
+naming the bound).
+
+A helper's `{Bool | _ == e}` is proved only for arguments that satisfy its
+refined parameters, so it is inlined only where each of those is proved at the
+call: from what the combinator's callback domain promises (`true` for
+`a -> Bool[p]`) and from what the lambda has already decided on the way to the
+call (the left side of `&&` or `||`, an `if` condition). With
+`weird(a : {Int | _ > 0}) : {Bool | _ == (a > 0)}`, `fn y -> weird(y)` is
+declined, naming the precondition, while `fn y -> y > 0 && weird(y)` is read
+as `y > 0 && y > 0`.
+
 **The standard library.** `List.filter`, `List.find`
-(`Option({a | p(_)})`), `List.take_while` and `Option.filter` all carry `p`:
+(`Option({a | p(_)})`), `List.take_while`, `Option.filter` and
+`List.partition` all carry `p`, and so do the same combinators elsewhere:
+the bare `filter` (`Prelude.filter`), `Enum.filter`, `Enum.take_while` and
+`Iterable.filter` (`List(a[p])`), `Enum.find` and `Iterable.find`
+(`Option(a[p])`), `Range.filter`, whose predicate is over `Int`
+(`f : Int -> Bool[p]`, returning `List(Int[p])`), and `Deque.filter`
+(`Deque(a[p])`; see the last bullet of
+[What element refinements do not do](#what-element-refinements-do-not-do) for
+how a type whose elements sit in `List` fields is checked):
 
 ```march
 fn one_pos(o : Option({Int | _ > 0})) : Int do … end
 one_pos(List.find(ys, fn y -> y > 0))         -- proved
 one_pos(Option.filter(o, is_pos))             -- proved
 sum_pos(List.take_while(ys, is_pos))          -- proved
+sum_pos(filter(ys, fn y -> y > 0))            -- proved: Prelude.filter
+one_pos(Enum.find(ys, fn y -> y > 0))         -- proved
+sum_pos(Range.filter(Range.new(0, n), fn y -> y > 0))  -- proved
+sum_pos(Deque.to_list(Deque.filter(d, fn y -> y > 0))) -- proved
 ```
+
+Each proves its own contract on the definition side; none is assumed.
+
+**Tuples: `List.partition`.** A return that is a tuple of containers carries
+one element slot per component:
+
+```march
+fn partition(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)}))
+
+let (pos, neg) = List.partition(ys, fn y -> y > 0)
+sum_pos(pos)                                  -- proved: `y > 0`
+sum_nonpos(neg)                               -- proved: `!(y > 0)`
+sum_pos(neg)                                  -- skip: too weak (`!(y > 0)`)
+match List.partition(ys, fn y -> y > 0) do
+(pos, _) -> sum_pos(pos)                      -- proved
+end
+```
+
+A component reaches a demand only through destructuring: `let (a, b) = g(…)`
+or a `match` with exactly one arm that is a tuple of names and `_`, with no
+guard, over a direct call. Each name then stands for its component of that
+call, through an alias (`let p2 = pos`) too, until it or a name the call
+mentions is rebound. A user function may declare such a return, abstract or
+not (`split_pos(xs) : (List({Int | _ > 0}), List(Int))`): every tail is
+checked component by component (a tuple literal, a recursive call through the
+structural induction hypothesis, a call to another proved tuple return), and
+a recursive result destructured in the body (`let (yes, no) = part(t, pred)`)
+carries the hypothesis as well. `List.partition` keeps a tail-recursive
+accumulator: a top-level `partition_go` whose `yes : List(a[p])` and
+`no : List({a | !p(_)})` parameters are checked at every push, so both halves
+are proved on its definition side.
 
 What it does not do (reason `abstract-refinement-uninstantiated` where a
 demand meets one of these):
 
-- **A predicate with no proved `{Bool | _ == …}` contract over one parameter**
-  instantiates nothing: no contract is inferred from a body, and a
-  two-parameter function (`gt(n, m)`, even as `fn y -> gt(y, 0)`) is declined.
-- **A lambda that mentions any name besides its parameter** (`fn y -> y > m`)
-  is declined rather than read with `m` unknown, and so is one whose body
-  calls a function other than as the single eta-reducible call
-  (`fn y -> is_pos(y) && y < 100`).
-- **One argument only.** `Map.filter`'s `(k, v) -> Bool` and a `fold_left`
-  accumulator invariant would need a two-argument `p(k, v)`.
-- **Not every combinator.** `List.partition` would need `p` inside a tuple and
-  under `not`; `drop_while` keeps no element fact; `Deque.filter` does not
-  declare one.
+- **A predicate with no proved `{Bool | _ == …}` contract** instantiates
+  nothing, by name or called inside a lambda: no contract is inferred from a
+  body. Passed by name, it must also take one parameter: a bare two-parameter
+  `gt` has no one-argument meaning (inside a lambda, `fn y -> gt(y, 0)` is
+  read).
+- **A lambda body the reader does not translate** is declined, naming the
+  construct: one that mentions a name besides its parameter (`fn y -> y > m`),
+  a block with `let`, a `match` on anything but a Bool (or with guards), an
+  `if` or Bool `match` used as a non-Bool value, a call to a function with no
+  proved contract or to the lambda's own parameter, a computed call head, a
+  `let`-bound lambda that names itself, or inlining deeper than four
+  `let`-bound lambdas. Int-valued helpers (`score(y) > 3` with
+  `score : {Int | _ == …}`) are not inlined, and neither is a helper whose
+  refined parameters are not proved at the call inside the lambda.
+- **A callback parameter's codomain contract is taken on trust from its
+  callers.** In `fn keep_pos(ys, k : ({x : Int | true}) -> {Bool | _ == (x > 0)})`,
+  `k`'s `_ == (x > 0)` instantiates `p` inside `keep_pos`, but it is only as
+  good as the obligation at each place `keep_pos` is called, and passing a
+  callable whose return is not known to meet it is a skip there today, not a
+  violation.
+- **One argument only.** `Map.filter`'s `(k, v) -> Bool` would need a
+  two-argument `p(k, v)`. (A fold's accumulator invariant needs no abstract
+  refinement at all; see [Folds](#folds-an-accumulator-invariant).)
+- **Not every combinator.** `drop_while` (`List`, `Enum`) keeps no element
+  fact: its result starts at the first element that FAILS `pred`, so nothing
+  holds of all of it. `List.filter_map`'s callback returns an `Option`, not a
+  `Bool`, so nothing defines `p`. `List.find_index` returns an index, not an
+  element.
+- **A tuple component only through destructuring.** `Tuple.first(g(…))`, a
+  tuple bound whole and taken apart later (`let r = g(…)` then
+  `match r do …`), a `match` with more than one arm or a refutable component
+  (`(Cons(_, pos), _) -> …`), a `let (xs, b) = g(xs)` whose call mentions one
+  of its own binders, a nested tuple and a tuple inside a container carry no
+  component fact; a tuple flowing into another function carries none either.
+- **A String-sorted callback on the definition side.** Inside a combinator
+  over `List(String)`, `f(h)` with `f : String -> Bool[p]` does not yet
+  reflect as `p(h)`, so a natural-style body over strings does not prove its
+  `List(String[p])` return (delegating to `List.filter` does).
 - **`p` only in an element slot**, not on a bare scalar return
   (`(a) -> {a | p(_)}`), and not through `interface`/`impl` dispatch.
 
+### Folds: an accumulator invariant
+
+A demand on the result of a fold is read as the invariant its accumulator
+keeps. `List.fold_left(xs : List(a), acc : b, f : b -> a -> b) : b` is generic
+in `b`, so every `b` it returns is either the initial value or a result of `f`,
+and every `b` it hands `f` is one of those again. The demand therefore holds
+when two things do:
+
+- **the base**: the initial value meets it;
+- **the step**: `f`, *assuming* the demand of each of its parameters whose type
+  is exactly `b`, returns a value that meets it.
+
+```march
+fn need_nn(k : {Int | _ >= 0}) : Int do k end
+fn need_pos(k : {Int | _ > 0}) : Int do k end
+
+fn count(ys : List(Int)) : Int do
+  need_nn(List.fold_left(ys, 0, fn (acc, _x) -> acc + 1))      -- proved
+end
+
+fn drained(pos : List({Int | _ > 0})) : Int do
+  need_nn(List.fold_left(pos, 0, fn (acc, x) -> acc - x))      -- skip: the step can break it
+end
+
+fn summed(pos : List({Int | _ > 0})) : Int do
+  need_pos(List.fold_left(pos, 0, fn (acc, x) -> acc + x))     -- skip: the base 0 fails it
+end
+
+fn running_max(ys : List(Int)) : {Int | _ >= 0} do
+  List.fold_left(ys, 0, fn (a, x) -> if x > a do x else a end) -- proved, at a return
+end
+```
+
+The step may also use what its other parameters know (`x` above has `pos`'s
+element refinement) and anything it captures (`acc + m` with `m : {Int | _ > 0}`
+proves; with `m : Int` it does not). Nothing about how often or in what order
+the step runs is assumed: running it zero times is the base. So `fold_right`
+(whose accumulator is the second parameter), the curried `Enum.fold`
+(`fn a -> fn x -> …`, read as one two-parameter lambda), `Enum.reduce` (no
+initial value: the list's elements are the base, and both parameters assume the
+demand) and a fold you write yourself all work the same way. Nothing here is
+specific to the stdlib's folds: the rule applies to any function generic in its
+return variable with a callback that consumes it.
+
+The accumulator can be a container. An element demand on a fold's result
+(`List({Int | _ > 0})` here) instantiates `b` to that refined list: the
+initial list must meet it, and the step, assuming the list it is handed meets
+it, must build one that does.
+
+```march
+fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end
+
+fn reversed(pos : List({Int | _ > 0})) : Int do
+  sum_pos(List.fold_left(pos, [], fn (acc, x) -> Cons(x, acc)))       -- proved
+end
+
+fn kept(ys : List(Int)) : List({Int | _ > 0}) do
+  List.fold_left(ys, [1], fn (acc, x) -> if x > 0 do Cons(x, acc) else acc end) -- proved
+end
+
+fn copied(ys : List(Int)) : Int do
+  sum_pos(List.fold_left(ys, [], fn (acc, x) -> Cons(x, acc)))        -- skip: x is not known positive
+end
+
+fn seeded(pos : List({Int | _ > 0})) : Int do
+  sum_pos(List.fold_left(pos, [0], fn (acc, x) -> Cons(x, acc)))      -- skip: the base [0] fails it
+end
+```
+
+`List.fold_right`, the curried `Enum.fold` and a nested fold (the inner fold's
+initial value is the outer accumulator, which meets the demand by the outer
+assumption) prove the same way. A curried step's inner parameter (`x` in
+`fn a -> fn x -> …`) also gets its element refinement here, so
+`need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))` is proved.
+
+**Which stdlib folds carry it.** `List.fold_left`, `List.fold_right`, the
+prelude's `fold_left`, `Enum.fold`, `Iterable.fold`, `Enum.reduce`,
+`Range.reduce`, `Map.fold`, `Set.fold`, `HashMap.fold`, `Array.fold_left`,
+`RRB.fold`, `RRB.fold_left`, `Deque.fold_left` and `Deque.fold_right`. Each
+declares its accumulator `b` and its callback's arrow (`f : b -> k -> v -> b`
+for the map folds, `f : b -> a -> b` or `f : a -> b -> b` for the rest), which
+is what the parametricity checks read:
+
+```march
+fn entries(m : Map(String, Int)) : Int do
+  need_nn(Map.fold(m, 0, fn (acc, _k, _v) -> acc + 1))         -- proved
+end
+
+fn shrink(d : Deque.Deque(Int)) : Int do
+  need_nn(Deque.fold_left(d, 0, fn (acc, _x) -> acc - 1))      -- skip: the step can break it
+end
+```
+
+These do **not**, and a demand through them stays a skip: the `NativeArray`
+folds (`fold_int` and the other element kinds; the body is one builtin, which
+the checks cannot see through), `Seq.fold` / `Seq.fold_while` and the folds
+built on them (`JsonStream.fold`, `Flow.reduce`; the accumulator travels
+through a closure stored in data), `Hamt.fold` (unannotated, curried callback),
+and, for now, `SortedSet.fold` and `OrderedMap.fold`: they are annotated, but
+their collection parameter is a record type, which the parametricity check does
+not yet walk. None of these is `@[assume]`d: parametricity is checked, never
+taken on trust.
+
+A refuted base or step is a **skip, never a violation**, with its own reason,
+`accumulator-base-unproved` or `accumulator-step-unproved`, so the report says
+which half failed. A failing base can be harmless on a non-empty list and a
+failing step harmless on an empty one; and a true property need not be an
+invariant of the step (`fold_left(ys, 0, fn (a, _) -> a + 1)` never returns
+`-1`, but `a != -1` does not imply `a + 1 != -1`). Under `cap verified` the skip
+is an error, as always.
+
+The argument rests on the callee being unable to make a `b` of its own, so it
+applies only where the [parametricity checks](#through-a-polymorphic-call)
+pass. A "fold" whose body fixes `b`, feeds the step a value it built, takes an
+unannotated callback, calls a decoder or an interface method returning a type
+variable, or is marked `@[trusted]`/`@[assume]` or dispatched through an
+`impl`, gets no assumption, and its call keeps the plain
+`parametric-source-unproved` skip. The rule also declines a step using
+`let?`/`let*`, and a step whose parameter is spelled like a name the demand
+mentions. An accumulator parameter carrying its own refinement annotation is
+the next subsection's case.
+
+Only a demand the checker already traces reaches a fold: a closed scalar demand
+(a precondition, an annotated `let`, a closed return) or an element demand on
+the call (`one_pos(Enum.reduce(pos, …))`, `sum_pos(List.fold_left(pos, [], …))`,
+a declared `List({Int | _ > 0})` return). A relational scalar return
+(`: {Int | _ >= lo}`) is not traced yet, and a `let`-bound fold result used
+later carries nothing unless the accumulator is annotated (below). The step's
+tails are checked where the lambda is written, so a tail naming something
+bound inside the step (`match acc do Cons(h, _) -> Cons(h, acc) … end`) is not
+checked and the call is a skip.
+
+#### An annotated accumulator
+
+Annotating the accumulator states the invariant yourself:
+`fn (acc : {Int | _ > 0}, x) -> …`. The annotation is checked as exactly the
+judgment above, with it in place of a demand: the initial value must meet it,
+and the step, assuming it of every parameter typed `b`, must return a value
+that meets it. When it holds, `acc` may assume it inside the step's body, and
+the call's result carries it, so a `let`-bound fold result has the fact with
+no demand on the call:
+
+```march
+fn count(ys : List(Int)) : Int do
+  let s = List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) ->
+    let _u = need_pos(acc)                                 -- proved: acc assumes it
+    acc + 1)
+  need_pos(s) + need_nn(s)                                 -- both proved
+end
+
+fn above(ys : List(Int), lo : Int) : Int do
+  let s = List.fold_left(ys, lo, fn (acc : {Int | _ >= lo}, _x) -> acc + 1)
+  need_ge(s, lo)                                           -- proved
+end
+
+fn zeroed(ys : List(Int)) : Int do
+  let s = List.fold_left(ys, 0, fn (acc : {Int | _ > 0}, _x) -> acc + 1)
+  need_pos(s)                         -- skip: the base 0 fails the annotation
+end
+
+fn shrinking(ys : List(Int)) : Int do
+  List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc - 1) -- skip: the step breaks it
+end
+```
+
+The annotation is an obligation of its own, on the parameter, reported
+against the callee (`List.fold_left`) with the same two reasons. A refuted base
+or step is a skip, never a violation, for the reasons above; under
+`cap verified` it is an error. An annotation that does not hold is not
+assumed, in the body or of the result. The fact belongs to its call's result
+and is retired like any other when the result, or a name the annotation
+mentions (`lo` above), is rebound.
+
+With a demand on the call as well (`need_nn(List.fold_left(ys, 1, fn (acc :
+{Int | _ > 0}, _x) -> acc + 1))`, or a return tail), the annotation is checked
+and must imply the demand. If it does not hold, or does not imply the demand,
+the demand is tried as the invariant on its own, as if the parameter were
+unannotated; the annotation is never assumed for it.
+
+The same gates apply (the callee must be generic in its return variable `b` by
+the parametricity checks, and not `@[trusted]`, `@[assume]` or an `impl`
+method), and the shape is narrow:
+
+- the callee's declared return is a bare type variable `b` and the annotated
+  parameter's type is exactly `b`, in an inline lambda argument (a
+  `let`-bound lambda passed by name is not read);
+- the annotation refines the value itself (`{Int | …}`, or another base a
+  parameter refinement accepts), not a container's elements
+  (`acc : List({Int | _ > 0})` stays as it was: not checked, not assumed);
+- exactly one parameter typed `b` is annotated; the others typed `b` assume it
+  too (`fn (a : {Int | _ > 0}, c) -> a + c` passed as `f : b -> b -> b`), and
+  two annotated ones are left as they were;
+- a one-parameter lambda is checked at the pass site instead, as any refined
+  callable is: `fn (k : {Int | _ > 0}) -> k + 1` passed as `f : b -> b` is a
+  violation there, since `b` does not imply `_ > 0`. That includes the outer
+  lambda of a curried step (`Enum.fold(ys, 1, fn (a : {Int | _ > 0}) -> fn x ->
+  …)`); annotating an inner curried parameter is read as above.
+
+An annotation on the *element* parameter (`fn (acc, x : {Int | _ > 0}) -> …`)
+is not an invariant of anything: it is a claim about the list's elements, which
+nobody checks, so it stays neither checked nor assumed. Give the list the
+refinement instead (`xs : List({Int | _ > 0})`), and `x` gets it.
+
 ### What element refinements do not do
 
-- **Only four combinators carry an abstract refinement** (`List.filter`,
-  `List.find`, `List.take_while`, `Option.filter`), instantiated from a lambda,
+- **Only these combinators carry an abstract refinement:** `List.filter`,
+  `List.find`, `List.take_while`, `Option.filter`, `List.partition` (per
+  component), `Prelude.filter` (the bare `filter`), `Enum.filter`,
+  `Enum.find`, `Enum.take_while`, `Iterable.filter`, `Iterable.find`,
+  `Range.filter` and `Deque.filter`. Each is instantiated from a lambda
+  (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
   a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
-- **Only a container demand is traced.** A single element flowing into a scalar
-  position (`need_pos(Option.unwrap_or(o, 1))`, the result of `fold_left`) is
-  not checked through the callee's sources.
-- **Only a one-parameter lambda receives a domain fact.** `fold_left`'s
-  two-parameter callback does not.
-- **A local `fn` with a container return** has its tails checked by nothing and
-  lends no element fact at its call sites.
-- **An element refinement that names a parameter** (`: List({Int | _ < n})`) is
-  not a fact at the call site of the function that returns it.
+- **A scalar demand is traced only when it is closed.** `need_pos(Option.unwrap_or(o, 1))`
+  is checked through `unwrap_or`'s sources (the elements of `o` and the
+  default), but a demand that names another parameter of its function
+  (`List.nth(xs, Option.unwrap_or(o, 0))` against `_ < len(xs)`) is not, and
+  neither is a relational return (`: {Int | _ >= lo}`, so a fold's running
+  maximum `>= lo` is not checked either). A block-level `fn`'s
+  return tail is traced over that `fn`'s own parameters only: a captured
+  variable carries no fact there. A source that fails the demand makes the call
+  a skip, never a violation.
+- **A fold's accumulator assumes only a demand on the fold's result.** In
+  `fold_left(xs, 1, fn (acc, x) -> …)`, `x` assumes `xs`'s element refinement,
+  but `acc` assumes something only while the step's result is being checked
+  against a demand on the call ([Folds](#folds-an-accumulator-invariant)).
+  With no such demand (`need_pos(acc)` inside the step, a `let`-bound result
+  used later) it assumes nothing unless it is annotated
+  ([An annotated accumulator](#an-annotated-accumulator)), and an invariant is
+  never inferred. An annotation on the element parameter
+  (`fn (acc, x : {Int | _ > 0}) -> …`) is neither checked nor assumed. Indexed
+  invariants (`_ == len(xs)`), tuple or record accumulators, a
+  callback parameter of type `List(b)` and a hand-written accumulator
+  recursion (`fn sum(xs, acc : {Int | _ >= 0}) : {Int | _ >= 0}`) are not
+  covered. A curried lambda (`fn a -> fn x -> …`) gives an element fact to its
+  inner parameters only while its result is checked against a demand on the
+  call; inside its body otherwise, only the outer parameter gets one.
+- **A local `fn` with a container return lends it only when the entry names
+  nothing but the `fn`'s own parameters, and the `fn` does not recurse into it.**
+  Its tails are checked like a top-level function's, and a proved one is a fact
+  at its later calls in the block (read at each call's arguments), but a return
+  naming a captured variable (`List({Int | _ < k})` with `k` from outside)
+  lends nothing, and a recursive call inside the local carries nothing (no
+  structural self-call hypothesis), so `fn go(xs) : List({Int | _ > 0})` whose
+  tail is `go(t)` is a skip. A local returning a tuple of element-refined
+  containers has every component of every tail checked, but lends nothing at
+  its calls.
 - **A predicate relating elements to each other** (sortedness, distinctness)
   cannot be written; see [Set Refinements](#set-refinements) for what a
   predicate can say about a collection's elements as a set.
+- **A parameter inside another container is followed one level, and only
+  as a bare argument.** A constructor field `C(…)` of another registered
+  container (`List`, `Option`, `Result`, or a variant type of the program)
+  whose every argument is a bare type parameter or mentions none is checked
+  as that container: in `type Dq(a) = Dq(Int, List(a), List(a))`,
+  `Dq(1, [0 - 1], [])` against `Dq({Int | _ > 0})` is a violation, and
+  `match d do Dq(_, f, b) -> …` gives `f` and `b` the element refinement. That
+  is what lets `Deque.filter` declare `Deque(a[p])`. Any other field that
+  holds a parameter (`type Box(b) = Box(Int -> b)`,
+  `type Wrap(k, v) = Wrap(List((k, v)))`, a `List(List(a))` field, a field of
+  a container that itself hides the parameter, a self-reference with the
+  parameters permuted) has its element refinement checked at no construction:
+  `Wrap([(1, 0 - 5)])` against `Wrap(Int, {Int | _ > 0})` is a recorded
+  `unreflectable-subject` skip naming the constructor and the hiding type (an
+  error under `cap verified`), a function returning such a construction lends
+  no element fact at its call sites, and a `match` binder at that field gets
+  none. Element refinements say nothing about order or size: a `Dq(a[p])`
+  with its two lists swapped is still one.
 
 ---
 

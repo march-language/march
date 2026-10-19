@@ -523,6 +523,13 @@ let rec pred_str (e : A.expr) : string =
                              | "+" | "-" | "*" | "/" | "%" | "+." | "-." | "*." | "/.") as op; _ },
             [ a; b ], _) ->
     binop op a b
+  (* `!` binds tighter than any infix operator, so `!(y > 0)` printed flat
+     as `!y > 0` would name a different predicate (an instantiated `!p(_)`
+     slot is the common producer, leftovers design §3.2). *)
+  | A.EApp (A.EVar { A.txt = "not"; _ },
+            [ (A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
+                                       | "+" | "-" | "*" | "/" | "%"); _ }, [ _; _ ], _) as a) ], _) ->
+    "!(" ^ pred_str a ^ ")"
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> "-" ^ pred_str a
   (* Any other application of a plain IDENTIFIER — an unrecognised predicate
@@ -1266,6 +1273,81 @@ let rec let_equality_operand (e : A.expr) : bool =
      | _ -> false)
   | _ -> false
 
+(* ── The opaque-path marker (review of 8e5c15c48) ──────────────────────
+   A program point whose reachability depends on something the path does
+   not record — a literal-pattern arm the walk cannot state, an EARLIER
+   arm's failure, a later `cond` arm (the earlier conditions' negations are
+   not pushed) — gets this entry in its path.  It reads as `true` to every
+   consumer (no fact, and nothing to mis-sort), and [Refine_call.check_call]
+   detects it: a solver model there may be a state the program never
+   reaches, so it is no definite counterexample.  Recognised by its span's
+   file, which no source file can be named. *)
+let opaque_path_file = "<opaque-path>"
+
+let opaque_path_marker : A.expr * bool =
+  (A.ELit (A.LitBool true, { A.dummy_span with A.file = opaque_path_file }), false)
+
+let path_is_opaque (path : (A.expr * bool) list) : bool =
+  List.exists (function A.ELit (_, sp), _ -> sp.A.file = opaque_path_file | _ -> false) path
+
+(* ── Opaque NAMES (re-review of fece9d212) ───────────────────────────────
+   The same marker, about one name: a local whose value the query does not
+   pin down although the program does — `let ok = small(k)`, a lambda's or
+   local `fn`'s parameter, a binder destructured from a computed value, or a
+   name whose defining fact (`ok == …`, `j == k + 1`) was retired when
+   something it mentions was rebound.  A solver model may give such a name a
+   value it never has at this point (`ok = true` with `k = 6` after `let ok =
+   k < 5`), so [check_call] takes no model naming it as a definite
+   counterexample.  Like the path marker it reads as `true` to every consumer;
+   the name rides in the span's file.  It is never retired (a rebinding
+   leaves the tag behind): conservative, it only ever loses a violation. *)
+let opaque_name_prefix = "<opaque-name>:"
+
+let opaque_name_marker (n : string) : A.expr * bool =
+  (A.ELit (A.LitBool true, { A.dummy_span with A.file = opaque_name_prefix ^ n }), false)
+
+let path_opaque_names (path : (A.expr * bool) list) : string list =
+  let k = String.length opaque_name_prefix in
+  List.filter_map
+    (function
+      | A.ELit (_, sp), _
+        when String.length sp.A.file > k && String.sub sp.A.file 0 k = opaque_name_prefix ->
+        Some (String.sub sp.A.file k (String.length sp.A.file - k))
+      | _ -> None)
+    path
+
+let tag_opaque (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
+  List.fold_left (fun p n -> opaque_name_marker n :: p) path names
+
+(* A Bool-valued application the path translator reads exactly: a
+   comparison or a connective.  [let ok = k < 5] binds such a value, and
+   [check_call] reads a later `if ok` as `if k < 5` through [lets]. *)
+let predicate_shaped (e : A.expr) : bool =
+  match e with
+  | A.EApp (A.EVar { A.txt = ("<" | "<=" | ">" | ">=" | "==" | "!=" | "&&" | "||" | "not"); _ }, _, _) -> true
+  | _ -> false
+
+(* The names a rebinding of [names] leaves UNTIED: every value name of a
+   path fact about to be retired by mention (`j == k + 1` when `k` is
+   rebound loses `j`'s definition), other than [names] themselves. *)
+let untied_by_rebinding (path : (A.expr * bool) list) (names : string list) : string list =
+  if names = [] then []
+  else
+    let rec value_names (e : A.expr) : string list =
+      match e with
+      | A.EVar { A.txt; _ } -> [ txt ]
+      | A.EApp (A.EVar _, xs, _) -> List.concat_map value_names xs
+      | A.EApp (f, xs, _) -> value_names f @ List.concat_map value_names xs
+      | A.ECon (_, xs, _) | A.ETuple (xs, _) | A.EAtom (_, xs, _) -> List.concat_map value_names xs
+      | A.EField (r, _, _) | A.EAnnot (r, _, _) -> value_names r
+      | _ -> []
+    in
+    List.concat_map
+      (fun (c, _) -> if expr_mentions names c then value_names c else [])
+      path
+    |> List.filter (fun n -> not (List.mem n names))
+    |> List.sort_uniq compare
+
 let let_equality_rhs (e : A.expr) : bool =
   match e with
   | A.EVar _ -> false
@@ -1392,8 +1474,27 @@ type elem = Refined of (string * A.expr * string option) | Container of string *
 
 type contenv = (string * (string * elem option list)) list
 
+(* Does any element predicate of [entry] mention one of [names] (other than
+   that slot's own binder)?  Over-approximate exactly as [expr_mentions]. *)
+let rec elem_entry_mentions (names : string list) ((_, slots) : string * elem option list) : bool =
+  names <> []
+  && List.exists
+       (function
+         | None -> false
+         | Some (Refined (b, p, _)) -> expr_mentions (List.filter (( <> ) b) names) p
+         | Some (Container (c, inner)) -> elem_entry_mentions names (c, inner))
+       slots
+
+(* Retires an entry by its KEY and also any entry one of whose slot
+   predicates MENTIONS a rebound name — the same rule as [scope_shadow].
+   Until 2026-10-18 only the key retired, so `xs : List({Int | _ < n})`
+   survived `let n = 0` and was read as a fact about the NEW `n` the moment a
+   `match` handed an element its slot (design 2026-10-18 element-flow
+   follow-ups, row z3: `need_neg(h)` "proved"). *)
 let cont_shadow (ce : contenv) (names : string list) : contenv =
-  if names = [] then ce else List.filter (fun (n, _) -> not (List.mem n names)) ce
+  if names = [] then ce
+  else
+    List.filter (fun (n, entry) -> (not (List.mem n names)) && not (elem_entry_mentions names entry)) ce
 
 (* A registered container: any ADT whose constructors' field roles are known
    ([ctor_param_fields]) — the builtins `List` / `Option`
@@ -1446,6 +1547,29 @@ let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
     if List.exists Option.is_some slots then Some (c, slots) else None
   | _ -> None
 
+(* A function's element RETURN (leftovers design 2026-10-18 §5.1): today's
+   container return, or a TUPLE of them, one entry per component (`None`: that
+   component carries no element refinement).  A tuple counts only when some
+   component has an entry; a nested tuple or a tuple inside a container reads
+   [None] for that component (out of scope).  Read under whatever
+   [current_abstracts] the caller set, exactly as [elem_refinement]. *)
+type ret_elems =
+  | Single of (string * elem option list)
+  | Tuple of (string * elem option list) option list
+
+let ret_elems_of_ty (t : A.ty option) : ret_elems option =
+  let rec strip (t : A.ty) = match unlinear t with A.TyRefine (b, _, _) -> strip b | t -> t in
+  match Option.map strip t with
+  | Some (A.TyTuple ts) ->
+    let comps = List.map (fun c -> elem_refinement (Some c)) ts in
+    if List.exists Option.is_some comps then Some (Tuple comps) else None
+  | _ -> Option.map (fun e -> Single e) (elem_refinement t)
+
+(* Every entry of a [ret_elems] (never empty: a [Tuple] has at least one). *)
+let ret_entries : ret_elems -> (string * elem option list) list = function
+  | Single e -> [ e ]
+  | Tuple comps -> List.filter_map Fun.id comps
+
 let cont_add_param (ce : contenv) (p : A.param) : contenv =
   let ce = cont_shadow ce [ p.A.param_name.A.txt ] in
   match elem_refinement p.A.param_ty with
@@ -1455,6 +1579,34 @@ let cont_add_param (ce : contenv) (p : A.param) : contenv =
 let cont_add_fnparam (ce : contenv) : A.fn_param -> contenv = function
   | A.FPNamed p | A.FPDefault (p, _) -> cont_add_param ce p
   | A.FPPat pat -> cont_shadow ce (pat_binders pat)
+
+(* A parameter LIST binds simultaneously: an entry naming a sibling parameter
+   (`fn f(xs : List({Int | _ < n}), n : Int)`) is about that very parameter,
+   so it must not be retired by the sibling's own binding the way a later
+   rebinding retires it ([cont_add_param] folded left would drop `xs` when it
+   reaches `n`).  The outer env is shadowed by every name first, by mention;
+   the parameters' own entries then go in by key only. *)
+let cont_add_params (ce : contenv) (ps : A.param list) : contenv =
+  let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+  List.fold_left
+    (fun ce (p : A.param) ->
+      let n = p.A.param_name.A.txt in
+      let ce = List.filter (fun (k, _) -> k <> n) ce in
+      match elem_refinement p.A.param_ty with Some e -> (n, e) :: ce | None -> ce)
+    (cont_shadow ce names) ps
+
+(* The same for a function's clause parameters, into an EMPTY env. *)
+let cont_of_fnparams (ps : A.fn_param list) : contenv =
+  List.fold_left
+    (fun ce -> function
+      | A.FPNamed p | A.FPDefault (p, _) ->
+        let n = p.A.param_name.A.txt in
+        let ce = List.filter (fun (k, _) -> k <> n) ce in
+        (match elem_refinement p.A.param_ty with Some e -> (n, e) :: ce | None -> ce)
+      | A.FPPat pat ->
+        let bs = pat_binders pat in
+        List.filter (fun (k, _) -> not (List.mem k bs)) ce)
+    [] ps
 
 (* A `let` enters the channel through an ANNOTATION only when its element
    obligations were PROVED (the caller passes [~proved]; the same rule

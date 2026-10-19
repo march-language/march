@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: cannot verify the accumulator invariant `_ > 0` annotated on `acc` (passed to `List.fold_left`) (accumulator-step-unproved:
+-- Accumulator invariants, phase 4 (2026-10-18): an annotated accumulator the
+-- step does not keep.  `acc - 1` from `acc > 0` can be `0`; on `[5]` the
+-- second accumulator would be 0.  The annotation's own obligation is a skip
+-- with the step reason (never a violation: a refuted step is a fact about
+-- the candidate invariant, not the program), an error under `cap verified`.
+-- No demand is placed on the result, so before phase 4 this module filed no
+-- obligation at all and was ACCEPTED: the annotation was inert.  Accept twin:
+-- accept/t450.
+mod FoldAnnotatedAccumulatorStepBreaks do
+  cap verified
+  fn count(ys : List(Int)) : Int do
+    List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc - 1)
+  end
+end

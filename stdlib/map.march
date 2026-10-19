@@ -591,8 +591,10 @@ mod Map do
   Left fold over all entries.  Argument order: collection first, init
   second, callback last (uncurried-collection convention).
   The callback `f` is called uncurried as `f(acc, key, val) = new_acc`.
+  Generic in the accumulator `b`, so a refinement demanded of the result
+  is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
   """
-  fn fold(m, acc, f) do
+  fn fold(m : Map(k, v), acc : b, f : b -> k -> v -> b) : b do
     match m do
     HamtMap(node) -> node_fold(acc, node, f)
     end

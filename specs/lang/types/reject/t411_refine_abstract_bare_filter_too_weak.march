@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: (abstract-refinement-too-weak: `fn y -> y >= 0` does not imply `_ > 0`)
+-- Abstract refinements, the leftovers, phase D: a bare `filter(...)`
+-- (`Prelude.filter`) instantiates its abstract refinement from the lambda, so
+-- `fn y -> y >= 0` admits `0` and does not imply the demand `_ > 0`: a
+-- too-weak skip (never a violation: an input with no zero is fine), which
+-- `cap verified` makes this error.  Accept companion: accept/t410.
+mod AbsBareFilterWeak do
+  cap verified
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn go(ys : List(Int)) : Int do sum_pos(filter(ys, fn y -> y >= 0)) end
+end

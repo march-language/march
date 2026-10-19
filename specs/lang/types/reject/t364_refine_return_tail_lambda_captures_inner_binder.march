@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: cannot verify return type constraint `_ > 0` on `q1`
+-- Refinements, a return tail whose lambda captures an inner binder named like a
+-- parameter (2026-10-18, specs/progress/2026-10-18-element-flow-phase2-scalar-demands.md,
+-- "Review follow-up"): the lambda's `n` is the arm's payload.  The renaming that
+-- keeps an inner binder apart from the parameter (reject/t363) did not reach
+-- into the lambda, so the scalar demand hook read `n` as the parameter
+-- `n > 0` and proved the tail, although `q1(1, Some(0 - 5))` returns -5.  Now a
+-- parametric-source skip, an error under `cap verified`.
+mod ReturnTailLambdaInnerBinder do
+  cap verified
+  fn ap(x : b, f : b -> a) : a do f(x) end
+  fn q1(n : {Int | _ > 0}, p : Option(Int)) : {Int | _ > 0} do
+    match p do
+      Some(n) -> ap(1, fn z -> n)
+      None -> 1
+    end
+  end
+end
