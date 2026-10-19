@@ -3,179 +3,446 @@
 -- Transcendental functions (sin, cos, exp, etc.) delegate to
 -- the math_* builtins which wrap libm.
 -- Pure functions (min, max, clamp, lerp) are implemented in March.
+--
+-- doc: try
 
 mod Math do
 
   -- ---- Constants ----
 
-  doc "The mathematical constant pi (3.14159...)."
+  doc """
+  The mathematical constant pi (3.14159...).
+
+  ## Examples
+
+      march> Math.pi() > 3.14159 && Math.pi() < 3.1416
+      true
+  """
   fn pi() : Float do
     3.14159265358979323846
   end
 
-  doc "Euler's number e (2.71828...)."
+  doc """
+  Euler's number e (2.71828...).
+
+  ## Examples
+
+      march> Math.log(Math.e())
+      1.0
+  """
   fn e() : Float do
     2.71828182845904523536
   end
 
-  doc "Tau = 2*pi (6.28318...)."
+  doc """
+  Tau = 2*pi (6.28318...), one full turn in radians.
+
+  ## Examples
+
+      march> Math.tau() == 2.0 *. Math.pi()
+      true
+  """
   fn tau() : Float do
     6.28318530717958647692
   end
 
   -- ---- Basic ----
 
-  doc "Absolute value of a float."
+  doc """
+  Absolute value of a float.
+
+  ## Examples
+
+      march> Math.abs(-2.5)
+      2.5
+      march> Math.abs(3.0)
+      3.0
+  """
   fn abs(x : Float) : Float do
     float_abs(x)
   end
 
-  doc "Returns the smaller of two values."
+  doc """
+  Returns the smaller of two Ints.
+
+  ## Examples
+
+      march> Math.min_int(3, -1)
+      -1
+  """
   fn min_int(a : Int, b : Int) : Int do
     if a < b do a else b end
   end
 
-  doc "Returns the larger of two values."
+  doc """
+  Returns the larger of two Ints.
+
+  ## Examples
+
+      march> Math.max_int(3, -1)
+      3
+  """
   fn max_int(a : Int, b : Int) : Int do
     if a > b do a else b end
   end
 
-  doc "Returns the smaller of two floats."
+  doc """
+  Returns the smaller of two floats. If either argument is NaN the result
+  is `b` (the comparison `a < b` is false).
+
+  ## Examples
+
+      march> Math.min_float(1.5, 2.0)
+      1.5
+  """
   fn min_float(a : Float, b : Float) : Float do
     if a < b do a else b end
   end
 
-  doc "Returns the larger of two floats."
+  doc """
+  Returns the larger of two floats. If either argument is NaN the result
+  is `b` (the comparison `a > b` is false).
+
+  ## Examples
+
+      march> Math.max_float(1.5, 2.0)
+      2.0
+  """
   fn max_float(a : Float, b : Float) : Float do
     if a > b do a else b end
   end
 
-  doc "Clamps `x` to the range [low, high]."
+  doc """
+  Clamps `x` to the range [low, high]: returns `low` if `x < low`, `high` if
+  `x > high`, else `x`. Expects `low <= high`; the bounds are not checked.
+
+  ## Examples
+
+      march> Math.clamp_int(15, 0, 10)
+      10
+      march> Math.clamp_int(-3, 0, 10)
+      0
+      march> Math.clamp_int(7, 0, 10)
+      7
+  """
   fn clamp_int(x : Int, low : Int, high : Int) : Int do
     if x < low do low else if x > high do high else x end end
   end
 
-  doc "Clamps `x` to the range [low, high]."
+  doc """
+  Clamps `x` to the range [low, high]: returns `low` if `x < low`, `high` if
+  `x > high`, else `x` (so a NaN `x` is returned unchanged). Expects
+  `low <= high`; the bounds are not checked.
+
+  ## Examples
+
+      march> Math.clamp_float(1.5, 0.0, 1.0)
+      1.0
+      march> Math.clamp_float(0.25, 0.0, 1.0)
+      0.25
+  """
   fn clamp_float(x : Float, low : Float, high : Float) : Float do
     if x < low do low else if x > high do high else x end end
   end
 
   -- ---- Powers & roots ----
 
-  doc "Square root."
+  doc """
+  Square root. Returns NaN for negative `x`.
+
+  ## Examples
+
+      march> Math.sqrt(16.0)
+      4.0
+      march> Math.sqrt(0.0)
+      0.0
+  """
   fn sqrt(x : Float) : Float do
     math_sqrt(x)
   end
 
-  doc "Cube root."
+  doc """
+  Cube root. Defined for negative `x` too.
+
+  ## Examples
+
+      march> Math.cbrt(27.0)
+      3.0
+      march> Math.cbrt(-8.0)
+      -2.0
+  """
   fn cbrt(x : Float) : Float do
     math_cbrt(x)
   end
 
-  doc "Raises `base` to the power `exp` (both Float)."
+  doc """
+  Raises `base` to the power `exp` (both Float), as C `pow`.
+
+  ## Examples
+
+      march> Math.pow(2.0, 10.0)
+      1024.0
+      march> Math.pow(2.0, -1.0)
+      0.5
+      march> Math.pow(4.0, 0.5)
+      2.0
+  """
   fn pow(base : Float, exp : Float) : Float do
     math_pow(base, exp)
   end
 
-  doc "e raised to the power `x`."
+  doc """
+  e raised to the power `x`.
+
+  ## Examples
+
+      march> Math.exp(0.0)
+      1.0
+  """
   fn exp(x : Float) : Float do
     math_exp(x)
   end
 
-  doc "2 raised to the power `x`."
+  doc """
+  2 raised to the power `x`.
+
+  ## Examples
+
+      march> Math.exp2(10.0)
+      1024.0
+      march> Math.exp2(-1.0)
+      0.5
+  """
   fn exp2(x : Float) : Float do
     math_exp2(x)
   end
 
   -- ---- Logarithms ----
 
-  doc "Natural logarithm (base e)."
+  doc """
+  Natural logarithm (base e). Returns negative infinity for `0.0` and NaN
+  for negative `x`.
+
+  ## Examples
+
+      march> Math.log(1.0)
+      0.0
+  """
   fn log(x : Float) : Float do
     math_log(x)
   end
 
-  doc "Logarithm base 2."
+  doc """
+  Logarithm base 2. Same domain as `log`.
+
+  ## Examples
+
+      march> Math.log2(1024.0)
+      10.0
+  """
   fn log2(x : Float) : Float do
     math_log2(x)
   end
 
-  doc "Logarithm base 10."
+  doc """
+  Logarithm base 10. Same domain as `log`.
+
+  ## Examples
+
+      march> Math.log10(1000.0)
+      3.0
+  """
   fn log10(x : Float) : Float do
     math_log10(x)
   end
 
   -- ---- Trigonometry ----
 
-  doc "Sine of `x` (in radians)."
+  doc """
+  Sine of `x` (in radians).
+
+  ## Examples
+
+      march> Math.sin(0.0)
+      0.0
+  """
   fn sin(x : Float) : Float do
     math_sin(x)
   end
 
-  doc "Cosine of `x` (in radians)."
+  doc """
+  Cosine of `x` (in radians).
+
+  ## Examples
+
+      march> Math.cos(0.0)
+      1.0
+  """
   fn cos(x : Float) : Float do
     math_cos(x)
   end
 
-  doc "Tangent of `x` (in radians)."
+  doc """
+  Tangent of `x` (in radians).
+
+  ## Examples
+
+      march> Math.tan(0.0)
+      0.0
+  """
   fn tan(x : Float) : Float do
     math_tan(x)
   end
 
-  doc "Arc sine, returns radians in [-pi/2, pi/2]."
+  doc """
+  Arc sine, returns radians in [-pi/2, pi/2]. NaN for `x` outside [-1, 1].
+
+  ## Examples
+
+      march> Math.asin(1.0) == Math.pi() /. 2.0
+      true
+  """
   fn asin(x : Float) : Float do
     math_asin(x)
   end
 
-  doc "Arc cosine, returns radians in [0, pi]."
+  doc """
+  Arc cosine, returns radians in [0, pi]. NaN for `x` outside [-1, 1].
+
+  ## Examples
+
+      march> Math.acos(1.0)
+      0.0
+  """
   fn acos(x : Float) : Float do
     math_acos(x)
   end
 
-  doc "Arc tangent, returns radians in (-pi/2, pi/2)."
+  doc """
+  Arc tangent, returns radians in (-pi/2, pi/2).
+
+  ## Examples
+
+      march> Math.atan(0.0)
+      0.0
+  """
   fn atan(x : Float) : Float do
     math_atan(x)
   end
 
-  doc "Arc tangent of y/x, using signs to determine the quadrant."
+  doc """
+  Arc tangent of y/x, using the signs of both arguments to pick the quadrant.
+  Returns radians in [-pi, pi]. Note the argument order: `y` first.
+
+  ## Examples
+
+      march> Math.atan2(0.0, -1.0) == Math.pi()
+      true
+      march> Math.atan2(1.0, 1.0) == Math.pi() /. 4.0
+      true
+  """
   fn atan2(y : Float, x : Float) : Float do
     math_atan2(y, x)
   end
 
   -- ---- Hyperbolic ----
 
-  doc "Hyperbolic sine."
+  doc """
+  Hyperbolic sine.
+
+  ## Examples
+
+      march> Math.sinh(0.0)
+      0.0
+  """
   fn sinh(x : Float) : Float do
     math_sinh(x)
   end
 
-  doc "Hyperbolic cosine."
+  doc """
+  Hyperbolic cosine.
+
+  ## Examples
+
+      march> Math.cosh(0.0)
+      1.0
+  """
   fn cosh(x : Float) : Float do
     math_cosh(x)
   end
 
-  doc "Hyperbolic tangent."
+  doc """
+  Hyperbolic tangent, in (-1, 1).
+
+  ## Examples
+
+      march> Math.tanh(0.0)
+      0.0
+  """
   fn tanh(x : Float) : Float do
     math_tanh(x)
   end
 
   -- ---- Rounding ----
 
-  doc "Largest integer not greater than x (returns Float)."
+  doc """
+  Largest integer not greater than `x`, as a Float. Computed via an Int
+  round-trip, so it is only correct when the result fits in an Int (NaN,
+  infinities and huge magnitudes are not preserved).
+
+  ## Examples
+
+      march> Math.floor(2.7)
+      2.0
+      march> Math.floor(-2.3)
+      -3.0
+  """
   fn floor(x : Float) : Float do
     int_to_float(float_floor(x))
   end
 
-  doc "Smallest integer not less than x (returns Float)."
+  doc """
+  Smallest integer not less than `x`, as a Float. Same Int round-trip
+  caveat as `floor`.
+
+  ## Examples
+
+      march> Math.ceil(2.1)
+      3.0
+      march> Math.ceil(-2.7)
+      -2.0
+  """
   fn ceil(x : Float) : Float do
     int_to_float(float_ceil(x))
   end
 
-  doc "Rounds to the nearest integer (returns Float)."
+  doc """
+  Rounds to the nearest integer, as a Float; halves round away from zero.
+  Same Int round-trip caveat as `floor`.
+
+  ## Examples
+
+      march> Math.round(2.5)
+      3.0
+      march> Math.round(-2.5)
+      -3.0
+      march> Math.round(2.4)
+      2.0
+  """
   fn round(x : Float) : Float do
     int_to_float(float_round(x))
   end
 
-  doc "Rounds toward zero (returns Float)."
+  doc """
+  Rounds toward zero, as a Float. Same Int round-trip caveat as `floor`.
+
+  ## Examples
+
+      march> Math.truncate(-2.7)
+      -2.0
+      march> Math.truncate(2.7)
+      2.0
+  """
   fn truncate(x : Float) : Float do
     int_to_float(float_truncate(x))
   end
@@ -184,18 +451,50 @@ mod Math do
 
   doc """
   Linear interpolation: lerp(a, b, t) = a + t*(b-a).
-  Returns `a` when t=0, `b` when t=1.
+  Returns `a` when t=0, `b` when t=1. `t` is not clamped, so values outside
+  [0, 1] extrapolate.
+
+  ## Examples
+
+      march> Math.lerp(0.0, 10.0, 0.5)
+      5.0
+      march> Math.lerp(0.0, 10.0, 2.0)
+      20.0
   """
   fn lerp(a : Float, b : Float, t : Float) : Float do
     a +. (t *. (b -. a))
   end
 
-  doc "Divide `a` by `b`, returning `None` if `b` is zero."
+  doc """
+  Divide `a` by `b`, returning `None` if `b` is zero. Division truncates
+  toward zero.
+
+  ## Examples
+
+      march> Math.checked_div(7, 2)
+      Some(3)
+      march> Math.checked_div(-7, 2)
+      Some(-3)
+      march> Math.checked_div(7, 0)
+      None
+  """
   fn checked_div(a : Int, b : Int) : Option(Int) do
     if b == 0 do None else Some(a / b) end
   end
 
-  doc "Compute `a % b`, returning `None` if `b` is zero."
+  doc """
+  Compute `a % b`, returning `None` if `b` is zero. The remainder takes the
+  sign of `a`.
+
+  ## Examples
+
+      march> Math.checked_mod(7, 3)
+      Some(1)
+      march> Math.checked_mod(-7, 3)
+      Some(-1)
+      march> Math.checked_mod(7, 0)
+      None
+  """
   fn checked_mod(a : Int, b : Int) : Option(Int) do
     if b == 0 do None else Some(a % b) end
   end

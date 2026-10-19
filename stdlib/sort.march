@@ -4,19 +4,35 @@
 --
 -- All functions operate on List(a) with a comparator (a -> a -> Bool).
 -- cmp x y = true means x should come before y (i.e., x is "less than or equal").
+-- The comparator is curried: write `fn a -> fn b -> a <= b`; an uncurried
+-- `fn (a, b) -> ...` fails at runtime with an arity mismatch.
+--
+-- Stability caveat: the merge steps keep equal elements in input order only
+-- for a non-strict (`<=`) cmp, insertion sort only for a strict (`<`) cmp, and
+-- the comparison networks not reliably for either. Only mergesort_by (with
+-- `<=`) and insertion_sort_by (with `<`) are stable.
 --
 -- Design choices documented per function:
---   timsort_by  — stable, exploits natural runs, best on nearly-sorted input
+--   timsort_by  — exploits natural runs, best on nearly-sorted input
 --   introsort_by — unstable, O(n log n) worst-case via heapsort fallback
 --   sort_small_by — optimal comparison networks (Dobbelaere / Floyd & Knuth 1966)
 --
 -- See specs/2026-03-19-sorting-and-enum-design.md for algorithm detail.
+--
+-- doc: try
 
 mod Sort do
 
   -- ---- Shared helpers ----
 
-  doc "Reverses a list. O(n)."
+  doc """
+  Reverses a list. O(n).
+
+  ## Examples
+
+      march> Sort.reverse_list([1, 2, 3])
+      [3, 2, 1]
+  """
   fn reverse_list(xs : List(a)) : List(a) do
     fn go(lst : List(a), acc : List(a)) : List(a) do
       match lst do
@@ -27,7 +43,14 @@ mod Sort do
     go(xs, Nil)
   end
 
-  doc "Appends two lists. O(|xs|)."
+  doc """
+  Appends two lists (`xs` then `ys`). O(|xs|); `ys` is shared, not copied.
+
+  ## Examples
+
+      march> Sort.append_list([1, 2], [3])
+      [1, 2, 3]
+  """
   fn append_list(xs : List(a), ys : List(a)) : List(a) do
     fn go(lst : List(a), acc : List(a)) : List(a) do
       match lst do
@@ -104,9 +127,19 @@ mod Sort do
   end
 
   doc """
-  Top-down mergesort. Stable, O(n log n).
-  Used as the fallback for sort_small_by when n > 8,
-  and as the heapsort-free path for introsort on very small inputs.
+  Bottom-up mergesort: starts from singleton runs and merges adjacent pairs
+  until one run remains. O(n log n). Stable when cmp is non-strict (`<=`):
+  on a tie the earlier element is taken first. With a strict `<` equal
+  elements come out reversed.
+  Used as the fallback for sort_small_by when n > 8 (and so by introsort for
+  9..15-element slices).
+
+  ## Examples
+
+      march> Sort.mergesort_by([5, 2, 8, 1], fn a -> fn b -> a <= b)
+      [1, 2, 5, 8]
+      march> Sort.mergesort_by([(1, "x"), (1, "y"), (0, "z")], fn a -> fn b -> Tuple.first(a) <= Tuple.first(b))
+      [(0, "z"), (1, "x"), (1, "y")]
   """
   fn mergesort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
     fn step_pairs(groups : List(List(a)), acc : List(List(a))) : List(List(a)) do
@@ -267,13 +300,23 @@ mod Sort do
   catalog, proven optimal by Floyd & Knuth (1966). Comparator counts:
     n=2: 1, n:3: 3, n:4: 5, n:5: 9, n:6: 12, n:7: 16, n:8: 19
 
-  Stability: stable for n ≤ 8 (equal elements preserve original list order).
+  Stability: NOT stable for n ≤ 8: the networks compare non-adjacent
+  positions, so equal elements can be reordered whichever of `<` / `<=` is
+  used (with `<=`, `[(1, "x"), (1, "y"), (0, "z")]` sorts to
+  `[(0, "z"), (1, "y"), (1, "x")]`). For n > 8 see mergesort_by.
   Complexity: O(1) for n ≤ 8 (fixed comparator count), O(n log n) for n > 8.
 
   Use this:
     - as the base case in other sort algorithms (Introsort uses it for n < 16)
     - when sorting known-small collections
   Prefer timsort_by or mergesort_by for general-purpose sorting.
+
+  ## Examples
+
+      march> Sort.sort_small_by([3, 1, 2], fn a -> fn b -> a <= b)
+      [1, 2, 3]
+      march> Sort.sort_small_by([9, 8, 7, 6, 5, 4, 3, 2, 1], fn a -> fn b -> a <= b)
+      [1, 2, 3, 4, 5, 6, 7, 8, 9]
   """
   fn sort_small_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
     match xs do
@@ -316,8 +359,17 @@ mod Sort do
   end
 
   doc """
-  Insertion sort. Stable, O(n²).
-  Used for small sublists (n < 16) where quadratic cost is bounded.
+  Insertion sort, O(n²). Each element is inserted before the first element
+  `h` of the sorted prefix with `cmp(x)(h)`, so it is stable only for a
+  strict `<` cmp; with `<=` equal elements come out reversed.
+  Used by `sort` for 16..63 elements, where the quadratic cost is bounded.
+
+  ## Examples
+
+      march> Sort.insertion_sort_by([3, 1, 2], fn a -> fn b -> a <= b)
+      [1, 2, 3]
+      march> Sort.insertion_sort_by([(1, "x"), (1, "y"), (0, "z")], fn a -> fn b -> Tuple.first(a) < Tuple.first(b))
+      [(0, "z"), (1, "x"), (1, "y")]
   """
   fn insertion_sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
     fn go(lst : List(a), acc : List(a)) : List(a) do
@@ -352,8 +404,10 @@ mod Sort do
   end
 
   doc """
-  Scans the list into natural runs (maximal ascending sequences).
-  Descending runs are reversed. Each run is extended to MIN_RUN=16 if shorter.
+  Scans the list into natural runs (maximal ascending sequences, where each
+  next element `h` satisfies `cmp(prev)(h)`). Descending runs are NOT
+  detected or reversed: they split into one-element runs. Each run is
+  extended to MIN_RUN=16 if shorter.
   Returns a list of (run, length) pairs in input order.
   """
   pfn detect_runs(xs : List(a), cmp : a -> a -> Bool) : List((List(a), Int)) do
@@ -454,7 +508,7 @@ mod Sort do
   end
 
   doc """
-  Timsort. Stable, O(n log n) worst-case, O(n) on sorted input.
+  Timsort. O(n log n) worst-case, O(n) on sorted input.
 
   Algorithm: detect natural runs (ascending sequences), extend short runs to
   MIN_RUN=16 via insertion sort, maintain a merge stack with the Timsort
@@ -463,6 +517,18 @@ mod Sort do
   Prefer over mergesort_by when input is known to be partially sorted or
   contains natural ascending runs (event logs, time-series, pre-sorted sublists).
   On fully random input, performance is similar to mergesort_by.
+
+  Not guaranteed stable: runs are extended with insertion (stable only for a
+  strict `<` cmp) and merged with merge steps (stable only for a non-strict
+  `<=` cmp). With `<=`, `[(1, "x"), (0, "a"), (1, "y")]` keyed on the first
+  component sorts to `[(0, "a"), (1, "y"), (1, "x")]`.
+
+  ## Examples
+
+      march> Sort.timsort_by([5, 4, 3, 2, 1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], fn a -> fn b -> a <= b)
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+      march> Sort.timsort_by([], fn a -> fn b -> a <= b)
+      []
   """
   fn timsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
     let runs = detect_runs(xs, cmp)
@@ -553,6 +619,18 @@ mod Sort do
     end
   end
 
+  doc """
+  Heapsort over a leftist heap: inserts every element, then repeatedly
+  extracts the minimum. Unstable, O(n log n) worst-case. Introsort's
+  fallback once its quicksort recursion depth is exhausted.
+
+  ## Examples
+
+      march> Sort.heapsort_by([5, 2, 8, 1, 2], fn a -> fn b -> a <= b)
+      [1, 2, 2, 5, 8]
+      march> Sort.heapsort_by([], fn a -> fn b -> a <= b)
+      []
+  """
   fn heapsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
     heap_drain(heap_build(xs, cmp), cmp, Nil)
   end
@@ -598,7 +676,7 @@ mod Sort do
   pfn introsort_go(xs : List(a), n : Int, depth : Int, cmp : a -> a -> Bool) : List(a) do
     if n <= 1 do xs
     else if n < 16 do
-      -- Small: use AlphaDev network (≤8) or insertion sort (9-15).
+      -- Small: use AlphaDev network (≤8) or mergesort (9-15).
       -- sort_small_by handles both via its n>8 mergesort fallback.
       sort_small_by(xs, cmp)
     else if depth == 0 do
@@ -628,8 +706,9 @@ mod Sort do
   Introsort. Unstable, O(n log n) worst-case guaranteed.
 
   Algorithm: starts with median-of-3 quicksort; switches to heapsort when
-  recursion depth exceeds 2*floor(log2(n)); uses AlphaDev/insertion sort for
-  n < 16. This prevents quicksort's O(n²) worst-case on adversarial inputs.
+  recursion depth exceeds 2*floor(log2(n)); uses sort_small_by (networks or
+  mergesort) for n < 16. This prevents quicksort's O(n²) worst-case on
+  adversarial inputs.
 
   Note on list performance: partitioning a linked list requires O(n) single-pass
   with three accumulators. Random-access middle element requires O(n/2) walk.
@@ -639,6 +718,13 @@ mod Sort do
   Prefer over timsort_by or mergesort_by when:
     - worst-case O(n log n) is required (security-sensitive sorting)
     - input is adversarial or unknown shape
+
+  ## Examples
+
+      march> Sort.introsort_by([20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1], fn a -> fn b -> a <= b)
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+      march> Sort.introsort_by([3, 1, 2], fn a -> fn b -> a > b)
+      [3, 2, 1]
   """
   fn introsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
     let n = list_len(xs)
@@ -650,16 +736,22 @@ mod Sort do
   input size:
 
   - n <  16  → `sort_small_by` (specialised straight-line sort networks
-                with an insertion-sort fallback)
+                for n <= 8, mergesort for 9..15)
   - n <  64  → `insertion_sort_by` (in-list, low overhead for small inputs)
   - n >= 64  → `timsort_by` (stable, adapts to runs in real-world data)
 
   Use `introsort_by` directly when you need worst-case O(n log n) on
-  adversarial inputs; the default `by` chooses stability + adaptivity
-  over the worst-case bound.
+  adversarial inputs; the default chooses adaptivity over the worst-case
+  bound. Stability is not guaranteed (see the module header).
 
-      Sort.sort([3, 1, 4, 1, 5, 9, 2, 6], fn a -> fn b -> a < b)
-      -- [1, 1, 2, 3, 4, 5, 6, 9]
+  ## Examples
+
+      march> Sort.sort([3, 1, 4, 1, 5, 9, 2, 6], fn a -> fn b -> a < b)
+      [1, 1, 2, 3, 4, 5, 6, 9]
+      march> Sort.sort(["b", "a", "c"], fn a -> fn b -> a >= b)
+      ["c", "b", "a"]
+      march> Sort.sort([], fn a -> fn b -> a < b)
+      []
   """
   fn sort(xs : List(a), cmp : a -> a -> Bool) : List(a) do
     let n = list_len(xs)

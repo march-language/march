@@ -15,13 +15,15 @@
 --   impl Iterable(a) for List(a) do
 --     fn next(xs : List(a)) : Option((a, List(a))) do
 --       match xs do
---       | Nil        -> None
---       | Cons(h, t) -> Some((h, t))
+--       Nil        -> None
+--       Cons(h, t) -> Some((h, t))
 --       end
 --     end
 --   end
 --
 -- Until then, every function here takes and returns List(a).
+--
+-- doc: try
 
 mod Iterable do
 
@@ -38,7 +40,16 @@ mod Iterable do
 
   -- ---- Transformation ----
 
-  doc "Applies f to each element, returning a new list of results."
+  doc """
+  Applies `f` to each element, returning a new list of results in order.
+
+  ## Examples
+
+      march> Iterable.map([1, 2, 3], fn x -> x * 10)
+      [10, 20, 30]
+      march> Iterable.map([], fn x -> x * 10)
+      []
+  """
   fn map(xs : List(a), f : a -> b) : List(b) do
     fn go(lst : List(a), acc : List(b)) : List(b) do
       match lst do
@@ -49,7 +60,17 @@ mod Iterable do
     go(xs, Nil)
   end
 
-  doc "Applies f to each element; collects the resulting lists and concatenates them."
+  doc """
+  Applies `f` to each element and concatenates the resulting lists, in order.
+  O(total output length).
+
+  ## Examples
+
+      march> Iterable.flat_map([1, 2, 3], fn x -> [x, x])
+      [1, 1, 2, 2, 3, 3]
+      march> Iterable.flat_map([1, 2], fn _ -> [])
+      []
+  """
   fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
     -- O(total output): accumulate each f(h) reversed onto acc, reverse once at
     -- the end. The old append-based version was O(total^2) and non-tail.
@@ -68,7 +89,14 @@ mod Iterable do
     go(xs, Nil)
   end
 
-  doc "Returns only the elements for which pred returns true."
+  doc """
+  Returns only the elements for which `pred` returns true, preserving order.
+
+  ## Examples
+
+      march> Iterable.filter([1, 2, 3, 4], fn x -> x % 2 == 0)
+      [2, 4]
+  """
   fn filter(xs : List(a), pred : a -> Bool) : List(a) do
     fn go(lst : List(a), acc : List(a)) : List(a) do
       match lst do
@@ -88,7 +116,14 @@ mod Iterable do
   Left fold: reduces the list from left to right using an accumulator.
   Argument order: collection first, init second, callback last
   (uncurried-collection convention).  Callback `f(acc, x)` returns the
-  new accumulator.
+  new accumulator. Returns `zero` for an empty list.
+
+  ## Examples
+
+      march> Iterable.fold([1, 2, 3], 0, fn (acc, x) -> acc + x)
+      6
+      march> Iterable.fold(["a", "b", "c"], "", fn (acc, x) -> acc ++ x)
+      "abc"
   """
   fn fold(xs : List(a), zero : b, f : b -> a -> b) : b do
     fn go(lst : List(a), acc : b) : b do
@@ -100,7 +135,16 @@ mod Iterable do
     go(xs, zero)
   end
 
-  doc "Returns the number of elements in the list."
+  doc """
+  Returns the number of elements in the list. O(n).
+
+  ## Examples
+
+      march> Iterable.count([1, 2, 3])
+      3
+      march> Iterable.count([])
+      0
+  """
   fn count(xs : List(a)) : Int do
     fn go(lst : List(a), acc : Int) : Int do
       match lst do
@@ -111,7 +155,17 @@ mod Iterable do
     go(xs, 0)
   end
 
-  doc "Returns true if any element satisfies pred (short-circuits)."
+  doc """
+  Returns true if any element satisfies `pred`, stopping at the first match.
+  False for an empty list.
+
+  ## Examples
+
+      march> Iterable.any([1, 2, 3], fn x -> x > 2)
+      true
+      march> Iterable.any([], fn x -> x > 2)
+      false
+  """
   fn any(xs : List(a), pred : a -> Bool) : Bool do
     match xs do
     Nil        -> false
@@ -122,7 +176,19 @@ mod Iterable do
     end
   end
 
-  doc "Returns true if all elements satisfy pred (short-circuits on failure)."
+  doc """
+  Returns true if every element satisfies `pred`, stopping at the first
+  failure. True for an empty list.
+
+  ## Examples
+
+      march> Iterable.all([1, 2, 3], fn x -> x > 0)
+      true
+      march> Iterable.all([1, -2, 3], fn x -> x > 0)
+      false
+      march> Iterable.all([], fn x -> x > 0)
+      true
+  """
   fn all(xs : List(a), pred : a -> Bool) : Bool do
     match xs do
     Nil        -> true
@@ -133,7 +199,17 @@ mod Iterable do
     end
   end
 
-  doc "Returns the first element satisfying pred, or None."
+  doc """
+  Returns the first element satisfying `pred` as `Some`, or `None` if there
+  is none.
+
+  ## Examples
+
+      march> Iterable.find([1, 2, 3, 4], fn x -> x > 2)
+      Some(3)
+      march> Iterable.find([1, 2], fn x -> x > 5)
+      None
+  """
   fn find(xs : List(a), pred : a -> Bool) : Option(a) do
     match xs do
     Nil        -> None
@@ -146,7 +222,19 @@ mod Iterable do
 
   -- ---- Slicing ----
 
-  doc "Returns the first n elements. Returns the whole list if n >= length."
+  doc """
+  Returns the first `n` elements. Returns the whole list if `n >= length`
+  and `[]` if `n <= 0`.
+
+  ## Examples
+
+      march> Iterable.take([1, 2, 3], 2)
+      [1, 2]
+      march> Iterable.take([1, 2, 3], 5)
+      [1, 2, 3]
+      march> Iterable.take([1, 2, 3], -1)
+      []
+  """
   fn take(xs : List(a), n : Int) : List(a) do
     -- Tail-recursive accumulator + single reverse (the Cons-wrapped recursion
     -- below was non-tail and built O(n) stack).
@@ -160,7 +248,19 @@ mod Iterable do
     go(xs, n, Nil)
   end
 
-  doc "Drops the first n elements. Returns [] if n >= length."
+  doc """
+  Drops the first `n` elements. Returns `[]` if `n >= length` and the whole
+  list if `n <= 0`.
+
+  ## Examples
+
+      march> Iterable.drop([1, 2, 3], 2)
+      [3]
+      march> Iterable.drop([1, 2, 3], 5)
+      []
+      march> Iterable.drop([1, 2, 3], -1)
+      [1, 2, 3]
+  """
   fn drop(xs : List(a), n : Int) : List(a) do
     if n <= 0 do xs
     else match xs do
@@ -171,7 +271,15 @@ mod Iterable do
 
   -- ---- Combining ----
 
-  doc "Pairs up elements from two lists. Stops at the shorter list."
+  doc """
+  Pairs up elements from two lists. Stops at the shorter list; the extra
+  elements of the longer one are dropped.
+
+  ## Examples
+
+      march> Iterable.zip([1, 2, 3], ["a", "b"])
+      [(1, "a"), (2, "b")]
+  """
   fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
     -- Tail-recursive accumulator + single reverse (the Cons-wrapped recursion
     -- was non-tail and built O(min(n,m)) stack).
@@ -189,7 +297,16 @@ mod Iterable do
     go(xs, ys, Nil)
   end
 
-  doc "Pairs each element with its 0-based index: [a, b] -> [(0, a), (1, b)]."
+  doc """
+  Pairs each element with its 0-based index, index first.
+
+  ## Examples
+
+      march> Iterable.enumerate(["a", "b"])
+      [(0, "a"), (1, "b")]
+      march> Iterable.enumerate([])
+      []
+  """
   fn enumerate(xs : List(a)) : List((Int, a)) do
     fn go(lst : List(a), i : Int, acc : List((Int, a))) : List((Int, a)) do
       match lst do
