@@ -22547,7 +22547,13 @@ let fold_invariants_3_suite =
     proof "RRB.fold" "rs : RRB.Slice(Int)" "RRB.fold(rs, 0, fn (a, _x) -> a + 1)";
     control "RRB.fold" "rs : RRB.Slice(Int)" "RRB.fold(rs, 0, fn (a, _x) -> a - 1)";
     proof "RRB.fold_left" "rv : RRB.Vec(Int)" "RRB.fold_left(rv, 0, fn (a, _x) -> a + 1)";
-    control "RRB.fold_left" "rv : RRB.Vec(Int)" "RRB.fold_left(rv, 0, fn (a, _x) -> a - 1)" ]
+    control "RRB.fold_left" "rv : RRB.Vec(Int)" "RRB.fold_left(rv, 0, fn (a, _x) -> a - 1)";
+    (* Deque.fold_left / fold_right: `f` was unannotated (design §0: P1
+       rejects `b`); 0d2afa8f6: (0, 0, 1), parametric-source-unproved. *)
+    proof "Deque.fold_left" "dq : Deque.Deque(Int)" "Deque.fold_left(dq, 0, fn (a, _x) -> a + 1)";
+    control "Deque.fold_left" "dq : Deque.Deque(Int)" "Deque.fold_left(dq, 0, fn (a, _x) -> a - 1)";
+    proof "Deque.fold_right" "dq : Deque.Deque(Int)" "Deque.fold_right(dq, 0, fn (_x, a) -> a + 1)";
+    control "Deque.fold_right" "dq : Deque.Deque(Int)" "Deque.fold_right(dq, 0, fn (_x, a) -> a - 1)" ]
 
 let () =
   Alcotest.run "march-refinecheck"
