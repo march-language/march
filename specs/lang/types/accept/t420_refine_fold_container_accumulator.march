@@ -1,0 +1,40 @@
+-- Accumulator invariants, phase 2 (2026-10-18, design
+-- specs/2026-10-18-fold-accumulator-invariants-design.md phase 2): element
+-- facts on the step, and container accumulators.  An element demand on the
+-- result of a call whose declared return is a bare type variable `b`
+-- (`sum_pos(List.fold_left(pos, [], fn (acc, x) -> Cons(x, acc)))`) is read
+-- as instantiating `b := List({Int | _ > 0})`: the initial list must meet it
+-- (the base), and the step must build a list meeting it ASSUMING the
+-- accumulator it is handed does (the step), with `x` carrying `pos`'s
+-- element fact.  `List.fold_left`, `List.fold_right` (accumulator second),
+-- the curried `Enum.fold` (whose inner `x` now gets its element fact too)
+-- and a return tail all prove; the nonnegative sum proved already after
+-- phase 1 and is pinned here.  Each list-building call was an
+-- unreflectable-subject skip before, so `cap verified` rejected this module.
+-- Under `cap verified`, exit 0 means every demand PROVED.  Reject twins:
+-- reject/t421 (the step pushes an unrefined element), reject/t422 (the
+-- initial list fails it).
+mod FoldContainerAccumulator do
+  cap verified
+  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  fn total(nn : List({Int | _ >= 0})) : Int do
+    need_nn(List.fold_left(nn, 0, fn (acc, x) -> acc + x))
+  end
+  fn rev(pos : List({Int | _ > 0})) : Int do
+    sum_pos(List.fold_left(pos, [], fn (acc, x) -> Cons(x, acc)))
+  end
+  fn copy(pos : List({Int | _ > 0})) : Int do
+    sum_pos(List.fold_right(pos, Nil, fn (x, acc) -> Cons(x, acc)))
+  end
+  fn rev_curried(pos : List({Int | _ > 0})) : Int do
+    sum_pos(Enum.fold(pos, Nil, fn acc -> fn x -> Cons(x, acc)))
+  end
+  fn keep_pos(ys : List(Int)) : List({Int | _ > 0}) do
+    List.fold_left(ys, [1], fn (acc, x) -> if x > 0 do Cons(x, acc) else acc end)
+  end
+  fn sum_curried(pos : List({Int | _ > 0})) : Int do
+    need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))
+  end
+end

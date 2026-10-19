@@ -89,9 +89,15 @@ let rec applications (e : A.expr) : (string * string option * A.span) list =
 
 (* Nested application of a candidate inside another's argument (`p(q(_))`),
    rejected by rule 5.  Detected structurally rather than by the flattened
-   list above, which cannot tell `p(q(_))` from two siblings. *)
+   list above, which cannot tell `p(q(_))` from two siblings.
+
+   `not` is exempt (leftovers design 2026-10-18 §3.1): `!p(_)` and
+   `not(p(_))` are the negation of `p` at the binder, a Boolean connective
+   rather than an application of one predicate to another.  Its argument is
+   still walked, so `not(p(q(_)))` is still rejected. *)
 let rec nested_apps (e : A.expr) : (string * A.span) list =
   match e with
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ arg ], _) -> nested_apps arg
   | A.EApp (A.EVar _, [ arg ], _) ->
     (match arg with
      | A.EApp (A.EVar { A.txt = inner; _ }, [ _ ], span) -> [ (inner, span) ]
@@ -102,6 +108,53 @@ let rec nested_apps (e : A.expr) : (string * A.span) list =
     List.concat_map nested_apps es
   | A.EAnnot (e, _, _) -> nested_apps e
   | _ -> []
+
+(* A SLOT PREDICATE (leftovers design §3.2): does [e] apply the abstract
+   refinements [ps] only as `p(binder)` (or `p(_)`), and only under `&&`, `||`
+   and `not`?  The parts that do not mention [ps] are left to the caller (they
+   are ordinary vocabulary over the binder, translated or not as any
+   refinement is).  `p(_) == false`, `if … p(_) …`, `p` under any other
+   operator: [false], so a call site declines rather than guessing what the
+   shape means. *)
+let rec slot_mentions_only_applied (ps : string list) (binder : string) (e : A.expr) : bool =
+  let rec mentions (e : A.expr) =
+    match e with
+    | A.EVar { A.txt; _ } -> List.mem txt ps
+    | A.EApp (f, args, _) -> mentions f || List.exists mentions args
+    | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.exists mentions es
+    | A.EAnnot (e, _, _) | A.EField (e, _, _) -> mentions e
+    | A.EBlock (es, _) -> List.exists mentions es
+    | A.EIf (c, t, f, _) -> mentions c || mentions t || mentions f
+    | A.EMatch (s, bs, _) ->
+      mentions s || List.exists (fun (b : A.branch) -> mentions b.A.branch_body) bs
+    | A.ELam _ -> true (* conservative: never looked inside *)
+    | _ -> false
+  in
+  match e with
+  | A.EApp (A.EVar { A.txt = p; _ }, [ A.EVar { A.txt = v; _ } ], _) when List.mem p ps ->
+    v = binder || v = "_"
+  | A.EApp (A.EVar { A.txt = ("&&" | "||"); _ }, [ a; b ], _) ->
+    slot_mentions_only_applied ps binder a && slot_mentions_only_applied ps binder b
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> slot_mentions_only_applied ps binder a
+  | A.EAnnot (e', _, _) -> slot_mentions_only_applied ps binder e'
+  | _ -> not (mentions e)
+
+(* [subst_abstract p (y, q) s]: every application `p(v)` in [s] replaced by
+   [q] with [y := v] (leftovers design §3.2, `inst`).  [subst] is the
+   simultaneous substitution [Refine_scope.subst_params] (passed in: this
+   module sits below it).  Only the shapes [slot_mentions_only_applied]
+   admits reach here, so an application is always to a bare variable. *)
+let rec subst_abstract ~(subst : (string * A.expr) list -> A.expr -> A.expr) (p : string)
+    ((y, q) : string * A.expr) (s : A.expr) : A.expr =
+  let go = subst_abstract ~subst p (y, q) in
+  match s with
+  | A.EApp (A.EVar { A.txt; _ }, [ (A.EVar _ as v) ], _) when txt = p -> subst [ (y, v) ] q
+  | A.EApp (f, args, sp) -> A.EApp (go f, List.map go args, sp)
+  | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)
+  | A.ECon (c, es, sp) -> A.ECon (c, List.map go es, sp)
+  | A.EAtom (a, es, sp) -> A.EAtom (a, List.map go es, sp)
+  | A.EAnnot (e, t, sp) -> A.EAnnot (go e, t, sp)
+  | e -> e
 
 (* Walk one declared type, collecting occurrences at [role].
 

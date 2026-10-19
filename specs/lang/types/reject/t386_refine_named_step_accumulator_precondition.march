@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: the precondition `_ > 100` of `dec2`
+-- A named function passed as a fold's step lends its declared return only when
+-- its own preconditions are met (2026-10-18, review of the fold-accumulator
+-- invariants phase 1).  `dec2`'s `{Int | _ > 0}` return is proved ASSUMING
+-- `a > 100`; at the accumulator position `List.fold_left` passes it the
+-- initial value `1` and earlier results, and the demand `_ > 0` does not give
+-- `_ > 100`.  The demand was PROVED and `cap verified` accepted this module,
+-- although `go([5])` is -49.  A skip naming the unmet precondition, an error
+-- under `cap verified`.  Accept twin: accept/t388.
+mod NamedStepAccumulatorPrecondition do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn dec2(a : {Int | _ > 100}, _x : Int) : {Int | _ > 0} do a - 50 end
+  fn go(ys : List(Int)) : Int do need_pos(List.fold_left(ys, 1, dec2)) end
+end

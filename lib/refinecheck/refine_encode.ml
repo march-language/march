@@ -1425,8 +1425,23 @@ let ctor_field_names : (string, string list) Hashtbl.t = Hashtbl.create 16
    [Param i] binder of every `match` — table-driven, so `Cons`/`Some` are
    the same case as a user `Tree(a)`'s `Node`.  Populated for the builtins
    by hand below and for user variants by [register_field_sorts] from the
-   type's own parameter list; cleared with the other registries. *)
-type field_role = Param of int | Self | Other
+   type's own parameter list; cleared with the other registries.
+
+   [Within (c, m)] (leftovers design 2026-10-18 phase E, §6.5): the field has
+   type `c(args)` for another registered container [c] whose every argument is
+   a bare parameter of this type or mentions none, and [m.(k) = Some j] when
+   [c]'s slot [k] holds this type's parameter [j] (`List(a)` in
+   `Deque(Int, List(a), List(a))` is [Within ("List", [Some 0])]).  [c]'s
+   mapped slots are not hidden in [c], so every value of parameter [j] in
+   such a field sits in an element slot of the nested container: a
+   construction checks the field against [c]'s entry with the slots mapped,
+   and a `match` binder at the field takes that entry.  A relational
+   (multi-slot) fact must NOT pair a [Within] field with a [Param] field
+   position-wise: the nested container holds many values per slot, so a
+   relation over slots that meet only through [Within] fields is either the
+   nested container's own relation (all of its slots mapped from one [Within]
+   field) or owed nothing / skipped (multi-arg design §2.5). *)
+type field_role = Param of int | Self | Within of string * int option list | Other
 
 let ctor_param_fields : (string, field_role list) Hashtbl.t = Hashtbl.create 32
 
@@ -1439,6 +1454,35 @@ let ctor_param_fields : (string, field_role list) Hashtbl.t = Hashtbl.create 32
    container outside every slot; [Refine_param.container_paths] refuses to
    treat slot [j] as covering them (2026-09-18 plan). *)
 let ctor_hidden_params : (string, int list) Hashtbl.t = Hashtbl.create 32
+
+(* Per constructor, per field (in declaration order): the container's type
+   parameters the field HIDES, as (index, name), and the field type rendered
+   for a message.  A [Param] field and an identity self-reference hide
+   nothing; any other field hides every parameter its type mentions (the
+   per-field view of [ctor_hidden_params]).  Filled by [register_field_sorts]
+   for user variants only; a constructor absent here (the builtins) hides
+   nothing.  The [ECon] arm of [Refine_check.check_elements] reads it: a field
+   that hides a DEMANDED parameter (`type Wrap(k, v) = Wrap(List((k, v)))`,
+   or a permuted self-reference `N(T(b, a))`) holds values of that parameter
+   outside every element slot, so the construction is a recorded skip rather
+   than vacuously true or checked against the wrong slots (2026-10-18
+   multi-arg design, phase 0). *)
+let ctor_field_params : (string, ((int * string) list * string) list) Hashtbl.t = Hashtbl.create 32
+
+(* Source-ish rendering of a declared field type, for [ctor_field_params]'
+   messages only. *)
+let rec field_ty_text (t : A.ty) : string =
+  match t with
+  | A.TyCon (n, []) -> n.A.txt
+  | A.TyCon (n, args) -> Printf.sprintf "%s(%s)" n.A.txt (String.concat ", " (List.map field_ty_text args))
+  | A.TyVar n -> n.A.txt
+  | A.TyTuple ts -> Printf.sprintf "(%s)" (String.concat ", " (List.map field_ty_text ts))
+  | A.TyArrow (a, b) -> Printf.sprintf "%s -> %s" (field_ty_text a) (field_ty_text b)
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> field_ty_text b
+  | A.TyRecord _ -> "a record"
+  | A.TyChan _ -> "a channel"
+  | A.TyNat n -> string_of_int n
+  | A.TyNatOp _ -> "a type-level number"
 
 (* The ADT sort a constructor belongs to, or [None]. *)
 let sort_of_ctor (ctor : string) : string option =
@@ -1769,21 +1813,12 @@ let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
     decls
 
 (* Pass 2: register each constructor's field sorts (needs all names from pass 1). *)
-let rec register_field_sorts (decls : A.decl list) : unit =
+let rec register_field_sorts_once (decls : A.decl list) : unit =
   List.iter
     (function
       | A.DType (_, tname, tparams, A.TDVariant variants, _)
       | A.DAlwaysLinearType (_, tname, tparams, A.TDVariant variants, _) ->
         let pnames = List.map (fun (p : A.name) -> p.A.txt) tparams in
-        let role_of (t : A.ty) : field_role =
-          match t with
-          | A.TyVar v ->
-            (match List.find_index (fun n -> n = v.A.txt) pnames with
-             | Some i -> Param i
-             | None -> Other)
-          | A.TyCon (c, _) when c.A.txt = tname.A.txt -> Self
-          | _ -> Other
-        in
         let rec tvars acc (t : A.ty) =
           match t with
           | A.TyVar v -> v.A.txt :: acc
@@ -1793,21 +1828,70 @@ let rec register_field_sorts (decls : A.decl list) : unit =
           | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> tvars acc b
           | A.TyNat _ | A.TyChan _ -> acc
         in
+        (* [Within] (phase E): [c] is a registered container ALREADY
+           registered with its roles ([ctor_param_fields] for every
+           constructor; [register_field_sorts] iterates to a fixpoint so a
+           container declared later is seen on the next round), of the right
+           arity, every argument a bare parameter of this type or free of
+           them, at least one a parameter, and none of the mapped slots
+           hidden in [c].  Anything else (`List(List(a))`, `List((k, v))`,
+           `Result(a, List(a))`, a hiding [c]) stays [Other], i.e. hidden. *)
+        let within_of (c : string) (args : A.ty list) : field_role option =
+          let key = adt_sort_name c in
+          let registered =
+            match Hashtbl.find_opt adt_ctors key with
+            | Some ctors -> ctors <> [] && List.for_all (Hashtbl.mem ctor_param_fields) ctors
+            | None -> false
+          in
+          if not registered || Hashtbl.find_opt adt_arity key <> Some (List.length args) then None
+          else
+            let m =
+              List.map
+                (fun (a : A.ty) ->
+                  match a with
+                  | A.TyVar v ->
+                    (match List.find_index (( = ) v.A.txt) pnames with
+                     | Some j -> Some (Some j)
+                     | None -> Some None)
+                  | _ -> if List.exists (fun n -> List.mem n pnames) (tvars [] a) then None else Some None)
+                args
+            in
+            if List.exists Option.is_none m then None
+            else
+              let m = List.map Option.get m in
+              let c_hidden = Option.value ~default:[] (Hashtbl.find_opt ctor_hidden_params key) in
+              if List.for_all Option.is_none m then None
+              else if List.exists (fun k -> List.nth m k <> None) c_hidden then None
+              else Some (Within (c, m))
+        in
+        let role_of (t : A.ty) : field_role =
+          match t with
+          | A.TyVar v ->
+            (match List.find_index (fun n -> n = v.A.txt) pnames with
+             | Some i -> Param i
+             | None -> Other)
+          | A.TyCon (c, _) when c.A.txt = tname.A.txt -> Self
+          | A.TyCon (c, args) ->
+            (match within_of c.A.txt args with Some r -> r | None -> Other)
+          | _ -> Other
+        in
+        (* The type-parameter names a field holds OUTSIDE its element role:
+           none for a [Param] field or an identity self-reference
+           (`T(a, b)` in `type T(a, b)`); every one it mentions otherwise. *)
+        let hidden_of (t : A.ty) : string list =
+          match role_of t, t with
+          | (Param _ | Within _), _ -> []
+          | Self, A.TyCon (_, args)
+            when List.length args = List.length pnames
+                 && List.for_all2
+                      (fun a n -> match a with A.TyVar v -> v.A.txt = n | _ -> false)
+                      args pnames ->
+            []
+          | _ -> tvars [] t
+        in
         let hidden =
           List.concat_map
-            (fun (v : A.variant) ->
-              List.concat_map
-                (fun (t : A.ty) ->
-                  match role_of t, t with
-                  | Param _, _ -> []
-                  | Self, A.TyCon (_, args)
-                    when List.length args = List.length pnames
-                         && List.for_all2
-                              (fun a n -> match a with A.TyVar v -> v.A.txt = n | _ -> false)
-                              args pnames ->
-                    []
-                  | _ -> tvars [] t)
-                v.A.var_args)
+            (fun (v : A.variant) -> List.concat_map hidden_of v.A.var_args)
             variants
           |> List.filter_map (fun n -> List.find_index (( = ) n) pnames)
           |> List.sort_uniq compare
@@ -1817,7 +1901,18 @@ let rec register_field_sorts (decls : A.decl list) : unit =
           (fun (v : A.variant) ->
             set_ctor_fields (adt_sort_name tname.A.txt) v.A.var_name.A.txt
               (List.map (smt_sort_of_field ~pnames) v.A.var_args);
-            Hashtbl.replace ctor_param_fields v.A.var_name.A.txt (List.map role_of v.A.var_args))
+            Hashtbl.replace ctor_param_fields v.A.var_name.A.txt (List.map role_of v.A.var_args);
+            Hashtbl.replace ctor_field_params v.A.var_name.A.txt
+              (List.map
+                 (fun (t : A.ty) ->
+                   let ps =
+                     hidden_of t
+                     |> List.filter_map (fun n ->
+                            Option.map (fun i -> (i, n)) (List.find_index (( = ) n) pnames))
+                     |> List.sort_uniq compare
+                   in
+                   (ps, field_ty_text t))
+                 v.A.var_args))
           variants
       | A.DType (_, name, tparams, A.TDRecord fields, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDRecord fields, _) ->
@@ -1833,9 +1928,29 @@ let rec register_field_sorts (decls : A.decl list) : unit =
           (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) ad.A.actor_state);
         Hashtbl.replace ctor_field_names ctor
           (List.map (fun (f : A.field) -> f.A.fld_name.A.txt) ad.A.actor_state)
-      | A.DMod (_, _, ds, _) -> register_field_sorts ds
+      | A.DMod (_, _, ds, _) -> register_field_sorts_once ds
       | _ -> ())
     decls
+
+(* [register_field_sorts_once] to a fixpoint of the field roles and hidden
+   lists.  A [Within] role needs the nested container already registered, so
+   one pass sees only containers declared EARLIER; each further pass can only
+   turn an [Other] into a [Within] (a container's hidden list never grows
+   from one pass to the next: the first pass treats every unregistered
+   container as hiding everything), so the iteration is monotone and every
+   intermediate state is sound.  Bounded; two passes in the common case (the
+   second confirms nothing moved). *)
+let register_field_sorts (decls : A.decl list) : unit =
+  let snapshot () =
+    ( List.sort compare (Hashtbl.fold (fun k v acc -> (k, v) :: acc) ctor_param_fields [])
+    , List.sort compare (Hashtbl.fold (fun k v acc -> (k, v) :: acc) ctor_hidden_params []) )
+  in
+  let rec go n prev =
+    register_field_sorts_once decls;
+    let now = snapshot () in
+    if n > 1 && now <> prev then go (n - 1) now
+  in
+  go 16 (snapshot ())
 
 (* The matched argument's name + its ADT, if the (first) parameter is a
    registered ADT. *)

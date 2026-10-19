@@ -1,5 +1,5 @@
 -- types (0) --
--- fns (57) --
+-- fns (58) --
 ## List.all
 fn List.all(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
@@ -262,7 +262,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 805);
+  Nil() -> __panic_site("stdlib/list.march", 815);
 panic("List.maximum_int: empty list")
   Cons($f489, $f490) -> let t : '_ = $f490 in
 let h : '_ = $f489 in
@@ -280,7 +280,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 791);
+  Nil() -> __panic_site("stdlib/list.march", 801);
 panic("List.minimum_int: empty list")
   Cons($f476, $f477) -> let t : '_ = $f477 in
 let h : '_ = $f476 in
@@ -316,11 +316,25 @@ List.nth_opt(t, $t65)
 
 ## List.partition
 fn List.partition(xs : List('a), pred : ('a) -> Bool) : (List('a), List('a)) =
-  let go : (List('a), List('a), List('a)) -> (List('a), List('a)) = letrec [go] in
-go in
-let $t384 : '_ = alloc Nil() in
-let $t385 : '_ = alloc Nil() in
-go(xs, $t384, $t385)
+  let $t373 : '_ = alloc Nil() in
+let $t374 : '_ = alloc Nil() in
+List.partition_go(xs, pred, $t373, $t374)
+
+## List.partition_go
+fn List.partition_go(lst : List('a), pred : ('a) -> Bool, yes : List('a), no : List('a)) : (List('a), List('a)) =
+  case lst of
+  Nil() -> let $t375 : '_ = List.reverse(yes) in
+let $t376 : '_ = List.reverse(no) in
+($t375, $t376)
+  Cons($f380, $f381) -> let t : '_ = $f381 in
+let h : '_ = $f380 in
+let $t377 : '_ = pred(h) in
+case $t377 of
+  True() -> let $t378 : '_ = alloc Cons(h, yes) in
+List.partition_go(t, pred, $t378, no)
+  _ -> let $t379 : '_ = alloc Cons(h, no) in
+List.partition_go(t, pred, yes, $t379)
+  _ -> panic("non-exhaustive pattern match")
 
 ## List.pfilter
 fn List.pfilter(xs : List('a), pred : ('a) -> Bool) : List('a) =

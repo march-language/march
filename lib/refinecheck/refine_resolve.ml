@@ -235,6 +235,37 @@ let cb_add_binding (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (cb :
      | _ -> cb)
   | _ -> cb
 
+(* ── Annotated accumulators (fold-invariants design phase 4) ──────────────
+   A fold-shaped call `g(…, fn (acc : {T | I}, x) -> …)` whose annotated
+   accumulator [I] the walk PROVED to be an invariant (base and step,
+   [Refine_check.annotated_invariant]) returns a value meeting [I]: the
+   call's result is a [b] the callee held, and every one of those met [I]
+   (the design's §2.2 induction, with [I] for the demand).  Filled by
+   [Refine_check.visit] when it reaches the call, keyed by the lambda's span
+   and checked against the lambda itself (physical equality), so a copy of
+   the lambda substituted into another scope never matches; an unproved
+   annotation is removed.  Cleared at the top of every function's walk
+   ([Refine_check.visit_fn]), so an entry is only ever read by the walk that
+   proved it, after the call was visited (a `let`-bound result; an inline
+   use is checked before its arguments are visited and goes through the
+   scalar demand entry instead).  A pure lookup: [postcond_of] stays
+   solver-free. *)
+let annotated_acc_facts : (A.span, A.expr * (string * A.expr * string option)) Hashtbl.t =
+  Hashtbl.create 16
+
+let annotated_acc_fact (args : A.expr list) : (string * A.expr * string option) option =
+  if Hashtbl.length annotated_acc_facts = 0 then None
+  else
+    List.find_map
+      (fun a ->
+        match a with
+        | A.ELam (_, _, sp) ->
+          (match Hashtbl.find_opt annotated_acc_facts sp with
+           | Some (lam, r) when lam == a -> Some r
+           | _ -> None)
+        | _ -> None)
+      args
+
 (* Resolve a call name and its actual arguments to the callee's return
    refinement, expressed entirely in the CALLER's namespace, or None.  This is
    the single place the usability filter is applied, so both use sites (a
@@ -260,7 +291,7 @@ let cb_add_binding (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (cb :
 
    The third component of the result is the returned value's SMT sort ([None]
    for Int); see [fn_sig.ret_sort] for why every consumer must branch on it. *)
-let postcond_of ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
+let postcond_of_declared ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
     (fname : string) (args : A.expr list) : (string * A.expr * string option) option =
   (* A callee the callee ENV knows — a refined callback parameter with a
      refined codomain, a local `fn` or `let`-bound lambda whose return was
@@ -308,6 +339,14 @@ let postcond_of ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) 
           else None)
      | _ -> None)
   | _ -> None
+
+(* A callee's proved declared return first; failing that, a proved annotated
+   accumulator's invariant ([annotated_acc_facts]). *)
+let postcond_of ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
+    (fname : string) (args : A.expr list) : (string * A.expr * string option) option =
+  match postcond_of_declared ~cb ctx defs fname args with
+  | Some r -> Some r
+  | None -> annotated_acc_fact args
 
 (* =================================================================
    §13 Reflecting actual arguments: fields, records, scalars

@@ -1,6 +1,6 @@
 -- types (1) --
 record Mem { node_id : String, addr : String }
--- fns (59) --
+-- fns (60) --
 ## List.all
 fn List.all(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
@@ -263,7 +263,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 805);
+  Nil() -> __panic_site("stdlib/list.march", 815);
 panic("List.maximum_int: empty list")
   Cons($f498, $f499) -> let t : '_ = $f499 in
 let h : '_ = $f498 in
@@ -281,7 +281,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 791);
+  Nil() -> __panic_site("stdlib/list.march", 801);
 panic("List.minimum_int: empty list")
   Cons($f485, $f486) -> let t : '_ = $f486 in
 let h : '_ = $f485 in
@@ -317,11 +317,25 @@ List.nth_opt(t, $t74)
 
 ## List.partition
 fn List.partition(xs : List('a), pred : ('a) -> Bool) : (List('a), List('a)) =
-  let go : (List('a), List('a), List('a)) -> (List('a), List('a)) = letrec [go] in
-go in
-let $t393 : '_ = alloc Nil() in
-let $t394 : '_ = alloc Nil() in
-go(xs, $t393, $t394)
+  let $t382 : '_ = alloc Nil() in
+let $t383 : '_ = alloc Nil() in
+List.partition_go(xs, pred, $t382, $t383)
+
+## List.partition_go
+fn List.partition_go(lst : List('a), pred : ('a) -> Bool, yes : List('a), no : List('a)) : (List('a), List('a)) =
+  case lst of
+  Nil() -> let $t384 : '_ = List.reverse(yes) in
+let $t385 : '_ = List.reverse(no) in
+($t384, $t385)
+  Cons($f389, $f390) -> let t : '_ = $f390 in
+let h : '_ = $f389 in
+let $t386 : '_ = pred(h) in
+case $t386 of
+  True() -> let $t387 : '_ = alloc Cons(h, yes) in
+List.partition_go(t, pred, $t387, no)
+  _ -> let $t388 : '_ = alloc Cons(h, no) in
+List.partition_go(t, pred, yes, $t388)
+  _ -> panic("non-exhaustive pattern match")
 
 ## List.pfilter
 fn List.pfilter(xs : List('a), pred : ('a) -> Bool) : List('a) =

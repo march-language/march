@@ -439,6 +439,7 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "HashMap",
+    "List",
     "Map",
     "Set",
     "Sort"
@@ -585,7 +586,9 @@ window.marchModuleIndex = {
   "Iterable": {
    "file": "iterable.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "List"
+   ]
   },
   "Js.Audio": {
    "file": "audio.march",
@@ -865,7 +868,9 @@ window.marchModuleIndex = {
   "Prelude": {
    "file": "prelude.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "List"
+   ]
   },
   "Presence": {
    "file": "presence.march",

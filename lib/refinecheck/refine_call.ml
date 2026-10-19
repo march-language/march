@@ -677,14 +677,47 @@ type call_ctx = {
       (* Caller names -> their BINDING-site spans ([rctx.binds]), read with
          [caller_sort_at] to give a caller value its typechecked sort instead
          of the `Int` default.  Shadowed exactly like [sc]. *)
+  demand :
+    (call_ctx -> span:A.span -> A.expr -> string * A.expr * string option
+     -> [ `Na | `Proved | `Unproved of Obligation.reason ])
+    option;
+      (* A scalar demand on a CALL subject that did not reflect, discharged
+         over the callee's sources (design 2026-10-18 element-flow follow-ups,
+         phase 2, §3: `need_pos(Option.unwrap_or(o, 1))`).  [None] where no
+         container env exists (the pass-site checks, a unit fixture).  Takes
+         the [call_ctx] it is called with, so the closure reads the very
+         channels [check_call] was given: a shadowed context (a `let`
+         annotation, a lambda tail) must not be discharged against the
+         unshadowed one.  [`Na] leaves the obligation's skip as it was. *)
 }
 
 let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
+    ?(goal_scope_facts = false)
     ?(verdict_out : Obligation.verdict option ref option)
     (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
-  let { root; errctx; postcond; path; lets; sc; re; binds } = cx in
+  let { root; errctx; postcond; path; lets; sc; re; binds; demand = _ } = cx in
+  (* A Bool local bound to a comparison or connective (`let ok = k < 5`,
+     recorded in [lets], which retires it when `ok` or anything it mentions
+     is rebound) is read as that predicate in a path condition, so `if ok`
+     constrains `k` exactly as `if k < 5` does (re-review of fece9d212).  A
+     self-mentioning entry is skipped: its RHS names the OLD binding. *)
+  let path =
+    let rec unlaunder (depth : int) (e : A.expr) : A.expr =
+      if depth > 8 then e
+      else
+        match e with
+        | A.EVar { A.txt = x; _ } ->
+          (match List.assoc_opt x lets with
+           | Some rhs when predicate_shaped rhs && not (expr_mentions [ x ] rhs) -> unlaunder (depth + 1) rhs
+           | _ -> e)
+        | A.EApp ((A.EVar { A.txt = ("&&" | "||" | "not"); _ } as hd), xs, sp) ->
+          A.EApp (hd, List.map (unlaunder depth) xs, sp)
+        | _ -> e
+    in
+    List.map (fun (c, neg) -> (unlaunder 0 c, neg)) path
+  in
   let subject_noun =
     match subject with
     | Argument -> "argument"
@@ -855,6 +888,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _
                | Obligation.Parametric_source_unproved _
+               | Obligation.Accumulator_base_unproved _
+               | Obligation.Accumulator_step_unproved _
                | Obligation.Abstract_too_weak _
                | Obligation.Abstract_uninstantiated _
                | Obligation.Unreflectable_subject _
@@ -884,6 +919,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
        | Obligation.Parametric_source_unproved _
+       | Obligation.Accumulator_base_unproved _
+       | Obligation.Accumulator_step_unproved _
        | Obligation.Abstract_too_weak _
        | Obligation.Abstract_uninstantiated _
        | Obligation.Unreflectable_subject _
@@ -895,6 +932,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _
         | Obligation.Parametric_source_unproved _
+        | Obligation.Accumulator_base_unproved _
+        | Obligation.Accumulator_step_unproved _
         | Obligation.Abstract_too_weak _
         | Obligation.Abstract_uninstantiated _
         | Obligation.Unreflectable_subject _
@@ -2418,41 +2457,94 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       | A.EField (r, _, _) | A.EAnnot (r, _, _) -> guard_names r
       | _ -> []
     in
+    (* Caller names some USER assumption actually constrains: a scope fact
+       loaded over the name, or a translated path condition mentioning it.
+       Read by the definite-failure rule under [~goal_scope_facts]. *)
+    let constrained_names : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+    let load_scalar_name_fact x =
+      if not (Hashtbl.mem scalar_path_facts_loaded x) then begin
+        Hashtbl.replace scalar_path_facts_loaded x ();
+        match List.assoc_opt x sc with
+        | Some (b, q, m) when scalar_sort_of_marker m <> None
+                           && not (Hashtbl.mem str_names x) && not (is_recvar x) ->
+          let srt = scalar_sort_or_int m in
+          if srt <> Smt.SInt then Hashtbl.replace caller_scalar x srt;
+          let xc = Smt.Const x in
+          decls := (x, srt) :: !decls;
+          let rv n =
+            if n = b || n = "_" || n = x then Some xc
+            else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
+          in
+          (match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure
+                   ~resolve_str_lit:str_lit_const q with
+           | Some qa -> Hashtbl.replace constrained_names x (); push_user qa
+           | None -> ())
+        | _ -> ()
+      end
+    in
+    List.iter (fun (cond, _) -> List.iter load_scalar_name_fact (guard_names cond)) path;
+    (* [~goal_scope_facts]: the GOAL is in the caller's namespace (an element
+       demand moved there by [Refine_check.instantiate_entry], `_ < k` for
+       `need_lt(ys, k)`), so a name it mentions that is neither the subject
+       nor a parameter of [sg] is a caller-scope variable exactly as a
+       guard's name is ([resolve_var]'s caller-scope arm), and carries its
+       scope fact the same way.  Off for every other caller: a scalar
+       contract's goal is in the CALLEE's namespace, where such a name has
+       no business being read as the caller's (design 2026-10-18
+       element-flow follow-ups, phase 0). *)
+    if goal_scope_facts then
+      List.iter
+        (fun x -> if not (is_self x) && not (List.mem_assoc x name_pos) then load_scalar_name_fact x)
+        (guard_names rp.pred);
+    (* …and so is a name an ACTUAL's own scope fact mentions (design
+       2026-10-18 element-flow follow-ups, phase 4): a relational element
+       return read at the call's actuals puts `$elem : {_ < k}` in scope for
+       `sum_small(below(k))`, and `k`'s own fact (`k <= 10`) is what
+       discharges it.  [subject_facts] keeps each such predicate with the
+       names that denote the actual itself, for the definite-failure rule
+       below. *)
+    let subject_facts =
+      if not goal_scope_facts then []
+      else
+        List.filter_map
+          (function
+            | A.EVar { A.txt = x; _ } ->
+              (match List.assoc_opt x sc with
+               | Some (b, q, _) -> Some ([ b; "_"; x ], q)
+               | None -> None)
+            | _ -> None)
+          args
+    in
     List.iter
-      (fun (cond, _) ->
+      (fun (own, q) ->
         List.iter
           (fun x ->
-            if not (Hashtbl.mem scalar_path_facts_loaded x) then begin
-              Hashtbl.replace scalar_path_facts_loaded x ();
-              match List.assoc_opt x sc with
-              | Some (b, q, m) when scalar_sort_of_marker m <> None
-                                 && not (Hashtbl.mem str_names x) && not (is_recvar x) ->
-                let srt = scalar_sort_or_int m in
-                if srt <> Smt.SInt then Hashtbl.replace caller_scalar x srt;
-                let xc = Smt.Const x in
-                decls := (x, srt) :: !decls;
-                let rv n =
-                  if n = b || n = "_" || n = x then Some xc
-                  else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
-                in
-                (match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure
-                         ~resolve_str_lit:str_lit_const q with
-                 | Some qa -> push_user qa
-                 | None -> ())
-              | _ -> ()
-            end)
-          (guard_names cond))
-      path;
+            if not (List.mem x own) && not (is_self x) && not (List.mem_assoc x name_pos) then
+              load_scalar_name_fact x)
+          (guard_names q))
+      subject_facts;
+    (* Does the query see the whole path to this call?  Not when a
+       condition did not translate exactly (dropped, or stood up as a call
+       constant carrying at most a postcondition), nor under the walk's
+       opaque marker ([opaque_path_marker]).  Read by the definite-failure
+       rule below: a model of an incomplete path may be a state the program
+       never reaches (review of 8e5c15c48). *)
+    let path_incomplete = ref (path_is_opaque path) in
+    let opaque_names = path_opaque_names path in
     List.iter
       (fun (cond, negated) ->
+        if List.exists (fun x -> List.mem x opaque_names) (guard_names cond) then path_incomplete := true;
         match
           smt_of ~vocab:false ~resolve_var:path_resolve_var ~resolve_measure:path_resolve_measure
             ~resolve_field:path_resolve_field
             ~resolve_measure_app ~resolve_tester:path_resolve_tester
             ~resolve_str_lit:str_lit_const cond
         with
-        | Some t -> push_user (if negated then Smt.Not t else t)
+        | Some t ->
+          List.iter (fun x -> Hashtbl.replace constrained_names x ()) (guard_names cond);
+          push_user (if negated then Smt.Not t else t)
         | None ->
+          path_incomplete := true;
           (* A guard that IS a call (`if Set.contains(s, x, cmp) do …`, or its
              negation): stand the call up as a Bool constant carrying the
              callee's postcondition, exactly as an ACTUAL in Bool position
@@ -2475,6 +2567,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               | Some (t, ds, asms) ->
                 List.iter (fun d -> decls := d :: !decls) ds;
                 List.iter push_user asms;
+                List.iter (fun x -> Hashtbl.replace constrained_names x ()) (guard_names cond);
                 let t = if inner_neg then Smt.Not t else t in
                 push_user (if negated then Smt.Not t else t)
               | None -> ())
@@ -2608,6 +2701,20 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              "the argument passed for `%s`%s, which the predicate `%s` depends on%s"
              pname actual (pred_str rp.pred) more
        in
+       (* The subject is a call with no postcondition: a closed scalar demand
+          on it may still hold of every value its callee can return
+          ([cx.demand], design 2026-10-18 element-flow follow-ups §3.2).  A
+          refuted source is a skip, never a violation (§3.4). *)
+       let from_sources =
+         match mode, cx.demand, self_actual with
+         | `Other, Some f, A.EApp (A.EVar _, _, _) when self_reflection_failed ->
+           f cx ~span self_actual (rp.binder, rp.pred, rp.sort)
+         | _ -> `Na
+       in
+       (match from_sources with
+       | `Proved -> note Obligation.Proved
+       | `Unproved r -> note (Obligation.Skipped r)
+       | `Na ->
        note
          (Obligation.Skipped
             (match mode with
@@ -2619,7 +2726,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              | `Other | `Record _ ->
                let leaf = Option.value !pred_fail_expr ~default:rp.pred in
                Obligation.Unreflectable_predicate
-                 (pred_str leaf, division_outside_fragment_hint leaf)))
+                 (pred_str leaf, division_outside_fragment_hint leaf))))
      | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
        note (Obligation.Skipped Obligation.Sort_conflict)
      | Some goal ->
@@ -2762,9 +2869,62 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              pred fail for ALL of them (the `¬G` discharge below) would let
              `apply(take_n, -3)` through whenever `_ >= 0` merely SOMETIMES
              holds, which is always. *)
+          (* …but only when every name the goal mentions is the subject, a
+             parameter, or a caller name some user assumption constrains.  A
+             substituted element demand (`_ < k`, [~goal_scope_facts]) can
+             name a caller variable whose fact was retired or never existed
+             (`let k = x; let x = 0; need_lt(ys, k)`): the solver then picks
+             `k` freely, and "some `k` refutes it" says nothing about the
+             real one.  Such a goal falls through to the `¬G` discharge,
+             which only reports a failure no value of `k` can avoid, and is
+             otherwise a skip, as a scalar `big(k)` is. *)
+          let rec value_names (e : A.expr) : string list =
+            match e with
+            | A.EVar { A.txt; _ } -> [ txt ]
+            (* An application's head names a function or operator, not a value. *)
+            | A.EApp (A.EVar _, xs, _) -> List.concat_map value_names xs
+            | A.EApp (f, xs, _) -> value_names f @ List.concat_map value_names xs
+            | A.ECon (_, xs, _) | A.ETuple (xs, _) | A.EAtom (_, xs, _) -> List.concat_map value_names xs
+            | A.EField (r, _, _) | A.EAnnot (r, _, _) -> value_names r
+            | _ -> []
+          in
+          let free_caller_name x =
+            (not (is_self x)) && (not (List.mem_assoc x name_pos))
+            && not (Hashtbl.mem constrained_names x)
+          in
+          (* The same holds of the SUBJECT's fact (phase 4): an instantiated
+             relational element return `$elem : {_ < n}` with a caller `n`
+             nothing constrains says nothing about the real `n`, so
+             `sum_small(below(n))` is not a definite failure because the
+             solver picked `n = 100`.  The `¬G` discharge still reports one
+             no value of `n` avoids (`need_ge(below(n), n)`). *)
+          let goal_caller_names =
+            if not goal_scope_facts then []
+            else
+              List.filter (fun x -> (not (is_self x)) && not (List.mem_assoc x name_pos)) (value_names rp.pred)
+              @ List.concat_map
+                  (fun (own, q) ->
+                    List.filter
+                      (fun x -> (not (List.mem x own)) && (not (is_self x)) && not (List.mem_assoc x name_pos))
+                      (value_names q))
+                  subject_facts
+          in
+          let free_goal_name = List.exists free_caller_name goal_caller_names in
+          (* A model that picks a CALLER variable's value is a real
+             counterexample only if the query saw every condition on the way
+             here: under an untranslated guard (`if small(k)`), a literal arm,
+             an earlier arm's failure or a later `cond` arm, `k = 6` may be
+             unreachable (review of 8e5c15c48: a correct program reported
+             violated; the scalar path, which never takes this shortcut,
+             skipped it).  A goal and fact naming no caller variable are
+             decided by the contracts alone, as before. *)
           let definite =
             match subject, first with
-            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ -> true
+            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ ->
+              (not free_goal_name)
+              && (goal_caller_names = []
+                  || ((not !path_incomplete)
+                      && not (List.exists (fun x -> List.mem x opaque_names) goal_caller_names)))
             | _ -> false
           in
           (match

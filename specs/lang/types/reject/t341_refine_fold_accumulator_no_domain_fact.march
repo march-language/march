@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: cannot verify precondition `_ > 0` on `need_pos`
+-- Element refinements, multi-parameter domain facts (2026-10-18, design
+-- specs/2026-10-18-element-flow-followups-design.md phase 1), the boundary:
+-- `fold_left`'s `acc : b` has a bare source (the initial value) and a
+-- codomain source (the callback's result), so it is not an element-only
+-- variable and gets NO domain fact, although `x` does.  Assuming the demand
+-- on `acc` is an accumulator invariant (specs/2026-10-18-fold-accumulator-
+-- invariants-design.md), not a domain fact.  `need_pos(acc)` is a skip, and
+-- `cap verified` makes it this error.  Accept twin: accept/t340.
+mod FoldAccumulatorNoFact do
+  cap verified
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn folded(xs : List({Int | _ > 0})) : Int do
+    List.fold_left(xs, 1, fn (acc, x) -> need_pos(acc) + x)
+  end
+end

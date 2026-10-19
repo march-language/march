@@ -6,10 +6,12 @@ codomain (`keep : ({x : a | true}) -> {Bool | _ == p(x)}`), so a combinator
 whose callback takes two arguments cannot state one:
 
 - `Map.filter`'s callback is `(k, v) -> Bool`, so a filtered map carries no
-  fact about its remaining entries;
-- `List.fold_left`'s `(b, a) -> b` is the other shape, where the interesting
-  statement is an *invariant* on the accumulator (a negative occurrence),
-  which needs its own soundness argument rather than the element rule.
+  fact about its remaining entries.
+
+(`List.fold_left`'s `(b, a) -> b`, the other shape this item used to list, is
+not an abstract refinement at all: its accumulator invariant shipped through
+parametricity instead, `specs/2026-10-18-fold-accumulator-invariants-design.md`
+phases 1-2, `specs/progress/2026-10-18-fold-invariants-phase2.md`.)
 
 A two-argument definer binding only its first argument was considered and
 rejected in review as a half-measure: it would silently drop what the predicate
