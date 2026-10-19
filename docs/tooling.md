@@ -27,7 +27,7 @@ trying to do, and the table after it goes from a task to the command.
 
 **Everyday**
 
-- [forge: Build Tool](#forge-build-tool): [creating a project](#creating-a-project), [building and running](#building-and-running), [GUI apps](#gui-apps-main-on-the-process-main-thread), [JavaScript backend](#javascript-backend), [cross-compiling to Linux](#cross-compiling-to-linux), [checking types](#checking-types), [asking the compiler questions](#asking-the-compiler-questions), [auto-fixing diagnostics](#auto-fixing-diagnostics), [testing](#testing), [linting](#linting), [watch mode](#watch-mode), [formatting](#formatting), [cleaning](#cleaning-build-artifacts), [REPL](#interactive-mode-repl)
+- [forge: Build Tool](#forge-build-tool): [creating a project](#creating-a-project), [building and running](#building-and-running), [GUI apps](#gui-apps-main-on-the-process-main-thread), [JavaScript backend](#javascript-backend), [cross-compiling to Linux](#cross-compiling-to-linux), [static binaries](#static-binaries), [checking types](#checking-types), [asking the compiler questions](#asking-the-compiler-questions), [auto-fixing diagnostics](#auto-fixing-diagnostics), [testing](#testing), [linting](#linting), [watch mode](#watch-mode), [formatting](#formatting), [cleaning](#cleaning-build-artifacts), [REPL](#interactive-mode-repl)
 
 **Finding things**
 
@@ -369,6 +369,47 @@ workloads**. Not yet included in a cross build:
 Correctness is guarded by a differential test that cross-compiles a corpus and
 checks each program's output against the native build to the exact byte, so a
 codegen regression on a cross target is caught in CI.
+
+### Static binaries
+
+A compiled program links only the runtime libraries it uses: one that never uses TLS
+does not load OpenSSL, and one that never uses `Compress` loads no compression library.
+`--static` goes further and makes the binary self-contained:
+
+```bash
+march --compile --static app.march -o app
+```
+
+- **Linux:** a fully static executable with no shared-library dependencies, which runs in a
+  `scratch` or distroless image. It links against musl, so it builds on a musl host such as
+  Alpine (`apk add clang build-base openssl-dev openssl-libs-static zlib-static zstd-static
+  brotli-static libucontext-dev`). On a glibc host it is refused: a static glibc binary
+  still depends on the host for name-service lookups, iconv and `dlopen`.
+- **macOS:** a fully static executable is not possible (`libSystem` is always dynamic), so
+  `--static` means the binary loads nothing outside `/usr/lib` and `/System`. OpenSSL, zstd
+  and brotli come from Homebrew's static archives, so the binary runs on a Mac without
+  Homebrew.
+
+The compiler checks the result after linking and refuses a binary that still loads a
+library outside that set (for example through `--ffi-link`). A library the program needs
+whose static archive is missing is an error naming the package to install. `--static`
+cannot be combined with `--hot-reload` (hot patches are loaded with `dlopen`) or
+`--compile-so`, and not yet with `--target`.
+
+**TLS certificates.** A static binary carries no CA bundle. Point it at one with OpenSSL's
+standard variables, `SSL_CERT_FILE` (a bundle file) or `SSL_CERT_DIR` (a directory), and copy
+the bundle into a `scratch` image:
+
+```dockerfile
+FROM scratch
+COPY --from=alpine:3.21 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY app /app
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENTRYPOINT ["/app"]
+```
+
+A binary that links OpenSSL statically contains it, so distribute OpenSSL's license
+(Apache-2.0) with it; the compiler prints a reminder when it does.
 
 ### Checking Types
 

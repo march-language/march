@@ -105,6 +105,10 @@ resolves runtime symbols against it). BLAKE3 is vendored (`runtime/third_party/b
 and no longer a library dependency of anything a user compiles. Measured on macOS arm64:
 a `println`-only program loads `libSystem` alone.
 
+`march --compile --static` (musl Linux hosts) produces a binary with no shared-library
+dependencies at all, which is what a `scratch` variant needs; see "Static binaries" in
+`docs/tooling.md`, including the CA-bundle line a TLS program needs.
+
 The rest of this section is the 2026-09-02 measurement that motivated the change, kept
 for the record.
 

@@ -327,6 +327,75 @@ jobs:
           } || echo "  none — statically linked"
           exit $fail
 
+      # `march --compile --static` (static-output design, Stage 4:
+      # specs/2026-09-23-static-compile-output-design.md §6 check 2). A link
+      # that merely succeeds is not evidence: run the binary in an image with
+      # nothing in it but the binary. Compiled with the PACKAGED compiler
+      # inside a stock Alpine (musl) container, since --static is musl-only
+      # and this runner is glibc. The red half is the same hello WITHOUT
+      # --static, which must fail to start in the same scratch image; if it
+      # starts, this check could not tell the two apart.
+      - name: Verify --static output runs in an empty container
+        if: matrix.alpine
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          mkdir -p "$work/home"
+          cat > "$work/hello.march" <<'MARCH'
+          mod Hello do
+            needs IO.Console
+            fn main(_c : Cap(IO.Console)) : Unit do
+              println("hi")
+            end
+          end
+          MARCH
+          cat > "$work/tlsp.march" <<'MARCH'
+          mod Tlsp do
+            needs IO.Console
+            needs IO.NetConnect.TLS
+            fn main(_c : Cap(IO.Console), _t : Cap(IO.NetConnect.TLS)) : Unit do
+              match Tls.client_ctx(Tls.default_client_config()) do
+                Ok(_) -> println("tls ctx ok")
+                Err(e) -> println("tls err " ++ Tls.error_to_string(e))
+              end
+            end
+          end
+          MARCH
+          docker run --rm -v "$PWD/_dist:/dist:ro" -v "$work:/w" -w /w alpine:3.21 sh -euc '
+            apk add --no-cache clang build-base openssl-dev openssl-libs-static               zlib-dev zlib-static zstd-dev zstd-static brotli-dev brotli-static               libucontext-dev > /dev/null
+            for p in hello tlsp; do
+              HOME=/w/home /dist/bin/march --compile --static -o /w/$p /w/$p.march
+            done
+            HOME=/w/home /dist/bin/march --compile -o /w/hello_dynamic /w/hello.march'
+          fail=0
+          if readelf -d "$work/hello" "$work/tlsp" | grep NEEDED; then
+            echo "::error::${{ matrix.platform }}: a --static binary has NEEDED entries." >&2
+            fail=1
+          fi
+          run_scratch() {  # run_scratch BIN -> its stdout, from a FROM-scratch image
+            local d; d="$(mktemp -d)"
+            cp "$work/$1" "$d/prog"
+            printf 'FROM scratch\nCOPY prog /prog\nENTRYPOINT ["/prog"]\n' > "$d/Dockerfile"
+            docker build -q -t "march-static-check-$1" "$d" > /dev/null
+            docker run --rm "march-static-check-$1" 2>&1
+          }
+          for pe in "hello:hi" "tlsp:tls ctx ok"; do
+            p="${pe%%:*}"; want="${pe#*:}"
+            if out=$(run_scratch "$p") && [ "$out" = "$want" ]; then
+              echo "  ok: $p --static in scratch: $out"
+            else
+              echo "::error::${{ matrix.platform }}: $p --static in a scratch image printed '$out', expected '$want'." >&2
+              fail=1
+            fi
+          done
+          if out=$(run_scratch hello_dynamic); then
+            echo "::error::${{ matrix.platform }}: the DYNAMIC hello started in scratch ('$out'); this check cannot tell static from dynamic." >&2
+            fail=1
+          else
+            echo "  ok: the dynamic hello does not start in scratch, as expected"
+          fi
+          exit $fail
+
       - name: Strip binary
         run: |
           if command -v strip &> /dev/null; then

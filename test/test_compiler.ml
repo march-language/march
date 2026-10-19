@@ -17744,6 +17744,7 @@ let compiler_suites =
       ("cas_report_bypass", Test_cas_report_bypass.tests);
       ("cas_b7", Test_cas_b7.tests);
       ("link_deps", Test_link_deps.tests);
+      ("static_link", Test_static_link.tests);
       ("shell_ident", Test_shell_ident.tests);
       ("shell_triple", Test_shell_triple.tests);
       ("cap_package", Test_cap_package.tests);

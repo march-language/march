@@ -19,6 +19,15 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- `march --compile --static` builds a self-contained executable: on Linux a fully
+  static binary that runs in a `scratch` image (musl hosts such as Alpine; refused on
+  glibc), on macOS one that loads nothing outside `/usr/lib` and `/System`. A missing
+  static library is an error naming the package to install, and the compiler checks
+  the finished binary before keeping it. See "Static binaries" in the tooling docs,
+  including how a static binary finds TLS certificates.
+
 ### Fixed
 
 - `march --compile` no longer serves a cached binary that was linked under a different

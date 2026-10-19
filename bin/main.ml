@@ -1725,6 +1725,8 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
         (* --cap-sandbox changes the emitted binary (a -D define), so a
            non-sandboxed cached artifact must never satisfy it. *)
         @ (if !cap_sandbox then ["capsandbox"] else [])
+        (* --static links different archives and checks the result. *)
+        @ (if !static_build then ["static"] else [])
         @ (if !cap_strict then ["capstrict"] else [])
         (* --target-cpu changes the instructions clang emits (SIMD width),
            so a baseline-ISA cached binary must never satisfy it. *)
@@ -4510,6 +4512,24 @@ let compile filename =
                this host (or target) lacks stops here with the package name,
                not at a link error (or, before Stage 3, a run-time Err). *)
             check_codecs_available ~cross:(linux_arch_str (parse_target !target_str) <> None);
+            if !static_build then
+              Static_link.check_supported ~hot_reload:(!hot_reload_prefix <> None)
+                ~compile_so:!compile_so
+                ~cross:(linux_arch_str (parse_target !target_str) <> None)
+                ~macos:(host_is_darwin ()) ~musl:(is_musl_host ());
+            (* --static: the archives the program needs, resolved now, before
+               any runtime C is compiled, so a missing one is the named-package
+               error and nothing else. *)
+            let static_libs_for r =
+              if host_is_darwin () then
+                Static_link.macos_link_args ~r ~openssl_flags:(Lazy.force openssl_probe_flags)
+                  ~zstd_flags:(Option.value ~default:"" (Lazy.force zstd_probe))
+                  ~brotli_flags:(Option.value ~default:"" (Lazy.force brotli_probe))
+              else Static_link.musl_link_args ~r in
+            let static_reached =
+              Static_link.reached (March_tir.Llvm_builtins.called_c_symbols ()) in
+            let static_libs_reached =
+              if !static_build then static_libs_for static_reached else "" in
             let runtime = match find_runtime_file "march_runtime.c" with
               | Some p -> p
               | None ->
@@ -5157,7 +5177,25 @@ let compile filename =
                --as-needed / --no-as-needed so a user's --ffi-link libraries
                keep today's semantics.  ld64's -dead_strip_dylibs is global, so
                it is passed only when there is no --ffi-link. *)
+            let static_reach =
+              match opt_archive with
+              | Some _ -> static_reached
+              | None -> Static_link.everything   (* every member is linked loose *)
+            in
             let pre_ll_libs, post_ll_libs =
+              if !static_build then begin
+                (* Only the -I part of the probes: their -L/-l would link the
+                   dylibs.  The archives come from Static_link. *)
+                let includes flags =
+                  String.split_on_char ' ' flags
+                  |> List.filter (fun t -> String.length t > 2 && String.sub t 0 2 = "-I")
+                  |> List.map (fun t -> " " ^ t) |> String.concat "" in
+                let libs =
+                  if opt_archive <> None then static_libs_reached
+                  else static_libs_for static_reach in
+                (includes openssl_flags2 ^ includes compress_flags2,
+                 (match opt_archive with Some (_, a) -> " " ^ Filename.quote a | None -> "") ^ libs)
+              end else
               match opt_archive with
               | None -> (openssl_flags2 ^ compress_flags2, "")
               | Some (_, a) ->
@@ -5185,6 +5223,11 @@ let compile filename =
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
             end else begin
+              (* --static: the binary must prove it, before it is cached. *)
+              if !static_build then begin
+                Static_link.verify ~macos:(host_is_darwin ()) out_bin;
+                Static_link.openssl_notice static_reach
+              end;
               stamp "clang";
               March_cas.Cas.store_artifact store ch out_bin;
               (match source_cas_state with
@@ -6413,6 +6456,7 @@ let () =
     ("--stdlib-source", Arg.Set stdlib_source, " The entry file(s) are standard-library sources checked under a path outside the resolved stdlib root (e.g. `march --check --stdlib-source stdlib/actor.march` from the repo root): exempt them from the stdlib-only builtin gate. Never inferred from the file name");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
+    ("--static", Arg.Set static_build, " With --compile: a self-contained executable (Linux: static, musl hosts only; macOS: no library outside /usr/lib and /System)");
     ("--verify-tir", Arg.Set March_tir.Tir_verify.enabled_flag,
      " Check TIR well-formedness after every pass (scoping and references); a finding is an internal compiler error. Same as MARCH_VERIFY_TIR=1");
     ("--disable-pass", Arg.String (fun s ->

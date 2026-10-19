@@ -5,7 +5,12 @@
 > prerequisite below) and the host library probe in the CAS key (Stage 0,
 > `specs/progress/2026-10-18-libprobe-in-cas-key.md`). The rest (the runtime archive and
 > library selection, the per-codec compression split, `--static`) follows the design's
-> recommendations, all approved by the owner on 2026-10-18 (design §0).
+> recommendations, all approved by the owner on 2026-10-18 (design §0). Stages 2, 3, 4 and 6
+> landed the same day (`specs/progress/2026-10-18-runtime-archive-link-on-reach.md`,
+> `…-compression-codecs-split.md`, `…-compile-static-flag.md`): `--static` exists, refuses
+> glibc, names a missing archive's package, and checks its own output. Open: the first CI run
+> of the scratch-container check (`.github/workflows/build.yml`, Alpine legs; acceptance item
+> 2), Stage 5 (`--target linux/<arch>-musl`), and the musl allocator measurement (§4.4).
 
 `[P2]` # `march --compile` output is dynamically linked — no `scratch`/distroless deploy
 
