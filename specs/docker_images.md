@@ -85,20 +85,28 @@ does not work on its own either — hence both the package line and the
 
 ### What `march --compile` actually links
 
-The link command is assembled in `bin/main.ml` (the `Printf.sprintf` that builds
-`cmd`, around the `math_flag` binding) with helpers in `bin/toolchain.ml`. It
-passes **no `-static`** on any path. The cross path goes further and links
-positional `.so` paths precisely so the target soname is recorded in
-`DT_NEEDED`. Every library below is a `DT_NEEDED` entry on the output binary.
+Updated 2026-10-18 (static-output design Stages 1-3,
+`specs/2026-09-23-static-compile-output-design.md`): a compiled program records a
+library only for the runtime pieces it reaches. The link command is assembled in
+`bin/main.ml` (the `Printf.sprintf` that builds `cmd`, around the `math_flag`
+binding); it still passes **no `-static`**.
 
-| Library | Comes from | Notes |
+| Library | Comes from | Recorded when |
 |---------|-----------|-------|
-| `libssl`, `libcrypto` | `runtime/march_tls.c` | linked whenever the runtime source is present — i.e. always, not only for programs that use TLS |
-| `libz` | `runtime/march_compress.c` | mandatory (gzip/deflate) |
-| `libzstd`, `libbrotlienc`, `libbrotlidec` | `runtime/march_compress.c` | added when the build host has the headers, so the dependency set varies by build machine |
-| `libblake3` | `runtime/march_blake3.c` | see below |
-| `libucontext` (musl only) | scheduler green threads | musl has no `ucontext` in libc |
+| `libssl`, `libcrypto` | `runtime/march_tls.c` | the program uses TLS |
+| `libz` | `runtime/march_compress.c` | the program uses `Compress.Gzip` / `Compress.Deflate` |
+| `libzstd` | `runtime/march_compress_zstd.c` | the program uses `Compress.Zstd` (a compile error naming the package if the build host lacks it) |
+| `libbrotlienc`, `libbrotlidec` | `runtime/march_compress_brotli.c` | the program uses `Compress.Brotli` (likewise) |
+| `libucontext` (musl only) | scheduler green threads | always: musl has no `ucontext` in libc |
 | `libc` / `libc.musl-<arch>` | always | |
+
+A `--hot-reload` build still links the whole runtime and all of these (a hot patch
+resolves runtime symbols against it). BLAKE3 is vendored (`runtime/third_party/blake3/`)
+and no longer a library dependency of anything a user compiles. Measured on macOS arm64:
+a `println`-only program loads `libSystem` alone.
+
+The rest of this section is the 2026-09-02 measurement that motivated the change, kept
+for the record.
 
 Verified 2026-09-02 two ways. On `alpine:3.21` aarch64 under Docker, `readelf -d`
 on a compiled hello-world lists `libssl.so.3`, `libcrypto.so.3`, `libz.so.1`,

@@ -47,6 +47,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- A compiled program that uses `Compress.Zstd` or `Compress.Brotli` on a build host
+  without that library now fails to compile with a message naming the package to
+  install, instead of building a binary whose codec returns `Err("... not available")`
+  at run time. Each codec is linked only when the program uses it, so a gzip program
+  loads zlib alone.
 - A compiled program now loads OpenSSL only when it uses TLS, and zlib/zstd/brotli
   only when it uses `Compress`: a hello-world depends on libc alone, where it used to
   need six libraries. `--hot-reload` builds still link the whole runtime.

@@ -1629,25 +1629,60 @@ let openssl_probe_flags : string Lazy.t = lazy (
          && Sys.command "pkg-config --exists openssl 2>/dev/null" = 0
       then " -lssl -lcrypto" else "")
 
+(* zstd and brotli, each [Some link-flags] when the build host has the
+   library's header, else [None].  Since the per-codec split (static-output
+   design, Stage 3) this decides only whether march_compress_zstd.c /
+   march_compress_brotli.c are compiled at all; a program that reaches a
+   codec whose library is [None] is refused ([check_codecs_available]), so
+   what a binary DOES no longer depends on the host. *)
+let zstd_probe : string option Lazy.t = lazy (
+  if probe_exists "/opt/homebrew/include/zstd.h" then
+    Some " -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
+  else if probe_exists "/usr/include/zstd.h" then Some " -lzstd"
+  else None)
+
+let brotli_probe : string option Lazy.t = lazy (
+  if probe_exists "/opt/homebrew/include/brotli/encode.h" then
+    Some " -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
+  else if probe_exists "/usr/include/brotli/encode.h" then Some " -lbrotlienc -lbrotlidec"
+  else None)
+
 let compress_probe_flags : string Lazy.t = lazy (
   match find_runtime_file "march_compress.c" with
   | None -> ""
   | Some _ ->
-    let zstd_flags =
-      if probe_exists "/opt/homebrew/include/zstd.h" then
-        " -DMARCH_HAVE_ZSTD -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
-      else if probe_exists "/usr/include/zstd.h" then
-        " -DMARCH_HAVE_ZSTD -lzstd"
-      else ""
-    in
-    let brotli_flags =
-      if probe_exists "/opt/homebrew/include/brotli/encode.h" then
-        " -DMARCH_HAVE_BROTLI -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
-      else if probe_exists "/usr/include/brotli/encode.h" then
-        " -DMARCH_HAVE_BROTLI -lbrotlienc -lbrotlidec"
-      else ""
-    in
-    Printf.sprintf " -lz%s%s" zstd_flags brotli_flags)
+    " -lz" ^ Option.value ~default:"" (Lazy.force zstd_probe)
+    ^ Option.value ~default:"" (Lazy.force brotli_probe))
+
+(* A program that reaches Compress.Zstd / Compress.Brotli on a host (or a
+   target) without that library is a compile error naming the package, not a
+   binary that answers Err("... not available") at run time (static-output
+   design, decision D3).  Read from the C symbols the emitted code calls
+   (Llvm_builtins.called_c_symbols), so a program that never calls a codec
+   is never refused for lacking it.  [cross]: cross targets link zlib from
+   the sysroot and neither of the others. *)
+let check_codecs_available ~(cross : bool) : unit =
+  let called = March_tir.Llvm_builtins.called_c_symbols () in
+  let uses prefix = List.exists (fun s ->
+      String.length s >= String.length prefix
+      && String.sub s 0 (String.length prefix) = prefix) called in
+  let missing =
+    (if uses "march_zstd_" && (cross || Lazy.force zstd_probe = None) then
+       [ ("Compress.Zstd", "libzstd",
+          "apk add zstd-dev | apt install libzstd-dev | brew install zstd") ] else [])
+    @ (if uses "march_brotli_" && (cross || Lazy.force brotli_probe = None) then
+         [ ("Compress.Brotli", "libbrotlienc/libbrotlidec",
+            "apk add brotli-dev | apt install libbrotli-dev | brew install brotli") ] else [])
+  in
+  if missing <> [] then begin
+    List.iter (fun (m, lib, pkgs) ->
+        if cross then
+          Printf.eprintf "march: %s is used, but %s is not available for cross targets\n" m lib
+        else
+          Printf.eprintf "march: %s is used, but %s was not found on this host (%s)\n" m lib pkgs)
+      missing;
+    exit 1
+  end
 
 (* The CAS tag for the probes above (a digest: the flag strings carry host
    paths).  Cross builds link against the sysroot instead, which
@@ -4471,6 +4506,10 @@ let compile filename =
             end
           end else begin
             (* ── Native compilation path ────────────────────────────────── *)
+            (* Before any runtime C is compiled: a program that reaches a codec
+               this host (or target) lacks stops here with the package name,
+               not at a link error (or, before Stage 3, a run-time Err). *)
+            check_codecs_available ~cross:(linux_arch_str (parse_target !target_str) <> None);
             let runtime = match find_runtime_file "march_runtime.c" with
               | Some p -> p
               | None ->
@@ -4498,6 +4537,14 @@ let compile filename =
                 ^ macro "MARCH_HCR_PREFIX" prefix
               | _ -> "" in
             let opt_file2 f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
+            (* One file per optional codec, compiled only when its library
+               resolves (cross targets: never); see check_codecs_available. *)
+            let codec_c2 =
+              let is_cross = linux_arch_str (parse_target !target_str) <> None in
+              (if not is_cross && Lazy.force zstd_probe <> None then
+                 opt_file2 (Filename.concat runtime_dir "march_compress_zstd.c") else "")
+              ^ (if not is_cross && Lazy.force brotli_probe <> None then
+                   opt_file2 (Filename.concat runtime_dir "march_compress_brotli.c") else "") in
             let sched_c2  = Filename.concat runtime_dir "march_scheduler.c" in
             let ffi_c2    = Filename.concat runtime_dir "march_ffi.c" in
             let sha1_c2   = Filename.concat runtime_dir "sha1.c" in
@@ -4562,14 +4609,14 @@ let compile filename =
                 Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c2 base64_c2
                   (opt_file2 simd_c) (opt_file2 sched_c2) (opt_file2 resp_c)
                   (opt_file2 io_c) (opt_file2 evloop_c)
-                  (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2)
+                  (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2 ^ codec_c2)
               else
                 (* march_extras.c references base64_encode (base64.c) and sha1
                    (sha1.c), so link them whenever extras is linked — independent
                    of the HTTP stack (else an extras-but-no-http build tree fails
                    with undefined _base64_encode / _sha1). opt_file2-guarded. *)
                 Printf.sprintf "%s%s%s%s%s" (opt_file2 sched_c2) (opt_file2 extras_c2)
-                  (opt_file2 compress_c2) (opt_file2 base64_c2) (opt_file2 sha1_c2))
+                  (opt_file2 compress_c2 ^ codec_c2) (opt_file2 base64_c2) (opt_file2 sha1_c2))
               ^ (opt_file2 ffi_c2)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_trace.c") else "")  (* R8 trace sessions *)

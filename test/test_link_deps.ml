@@ -70,6 +70,16 @@ let programs = [
   \      Err(_) -> println(\"gz encode err\")\n\
   \    end\n  end\nend\n",
   "gz hello hello";
+  "zs",
+  "mod Zs do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n\
+  \    match Compress.Zstd.encode(Bytes.from_string(\"zstd zstd\")) do\n\
+  \      Ok(z) -> match Compress.Zstd.decode(z) do\n\
+  \        Ok(x) -> println(\"zs \" ++ Bytes.to_string(x))\n\
+  \        Err(_) -> println(\"zs decode err\")\n\
+  \      end\n\
+  \      Err(_) -> println(\"zs encode err\")\n\
+  \    end\n  end\nend\n",
+  "zs zstd zstd";
 ]
 
 (* Compile [name] in [dir] (private HOME, so no other build's cache serves
@@ -121,8 +131,6 @@ let deps bin =
 
 let show l = "[" ^ String.concat "," l ^ "]"
 
-let compression = [ "brotlidec"; "brotlienc"; "z"; "zstd" ]
-
 let test_deps_follow_reach () =
   if not (is_macos || is_linux) then Alcotest.skip ();
   with_dir @@ fun dir ->
@@ -135,11 +143,11 @@ let test_deps_follow_reach () =
         Alcotest.(check string) "hello loads no library beyond libc" "[]" (show d)
       | "tlsp" ->
         Alcotest.(check string) "tlsp loads OpenSSL and nothing else" "[crypto,ssl]" (show d)
+      | "gz" ->
+        (* One archive member per codec (Stage 3): gzip is zlib alone. *)
+        Alcotest.(check string) "gz loads zlib and nothing else" "[z]" (show d)
       | _ ->
-        (* zstd/brotli ride with zlib until the per-codec split (Stage 3). *)
-        Alcotest.(check bool) ("gz loads zlib " ^ show d) true (List.mem "z" d);
-        Alcotest.(check bool) ("gz loads compression libraries only " ^ show d) true
-          (List.for_all (fun l -> List.mem l compression) d))
+        Alcotest.(check string) "zs loads libzstd and nothing else" "[zstd]" (show d))
     programs
 
 (* Red half: with every member loose (the old link), hello loads OpenSSL. *)
@@ -164,7 +172,36 @@ let test_hot_reload_keeps_runtime () =
   Alcotest.(check bool) "a --hot-reload build still defines march_tls_client_ctx for patches"
     true (n >= 1)
 
+(* A program that reaches a codec this host lacks is refused at compile time,
+   naming the package (design D3 and check 5); before Stage 3 it compiled and
+   its binary answered Err("Compress.Zstd: libzstd not available") at run
+   time.  MARCH_TEST_LIBPROBE_ROOT (bin/main.ml) makes the probe find no
+   library without touching the host. *)
+let test_missing_codec_refused () =
+  if not (is_macos || is_linux) then Alcotest.skip ();
+  with_dir @@ fun dir ->
+  let (name, src, _) = List.nth programs 3 in
+  let f = Filename.concat dir (name ^ ".march") in
+  Out_channel.with_open_bin f (fun oc -> output_string oc src);
+  let log = Filename.concat dir "refused.log" in
+  let rc = Sys.command (Printf.sprintf
+      "cd %s && env HOME=%s MARCH_TEST_LIBPROBE_ROOT=%s %s --compile -o zs %s > %s 2>&1"
+      (Filename.quote dir) (Filename.quote (Filename.concat dir "home"))
+      (Filename.quote (Filename.concat dir "no-such-root"))
+      (Filename.quote compiler_exe) (Filename.quote f) (Filename.quote log)) in
+  let out = read_file log in
+  let has needle =
+    let n = String.length out and m = String.length needle in
+    let rec go i = i + m <= n && (String.sub out i m = needle || go (i + 1)) in go 0 in
+  Alcotest.(check bool) ("the build fails\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("naming Compress.Zstd and libzstd\n" ^ out) true
+    (has "Compress.Zstd is used, but libzstd was not found");
+  Alcotest.(check bool) ("with the packages\n" ^ out) true (has "apt install libzstd-dev");
+  Alcotest.(check bool) ("before any C is compiled or linked\n" ^ out) false
+    (has "undefined" || has "error:")
+
 let tests = [
+  Alcotest.test_case "a codec this host lacks is a compile error naming the package" `Slow test_missing_codec_refused;
   Alcotest.test_case "dependency set follows what the program reaches" `Slow test_deps_follow_reach;
   Alcotest.test_case "every member loose (old link): hello loads OpenSSL" `Slow test_loose_members_load_everything;
   Alcotest.test_case "--hot-reload keeps the whole runtime" `Slow test_hot_reload_keeps_runtime;

@@ -290,7 +290,9 @@ let ensure ~(cc : string) ~(cflags : string) ~(sources : string list)
     Everything above links the runtime object-for-object, so every program
     loads every library any member needs: [march_tls.o] made a pure-compute
     program depend on libssl/libcrypto, [march_compress.o] on zlib, zstd and
-    brotli.  Those two members are referenced only from generated code (the
+    brotli (one file per codec since Stage 3: march_compress.o is gzip/deflate
+    over zlib, march_compress_zstd.o and march_compress_brotli.o the others).
+    These members are referenced only from generated code (the
     stdlib's TLS and Compress builtins), never from other runtime C, so the
     driver passes them through this archive, after the program's object:
     the linker pulls a member only for a symbol the program left undefined,
@@ -308,7 +310,8 @@ let ensure ~(cc : string) ~(cflags : string) ~(sources : string list)
     per-pid temp file renamed into place, so racing builds are as safe as
     the per-object publish above.  [Error] rather than raise: the caller
     falls back to linking the members as loose objects. *)
-let archived_members = [ "march_tls.o"; "march_compress.o" ]
+let archived_members =
+  [ "march_tls.o"; "march_compress.o"; "march_compress_zstd.o"; "march_compress_brotli.o" ]
 
 let ensure_opt_archive ~(objs : string list) : (string, string) result =
   match objs with
