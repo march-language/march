@@ -18331,15 +18331,20 @@ let fold_invariants_1_suite =
         Alcotest.(check (list string)) "unreflectable-subject" [ "unreflectable-subject" ] (reasons src));
 
     (* ── Guards: each blocks a specific proof ──────────────────────────── *)
-    case "guard: an accumulator's own refinement is neither assumed nor read as the invariant" (fun () ->
+    case "guard: an accumulator's own refinement is not assumed when it does not hold" (fun () ->
         (* On 6fcef2c9d this was (1, 0, 0), a FALSE proof: [lambda_ok]
-           assumed the unchecked annotation, and `foldl([5], 1, …)` is -49. *)
+           assumed the unchecked annotation, and `foldl([5], 1, …)` is -49.
+           Phase 1 declined the hypothesis on the annotation (0, 0, 1).
+           Since phase 4 the annotation IS read as the invariant and checked:
+           its base `1 > 100` fails (its own skip), so it is not assumed, and
+           the demand falls back to `_ > 0` as the invariant on its own,
+           whose step `acc - 50` fails (fold-invariants-4 pins the rest). *)
         let src =
           m ("  fn go(" ^ pos ^ ") : Int do need_pos(foldl(pos, 1, fn (acc : {Int | _ > 100}, x) -> acc - 50)) end\n")
         in
-        Alcotest.check t3 "skipped" (0, 0, 1) (l3 src);
-        Alcotest.(check bool) "declined, naming the annotation" true
-          (has_detail "its parameter `acc` carries its own refinement annotation" src));
+        Alcotest.check t3 "skipped twice" (0, 0, 2) (l3 src);
+        Alcotest.(check (list string)) "the demand's step, the annotation's base"
+          (step @ base) (reasons src));
 
     case "guard: a step using let? declines" (fun () ->
         let src =
@@ -18956,6 +18961,363 @@ let fold_invariants_2_suite =
         let s2 = src "zs" in
         Alcotest.check t3 "pick(c, pos, zs) skips" (0, 0, 1) (l3 s2);
         Alcotest.(check (list string)) "a plain parametric source skip" param (reasons s2)) ]
+
+(* ── Accumulator invariants, phase 4: the annotated accumulator (design
+   specs/2026-10-18-fold-accumulator-invariants-design.md §8, option iii)
+   ───────────────────────────────────────────────────────────────────────
+   `g(…, fn (acc : {T | I}, x) -> step)` with [g] parametric in its bare
+   return variable `b` (P1/P2, not trusted/assumed/impl) and `acc`'s domain
+   exactly `b`: the annotation is the invariant.  Its obligation (on the
+   parameter, callee [g]) is the phase-1 judgment with I for the demand
+   (base: the initial value meets I; step: I of the accumulator gives I of
+   the result).  Proved: the body assumes I of `acc`, and the call's result
+   carries I (a `let` binding it gets the fact, with no demand anywhere).
+   Not proved: a skip with the accumulator reason, never a violation, and
+   neither the body nor the result gets anything.  A demand on the result
+   is met by I => D; failing that, by D as the invariant on its own (phase
+   1), the annotation ignored.  The prelude is fold-invariants-1's local
+   fold shapes; the conformance trio t450-t452 runs the stdlib folds.  The
+   triple each case had on 56be54964 (before this phase) is in its
+   comment. *)
+let fold_invariants_4_suite =
+  let prelude =
+    {|  fn need_nn(k : {Int | _ >= 0}) : Int do k end
+  fn need_pos(k : {Int | _ > 0}) : Int do k end
+  fn need_ge(k : {Int | _ >= n}, n : Int) : Int do k end
+  fn foldl(xs : List(a), acc : b, f : b -> a -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> foldl(t, f(acc, h), f)
+    end
+  end
+  fn foldr(xs : List(a), acc : b, f : a -> b -> b) : b do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> f(h, foldr(t, acc, f))
+    end
+  end
+|}
+  in
+  let m ?(verified = false) body =
+    "mod FI4 do\n" ^ (if verified then "  cap verified\n" else "") ^ prelude ^ body ^ "end\n"
+  in
+  let l3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let reasons src = let (_, _, _, rs) = typed_ledger src in rs in
+  let details src =
+    March_refinecheck.Obligation.reset ();
+    ignore (has_refine_error_typed src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r -> Some (March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  (* (callee, verdict, reason) of every obligation, in record order. *)
+  let obls = typed_obligations in
+  let t3s = Alcotest.(list (triple string string string)) in
+  let mentions sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let has_detail sub src = List.exists (mentions sub) (details src) in
+  let t3 = Alcotest.(triple int int int) in
+  let pos = "pos : List({Int | _ > 0})" in
+  let case name f = gated name f in
+  let go_ys body = m ("  fn go(ys : List(Int)) : Int do\n" ^ body ^ "\n  end\n") in
+  [ (* ── Proofs ─────────────────────────────────────────────────────────── *)
+    case "f18: the annotation is checked and assumed in the body" (fun () ->
+        (* 56be54964: (0, 0, 1), `need_pos(acc)` unconstrained-subject; the
+           annotation itself was no obligation at all. *)
+        let src =
+          go_ys "    foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc + 1)"
+        in
+        Alcotest.check t3 "annotation proved, need_pos(acc) proved" (2, 0, 0) (l3 src);
+        Alcotest.check t3s "the annotation is foldl's obligation"
+          [ ("foldl", "proved", ""); ("need_pos", "proved", "") ] (obls src));
+
+    case "a let-bound result carries the invariant, with no demand on the call" (fun () ->
+        (* The design's motivating case.  56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "need_pos(s) proves" (2, 0, 0)
+          (l3 (go_ys "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n    need_pos(s)")));
+
+    case "the result fact is used twice" (fun () ->
+        (* 56be54964: (0, 0, 2). *)
+        Alcotest.check t3 "both uses prove" (3, 0, 0)
+          (l3
+             (go_ys
+                "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n\
+                 \    need_pos(s) + need_nn(s)")));
+
+    case "an inline demand equal to the annotation" (fun () ->
+        (* 56be54964: (0, 0, 1), the hypothesis declined on the own
+           annotation. *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3 (go_ys "    need_pos(foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1))")));
+
+    case "an inline demand the annotation implies" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "I = _ > 0 gives D = _ >= 0" (2, 0, 0)
+          (l3 (go_ys "    need_nn(foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1))")));
+
+    case "a demand the annotation does not imply falls back to the demand as the invariant" (fun () ->
+        (* I = `_ >= 0` holds but does not give `_ > 0`; D on its own is
+           inductive (base 1, `acc + 1`).  56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves through D" (2, 0, 0)
+          (l3 (go_ys "    need_pos(foldl(ys, 1, fn (acc : {Int | _ >= 0}, _x) -> acc + 1))")));
+
+    case "an annotation that holds but does not give the demand" (fun () ->
+        (* I = `_ >= 0` proves (base 0), and does not give `_ > 0`; nor does
+           D on its own (its base 0 fails): `foldl([], 0, …)` is 0, so
+           `need_pos` of it is a real failure.  56be54964: (0, 0, 1). *)
+        let src = go_ys "    need_pos(foldl(ys, 0, fn (acc : {Int | _ >= 0}, _x) -> acc + 1))" in
+        Alcotest.check t3 "the annotation proved, the demand not" (1, 0, 1) (l3 src);
+        Alcotest.check t3s "the demand is the skip"
+          [ ("need_pos", "skipped", "accumulator-base-unproved"); ("foldl", "proved", "") ] (obls src));
+
+    case "a return tail" (fun () ->
+        (* 56be54964: (0, 0, 1), a postcondition. *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3
+             (m "  fn h(ys : List(Int)) : {Int | _ > 0} do foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1) end\n")));
+
+    case "the step uses the element fact of x" (fun () ->
+        (* `x` keeps its element fact beside the annotated accumulator.
+           56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3
+             (m ("  fn go(" ^ pos ^ ") : Int do\n\
+                  \    let s = foldl(pos, 1, fn (acc : {Int | _ > 0}, x) -> acc + x)\n    need_pos(s)\n  end\n"))));
+
+    case "fold_right: the accumulator is the second parameter" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3 (go_ys "    let s = foldr(ys, 1, fn (_x, a : {Int | _ > 0}) -> a + 1)\n    need_pos(s)")));
+
+    case "a curried step whose inner parameter is the accumulator" (fun () ->
+        (* A fold_right-shaped curried callee puts `b` second; the outer
+           one-parameter lambda is unannotated, so no pass site obliges it.
+           56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3
+             (m "  fn cfr(xs : List(a), acc : b, f : a -> b -> b) : b do\n\
+                 \    match xs do\n      Nil -> acc\n      Cons(h, t) ->\n        let g = f(h)\n        g(cfr(t, acc, f))\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = cfr(ys, 1, fn _x -> fn (a : {Int | _ > 0}) -> a + 1)\n    need_pos(s)\n  end\n")));
+
+    case "a relational invariant over a capture" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "need_ge(s, lo) proves" (2, 0, 0)
+          (l3
+             (m "  fn go(ys : List(Int), lo : Int) : Int do\n\
+                 \    let s = foldl(ys, lo, fn (acc : {Int | _ >= lo}, _x) -> acc + 1)\n    need_ge(s, lo)\n  end\n")));
+
+    case "a sibling b-typed parameter assumes the invariant too" (fun () ->
+        (* `pairf` hands its step two values of `b`, both sources: the
+           invariant (one annotation) is assumed of both (§2.2).
+           56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "proves" (2, 0, 0)
+          (l3
+             (m "  fn pairf(x : b, y : b, f : b -> b -> b) : b do f(x, y) end\n\
+                 \  fn go(n : Int) : Int do\n\
+                 \    let s = pairf(1, 2, fn (a : {Int | _ > 0}, c) -> a + c)\n    need_pos(s)\n  end\n")));
+
+    case "f18 under cap verified is accepted" (fun () ->
+        (* 56be54964: rejected (`need_pos(acc)` unconstrained). *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_typed
+             (m ~verified:true
+                "  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc + 1)\n\
+                 \    need_pos(s)\n  end\n")));
+
+    (* ── Controls: an annotation that does not hold is not assumed ───────── *)
+    case "t385's shape: the base fails, the demand falls back and fails too" (fun () ->
+        (* 56be54964: (0, 0, 1), the step declined on the own annotation. *)
+        let body = "  fn go(" ^ pos ^ ") : Int do need_pos(foldl(pos, 1, fn (acc : {Int | _ > 100}, x) -> acc - 50)) end\n" in
+        let src = m body in
+        Alcotest.check t3 "two skips" (0, 0, 2) (l3 src);
+        Alcotest.check t3s "demand: the step; annotation: the base"
+          [ ("need_pos", "skipped", "accumulator-step-unproved")
+          ; ("foldl", "skipped", "accumulator-base-unproved") ]
+          (obls src);
+        Alcotest.(check bool) "the base detail names the initial value" true
+          (has_detail "the initial value `1`" src);
+        Alcotest.(check bool) "under cap verified: rejected" true (has_refine_error_typed (m ~verified:true body)));
+
+    case "an annotation whose base fails is neither assumed nor carried" (fun () ->
+        (* 56be54964: (0, 0, 2). *)
+        let src =
+          go_ys
+            "    let s = foldl(ys, 0, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc + 1)\n\
+             \    need_pos(s)"
+        in
+        Alcotest.check t3 "three skips" (0, 0, 3) (l3 src);
+        Alcotest.(check (list string)) "the base; then nothing on acc or s"
+          [ "accumulator-base-unproved"; "unconstrained-subject"; "unconstrained-subject" ] (reasons src));
+
+    case "a step that breaks the annotation" (fun () ->
+        (* 56be54964: (0, 0, 2). *)
+        let src =
+          go_ys
+            "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc - 1)\n\
+             \    need_pos(s)"
+        in
+        Alcotest.check t3 "three skips" (0, 0, 3) (l3 src);
+        Alcotest.(check (list string)) "the step; then nothing on acc or s"
+          [ "accumulator-step-unproved"; "unconstrained-subject"; "unconstrained-subject" ] (reasons src);
+        Alcotest.(check bool) "the step detail" true
+          (has_detail "the function passed as argument 3 of `foldl` is not known to preserve it" src);
+        Alcotest.(check bool) "under cap verified: rejected" true
+          (has_refine_error_typed
+             (m ~verified:true "  fn go(ys : List(Int)) : Int do foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc - 1) end\n")));
+
+    case "a step that needs an element fact it does not have" (fun () ->
+        (* `x` is an unrefined Int: `acc + x` can break `_ > 0`.
+           56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "two skips" (0, 0, 2)
+          (l3 (go_ys "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, x) -> acc + x)\n    need_pos(s)")));
+
+    case "an annotation on the ELEMENT parameter is not an invariant, nor assumed" (fun () ->
+        (* `x`'s domain is `a`: the annotation would be a claim about `ys`'s
+           elements, which nobody checks.  Unchanged from 56be54964. *)
+        let src =
+          go_ys
+            "    let s = foldl(ys, 1, fn (acc, x : {Int | _ > 0}) ->\n      let _u = need_pos(x)\n      acc + x)\n\
+             \    need_pos(s)"
+        in
+        Alcotest.check t3 "two skips, no obligation for the annotation" (0, 0, 2) (l3 src);
+        Alcotest.(check (list string)) "nothing on x or s"
+          [ "unconstrained-subject"; "unconstrained-subject" ] (reasons src));
+
+    case "an element annotation beside a proved accumulator annotation stays unassumed" (fun () ->
+        (* 56be54964: (0, 0, 2). *)
+        let src =
+          go_ys
+            "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, x : {Int | _ > 0}) ->\n      let _u = need_pos(x)\n      acc + 1)\n\
+             \    need_pos(s)"
+        in
+        Alcotest.check t3 "annotation and s proved, x not" (2, 0, 1) (l3 src);
+        Alcotest.check t3s "x's obligation is the skip"
+          [ ("foldl", "proved", ""); ("need_pos", "skipped", "unconstrained-subject"); ("need_pos", "proved", "") ]
+          (obls src));
+
+    case "the result fact retires when the result is rebound" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "not proved" (1, 0, 1)
+          (l3
+             (go_ys
+                "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n\
+                 \    let s = s - 5\n    need_pos(s)")));
+
+    case "a relational result fact retires when its capture is rebound" (fun () ->
+        (* 56be54964: (0, 0, 1). *)
+        Alcotest.check t3 "not proved" (1, 0, 1)
+          (l3
+             (m "  fn go(ys : List(Int), lo : Int) : Int do\n\
+                 \    let s = foldl(ys, lo, fn (acc : {Int | _ >= lo}, _x) -> acc + 1)\n\
+                 \    let lo = lo + 100\n    need_ge(s, lo)\n  end\n")));
+
+    case "the fact belongs to its call, not to the callee" (fun () ->
+        (* Another `foldl` call, unannotated, gets nothing from the first.
+           56be54964: (0, 0, 2). *)
+        Alcotest.check t3 "t not proved" (2, 0, 1)
+          (l3
+             (go_ys
+                "    let s = foldl(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n\
+                 \    let t = foldl(ys, 0, fn (acc, _x) -> acc - 1)\n    need_pos(s) + need_pos(t)")));
+
+    case "the same lambda under two annotations: the second does not inherit the first" (fun () ->
+        (* VC cache: `_ >= 0` proves with base 0, `_ > 0` must not. *)
+        let src i = go_ys ("    let s = foldl(ys, 0, fn (acc : {Int | " ^ i ^ "}, _x) -> acc + 1)\n    need_nn(s)") in
+        Alcotest.check t3 "_ >= 0: proves" (2, 0, 0) (l3 (src "_ >= 0"));
+        Alcotest.check t3 "_ > 0: the base fails, need_nn(s) unconstrained" (0, 0, 2) (l3 (src "_ > 0")));
+
+    case "guard: a lambda parameter shadowing a name the annotation mentions" (fun () ->
+        (* `fn (lo : {Int | _ >= lo}, …)`: the annotation's `lo` is not the
+           parameter.  Declined, not assumed. *)
+        let src =
+          m "  fn go(ys : List(Int), lo : Int) : Int do\n\
+             \    let s = foldl(ys, lo, fn (lo : {Int | _ >= lo}, _x) -> lo - 1)\n    need_ge(s, lo)\n  end\n"
+        in
+        Alcotest.check t3 "two skips" (0, 0, 2) (l3 src);
+        Alcotest.(check bool) "the shadowing named" true
+          (has_detail "shadows a name the demanded refinement mentions" src));
+
+    case "guard: two annotated b-typed parameters decline (the annotations stay inert)" (fun () ->
+        (* Conservative: which one is the invariant?  Unchanged from
+           56be54964. *)
+        Alcotest.check t3 "one skip, no annotation obligation" (0, 0, 1)
+          (l3
+             (m "  fn pairf(x : b, y : b, f : b -> b -> b) : b do f(x, y) end\n\
+                 \  fn go(n : Int) : Int do\n\
+                 \    let s = pairf(1, 2, fn (a : {Int | _ > 0}, c : {Int | _ > 0}) -> a + c)\n    need_pos(s)\n  end\n")));
+
+    case "a one-parameter lambda keeps the pass-site rule" (fun () ->
+        (* `iter1(n, x : b, f : b -> b)`: a refined one-parameter callable at
+           a type-variable domain is obliged at the pass site (and reported
+           violated there: `b` does not imply it).  Unchanged from
+           56be54964. *)
+        Alcotest.check t3 "violated at the pass site" (0, 1, 1)
+          (l3
+             (m "  fn iter1(n : Int, x : b, f : b -> b) : b do\n\
+                 \    if n > 0 do iter1(n - 1, f(x), f) else x end\n  end\n\
+                 \  fn go(n : Int) : Int do\n\
+                 \    let s = iter1(n, 1, fn (k : {Int | _ > 0}) -> k + 1)\n    need_pos(s)\n  end\n")));
+
+    case "a let-bound lambda is not read" (fun () ->
+        (* Only an inline lambda argument is the call's own.  Unchanged. *)
+        Alcotest.check t3 "s not proved" (0, 0, 1)
+          (l3
+             (go_ys
+                "    let f = fn (acc : {Int | _ > 0}, _x) -> acc + 1\n\
+                 \    let s = foldl(ys, 1, f)\n    need_pos(s)")));
+
+    (* ── Impostors: a non-parametric or trusted "fold" gets nothing ──────── *)
+    case "impostor: a fold that returns a constant" (fun () ->
+        (* P1.  `k1` returns -5 whatever the step does. *)
+        Alcotest.check t3 "no annotation obligation, s not proved" (0, 0, 1)
+          (l3
+             (m "  fn k1(xs : List(a), z : b, f : b -> a -> b) : b do 0 - 5 end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = k1(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n    need_pos(s)\n  end\n")));
+
+    case "impostor: a fold that hands the step a b it built" (fun () ->
+        (* P1.  `k2([5], 1, f)` hands `f` the accumulator -5. *)
+        Alcotest.check t3 "acc not assumed" (0, 0, 1)
+          (l3
+             (m "  fn k2(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+                 \    match xs do\n      Nil -> z\n      Cons(h, t) -> f(0 - 5, h)\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    k2(ys, 1, fn (acc : {Int | _ > 0}, _x) ->\n      let _u = need_pos(acc)\n      acc + 1)\n  end\n")));
+
+    case "impostor: an unannotated step parameter (P1)" (fun () ->
+        Alcotest.check t3 "s not proved" (0, 0, 1)
+          (l3
+             (m "  fn k6(xs : List(a), z : b, f) : b do foldl(xs, z, f) end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = k6(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n    need_pos(s)\n  end\n")));
+
+    case "impostor: trusted and assumed folds get nothing" (fun () ->
+        let src attr =
+          m (attr ^ "  fn k3(xs : List(a), z : b, f : b -> a -> b) : b do foldl(xs, z, f) end\n\
+                    \  fn go(ys : List(Int)) : Int do\n\
+                    \    let s = k3(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)\n    need_pos(s)\n  end\n")
+        in
+        Alcotest.check t3 "@[trusted]: s not proved" (0, 0, 1) (l3 (src "  @[trusted]\n"));
+        Alcotest.check t3 "@[assume]: s not proved" (0, 0, 1) (l3 (src "  @[assume]\n"));
+        Alcotest.check t3 "control: unmarked proves" (2, 0, 0) (l3 (src "")));
+
+    case "impostor: an interface method's result handed to the step (P2)" (fun () ->
+        Alcotest.check t3 "s not proved" (0, 0, 1)
+          (l3
+             (m "  interface Dflt(t) do\n    fn dflt : Int -> t\n  end\n\
+                 \  impl Dflt(Int) do\n    fn dflt(n) do 0 - 5 end\n  end\n\
+                 \  fn k13(xs : List(a), z : b, f : b -> a -> b) : b do\n\
+                 \    match xs do\n      Nil -> z\n      Cons(h, t) -> f(dflt(1), h)\n    end\n  end\n\
+                 \  fn go(ys : List(Int)) : Int do\n\
+                 \    let s = k13(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc)\n    need_pos(s)\n  end\n"))) ]
 
 (* ── Datatype instances from declared types (plan steps 1.3 + 1.4) ──────
    Each datatype instance is declared as its own monomorphic datatype; a term's instance
@@ -23431,6 +23793,7 @@ let () =
       ("fold-invariants-1", fold_invariants_1_suite);
       ("named-callback-preconds", named_callback_preconds_suite);
       ("fold-invariants-2", fold_invariants_2_suite);
+      ("fold-invariants-4", fold_invariants_4_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);

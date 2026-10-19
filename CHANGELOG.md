@@ -122,6 +122,21 @@ git log is authoritative for exact commits.
   `accumulator-base-unproved` skip. A curried step's inner parameter
   (`fn a -> fn x -> …`) now gets its element refinement while the step is
   checked, so `need_pos(Enum.fold(pos, 1, fn a -> fn x -> a + x))` is proved.
+- **Refinements: an annotated fold accumulator is checked, assumed and
+  carried.** `List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc + 1)`
+  states the invariant: the annotation is now an obligation of its own (the
+  initial value must meet it, and the step must keep it given an accumulator
+  that does), and when it holds `acc` assumes it inside the step and the call's
+  result carries it, so `let s = List.fold_left(…)` then `need_pos(s)` is
+  proved with no demand on the call. Before, the annotation was silently
+  neither checked nor assumed. A failing initial value or step is an
+  `accumulator-base-unproved` / `accumulator-step-unproved` skip (never a
+  violation; an error under `cap verified`), and the annotation is then not
+  assumed. A `cap verified` module with an annotated accumulator that does not
+  hold, and no demand on the fold, used to be accepted and is now rejected.
+  Same parametricity gates as the demand rule; a one-parameter lambda keeps
+  the pass-site check, and an annotation on the element parameter is still
+  neither checked nor assumed.
 - **Refinements: element refinements see into `List(a)` (and other container)
   constructor fields, and `Deque.filter` carries its predicate.** In
   `type Dq(a) = Dq(Int, List(a), List(a))`, `Dq(1, [0 - 1], [])` against

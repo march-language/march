@@ -10,7 +10,9 @@ parameters; f1's CI z3 verdict not probed, see there); phase 3 landed 2026-10-18
 (`specs/progress/2026-10-18-fold-invariants-phase3.md`: `Map`/`Set`/`HashMap.fold`,
 `Array.fold_left`, `RRB.fold`/`fold_left`, `Deque.fold_left`/`fold_right` annotated, one
 commit each, f16 proved; `SortedSet`/`OrderedMap.fold` probed and NOT covered (P1 does not
-walk a record-typed parameter, filed); `Hamt.fold` found unsurveyed, filed); phase 4 open. Probed on `ba8db5805` (0.6.0 + docs), z3 4.16.0.
+walk a record-typed parameter, filed); `Hamt.fold` found unsurveyed, filed); phase 4 landed 2026-10-18
+(`specs/progress/2026-10-18-fold-invariants-phase4.md`: the annotated accumulator is checked,
+assumed in the body and carried by the result; f18 proved; declined shapes filed). All four phases done. Probed on `ba8db5805` (0.6.0 + docs), z3 4.16.0.
 Its dependency on sibling (a)'s scalar entry point has landed (2026-10-18, element-flow phase 2,
 `specs/progress/2026-10-18-element-flow-phase2-scalar-demands.md`): `Refine_check.scalar_demand`
 and `discharge_pairs` exist, `check_call` reaches them through `call_ctx.demand`, and a top-level

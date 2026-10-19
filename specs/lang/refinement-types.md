@@ -2197,7 +2197,9 @@ through the bare initial value and the callback's own result, so
 `fn (acc, x) -> need_pos(acc) + x` is a skip. (A demand on the fold's *result*
 is different: the accumulator may then assume it, see
 [Folds](#folds-an-accumulator-invariant).) A lambda in which any parameter
-carries a refinement annotation of its own receives no fact at all, a fact
+carries a refinement annotation of its own receives no fact at all (an
+[annotated accumulator](#an-annotated-accumulator) whose annotation was proved
+aside: its siblings keep theirs), a fact
 that names one of the lambda's own parameters is not given to any of them,
 and a lambda with fewer parameters than the function type takes arguments (other
 than a one-parameter lambda) gets nothing.
@@ -2645,19 +2647,91 @@ pass. A "fold" whose body fixes `b`, feeds the step a value it built, takes an
 unannotated callback, calls a decoder or an interface method returning a type
 variable, or is marked `@[trusted]`/`@[assume]` or dispatched through an
 `impl`, gets no assumption, and its call keeps the plain
-`parametric-source-unproved` skip. The rule also declines a step whose
-parameter carries its own refinement annotation (that annotation is not
-assumed either: nothing checks it), a step using `let?`/`let*`, and a step
-whose parameter is spelled like a name the demand mentions.
+`parametric-source-unproved` skip. The rule also declines a step using
+`let?`/`let*`, and a step whose parameter is spelled like a name the demand
+mentions. An accumulator parameter carrying its own refinement annotation is
+the next subsection's case.
 
 Only a demand the checker already traces reaches a fold: a closed scalar demand
 (a precondition, an annotated `let`, a closed return) or an element demand on
 the call (`one_pos(Enum.reduce(pos, …))`, `sum_pos(List.fold_left(pos, [], …))`,
 a declared `List({Int | _ > 0})` return). A relational scalar return
 (`: {Int | _ >= lo}`) is not traced yet, and a `let`-bound fold result used
-later carries nothing. The step's tails are checked where the lambda is
-written, so a tail naming something bound inside the step (`match acc do
-Cons(h, _) -> Cons(h, acc) … end`) is not checked and the call is a skip.
+later carries nothing unless the accumulator is annotated (below). The step's
+tails are checked where the lambda is written, so a tail naming something
+bound inside the step (`match acc do Cons(h, _) -> Cons(h, acc) … end`) is not
+checked and the call is a skip.
+
+#### An annotated accumulator
+
+Annotating the accumulator states the invariant yourself:
+`fn (acc : {Int | _ > 0}, x) -> …`. The annotation is checked as exactly the
+judgment above, with it in place of a demand: the initial value must meet it,
+and the step, assuming it of every parameter typed `b`, must return a value
+that meets it. When it holds, `acc` may assume it inside the step's body, and
+the call's result carries it, so a `let`-bound fold result has the fact with
+no demand on the call:
+
+```march
+fn count(ys : List(Int)) : Int do
+  let s = List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) ->
+    let _u = need_pos(acc)                                 -- proved: acc assumes it
+    acc + 1)
+  need_pos(s) + need_nn(s)                                 -- both proved
+end
+
+fn above(ys : List(Int), lo : Int) : Int do
+  let s = List.fold_left(ys, lo, fn (acc : {Int | _ >= lo}, _x) -> acc + 1)
+  need_ge(s, lo)                                           -- proved
+end
+
+fn zeroed(ys : List(Int)) : Int do
+  let s = List.fold_left(ys, 0, fn (acc : {Int | _ > 0}, _x) -> acc + 1)
+  need_pos(s)                         -- skip: the base 0 fails the annotation
+end
+
+fn shrinking(ys : List(Int)) : Int do
+  List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, _x) -> acc - 1) -- skip: the step breaks it
+end
+```
+
+The annotation is an obligation of its own, on the parameter, reported
+against the callee (`List.fold_left`) with the same two reasons. A refuted base
+or step is a skip, never a violation, for the reasons above; under
+`cap verified` it is an error. An annotation that does not hold is not
+assumed, in the body or of the result. The fact belongs to its call's result
+and is retired like any other when the result, or a name the annotation
+mentions (`lo` above), is rebound.
+
+With a demand on the call as well (`need_nn(List.fold_left(ys, 1, fn (acc :
+{Int | _ > 0}, _x) -> acc + 1))`, or a return tail), the annotation is checked
+and must imply the demand. If it does not hold, or does not imply the demand,
+the demand is tried as the invariant on its own, as if the parameter were
+unannotated; the annotation is never assumed for it.
+
+The same gates apply (the callee must be generic in its return variable `b` by
+the parametricity checks, and not `@[trusted]`, `@[assume]` or an `impl`
+method), and the shape is narrow:
+
+- the callee's declared return is a bare type variable `b` and the annotated
+  parameter's type is exactly `b`, in an inline lambda argument (a
+  `let`-bound lambda passed by name is not read);
+- the annotation refines the value itself (`{Int | …}`, or another base a
+  parameter refinement accepts), not a container's elements
+  (`acc : List({Int | _ > 0})` stays as it was: not checked, not assumed);
+- exactly one parameter typed `b` is annotated; the others typed `b` assume it
+  too (`fn (a : {Int | _ > 0}, c) -> a + c` passed as `f : b -> b -> b`), and
+  two annotated ones are left as they were;
+- a one-parameter lambda is checked at the pass site instead, as any refined
+  callable is: `fn (k : {Int | _ > 0}) -> k + 1` passed as `f : b -> b` is a
+  violation there, since `b` does not imply `_ > 0`. That includes the outer
+  lambda of a curried step (`Enum.fold(ys, 1, fn (a : {Int | _ > 0}) -> fn x ->
+  …)`); annotating an inner curried parameter is read as above.
+
+An annotation on the *element* parameter (`fn (acc, x : {Int | _ > 0}) -> …`)
+is not an invariant of anything: it is a claim about the list's elements, which
+nobody checks, so it stays neither checked nor assumed. Give the list the
+refinement instead (`xs : List({Int | _ > 0})`), and `x` gets it.
 
 ### What element refinements do not do
 
@@ -2683,9 +2757,11 @@ Cons(h, _) -> Cons(h, acc) … end`) is not checked and the call is a skip.
   but `acc` assumes something only while the step's result is being checked
   against a demand on the call ([Folds](#folds-an-accumulator-invariant)).
   With no such demand (`need_pos(acc)` inside the step, a `let`-bound result
-  used later) it assumes nothing, and an invariant is never inferred. Its own
-  annotation (`fn (acc : {Int | _ > 0}, x) -> …`) is neither checked nor
-  assumed. Indexed invariants (`_ == len(xs)`), tuple or record accumulators, a
+  used later) it assumes nothing unless it is annotated
+  ([An annotated accumulator](#an-annotated-accumulator)), and an invariant is
+  never inferred. An annotation on the element parameter
+  (`fn (acc, x : {Int | _ > 0}) -> …`) is neither checked nor assumed. Indexed
+  invariants (`_ == len(xs)`), tuple or record accumulators, a
   callback parameter of type `List(b)` and a hand-written accumulator
   recursion (`fn sum(xs, acc : {Int | _ >= 0}) : {Int | _ >= 0}`) are not
   covered. A curried lambda (`fn a -> fn x -> …`) gives an element fact to its

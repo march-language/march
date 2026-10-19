@@ -1182,9 +1182,11 @@ let has_early_exit (e : A.expr) : bool =
    [Error why] declines the hypothesis for the whole lambda (the tails are
    then checked without it):
 
-   - a receiving parameter carrying its own refinement annotation: it is
-     neither checked nor assumed today (f18), and two facts for one name is
-     phase 4's business;
+   - a receiving parameter carrying its own refinement annotation: two facts
+     for one name.  Phase 4 reads a scalar one as the invariant itself
+     ([annotated_acc_of]), calling this over the arguments with it ERASED;
+     every other own annotation (a container one, a shape phase 4 declines)
+     reaches here and declines;
    - the body contains `let?` / `let*` ([has_early_exit]);
    - a lambda parameter's name is free in a demand it would assume (other than
      a scalar demand's own binder): read inside the lambda, the demand would
@@ -1266,6 +1268,137 @@ let invariant_params (sg : fn_sig) (i : int) (pairs : (string * elem) list) (ps 
                   ps
               in
               Ok (ps', List.rev !entries, !used))
+
+(* ── The annotated accumulator (design 2026-10-18 fold-accumulator
+   invariants, phase 4, option iii) ──────────────────────────────────────
+   `g(…, fn (acc : {T | I}, x) -> step)` where [g]'s declared return is a
+   bare type variable [b] and [acc]'s arrow-chain domain is exactly [b]: the
+   annotation states the invariant [I] directly.  It is checked as the
+   phase-1 judgment with [I] for the demand (base: every source of [b] meets
+   [I]; step: [I] of every parameter typed [b] gives [I] of the result), by
+   the same [discharge_pairs] on the arguments with the annotation ERASED
+   (so [invariant_params] hypothesises [I] rather than declining on an own
+   annotation).  [annotated_acc_of] only finds the shape; the gates are:
+
+   - [g] resolves to a top-level definition, parametric in [b] (P1/P2,
+     [parametric_ok]) and not taken on trust ([invariant_callee_ok]);
+   - exactly one lambda argument has a [b]-typed parameter carrying a
+     refinement, exactly one such parameter, a scalar one
+     ([refined_param_ty]); a second annotated [b] parameter, a container or
+     nested annotation, or a wildcard declines (the annotation stays inert,
+     as before phase 4);
+   - the lambda is one no pass site obliges ([pass_site_obligation] is
+     [None]): a one-parameter lambda at a type-variable domain is already
+     checked there (contravariantly, and reported), and that rule wins.
+
+   The element parameter's own annotation (`fn (acc, x : {Int | _ > 0})`)
+   is not an invariant of anything: it is not [b]-typed, stays erased in the
+   discharge ([lambda_ok]) and unassumed in the walk, exactly as before. *)
+type annotated_acc =
+  { aa_arg : int  (* the lambda's argument position *)
+  ; aa_lam : A.expr  (* the lambda, as written *)
+  ; aa_param : A.param  (* the annotated parameter, as written *)
+  ; aa_var : string  (* the type variable its domain is *)
+  ; aa_inv : string * A.expr * string option  (* I *)
+  ; aa_args : A.expr list  (* the arguments, that one annotation erased *)
+  }
+
+let annotated_acc_of (ctx : rctx) defs (cb : cbenv) ~(span : A.span) (g : string) (sg : fn_sig)
+    (args : A.expr list) : annotated_acc option =
+  if resolve_key ctx g = None || List.length sg.param_tys <> List.length args then None
+  else
+    match Option.map strip_ty sg.ret_ty with
+    | Some (A.TyVar bv) when parametric_ok ctx g [ bv.A.txt ] && invariant_callee_ok ctx g ->
+      let b = bv.A.txt in
+      let refined (p : A.param) =
+        match p.A.param_ty with Some pt -> ty_has_refinement pt | None -> false
+      in
+      (* Per lambda argument: [`None] (nothing annotated at a [b] position),
+         [`One c] or [`Bad] (an annotated [b] position the rule declines). *)
+      let per_arg =
+        List.mapi
+          (fun i a ->
+            match a, Option.join (List.nth_opt sg.param_tys i) with
+            | A.ELam (ps, body, _), Some t ->
+              let doms, _ = arrow_chain t in
+              let chain = List.length doms in
+              let all =
+                if List.length ps = chain then Some ps
+                else Option.map fst (peel_lambda chain ps body)
+              in
+              (match all with
+               | Some all when List.length all = chain ->
+                 let at_b =
+                   List.filter_map
+                     (fun ((p : A.param), dom) ->
+                       match strip_ty dom with
+                       | A.TyVar v when v.A.txt = b && refined p -> Some p
+                       | _ -> None)
+                     (List.combine all doms)
+                 in
+                 (match at_b with
+                  | [] -> `None
+                  | [ p ] ->
+                    let obliged =
+                      match callable_sig_of_actual ctx defs cb a with
+                      | Some (_, gsg) -> pass_site_obligation sg i gsg ~span <> None
+                      | None -> false
+                    in
+                    (match refined_param_ty p.A.param_ty with
+                     | Some r when p.A.param_name.A.txt <> "_" && not obliged ->
+                       let erased = erase_param_refinements p in
+                       (* The same parameter, wherever the peel found it. *)
+                       let rec erase_in (e : A.expr) =
+                         match e with
+                         | A.ELam (qs, body, sp) ->
+                           if List.memq p qs then
+                             A.ELam (List.map (fun q -> if q == p then erased else q) qs, body, sp)
+                           else A.ELam (qs, erase_in body, sp)
+                         | A.EBlock ([ inner ], sp) -> A.EBlock ([ erase_in inner ], sp)
+                         | e -> e
+                       in
+                       `One
+                         { aa_arg = i; aa_lam = a; aa_param = p; aa_var = b; aa_inv = r
+                         ; aa_args = List.mapi (fun j x -> if j = i then erase_in x else x) args }
+                     | _ -> `Bad)
+                  | _ -> `Bad)
+               | _ ->
+                 if List.exists refined ps then `Bad else `None)
+            | _ -> `None)
+          args
+      in
+      if List.exists (function `Bad -> true | _ -> false) per_arg then None
+      else (
+        match List.filter_map (function `One c -> Some c | _ -> None) per_arg with
+        | [ c ] -> Some c
+        | _ -> None)
+    | _ -> None
+
+(* The annotated accumulator's obligation, on the parameter's name: proved,
+   or a skip with the accumulator reason [discharge_pairs] classified (an
+   error under `cap verified`, like every skip). *)
+let record_acc_invariant errctx ~(callee : string) (aa : annotated_acc)
+    (v : [ `Proved | `Unproved of Obligation.reason ]) : unit =
+  let span = aa.aa_param.A.param_name.A.span in
+  let _, q, _ = aa.aa_inv in
+  let predicate = pred_str q in
+  match v with
+  | `Proved ->
+    Obligation.record
+      { Obligation.span; callee; predicate; verdict = Obligation.Proved; kind = Obligation.Precondition }
+  | `Unproved reason ->
+    Obligation.record
+      { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
+      ; kind = Obligation.Precondition };
+    if !strict_verified then
+      Err.error ~code:Err.Code.refinement_unverified errctx ~span
+        (Printf.sprintf
+           "`cap verified` module: cannot verify the accumulator invariant `%s` annotated on `%s` \
+            (passed to `%s`) (%s: %s)\n\
+            note: make the initial value meet it and every step preserve it, or remove the \
+            annotation (or `cap verified`)"
+           predicate aa.aa_param.A.param_name.A.txt callee (Obligation.reason_name reason)
+           (Obligation.reason_detail reason))
 
 (* A skip filed by the demand-driven element rule ([demand_flow]), with its
    own reason so `--refine-report` counts it apart from a plain unreflectable
@@ -2387,15 +2520,66 @@ and scalar_demand ~root defs (ctx : rctx) (cb : cbenv) (ce : contenv) (cx : call
           (* The channels [check_call] was given, not the ones [ctx] was
              built with. *)
           let ctx = { ctx with binds = cx.binds } in
-          (match
-             discharge_pairs ~root defs ctx cx.path cx.lets cx.sc cx.re cb ce ~span ~callee:g g sg args
-               [ (v.A.txt, Refined d) ]
-           with
-           | `Proved -> `Proved
-           | `Unproved w -> `Unproved w)
+          let by_demand args =
+            match
+              discharge_pairs ~root defs ctx cx.path cx.lets cx.sc cx.re cb ce ~span ~callee:g g sg args
+                [ (v.A.txt, Refined d) ]
+            with
+            | `Proved -> `Proved
+            | `Unproved w -> `Unproved w
+          in
+          (* An annotated accumulator (fold-invariants phase 4): check its
+             invariant [I], then [I] => [d].  Failing either, [d] is tried as
+             the invariant on its own (phase 1) over the arguments with the
+             annotation erased: the annotation is not assumed, and [d]'s
+             hypothesis needs nothing from it. *)
+          (match annotated_acc_of ctx defs cb ~span g sg args with
+           | None -> by_demand args
+           | Some aa ->
+             let via_inv =
+               match annotated_invariant ~root defs ctx cx.path cx.lets cx.sc cx.re cb ce ~span g sg aa with
+               | `Proved -> implied_by ~root defs ctx cx cb ce ~span ~callee:g aa.aa_inv d
+               | `Unproved _ -> false
+             in
+             if via_inv then `Proved else by_demand aa.aa_args)
         | _ -> `Na)
      | _ -> `Na)
   | _ -> `Na
+
+(* The annotated accumulator's own obligation (phase 4): its invariant [I]
+   is the demand on [b], discharged by the phase-1 judgment over the
+   arguments with the annotation erased ([annotated_acc_of]: base, and the
+   step with [I] hypothesised of every [b]-typed parameter).  A refuted base
+   or step is a skip with the accumulator reasons, never a violation (§3.5:
+   the base is data dependent, the method incomplete). *)
+and annotated_invariant ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
+    ~(span : A.span) (g : string) (sg : fn_sig) (aa : annotated_acc)
+  : [ `Proved | `Unproved of Obligation.reason ] =
+  discharge_pairs ~root defs ctx path lets sc re cb ce ~span ~callee:g g sg aa.aa_args
+    [ (aa.aa_var, Refined aa.aa_inv) ]
+
+(* Does a value known only to meet [inv] meet [d]?  One query over a fresh
+   `$r` carrying [inv], against a scratch ledger and a throwaway error
+   context, like [discharge_pairs]' sub-checks. *)
+and implied_by ~root defs (ctx : rctx) (cx : call_ctx) (cb : cbenv) (ce : contenv) ~(span : A.span)
+    ~(callee : string) (inv : string * A.expr * string option) (d : string * A.expr * string option) : bool =
+  let errctx = Err.create () in
+  let saved_strict = !strict_verified and saved_hinted = !unverified_hinted in
+  Fun.protect
+    ~finally:(fun () ->
+      strict_verified := saved_strict;
+      unverified_hinted := saved_hinted)
+    (fun () ->
+      Obligation.with_scratch (fun () ->
+          strict_verified := false;
+          let cx0 = cx_of ~root errctx defs ctx cx.path cx.lets cx.sc cx.re cb ce in
+          let cx' = { cx0 with sc = ("$r", inv) :: scope_shadow cx.sc [ "$r" ] } in
+          let sg1 = elem_sig ~name:"$elem" d in
+          let out = ref None in
+          check_call cx' ~span ~callee ~goal_scope_facts:true ~verdict_out:out sg1
+            [ A.EVar { A.txt = "$r"; A.span = A.dummy_span } ]
+            (List.hd sg1.refined);
+          !out = Some Obligation.Proved))
 
 (* [demand_flow]'s source discharge, given the demanded (type variable,
    demand) pairs of [g]'s declared return: every source of each variable
@@ -3298,6 +3482,31 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      | None when resolved = None && not (List.mem fname ctx.locals) ->
        check_impl_dispatch ~root errctx defs ctx path lets sc re ~span:sp fname args
      | None -> ());
+    (* An annotated accumulator (fold-invariants design phase 4): its
+       invariant is checked here, once per call, and recorded as an
+       obligation on the parameter.  Proved, the lambda's body assumes it of
+       that parameter (below), and the call's result carries it
+       ([Refine_resolve.annotated_acc_facts], read by [postcond_of] for a
+       `let` binding the call).  Not proved: neither, and the entry of an
+       earlier walk is withdrawn. *)
+    let acc_inv =
+      match callee with
+      | Some csg ->
+        (match annotated_acc_of ctx defs cb ~span:sp fname csg args with
+         | Some aa ->
+           let lam_span = match aa.aa_lam with A.ELam (_, _, lsp) -> lsp | _ -> sp in
+           let v = annotated_invariant ~root defs ctx path lets sc re cb ce ~span:sp fname csg aa in
+           record_acc_invariant errctx ~callee:fname aa v;
+           (match v with
+            | `Proved ->
+              Hashtbl.replace annotated_acc_facts lam_span (aa.aa_lam, aa.aa_inv);
+              Some aa
+            | `Unproved _ ->
+              Hashtbl.remove annotated_acc_facts lam_span;
+              None)
+         | None -> None)
+      | None -> None
+    in
     (* An INLINE lambda at a pass site the check above obliged may assume its
        own parameter refinements: the only way to call it is through the
        callee's domain, which was just proved (or reported) to imply them.
@@ -3305,6 +3514,23 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     List.iteri
       (fun i a ->
         match a, callee with
+        (* A proved annotated accumulator: that parameter assumes its
+           annotation (every value [g] hands it met the invariant, design
+           §2.2); the others take their element fact or nothing, as for any
+           lambda argument ([lambda_domain_params], over the arguments with
+           the annotation erased, so its own-annotation guard does not
+           decline the siblings).  An annotated parameter a curried peel
+           found inside is not in [ps]: its inner lambda takes the ordinary
+           walk. *)
+        | A.ELam (ps, body, _), Some csg when (match acc_inv with Some aa -> aa.aa_arg = i | None -> false) ->
+          let aa = Option.get acc_inv in
+          let others =
+            match lambda_domain_params ctx defs cb ce fname csg aa.aa_args i with
+            | Some ps' when List.length ps' = List.length ps -> ps'
+            | _ -> strip_params_refinements ps
+          in
+          let ps' = List.map2 (fun (o : A.param) (q : A.param) -> if o == aa.aa_param then o else q) ps others in
+          visit_lambda ~root errctx defs ctx path lets sc re cb ce ~assume:true ps' body
         | A.ELam (ps, body, _), Some csg
           when (match callable_sig_of_actual ctx defs cb a with
                 | Some (_, gsg) -> pass_site_obligation csg i gsg ~span:sp <> None
@@ -4927,6 +5153,9 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
       enclosing_fn := saved_enclosing;
       current_abstracts := saved_abstracts)
     (fun () ->
+    (* Annotated-accumulator facts are read only by the walk that proved
+       them ([Refine_resolve.annotated_acc_facts]). *)
+    Hashtbl.reset annotated_acc_facts;
     with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
         with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
     let walked = if assume_params then fd else strip_param_refinements fd in
@@ -6076,6 +6305,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      this module's promotion checks. *)
   enclosing_fn := None;
   Hashtbl.reset abstracts_tbl;
+  Hashtbl.reset annotated_acc_facts;
   stdlib_source_files := stdlib_files;
   let mod_name = m.A.mod_name.A.txt in
   (* Each gate answers "is the alias still safe?"; a `false` is a WITHDRAWAL,
