@@ -204,6 +204,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- The in-browser REPL (stdlib "Try it" pages, playground, landing page) now runs a
+  pasted doc transcript one `march> ` line at a time and ignores the expected-output
+  lines between them. Pasting a transcript whole used to evaluate it as one block and
+  print the value of its last line, the transcript's own expected output, which on
+  Sort.html made `Sort.heapsort_by` look as if it dropped the largest element.
 - `march --compile` no longer serves a cached binary that was linked under a different
   host library probe: whether the build host has OpenSSL, zstd or brotli decides what
   the binary links and whether its zstd/brotli codecs work, and is now part of the
