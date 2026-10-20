@@ -72,7 +72,9 @@ window.marchModuleIndex = {
   "Bytes": {
    "file": "bytes.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Result"
+   ]
   },
   "CRDT": {
    "file": "crdt.march",
@@ -132,7 +134,9 @@ window.marchModuleIndex = {
   "Channel": {
    "file": "channel.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "PubSub"
+   ]
   },
   "ChannelServer": {
    "file": "channel_server.march",
@@ -149,6 +153,7 @@ window.marchModuleIndex = {
     "Channel",
     "HttpServer",
     "Map",
+    "Option",
     "PubSub",
     "WebSocket"
    ]
@@ -156,14 +161,18 @@ window.marchModuleIndex = {
   "Char": {
    "file": "char.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "String"
+   ]
   },
   "Check": {
    "file": "check.march",
    "unavailable": null,
    "uses": [
     "Gen",
-    "Random"
+    "List",
+    "Random",
+    "Result"
    ]
   },
   "Cli": {
@@ -300,6 +309,8 @@ window.marchModuleIndex = {
    "uses": [
     "IO",
     "List",
+    "Option",
+    "Result",
     "Vault"
    ]
   },
@@ -325,6 +336,7 @@ window.marchModuleIndex = {
     "Result",
     "String",
     "Topology",
+    "Tuple",
     "Vault"
    ]
   },
@@ -342,7 +354,8 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "IO",
-    "List"
+    "List",
+    "String"
    ]
   },
   "DataFrame": {
@@ -361,7 +374,9 @@ window.marchModuleIndex = {
   "DateTime": {
    "file": "datetime.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Duration"
+   ]
   },
   "Decimal": {
    "file": "decimal.march",
@@ -381,7 +396,8 @@ window.marchModuleIndex = {
    "uses": [
     "Actor",
     "Json",
-    "List"
+    "List",
+    "Result"
    ]
   },
   "Diagnostics": {
@@ -439,10 +455,12 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "HashMap",
+    "Iterable",
     "List",
     "Map",
     "Set",
-    "Sort"
+    "Sort",
+    "Tuple"
    ]
   },
   "Env": {
@@ -454,8 +472,10 @@ window.marchModuleIndex = {
    "file": "file.march",
    "unavailable": "it needs a file system",
    "uses": [
+    "Dir",
     "IO",
     "List",
+    "Seq",
     "String"
    ]
   },
@@ -476,7 +496,9 @@ window.marchModuleIndex = {
    "file": "gen.march",
    "unavailable": null,
    "uses": [
+    "Check",
     "List",
+    "Option",
     "Random"
    ]
   },
@@ -542,6 +564,7 @@ window.marchModuleIndex = {
    "file": "http.march",
    "unavailable": null,
    "uses": [
+    "Result",
     "Uri"
    ]
   },
@@ -550,13 +573,15 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "Http",
-    "HttpTransport"
+    "HttpTransport",
+    "Result"
    ]
   },
   "HttpServer": {
    "file": "http_server.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "HttpClient",
     "IO",
     "List"
    ]
@@ -567,6 +592,7 @@ window.marchModuleIndex = {
    "uses": [
     "Http",
     "IO",
+    "Result",
     "Tls"
    ]
   },
@@ -593,17 +619,23 @@ window.marchModuleIndex = {
   "Js.Audio": {
    "file": "audio.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Js.Dom"
+   ]
   },
   "Js.Canvas": {
    "file": "canvas.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Js.Dom"
+   ]
   },
   "Js.Dom": {
    "file": "dom.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "List"
+   ]
   },
   "Json": {
    "file": "json.march",
@@ -616,7 +648,9 @@ window.marchModuleIndex = {
    "uses": [
     "File",
     "Json",
-    "Seq"
+    "Result",
+    "Seq",
+    "Tuple"
    ]
   },
   "LazyNicheProbe": {
@@ -630,6 +664,7 @@ window.marchModuleIndex = {
    "file": "linear_map.march",
    "unavailable": null,
    "uses": [
+    "List",
     "Map",
     "Option"
    ]
@@ -638,7 +673,9 @@ window.marchModuleIndex = {
    "file": "list.march",
    "unavailable": null,
    "uses": [
-    "String"
+    "Result",
+    "String",
+    "Tuple"
    ]
   },
   "Logger": {
@@ -647,13 +684,16 @@ window.marchModuleIndex = {
    "uses": [
     "Crypto",
     "File",
+    "Option",
     "String"
    ]
   },
   "Map": {
    "file": "map.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "List"
+   ]
   },
   "Math": {
    "file": "math.march",
@@ -673,7 +713,9 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "Crypto",
-    "List"
+    "List",
+    "Option",
+    "String"
    ]
   },
   "Msgpack": {
@@ -709,6 +751,7 @@ window.marchModuleIndex = {
     "Node",
     "NodeCert",
     "NodeIdentity",
+    "NodeSend",
     "Option",
     "Socket",
     "String",
@@ -733,6 +776,7 @@ window.marchModuleIndex = {
    "file": "node_call.march",
    "unavailable": "it needs the cluster runtime",
    "uses": [
+    "Msgpack",
     "NetKernel",
     "NodeRpc",
     "RemoteCall"
@@ -781,6 +825,7 @@ window.marchModuleIndex = {
    "unavailable": "it needs the cluster runtime",
    "uses": [
     "Map",
+    "NodeCall",
     "RemoteCall"
    ]
   },
@@ -788,10 +833,12 @@ window.marchModuleIndex = {
    "file": "node_send.march",
    "unavailable": "it needs the cluster runtime",
    "uses": [
+    "Bytes",
     "IO",
     "List",
     "Msgpack",
     "NetKernel",
+    "Node",
     "SessionAP",
     "SessionNode",
     "String",
@@ -827,6 +874,7 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "List",
+    "Result",
     "String"
    ]
   },
@@ -862,14 +910,18 @@ window.marchModuleIndex = {
     "List",
     "Math",
     "Option",
-    "Sort"
+    "Sort",
+    "String"
    ]
   },
   "Prelude": {
    "file": "prelude.march",
    "unavailable": null,
    "uses": [
-    "List"
+    "List",
+    "Option",
+    "Result",
+    "String"
    ]
   },
   "Presence": {
@@ -891,13 +943,16 @@ window.marchModuleIndex = {
    "file": "pubsub.march",
    "unavailable": null,
    "uses": [
+    "ChannelServer",
     "Map"
    ]
   },
   "Queue": {
    "file": "queue.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Option"
+   ]
   },
   "RRB": {
    "file": "rrb_vec.march",
@@ -943,13 +998,16 @@ window.marchModuleIndex = {
    "unavailable": "it needs the cluster runtime",
    "uses": [
     "GlobalPid",
-    "Msgpack"
+    "Msgpack",
+    "NetFrame"
    ]
   },
   "Result": {
    "file": "result.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "String"
+   ]
   },
   "RingBuf": {
    "file": "ring_buf.march",
@@ -959,7 +1017,9 @@ window.marchModuleIndex = {
   "Scheduler": {
    "file": "scheduler.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Actor"
+   ]
   },
   "Seq": {
    "file": "seq.march",
@@ -1018,7 +1078,9 @@ window.marchModuleIndex = {
   "Set": {
    "file": "set.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "List"
+   ]
   },
   "ShellRender": {
    "file": "shell_render.march",
@@ -1056,7 +1118,11 @@ window.marchModuleIndex = {
   "Simd": {
    "file": "simd.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Bytes",
+    "List",
+    "NativeArray"
+   ]
   },
   "Socket": {
    "file": "socket.march",
@@ -1069,7 +1135,9 @@ window.marchModuleIndex = {
   "Sort": {
    "file": "sort.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Tuple"
+   ]
   },
   "SortedSet": {
    "file": "sorted_set.march",
@@ -1137,13 +1205,18 @@ window.marchModuleIndex = {
   "Test": {
    "file": "test.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "List",
+    "String"
+   ]
   },
   "Tls": {
    "file": "tls.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "HttpTransport",
     "IO",
+    "Result",
     "Socket"
    ]
   },
@@ -1190,7 +1263,8 @@ window.marchModuleIndex = {
    "file": "tuple.march",
    "unavailable": null,
    "uses": [
-    "List"
+    "List",
+    "String"
    ]
   },
   "UUID": {
@@ -1229,6 +1303,7 @@ window.marchModuleIndex = {
    "file": "websocket.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "HttpServer",
     "IO"
    ]
   },
