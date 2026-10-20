@@ -308,8 +308,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <span class="tok-kw">let</span> (n, rb) = <span class="tok-ty">RingBuf</span>.size(rb)
 <span class="tok-ty">RingBuf</span>.to_list(rb)</code></pre><p>In actor state the buffer is a linear field, so a handler that reads it stores one back: <code>{ state with buf: RingBuf.push(state.buf, x) }</code>. A send or a spawn argument is the consuming use, so a buffer can MOVE to another actor; it can never be aliased, captured by a closure, stored at module level or put in a Vault (each is a compile-time error), which is what lets the in-place write stay unconditional and allocation-free. Elements are ordinary values: a buffer silently overwrites its oldest element, so it cannot hold a value that must itself be consumed.</p><p>Design: specs/2026-10-06-linear-ringbuf-and-sendable-arrays-design.md.</p></div><h2>Functions</h2><div class="item" id="fn-cap"><div class="ih"><span class="badge bfn">fn</span><span class="name">cap</span><span class="sig">cap(rb : RingBuf(a)) : (Int, RingBuf(a))</span><a class="anchor-link" href="#fn-cap" title="Link">#</a></div><div class="ib"><p>Fixed capacity of the buffer, beside the buffer. O(1). Set once at make() and never changes.</p><h3>Examples</h3><pre data-try="let (c, rb) = RingBuf.cap(RingBuf.make(8))
 RingBuf.drop(rb)
+let (c, rb) = RingBuf.cap(RingBuf.make(8))
 c" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> (c, rb) = <span class="tok-ty">RingBuf</span>.cap(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">8</span>))
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (c, rb) = <span class="tok-ty">RingBuf</span>.cap(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">8</span>))
 march&gt; c
 <span class="tok-num">8</span></code></pre></div></div>
 <div class="item" id="fn-clear"><div class="ih"><span class="badge bfn">fn</span><span class="name">clear</span><span class="sig">clear(rb : RingBuf(a)) : RingBuf(a)</span><a class="anchor-link" href="#fn-clear" title="Link">#</a></div><div class="ib"><p>Reset to empty in O(1) and hand the buffer back. Does not zero the backing array — elements previously written remain in memory until overwritten by future pushes. Cap is unchanged.</p><h3>Examples</h3><pre data-try="RingBuf.to_list(RingBuf.clear(RingBuf.push(RingBuf.make(4), 1)))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">RingBuf</span>.to_list(<span class="tok-ty">RingBuf</span>.clear(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>), <span class="tok-num">1</span>)))
@@ -318,61 +320,79 @@ march&gt; c
 ()</code></pre></div></div>
 <div class="item" id="fn-get"><div class="ih"><span class="badge bfn">fn</span><span class="name">get</span><span class="sig">get(rb : RingBuf(a), i : Int) : (Option(a), RingBuf(a))</span><a class="anchor-link" href="#fn-get" title="Link">#</a></div><div class="ib"><p>The element at logical index [i] (0 = oldest) beside the buffer, or <code>(None, rb)</code> when [i] is out of range. O(1).</p><p>Valid indices are 0 .. size-1. Negative indices or indices &gt;= size give None.</p><h3>Examples</h3><pre data-try="let (x, rb) = RingBuf.get(RingBuf.push(RingBuf.make(4), 7), 0)
 RingBuf.drop(rb)
+let (x, rb) = RingBuf.get(RingBuf.push(RingBuf.make(4), 7), 0)
 x" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> (x, rb) = <span class="tok-ty">RingBuf</span>.get(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>), <span class="tok-num">7</span>), <span class="tok-num">0</span>)
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (x, rb) = <span class="tok-ty">RingBuf</span>.get(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>), <span class="tok-num">7</span>), <span class="tok-num">0</span>)
 march&gt; x
 <span class="tok-ty">Some</span>(<span class="tok-num">7</span>)</code></pre></div></div>
 <div class="item" id="fn-is_empty"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_empty</span><span class="sig">is_empty(rb : RingBuf(a)) : (Bool, RingBuf(a))</span><a class="anchor-link" href="#fn-is_empty" title="Link">#</a></div><div class="ib"><p>True when the buffer contains no elements, beside the buffer.</p><h3>Examples</h3><pre data-try="let (e, rb) = RingBuf.is_empty(RingBuf.make(4))
 RingBuf.drop(rb)
+let (e, rb) = RingBuf.is_empty(RingBuf.make(4))
 e" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> (e, rb) = <span class="tok-ty">RingBuf</span>.is_empty(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>))
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (e, rb) = <span class="tok-ty">RingBuf</span>.is_empty(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>))
 march&gt; e
 <span class="tok-kw">true</span></code></pre></div></div>
 <div class="item" id="fn-is_full"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_full</span><span class="sig">is_full(rb : RingBuf(a)) : (Bool, RingBuf(a))</span><a class="anchor-link" href="#fn-is_full" title="Link">#</a></div><div class="ib"><p>True when size equals cap, beside the buffer. The next push will overwrite the oldest element.</p><h3>Examples</h3><pre data-try="let (f, rb) = RingBuf.is_full(RingBuf.make(4))
 RingBuf.drop(rb)
+let (f, rb) = RingBuf.is_full(RingBuf.make(4))
 f" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> (f, rb) = <span class="tok-ty">RingBuf</span>.is_full(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>))
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (f, rb) = <span class="tok-ty">RingBuf</span>.is_full(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>))
 march&gt; f
 <span class="tok-kw">false</span></code></pre></div></div>
 <div class="item" id="fn-make"><div class="ih"><span class="badge bfn">fn</span><span class="name">make</span><span class="sig">make(cap : Int) : RingBuf(a)</span><a class="anchor-link" href="#fn-make" title="Link">#</a></div><div class="ib"><p>Create a new ring buffer with fixed [cap] capacity. Panics if [cap] &lt;= 0.</p><h3>Examples</h3><pre data-try="RingBuf.drop(RingBuf.make(4))
 let (c, rb) = RingBuf.cap(RingBuf.make(16))
 RingBuf.drop(rb)
+let (c, rb) = RingBuf.cap(RingBuf.make(16))
 c" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">RingBuf</span>.drop(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>))
 ()
 march&gt; <span class="tok-kw">let</span> (c, rb) = <span class="tok-ty">RingBuf</span>.cap(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">16</span>))
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (c, rb) = <span class="tok-ty">RingBuf</span>.cap(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">16</span>))
 march&gt; c
 <span class="tok-num">16</span></code></pre></div></div>
 <div class="item" id="fn-peek_newest"><div class="ih"><span class="badge bfn">fn</span><span class="name">peek_newest</span><span class="sig">peek_newest(rb : RingBuf(a)) : (Option(a), RingBuf(a))</span><a class="anchor-link" href="#fn-peek_newest" title="Link">#</a></div><div class="ib"><p>The newest element without removing it, beside the buffer; <code>(None, rb)</code> when empty. O(1). Equivalent to get(rb, size - 1).</p><h3>Examples</h3><pre data-try="let (x, rb) = RingBuf.peek_newest(RingBuf.push(RingBuf.make(4), 9))
 RingBuf.drop(rb)
+let (x, rb) = RingBuf.peek_newest(RingBuf.push(RingBuf.make(4), 9))
 x" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> (x, rb) = <span class="tok-ty">RingBuf</span>.peek_newest(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>), <span class="tok-num">9</span>))
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (x, rb) = <span class="tok-ty">RingBuf</span>.peek_newest(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>), <span class="tok-num">9</span>))
 march&gt; x
 <span class="tok-ty">Some</span>(<span class="tok-num">9</span>)</code></pre></div></div>
 <div class="item" id="fn-peek_oldest"><div class="ih"><span class="badge bfn">fn</span><span class="name">peek_oldest</span><span class="sig">peek_oldest(rb : RingBuf(a)) : (Option(a), RingBuf(a))</span><a class="anchor-link" href="#fn-peek_oldest" title="Link">#</a></div><div class="ib"><p>The oldest element without removing it, beside the buffer; <code>(None, rb)</code> when empty. O(1). Equivalent to get(rb, 0).</p><h3>Examples</h3><pre data-try="let (x, rb) = RingBuf.peek_oldest(RingBuf.make(4))
 RingBuf.drop(rb)
+let (x, rb) = RingBuf.peek_oldest(RingBuf.make(4))
 x" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> (x, rb) = <span class="tok-ty">RingBuf</span>.peek_oldest(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>))
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (x, rb) = <span class="tok-ty">RingBuf</span>.peek_oldest(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>))
 march&gt; x
 <span class="tok-ty">None</span></code></pre></div></div>
 <div class="item" id="fn-pop"><div class="ih"><span class="badge bfn">fn</span><span class="name">pop</span><span class="sig">pop(rb : RingBuf(a)) : (Option(a), RingBuf(a))</span><a class="anchor-link" href="#fn-pop" title="Link">#</a></div><div class="ib"><p>Remove the oldest element (FIFO head). Returns <code>(Some(x), rb)</code>, or <code>(None, rb)</code> when the buffer is empty. O(1).</p><p>Clears the vacated slot so the element's storage can be released.</p><h3>Examples</h3><pre data-try="let (x, rb) = RingBuf.pop(RingBuf.make(4))
 RingBuf.drop(rb)
+let (x, rb) = RingBuf.pop(RingBuf.make(4))
 x" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> (x, rb) = <span class="tok-ty">RingBuf</span>.pop(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>))
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (x, rb) = <span class="tok-ty">RingBuf</span>.pop(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>))
 march&gt; x
 <span class="tok-ty">None</span></code></pre></div></div>
 <div class="item" id="fn-push"><div class="ih"><span class="badge bfn">fn</span><span class="name">push</span><span class="sig">push(rb : RingBuf(a), x : a) : RingBuf(a)</span><a class="anchor-link" href="#fn-push" title="Link">#</a></div><div class="ib"><p>Push [x] as the newest element and hand the buffer back. O(1), in place.</p><p>When the buffer is already full (size == cap), the oldest element is silently overwritten and size stays at cap.</p><h3>Examples</h3><pre data-try="RingBuf.to_list(RingBuf.push(RingBuf.make(4), 1))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">RingBuf</span>.to_list(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>), <span class="tok-num">1</span>))
 [<span class="tok-num">1</span>]</code></pre></div></div>
 <div class="item" id="fn-size"><div class="ih"><span class="badge bfn">fn</span><span class="name">size</span><span class="sig">size(rb : RingBuf(a)) : (Int, RingBuf(a))</span><a class="anchor-link" href="#fn-size" title="Link">#</a></div><div class="ib"><p>Current number of elements, beside the buffer. O(1).</p><p>Starts at 0 and grows with each push up to cap. Once full, subsequent pushes overwrite the oldest element and size stays at cap.</p><h3>Examples</h3><pre data-try="let (n, rb) = RingBuf.size(RingBuf.make(8))
 RingBuf.drop(rb)
+let (n, rb) = RingBuf.size(RingBuf.make(8))
 n" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> (n, rb) = <span class="tok-ty">RingBuf</span>.size(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">8</span>))
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (n, rb) = <span class="tok-ty">RingBuf</span>.size(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">8</span>))
 march&gt; n
 <span class="tok-num">0</span></code></pre></div></div>
 <div class="item" id="fn-snapshot"><div class="ih"><span class="badge bfn">fn</span><span class="name">snapshot</span><span class="sig">snapshot(rb : RingBuf(a)) : (List(a), RingBuf(a))</span><a class="anchor-link" href="#fn-snapshot" title="Link">#</a></div><div class="ib"><p>The elements from oldest to newest as a List, beside the buffer. O(n).</p><p>The buffer is unchanged and stays live; the returned list is a copy, so pushes after this call do not affect it. Use <code>to_list</code> instead when the buffer is finished.</p><h3>Examples</h3><pre data-try="let (xs, rb) = RingBuf.snapshot(RingBuf.push(RingBuf.make(4), 1))
 RingBuf.drop(rb)
+let (xs, rb) = RingBuf.snapshot(RingBuf.push(RingBuf.make(4), 1))
 xs" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> (xs, rb) = <span class="tok-ty">RingBuf</span>.snapshot(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>), <span class="tok-num">1</span>))
 march&gt; <span class="tok-ty">RingBuf</span>.drop(rb)
+march&gt; <span class="tok-kw">let</span> (xs, rb) = <span class="tok-ty">RingBuf</span>.snapshot(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>), <span class="tok-num">1</span>))
 march&gt; xs
 [<span class="tok-num">1</span>]</code></pre></div></div>
 <div class="item" id="fn-to_list"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_list</span><span class="sig">to_list(rb : RingBuf(a)) : List(a)</span><a class="anchor-link" href="#fn-to_list" title="Link">#</a></div><div class="ib"><p>The elements from oldest to newest as a List, and the buffer ENDS. O(n).</p><p>This is the consuming use that finishes a buffer with its contents; use <code>snapshot</code> to read the elements out and keep pushing, or <code>drop</code> to finish a buffer whose contents are not needed.</p><h3>Examples</h3><pre data-try="RingBuf.to_list(RingBuf.push(RingBuf.push(RingBuf.make(4), 1), 2))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">RingBuf</span>.to_list(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.push(<span class="tok-ty">RingBuf</span>.make(<span class="tok-num">4</span>), <span class="tok-num">1</span>), <span class="tok-num">2</span>))

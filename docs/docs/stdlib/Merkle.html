@@ -299,15 +299,126 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="WebSocket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WebSocket.html">WebSocket</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="WorkDispatch.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WorkDispatch.html">WorkDispatch</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Xml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Xml.html">Xml</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Merkle</span></nav><h1>Merkle</h1><div class="mdoc"><p>Merkle: content-addressed hash tree.</p><p>Each leaf stores a value and the SHA-256 hash of its byte representation. Each branch stores the SHA-256 hash of (left_hash ++ right_hash). The root hash summarises the entire tree; comparing root hashes detects any difference in O(1), while diff() localises changes in O(k log n) by recursing only into subtrees whose hashes differ.</p><p>build/3 constructs a balanced tree from a list of items in O(n). The caller supplies a <code>to_bytes : a -&gt; String</code> function for leaf hashing.</p></div><h2>Types</h2><div class="item" id="type-MerkleTree"><div class="ih"><span class="badge bty">type</span><span class="name">MerkleTree</span><span class="sig"><a href="#type-MerkleTree">MerkleTree</a>(a) = MLeaf(String, a) | MBranch(String, <a href="#type-MerkleTree">MerkleTree</a>(a), <a href="#type-MerkleTree">MerkleTree</a>(a))</span><a class="anchor-link" href="#type-MerkleTree" title="Link">#</a></div><div class="ib"><p>A node: MLeaf(sha256_hex, value) or MBranch(sha256_hex, left, right).</p></div></div><h2>Functions</h2><div class="item" id="fn-branch"><div class="ih"><span class="badge bfn">fn</span><span class="name">branch</span><span class="sig">branch(l : <a href="#type-MerkleTree">MerkleTree</a>(a), r : <a href="#type-MerkleTree">MerkleTree</a>(a)) : <a href="#type-MerkleTree">MerkleTree</a>(a)</span><a class="anchor-link" href="#fn-branch" title="Link">#</a></div><div class="ib"><p>Construct a branch, hashing the concatenation of the children's root hashes.</p></div></div>
-<div class="item" id="fn-build"><div class="ih"><span class="badge bfn">fn</span><span class="name">build</span><span class="sig">build(items : List(a), to_bytes : a -&gt; String) : Option(<a href="#type-MerkleTree">MerkleTree</a>(a))</span><a class="anchor-link" href="#fn-build" title="Link">#</a></div><div class="ib"><p>Build a balanced Merkle tree from a non-empty list. Returns None for an empty list.</p></div></div>
-<div class="item" id="fn-contains_hash"><div class="ih"><span class="badge bfn">fn</span><span class="name">contains_hash</span><span class="sig">contains_hash(t : <a href="#type-MerkleTree">MerkleTree</a>(a), h : String) : Bool</span><a class="anchor-link" href="#fn-contains_hash" title="Link">#</a></div><div class="ib"><p>True when the tree contains a leaf whose hash equals h.</p></div></div>
-<div class="item" id="fn-diff"><div class="ih"><span class="badge bfn">fn</span><span class="name">diff</span><span class="sig">diff(t1 : <a href="#type-MerkleTree">MerkleTree</a>(a), t2 : <a href="#type-MerkleTree">MerkleTree</a>(a)) : List(String)</span><a class="anchor-link" href="#fn-diff" title="Link">#</a></div><div class="ib"><p>Return the leaf hashes that differ between two trees with the same structure.</p></div></div>
-<div class="item" id="fn-leaf"><div class="ih"><span class="badge bfn">fn</span><span class="name">leaf</span><span class="sig">leaf(x : a, to_bytes : a -&gt; String) : <a href="#type-MerkleTree">MerkleTree</a>(a)</span><a class="anchor-link" href="#fn-leaf" title="Link">#</a></div><div class="ib"><p>Construct a leaf, hashing the value with to_bytes.</p></div></div>
-<div class="item" id="fn-leaf_hashes"><div class="ih"><span class="badge bfn">fn</span><span class="name">leaf_hashes</span><span class="sig">leaf_hashes(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : List(String)</span><a class="anchor-link" href="#fn-leaf_hashes" title="Link">#</a></div><div class="ib"><p>Collect all leaf hashes, left to right.</p></div></div>
-<div class="item" id="fn-leaves"><div class="ih"><span class="badge bfn">fn</span><span class="name">leaves</span><span class="sig">leaves(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : List(a)</span><a class="anchor-link" href="#fn-leaves" title="Link">#</a></div><div class="ib"><p>Collect all values stored at the leaves, left to right.</p></div></div>
-<div class="item" id="fn-root_hash"><div class="ih"><span class="badge bfn">fn</span><span class="name">root_hash</span><span class="sig">root_hash(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : String</span><a class="anchor-link" href="#fn-root_hash" title="Link">#</a></div><div class="ib"><p>Return the hash stored at the root of the tree.</p></div></div>
-<div class="item" id="fn-size"><div class="ih"><span class="badge bfn">fn</span><span class="name">size</span><span class="sig">size(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : Int</span><a class="anchor-link" href="#fn-size" title="Link">#</a></div><div class="ib"><p>Number of leaves in the tree.</p></div></div></main></div><script>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Merkle</span></nav><h1>Merkle</h1><div class="mdoc"><p>Merkle: content-addressed hash tree.</p><p>Each leaf stores a value and the SHA-256 hash of its byte representation. Each branch stores the SHA-256 hash of (left_hash ++ right_hash). The root hash summarises the entire tree; comparing root hashes detects any difference in O(1), while diff() localises changes in O(k log n) by recursing only into subtrees whose hashes differ.</p><p>build/2 constructs a balanced tree from a list of items in O(n). The caller supplies a <code>to_bytes : a -&gt; String</code> function for leaf hashing. Hashes are lowercase hex SHA-256 strings (Crypto.sha256).</p></div><h2>Types</h2><div class="item" id="type-MerkleTree"><div class="ih"><span class="badge bty">type</span><span class="name">MerkleTree</span><span class="sig"><a href="#type-MerkleTree">MerkleTree</a>(a) = MLeaf(String, a) | MBranch(String, <a href="#type-MerkleTree">MerkleTree</a>(a), <a href="#type-MerkleTree">MerkleTree</a>(a))</span><a class="anchor-link" href="#type-MerkleTree" title="Link">#</a></div><div class="ib"><p>A node: MLeaf(sha256_hex, value) or MBranch(sha256_hex, left, right).</p></div></div><h2>Functions</h2><div class="item" id="fn-branch"><div class="ih"><span class="badge bfn">fn</span><span class="name">branch</span><span class="sig">branch(l : <a href="#type-MerkleTree">MerkleTree</a>(a), r : <a href="#type-MerkleTree">MerkleTree</a>(a)) : <a href="#type-MerkleTree">MerkleTree</a>(a)</span><a class="anchor-link" href="#fn-branch" title="Link">#</a></div><div class="ib"><p>A branch over <code>l</code> and <code>r</code>, whose hash is the SHA-256 of the two children's root hashes concatenated (left first, as hex strings).</p><h3>Examples</h3><pre data-try="Merkle.size(Merkle.branch(Merkle.leaf(1, int_to_string), Merkle.leaf(2, int_to_string)))
+Merkle.root_hash(Merkle.branch(Merkle.leaf(&quot;a&quot;, fn s -&gt; s), Merkle.leaf(&quot;b&quot;, fn s -&gt; s))) == Crypto.sha256(Crypto.sha256(&quot;a&quot;) ++ Crypto.sha256(&quot;b&quot;))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Merkle</span>.size(<span class="tok-ty">Merkle</span>.branch(<span class="tok-ty">Merkle</span>.leaf(<span class="tok-num">1</span>, int_to_string), <span class="tok-ty">Merkle</span>.leaf(<span class="tok-num">2</span>, int_to_string)))
+<span class="tok-num">2</span>
+march&gt; <span class="tok-ty">Merkle</span>.root_hash(<span class="tok-ty">Merkle</span>.branch(<span class="tok-ty">Merkle</span>.leaf(<span class="tok-str">&quot;a&quot;</span>, <span class="tok-kw">fn</span> s -&gt; s), <span class="tok-ty">Merkle</span>.leaf(<span class="tok-str">&quot;b&quot;</span>, <span class="tok-kw">fn</span> s -&gt; s))) == <span class="tok-ty">Crypto</span>.sha256(<span class="tok-ty">Crypto</span>.sha256(<span class="tok-str">&quot;a&quot;</span>) ++ <span class="tok-ty">Crypto</span>.sha256(<span class="tok-str">&quot;b&quot;</span>))
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-build"><div class="ih"><span class="badge bfn">fn</span><span class="name">build</span><span class="sig">build(items : List(a), to_bytes : a -&gt; String) : Option(<a href="#type-MerkleTree">MerkleTree</a>(a))</span><a class="anchor-link" href="#fn-build" title="Link">#</a></div><div class="ib"><p>Build a tree from <code>items</code>, hashing each with <code>to_bytes</code>. Leaves are paired left to right, layer by layer; an odd node at the end of a layer is carried up unpaired. Returns <code>None</code> for an empty list. O(n).</p><h3>Examples</h3><pre data-try="Merkle.build([], int_to_string)
+Option.map(Merkle.build([1, 2, 3], int_to_string), Merkle.leaves)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Merkle</span>.build([], int_to_string)
+<span class="tok-ty">None</span>
+march&gt; <span class="tok-ty">Option</span>.map(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>], int_to_string), <span class="tok-ty">Merkle</span>.leaves)
+<span class="tok-ty">Some</span>([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>])</code></pre></div></div>
+<div class="item" id="fn-contains_hash"><div class="ih"><span class="badge bfn">fn</span><span class="name">contains_hash</span><span class="sig">contains_hash(t : <a href="#type-MerkleTree">MerkleTree</a>(a), h : String) : Bool</span><a class="anchor-link" href="#fn-contains_hash" title="Link">#</a></div><div class="ib"><p>True when any node of the tree, leaf or branch, has hash <code>h</code>. A branch match stops the search, so this also answers &quot;is this subtree present&quot;. O(n) in the worst case.</p><h3>Examples</h3><pre data-try="let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
+Merkle.contains_hash(mt1, Crypto.sha256(&quot;2&quot;))
+let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
+Merkle.contains_hash(mt1, Merkle.root_hash(mt1))
+let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
+Merkle.contains_hash(mt1, &quot;nope&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> mt1 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-ty">Merkle</span>.contains_hash(mt1, <span class="tok-ty">Crypto</span>.sha256(<span class="tok-str">&quot;2&quot;</span>))
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-kw">let</span> mt1 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-ty">Merkle</span>.contains_hash(mt1, <span class="tok-ty">Merkle</span>.root_hash(mt1))
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-kw">let</span> mt1 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-ty">Merkle</span>.contains_hash(mt1, <span class="tok-str">&quot;nope&quot;</span>)
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-diff"><div class="ih"><span class="badge bfn">fn</span><span class="name">diff</span><span class="sig">diff(t1 : <a href="#type-MerkleTree">MerkleTree</a>(a), t2 : <a href="#type-MerkleTree">MerkleTree</a>(a)) : List(String)</span><a class="anchor-link" href="#fn-diff" title="Link">#</a></div><div class="ib"><p>The hashes, taken from <code>t1</code>, of the leaves where <code>t1</code> and <code>t2</code> differ, left to right. Subtrees whose hashes match are skipped, so for k changed leaves this is O(k log n). Meant for trees of the same shape (built from lists of the same length); where the shapes diverge it reports <code>t1</code>'s node at that point, which for a branch is a branch hash, not a leaf hash.</p><h3>Examples</h3><pre data-try="let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
+let mt2 = Option.unwrap(Merkle.build([1, 2, 30, 4], int_to_string))
+Merkle.diff(mt1, mt1)
+let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
+let mt2 = Option.unwrap(Merkle.build([1, 2, 30, 4], int_to_string))
+Merkle.diff(mt1, mt2) == [Merkle.root_hash(Merkle.leaf(3, int_to_string))]" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> mt1 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-kw">let</span> mt2 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">30</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-ty">Merkle</span>.diff(mt1, mt1)
+[]
+march&gt; <span class="tok-kw">let</span> mt1 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-kw">let</span> mt2 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">30</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-ty">Merkle</span>.diff(mt1, mt2) == [<span class="tok-ty">Merkle</span>.root_hash(<span class="tok-ty">Merkle</span>.leaf(<span class="tok-num">3</span>, int_to_string))]
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-leaf"><div class="ih"><span class="badge bfn">fn</span><span class="name">leaf</span><span class="sig">leaf(x : a, to_bytes : a -&gt; String) : <a href="#type-MerkleTree">MerkleTree</a>(a)</span><a class="anchor-link" href="#fn-leaf" title="Link">#</a></div><div class="ib"><p>A single-leaf tree holding <code>x</code>, whose hash is <code>Crypto.sha256(to_bytes(x))</code>.</p><h3>Examples</h3><pre data-try="Merkle.leaves(Merkle.leaf(42, int_to_string))
+Merkle.root_hash(Merkle.leaf(&quot;abc&quot;, fn s -&gt; s)) == Crypto.sha256(&quot;abc&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Merkle</span>.leaves(<span class="tok-ty">Merkle</span>.leaf(<span class="tok-num">42</span>, int_to_string))
+[<span class="tok-num">42</span>]
+march&gt; <span class="tok-ty">Merkle</span>.root_hash(<span class="tok-ty">Merkle</span>.leaf(<span class="tok-str">&quot;abc&quot;</span>, <span class="tok-kw">fn</span> s -&gt; s)) == <span class="tok-ty">Crypto</span>.sha256(<span class="tok-str">&quot;abc&quot;</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-leaf_hashes"><div class="ih"><span class="badge bfn">fn</span><span class="name">leaf_hashes</span><span class="sig">leaf_hashes(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : List(String)</span><a class="anchor-link" href="#fn-leaf_hashes" title="Link">#</a></div><div class="ib"><p>All leaf hashes, left to right.</p><h3>Examples</h3><pre data-try="let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
+Merkle.leaf_hashes(mt1) == List.map([1, 2, 3, 4], fn x -&gt; Crypto.sha256(int_to_string(x)))" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> mt1 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-ty">Merkle</span>.leaf_hashes(mt1) == <span class="tok-ty">List</span>.map([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>], <span class="tok-kw">fn</span> x -&gt; <span class="tok-ty">Crypto</span>.sha256(int_to_string(x)))
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-leaves"><div class="ih"><span class="badge bfn">fn</span><span class="name">leaves</span><span class="sig">leaves(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : List(a)</span><a class="anchor-link" href="#fn-leaves" title="Link">#</a></div><div class="ib"><p>All values stored at the leaves, left to right (the order given to <code>build</code>).</p><h3>Examples</h3><pre data-try="let mt2 = Option.unwrap(Merkle.build([1, 2, 30, 4], int_to_string))
+Merkle.leaves(mt2)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> mt2 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">30</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-ty">Merkle</span>.leaves(mt2)
+[<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">30</span>, <span class="tok-num">4</span>]</code></pre></div></div>
+<div class="item" id="fn-root_hash"><div class="ih"><span class="badge bfn">fn</span><span class="name">root_hash</span><span class="sig">root_hash(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : String</span><a class="anchor-link" href="#fn-root_hash" title="Link">#</a></div><div class="ib"><p>The hash stored at the root: the leaf's hash for a leaf, the branch hash otherwise. Two trees built the same way from equal leaves have equal root hashes. O(1).</p><h3>Examples</h3><pre data-try="String.byte_size(Merkle.root_hash(Merkle.leaf(&quot;abc&quot;, fn s -&gt; s)))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.byte_size(<span class="tok-ty">Merkle</span>.root_hash(<span class="tok-ty">Merkle</span>.leaf(<span class="tok-str">&quot;abc&quot;</span>, <span class="tok-kw">fn</span> s -&gt; s)))
+<span class="tok-num">64</span></code></pre></div></div>
+<div class="item" id="fn-size"><div class="ih"><span class="badge bfn">fn</span><span class="name">size</span><span class="sig">size(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : Int</span><a class="anchor-link" href="#fn-size" title="Link">#</a></div><div class="ib"><p>Number of leaves in the tree. O(n).</p><h3>Examples</h3><pre data-try="let mt1 = Option.unwrap(Merkle.build([1, 2, 3, 4], int_to_string))
+Merkle.size(mt1)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> mt1 = <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">Merkle</span>.build([<span class="tok-num">1</span>, <span class="tok-num">2</span>, <span class="tok-num">3</span>, <span class="tok-num">4</span>], int_to_string))
+march&gt; <span class="tok-ty">Merkle</span>.size(mt1)
+<span class="tok-num">4</span></code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

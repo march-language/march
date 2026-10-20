@@ -301,15 +301,119 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
 <a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Yaml</span></nav><h1>Yaml</h1><div class="mdoc"><p>Simplified YAML parser (pure March, no FFI).</p><p>Supports: block mappings, block sequences, flow mappings {}, flow sequences [], plain scalars (string/int/bool/null), single-quoted and double-quoted strings, comments (#), document separator (---), inline comments.</p><p>Does NOT support: anchors (&amp;), aliases (*), explicit tags (!!), multi-document streams, merge keys (&lt;&lt;), block scalars (| and &gt;).</p><p>Public API: Yaml.parse(src)          : Result(YamlValue, YamlError) Yaml.parse_exn(src)      : YamlValue  (panics on error) Yaml.to_string(v)        : String Yaml.get(v, key)         : Option(YamlValue) Yaml.get_in(v, keys)     : Option(YamlValue) Yaml.get_str(v, key)     : Option(String) Yaml.get_int(v, key)     : Option(Int) Yaml.get_bool(v, key)    : Option(Bool) Yaml.get_seq(v)          : Option(List(YamlValue))</p></div><h2>Types</h2><div class="item" id="type-YamlValue"><div class="ih"><span class="badge bty">type</span><span class="name">YamlValue</span><span class="sig"><a href="#type-YamlValue">YamlValue</a></span><a class="anchor-link" href="#type-YamlValue" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-YamlError"><div class="ih"><span class="badge bty">type</span><span class="name">YamlError</span><span class="sig"><a href="#type-YamlError">YamlError</a> = <a href="#type-YamlError">YamlError</a>(String, Int, Int)</span><a class="anchor-link" href="#type-YamlError" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-get"><div class="ih"><span class="badge bfn">fn</span><span class="name">get</span><span class="sig">get(v : <a href="#type-YamlValue">YamlValue</a>, key : String) : Option(<a href="#type-YamlValue">YamlValue</a>)</span><a class="anchor-link" href="#fn-get" title="Link">#</a></div><div class="ib"><p>Get a key from a YMap value.</p></div></div>
-<div class="item" id="fn-get_bool"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_bool</span><span class="sig">get_bool(v : <a href="#type-YamlValue">YamlValue</a>, key : String) : Option(Bool)</span><a class="anchor-link" href="#fn-get_bool" title="Link">#</a></div><div class="ib"><p>Get a boolean value from a YMap.</p></div></div>
-<div class="item" id="fn-get_in"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_in</span><span class="sig">get_in(v : <a href="#type-YamlValue">YamlValue</a>, keys : List(String)) : Option(<a href="#type-YamlValue">YamlValue</a>)</span><a class="anchor-link" href="#fn-get_in" title="Link">#</a></div><div class="ib"><p>Navigate nested YMap values by a list of keys.</p></div></div>
-<div class="item" id="fn-get_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_int</span><span class="sig">get_int(v : <a href="#type-YamlValue">YamlValue</a>, key : String) : Option(Int)</span><a class="anchor-link" href="#fn-get_int" title="Link">#</a></div><div class="ib"><p>Get an integer value from a YMap.</p></div></div>
-<div class="item" id="fn-get_seq"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_seq</span><span class="sig">get_seq(v : <a href="#type-YamlValue">YamlValue</a>) : Option(List(<a href="#type-YamlValue">YamlValue</a>))</span><a class="anchor-link" href="#fn-get_seq" title="Link">#</a></div><div class="ib"><p>Get the list from a YSeq value.</p></div></div>
-<div class="item" id="fn-get_str"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_str</span><span class="sig">get_str(v : <a href="#type-YamlValue">YamlValue</a>, key : String) : Option(String)</span><a class="anchor-link" href="#fn-get_str" title="Link">#</a></div><div class="ib"><p>Get a string value from a YMap.</p></div></div>
-<div class="item" id="fn-parse"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse</span><span class="sig">parse(src : String) : Result(<a href="#type-YamlValue">YamlValue</a>, <a href="#type-YamlError">YamlError</a>)</span><a class="anchor-link" href="#fn-parse" title="Link">#</a></div><div class="ib"><p>Parse a YAML string. Returns Ok(YamlValue) or Err(YamlError). Supports: block mappings, block sequences, scalars, flow {}/[], comments.</p><pre><code><span class="tok-ty">Yaml</span>.parse(<span class="tok-str">&quot;name: alice\\nage: 30&quot;</span>)</code></pre></div></div>
-<div class="item" id="fn-parse_exn"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse_exn</span><span class="sig">parse_exn(src : String) : <a href="#type-YamlValue">YamlValue</a></span><a class="anchor-link" href="#fn-parse_exn" title="Link">#</a></div><div class="ib"><p>Parse YAML, panicking on error.</p></div></div>
-<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(v : <a href="#type-YamlValue">YamlValue</a>) : String</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Serialize a YamlValue to a YAML string.</p></div></div></main></div><script>
+<div class="item" id="type-YamlError"><div class="ih"><span class="badge bty">type</span><span class="name">YamlError</span><span class="sig"><a href="#type-YamlError">YamlError</a> = <a href="#type-YamlError">YamlError</a>(String, Int, Int)</span><a class="anchor-link" href="#type-YamlError" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-get"><div class="ih"><span class="badge bfn">fn</span><span class="name">get</span><span class="sig">get(v : <a href="#type-YamlValue">YamlValue</a>, key : String) : Option(<a href="#type-YamlValue">YamlValue</a>)</span><a class="anchor-link" href="#fn-get" title="Link">#</a></div><div class="ib"><p>Get a key from a YMap value (the first entry with that key). Returns None if the key is absent or <code>v</code> is not a YMap.</p><h3>Examples</h3><pre data-try="Yaml.get(Yaml.parse_exn(&quot;a: 1\na: 2&quot;), &quot;a&quot;)
+Yaml.get(Yaml.parse_exn(&quot;- a&quot;), &quot;a&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Yaml</span>.get(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;a: 1\na: 2&quot;</span>), <span class="tok-str">&quot;a&quot;</span>)
+<span class="tok-ty">Some</span>(<span class="tok-ty">YInt</span>(<span class="tok-num">1</span>))
+march&gt; <span class="tok-ty">Yaml</span>.get(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;- a&quot;</span>), <span class="tok-str">&quot;a&quot;</span>)
+<span class="tok-ty">None</span></code></pre></div></div>
+<div class="item" id="fn-get_bool"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_bool</span><span class="sig">get_bool(v : <a href="#type-YamlValue">YamlValue</a>, key : String) : Option(Bool)</span><a class="anchor-link" href="#fn-get_bool" title="Link">#</a></div><div class="ib"><p>Get a boolean value from a YMap, or None if the key is absent or its value is not a YBool. YAML 1.1 spellings such as <code>yes</code>/<code>no</code> parse as booleans.</p><h3>Examples</h3><pre data-try="Yaml.get_bool(Yaml.parse_exn(&quot;tls: yes&quot;), &quot;tls&quot;)
+Yaml.get_bool(Yaml.parse_exn(&quot;tls: maybe&quot;), &quot;tls&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Yaml</span>.get_bool(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;tls: yes&quot;</span>), <span class="tok-str">&quot;tls&quot;</span>)
+<span class="tok-ty">Some</span>(<span class="tok-kw">true</span>)
+march&gt; <span class="tok-ty">Yaml</span>.get_bool(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;tls: maybe&quot;</span>), <span class="tok-str">&quot;tls&quot;</span>)
+<span class="tok-ty">None</span></code></pre></div></div>
+<div class="item" id="fn-get_in"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_in</span><span class="sig">get_in(v : <a href="#type-YamlValue">YamlValue</a>, keys : List(String)) : Option(<a href="#type-YamlValue">YamlValue</a>)</span><a class="anchor-link" href="#fn-get_in" title="Link">#</a></div><div class="ib"><p>Navigate nested YMap values by a list of keys. An empty key list returns <code>Some(v)</code>; None if any step is missing or not a YMap.</p><h3>Examples</h3><pre data-try="let cfg = Yaml.parse_exn(&quot;server:\n  host: example.com\n  port: 8080&quot;)
+Yaml.get_in(cfg, [&quot;server&quot;, &quot;port&quot;])
+let cfg = Yaml.parse_exn(&quot;server:\n  host: example.com\n  port: 8080&quot;)
+Yaml.get_in(cfg, [&quot;server&quot;, &quot;user&quot;])" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> cfg = <span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;server:\n  host: example.com\n  port: 8080&quot;</span>)
+march&gt; <span class="tok-ty">Yaml</span>.get_in(cfg, [<span class="tok-str">&quot;server&quot;</span>, <span class="tok-str">&quot;port&quot;</span>])
+<span class="tok-ty">Some</span>(<span class="tok-ty">YInt</span>(<span class="tok-num">8080</span>))
+march&gt; <span class="tok-kw">let</span> cfg = <span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;server:\n  host: example.com\n  port: 8080&quot;</span>)
+march&gt; <span class="tok-ty">Yaml</span>.get_in(cfg, [<span class="tok-str">&quot;server&quot;</span>, <span class="tok-str">&quot;user&quot;</span>])
+<span class="tok-ty">None</span></code></pre></div></div>
+<div class="item" id="fn-get_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_int</span><span class="sig">get_int(v : <a href="#type-YamlValue">YamlValue</a>, key : String) : Option(Int)</span><a class="anchor-link" href="#fn-get_int" title="Link">#</a></div><div class="ib"><p>Get an integer value from a YMap, or None if the key is absent or its value is not a YInt.</p><h3>Examples</h3><pre data-try="Yaml.get_int(Yaml.parse_exn(&quot;name: alice\nage: 30&quot;), &quot;age&quot;)
+Yaml.get_int(Yaml.parse_exn(&quot;ratio: 0.5&quot;), &quot;ratio&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Yaml</span>.get_int(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;name: alice\nage: 30&quot;</span>), <span class="tok-str">&quot;age&quot;</span>)
+<span class="tok-ty">Some</span>(<span class="tok-num">30</span>)
+march&gt; <span class="tok-ty">Yaml</span>.get_int(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;ratio: 0.5&quot;</span>), <span class="tok-str">&quot;ratio&quot;</span>)
+<span class="tok-ty">None</span></code></pre></div></div>
+<div class="item" id="fn-get_seq"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_seq</span><span class="sig">get_seq(v : <a href="#type-YamlValue">YamlValue</a>) : Option(List(<a href="#type-YamlValue">YamlValue</a>))</span><a class="anchor-link" href="#fn-get_seq" title="Link">#</a></div><div class="ib"><p>Get the elements of a YSeq value, or None if <code>v</code> is not a YSeq.</p><h3>Examples</h3><pre data-try="Yaml.get_seq(Yaml.parse_exn(&quot;- 1\n- 2&quot;))
+Yaml.get_seq(Yaml.parse_exn(&quot;a: 1&quot;))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Yaml</span>.get_seq(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;- 1\n- 2&quot;</span>))
+<span class="tok-ty">Some</span>([<span class="tok-ty">YInt</span>(<span class="tok-num">1</span>), <span class="tok-ty">YInt</span>(<span class="tok-num">2</span>)])
+march&gt; <span class="tok-ty">Yaml</span>.get_seq(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;a: 1&quot;</span>))
+<span class="tok-ty">None</span></code></pre></div></div>
+<div class="item" id="fn-get_str"><div class="ih"><span class="badge bfn">fn</span><span class="name">get_str</span><span class="sig">get_str(v : <a href="#type-YamlValue">YamlValue</a>, key : String) : Option(String)</span><a class="anchor-link" href="#fn-get_str" title="Link">#</a></div><div class="ib"><p>Get a string value from a YMap, or None if the key is absent or its value is not a YStr (a plain scalar that parsed as a number or boolean is not converted back).</p><h3>Examples</h3><pre data-try="Yaml.get_str(Yaml.parse_exn(&quot;name: alice\nage: 30&quot;), &quot;name&quot;)
+Yaml.get_str(Yaml.parse_exn(&quot;name: alice\nage: 30&quot;), &quot;age&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Yaml</span>.get_str(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;name: alice\nage: 30&quot;</span>), <span class="tok-str">&quot;name&quot;</span>)
+<span class="tok-ty">Some</span>(<span class="tok-str">&quot;alice&quot;</span>)
+march&gt; <span class="tok-ty">Yaml</span>.get_str(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;name: alice\nage: 30&quot;</span>), <span class="tok-str">&quot;age&quot;</span>)
+<span class="tok-ty">None</span></code></pre></div></div>
+<div class="item" id="fn-parse"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse</span><span class="sig">parse(src : String) : Result(<a href="#type-YamlValue">YamlValue</a>, <a href="#type-YamlError">YamlError</a>)</span><a class="anchor-link" href="#fn-parse" title="Link">#</a></div><div class="ib"><p>Parse a YAML string. Returns Ok(YamlValue) or Err(YamlError(message, line, col)). Supports block mappings, block sequences, scalars, flow <code>{}</code>/<code>[]</code>, quoted strings and comments; an optional leading <code>---</code> is skipped. Plain scalars are typed: integers become <code>YInt</code>, floats <code>YFloat</code>; <code>true</code>/<code>True</code>/<code>TRUE</code>/<code>yes</code>/<code>Yes</code>/<code>on</code> and <code>false</code>/<code>False</code>/<code>FALSE</code>/<code>no</code>/<code>No</code>/<code>off</code> become <code>YBool</code>; <code>null</code>/<code>Null</code>/<code>NULL</code>/<code>~</code>/empty become <code>YNull</code>; anything else <code>YStr</code>. Duplicate keys are kept; lookups return the first. An empty (or comment-only) document is an error.</p><h3>Examples</h3><pre data-try="Yaml.parse(&quot;name: alice\nage: 30&quot;)
+Yaml.parse(&quot;---\n- 1\n- two\n- ~&quot;)
+Yaml.parse(&quot;&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Yaml</span>.parse(<span class="tok-str">&quot;name: alice\nage: 30&quot;</span>)
+<span class="tok-ty">Ok</span>(<span class="tok-ty">YMap</span>([(<span class="tok-str">&quot;name&quot;</span>, <span class="tok-ty">YStr</span>(<span class="tok-str">&quot;alice&quot;</span>)), (<span class="tok-str">&quot;age&quot;</span>, <span class="tok-ty">YInt</span>(<span class="tok-num">30</span>))]))
+march&gt; <span class="tok-ty">Yaml</span>.parse(<span class="tok-str">&quot;---\n- 1\n- two\n- ~&quot;</span>)
+<span class="tok-ty">Ok</span>(<span class="tok-ty">YSeq</span>([<span class="tok-ty">YInt</span>(<span class="tok-num">1</span>), <span class="tok-ty">YStr</span>(<span class="tok-str">&quot;two&quot;</span>), <span class="tok-ty">YNull</span>]))
+march&gt; <span class="tok-ty">Yaml</span>.parse(<span class="tok-str">&quot;&quot;</span>)
+<span class="tok-ty">Err</span>(<span class="tok-ty">YamlError</span>(<span class="tok-str">&quot;empty document&quot;</span>, <span class="tok-num">1</span>, <span class="tok-num">0</span>))</code></pre></div></div>
+<div class="item" id="fn-parse_exn"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse_exn</span><span class="sig">parse_exn(src : String) : <a href="#type-YamlValue">YamlValue</a></span><a class="anchor-link" href="#fn-parse_exn" title="Link">#</a></div><div class="ib"><p>Parse YAML like <code>parse</code>, returning the value directly. Panics with <code>YAML parse error at LINE:COL: MESSAGE</code> if the input is invalid (or empty), so use it only for trusted, known-good input.</p><h3>Examples</h3><pre data-try="Yaml.parse_exn(&quot;a: {b: 1, c: [x, y]}&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;a: {b: 1, c: [x, y]}&quot;</span>)
+<span class="tok-ty">YMap</span>([(<span class="tok-str">&quot;a&quot;</span>, <span class="tok-ty">YMap</span>([(<span class="tok-str">&quot;b&quot;</span>, <span class="tok-ty">YInt</span>(<span class="tok-num">1</span>)), (<span class="tok-str">&quot;c&quot;</span>, <span class="tok-ty">YSeq</span>([<span class="tok-ty">YStr</span>(<span class="tok-str">&quot;x&quot;</span>), <span class="tok-ty">YStr</span>(<span class="tok-str">&quot;y&quot;</span>)]))]))])</code></pre></div></div>
+<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(v : <a href="#type-YamlValue">YamlValue</a>) : String</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Serialize a YamlValue to a block-style YAML string, two spaces per nesting level, with no trailing newline. Strings that would otherwise re-parse as another type, or that contain flow/comment characters, are double-quoted and escaped; empty sequences and maps render as <code>[]</code> and <code>{}</code>. Known limitations: a sequence nested under a key is emitted at the key's own indentation, which <code>parse</code> does not read back; a YMap inside a YSeq is misindented; a top-level YSeq starts with a newline; and a string containing a newline but no other special character is emitted unquoted.</p><h3>Examples</h3><pre data-try="Yaml.to_string(Yaml.parse_exn(&quot;name: alice\nage: 30&quot;))
+Yaml.to_string(YMap([(&quot;a&quot;, YMap([(&quot;b&quot;, YInt(1))])), (&quot;k&quot;, YStr(&quot;true&quot;))]))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Yaml</span>.to_string(<span class="tok-ty">Yaml</span>.parse_exn(<span class="tok-str">&quot;name: alice\nage: 30&quot;</span>))
+<span class="tok-str">&quot;name: alice\nage: 30&quot;</span>
+march&gt; <span class="tok-ty">Yaml</span>.to_string(<span class="tok-ty">YMap</span>([(<span class="tok-str">&quot;a&quot;</span>, <span class="tok-ty">YMap</span>([(<span class="tok-str">&quot;b&quot;</span>, <span class="tok-ty">YInt</span>(<span class="tok-num">1</span>))])), (<span class="tok-str">&quot;k&quot;</span>, <span class="tok-ty">YStr</span>(<span class="tok-str">&quot;true&quot;</span>))]))
+<span class="tok-str">&quot;a:\n  b: 1\nk: \&quot;true\&quot;&quot;</span></code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

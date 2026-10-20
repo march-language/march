@@ -322,28 +322,171 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="type-SeriesKind"><div class="ih"><span class="badge bty">type</span><span class="name">SeriesKind</span><span class="sig"><a href="#type-SeriesKind">SeriesKind</a> = Line | Scatter | Bar | HistogramSeries</span><a class="anchor-link" href="#type-SeriesKind" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-Series"><div class="ih"><span class="badge bty">type</span><span class="name">Series</span><span class="sig"><a href="#type-Series">Series</a> = {</span><a class="anchor-link" href="#type-Series" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-Axis"><div class="ih"><span class="badge bty">type</span><span class="name">Axis</span><span class="sig"><a href="#type-Axis">Axis</a> = {</span><a class="anchor-link" href="#type-Axis" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-Plot"><div class="ih"><span class="badge bty">type</span><span class="name">Plot</span><span class="sig"><a href="#type-Plot">Plot</a> = {</span><a class="anchor-link" href="#type-Plot" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-add_labeled_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">add_labeled_series</span><span class="sig">add_labeled_series(p : <a href="#type-Plot">Plot</a>, s : <a href="#type-Series">Series</a>, lbl : String) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-add_labeled_series" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-add_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">add_series</span><span class="sig">add_series(p : <a href="#type-Plot">Plot</a>, s : <a href="#type-Series">Series</a>) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-add_series" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-bar_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">bar_series</span><span class="sig">bar_series(labels : List(String), values : List(Float)) : <a href="#type-Series">Series</a></span><a class="anchor-link" href="#fn-bar_series" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-histogram_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">histogram_series</span><span class="sig">histogram_series(values : List(Float), bins : Int) : <a href="#type-Series">Series</a></span><a class="anchor-link" href="#fn-histogram_series" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-line_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">line_series</span><span class="sig">line_series(xs : List(Float), ys : List(Float)) : <a href="#type-Series">Series</a></span><a class="anchor-link" href="#fn-line_series" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-new"><div class="ih"><span class="badge bfn">fn</span><span class="name">new</span><span class="sig">new() : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-new" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-new_sized"><div class="ih"><span class="badge bfn">fn</span><span class="name">new_sized</span><span class="sig">new_sized(w : Int, h : Int) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-new_sized" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-quick_bar"><div class="ih"><span class="badge bfn">fn</span><span class="name">quick_bar</span><span class="sig">quick_bar(labels : List(String), values : List(Float)) : String</span><a class="anchor-link" href="#fn-quick_bar" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-quick_histogram"><div class="ih"><span class="badge bfn">fn</span><span class="name">quick_histogram</span><span class="sig">quick_histogram(values : List(Float), bins : Int) : String</span><a class="anchor-link" href="#fn-quick_histogram" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-quick_line"><div class="ih"><span class="badge bfn">fn</span><span class="name">quick_line</span><span class="sig">quick_line(xs : List(Float), ys : List(Float)) : String</span><a class="anchor-link" href="#fn-quick_line" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-quick_scatter"><div class="ih"><span class="badge bfn">fn</span><span class="name">quick_scatter</span><span class="sig">quick_scatter(xs : List(Float), ys : List(Float)) : String</span><a class="anchor-link" href="#fn-quick_scatter" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-save"><div class="ih"><span class="badge bfn">fn</span><span class="name">save</span><span class="sig">save(p : <a href="#type-Plot">Plot</a>, path : String) : Result(Unit, File.FileError)</span><a class="anchor-link" href="#fn-save" title="Link">#</a></div><div class="ib"><p>Render <code>p</code> to SVG and write it to <code>path</code>. Fails with the <code>File.FileError</code> the write reported (<code>NotFound</code>, <code>Permission</code>, <code>IsDirectory</code>, <code>IoError</code>, ...).</p></div></div>
-<div class="item" id="fn-scatter_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">scatter_series</span><span class="sig">scatter_series(xs : List(Float), ys : List(Float)) : <a href="#type-Series">Series</a></span><a class="anchor-link" href="#fn-scatter_series" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-set_size"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_size</span><span class="sig">set_size(p : <a href="#type-Plot">Plot</a>, w : Int, h : Int) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_size" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-set_title"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_title</span><span class="sig">set_title(p : <a href="#type-Plot">Plot</a>, t : String) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_title" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-set_x_range"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_x_range</span><span class="sig">set_x_range(p : <a href="#type-Plot">Plot</a>, lo : Float, hi : Float) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_x_range" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-set_xlabel"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_xlabel</span><span class="sig">set_xlabel(p : <a href="#type-Plot">Plot</a>, l : String) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_xlabel" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-set_y_range"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_y_range</span><span class="sig">set_y_range(p : <a href="#type-Plot">Plot</a>, lo : Float, hi : Float) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_y_range" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-set_ylabel"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_ylabel</span><span class="sig">set_ylabel(p : <a href="#type-Plot">Plot</a>, l : String) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_ylabel" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-to_svg"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_svg</span><span class="sig">to_svg(p : <a href="#type-Plot">Plot</a>) : String</span><a class="anchor-link" href="#fn-to_svg" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-with_grid"><div class="ih"><span class="badge bfn">fn</span><span class="name">with_grid</span><span class="sig">with_grid(p : <a href="#type-Plot">Plot</a>) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-with_grid" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-with_legend"><div class="ih"><span class="badge bfn">fn</span><span class="name">with_legend</span><span class="sig">with_legend(p : <a href="#type-Plot">Plot</a>) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-with_legend" title="Link">#</a></div><div class="ib"></div></div></main></div><script>
+<div class="item" id="type-Plot"><div class="ih"><span class="badge bty">type</span><span class="name">Plot</span><span class="sig"><a href="#type-Plot">Plot</a> = {</span><a class="anchor-link" href="#type-Plot" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-add_labeled_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">add_labeled_series</span><span class="sig">add_labeled_series(p : <a href="#type-Plot">Plot</a>, s : <a href="#type-Series">Series</a>, lbl : String) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-add_labeled_series" title="Link">#</a></div><div class="ib"><p>Like <code>add_series</code>, but also sets the series label shown by the legend (see <code>with_legend</code>).</p><h3>Examples</h3><pre data-try="let bars = Plot.bar_series([&quot;a&quot;, &quot;b&quot;, &quot;c&quot;], [3.0, 1.0, 2.0])
+let lp = Plot.new() |&gt; Plot.add_labeled_series(bars, &quot;sales&quot;)
+List.map(lp.series, fn s -&gt; s.label)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> bars = <span class="tok-ty">Plot</span>.bar_series([<span class="tok-str">&quot;a&quot;</span>, <span class="tok-str">&quot;b&quot;</span>, <span class="tok-str">&quot;c&quot;</span>], [<span class="tok-num">3.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>])
+march&gt; <span class="tok-kw">let</span> lp = <span class="tok-ty">Plot</span>.new() |&gt; <span class="tok-ty">Plot</span>.add_labeled_series(bars, <span class="tok-str">&quot;sales&quot;</span>)
+march&gt; <span class="tok-ty">List</span>.map(lp.series, <span class="tok-kw">fn</span> s -&gt; s.label)
+[<span class="tok-ty">Some</span>(<span class="tok-str">&quot;sales&quot;</span>)]</code></pre></div></div>
+<div class="item" id="fn-add_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">add_series</span><span class="sig">add_series(p : <a href="#type-Plot">Plot</a>, s : <a href="#type-Series">Series</a>) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-add_series" title="Link">#</a></div><div class="ib"><p>Append series <code>s</code> to <code>p</code> (drawn after, i.e. on top of, earlier series). The series is recoloured from the 10-colour palette by its position in the plot, overriding its previous style.</p><h3>Examples</h3><pre data-try="let bars = Plot.bar_series([&quot;a&quot;, &quot;b&quot;, &quot;c&quot;], [3.0, 1.0, 2.0])
+let two = Plot.new() |&gt; Plot.add_series(Plot.line_series([0.0], [1.0])) |&gt; Plot.add_series(bars)
+List.map(two.series, fn s -&gt; s.style.line_color.r)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> bars = <span class="tok-ty">Plot</span>.bar_series([<span class="tok-str">&quot;a&quot;</span>, <span class="tok-str">&quot;b&quot;</span>, <span class="tok-str">&quot;c&quot;</span>], [<span class="tok-num">3.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>])
+march&gt; <span class="tok-kw">let</span> two = <span class="tok-ty">Plot</span>.new() |&gt; <span class="tok-ty">Plot</span>.add_series(<span class="tok-ty">Plot</span>.line_series([<span class="tok-num">0.0</span>], [<span class="tok-num">1.0</span>])) |&gt; <span class="tok-ty">Plot</span>.add_series(bars)
+march&gt; <span class="tok-ty">List</span>.map(two.series, <span class="tok-kw">fn</span> s -&gt; s.style.line_color.r)
+[<span class="tok-num">31</span>, <span class="tok-num">255</span>]</code></pre></div></div>
+<div class="item" id="fn-bar_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">bar_series</span><span class="sig">bar_series(labels : List(String), values : List(Float)) : <a href="#type-Series">Series</a></span><a class="anchor-link" href="#fn-bar_series" title="Link">#</a></div><div class="ib"><p>A bar series with one bar per value, placed at x = 0.0, 1.0, 2.0, ... (one position per element of <code>labels</code>). Bars rise from y = 0 (negative values hang below it). Note: only the number of <code>labels</code> is used; the label strings themselves are not rendered on the axis.</p><h3>Examples</h3><pre data-try="let bars = Plot.bar_series([&quot;a&quot;, &quot;b&quot;, &quot;c&quot;], [3.0, 1.0, 2.0])
+bars.xs == [0.0, 1.0, 2.0]
+let bars = Plot.bar_series([&quot;a&quot;, &quot;b&quot;, &quot;c&quot;], [3.0, 1.0, 2.0])
+bars.ys == [3.0, 1.0, 2.0]" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> bars = <span class="tok-ty">Plot</span>.bar_series([<span class="tok-str">&quot;a&quot;</span>, <span class="tok-str">&quot;b&quot;</span>, <span class="tok-str">&quot;c&quot;</span>], [<span class="tok-num">3.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>])
+march&gt; bars.xs == [<span class="tok-num">0.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>]
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-kw">let</span> bars = <span class="tok-ty">Plot</span>.bar_series([<span class="tok-str">&quot;a&quot;</span>, <span class="tok-str">&quot;b&quot;</span>, <span class="tok-str">&quot;c&quot;</span>], [<span class="tok-num">3.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>])
+march&gt; bars.ys == [<span class="tok-num">3.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>]
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-histogram_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">histogram_series</span><span class="sig">histogram_series(values : List(Float), bins : Int) : <a href="#type-Series">Series</a></span><a class="anchor-link" href="#fn-histogram_series" title="Link">#</a></div><div class="ib"><p>Bin <code>values</code> into <code>bins</code> equal-width bins spanning <code>[min, max]</code> and return a bar series of the counts, at x = 0.0 .. bins - 1. The maximum value falls into the last bin. When all values are equal every value lands in bin 0. An empty <code>values</code> list (or <code>bins &lt;= 0</code>) gives a series with no bars. O(n log n + n * bins).</p><h3>Examples</h3><pre data-try="(Plot.histogram_series([1.0, 2.0, 2.5, 4.0], 3)).ys == [1.0, 2.0, 1.0]
+(Plot.histogram_series([5.0, 5.0], 2)).ys == [2.0, 0.0]
+(Plot.histogram_series([], 3)).ys" data-try-kind="transcript"><code>march&gt; (<span class="tok-ty">Plot</span>.histogram_series([<span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>, <span class="tok-num">2.5</span>, <span class="tok-num">4.0</span>], <span class="tok-num">3</span>)).ys == [<span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>, <span class="tok-num">1.0</span>]
+<span class="tok-kw">true</span>
+march&gt; (<span class="tok-ty">Plot</span>.histogram_series([<span class="tok-num">5.0</span>, <span class="tok-num">5.0</span>], <span class="tok-num">2</span>)).ys == [<span class="tok-num">2.0</span>, <span class="tok-num">0.0</span>]
+<span class="tok-kw">true</span>
+march&gt; (<span class="tok-ty">Plot</span>.histogram_series([], <span class="tok-num">3</span>)).ys
+[]</code></pre></div></div>
+<div class="item" id="fn-line_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">line_series</span><span class="sig">line_series(xs : List(Float), ys : List(Float)) : <a href="#type-Series">Series</a></span><a class="anchor-link" href="#fn-line_series" title="Link">#</a></div><div class="ib"><p>A line series through the points <code>zip(xs, ys)</code>, drawn as one SVG polyline in data order (points are not sorted by x). Unpaired trailing values of the longer list are ignored. Its colour is assigned when it is added to a plot.</p><h3>Examples</h3><pre data-try="(Plot.line_series([0.0, 1.0], [2.0, 3.0])).ys == [2.0, 3.0]" data-try-kind="transcript"><code>march&gt; (<span class="tok-ty">Plot</span>.line_series([<span class="tok-num">0.0</span>, <span class="tok-num">1.0</span>], [<span class="tok-num">2.0</span>, <span class="tok-num">3.0</span>])).ys == [<span class="tok-num">2.0</span>, <span class="tok-num">3.0</span>]
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-new"><div class="ih"><span class="badge bfn">fn</span><span class="name">new</span><span class="sig">new() : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-new" title="Link">#</a></div><div class="ib"><p>An empty 640x480 plot: no title, no series, 60px margin, axes auto-ranged from the data with 5 target ticks, legend and grid off.</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+p.width
+let p = Plot.new()
+List.length(p.series)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; p.width
+<span class="tok-num">640</span>
+march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; <span class="tok-ty">List</span>.length(p.series)
+<span class="tok-num">0</span></code></pre></div></div>
+<div class="item" id="fn-new_sized"><div class="ih"><span class="badge bfn">fn</span><span class="name">new_sized</span><span class="sig">new_sized(w : Int, h : Int) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-new_sized" title="Link">#</a></div><div class="ib"><p>Like <code>new()</code> but with the given width and height in pixels.</p><h3>Examples</h3><pre data-try="let big = Plot.new_sized(800, 600)
+(big.width, big.height)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> big = <span class="tok-ty">Plot</span>.new_sized(<span class="tok-num">800</span>, <span class="tok-num">600</span>)
+march&gt; (big.width, big.height)
+(<span class="tok-num">800</span>, <span class="tok-num">600</span>)</code></pre></div></div>
+<div class="item" id="fn-quick_bar"><div class="ih"><span class="badge bfn">fn</span><span class="name">quick_bar</span><span class="sig">quick_bar(labels : List(String), values : List(Float)) : String</span><a class="anchor-link" href="#fn-quick_bar" title="Link">#</a></div><div class="ib"><p>Shortcut: the SVG of a default plot with one bar series (see <code>bar_series</code>; the labels are not drawn).</p><h3>Examples</h3><pre data-try="String.ends_with(Plot.quick_bar([&quot;a&quot;, &quot;b&quot;], [1.0, 2.0]), &quot;&lt;/svg&gt;&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.ends_with(<span class="tok-ty">Plot</span>.quick_bar([<span class="tok-str">&quot;a&quot;</span>, <span class="tok-str">&quot;b&quot;</span>], [<span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>]), <span class="tok-str">&quot;&lt;/svg&gt;&quot;</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-quick_histogram"><div class="ih"><span class="badge bfn">fn</span><span class="name">quick_histogram</span><span class="sig">quick_histogram(values : List(Float), bins : Int) : String</span><a class="anchor-link" href="#fn-quick_histogram" title="Link">#</a></div><div class="ib"><p>Shortcut: the SVG of a default plot with one <code>histogram_series(values, bins)</code>.</p><h3>Examples</h3><pre data-try="String.contains(Plot.quick_histogram([1.0, 2.0, 2.0, 3.0], 2), &quot;&lt;rect&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.contains(<span class="tok-ty">Plot</span>.quick_histogram([<span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>, <span class="tok-num">2.0</span>, <span class="tok-num">3.0</span>], <span class="tok-num">2</span>), <span class="tok-str">&quot;&lt;rect&quot;</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-quick_line"><div class="ih"><span class="badge bfn">fn</span><span class="name">quick_line</span><span class="sig">quick_line(xs : List(Float), ys : List(Float)) : String</span><a class="anchor-link" href="#fn-quick_line" title="Link">#</a></div><div class="ib"><p>Shortcut: the SVG of a default plot with one line series.</p><h3>Examples</h3><pre data-try="String.contains(Plot.quick_line([0.0, 1.0], [0.0, 1.0]), &quot;&lt;polyline&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.contains(<span class="tok-ty">Plot</span>.quick_line([<span class="tok-num">0.0</span>, <span class="tok-num">1.0</span>], [<span class="tok-num">0.0</span>, <span class="tok-num">1.0</span>]), <span class="tok-str">&quot;&lt;polyline&quot;</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-quick_scatter"><div class="ih"><span class="badge bfn">fn</span><span class="name">quick_scatter</span><span class="sig">quick_scatter(xs : List(Float), ys : List(Float)) : String</span><a class="anchor-link" href="#fn-quick_scatter" title="Link">#</a></div><div class="ib"><p>Shortcut: the SVG of a default plot with one scatter series.</p><h3>Examples</h3><pre data-try="String.contains(Plot.quick_scatter([1.0, 2.0], [2.0, 3.0]), &quot;&lt;circle&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.contains(<span class="tok-ty">Plot</span>.quick_scatter([<span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>], [<span class="tok-num">2.0</span>, <span class="tok-num">3.0</span>]), <span class="tok-str">&quot;&lt;circle&quot;</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-save"><div class="ih"><span class="badge bfn">fn</span><span class="name">save</span><span class="sig">save(p : <a href="#type-Plot">Plot</a>, path : String) : Result(Unit, File.FileError)</span><a class="anchor-link" href="#fn-save" title="Link">#</a></div><div class="ib"><p>Render <code>p</code> to SVG and write it to <code>path</code>, replacing any existing file. Fails with the <code>File.FileError</code> the write reported (<code>NotFound</code>, <code>Permission</code>, <code>IsDirectory</code>, <code>IoError</code>, ...).</p><h3>Examples</h3><pre><code><span class="tok-ty">Plot</span>.new()
+  |&gt; <span class="tok-ty">Plot</span>.add_series(<span class="tok-ty">Plot</span>.line_series([<span class="tok-num">0.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>], [<span class="tok-num">1.0</span>, <span class="tok-num">4.0</span>, <span class="tok-num">9.0</span>]))
+  |&gt; <span class="tok-ty">Plot</span>.set_title(<span class="tok-str">&quot;Squares&quot;</span>)
+  |&gt; <span class="tok-ty">Plot</span>.save(<span class="tok-str">&quot;squares.svg&quot;</span>)</code></pre></div></div>
+<div class="item" id="fn-scatter_series"><div class="ih"><span class="badge bfn">fn</span><span class="name">scatter_series</span><span class="sig">scatter_series(xs : List(Float), ys : List(Float)) : <a href="#type-Series">Series</a></span><a class="anchor-link" href="#fn-scatter_series" title="Link">#</a></div><div class="ib"><p>A scatter series: one circle (radius 4px) per point of <code>zip(xs, ys)</code>. Unpaired trailing values of the longer list are ignored.</p><h3>Examples</h3><pre data-try="(Plot.scatter_series([1.0], [5.0])).xs == [1.0]" data-try-kind="transcript"><code>march&gt; (<span class="tok-ty">Plot</span>.scatter_series([<span class="tok-num">1.0</span>], [<span class="tok-num">5.0</span>])).xs == [<span class="tok-num">1.0</span>]
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-set_size"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_size</span><span class="sig">set_size(p : <a href="#type-Plot">Plot</a>, w : Int, h : Int) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_size" title="Link">#</a></div><div class="ib"><p>Set the SVG width and height in pixels.</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+let sized = Plot.set_size(p, 320, 240)
+(sized.width, sized.height)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; <span class="tok-kw">let</span> sized = <span class="tok-ty">Plot</span>.set_size(p, <span class="tok-num">320</span>, <span class="tok-num">240</span>)
+march&gt; (sized.width, sized.height)
+(<span class="tok-num">320</span>, <span class="tok-num">240</span>)</code></pre></div></div>
+<div class="item" id="fn-set_title"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_title</span><span class="sig">set_title(p : <a href="#type-Plot">Plot</a>, t : String) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_title" title="Link">#</a></div><div class="ib"><p>Set the title drawn centred above the plot (escaped for SVG).</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+(Plot.set_title(p, &quot;Revenue&quot;)).title" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; (<span class="tok-ty">Plot</span>.set_title(p, <span class="tok-str">&quot;Revenue&quot;</span>)).title
+<span class="tok-ty">Some</span>(<span class="tok-str">&quot;Revenue&quot;</span>)</code></pre></div></div>
+<div class="item" id="fn-set_x_range"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_x_range</span><span class="sig">set_x_range(p : <a href="#type-Plot">Plot</a>, lo : Float, hi : Float) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_x_range" title="Link">#</a></div><div class="ib"><p>Fix the x-axis data range to <code>[lo, hi]</code> instead of auto-ranging. Auto ranges take the data min/max and pad each side by 5% of the span (0.5 when the span is zero); a fixed range is used as given. Points outside the range are not clipped.</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+((Plot.set_x_range(p, 0.0, 10.0)).x_axis.data_max) == Some(10.0)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; ((<span class="tok-ty">Plot</span>.set_x_range(p, <span class="tok-num">0.0</span>, <span class="tok-num">10.0</span>)).x_axis.data_max) == <span class="tok-ty">Some</span>(<span class="tok-num">10.0</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-set_xlabel"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_xlabel</span><span class="sig">set_xlabel(p : <a href="#type-Plot">Plot</a>, l : String) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_xlabel" title="Link">#</a></div><div class="ib"><p>Set the x-axis label, drawn centred under the x-axis tick labels.</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+(Plot.set_xlabel(p, &quot;time&quot;)).x_axis.label" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; (<span class="tok-ty">Plot</span>.set_xlabel(p, <span class="tok-str">&quot;time&quot;</span>)).x_axis.label
+<span class="tok-ty">Some</span>(<span class="tok-str">&quot;time&quot;</span>)</code></pre></div></div>
+<div class="item" id="fn-set_y_range"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_y_range</span><span class="sig">set_y_range(p : <a href="#type-Plot">Plot</a>, lo : Float, hi : Float) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_y_range" title="Link">#</a></div><div class="ib"><p>Fix the y-axis data range to <code>[lo, hi]</code> instead of auto-ranging (see <code>set_x_range</code>).</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+((Plot.set_y_range(p, 0.0, 1.0)).y_axis.data_min) == Some(0.0)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; ((<span class="tok-ty">Plot</span>.set_y_range(p, <span class="tok-num">0.0</span>, <span class="tok-num">1.0</span>)).y_axis.data_min) == <span class="tok-ty">Some</span>(<span class="tok-num">0.0</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-set_ylabel"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_ylabel</span><span class="sig">set_ylabel(p : <a href="#type-Plot">Plot</a>, l : String) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-set_ylabel" title="Link">#</a></div><div class="ib"><p>Set the y-axis label, drawn rotated to the left of the y-axis.</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+(Plot.set_ylabel(p, &quot;count&quot;)).y_axis.label" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; (<span class="tok-ty">Plot</span>.set_ylabel(p, <span class="tok-str">&quot;count&quot;</span>)).y_axis.label
+<span class="tok-ty">Some</span>(<span class="tok-str">&quot;count&quot;</span>)</code></pre></div></div>
+<div class="item" id="fn-to_svg"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_svg</span><span class="sig">to_svg(p : <a href="#type-Plot">Plot</a>) : String</span><a class="anchor-link" href="#fn-to_svg" title="Link">#</a></div><div class="ib"><p>Render <code>p</code> as a self-contained SVG document string (<code>&lt;svg ...&gt;</code> through <code>&lt;/svg&gt;</code>): white background, plot-area border, optional grid, axes with &quot;nice&quot; ticks (steps of 1, 2 or 5 times a power of ten), the series, the title and the optional legend. Coordinates and tick labels are written with two decimals (truncated). Title, axis and legend text is XML-escaped.</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+String.starts_with(Plot.to_svg(p), &quot;&lt;svg&quot;)
+let p = Plot.new()
+String.contains(Plot.to_svg(Plot.set_title(p, &quot;a&lt;b&quot;)), &quot;a&amp;lt;b&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; <span class="tok-ty">String</span>.starts_with(<span class="tok-ty">Plot</span>.to_svg(p), <span class="tok-str">&quot;&lt;svg&quot;</span>)
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; <span class="tok-ty">String</span>.contains(<span class="tok-ty">Plot</span>.to_svg(<span class="tok-ty">Plot</span>.set_title(p, <span class="tok-str">&quot;a&lt;b&quot;</span>)), <span class="tok-str">&quot;a&amp;lt;b&quot;</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-with_grid"><div class="ih"><span class="badge bfn">fn</span><span class="name">with_grid</span><span class="sig">with_grid(p : <a href="#type-Plot">Plot</a>) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-with_grid" title="Link">#</a></div><div class="ib"><p>Turn on light dashed grid lines at every axis tick.</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+(Plot.with_grid(p)).show_grid" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; (<span class="tok-ty">Plot</span>.with_grid(p)).show_grid
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-with_legend"><div class="ih"><span class="badge bfn">fn</span><span class="name">with_legend</span><span class="sig">with_legend(p : <a href="#type-Plot">Plot</a>) : <a href="#type-Plot">Plot</a></span><a class="anchor-link" href="#fn-with_legend" title="Link">#</a></div><div class="ib"><p>Turn on the legend, drawn to the right of the plot area. Only series with a label (see <code>add_labeled_series</code>) appear in it.</p><h3>Examples</h3><pre data-try="let p = Plot.new()
+(Plot.with_legend(p)).show_legend" data-try-kind="transcript"><code>march&gt; <span class="tok-kw">let</span> p = <span class="tok-ty">Plot</span>.new()
+march&gt; (<span class="tok-ty">Plot</span>.with_legend(p)).show_legend
+<span class="tok-kw">true</span></code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

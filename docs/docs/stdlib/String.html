@@ -393,7 +393,11 @@ march&gt; <span class="tok-ty">String</span>.from_int(-<span class="tok-num">7</
 <span class="tok-str">&quot;-7&quot;</span>
 march&gt; <span class="tok-ty">String</span>.from_int(<span class="tok-num">0</span>)
 <span class="tok-str">&quot;0&quot;</span></code></pre><p>Cost: O(digits).</p></div></div>
-<div class="item" id="fn-grapheme_count"><div class="ih"><span class="badge bfn">fn</span><span class="name">grapheme_count</span><span class="sig">grapheme_count(s) do codepoint_count(s) end</span><a class="anchor-link" href="#fn-grapheme_count" title="Link">#</a></div><div class="ib"><p>Legacy alias for <code>codepoint_count</code>.  Despite the name, this function counts codepoints, not grapheme clusters; new code should call <code>codepoint_count</code> directly.  Retained for backward compatibility.</p></div></div>
+<div class="item" id="fn-grapheme_count"><div class="ih"><span class="badge bfn">fn</span><span class="name">grapheme_count</span><span class="sig">grapheme_count(s) do codepoint_count(s) end</span><a class="anchor-link" href="#fn-grapheme_count" title="Link">#</a></div><div class="ib"><p>Legacy alias for <code>codepoint_count</code>.  Despite the name, this function counts codepoints, not grapheme clusters; new code should call <code>codepoint_count</code> directly.  Retained for backward compatibility.</p><pre data-try="String.grapheme_count(&quot;héllo&quot;)
+String.grapheme_count(&quot;e&quot; ++ Option.unwrap(String.from_codepoint(769)))  -- one grapheme, two codepoints" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.grapheme_count(<span class="tok-str">&quot;héllo&quot;</span>)
+<span class="tok-num">5</span>
+march&gt; <span class="tok-ty">String</span>.grapheme_count(<span class="tok-str">&quot;e&quot;</span> ++ <span class="tok-ty">Option</span>.unwrap(<span class="tok-ty">String</span>.from_codepoint(<span class="tok-num">769</span>)))  <span class="tok-com">-- one grapheme, two codepoints</span>
+<span class="tok-num">2</span></code></pre></div></div>
 <div class="item" id="fn-index_of"><div class="ih"><span class="badge bfn">fn</span><span class="name">index_of</span><span class="sig">index_of(s, substring) do string_index_of(s, substring) end</span><a class="anchor-link" href="#fn-index_of" title="Link">#</a></div><div class="ib"><p>Find the byte offset of the first occurrence of <code>substring</code> in <code>s</code>. Returns <code>Some(offset)</code> if found, <code>None</code> if not found.</p><pre data-try="String.index_of(&quot;hello&quot;, &quot;ll&quot;)
 String.index_of(&quot;hello&quot;, &quot;xyz&quot;)
 String.index_of(&quot;hello&quot;, &quot;&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.index_of(<span class="tok-str">&quot;hello&quot;</span>, <span class="tok-str">&quot;ll&quot;</span>)
@@ -467,7 +471,11 @@ String.reverse(&quot;racecar&quot;)" data-try-kind="transcript"><code>march&gt; 
 <span class="tok-str">&quot;olleh&quot;</span>
 march&gt; <span class="tok-ty">String</span>.reverse(<span class="tok-str">&quot;racecar&quot;</span>)
 <span class="tok-str">&quot;racecar&quot;</span></code></pre><p>Note: byte-reversal is not the same as grapheme-reversal for multi-byte UTF-8 codepoints.  This function is primarily useful for ASCII strings.</p><p>Cost: O(n).</p></div></div>
-<div class="item" id="fn-slice"><div class="ih"><span class="badge bfn">fn</span><span class="name">slice</span><span class="sig">slice(s, start, len) do string_slice(s, start, len) end</span><a class="anchor-link" href="#fn-slice" title="Link">#</a></div><div class="ib"><p>Alias for slice_bytes: extract len bytes starting at start.</p></div></div>
+<div class="item" id="fn-slice"><div class="ih"><span class="badge bfn">fn</span><span class="name">slice</span><span class="sig">slice(s, start, len) do string_slice(s, start, len) end</span><a class="anchor-link" href="#fn-slice" title="Link">#</a></div><div class="ib"><p>Alias for <code>slice_bytes</code>: extracts <code>len</code> bytes starting at byte offset <code>start</code>, with the same clamping. Offsets are bytes, not codepoints, so a slice can split a multi-byte character.</p><pre data-try="String.slice(&quot;hello world&quot;, 0, 5)
+String.slice(&quot;hello&quot;, 3, 100)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.slice(<span class="tok-str">&quot;hello world&quot;</span>, <span class="tok-num">0</span>, <span class="tok-num">5</span>)
+<span class="tok-str">&quot;hello&quot;</span>
+march&gt; <span class="tok-ty">String</span>.slice(<span class="tok-str">&quot;hello&quot;</span>, <span class="tok-num">3</span>, <span class="tok-num">100</span>)
+<span class="tok-str">&quot;lo&quot;</span></code></pre></div></div>
 <div class="item" id="fn-slice_bytes"><div class="ih"><span class="badge bfn">fn</span><span class="name">slice_bytes</span><span class="sig">slice_bytes(s, start, len) do string_slice(s, start, len) end</span><a class="anchor-link" href="#fn-slice_bytes" title="Link">#</a></div><div class="ib"><p>Return a byte-indexed substring of <code>s</code> starting at byte offset <code>start</code> with length <code>len</code> bytes.</p><pre data-try="String.slice_bytes(&quot;hello world&quot;, 6, 5)
 String.slice_bytes(&quot;hello&quot;, 0, 100)  -- clamped" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.slice_bytes(<span class="tok-str">&quot;hello world&quot;</span>, <span class="tok-num">6</span>, <span class="tok-num">5</span>)
 <span class="tok-str">&quot;world&quot;</span>
@@ -497,7 +505,17 @@ march&gt; <span class="tok-ty">String</span>.starts_with(<span class="tok-str">&
 <span class="tok-kw">false</span>
 march&gt; <span class="tok-ty">String</span>.starts_with(<span class="tok-str">&quot;hello&quot;</span>, <span class="tok-str">&quot;&quot;</span>)
 <span class="tok-kw">true</span></code></pre><p>Cost: O(|prefix|).</p></div></div>
-<div class="item" id="fn-to_codepoints"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_codepoints</span><span class="sig">to_codepoints(s : String) : List(Int)</span><a class="anchor-link" href="#fn-to_codepoints" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="fn-to_codepoints"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_codepoints</span><span class="sig">to_codepoints(s : String) : List(Int)</span><a class="anchor-link" href="#fn-to_codepoints" title="Link">#</a></div><div class="ib"><p>Extract all Unicode codepoints from a string as an Int list. Each codepoint is yielded as a separate integer in the range 0x0 to 0x10FFFF.</p><p>Returns a list ordered left-to-right. Invalid UTF-8 sequences are treated as individual byte values (0x0 to 0xFF); well-formed March strings will not encounter this case.</p><pre data-try="String.to_codepoints(&quot;A&quot;)
+String.to_codepoints(&quot;é&quot;)
+String.to_codepoints(&quot;AB&quot;)
+String.to_codepoints(&quot;😀&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.to_codepoints(<span class="tok-str">&quot;A&quot;</span>)
+[<span class="tok-num">65</span>]
+march&gt; <span class="tok-ty">String</span>.to_codepoints(<span class="tok-str">&quot;é&quot;</span>)
+[<span class="tok-num">233</span>]
+march&gt; <span class="tok-ty">String</span>.to_codepoints(<span class="tok-str">&quot;AB&quot;</span>)
+[<span class="tok-num">65</span>, <span class="tok-num">66</span>]
+march&gt; <span class="tok-ty">String</span>.to_codepoints(<span class="tok-str">&quot;😀&quot;</span>)
+[<span class="tok-num">128512</span>]</code></pre><p>Cost: O(n) where n is the byte length of the string.</p></div></div>
 <div class="item" id="fn-to_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_float</span><span class="sig">to_float(s)</span><a class="anchor-link" href="#fn-to_float" title="Link">#</a></div><div class="ib"><p>Parse <code>s</code> as a floating-point number. Returns <code>Ok(f)</code> on success, <code>Err(msg)</code> if the string is not a valid float.</p><pre data-try="String.to_float(&quot;3.14&quot;)
 String.to_float(&quot;1e10&quot;) == Ok(10000000000.0)
 String.to_float(&quot;abc&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">String</span>.to_float(<span class="tok-str">&quot;3.14&quot;</span>)

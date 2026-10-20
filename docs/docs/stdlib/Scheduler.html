@@ -294,11 +294,83 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="WebSocket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WebSocket.html">WebSocket</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="WorkDispatch.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WorkDispatch.html">WorkDispatch</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Xml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Xml.html">Xml</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Scheduler</span></nav><h1>Scheduler</h1><div class="mdoc"><p>Scheduler: runtime observability for the actor/task scheduler.</p><p>These counters are the load-shedding substrate: a supervisor or ingress actor polls them to decide when to shed. Interpreted backend reports the subset that is meaningful without the C scheduler (live actor count); unknown/unsupported indices read 0 on both backends.</p></div><h2>Functions</h2><div class="item" id="fn-dropped_messages"><div class="ih"><span class="badge bfn">fn</span><span class="name">dropped_messages</span><span class="sig">dropped_messages() : Int do sched_stat(4) end</span><a class="anchor-link" href="#fn-dropped_messages" title="Link">#</a></div><div class="ib"><p>Messages dropped by bounded-mailbox overflow policies.</p></div></div>
-<div class="item" id="fn-live_procs"><div class="ih"><span class="badge bfn">fn</span><span class="name">live_procs</span><span class="sig">live_procs() : Int do sched_stat(0) end</span><a class="anchor-link" href="#fn-live_procs" title="Link">#</a></div><div class="ib"><p>Green-thread processes currently alive (actors + tasks + main).</p></div></div>
-<div class="item" id="fn-runq_depth"><div class="ih"><span class="badge bfn">fn</span><span class="name">runq_depth</span><span class="sig">runq_depth() : Int do sched_stat(2) end</span><a class="anchor-link" href="#fn-runq_depth" title="Link">#</a></div><div class="ib"><p>Cross-thread global run-queue depth (instantaneous).</p></div></div>
-<div class="item" id="fn-stat"><div class="ih"><span class="badge bfn">fn</span><span class="name">stat</span><span class="sig">stat(i : Int) : Int</span><a class="anchor-link" href="#fn-stat" title="Link">#</a></div><div class="ib"><p>Raw stat by index. 0=live procs, 1=total spawned, 2=global runq depth, 3=stack-alloc failures, 4=messages dropped by mailbox policy, 5=stacks recycled, 6=pending timers, 7=execution contexts released at proc death, 8=dead proc structs freed, 9=dead proc structs retired and still waiting for their grace period, 10=dead actors' metadata freed, 11=dead actors' metadata retired and still waiting for its grace period. Unknown index reads 0.</p></div></div>
-<div class="item" id="fn-total_spawned"><div class="ih"><span class="badge bfn">fn</span><span class="name">total_spawned</span><span class="sig">total_spawned() : Int do sched_stat(1) end</span><a class="anchor-link" href="#fn-total_spawned" title="Link">#</a></div><div class="ib"><p>Processes ever spawned over the program lifetime.</p></div></div></main></div><script>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Scheduler</span></nav><h1>Scheduler</h1><div class="mdoc"><p>Scheduler: runtime observability for the actor/task scheduler.</p><p>These counters are the load-shedding substrate: a supervisor or ingress actor polls them to decide when to shed. Interpreted backend reports the subset that is meaningful without the C scheduler (live actor count); unknown/unsupported indices read 0 on both backends.</p><p>Every value is an instantaneous reading of the running program, so the examples below compare readings rather than pinning them.</p></div><h2>Functions</h2><div class="item" id="fn-dropped_messages"><div class="ih"><span class="badge bfn">fn</span><span class="name">dropped_messages</span><span class="sig">dropped_messages() : Int do sched_stat(4) end</span><a class="anchor-link" href="#fn-dropped_messages" title="Link">#</a></div><div class="ib"><p>Messages dropped by bounded-mailbox overflow policies (see <code>Actor.set_queue_limit</code>), summed over every actor for the program lifetime.</p><pre><code><span class="tok-kw">let</span> dropped = <span class="tok-ty">Scheduler</span>.dropped_messages()
+<span class="tok-kw">if</span> dropped &gt; last_dropped <span class="tok-kw">do</span> alert(dropped - last_dropped) <span class="tok-kw">else</span> () <span class="tok-kw">end</span></code></pre></div></div>
+<div class="item" id="fn-live_procs"><div class="ih"><span class="badge bfn">fn</span><span class="name">live_procs</span><span class="sig">live_procs() : Int do sched_stat(0) end</span><a class="anchor-link" href="#fn-live_procs" title="Link">#</a></div><div class="ib"><p>Green-thread processes currently alive (actors + tasks + main).  The interpreter counts live actors only.</p><pre><code><span class="tok-kw">let</span> before = <span class="tok-ty">Scheduler</span>.live_procs()
+<span class="tok-kw">let</span> pid = <span class="tok-kw">spawn</span>(<span class="tok-ty">Worker</span>)
+<span class="tok-ty">Scheduler</span>.live_procs() - before   <span class="tok-com">-- 1 while the worker lives</span></code></pre></div></div>
+<div class="item" id="fn-runq_depth"><div class="ih"><span class="badge bfn">fn</span><span class="name">runq_depth</span><span class="sig">runq_depth() : Int do sched_stat(2) end</span><a class="anchor-link" href="#fn-runq_depth" title="Link">#</a></div><div class="ib"><p>Cross-thread global run-queue depth (instantaneous).  Compiled backend only; the interpreter reads 0.</p><pre><code><span class="tok-kw">if</span> <span class="tok-ty">Scheduler</span>.runq_depth() &gt; <span class="tok-num">1000</span> <span class="tok-kw">do</span> shed(req) <span class="tok-kw">else</span> serve(req) <span class="tok-kw">end</span></code></pre></div></div>
+<div class="item" id="fn-stat"><div class="ih"><span class="badge bfn">fn</span><span class="name">stat</span><span class="sig">stat(i : Int) : Int</span><a class="anchor-link" href="#fn-stat" title="Link">#</a></div><div class="ib"><p>Raw stat by index:</p><ul><li>0 live procs</li><li>1 total spawned</li><li>2 global runq depth</li><li>3 stack-alloc failures</li><li>4 messages dropped by mailbox policy</li><li>5 stacks recycled</li><li>6 pending timers</li><li>7 execution contexts released at proc death</li><li>8 dead proc structs freed</li><li>9 dead proc structs retired and still waiting for their grace period</li><li>10 dead actors' metadata freed</li><li>11 dead actors' metadata retired and still waiting for its grace period</li></ul><p>An unknown index (including a negative one) reads 0, as does a counter the interpreter does not track.</p><h3>Examples</h3><pre data-try="Scheduler.stat(99)
+Scheduler.stat(1) &gt;= Scheduler.stat(0)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Scheduler</span>.stat(<span class="tok-num">99</span>)
+<span class="tok-num">0</span>
+march&gt; <span class="tok-ty">Scheduler</span>.stat(<span class="tok-num">1</span>) &gt;= <span class="tok-ty">Scheduler</span>.stat(<span class="tok-num">0</span>)
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-total_spawned"><div class="ih"><span class="badge bfn">fn</span><span class="name">total_spawned</span><span class="sig">total_spawned() : Int do sched_stat(1) end</span><a class="anchor-link" href="#fn-total_spawned" title="Link">#</a></div><div class="ib"><p>Processes ever spawned over the program lifetime.  Never decreases, and is never below <code>live_procs()</code>.</p><h3>Examples</h3><pre data-try="Scheduler.total_spawned() &gt;= Scheduler.live_procs()" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Scheduler</span>.total_spawned() &gt;= <span class="tok-ty">Scheduler</span>.live_procs()
+<span class="tok-kw">true</span></code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
