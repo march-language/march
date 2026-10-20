@@ -14,6 +14,8 @@
 -- - Records, tuples and constructors render field by field, in derive Show's
 --   form.
 -- - A hand-written Show impl's string is cut at 16 KiB (`show_cut`).
+--
+-- doc: try
 
 mod ShellRender do
 
@@ -75,7 +77,16 @@ mod ShellRender do
 
   doc """
   `s` as a March string literal: quoted, with double quotes, backslashes,
-  control bytes and an interpolation opener escaped.
+  control bytes and an interpolation opener escaped.  `\n`, `\r` and `\t`
+  use their short escapes, other control bytes and DEL become `\xNN`, and
+  `$` is escaped only when followed by `{`.  Bytes >= 128 pass through.
+
+  ## Examples
+
+      march> ShellRender.quote("hi")
+      "\"hi\""
+      march> ShellRender.quote("a\tb")
+      "\"a\\tb\""
   """
   fn quote(s : String) : String do
     "\"" ++ escape_go(s, 0, string_byte_length(s), 0, Nil) ++ "\""
@@ -83,7 +94,16 @@ mod ShellRender do
 
   doc """
   `s` quoted (see `quote`), cut after `limit` codepoints with `… n more
-  chars`.  `limit <= 0` keeps all of it.
+  chars`.  `limit <= 0` keeps all of it.  The cut counts codepoints but
+  `n` is computed from the grapheme count, so the two can disagree for
+  text with combining marks.
+
+  ## Examples
+
+      march> ShellRender.string("hello", 0)
+      "\"hello\""
+      march> ShellRender.string("hello", 3) == "\"hel\"… 2 more chars"
+      true
   """
   fn string(s : String, limit : Int) : String do
     let len = string_byte_length(s)
@@ -100,6 +120,13 @@ mod ShellRender do
   (`limit <= 0` keeps all of it): the shell prints a string at the top of a
   result this way, and the payload of a top-level one-field constructor
   (`Ok("…")`, as `Actor.inspect_state` returns its already rendered state).
+
+  ## Examples
+
+      march> ShellRender.raw("hello", 3) == "hel… 2 more chars"
+      true
+      march> ShellRender.raw("hello", 10)
+      "hello"
   """
   fn raw(s : String, limit : Int) : String do
     let len = string_byte_length(s)
@@ -111,12 +138,25 @@ mod ShellRender do
     end
   end
 
-  doc "The most bytes `show_cut` keeps of a hand-written Show impl's string: 16 KiB."
+  doc """
+  The most bytes `show_cut` keeps of a hand-written Show impl's string: 16 KiB.
+
+  ## Examples
+
+      march> ShellRender.show_cap()
+      16384
+  """
   fn show_cap() : Int do 16384 end
 
   doc """
   A hand-written Show impl's string, cut at 16 KiB (on a codepoint
   boundary) with `… (n more bytes)`; it cannot take an element limit.
+  A string of at most `show_cap()` bytes is returned unchanged.
+
+  ## Examples
+
+      march> ShellRender.show_cut("short")
+      "short"
   """
   fn show_cut(s : String) : String do
     let len = string_byte_length(s)
@@ -165,18 +205,42 @@ mod ShellRender do
 
   doc """
   A list, each element rendered by `f`: `[1, 2, … 98 more]` at most `limit`
-  elements (all when `limit <= 0`).
+  elements (all when `limit <= 0`).  `f` is called only on the elements
+  shown.
+
+  ## Examples
+
+      march> ShellRender.list([1, 2, 3, 4], 2, int_to_string) == "[1, 2, … 2 more]"
+      true
+      march> ShellRender.list([1, 2, 3], 0, int_to_string)
+      "[1, 2, 3]"
+      march> ShellRender.list([], 2, int_to_string)
+      "[]"
   """
   fn list(xs : List(a), limit : Int, f : a -> String) : String do
     "[" ++ items(xs, limit, f) ++ "]"
   end
 
-  doc "An Array: `Array[1, 2, … n more]`, as `list`."
+  doc """
+  An Array: `Array[1, 2, … n more]`, as `list`.
+
+  ## Examples
+
+      march> ShellRender.array(Array.from_list([1, 2, 3]), 2, int_to_string) == "Array[1, 2, … 1 more]"
+      true
+  """
   fn array(v, limit : Int, f) : String do
     "Array[" ++ items(Array.to_list(v), limit, f) ++ "]"
   end
 
-  doc "A Set: `Set{1, 2, … n more}`, as `list`, in the set's iteration order."
+  doc """
+  A Set: `Set{1, 2, … n more}`, as `list`, in the set's iteration order.
+
+  ## Examples
+
+      march> ShellRender.set(Set.from_list([3, 1, 2], fn a -> fn b -> a < b), 0, int_to_string)
+      "Set{1, 2, 3}"
+  """
   fn set(s, limit : Int, f) : String do
     "Set{" ++ items(Set.to_list(s), limit, f) ++ "}"
   end
@@ -184,6 +248,11 @@ mod ShellRender do
   doc """
   A Map: `Map{k => v, … n more}`, keys by `fk` and values by `fv`, at most
   `limit` entries, in the map's iteration order.
+
+  ## Examples
+
+      march> ShellRender.map(Map.from_list_int([(1, "a"), (2, "b")]), 1, int_to_string, ShellRender.quote) == "Map{1 => \"a\", … 1 more}"
+      true
   """
   fn map(m, limit : Int, fk, fv) : String do
     "Map{" ++ items(Map.to_list(m), limit, fn p -> entry(p, fk, fv)) ++ "}"
@@ -201,6 +270,11 @@ mod ShellRender do
   doc """
   A HashMap: `HashMap{k => v, … n more}`, as `map`, in the map's hash
   order.
+
+  ## Examples
+
+      march> ShellRender.hash_map(HashMap.from_list([(1, "a")]), 0, int_to_string, ShellRender.quote)
+      "HashMap{1 => \"a\"}"
   """
   fn hash_map(m, limit : Int, fk, fv) : String do
     "HashMap{" ++ entries(HashMap.to_list(m), limit, fk, fv) ++ "}"
@@ -208,27 +282,60 @@ mod ShellRender do
 
   doc """
   An OrderedMap: `OrderedMap{k => v, … n more}`, as `map`, in key order.
+
+  ## Examples
+
+      march> ShellRender.ordered_map(OrderedMap.from_list([(2, "b"), (1, "a")], fn (a, b) -> a - b), 0, int_to_string, ShellRender.quote)
+      "OrderedMap{1 => \"a\", 2 => \"b\"}"
   """
   fn ordered_map(m, limit : Int, fk, fv) : String do
     "OrderedMap{" ++ entries(OrderedMap.to_list(m), limit, fk, fv) ++ "}"
   end
 
-  doc "A SortedSet: `SortedSet{1, 2, … n more}`, as `list`, in order."
+  doc """
+  A SortedSet: `SortedSet{1, 2, … n more}`, as `list`, in order.
+
+  ## Examples
+
+      march> ShellRender.sorted_set(SortedSet.from_list([3, 1, 2], fn (a, b) -> a - b), 2, int_to_string) == "SortedSet{1, 2, … 1 more}"
+      true
+  """
   fn sorted_set(s, limit : Int, f) : String do
     "SortedSet{" ++ items(SortedSet.to_list(s), limit, f) ++ "}"
   end
 
-  doc "A Deque: `Deque[1, 2, … n more]`, as `list`, front to back."
+  doc """
+  A Deque: `Deque[1, 2, … n more]`, as `list`, front to back.
+
+  ## Examples
+
+      march> ShellRender.deque(Deque.from_list([1, 2, 3]), 0, int_to_string)
+      "Deque[1, 2, 3]"
+  """
   fn deque(d, limit : Int, f) : String do
     "Deque[" ++ items(Deque.to_list(d), limit, f) ++ "]"
   end
 
-  doc "A Queue: `Queue[1, 2, … n more]`, as `list`, front to back."
+  doc """
+  A Queue: `Queue[1, 2, … n more]`, as `list`, front to back.
+
+  ## Examples
+
+      march> ShellRender.queue(Queue.from_list([1, 2, 3]), 1, int_to_string) == "Queue[1, … 2 more]"
+      true
+  """
   fn queue(q, limit : Int, f) : String do
     "Queue[" ++ items(Queue.to_list(q), limit, f) ++ "]"
   end
 
-  doc "An RRB vector: `RRB.Vec[1, 2, … n more]`, as `list`, in index order."
+  doc """
+  An RRB vector: `RRB.Vec[1, 2, … n more]`, as `list`, in index order.
+
+  ## Examples
+
+      march> ShellRender.rrb_vec(RRB.from_list([1, 2, 3]), 0, int_to_string)
+      "RRB.Vec[1, 2, 3]"
+  """
   fn rrb_vec(v, limit : Int, f) : String do
     "RRB.Vec[" ++ items(RRB.to_list(v), limit, f) ++ "]"
   end
@@ -236,6 +343,11 @@ mod ShellRender do
   doc """
   A NativeArray, given as the list of its elements (its family's
   `to_list_*`): `NativeArray[1, 2, … n more]`, as `list`.
+
+  ## Examples
+
+      march> ShellRender.native_array([1, 2, 3], 2, int_to_string) == "NativeArray[1, 2, … 1 more]"
+      true
   """
   fn native_array(xs : List(a), limit : Int, f : a -> String) : String do
     "NativeArray[" ++ items(xs, limit, f) ++ "]"
@@ -243,12 +355,28 @@ mod ShellRender do
 
   -- ── records, tuples, constructors ──────────────────────────────────────
 
-  doc "A constructor with arguments: `Name(a, b)`."
+  doc """
+  A constructor with arguments: `Name(a, b)`.  The arguments arrive
+  already rendered.  An empty list still prints the parentheses
+  (`Name()`); a nullary constructor is rendered by its bare name instead.
+
+  ## Examples
+
+      march> ShellRender.ctor("Pair", ["1", "\"a\""])
+      "Pair(1, \"a\")"
+  """
   fn ctor(name : String, args : List(String)) : String do
     name ++ "(" ++ string_join(args, ", ") ++ ")"
   end
 
-  doc "A tuple: `(a, b)`."
+  doc """
+  A tuple: `(a, b)`, its parts already rendered.
+
+  ## Examples
+
+      march> ShellRender.tuple(["1", "true"])
+      "(1, true)"
+  """
   fn tuple(parts : List(String)) : String do
     "(" ++ string_join(parts, ", ") ++ ")"
   end
@@ -256,12 +384,27 @@ mod ShellRender do
   doc """
   A named record, in derive Show's form: `Name { a = 1, b = 2 }`.  Each
   field arrives rendered as `a = 1`.
+
+  ## Examples
+
+      march> ShellRender.record("Point", ["x = 1", "y = 2"])
+      "Point { x = 1, y = 2 }"
   """
   fn record(name : String, fields : List(String)) : String do
     name ++ " { " ++ string_join(fields, ", ") ++ " }"
   end
 
-  doc "An anonymous record: `{ a: 1, b: 2 }`.  Each field arrives rendered as `a: 1`."
+  doc """
+  An anonymous record: `{ a: 1, b: 2 }`.  Each field arrives rendered as
+  `a: 1`.  No fields renders as `{}`.
+
+  ## Examples
+
+      march> ShellRender.anon_record(["a: 1", "b: 2"])
+      "{ a: 1, b: 2 }"
+      march> ShellRender.anon_record([])
+      "{}"
+  """
   fn anon_record(fields : List(String)) : String do
     match fields do
       Nil -> "{}"

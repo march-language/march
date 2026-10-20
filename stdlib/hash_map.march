@@ -9,7 +9,8 @@
 --   size / fold / keys   O(n)
 --
 -- Key order is hash-traversal order (not insertion order, not sorted).
--- Use Map if you need sorted iteration or Ord-derived equality.
+-- Use OrderedMap if you need sorted iteration, or Map for comparator-derived
+-- key equality (Map is also hash-ordered).
 --
 -- doc: try
 
@@ -382,7 +383,16 @@ mod HashMap do
     HamtHashMap(HEmpty)
   end
 
-  doc "Returns true if the map contains no entries."
+  doc """
+  Returns true if the map contains no entries.  O(1).
+
+  ## Examples
+
+      march> HashMap.is_empty(HashMap.put(HashMap.new(), "a", 1))
+      false
+      march> HashMap.is_empty(HashMap.delete(HashMap.put(HashMap.new(), "a", 1), "a"))
+      true
+  """
   fn is_empty(m) do
     match m do
     HamtHashMap(HEmpty) -> true
@@ -420,7 +430,16 @@ mod HashMap do
     end
   end
 
-  doc "Returns the value for key, or default if the key is absent."
+  doc """
+  Returns the value for key, or default if the key is absent.
+
+  ## Examples
+
+      march> HashMap.get_or(HashMap.from_list([("a", 1)]), "a", 0)
+      1
+      march> HashMap.get_or(HashMap.from_list([("a", 1)]), "b", 0)
+      0
+  """
   fn get_or(m, key, default) do
     match get(m, key) do
     Some(v) -> v
@@ -428,7 +447,16 @@ mod HashMap do
     end
   end
 
-  doc "Returns true if key is present."
+  doc """
+  Returns true if key is present.
+
+  ## Examples
+
+      march> HashMap.has(HashMap.from_list([(1, "a")]), 1)
+      true
+      march> HashMap.has(HashMap.from_list([(1, "a")]), 2)
+      false
+  """
   fn has(m, key) do
     match get(m, key) do
     Some(_) -> true
@@ -451,7 +479,17 @@ mod HashMap do
     end
   end
 
-  doc "Returns the number of key-value pairs. O(n)."
+  doc """
+  Returns the number of key-value pairs. O(n): the count is not cached,
+  every call walks the trie.
+
+  ## Examples
+
+      march> HashMap.size(HashMap.new())
+      0
+      march> HashMap.size(HashMap.put(HashMap.from_list([("a", 1), ("b", 2)]), "a", 3))
+      2
+  """
   fn size(m) do
     match m do
     HamtHashMap(node) -> node_size(node)
@@ -463,6 +501,13 @@ mod HashMap do
   Iteration order is hash-traversal order (not sorted, not insertion order).
   Generic in the accumulator `b`, so a refinement demanded of the result
   is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
+
+  ## Examples
+
+      march> HashMap.fold(HashMap.from_list([("a", 1), ("b", 2)]), 0, fn (acc, k, v) -> acc + v)
+      3
+      march> HashMap.fold(HashMap.new(), "init", fn (acc, k, v) -> acc ++ k)
+      "init"
   """
   fn fold(m : HashMap(k, v), acc : b, f : b -> k -> v -> b) : b do
     match m do
@@ -470,19 +515,42 @@ mod HashMap do
     end
   end
 
-  doc "Returns all keys as a list (hash-traversal order)."
+  doc """
+  Returns all keys as a list (hash-traversal order, not sorted).
+
+  ## Examples
+
+      march> List.sort_by(HashMap.keys(HashMap.from_list([("b", 2), ("a", 1)])), fn (x, y) -> x < y)
+      ["a", "b"]
+  """
   fn keys(m) do
     let ks = fold(m, Nil, fn (acc, k, _v) -> Cons(k, acc))
     lst_rev(ks)
   end
 
-  doc "Returns all values as a list (hash-traversal order)."
+  doc """
+  Returns all values as a list (hash-traversal order, the same order as
+  `keys`).
+
+  ## Examples
+
+      march> List.sort_by(HashMap.values(HashMap.from_list([("b", 2), ("a", 1)])), fn (x, y) -> x < y)
+      [1, 2]
+  """
   fn values(m) do
     let vs = fold(m, Nil, fn (acc, _k, v) -> Cons(v, acc))
     lst_rev(vs)
   end
 
-  doc "Returns all (key, value) pairs as a list (hash-traversal order)."
+  doc """
+  Returns all (key, value) pairs as a list (hash-traversal order).  Same as
+  `to_list`.
+
+  ## Examples
+
+      march> List.sort_by(HashMap.entries(HashMap.from_list([("b", 2), ("a", 1)])), fn (x, y) -> x < y)
+      [("a", 1), ("b", 2)]
+  """
   fn entries(m) do
     let es = fold(m, Nil, fn (acc, k, v) -> Cons((k, v), acc))
     lst_rev(es)
@@ -508,7 +576,17 @@ mod HashMap do
     go(pairs, new())
   end
 
-  doc "Converts a HashMap to a list of (key, value) pairs (hash-traversal order)."
+  doc """
+  Converts a HashMap to a list of (key, value) pairs (hash-traversal order,
+  not sorted; sort the result if order matters).
+
+  ## Examples
+
+      march> HashMap.to_list(HashMap.new())
+      []
+      march> HashMap.to_list(HashMap.from_list([("k", 1), ("k", 2)]))
+      [("k", 2)]
+  """
   fn to_list(m) do
     entries(m)
   end
@@ -526,7 +604,15 @@ mod HashMap do
     put(m, key, new_val)
   end
 
-  doc "Applies f to each value, returning a new map with the same keys."
+  doc """
+  Applies f to each value, returning a new map with the same keys.  `f`
+  takes the value only (not the key).
+
+  ## Examples
+
+      march> HashMap.get(HashMap.map_values(HashMap.from_list([("a", 2), ("b", 3)]), fn v -> v * 10), "b")
+      Some(30)
+  """
   fn map_values(m, f) do
     fn go(node) do
       match node do
@@ -568,7 +654,14 @@ mod HashMap do
 
   doc """
   Returns a map containing only entries where `pred(key)(value)` is true.
-  pred : k -> v -> Bool (curried).
+  pred : k -> v -> Bool (curried).  Rebuilds the map by re-inserting the
+  kept entries.
+
+  ## Examples
+
+      march> let fm = HashMap.from_list([("a", 1), ("b", 20), ("c", 30)])
+      march> List.sort_by(HashMap.keys(HashMap.filter(fm, fn k -> fn v -> v > 10)), fn (x, y) -> x < y)
+      ["b", "c"]
   """
   fn filter(m, pred) do
     fn go(lst, acc) do
@@ -588,6 +681,13 @@ mod HashMap do
   doc """
   Merges two maps. When a key appears in both, the value from `b` takes
   precedence. O(n log n) in the size of b.
+
+  ## Examples
+
+      march> let ha = HashMap.from_list([(1, "a"), (2, "b")])
+      march> let hb = HashMap.from_list([(2, "B"), (3, "C")])
+      march> List.sort_by(HashMap.to_list(HashMap.merge(ha, hb)), fn (x, y) -> x < y)
+      [(1, "a"), (2, "B"), (3, "C")]
   """
   fn merge(a, b) do
     fn go(lst, acc) do
@@ -604,8 +704,16 @@ mod HashMap do
 
   doc """
   Merges two maps with a combining function for conflicting keys.
-  When key exists in both, value is `f(val_from_a)(val_from_b)`.
+  When key exists in both, value is `f(val_from_a)(val_from_b)`; keys in
+  only one map keep their value.
   f : v -> v -> v (curried).
+
+  ## Examples
+
+      march> let wa = HashMap.from_list([("x", 1), ("y", 2)])
+      march> let wb = HashMap.from_list([("y", 10), ("z", 5)])
+      march> List.sort_by(HashMap.to_list(HashMap.merge_with(wa, wb, fn a -> fn b -> a + b)), fn (x, y) -> x < y)
+      [("x", 1), ("y", 12), ("z", 5)]
   """
   fn merge_with(a, b, f) do
     fn go(lst, acc) do

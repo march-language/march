@@ -150,7 +150,14 @@ mod DateTime do
 
   -- ── Public API ────────────────────────────────────────────────────────────
 
-  doc "Return the current Unix timestamp as an Int (seconds since 1970-01-01 UTC)."
+  doc """
+  Return the current Unix timestamp as an Int (whole seconds since
+  1970-01-01 UTC; the fractional part of the clock is truncated).
+  Nondeterministic, so there is no runnable example.
+
+      let started = DateTime.now()
+      DateTime.format(DateTime.from_timestamp(started), "%H:%M:%S")
+  """
   fn now() do
     float_to_int(unix_time(()))
   end
@@ -185,42 +192,100 @@ mod DateTime do
     end
   end
 
-  doc "Add n days to a DateTime. n may be negative."
+  doc """
+  Add n days (of exactly 86400 seconds) to a DateTime. n may be negative.
+  Month, year and leap-day rollover are handled.
+
+  ## Examples
+
+      march> DateTime.add_days(DateTime(Date(2024, 2, 28), Time(12, 0, 0)), 1)
+      DateTime(Date(2024, 2, 29), Time(12, 0, 0))
+      march> DateTime.add_days(DateTime(Date(2024, 3, 1), Time(0, 0, 0)), -1)
+      DateTime(Date(2024, 2, 29), Time(0, 0, 0))
+  """
   fn add_days(dt, n) do
     from_timestamp(to_timestamp(dt) + n * 86400)
   end
 
-  doc "Add n hours to a DateTime. n may be negative."
+  doc """
+  Add n hours to a DateTime. n may be negative.
+
+  ## Examples
+
+      march> DateTime.add_hours(DateTime(Date(2024, 12, 31), Time(23, 0, 0)), 2)
+      DateTime(Date(2025, 1, 1), Time(1, 0, 0))
+  """
   fn add_hours(dt, n) do
     from_timestamp(to_timestamp(dt) + n * 3600)
   end
 
-  doc "Add n seconds to a DateTime. n may be negative."
+  doc """
+  Add n seconds to a DateTime. n may be negative.
+
+  ## Examples
+
+      march> DateTime.add_seconds(DateTime(Date(1970, 1, 1), Time(0, 0, 0)), -1)
+      DateTime(Date(1969, 12, 31), Time(23, 59, 59))
+  """
   fn add_seconds(dt, n) do
     from_timestamp(to_timestamp(dt) + n)
   end
 
-  doc "Add n milliseconds to a DateTime. n may be negative."
+  doc """
+  Add n milliseconds to a DateTime. n may be negative. DateTime has
+  whole-second resolution, so n is truncated toward zero to whole seconds
+  first (2500 adds 2 s, -1500 subtracts 1 s, 999 adds nothing).
+
+  ## Examples
+
+      march> DateTime.add_ms(DateTime(Date(2024, 1, 1), Time(0, 0, 0)), 2500)
+      DateTime(Date(2024, 1, 1), Time(0, 0, 2))
+      march> DateTime.add_ms(DateTime(Date(2024, 1, 1), Time(0, 0, 0)), -1500)
+      DateTime(Date(2023, 12, 31), Time(23, 59, 59))
+  """
   fn add_ms(dt : DateTime, n : Int) : DateTime do
     add_seconds(dt, int_div(n, 1000))
   end
 
-  doc "Add a Duration (stored in milliseconds) to a DateTime."
+  doc """
+  Add a span of `dur` milliseconds to a DateTime; same as `add_ms`.
+  Despite the name it takes a plain Int, not a `Duration.Duration`
+  value: convert with `Duration.to_milliseconds` first.
+
+  ## Examples
+
+      march> DateTime.add(DateTime(Date(2024, 1, 1), Time(0, 0, 0)), Duration.to_milliseconds(Duration.minutes(90)))
+      DateTime(Date(2024, 1, 1), Time(1, 30, 0))
+  """
   fn add(dt : DateTime, dur : Int) : DateTime do
     add_ms(dt, dur)
   end
 
   doc """
-  Difference between two DateTimes in seconds.
-  diff_seconds(a, b) = to_timestamp(a) - to_timestamp(b).
+  Difference between two DateTimes in seconds:
+  `to_timestamp(a) - to_timestamp(b)`, so negative when `a` is earlier.
+
+  ## Examples
+
+      march> DateTime.diff_seconds(DateTime(Date(2024, 1, 2), Time(0, 0, 0)), DateTime(Date(2024, 1, 1), Time(12, 0, 0)))
+      43200
+      march> DateTime.diff_seconds(DateTime(Date(2024, 1, 1), Time(0, 0, 0)), DateTime(Date(2024, 1, 1), Time(0, 1, 0)))
+      -60
   """
   fn diff_seconds(a, b) do
     to_timestamp(a) - to_timestamp(b)
   end
 
   doc """
-  Compare two DateTimes.
+  Compare two DateTimes chronologically.
   Returns -1 if a < b, 0 if a == b, 1 if a > b.
+
+  ## Examples
+
+      march> DateTime.compare(DateTime(Date(2024, 1, 2), Time(0, 0, 0)), DateTime(Date(2024, 1, 1), Time(12, 0, 0)))
+      1
+      march> DateTime.compare(DateTime(Date(2024, 1, 1), Time(0, 0, 0)), DateTime(Date(2024, 1, 1), Time(0, 0, 0)))
+      0
   """
   fn compare(a, b) do
     let ta = to_timestamp(a)
@@ -233,7 +298,16 @@ mod DateTime do
   doc """
   Return the day of the week for the date component of a DateTime.
   0 = Sunday, 1 = Monday, ..., 6 = Saturday.
-  (January 1, 1970 was a Thursday = 4.)
+  (January 1, 1970 was a Thursday = 4.) The time component is ignored.
+  Note: dates more than four days before 1970-01-01 currently return a
+  negative number (the remainder is not floored).
+
+  ## Examples
+
+      march> DateTime.day_of_week(DateTime(Date(1970, 1, 1), Time(0, 0, 0)))
+      4
+      march> DateTime.day_of_week(DateTime(Date(2024, 1, 15), Time(18, 0, 0)))
+      1
   """
   fn day_of_week(dt) do
     match dt do
@@ -245,11 +319,15 @@ mod DateTime do
   end
 
   doc """
-  Format a DateTime as a string.
-  Supported specifiers: %Y %m %d %H %M %S %%
+  Format a DateTime as a string by replacing the specifiers
+  `%Y` (4-digit year) and `%m %d %H %M %S` (2-digit, zero-padded).
+  Any other text, including `%%`, is copied through unchanged
+  (`%%` is not collapsed to `%`).
 
       march> DateTime.format(DateTime.from_timestamp(1700000000), "%Y-%m-%d %H:%M:%S")
       "2023-11-14 22:13:20"
+      march> DateTime.format(DateTime(Date(2024, 1, 5), Time(9, 5, 0)), "%d/%m/%Y")
+      "05/01/2024"
   """
   fn format(dt, fmt) do
     match dt do
@@ -274,6 +352,19 @@ mod DateTime do
   represents UTC.  For ISO 8601 strings with an explicit offset
   (`Z`, `+HH:MM`, `-HHMM`, …) use `parse_offset` to get a
   `LocalDateTime` whose zone is recovered from the suffix.
+  Anything after the seconds field is currently ignored, so
+  `"2024-01-15 10:30:45xyz"` parses as `10:30:45`.
+
+  ## Examples
+
+      march> DateTime.parse("2024-01-15")
+      Ok(DateTime(Date(2024, 1, 15), Time(0, 0, 0)))
+      march> DateTime.parse("2024-01-15 10:30:45")
+      Ok(DateTime(Date(2024, 1, 15), Time(10, 30, 45)))
+      march> DateTime.parse("2024-02-30")
+      Err("invalid day 30 for 2024-02")
+      march> DateTime.parse("2024-01-15T10:30:45")
+      Err("expected ' ' or end after date")
   """
   fn parse(s) do
     let len = string_byte_length(s)
@@ -353,7 +444,14 @@ mod DateTime do
 
   -- ---- Tz construction ----
 
-  doc "The UTC zone (offset 0, name \"UTC\").  Format renders as \"Z\"."
+  doc """
+  The UTC zone (offset 0, name `"UTC"`).  `format_offset` renders it as `"Z"`.
+
+  ## Examples
+
+      march> DateTime.utc_zone()
+      Tz("UTC", 0)
+  """
   fn utc_zone() : Tz do
     Tz("UTC", 0)
   end
@@ -362,6 +460,11 @@ mod DateTime do
   Build a fixed-offset zone from an explicit label and second offset.
   `offset_seconds` is positive east of UTC, negative west.  Panics if
   the offset is outside ±14 hours (the widest real-world legal range).
+
+  ## Examples
+
+      march> DateTime.fixed_zone("IST", 19800)
+      Tz("IST", 19800)
   """
   fn fixed_zone(name : String, offset_seconds : {Int | _ >= -50400 && _ <= 50400}) : Tz do
     if offset_seconds > 50400 || offset_seconds < -50400 do
@@ -373,7 +476,15 @@ mod DateTime do
   doc """
   Convenience constructor: fixed offset in whole hours.  The name is
   auto-derived in ISO 8601 form (e.g. `"+05:00"`, `"-08:00"`, `"Z"`).
-  For custom labels use `fixed_zone(name, seconds)`.
+  For custom labels use `fixed_zone(name, seconds)`.  Unlike
+  `fixed_zone`, the ±14 h range is not checked.
+
+  ## Examples
+
+      march> DateTime.fixed_zone_hours(-8)
+      Tz("-08:00", -28800)
+      march> DateTime.fixed_zone_hours(0)
+      Tz("Z", 0)
   """
   fn fixed_zone_hours(hours : Int) : Tz do
     let secs = hours * 3600
@@ -385,7 +496,17 @@ mod DateTime do
   Convenience constructor: fixed offset as `(hours, minutes)` with a
   single sign applied by `hours` (per ISO convention).  For UTC+05:30
   pass `(5, 30)`; for UTC−03:30 pass `(-3, 30)` (minutes always
-  positive, sign comes from `hours`).  Name is auto-derived.
+  positive, sign comes from `hours`).  Name is auto-derived.  Because
+  the sign comes from `hours`, a negative offset under one hour (such as
+  -00:30) cannot be built here; use `fixed_zone` for that.  Panics if
+  `minutes` is outside [0, 60).
+
+  ## Examples
+
+      march> DateTime.fixed_zone_hm(5, 30)
+      Tz("+05:30", 19800)
+      march> DateTime.fixed_zone_hm(-3, 30)
+      Tz("-03:30", -12600)
   """
   fn fixed_zone_hm(hours : Int, minutes : {Int | _ >= 0 && _ < 60}) : Tz do
     if minutes < 0 || minutes >= 60 do
@@ -400,12 +521,26 @@ mod DateTime do
 
   -- ---- Tz accessors ----
 
-  doc "Return the zone's human label (e.g. \"UTC\", \"+05:30\", \"PST\")."
+  doc """
+  Return the zone's human label (e.g. `"UTC"`, `"+05:30"`, `"PST"`).
+
+  ## Examples
+
+      march> DateTime.zone_name(DateTime.fixed_zone_hm(5, 30))
+      "+05:30"
+  """
   fn zone_name(tz : Tz) : String do
     match tz do Tz(n, _) -> n end
   end
 
-  doc "Return the zone's offset from UTC in seconds (east is positive)."
+  doc """
+  Return the zone's offset from UTC in seconds (east is positive).
+
+  ## Examples
+
+      march> DateTime.zone_offset_seconds(DateTime.fixed_zone_hm(-3, 30))
+      -12600
+  """
   fn zone_offset_seconds(tz : Tz) : Int do
     match tz do Tz(_, o) -> o end
   end
@@ -413,7 +548,15 @@ mod DateTime do
   doc """
   Format a zone's offset as ISO 8601: \"Z\" for UTC, \"+HH:MM\" or
   \"-HH:MM\" otherwise.  Seconds-of-offset are ignored (no real zone
-  uses sub-minute offsets since 1972).
+  uses sub-minute offsets since 1972).  The name is not consulted: any
+  zone with offset 0 renders as `"Z"`.
+
+  ## Examples
+
+      march> DateTime.format_offset(DateTime.fixed_zone("PST", -28800))
+      "-08:00"
+      march> DateTime.format_offset(DateTime.utc_zone())
+      "Z"
   """
   fn format_offset(tz : Tz) : String do
     match tz do
@@ -434,35 +577,75 @@ mod DateTime do
   Pair a civil `DateTime` (interpreted as the wall-clock time in `tz`)
   with its zone.  No conversion happens — `dt` is used as-is.  Use
   `local_from_utc` if you start from a UTC instant.
+
+  ## Examples
+
+      march> DateTime.local_of(DateTime(Date(2024, 1, 15), Time(10, 0, 0)), DateTime.fixed_zone_hours(2))
+      LocalDateTime(DateTime(Date(2024, 1, 15), Time(10, 0, 0)), Tz("+02:00", 7200))
   """
   fn local_of(dt : DateTime, tz : Tz) : LocalDateTime do
     LocalDateTime(dt, tz)
   end
 
-  doc "Return the current wall-clock time in zone `tz`."
+  doc """
+  Return the current wall-clock time in zone `tz` (see `now`).
+  Nondeterministic, so there is no runnable example.
+
+      DateTime.local_format(DateTime.local_now(DateTime.fixed_zone_hours(9)), "%H:%M%:z")
+  """
   fn local_now(tz : Tz) : LocalDateTime do
     local_from_timestamp(now(), tz)
   end
 
-  doc "Build a `LocalDateTime` from a UTC instant expressed as a Unix timestamp (Int seconds)."
+  doc """
+  Build a `LocalDateTime` from a UTC instant expressed as a Unix timestamp
+  (Int seconds): the civil part is the wall-clock time in `tz` at that instant.
+
+  ## Examples
+
+      march> DateTime.local_from_timestamp(0, DateTime.fixed_zone_hm(5, 30))
+      LocalDateTime(DateTime(Date(1970, 1, 1), Time(5, 30, 0)), Tz("+05:30", 19800))
+  """
   fn local_from_timestamp(ts : Int, tz : Tz) : LocalDateTime do
     let civil = from_timestamp(ts + zone_offset_seconds(tz))
     LocalDateTime(civil, tz)
   end
 
-  doc "Reinterpret a UTC `DateTime` as the same instant in zone `tz`."
+  doc """
+  Reinterpret a UTC `DateTime` as the same instant in zone `tz`
+  (the civil part is shifted by the zone's offset).
+
+  ## Examples
+
+      march> DateTime.local_from_utc(DateTime(Date(2024, 1, 15), Time(22, 0, 0)), DateTime.fixed_zone_hours(3))
+      LocalDateTime(DateTime(Date(2024, 1, 16), Time(1, 0, 0)), Tz("+03:00", 10800))
+  """
   fn local_from_utc(utc_dt : DateTime, tz : Tz) : LocalDateTime do
     local_from_timestamp(to_timestamp(utc_dt), tz)
   end
 
   -- ---- LocalDateTime accessors ----
 
-  doc "Return the civil (wall-clock) `DateTime` component."
+  doc """
+  Return the civil (wall-clock) `DateTime` component.
+
+  ## Examples
+
+      march> DateTime.local_datetime(DateTime.local_from_timestamp(0, DateTime.fixed_zone_hours(-5)))
+      DateTime(Date(1969, 12, 31), Time(19, 0, 0))
+  """
   fn local_datetime(ldt : LocalDateTime) : DateTime do
     match ldt do LocalDateTime(dt, _) -> dt end
   end
 
-  doc "Return the zone of a `LocalDateTime`."
+  doc """
+  Return the zone of a `LocalDateTime`.
+
+  ## Examples
+
+      march> DateTime.local_zone(DateTime.local_from_timestamp(0, DateTime.fixed_zone_hours(-5)))
+      Tz("-05:00", -18000)
+  """
   fn local_zone(ldt : LocalDateTime) : Tz do
     match ldt do LocalDateTime(_, tz) -> tz end
   end
@@ -472,6 +655,11 @@ mod DateTime do
   doc """
   Convert a `LocalDateTime` to the corresponding UTC `DateTime`.
   Subtracts the zone's offset from the civil time.
+
+  ## Examples
+
+      march> DateTime.local_to_utc(DateTime.local_of(DateTime(Date(2024, 1, 15), Time(1, 0, 0)), DateTime.fixed_zone_hours(2)))
+      DateTime(Date(2024, 1, 14), Time(23, 0, 0))
   """
   fn local_to_utc(ldt : LocalDateTime) : DateTime do
     match ldt do
@@ -479,7 +667,14 @@ mod DateTime do
     end
   end
 
-  doc "Unix timestamp (UTC seconds) of the instant this `LocalDateTime` denotes."
+  doc """
+  Unix timestamp (UTC seconds) of the instant this `LocalDateTime` denotes.
+
+  ## Examples
+
+      march> DateTime.local_to_timestamp(DateTime.local_from_timestamp(86400, DateTime.fixed_zone_hours(9)))
+      86400
+  """
   fn local_to_timestamp(ldt : LocalDateTime) : Int do
     to_timestamp(local_to_utc(ldt))
   end
@@ -489,6 +684,11 @@ mod DateTime do
   `local_with_zone(ldt, z)` satisfies
   `local_to_timestamp(result) == local_to_timestamp(ldt)` (same instant,
   different wall-clock).
+
+  ## Examples
+
+      march> DateTime.local_datetime(DateTime.local_with_zone(DateTime.local_of(DateTime(Date(2024, 1, 15), Time(10, 0, 0)), DateTime.fixed_zone_hours(2)), DateTime.fixed_zone_hours(-5)))
+      DateTime(Date(2024, 1, 15), Time(3, 0, 0))
   """
   fn local_with_zone(ldt : LocalDateTime, new_tz : Tz) : LocalDateTime do
     local_from_timestamp(local_to_timestamp(ldt), new_tz)
@@ -497,11 +697,18 @@ mod DateTime do
   -- ---- Formatting / parsing ----
 
   doc """
-  Format a `LocalDateTime`.  All `DateTime.format` specifiers are supported
-  (`%Y %m %d %H %M %S %%`) plus:
+  Format a `LocalDateTime`'s civil time.  All `DateTime.format`
+  specifiers are supported (`%Y %m %d %H %M %S`) plus:
     `%z`  — offset without colon, e.g. `+0530`, `-0800`, `+0000`
     `%:z` — ISO 8601 offset, e.g. `+05:30`, `-08:00`, `Z` for UTC
     `%Z`  — zone name (whatever was passed to the Tz constructor)
+
+  ## Examples
+
+      march> DateTime.local_format(DateTime.local_from_timestamp(0, DateTime.fixed_zone_hm(5, 30)), "%Y-%m-%dT%H:%M:%S%:z")
+      "1970-01-01T05:30:00+05:30"
+      march> DateTime.local_format(DateTime.local_from_timestamp(0, DateTime.fixed_zone("PST", -28800)), "%H:%M %z %Z")
+      "16:00 -0800 PST"
   """
   fn local_format(ldt : LocalDateTime, fmt : String) : String do
     match ldt do
@@ -577,11 +784,22 @@ mod DateTime do
   `"2024-01-15T10:30:45Z"` or `"2024-01-15 10:30:45+05:30"`.
   Returns `Ok(LocalDateTime)` or `Err(msg)`.
 
-  Bare UTC instants (no offset suffix) parse as UTC.  The `T`/space
-  separator is required.  Offsets may use `:` (ISO form) or the compact
-  `+HHMM` form.  Civil fields are range-validated, as is the offset
-  itself: an hour outside `[0, 24)` or a minute outside `[0, 60)`
-  (e.g. `"+01:60"`) is an `Err`, not a panic.
+  The offset suffix is required: a string without one is an `Err`
+  (use `parse` for offset-less UTC strings).  The `T`/space separator is
+  required, and trailing text after the offset is an `Err`.  Offsets may
+  use `:` (ISO form) or the compact `+HHMM` form.  Civil fields are
+  range-validated, as is the offset itself: an hour outside `[0, 24)` or
+  a minute outside `[0, 60)` (e.g. `"+01:60"`) is an `Err`, not a panic.
+  The parsed civil time is kept as-is (not converted to UTC).
+
+  ## Examples
+
+      march> DateTime.parse_offset("2024-01-15T10:30:45Z")
+      Ok(LocalDateTime(DateTime(Date(2024, 1, 15), Time(10, 30, 45)), Tz("UTC", 0)))
+      march> DateTime.parse_offset("2024-01-15 10:30:45-0800")
+      Ok(LocalDateTime(DateTime(Date(2024, 1, 15), Time(10, 30, 45)), Tz("-08:00", -28800)))
+      march> DateTime.parse_offset("2024-01-15T10:30:45")
+      Err("expected offset (Z / +HH:MM / -HH:MM) after time")
   """
   fn parse_offset(s : String) : Result(LocalDateTime, String) do
     if string_byte_length(s) < 19 do

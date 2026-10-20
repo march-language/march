@@ -3,10 +3,21 @@
 -- Result is the primary error-handling mechanism. Use it for any
 -- operation that can reasonably fail. Panics are reserved for
 -- programmer errors (invariant violations).
+--
+-- doc: try
 
 mod Result do
 
-  doc "Returns true if the result is Ok."
+  doc """
+  Returns true if the result is Ok.
+
+  ## Examples
+
+      march> Result.is_ok(Ok(1))
+      true
+      march> Result.is_ok(Err("x"))
+      false
+  """
   fn is_ok(res : Result(a, e)) : Bool do
     match res do
     Ok(_)  -> true
@@ -14,7 +25,16 @@ mod Result do
     end
   end
 
-  doc "Returns true if the result is Err."
+  doc """
+  Returns true if the result is Err.
+
+  ## Examples
+
+      march> Result.is_err(Err("x"))
+      true
+      march> Result.is_err(Ok(1))
+      false
+  """
   fn is_err(res : Result(a, e)) : Bool do
     match res do
     Err(_) -> true
@@ -27,7 +47,13 @@ mod Result do
   Use when you are certain the result is Ok.
 
   The panic message includes the underlying Err value so callers can
-  see *why* the assumption was violated, not just that it was.
+  see *why* the assumption was violated, not just that it was
+  (`Result.expect on Err(<err>): <msg>`).
+
+  ## Examples
+
+      march> Result.expect(Ok(3), "must parse")
+      3
   """
   fn expect(res : {Result(a, e) | is_Ok(_)}, msg : String) : a do
     match res do
@@ -36,7 +62,15 @@ mod Result do
     end
   end
 
-  doc "Extracts the Ok value, panicking if Err."
+  doc """
+  Extracts the Ok value, panicking if Err (the panic message includes the
+  Err value). Prefer `unwrap_or` or a `match` when Err is possible.
+
+  ## Examples
+
+      march> Result.unwrap(Ok(3))
+      3
+  """
   fn unwrap(res : {Result(a, e) | is_Ok(_)}) : a do
     match res do
     Ok(x)  -> x
@@ -44,7 +78,14 @@ mod Result do
     end
   end
 
-  doc "Extracts the Err value, panicking if Ok."
+  doc """
+  Extracts the Err value, panicking if Ok.
+
+  ## Examples
+
+      march> Result.unwrap_err(Err("bad"))
+      "bad"
+  """
   fn unwrap_err(res : {Result(a, e) | is_Err(_)}) : e do
     match res do
     Err(e) -> e
@@ -52,7 +93,16 @@ mod Result do
     end
   end
 
-  doc "Returns the Ok value, or `default` if Err."
+  doc """
+  Returns the Ok value, or `default` if Err (the error is discarded).
+
+  ## Examples
+
+      march> Result.unwrap_or(Ok(5), 0)
+      5
+      march> Result.unwrap_or(Err("bad"), 0)
+      0
+  """
   fn unwrap_or(res : Result(a, e), default : a) : a do
     match res do
     Ok(x)  -> x
@@ -60,7 +110,16 @@ mod Result do
     end
   end
 
-  doc "Applies `f` to the Ok value, leaving Err unchanged."
+  doc """
+  Applies `f` to the Ok value, leaving Err unchanged (`f` is not called).
+
+  ## Examples
+
+      march> Result.map(Ok(2), fn x -> x * 10)
+      Ok(20)
+      march> Result.map(Err("e"), fn x -> x * 10)
+      Err("e")
+  """
   fn map(res : Result(a, e), f : a -> b) : Result(b, e) do
     match res do
     Ok(x)  -> Ok(f(x))
@@ -68,7 +127,17 @@ mod Result do
     end
   end
 
-  doc "Applies `f` to the Err value, leaving Ok unchanged."
+  doc """
+  Applies `f` to the Err value, leaving Ok unchanged. The error type may
+  change.
+
+  ## Examples
+
+      march> Result.map_err(Err("e"), fn e -> e ++ "!")
+      Err("e!")
+      march> Result.map_err(Ok(1), fn e -> e ++ "!")
+      Ok(1)
+  """
   fn map_err(res : Result(a, e), f : e -> f2) : Result(a, f2) do
     match res do
     Ok(x)  -> Ok(x)
@@ -76,7 +145,20 @@ mod Result do
     end
   end
 
-  doc "Applies `f` (which returns a Result) to the Ok value, flattening the result."
+  doc """
+  Applies `f` (which returns a Result) to the Ok value, flattening the
+  result; an Err input is returned unchanged without calling `f`. Use it to
+  chain fallible steps.
+
+  ## Examples
+
+      march> Result.flat_map(Ok(4), fn x -> if x > 0 do Ok(x - 1) else Err("neg") end)
+      Ok(3)
+      march> Result.flat_map(Ok(0), fn x -> if x > 0 do Ok(x - 1) else Err("neg") end)
+      Err("neg")
+      march> Result.flat_map(String.to_int("21"), fn n -> Ok(n * 2))
+      Ok(42)
+  """
   fn flat_map(res : Result(a, e), f : a -> Result(b, e)) : Result(b, e) do
     match res do
     Ok(x)  -> f(x)
@@ -84,7 +166,17 @@ mod Result do
     end
   end
 
-  doc "Returns `f(err)` if Err, or the original Ok value."
+  doc """
+  Returns `f(err)` if Err, or the original Ok value (without calling `f`).
+  Use it to recover from an error or replace it with a different one.
+
+  ## Examples
+
+      march> Result.or_else(Err("e"), fn _ -> Ok(0))
+      Ok(0)
+      march> Result.or_else(Ok(5), fn _ -> Ok(0))
+      Ok(5)
+  """
   fn or_else(res : Result(a, e), f : e -> Result(a, f2)) : Result(a, f2) do
     match res do
     Ok(x)  -> Ok(x)
@@ -94,7 +186,17 @@ mod Result do
 
   doc """
   Collects a list of Results into a Result of a list.
-  Returns the first Err encountered, or Ok with all values if all are Ok.
+  Returns the first Err encountered (stopping there), or Ok with all values,
+  in order, if all are Ok. An empty list gives Ok([]).
+
+  ## Examples
+
+      march> Result.collect([Ok(1), Ok(2)])
+      Ok([1, 2])
+      march> Result.collect([Ok(1), Err("a"), Err("b")])
+      Err("a")
+      march> Result.collect([])
+      Ok([])
   """
   fn collect(results : List(Result(a, e))) : Result(List(a), e) do
     fn go(xs : List(Result(a, e)), acc : List(a)) : Result(List(a), e) do
@@ -111,7 +213,16 @@ mod Result do
     go(results, Nil)
   end
 
-  doc "Converts Result(a, e) to Option(a), discarding the error."
+  doc """
+  Converts Result(a, e) to Option(a), discarding the error.
+
+  ## Examples
+
+      march> Result.to_option(Ok(1))
+      Some(1)
+      march> Result.to_option(Err("x"))
+      None
+  """
   fn to_option(res : Result(a, e)) : Option(a) do
     match res do
     Ok(x)  -> Some(x)

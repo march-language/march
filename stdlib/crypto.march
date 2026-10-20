@@ -168,7 +168,10 @@ mod Crypto do
       -- "pbkdf2:sha256:600000:<salt_hex>:<hash_hex>"
 
   The result is safe to store in a database.  Use `verify_password/2` to check
-  a candidate password against the stored hash.
+  a candidate password against the stored hash.  The salt is random, so two
+  calls with the same password return different strings (no executable
+  example for that reason); each call also costs the full 600 000
+  iterations, which is deliberately slow.
 
   Uses 600 000 PBKDF2 iterations (OWASP 2023 recommendation for SHA-256) with
   a 16-byte random salt and 32-byte output.  Existing hashes stored with a
@@ -204,7 +207,11 @@ mod Crypto do
       march> Crypto.verify_password("hunter2", "md5:abc")  -- unrecognised format
       false
 
-  Returns `false` if the hash format is unrecognised.
+  Returns `false` if the hash format is unrecognised (wrong prefix, wrong
+  number of fields, non-integer iteration count, or a salt that is not
+  even-length hex). The digest is compared as lowercase hex, so a stored
+  hash whose digest was uppercased does not verify. Panics if the stored
+  iteration count is zero or negative (the runtime PBKDF2 call fails).
   """
   fn verify_password(plain, stored) do
     let parts = string_split(stored, ":")
@@ -245,7 +252,10 @@ mod Crypto do
   end
 
   doc """
-  Generate n random bytes and return them as a lowercase hex string (2n chars).
+  Generate n random bytes and return them as a lowercase hex string (2n chars),
+  from the same CSPRNG as `random_bytes`. `random_hex(0)` is `""`.
+
+  Panics if `n` is negative or if `/dev/urandom` cannot be opened.
 
       Crypto.random_hex(16)  -- 32-character lowercase hex string
   """
@@ -269,9 +279,16 @@ mod Crypto do
   this function provides *algorithmic* constant-time behaviour that translates
   to machine-level constant time under the native compiler.
 
-      Crypto.secure_compare("abc", "abc")  -- true
-      Crypto.secure_compare("abc", "abd")  -- false
-      Crypto.secure_compare("abc", "abcd") -- false (no length-based early exit)
+  ## Examples
+
+      march> Crypto.secure_compare("abc", "abc")
+      true
+      march> Crypto.secure_compare("abc", "abd")
+      false
+      march> Crypto.secure_compare("abc", "abcd")
+      false
+      march> Crypto.secure_compare("", "")
+      true
   """
   fn secure_compare(a, b) do
     let la = string_byte_length(a)

@@ -9,6 +9,8 @@
 -- All constructor names are prefixed (Ev*/E*/M*/P*/S*/Js*/St*): the ctor
 -- namespace is flat across modules, and Json.JsonValue already owns the
 -- natural names.  Do not rename until FQN type identity lands.
+--
+-- doc: try
 
 mod JsonStream do
 
@@ -37,8 +39,31 @@ mod JsonStream do
   -- max_depth, max_token_bytes
   type JsonLimits = JsonLimits(Int, Int)
 
+  doc """
+  The default limits: `JsonLimits(512, 8000000)`, i.e. a maximum nesting
+  depth of 512 and a maximum single-token (string or number) length of
+  8,000,000 bytes.
+
+  ## Examples
+
+      march> JsonStream.default_limits()
+      JsonLimits(512, 8000000)
+  """
   fn default_limits() do JsonLimits(512, 8000000) end
 
+  doc """
+  Render a `JsonStreamError` as a one-line message ending in the absolute
+  byte offset it carries.
+
+  ## Examples
+
+      march> JsonStream.err_to_string(EMalformed("expected a JSON value", 3))
+      "expected a JSON value at byte 3"
+      march> JsonStream.err_to_string(EDepthLimit(7))
+      "nesting deeper than max_depth at byte 7"
+      march> JsonStream.err_to_string(ETruncated(5))
+      "input truncated at byte 5"
+  """
   fn err_to_string(e) do
     match e do
     EMalformed(msg, off) -> msg ++ " at byte " ++ to_string(off)
@@ -84,9 +109,54 @@ mod JsonStream do
 
   -- ── Construction ──────────────────────────────────────────────────────
 
+  doc """
+  A fresh tokenizer state for a single JSON document, with
+  `default_limits()`. Data after the first complete top-level value is
+  rejected. Feed it with `feed`, then close it with `finish`.
+
+  ## Examples
+
+      march> JsonStream.finish(JsonStream.start())
+      Err(ETruncated(0))
+  """
   fn start() do StOk(cfg_of(default_limits(), false), MTop, Nil, 0, PNone, 0) end
+
+  doc """
+  Like `start`, with caller-supplied `JsonLimits(max_depth, max_token_bytes)`.
+  Opening a container deeper than `max_depth` fails with `EDepthLimit`; a
+  string or number token longer than `max_token_bytes` fails with
+  `ETokenLimit` (offset of the token start).
+
+  ## Examples
+
+      march> JsonStream.feed(JsonStream.start_with(JsonLimits(1, 100)), "[[1]]")
+      Err(EDepthLimit(1))
+  """
   fn start_with(l) do StOk(cfg_of(l, false), MTop, Nil, 0, PNone, 0) end
+
+  doc """
+  A fresh tokenizer state for NDJSON (any number of top-level values,
+  whitespace-separated), with `default_limits()`. Unlike `start`, an
+  input with no values at all finishes successfully.
+
+  ## Examples
+
+      march> Result.map(JsonStream.feed(JsonStream.start_ndjson(), "1\n{}\n"), Tuple.first) == Ok([EvNum(1.0), EvObjStart, EvObjEnd])
+      true
+      march> JsonStream.finish(JsonStream.start_ndjson())
+      Ok([])
+  """
   fn start_ndjson() do StOk(cfg_of(default_limits(), true), MTop, Nil, 0, PNone, 0) end
+
+  doc """
+  Like `start_ndjson`, with caller-supplied
+  `JsonLimits(max_depth, max_token_bytes)`.
+
+  ## Examples
+
+      march> JsonStream.feed(JsonStream.start_ndjson_with(JsonLimits(8, 2)), "123")
+      Err(ETokenLimit(0))
+  """
   fn start_ndjson_with(l) do StOk(cfg_of(l, true), MTop, Nil, 0, PNone, 0) end
 
   pfn cfg_of(l, nd) do
@@ -104,6 +174,12 @@ mod JsonStream do
   Validation is unchanged -- a malformed number is still rejected with the
   same error at the same offset.  Intended for a fresh state; applied
   mid-stream it affects only numbers completed after the call.
+
+  ## Examples
+
+      march> let raw = JsonStream.feed(JsonStream.with_raw_numbers(JsonStream.start()), "[12345678901234567890]")
+      march> Result.map(raw, Tuple.first) == Ok([EvArrStart, EvNumRaw("12345678901234567890"), EvArrEnd])
+      true
   """
   fn with_raw_numbers(st) do
     match st do
@@ -218,6 +294,28 @@ mod JsonStream do
   -- absolute offset of chunk byte 0; `base + i` is the current byte's
   -- absolute offset.
 
+  doc """
+  Feed one chunk of input to the tokenizer. Returns
+  `Ok((events, next_state))` with the events completed by this chunk, in
+  order, or `Err(JsonStreamError)` on the first error. Chunk boundaries
+  may fall anywhere, including inside a token: a partial token is carried
+  in the state and its event is emitted by the chunk that completes it. A
+  number at the very end of a chunk is not emitted until a delimiter
+  arrives (or `finish`). Error offsets are absolute across all chunks
+  fed; a malformed number reports its start offset.
+
+  ## Examples
+
+      march> let r1 = JsonStream.feed(JsonStream.start(), "[1, tr")
+      march> Result.map(r1, Tuple.first) == Ok([EvArrStart, EvNum(1.0)])
+      true
+      march> let r1 = JsonStream.feed(JsonStream.start(), "[1, tr")
+      march> let r2 = JsonStream.feed(Tuple.second(Result.unwrap(r1)), "ue]")
+      march> Result.map(r2, Tuple.first) == Ok([EvBool(true), EvArrEnd])
+      true
+      march> Result.map_err(JsonStream.feed(JsonStream.start(), "[1 2]"), JsonStream.err_to_string)
+      Err("expected ',' or ']' in array at byte 3")
+  """
   fn feed(st, chunk) do
     match st do
     StOk(cfg, mode, stack, depth, partial, base) ->
@@ -588,6 +686,22 @@ mod JsonStream do
 
   -- ── finish ────────────────────────────────────────────────────────────
 
+  doc """
+  Signal end of input. Returns `Ok(events)` with any final events (a
+  number still in flight at end of input), or `ETruncated(offset)` if the
+  input ended inside a string or literal (offset of its start), inside an
+  open container, or (single-document mode) before any value. A malformed
+  trailing number fails with `EMalformed`.
+
+  ## Examples
+
+      march> JsonStream.finish(Tuple.second(Result.unwrap(JsonStream.feed(JsonStream.start(), "12")))) == Ok([EvNum(12.0)])
+      true
+      march> JsonStream.finish(Tuple.second(Result.unwrap(JsonStream.feed(JsonStream.start(), "\"ab"))))
+      Err(ETruncated(0))
+      march> JsonStream.finish(Tuple.second(Result.unwrap(JsonStream.feed(JsonStream.start(), "01"))))
+      Err(EMalformed("invalid number", 0))
+  """
   fn finish(st) do
     match st do
     StOk(cfg, mode, stack, depth, partial, off) ->
@@ -627,6 +741,19 @@ mod JsonStream do
   -- Seq's Step constructors prove publicly constructible, switching to
   -- Seq.fold_while for early exit is a drop-in improvement.
 
+  doc """
+  Tokenize a whole `Seq` of chunks as ONE JSON document (`start()`
+  limits), folding `f(acc, event)` over every event in order. Returns
+  `Ok(acc)`, or the first tokenizer error. The fold is eager: after an
+  error, the remaining chunks are still consumed (and ignored).
+
+  ## Examples
+
+      march> JsonStream.fold(Seq.from_list(["[1,", "2]"]), 0, fn (n, _) -> n + 1)
+      Ok(4)
+      march> JsonStream.fold(Seq.from_list(["[1,", "2"]), 0, fn (n, _) -> n + 1)
+      Err(ETruncated(4))
+  """
   fn fold(chunks, z, f) do
     let r = Seq.fold(chunks, Ok((z, start())), fn (acc, chunk) ->
       match acc do
@@ -706,7 +833,18 @@ mod JsonStream do
     end
   end
 
-  -- Fold a whole single-document chunk stream into one JsonValue.
+  doc """
+  Fold a whole single-document chunk stream into one `Json.JsonValue`,
+  producing the same tree as `Json.parse` on the concatenated input but
+  with this tokenizer's limits and error offsets.
+
+  ## Examples
+
+      march> JsonStream.build(Seq.from_list(["{\"a\": [tr", "ue]}"])) == Ok(Json.encode_object([("a", Json.encode_array([Json.encode_bool(true)]))]))
+      true
+      march> JsonStream.build(Seq.from_list(["1 2"]))
+      Err(EMalformed("unexpected data after top-level value", 2))
+  """
   fn build(chunks) do
     let r = fold(chunks, Ok((Nil, None)), fn (acc, ev) ->
       match acc do
@@ -735,6 +873,15 @@ mod JsonStream do
     end
   end
 
+  doc """
+  Read the NDJSON file at `path` in 64 KiB chunks and call `cb(value)`
+  for each completed top-level `JsonValue`, in order, with memory bounded
+  by the largest single value. Returns `Ok(())`, or the first tokenizer
+  error; a file error is reported as `EMalformed("file error: ...", 0)`.
+  Values seen before an error have already been passed to `cb`.
+
+      JsonStream.each_value("events.ndjson", fn v -> println(Json.to_string(v)))
+  """
   -- NDJSON: parse `path`, calling cb(JsonValue) per completed top-level
   -- value, with bounded memory.  File.with_chunks wraps the callback's
   -- return in `Ok(callback_result)` (Result(_, FileError)), while
@@ -825,6 +972,16 @@ mod JsonStream do
   -- produced while consuming events from that line. This is independent
   -- of (and does not read) the tokenizer's own internal `StOk` offset
   -- field; it is a running counter of bytes handed to `feed` so far.
+  doc """
+  Read the NDJSON file at `path` line by line, decode each top-level value
+  with the caller's `derive Json`-generated `from_json`, and call
+  `cb(record)` per success. Returns `Ok(count)` of records decoded, or the
+  first failure as a `Json.DecodeError`: a decode failure carries the
+  failing record's line start offset (`$.id (byte 4096): expected Int`), a
+  tokenizer error its own offset, and a file error offset -1.
+
+      JsonStream.each_typed("users.ndjson", fn u -> println(u.name))
+  """
   fn each_typed(path, cb) do
     match File.with_lines(path, fn seq -> typed_run(seq, cb)) do
     Err(e) -> Err(Json.DecodeError("file error: " ++ to_string(e), Nil, 0 - 1))

@@ -476,7 +476,7 @@ let $t81 : '_ = <(v, 0) in
 case $t81 of
   True() -> dec_rc $t81;
 dec_rc v;
-__panic_site("stdlib/bytes.march", 110);
+__panic_site("stdlib/bytes.march", 180);
 panic("Bytes.get: index out of bounds")
   _ -> dec_rc $t81;
 v
@@ -632,7 +632,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
 case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
-__panic_site("stdlib/list.march", 815);
+__panic_site("stdlib/list.march", 1183);
 panic("List.maximum_int: empty list")
   Cons($f755, $f756) -> dec_rc xs;
 let t : '_ = $f756 in
@@ -648,7 +648,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
 case xs of
   Nil() -> dec_rc xs;
 dec_rc go;
-__panic_site("stdlib/list.march", 801);
+__panic_site("stdlib/list.march", 1162);
 panic("List.minimum_int: empty list")
   Cons($f742, $f743) -> dec_rc xs;
 let t : '_ = $f743 in

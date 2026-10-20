@@ -76,7 +76,22 @@ mod List do
     go(stop - 1, Nil)
   end
 
-  doc "Returns [start, start+step, ...] up to but not including stop."
+  doc """
+  Returns [start, start+step, start+2*step, ...], stopping before `stop`.
+  A positive `step` counts up while the value is `< stop`; a negative `step`
+  counts down while it is `> stop`. Returns [] when `start` is already past
+  `stop` in the direction of `step`. A `step` of 0 returns [] when
+  `start <= stop` and never terminates when `start > stop`.
+
+  ## Examples
+
+      march> List.range_step(0, 10, 3)
+      [0, 3, 6, 9]
+      march> List.range_step(5, 0, -2)
+      [5, 3, 1]
+      march> List.range_step(0, 5, -1)
+      []
+  """
   fn range_step(start : Int, stop : Int, step : Int) : List(Int) do
     range_step_go(start, stop, step)
   end
@@ -100,7 +115,15 @@ mod List do
 
   -- ---- Access ----
 
-  doc "Returns the first element. Panics on empty list."
+  doc """
+  Returns the first element. Panics on an empty list; use `head_opt` when
+  the list may be empty.
+
+  ## Examples
+
+      march> List.head([7, 8, 9])
+      7
+  """
   fn head(xs : {List(a) | len(_) > 0}) : a do
     match xs do
     Cons(h, _) -> h
@@ -108,7 +131,17 @@ mod List do
     end
   end
 
-  doc "Returns the tail (all but first element). Panics on empty list."
+  doc """
+  Returns the tail (all but the first element). Panics on an empty list;
+  use `tail_opt` when the list may be empty.
+
+  ## Examples
+
+      march> List.tail([7, 8, 9])
+      [8, 9]
+      march> List.tail([7])
+      []
+  """
   fn tail(xs : {List(a) | len(_) > 0}) : List(a) do
     match xs do
     Cons(_, t) -> t
@@ -116,7 +149,16 @@ mod List do
     end
   end
 
-  doc "Returns Some(first element), or None if empty."
+  doc """
+  Returns Some(first element), or None if the list is empty.
+
+  ## Examples
+
+      march> List.head_opt([7, 8])
+      Some(7)
+      march> List.head_opt([])
+      None
+  """
   fn head_opt(xs : List(a)) : Option(a) do
     match xs do
     Cons(h, _) -> Some(h)
@@ -124,7 +166,18 @@ mod List do
     end
   end
 
-  doc "Returns Some(tail), or None if empty."
+  doc """
+  Returns Some(tail), or None if the list is empty.
+
+  ## Examples
+
+      march> List.tail_opt([1, 2])
+      Some([2])
+      march> List.tail_opt([1])
+      Some([])
+      march> List.tail_opt([])
+      None
+  """
   fn tail_opt(xs : List(a)) : Option(List(a)) do
     match xs do
     Cons(_, t) -> Some(t)
@@ -132,7 +185,15 @@ mod List do
     end
   end
 
-  doc "Returns the last element. Panics on empty list."
+  doc """
+  Returns the last element, walking the whole list (O(n)). Panics on an
+  empty list.
+
+  ## Examples
+
+      march> List.last([1, 2, 3])
+      3
+  """
   fn last(xs : {List(a) | len(_) > 0}) : a do
     match xs do
     Nil        -> panic("List.last: empty list")
@@ -148,7 +209,14 @@ mod List do
   the compiler can prove out of range is a compile error rather than a runtime
   panic. An index it cannot bound is accepted in silence — March reports only
   definite failures — and the `panic` below remains the runtime backstop.
-  Use `nth_opt` when the index is genuinely unknown.
+  Use `nth_opt` when the index is genuinely unknown. O(n).
+
+  ## Examples
+
+      march> List.nth([10, 20, 30], 0)
+      10
+      march> List.nth([10, 20, 30], 2)
+      30
   """
   fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do
     match xs do
@@ -157,7 +225,19 @@ mod List do
     end
   end
 
-  doc "Returns Some(nth element), or None if out of bounds."
+  doc """
+  Returns Some(nth element) (0-indexed), or None if `n` is out of bounds,
+  including any negative `n`. O(n).
+
+  ## Examples
+
+      march> List.nth_opt([10, 20, 30], 1)
+      Some(20)
+      march> List.nth_opt([10, 20, 30], 3)
+      None
+      march> List.nth_opt([10, 20, 30], -1)
+      None
+  """
   fn nth_opt(xs : List(a), n : Int) : Option(a) do
     match xs do
     Nil        -> None
@@ -187,7 +267,16 @@ mod List do
     go(xs, 0)
   end
 
-  doc "Returns true if the list has no elements."
+  doc """
+  Returns true if the list has no elements. O(1), unlike `length(xs) == 0`.
+
+  ## Examples
+
+      march> List.is_empty([])
+      true
+      march> List.is_empty([0])
+      false
+  """
   fn is_empty(xs : List(a)) : Bool do
     match xs do
     Nil -> true
@@ -197,7 +286,16 @@ mod List do
 
   -- ---- Transforming ----
 
-  doc "Returns the list in reverse order."
+  doc """
+  Returns the list in reverse order.
+
+  ## Examples
+
+      march> List.reverse([1, 2, 3])
+      [3, 2, 1]
+      march> List.reverse([])
+      []
+  """
   fn reverse(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
     fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
       match lst do
@@ -247,7 +345,15 @@ mod List do
     end
   end
 
-  doc "Applies `f` to each element for side effects. Returns ()."
+  doc """
+  Applies `f` to each element, in order, for its side effects; `f`'s
+  results are discarded. Returns ().
+
+  ## Examples
+
+      march> List.each([1, 2, 3], fn x -> x * 2)
+      ()
+  """
   fn each(xs : List(a), f : a -> b) : () do
     fn go(lst : List(a)) : () do
       match lst do
@@ -261,7 +367,17 @@ mod List do
     go(xs)
   end
 
-  doc "Applies `f` to each element and concatenates the results.  O(n) in the total output size."
+  doc """
+  Applies `f` to each element and concatenates the resulting lists, in
+  order. O(n) in the total output size.
+
+  ## Examples
+
+      march> List.flat_map([1, 2, 3], fn x -> List.repeat(x, x))
+      [1, 2, 2, 3, 3, 3]
+      march> List.flat_map([1, 2], fn _ -> [])
+      []
+  """
   fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
     flat_map_go(Nil, xs, f)
   end
@@ -294,11 +410,9 @@ mod List do
   ## Examples
 
       march> List.filter([1, 2, 3, 4, 5], fn x -> x > 2)
-      march> 
       [3, 4, 5]
 
       march> List.filter(["foo", "", "bar", ""], fn s -> !String.is_empty(s))
-      march> 
       ["foo", "bar"]
   """
   fn filter(xs : List(a), pred : a -> Bool[p]) : {List(a[p]) | subset(elts(_), elts(xs))} do
@@ -347,6 +461,13 @@ mod List do
   heuristic doesn't apply.  No threshold check is performed.
 
   `max_concurrency` is treated as at least 1.  Result order matches `map`.
+
+  ## Examples
+
+      march> List.pmap_n([1, 2, 3, 4, 5], fn x -> x * x, 2)
+      [1, 4, 9, 16, 25]
+      march> List.pmap_n([], fn x -> x * x, 4)
+      []
   """
   fn pmap_n(xs : List(a), f : a -> b, max_concurrency : Int) : List(b) do
     let n = length(xs)
@@ -369,6 +490,11 @@ mod List do
   `pmap_threshold()` elements it delegates to sequential `filter`; above it
   each threshold-sized chunk is filtered on its own task and the kept
   elements concatenated in order.
+
+  ## Examples
+
+      march> List.pfilter([1, 2, 3, 4], fn x -> x % 2 == 0)
+      [2, 4]
   """
   fn pfilter(xs : List(a), pred : a -> Bool) : List(a) do
     let t = pmap_threshold()
@@ -417,7 +543,14 @@ mod List do
 
   doc """
   Applies `f` to each element; collects Some values, discards None.
-  Equivalent to map followed by filter for non-None values.
+  Equivalent to map followed by filter for non-None values, in one pass.
+
+  ## Examples
+
+      march> List.filter_map([1, 2, 3, 4], fn x -> if x % 2 == 0 do Some(x * 10) else None end)
+      [20, 40]
+      march> List.filter_map(["1", "x", "3"], fn s -> Result.to_option(String.to_int(s)))
+      [1, 3]
   """
   fn filter_map(xs : List(a), f : a -> Option(b)) : List(b) do
     -- Natural style on purpose: TRMC makes it a single-traversal loop.
@@ -451,12 +584,35 @@ mod List do
     end
   end
 
-  doc "Right fold: reduces the list from right to left."
+  doc """
+  Right fold: reduces the list from right to left, so the last element is
+  combined with `acc` first. The callback takes the element first and the
+  accumulator second, `f(x, acc)` (the reverse of `fold_left`). Uses
+  constant stack (it folds left over the reversed list).
+
+  ## Examples
+
+      march> List.fold_right([1, 2, 3], [], fn (x, acc) -> Cons(x * 2, acc))
+      [2, 4, 6]
+      march> List.fold_right(["a", "b", "c"], "", fn (x, acc) -> acc ++ x)
+      "cba"
+  """
   fn fold_right(xs : List(a), acc : b, f : a -> b -> b) : b do
     fold_left(reverse(xs), acc, fn (acc, h) -> f(h, acc))
   end
 
-  doc "Like fold_left but returns a list of all intermediate accumulator values."
+  doc """
+  Like `fold_left` but returns every accumulator value, starting with the
+  initial `acc`, so the result has one more element than `xs`; its last
+  element is what `fold_left` would return.
+
+  ## Examples
+
+      march> List.scan_left([1, 2, 3], 0, fn (acc, x) -> acc + x)
+      [0, 1, 3, 6]
+      march> List.scan_left([], 5, fn (acc, x) -> acc + x)
+      [5]
+  """
   fn scan_left(xs : List(a), acc : b, f : b -> a -> b) : List(b) do
     fn go(a : b, lst : List(a), result : List(b)) : List(b) do
       match lst do
@@ -470,7 +626,16 @@ mod List do
     go(acc, xs, Nil)
   end
 
-  doc "Concatenates a list of lists into a single list."
+  doc """
+  Concatenates a list of lists into a single list, in order. O(total length).
+
+  ## Examples
+
+      march> List.concat([[1, 2], [], [3]])
+      [1, 2, 3]
+      march> List.concat([])
+      []
+  """
   fn concat(xss : List(List(a))) : List(a) do
     -- O(total): prepend each sublist reversed onto acc, reverse once at the end.
     -- The old fold_right + append was O(total^2) (append is O(len) per sublist).
@@ -489,7 +654,17 @@ mod List do
     go(xss, Nil)
   end
 
-  doc "Inserts `sep` between every consecutive pair of elements."
+  doc """
+  Inserts `sep` between every consecutive pair of elements. Lists with
+  fewer than two elements are returned unchanged.
+
+  ## Examples
+
+      march> List.intersperse([1, 2, 3], 0)
+      [1, 0, 2, 0, 3]
+      march> List.intersperse([1], 0)
+      [1]
+  """
   fn intersperse(xs : List(a), sep : a) : List(a) do
     fn go(lst : List(a), acc : List(a)) : List(a) do
       match lst do
@@ -503,7 +678,18 @@ mod List do
 
   -- ---- Searching ----
 
-  doc "Returns the first element satisfying `pred`, or None. The element, when present, is known to satisfy `pred` (an abstract refinement `p`, as for `filter`)."
+  doc """
+  Returns the first element satisfying `pred`, or None. Stops at the first
+  match. The element, when present, is known to satisfy `pred` (an abstract
+  refinement `p`, as for `filter`).
+
+  ## Examples
+
+      march> List.find([1, 5, 8, 9], fn x -> x > 4)
+      Some(5)
+      march> List.find([1, 2], fn x -> x > 4)
+      None
+  """
   fn find(xs : List(a), pred : a -> Bool[p]) : Option(a[p]) do
     match xs do
     Nil        -> None
@@ -511,7 +697,16 @@ mod List do
     end
   end
 
-  doc "Returns the index of the first element satisfying `pred`, or None."
+  doc """
+  Returns the 0-based index of the first element satisfying `pred`, or None.
+
+  ## Examples
+
+      march> List.find_index(["a", "b", "c"], fn s -> s == "c")
+      Some(2)
+      march> List.find_index([], fn s -> s == "c")
+      None
+  """
   fn find_index(xs : List(a), pred : a -> Bool) : Option(Int) do
     fn go(lst : List(a), i : Int) : Option(Int) do
       match lst do
@@ -522,7 +717,17 @@ mod List do
     go(xs, 0)
   end
 
-  doc "Returns true if any element satisfies `pred`."
+  doc """
+  Returns true if any element satisfies `pred` (false for []). Stops at the
+  first match.
+
+  ## Examples
+
+      march> List.any([1, 2, 3], fn x -> x > 2)
+      true
+      march> List.any([], fn x -> x > 2)
+      false
+  """
   fn any(xs : List(a), pred : a -> Bool) : Bool do
     match xs do
     Nil        -> false
@@ -530,7 +735,19 @@ mod List do
     end
   end
 
-  doc "Returns true if all elements satisfy `pred` (vacuously true for [])."
+  doc """
+  Returns true if all elements satisfy `pred` (vacuously true for []).
+  Stops at the first element that fails.
+
+  ## Examples
+
+      march> List.all([2, 4], fn x -> x % 2 == 0)
+      true
+      march> List.all([2, 3], fn x -> x % 2 == 0)
+      false
+      march> List.all([], fn x -> x > 100)
+      true
+  """
   fn all(xs : List(a), pred : a -> Bool) : Bool do
     match xs do
     Nil        -> true
@@ -541,17 +758,26 @@ mod List do
   -- ---- Sorting ----
 
   doc """
-  Sorts by a comparator function. Uses merge sort (stable, O(n log n)).
+  Sorts by a comparator function: `cmp(a, b)` returns true when `a` may come
+  before `b`. Uses bottom-up merge sort, O(n log n).
+
+  Stable only with a non-strict comparator (`<=`): on a tie the merge takes
+  the left element only when `cmp(left, right)` is true, so with a strict
+  `<` equal elements can come out reordered.
 
   ## Examples
 
       march> List.sort_by([3, 1, 4, 1, 5], fn (a, b) -> a < b)
-      march> 
       [1, 1, 3, 4, 5]
 
       march> List.sort_by(["banana", "apple", "cherry"], fn (a, b) -> a < b)
-      march> 
       ["apple", "banana", "cherry"]
+
+      march> List.sort_by([3, 1, 2], fn (a, b) -> a >= b)
+      [3, 2, 1]
+
+      march> List.sort_by([(1, "a"), (0, "z"), (1, "b")], fn (p, q) -> Tuple.first(p) <= Tuple.first(q))
+      [(0, "z"), (1, "a"), (1, "b")]
   """
   fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
     fn rev_onto(rev_prefix : List(a), suffix : List(a)) : List(a) do
@@ -601,7 +827,19 @@ mod List do
 
   -- ---- Splitting ----
 
-  doc "Returns the first `n` elements. Returns the whole list if n >= length."
+  doc """
+  Returns the first `n` elements. Returns the whole list if n >= length,
+  and [] if n <= 0.
+
+  ## Examples
+
+      march> List.take([1, 2, 3], 2)
+      [1, 2]
+      march> List.take([1, 2, 3], 5)
+      [1, 2, 3]
+      march> List.take([1, 2, 3], -1)
+      []
+  """
   fn take(xs : List(a), n : Int) : List(a) do
     fn go(lst : List(a), k : Int, acc : List(a)) : List(a) do
       if k <= 0 do reverse(acc)
@@ -613,7 +851,19 @@ mod List do
     go(xs, n, Nil)
   end
 
-  doc "Drops the first `n` elements. Returns [] if n >= length."
+  doc """
+  Drops the first `n` elements. Returns [] if n >= length, and the whole
+  list if n <= 0.
+
+  ## Examples
+
+      march> List.drop([1, 2, 3], 2)
+      [3]
+      march> List.drop([1, 2, 3], 10)
+      []
+      march> List.drop([1, 2, 3], 0)
+      [1, 2, 3]
+  """
   fn drop(xs : List(a), n : Int) : List(a) do
     if n <= 0 do xs
     else match xs do
@@ -622,7 +872,18 @@ mod List do
       end end
   end
 
-  doc "Returns the longest prefix of elements satisfying `pred`. Every element of the result is known to satisfy `pred` (an abstract refinement `p`, as for `filter`)."
+  doc """
+  Returns the longest prefix of elements satisfying `pred`, stopping at the
+  first element that fails. Every element of the result is known to satisfy
+  `pred` (an abstract refinement `p`, as for `filter`).
+
+  ## Examples
+
+      march> List.take_while([1, 2, 5, 1], fn x -> x < 3)
+      [1, 2]
+      march> List.take_while([5, 1], fn x -> x < 3)
+      []
+  """
   fn take_while(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
     -- Natural style on purpose: TRMC makes it a single-traversal loop, and
     -- the element contract is proved through the self-call (an accumulator
@@ -633,7 +894,18 @@ mod List do
     end
   end
 
-  doc "Drops elements while `pred` holds, returning the rest."
+  doc """
+  Drops the longest prefix of elements satisfying `pred`, returning the rest
+  (starting at the first element that fails). The complement of
+  `take_while`.
+
+  ## Examples
+
+      march> List.drop_while([1, 2, 5, 1], fn x -> x < 3)
+      [5, 1]
+      march> List.drop_while([1, 2], fn x -> x < 3)
+      []
+  """
   fn drop_while(xs : List(a), pred : a -> Bool) : List(a) do
     match xs do
     Nil        -> Nil
@@ -641,7 +913,18 @@ mod List do
     end
   end
 
-  doc "Splits the list at position n, returning (take n xs, drop n xs)."
+  doc """
+  Splits the list at position `n`, returning `(take(xs, n), drop(xs, n))`
+  in a single pass. An `n` past the end gives `(xs, [])`; `n <= 0` gives
+  `([], xs)`.
+
+  ## Examples
+
+      march> List.split_at([1, 2, 3, 4], 1)
+      ([1], [2, 3, 4])
+      march> List.split_at([1, 2], 5)
+      ([1, 2], [])
+  """
   fn split_at(xs : List(a), n : Int) : (List(a), List(a)) do
     fn go(lst : List(a), k : Int, acc : List(a)) : (List(a), List(a)) do
       if k <= 0 do (reverse(acc), lst)
@@ -654,11 +937,18 @@ mod List do
   end
 
   doc """
-  Splits into (elements satisfying pred, elements not satisfying pred), each
-  half in input order.  Every element of the first list satisfies `pred` and
-  none of the second does: an abstract refinement `p`, as for `filter`, so
-  `let (pos, neg) = List.partition(ys, fn y -> y > 0)` gives `pos` the
-  element refinement `y > 0` and `neg` the refinement `!(y > 0)`.
+  Splits into (elements satisfying `pred`, elements not satisfying `pred`),
+  each keeping the original order.  Every element of the first list satisfies
+  `pred` and none of the second does: an abstract refinement `p`, as for
+  `filter`, so `let (pos, neg) = List.partition(ys, fn y -> y > 0)` gives `pos`
+  the element refinement `y > 0` and `neg` the refinement `!(y > 0)`.
+
+  ## Examples
+
+      march> List.partition([1, 2, 3, 4, 5], fn x -> x % 2 == 1)
+      ([1, 3, 5], [2, 4])
+      march> List.partition([], fn x -> x > 0)
+      ([], [])
   """
   fn partition(xs : List(a), pred : a -> Bool[p]) : (List(a[p]), List({a | !p(_)})) do
     partition_go(xs, pred, Nil, Nil)
@@ -677,7 +967,19 @@ mod List do
     end
   end
 
-  doc "Returns all elements except the last. Returns Nil for empty or singleton lists."
+  doc """
+  Returns all elements except the last. Returns [] for empty or singleton
+  lists (no panic).
+
+  ## Examples
+
+      march> List.drop_last([1, 2, 3])
+      [1, 2]
+      march> List.drop_last([1])
+      []
+      march> List.drop_last([])
+      []
+  """
   fn drop_last(xs : List(a)) : List(a) do
     match reverse(xs) do
     Nil -> Nil
@@ -685,7 +987,18 @@ mod List do
     end
   end
 
-  doc "Splits the list into consecutive chunks of at most `size` elements."
+  doc """
+  Splits the list into consecutive chunks of `size` elements; the last
+  chunk holds the remainder and may be shorter. Returns [] for an empty
+  list. `size` must be positive (`{Int | _ > 0}`).
+
+  ## Examples
+
+      march> List.chunks([1, 2, 3, 4, 5], 2)
+      [[1, 2], [3, 4], [5]]
+      march> List.chunks([1, 2], 5)
+      [[1, 2]]
+  """
   fn chunks(xs : List(a), size : {Int | _ > 0}) : List(List(a)) do
     fn go(lst : List(a), acc : List(List(a))) : List(List(a)) do
       if is_empty(lst) do reverse(acc)
@@ -705,11 +1018,9 @@ mod List do
   ## Examples
 
       march> List.zip([1, 2, 3], ["a", "b", "c"])
-      march> 
       [(1, "a"), (2, "b"), (3, "c")]
 
       march> List.zip([1, 2], ["a", "b", "c", "d"])
-      march> 
       [(1, "a"), (2, "b")]
   """
   fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
@@ -727,7 +1038,15 @@ mod List do
     go(xs, ys, Nil)
   end
 
-  doc "Like zip but applies `f` to each pair instead of building tuples."
+  doc """
+  Like `zip` but applies `f(x, y)` to each pair of elements instead of
+  building tuples. Stops at the shorter list.
+
+  ## Examples
+
+      march> List.zip_with([1, 2, 3], [10, 20], fn (a, b) -> a + b)
+      [11, 22]
+  """
   fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
     fn go(a : List(a), b : List(b), acc : List(c)) : List(c) do
       match a do
@@ -743,7 +1062,17 @@ mod List do
     go(xs, ys, Nil)
   end
 
-  doc "Splits a list of pairs into two lists."
+  doc """
+  Splits a list of pairs into a pair of lists (first components, second
+  components). The inverse of `zip`.
+
+  ## Examples
+
+      march> List.unzip([(1, "a"), (2, "b")])
+      ([1, 2], ["a", "b"])
+      march> List.unzip([])
+      ([], [])
+  """
   fn unzip(pairs : List((a, b))) : (List(a), List(b)) do
     fn go(lst : List((a, b)), as_ : List(a), bs : List(b)) : (List(a), List(b)) do
       match lst do
@@ -754,7 +1083,14 @@ mod List do
     go(pairs, Nil, Nil)
   end
 
-  doc "Pairs each element with its 0-based index: [a, b] -> [(0, a), (1, b)]."
+  doc """
+  Pairs each element with its 0-based index: [a, b] -> [(0, a), (1, b)].
+
+  ## Examples
+
+      march> List.enumerate(["a", "b"])
+      [(0, "a"), (1, "b")]
+  """
   fn enumerate(xs : List(a)) : List((Int, a)) do
     fn go(lst : List(a), i : Int, acc : List((Int, a))) : List((Int, a)) do
       match lst do
@@ -767,7 +1103,16 @@ mod List do
 
   -- ---- Reducing ----
 
-  doc "Sums a list of integers."
+  doc """
+  Sums a list of integers. Returns 0 for [].
+
+  ## Examples
+
+      march> List.sum_int([1, 2, 3])
+      6
+      march> List.sum_int([])
+      0
+  """
   fn sum_int(xs : List(Int)) : Int do
     fn go(lst : List(Int), acc : Int) : Int do
       match lst do
@@ -778,7 +1123,16 @@ mod List do
     go(xs, 0)
   end
 
-  doc "Multiplies all integers in a list."
+  doc """
+  Multiplies all integers in a list. Returns 1 for [].
+
+  ## Examples
+
+      march> List.product_int([2, 3, 4])
+      24
+      march> List.product_int([])
+      1
+  """
   fn product_int(xs : List(Int)) : Int do
     fn go(lst : List(Int), acc : Int) : Int do
       match lst do
@@ -789,7 +1143,14 @@ mod List do
     go(xs, 1)
   end
 
-  doc "Returns the minimum integer in the list. Panics if empty."
+  doc """
+  Returns the minimum integer in the list. Panics if empty.
+
+  ## Examples
+
+      march> List.minimum_int([3, -1, 2])
+      -1
+  """
   fn minimum_int(xs : {List(Int) | len(_) > 0}) : Int do
     fn go(lst : List(Int), m : Int) : Int do
       match lst do
@@ -803,7 +1164,14 @@ mod List do
     end
   end
 
-  doc "Returns the maximum integer in the list. Panics if empty."
+  doc """
+  Returns the maximum integer in the list. Panics if empty.
+
+  ## Examples
+
+      march> List.maximum_int([3, -1, 2])
+      3
+  """
   fn maximum_int(xs : {List(Int) | len(_) > 0}) : Int do
     fn go(lst : List(Int), m : Int) : Int do
       match lst do
@@ -819,12 +1187,32 @@ mod List do
 
   -- ---- Deduplication ----
 
-  doc "Returns true if `xs` contains `x` (using structural equality)."
+  doc """
+  Returns true if `xs` contains `x` (using structural equality). O(n).
+
+  ## Examples
+
+      march> List.member([1, 2, 3], 2)
+      true
+      march> List.member([], 2)
+      false
+  """
   fn member(xs : List(a), x : a) : Bool do
     any(xs, fn y -> y == x)
   end
 
-  doc "Removes consecutive duplicate elements (keeps first of each run).  Uses structural equality."
+  doc """
+  Removes consecutive duplicate elements (keeps the first of each run).
+  Uses structural equality. Only adjacent repeats are removed, so a value
+  can appear again later; sort first to remove all duplicates.
+
+  ## Examples
+
+      march> List.dedup([1, 1, 2, 1, 1, 3])
+      [1, 2, 1, 3]
+      march> List.dedup([])
+      []
+  """
   fn dedup(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
     fn go(lst : List(a), prev : a, acc : {List(a) | member(prev, elts(_))}) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
       match lst do

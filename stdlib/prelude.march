@@ -25,37 +25,67 @@
 -- New code should prefer module-qualified calls for readability;
 -- prelude names exist for short scripts and for the few cases (head,
 -- tail, length, reverse) where the unqualified name reads better.
+-- Prelude functions are called unqualified (`length(xs)`, not
+-- `Prelude.length(xs)`).
+--
+-- doc: try
 
 mod Prelude do
 
   -- ---- Diverging ----
 
   doc """
-  Terminates the program with a runtime error.
-  Used for violated invariants — bugs, not expected failures.
-  Propagates to the enclosing actor boundary.
+  Terminates the program with a runtime error carrying `msg`.
+  Used for violated invariants — bugs, not expected failures; return a
+  `Result` for errors a caller can handle. Propagates to the enclosing
+  actor boundary. Typechecks as any type, so it can stand in any branch:
+
+      fn safe_div(a : Int, b : Int) : Int do
+        if b == 0 do panic("safe_div: zero divisor") else a / b end
+      end
   """
   fn panic(msg : String) : a do
     panic_(msg)
   end
 
   doc """
-  Marks code as not yet implemented.
-  Typechecks as any type so you can sketch a program top-down.
-  Never valid in production.
+  Marks code as not yet implemented: evaluating it is a runtime error
+  carrying `msg`. Typechecks as any type so you can sketch a program
+  top-down. Never valid in production.
+
+      fn parse_config(s : String) : Config do
+        todo("parse_config")
+      end
   """
   fn todo(msg : String) : a do
     todo_(msg)
   end
 
-  doc "Asserts that a code path is unreachable."
+  doc """
+  Asserts that a code path is unreachable: reaching it at runtime is an
+  error. Typechecks as any type.
+
+      match n % 2 do
+      0 -> "even"
+      1 -> "odd"
+      _ -> unreachable()
+      end
+  """
   fn unreachable() : a do
     unreachable_()
   end
 
   -- ---- Option helpers ----
 
-  doc "Extracts the value from Some(x), panicking if None."
+  doc """
+  Extracts the value from Some(x), panicking if None. The Option-only
+  prelude form of `Option.unwrap`; for Result use `Result.unwrap`.
+
+  ## Examples
+
+      march> unwrap(Some(3))
+      3
+  """
   fn unwrap(opt : {Option(a) | is_Some(_)}) : a do
     match opt do
     Some(x) -> x
@@ -63,7 +93,17 @@ mod Prelude do
     end
   end
 
-  doc "Returns the contained value, or `default` if None."
+  doc """
+  Returns the contained value, or `default` if None. Option-only; for
+  Result use `Result.unwrap_or`.
+
+  ## Examples
+
+      march> unwrap_or(Some(1), 7)
+      1
+      march> unwrap_or(None, 7)
+      7
+  """
   fn unwrap_or(opt : Option(a), default : a) : a do
     match opt do
     Some(x) -> x
@@ -73,7 +113,15 @@ mod Prelude do
 
   -- ---- List basics ----
 
-  doc "Returns the first element of the list. Panics if empty."
+  doc """
+  Returns the first element of the list. Panics if empty; use
+  `List.head_opt` when the list may be empty.
+
+  ## Examples
+
+      march> head([4, 5])
+      4
+  """
   fn head(xs : {List(a) | len(_) > 0}) : a do
     match xs do
     Cons(h, _) -> h
@@ -81,7 +129,17 @@ mod Prelude do
     end
   end
 
-  doc "Returns all but the first element. Panics if empty."
+  doc """
+  Returns all but the first element. Panics if empty; use `List.tail_opt`
+  when the list may be empty.
+
+  ## Examples
+
+      march> tail([4, 5])
+      [5]
+      march> tail([4])
+      []
+  """
   fn tail(xs : {List(a) | len(_) > 0}) : List(a) do
     match xs do
     Cons(_, t) -> t
@@ -89,7 +147,16 @@ mod Prelude do
     end
   end
 
-  doc "Returns true if the list is empty."
+  doc """
+  Returns true if the list is empty.
+
+  ## Examples
+
+      march> is_nil([])
+      true
+      march> is_nil([1])
+      false
+  """
   fn is_nil(xs : List(a)) : Bool do
     match xs do
     Nil -> true
@@ -97,7 +164,17 @@ mod Prelude do
     end
   end
 
-  doc "Returns the number of elements in the list."
+  doc """
+  Returns the number of elements in the list. O(n). Lists only: for a
+  String use `String.byte_size` or `String.codepoint_count`.
+
+  ## Examples
+
+      march> length([1, 2, 3])
+      3
+      march> length([])
+      0
+  """
   fn length(xs : List(a)) : Int do
     fn go(lst : List(a), acc : Int) : Int do
       match lst do
@@ -108,7 +185,14 @@ mod Prelude do
     go(xs, 0)
   end
 
-  doc "Reverses a list."
+  doc """
+  Reverses a list.
+
+  ## Examples
+
+      march> reverse([1, 2, 3])
+      [3, 2, 1]
+  """
   fn reverse(xs : List(a)) : List(a) do
     fn go(lst : List(a), acc : List(a)) : List(a) do
       match lst do
@@ -121,7 +205,15 @@ mod Prelude do
 
   doc """
   Left fold over a list.  Argument order: collection first, init
-  second, callback last (uncurried-collection convention).
+  second, callback last (uncurried-collection convention). The callback
+  takes the accumulator first: `f(acc, x)`.
+
+  ## Examples
+
+      march> fold_left([1, 2, 3], 10, fn (acc, x) -> acc - x)
+      4
+      march> fold_left([], 10, fn (acc, x) -> acc - x)
+      10
   """
   fn fold_left(xs : List(a), acc : b, f : b -> a -> b) : b do
     match xs do
@@ -131,12 +223,17 @@ mod Prelude do
   end
 
   doc """
-  Returns only the elements satisfying `pred`, in order.
+  Returns only the elements satisfying `pred`, in their original order.
 
   Every element of the result is known to satisfy `pred` (an abstract
   refinement `p`, as for `List.filter`): with
   `sum_pos(xs : List({Int | _ > 0}))`, `sum_pos(filter(ys, fn y -> y > 0))`
   is proved.
+
+  ## Examples
+
+      march> filter([1, 2, 3, 4], fn x -> x > 2)
+      [3, 4]
   """
   fn filter(xs : List(a), pred : a -> Bool[p]) : List(a[p]) do
     -- List.filter's natural body, copied rather than called (the prelude
@@ -149,7 +246,16 @@ mod Prelude do
     end
   end
 
-  doc "Applies `f` to every element of the list."
+  doc """
+  Applies `f` to every element of the list, returning the new list.
+
+  ## Examples
+
+      march> map([1, 2, 3], fn x -> x + 1)
+      [2, 3, 4]
+      march> map([], fn x -> x + 1)
+      []
+  """
   fn map(xs : List(a), f : a -> b) : List(b) do
     fn go(acc : List(b), remaining : List(a)) : List(b) do
       match remaining do
@@ -162,22 +268,58 @@ mod Prelude do
 
   -- ---- Combinators ----
 
-  doc "The identity function — returns its argument unchanged."
+  doc """
+  The identity function — returns its argument unchanged.
+
+  ## Examples
+
+      march> identity(5)
+      5
+      march> List.filter_map([Some(1), None, Some(3)], identity)
+      [1, 3]
+  """
   fn identity(x : a) : a do
     x
   end
 
-  doc "Function composition: compose(f, g)(x) = f(g(x))."
+  doc """
+  Function composition: returns the function `fn x -> f(g(x))` (`g` runs
+  first). March has no chained call `f(a)(b)`, so bind the result or wrap
+  it in parentheses before calling it.
+
+  ## Examples
+
+      march> (compose(fn x -> x * 2, fn x -> x + 1))(3)
+      8
+      march> List.map([1, 2], compose(fn x -> x * 2, fn x -> x + 1))
+      [4, 6]
+  """
   fn compose(f : b -> c, g : a -> b) : a -> c do
     fn x -> f(g(x))
   end
 
-  doc "Flips the order of arguments: flip(f)(b, a) = f(a, b)."
+  doc """
+  Flips the order of a two-argument function's arguments: the result `g`
+  satisfies `g(b, a) == f(a, b)`.
+
+  ## Examples
+
+      march> (flip(fn (a, b) -> a - b))(1, 10)
+      9
+  """
   fn flip(f : a -> b -> c) : b -> a -> c do
     fn (b, a) -> f(a, b)
   end
 
-  doc "Returns a function that always returns `x`, ignoring its argument."
+  doc """
+  Returns a one-argument function that always returns `x`, ignoring its
+  argument.
+
+  ## Examples
+
+      march> List.map([1, 2, 3], const(0))
+      [0, 0, 0]
+  """
   fn const(x : a) : b -> a do
     fn _ -> x
   end
@@ -309,9 +451,12 @@ mod Prelude do
   -- ---- Polymorphic println and string conversion ----
 
   doc """
-  Prints any Show value followed by a newline.
-  Works for Int, Float, String, Bool, List, Option, Result,
-  and any type with an explicit impl Show.
+  Prints any Show value followed by a newline, and returns ().
+  Works for Int, Float, String, Bool, List, Option, Result, tuples,
+  and any type with an explicit impl Show. A String prints without quotes.
+
+      println([1, 2])     -- prints [1, 2]
+      println("hi")       -- prints hi
   """
   fn println(x) do
     print_line(show(x))
@@ -329,20 +474,52 @@ mod Prelude do
   compiler's capability-passing elaboration, which rewrites calls inside `f`
   to route through `c`'s dictionary. Outside a `--test` build the elaboration
   does not run and this is exactly `f(())`.
+
+  ## Examples
+
+      march> with_cap(0, fn _ -> 9)
+      9
   """
   fn with_cap(_c, f) do f(()) end
 
-  doc "Short alias for to_string."
+  doc """
+  Short alias for `to_string`: the value's Show representation. Strings
+  nested inside a list, option or tuple are shown without quotes.
+
+  ## Examples
+
+      march> str(42)
+      "42"
+      march> str([1, 2])
+      "[1, 2]"
+      march> str(Some(true))
+      "Some(true)"
+  """
   fn str(x) do to_string(x) end
 
   -- ---- IO convenience ----
 
-  doc "Prints a value using its Show representation, with a trailing newline."
+  doc """
+  Prints a value using its Show representation, with a trailing newline,
+  and returns (). The same output as `println`.
+
+      debug(Some(3))      -- prints Some(3)
+  """
   fn debug(x) do
     print_line(to_string(x))
   end
 
-  doc "Converts any value to its string representation."
+  doc """
+  Converts any value to its string representation; the same as `str` and
+  `to_string`.
+
+  ## Examples
+
+      march> inspect([Some(1), None])
+      "[Some(1), None]"
+      march> inspect("hi")
+      "hi"
+  """
   fn inspect(x) do to_string(x) end
 
 end

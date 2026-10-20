@@ -12,7 +12,7 @@
 --   |> HttpServer.listen()
 
 mod HttpServer do
-  -- This module's serve/serve_multi functions call the http_server_listen /
+  -- This module's listen/spawn_n/wait_for functions call the http_server_listen /
   -- http_server_spawn_n / http_server_wait builtins, which the body-scan
   -- classifies as Cap(IO.NetListen).  Declare the capability so the enforcement
   -- (typecheck.ml builtin_cap_table) is satisfied here rather than warning at
@@ -80,72 +80,84 @@ mod HttpServer do
     else "UNKNOWN" end end end end end end end end end
   end
 
+  doc "The raw request path without the query string, e.g. `/users/42`."
   fn path(conn) do
     match conn do
     Conn(_, _, p, _, _, _, _, _, _, _, _, _, _) -> p
     end
   end
 
+  doc "The request path split on `/` with empty segments removed: `/users/42/` gives a two-element list of `users` and `42`."
   fn path_info(conn) do
     match conn do
     Conn(_, _, _, pi, _, _, _, _, _, _, _, _, _) -> pi
     end
   end
 
+  doc "The raw query string after the `?`, e.g. `page=1&limit=10`; empty when the URL has none."
   fn query_string(conn) do
     match conn do
     Conn(_, _, _, _, qs, _, _, _, _, _, _, _, _) -> qs
     end
   end
 
+  doc "All request headers as a `List(Header)`. The runtime builds the list by prepending, so it is in reverse wire order."
   fn req_headers(conn) do
     match conn do
     Conn(_, _, _, _, _, rh, _, _, _, _, _, _, _) -> rh
     end
   end
 
+  doc "The request body (the Content-Length bytes) as a String; empty when there is none."
   fn req_body(conn) do
     match conn do
     Conn(_, _, _, _, _, _, rb, _, _, _, _, _, _) -> rb
     end
   end
 
+  doc "The response status set so far: 0 until `send_resp` or a helper sets it. A conn returned with status 0 is sent as 200."
   fn status(conn) do
     match conn do
     Conn(_, _, _, _, _, _, _, s, _, _, _, _, _) -> s
     end
   end
 
+  doc "The response headers set so far, most recently put first."
   fn resp_headers(conn) do
     match conn do
     Conn(_, _, _, _, _, _, _, _, rh, _, _, _, _) -> rh
     end
   end
 
+  doc "The response body set so far; empty until a response is sent."
   fn resp_body(conn) do
     match conn do
     Conn(_, _, _, _, _, _, _, _, _, rb, _, _, _) -> rb
     end
   end
 
+  doc "True once the conn has been responded to or halted; `run_pipeline` then skips the remaining plugs."
   fn halted(conn) do
     match conn do
     Conn(_, _, _, _, _, _, _, _, _, _, h, _, _) -> h
     end
   end
 
+  doc "All assigns as a `List((String, String))`, most recent first (see `assign`)."
   fn assigns(conn) do
     match conn do
     Conn(_, _, _, _, _, _, _, _, _, _, _, a, _) -> a
     end
   end
 
+  doc "The conn's upgrade request: `NoUpgrade` (the default), or `WebSocketUpgrade(handler)` to hand the socket to a WebSocket handler after the pipeline."
   fn conn_upgrade(conn) do
     match conn do
     Conn(_, _, _, _, _, _, _, _, _, _, _, _, u) -> u
     end
   end
 
+  doc "The underlying TCP socket file descriptor of the conn."
   fn fd(conn) do
     match conn do
     Conn(f, _, _, _, _, _, _, _, _, _, _, _, _) -> f
@@ -166,7 +178,17 @@ mod HttpServer do
     tcp_peer_addr(fd(conn))
   end
 
-  -- Header lookup (case-insensitive) on request headers
+  doc """
+  Look up a request header by name, case-insensitively. Returns
+  `Some(value)` for the first match in `req_headers` order, or `None`.
+
+  ## Examples
+
+      match HttpServer.get_req_header(conn, "Authorization") do
+        Some(v) -> check_token(conn, v)
+        None -> HttpServer.text(conn, 401, "unauthorized")
+      end
+  """
   fn get_req_header(conn, name) do
     let lower_name = string_to_lowercase(name)
     fn find(hs) do
@@ -181,7 +203,10 @@ mod HttpServer do
     find(req_headers(conn))
   end
 
-  -- Header lookup (case-insensitive) on response headers
+  doc """
+  Look up a response header set so far, case-insensitively. Because
+  `put_resp_header` prepends, this returns the most recently put value.
+  """
   fn get_resp_header(conn, name) do
     let lower_name = string_to_lowercase(name)
     fn find(hs) do
@@ -196,7 +221,15 @@ mod HttpServer do
     find(resp_headers(conn))
   end
 
-  -- Assign lookup
+  doc """
+  Look up a value stored with `assign`: `Some(value)` for the most recent
+  assignment to `key`, or `None`.
+
+  ## Examples
+
+      let conn = HttpServer.assign(conn, "user", "ann")
+      HttpServer.get_assign(conn, "user")   -- Some("ann")
+  """
   fn get_assign(conn, key) do
     fn find(pairs) do
       match pairs do
@@ -212,6 +245,10 @@ mod HttpServer do
 
   -- Conn transforms
 
+  doc """
+  Add a response header. The header is prepended and existing headers with
+  the same name are NOT replaced, so putting a name twice sends it twice.
+  """
   fn put_resp_header(conn, name, value) do
     match conn do
     Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
@@ -219,6 +256,11 @@ mod HttpServer do
     end
   end
 
+  doc """
+  Store a key/value pair in the conn's assigns (a per-request store plugs
+  use to pass data along the pipeline). Later assignments to the same key
+  shadow earlier ones for `get_assign`; all are kept in `assigns`.
+  """
   fn assign(conn, key, value) do
     match conn do
     Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
@@ -226,12 +268,21 @@ mod HttpServer do
     end
   end
 
-  -- Set response status + body and mark halted.
-  -- This is the primary way to "respond".
-  --
-  -- Panics if the conn has already been sent or halted — double-response
-  -- is always a handler bug (silently overwriting the first reply would
-  -- mask the mistake and cause subtle response-mixing at the wire level).
+  doc """
+  Set the response status and body and mark the conn halted. This is the
+  primary way to respond; later plugs in the pipeline are skipped. The
+  response is written by the runtime after the pipeline returns.
+
+  Panics if the conn is already halted (by `send_resp`, a helper such as
+  `text`/`json`, or `halt`): a double response is always a handler bug, and
+  silently overwriting the first reply would mask it.
+
+  ## Examples
+
+      conn
+      |> HttpServer.put_resp_header("cache-control", "no-store")
+      |> HttpServer.send_resp(200, "ok")
+  """
   fn send_resp(conn, resp_status, body) do
     match conn do
     Conn(fd, m, p, pi, qs, rh, rb, _, rhs, _, h, a, u) ->
@@ -243,7 +294,11 @@ mod HttpServer do
     end
   end
 
-  -- Mark as halted without setting a response.
+  doc """
+  Mark the conn halted without setting a response, so remaining plugs are
+  skipped. The status stays whatever it was (0 if never set). A later
+  `send_resp` on the halted conn panics.
+  """
   fn halt(conn) do
     match conn do
     Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, _, a, u) ->
@@ -253,32 +308,62 @@ mod HttpServer do
 
   -- Convenience response helpers
 
+  doc """
+  Respond with a plain-text body: adds `content-type: text/plain; charset=utf-8`
+  and calls `send_resp`. Panics if the conn is already halted.
+
+  ## Examples
+
+      fn hello(conn) do
+        HttpServer.text(conn, 200, "hello, " ++ HttpServer.path(conn))
+      end
+  """
   fn text(conn, resp_status, body) do
     conn
     |> put_resp_header("content-type", "text/plain; charset=utf-8")
     |> send_resp(resp_status, body)
   end
 
+  doc """
+  Respond with a JSON body (already-encoded String): adds
+  `content-type: application/json` and calls `send_resp`. Panics if the conn
+  is already halted.
+  """
   fn json(conn, resp_status, body) do
     conn
     |> put_resp_header("content-type", "application/json")
     |> send_resp(resp_status, body)
   end
 
+  doc """
+  Respond with an HTML body: adds `content-type: text/html; charset=utf-8`
+  and calls `send_resp`. Panics if the conn is already halted.
+  """
   fn html(conn, resp_status, body) do
     conn
     |> put_resp_header("content-type", "text/html; charset=utf-8")
     |> send_resp(resp_status, body)
   end
 
+  doc """
+  Respond `302 Found` with a `location: url` header and an empty body.
+  Panics if the conn is already halted.
+  """
   fn redirect(conn, url) do
     conn
     |> put_resp_header("location", url)
     |> send_resp(302, "")
   end
 
-  -- Pipeline execution: run a list of plugs in order.
-  -- Stops at the first halted conn.
+  doc """
+  Run a list of plugs (`Conn -> Conn` functions) in order, threading the
+  conn through. Before each plug the conn is checked: once it is halted the
+  remaining plugs are skipped and the halted conn is returned.
+
+  ## Examples
+
+      HttpServer.run_pipeline(conn, [logger, auth, router])
+  """
   fn run_pipeline(conn, plugs) do
     match plugs do
     Nil -> conn
@@ -297,10 +382,25 @@ mod HttpServer do
     Int                  -- idle_timeout_secs (default 60)
   )
 
+  doc """
+  A server config listening on `port` with no plugs, `max_connections`
+  1000 and `idle_timeout` 60 seconds. Nothing is bound until `listen` or
+  `spawn_n`.
+
+  ## Examples
+
+      HttpServer.new(4000)
+      |> HttpServer.plug(fn conn -> HttpServer.text(conn, 200, "ok"))
+      |> HttpServer.listen()
+  """
   fn new(port) do
     Server(port, Nil, 1000, 60)
   end
 
+  doc """
+  Append a plug (`Conn -> Conn`) to the end of the server's pipeline. Plugs
+  run in the order they were added.
+  """
   fn plug(server, p) do
     match server do
     Server(port, plugs, mc, it) ->
@@ -308,12 +408,14 @@ mod HttpServer do
     end
   end
 
+  doc "Set the maximum number of concurrent connections (default 1000)."
   fn max_connections(server, n) do
     match server do
     Server(port, plugs, _, it) -> Server(port, plugs, n, it)
     end
   end
 
+  doc "Set the idle keep-alive timeout in seconds (default 60)."
   fn idle_timeout(server, secs) do
     match server do
     Server(port, plugs, mc, _) -> Server(port, plugs, mc, secs)
@@ -328,8 +430,13 @@ mod HttpServer do
     ()
   end
 
-  -- Start the server. Blocks forever.
-  -- Extracts config and calls the C runtime http_server_listen builtin.
+  doc """
+  Bind the configured port and serve requests forever with the plug
+  pipeline (via the runtime's `http_server_listen`). Each request becomes a
+  `Conn`; the pipeline's result is written back as the response, or handed
+  to the WebSocket handler if `conn_upgrade` is a `WebSocketUpgrade`.
+  Does not return in normal operation. Requires `IO.NetListen`.
+  """
   fn listen(server) do
     match server do
     Server(port, plugs, mc, it) -> do
@@ -348,9 +455,20 @@ mod HttpServer do
     end
   end
 
-  -- Start the server in a forked subprocess that handles exactly n requests
-  -- then exits. Returns a handle (child PID) that can be passed to wait_for.
-  -- A readiness pipe ensures the parent does not race ahead of the child's bind.
+  doc """
+  Start the server in a forked subprocess that handles exactly `n` requests
+  and then exits. Returns a handle (the child PID) for `wait_for`. A
+  readiness pipe makes the call return only after the child has bound the
+  port, so the caller can connect immediately. Intended for tests.
+
+  ## Examples
+
+      let h = HttpServer.new(18080)
+        |> HttpServer.plug(fn conn -> HttpServer.text(conn, 200, "pong"))
+        |> HttpServer.spawn_n(1)
+      let resp = HttpClient.get(HttpClient.new_client(), "http://127.0.0.1:18080/")
+      HttpServer.wait_for(h)
+  """
   fn spawn_n(server, n) do
     match server do
     Server(port, plugs, mc, it) -> do
@@ -360,7 +478,7 @@ mod HttpServer do
     end
   end
 
-  -- Wait for a server handle (child PID) returned by spawn_n to exit.
+  doc "Block until the server subprocess started by `spawn_n` (given its handle) exits."
   fn wait_for(handle) do
     http_server_wait(handle)
   end

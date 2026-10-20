@@ -78,7 +78,16 @@ mod Random do
 
   -- ---- Construction ----
 
-  doc "Create a deterministic Rng from an integer seed."
+  doc """
+  Create a deterministic Rng from an integer seed. Any Int (including
+  negative values) is accepted; the same seed yields the same sequence on
+  every backend.
+
+  ## Examples
+
+      let rng = Random.seed(42)
+      let (n, rng2) = Random.next_int(rng)
+  """
   fn seed(n : Int) : Rng do
     -- Base-2^32 digits of n. lo is the low word (int_and sign-extends
     -- consistently on every backend); n - lo is then an exact multiple of
@@ -109,7 +118,12 @@ mod Random do
   doc """
   Generate the next pseudorandom non-negative integer, uniform in [0, 2^52).
   52 bits is the widest range that stays exact on every backend (the JS
-  target stores Int in an IEEE double).
+  target stores Int in an IEEE double). Returns `(value, new_rng)`.
+
+  ## Examples
+
+      let (n, rng2) = Random.next_int(Random.seed(1))
+      -- 0 <= n < 2^52; repeating with seed 1 gives the same n
   """
   fn next_int(rng : Rng) : (Int, Rng) do
     let (hi, rng2) = next_raw(rng)
@@ -117,19 +131,47 @@ mod Random do
     (int_and(hi, 1048575) * (65536 * 65536) + lo, rng3)
   end
 
-  doc "Generate a pseudorandom float in [0.0, 1.0)."
+  doc """
+  Generate a pseudorandom float in [0.0, 1.0) (52 random bits divided by
+  2^52). Returns `(value, new_rng)`.
+
+  ## Examples
+
+      let (f, rng2) = Random.next_float(Random.seed(7))
+      -- 0.0 <= f < 1.0
+  """
   fn next_float(rng : Rng) : (Float, Rng) do
     let (bits, rng2) = next_int(rng)
     (int_to_float(bits) /. 4503599627370496.0, rng2)
   end
 
-  doc "Generate a random integer in [lo, hi] (inclusive). Spans up to 2^52."
+  doc """
+  Generate a random integer in [lo, hi] (inclusive). Spans up to 2^52.
+  Requires `lo <= hi`: when `hi == lo - 1` the modulus is zero and it
+  panics (`int_mod: division by zero`); a smaller `hi` gives meaningless results.
+  Returns `(value, new_rng)`.
+
+  ## Examples
+
+      let (die, rng2) = Random.range(rng, 1, 6)
+      -- die is one of 1..6
+  """
   fn range(rng : Rng, lo : Int, hi : Int) : (Int, Rng) do
     let (raw, rng2) = next_int(rng)
     (lo + int_mod(raw, hi - lo + 1), rng2)
   end
 
-  doc "Generate a random integer in [lo, hi] (inclusive) using the current time as seed."
+  doc """
+  Generate a random integer in [lo, hi] (inclusive), seeding from the
+  current Unix time in whole seconds. Not reproducible, and two calls in
+  the same second return the same value; thread an Rng through `range`
+  instead when you need a sequence of values. Same `lo <= hi` requirement
+  as `range`.
+
+  ## Examples
+
+      let n = Random.int(1, 100)
+  """
   fn int(lo : Int, hi : Int) : Int do
     let rng = seed(float_to_int(unix_time(())))
     let (n, _) = range(rng, lo, hi)
@@ -155,8 +197,14 @@ mod Random do
 
   doc """
   Shuffle a list using the Fisher-Yates algorithm.
-  Returns (shuffled_list, new_rng). O(n²) on lists.
-  Same seed + same list always produces the same shuffle.
+  Returns (shuffled_list, new_rng). O(n^2) on lists.
+  Same seed + same list always produces the same shuffle; the empty list
+  shuffles to itself.
+
+  ## Examples
+
+      let (deck, rng2) = Random.shuffle(Random.seed(42), [1, 2, 3, 4, 5])
+      -- deck is a permutation of [1, 2, 3, 4, 5]
   """
   fn shuffle(rng : Rng, xs : List(a)) : (List(a), Rng) do
     fn go(rest : List(a), remaining : Int, acc : List(a), r : Rng) : (List(a), Rng) do
@@ -173,9 +221,14 @@ mod Random do
   end
 
   doc """
-  Sample n elements from xs without replacement.
-  If n >= length(xs), returns all elements (shuffled).
-  Returns (sample, new_rng).
+  Sample n elements from xs without replacement (the first n of a
+  `shuffle`). If n >= length(xs), returns all elements (shuffled); n <= 0
+  gives `[]`. Returns (sample, new_rng). O(length(xs)^2).
+
+  ## Examples
+
+      let (picks, rng2) = Random.sample(rng, ["a", "b", "c", "d"], 2)
+      -- picks is two distinct elements of the list
   """
   fn sample(rng : Rng, xs : List(a), n : Int) : (List(a), Rng) do
     let len = List.length(xs)
@@ -199,9 +252,14 @@ mod Random do
 
   doc """
   Sample from the standard normal distribution N(0, 1) using the
-  Box–Muller transform.  Consumes two uniform samples per call and
+  Box-Muller transform. Consumes two uniform samples per call and
   discards the second Gaussian deviate (simple + stateless; the
   pairing optimization requires a stateful RNG wrapper).
+  Returns `(value, new_rng)`.
+
+  ## Examples
+
+      let (z, rng2) = Random.standard_normal(rng)
   """
   fn standard_normal(rng : Rng) : (Float, Rng) do
     let (u1, rng2) = next_float_open(rng)
@@ -214,7 +272,12 @@ mod Random do
 
   doc """
   Sample from the normal distribution N(mu, sigma^2).
-  Panics if sigma < 0.  sigma=0 returns mu.
+  Panics if sigma < 0. sigma = 0 returns mu without consuming randomness
+  (the returned Rng is the input Rng). Returns `(value, new_rng)`.
+
+  ## Examples
+
+      let (height, rng2) = Random.normal(rng, 170.0, 10.0)
   """
   fn normal(rng : Rng, mu : Float, sigma : {Float | _ >= 0.0}) : (Float, Rng) do
     if sigma < 0.0 do panic("Random.normal: sigma must be non-negative")
@@ -226,10 +289,14 @@ mod Random do
   end
 
   doc """
-  Sample from the exponential distribution with rate `lambda > 0`.
-  Uses the inverse-CDF method: if U ~ Uniform(0, 1) then
-  X = -ln(U) / lambda is Exp(lambda).
-  Panics if lambda <= 0.
+  Sample from the exponential distribution with rate `lambda > 0`
+  (mean `1 / lambda`). Uses the inverse-CDF method: if U ~ Uniform(0, 1)
+  then X = -ln(U) / lambda is Exp(lambda). The result is always > 0.
+  Panics if lambda <= 0. Returns `(value, new_rng)`.
+
+  ## Examples
+
+      let (wait, rng2) = Random.exponential(rng, 0.5)
   """
   fn exponential(rng : Rng, lambda : {Float | _ > 0.0}) : (Float, Rng) do
     if lambda <= 0.0 do panic("Random.exponential: lambda must be positive")
@@ -240,8 +307,13 @@ mod Random do
   end
 
   doc """
-  Sample from a Bernoulli distribution with success probability p.
-  p must be in [0.0, 1.0]; panics otherwise.
+  Sample from a Bernoulli distribution with success probability p:
+  returns `(true, new_rng)` with probability p. p = 0.0 is always false
+  and p = 1.0 always true. p must be in [0.0, 1.0]; panics otherwise.
+
+  ## Examples
+
+      let (heads, rng2) = Random.bernoulli(rng, 0.5)
   """
   fn bernoulli(rng : Rng, p : {Float | _ >= 0.0 && _ <= 1.0}) : (Bool, Rng) do
     if p < 0.0 || p > 1.0 do panic("Random.bernoulli: p must be in [0, 1]")
@@ -266,17 +338,20 @@ mod Random do
   end
 
   doc """
-  Weighted random selection from a list of `(item, weight)` pairs.
+  Weighted random selection from a list of `(item, weight)` pairs: each
+  item is chosen with probability `weight / total_weight`, so zero-weight
+  items are never chosen.
 
   `items` must be non-empty. Weights must be non-negative and at least one
   must be positive (both data-dependent conditions the type system cannot
   express; still checked at runtime and panic if violated).
-  Returns `(chosen_item, new_rng)`.  Linear in the number of items.
+  Returns `(chosen_item, new_rng)`. Linear in the number of items.
 
-  Example:
-    let items = [(:cat, 1.0), (:dog, 2.0), (:fish, 0.5)]
-    let (pet, rng2) = Random.choice_weighted(rng, items)
-    -- pet is one of :cat, :dog, :fish with probability ~0.28, 0.57, 0.14
+  ## Examples
+
+      let items = [(:cat, 1.0), (:dog, 2.0), (:fish, 0.5)]
+      let (pet, rng2) = Random.choice_weighted(rng, items)
+      -- pet is one of :cat, :dog, :fish with probability ~0.28, 0.57, 0.14
   """
   fn choice_weighted(rng : Rng, items : {List((a, Float)) | len(_) > 0}) : (a, Rng) do
     match items do
@@ -301,7 +376,11 @@ mod Random do
 
   doc """
   Pick a uniform element from a non-empty list.
-  Returns `(element, new_rng)`.  Panics on empty input.
+  Returns `(element, new_rng)`. Panics on empty input. O(length(xs)).
+
+  ## Examples
+
+      let (color, rng2) = Random.choice(rng, ["red", "green", "blue"])
   """
   fn choice(rng : Rng, xs : {List(a) | len(_) > 0}) : (a, Rng) do
     match xs do

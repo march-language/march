@@ -16,9 +16,14 @@ mod WorkDispatch do
   pfn load_stale_ms() : Int do 10000 end
   pfn dispatch_threshold_milli() : Int do 200 end
 
-  -- Power-of-two-choices: pick the better of two random live members.
-  -- Candidates are filtered to those with sampled_at >= now_ms - LOAD_STALE_MS.
-  -- Returns None if fewer than 2 fresh candidates.
+  doc """
+  Pick a dispatch target from [members]: keep the fresh loads (sampled at
+  most 10 s before [now_ms]), then return whichever of the FIRST and LAST
+  fresh entries scores higher under [scorer] (the first on a tie). Returns
+  `None` when fewer than 2 loads are fresh. The choice is deterministic: for
+  power-of-two-choices, pass a shuffled or randomly sampled [members] list
+  (the transport owns the RNG), or use `pick_two`.
+  """
   fn pick_dispatch_target(
     members : List(NodeLoad),
     scorer : NodeLoad -> Int,
@@ -40,9 +45,13 @@ mod WorkDispatch do
     end
   end
 
-  -- Like pick_dispatch_target but uses an explicit pair of indices for
-  -- the two chosen candidates. Useful when the caller has already sampled
-  -- indices from an RNG.
+  doc """
+  Like `pick_dispatch_target`, but compares the fresh loads at indices
+  [idx_a] and [idx_b] (taken modulo the number of fresh loads), for a caller
+  that has already sampled indices from an RNG. The two indices may name the
+  same entry. Returns `None` when fewer than 2 loads are fresh, or when an
+  index is negative (the remainder stays negative).
+  """
   fn pick_two(
     members : List(NodeLoad),
     idx_a : Int,
@@ -70,18 +79,22 @@ mod WorkDispatch do
     end
   end
 
-  -- Route fn_ref to the best available peer node.
-  --
-  -- 1. pick_dispatch_target over [peers]; if None or target spare CPU is not
-  --    > local spare + DISPATCH_THRESHOLD_MILLI, execute locally (invoke_local).
-  -- 2. If Some(target) and it's sufficiently idle: call NodeCall.call on [fd].
-  -- 3. On NoConnection or DeadlineExceeded: fall back to invoke_local.
-  -- 4. TypeMismatch propagates (programming error, not a routing error).
-  --
-  -- [invoke_local] is a thunk wrapping the actual local function call.
-  -- [fd] is the file descriptor for the target node's RPC connection.
-  -- [local_spare] is spare_cpu_milli for the local node (used for the
-  --   threshold check so we don't dispatch for tiny gains).
+  doc """
+  Route a call of [fn_ref] with [args] to the best peer in [peers], or run it
+  locally with [invoke_local]:
+
+  1. `pick_dispatch_target` over [peers] scored by spare CPU; with fewer than
+     two fresh peers the call runs locally.
+  2. Unless the target's spare CPU exceeds [local_spare] by more than 200
+     milli-cores (a fifth of a core), the call runs locally.
+  3. [fd_for] maps the target to its RPC connection; `None` runs locally.
+  4. Otherwise `NodeCall.call` with deadline `now_ms + timeout_ms`; a
+     `NoConnection` or `DeadlineExceeded` falls back to [invoke_local], any
+     other result (including `TypeMismatch`) is returned as is.
+
+  Note that the remote attempt may already have used up the timeout before
+  the local fallback runs.
+  """
   fn dispatch(
     peers : List(NodeLoad),
     now_ms : Int,
@@ -115,8 +128,13 @@ mod WorkDispatch do
     end
   end
 
-  -- Consistent-hash affinity dispatch: route by key to the ring owner.
-  -- Falls back to load-aware dispatch if the owner's fd is unavailable.
+  doc """
+  Consistent-hash affinity dispatch: call [fn_ref] on the ring owner of [key]
+  in [ring] through `fd_for(owner_id)`, so the same key keeps hitting the same
+  node. Falls back to load-aware `dispatch` (with the same [now_ms]) when the
+  ring is empty, the owner has no connection, or the call fails with
+  `NoConnection` or `DeadlineExceeded`; any other result is returned as is.
+  """
   fn dispatch_affine(
     ring : ConsistentHash.HashRing(String),
     peers : List(NodeLoad),

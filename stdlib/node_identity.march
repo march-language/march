@@ -9,7 +9,11 @@ mod NodeIdentity do
   type Identity = { name : String, node_id : String, incarnation : Int }
   derive Eq for Identity
 
-  -- Stable NodeId for a node: the hash of its public key.
+  doc """
+  The stable NodeId for a node: the hex SHA-256 of its public key
+  [pubkey] (`Crypto.sha256`), 64 lowercase hex digits. The same key always
+  gives the same id.
+  """
   fn derive_id(pubkey : String) : String do
     Crypto.sha256(pubkey)
   end
@@ -23,11 +27,17 @@ mod NodeIdentity do
   """
   fn name_id(name : String) : String do derive_id("pk-" ++ name) end
 
+  doc """
+  An identity for node [name] with public key [pubkey] at [incarnation]: its
+  `node_id` is `derive_id(pubkey)`.
+
+      NodeIdentity.make("worker@host", "pk-worker@host", 1).node_id == NodeIdentity.name_id("worker@host")
+  """
   fn make(name : String, pubkey : String, incarnation : Int) : Identity do
     { name: name, node_id: derive_id(pubkey), incarnation: incarnation }
   end
 
-  -- Serialize to MessagePack bytes: a 3-element array [name, node_id, incarnation].
+  doc "Serialize [id] to MessagePack bytes: the 3-element array [name, node_id, incarnation]."
   fn encode(id : Identity) : List(Int) do
     Msgpack.encode(Msgpack.array(
       Cons(Msgpack.str(id.name),
@@ -35,6 +45,11 @@ mod NodeIdentity do
       Cons(Msgpack.int(id.incarnation), Nil)))))
   end
 
+  doc """
+  Decode the bytes of `encode`. `Err` with Msgpack's message for bytes that
+  are not MessagePack, or "NodeIdentity: malformed identity record" for any
+  other value than a [Str, Str, Int] array.
+  """
   fn decode(bytes : List(Int)) : Result(Identity, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)

@@ -19,10 +19,10 @@
 --
 -- ## Examples
 --
---     march> let v = RRB.from_list([1, 2, 3, 4, 5])
---     march> RRB.length(v)
+--     march> let vec = RRB.from_list([1, 2, 3, 4, 5])
+--     march> RRB.length(vec)
 --     5
---     march> let s = RRB.slice(v, 1, 4)
+--     march> let s = RRB.slice(vec, 1, 4)
 --     march> RRB.fold(s, 0, fn (acc, x) -> acc + x)
 --     9
 --
@@ -47,16 +47,47 @@ mod RRB do
 
   -- ── Construction ──────────────────────────────────────────────────────────
 
-  doc "An empty `Vec`. O(1)."
+  doc """
+  An empty `Vec`. O(1).
+
+  ## Examples
+
+      march> RRB.length(RRB.empty())
+      0
+  """
   fn empty(): Vec(a) do Vec(Array.empty()) end
 
-  doc "A `Vec` containing exactly one element. O(1)."
+  doc """
+  A `Vec` containing exactly one element. O(1).
+
+  ## Examples
+
+      march> RRB.to_list(RRB.singleton("x"))
+      ["x"]
+  """
   fn singleton(x: a): Vec(a) do Vec(Array.push(Array.empty(), x)) end
 
-  doc "Build a `Vec` from a list. O(n)."
+  doc """
+  Build a `Vec` from a list, preserving order. O(n).
+
+  ## Examples
+
+      march> RRB.get(RRB.from_list([10, 20, 30]), 2)
+      30
+      march> RRB.is_empty(RRB.from_list([]))
+      true
+  """
   fn from_list(xs: List(a)): Vec(a) do Vec(Array.from_list(xs)) end
 
-  doc "Wrap an `Array` (an `Array.PVec(a)`, the type every `Array.*` function returns) as a `Vec`. O(1)."
+  doc """
+  Wrap an `Array` (an `Array.PVec(a)`, the type every `Array.*` function returns) as a
+  `Vec`. O(1); the array is shared, not copied.
+
+  ## Examples
+
+      march> RRB.to_list(RRB.from_array(Array.from_list([1, 2, 3])))
+      [1, 2, 3]
+  """
   fn from_array(xs: Array.PVec(a)): Vec(a) do Vec(xs) end
 
   doc """
@@ -92,12 +123,30 @@ mod RRB do
 
   -- ── Basic access ──────────────────────────────────────────────────────────
 
-  doc "Number of elements. O(1)."
+  doc """
+  Number of elements. O(1).
+
+  ## Examples
+
+      march> RRB.length(RRB.range(0, 40))
+      40
+      march> RRB.length(RRB.empty())
+      0
+  """
   fn length(v: Vec(a)): Int do
     match v do Vec(arr) -> Array.length(arr) end
   end
 
-  doc "True when the `Vec` is empty. O(1)."
+  doc """
+  True when the `Vec` is empty. O(1).
+
+  ## Examples
+
+      march> RRB.is_empty(RRB.empty())
+      true
+      march> RRB.is_empty(RRB.singleton(0))
+      false
+  """
   fn is_empty(v: Vec(a)): Bool do
     match v do Vec(arr) -> Array.is_empty(arr) end
   end
@@ -121,7 +170,16 @@ mod RRB do
 
   -- ── Modification ──────────────────────────────────────────────────────────
 
-  doc "Append `x` at the end. Returns a new `Vec`. O(1) amortised."
+  doc """
+  Append `x` at the end. Returns a new `Vec`; the original is unchanged. O(1) amortised.
+
+  ## Examples
+
+      march> RRB.to_list(RRB.push(RRB.from_list([1, 2]), 3))
+      [1, 2, 3]
+      march> RRB.to_list(RRB.push(RRB.empty(), 1))
+      [1]
+  """
   fn push(v: Vec(a), x: a): Vec(a) do
     match v do Vec(arr) -> Vec(Array.push(arr, x)) end
   end
@@ -232,28 +290,58 @@ mod RRB do
 
   -- ── Conversion ────────────────────────────────────────────────────────────
 
-  doc "Return all elements as a list in index order. O(n)."
+  doc """
+  Return all elements as a list in index order. O(n).
+
+  ## Examples
+
+      march> RRB.to_list(RRB.range(3, 6))
+      [3, 4, 5]
+      march> RRB.to_list(RRB.empty())
+      []
+  """
   fn to_list(v: Vec(a)): List(a) do
     match v do Vec(arr) -> Array.to_list(arr) end
   end
 
-  doc "Return the underlying `Array` (an `Array.PVec(a)`). O(1)."
+  doc """
+  Return the underlying `Array` (an `Array.PVec(a)`). O(1); nothing is copied.
+
+  ## Examples
+
+      march> Array.to_list(RRB.to_array(RRB.from_list([1, 2, 3])))
+      [1, 2, 3]
+  """
   fn to_array(v: Vec(a)): Array.PVec(a) do
     match v do Vec(arr) -> arr end
   end
 
   -- ── Bulk operations ───────────────────────────────────────────────────────
 
-  doc "Apply `f` to each element for side effects. O(n)."
+  doc """
+  Apply `f` to each element in index order, for side effects. O(n).
+
+  ## Examples
+
+      RRB.each(RRB.from_list(["a", "b"]), fn s -> println(s))
+      -- prints a, then b
+  """
   fn each(v: Vec(a), f: a -> Unit): Unit do
     fold_left(v, (), fn (_, x) -> f(x))
   end
 
   doc """
-  Apply `f` to every element, collecting results in a new `Vec`. O(n).
+  Apply `f` to every element, collecting results in a new `Vec` in the same order. O(n).
 
   For parallel map, use `Parallel.pmap` instead — this is the sequential
   version.
+
+  ## Examples
+
+      march> RRB.to_list(RRB.map(RRB.from_list([1, 2, 3]), fn x -> x * 2))
+      [2, 4, 6]
+      march> RRB.length(RRB.map(RRB.empty(), fn x -> x + 1))
+      0
   """
   fn map(v: Vec(a), f: a -> b): Vec(b) do
     match v do Vec(arr) -> Vec(Array.map(arr, f)) end

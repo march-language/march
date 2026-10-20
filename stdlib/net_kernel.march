@@ -23,21 +23,36 @@ mod NetKernel do
 
   -- ── byte bridge: List(Int) bytes <-> Socket String ─────────────────────────
 
+  doc "The bytes of [s] (its UTF-8 encoding) as a List(Int), each 0..255."
   fn str_to_bytes(s : String) : List(Int) do Bytes.to_list(Bytes.from_string(s)) end
+  doc "The String whose bytes are [b] (the inverse of `str_to_bytes`): what the socket layer writes."
   fn bytes_to_str(b : List(Int)) : String do Bytes.to_string(Bytes.from_list(b)) end
 
-  -- Frame [payload] and render it as the String the socket layer sends.
+  doc """
+  Frame [payload] (`NetFrame.encode`) and render it as the String the socket
+  layer sends. Never sealed.
+
+      NetKernel.str_to_bytes(NetKernel.to_wire([104, 105]))   -- [0, 0, 0, 2, 104, 105]
+  """
   fn to_wire(payload : List(Int)) : String do
     bytes_to_str(NetFrame.encode(payload))
   end
 
-  -- A fresh random nonce for a handshake challenge.
+  doc "A fresh random nonce for a handshake challenge: 16 random bytes as 32 hex digits (`Crypto.random_hex(16)`)."
   fn fresh_nonce() : String do Crypto.random_hex(16) end
 
   -- ── framed socket I/O ──────────────────────────────────────────────────────
 
-  -- Frame [payload] and write it; sealed (NetFrame.seal) when the
-  -- connection's handshake agreed a MAC key.
+  doc """
+  Frame [payload] and write it to [fd]; sealed (`NetFrame.seal`, with the
+  connection's next frame number) when the connection's handshake agreed a
+  MAC key. `Err` with the socket's message when the write fails.
+
+      match NetKernel.send_frame(fd, NodeSend.encode_failed(seq, "no such actor")) do
+        Ok(_) -> ()
+        Err(e) -> println("write failed: " ++ e)
+      end
+  """
   fn send_frame(fd : Int, payload : List(Int)) : Result((), String) do
     match Vault.get(mac_table(), fk(fd)) do
       None -> send_raw(fd, payload)
@@ -80,18 +95,28 @@ mod NetKernel do
     end
   end
 
-  -- Read one complete frame off [fd], starting from already-buffered [buf].
-  -- Returns (payload, leftover_bytes); None-from-decode means read more.
   -- Linear in the frame size: once the 4-byte length prefix is in [buf],
   -- the rest of the body is read with ONE tcp_recv_exact and appended ONCE.
   -- The first version appended every 4 KiB chunk to the accumulated list,
   -- quadratic in the frame size -- a 16 MiB frame was impractical
   -- (specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md).
-  -- Bytes read past the frame boundary come back as the leftover for the
-  -- next call, as before.
-  -- On a sealed connection each frame's MAC is checked (`unseal`): a frame
-  -- that fails is dropped and the next one read; the connection's reader
-  -- gets Err once `mac_failure_limit()` frames have failed.
+  doc """
+  Read one complete frame off [fd], starting from the already-buffered bytes
+  [buf] (`Nil` at first). Blocks until the frame has arrived. Returns
+  `Ok((payload, leftover))`: bytes read past the frame boundary come back
+  as the leftover, which the caller passes as [buf] to the next call.
+  `Err` on a read failure, or "connection closed mid-frame".
+
+  On a sealed connection each frame's MAC is checked: a frame that fails
+  (or replays an earlier number) is dropped and the next one read; the
+  call returns `Err` once `mac_failure_limit()` frames on the connection
+  have failed.
+
+      match NetKernel.recv_frame(fd, buf) do
+        Ok((frame, rest)) -> handle(frame, rest)
+        Err(e) -> println("connection lost: " ++ e)
+      end
+  """
   fn recv_frame(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do
     match recv_frame_plain(fd, buf) do
       Err(e) -> Err(e)
@@ -133,15 +158,19 @@ mod NetKernel do
     end
   end
 
-  -- Read exactly one frame and not a byte more: the 4-byte prefix, then
-  -- exactly the body. For the handshake, where the frames that follow
-  -- belong to whoever the connection is handed to. `recv_frame` reads in
-  -- chunks and returns the over-read as a leftover the caller must carry;
-  -- the handshake used it and DROPPED that leftover, so a peer that
-  -- finished its side of the handshake and immediately wrote (the
-  -- control/data split's data stream) lost its first bytes whenever they
-  -- landed in the same recv() as the proof -- 2 runs in 20 under load,
+  -- `recv_frame` reads in chunks and returns the over-read as a leftover
+  -- the caller must carry; the handshake used it and DROPPED that leftover,
+  -- so a peer that finished its side of the handshake and immediately wrote
+  -- (the control/data split's data stream) lost its first bytes whenever
+  -- they landed in the same recv() as the proof -- 2 runs in 20 under load,
   -- never unloaded (control_channel_loopback, 2026-09-14).
+  doc """
+  Read exactly one frame off [fd] and not a byte more: the 4-byte prefix,
+  then exactly the body, so the bytes that follow stay in the socket for
+  whoever the connection is handed to. Returns the payload; on a sealed
+  connection it is MAC-checked as in `recv_frame`. Blocks; `Err` on a read
+  failure.
+  """
   fn recv_frame_exact(fd : Int) : Result(List(Int), String) do
     match recv_frame_exact_raw(fd) do
       Err(e) -> Err(e)
@@ -171,10 +200,19 @@ mod NetKernel do
   end
 
   -- ── symmetric authenticated handshake ──────────────────────────────────────
-  -- Both peers run the same sequence: send hello, recv hello, send proof bound
-  -- to the peer's nonce, recv proof, authenticate (peer's proof must bind to
-  -- the nonce WE issued). Returns the authenticated peer identity or a reason.
-  -- Shared-secret mode; `handshake_auth` is the general form.
+  doc """
+  The shared-secret handshake on [fd], opening a control connection. Both
+  peers run the same sequence: send hello, read the peer's, send a proof
+  bound to the peer's nonce, read the peer's proof, authenticate (it must
+  bind to the nonce WE issued, [my_nonce]). Returns the authenticated
+  peer's identity, or why it was refused. Blocks with no timeout;
+  `handshake_auth` is the general form.
+
+      match NetKernel.handshake(fd, me, secret, NetKernel.fresh_nonce()) do
+        Ok(peer) -> println("joined by " ++ peer.name)
+        Err(e) -> println("refused: " ++ e)
+      end
+  """
   fn handshake(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                my_nonce : String) : Result(NodeIdentity.Identity, String) do
     match handshake_role(fd, my_id, secret, my_nonce, Handshake.role_control()) do
@@ -183,13 +221,14 @@ mod NetKernel do
     end
   end
 
-  -- The same handshake, opening a connection of [role] ("control" or "data",
-  -- Handshake.role_*); returns the peer's identity AND the role the peer
-  -- announced, so an acceptor knows which of a peer's two connections it
-  -- just took. A pre-split peer announces no role and reads as control.
-  -- Reads are exact (recv_frame_exact): nothing past the handshake's own two
-  -- frames is consumed, so the connection is handed over with the peer's
-  -- first real frame still unread in the socket.
+  doc """
+  `handshake`, opening a connection of [role] ("control" or "data",
+  `Handshake.role_*`); returns the peer's identity AND the role the peer
+  announced, so an acceptor knows which of a peer's two connections it just
+  took. A pre-split peer announces no role and reads as control. Reads are
+  exact: nothing past the handshake's own two frames is consumed, so the
+  connection is handed over with the peer's first real frame still unread.
+  """
   fn handshake_role(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                     my_nonce : String, role : String) : Result((NodeIdentity.Identity, String), String) do
     match handshake_auth(fd, my_id, ClusterAuth.Secret(secret), my_nonce, role, "", 0) do
@@ -229,7 +268,12 @@ mod NetKernel do
     end
   end
 
-  -- One frame, exactly, before [deadline] (unix ms).
+  doc """
+  One frame off [fd], exactly (never over-read, as `recv_frame_exact`, but
+  never MAC-checked: for the handshake's own frames), before [deadline] (absolute unix ms). `Err("net-kernel:
+  handshake timed out")` when the deadline passes first, or an error when
+  the read fails or the connection closes.
+  """
   fn recv_frame_until(fd : Int, deadline : Int) : Result(List(Int), String) do
     match recv_exact_until(fd, 4, deadline, Nil) do
       Err(e) -> Err(e)
@@ -237,10 +281,13 @@ mod NetKernel do
     end
   end
 
-  -- The symmetric handshake of `handshake_role`, sending [addr] (this node's
-  -- advertised listen address) in the hello and bounded by [timeout_ms].
-  -- Returns the peer's identity, the role it announced and the address it
-  -- advertised ("" from a peer that sends none).
+  doc """
+  The shared-secret handshake of `handshake_role`, sending [addr] (this
+  node's advertised listen address) in the hello, with the whole exchange
+  bounded by [timeout_ms] (<= 0: no bound). Returns the peer's identity, the
+  role it announced and the address it advertised ("" from a peer that
+  sends none).
+  """
   fn handshake_addr(fd : Int, my_id : NodeIdentity.Identity, secret : String, my_nonce : String,
                     role : String, addr : String, timeout_ms : Int)
       : Result((NodeIdentity.Identity, String, String), String) do
@@ -354,6 +401,7 @@ mod NetKernel do
     id
   end
 
+  doc "Remove the hook `on_frame_rejected` returned [id] for; an unknown id is ignored."
   fn off_frame_rejected(id : Int) : () do Vault.drop(mac_hooks(), int_to_string(id)) end
 
   -- A sealed frame's body (after the length prefix) off [fd]: the payload,
@@ -536,17 +584,21 @@ mod NetKernel do
 
   -- ── P5 frame codecs ──────────────────────────────────────────────────────────
 
-  -- REGISTRY_SYNC_REQ: send our root hash, ask peer to diff.
+  doc "A REGISTRY_SYNC_REQ frame payload (MessagePack, tag 5): our registry's Merkle [root_hash], asking the peer to diff."
   fn encode_registry_sync_req(root_hash : String) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(5), Cons(Msgpack.str(root_hash), Nil))))
   end
 
-  -- REGISTRY_SYNC_RESP: our root hash + any leaves that differ.
-  -- Each leaf is encoded as [name, node_id, pid, present_int, clock], clock
-  -- the entry's VectorClock as [[actor_id, ts], ...]. The clock is what
-  -- GlobalRegistry.merge orders bindings by: a leaf without it decodes as
-  -- causally OLDER than any local claim, so after a partition each side kept
-  -- its own binding and the replicas never converged (test/two_node/partition).
+  -- The clock is what GlobalRegistry.merge orders bindings by: a leaf
+  -- without it decodes as causally OLDER than any local claim, so after a
+  -- partition each side kept its own binding and the replicas never
+  -- converged (test/two_node/partition).
+  doc """
+  A REGISTRY_SYNC_RESP frame payload (MessagePack, tag 6): our [root_hash]
+  and the [leaves] that differ. Each leaf is [name, node_id, pid,
+  present (1/0), clock, creation], clock the entry's VectorClock as
+  [[actor_id, ts], ...], plus a [0, retired_at] pair for a tombstone.
+  """
   fn encode_registry_sync_resp(root_hash : String,
                                 leaves : List((String, GlobalRegistry.Entry))) : List(Int) do
     let leaf_vals = List.map(leaves, fn pair ->
@@ -594,6 +646,7 @@ mod NetKernel do
       end)
   end
 
+  doc "Decode a REGISTRY_SYNC_REQ frame payload into its root hash. `Err` for bytes that are not MessagePack or not a REGISTRY_SYNC_REQ."
   fn decode_registry_sync_req(bytes : List(Int)) : Result(String, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -605,6 +658,14 @@ mod NetKernel do
     end
   end
 
+  doc """
+  Decode a REGISTRY_SYNC_RESP frame payload into (root hash, leaves). Older
+  leaf shapes still decode: a 4-element leaf with an empty clock, a
+  5-element one with creation 0. A malformed leaf is skipped and a malformed
+  clock pair ignored; a decoded entry's `registrant` is "", and a present
+  entry never carries a tombstone stamp. `Err` for bytes that are not
+  MessagePack or not a REGISTRY_SYNC_RESP.
+  """
   fn decode_registry_sync_resp(bytes : List(Int)) : Result((String, List((String, GlobalRegistry.Entry))), String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -646,7 +707,7 @@ mod NetKernel do
     end
   end
 
-  -- MONITOR_REQ: register a remote watcher on a local target.
+  doc "A MONITOR_REQ frame payload (MessagePack, tag 7): [watcher_pid] on node [watcher_node] asks to watch the receiver's local process [target_pid]."
   fn encode_monitor_req(watcher_node : String, watcher_pid : Int, target_pid : Int) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(7),
       Cons(Msgpack.str(watcher_node),
@@ -654,6 +715,7 @@ mod NetKernel do
       Cons(Msgpack.int(target_pid), Nil))))))
   end
 
+  doc "Decode a MONITOR_REQ frame payload into (watcher_node, watcher_pid, target_pid). `Err` for bytes that are not MessagePack or not a MONITOR_REQ."
   fn decode_monitor_req(bytes : List(Int)) : Result((String, Int, Int), String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -668,8 +730,11 @@ mod NetKernel do
     end
   end
 
-  -- MONITOR_FIRE: remote process died; notify local watcher.
-  -- reason_tag: 0=Normal 1=Killed 2=Crash 3=NodeDown
+  doc """
+  A MONITOR_FIRE frame payload (MessagePack, tag 8): the watched process
+  [target_pid] died, for [reason_tag] (0 = Normal, 1 = Killed, 2 = Crash,
+  3 = NodeDown) with [reason_msg]; the receiver notifies its local watcher.
+  """
   fn encode_monitor_fire(target_pid : Int, reason_tag : Int, reason_msg : String) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(8),
       Cons(Msgpack.int(target_pid),
@@ -677,6 +742,7 @@ mod NetKernel do
       Cons(Msgpack.str(reason_msg), Nil))))))
   end
 
+  doc "Decode a MONITOR_FIRE frame payload into (target_pid, reason_tag, reason_msg). `Err` for bytes that are not MessagePack or not a MONITOR_FIRE."
   fn decode_monitor_fire(bytes : List(Int)) : Result((Int, Int, String), String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -691,7 +757,16 @@ mod NetKernel do
     end
   end
 
-  -- Peek at the frame tag (first element of the outer array) without full decode.
+  doc """
+  The tag of a frame payload: the first element of its outer MessagePack
+  array, when that is an Int. None for bytes that do not decode, or another
+  shape. It decodes the whole payload (it is not a cheap peek).
+
+      match NetKernel.frame_tag(frame) do
+        Some(7) -> handle_monitor_req(frame)
+        _ -> ()
+      end
+  """
   fn frame_tag(bytes : List(Int)) : Option(Int) do
     match Msgpack.decode(bytes) do
       Err(_) -> None

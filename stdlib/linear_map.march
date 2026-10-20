@@ -46,6 +46,10 @@
 -- Performance: put/take/take_slot/fill O(log32 n) (a get plus an insert or a
 -- remove); size O(1); keys/drain/to_list O(n), in hash order.
 --
+-- A `LinearMap` cannot be bound by a top-level REPL `let` (a module-level
+-- value cannot be linear), so the examples below build and consume each map
+-- inside one expression; `two(0)` stands for a fresh map {1: 10, 2: 20}.
+--
 -- doc: try
 
 mod LinearMap do
@@ -62,17 +66,36 @@ mod LinearMap do
   An empty map whose keys are ordered by the curried less-than comparator
   `cmp` (`cmp(a)(b)` is true when `a < b`).  The comparator is stored, so no
   later call takes one.
+
+  ## Examples
+
+      march> LinearMap.to_list(LinearMap.empty(fn a -> fn b -> a < b))
+      []
   """
   fn empty(cmp : k -> k -> Bool) : LinearMap(k, v) do
     LinearMapRep(0, cmp, Map.empty())
   end
 
-  doc "An empty map keyed by Int."
+  doc """
+  An empty map keyed by Int, ordered by `Map.int_cmp`.
+
+  ## Examples
+
+      march> match LinearMap.put(LinearMap.empty_int(), 1, 10) do (old, m) -> (old, LinearMap.to_list(m)) end
+      (None, [(1, 10)])
+  """
   fn empty_int() : LinearMap(Int, v) do
     empty(Map.int_cmp)
   end
 
-  doc "An empty map keyed by String."
+  doc """
+  An empty map keyed by String, ordered by `Map.str_cmp`.
+
+  ## Examples
+
+      march> match LinearMap.put(LinearMap.empty_string(), "a", 1) do (old, m) -> (old, LinearMap.to_list(m)) end
+      (None, [("a", 1)])
+  """
   fn empty_string() : LinearMap(String, v) do
     empty(Map.str_cmp)
   end
@@ -83,9 +106,12 @@ mod LinearMap do
   Store `val` under `key`.  Returns the value that was there before, if any,
   and the map.  The displaced value is the caller's to consume.
 
-      march> let (old, m) = LinearMap.put(LinearMap.empty_int(), 1, 10)
-      march> LinearMap.drain(m, 0, fn (acc, k, v) -> acc + k + v) + Option.unwrap_or(old, 0)
+  ## Examples
+
+      march> match LinearMap.put(LinearMap.empty_int(), 1, 10) do (old, m) -> LinearMap.drain(m, 0, fn (acc, k, v) -> acc + k + v) + Option.unwrap_or(old, 0) end
       11
+      march> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 1, 20) do (old, m2) -> (old, LinearMap.to_list(m2)) end end
+      (Some(10), [(1, 20)])
   """
   @[trusted_linear(v)]
   fn put(m : LinearMap(k, v), key : k, val : v) : (Option(v), LinearMap(k, v)) do
@@ -104,6 +130,15 @@ mod LinearMap do
   Remove the value under `key` and return it with the rest of the map.  This
   is the only way a value leaves a `LinearMap` (besides the terminal
   operations).  `None` when the key is absent; the map is unchanged then.
+
+  ## Examples
+
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.take(two(0), 1) do (v, m) -> (v, LinearMap.to_list(m)) end
+      (Some(10), [(2, 20)])
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.take(two(0), 9) do (v, m) -> (v, LinearMap.drain(m, 0, fn (acc, k, x) -> acc + x)) end
+      (None, 30)
   """
   @[trusted_linear(v)]
   fn take(m : LinearMap(k, v), key : k) : (Option(v), LinearMap(k, v)) do
@@ -126,6 +161,17 @@ mod LinearMap do
         (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
         (Some(p), slot) -> { state with sessions: LinearMap.fill(slot, step(p)) }
       end
+
+  The key is remembered even when it was absent, so `fill` then adds it.
+
+  ## Examples
+
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.take_slot(two(0), 1) do (v, s) -> (v, List.sort_by(LinearMap.to_list(LinearMap.fill(s, 99)), fn (x, y) -> x < y)) end
+      (Some(10), [(1, 99), (2, 20)])
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.take_slot(two(0), 7) do (v, s) -> (v, LinearMap.drain(LinearMap.fill(s, 70), 0, fn (acc, k, x) -> acc + x)) end
+      (None, 100)
   """
   @[trusted_linear(v)]
   fn take_slot(m : LinearMap(k, v), key : k) : (Option(v), LinearSlot(k, v)) do
@@ -138,7 +184,16 @@ mod LinearMap do
     end
   end
 
-  doc "Put `val` into the slot's key and return the whole map."
+  doc """
+  Put `val` into the slot's key and return the whole map.  The key was
+  removed by `take_slot`, so nothing is displaced.
+
+  ## Examples
+
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.take_slot(two(0), 2) do (v, s) -> List.sort_by(LinearMap.to_list(LinearMap.fill(s, 0)), fn (x, y) -> x < y) end
+      [(1, 10), (2, 0)]
+  """
   @[trusted_linear(v)]
   fn fill(s : LinearSlot(k, v), val : v) : LinearMap(k, v) do
     match s do
@@ -147,7 +202,15 @@ mod LinearMap do
     end
   end
 
-  doc "Close the slot with its key absent and return the map."
+  doc """
+  Close the slot with its key absent and return the map.
+
+  ## Examples
+
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.take_slot(two(0), 1) do (v, s) -> (v, LinearMap.to_list(LinearMap.vacate(s))) end
+      (Some(10), [(2, 20)])
+  """
   @[trusted_linear(v)]
   fn vacate(s : LinearSlot(k, v)) : LinearMap(k, v) do
     match s do
@@ -160,9 +223,13 @@ mod LinearMap do
   doc """
   The number of entries, and the map.  O(1).
 
-      march> let (n, m) = LinearMap.size(LinearMap.empty_int())
-      march> n + LinearMap.drain(m, 0, fn (acc, k, v) -> acc + v)
+  ## Examples
+
+      march> match LinearMap.size(LinearMap.empty_int()) do (n, m) -> n + LinearMap.drain(m, 0, fn (acc, k, v) -> acc + v) end
       0
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.size(two(0)) do (n, m) -> (n, LinearMap.drain(m, 0, fn (acc, k, x) -> acc + x)) end
+      (2, 30)
   """
   @[trusted_linear(v)]
   fn size(m : LinearMap(k, v)) : (Int, LinearMap(k, v)) do
@@ -171,7 +238,18 @@ mod LinearMap do
     end
   end
 
-  doc "Whether `key` is present, and the map."
+  doc """
+  Whether `key` is present, and the map.
+
+  ## Examples
+
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.member(two(0), 2) do (b, m) -> (b, LinearMap.drain(m, 0, fn (acc, k, x) -> acc + x)) end
+      (true, 30)
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.member(two(0), 5) do (b, m) -> (b, LinearMap.drain(m, 0, fn (acc, k, x) -> acc + x)) end
+      (false, 30)
+  """
   @[trusted_linear(v)]
   fn member(m : LinearMap(k, v), key : k) : (Bool, LinearMap(k, v)) do
     match m do
@@ -184,6 +262,12 @@ mod LinearMap do
   The keys (hash order), and the map.  Keys are ordinary values, so the list
   can be used freely; to visit each value, `take_slot` it by key and `fill` it
   back, recursing over the list.
+
+  ## Examples
+
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> match LinearMap.keys(two(0)) do (ks, m) -> (List.sort_by(ks, fn (x, y) -> x < y), LinearMap.drain(m, 0, fn (acc, k, x) -> acc + x)) end
+      ([1, 2], 30)
   """
   @[trusted_linear(v)]
   fn keys(m : LinearMap(k, v)) : (List(k), LinearMap(k, v)) do
@@ -197,6 +281,12 @@ mod LinearMap do
   doc """
   Consume the map, folding every entry into `acc` with `f(acc, key, value)`.
   `f` receives each value once and must consume it.  Hash order.
+
+  ## Examples
+
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> LinearMap.drain(two(0), 0, fn (acc, k, v) -> acc + k * v)
+      50
   """
   @[trusted_linear(v)]
   fn drain(m : LinearMap(k, v), acc : a, f : a -> k -> v -> a) : a do
@@ -208,6 +298,12 @@ mod LinearMap do
   doc """
   Consume the map into its `(key, value)` pairs (hash order).  The list holds
   the values, so it must be consumed in turn.
+
+  ## Examples
+
+      march> let two = fn _ -> match LinearMap.put(LinearMap.empty(fn a -> fn b -> a < b), 1, 10) do (_, m) -> match LinearMap.put(m, 2, 20) do (_, m2) -> m2 end end
+      march> List.sort_by(LinearMap.to_list(two(0)), fn (x, y) -> x < y)
+      [(1, 10), (2, 20)]
   """
   @[trusted_linear(v)]
   fn to_list(m : LinearMap(k, v)) : List((k, v)) do
@@ -224,6 +320,11 @@ mod LinearMap do
         Ok(_) -> ()
         Err(m2) -> LinearMap.drain(m2, (), fn (u, k, p) -> retire(p))
       end
+
+  ## Examples
+
+      march> LinearMap.dispose(LinearMap.empty_int())
+      Ok(())
   """
   @[trusted_linear(v)]
   fn dispose(m : LinearMap(k, v)) : Result((), LinearMap(k, v)) do

@@ -17,8 +17,8 @@
 --   Logger.with_scope([Logger.LogField("request_id", Logger.s("abc"))],
 --     fn _ -> handle_request())
 --
--- Output goes to stderr in the format:
---   [LEVEL] message {key:value, key2:value2}
+-- With no appender registered, output goes to stderr in the format:
+--   [LEVEL] message {key=value, key2=value2}
 --
 -- v1 API (still supported):
 --   Logger.set_level(Logger.Info)
@@ -27,6 +27,12 @@
 --   Logger.warn("slow query")
 --   Logger.error("db connection lost")
 --   Logger.log_with(Logger.Info, "user signed in", [("user", "alice")])
+--
+-- Logging calls write output, so their docs show plain code; the level
+-- helpers, value constructors, entry accessors and formatters are pure and
+-- carry REPL examples.
+--
+-- doc: try
 
 mod Logger do
 
@@ -48,15 +54,72 @@ mod Logger do
   -- Convenience constructors so call sites stay short:
   --   Logger.with_field("k", Logger.s("v"))
   --   Logger.with_field("n", Logger.i(42))
+  doc """
+  Field value constructor: a String (`LStr`).
+
+  ## Examples
+
+      march> Logger.s("v")
+      LStr("v")
+  """
   fn s(v : String) : LogValue do LStr(v) end
+  doc """
+  Field value constructor: an Int (`LInt`).
+
+  ## Examples
+
+      march> Logger.i(42)
+      LInt(42)
+  """
   fn i(v : Int)    : LogValue do LInt(v) end
+  doc """
+  Field value constructor: a Float (`LFloat`).
+
+  ## Examples
+
+      march> Logger.f(1.5)
+      LFloat(1.5)
+  """
   fn f(v : Float)  : LogValue do LFloat(v) end
+  doc """
+  Field value constructor: a Bool (`LBool`).
+
+  ## Examples
+
+      march> Logger.b(true)
+      LBool(true)
+  """
   fn b(v : Bool)   : LogValue do LBool(v) end
+  doc """
+  Field value constructor: an Atom (`LAtom`).
+
+  ## Examples
+
+      march> Logger.a(:ok)
+      LAtom(:ok)
+  """
   fn a(v : Atom)   : LogValue do LAtom(v) end
+  doc """
+  Field value constructor: an explicit null (`LNull`), rendered as `null`.
+
+  ## Examples
+
+      march> Logger.nul()
+      LNull
+  """
   fn nul()         : LogValue do LNull    end
 
   -- ---- Level helpers ----
 
+  doc """
+  The numeric level: Debug=0, Info=1, Warn=2, Error=3 (same as
+  `level_rank`). This is the value the runtime's level filter stores.
+
+  ## Examples
+
+      march> Logger.level_to_int(Logger.Warn)
+      2
+  """
   fn level_to_int(l) do
     match l do
     Debug -> 0
@@ -66,6 +129,15 @@ mod Logger do
     end
   end
 
+  doc """
+  The upper-case level name used in log lines: "DEBUG", "INFO", "WARN" or
+  "ERROR".
+
+  ## Examples
+
+      march> Logger.level_to_string(Logger.Warn)
+      "WARN"
+  """
   fn level_to_string(l) do
     match l do
     Debug -> "DEBUG"
@@ -75,6 +147,19 @@ mod Logger do
     end
   end
 
+  doc """
+  Inverse of `level_to_int`, clamping out-of-range input: `n <= 0` is
+  Debug, 1 Info, 2 Warn, and anything `>= 3` Error.
+
+  ## Examples
+
+      march> Logger.int_to_level(1)
+      Info
+      march> Logger.int_to_level(7)
+      Error
+      march> Logger.int_to_level(-1)
+      Debug
+  """
   fn int_to_level(n) do
     if n <= 0 do Debug
     else if n == 1 do Info
@@ -82,7 +167,17 @@ mod Logger do
     else Error end end end
   end
 
-  doc "Parse a log level from a string (case-insensitive). Returns None for unknown strings."
+  doc """
+  Parse a log level from a string (case-insensitive); "warning" is
+  accepted as Warn. Returns None for unknown strings.
+
+  ## Examples
+
+      march> Logger.level_from_string("WARNING")
+      Some(Warn)
+      march> Logger.level_from_string("trace")
+      None
+  """
   fn level_from_string(s) do
     let lower = string_to_lowercase(s)
     if lower == "debug" do Some(Debug)
@@ -92,7 +187,14 @@ mod Logger do
     else None end end end end
   end
 
-  doc "Return the numeric rank of a log level: Debug=0, Info=1, Warn=2, Error=3."
+  doc """
+  Return the numeric rank of a log level: Debug=0, Info=1, Warn=2, Error=3.
+
+  ## Examples
+
+      march> Logger.level_rank(Logger.Error)
+      3
+  """
   fn level_rank(l) do
     match l do
     Debug -> 0
@@ -102,17 +204,39 @@ mod Logger do
     end
   end
 
-  doc "Return true if `level` is at least as severe as `min_level`."
+  doc """
+  Return true if `level` is at least as severe as `min_level`.
+
+  ## Examples
+
+      march> Logger.level_enabled(Logger.Warn, Logger.Info)
+      true
+      march> Logger.level_enabled(Logger.Debug, Logger.Info)
+      false
+  """
   fn level_enabled(level, min_level) do
     level_rank(level) >= level_rank(min_level)
   end
 
-  doc "Format a log entry as a simple string: [LEVEL] message"
+  doc """
+  Format a level and message as a simple string: `[LEVEL] message`.
+
+  ## Examples
+
+      march> Logger.format_entry(Logger.Warn, "disk low")
+      "[WARN] disk low"
+  """
   fn format_entry(level, msg) do
     "[" ++ level_to_string(level) ++ "] " ++ msg
   end
 
-  doc "Log at `level` only if `level` is enabled relative to `min_level`."
+  doc """
+  Log at `level` only if `level` is enabled relative to `min_level`. The
+  message must also pass the global level (`set_level`), like any `log`
+  call.
+
+      Logger.log_if(Logger.Debug, Logger.Info, "skipped: Debug < Info")
+  """
   fn log_if(level, min_level, msg) do
     if level_enabled(level, min_level) do log(level, msg)
     else () end
@@ -120,12 +244,31 @@ mod Logger do
 
   -- ---- Level control ----
 
-  doc "Set the minimum log level. Messages below this level are discarded."
+  doc """
+  Set the global minimum log level. Messages below this level are
+  discarded by `debug`/`info`/`warn`/`error`/`log`/`log_with`; `log_in`
+  consults per-module overrides first. The default is Info.
+
+  ## Examples
+
+      march> Logger.set_level(Logger.Warn)
+      march> Logger.level_to_string(Logger.get_level())
+      "WARN"
+      march> Logger.set_level(Logger.Info)
+  """
   fn set_level(level) do
     logger_set_level(level_to_int(level))
   end
 
-  doc "Get the current minimum log level."
+  doc """
+  Get the current global minimum log level (Info unless `set_level` was
+  called).
+
+  ## Examples
+
+      march> Logger.get_level()
+      Info
+  """
   fn get_level() do
     int_to_level(logger_get_level())
   end
@@ -136,12 +279,28 @@ mod Logger do
   v1 helper: add a `(key, String)` pair to the log context.  Equivalent
   to `with_field(key, LStr(value))`.  Retained for backward
   compatibility with existing callers.
+
+  ## Examples
+
+      march> Logger.with_context("request_id", "abc123")
+      march> Logger.format_text(Logger.LogEntry(Logger.Info, "m", 0, "", Logger.current_fields()))
+      "[INFO] m {request_id=abc123}"
+      march> Logger.clear_context()
   """
   fn with_context(key, value) do
     logger_add_context(key, value)
   end
 
-  doc "Remove all log fields (v1 + v2)."
+  doc """
+  Remove all log fields (v1 + v2): empties the whole context stack.
+
+  ## Examples
+
+      march> Logger.with_field("k", Logger.i(1))
+      march> Logger.clear_context()
+      march> Logger.field_count()
+      0
+  """
   fn clear_context() do
     logger_clear_context()
   end
@@ -155,7 +314,16 @@ mod Logger do
 
       Logger.with_field("user_id", Logger.i(42))
       Logger.info("login")
-      -- emits: [INFO] login {user_id:42}
+      -- emits (no appender registered): [INFO] login {user_id=42}
+
+  ## Examples
+
+      march> Logger.with_field("user_id", Logger.i(42))
+      march> Logger.current_trace_id()
+      None
+      march> Logger.field_count()
+      1
+      march> Logger.clear_context()
   """
   fn with_field(key : String, value : LogValue) : Unit do
     logger_add_field(key, value)
@@ -164,7 +332,15 @@ mod Logger do
   doc """
   Push a list of typed fields onto the log context in one call.
   Order is preserved: the first element of `fields` is at the BOTTOM
-  of the pushed batch (formatters render fields in stack order).
+  of the pushed batch (formatters render fields in stack order), so
+  `current_fields` lists them reversed.
+
+  ## Examples
+
+      march> Logger.with_fields([Logger.LogField("a", Logger.i(1)), Logger.LogField("b", Logger.i(2))])
+      march> Logger.format_text(Logger.LogEntry(Logger.Info, "m", 0, "", Logger.current_fields()))
+      "[INFO] m {b=2, a=1}"
+      march> Logger.clear_context()
   """
   fn with_fields(fields : List(LogField)) : Unit do
     fn push_each(lst) do
@@ -182,13 +358,29 @@ mod Logger do
   doc """
   Return the current log context as a List(LogField), most-recent
   push at the head.  Useful for inspecting state in tests or for
-  copying the current context into another actor's mailbox.
+  copying the current context into another actor's mailbox.  Empty when
+  nothing has been pushed.
+
+  ## Examples
+
+      march> Logger.current_fields()
+      []
   """
   fn current_fields() : List(LogField) do
     logger_get_fields()
   end
 
-  doc "Return the current depth of the field stack.  Useful for tests."
+  doc """
+  Return the current depth of the field stack (duplicate keys each
+  count).  Useful for tests.
+
+  ## Examples
+
+      march> Logger.with_fields([Logger.LogField("k", Logger.i(1)), Logger.LogField("k", Logger.i(2))])
+      march> Logger.field_count()
+      2
+      march> Logger.clear_context()
+  """
   fn field_count() : Int do
     logger_field_count()
   end
@@ -201,6 +393,15 @@ mod Logger do
 
       Logger.with_scope([Logger.LogField("request_id", Logger.s("abc123"))],
                         fn _ -> handle_request(req))
+
+  Returns whatever `thunk` returns. Pass the thunk as `fn _ -> ...`.
+
+  ## Examples
+
+      march> Logger.with_scope([Logger.LogField("x", Logger.i(1))], fn _ -> Logger.field_count())
+      1
+      march> Logger.field_count()
+      0
   """
   fn with_scope(fields : List(LogField), thunk : () -> a) : a do
     let depth_before = logger_field_count()
@@ -216,19 +417,41 @@ mod Logger do
   bare `info`/`debug`/etc. use the global level (set with `set_level`).
 
       Logger.set_module_level("MyApp.NoisyWorker", Logger.Debug)
+
+  ## Examples
+
+      march> Logger.set_module_level("MyApp.NoisyWorker", Logger.Error)
+      march> Logger.level_to_string(Logger.level_for("MyApp.NoisyWorker"))
+      "ERROR"
+      march> Logger.clear_module_level("MyApp.NoisyWorker")
   """
   fn set_module_level(module : String, l : Level) : Unit do
     logger_set_module_level(module, level_to_int(l))
   end
 
-  doc "Remove a module-level override; the module reverts to the global level."
+  doc """
+  Remove a module-level override; the module reverts to the global level.
+  No-op if none is set.
+
+  ## Examples
+
+      march> Logger.set_module_level("MyApp.Db", Logger.Debug)
+      march> Logger.clear_module_level("MyApp.Db")
+      march> Logger.level_for("MyApp.Db")
+      Info
+  """
   fn clear_module_level(module : String) : Unit do
     logger_clear_module_level(module)
   end
 
   doc """
   Return the effective level for `module` — the override if one is
-  set, otherwise the global default.
+  set, otherwise the global level (`get_level`).
+
+  ## Examples
+
+      march> Logger.level_for("MyApp.Unconfigured")
+      Info
   """
   fn level_for(module : String) : Level do
     int_to_level(logger_module_level(module))
@@ -241,10 +464,53 @@ mod Logger do
   type LogEntry = LogEntry(Level, String, Int, String, List(LogField))
 
   -- Field accessors so users / appenders don't depend on positional layout.
+  doc """
+  The entry's level.
+
+  ## Examples
+
+      march> Logger.entry_level(Logger.LogEntry(Logger.Warn, "slow", 0, "", []))
+      Warn
+  """
   fn entry_level(e)   do match e do LogEntry(l, _, _, _, _) -> l end end
+  doc """
+  The entry's message text.
+
+  ## Examples
+
+      march> Logger.entry_message(Logger.LogEntry(Logger.Info, "login ok", 0, "", []))
+      "login ok"
+  """
   fn entry_message(e) do match e do LogEntry(_, m, _, _, _) -> m end end
+  doc """
+  The entry's timestamp in milliseconds since the Unix epoch (set by the
+  runtime when the entry is dispatched).
+
+  ## Examples
+
+      march> Logger.entry_ts_ms(Logger.LogEntry(Logger.Info, "m", 1000, "", []))
+      1000
+  """
   fn entry_ts_ms(e)   do match e do LogEntry(_, _, t, _, _) -> t end end
+  doc """
+  The entry's source: the module name given to `log_in`, or `""` for the
+  plain `info`/`warn`/... calls.
+
+  ## Examples
+
+      march> Logger.entry_source(Logger.LogEntry(Logger.Info, "m", 0, "MyApp", []))
+      "MyApp"
+  """
   fn entry_source(e)  do match e do LogEntry(_, _, _, s, _) -> s end end
+  doc """
+  The entry's fields: call-site fields first, then the context stack
+  (most recent push first). Duplicate keys are kept.
+
+  ## Examples
+
+      march> Logger.entry_fields(Logger.LogEntry(Logger.Info, "m", 0, "", [Logger.LogField("n", Logger.i(3))]))
+      [LogField("n", LInt(3))]
+  """
   fn entry_fields(e)  do match e do LogEntry(_, _, _, _, fs) -> fs end end
 
   -- An appender consumes log entries and writes them somewhere.  The
@@ -278,24 +544,65 @@ mod Logger do
     end
   end
 
-  doc "Register an appender.  Replaces any prior appender with the same name."
+  doc """
+  Register an appender.  Replaces any prior appender with the same name
+  (and moves it to the front: appenders fire newest first).  While any
+  appender is registered, the default stderr line is no longer printed.
+
+  ## Examples
+
+      march> Logger.add_appender(Logger.appender_callback("sink", fn _ -> ()))
+      march> Logger.list_appenders()
+      ["sink"]
+      march> Logger.clear_appenders()
+  """
   fn add_appender(a : Appender) : Unit do
     match a do
     Appender(name, cb) -> logger_register_appender(name, fn call -> deliver(cb, call))
     end
   end
 
-  doc "Remove a registered appender by name.  No-op if absent."
+  doc """
+  Remove a registered appender by name.  No-op if absent.
+
+  ## Examples
+
+      march> Logger.add_appender(Logger.appender_callback("tmp", fn _ -> ()))
+      march> Logger.remove_appender("tmp")
+      march> Logger.list_appenders()
+      []
+  """
   fn remove_appender(name : String) : Unit do
     logger_remove_appender(name)
   end
 
-  doc "Remove every registered appender.  Future logs will fall back to the v1 stderr text format."
+  doc """
+  Remove every registered appender.  Future logs will fall back to the v1
+  stderr text format.
+
+  ## Examples
+
+      march> Logger.add_appender(Logger.appender_callback("one", fn _ -> ()))
+      march> Logger.clear_appenders()
+      march> Logger.list_appenders()
+      []
+  """
   fn clear_appenders() : Unit do
     logger_clear_appenders()
   end
 
-  doc "Return the names of all currently registered appenders."
+  doc """
+  Return the names of all currently registered appenders, newest first
+  (`[]` when none is registered).
+
+  ## Examples
+
+      march> Logger.add_appender(Logger.appender_callback("first", fn _ -> ()))
+      march> Logger.add_appender(Logger.appender_callback("second", fn _ -> ()))
+      march> Logger.list_appenders()
+      ["second", "first"]
+      march> Logger.clear_appenders()
+  """
   fn list_appenders() : List(String) do
     logger_appender_names()
   end
@@ -329,7 +636,17 @@ mod Logger do
 
   doc """
   Default text formatter.  Mirrors the v1 output:
-      [LEVEL] message {key:value, key2:value2}
+      [LEVEL] message {key=value, key2=value2}
+  Fields appear in stack order, duplicates included; string values are
+  not quoted. The braces are omitted when there are no fields; the
+  timestamp and source are not shown.
+
+  ## Examples
+
+      march> Logger.format_text(Logger.LogEntry(Logger.Info, "login ok", 0, "", [Logger.LogField("user", Logger.s("ann")), Logger.LogField("n", Logger.i(3))]))
+      "[INFO] login ok {user=ann, n=3}"
+      march> Logger.format_text(Logger.LogEntry(Logger.Error, "boom", 0, "", []))
+      "[ERROR] boom"
   """
   fn format_text(e : LogEntry) : String do
     let fs = entry_fields(e)
@@ -364,7 +681,14 @@ mod Logger do
   doc """
   logfmt-style formatter (Heroku / Grafana convention):
       level=info ts=1681400000000 msg="hello world" k=v
-  String values containing spaces or quotes are escaped.
+  The message is always quoted (inner `"` escaped as `\"`); `src=` is
+  added when the source is non-empty; string field values are quoted only
+  when they contain a space or a `"`.
+
+  ## Examples
+
+      march> Logger.format_logfmt(Logger.LogEntry(Logger.Warn, "slow query", 1000, "Db", [Logger.LogField("user", Logger.s("ann smith")), Logger.LogField("ms", Logger.i(42))]))
+      "level=warn ts=1000 msg=\"slow query\" src=Db user=\"ann smith\" ms=42"
   """
   fn format_logfmt(e : LogEntry) : String do
     let header =
@@ -477,7 +801,14 @@ mod Logger do
   The reserved field names `trace_id`, `span_id`, and `parent_span_id`
   appear at the top level of the JSON object so log shippers that
   speak OTLP can pluck them directly; everything else lands in the
-  `attributes` sub-object.
+  `attributes` sub-object (omitted when empty).  Fields are de-duplicated
+  by key, keeping the most recent push (the first occurrence); `src` is
+  included only when the source is non-empty.
+
+  ## Examples
+
+      march> Logger.format_json(Logger.LogEntry(Logger.Info, "login", 1000, "", [Logger.LogField("trace_id", Logger.s("t1")), Logger.LogField("n", Logger.i(2)), Logger.LogField("n", Logger.i(1))]))
+      "{\"ts\":1000,\"level\":\"info\",\"msg\":\"login\",\"trace_id\":\"t1\",\"attributes\":{\"n\":2}}"
   """
   fn format_json(e : LogEntry) : String do
     let fs = entry_fields(e)
@@ -516,15 +847,23 @@ mod Logger do
     Appender("stderr", fn entry -> print_stderr(format_fn(entry) ++ "\n"))
   end
 
-  doc "An appender that writes formatted entries to stdout."
+  doc """
+  An appender, named "stdout", that writes each formatted entry to stdout
+  followed by a newline.
+
+      Logger.add_appender(Logger.appender_stdout(Logger.format_logfmt))
+  """
   fn appender_stdout(format_fn : LogEntry -> String) : Appender do
     Appender("stdout", fn entry -> println(format_fn(entry)))
   end
 
   doc """
   An appender that appends each formatted entry as a new line to
-  `path`.  Open / write / close happens per call (slow but simple); a
-  buffered variant lives in a future commit.
+  `path`; the appender is named `"file:" ++ path`.  Open / write / close
+  happens per call (slow but simple); a buffered variant lives in a
+  future commit.  A failed write is silently ignored.
+
+      Logger.add_appender(Logger.appender_file("/var/log/app.log", Logger.format_json))
   """
   fn appender_file(path : String, format_fn : LogEntry -> String) : Appender do
     Appender("file:" ++ path, fn entry -> do
@@ -537,7 +876,11 @@ mod Logger do
   doc """
   A custom appender that calls the user's `on_entry` callback for
   each log entry.  Use to forward entries to OpenTelemetry exporters,
-  in-process telemetry buses, or test harnesses.
+  in-process telemetry buses, or test harnesses.  `name` is what
+  `remove_appender` and `list_appenders` use.
+
+      Logger.add_appender(Logger.appender_callback("collector", fn e ->
+        Telemetry.emit(Logger.entry_message(e))))
   """
   fn appender_callback(name : String, on_entry : LogEntry -> Unit) : Appender do
     Appender(name, on_entry)
@@ -589,24 +932,48 @@ mod Logger do
     end
   end
 
-  doc "Log a Debug-level message."
+  doc """
+  Log a Debug-level message (dropped unless the global level is Debug).
+  Context fields are attached.
+
+      Logger.debug("cache miss")
+  """
   fn debug(msg) do do_log(Debug, msg, Nil) end
 
-  doc "Log an Info-level message."
+  doc """
+  Log an Info-level message, with the current context fields.
+
+      Logger.info("server started")
+  """
   fn info(msg) do do_log(Info, msg, Nil) end
 
-  doc "Log a Warn-level message."
+  doc """
+  Log a Warn-level message, with the current context fields.
+
+      Logger.warn("slow query")
+  """
   fn warn(msg) do do_log(Warn, msg, Nil) end
 
-  doc "Log an Error-level message."
+  doc """
+  Log an Error-level message, with the current context fields.
+
+      Logger.error("db connection lost")
+  """
   fn error(msg) do do_log(Error, msg, Nil) end
 
-  doc "Log a message at the given level."
+  doc """
+  Log a message at the given level, subject to the global level filter.
+  With no appender registered it prints `[LEVEL] msg {k=v, ...}` to
+  stderr; otherwise each appender receives a `LogEntry` (source `""`).
+
+      Logger.log(Logger.Warn, "disk 90% full")
+  """
   fn log(level, msg) do do_log(level, msg, Nil) end
 
   doc """
   Log a message at the given level with extra metadata.
-  metadata is a List((String, String)) of key-value pairs.
+  metadata is a List((String, String)) of key-value pairs, attached as
+  string fields ahead of the context fields (for this entry only).
 
       Logger.log_with(Logger.Info, "request done", [("status", "200"), ("ms", "42")])
   """
@@ -638,6 +1005,8 @@ mod Logger do
 
       Logger.log_in("MyApp.Worker", Logger.Debug, "task done",
                     [Logger.LogField("ms", Logger.i(42))])
+
+  `fields` are attached ahead of the context fields, for this entry only.
   """
   fn log_in(module : String, level : Level, msg : String,
             fields : List(LogField)) : Unit do
@@ -658,6 +1027,13 @@ mod Logger do
   are popped or `clear_context` is called.
 
       Logger.with_trace_context("trace-abc", "span-xyz", Some("parent-uvw"))
+
+  ## Examples
+
+      march> Logger.with_trace_context("trace-abc", "span-xyz", None)
+      march> Logger.field_count()
+      2
+      march> Logger.clear_context()
   """
   fn with_trace_context(trace_id : String, span_id : String,
                         parent_span_id : Option(String)) : Unit do
@@ -684,17 +1060,50 @@ mod Logger do
     end
   end
 
-  doc "Return the current trace_id from the log context, if set."
+  doc """
+  Return the current trace_id from the log context (the most recent push),
+  if set to a string value.
+
+  ## Examples
+
+      march> Logger.with_trace_context("trace-abc", "span-xyz", None)
+      march> Option.unwrap_or(Logger.current_trace_id(), "unset")
+      "trace-abc"
+      march> Logger.clear_context()
+      march> Logger.current_trace_id()
+      None
+  """
   fn current_trace_id() : Option(String) do
     log_value_as_string(find_field_value(current_fields(), "trace_id"))
   end
 
-  doc "Return the current span_id from the log context, if set."
+  doc """
+  Return the current span_id from the log context (the most recent push),
+  if set to a string value.
+
+  ## Examples
+
+      march> Logger.with_trace_context("trace-abc", "span-xyz", None)
+      march> Option.unwrap_or(Logger.current_span_id(), "unset")
+      "span-xyz"
+      march> Logger.clear_context()
+  """
   fn current_span_id() : Option(String) do
     log_value_as_string(find_field_value(current_fields(), "span_id"))
   end
 
-  doc "Return the parent_span_id from the log context, if set."
+  doc """
+  Return the parent_span_id from the log context, if set to a string
+  value (`with_span` at the top level pushes it as `LNull`, which reads
+  as `None`).
+
+  ## Examples
+
+      march> Logger.with_trace_context("trace-abc", "span-xyz", Some("parent-uvw"))
+      march> Option.unwrap_or(Logger.current_parent_span_id(), "unset")
+      "parent-uvw"
+      march> Logger.clear_context()
+  """
   fn current_parent_span_id() : Option(String) do
     log_value_as_string(find_field_value(current_fields(), "parent_span_id"))
   end
@@ -707,8 +1116,9 @@ mod Logger do
   doc """
   Run `thunk` inside a tracing span: pushes a fresh `span_id`,
   promotes the current span (if any) to `parent_span_id`, and either
-  inherits the current `trace_id` or starts a new one.  Pops all
-  three fields when `thunk` returns OR panics.
+  inherits the current `trace_id` or starts a new one (ids are random
+  hex: 16 chars for a span, 32 for a trace).  Pushes five fields and pops
+  them all when `thunk` returns OR panics; returns the thunk's result.
 
   Adds two extra fields for instrumentation:
     - `span_name` : LStr(name)

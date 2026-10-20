@@ -2,52 +2,113 @@
 --
 -- All functions operate on (a, b) pairs.
 -- Use let-destructuring to access components.
+--
+-- doc: try
 
 mod Tuple do
 
-  doc "Returns the first element of a pair."
+  doc """
+  Returns the first element of a pair.
+
+  ## Examples
+
+      march> Tuple.first((1, "a"))
+      1
+  """
   fn first(t : (a, b)) : a do
     let (x, _) = t
     x
   end
 
-  doc "Returns the second element of a pair."
+  doc """
+  Returns the second element of a pair.
+
+  ## Examples
+
+      march> Tuple.second((1, "a"))
+      "a"
+  """
   fn second(t : (a, b)) : b do
     let (_, y) = t
     y
   end
 
-  doc "Swaps the two elements of a pair."
+  doc """
+  Swaps the two elements of a pair.
+
+  ## Examples
+
+      march> Tuple.swap((1, "a"))
+      ("a", 1)
+  """
   fn swap(t : (a, b)) : (b, a) do
     let (x, y) = t
     (y, x)
   end
 
-  doc "Applies f to the first element, returning a new pair."
+  doc """
+  Applies f to the first element, returning a new pair; the second element
+  is unchanged.
+
+  ## Examples
+
+      march> Tuple.map_first((1, "a"), fn x -> x + 1)
+      (2, "a")
+  """
   fn map_first(t : (a, b), f : a -> c) : (c, b) do
     let (x, y) = t
     (f(x), y)
   end
 
-  doc "Applies f to the second element, returning a new pair."
+  doc """
+  Applies f to the second element, returning a new pair; the first element
+  is unchanged.
+
+  ## Examples
+
+      march> Tuple.map_second((1, "a"), fn s -> s ++ "!")
+      (1, "a!")
+  """
   fn map_second(t : (a, b), f : b -> c) : (a, c) do
     let (x, y) = t
     (x, f(y))
   end
 
-  doc "Applies f to the first element and g to the second element."
+  doc """
+  Applies f to the first element and g to the second element, returning
+  the new pair.
+
+  ## Examples
+
+      march> Tuple.map_both((1, "a"), fn x -> x * 10, String.to_uppercase)
+      (10, "A")
+  """
   fn map_both(t : (a, b), f : a -> c, g : b -> d) : (c, d) do
     let (x, y) = t
     (f(x), g(y))
   end
 
-  doc "Converts a pair to a 2-element list. Both elements must be the same type."
+  doc """
+  Converts a pair to a 2-element list. Both elements must be the same type.
+
+  ## Examples
+
+      march> Tuple.to_list((1, 2))
+      [1, 2]
+  """
   fn to_list(t : (a, a)) : List(a) do
     let (x, y) = t
     Cons(x, Cons(y, Nil))
   end
 
-  doc "Creates a pair from two values."
+  doc """
+  Creates a pair from two values.
+
+  ## Examples
+
+      march> Tuple.make(1, "a")
+      (1, "a")
+  """
   fn make(a : a, b : b) : (a, b) do
     (a, b)
   end
@@ -58,18 +119,41 @@ mod Tuple do
   `(a, b) -> c` is a function of ONE argument that is a pair — not a
   two-argument function, which March spells curried, `a -> b -> c`. To apply
   a two-argument function to a pair, destructure it: `let (x, y) = t`.
+
+  ## Examples
+
+      march> Tuple.apply((3, 4), fn p -> Tuple.first(p) * Tuple.second(p))
+      12
   """
   fn apply(t : (a, b), f : (a, b) -> c) : c do
     f(t)
   end
 
-  doc "Returns true if both elements satisfy their respective predicates."
+  doc """
+  Returns true if `p` holds for the first element and `q` for the second.
+  `q` is not called when `p` is false.
+
+  ## Examples
+
+      march> Tuple.both((1, "a"), fn x -> x > 0, fn s -> s == "a")
+      true
+      march> Tuple.both((1, "a"), fn x -> x > 0, String.is_empty)
+      false
+  """
   fn both(t : (a, b), p : a -> Bool, q : b -> Bool) : Bool do
     let (x, y) = t
     p(x) && q(y)
   end
 
-  doc "Zips two lists into a list of pairs. Stops at the shorter list."
+  doc """
+  Zips two lists into a list of pairs. Stops at the shorter list. Same
+  result as `List.zip`.
+
+  ## Examples
+
+      march> Tuple.zip([1, 2, 3], ["a", "b"])
+      [(1, "a"), (2, "b")]
+  """
   fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
     match xs do
     Nil -> Nil
@@ -81,7 +165,17 @@ mod Tuple do
     end
   end
 
-  doc "Unzips a list of pairs into a pair of lists."
+  doc """
+  Unzips a list of pairs into a pair of lists (first components, second
+  components). Same result as `List.unzip`.
+
+  ## Examples
+
+      march> Tuple.unzip([(1, "a"), (2, "b")])
+      ([1, 2], ["a", "b"])
+      march> Tuple.unzip([])
+      ([], [])
+  """
   fn unzip(pairs : List((a, b))) : (List(a), List(b)) do
     fn go(ps : List((a, b)), as_ : List(a), bs : List(b)) : (List(a), List(b)) do
       match ps do

@@ -31,6 +31,8 @@
 --   ["march-revocation-v1", node, serial, issued_at]
 -- revoking one certificate (serial != "") or every certificate of a node
 -- (serial == ""). Revocations are gossiped between nodes (ClusterNode).
+--
+-- doc: try
 mod NodeCert do
 
   type Cert = { node : String, roles : List(String), flags : List(String), not_after : Int,
@@ -53,21 +55,53 @@ mod NodeCert do
   type Credentials = { signed : Signed, secret_key : Bytes, operator_pubkey : Bytes,
                        revoked : Cert -> Bool }
 
+  doc "The version string a certificate body starts with: \"march-node-cert-v1\"."
   fn cert_version() : String do "march-node-cert-v1" end
+  doc "The version string a revocation body starts with: \"march-revocation-v1\"."
   fn revocation_version() : String do "march-revocation-v1" end
 
   -- ── keys ────────────────────────────────────────────────────────────────
 
-  doc "A fresh ed25519 secret key (64 bytes: seed || public key)."
+  doc "A fresh, random ed25519 secret key (64 bytes: seed || public key), from a 32-byte random seed."
   fn keypair() : Bytes do ed25519_seed_keypair(Crypto.random_bytes(32)) end
 
-  doc "The secret key a 32-byte [seed] determines (RFC 8032); empty Bytes for a wrong length."
+  doc """
+  The 64-byte ed25519 secret key (seed || public key) a 32-byte [seed]
+  determines (RFC 8032): the same seed always gives the same key. Returns
+  empty Bytes when [seed] is not exactly 32 bytes.
+
+  ## Examples
+
+      march> Bytes.length(NodeCert.keypair_from_seed(Bytes.from_list([1, 2])))
+      0
+  """
   fn keypair_from_seed(seed : Bytes) : Bytes do ed25519_seed_keypair(seed) end
 
-  doc "The 32-byte public key inside a 64-byte secret key."
+  doc """
+  The 32-byte public key inside a 64-byte secret key [sk] (its last 32
+  bytes).
+
+  ## Examples
+
+      march> Bytes.length(NodeCert.public_key(Bytes.from_list(List.range(0, 64))))
+      32
+      march> List.take(Bytes.to_list(NodeCert.public_key(Bytes.from_list(List.range(0, 64)))), 3)
+      [32, 33, 34]
+  """
   fn public_key(sk : Bytes) : Bytes do Bytes.slice(sk, 32, 32) end
 
-  doc "A key (or signature) from its hex text, checking its length in bytes."
+  doc """
+  A key (or signature) from its hex text (surrounding whitespace trimmed),
+  checking it is exactly [len] bytes. `Err` names the problem: text that is
+  not hex, or the wrong length.
+
+  ## Examples
+
+      march> Result.map(NodeCert.key_from_hex(" 0a0b ", 2), Bytes.to_list)
+      Ok([10, 11])
+      march> NodeCert.key_from_hex("0a0b", 32)
+      Err("expected 32 bytes, got 2")
+  """
   fn key_from_hex(s : String, len : Int) : Result(Bytes, String) do
     match Bytes.from_hex(String.trim(s)) do
       Err(e) -> Err("not hex: " ++ e)
@@ -80,12 +114,28 @@ mod NodeCert do
 
   -- ── names ───────────────────────────────────────────────────────────────
 
-  doc "The SPIFFE-style URI of node [name] in [pool] under [trust_domain]."
+  doc """
+  The SPIFFE-style URI of node [name] in [pool] under [trust_domain]. No
+  part is validated or escaped.
+
+  ## Examples
+
+      march> NodeCert.node_uri("example.org", "web", "n1")
+      "spiffe://example.org/pool/web/node/n1"
+  """
   fn node_uri(trust_domain : String, pool : String, name : String) : String do
     "spiffe://" ++ trust_domain ++ "/pool/" ++ pool ++ "/node/" ++ name
   end
 
-  doc "The issuer URI for an operator public key (hex): its first 16 hex digits."
+  doc """
+  The issuer URI for an operator public key given as hex
+  ([operator_pub_hex]): the trust domain and the key's first 16 hex digits.
+
+  ## Examples
+
+      march> NodeCert.issuer_uri("example.org", "0123456789abcdef0123")
+      "spiffe://example.org/operator/0123456789abcdef"
+  """
   fn issuer_uri(trust_domain : String, operator_pub_hex : String) : String do
     "spiffe://" ++ trust_domain ++ "/operator/" ++ String.slice(operator_pub_hex, 0, 16)
   end
@@ -94,6 +144,13 @@ mod NodeCert do
   The node name a certificate's URI ends in (the segment after the last
   "/node/"), or "" when the URI has no node segment. The handshake requires it
   to equal the name the peer announces.
+
+  ## Examples
+
+      march> NodeCert.node_name("spiffe://example.org/pool/web/node/n1")
+      "n1"
+      march> NodeCert.node_name("spiffe://example.org/operator/0123")
+      ""
   """
   fn node_name(uri : String) : String do
     match List.reverse(String.split(uri, "/node/")) do
@@ -102,17 +159,46 @@ mod NodeCert do
     end
   end
 
-  doc "Does [c] let its node play role [role] (\"Proto.Role:offer\" or \":initiate\")?"
+  doc """
+  Does [c] let its node play role [role] ("Proto.Role:offer" or
+  "Proto.Role:initiate")? An exact string match against `c.roles`.
+
+  ## Examples
+
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.has_role(c, "Chat.Server:offer")
+      true
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.has_role(c, "Chat.Server:initiate")
+      false
+  """
   fn has_role(c : Cert, role : String) : Bool do List.member(c.roles, role) end
 
-  doc "Does [c] carry [flag] (e.g. \"raw_send\")?"
+  doc """
+  Does [c] carry [flag] (e.g. "raw_send")? An exact string match against
+  `c.flags`.
+
+  ## Examples
+
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.has_flag(c, "raw_send")
+      true
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.has_flag(c, "debug")
+      false
+  """
   fn has_flag(c : Cert, flag : String) : Bool do List.member(c.flags, flag) end
 
   -- ── the canonical body ──────────────────────────────────────────────────
 
   pfn strs(xs : List(String)) : Msgpack.Value do Msgpack.array(List.map(xs, fn x -> Msgpack.str(x))) end
 
-  doc "The canonical MessagePack body of [c] (what the operator signs)."
+  doc """
+  The canonical MessagePack body of [c] (what the operator signs): the array
+  [cert_version(), node, roles, flags, not_after, issuer, pubkey, serial] in
+  Msgpack's smallest-form encoding, so one certificate always encodes to the
+  same bytes.
+  """
   fn encode(c : Cert) : List(Int) do
     Msgpack.encode(Msgpack.array([
       Msgpack.str(cert_version()), Msgpack.str(c.node), strs(c.roles), strs(c.flags),
@@ -135,7 +221,12 @@ mod NodeCert do
     end
   end
 
-  doc "Decode a canonical body."
+  doc """
+  Decode a canonical body (the inverse of `encode`). `Err` (prefixed
+  "NodeCert: ") for bytes that are not MessagePack, a body of the wrong
+  shape, a version other than `cert_version()`, or roles / flags that are
+  not all strings. Checks no signature.
+  """
   fn decode(bytes : List(Int)) : Result(Cert, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err("NodeCert: " ++ e)
@@ -156,7 +247,11 @@ mod NodeCert do
 
   -- ── signing and verification ────────────────────────────────────────────
 
-  doc "Sign [c] with the operator secret key [operator_sk]."
+  doc """
+  Sign [c] with the operator secret key [operator_sk] (64 bytes, as from
+  `keypair`): the ed25519 signature over `encode(c)`, kept with the body
+  bytes it covers.
+  """
   fn sign(c : Cert, operator_sk : Bytes) : Signed do
     let body = encode(c)
     { cert: c, body: body, signature: ed25519_sign(operator_sk, Bytes.from_list(body)) }
@@ -167,7 +262,11 @@ mod NodeCert do
     Msgpack.encode(Msgpack.array([Msgpack.bin(s.body), Msgpack.bin(Bytes.to_list(s.signature))]))
   end
 
-  doc "Parse wire bytes (does NOT verify: see `verify`)."
+  doc """
+  Parse the wire bytes of `to_bytes` (does NOT verify: see `verify`). `Err`
+  (prefixed "NodeCert: ") for bytes that are not a two-element
+  [Bin(body), Bin(signature)] array, or a body `decode` refuses.
+  """
   fn from_bytes(bytes : List(Int)) : Result(Signed, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err("NodeCert: " ++ e)
@@ -183,7 +282,7 @@ mod NodeCert do
   doc "The text form (base64 of `to_bytes`): MARCH_NODE_CERT and forge's .cert files."
   fn to_text(s : Signed) : String do Bytes.encode_base64(Bytes.from_list(to_bytes(s))) end
 
-  doc "Parse the text form (does NOT verify)."
+  doc "Parse the text form of `to_text` (surrounding whitespace trimmed; does NOT verify). `Err` for bad base64 or what `from_bytes` refuses."
   fn from_text(t : String) : Result(Signed, String) do
     match Bytes.decode_base64(String.trim(t)) do
       Err(e) -> Err("NodeCert: " ++ e)
@@ -193,8 +292,11 @@ mod NodeCert do
 
   doc """
   Verify a signed certificate against [operator_pubkey] (32 bytes) at [now]
-  (unix seconds): the signature must cover the body, and [now] must not be
-  past `not_after`. Returns the certificate, or why it is refused.
+  (unix seconds), in this order: the signature must cover the body, [now]
+  must not be past `not_after` (`not_after` itself is still valid), and the
+  certificate's `pubkey` must be the hex of a 32-byte key. Returns the
+  certificate, or why it is refused. Revocation is the caller's (see
+  `is_revoked`).
   """
   fn verify(s : Signed, operator_pubkey : Bytes, now : Int) : Result(Cert, String) do
     if not(ed25519_verify(operator_pubkey, Bytes.from_list(s.body), s.signature)) do
@@ -208,7 +310,19 @@ mod NodeCert do
     end end end
   end
 
-  doc "Has [c] expired at [now] (unix seconds)?"
+  doc """
+  Has [c] expired at [now] (unix seconds)? `not_after` is inclusive: a
+  certificate is still valid during its last second.
+
+  ## Examples
+
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.expired(c, 2000000000)
+      false
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.expired(c, 2000000001)
+      true
+  """
   fn expired(c : Cert, now : Int) : Bool do now > c.not_after end
 
   -- ── issue order (security review, dd step 12b) ──────────────────────────
@@ -221,7 +335,14 @@ mod NodeCert do
   -- cannot be put back. The order is the issue time, not `not_after`, so a
   -- re-issue that lives shorter (or narrows the roles) still replaces.
 
-  doc "A serial carrying issue time [issued_ms] (unix ms): \"<issued_ms>-<rest>\"."
+  doc """
+  A serial carrying issue time [issued_ms] (unix ms): "<issued_ms>-<rest>".
+
+  ## Examples
+
+      march> NodeCert.ordered_serial(1000, "ab")
+      "1000-ab"
+  """
   fn ordered_serial(issued_ms : Int, rest : String) : String do int_to_string(issued_ms) ++ "-" ++ rest end
 
   pfn all_digits(s : String) : Bool do
@@ -229,7 +350,20 @@ mod NodeCert do
     bs != Nil && List.length(bs) <= 18 && List.all(bs, fn b -> b >= 48 && b <= 57)
   end
 
-  doc "When [c] was issued (unix ms), if its serial says (`ordered_serial`); None for a serial with no order."
+  doc """
+  When [c] was issued (unix ms), if its serial says (`ordered_serial`): the
+  text before the serial's first "-", when it is 1 to 18 decimal digits and
+  a "-" follows. None for a serial with no order.
+
+  ## Examples
+
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.issued_ms(c)
+      Some(1000)
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.issued_ms({ c with serial: "f00d" })
+      None
+  """
   fn issued_ms(c : Cert) : Option(Int) do
     match String.split(c.serial, "-") do
       Cons(t, Cons(_, _)) -> if all_digits(t) do string_to_int(t) else None end
@@ -243,6 +377,15 @@ mod NodeCert do
   from before ordered serials cannot replace one after). When [held] has no
   issue time there is no order to keep and the answer is yes (the release
   floor guards that case, `Control`). The same certificate again is yes.
+
+  ## Examples
+
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.supersedes({ c with serial: "999-cd" }, c)
+      false
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.supersedes(c, { c with serial: "f00d" })
+      true
   """
   fn supersedes(next : Cert, held : Cert) : Bool do
     match (issued_ms(next), issued_ms(held)) do
@@ -252,7 +395,19 @@ mod NodeCert do
     end
   end
 
-  doc "Why [next] may not replace [held] (`supersedes`), if it may not."
+  doc """
+  Why [next] may not replace [held] (`supersedes`), if it may not: None when
+  it may, else a message naming both serials.
+
+  ## Examples
+
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.order_problem({ c with serial: "999-cd" }, c)
+      Some("certificate 999-cd was issued before 1000-ab, the certificate in use")
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.order_problem({ c with serial: "2000-cd" }, c)
+      None
+  """
   fn order_problem(next : Cert, held : Cert) : Option(String) do
     if supersedes(next, held) do None
     else if issued_ms(next) == None do
@@ -262,11 +417,20 @@ mod NodeCert do
 
   -- ── revocations ─────────────────────────────────────────────────────────
 
+  doc """
+  The canonical MessagePack body of a revocation (what the operator signs):
+  [revocation_version(), node, serial, issued_at].
+  """
   fn encode_revocation(r : Revocation) : List(Int) do
     Msgpack.encode(Msgpack.array([Msgpack.str(revocation_version()), Msgpack.str(r.node),
                                   Msgpack.str(r.serial), Msgpack.int(r.issued_at)]))
   end
 
+  doc """
+  Decode a revocation body (the inverse of `encode_revocation`). `Err`
+  (prefixed "NodeCert: ") for bytes that are not MessagePack, the wrong
+  shape, or a version other than `revocation_version()`.
+  """
   fn decode_revocation(bytes : List(Int)) : Result(Revocation, String) do
     match Msgpack.decode(bytes) do
       Ok(Msgpack.Array([Msgpack.Str(v), Msgpack.Str(node), Msgpack.Str(serial), Msgpack.Int(at)])) ->
@@ -277,16 +441,22 @@ mod NodeCert do
     end
   end
 
-  doc "Sign a revocation with the operator secret key."
+  doc "Sign [r] with the operator secret key [operator_sk]: the ed25519 signature over `encode_revocation(r)`, kept with the body it covers."
   fn sign_revocation(r : Revocation, operator_sk : Bytes) : SignedRevocation do
     let body = encode_revocation(r)
     { rev: r, body: body, signature: ed25519_sign(operator_sk, Bytes.from_list(body)) }
   end
 
+  doc "A signed revocation's wire bytes: [Bin(body), Bin(signature)], as `to_bytes` is for a certificate."
   fn revocation_to_bytes(s : SignedRevocation) : List(Int) do
     Msgpack.encode(Msgpack.array([Msgpack.bin(s.body), Msgpack.bin(Bytes.to_list(s.signature))]))
   end
 
+  doc """
+  Parse the wire bytes of `revocation_to_bytes` (does NOT verify: see
+  `verify_revocation`). `Err` for a malformed array or a body
+  `decode_revocation` refuses.
+  """
   fn revocation_from_bytes(bytes : List(Int)) : Result(SignedRevocation, String) do
     match Msgpack.decode(bytes) do
       Ok(Msgpack.Array([Msgpack.Bin(body), Msgpack.Bin(sg)])) ->
@@ -304,6 +474,7 @@ mod NodeCert do
     Bytes.encode_base64(Bytes.from_list(revocation_to_bytes(s)))
   end
 
+  doc "Parse the text form of `revocation_to_text` (surrounding whitespace trimmed; does NOT verify). `Err` for bad base64 or what `revocation_from_bytes` refuses."
   fn revocation_from_text(t : String) : Result(SignedRevocation, String) do
     match Bytes.decode_base64(String.trim(t)) do
       Err(e) -> Err("NodeCert: " ++ e)
@@ -311,18 +482,42 @@ mod NodeCert do
     end
   end
 
-  doc "Verify a signed revocation against the operator key (a member cannot revoke another)."
+  doc "Verify a signed revocation against [operator_pubkey]: `Ok` with the revocation when the operator signed its body, else `Err` (so a member node cannot revoke another)."
   fn verify_revocation(s : SignedRevocation, operator_pubkey : Bytes) : Result(Revocation, String) do
     if ed25519_verify(operator_pubkey, Bytes.from_list(s.body), s.signature) do Ok(s.rev)
     else Err("revocation not signed by the cluster operator") end
   end
 
-  doc "Does [r] revoke [c]: the same serial, or (serial \"\") every certificate of [c]'s node?"
+  doc """
+  Does [r] revoke [c]? A revocation with a serial revokes the certificate
+  with that serial (whatever its node); one with serial "" revokes every
+  certificate whose `node` equals `r.node`.
+
+  ## Examples
+
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.revokes({ node: "spiffe://example.org/pool/web/node/n1", serial: "", issued_at: 5 }, c)
+      true
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.revokes({ node: "spiffe://example.org/pool/web/node/n1", serial: "999-cd", issued_at: 5 }, c)
+      false
+  """
   fn revokes(r : Revocation, c : Cert) : Bool do
     if String.is_empty(r.serial) do r.node == c.node else r.serial == c.serial end
   end
 
-  doc "Is [c] revoked by any of [rs]?"
+  doc """
+  Is [c] revoked by any of [rs] (`revokes`)? False for an empty list.
+
+  ## Examples
+
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.is_revoked(c, [{ node: "other", serial: "1000-ab", issued_at: 5 }])
+      true
+      march> let c = { node: "spiffe://example.org/pool/web/node/n1", roles: ["Chat.Server:offer"], flags: ["raw_send"], not_after: 2000000000, issuer: "spiffe://example.org/operator/00", pubkey: "", serial: "1000-ab" }
+      march> NodeCert.is_revoked(c, [])
+      false
+  """
   fn is_revoked(c : Cert, rs : List(Revocation)) : Bool do
     List.any(rs, fn r -> revokes(r, c))
   end

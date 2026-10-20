@@ -17,6 +17,12 @@
 -- refused).
 --
 -- R3 of specs/plans/2026-09-28-observe-recon-shell-plan.md.
+--
+-- Every reading is of the live program, so the examples are plain code; only
+-- `format_top`, which renders rows you hand it, carries runnable ones. Every
+-- reader answers its empty value (Nil, None, zeros) when the query fails.
+--
+-- doc: try
 mod Recon do
   needs Actor.Introspect
   needs Actor.Debug
@@ -203,7 +209,12 @@ mod Recon do
     end
   end
 
-  doc "Every live actor, deepest mailbox first."
+  doc """
+  Every live actor (up to 10000), deepest mailbox first. Nil if the query
+  fails.
+
+      let busy = List.filter(Recon.actors(c), fn a -> a.mbox > 100)
+  """
   fn actors(_c : Cap(Actor.Introspect)) : List(ActorInfo) do
     match ask("ACTORS mbox 10000") do
       Ok(d) -> List.map(list_of(d, "actors"), actor_info)
@@ -223,6 +234,11 @@ mod Recon do
   children's crashes in the last hour), "slices", "msgs_in" or "msgs_out"
   (cumulative since spawn; see `proc_window` for a rate). An unknown `attr`
   gives Nil.
+
+      match Recon.proc_count(c, "mbox", 1) do
+        Cons((pid, depth), _) -> println(int_to_string(pid) ++ ": " ++ int_to_string(depth))
+        Nil -> println("no actors")
+      end
   """
   fn proc_count(_c : Cap(Actor.Introspect), attr : String, n : Int) : List((Int, Int)) do
     match ask("TOP " ++ attr ++ " " ++ int_to_string(n) ++ counter_window(attr)) do
@@ -325,7 +341,20 @@ mod Recon do
 
   doc """
   `rows` (from `top`) as a table, one line per actor and a header line, in the order given.
-  The ranked column is headed `VALUE`.
+  The ranked column is headed `VALUE`; `NAME` is the first registered name,
+  else the actor type, and long cells are clipped to their column. No trailing
+  newline; an empty `rows` gives the header line alone.
+
+  ## Examples
+
+      march> let row = { pid: 12, type_name: "Worker", names: ["billing"], status: "running", value: 40, mbox: 40, stack_bytes: 8192, link: "supervised", parent: Some(3), parent_type: "AppSup", spawned_by: Some(3), children: 0, crashes: 1, child_crashes: 0, supervision: None }
+      march> List.length(String.split(Recon.format_top([row, row]), "\n"))
+      3
+      march> let row = { pid: 12, type_name: "Worker", names: ["billing"], status: "running", value: 40, mbox: 40, stack_bytes: 8192, link: "supervised", parent: Some(3), parent_type: "AppSup", spawned_by: Some(3), children: 0, crashes: 1, child_crashes: 0, supervision: None }
+      march> List.nth(String.split(Recon.format_top([row]), "\n"), 1)
+      "     12  billing          running       40     8192       40       1  supervised 3 (AppSup)            -"
+      march> List.length(String.split(Recon.format_top([]), "\n"))
+      1
   """
   fn format_top(rows : List(TopRow)) : String do
     let head = String.pad_left("PID", 7, " ") ++ "  " ++ cell("NAME", 16) ++ " " ++ cell("STATUS", 8)
@@ -337,7 +366,7 @@ mod Recon do
 
   doc """
   Print `top(c, attr, n)` as a table: the one-liner for the remote shell,
-  `Recon.print_top(intro, "stack", 10)`.
+  `Recon.print_top(intro, "stack", 10)`. See `format_top` for the layout.
   """
   fn print_top(c : Cap(Actor.Introspect), attr : String, n : Int) : Unit do
     println(format_top(top(c, attr, n)))
@@ -361,6 +390,9 @@ mod Recon do
   Like `proc_count` for "slices", "msgs_in" or "msgs_out", but ranked by how
   much each rose over the next `window_ms`: two samples, with this green
   thread asleep between them. An actor born during the window counts from 0.
+  Any other `attr` ranks by mailbox depth growth.
+
+      Recon.proc_window(c, "msgs_in", 5, 1000)   -- top 5 receivers over 1 s
   """
   fn proc_window(c : Cap(Actor.Introspect), attr : String, n : Int, window_ms : Int) : List((Int, Int)) do
     let before = List.map(actors(c), fn a -> (a.pid, counter(a, attr)))
@@ -380,6 +412,15 @@ mod Recon do
   The supervision tree: one node per root (an actor with no supervisor that
   supervises or spawned something live), children nested. Actors in neither
   role are left out; `actors` lists everything.
+
+      fn show(n : Recon.SupNode, depth : Int) : Unit do
+        match n do
+          Recon.SupNode(pid, ty, _, kids) ->
+            println(String.repeat("  ", depth) ++ ty ++ " " ++ int_to_string(pid))
+            List.each(kids, fn k -> show(k, depth + 1))
+        end
+      end
+      List.each(Recon.tree(c), fn r -> show(r, 0))
   """
   fn tree(_c : Cap(Actor.Introspect)) : List(SupNode) do
     match ask("TREE") do
@@ -388,7 +429,13 @@ mod Recon do
     end
   end
 
-  doc "Actors, queued messages, memory and crash totals from one snapshot."
+  doc """
+  Actors, queued messages, memory and crash totals from one snapshot. All
+  zeros and Nones if the query fails.
+
+      let s = Recon.node_stats(c)
+      println(int_to_string(s.actors) ++ " actors, " ++ int_to_string(s.queued) ++ " queued")
+  """
   fn node_stats(_c : Cap(Actor.Introspect)) : NodeStats do
     match ask("SNAPSHOT mem,sched,crashes") do
       Ok(d) ->
@@ -409,7 +456,11 @@ mod Recon do
     end
   end
 
-  doc "The last `n` crashes (at most 256), newest first, without their messages."
+  doc """
+  The last `n` crashes (at most 256), newest first, without their messages.
+
+      List.each(Recon.crashes(c, 10), fn r -> println(r.type_name ++ " " ++ r.kind))
+  """
   fn crashes(_c : Cap(Actor.Introspect), n : Int) : List(CrashReport) do
     match ask("CRASHES " ++ int_to_string(n)) do
       Ok(d) ->
@@ -421,7 +472,13 @@ mod Recon do
     end
   end
 
-  doc "The current hot-reload epoch and the pins held at each epoch."
+  doc """
+  The current hot-reload epoch and the pins held at each epoch, as
+  `(epoch, pins)` pairs. `{ current: 0, pins: Nil }` if the query fails.
+
+      let e = Recon.epochs(c)
+      println("epoch " ++ int_to_string(e.current))
+  """
   fn epochs(_c : Cap(Actor.Introspect)) : EpochReport do
     match ask("EPOCHS") do
       Ok(d) ->
@@ -439,6 +496,10 @@ mod Recon do
   Each scheduler's utilisation over the next `window_ms`, as (scheduler id,
   fraction busy in 0.0 to 1.0): two samples of its idle time, with this green
   thread asleep between them. Nil under the interpreter (no scheduler threads).
+  The fraction is clamped to 0.0..1.0.
+
+      List.each(Recon.scheduler_usage(c, 1000), fn t ->
+        match t do (id, busy) -> println(int_to_string(id) ++ ": " ++ float_to_string(busy)) end)
   """
   fn scheduler_usage(_c : Cap(Actor.Introspect), window_ms : Int) : List((Int, Float)) do
     match ask("SCHED 0") do

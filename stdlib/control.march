@@ -38,6 +38,12 @@
 -- The leader itself is `count = 1` placement over SWIM with no strict lease
 -- (D40): two leaders during a partition each drive their side toward the
 -- newest release they hold, and nodes refuse anything older (12-pre).
+--
+-- Everything but the Agent's real ops, signing and verifying is pure, so the
+-- examples build one small release (`rel`, in `parse`) and a simulated node and
+-- follow it through the executor; later examples reuse earlier bindings.
+--
+-- doc: try
 mod Control do
   -- ── the release document ─────────────────────────────────────────────────
 
@@ -90,7 +96,14 @@ mod Control do
     drain : Option(CtlDrain), signature : String
   }
 
-  doc "The `parent` of the first release of an environment."
+  doc """
+  The `parent` of the first release of an environment.
+
+  ## Examples
+
+      march> Control.no_parent()
+      "none"
+  """
   fn no_parent() : String do "none" end
 
   -- ── parsing ──────────────────────────────────────────────────────────────
@@ -106,7 +119,21 @@ mod Control do
     end
   end
 
-  doc "A duration: `250ms`, `60s`, `2m`, or a bare number of milliseconds."
+  doc """
+  A duration: `250ms`, `60s`, `2m`, or a bare number of milliseconds.
+  `Err` when the number part is not an integer.
+
+  ## Examples
+
+      march> Control.parse_duration("250ms")
+      Ok(250)
+      march> Control.parse_duration("2m")
+      Ok(120000)
+      march> Control.parse_duration("1500")
+      Ok(1500)
+      march> Control.parse_duration("soon")
+      Err("duration: not a number: soon")
+  """
   fn parse_duration(s : String) : Result(Int, String) do
     if String.ends_with(s, "ms") do int_of(String.slice(s, 0, String.byte_size(s) - 2), "duration")
     else if String.ends_with(s, "s") do Result.map(int_of(String.slice(s, 0, String.byte_size(s) - 1), "duration"), fn n -> n * 1000)
@@ -114,7 +141,19 @@ mod Control do
     else int_of(s, "duration") end end end
   end
 
-  doc "A duration written the way `parse_duration` reads it back: whole seconds as `Ns`, else `Nms`."
+  doc """
+  A duration written the way `parse_duration` reads it back: whole seconds as `Ns`, else `Nms`
+  (so 0 and negative durations are written in ms).
+
+  ## Examples
+
+      march> Control.show_duration(60000)
+      "60s"
+      march> Control.show_duration(1500)
+      "1500ms"
+      march> Control.show_duration(0)
+      "0ms"
+  """
   fn show_duration(ms : Int) : String do
     if ms > 0 && ms % 1000 == 0 do int_to_string(ms / 1000) ++ "s" else int_to_string(ms) ++ "ms" end
   end
@@ -294,6 +333,24 @@ mod Control do
   be `release v1`; words may be separated by any run of spaces, and `sig -`
   stands for an unsigned release. The result is `check`ed, so an `Ok` release
   is well formed (not yet verified: see `verify`).
+
+  `Err` names the line: an unknown entry, a malformed step, anything after `sig`, or a
+  failed `check`.
+
+  ## Examples
+
+  `rel` is a two-step release (a canary, then the rest) used by the examples further
+  down; it round-trips through its text form:
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Result.map(Control.parse(Control.serialize(rel)), fn r -> List.length(r.steps))
+      Ok(2)
+      march> Control.parse("release v1\nseq x")
+      Err("line 2: seq: not a number: x")
+      march> Control.parse("release v2")
+      Err("expected `release v1` first, got `release v2`")
+      march> Control.parse("")
+      Err("empty release")
   """
   fn parse(text : String) : Result(CtlRelease, String) do
     let lines = String.split(String.replace_all(text, "\r", ""), "\n")
@@ -412,6 +469,18 @@ mod Control do
   every signed `line` naming a step that exists, and certificate and
   revocation items that decode, one certificate per node, with a `do:certs`
   step to deliver them.
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.check(rel)
+      Ok(())
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.check({ rel with seq: 0 })
+      Err("seq must be positive")
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.check({ rel with builds: [] })
+      Err("step 1: activates build `web`, which the release does not ship")
   """
   fn check(r : CtlRelease) : Result((), String) do
     if r.seq <= 0 do Err("seq must be positive")
@@ -444,7 +513,16 @@ mod Control do
     end
   end
 
-  doc "The action as the release and the wire write it: `activate(web)`, `topology`, `drain`."
+  doc """
+  The action as the release and the wire write it: `activate(web)`, `topology`, `drain`, `certs`.
+
+  ## Examples
+
+      march> Control.show_action(Control.DoActivate("web"))
+      "activate(web)"
+      march> Control.show_action(Control.DoDrain)
+      "drain"
+  """
   fn show_action(a : CtlAction) : String do
     match a do
       DoActivate(b) -> "activate(" ++ b ++ ")"
@@ -472,6 +550,12 @@ mod Control do
   line, one entry per line, single spaces, a newline after every line. forge
   signs exactly this, so a document may be laid out any way `parse` accepts
   and still verify.
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.signed_text(rel)
+      "release v1\nseq 1\nparent none\nenv prod\ntopology t1\nbuild web base:b1 manifest:m1\nstep 1 pools:web hosts:canary(1) do:activate(web) gate:healthy(30s)\nstep 2 pools:web hosts:rest do:activate(web) gate:none\n"
   """
   fn signed_text(r : CtlRelease) : String do
     let head_lines = [
@@ -493,7 +577,18 @@ mod Control do
     String.join(List.concat([head_lines, builds, steps, lines, certs, revokes, drain]), "\n") ++ "\n"
   end
 
-  doc "The release document: `signed_text`, then its `sig` line (`sig -` when unsigned). `parse(serialize(r)) == Ok(r)` for a well-formed `r`."
+  doc """
+  The release document: `signed_text`, then its `sig` line (`sig -` when unsigned).
+  `parse(serialize(r)) == Ok(r)` for a well-formed `r`.
+
+  ## Examples
+
+  Using `rel` from `parse`:
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.serialize(rel)
+      "release v1\nseq 1\nparent none\nenv prod\ntopology t1\nbuild web base:b1 manifest:m1\nstep 1 pools:web hosts:canary(1) do:activate(web) gate:healthy(30s)\nstep 2 pools:web hosts:rest do:activate(web) gate:none\nsig -\n"
+  """
   fn serialize(r : CtlRelease) : String do
     -- Compiled, `(if r.signature == "" do "-" else r.signature end)` used to
     -- release the field while `r` still held it, so the next read of the
@@ -504,10 +599,22 @@ mod Control do
     signed_text(r) ++ sig_line
   end
 
-  doc "The release's content address: sha256 (hex) of `signed_text`. A child names it as its `parent`."
+  doc """
+  The release's content address: sha256 (hex, 64 characters) of `signed_text`. A child
+  names it as its `parent`. The `sig` line is not covered, so signing a release does not
+  change its digest.
+
+      let child = { next with seq: rel.seq + 1, parent: Control.digest(rel) }
+  """
   fn digest(r : CtlRelease) : String do sha256(Bytes.from_string(signed_text(r))) end
 
-  doc "Sign [r] with an ed25519 secret key (`ed25519_seed_keypair` form). What forge does; here for tests and tooling."
+  doc """
+  Sign [r] with an ed25519 secret key (`ed25519_seed_keypair` form). What forge does; here
+  for tests and tooling. Returns [r] with `signature` set to the signature's hex.
+
+      let kp = ed25519_seed_keypair(seed)
+      let signed = Control.sign(rel, kp)
+  """
   fn sign(r : CtlRelease, sk : Bytes) : CtlRelease do
     { r with signature: Bytes.to_hex(ed25519_sign(sk, Bytes.from_string(signed_text(r)))) }
   end
@@ -516,6 +623,11 @@ mod Control do
   Does [r] carry a valid operator signature for [pubkey]? The leader checks
   this before storing a release so it never relays junk; the nodes check the
   signed lines themselves either way (the control plane is not trusted, D37).
+
+  `false` too when the signature is not hex.
+
+      Control.verify(Control.sign(rel, secret), public)   -- true
+      Control.verify(rel, public)                         -- false: unsigned
   """
   fn verify(r : CtlRelease, pubkey : Bytes) : Bool do
     match Bytes.from_hex(r.signature) do
@@ -530,6 +642,24 @@ mod Control do
   held release itself is accepted again (a retry). Otherwise `r.seq` must be
   higher and `r.parent` must be `digest(head)`: the parent chain is enforced by
   the one writer that sees every release (section 5).
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.accept(None, rel)
+      Ok(())
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.accept(Some(rel), rel)
+      Ok(())
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.accept(Some(rel), { rel with seq: 2, parent: Control.digest(rel) })
+      Ok(())
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.accept(Some(rel), { rel with seq: 2, parent: "x" })
+      Err("parent mismatch: release 2 does not follow the head 1")
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> Control.accept(Some({ rel with seq: 5 }), rel)
+      Err("stale: release 1 is older than the head 5")
   """
   fn accept(head : Option(CtlRelease), r : CtlRelease) : Result((), String) do
     match head do
@@ -585,12 +715,35 @@ mod Control do
 
   pfn version_text(v : CtlVersion) : String do v.build ++ "=" ++ v.manifest end
 
-  doc "The canonical text of what a node runs: `build=manifest` words, sorted by build."
+  doc """
+  The canonical text of what a node runs: `build=manifest` words, sorted by build.
+  An empty list gives "".
+
+  ## Examples
+
+      march> Control.versions_text([{ build: "web", manifest: "m1" }, { build: "api", manifest: "m2" }])
+      "api=m2 web=m1"
+      march> Control.versions_text([])
+      ""
+  """
   fn versions_text(vs : List(CtlVersion)) : String do
     String.join(List.map(List.sort_by(vs, fn (a, b) -> a.build < b.build), fn v -> version_text(v)), " ")
   end
 
-  doc "The builds [rep] runs."
+  doc """
+  The builds [rep] runs, read back from its `versions` text; a word with no `=` is skipped.
+
+  ## Examples
+
+  `rep` is reused by the examples further down:
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> List.map(Control.report_versions({ rep with versions: "api=m2 web=m1" }), fn v -> v.build)
+      ["api", "web"]
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> Control.report_versions({ rep with versions: "" })
+      []
+  """
   fn report_versions(rep : AgentReport) : List(CtlVersion) do
     List.filter_map(words(rep.versions), fn w ->
       match String.split_first(w, "=") do
@@ -603,6 +756,13 @@ mod Control do
   A node's certificate state as it reports it (`AgentReport.certs`):
   `cert:<serial>` for the certificate it presents (absent on a shared-secret
   node), then `rev:<id>` for every revocation it knows (`NodeCert.revocation_id`).
+
+      Control.certs_text(Some(my_cert), revs)   -- "cert:<serial> rev:<id> ..."
+
+  ## Examples
+
+      march> Control.certs_text(None, [])
+      ""
   """
   fn certs_text(own : Option(NodeCert.Cert), revs : List(NodeCert.Revocation)) : String do
     let mine = match own do
@@ -612,7 +772,18 @@ mod Control do
     String.join(List.append(mine, List.map(revs, fn r -> "rev:" ++ NodeCert.revocation_id(r))), " ")
   end
 
-  doc "The serial of the certificate [rep]'s node presents (\"\" when it reports none)."
+  doc """
+  The serial of the certificate [rep]'s node presents ("" when it reports none).
+
+  ## Examples
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> Control.report_serial(rep)
+      "42"
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> Control.report_serial({ rep with certs: "" })
+      ""
+  """
   fn report_serial(rep : AgentReport) : String do
     match first_some(words(rep.certs), fn w -> field(w, "cert")) do
       Some(s) -> s
@@ -620,13 +791,33 @@ mod Control do
     end
   end
 
-  doc "The last step [rep]'s node failed, if any."
+  doc """
+  The last step [rep]'s node failed, if any (`failed_seq` 0 means none).
+
+  ## Examples
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> Control.report_failure(rep)
+      None
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> Option.map(Control.report_failure({ rep with failed_seq: 1, failed_step: 2, failed_why: "refused" }), fn f -> f.why)
+      Some("refused")
+  """
   fn report_failure(rep : AgentReport) : Option(CtlFailure) do
     if rep.failed_seq == 0 do None
     else Some({ seq: rep.failed_seq, step: rep.failed_step, why: rep.failed_why }) end
   end
 
-  doc "[rep] with its failure set to [f]."
+  doc """
+  [rep] with its failure set to [f].
+
+  ## Examples
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let res = Control.with_failure(rep, { seq: 1, step: 2, why: "refused" })
+      march> res.failed_step
+      2
+  """
   fn with_failure(rep : AgentReport, f : CtlFailure) : AgentReport do
     { rep with failed_seq: f.seq, failed_step: f.step, failed_why: f.why }
   end
@@ -642,10 +833,34 @@ mod Control do
   }
   derive Eq for StepOrder
 
-  doc "The artifact hashes [o] needs."
+  doc """
+  The artifact hashes [o] needs.
+
+  ## Examples
+
+  `ord` is reused by the examples further down:
+
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> Control.order_artifacts(ord)
+      ["m1"]
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> Control.order_artifacts({ ord with artifacts: "" })
+      []
+  """
   fn order_artifacts(o : StepOrder) : List(String) do words(o.artifacts) end
 
-  doc "The signed lines [o] relays, in order."
+  doc """
+  The signed lines [o] relays, in order; blank lines are dropped.
+
+  ## Examples
+
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> Control.order_lines({ ord with lines: "L1\n\nL2" })
+      ["L1", "L2"]
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> Control.order_lines(ord)
+      []
+  """
   fn order_lines(o : StepOrder) : List(String) do
     List.filter(String.split(o.lines, "\n"), fn l -> l != "")
   end
@@ -670,6 +885,23 @@ mod Control do
   leader first sees it healthy in its current state, and restarts when the
   state changes or the node reports unhealthy. The window is the leader's own,
   so a new leader restarts every window: conservative (design section 4).
+
+  ## Examples
+
+  `obs0` (node "a" healthy since t=1000) is reused by the examples further down:
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let obs0 = Control.observe([], rep, 1000)
+      march> List.map(Control.observe(obs0, rep, 5000), fn o -> o.healthy_since)
+      [Some(1000)]
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let obs0 = Control.observe([], rep, 1000)
+      march> List.map(Control.observe(obs0, { rep with versions: "web=m2" }, 5000), fn o -> o.healthy_since)
+      [Some(5000)]
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let obs0 = Control.observe([], rep, 1000)
+      march> List.map(Control.observe(obs0, { rep with healthy: false }, 5000), fn o -> o.healthy_since)
+      [None]
   """
   fn observe(obs : List(CtlObs), rep : AgentReport, now : Int) : List(CtlObs) do
     let since = if not(rep.healthy) do None
@@ -704,7 +936,26 @@ mod Control do
     List.member(pools, "*") || List.any(m.pools, fn p -> List.member(pools, p))
   end
 
-  doc "A step's target nodes: the members in any of its pools, in node order (the canary is the first)."
+  doc """
+  A step's target nodes: the members in any of its pools (every member for `["*"]`),
+  sorted by node name (the canary is the first).
+
+  ## Examples
+
+  `members`, `step1` and `step2` are reused by the examples further down:
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let step1 = List.head(rel.steps)
+      march> let step2 = List.nth(rel.steps, 1)
+      march> Control.targets(step1, members)
+      ["a", "b", "c"]
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let step1 = List.head(rel.steps)
+      march> Control.targets({ step1 with pools: ["*"] }, members)
+      ["a", "b", "c", "db1"]
+  """
   fn targets(step : CtlStep, members : List(CtlMember)) : List(String) do
     List.sort_by(List.map(List.filter(members, fn m -> in_pools(m, step.pools)), fn m -> m.node), fn (a, b) -> a < b)
   end
@@ -723,6 +974,20 @@ mod Control do
   `rest` the targets no earlier step with the same action selected. Selection
   depends only on the release and the membership, never on progress, so every
   leader selects the same canary.
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let step1 = List.head(rel.steps)
+      march> Control.select(step1, members, [])
+      ["a"]
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let step1 = List.head(rel.steps)
+      march> let step2 = List.nth(rel.steps, 1)
+      march> Control.select(step2, members, [(step1, ["a"])])
+      ["b", "c"]
   """
   fn select(step : CtlStep, members : List(CtlMember), prior : List((CtlStep, List(String)))) : List(String) do
     let ts = targets(step, members)
@@ -735,7 +1000,22 @@ mod Control do
     end
   end
 
-  doc "The end state a node reports once [step] of [r] is done on it (`StepOrder.want`)."
+  doc """
+  The end state a node reports once [step] of [r] is done on it (`StepOrder.want`): the
+  build's manifest for `activate`, the topology digest, or the drain epoch. "" for a
+  `certs` step (per node: see `want_for`) and for a build or drain the release lacks.
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
+      march> Control.want(rel, step1)
+      "m1"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
+      march> Control.want(rel, { step1 with action: Control.DoTopology })
+      "t1"
+  """
   fn want(r : CtlRelease, step : CtlStep) : String do
     match step.action do
       DoActivate(b) -> match find_build(r, b) do
@@ -775,6 +1055,13 @@ mod Control do
   for a `do:certs` step, whose end state is per node: `cert:<serial>` when the
   release carries a certificate for [node], and `rev:<id>` for each of its
   revocations (the words of `certs_text` the node must report).
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
+      march> Control.want_for(rel, step1, "a")
+      "m1"
   """
   fn want_for(r : CtlRelease, step : CtlStep, node : String) : String do
     match step.action do
@@ -788,7 +1075,27 @@ mod Control do
     end
   end
 
-  doc "Does [rep] show the end state [w] of an order with action [action] (`show_action` form)?"
+  doc """
+  Does [rep] show the end state [w] of an order with action [action] (`show_action` form)?
+  `activate`: a version of that build (or `*`) with manifest [w]; `topology`: the digest;
+  `drain`: drained at least to epoch [w]; `certs`: every word of [w] among the reported
+  ones. An unknown action is never done.
+
+  ## Examples
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> Control.reports_state(rep, "activate(web)", "m1")
+      true
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> Control.reports_state(rep, "activate(web)", "m2")
+      false
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> Control.reports_state(rep, "drain", "1")
+      false
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> Control.reports_state(rep, "certs", "cert:42")
+      true
+  """
   fn reports_state(rep : AgentReport, action : String, w : String) : Bool do
     match call_arg(action, "activate") do
       Some(b) -> List.any(report_versions(rep), fn v -> (v.build == b || v.build == "*") && v.manifest == w)
@@ -832,7 +1139,25 @@ mod Control do
     end
   end
 
-  doc "The order that takes [step] of [r] on [node]."
+  doc """
+  The order that takes [step] of [r] on [node]: `release` is `digest(r)`, `want` is
+  `want_for`, the artifacts are the build's manifest (activate) or the topology digest
+  (topology), and the lines are the release's signed lines for the step (a `certs`
+  step carries the whole serialized release instead).
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
+      march> let o1 = Control.order(rel, step1, "a")
+      march> Control.order_artifacts(o1)
+      ["m1"]
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let step1 = List.head(rel.steps)
+      march> let o1 = Control.order(rel, step1, "a")
+      march> o1.want
+      "m1"
+  """
   fn order(r : CtlRelease, step : CtlStep, node : String) : StepOrder do
     let artifacts = match step.action do
       DoActivate(b) -> match find_build(r, b) do
@@ -970,6 +1295,36 @@ mod Control do
   once every earlier step is done on its nodes and its gate has passed, and a
   node is ordered only while it does not report the step's end state and has
   no order in flight. So no step is skipped and none is applied twice.
+
+  ## Examples
+
+  Node "a" is the canary; once it reports `m1` the 30 s gate holds step 2 back:
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> Control.show_decision(Control.pass(rel, members, [], [], 0))
+      "step 1: apply to [a]"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> Control.show_decision(Control.pass(rel, members, [], ["a"], 0))
+      "step 1: apply to []"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let obs0 = Control.observe([], rep, 1000)
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> Control.show_decision(Control.pass(rel, members, obs0, [], 2000))
+      "step 1: waiting, gate healthy(30s): a healthy for 1000ms of 30000ms"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let obs0 = Control.observe([], rep, 1000)
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> Control.show_decision(Control.pass(rel, members, obs0, [], 31000))
+      "step 2: apply to [b, c]"
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> Control.show_decision(Control.pass(rel, members, Control.observe([], { rep with seq: 4 }, 0), [], 0))
+      "behind: a node holds release 4"
   """
   fn pass(r : CtlRelease, members : List(CtlMember), obs : List(CtlObs), inflight : List(String), now : Int) : CtlDecision do
     let newest = max_seq(obs, r.seq)
@@ -985,10 +1340,29 @@ mod Control do
   -- release it can find, and the agents' next reports.
   type CtlLeader = { release : Option(CtlRelease), obs : List(CtlObs), inflight : List(String), halted : Option(CtlDecision) }
 
-  doc "A leader holding nothing yet."
+  doc """
+  A leader holding nothing yet.
+
+  ## Examples
+
+      march> let ldr0 = Control.leader_new()
+      march> Option.is_none(ldr0.release)
+      true
+  """
   fn leader_new() : CtlLeader do { release: None, obs: Nil, inflight: Nil, halted: None } end
 
-  doc "Offer a release to the leader (`check`, then `accept`'s compare-and-set). A new release clears the halt."
+  doc """
+  Offer a release to the leader (`check`, then `accept`'s compare-and-set). A new release
+  clears the halt and the orders in flight; offering the held release again changes nothing.
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let ldr0 = Control.leader_new()
+      march> let ldr1 = Result.unwrap(Control.leader_release(ldr0, rel))
+      march> Control.leader_release(ldr1, { rel with seq: 0 })
+      Err("seq must be positive")
+  """
   fn leader_release(l : CtlLeader, r : CtlRelease) : Result(CtlLeader, String) do
     let? _ = check(r)
     let? _ = accept(l.release, r)
@@ -1003,6 +1377,13 @@ mod Control do
   flight. A failure this leader already knows of for the node is kept even if
   the report omits it, so a halt cannot be lost to a report sent before the
   failure; so is the node's `detail` when the report has none (a poll's).
+
+  ## Examples
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ldr2 = Control.leader_report(Control.leader_new(), rep, 1000)
+      march> List.length(ldr2.obs)
+      1
   """
   fn leader_report(l : CtlLeader, rep : AgentReport, now : Int) : CtlLeader do
     let prior = obs_of(l.obs, rep.node)
@@ -1027,6 +1408,18 @@ mod Control do
   (so the next pass halts; a new leader re-derives the halt from the agent's
   own report). The order stays in flight until the node's next report, so it
   is not sent again on the strength of a stale report.
+
+  A result from a node the leader has no report of changes nothing.
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let ldr2 = Control.leader_report(Control.leader_new(), rep, 1000)
+      march> let ldr3 = Control.leader_result(Result.unwrap(Control.leader_release(ldr2, rel)), { seq: 1, step: 1, node: "a", ok: false, detail: "ERR refused" }, 1500)
+      march> Option.map(Tuple.second(Control.leader_pass(ldr3, members, 2000)), Control.show_decision)
+      Some("step 1: HALTED on a: ERR refused")
   """
   fn leader_result(l : CtlLeader, res : StepResult, now : Int) : CtlLeader do
     if res.ok do l
@@ -1042,6 +1435,21 @@ mod Control do
   doc """
   Run a pass. The orders it returns are now in flight. A `RolloutHalted` verdict
   sticks until a new release; `RolloutComplete` and `RolloutWait` hold no state.
+
+  A leader with no release returns `None`.
+
+  ## Examples
+
+      march> let rel = { seq: 1, parent: "none", env: "prod", topology: "t1", builds: [{ name: "web", base: "b1", manifest: "m1" }], steps: [{ id: 1, pools: ["web"], hosts: Control.HostsCanary(1), action: Control.DoActivate("web"), gate: Control.GateHealthy(30000), batch: 0 }, { id: 2, pools: ["web"], hosts: Control.HostsRest, action: Control.DoActivate("web"), gate: Control.GateNone, batch: 0 }], lines: [], certs: [], revokes: [], drain: None, signature: "" }
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let ldr0 = Control.leader_new()
+      march> let ldr1 = Result.unwrap(Control.leader_release(ldr0, rel))
+      march> Option.map(Tuple.second(Control.leader_pass(ldr1, members, 0)), Control.show_decision)
+      Some("step 1: apply to [a]")
+      march> let members = [{ node: "b", pools: ["web"] }, { node: "a", pools: ["web"] }, { node: "c", pools: ["web"] }, { node: "db1", pools: ["db"] }]
+      march> let ldr0 = Control.leader_new()
+      march> Tuple.second(Control.leader_pass(ldr0, members, 0))
+      None
   """
   fn leader_pass(l : CtlLeader, members : List(CtlMember), now : Int) : (CtlLeader, Option(CtlDecision)) do
     match l.halted do
@@ -1060,7 +1468,16 @@ mod Control do
     end
   end
 
-  doc "The decision as one line, for status output and logs."
+  doc """
+  The decision as one line, for status output and logs.
+
+  ## Examples
+
+      march> Control.show_decision(Control.RolloutComplete)
+      "complete"
+      march> Control.show_decision(Control.RolloutHalted(2, "a", "ERR refused"))
+      "step 2: HALTED on a: ERR refused"
+  """
   fn show_decision(d : CtlDecision) : String do
     match d do
       RolloutApply(s, os) -> "step " ++ int_to_string(s) ++ ": apply to [" ++ String.join(List.map(os, fn o -> o.node), ", ") ++ "]"
@@ -1080,7 +1497,25 @@ mod Control do
   -- (design section 6, not built yet); tests build it over a simulated node.
   type AgentOps = { report : () -> AgentReport, has : String -> Bool, request : String -> String }
 
-  doc "The artifacts of [o] the node does not hold yet (to fetch over `CtlFetch` before applying)."
+  doc """
+  The artifacts of [o] the node does not hold yet (to fetch over `CtlFetch` before applying).
+
+  ## Examples
+
+  `ops` simulates a node: it reports `rep`, holds artifact `m1`, and accepts every line.
+  It is reused by the examples further down:
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> Control.missing(ops, ord)
+      []
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> Control.missing({ ops with has: fn h -> false }, ord)
+      ["m1"]
+  """
   fn missing(ops : AgentOps, o : StepOrder) : List(String) do
     List.filter(order_artifacts(o), fn h -> not(ops.has(h)))
   end
@@ -1099,12 +1534,33 @@ mod Control do
   end
 
   doc """
-  RolloutApply one order on this node. Idempotent: a node that already reports the
+  Apply one order on this node. Idempotent: a node that already reports the
   order's end state answers ok without touching the reload server, so an
   order a new leader sends again is harmless. Missing artifacts or a refused
   line answer not-ok with the reason, which halts the release. A topology
   step the reload server took is given a few placement ticks for the node to
   report it (`agent_apply_within`).
+
+  ## Examples
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply(ops, ord)
+      march> res.detail
+      "already applied"
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply({ ops with has: fn h -> false }, { ord with want: "m2" })
+      march> res.detail
+      "missing artifacts: m1"
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply({ ops with request: fn l -> "ERR bad signature" }, { ord with want: "m2", lines: "SEQ 1 x" })
+      march> res.detail
+      "ERR bad signature"
   """
   fn agent_apply(ops : AgentOps, o : StepOrder) : StepResult do agent_apply_ticked(ops, o, 200) end
 
@@ -1112,6 +1568,17 @@ mod Control do
   `agent_apply` on a node whose placement loop ticks every [tick_ms]
   (`MARCH_PLACEMENT_TICK_MS`; `agent_apply` assumes its default, 200): a
   topology step waits `topology_wait_ms(tick_ms)` for the node to report it.
+
+  A [tick_ms] below 1 is taken as 1.
+
+  ## Examples
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply_ticked(ops, ord, 50)
+      march> res.ok
+      true
   """
   fn agent_apply_ticked(ops : AgentOps, o : StepOrder, tick_ms : Int) : StepResult do
     let tick = if tick_ms < 1 do 1 else tick_ms end
@@ -1123,6 +1590,15 @@ mod Control do
   digest the reload server already took, given the loop's tick [tick_ms]:
   ten ticks, at least two seconds (a loaded host delays a tick), at most a
   minute.
+
+  ## Examples
+
+      march> Control.topology_wait_ms(200)
+      2000
+      march> Control.topology_wait_ms(500)
+      5000
+      march> Control.topology_wait_ms(10000)
+      60000
   """
   fn topology_wait_ms(tick_ms : Int) : Int do
     let w = tick_ms * 10
@@ -1135,6 +1611,17 @@ mod Control do
   once, but the node reports the digest only once its placement loop has
   re-read the file, on its next tick (`MARCH_PLACEMENT_TICK_MS`): until then
   the step is pending, not failed. Every other step is checked once.
+
+  ## Examples
+
+  Every line accepted, but the node never reports the new manifest:
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let res = Control.agent_apply_within(ops, { ord with want: "m2" }, 0, 10)
+      march> res.detail
+      "the node accepted every line but does not report activate(web) at m2"
   """
   fn agent_apply_within(ops : AgentOps, o : StepOrder, wait_ms : Int, poll_ms : Int) : StepResult do
     if reports_state(ops.report(), o.action, o.want) do result_of(o, true, "already applied")
@@ -1168,10 +1655,24 @@ mod Control do
   -- signature checks, the release sequence and the audit are the socket's.
   -- The Agent adds no authority: it relays operator-signed lines.
 
-  doc "The reload server's answer to [line] (or lines: the request is a stream, a body verb's bytes follow the first newline)."
+  doc """
+  The reload server's answer to [line] (or lines: the request is a stream, a body verb's
+  bytes follow the first newline). Goes through the stdlib-only `reload_request` builtin.
+
+      Control.relay_line("NODE_STATE")
+  """
   fn relay_line(line : String) : String do reload_request(line) end
 
-  doc "The value of `key:value` among the words of [line] (\"\" when absent)."
+  doc """
+  The value of `key:value` among the words of [line] ("" when absent).
+
+  ## Examples
+
+      march> Control.state_field("STATE head:3 drained:1 topology:t1", "head")
+      "3"
+      march> Control.state_field("STATE head:3", "topology")
+      ""
+  """
   fn state_field(line : String, key : String) : String do
     match first_some(words(line), fn w -> field(w, key)) do
       Some(v) -> v
@@ -1179,12 +1680,28 @@ mod Control do
     end
   end
 
-  doc "The non-empty lines of a reload-server answer."
+  doc """
+  The non-empty lines of a reload-server answer.
+
+  ## Examples
+
+      march> Control.answer_lines("OK\n\nSTATE head:3\n")
+      ["OK", "STATE head:3"]
+  """
   fn answer_lines(resp : String) : List(String) do
     List.filter(String.split(resp, "\n"), fn l -> l != "")
   end
 
-  doc "The `STATE` line of a `NODE_STATE` answer (\"\" when absent)."
+  doc """
+  The `STATE` line of a `NODE_STATE` answer ("" when absent).
+
+  ## Examples
+
+      march> Control.state_line(["PIN 1", "STATE head:3 drained:1"])
+      "STATE head:3 drained:1"
+      march> Control.state_line([])
+      ""
+  """
   fn state_line(lines : List(String)) : String do
     match List.find(lines, fn l -> String.starts_with(l, "STATE ")) do
       Some(l) -> l
@@ -1204,6 +1721,8 @@ mod Control do
   on every poll, cost a node gigabytes within a minute. The patch artifacts in
   effect (`NODE_STATE`) are what the executor needs, and an operator reads the
   per-function view through the control API (`VERSIONS_DETAIL` passes through).
+
+      let rep = Control.reload_report("node-a", "web", status_text, true, "", certs)
   """
   fn reload_report(name : String, pools : String, status : String, applied : Bool, failure : String, certs : String) : AgentReport do
     let st = answer_lines(relay_line("NODE_STATE"))
@@ -1246,6 +1765,10 @@ mod Control do
   `agent_apply_recording`). [certs] is the node's certificate state
   (`certs_text`). `has` is the artifact's presence in the CAS
   (a `base:` in the release is informational: the base image is not an artifact).
+
+      let mem = Vault.new("agent")
+      let ops = Control.real_ops("node-a", "web", status, certs, mem)
+      Control.agent_apply_recording(ops, mem, order, 200)
   """
   fn real_ops(name : String, pools : String, status : () -> (String, Bool), certs : () -> String, memory : Vault(String)) : AgentOps do
     { report: fn ->
@@ -1260,6 +1783,26 @@ mod Control do
   remembering a failure in [memory] so the node's next report carries it
   (a new leader re-derives the halt from it) and forgetting it once a later order succeeds.
   A batch left half-staged by an earlier failed step is rolled back first.
+
+  ## Examples
+
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let mem = Vault.new("doc_control_memory")
+      march> let res = Control.agent_apply_recording({ ops with has: fn h -> false }, mem, { ord with want: "m2" }, 200)
+      march> res.ok
+      false
+      march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
+      march> let mem = Vault.new("doc_control_memory")
+      march> let res = Control.agent_apply_recording(ops, mem, ord, 200)
+      march> res.ok
+      true
+
+  After the failure `mem` holds `"failure"` = `"1 1 missing artifacts: m1"` (`seq step
+  why`); the success that follows removes it.
   """
   fn agent_apply_recording(ops : AgentOps, memory : Vault(String), o : StepOrder, tick_ms : Int) : StepResult do
     let _ = ops.request("ROLLBACK_BATCH")
@@ -1347,6 +1890,10 @@ mod Control do
   known one once, so a revocation already gossiped here is a no-op). Idempotent:
   a certificate already in use and a revocation already known change nothing.
   Any refusal answers not-ok with the reason, which halts the release.
+
+      match Control.agent_apply_certs(cert_ops, order) do
+        r -> if r.ok do () else println("refused: " ++ r.detail) end
+      end
   """
   fn agent_apply_certs(c : CertOps, o : StepOrder) : StepResult do
     match order_release(c, o) do
@@ -1375,6 +1922,9 @@ mod Control do
   `agent_apply_recording`, and the release's seq once it succeeds: the floor
   below which this node refuses certificate releases (`CertOps.floor` should
   read it back with `cert_floor`).
+
+      let res = Control.agent_apply_certs_recording(cert_ops, mem, order)
+      Control.cert_floor(mem)    -- order.seq once res.ok
   """
   fn agent_apply_certs_recording(c : CertOps, memory : Vault(String), o : StepOrder) : StepResult do
     let res = remember(memory, agent_apply_certs(c, o))
@@ -1382,7 +1932,15 @@ mod Control do
     res
   end
 
-  doc "The newest release seq this agent has taken certificates or revocations from (0: none), as `agent_apply_certs_recording` keeps it."
+  doc """
+  The newest release seq this agent has taken certificates or revocations from (0: none),
+  as `agent_apply_certs_recording` keeps it. An unreadable entry also reads 0.
+
+  ## Examples
+
+      march> Control.cert_floor(Vault.new("doc_control_cert_floor"))
+      0
+  """
   fn cert_floor(memory : Vault(String)) : Int do
     match string_to_int(Vault.get_or(memory, "cert_floor", "0")) do
       Some(n) -> n
@@ -1404,7 +1962,20 @@ mod Control do
   -- the last.
   type CtlChunk = { offset : Int, data : String, last : Bool }
 
-  doc "Split [hex] (an artifact as hex) into chunks of [size] hex characters; an empty artifact is one empty last chunk."
+  doc """
+  Split [hex] (an artifact as hex) into chunks of [size] hex characters, offsets counted in
+  characters; an artifact of at most [size] characters (including an empty one) is one last
+  chunk.
+
+  ## Examples
+
+      march> List.map(Control.chunks("abcdef", 4), fn c -> c.data)
+      ["abcd", "ef"]
+      march> List.map(Control.chunks("abcdef", 4), fn c -> c.offset)
+      [0, 4]
+      march> List.map(Control.chunks("", 4), fn c -> c.last)
+      [true]
+  """
   fn chunks(hex : String, size : Int) : List(CtlChunk) do
     let n = String.byte_size(hex)
     if n <= size do [{ offset: 0, data: hex, last: true }]
@@ -1443,6 +2014,13 @@ mod Control do
   The `result` of a release the leader refused, from its reason: `err_stale`,
   `err_fork`, `err_parent` (the compare-and-set on `parent`), or `err_invalid`
   (the release does not check).
+
+  ## Examples
+
+      march> Control.audit_refusal("stale: release 1 is older than the head 2")
+      "err_stale"
+      march> Control.audit_refusal("missing env")
+      "err_invalid"
   """
   fn audit_refusal(why : String) : String do
     if String.starts_with(why, "stale") do "err_stale"
@@ -1451,24 +2029,57 @@ mod Control do
     else "err_invalid" end end end
   end
 
-  doc "The audit line for a release offered to the leader: [result] is \"ok\" or an `err_...` word, [why] the reason (\"\" when accepted)."
+  doc """
+  The audit line for a release offered to the leader: [result] is "ok" or an `err_...`
+  word, [why] the reason ("" when accepted). One JSON object and a newline.
+
+  ## Examples
+
+      march> Control.audit_release(1000, "n1", 2, "abc", "ok", "")
+      "{\"ts\":1000,\"type\":\"release\",\"leader\":\"n1\",\"seq\":2,\"release\":\"abc\",\"result\":\"ok\",\"why\":\"\"}\n"
+  """
   fn audit_release(ts : Int, leader : String, seq : Int, digest : String, result : String, why : String) : String do
     audit_json(ts, "release", leader, [("seq", Json.Number(int_to_float(seq))), ("release", Json.Str(digest)), ("result", Json.Str(result)), ("why", Json.Str(why))])
   end
 
-  doc "The audit line for an order sent to a node."
+  doc """
+  The audit line for an order sent to a node (its signed lines are not logged).
+
+  ## Examples
+
+      march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
+      march> Control.audit_order(1000, "n1", ord)
+      "{\"ts\":1000,\"type\":\"order\",\"leader\":\"n1\",\"seq\":1,\"release\":\"abc\",\"step\":1,\"node\":\"a\",\"action\":\"activate(web)\",\"artifacts\":\"m1\"}\n"
+  """
   fn audit_order(ts : Int, leader : String, o : StepOrder) : String do
     audit_json(ts, "order", leader, [("seq", Json.Number(int_to_float(o.seq))), ("release", Json.Str(o.release)), ("step", Json.Number(int_to_float(o.step))),
       ("node", Json.Str(o.node)), ("action", Json.Str(o.action)), ("artifacts", Json.Str(o.artifacts))])
   end
 
-  doc "The audit line for a node's answer to an order."
+  doc """
+  The audit line for a node's answer to an order.
+
+  ## Examples
+
+      march> Control.audit_step(1000, "n1", { seq: 1, step: 1, node: "a", ok: true, detail: "applied" })
+      "{\"ts\":1000,\"type\":\"step\",\"leader\":\"n1\",\"seq\":1,\"step\":1,\"node\":\"a\",\"result\":\"ok\",\"why\":\"applied\"}\n"
+  """
   fn audit_step(ts : Int, leader : String, res : StepResult) : String do
     audit_json(ts, "step", leader, [("seq", Json.Number(int_to_float(res.seq))), ("step", Json.Number(int_to_float(res.step))), ("node", Json.Str(res.node)),
       ("result", Json.Str(if res.ok do "ok" else "err" end)), ("why", Json.Str(res.detail))])
   end
 
-  doc "The audit line for a release's end: a halt (with its step, node and reason) or completion; None for any other decision."
+  doc """
+  The audit line for a release's end: a halt (with its step, node and reason) or completion;
+  None for any other decision.
+
+  ## Examples
+
+      march> Control.audit_decision(1000, "n1", 1, Control.RolloutComplete)
+      Some("{\"ts\":1000,\"type\":\"complete\",\"leader\":\"n1\",\"seq\":1}\n")
+      march> Control.audit_decision(1000, "n1", 1, Control.RolloutWait(1, "gate"))
+      None
+  """
   fn audit_decision(ts : Int, leader : String, seq : Int, d : CtlDecision) : Option(String) do
     match d do
       RolloutHalted(st, n, why) ->

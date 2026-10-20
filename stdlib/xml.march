@@ -636,10 +636,20 @@ mod Xml do
   doc """
   Parse an XML string. Returns Ok(XmlDoc) on success or Err(XmlError) on failure.
   This is a non-validating parser: it does not check DTDs or enforce constraints
-  beyond well-formedness.
+  beyond well-formedness. Entity references are decoded; comments, CDATA
+  sections and processing instructions inside the root are kept as nodes;
+  the XML declaration and DOCTYPE are skipped (the XmlDoc's declaration
+  field is always None). Whitespace-only text is dropped, and leading
+  whitespace of a text run is stripped (trailing whitespace is kept).
+
+  ## Examples
 
       march> Xml.parse("<root><item>hello</item></root>")
       Ok(XmlDoc(None, Element("root", [], [Element("item", [], [Text("hello")])])))
+      march> Xml.parse("<a x='1'>hi &amp; bye<!-- c --><b/></a>")
+      Ok(XmlDoc(None, Element("a", [("x", "1")], [Text("hi & bye"), Comment(" c "), Element("b", [], [])])))
+      march> Xml.parse("<a><b></a>")
+      Err(XmlError("mismatched tag: </b> expected, got </a>", 1, 9))
   """
   fn parse(src : String) : Result(XmlDoc, XmlError) do
     let st = make_state(src)
@@ -649,7 +659,16 @@ mod Xml do
     end
   end
 
-  doc "Parse XML, panicking on error."
+  doc """
+  Parse XML like `parse`, returning the document directly. Panics with
+  `XML parse error at LINE:COL: MESSAGE` if the input is not well-formed
+  (or empty), so use it only for trusted, known-good input.
+
+  ## Examples
+
+      march> Xml.parse_exn("<p>x</p>")
+      XmlDoc(None, Element("p", [], [Text("x")]))
+  """
   fn parse_exn(src : String) : XmlDoc do
     match parse(src) do
     Ok(xdoc) -> xdoc
@@ -661,12 +680,28 @@ mod Xml do
     end
   end
 
-  doc "Get the root element of a document."
+  doc """
+  Get the root element of a document.
+
+  ## Examples
+
+      march> Xml.root(Xml.parse_exn("<p>x</p>"))
+      Element("p", [], [Text("x")])
+  """
   fn root(xdoc : XmlDoc) : XmlNode do
     match xdoc do XmlDoc(_, r) -> r end
   end
 
-  doc "Get the tag name of an element node, or None for non-element nodes."
+  doc """
+  Get the tag name of an element node, or None for non-element nodes.
+
+  ## Examples
+
+      march> Xml.tag(Xml.root(Xml.parse_exn("<p>x</p>")))
+      Some("p")
+      march> Xml.tag(Xml.text_node("x"))
+      None
+  """
   fn tag(node : XmlNode) : Option(String) do
     match node do
     Element(t, _, _) -> Some(t)
@@ -674,7 +709,19 @@ mod Xml do
     end
   end
 
-  doc "Get the concatenated direct text content of a node, or None if no text children."
+  doc """
+  Get the text of a node. For an element, the concatenation of its DIRECT
+  Text and CData children (text inside child elements is not included),
+  or None if it has none. For a Text or CData node, its content; None for
+  comments and processing instructions.
+
+  ## Examples
+
+      march> Xml.text(Xml.root(Xml.parse_exn("<p>a<b>skip</b>c</p>")))
+      Some("ac")
+      march> Xml.text(Xml.root(Xml.parse_exn("<p><b/></p>")))
+      None
+  """
   fn text(node : XmlNode) : Option(String) do
     match node do
     Text(s) -> Some(s)
@@ -694,7 +741,17 @@ mod Xml do
     end
   end
 
-  doc "Get the value of an attribute by name, or None if absent."
+  doc """
+  Get the value of an attribute by name (entities decoded), or None if
+  absent or if the node is not an element.
+
+  ## Examples
+
+      march> Xml.attr(Xml.root(Xml.parse_exn("<a href=\"/x\" id='1'/>")), "id")
+      Some("1")
+      march> Xml.attr(Xml.root(Xml.parse_exn("<a href=\"/x\"/>")), "id")
+      None
+  """
   fn attr(node : XmlNode, name : String) : Option(String) do
     match node do
     Element(_, attrs, _) ->
@@ -706,7 +763,17 @@ mod Xml do
     end
   end
 
-  doc "Get all child nodes of an element (text, elements, comments, etc.)."
+  doc """
+  Get all child nodes of an element in document order (text, elements,
+  comments, etc.); `[]` for a non-element node.
+
+  ## Examples
+
+      march> List.length(Xml.children(Xml.root(Xml.parse_exn("<p>a<b/><!--c--></p>"))))
+      3
+      march> List.length(Xml.children(Xml.text_node("x")))
+      0
+  """
   fn children(node : XmlNode) : List(XmlNode) do
     match node do
     Element(_, _, kids) -> kids
@@ -714,7 +781,15 @@ mod Xml do
     end
   end
 
-  doc "Get only element-type children (filters out text, comments, etc.)."
+  doc """
+  Get only element-type children, in order (filters out text, comments,
+  etc.); `[]` for a non-element node.
+
+  ## Examples
+
+      march> List.map(Xml.elements(Xml.root(Xml.parse_exn("<p>a<b/><!--c--><i/></p>"))), Xml.tag)
+      [Some("b"), Some("i")]
+  """
   fn elements(node : XmlNode) : List(XmlNode) do
     match node do
     Element(_, _, kids) ->
@@ -728,7 +803,11 @@ mod Xml do
   end
 
   doc """
-  Navigate to the first node matching a slash-delimited tag path.
+  Navigate to the first node matching a slash-delimited tag path. Each
+  segment selects the FIRST child element with that tag, starting from
+  the children of `node` (the node's own tag is not part of the path);
+  there is no backtracking, so if the first matching child lacks the rest
+  of the path the result is None even when a later sibling has it.
 
       march> let root = Xml.root(Xml.parse_exn("<shop><item><name>pen</name></item><item><name>ink</name></item></shop>"))
       march> Xml.find(root, "item/name")  -- the first <name> inside an <item>
@@ -772,7 +851,10 @@ mod Xml do
   end
 
   doc """
-  Find all element children at the last segment of a slash-delimited path.
+  Find all element children at the last segment of a slash-delimited
+  path. The prefix segments are followed like `find` (first match at each
+  step); then every child of that element whose tag equals the last
+  segment is returned, in order. `[]` if the prefix is not found.
 
       march> let root = Xml.root(Xml.parse_exn("<order><items><item>pen</item><item>ink</item></items></order>"))
       march> List.map(Xml.find_all(root, "items/item"), Xml.text)  -- all <item> inside <items>
@@ -797,12 +879,29 @@ mod Xml do
     end
   end
 
-  doc "Construct an element node."
+  doc """
+  Construct an element node from a tag name, (name, value) attributes and
+  child nodes. Nothing is validated or escaped here; escaping happens in
+  `to_string`.
+
+  ## Examples
+
+      march> Xml.to_string(XmlDoc(None, Xml.elem("a", [("href", "/x")], [Xml.text_node("go")])))
+      "<a href=\"/x\">go</a>"
+  """
   fn elem(tag_name : String, attrs : List((String, String)), kids : List(XmlNode)) : XmlNode do
     Element(tag_name, attrs, kids)
   end
 
-  doc "Construct a text node."
+  doc """
+  Construct a text node. The string is stored raw; `<`, `>` and `&` are
+  escaped when serialized.
+
+  ## Examples
+
+      march> Xml.text(Xml.text_node("1 < 2"))
+      Some("1 < 2")
+  """
   fn text_node(s : String) : XmlNode do
     Text(s)
   end
@@ -856,7 +955,18 @@ mod Xml do
     end
   end
 
-  doc "Serialize an XmlDoc to a compact XML string."
+  doc """
+  Serialize an XmlDoc to a compact XML string with no added whitespace and
+  no XML declaration. Text escapes `<`, `>` and `&`; attribute values also
+  escape `"`. An element with no children is written self-closing.
+
+  ## Examples
+
+      march> Xml.to_string(XmlDoc(None, Xml.elem("a", [("t", "x\"y")], [Xml.text_node("1 < 2")])))
+      "<a t=\"x&quot;y\">1 &lt; 2</a>"
+      march> Xml.to_string(XmlDoc(None, Xml.elem("br", [], [])))
+      "<br/>"
+  """
   fn to_string(xdoc : XmlDoc) : String do
     match xdoc do
     XmlDoc(_, root_node) -> node_to_string(root_node)
@@ -893,7 +1003,18 @@ mod Xml do
     end
   end
 
-  doc "Serialize an XmlDoc to a pretty-printed XML string."
+  doc """
+  Serialize an XmlDoc to a pretty-printed XML string: one node per line,
+  two spaces per nesting level, every line (including the last) ending
+  in a newline. Text nodes are trimmed and placed on their own line, and
+  whitespace-only text is dropped, so this is for display and does not
+  preserve text exactly.
+
+  ## Examples
+
+      march> Xml.to_string_pretty(Xml.parse_exn("<a><b>hi</b><c/></a>"))
+      "<a>\n  <b>\n    hi\n  </b>\n  <c/>\n</a>\n"
+  """
   fn to_string_pretty(xdoc : XmlDoc) : String do
     match xdoc do
     XmlDoc(_, root_node) -> node_to_string_pretty(root_node, 0)

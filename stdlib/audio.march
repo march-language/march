@@ -2,8 +2,12 @@
 --
 -- Wraps the browser's Web Audio API to synthesize short sound effects on the
 -- fly (tones, frequency sweeps, filtered noise) instead of loading audio
--- files -- no assets, no licensing, fully deterministic from code. Requires
--- --target js; calling these functions from a native build panics.
+-- files -- no assets, no licensing. Every sound is routed through one master
+-- gain node per context (see `set_volume`) and shaped by the same envelope:
+-- an 8 ms linear attack to 0.9 gain, then an exponential decay to near
+-- silence over the requested duration, so tones don't click at their edges.
+-- Requires --target js; the native compiler and REPL have no implementation
+-- of these externs.
 --
 -- Browsers block audio output until a user gesture occurs on the page --
 -- call `resume` from inside your first tap/click handler.
@@ -33,22 +37,83 @@ mod Js.Audio do
 
   -- ── Public API ─────────────────────────────────────────────────────────
 
-  doc "Create a new Web Audio context. Call once at startup."
+  doc """
+  Create a new Web Audio context (an `AudioContext`, or `webkitAudioContext`
+  on older Safari) with its master gain set to 1.0. Call once at startup and
+  reuse the handle; browsers limit how many contexts a page may open.
+
+  A context created before any user gesture starts out suspended: sounds
+  played on it are silent until `resume` is called from a gesture handler.
+
+  ## Examples
+
+      let actx = Js.Audio.create()
+      Js.Dom.listen(Js.Dom.body(), "pointerdown", fn _ -> Js.Audio.resume(actx))
+  """
   fn create()                          do audio_create() end
 
-  doc "Unlock audio output. Browsers block sound until a user gesture occurs on the page -- call this from inside your first tap/click handler."
+  doc """
+  Unlock audio output. Browsers block sound until a user gesture occurs on the
+  page -- call this from inside your first tap/click/key handler. Resumes the
+  context only when it is suspended, so calling it on every gesture is a
+  cheap no-op once audio is running. Returns immediately; the browser resumes
+  the context asynchronously.
+  """
   fn resume(actx)                      do audio_resume(actx) end
 
-  doc "Play a flat tone at `freq` Hz for `duration` seconds. `wave` is one of \"sine\", \"square\", \"sawtooth\", \"triangle\"."
+  doc """
+  Play a tone at a constant `freq` Hz lasting `duration` seconds, with the
+  module's short-attack, exponential-decay envelope (so it reads as a blip,
+  not a flat beep). `wave` is the oscillator shape: "sine", "square",
+  "sawtooth" or "triangle"; the browser ignores any other string and keeps
+  "sine". Non-blocking: the call schedules the sound and returns at once,
+  so several calls in a row play overlapping.
+
+  ## Examples
+
+      Js.Audio.beep(actx, 900.0, 0.05, "square")    -- short laser-ish blip
+      Js.Audio.beep(actx, 220.0, 0.4, "triangle")   -- softer, longer tone
+  """
   fn beep(actx, freq, duration, wave)  do audio_beep(actx, freq, duration, wave) end
 
-  doc "Play a tone that glides from `freq_from` Hz to `freq_to` Hz over `duration` seconds -- risers, chirps, fall-offs."
+  doc """
+  Play a tone whose pitch glides exponentially from `freq_from` Hz to
+  `freq_to` Hz over `duration` seconds -- risers, chirps, fall-offs. Both
+  frequencies are clamped up to 1.0 Hz (an exponential ramp cannot reach 0).
+  `wave` and the envelope are as for `beep`; non-blocking.
+
+  ## Examples
+
+      Js.Audio.sweep(actx, 400.0, 900.0, 0.12, "sine")      -- rising chime
+      Js.Audio.sweep(actx, 600.0, 80.0, 0.5, "sawtooth")    -- falling "game over"
+  """
   fn sweep(actx, freq_from, freq_to, duration, wave) do audio_sweep(actx, freq_from, freq_to, duration, wave) end
 
-  doc "Play a burst of filtered white noise for `duration` seconds, low-passed at `filter_freq` Hz -- impacts, explosions."
+  doc """
+  Play a burst of white noise for `duration` seconds through a low-pass filter
+  at `filter_freq` Hz -- impacts, explosions (a low cutoff gives a dull thud,
+  a high one a hiss). The noise comes from a 1-second random buffer generated
+  once per context and replayed, so a `duration` above about 1.0 is cut short
+  when the buffer runs out. Non-blocking.
+
+  ## Examples
+
+      Js.Audio.noise_burst(actx, 0.2, 900.0)    -- explosion-ish thud
+      Js.Audio.noise_burst(actx, 0.05, 6000.0)  -- short hiss
+  """
   fn noise_burst(actx, duration, filter_freq) do audio_noise_burst(actx, duration, filter_freq) end
 
-  doc "Set the master volume, 0.0 (silent) to 1.0 (full)."
+  doc """
+  Set the master volume (the gain of the context's master node) for all
+  sounds on `actx`, including ones already playing: 0.0 is silent, 1.0 is the
+  default full level. The value is not clamped; above 1.0 amplifies and may
+  distort.
+
+  ## Examples
+
+      Js.Audio.set_volume(actx, 0.0)    -- mute
+      Js.Audio.set_volume(actx, 0.5)    -- half volume
+  """
   fn set_volume(actx, vol)             do audio_set_volume(actx, vol) end
 
 end

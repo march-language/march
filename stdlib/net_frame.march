@@ -20,15 +20,22 @@ mod NetFrame do
     Cons(lo8(n), Nil))))
   end
 
-  -- Prepend a 4-byte big-endian length header to [payload].
+  doc """
+  Prepend a 4-byte big-endian length header to [payload] (bytes 0..255).
+  The length must be below 2^32; it is not checked.
+
+      NetFrame.encode([1, 2, 3])   -- [0, 0, 0, 3, 1, 2, 3]
+  """
   fn encode(payload : List(Int)) : List(Int) do
     List.append(len4(List.length(payload)), payload)
   end
 
-  -- Pull one complete frame off the front of [buf]. Returns Some((payload, rest))
-  -- when a full header + body have arrived, or None when more bytes are needed.
-  -- The body length a buffer's first four bytes announce (caller checks
-  -- there are four).
+  doc """
+  The body length the first four bytes of [buf] announce (big-endian), or 0
+  when [buf] has fewer than four bytes (the caller checks there are four).
+
+      NetFrame.body_length([0, 0, 1, 2, 99])   -- 258
+  """
   fn body_length(buf : List(Int)) : Int do
     match List.take(buf, 4) do
       Cons(b0, Cons(b1, Cons(b2, Cons(b3, _)))) ->
@@ -37,6 +44,15 @@ mod NetFrame do
     end
   end
 
+  doc """
+  Pull one complete frame off the front of [buf]: `Some((payload, rest))`
+  when a full header and body have arrived, `rest` the bytes after the
+  frame; None when more bytes are needed (fewer than four, or a body still
+  short). Linear in the buffer length.
+
+      NetFrame.decode([0, 0, 0, 2, 7, 8, 9])   -- Some(([7, 8], [9]))
+      NetFrame.decode([0, 0, 0, 2, 7])         -- None
+  """
   fn decode(buf : List(Int)) : Option((List(Int), List(Int))) do
     if List.length(buf) < 4 do
       None
@@ -71,9 +87,11 @@ mod NetFrame do
   -- frame is not detected (an attacker able to drop frames can drop the
   -- connection too).
 
+  doc "Bytes of a sealed frame's MAC tag (HMAC-SHA256): 32."
   fn tag_size() : Int do 32 end
+  doc "Bytes of a sealed frame's sequence number: 8."
   fn seq_size() : Int do 8 end
-  -- Bytes a sealed frame adds to its payload.
+  doc "Bytes a sealed frame adds to its payload (sequence number + tag): 40."
   fn mac_overhead() : Int do 40 end
 
   pfn be64(n : Int) : List(Int) do
@@ -84,12 +102,16 @@ mod NetFrame do
     List.fold_left(bs, 0, fn (acc, b) -> acc * 256 + b)
   end
 
-  doc "The MAC tag over [seq] and [payload] under [key]."
+  doc "The 32-byte MAC tag over [seq] (the 8-byte encoded number) and [payload] under [key]: HMAC-SHA256(key, seq ++ payload)."
   fn mac_tag(key : Bytes, seq : Bytes, payload : Bytes) : Bytes do
     hmac_sha256_bytes(key, Bytes.concat(seq, payload))
   end
 
-  doc "A sealed frame (4-byte length ++ seq ++ payload ++ tag) for [payload] as frame number [seq]."
+  doc """
+  A sealed frame for [payload] as frame number [seq] under [key]: 4-byte
+  length ++ 8-byte big-endian seq ++ payload ++ 32-byte tag, the length
+  covering everything after it (`Bytes.length(payload) + mac_overhead()`).
+  """
   fn seal(key : Bytes, seq : Int, payload : Bytes) : Bytes do
     let sb = Bytes.from_list(be64(seq))
     let tag = mac_tag(key, sb, payload)
@@ -97,7 +119,11 @@ mod NetFrame do
                  Bytes.concat(sb, Bytes.concat(payload, tag)))
   end
 
-  doc "Seal an already-framed (length-prefixed, unsealed) frame: NodeQueue frames at enqueue time."
+  doc """
+  Seal an already-framed (length-prefixed, unsealed) frame [framed]: its old
+  4-byte prefix is dropped and the body sealed as `seal(key, seq, body)`.
+  For NodeQueue's frames, framed at enqueue time.
+  """
   fn reseal(key : Bytes, seq : Int, framed : Bytes) : Bytes do
     seal(key, seq, Bytes.slice(framed, 4, Bytes.length(framed) - 4))
   end
@@ -105,7 +131,9 @@ mod NetFrame do
   doc """
   Open a sealed frame BODY (what follows the length prefix) under [key]:
   Ok((seq, payload)) when the tag verifies, Err otherwise. The caller decides
-  whether [seq] is acceptable (`window_accept`).
+  whether [seq] is acceptable (`window_accept`). `Err("frame too short for
+  its MAC")` for a body under `mac_overhead()` bytes, `Err("frame MAC
+  mismatch")` for a modified frame or the wrong key.
   """
   fn open(key : Bytes, body : Bytes) : Result((Int, Bytes), String) do
     let n = Bytes.length(body)
@@ -125,9 +153,19 @@ mod NetFrame do
   -- A number above hi slides the window; one inside it is accepted once; one
   -- below it, or seen already, is a replay. hi starts at -1 (nothing seen).
 
+  doc "How many sequence numbers at and below the highest one seen the receive window remembers: 32."
   fn window_size() : Int do 32 end
 
-  doc "Accept [seq] against the window (hi, mask): Some(new window), or None for a replay / too old."
+  doc """
+  Accept [seq] against the receive window ([hi], [mask]) (start from
+  (-1, 0)): `Some(new window)`, or None for a replay (already seen) or a
+  number 32 or more below [hi] (too old). A number above [hi] slides the
+  window up to it.
+
+      NetFrame.window_accept(-1, 0, 0)   -- Some((0, 1))
+      NetFrame.window_accept(5, 1, 3)    -- Some((5, 5))
+      NetFrame.window_accept(5, 5, 3)    -- None (replay)
+  """
   fn window_accept(hi : Int, mask : Int, seq : Int) : Option((Int, Int)) do
     if seq > hi do
       let shift = seq - hi

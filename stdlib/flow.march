@@ -26,6 +26,11 @@
 --     |> Flow.filter(fn x -> x > 4)
 --     |> Flow.collect
 --   -- [6, 8, 10]
+--
+-- Stages are lazy: nothing runs until a consumer (collect, reduce, count,
+-- find, ...) is applied, and each consumer re-runs the whole pipeline.
+--
+-- doc: try
 
 mod Flow do
 
@@ -36,12 +41,26 @@ mod Flow do
 
   -- ---- Producers ----
 
-  doc "Create a stage from a list of items."
+  doc """
+  Create a stage from a list of items.
+
+  ## Examples
+
+      march> Flow.collect(Flow.from_list([1, 2, 3]))
+      [1, 2, 3]
+  """
   fn from_list(xs) do
     Stage(Seq.from_list(xs))
   end
 
-  doc "Create a stage from an existing Seq."
+  doc """
+  Create a stage from an existing Seq.
+
+  ## Examples
+
+      march> Flow.collect(Flow.from_seq(Seq.from_list([1, 2])))
+      [1, 2]
+  """
   fn from_seq(seq) do
     Stage(seq)
   end
@@ -51,14 +70,30 @@ mod Flow do
   next : seed -> Option((item, new_seed))
   Produces items until next returns None.
 
-  Example — integers from 0 to 4:
-      Flow.unfold(0, fn s -> if s >= 5 do None else Some((s, s + 1))) end
+  `next` is re-run from `seed` each time the stage is consumed. If it never
+  returns `None` the stage is unbounded and no consumer terminates on it
+  (not even after `take`).
+
+  ## Examples
+
+      march> Flow.collect(Flow.unfold(0, fn s -> if s >= 5 do None else Some((s, s + 1)) end))
+      [0, 1, 2, 3, 4]
   """
   fn unfold(seed, next) do
     Stage(Seq.unfold(seed, next))
   end
 
-  doc "Create a stage over the integer range [start, stop)."
+  doc """
+  Create a stage over the integer range [start, stop), counting up by 1.
+  Empty when `start >= stop`.
+
+  ## Examples
+
+      march> Flow.collect(Flow.range(0, 5))
+      [0, 1, 2, 3, 4]
+      march> Flow.collect(Flow.range(5, 5))
+      []
+  """
   fn range(start, stop) do
     Stage(Seq.unfold(start, fn i -> do
       if i >= stop do None
@@ -68,21 +103,43 @@ mod Flow do
 
   -- ---- Transformers ----
 
-  doc "Apply f to every item."
+  doc """
+  Apply `f` to every item.
+
+  ## Examples
+
+      march> Flow.collect(Flow.map(Flow.from_list([1, 2, 3]), fn x -> x * 2))
+      [2, 4, 6]
+  """
   fn map(stage, f) do
     match stage do
     Stage(seq) -> Stage(Seq.map(seq, f))
     end
   end
 
-  doc "Keep only items where pred returns true."
+  doc """
+  Keep only items where `pred` returns true.
+
+  ## Examples
+
+      march> Flow.collect(Flow.filter(Flow.range(0, 5), fn x -> x > 2))
+      [3, 4]
+  """
   fn filter(stage, pred) do
     match stage do
     Stage(seq) -> Stage(Seq.filter(seq, pred))
     end
   end
 
-  doc "Apply f to each item (f returns a list) and flatten the results."
+  doc """
+  Apply `f` to each item and flatten the results. `f` must return a Stage
+  (e.g. `Flow.from_list(...)`), not a List.
+
+  ## Examples
+
+      march> Flow.collect(Flow.flat_map(Flow.from_list([1, 2]), fn x -> Flow.range(0, x)))
+      [0, 0, 1]
+  """
   fn flat_map(stage, f) do
     match stage do
     Stage(seq) ->
@@ -93,21 +150,44 @@ mod Flow do
     end
   end
 
-  doc "Keep at most n items."
+  doc """
+  Keep at most the first `n` items (none if `n <= 0`). Upstream stages
+  still run to completion; only the extra items are discarded.
+
+  ## Examples
+
+      march> Flow.collect(Flow.take(Flow.range(0, 10), 3))
+      [0, 1, 2]
+  """
   fn take(stage, n) do
     match stage do
     Stage(seq) -> Stage(Seq.take(seq, n))
     end
   end
 
-  doc "Skip the first n items."
+  doc """
+  Skip the first `n` items (nothing is skipped if `n <= 0`).
+
+  ## Examples
+
+      march> Flow.collect(Flow.drop(Flow.range(0, 5), 3))
+      [3, 4]
+  """
   fn drop(stage, n) do
     match stage do
     Stage(seq) -> Stage(Seq.drop(seq, n))
     end
   end
 
-  doc "Group items into lists of at most n elements."
+  doc """
+  Group items into lists of `n` elements (`n` must be positive); the last
+  group holds the remainder and may be shorter.
+
+  ## Examples
+
+      march> Flow.collect(Flow.batch(Flow.range(0, 5), 2))
+      [[0, 1], [2, 3], [4]]
+  """
   fn batch(stage, n : {Int | _ > 0}) do
     match stage do
     Stage(seq) -> Stage(Seq.batch(seq, n))
@@ -116,7 +196,7 @@ mod Flow do
 
   doc """
   Parallelism hint: in the compiled runtime, spawn n worker actors for this stage.
-  No-op in the interpreter (single-threaded execution).
+  Currently a no-op everywhere: it returns `stage` unchanged.
 
       Flow.from_list(urls)
         |> Flow.map(fn url -> Http.get(url))
@@ -127,61 +207,130 @@ mod Flow do
 
   -- ---- Consumers (run the pipeline eagerly) ----
 
-  doc "Collect all items into a List."
+  doc """
+  Run the pipeline and collect all items into a List, in order.
+
+  ## Examples
+
+      march> Flow.from_list([1, 2, 3, 4, 5]) |> Flow.map(fn x -> x * 2) |> Flow.filter(fn x -> x > 4) |> Flow.collect
+      [6, 8, 10]
+  """
   fn collect(stage) do
     match stage do
     Stage(seq) -> Seq.to_list(seq)
     end
   end
 
-  doc "Run the pipeline for side effects; discard all items."
+  doc """
+  Run the pipeline for side effects; discard all items and return `:ok`.
+
+  Note: this passes a `()`-returning callback to `Seq.each`, which the
+  typechecker currently rejects (it expects an Atom), so use `each` with an
+  `:ok`-returning callback instead.
+  """
   fn run(stage) do
     match stage do
     Stage(seq) -> Seq.each(seq, fn _ -> ())
     end
   end
 
-  doc "Reduce all items to a single value using f(accumulator, item) -> accumulator."
+  doc """
+  Reduce all items to a single value using `f(accumulator, item)`, starting
+  from `start`. Returns `start` for an empty stage.
+
+  ## Examples
+
+      march> Flow.reduce(Flow.range(1, 5), 0, fn (acc, x) -> acc + x)
+      10
+  """
   fn reduce(stage, start, f) do
     match stage do
     Stage(seq) -> Seq.fold(seq, start, f)
     end
   end
 
-  doc "Consume with f(acc, item) -> acc (alias for reduce)."
+  doc """
+  Consume with `f(acc, item) -> acc` (alias for `reduce`).
+
+  ## Examples
+
+      march> Flow.into(Flow.from_list(["a", "b"]), "", fn (acc, x) -> acc ++ x)
+      "ab"
+  """
   fn into(stage, start, f) do
     reduce(stage, start, f)
   end
 
-  doc "Run f on each item for its side effects."
+  doc """
+  Run `f` on each item for its side effects and return `:ok`. As with
+  `Seq.each`, `f` must currently return an Atom such as `:ok`.
+
+      Flow.each(Flow.from_list(["a", "b"]), fn s -> do
+        println(s)
+        :ok
+      end)
+  """
   fn each(stage, f) do
     match stage do
     Stage(seq) -> Seq.each(seq, f)
     end
   end
 
-  doc "Count the total number of items produced."
+  doc """
+  Count the total number of items produced.
+
+  ## Examples
+
+      march> Flow.count(Flow.range(0, 7))
+      7
+  """
   fn count(stage) do
     match stage do
     Stage(seq) -> Seq.count(seq)
     end
   end
 
-  doc "Return the first item satisfying pred, or None."
+  doc """
+  Return the first item satisfying `pred` as `Some`, or `None`. The rest of
+  the pipeline still runs; its items are ignored.
+
+  ## Examples
+
+      march> Flow.find(Flow.range(0, 10), fn x -> x * x > 20)
+      Some(5)
+      march> Flow.find(Flow.range(0, 3), fn x -> x > 5)
+      None
+  """
   fn find(stage, pred) do
     match stage do
     Stage(seq) -> Seq.find(seq, pred)
     end
   end
 
-  doc "True if any item satisfies pred."
+  doc """
+  True if any item satisfies `pred`; false for an empty stage.
+
+  ## Examples
+
+      march> Flow.any(Flow.range(0, 3), fn x -> x == 2)
+      true
+  """
   fn any(stage, pred) do
     match stage do
     Stage(seq) -> Seq.any(seq, pred)
     end
   end
 
-  doc "True if all items satisfy pred."
+  doc """
+  True if all items satisfy `pred`; true for an empty stage.
+
+  ## Examples
+
+      march> Flow.all(Flow.range(0, 3), fn x -> x < 2)
+      false
+      march> Flow.all(Flow.range(0, 0), fn x -> x < 2)
+      true
+  """
   fn all(stage, pred) do
     match stage do
     Stage(seq) -> Seq.all(seq, pred)
