@@ -12,7 +12,12 @@
 module A = March_ast.Ast
 module Ob = Obligation
 
-type key = { span : A.span; callee : string; predicate : string; kind : Ob.kind }
+(* [inst] (the demand re-spelled in the caller's scope) tells apart two
+   demands with the same predicate text at one call — `mean(positives(raw), n)`
+   owes `_ > 0` for `n` (inst `n > 0`) and for the list's elements (no inst).
+   Not every recording path fills it (a proved site may carry it where the
+   skipped one did not), so [diff] matches on it first and without it second. *)
+type key = { span : A.span; callee : string; predicate : string; kind : Ob.kind; inst : string option }
 
 type snapshot = (key * Ob.verdict) list
 
@@ -26,7 +31,7 @@ let change_name = function
   | Unchanged -> "unchanged"
 
 let key_of (o : Ob.t) : key =
-  { span = o.Ob.span; callee = o.Ob.callee; predicate = o.Ob.predicate; kind = o.Ob.kind }
+  { span = o.Ob.span; callee = o.Ob.callee; predicate = o.Ob.predicate; kind = o.Ob.kind; inst = o.Ob.inst }
 
 (* A site is "settled" when nothing is owed there: proved, or deliberately
    waved through by the author ([Trusted] is not debt). *)
@@ -92,20 +97,31 @@ let nested_site (a : key) (b : key) =
   a.predicate = b.predicate && a.kind = b.kind && (contains a.span b.span || contains b.span a.span)
 
 let diff ~(before : snapshot) ~(after : snapshot) : (key * change) list =
-  let exact k = List.find_map (fun (k', v') -> if same_site k k' then Some v' else None) before in
-  let matched_exactly k' = List.exists (fun (k, _) -> same_site k k') after in
-  List.map
-    (fun (k, v) ->
-      let b =
-        match exact k with
-        | Some v' -> Some v'
-        | None ->
-          List.find_map
-            (fun (k', v') -> if nested_site k k' && not (matched_exactly k') then Some v' else None)
-            before
-      in
-      (k, classify b v))
-    after
+  (* Pair each after-site with at most one before-site, in three passes of
+     decreasing precision — same site and [inst]; same site; a nested span —
+     each pass only over the before-sites earlier passes left unpaired, so two
+     demands at one call never compete for the same partner. *)
+  let before_a = Array.of_list before and after_a = Array.of_list after in
+  let used = Array.make (Array.length before_a) false in
+  let pair = Array.make (Array.length after_a) None in
+  let pass ok =
+    Array.iteri
+      (fun i (k, _) ->
+        if pair.(i) = None then
+          let rec find j =
+            if j >= Array.length before_a then ()
+            else
+              let k', v' = before_a.(j) in
+              if (not used.(j)) && ok k k' then begin used.(j) <- true; pair.(i) <- Some v' end
+              else find (j + 1)
+          in
+          find 0)
+      after_a
+  in
+  pass (fun a b -> same_site a b && a.inst = b.inst);
+  pass same_site;
+  pass nested_site;
+  Array.to_list (Array.mapi (fun i (k, v) -> (k, classify pair.(i) v)) after_a)
 
 let keys_with c d = List.filter_map (fun (k, c') -> if c' = c then Some k else None) d
 let closed d = keys_with Closed d

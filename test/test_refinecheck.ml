@@ -23708,7 +23708,7 @@ let infer_suggest_all (fx : infer_fixture) : PI.t list =
 
 let ld_key line callee : LD.key =
   let sp = { March_ast.Ast.dummy_span with March_ast.Ast.start_line = line } in
-  { LD.span = sp; callee; predicate = "_ > 0"; kind = Ob.Precondition }
+  { LD.span = sp; callee; predicate = "_ > 0"; kind = Ob.Precondition; inst = None }
 
 let skipped = Ob.Skipped Ob.Solver_undecided
 
@@ -24331,6 +24331,18 @@ let infer_apply_suite =
         with_src_dir src (fun dir _ ->
             let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
             Alcotest.(check bool) ("no prediction mismatch: " ^ out) true (code <> 3)));
+    gated "two demands with the same text at one call are two sites (scalar + element)" (fun () ->
+        (* `mean(positives(raw), n)` owes `_ > 0` for `n` AND for the list's
+           elements: same span, same predicate text, same kind.  Merged into
+           one ledger key, closing either one alone looked like closing
+           nothing, and neither proposal was made. *)
+        let src = "mod MS do\n  fn mean(_xs : List({Int | _ > 0}), n : {Int | _ > 0}) : Int do n end\n  fn positives(xs : List(Int)) : List(Int) do List.filter(xs, fn x -> x > 0) end\n  pfn report(raw : List(Int), n : Int) : Int do mean(positives(raw), n) end\n  fn main() : Int do report([3, 0 - 1, 4], 2) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            let c = contents () in
+            Alcotest.(check bool) ("element return: " ^ c) true (Astring_contains.contains c "fn positives(xs : List(Int)) : List({Int | _ > 0})");
+            Alcotest.(check bool) ("precondition: " ^ c) true (Astring_contains.contains c "pfn report(raw : List(Int), n : {Int | _ > 0})")));
     gated "--refine-infer-diff prints the edit without writing" (fun () ->
         with_src_dir e2 (fun dir contents ->
             let before = contents () in
