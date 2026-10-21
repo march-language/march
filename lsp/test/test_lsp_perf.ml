@@ -539,7 +539,9 @@ let apply_byte_edits src edits =
 
 (* The editor's edit and the CLI's --refine-infer-apply produce the same bytes. *)
 let test_infer_action_bytes_equal_cli () =
-  let exe = Filename.concat (Sys.getcwd ()) "_build/default/bin/main.exe" in
+  (* Exe-relative, not cwd-relative: `dune runtest` runs this from
+     _build/default/lsp/test, the direct invocation from the repo root. *)
+  let exe = Filename.concat (Filename.dirname Sys.executable_name) "../../bin/main.exe" in
   if not (Sys.file_exists exe) then Alcotest.fail ("build bin/main.exe first: " ^ exe);
   let dir = Filename.temp_dir "lspinfer" "" in
   let src =
