@@ -22458,6 +22458,84 @@ end|}
         Alcotest.(check string) "spelled out" "List({ a | ... })"
           (first_param_ty "mod P2 do\n  fn f(xs : List({a | p(_)}), k : a -> Bool[p]) : Int do 0 end\nend\n")) ]
 
+(* ── Element entries (multi-arg design 2026-10-18 §2.2-§2.3, phase 1a) ────
+   The entry record's normal form (I1) and its conjunction, unit-tested on
+   hand-built entries: phase 1a constructs no relation anywhere, so nothing
+   else exercises them until 1b. *)
+let element_entries_suite =
+  let module RC = March_refinecheck.Refine_check in
+  let module A = March_ast.Ast in
+  let sp = A.dummy_span in
+  let v x = A.EVar { A.txt = x; A.span = sp } in
+  let i n = A.ELit (A.LitInt n, sp) in
+  let op o a b = A.EApp (v o, [ a; b ], sp) in
+  let tt = A.ELit (A.LitBool true, sp) in
+  let rec show (e : A.expr) =
+    match e with
+    | A.EVar n -> n.A.txt
+    | A.ELit (A.LitInt n, _) -> string_of_int n
+    | A.ELit (A.LitBool b, _) -> string_of_bool b
+    | A.EApp (A.EVar f, [ a; b ], _) -> Printf.sprintf "(%s %s %s)" (show a) f.A.txt (show b)
+    | e -> A.show_expr e
+  in
+  let rec show_slot = function
+    | None -> "-"
+    | Some (RC.Refined (b, p, s)) ->
+      Printf.sprintf "{%s%s | %s}" b (match s with Some s -> " : " ^ s | None -> "") (show p)
+    | Some (RC.Container e) -> show_entry e
+  and show_entry (e : RC.entry) =
+    Printf.sprintf "%s(%s)%s" e.RC.cont (String.concat ", " (List.map show_slot e.RC.slots))
+      (String.concat ""
+         (List.map
+            (fun (r : RC.rel) ->
+              Printf.sprintf " rel[%s | %s]"
+                (String.concat "," (List.map (fun (j, b, _) -> Printf.sprintf "%d:%s" j b) r.RC.rel_args))
+                (show r.RC.rel_pred))
+            e.RC.rels))
+  in
+  let entry cont slots rels = { RC.cont; slots; rels } in
+  let rel args p = { RC.rel_args = args; rel_pred = p } in
+  let pos b = Some (RC.Refined (b, op ">" (v b) (i 0), None)) in
+  let check msg want got = Alcotest.(check string) msg want (show_entry got) in
+  [ Alcotest.test_case "normalize: rel-free entry is unchanged" `Quick (fun () ->
+        let e = entry "Assoc" [ None; pos "y" ] [] in
+        check "identity" "Assoc(-, {y | (y > 0)})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I1): a one-slot rel folds into its slot, incoming first" `Quick (fun () ->
+        let e = entry "Assoc" [ None; pos "y" ] [ rel [ (1, "z", None) ] (op "<" (v "z") (i 10)) ] in
+        check "folded" "Assoc(-, {y | ((y > 0) && (y < 10))})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I1): a one-slot rel fills an empty slot" `Quick (fun () ->
+        let e = entry "Assoc" [ None; pos "y" ] [ rel [ (0, "k", None) ] (op ">" (v "k") (i 3)) ] in
+        check "filled" "Assoc({k | (k > 3)}, {y | (y > 0)})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I1): a `true` rel drops" `Quick (fun () ->
+        let e = entry "Assoc" [ None; pos "y" ] [ rel [ (0, "x", None); (1, "y", None) ] tt ] in
+        check "dropped" "Assoc(-, {y | (y > 0)})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize: a two-slot rel stays a rel" `Quick (fun () ->
+        let e = entry "Assoc" [ None; None ] [ rel [ (0, "x", None); (1, "y", None) ] (op ">" (v "y") (v "x")) ] in
+        check "kept" "Assoc(-, -) rel[0:x,1:y | (y > x)]" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I1): folding avoids capturing the slot binder" `Quick (fun () ->
+        (* The rel's predicate names an outer `y` that is NOT the slot. *)
+        let e = entry "Assoc" [ None; pos "y" ] [ rel [ (1, "z", None) ] (op "<" (v "z") (v "y")) ] in
+        check "fresh binder" "Assoc(-, {$r | (($r > 0) && ($r < y))})" (RC.normalize_entry e));
+    Alcotest.test_case "normalize (I2): a one-slot rel on a nested container slot drops" `Quick (fun () ->
+        let inner = entry "List" [ pos "e" ] [] in
+        let e = entry "Assoc" [ Some (RC.Container inner); None ] [ rel [ (0, "l", None) ] (op ">" (v "l") (i 0)) ] in
+        check "dropped" "Assoc(List({e | (e > 0)}), -)" (RC.normalize_entry e));
+    Alcotest.test_case "entry_meet: slots pairwise, incoming first, binder aligned" `Quick (fun () ->
+        let a = entry "Assoc" [ None; pos "y" ] [] in
+        let b = entry "Assoc" [ pos "k"; Some (RC.Refined ("w", op "<" (v "w") (i 9), None)) ] [] in
+        check "met" "Assoc({k | (k > 0)}, {y | ((y > 0) && (y < 9))})" (RC.entry_meet a b));
+    Alcotest.test_case "entry_meet: rels concatenate, incoming first, and normalise" `Quick (fun () ->
+        let r1 = rel [ (0, "x", None); (1, "y", None) ] (op ">" (v "y") (v "x")) in
+        let r2 = rel [ (0, "p", None); (1, "q", None) ] (op "!=" (v "q") (v "p")) in
+        let a = entry "Assoc" [ None; None ] [ r1 ] in
+        let b = entry "Assoc" [ None; None ] [ r2; rel [ (1, "z", None) ] (op "<" (v "z") (i 5)) ] in
+        check "met" "Assoc(-, {z | (z < 5)}) rel[0:x,1:y | (y > x)] rel[0:p,1:q | (q != p)]"
+          (RC.entry_meet a b));
+    Alcotest.test_case "entry_meet: nested containers meet slot by slot" `Quick (fun () ->
+        let a = entry "List" [ Some (RC.Container (entry "List" [ pos "e" ] [])) ] [] in
+        let b = entry "List" [ Some (RC.Container (entry "List" [ Some (RC.Refined ("f", op "<" (v "f") (i 7), None)) ] [])) ] [] in
+        check "met" "List(List({e | ((e > 0) && (e < 7))}))" (RC.entry_meet a b)) ]
+
 let z3_wellformed_suite =
   [ gated "the rejection counter sees a malformed query" (fun () ->
         let before = !March_refine.Solver.malformed_count in
@@ -23820,4 +23898,5 @@ let () =
       ("hidden-field-elements", hidden_field_elements_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
+      ("element-entries", element_entries_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

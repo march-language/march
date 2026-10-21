@@ -1469,21 +1469,134 @@ let cb_add_fnparam (cb : cbenv) : A.fn_param -> cbenv = function
    that parameter, a nested container carrying its own slots
    (`List(List({Int | p}))`, P3 design §2b), or nothing.  A container entry
    is the container's bare type name plus its slots; [elem_refinement]
-   returns one only when some slot is non-empty. *)
-type elem = Refined of (string * A.expr * string option) | Container of string * elem option list
+   returns one only when some slot is non-empty.
 
-type contenv = (string * (string * elem option list)) list
+   [rels] (multi-arg design 2026-10-18 §2.2, R1): RELATIONS between scalar
+   slots, each holding of every entry's components jointly (`Assoc({x : Int
+   | true}, {y : Int | y > x})`).  Phase 1a is the inert migration: no
+   constructor builds one, so every [rels] is [[]]; the type is here so every
+   reader of an entry is a site the compiler enumerates. *)
+type elem =
+  | Refined of (string * A.expr * string option)
+  | Container of entry
+
+and entry = { cont : string; slots : elem option list; rels : rel list }
+
+(* [rel_args]: (slot index, binder, sort marker), at least two distinct
+   slots once normalised ([normalize_entry]); [rel_pred] is over those
+   binders. *)
+and rel = { rel_args : (int * string * string option) list; rel_pred : A.expr }
+
+type contenv = (string * entry) list
+
+(* Today's (container, slots) pair as an entry: no relation. *)
+let entry_of_slots (cont : string) (slots : elem option list) : entry = { cont; slots; rels = [] }
+
+(* [p] conjoined with [q] at one binder, [p]'s first (AR design §3.4: the
+   incoming fact first, for stable rendering).  [q]'s binder is renamed to
+   [p]'s, unless [q] mentions [p]'s binder as an outer name: then both move
+   to the first `$r`, `$r1`, … neither mentions (deterministic, no counter). *)
+let conj_refined ((b, p, s) : string * A.expr * string option) ((b', q, s') : string * A.expr * string option)
+  : string * A.expr * string option =
+  let sp = A.dummy_span in
+  let ev x = A.EVar { A.txt = x; A.span = sp } in
+  let rn from x e = if from = x then e else subst_params [ (from, ev x) ] e in
+  let b, p =
+    if b = b' || not (expr_mentions [ b ] q) then (b, p)
+    else
+      let rec fresh k =
+        let x = if k = 0 then "$r" else Printf.sprintf "$r%d" k in
+        if expr_mentions [ x ] p || expr_mentions [ x ] q then fresh (k + 1) else x
+      in
+      let x = fresh 0 in
+      (x, rn b x p)
+  in
+  let sort = match s with Some _ -> s | None -> s' in
+  (b, A.EApp (ev "&&", [ p; rn b' b q ], sp), sort)
+
+(* The normal form every entry is built in (§2.2):
+   (I1) a relation over ONE slot is conjoined into that slot (its binders
+        renamed to the slot's), and a literally `true` relation drops, so a
+        fact over one slot is always a slot fact;
+   (I2) a relation over a nested-container slot drops (no scalar stand-in);
+   (I3) a relation's sort markers come from the slot's declared base.
+   With [rels = []] it is the identity on the slots (nested entries included),
+   which is what keeps phase 1a byte-identical. *)
+let rec normalize_entry (e : entry) : entry =
+  let slots =
+    List.map (function Some (Container inner) -> Some (Container (normalize_entry inner)) | s -> s) e.slots
+  in
+  if e.rels = [] then { e with slots }
+  else
+    let slots = Array.of_list slots in
+    let slot_at j = if j >= 0 && j < Array.length slots then Some slots.(j) else None in
+    let rels =
+      List.filter_map
+        (fun (r : rel) ->
+          let idxs = List.sort_uniq compare (List.map (fun (j, _, _) -> j) r.rel_args) in
+          let is_true = match r.rel_pred with A.ELit (A.LitBool true, _) -> true | _ -> false in
+          let scalar j = match slot_at j with Some (None | Some (Refined _)) -> true | _ -> false in
+          if is_true || idxs = [] || not (List.for_all scalar idxs) then None
+          else
+            match idxs, r.rel_args with
+            | [ j ], (_, b0, s0) :: rest ->
+              (* Every binder of the one slot spelled as the first. *)
+              let pred =
+                List.fold_left
+                  (fun p (_, b, _) ->
+                    if b = b0 then p else subst_params [ (b, A.EVar { A.txt = b0; A.span = A.dummy_span }) ] p)
+                  r.rel_pred rest
+              in
+              slots.(j) <-
+                (match slots.(j) with
+                 | Some (Refined have) -> Some (Refined (conj_refined have (b0, pred, s0)))
+                 | _ -> Some (Refined (b0, pred, s0)));
+              None
+            | _ ->
+              let rel_args =
+                List.map
+                  (fun (j, b, s) ->
+                    match slot_at j with Some (Some (Refined (_, _, (Some _ as s')))) -> (j, b, s') | _ -> (j, b, s))
+                  r.rel_args
+              in
+              Some { r with rel_args })
+        e.rels
+    in
+    { e with slots = Array.to_list slots; rels }
+
+(* The conjunction of two facts about one container (§2.3, AR §3.4): slots
+   pairwise, [a]'s (the incoming fact) first; relations concatenated, [a]'s
+   first; normalised.  Two entries that do not line up (another container, a
+   different slot count, a scalar against a nested slot) keep [a]'s side:
+   a lost assumption, sound for the have side this is used on. *)
+let rec entry_meet (a : entry) (b : entry) : entry =
+  if a.cont <> b.cont || List.length a.slots <> List.length b.slots then a
+  else
+    let slot x y =
+      match x, y with
+      | None, s | s, None -> s
+      | Some (Refined p), Some (Refined q) -> Some (Refined (conj_refined p q))
+      | Some (Container ea), Some (Container eb) -> Some (Container (entry_meet ea eb))
+      | s, Some _ -> s
+    in
+    normalize_entry { a with slots = List.map2 slot a.slots b.slots; rels = a.rels @ b.rels }
 
 (* Does any element predicate of [entry] mention one of [names] (other than
-   that slot's own binder)?  Over-approximate exactly as [expr_mentions]. *)
-let rec elem_entry_mentions (names : string list) ((_, slots) : string * elem option list) : bool =
+   that slot's own binder, or a relation's own binders)?  Over-approximate
+   exactly as [expr_mentions]. *)
+let rec elem_entry_mentions (names : string list) (e : entry) : bool =
   names <> []
-  && List.exists
-       (function
-         | None -> false
-         | Some (Refined (b, p, _)) -> expr_mentions (List.filter (( <> ) b) names) p
-         | Some (Container (c, inner)) -> elem_entry_mentions names (c, inner))
-       slots
+  && (List.exists
+        (function
+          | None -> false
+          | Some (Refined (b, p, _)) -> expr_mentions (List.filter (( <> ) b) names) p
+          | Some (Container inner) -> elem_entry_mentions names inner)
+        e.slots
+     || List.exists
+          (fun (r : rel) ->
+            let own = List.map (fun (_, b, _) -> b) r.rel_args in
+            expr_mentions (List.filter (fun n -> not (List.mem n own)) names) r.rel_pred)
+          e.rels)
 
 (* Retires an entry by its KEY and also any entry one of whose slot
    predicates MENTIONS a rebound name — the same rule as [scope_shadow].
@@ -1523,7 +1636,7 @@ let abstract_tyvar_slot (arg : A.ty) : (string * A.expr * string option) option 
     Some (binder_name binder, pred, None)
   | _ -> None
 
-let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
+let rec elem_refinement (t : A.ty option) : entry option =
   match Option.map unlinear t with
   (* A refinement on the CONTAINER itself (`{List({Int | p}) | len(_) > 0}`)
      is a fact about the container, carried by [scope]; the element slots are
@@ -1540,11 +1653,13 @@ let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
             | Some r -> Some (Refined r)
             | None ->
             (match elem_refinement (Some arg) with
-             | Some (c', slots') -> Some (Container (c', slots'))
+             | Some inner -> Some (Container inner)
              | None -> None))
         args
     in
-    if List.exists Option.is_some slots then Some (c, slots) else None
+    (* 1b: a slot predicate naming a sibling slot's binder becomes a [rel]
+       here (§1.3); today it keeps that name free (F3). *)
+    if List.exists Option.is_some slots then Some (entry_of_slots c slots) else None
   | _ -> None
 
 (* A function's element RETURN (leftovers design 2026-10-18 §5.1): today's
@@ -1554,8 +1669,8 @@ let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
    [None] for that component (out of scope).  Read under whatever
    [current_abstracts] the caller set, exactly as [elem_refinement]. *)
 type ret_elems =
-  | Single of (string * elem option list)
-  | Tuple of (string * elem option list) option list
+  | Single of entry
+  | Tuple of entry option list
 
 let ret_elems_of_ty (t : A.ty option) : ret_elems option =
   let rec strip (t : A.ty) = match unlinear t with A.TyRefine (b, _, _) -> strip b | t -> t in
@@ -1566,7 +1681,7 @@ let ret_elems_of_ty (t : A.ty option) : ret_elems option =
   | _ -> Option.map (fun e -> Single e) (elem_refinement t)
 
 (* Every entry of a [ret_elems] (never empty: a [Tuple] has at least one). *)
-let ret_entries : ret_elems -> (string * elem option list) list = function
+let ret_entries : ret_elems -> entry list = function
   | Single e -> [ e ]
   | Tuple comps -> List.filter_map Fun.id comps
 

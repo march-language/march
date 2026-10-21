@@ -299,14 +299,22 @@ let resolve_key (ctx : rctx) (fname : string) : string option =
 (* An element entry usable as a fact OUTSIDE the definition that declared it:
    every element predicate mentions nothing but its own binder.  A predicate
    naming one of the callee's parameters (`List({Int | _ < n})`) would, read at
-   a call site, name whatever the CALLER calls `n`. *)
-let rec entry_is_closed ((_, slots) : string * elem option list) : bool =
+   a call site, name whatever the CALLER calls `n`.  A relation likewise:
+   nothing but its own binders. *)
+let rec entry_is_closed (e : entry) : bool =
   List.for_all
     (function
       | None -> true
       | Some (Refined (b, p, _)) -> classify_pred b [] p = Closed
-      | Some (Container (c, inner)) -> entry_is_closed (c, inner))
-    slots
+      | Some (Container inner) -> entry_is_closed inner)
+    e.slots
+  && List.for_all
+       (fun (r : rel) ->
+         let own = List.sort_uniq compare (List.map (fun (_, b, _) -> b) r.rel_args) in
+         match own with
+         | [] -> false
+         | b :: others -> classify_pred b others r.rel_pred <> Unusable)
+       e.rels
 
 (* ── (P2) parametric_safe ─────────────────────────────────────────────── *)
 

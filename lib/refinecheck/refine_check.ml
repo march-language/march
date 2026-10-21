@@ -604,7 +604,7 @@ let record_elem_skip errctx ~(span : A.span) ~(callee : string) ~(predicate : st
 
 (* The element slot a call's result inherits for type variable [v] of its
    callee, or [None] (see the soundness note inside). *)
-let agreed_elem_slot ~(entry_of : A.expr -> (string * elem option list) option) (ctx : rctx)
+let agreed_elem_slot ~(entry_of : A.expr -> entry option) (ctx : rctx)
     (fname : string) (sg : fn_sig) (args : A.expr list) (v : string) : elem option =
   (* SOUNDNESS: the rule may carry [v]'s refinement only if the callee
      cannot MANUFACTURE a [v] (P3 design §2, condition (i)).  Since
@@ -623,13 +623,15 @@ let agreed_elem_slot ~(entry_of : A.expr -> (string * elem option list) option) 
      the SAME one (compared by source rendering, so two spellings of one
      predicate simply lose the fact).  Until 2026-09-18 the first source's
      slot was taken and `append(pos, neg)` was proved all-positive. *)
-  let rec follow (entry : string * elem option list) (path : (string * int) list) : elem option =
-    match path, entry with
-    | [], _ -> None
-    | [ (c, j) ], (c', slots) when c = c' -> Option.join (List.nth_opt slots j)
-    | (c, j) :: rest, (c', slots) when c = c' ->
-      (match Option.join (List.nth_opt slots j) with
-       | Some (Container (c'', slots')) -> follow (c'', slots') rest
+  (* 1b (§2.5): a slot taken out of an entry here leaves the entry's rels
+     behind; carrying them is [parametric_return]'s rule, not this one's. *)
+  let rec follow (entry : entry) (path : (string * int) list) : elem option =
+    match path with
+    | [] -> None
+    | [ (c, j) ] when c = entry.cont -> Option.join (List.nth_opt entry.slots j)
+    | (c, j) :: rest when c = entry.cont ->
+      (match Option.join (List.nth_opt entry.slots j) with
+       | Some (Container inner) -> follow inner rest
        | _ -> None)
     | _ -> None
   in
@@ -638,8 +640,20 @@ let agreed_elem_slot ~(entry_of : A.expr -> (string * elem option list) option) 
     | None -> None
     | Some (Refined (b, p, srt)) ->
       Some (Printf.sprintf "%s|%s|%s" b (pred_str p) (Option.value ~default:"" srt))
-    | Some (Container (c, slots)) ->
-      Some (c ^ "(" ^ String.concat "," (List.map (fun e -> Option.value ~default:"-" (key e)) slots) ^ ")")
+    | Some (Container inner) ->
+      (* A nested entry's relations are part of what must agree. *)
+      let rels =
+        List.map
+          (fun (r : rel) ->
+            Printf.sprintf ";%s|%s"
+              (String.concat "," (List.map (fun (j, b, _) -> Printf.sprintf "%d:%s" j b) r.rel_args))
+              (pred_str r.rel_pred))
+          inner.rels
+      in
+      Some
+        (inner.cont ^ "("
+        ^ String.concat "," (List.map (fun e -> Option.value ~default:"-" (key e)) inner.slots)
+        ^ String.concat "" rels ^ ")")
   in
   let slot_of_var (v : string) : elem option =
     if List.length sg.param_tys <> List.length args || not (parametric_ok ctx fname [ v ]) then None
@@ -678,9 +692,9 @@ let agreed_elem_slot ~(entry_of : A.expr -> (string * elem option list) option) 
    parameter's precondition, checked where the call is, and stripped here.
    Returns the container entry for a container return, the scalar
    refinement for a bare type-variable return, [None] otherwise. *)
-let parametric_return ~(entry_of : A.expr -> (string * elem option list) option) (ctx : rctx)
+let parametric_return ~(entry_of : A.expr -> entry option) (ctx : rctx)
     defs (cb : cbenv) (fname : string) (args : A.expr list)
-  : [ `Container of string * elem option list | `Scalar of string * A.expr * string option ] option =
+  : [ `Container of entry | `Scalar of string * A.expr * string option ] option =
   match callee_sig ctx defs cb fname with
   | None -> None
   | Some sg ->
@@ -693,7 +707,10 @@ let parametric_return ~(entry_of : A.expr -> (string * elem option list) option)
     (match strip_refine sg.ret_ty with
      | Some (A.TyCon (rc, rargs)) when rargs <> [] && is_container_type rc.A.txt ->
        let rslots = List.map (function A.TyVar tv -> slot_of_var tv.A.txt | _ -> None) rargs in
-       if List.exists Option.is_some rslots then Some (`Container (rc.A.txt, rslots)) else None
+       (* 1b (§2.5): rels ride along only from one agreed [Src_elem] source
+          mapping slot-for-slot into this return; otherwise none (sound). *)
+       if List.exists Option.is_some rslots then Some (`Container (entry_of_slots rc.A.txt rslots))
+       else None
      | Some (A.TyVar tv) ->
        (match slot_of_var tv.A.txt with Some (Refined r) -> Some (`Scalar r) | _ -> None)
      | _ -> None)
@@ -721,14 +738,16 @@ let parametric_return ~(entry_of : A.expr -> (string * elem option list) option)
    CALLER declares an abstract refinement of the same name: [abstract_tyvar_slot]
    then admits the callee's slot, and the caller would read the callee's `p`
    as its own. *)
-let entry_mentions (names : string list) ((_, slots) : string * elem option list) : bool =
-  let rec slot = function
+let entry_mentions (names : string list) (e : entry) : bool =
+  let applies p = List.exists (fun (n, _, _) -> List.mem n names) (Refine_abstract.applications p) in
+  let rec go (e : entry) =
+    List.exists slot e.slots || List.exists (fun (r : rel) -> applies r.rel_pred) e.rels
+  and slot = function
     | None -> false
-    | Some (Refined (_, p, _)) ->
-      List.exists (fun (n, _, _) -> List.mem n names) (Refine_abstract.applications p)
-    | Some (Container (_, inner)) -> List.exists slot inner
+    | Some (Refined (_, p, _)) -> applies p
+    | Some (Container inner) -> go inner
   in
-  names <> [] && List.exists slot slots
+  names <> [] && go e
 
 (* ── One namespace for a declared element slot (design 2026-10-18
    element-flow follow-ups, phase 0, §1.1) ───────────────────────────────
@@ -749,7 +768,7 @@ let entry_mentions (names : string list) ((_, slots) : string * elem option list
    once, here, where each actual denotes exactly the value the callee
    receives).  [Error why] names the first slot that could not be moved. *)
 let instantiate_entry ~(mode : [ `Stable | `Any ]) ~(formals : string list) ~(args : A.expr list)
-    (entry : string * elem option list) : (string * elem option list, string) result =
+    (entry : entry) : (entry, string) result =
   let env =
     List.mapi (fun i n -> (n, List.nth_opt args i)) formals
     |> List.filter_map (function "_", _ | _, None -> None | n, Some a -> Some (n, a))
@@ -761,7 +780,7 @@ let instantiate_entry ~(mode : [ `Stable | `Any ]) ~(formals : string list) ~(ar
   let rec slot (s : elem option) : elem option =
     match s with
     | None -> None
-    | Some (Container (c, inner)) -> Some (Container (c, List.map slot inner))
+    | Some (Container inner) -> Some (Container (sub_entry inner))
     | Some (Refined (b, p, srt)) ->
       (match classify_pred b formals p with
        | Closed -> s
@@ -790,10 +809,18 @@ let instantiate_entry ~(mode : [ `Stable | `Any ]) ~(formals : string list) ~(ar
                  else subst_params [ (b, A.EVar { A.txt = "_"; A.span = A.dummy_span }) ] p
                in
                Some (Refined ("_", subst_params sub p, srt)))))
+  (* A relation is moved only when it mentions nothing but its own binders;
+     1b: one relational over the formals is substituted like a slot. *)
+  and sub_entry (e : entry) : entry =
+    let rel (r : rel) =
+      match List.map (fun (_, b, _) -> b) r.rel_args with
+      | b :: others when classify_pred b others r.rel_pred <> Unusable -> r
+      | _ -> raise (Stuck (Printf.sprintf "its element relation `%s` mentions a parameter" (pred_str r.rel_pred)))
+    in
+    { e with slots = List.map slot e.slots; rels = List.map rel e.rels }
   in
-  let c, slots = entry in
-  match List.map slot slots with
-  | slots' -> Ok (c, slots')
+  match sub_entry entry with
+  | e -> Ok e
   | exception Stuck why -> Error why
 
 (* ── Relational element returns as call-site facts (design 2026-10-18
@@ -808,28 +835,35 @@ let instantiate_entry ~(mode : [ `Stable | `Any ]) ~(formals : string list) ~(ar
    moves on its own; one that cannot move (an unstable actual, a missing
    argument) is [None], weaker and sound.  [None] when no slot survives, so
    the caller's other routes still get their turn. *)
-let lend_entry ~(formals : string list) ~(args : A.expr list) ((c, slots) : string * elem option list)
-  : (string * elem option list) option =
+let lend_entry ~(formals : string list) ~(args : A.expr list) (e : entry) : entry option =
+  (* Slot by slot, so the entry's relations are not lent (a lost fact,
+     sound); 1b may move a relation whose slots all moved. *)
   let slots' =
     List.map
       (fun s ->
-        match instantiate_entry ~mode:`Stable ~formals ~args (c, [ s ]) with
-        | Ok (_, [ s' ]) -> s'
+        match instantiate_entry ~mode:`Stable ~formals ~args (entry_of_slots e.cont [ s ]) with
+        | Ok { slots = [ s' ]; _ } -> s'
         | _ -> None)
-      slots
+      e.slots
   in
-  if List.exists Option.is_some slots' then Some (c, slots') else None
+  if List.exists Option.is_some slots' then Some (entry_of_slots e.cont slots') else None
 
 (* Can [entry] be moved to a call's namespace at all: every predicate
    [Closed] or [Relational] over [formals] (a name that is no parameter, a
    captured variable or a module-level name, is [Unusable]: never lent). *)
-let rec entry_movable ~(formals : string list) ((_, slots) : string * elem option list) : bool =
+let rec entry_movable ~(formals : string list) (e : entry) : bool =
   List.for_all
     (function
       | None -> true
       | Some (Refined (b, p, _)) -> classify_pred b formals p <> Unusable
-      | Some (Container (c, inner)) -> entry_movable ~formals (c, inner))
-    slots
+      | Some (Container inner) -> entry_movable ~formals inner)
+    e.slots
+  && List.for_all
+       (fun (r : rel) ->
+         match List.map (fun (_, b, _) -> b) r.rel_args with
+         | b :: others -> classify_pred b (others @ formals) r.rel_pred <> Unusable
+         | [] -> false)
+       e.rels
 
 (* The formals a top-level definition's declared return is read under: the
    first clause's parameter names ([sig_of_fn]), but only when EVERY clause
@@ -868,7 +902,7 @@ let hyp_applies (ctx : rctx) (cb : cbenv) (fname : string) (args : A.expr list)
        definers
 
 let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e : A.expr)
-  : (string * elem option list) option =
+  : entry option =
   match e with
   | A.EVar { A.txt = x; _ } -> List.assoc_opt x ce
   | A.EAnnot (e', _, _) -> container_entry_of_expr ctx defs cb ce e'
@@ -901,7 +935,7 @@ let rec container_entry_of_expr (ctx : rctx) defs (cb : cbenv) (ce : contenv) (e
    actuals ([lend_entry]); without them (a callable passed as a value, which
    has no actuals) only a closed entry is, as before. *)
 and declared_elem_return ?(args : A.expr list option) (ctx : rctx) (cb : cbenv) (fname : string)
-  : (string * elem option list) option =
+  : entry option =
   let relational ~formals entry =
     match args with
     | Some args when List.length args = List.length formals -> lend_entry ~formals ~args entry
@@ -951,7 +985,7 @@ and declared_elem_return ?(args : A.expr list option) (ctx : rctx) (cb : cbenv) 
    component relational over the parameters is read at those actuals, as
    [declared_elem_return] reads a single container (phase 4). *)
 let declared_tuple_return ~(args : A.expr list) (ctx : rctx) (cb : cbenv) (fname : string)
-  : (string * elem option list) option list option =
+  : entry option list option =
   if List.mem_assoc fname cb then None
   else
     match resolve_key ctx fname with
@@ -1171,9 +1205,9 @@ let has_early_exit (e : A.expr) : bool =
      with the parameter's own name as the binder (a wildcard sibling binding
      `_` would otherwise retire a default-binder fact, as in
      [lambda_domain_params]).
-   - A container demand [Container (c, slots)] (phase 2: a list-building
+   - A container demand [Container e] (phase 2: a list-building
      accumulator, `fn (acc, x) -> Cons(x, acc)` under `List({Int | _ > 0})`)
-     becomes a container-env entry [(name, (c, slots))] for the caller to
+     becomes a container-env entry [(name, e)] for the caller to
      add after the parameters are bound: the element-refined accumulator
      `b := List({Int | …})`, by the same induction (§2.2: every `b` the
      callee hands the step is a value it already held, so it met the
@@ -1203,7 +1237,7 @@ let has_early_exit (e : A.expr) : bool =
    §2.2's argument, never a fact on its own. *)
 let invariant_params (sg : fn_sig) (i : int) (pairs : (string * elem) list) (ps : A.param list)
     (body : A.expr)
-  : (A.param list * (string * (string * elem option list)) list * bool, string) result =
+  : (A.param list * (string * entry) list * bool, string) result =
   match Option.join (List.nth_opt sg.param_tys i) with
   | None -> Ok (ps, [], false)
   | Some t ->
@@ -1228,7 +1262,7 @@ let invariant_params (sg : fn_sig) (i : int) (pairs : (string * elem) list) (ps 
       let shadowing ((_ : A.param), (d : elem)) =
         match d with
         | Refined (b0, q, _) -> List.find_opt (fun n -> n <> b0 && expr_mentions [ n ] q) names
-        | Container (c, slots) -> List.find_opt (fun n -> elem_entry_mentions [ n ] (c, slots)) names
+        | Container e -> List.find_opt (fun n -> elem_entry_mentions [ n ] e) names
       in
       if targets = [] then Ok (ps, [], false)
       else
@@ -1260,9 +1294,9 @@ let invariant_params (sg : fn_sig) (i : int) (pairs : (string * elem) list) (ps 
                       (match ty_of_refined (x, q', srt) with
                        | Some ty -> used := true; { p with A.param_ty = Some ty }
                        | None -> p)
-                    | Some (Container (c, slots)), (None | Some (A.TyCon _)) ->
+                    | Some (Container e), (None | Some (A.TyCon _)) ->
                       used := true;
-                      entries := (p.A.param_name.A.txt, (c, slots)) :: !entries;
+                      entries := (p.A.param_name.A.txt, e) :: !entries;
                       p
                     | _ -> p)
                   ps
@@ -1422,8 +1456,8 @@ let rec first_slot_pred (slots : elem option list) : string =
   match slots with
   | [] -> "<element refinement>"
   | Some (Refined (_, p, _)) :: _ -> pred_str p
-  | Some (Container (_, inner)) :: rest ->
-    (match first_slot_pred inner with "<element refinement>" -> first_slot_pred rest | s -> s)
+  | Some (Container inner) :: rest ->
+    (match first_slot_pred inner.slots with "<element refinement>" -> first_slot_pred rest | s -> s)
   | None :: rest -> first_slot_pred rest
 
 (* ── Abstract refinements at a call (design 2026-09-20 §3) ─────────────────
@@ -1973,7 +2007,7 @@ let scratch_implies ~root defs (ctx : rctx) path lets sc re (cb : cbenv) ~(span 
    than as a definite violation (§3.3, decision 9.2).  [None]: [g] declares no
    abstract element return; the caller falls through to [demand_flow]. *)
 let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
-    ~(span : A.span) ~(callee : string) ((_, slots) : string * elem option list) (g : string)
+    ~(span : A.span) ~(callee : string) ({ slots; _ } : entry) (g : string)
     (args : A.expr list)
   : [ `Proved | `Too_weak of string | `Uninstantiated of string | `Undecided ] option =
   let abs = callee_abstracts ctx g in
@@ -2031,7 +2065,7 @@ let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv
                         (match
                            Option.bind (List.nth_opt args j) (container_entry_of_expr ctx defs cb ce)
                          with
-                         | Some (_, [ Some (Refined (b0, q0, _)) ]) ->
+                         | Some { slots = [ Some (Refined (b0, q0, _)) ]; _ } ->
                            A.EApp
                              ( A.EVar { A.txt = "&&"; A.span = span }
                              , [ subst_params [ (b0, A.EVar { A.txt = y; A.span = span }) ] q0; body ]
@@ -2182,7 +2216,7 @@ let tuple_arity (ctx : rctx) defs (cb : cbenv) (g : string) : int option =
    [container_entry_of_expr]'s hypothesis arm applies to a container
    return.  Its per-component entries. *)
 let tuple_self_hyp (ctx : rctx) (cb : cbenv) (g : string) (args : A.expr list) (n : int)
-  : (string * elem option list) option list option =
+  : entry option list option =
   match !elem_ret_hyp with
   | Some (self, sets, Tuple h, definers, formals)
     when List.length h = n && hyp_applies ctx cb g args (self, sets, definers) ->
@@ -2197,9 +2231,56 @@ let tuple_self_hyp (ctx : rctx) (cb : cbenv) (g : string) (args : A.expr list) (
          h)
   | _ -> None
 
+(* ── Element subtyping: does [have]'s every entry meet [want]? (multi-arg
+   design 2026-10-18 §2.4) ─────────────────────────────────────────────────
+   The one implication routine between two entries of the same container,
+   [subject] the value [have] describes (a variable's name, `f(…)`).  Slot by
+   slot: a refined want slot against a refined have slot is the implication
+   on a fresh `$elem` (one [check_call], one ledger entry); a want slot the
+   have side promises nothing about is a recorded skip; a nested container
+   slot is a recorded skip too (no scalar stand-in for a symbolic nested
+   element).  Phase 1a: exactly the subtyping arm [check_elements] had,
+   relations ignored on both sides because none is built yet.  1b: the
+   projection of §2.4 (fresh `$elem_j` per slot, [have.rels] as path facts,
+   each of [want.rels] one more goal); until then a want relation must not
+   be silently dropped here. *)
+let entry_implies (cx : call_ctx) errctx ~(span : A.span) ~(callee : string) ~(subject : string)
+    ~(have : entry) ~(want : entry) : bool =
+  let xsp = span and x = subject in
+  let slots = want.slots and src_slots = have.slots in
+  let n = max (List.length slots) (List.length src_slots) in
+  List.fold_left
+    (fun acc i ->
+      let want = Option.join (List.nth_opt slots i) in
+      let have = Option.join (List.nth_opt src_slots i) in
+      let ok =
+        match want, have with
+        | None, _ -> true
+        | Some (Refined r), Some (Refined q) ->
+          let sg = elem_sig ~name:"$elem" r in
+          let rp = List.hd sg.refined in
+          let sc = ("$elem", q) :: scope_shadow cx.sc [ "$elem" ] in
+          let cx = { cx with sc } in
+          let out = ref None in
+          check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~goal_scope_facts:true ~verdict_out:out sg
+            [ A.EVar { A.txt = "$elem"; A.span = xsp } ] rp;
+          !out = Some Obligation.Proved
+        | Some (Refined (_, p, _)), _ ->
+          record_elem_skip errctx ~span:xsp ~callee ~predicate:(pred_str p)
+            ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (its declared element type is not refined there)" x);
+          false
+        | Some (Container inner), _ ->
+          record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred inner.slots)
+            ~what:(Printf.sprintf "`%s`'s nested elements cannot be compared symbolically; build the nested container from literals or destructure it" x);
+          false
+      in
+      acc && ok)
+    true (List.init n Fun.id)
+
 let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
-    ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
+    ~(span : A.span) ~(callee : string) (want : entry)
     (a : A.expr) : bool =
+  let container = want.cont and slots = want.slots in
   (* [~cb]: an element that is a call through a refined callback parameter
      (`Cons(f(h), …)` with `f : Int -> {Int | p}`) carries its codomain here
      exactly as it does in a scalar argument position (2026-09-18 plan,
@@ -2218,13 +2299,15 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
     match slot with
     | None -> true
     | Some (Refined r) -> check_one r e
-    | Some (Container (c', slots')) ->
-      check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee (c', slots') e
+    | Some (Container inner) -> check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee inner e
   in
-  let recur = check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee (container, slots) in
+  let recur = check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee want in
   match a with
   (* A CONSTRUCTION of this container: each field at [Param i] is checked
-     against slot [i]; a [Self] field is the same container again. *)
+     against slot [i]; a [Self] field is the same container again.  1b
+     (§2.5): each of [want.rels] is one more obligation over the
+     constructor's [Param] fields (one whose slots all sit in one [Within]
+     field is that nested entry's own; any other shape is a recorded skip). *)
   | A.ECon (k, args, _)
     when sort_of_ctor k.A.txt = Some (adt_sort_name container)
          && Hashtbl.mem ctor_param_fields k.A.txt ->
@@ -2267,7 +2350,8 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
               let inner = List.map (function Some j -> slot j | None -> None) m in
               if List.for_all Option.is_none inner then true
               else
-                check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee (c, inner) e
+                check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee
+                  (entry_of_slots c inner) e
             | Other, ([], _) -> true
           in
           (acc && ok, fi + 1))
@@ -2289,35 +2373,7 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
       | _ -> (arg_span span a, "this value")
     in
     (match container_entry_of_expr ctx defs cb ce a with
-     | Some (c', src_slots) when c' = container ->
-       let n = max (List.length slots) (List.length src_slots) in
-       List.fold_left
-         (fun acc i ->
-           let want = Option.join (List.nth_opt slots i) in
-           let have = Option.join (List.nth_opt src_slots i) in
-           let ok =
-             match want, have with
-             | None, _ -> true
-             | Some (Refined r), Some (Refined q) ->
-               let sg = elem_sig ~name:"$elem" r in
-               let rp = List.hd sg.refined in
-               let sc = ("$elem", q) :: scope_shadow sc [ "$elem" ] in
-               let cx = { cx with sc } in
-               let out = ref None in
-               check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~goal_scope_facts:true ~verdict_out:out sg
-                 [ A.EVar { A.txt = "$elem"; A.span = xsp } ] rp;
-               !out = Some Obligation.Proved
-             | Some (Refined (_, p, _)), _ ->
-               record_elem_skip errctx ~span:xsp ~callee ~predicate:(pred_str p)
-                 ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (its declared element type is not refined there)" x);
-               false
-             | Some (Container (_, inner)), _ ->
-               record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred inner)
-                 ~what:(Printf.sprintf "`%s`'s nested elements cannot be compared symbolically; build the nested container from literals or destructure it" x);
-               false
-           in
-           acc && ok)
-         true (List.init n Fun.id)
+     | Some have when have.cont = container -> entry_implies cx errctx ~span:xsp ~callee ~subject:x ~have ~want
      | _ ->
        (match a with
         | A.EVar { A.txt = xv; _ } ->
@@ -2332,9 +2388,8 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
           in
           (* [xv] as an entry: Refined-vs-Refined against the demand, exactly
              as a [contenv] variable. *)
-          let as_entry (entry : string * elem option list) : bool =
-            check_elements ~root errctx defs ctx path lets sc re cb ((xv, entry) :: ce) ~span ~callee
-              (container, slots) a
+          let as_entry (entry : entry) : bool =
+            check_elements ~root errctx defs ctx path lets sc re cb ((xv, entry) :: ce) ~span ~callee want a
           in
           (match List.assoc_opt xv lets with
            (* A component of a destructured call (`let (yes, no) = g(…)`, or a
@@ -2348,8 +2403,8 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
                 (match List.nth_opt h i with Some (Some entry) -> as_entry entry | _ -> no_entry ())
               | None ->
                 (match
-                   abstract_flow ~component:i ~root defs ctx path lets sc re cb ce ~span:xsp ~callee
-                     (container, slots) g args
+                   abstract_flow ~component:i ~root defs ctx path lets sc re cb ce ~span:xsp ~callee want g
+                     args
                  with
                  | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
                  | None ->
@@ -2359,20 +2414,20 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
                     | _ -> no_entry ())))
            | Some (A.EApp (A.EVar { A.txt = g; _ }, args, _)) ->
              (match
-                abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
+                abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee want g args
               with
               | Some v -> record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
               | None -> no_entry ())
            | _ -> no_entry ())
         | A.EApp (A.EVar { A.txt = g; _ }, args, _) ->
           (match
-             abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee (container, slots) g args
+             abstract_flow ~root defs ctx path lets sc re cb ce ~span:xsp ~callee want g args
            with
            | Some v ->
              record_abstract_verdict errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) v
            | None ->
           match
-             demand_flow ~root errctx defs ctx path lets sc re cb ce ~span ~callee (container, slots) g args
+             demand_flow ~root errctx defs ctx path lets sc re cb ce ~span ~callee want g args
            with
            | `Proved ->
              Obligation.record
@@ -2411,8 +2466,11 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
    `Proved; `Unproved with the account of the first source that did not
    prove — never a violation (design §4.3). *)
 and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
-    ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
+    ~(span : A.span) ~(callee : string) (want : entry)
     (g : string) (args : A.expr list) : [ `Na | `Proved | `Unproved of Obligation.reason ] =
+  let container = want.cont and slots = want.slots in
+  (* 1b (§2.5): a want relation is discharged only through one shared
+     [Src_elem] source, else `Unproved; today [want.rels] is empty. *)
   (* Every sub-check reports into a throwaway context ([discharge_pairs]'):
      the caller records the one obligation this call owes. *)
   ignore errctx;
@@ -2425,7 +2483,7 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
        let rec pair (t : A.ty) (d : elem) =
          match strip_ty t, d with
          | A.TyVar b, d -> pairs := (b.A.txt, d) :: !pairs
-         | A.TyCon (c, targs), Container (c', dslots)
+         | A.TyCon (c, targs), Container { cont = c'; slots = dslots; _ }
            when c.A.txt = c' && List.length targs = List.length dslots ->
            List.iter2 (fun t d -> Option.iter (pair t) d) targs dslots
          | _ -> shape_ok := false
@@ -2448,7 +2506,7 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
         last row): `sum_pos(fold_left(pos, Nil, fn (acc, x) -> Cons(x, acc)))`.
         The call's value is a [container] here (this is a container
         position, and the typechecker instantiated [b] to it), so the whole
-        demand is [b]'s: [(b, Container (container, slots))].  Same gates as
+        demand is [b]'s: [(b, Container want)].  Same gates as
         above (P1/P2) and the same discharge, every source of [b]; a callback
         parameter typed [b] assumes the entry ([invariant_params]). *)
      | Some (A.TyVar b) ->
@@ -2463,7 +2521,7 @@ and demand_flow ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce 
        else
          (match
             discharge_pairs ~root defs ctx path lets sc re cb ce ~span ~callee g sg args
-              [ (b.A.txt, Container (container, slots)) ]
+              [ (b.A.txt, Container want) ]
           with
           | `Proved -> `Proved
           | `Unproved w -> `Unproved w)
@@ -2594,19 +2652,19 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
      one obligation this call owes. *)
   let errctx = Err.create () in
          (* The entry a parameter type carries when [b] is demanded to meet [d]. *)
-         let rec entry_with (t : A.ty) (b : string) (d : elem) : (string * elem option list) option =
+         let rec entry_with (t : A.ty) (b : string) (d : elem) : entry option =
            match strip_ty t with
            | A.TyCon (c, targs) when is_container_type c.A.txt ->
              Some
-               ( c.A.txt
-               , List.map
-                   (fun ta ->
-                     match strip_ty ta with
-                     | A.TyVar w when w.A.txt = b -> Some d
-                     | ta' when List.mem b (ty_vars [] ta') ->
-                       Option.map (fun (c', ss) -> Container (c', ss)) (entry_with ta' b d)
-                     | _ -> None)
-                   targs )
+               (entry_of_slots c.A.txt
+                  (List.map
+                     (fun ta ->
+                       match strip_ty ta with
+                       | A.TyVar w when w.A.txt = b -> Some d
+                       | ta' when List.mem b (ty_vars [] ta') ->
+                         Option.map (fun inner -> Container inner) (entry_with ta' b d)
+                       | _ -> None)
+                     targs))
            | _ -> None
          in
          let cx0 = cx_of ~root errctx defs ctx path lets sc re cb ce in
@@ -2636,7 +2694,7 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
             demand ([invariant_params]): a scalar one as its annotation, a
             container one as a container-env entry.
             Returns the verdict and, when the hypothesis was declined, why. *)
-         let lambda_ok (i : int) (ps0 : A.param list) (ps : A.param list) (body : A.expr) (want : [ `S of string * A.expr * string option | `C of string * elem option list ]) =
+         let lambda_ok (i : int) (ps0 : A.param list) (ps : A.param list) (body : A.expr) (want : [ `S of string * A.expr * string option | `C of entry ]) =
            (* A parameter's OWN refinement annotation is not assumed: nothing
               checks it here (the callee's domain is a type variable, so no
               pass-site obligation exists), and assuming it proved
@@ -2773,8 +2831,8 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
              let e = List.nth args i in
              (match d with
               | Refined r -> (scalar_ok cx0 r e, describe i, None)
-              | Container (c, ss) ->
-                (ok_of (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee (c, ss) e), describe i, None))
+              | Container en ->
+                (ok_of (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee en e), describe i, None))
            | Src_elem (i, _) ->
              let e = List.nth args i in
              (match Option.bind (Option.join (List.nth_opt sg.param_tys i)) (fun t -> entry_with t b d) with
@@ -2797,7 +2855,7 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
              let want =
                match path_in_cod, d, cod with
                | [], Refined r, _ -> Some (`S r)
-               | [], Container (c, ss), _ -> Some (`C (c, ss))
+               | [], Container en, _ -> Some (`C en)
                | _, _, Some cod -> Option.map (fun en -> `C en) (entry_with cod b d)
                | _ -> None
              in
@@ -2979,17 +3037,17 @@ and discharge_pairs ~root defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : c
    - anything else (a variable, a `match` result bound earlier): a recorded
      skip.  Returns whether every component was proved. *)
 let rec check_ret_elems ~root errctx defs (ctx : rctx) path lets sc re (cb : cbenv) (ce : contenv)
-    ~(span : A.span) ~(callee : string) (comps : (string * elem option list) option list)
+    ~(span : A.span) ~(callee : string) (comps : entry option list)
     (t : A.expr) : bool =
   let n = List.length comps in
   let first_pred () =
-    match List.find_map Fun.id comps with Some (_, slots) -> first_slot_pred slots | None -> "<element refinement>"
+    match List.find_map Fun.id comps with Some e -> first_slot_pred e.slots | None -> "<element refinement>"
   in
   let untraced what =
     record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_pred ()) ~what;
     false
   in
-  let each (f : int -> string * elem option list -> bool) : bool =
+  let each (f : int -> entry -> bool) : bool =
     List.fold_left
       (fun (acc, i) c ->
         match c with
@@ -3009,13 +3067,13 @@ let rec check_ret_elems ~root errctx defs (ctx : rctx) path lets sc re (cb : cbe
     let label = g ^ "(…)" in
     (* A component entry stands in for the call under a name no program can
        spell, so the comparison reads like a variable's. *)
-    let against (er : string * elem option list) (have : (string * elem option list) option) : bool =
+    let against (er : entry) (have : entry option) : bool =
       match have with
       | Some entry ->
         check_elements ~root errctx defs ctx path lets sc re cb ((label, entry) :: ce) ~span ~callee er
           (A.EVar { A.txt = label; A.span = gsp })
       | None ->
-        record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred (snd er))
+        record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred er.slots)
           ~what:(Printf.sprintf "this component of `%s` is not known to satisfy it" label);
         false
     in
@@ -3031,12 +3089,12 @@ let rec check_ret_elems ~root errctx defs (ctx : rctx) path lets sc re (cb : cbe
                args
            with
            | Some v ->
-             record_abstract_verdict errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred (snd er)) v
+             record_abstract_verdict errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred er.slots) v
            | None ->
              (match Lazy.force declared with
               | Some d -> against er (Option.join (List.nth_opt d i))
               | None ->
-                record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred (snd er))
+                record_elem_skip errctx ~span:(arg_span span t) ~callee ~predicate:(first_slot_pred er.slots)
                   ~what:(Printf.sprintf "`%s` declares no proved tuple element return" g);
                 false)))
   | _ -> untraced "the tuple's components are not traced here"
@@ -3094,7 +3152,7 @@ let elem_marker_of_arg ?(erased_for : A.expr option) (a : A.expr) : string optio
    could not be instantiated here; [None]: not such a slot. *)
 let abstract_param_entry ~root (ctx : rctx) defs path sc re (cb : cbenv) (lets : launder) ~(span : A.span)
     (g : string) (t : A.ty) (args : A.expr list) (a : A.expr)
-  : (string * elem option list, string) result option =
+  : (entry, string) result option =
   match abstract_slot_of_ty ~abs:(callee_abstracts ctx g) t with
   | None -> None
   (* A slot that applies one of the callee's abstract refinements in a shape
@@ -3138,7 +3196,7 @@ let abstract_param_entry ~root (ctx : rctx) defs path sc re (cb : cbenv) (lets :
                     ("_", subst_params [ (y, A.EVar { A.txt = "_"; A.span = A.dummy_span }) ] body)
                   else (y, body)
                 in
-                Ok (c, [ Some (Refined (y, body, m)) ])
+                Ok (entry_of_slots c [ Some (Refined (y, body, m)) ])
               | None ->
                 Error
                   (Printf.sprintf
@@ -3220,7 +3278,7 @@ let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
                | Error why ->
                  let pname = Option.value ~default:"_" (List.nth_opt sg.param_names i) in
                  record_elem_skip errctx ~span:(arg_span span a) ~callee
-                   ~predicate:(first_slot_pred (snd er))
+                   ~predicate:(first_slot_pred er.slots)
                    ~what:(Printf.sprintf "the parameter `%s` cannot be read at this call: %s" pname why);
                  note false)
             | None -> ()))
@@ -3246,7 +3304,7 @@ let check_field_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cb
               read (design 2026-10-18 element-flow follow-ups §1.2). *)
            | Some er when not (entry_is_closed er) ->
              record_elem_skip errctx ~span:(arg_span span e) ~callee
-               ~predicate:(first_slot_pred (snd er))
+               ~predicate:(first_slot_pred er.slots)
                ~what:(Printf.sprintf "the element refinement of field `%s` names another field" pn)
            | Some er ->
              ignore (check_elements ~root errctx defs ctx path lets sc re cb ce ~span ~callee er e)
@@ -3279,7 +3337,7 @@ let check_pass_site_elements ~root errctx defs (ctx : rctx) path lets sc re (cb 
             recorded skip (design 2026-10-18 element-flow follow-ups §1.2). *)
          | Some er when not (entry_is_closed er) ->
            record_elem_skip errctx ~span:(arg_span span a) ~callee:"<callable>"
-             ~predicate:(first_slot_pred (snd er))
+             ~predicate:(first_slot_pred er.slots)
              ~what:"the expected codomain's element refinement names a parameter, which has no single meaning at the pass site"
          | Some er ->
            (match a with
@@ -3294,7 +3352,7 @@ let check_pass_site_elements ~root errctx defs (ctx : rctx) path lets sc re (cb 
                   match lambda_tail_rebinds bound t with
                   | Some n ->
                     record_elem_skip errctx ~span:(arg_span lsp t) ~callee:"return of <lambda>"
-                      ~predicate:(first_slot_pred (snd er))
+                      ~predicate:(first_slot_pred er.slots)
                       ~what:
                         (Printf.sprintf
                            "the lambda's return expression mentions `%s`, bound inside the lambda" n)
@@ -3314,10 +3372,10 @@ let check_pass_site_elements ~root errctx defs (ctx : rctx) path lets sc re (cb 
                    (check_elements ~root errctx defs ctx path lets sc re cb ce' ~span:gsp
                       ~callee:(Printf.sprintf "return of %s" g) er a)
                | None ->
-                 record_elem_skip errctx ~span:gsp ~callee:g ~predicate:(first_slot_pred (snd er))
+                 record_elem_skip errctx ~span:gsp ~callee:g ~predicate:(first_slot_pred er.slots)
                    ~what:(Printf.sprintf "`%s` declares no proved element return to imply the expected codomain from" g))
             | _ ->
-              record_elem_skip errctx ~span ~callee:"<callable>" ~predicate:(first_slot_pred (snd er))
+              record_elem_skip errctx ~span ~callee:"<callable>" ~predicate:(first_slot_pred er.slots)
                 ~what:"the passed callable is neither a named function, a callback parameter, nor an inline lambda"))
       | _ -> ())
     args
@@ -3402,10 +3460,10 @@ let with_no_ret_demand (f : unit -> 'a) : 'a =
    its first entry (a [Tuple] has at least one). *)
 let ret_elems_pred (er : ret_elems) : string =
   match er with
-  | Single e -> first_slot_pred (snd e)
+  | Single e -> first_slot_pred e.slots
   | Tuple cs ->
     (match List.find_map Fun.id cs with
-     | Some e -> first_slot_pred (snd e)
+     | Some e -> first_slot_pred e.slots
      | None -> "<element refinement>")
 
 let elem_return_tails errctx ~(label : string) ~(fname : string) ~(span : A.span)
@@ -4184,13 +4242,15 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
           match br.A.branch_pat with
           | A.PatCon (k, subpats) ->
             (match container_entry_of_expr ctx defs cb ce_outer subj, Hashtbl.find_opt ctor_param_fields k.A.txt with
-             | Some ((container, slots) as entry), Some roles
+             | Some ({ cont = container; slots; _ } as entry), Some roles
                when sort_of_ctor k.A.txt = Some (adt_sort_name container)
                     && List.length roles = List.length subpats ->
                (* Table-driven (P3 design §2a): a `PatVar` at a [Param i]
                   field takes slot [i] — a refined slot as a scope fact, a
                   nested container as its own env entry — and a `PatVar` at
-                  a [Self] field takes the whole entry. *)
+                  a [Self] field takes the whole entry.  1b (§2.5): each
+                  relation all of whose slots are bound by [PatVar]s here
+                  becomes a path fact over those binders. *)
                (* A [Self] binder takes the entry only at a field that hides
                   nothing ([ctor_field_params]): at a permuted or non-parameter
                   self-reference (`N(T(b, a))`) the outer slots are the wrong
@@ -4220,9 +4280,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                      (match Option.join (List.nth_opt slots i) with
                       | Some (Refined ((b, q, _) as r)) ->
                         if captures_binder b q then (sc, ce) else ((v.A.txt, r) :: sc, ce)
-                      | Some (Container (c', slots')) ->
-                        if elem_entry_mentions pb (c', slots') then (sc, ce)
-                        else (sc, (v.A.txt, (c', slots')) :: ce)
+                      | Some (Container inner) ->
+                        if elem_entry_mentions pb inner then (sc, ce) else (sc, (v.A.txt, inner) :: ce)
                       | None -> (sc, ce))
                    | Self, A.PatVar v when not (hides fi) && not (elem_entry_mentions pb entry) ->
                      (sc, (v.A.txt, entry) :: ce)
@@ -4230,11 +4289,14 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                       binder is a [c] whose slot [k] carries this
                       scrutinee's slot [m.(k)].  Like the [Self] arm, no
                       entry when it mentions one of this pattern's own
-                      binders (element-flow phase 4). *)
+                      binders (element-flow phase 4).  1b: a relation whose
+                      slots all map through [m] becomes the nested entry's
+                      own (remapped); any other is not carried. *)
                    | Within (c, m), A.PatVar v ->
                      let inner = List.map (function Some j -> Option.join (List.nth_opt slots j) | None -> None) m in
-                     if List.for_all Option.is_none inner || elem_entry_mentions pb (c, inner) then (sc, ce)
-                     else (sc, (v.A.txt, (c, inner)) :: ce)
+                     let inner = entry_of_slots c inner in
+                     if List.for_all Option.is_none inner.slots || elem_entry_mentions pb inner then (sc, ce)
+                     else (sc, (v.A.txt, inner) :: ce)
                    | _ -> (sc, ce)), fi + 1)
                  ((sc, ce), 0) roles subpats
              | _ -> (sc, ce))
