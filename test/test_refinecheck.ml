@@ -24000,6 +24000,50 @@ let infer_elements_suite =
   ]
 
 
+
+let k6_best (fx : infer_fixture) ~(fn : string) : (string * string) option =
+  let decls = fx.fx_m.March_ast.Ast.mod_decls in
+  match List.find_opt (fun (s : IS.slot) -> s.IS.fn = fn && List.mem IS.K6 s.IS.kinds) (IS.enumerate ~is_user:(fun _ -> true) decls) with
+  | None -> None
+  | Some slot -> (
+    let r = IO.best_k6 ~root:fx.fx_root ~decls slot ~budget:(ref 50) in
+    match fst r with
+    | Some (shape, _) -> Some (shape.IS.k6_callback, shape.IS.k6_return)
+    | None -> None)
+
+let infer_abstract_suite =
+  let pre =
+    "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do 0 end\n  fn one_pos(o : Option({Int | _ > 0})) : Int do 0 end\n"
+  in
+  let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
+  let k6 ?(stdlib = false) name body ~fn ~expect =
+    gated name (fun () ->
+        with_infer_fixture ~stdlib (m "K6" body) (fun fx ->
+            Alcotest.(check (option (pair string string))) "proposal" expect (k6_best fx ~fn)))
+  in
+  [ k6 ~stdlib:true "A1: keep passes its callback to List.filter"
+      "  fn keep(xs : List(a), f : a -> Bool) : List(a) do List.filter(xs, f) end\n  fn go(ys : List(Int)) : Int do sum_pos(keep(ys, fn y -> y > 0)) end\n"
+      ~fn:"keep" ~expect:(Some ("a -> Bool[p]", "List(a[p])"));
+    k6 "rediscover filter"
+      "  fn filt(xs : List(a), pred : a -> Bool) : List(a) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if pred(h) do Cons(h, filt(t, pred)) else filt(t, pred) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"
+      ~fn:"filt" ~expect:(Some ("a -> Bool[p]", "List(a[p])"));
+    k6 "rediscover find"
+      "  fn fnd(xs : List(a), pred : a -> Bool) : Option(a) do\n    match xs do\n    Nil -> None\n    Cons(h, t) -> if pred(h) do Some(h) else fnd(t, pred) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do one_pos(fnd(ys, fn y -> y > 0)) end\n"
+      ~fn:"fnd" ~expect:(Some ("a -> Bool[p]", "Option(a[p])"));
+    k6 "rediscover take_while"
+      "  fn tw(xs : List(a), pred : a -> Bool) : List(a) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if pred(h) do Cons(h, tw(t, pred)) else Nil end\n    end\n  end\n  fn go(ys : List(Int)) : Int do sum_pos(tw(ys, fn y -> y > 0)) end\n"
+      ~fn:"tw" ~expect:(Some ("a -> Bool[p]", "List(a[p])"));
+    k6 "rediscover partition (both halves)"
+      "  fn part(xs : List(a), pred : a -> Bool) : (List(a), List(a)) do\n    match xs do\n    Nil -> (Nil, Nil)\n    Cons(h, t) ->\n      let (yes, no) = part(t, pred)\n      if pred(h) do (Cons(h, yes), no) else (yes, Cons(h, no)) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do\n    let (pos, neg) = part(ys, fn y -> y > 0)\n    sum_pos(pos) + sum_nonpos(neg)\n  end\n"
+      ~fn:"part" ~expect:(Some ("a -> Bool[p]", "(List(a[p]), List({a | !p(_)}))"));
+    k6 "rediscover Option.filter"
+      "  fn ofilt(o : Option(a), pred : a -> Bool) : Option(a) do\n    match o do\n    None -> None\n    Some(x) -> if pred(x) do Some(x) else None end\n    end\n  end\n  fn go(o : Option(Int)) : Int do one_pos(ofilt(o, fn y -> y > 0)) end\n"
+      ~fn:"ofilt" ~expect:(Some ("a -> Bool[p]", "Option(a[p])"));
+    k6 "a wrong body (keeps rejected elements) is not proposed"
+      "  fn bad(xs : List(a), pred : a -> Bool) : List(a) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if pred(h) do Cons(h, bad(t, pred)) else Cons(h, bad(t, pred)) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do sum_pos(bad(ys, fn y -> y > 0)) end\n"
+      ~fn:"bad" ~expect:None
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -24145,6 +24189,7 @@ let () =
       ("infer-guards", infer_guards_suite);
       ("infer-vocab", infer_vocab_suite);
       ("infer-elements", infer_elements_suite);
+      ("infer-abstract", infer_abstract_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

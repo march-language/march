@@ -102,26 +102,6 @@ let slots_of_fn ~(fn : string) (fd : A.fn_def) : slot list =
       in
       ps @ rs
 
-let enumerate ~(is_user : A.span -> bool) (decls : A.decl list) : slot list =
-  PI.enum_fns [] decls
-  |> List.filter (fun (_, (fd : A.fn_def)) -> is_user fd.A.fn_name.A.span)
-  |> List.concat_map (fun ((_, fd) as pf) -> slots_of_fn ~fn:(PI.qualified_of pf) fd)
-
-(* Functions with a parameter that has no annotation: no base to refine
-   (reported `unannotated-signature`, §1.1). *)
-let unannotated (decls : A.decl list) : (string * A.span) list =
-  PI.enum_fns [] decls
-  |> List.filter_map (fun ((_, (fd : A.fn_def)) as pf) ->
-         match first_clause fd with
-         | Some c
-           when List.exists
-                  (function
-                    | A.FPNamed { A.param_ty = None; _ } | A.FPPat (A.PatVar _) -> true
-                    | _ -> false)
-                  c.A.fc_params ->
-           Some (PI.qualified_of pf, fd.A.fn_name.A.span)
-         | _ -> None)
-
 (* ── Re-spelling ─────────────────────────────────────────────────────────── *)
 
 (* The whole annotation at the slot's root, with [pred] written at the slot.
@@ -171,6 +151,130 @@ let respell (s : slot) ~(pred : string) : string option =
   match root_ty s with
   | Some t -> render ~at:(s.path, pred) (root s.path) t
   | None -> None
+
+(* ── K6: joint abstract-refinement candidates (design §1.2 row K6) ──────── *)
+
+(* A one-argument, uncurried callback parameter `f : a -> Bool` ([a] a type
+   variable) whose [a] appears in an element slot of the return: the shape of
+   `filter`, `find`, `take_while`, `partition`.  The body is not inspected —
+   the oracle decides; this only decides whether probes are spent. *)
+let k6_callback (t : A.ty) : string option =
+  match t with
+  | A.TyArrow (A.TyVar a, A.TyCon ({ A.txt = "Bool"; _ }, [])) -> Some a.A.txt
+  | _ -> None
+
+type k6_shape = { k6_param : string; k6_callback : string; k6_return : string }
+
+let k6_returns (a : string) (ret : A.ty) : string list =
+  let is_a = function A.TyVar v -> v.A.txt = a | _ -> false in
+  let pa = Printf.sprintf "%s[p]" a and np = Printf.sprintf "{%s | !p(_)}" a in
+  match ret with
+  | A.TyCon ({ A.txt = "List"; _ }, [ e ]) when is_a e -> [ Printf.sprintf "List(%s)" pa ]
+  | A.TyCon ({ A.txt = "Option"; _ }, [ e ]) when is_a e -> [ Printf.sprintf "Option(%s)" pa ]
+  | A.TyTuple [ A.TyCon ({ A.txt = "List"; _ }, [ e1 ]); A.TyCon ({ A.txt = "List"; _ }, [ e2 ]) ]
+    when is_a e1 && is_a e2 ->
+    [ Printf.sprintf "(List(%s), List(%s))" pa np;
+      Printf.sprintf "(List(%s), List(%s))" pa a;
+      Printf.sprintf "(List(%s), List(%s))" a np ]
+  | _ -> []
+
+let k6_shapes (s : slot) : k6_shape list =
+  match s.path, s.fd.A.fn_ret_ty with
+  | Param f, Some ret -> (
+    match k6_callback s.base with
+    | Some a ->
+      List.map
+        (fun r -> { k6_param = f; k6_callback = Printf.sprintf "%s -> Bool[p]" a; k6_return = r })
+        (k6_returns a ret)
+    | None -> [])
+  | _ -> []
+
+let k6_slots ~(fn : string) (fd : A.fn_def) : slot list =
+  match first_clause fd, fd.A.fn_ret_ty with
+  | Some c, Some ret when not (excluded fd) ->
+    List.filter_map
+      (fun (n, t) ->
+        match k6_callback t with
+        | Some a when k6_returns a ret <> [] -> Some { fn; fd; path = Param n; base = t; kinds = [ K6 ] }
+        | _ -> None)
+      (PI.named_params c)
+  | _ -> []
+
+(* The function with [shape] written into its signature: the signature is
+   re-spelled as text and PARSED, so the parser's own sugar (`Bool[p]`,
+   `a[p]`) defines the abstract refinement, and the parsed parameter and
+   return types are grafted onto the real definition (body untouched).
+   [None] when a parameter has no surface rendering or the text does not
+   parse. *)
+let graft (s : slot) (shape : k6_shape) : A.fn_def option =
+  let fd = s.fd in
+  match first_clause fd with
+  | None -> None
+  | Some c -> (
+    let params = PI.named_params c in
+    let rendered =
+      List.map
+        (fun (n, t) ->
+          if n = shape.k6_param then Some (Printf.sprintf "%s : %s" n shape.k6_callback)
+          else Option.map (fun ts -> Printf.sprintf "%s : %s" n ts) (render Return t))
+        params
+    in
+    if List.mem None rendered || List.length params <> List.length c.A.fc_params then None
+    else
+      let src =
+        Printf.sprintf "mod InferK6 do
+  fn %s(%s) : %s do 0 end
+end
+" fd.A.fn_name.A.txt
+          (String.concat ", " (List.map Option.get rendered)) shape.k6_return
+      in
+      match March_parser.Parse.module_of_lexbuf (Lexing.from_string src) with
+      | exception _ -> None
+      | m -> (
+        match m.A.mod_decls with
+        | [ A.DFn (g, _) ] -> (
+          match first_clause g with
+          | None -> None
+          | Some gc ->
+            let tys = PI.named_params gc in
+            let upd (p : A.param) =
+              match List.assoc_opt p.A.param_name.A.txt tys with
+              | Some t -> { p with A.param_ty = Some t }
+              | None -> p
+            in
+            let upd_fp = function
+              | A.FPNamed p -> A.FPNamed (upd p)
+              | A.FPDefault (p, e) -> A.FPDefault (upd p, e)
+              | other -> other
+            in
+            Some
+              { fd with
+                A.fn_ret_ty = g.A.fn_ret_ty;
+                A.fn_clauses =
+                  List.map (fun (c : A.fn_clause) -> { c with A.fc_params = List.map upd_fp c.A.fc_params }) fd.A.fn_clauses })
+        | _ -> None))
+
+let enumerate ~(is_user : A.span -> bool) (decls : A.decl list) : slot list =
+  PI.enum_fns [] decls
+  |> List.filter (fun (_, (fd : A.fn_def)) -> is_user fd.A.fn_name.A.span)
+  |> List.concat_map (fun ((_, fd) as pf) ->
+         let fn = PI.qualified_of pf in
+         slots_of_fn ~fn fd @ k6_slots ~fn fd)
+
+(* Functions with a parameter that has no annotation: no base to refine
+   (reported `unannotated-signature`, §1.1). *)
+let unannotated (decls : A.decl list) : (string * A.span) list =
+  PI.enum_fns [] decls
+  |> List.filter_map (fun ((_, (fd : A.fn_def)) as pf) ->
+         match first_clause fd with
+         | Some c
+           when List.exists
+                  (function
+                    | A.FPNamed { A.param_ty = None; _ } | A.FPPat (A.PatVar _) -> true
+                    | _ -> false)
+                  c.A.fc_params ->
+           Some (PI.qualified_of pf, fd.A.fn_name.A.span)
+         | _ -> None)
 
 (* ── Installing a hypothesis ─────────────────────────────────────────────── *)
 

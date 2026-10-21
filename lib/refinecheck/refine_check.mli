@@ -131,6 +131,11 @@ val sig_of_fn : A.fn_def -> fn_sig
     defined more than once ambiguously. *)
 val collect_all_defs : A.decl list -> (string, fn_sig option) Hashtbl.t
 
+(** Memoised abstract-refinement names per function key (from
+    [Refine_param.fn_defs_tbl]).  Exposed so inference-lite can withdraw a
+    key while it probes a hypothesised signature. *)
+val abstracts_tbl : (string, string list) Hashtbl.t
+
 (** One run of the element-return gate over [decls] (fixpoint rounds): every
     function whose declared element return the checker proves is added to
     [Refine_param.elem_ret_proved].  Exposed for inference-lite's TRUE test

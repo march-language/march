@@ -127,14 +127,21 @@ let elem_return ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
 let with_hyp_def (cx : ctx) (hyp : A.fn_def) (f : unit -> 'a) : 'a =
   let key = cx.qualified in
   let saved = Hashtbl.find_opt Refine_param.fn_defs_tbl key in
+  let saved_abs = Hashtbl.find_opt RC.abstracts_tbl key in
   (match saved with
    | Some (prefix, _) -> Hashtbl.replace Refine_param.fn_defs_tbl key (prefix, hyp)
    | None -> ());
+  (* [callee_abstracts] memoises a function's abstract names from the
+     definition table: withdraw the memo so the hypothesis is read. *)
+  Hashtbl.remove RC.abstracts_tbl key;
   Fun.protect
     ~finally:(fun () ->
-      match saved with
-      | Some v -> Hashtbl.replace Refine_param.fn_defs_tbl key v
-      | None -> ())
+      (match saved with
+       | Some v -> Hashtbl.replace Refine_param.fn_defs_tbl key v
+       | None -> ());
+      match saved_abs with
+      | Some v -> Hashtbl.replace RC.abstracts_tbl key v
+      | None -> Hashtbl.remove RC.abstracts_tbl key)
     f
 
 (* A probe that raises costs that candidate, never the command. *)
@@ -197,3 +204,41 @@ let best_for_slot ~(root : string) ~(decls : A.decl list) (s : IS.slot) (cands :
         go best (v :: verdicts) tl
     in
     go None [] cands
+
+(* ── K6: joint abstract-refinement candidates (design §1.2, §2) ──────────── *)
+
+(* TRUE: the checker's element-return gate proves the grafted signature on
+   the definition side ([p] uninterpreted; a recursive call must pass its own
+   callback unchanged — the checker's own-predicate rule).  USEFUL: some
+   caller site closes with [p] instantiated.  Passing a callable for a definer
+   owes nothing at the caller, so K6 adds no caller burden. *)
+let k6_verdict ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
+  with_hyp_def cx hyp @@ fun () -> elem_return ~root cx hyp
+
+let best_k6 ~(root : string) ~(decls : A.decl list) (s : IS.slot) ~(budget : int ref)
+    : (IS.k6_shape * verdict) option * verdict list =
+  Obligation.with_scratch @@ fun () ->
+  match prepare ~root ~decls s with
+  | None -> (None, [ Reject ("not-useful", "function not found") ])
+  | Some cx ->
+    let s = { s with IS.fd = cx.fd0 } in
+    let closes = function Accept { closes; _ } -> List.length closes | _ -> min_int in
+    let rec go best verdicts = function
+      | [] -> (best, List.rev verdicts)
+      | _ :: _ when !budget <= 0 -> (best, List.rev (Reject ("budget", "probe budget exhausted") :: verdicts))
+      | shape :: tl ->
+        decr budget;
+        let v =
+          match IS.graft s shape with
+          | None -> Reject ("unannotated-signature", "the signature cannot be re-spelled")
+          | Some hyp -> ( try k6_verdict ~root cx hyp with e -> Reject ("not-true", "probe raised: " ^ Printexc.to_string e))
+        in
+        let best =
+          match v, best with
+          | Accept _, None -> Some (shape, v)
+          | Accept _, Some (_, bv) when closes v > closes bv -> Some (shape, v)
+          | _ -> best
+        in
+        go best (v :: verdicts) tl
+    in
+    go None [] (IS.k6_shapes s)
