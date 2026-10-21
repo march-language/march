@@ -614,12 +614,43 @@ end|} in
   Alcotest.(check bool) "no synthetic binder leaks" false (has "$x");
   Alcotest.(check bool) "T[p] printed as shorthand" true (has "List(a[p])")
 
+(* The two-argument definer `k -> v -> Bool[p]` (multi-arg design
+   2026-10-18 §9 phase 3): the parser builds the chain
+   `({$x2 : k | true}) -> ({$x : v | true}) -> {Bool | _ == p($x2, $x)}`,
+   which must print back as written; and a user's spelled-out long form is
+   printed as the long form, never collapsed into a shorthand that re-parses
+   differently. *)
+let test_abstract_refinement_two_argument_shorthand () =
+  let src = {|mod Test do
+type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+fn keep2(a : Assoc(k, v), pred : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do
+  a
+end
+fn keep3(a : Assoc(Int, v), pred : ({x : Int | x > 0}) -> v -> Bool[q]) : Assoc(Int[q], v[q]) do
+  a
+end
+fn long(a : Assoc(k, v), pred : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == r(x, y)}) : Int do
+  0
+end
+end|} in
+  check_parses "two-argument shorthand" src;
+  check_idempotent "two-argument shorthand" src;
+  let out = fmt src in
+  let has needle =
+    let n = String.length out and m = String.length needle in
+    let rec go i = i + m <= n && (String.sub out i m = needle || go (i + 1)) in go 0 in
+  Alcotest.(check bool) "chain printed as shorthand" true (has "pred : k -> v -> Bool[p]");
+  Alcotest.(check bool) "named domain keeps its binder" true (has "({ x : Int | x > 0 }) -> v -> Bool[q]");
+  Alcotest.(check bool) "long form stays long" true (has "_ == r(x, y)");
+  Alcotest.(check bool) "no synthetic binder leaks" false (has "$x")
+
 let () =
   let open Alcotest in
   run "formatter" [
     "basic", [
       test_case "simple fn"       `Quick test_simple_fn;
       test_case "abstract refinement shorthand" `Quick test_abstract_refinement_shorthand;
+      test_case "two-argument abstract refinement shorthand" `Quick test_abstract_refinement_two_argument_shorthand;
       test_case "match expr"      `Quick test_match_expr;
       test_case "if expr"         `Quick test_if_expr;
       test_case "let binding"     `Quick test_let_binding;

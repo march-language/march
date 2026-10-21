@@ -1,0 +1,24 @@
+mod P43AbstractRefinementTwoArgumentSugar do
+  -- `k -> v -> Bool[p]` defines a `p` of TWO arguments (a curried chain is a
+  -- callback of two arguments), and `Assoc(k[p], v[p])` marks the two
+  -- sibling slots it relates: the long form is
+  -- `Assoc({x : k | true}, {y : v | p(x, y)})` (multi-arg design
+  -- specs/2026-10-18-abstract-refinements-multi-arg-design.md §1.1, §1.2).
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+  fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do
+    match a do
+      ANil -> ANil
+      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+
+  fn count(a : Assoc(k, v)) : Int do
+    match a do
+      ANil -> 0
+      ACons(_, _, t) -> 1 + count(t)
+    end
+  end
+
+  fn main() : Int do count(filt(ACons(1, 2, ACons(3, 0, ANil)), fn (k, v) -> v > k)) end
+end

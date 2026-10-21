@@ -428,13 +428,37 @@ let check_nary (errctx : Err.ctx) ~(entry_shaped : name_of:(int -> string) -> st
           in
           Printf.sprintf "%s(%s)" c (String.concat ", " shown)
         in
+        (* The sugar for the same (§1.2, phase 3): mark every slot `p`
+           relates, in slot order ([expand_markers] reads it back as the long
+           form). *)
+        let sugar () =
+          let c, slots =
+            match o.occ_cont with
+            | Some c when List.length o.occ_scope >= n -> (c, o.occ_scope)
+            | _ -> ("T", List.map (fun b -> ("_", b)) dbases)
+          in
+          Printf.sprintf "%s(%s)" c
+            (String.concat ", "
+               (List.mapi (fun i (_, base) -> if i < n then Printf.sprintf "%s[%s]" base name else base) slots))
+        in
+        (* An application with fewer slots than [p] relates cannot hold the
+           relation at all (`List(Int[p])` under `Int -> Int -> Bool[p]`). *)
+        let too_few () =
+          match o.occ_cont with
+          | Some c when List.length o.occ_scope < n ->
+            Printf.sprintf " (`%s` has %d type argument%s)" c (List.length o.occ_scope)
+              (if List.length o.occ_scope = 1 then "" else "s")
+          | _ -> ""
+        in
         if k = 1 && n >= 2 then
-          (* W2: a single slot cannot carry a relation. *)
+          (* W2: a single slot cannot carry a relation.  A marked slot `v[p]`
+             reaches here when its application marks a number of slots other
+             than n ([expand_markers] leaves those as written). *)
           misuse o.occ_span
             (Printf.sprintf
                "abstract refinement `%s` takes %d arguments, so it relates %d slots of one type \
-                application, not one slot: write `%s`."
-               name n n (fix ()))
+                application, not one slot%s: mark every slot it relates, `%s`."
+               name n n (too_few ()) (sugar ()))
         else if k <> n then
           misuse o.occ_span
             (Printf.sprintf
@@ -684,3 +708,117 @@ let positive_bases ~(is_known : string -> bool) (fd : A.fn_def) (p : string) : s
             if List.for_all Option.is_some bs then Some (List.map Option.get bs) else None
           | _, None -> None)
       occs
+
+(* ── The occurrence sugar `T(k[p], v[p])` (multi-arg design 2026-10-18 §1.2,
+   §9 phase 3) ─────────────────────────────────────────────────────────────
+   A pre-pass over every function's declared types, run before [Refine_check]
+   builds any table, so every later reader sees only the long form.
+
+   For an abstract refinement [p] of arity n ≥ 2 (its definer, the chain
+   `k -> v -> Bool[p]` the parser builds, applies it to n binders), the slots
+   of ONE type application marked `T[p]` (the parser's `{_ : T | p(_)}`) are
+   the relation's slots, in slot order.  When exactly n are marked they become
+   `T({$s0 : k | true}, {$s1 : v | p($s0, $s1)})`: every marked slot binds a
+   fresh name and the last carries the relation.  Any other count is left as
+   written, and [check_nary] reports each marked slot as W2's single-slot
+   error, whose fix is this sugar.  An arity-1 [p] is never touched:
+   `Map(k[p], v[p])` keeps its two unary facts.
+
+   The arity is read with [is_known = fun _ -> false]: no table exists yet.
+   A name the checker knows (a measure) is a candidate here only when a
+   well-formed chain definer applies it, and the expansion then spells out
+   exactly what the markers already meant. *)
+let marker_of (t : A.ty) : (A.ty * string * A.span) option =
+  match t with
+  | A.TyRefine (b, Some { A.txt = "_"; _ }, A.EApp (A.EVar { A.txt = p; _ }, [ A.EVar { A.txt = "_"; _ } ], sp)) ->
+    Some (b, p, sp)
+  | _ -> None
+
+let nary_arities (fd : A.fn_def) : (string * int) list =
+  List.filter_map
+    (fun (p, occs) ->
+      List.find_map
+        (fun o ->
+          let n = List.length o.occ_args in
+          if o.occ_role = Definer && n >= 2 && o.occ_args = List.map fst o.occ_scope then Some (p, n)
+          else None)
+        occs)
+    (collect ~is_known:(fun _ -> false) fd)
+
+let expand_markers_fn (fd : A.fn_def) : A.fn_def =
+  match nary_arities fd with
+  | [] -> fd
+  | ar ->
+    let ctr = ref 0 in
+    let rec ty (t : A.ty) : A.ty =
+      match t with
+      | A.TyCon (c, args) ->
+        let args = List.map ty args in
+        let marked p = List.filter_map (fun a -> match marker_of a with Some (_, q, _) when q = p -> Some () | _ -> None) args in
+        let args =
+          List.fold_left
+            (fun args (p, n) ->
+              if List.length (marked p) <> n then args
+              else begin
+                let names = List.init n (fun i -> Printf.sprintf "$s%d" (!ctr + i)) in
+                ctr := !ctr + n;
+                let k = ref 0 in
+                List.map
+                  (fun a ->
+                    match marker_of a with
+                    | Some (b, q, sp) when q = p ->
+                      let i = !k in
+                      incr k;
+                      let nm = { A.txt = List.nth names i; A.span = sp } in
+                      let pred =
+                        if i < n - 1 then A.ELit (A.LitBool true, sp)
+                        else
+                          A.EApp
+                            ( A.EVar { A.txt = p; A.span = sp }
+                            , List.map (fun x -> A.EVar { A.txt = x; A.span = sp }) names
+                            , sp )
+                      in
+                      A.TyRefine (b, Some nm, pred)
+                    | _ -> a)
+                  args
+              end)
+            args ar
+        in
+        A.TyCon (c, args)
+      | A.TyRefine (b, n, e) -> A.TyRefine (ty b, n, e)
+      | A.TyArrow (a, b) -> A.TyArrow (ty a, ty b)
+      | A.TyTuple ts -> A.TyTuple (List.map ty ts)
+      | A.TyRecord fs -> A.TyRecord (List.map (fun (n, t) -> (n, ty t)) fs)
+      | A.TyLinear (l, t) -> A.TyLinear (l, ty t)
+      | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> t
+    in
+    let param (p : A.param) = { p with A.param_ty = Option.map ty p.A.param_ty } in
+    { fd with
+      A.fn_clauses =
+        List.map
+          (fun (c : A.fn_clause) ->
+            { c with
+              A.fc_params =
+                List.map
+                  (function
+                    | A.FPNamed p -> A.FPNamed (param p)
+                    | A.FPDefault (p, e) -> A.FPDefault (param p, e)
+                    | A.FPPat _ as fp -> fp)
+                  c.A.fc_params })
+          fd.A.fn_clauses;
+      A.fn_ret_ty = Option.map ty fd.A.fn_ret_ty }
+
+(* Physically the same decl wherever nothing was expanded, so a module with no
+   arity-n definer is handed on untouched. *)
+let rec expand_markers (decls : A.decl list) : A.decl list =
+  List.map
+    (fun (d : A.decl) ->
+      match d with
+      | A.DFn (fd, sp) ->
+        let fd' = expand_markers_fn fd in
+        if fd' == fd then d else A.DFn (fd', sp)
+      | A.DMod (n, v, ds, sp) ->
+        let ds' = expand_markers ds in
+        if List.for_all2 ( == ) ds ds' then d else A.DMod (n, v, ds', sp)
+      | d -> d)
+    decls

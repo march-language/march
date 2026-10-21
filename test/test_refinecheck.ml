@@ -22431,16 +22431,32 @@ end|});
   fn f(xs : List(a), k : a -> {Bool | p(_)}) : List(a) do xs end
 end|} "f"));
 
-    (* Curried: the inner arrow is rewritten, nothing instantiates it, nothing
-       is proved — pinned as SAFE, not as a feature. *)
-    gated "a curried Bool[p] proves nothing and violates nothing" (fun () ->
-        let p, v, _, _ =
-          typed_ledger {|mod C do
+    (* Curried (rewritten by multi-arg phase 3): `Int -> Int -> Bool[p]`
+       defines a `p` of two arguments, so `List(Int[p])` marks ONE slot of
+       it — a hard error (W2, decision D3) naming the sugar fix.  It was
+       pinned here as "proves nothing, violates nothing" while the inner
+       arrow alone was the definer; that program is now rejected. *)
+    Alcotest.test_case "a curried Bool[p] on one slot is a W2 error naming the fix" `Quick (fun () ->
+        let src = {|mod C do
   fn need(xs : List(Int[p]), k : Int -> Int -> Bool[p]) : Int do 0 end
   fn go(ys : List(Int)) : Int do need(ys, fn a -> fn b -> a > 0) end
-end|}
+end|} in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
+        let msgs =
+          List.filter_map
+            (fun (d : March_errors.Errors.diagnostic) ->
+              if d.March_errors.Errors.code = March_errors.Errors.Code.abstract_refinement_misuse
+              then Some d.March_errors.Errors.message
+              else None)
+            ctx.March_errors.Errors.diagnostics
         in
-        Alcotest.(check (pair int int)) "nothing proved, nothing violated" (0, 0) (p, v));
+        let t = String.concat "\n" msgs in
+        Alcotest.(check int) ("one misuse error: " ^ t) 1 (List.length msgs);
+        Alcotest.(check bool) ("single slot: " ^ t) true
+          (Astring_contains.contains t "takes 2 arguments, so it relates 2 slots of one type application");
+        Alcotest.(check bool) ("fix: " ^ t) true
+          (Astring_contains.contains t "mark every slot it relates, `T(Int[p], Int[p])`"));
 
     (* Diagnostics and hovers print types with [show_ty]: the shorthand prints
        back as written, the spelled-out form is not prettified into it. *)
@@ -24248,7 +24264,9 @@ let abstract_multiarg_suite =
             (misuse (m "W2" ("  fn one(a : Assoc(k, v), keep : " ^ chain ^ ") : Assoc(k, {v | p(_)}) do a end\n")))
         in
         Alcotest.(check bool) ("single slot: " ^ t) true (has "relates 2 slots of one type application" t);
-        Alcotest.(check bool) ("fix: " ^ t) true (has "Assoc({x : k | true}, {y : v | p(x, y)})" t));
+        (* Phase 3: the fix is the occurrence sugar (it was the long form
+           while the sugar did not exist). *)
+        Alcotest.(check bool) ("fix: " ^ t) true (has "Assoc(k[p], v[p])" t));
     Alcotest.test_case "W2: arguments that are not distinct sibling binders are an error" `Quick (fun () ->
         let t =
           String.concat "\n"
@@ -24417,6 +24435,190 @@ let abstract_multiarg_suite =
         let t = String.concat "\n" (errors (m ~verified:true "A4W" (call "need_pos" "fn (_k, v) -> v >= 0"))) in
         Alcotest.(check bool) ("error: " ^ t) true (has "cannot verify" t)) ]
 
+(* ── The two-argument sugar (multi-arg design 2026-10-18 §1.1, §1.2, §9
+   phase 3) ────────────────────────────────────────────────────────────────
+   `keep : k -> v -> Bool[p]` is the chain definer
+   `({$x2 : k | true}) -> ({$x : v | true}) -> {Bool | _ == p($x2, $x)}`
+   (the parser extends a marked definer outward), and `Assoc(k[p], v[p])` of a
+   two-argument `p` is the long-form relation
+   `Assoc({$s0 : k | true}, {$s1 : v | p($s0, $s1)})`
+   ([Refine_abstract.expand_markers], run before every signature read). *)
+let abstract_multiarg_sugar_suite =
+  let module RA = March_refinecheck.Refine_abstract in
+  let prelude =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n\
+    \  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n\
+    \  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n"
+  in
+  let body =
+    " do\n\
+    \    match a do\n\
+    \      ANil -> ANil\n\
+    \      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end\n\
+    \    end\n\
+    \  end\n"
+  in
+  let long_chain = "({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}" in
+  let long_ret = "Assoc({x : k | true}, {y : v | p(x, y)})" in
+  let sugar_chain = "k -> v -> Bool[p]" in
+  let sugar_ret = "Assoc(k[p], v[p])" in
+  let filt chain ret = "  fn filt(a : Assoc(k, v), keep : " ^ chain ^ ") : " ^ ret ^ body in
+  let m name decls = "mod " ^ name ^ " do\n" ^ prelude ^ decls ^ "end\n" in
+  let run src =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          (o.callee, verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> ""))
+        (March_refinecheck.Obligation.all ())
+    in
+    (ctx.March_errors.Errors.diagnostics, obs)
+  in
+  let misuse src =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.code = March_errors.Errors.Code.abstract_refinement_misuse
+        then Some d.March_errors.Errors.message
+        else None)
+      (fst (run src))
+  in
+  let has needle hay = Astring_contains.contains hay needle in
+  let at callee src = List.filter_map (fun (c, v, r) -> if c = callee then Some (v, r) else None) (snd (run src)) in
+  let ps = Alcotest.(list (pair string string)) in
+  let rs = Alcotest.(list (pair string (list string))) in
+  (* The AR-phase-4 role summary ([abstract_roles]) of the signature every
+     reader sees, i.e. after the occurrence sugar is expanded. *)
+  let roles src name =
+    let fd = RA.expand_markers_fn (fd_of src name) in
+    List.map
+      (fun (p, occs) ->
+        ( p
+        , List.sort compare
+            (List.map
+               (fun (o : RA.occurrence) ->
+                 match o.RA.occ_role with
+                 | RA.Definer -> if o.RA.occ_arg = o.RA.occ_binder && o.RA.occ_arg <> "_" then "D=" else "D"
+                 | RA.Positive -> "+"
+                 | RA.Negative -> "-")
+               occs) ))
+      (RA.collect ~is_known:(fun _ -> false) fd)
+  in
+  let definer_args src name =
+    List.concat_map
+      (fun (_, occs) ->
+        List.filter_map
+          (fun (o : RA.occurrence) -> if o.RA.occ_role = RA.Definer then Some o.RA.occ_args else None)
+          occs)
+      (RA.collect ~is_known:(fun _ -> false) (fd_of src name))
+  in
+  let parse_error src =
+    try ignore (parse src); "" with March_errors.Errors.ParseError (msg, _, _) -> msg
+  in
+  let first_param_ty src name =
+    match (fd_of src name).March_ast.Ast.fn_clauses with
+    | c :: _ ->
+      (match c.March_ast.Ast.fc_params with
+       | _ :: March_ast.Ast.FPNamed { March_ast.Ast.param_ty = Some t; _ } :: _ -> t
+       | _ -> Alcotest.fail "no typed second parameter")
+    | [] -> Alcotest.fail "no clause"
+  in
+  [ Alcotest.test_case "s3: the sugar declares the same roles as the s1 long form, D= included" `Quick (fun () ->
+        let long = m "L" (filt long_chain long_ret) and short = m "S" (filt sugar_chain sugar_ret) in
+        Alcotest.check rs "long form" [ ("p", [ "+"; "D=" ]) ] (roles long "filt");
+        Alcotest.check rs "sugar = long form" (roles long "filt") (roles short "filt"));
+    Alcotest.test_case "the chain binds $x2 then $x; a named domain keeps its binder" `Quick (fun () ->
+        Alcotest.(check (list (list string))) "unnamed" [ [ "$x2"; "$x" ] ]
+          (definer_args (m "B1" (filt sugar_chain sugar_ret)) "filt");
+        Alcotest.(check (list (list string))) "named first" [ [ "x"; "$x" ] ]
+          (definer_args (m "B2" (filt "({x : k | true}) -> v -> Bool[p]" sugar_ret)) "filt");
+        Alcotest.(check (list (list string))) "three" [ [ "$x3"; "$x2"; "$x" ] ]
+          (definer_args
+             (m "B3" "  fn f(a : Assoc(k, v), keep : k -> v -> k -> Bool[p]) : Int do 0 end\n")
+             "f"));
+    Alcotest.test_case "the expansion is the long form: $s0 / $s1, the relation on the last slot" `Quick (fun () ->
+        let fd = RA.expand_markers_fn (fd_of (m "E" (filt sugar_chain sugar_ret)) "filt") in
+        let open March_ast.Ast in
+        match fd.fn_ret_ty with
+        | Some
+            (TyCon
+              ( _
+              , [ TyRefine (TyVar { txt = "k"; _ }, Some { txt = s0; _ }, ELit (LitBool true, _))
+                ; TyRefine (TyVar { txt = "v"; _ }, Some { txt = s1; _ },
+                            EApp (EVar { txt = "p"; _ }, [ EVar { txt = a0; _ }; EVar { txt = a1; _ } ], _)) ] )) ->
+          Alcotest.(check (list string)) "binders" [ "$s0"; "$s1"; "$s0"; "$s1" ] [ s0; s1; a0; a1 ]
+        | _ -> Alcotest.fail "Assoc(k[p], v[p]) did not expand to the long form");
+    Alcotest.test_case "W2: Assoc(k, v[p]) of a two-argument p is an error naming the sugar fix" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse (m "W2S" ("  fn one(a : Assoc(k, v), keep : " ^ sugar_chain ^ ") : Assoc(k, v[p]) do a end\n")))
+        in
+        Alcotest.(check bool) ("single slot: " ^ t) true (has "relates 2 slots of one type application" t);
+        Alcotest.(check bool) ("fix: " ^ t) true (has "mark every slot it relates, `Assoc(k[p], v[p])`" t));
+    Alcotest.test_case "W2: three marked slots of a two-argument p are an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W2T"
+                  "  type Tri(a, b, c) = Tri(a, b, c)\n\
+                   \  fn tri(t : Tri(k, v, v), keep : k -> v -> Bool[p]) : Tri(k[p], v[p], v[p]) do t end\n"))
+        in
+        Alcotest.(check bool) ("count: " ^ t) true (has "mark every slot it relates, `Tri(k[p], v[p], v)`" t));
+    Alcotest.test_case "the sugar has no misuse error" `Quick (fun () ->
+        Alcotest.(check (list string)) "no misuse" [] (misuse (m "WF" (filt sugar_chain sugar_ret))));
+    (* Control: an arity-1 `p` marking two slots is not touched (two unary
+       facts, AR phase 4's meaning). *)
+    Alcotest.test_case "control: Assoc(k[p], k[p]) of a one-argument p keeps two unary facts" `Quick (fun () ->
+        let src = m "A1" "  fn two(a : Assoc(k, k), keep : k -> Bool[p]) : Assoc(k[p], k[p]) do a end\n" in
+        let fd = fd_of src "two" in
+        Alcotest.(check bool) "expansion is the identity" true (RA.expand_markers_fn fd == fd);
+        Alcotest.check rs "two positive occurrences" [ ("p", [ "+"; "+"; "D=" ]) ] (roles src "two");
+        Alcotest.(check (list string)) "no misuse" [] (misuse src));
+    Alcotest.test_case "s2: a tuple domain is ONE tuple argument; the message writes the chain" `Quick (fun () ->
+        let msg = parse_error "mod T do\n  fn f(xs : List(a), k : (a, a) -> Bool[p]) : List(a[p]) do xs end\nend\n" in
+        Alcotest.(check bool) ("one argument: " ^ msg) true (has "is ONE tuple argument" msg);
+        Alcotest.(check bool) ("fix: " ^ msg) true (has "write `a -> a -> Bool[p]`" msg));
+    Alcotest.test_case "a chain naming one binder twice is a parse error" `Quick (fun () ->
+        let msg =
+          parse_error "mod T do\n  fn f(xs : List(Int), k : ({x : Int | x > 0}) -> ({x : Int | true}) -> Bool[p]) : Int do 0 end\nend\n"
+        in
+        Alcotest.(check bool) ("duplicate: " ^ msg) true (has "`x` names two of them" msg));
+    Alcotest.test_case "show_ty: the chain prints as k -> v -> Bool[p], and round-trips" `Quick (fun () ->
+        let shown chain = March_ast.Ast.show_ty (first_param_ty (m "P" ("  fn f(a : Assoc(k, v), keep : " ^ chain ^ ") : Int do 0 end\n")) "f") in
+        Alcotest.(check string) "two" "k -> v -> Bool[p]" (shown "k -> v -> Bool[p]");
+        Alcotest.(check string) "one" "v -> Bool[p]" (shown "v -> Bool[p]");
+        Alcotest.(check string) "round-trip" "k -> v -> Bool[p]" (shown (shown "k -> v -> Bool[p]"));
+        Alcotest.(check string) "long form is not prettified"
+          "{ x : k | ... } -> { y : v | ... } -> { Bool | ... }" (shown long_chain));
+    gated "a1 through sugar: filt's return is proved, as in the long form" (fun () ->
+        let long = at "return of filt" (m "AL" (filt long_chain long_ret))
+        and short = at "return of filt" (m "AS" (filt sugar_chain sugar_ret)) in
+        Alcotest.(check bool) "has obligations" true (short <> []);
+        Alcotest.check ps "all proved" (List.map (fun _ -> ("proved", "")) short) short;
+        Alcotest.check ps "same as the long form" long short);
+    gated "a1-bad through sugar: returning the input does not prove" (fun () ->
+        let vs =
+          at "return of bad"
+            (m "AB" (filt sugar_chain sugar_ret ^ "  fn bad(a : Assoc(k, v), keep : " ^ sugar_chain ^ ") : " ^ sugar_ret ^ " do a end\n"))
+        in
+        Alcotest.(check bool) "has obligations" true (vs <> []);
+        Alcotest.(check bool) "not all proved" true (List.exists (fun (v, _) -> v <> "proved") vs));
+    gated "a2 / rel through sugar: the demands are proved, as in the long form" (fun () ->
+        let calls =
+          "  fn go(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v > 0)) end\n\
+          \  fn go2(a : Assoc(Int, Int)) : Int do need_arel(filt(a, fn (k, v) -> v > k)) end\n\
+          \  fn go3(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v >= 0)) end\n"
+        in
+        let short = m "DS" (filt sugar_chain sugar_ret ^ calls) and long = m "DL" (filt long_chain long_ret ^ calls) in
+        Alcotest.check ps "need_pos" [ ("proved", ""); ("skipped", "abstract-refinement-too-weak") ] (at "need_pos" short);
+        Alcotest.check ps "need_arel" [ ("proved", "") ] (at "need_arel" short);
+        Alcotest.check ps "need_pos = long form" (at "need_pos" long) (at "need_pos" short);
+        Alcotest.check ps "need_arel = long form" (at "need_arel" long) (at "need_arel" short)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -24564,4 +24766,5 @@ let () =
       ("element-entries", element_entries_suite);
       ("relational-elements", relational_elements_suite);
       ("abstract-multiarg", abstract_multiarg_suite);
+      ("abstract-multiarg-sugar", abstract_multiarg_sugar_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

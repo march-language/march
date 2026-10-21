@@ -23,18 +23,25 @@ git log is authoritative for exact commits.
 
 - **Refinements: two-argument abstract refinements.** A callback of two arguments
   can define an abstract refinement `p` of two, and the return can relate two
-  sibling slots through it (long form):
-  `fn filt(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}) : Assoc({x : k | true}, {y : v | p(x, y)})`.
+  sibling slots through it:
+  `fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p])`, the
+  shorthand for
+  `keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}` returning
+  `Assoc({x : k | true}, {y : v | p(x, y)})` (both spellings are accepted; with a
+  one-argument `p`, `Assoc(k[p], k[p])` is still two separate slot facts).
   The body proves the return (`keep(k, v)` is `p(k, v)`); at a call `p` is what the
   passed lambda, `let`-bound lambda, named predicate or callback computes, so
   `need_pos(filt(a, fn (_k, v) -> v > 0))` and
   `need_arel(filt(a, fn (k, v) -> v > k))` are proved and a weaker lambda is an
   `abstract-refinement-too-weak` skip. A parameter can carry the relation too.
   Malformed signatures are `abstract_refinement_misuse` errors: `p` applied to
-  only some of the callback's arguments (this includes the shorthand
-  `a -> b -> Bool[p]`, which applied `p` to the last argument only and was
-  silently inert), `p` on a single slot, one argument at two types, a container
-  that is not entry-shaped, or one `p` at two arities. `Map.filter` does not
+  only some of the callback's arguments, `p` on a single slot (`Assoc(k, v[p])`,
+  fix `Assoc(k[p], v[p])`; this includes `List(Int[p])` under
+  `Int -> Int -> Bool[p]`, which used to apply `p` to the last argument only and
+  was silently inert), one argument at two types, a container that is not
+  entry-shaped, or one `p` at two arities. `(a, a) -> Bool[p]` stays a parse
+  error, whose message now says the tuple is ONE argument and writes
+  `a -> a -> Bool[p]`. `Map.filter` does not
   carry it yet. See "Two arguments" under abstract refinements in the refinement
   types reference.
 - **Refinements: relational element refinements.** A slot predicate may name a

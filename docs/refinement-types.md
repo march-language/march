@@ -2372,11 +2372,12 @@ fn filter(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)})
 - `D -> Bool[p]`, a callback's result, is the *definer*
   `({x : D | true}) -> {Bool | _ == p(x)}`. A domain that already names its
   argument keeps the name (`({v : Int | v > 0}) -> Bool[p]`); a domain refined
-  over `_` must name it, and a callback of several arguments (`(a, a) -> Bool[p]`)
-  cannot define one. Both are parse errors that say so.
-- The shorthand on a curried callback (`a -> b -> Bool[p]`) is an error: it
-  applies `p` to the last argument only, and a callback of two arguments
-  defines a `p` of two. Write the long form (**Two arguments**, below).
+  over `_` must name it. Both are parse errors that say so.
+- On a curried callback, `k -> v -> Bool[p]` defines a `p` of two arguments,
+  `({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}`, and is used
+  as a relation between two sibling slots (**Two arguments**, below). A tuple
+  domain `(a, a) -> Bool[p]` is ONE argument, a tuple, so it defines nothing over
+  the tuple's parts: a parse error that writes the curried chain for you.
 
 So
 with `sum_pos(xs : List({Int | _ > 0}))`:
@@ -2559,22 +2560,38 @@ accumulator: a top-level `partition_go` whose `yes : List(a[p])` and
 are proved on its definition side.
 
 **Two arguments: a relation between sibling slots.** A callback of two arguments defines a `p` of two. In March a two-argument
-callback is a curried chain `D1 -> D2 -> Bool` (a tuple domain `(D1, D2) -> Bool`
-is ONE argument). The definer applies `p` to both domain binders, in order, and
-an occurrence relates two sibling slots of one type application, as a
-[relational element refinement](#relational-element-refinements) does:
+callback is a curried chain `D1 -> D2 -> Bool`, whichever way the combinator
+calls it (a tuple domain `(D1, D2) -> Bool` is ONE argument, a tuple). The
+definer applies `p` to both domain binders, in order, and an occurrence relates
+two sibling slots of one type application, as a
+[relational element refinement](#relational-element-refinements) does. The
+shorthand marks every slot `p` relates, in slot order:
 
 ```march
 type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
 
-fn filt(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)})
-    : Assoc({x : k | true}, {y : v | p(x, y)}) do
+fn filt(a : Assoc(k, v), keep : k -> v -> Bool[p]) : Assoc(k[p], v[p]) do
   match a do
     ANil -> ANil
     ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end
   end
 end
 ```
+
+and means exactly the spelled-out form, which is also accepted:
+
+```march
+fn filt(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)})
+    : Assoc({x : k | true}, {y : v | p(x, y)}) do
+  …
+end
+```
+
+`Assoc(k[p], v[p])` is the relation only because `p` takes two arguments, and
+that is read from the definer in the same signature: with a one-argument `p`
+(`keep : k -> Bool[p]`), `Assoc(k[p], k[p])` is two separate facts, one per slot.
+A domain may name its binder in the chain as for one argument
+(`({x : Int | x > 0}) -> v -> Bool[p]`); two domains may not share one.
 
 The return says: every entry `(x, y)` of the result satisfies `p(x, y)`. Inside
 `filt`, `p` is an uninterpreted function of two arguments and `keep(k, v)` is
@@ -2612,15 +2629,15 @@ The signature is checked (each an error, `abstract_refinement_misuse`, with
 the fix in the message): the definer applies `p` to every binder of its chain,
 once each, in order (`p(y)` under a two-argument callback is an error, and so
 is `p(y, x)`); an occurrence names distinct binders of sibling slots (a single
-slot, `Assoc(k, {v | p(_)})`, is an error); each argument has one type across
+slot, `Assoc(k, v[p])` or `Assoc(k, {v | p(_)})`, is an error whose fix is
+`Assoc(k[p], v[p])`, and so is marking a number of slots other than two); each argument has one type across
 the definer and every occurrence; the container is entry-shaped (every
 constructor holds one `k` and one `v`, or neither); and one `p` has one arity.
 
 Not yet: inside a body, a callback called in two steps (`let g = keep(k)` then
 `g(v)`) gives `g(v)` no fact, so a combinator written that way does not prove
 its relational return, and its calls instantiate nothing. (`keep(k)(v)` is not
-March syntax.) The shorthand `k -> v -> Bool[p]` and `Assoc(k[p], v[p])` is not
-yet read as the two-argument form: today each is one of the errors above.
+March syntax.)
 
 What it does not do (reason `abstract-refinement-uninstantiated` where a
 demand meets one of these):

@@ -38,35 +38,104 @@
      of an abstract refinement, `({x : D | true}) -> {Bool | _ == p(x)}`
      (design 2026-09-20 §1).  A domain that already names its binder keeps it;
      one refined over `_` cannot be referred to, so it is rejected with the
-     fix; a tuple domain is a several-argument callback, which cannot define
-     one (§9.3).  Anything else — including an explicit `{Bool | p(_)}`, which
-     has no marker — is returned unchanged. *)
+     fix; a tuple domain is ONE tuple argument, whose parts it cannot relate (a
+     callback of several arguments is the curried chain below).  Anything
+     else — including an explicit `{Bool | p(_)}`, which has no marker — is
+     returned unchanged. *)
+  (* The generated codomain is MARKED with the binder `Some "_"` (multi-arg
+     design 2026-10-18 §9 phase 3), which a user cannot write, so an outer
+     arrow can recognise a definer this function made and extend its chain:
+     `k -> v -> Bool[p]` is `({$x2 : k | true}) -> ({$x : v | true}) -> {Bool |
+     _ == p($x2, $x)}`, the two-argument definer.  The innermost binder stays
+     `$x`, so a one-argument definer's output is what it always was (only the
+     marker is new; every reader treats `Some "_"` as `None`).  An explicit
+     `{Bool | _ == p(x)}` has no marker and is never extended. *)
+  let marked_definer (t : ty) : (name * expr list * span) option =
+    match t with
+    | TyRefine (TyCon ({ txt = "Bool"; _ }, []), Some { txt = "_"; _ },
+                EApp (EVar { txt = "=="; _ }, [ EVar { txt = "_"; _ }; EApp (EVar p, args, sp) ], _)) ->
+      Some (p, args, sp)
+    | _ -> None
+
+  (* The marked definer at the end of a chain this function built: [cod] is
+     `D2 -> … -> Dn -> <marked>` whose `p` is applied to exactly one binder per
+     arrow walked.  Returns `p` and its arguments so far. *)
+  let rec definer_chain (cod : ty) (depth : int) : (name * expr list) option =
+    match cod with
+    | TyArrow (_, c) ->
+      (match marked_definer c with
+       | Some (p, args, _) when List.length args = depth -> Some (p, args)
+       | Some _ -> None
+       | None -> definer_chain c (depth + 1))
+    | _ -> None
+
+  (* [cod] with its innermost definer's `p` applied to [x] first. *)
+  let rec prepend_definer_arg (x : name) (cod : ty) : ty =
+    match cod with
+    | TyArrow (d, c) ->
+      (match c with
+       | TyRefine (b, m, EApp (eq, [ u; EApp (EVar p, args, sp) ], sp2)) when marked_definer c <> None ->
+         TyArrow (d, TyRefine (b, m, EApp (eq, [ u; EApp (EVar p, EVar x :: args, sp) ], sp2)))
+       | _ -> TyArrow (d, prepend_definer_arg x c))
+    | t -> t
+
   let abstract_definer_arrow (dom : ty) (cod : ty) (pos : Lexing.position) : ty =
+    (* The callback argument [dom] as a definer domain: its binder (the user's,
+       else [synthetic]) and the domain carrying it. *)
+    let bind_domain ?(more = 0) (p : name) (synthetic : string) (sp : span) : name * ty =
+      match dom with
+      | TyTuple [] ->
+        error_raise
+          (Printf.sprintf
+             "`Bool[%s]` defines an abstract refinement from the callback's arguments, and \
+              `()` is no argument to define it over."
+             p.txt)
+          (Some "keep : a -> Bool[p]") pos
+      | TyTuple ts ->
+        (* [cod] prints as the rest of the chain (`Bool[p]`, `v -> Bool[p]`):
+           [show_ty] renders a definer the way it was written. *)
+        let n = List.length ts + more in
+        let part t = match t with TyArrow _ -> "(" ^ show_ty t ^ ")" | t -> show_ty t in
+        error_raise
+          (Printf.sprintf
+             "A tuple domain `%s` is ONE tuple argument, so `Bool[%s]` over it cannot relate \
+              its parts. A callback of %d arguments is curried: write `%s -> %s`."
+             (show_ty dom) p.txt n (String.concat " -> " (List.map part ts)) (show_ty cod))
+          (Some "keep : k -> v -> Bool[p]") pos
+      | TyRefine (_, Some x, _) when x.txt <> "_" -> (x, dom)
+      | TyRefine (_, _, _) ->
+        error_raise
+          "`Bool[p]` needs to name the callback's argument: write the domain as \
+           `{x : T | ...}`."
+          (Some "keep : ({x : Int | x > 0}) -> Bool[p]") pos
+      | d ->
+        let x = { p with txt = synthetic } in
+        (x, TyRefine (d, Some x, ELit (LitBool true, sp)))
+    in
     match cod with
     | TyRefine ((TyCon ({ txt = "Bool"; _ }, []) as b), Some { txt = "_"; _ },
                 EApp (EVar p, [ EVar { txt = "_"; _ } ], sp)) ->
-      let x, dom' =
-        match dom with
-        | TyTuple _ ->
-          error_raise
-            "`Bool[p]` defines an abstract refinement from a ONE-argument callback; \
-             this one takes several."
-            (Some "keep : a -> Bool[p]") pos
-        | TyRefine (_, Some x, _) when x.txt <> "_" -> (x, dom)
-        | TyRefine (_, _, _) ->
-          error_raise
-            "`Bool[p]` needs to name the callback's argument: write the domain as \
-             `{x : T | ...}`."
-            (Some "keep : ({x : Int | x > 0}) -> Bool[p]") pos
-        | d ->
-          let x = { p with txt = "$x" } in
-          (x, TyRefine (d, Some x, ELit (LitBool true, sp)))
-      in
+      let x, dom' = bind_domain p "$x" sp in
       let u = { p with txt = "_" } in
       TyArrow
         ( dom'
         , TyRefine
-            (b, None, EApp (EVar { p with txt = "==" }, [ EVar u; EApp (EVar p, [ EVar x ], sp) ], sp)) )
+            (b, Some u, EApp (EVar { p with txt = "==" }, [ EVar u; EApp (EVar p, [ EVar x ], sp) ], sp)) )
+    | TyArrow _ ->
+      (match definer_chain cod 1 with
+       | Some (p, args) ->
+         let x, dom' =
+           bind_domain ~more:(List.length args) p ("$x" ^ string_of_int (List.length args + 1)) p.span
+         in
+         if List.exists (function EVar y -> y.txt = x.txt | _ -> false) args then
+           error_raise
+             (Printf.sprintf
+                "`Bool[%s]` relates the callback's arguments, so each needs its own name; `%s` \
+                 names two of them."
+                p.txt x.txt)
+             (Some "keep : ({x : Int | x > 0}) -> ({y : Int | y > x}) -> Bool[p]") pos;
+         TyArrow (dom', prepend_definer_arg x cod)
+       | None -> TyArrow (dom, cod))
     | _ -> TyArrow (dom, cod)
 
   (* A replacement fix over one grammar symbol's extent. *)

@@ -7165,6 +7165,15 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(pre_desugar_decls : A.decl list option)
     ?(type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option)
     (errctx : Err.ctx) (m : A.module_) : unit =
+  (* The occurrence sugar `T(k[p], v[p])` of an arity-n abstract refinement is
+     its long form before anything reads a signature (multi-arg design
+     2026-10-18 §9 phase 3).  The identity on a module with no definer of
+     several arguments. *)
+  let m =
+    let ds = Refine_abstract.expand_markers m.A.mod_decls in
+    if List.for_all2 ( == ) ds m.A.mod_decls then m else { m with A.mod_decls = ds }
+  in
+  let pre_desugar_decls = Option.map Refine_abstract.expand_markers pre_desugar_decls in
   call_type_map := type_map;
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
