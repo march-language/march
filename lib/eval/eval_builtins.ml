@@ -3193,6 +3193,23 @@ let base_env : env =
         | [VInt _ssl] -> VCon ("None", [])
         | _ -> eval_error "tls_peer_cn(ssl_handle)"))
 
+  (* tls_ctx_set_groups(ctx_handle, groups) → Ok(Int)|Err(String);
+     tls_negotiated_group(ssl_handle) → Option(String);
+     tls_pq_available() → Bool.  No real TLS in the interpreter: the
+     context stub accepts any list, no handshake ever agreed a group, and
+     there is no OpenSSL to offer the post-quantum group. *)
+  ; ("tls_ctx_set_groups", VBuiltin ("tls_ctx_set_groups", function
+        | [VInt _ctx; VString g] ->
+          if g = "" then VCon ("Err", [VString "set_groups: empty group list"])
+          else VCon ("Ok", [VInt 0])
+        | _ -> eval_error "tls_ctx_set_groups(ctx_handle, groups)"))
+  ; ("tls_negotiated_group", VBuiltin ("tls_negotiated_group", function
+        | [VInt _ssl] -> VCon ("None", [])
+        | _ -> eval_error "tls_negotiated_group(ssl_handle)"))
+  ; ("tls_pq_available", VBuiltin ("tls_pq_available", function
+        | args when args = [] || args = [VUnit] -> VBool false
+        | _ -> eval_error "tls_pq_available: takes no arguments"))
+
   (* ---- Option combinators ---- *)
   ; ("Option.map", VBuiltin ("Option.map", function
         | [VCon ("Some", [v]); f] -> VCon ("Some", [!apply_hook f [v]])

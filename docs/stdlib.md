@@ -617,6 +617,28 @@ end
 
 ---
 
+## TLS
+
+`tls.march`: TLS client and server over TCP descriptors (OpenSSL), used by
+`HttpClient` for HTTPS.
+
+**Post-quantum key exchange is on by default.** Every context offers the
+hybrid group X25519MLKEM768 (X25519 + ML-KEM-768) first, then X25519, P-256,
+P-384 and P-521, so a session with a peer that also supports it cannot be
+decrypted later by someone who records it now and has a quantum computer
+then. This needs OpenSSL 3.5 or later linked into the program; with an older
+OpenSSL the context keeps that library's default groups and every handshake
+still works, classically. Certificates and signatures stay classical.
+
+```march
+Tls.post_quantum_available()            -- Bool: does the linked OpenSSL have ML-KEM?
+Tls.negotiated_group(conn)              -- Some("X25519MLKEM768"), Some("x25519"), ...
+Tls.is_post_quantum(conn)               -- Bool
+Tls.set_groups(ctx, ["X25519MLKEM768"]) -- require PQ; Err if the list is unknown
+```
+
+---
+
 ## File System
 
 `file.march`, `dir.march`, `path.march`:

@@ -1,7 +1,10 @@
 # Post-quantum cryptography: plan
 
-Status: phase 1 landed (2026-10-21, `specs/progress/2026-10-21-post-quantum-crypto-phase1.md`);
-phases 2-3 open (`specs/todos/2026-10-21-post-quantum-crypto-tls-and-cluster.md`).
+Status: phases 1-2 landed (2026-10-21: `specs/progress/2026-10-21-post-quantum-crypto-phase1.md`,
+`specs/progress/2026-10-21-post-quantum-crypto-phase2-tls.md`); phase 3 open
+(`specs/todos/2026-10-21-post-quantum-crypto-cluster.md`). Phase 2 as built detects ML-KEM
+at run time (the group list is tried, and an older OpenSSL keeps its defaults) rather
+than by `OPENSSL_VERSION_NUMBER`.
 
 As built, phase 1 differs from the sketch below in two ways: the modules are top-level
 `MlKem` / `MlDsa` (one module per stdlib file), and every random input is a builtin
