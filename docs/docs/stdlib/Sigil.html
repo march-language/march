@@ -226,6 +226,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="Math.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Math.html">Math</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Membership.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Membership.html">Membership</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Merkle.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Merkle.html">Merkle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlDsa.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlDsa.html">MlDsa</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlKem.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlKem.html">MlKem</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Msgpack.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Msgpack.html">Msgpack</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div></div>
@@ -293,10 +295,81 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="WebSocket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WebSocket.html">WebSocket</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="WorkDispatch.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WorkDispatch.html">WorkDispatch</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Xml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Xml.html">Xml</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Sigil</span></nav><h1>Sigil</h1><div class="mdoc"><p>Sigil module: handlers for sigil expressions (~R, ~J, etc.)</p><p>Most sigils ~X&quot;...&quot; desugar to a call to Sigil.x(content). Handlers receive the interpolated string and return an appropriate type.</p><p>The ~H sigil for HTML templates is special: it desugars directly to IOList.from_strings([...]) with separate segments for static and dynamic parts, avoiding intermediate string concatenation.</p></div><h2>Functions</h2><div class="item" id="fn-h"><div class="ih"><span class="badge bfn">fn</span><span class="name">h</span><span class="sig">h(content : String)</span><a class="anchor-link" href="#fn-h" title="Link">#</a></div><div class="ib"><p>HTML template sigil handler (legacy entry point).</p><p>The ~H sigil now desugars directly to IOList.from_strings([...]) at compile time, producing multi-segment IOLists without an intermediate concatenated string.  This function is retained for backward compatibility with code that calls Sigil.h() explicitly.</p></div></div>
-<div class="item" id="fn-toml"><div class="ih"><span class="badge bfn">fn</span><span class="name">toml</span><span class="sig">toml(content : String)</span><a class="anchor-link" href="#fn-toml" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-xml"><div class="ih"><span class="badge bfn">fn</span><span class="name">xml</span><span class="sig">xml(content : String)</span><a class="anchor-link" href="#fn-xml" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-yaml"><div class="ih"><span class="badge bfn">fn</span><span class="name">yaml</span><span class="sig">yaml(content : String)</span><a class="anchor-link" href="#fn-yaml" title="Link">#</a></div><div class="ib"></div></div></main></div><script>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Sigil</span></nav><h1>Sigil</h1><div class="mdoc"><p>Sigil module: handlers for sigil expressions (~H, ~toml, ~xml, ~yaml).</p><p>Most sigils ~X&quot;...&quot; desugar to a call to Sigil.x(content), with the sigil name lowercased (~toml&quot;...&quot; -&gt; Sigil.toml(&quot;...&quot;)). There is no handler for any other name (e.g. ~R or ~J), so such a sigil fails to resolve. Handlers receive the literal string and return an appropriate type. Interpolation (${...}) into a parsed sigil (~toml, ~xml, ~yaml) is a compile error: the value would be spliced into the source text and could change the parsed structure.</p><p>The ~H sigil for HTML templates is special: it desugars directly to IOList.from_strings([...]) with separate segments for static and dynamic parts, avoiding intermediate string concatenation.</p></div><h2>Functions</h2><div class="item" id="fn-h"><div class="ih"><span class="badge bfn">fn</span><span class="name">h</span><span class="sig">h(content : String)</span><a class="anchor-link" href="#fn-h" title="Link">#</a></div><div class="ib"><p>HTML template sigil handler (legacy entry point).</p><p>The ~H sigil now desugars directly to IOList.from_strings([...]) at compile time, producing multi-segment IOLists without an intermediate concatenated string.  This function is retained for backward compatibility with code that calls Sigil.h() explicitly. It wraps <code>content</code> in a one-segment IOList verbatim: nothing is escaped.</p><h3>Examples</h3><pre data-try="IOList.to_string(Sigil.h(&quot;&lt;p&gt;hi&lt;/p&gt;&quot;))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">IOList</span>.to_string(<span class="tok-ty">Sigil</span>.h(<span class="tok-str">&quot;&lt;p&gt;hi&lt;/p&gt;&quot;</span>))
+<span class="tok-str">&quot;&lt;p&gt;hi&lt;/p&gt;&quot;</span></code></pre></div></div>
+<div class="item" id="fn-toml"><div class="ih"><span class="badge bfn">fn</span><span class="name">toml</span><span class="sig">toml(content : String)</span><a class="anchor-link" href="#fn-toml" title="Link">#</a></div><div class="ib"><p>Handler for <code>~toml&quot;...&quot;</code>: parse <code>content</code> as a TOML document with <code>Toml.parse_exn</code>. Panics with the parse error (and its line and column) on invalid TOML; use <code>Toml.parse</code> for a <code>Result</code>.</p><h3>Examples</h3><pre data-try="Sigil.toml(&quot;a = 1&quot;) == TTable([(&quot;a&quot;, TInt(1))])
+Toml.get(Sigil.toml(&quot;[server]\nport = 8080&quot;), &quot;server&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Sigil</span>.toml(<span class="tok-str">&quot;a = 1&quot;</span>) == <span class="tok-ty">TTable</span>([(<span class="tok-str">&quot;a&quot;</span>, <span class="tok-ty">TInt</span>(<span class="tok-num">1</span>))])
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">Toml</span>.get(<span class="tok-ty">Sigil</span>.toml(<span class="tok-str">&quot;[server]\nport = 8080&quot;</span>), <span class="tok-str">&quot;server&quot;</span>)
+<span class="tok-ty">Some</span>(<span class="tok-ty">TTable</span>([(<span class="tok-str">&quot;port&quot;</span>, <span class="tok-ty">TInt</span>(<span class="tok-num">8080</span>))]))</code></pre></div></div>
+<div class="item" id="fn-xml"><div class="ih"><span class="badge bfn">fn</span><span class="name">xml</span><span class="sig">xml(content : String)</span><a class="anchor-link" href="#fn-xml" title="Link">#</a></div><div class="ib"><p>Handler for <code>~xml&quot;...&quot;</code>: parse <code>content</code> as an XML document with <code>Xml.parse_exn</code>. Panics with the parse error (and its line and column) on malformed XML; use <code>Xml.parse</code> for a <code>Result</code>.</p><h3>Examples</h3><pre data-try="Xml.root(Sigil.xml(&quot;&lt;a&gt;hi&lt;/a&gt;&quot;))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Xml</span>.root(<span class="tok-ty">Sigil</span>.xml(<span class="tok-str">&quot;&lt;a&gt;hi&lt;/a&gt;&quot;</span>))
+<span class="tok-ty">Element</span>(<span class="tok-str">&quot;a&quot;</span>, [], [<span class="tok-ty">Text</span>(<span class="tok-str">&quot;hi&quot;</span>)])</code></pre></div></div>
+<div class="item" id="fn-yaml"><div class="ih"><span class="badge bfn">fn</span><span class="name">yaml</span><span class="sig">yaml(content : String)</span><a class="anchor-link" href="#fn-yaml" title="Link">#</a></div><div class="ib"><p>Handler for <code>~yaml&quot;...&quot;</code>: parse <code>content</code> as a YAML document with <code>Yaml.parse_exn</code>. Panics with the parse error on invalid YAML or an empty document; use <code>Yaml.parse</code> for a <code>Result</code>.</p><h3>Examples</h3><pre data-try="Yaml.get_str(Sigil.yaml(&quot;name: ada&quot;), &quot;name&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Yaml</span>.get_str(<span class="tok-ty">Sigil</span>.yaml(<span class="tok-str">&quot;name: ada&quot;</span>), <span class="tok-str">&quot;name&quot;</span>)
+<span class="tok-ty">Some</span>(<span class="tok-str">&quot;ada&quot;</span>)</code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

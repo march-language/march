@@ -38,6 +38,7 @@ mod GlobalRegistry do
   -- name -> Entry.
   type Names = Names(Map(String, Entry))
 
+  doc "An empty registry: no bindings and no tombstones."
   fn empty() : Names do Names(Map.empty()) end
 
   -- Concurrent-update tiebreak: a total, deterministic order on bindings so
@@ -63,10 +64,15 @@ mod GlobalRegistry do
     end
   end
 
-  -- Fold one binding into the registry, keeping the winner for that name.
-  -- Two copies of the same tombstone (Equal clocks) keep the earlier stamp,
-  -- so a replica re-sent an unstamped or later-stamped copy does not restart
-  -- its expiry.
+  doc """
+  Fold one binding (present or tombstone) for [name] into the registry,
+  keeping the winner: the causally newer clock wins, an older one is
+  ignored, an Equal clock replaces the stored entry, and Concurrent clocks
+  fall to a deterministic tiebreak (higher node_id, then higher creation,
+  then higher pid). Presence plays no part in the order. Two copies of the
+  same tombstone (Equal clocks) keep the earlier `retired_at` stamp, so a
+  re-sent copy does not restart its expiry. An unknown name is simply added.
+  """
   fn observe(reg : Names, name : String, entry : Entry) : Names do
     match reg do
       Names(m) ->
@@ -91,35 +97,47 @@ mod GlobalRegistry do
     if a == 0 do b else if b == 0 do a else if a < b do a else b end end end
   end
 
-  -- Register [name] -> (node_id, pid) at [clock] (the registrant's VectorClock
-  -- after bumping its own entry). Wins only if causally newer / tiebreak.
+  doc """
+  Bind [name] to (node_id, pid) at [clock] for a holder at creation 0, with
+  no recorded registrant. [clock] should be the result of `next_clock`; the
+  binding takes effect only if it wins under the `observe` order, so a
+  causally older clock is silently ignored.
+
+  ## Examples
+
+      let clk = GlobalRegistry.next_clock(reg, "db", "n1")
+      let reg = GlobalRegistry.register(reg, "db", "n1", 42, clk)
+      GlobalRegistry.lookup(reg, "db")    -- Some(("n1", 42))
+  """
   fn register(reg : Names, name : String, node_id : String, pid : Int, clock : VectorClock) : Names do
     register_at(reg, name, node_id, 0, pid, clock)
   end
 
-  -- `register` for a holder at node creation [creation].
+  doc "`register` for a holder at node creation [creation]."
   fn register_at(reg : Names, name : String, node_id : String, creation : Int, pid : Int, clock : VectorClock) : Names do
     register_as(reg, name, node_id, creation, pid, clock, "")
   end
 
-  -- `register_at`, recording the registering certificate's identity.
+  doc "`register_at`, also recording [registrant], the registering node's certificate identity (local bookkeeping only)."
   fn register_as(reg : Names, name : String, node_id : String, creation : Int, pid : Int, clock : VectorClock,
                  registrant : String) : Names do
     observe(reg, name, { node_id: node_id, pid: pid, clock: clock, present: true, creation: creation,
                          registrant: registrant, retired_at: 0 })
   end
 
-  -- The entry for [name], tombstone or not.
+  doc "The stored entry for [name], tombstone or not; `None` if the name was never seen or its tombstone has been collected."
   fn entry(reg : Names, name : String) : Option(Entry) do
     match reg do
       Names(m) -> Map.get(m, name, Map.str_cmp)
     end
   end
 
-  -- The clock a new update to [name] by [node_id] should carry: the name's
-  -- current clock (if any) with [node_id]'s slot bumped. An update made
-  -- after seeing a binding is then causally After it, and wins over it
-  -- without falling to the tiebreak.
+  doc """
+  The clock a new update to [name] by [node_id] should carry: the name's
+  current clock (tombstones included) with [node_id]'s slot bumped, or a
+  fresh clock `{node_id: 1}` for an unknown name. An update made after seeing
+  a binding is then causally After it and wins without the tiebreak.
+  """
   fn next_clock(reg : Names, name : String, node_id : String) : VectorClock do
     match entry(reg, name) do
       None -> VectorClock.increment(VectorClock.new(), node_id)
@@ -127,10 +145,13 @@ mod GlobalRegistry do
     end
   end
 
-  -- Compare-and-delete: tombstone [name] only if its current winner is the
-  -- present binding (node_id, creation, pid). None when it is not ours --
-  -- `unregister` itself tombstones whatever is present, which must never be
-  -- done to another holder's binding.
+  doc """
+  Compare-and-delete: tombstone [name] at [clock] only if its current entry is
+  the present binding (node_id, creation, pid). Returns `None`, leaving the
+  registry alone, when the name is unknown, already tombstoned, or held by
+  anyone else; use this rather than `unregister`, which tombstones whatever is
+  present.
+  """
   fn unregister_own(reg : Names, name : String, node_id : String, creation : Int, pid : Int,
                     clock : VectorClock) : Option(Names) do
     match entry(reg, name) do
@@ -144,9 +165,13 @@ mod GlobalRegistry do
     end
   end
 
-  -- Unregister [name] at [clock]: a tombstone update carrying the prior binding
-  -- (so concurrent register/unregister tiebreak deterministically). No-op if the
-  -- name is unknown.
+  doc """
+  Unregister [name] at [clock]: observe a tombstone that carries the prior
+  binding's holder (so concurrent register/unregister tiebreak
+  deterministically). The tombstone only takes effect if [clock] wins under
+  the `observe` order. Returns the registry unchanged when the name is
+  unknown.
+  """
   fn unregister(reg : Names, name : String, clock : VectorClock) : Names do
     match reg do
       Names(m) ->
@@ -157,7 +182,7 @@ mod GlobalRegistry do
     end
   end
 
-  -- The (node_id, pid) currently bound to [name], or None (absent or tombstoned).
+  doc "The (node_id, pid) currently bound to [name], or `None` when the name is unknown or tombstoned."
   fn lookup(reg : Names, name : String) : Option((String, Int)) do
     match reg do
       Names(m) ->
@@ -168,6 +193,7 @@ mod GlobalRegistry do
     end
   end
 
+  doc "Whether [name] has a present (non-tombstoned) binding."
   fn contains(reg : Names, name : String) : Bool do
     match lookup(reg, name) do
       Some(_) -> true
@@ -180,7 +206,7 @@ mod GlobalRegistry do
     match kv do (n, _e) -> n end
   end
 
-  -- The names with a present (non-tombstoned) binding.
+  doc "The names with a present (non-tombstoned) binding, in unspecified order."
   fn names(reg : Names) : List(String) do
     match reg do
       Names(m) ->
@@ -190,10 +216,10 @@ mod GlobalRegistry do
     end
   end
 
-  -- Count of present bindings (tombstones excluded).
+  doc "The number of present bindings (tombstones excluded). O(n)."
   fn size(reg : Names) : Int do List.length(names(reg)) end
 
-  -- Count of tombstones held.
+  doc "The number of tombstones held. O(n)."
   fn tombstone_count(reg : Names) : Int do
     match reg do
       Names(m) -> List.length(List.filter(Map.entries(m), fn (kv) ->
@@ -225,7 +251,7 @@ mod GlobalRegistry do
     end
   end
 
-  -- CRDT join: observe every binding of [b] into [a].
+  doc "CRDT join: observe every binding of [b], tombstones included, into [a]."
   fn merge(a : Names, b : Names) : Names do
     match b do
       Names(mb) -> Map.fold(mb, a, fn (acc, name, entry) -> observe(acc, name, entry))

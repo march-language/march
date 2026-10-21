@@ -137,6 +137,30 @@ static int ctx_set_min_version(SSL_CTX *ctx, int64_t ver) {
     return SSL_CTX_set_min_proto_version(ctx, v);
 }
 
+/* ── Key-exchange groups ──────────────────────────────────────────────── */
+
+/* Every context offers the hybrid post-quantum group first.  X25519MLKEM768
+ * (X25519 + ML-KEM-768, the IETF hybrid that browsers and OpenSSL >= 3.5
+ * default to) protects the session key against a later quantum attacker who
+ * recorded the traffic; the classical groups after it keep every older peer
+ * working.  An OpenSSL without ML-KEM (< 3.5, or LibreSSL) rejects the whole
+ * list, and then the context keeps that library's own defaults: the same
+ * behaviour as before this was set.  Explicit rather than inherited so that
+ * the PQ group does not depend on which OpenSSL release happens to put it in
+ * its default list, and so tls_pq_available can say whether it is in effect. */
+#define MARCH_TLS_PQ_GROUPS "X25519MLKEM768:X25519:P-256:P-384:P-521"
+
+/* 1 if [groups] was accepted, 0 (error queue cleared, ctx unchanged) if not. */
+static int ctx_try_groups(SSL_CTX *ctx, const char *groups) {
+    if (SSL_CTX_set1_groups_list(ctx, groups) == 1) return 1;
+    ERR_clear_error();
+    return 0;
+}
+
+static void ctx_set_default_groups(SSL_CTX *ctx) {
+    (void)ctx_try_groups(ctx, MARCH_TLS_PQ_GROUPS);
+}
+
 /* ── ALPN server callback ─────────────────────────────────────────────── */
 
 /* arg points to: [unsigned int len][unsigned char wire_buf[len]] */
@@ -192,6 +216,8 @@ void *march_tls_client_ctx(void *ca_file, void *alpn_list,
 
     /* ALPN */
     ctx_set_alpn_protos(ctx, alpn_list);
+
+    ctx_set_default_groups(ctx);
 
     /* Enable session tickets for TLS 1.3 resumption */
     SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
@@ -278,7 +304,36 @@ void *march_tls_server_ctx(void *cert_file, void *key_file, void *ca_file,
 
     SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
 
+    ctx_set_default_groups(ctx);
+
     return make_ok_int((int64_t)(uintptr_t)ctx);
+}
+
+/* Replace a context's key-exchange groups with [groups], an OpenSSL group
+ * list ("X25519MLKEM768:X25519", "X25519", ...).  An unknown name, or one the
+ * linked OpenSSL lacks, is an Err and leaves the context as it was. */
+void *march_tls_ctx_set_groups(int64_t ctx_handle, void *groups) {
+    if (!ctx_handle) return make_err("set_groups: no context");
+    SSL_CTX *ctx = (SSL_CTX *)(uintptr_t)ctx_handle;
+    const char *g = ms_cstr(groups);
+    if (!g || g[0] == '\0') return make_err("set_groups: empty group list");
+    if (SSL_CTX_set1_groups_list(ctx, g) != 1) {
+        const char *e = ossl_error();
+        return make_err(e && e[0] ? e : "set_groups: unsupported group list");
+    }
+    return make_ok_int(0);
+}
+
+/* Whether the linked OpenSSL has the hybrid post-quantum group, i.e. whether
+ * new contexts offer it.  Probed once on a throwaway context. */
+int64_t march_tls_pq_available(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    int ok = ctx ? ctx_try_groups(ctx, "X25519MLKEM768") : 0;
+    if (ctx) SSL_CTX_free(ctx);
+    cached = ok;
+    return ok;
 }
 
 /* ── Handshake ────────────────────────────────────────────────────────── */
@@ -556,6 +611,19 @@ void *march_tls_negotiated_alpn(int64_t ssl_handle) {
     SSL_get0_alpn_selected(ssl, &proto, &proto_len);
     if (!proto || proto_len == 0) return NULL;
     return march_string_lit((const char *)proto, (int64_t)proto_len);
+}
+
+/* The key-exchange group the handshake agreed on, as OpenSSL names it
+ * ("X25519MLKEM768", "x25519", "secp256r1", ...), or NULL before a handshake
+ * or when the library cannot say. */
+void *march_tls_negotiated_group(int64_t ssl_handle) {
+    if (!ssl_handle) return NULL;
+    SSL *ssl = (SSL *)(uintptr_t)ssl_handle;
+    int nid = SSL_get_negotiated_group(ssl);
+    if (nid == 0) return NULL;
+    const char *name = SSL_group_to_name(ssl, nid);
+    if (!name || !name[0]) return NULL;
+    return march_string_lit(name, (int64_t)strlen(name));
 }
 
 void *march_tls_peer_cn(int64_t ssl_handle) {

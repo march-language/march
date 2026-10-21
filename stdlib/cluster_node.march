@@ -300,6 +300,11 @@ mod ClusterNode do
     end
   end
 
+  doc """
+  The node id a node named [name] runs under (`NodeIdentity.name_id`):
+  deterministic, so any node can compute a peer's id from its name. It is
+  what `node_id` answers for a node started with that name.
+  """
   -- A node's id: the hash of its public key (NodeIdentity.derive_id). Every
   -- caller in the stdlib still passes "pk-" ++ name for the key; real keys
   -- are an open question of the design.
@@ -390,6 +395,11 @@ mod ClusterNode do
   type SecurityEvent = HandshakeRejected(String, String) | FrameRejected(String, Int) | RawSendRefused(String, String)
                      | CertReplaced(String, String) | CertRefused(String, String)
 
+  doc """
+  A one-line, human-readable description of security event [ev], for logs:
+  e.g. `HandshakeRejected("10.0.0.2:9100", "bad proof")` gives
+  `"handshake with 10.0.0.2:9100 rejected: bad proof"`.
+  """
   fn security_text(ev : SecurityEvent) : String do
     match ev do
       HandshakeRejected(who, why) -> "handshake with " ++ who ++ " rejected: " ++ why
@@ -400,10 +410,16 @@ mod ClusterNode do
     end
   end
 
+  doc "The `NodeInfo` subscribers see for membership entry [m]: its id, name, address, creation and incarnation."
   fn info_of(m : Member) : NodeInfo do
     { node_id: m.node_id, name: m.name, addr: m.addr, creation: m.creation, incarnation: m.incarnation }
   end
 
+  doc """
+  A one-line description of membership event [ev], naming the node by its
+  name: `"<name> up"`, `"<name> suspect"`, `"<name> dead: <why>"` or
+  `"<name> rejoined"`.
+  """
   fn event_text(ev : NodeEvent) : String do
     match ev do
       NodeUp(i) -> i.name ++ " up"
@@ -475,6 +491,13 @@ mod ClusterNode do
     | Named(String, NameEvent)   -- tell every watcher of this name
     | Unwatch(Int)               -- stop the Down-watcher with this pid
 
+  doc """
+  The pure core's initial state for a node configured by [cfg]: a membership
+  holding only this node (Alive, incarnation 1), no links, an empty registry
+  replica, and those of `cfg.revocations` the operator signed (the rest are
+  dropped). [seed] seeds SWIM's probe-order randomness. Registry sync counts
+  as done at once when `cfg.seeds` is empty.
+  """
   fn core_new(cfg : CnConfig, seed : Int) : CnState do
     let me = node_id_of(cfg.name)
     let self_m = Membership.member(me, cfg.name, cfg.advertise, cfg.creation, Alive, 1)
@@ -499,13 +522,21 @@ mod ClusterNode do
   -- each new one to every linked peer. Only the operator's signature makes
   -- one count, so a member cannot revoke another.
 
+  doc "The REVOCATIONS control-frame tag, 15."
   fn tag_revocations() : Int do 15 end
 
+  doc "Encode [rs] as a REVOCATIONS control frame (msgpack `[15, [bin, ...]]`); the inverse of `decode_revocations`."
   fn encode_revocations(rs : List(NodeCert.SignedRevocation)) : List(Int) do
     Msgpack.encode(Msgpack.array([Msgpack.int(tag_revocations()),
       Msgpack.array(List.map(rs, fn r -> Msgpack.bin(NodeCert.revocation_to_bytes(r))))]))
   end
 
+  doc """
+  The signed revocations in a REVOCATIONS [frame]. Lenient: an entry that
+  does not decode is skipped, and a frame that is not a REVOCATIONS frame
+  gives the empty list. Signatures are NOT checked here
+  (`check_revocation` does that).
+  """
   fn decode_revocations(frame : List(Int)) : List(NodeCert.SignedRevocation) do
     match Msgpack.decode(frame) do
       Ok(Msgpack.Array([Msgpack.Int(15), Msgpack.Array(bins)])) ->
@@ -525,8 +556,12 @@ mod ClusterNode do
     end
   end
 
-  -- Is [r] signed by this cluster's operator? (Shared-secret nodes have no
-  -- operator and accept no revocations.)
+  doc """
+  Is [r] signed by this cluster's operator? `Ok(revocation)` when it
+  verifies against the operator key in `cfg.auth`, else `Err(why)`. Always
+  `Err` on a shared-secret node: it has no operator and accepts no
+  revocations.
+  """
   fn check_revocation(cfg : CnConfig, r : NodeCert.SignedRevocation) : Result(NodeCert.Revocation, String) do
     match operator_key(cfg) do
       None -> Err("this node runs in shared-secret mode; revocations need certificate mode")
@@ -534,6 +569,7 @@ mod ClusterNode do
     end
   end
 
+  doc "The (verified) revocations the core knows, newest first."
   fn core_revocations(st : CnState) : List(NodeCert.Revocation) do List.map(st.revs, fn r -> r.rev) end
 
   doc """
@@ -585,8 +621,10 @@ mod ClusterNode do
   end
 
   doc """
-  The certificate peer [id] presented in its latest verified handshake
-  (certificate mode); what `peer_cert` answers and step 11b checks.
+  Record [cert], the certificate peer [id] presented in its latest verified
+  handshake (certificate mode), replacing any earlier one; what `peer_cert`
+  answers and step 11b checks. `None` (shared-secret mode) leaves [st]
+  unchanged.
   """
   fn core_peer_cert(st : CnState, id : String, cert : Option(NodeCert.Cert)) : CnState do
     match cert do
@@ -620,6 +658,7 @@ mod ClusterNode do
   -- the frame and drops the link when the old certificate expires; the
   -- redial then handshakes under the new one (sessions on it are lost).
 
+  doc "The CERT_UPDATE control-frame tag, 16."
   fn tag_cert_update() : Int do 16 end
 
   -- The proof is bound to the LINK (security review, dd step 12b): it also
@@ -648,6 +687,11 @@ mod ClusterNode do
                  Bytes.from_list(NodeCert.to_bytes(signed)))
   end
 
+  doc """
+  Encode a v2 CERT_UPDATE frame (msgpack `[16, "v2", counter, cert, proof]`)
+  from an already-made [proof]; `sign_cert_update` makes the proof and calls
+  this. The inverse of `decode_cert_update`.
+  """
   fn encode_cert_update(signed : NodeCert.Signed, counter : Int, proof : Bytes) : List(Int) do
     Msgpack.encode(Msgpack.array([Msgpack.int(tag_cert_update()), Msgpack.str("v2"), Msgpack.int(counter),
                                   Msgpack.bin(NodeCert.to_bytes(signed)), Msgpack.bin(Bytes.to_list(proof))]))
@@ -762,8 +806,10 @@ mod ClusterNode do
     end
   end
 
+  doc "Every member in the core's SWIM view, in any status, this node included."
   fn core_members(st : CnState) : List(Member) do Membership.members(st.driver.swim.members) end
 
+  doc "The core's membership entry for node [id], or None if it has never heard of it."
   fn core_member(st : CnState, id : String) : Option(Member) do Membership.get(st.driver.swim.members, id) end
 
   pfn linked_ids(st : CnState) : List(String) do Map.keys(st.links) end
@@ -937,11 +983,6 @@ mod ClusterNode do
         match pair do (dest, bytes) -> Send(dest, bytes) end))
   end
 
-  doc """
-  One tick at [now]: fold the queued SWIM events and step the driver (its
-  actions become control frames to linked peers), derive the member events,
-  and plan the dials this tick allows.
-  """
   -- Expire the registry's tombstones (GlobalRegistry.collect_tombstones), at
   -- most once a minute and at least four times per grace period: each pass
   -- walks the whole registry, and a tombstone outlives its grace by at most
@@ -954,6 +995,14 @@ mod ClusterNode do
     end
   end
 
+  doc """
+  One tick at [now] (unix ms): recheck peers' certificates (dropping expired
+  or revoked ones), fold the queued SWIM events and step the driver (its
+  actions become control frames to linked peers), derive the member events,
+  plan the dials this tick allows, collect expired registry tombstones, send
+  an anti-entropy REGISTRY_SYNC_REQ to the peers due one, and report changes
+  to visible name bindings. Returns the new state and the effects to perform.
+  """
   fn core_tick(st0 : CnState, now : Int) : (CnState, List(CnEffect)) do
     let (st, cert_effs) = core_check_certs(st0, now / 1000)
     let before = st.driver.swim.members
@@ -1262,6 +1311,11 @@ mod ClusterNode do
 
   -- ── names ──────────────────────────────────────────────────────────────
 
+  doc """
+  The visible binding of [name] as last computed by the core (hidden
+  bindings, whose holder is Dead or restarted, give None); the pure
+  counterpart of `lookup`.
+  """
   fn core_lookup(st : CnState, name : String) : Option(GlobalPid.Pid) do
     Map.get(st.vis, name, Map.str_cmp)
   end
@@ -3304,6 +3358,7 @@ mod ClusterNode do
     d.subscribe(on_event)
   end
 
+  doc "Remove the `subscribe` callback with id [id]; an unknown id is a no-op."
   fn unsubscribe(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.unsubscribe(id)
@@ -3427,6 +3482,7 @@ mod ClusterNode do
     d.watch(name, on_event)
   end
 
+  doc "Remove the `watch` callback with id [id] (whatever name it watched); an unknown id is a no-op."
   fn unwatch(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.unwatch(id)
@@ -3460,6 +3516,11 @@ mod ClusterNode do
     d.stale_bindings(())
   end
 
+  doc """
+  A one-line description of name event [ev], naming the holder by node id:
+  `"<name> bound to <node_id>"`, `"<name> unbound"` or
+  `"<name> lost to <node_id>"`.
+  """
   fn name_event_text(ev : NameEvent) : String do
     match ev do
       Bound(n, p) -> n ++ " bound to " ++ p.node_id
@@ -3550,6 +3611,11 @@ mod ClusterNode do
     d.route_session(pid, deliver)
   end
 
+  doc """
+  Remove the route installed under [key] (from `route`, `route_type` or
+  `route_session`); an unknown key is a no-op. Later messages for it find no
+  route (and go back to the sender as DELIVERY_FAILED).
+  """
   fn unroute(c : Cap(ClusterNode.Live), key : String) : () do
     let d = ops(c)
     d.unroute(key)
@@ -3566,6 +3632,7 @@ mod ClusterNode do
     d.on_peer_closed(f)
   end
 
+  doc "Remove the `on_peer_closed` callback with id [id]; an unknown id is a no-op."
   fn off_peer_closed(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.off_peer_closed(id)
@@ -3611,6 +3678,11 @@ mod ClusterNode do
     d.on_session_failed(key, f)
   end
 
+  doc """
+  Remove the `on_session_failed` handler under [key]; an unknown key is a
+  no-op. A later DELIVERY_FAILED for that key's seqs then finds no handler
+  and is dropped.
+  """
   fn off_session_failed(c : Cap(ClusterNode.Live), key : Int) : () do
     let d = ops(c)
     d.off_session_failed(key)
@@ -3627,6 +3699,12 @@ mod ClusterNode do
     d.monitor_remote(target, on_down)
   end
 
+  doc """
+  Cancel the `monitor_remote` of [target] whose ref is [r] (the `Ok` value
+  `monitor_remote` returned): its `on_down` callback is removed here, so a
+  later fire for it is ignored. Local only: no message goes to [target]'s
+  node. An unknown ref is a no-op.
+  """
   fn demonitor_remote(c : Cap(ClusterNode.Live), target : GlobalPid.Pid, r : Int) : () do
     let d = ops(c)
     d.demonitor_remote(target, r)
@@ -3694,10 +3772,11 @@ mod ClusterNode do
   end
 
   doc """
-  May a node that presented [cert] play role [role] of protocol [proto] in
-  [mode] ("offer" or "initiate")? Always Ok on a shared-secret node; on a
-  certificate node, `SessionAP.authorize` against the peer's certificate
-  (None: the peer presented none). What SessionNode's access points check
+  May node [id] play role [role] of protocol [proto] in [mode] ("offer" or
+  "initiate")? Always Ok on a shared-secret node; on a certificate node,
+  `SessionAP.authorize` against [id]'s certificate (this node's own when
+  [id] is this node, else the peer's verified one; `Err` when the peer
+  presented none). What SessionNode's access points check
   when a session forms.
   """
   fn authorize_peer(c : Cap(ClusterNode.Live), id : String, proto : String, role : String,
@@ -3713,15 +3792,21 @@ mod ClusterNode do
   end
 
   doc """
-  Call [f] on every security event: a handshake refused (the peer's
-  certificate did not verify, it runs in the other mode, the wrong secret,
-  ...). Returns an id for `off_security_event`.
+  Call [f] on every security event (see `SecurityEvent`): a handshake
+  refused (the peer's certificate did not verify, it runs in the other mode,
+  the wrong secret, ...), a frame that failed its MAC, a raw send refused,
+  and a certificate replaced or a replacement refused. Returns an id for
+  `off_security_event`.
+
+      let id = ClusterNode.on_security_event(node, fn ev ->
+        println(ClusterNode.security_text(ev)))
   """
   fn on_security_event(c : Cap(ClusterNode.Live), f : SecurityEvent -> Unit) : Int do
     let d = ops(c)
     d.on_security_event(f)
   end
 
+  doc "Remove the `on_security_event` callback with id [id]; an unknown id is a no-op."
   fn off_security_event(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.off_security_event(id)

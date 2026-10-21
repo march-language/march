@@ -11,6 +11,11 @@
 #   hcr             linked by the driver, skipped under --compile-so (hot-reload plane)
 #   unit-test-only  the not-yet-default per-process arena; linked only by C unit-test
 #                   harnesses in test/dune and demo/dune, never by the driver
+#   codec           an optional compression codec (march_compress_zstd.c needs libzstd,
+#                   march_compress_brotli.c libbrotli): the driver compiles it only when
+#                   its library resolves and refuses a program that reaches it otherwise;
+#                   the REPL/JIT .so always builds it (as a stub when the library is
+#                   missing). Named by both driver lists like a core file.
 #   wasm            a separate wasm32 runtime; never linked into a native build
 # jit: `jit` if test/test_helpers.ml's REPL/JIT .so link list must include it, else `-`.
 march_runtime.c              core            jit
@@ -18,6 +23,8 @@ march_scheduler.c            core            jit
 march_reclaim.c              core            jit
 march_extras.c               core            jit
 march_compress.c             core            -
+march_compress_zstd.c        codec           -
+march_compress_brotli.c      codec           -
 march_ctx_escape.c           core            jit
 march_ffi.c                  core            jit
 march_remote_registry.c      core            jit
@@ -43,6 +50,8 @@ march_hcr_identity.c         hcr             -
 march_cap_lattice.c          hcr             -
 tweetnacl.c                  core            jit
 march_nacl.c                 core            jit
+pqc.c                        core            jit
+march_pqc.c                  core            jit
 march_gc.c                   unit-test-only  jit
 march_heap.c                 unit-test-only  jit
 march_message.c              unit-test-only  jit

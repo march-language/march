@@ -46,6 +46,12 @@
 -- `Actor.debug(io)` in `main`; the remote shell has it pre-bound as `debug`).
 --
 -- R8 of specs/plans/2026-09-28-observe-recon-shell-plan.md.
+--
+-- Only the option builders and the formatters are pure; they carry the
+-- runnable examples. Everything that talks to the tracer needs a
+-- `--hot-reload` build and the debug cap, so its examples are plain code.
+--
+-- doc: try
 mod Trace do
   needs Actor.Debug
 
@@ -281,7 +287,8 @@ mod Trace do
   doc """
   Start watching the boundary functions `names` (exact names, as `Recon`'s
   and `forge deploy hot` print them) under `limit`. At most 32 names and 4
-  sessions.
+  sessions. Shorthand for `start_with(c, calls(names), limit)`, so an empty
+  `names` is refused with `BadRequest` (nothing to watch).
 
       match Trace.start(d, ["Billing.charge"], Trace.MaxEvents(10)) do
         Ok(s) -> ...
@@ -293,20 +300,54 @@ mod Trace do
     start_with(c, calls(names), limit)
   end
 
-  doc "Options that watch only the boundary functions `names`."
+  doc """
+  Options that watch only the boundary functions `names`: no actor events
+  and no pids.
+
+  ## Examples
+
+      march> let tc = Trace.calls(["Billing.charge"])
+      march> tc.fns
+      ["Billing.charge"]
+      march> let tc = Trace.calls(["Billing.charge"])
+      march> List.length(tc.events)
+      0
+  """
   fn calls(names : List(String)) : Options do
     { fns: names, events: Nil, pids: Nil }
   end
 
   doc """
   Options that watch actor events of the kinds `kinds` for the actors `pids`
-  (pid indices, as `pid_to_int` gives them; one to eight, all live).
+  (pid indices, as `pid_to_int` gives them; one to eight, all live). No
+  boundary functions. The pids are only checked when the session starts.
+
+  ## Examples
+
+      march> let ta = Trace.actors([Trace.Sent, Trace.Received], [3, 5])
+      march> ta.pids
+      [3, 5]
+      march> let ta = Trace.actors([Trace.Sent, Trace.Received], [3, 5])
+      march> ta.fns
+      []
   """
   fn actors(kinds : List(EventKind), pids : List(Int)) : Options do
     { fns: Nil, events: kinds, pids: pids }
   end
 
-  doc "The same options, also watching the boundary functions `names`."
+  doc """
+  The same options, also watching the boundary functions `names`. The names
+  REPLACE any already in `o` rather than adding to them.
+
+  ## Examples
+
+      march> let tw = Trace.with_calls(Trace.actors([Trace.Sent], [3]), ["Billing.charge"])
+      march> tw.fns
+      ["Billing.charge"]
+      march> let tw = Trace.with_calls(Trace.actors([Trace.Sent], [3]), ["Billing.charge"])
+      march> tw.pids
+      [3]
+  """
   fn with_calls(o : Options, names : List(String)) : Options do
     { o with fns: names }
   end
@@ -327,7 +368,9 @@ mod Trace do
   doc """
   Start a session over `opts` (see `calls`, `actors`, `with_calls`) under
   `limit`. Actor events without pids, or pids without events, are refused;
-  so are more than 8 pids and pids that are not live actors.
+  so are more than 8 pids and pids that are not live actors. A negative limit
+  (`LimitOutOfRange`) or a negative pid (`BadRequest`) is refused before the
+  tracer is asked.
 
       match Trace.start_with(d, Trace.actors([Trace.Sent, Trace.Exited], [pid_to_int(a)]),
                              Trace.MaxEvents(50)) do
@@ -349,7 +392,17 @@ mod Trace do
 
   doc """
   The events recorded since the last drain (at most 1024; `drain_max` takes a
-  bound up to 4096), oldest first, and the session's state.
+  bound up to 4096), oldest first, and the session's state. Boundary calls
+  land in `events`, actor events in `actor_events`. Draining also keeps the
+  session alive: one left undrained for 60 seconds ends itself ("idle").
+  `Err(NoSuchSession)` once it has been stopped or has expired.
+
+      match Trace.drain(d, s) do
+        Ok(b) ->
+          println(Trace.format(b.events))
+          if b.done do println("finished: " ++ unwrap_or(b.why, "")) else () end
+        Err(e) -> println("session gone")
+      end
   """
   fn drain(_c : Cap(Actor.Debug), s : TraceId) : Result(Batch, TraceError) do
     match ask("TRACE_DRAIN local session:" ++ int_to_string(session_id(s))) do
@@ -358,7 +411,12 @@ mod Trace do
     end
   end
 
-  doc "Like `drain`, taking at most `max` events (1..4096)."
+  doc """
+  Like `drain`, taking at most `max` events (1..4096). Events beyond `max`
+  stay queued for the next drain (`queued` in the batch counts them).
+
+      let b = Trace.drain_max(d, s, 4096)
+  """
   fn drain_max(_c : Cap(Actor.Debug), s : TraceId, max : Int) : Result(Batch, TraceError) do
     match ask("TRACE_DRAIN local session:" ++ int_to_string(session_id(s)) ++ " max:" ++ int_to_string(max)) do
       Ok(d) -> Ok(drained_of(d))
@@ -366,7 +424,13 @@ mod Trace do
     end
   end
 
-  doc "Stop the session and free it; events not yet drained are discarded. The final state."
+  doc """
+  Stop the session and free it; events not yet drained are discarded. Returns
+  the final state (`done` true, `why` `Some("stopped")`), or
+  `Err(NoSuchSession)` if it had already ended.
+
+      let _ = Trace.stop(d, s)
+  """
   fn stop(_c : Cap(Actor.Debug), s : TraceId) : Result(Batch, TraceError) do
     match ask("TRACE_STOP local session:" ++ int_to_string(session_id(s))) do
       Ok(d) -> Ok(drained_of(d))
@@ -374,7 +438,18 @@ mod Trace do
     end
   end
 
-  doc "One line per actor event: `<at_ns>ns <kind> pid <pid> [peer <p>] [tag <t>] [<reason>]`."
+  doc """
+  One line per actor event: `<at_ns>ns <kind> pid <pid> [peer <p>] [tag <t>] [<reason>]`,
+  joined with newlines (no trailing one); absent fields are left out. An empty
+  list gives "".
+
+  ## Examples
+
+      march> Trace.format_actor([{ kind: Trace.Sent, pid: 3, peer: Some(5), msg_tag: Some(0), reason: None, epoch: 1, at_ns: 100 }])
+      "100ns sent pid 3 peer 5 tag 0"
+      march> Trace.format_actor([{ kind: Trace.Exited, pid: 5, peer: None, msg_tag: None, reason: Some("crash"), epoch: 1, at_ns: 900 }])
+      "900ns exited pid 5 crash"
+  """
   fn format_actor(events : List(ActorEvent)) : String do
     String.join(List.map(events, fn e ->
       int_to_string(e.at_ns) ++ "ns " ++ kind_word(e.kind) ++ " pid " ++ int_to_string(e.pid)
@@ -396,7 +471,17 @@ mod Trace do
     end
   end
 
-  doc "One line per event: `<at_ns>ns pid <pid> <function> epoch <epoch>`."
+  doc """
+  One line per event: `<at_ns>ns pid <pid> <function> epoch <epoch>`, joined
+  with newlines (no trailing one). An empty list gives "".
+
+  ## Examples
+
+      march> Trace.format([{ caller: 3, fn_name: "Billing.charge", epoch: 1, at_ns: 1500 }, { caller: 4, fn_name: "Billing.refund", epoch: 2, at_ns: 2700 }])
+      "1500ns pid 3 Billing.charge epoch 1\n2700ns pid 4 Billing.refund epoch 2"
+      march> Trace.format([])
+      ""
+  """
   fn format(events : List(CallEvent)) : String do
     String.join(List.map(events, fn e ->
       int_to_string(e.at_ns) ++ "ns pid " ++ int_to_string(e.caller) ++ " " ++ e.fn_name

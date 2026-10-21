@@ -39,6 +39,7 @@ mod NodeQueue do
   needs IO.Mut
   needs IO.NetConnect
 
+  doc "The frame tag of a CREDIT: 11."
   fn tag_credit() : Int do 11 end
 
   -- `BlockSender(timeout_ms)`: the caller BLOCKS until the frame is admitted
@@ -61,12 +62,16 @@ mod NodeQueue do
   type EnqueueError = Backpressure | NoConnection | NotAuthorized
 
   -- ── wire ────────────────────────────────────────────────────────────────
-  -- CREDIT carries the receiver's TOTAL consumed byte count, not a delta,
-  -- so a duplicated or replayed CREDIT never over-credits.
+  doc """
+  A CREDIT frame payload (MessagePack, not yet length-framed) announcing
+  [total_consumed]: the receiver's TOTAL consumed byte count, not a delta,
+  so a duplicated or replayed CREDIT never over-credits.
+  """
   fn encode_credit(total_consumed : Int) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(tag_credit()), Cons(Msgpack.int(total_consumed), Nil))))
   end
 
+  doc "Decode a CREDIT frame payload into its consumed total. `Err` for bytes that are not MessagePack or not a CREDIT."
   fn decode_credit(bytes : List(Int)) : Result(Int, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -403,8 +408,16 @@ mod NodeQueue do
   end
 
   -- ── sender API ──────────────────────────────────────────────────────────
-  -- Start a writer for the data connection [fd] with a byte [budget].
-  -- (`close_fd(q)` later closes the fd through the writer.)
+  doc """
+  Start a writer actor for the data connection [fd] with a byte [budget],
+  and return the queue handle `(writer, fd)` the other functions take. At
+  most [budget] bytes are queued (see the policies) and at most one budget
+  is in flight before the receiver's first CREDIT. One queue per fd: a
+  second `start` on the same fd resets the shared byte counters.
+  (`close_fd(q)` later closes the fd through the writer.)
+
+      let q = NodeQueue.start(peer.data_fd, 1048576)
+  """
   fn start(fd : Int, budget : Int) do
     let w = spawn(Writer)
     let _ = send(w, Configure(fd, budget))
@@ -417,8 +430,12 @@ mod NodeQueue do
   A LOCAL queue: the same writer and admission as `start`, but each frame is
   handed to [sink] (in the writer's turn, in queue order) instead of written
   to a socket. There is no receiver to grant credit, so it is bypassed: the
-  budget is effectively unbounded. The cluster node's loopback link (a node
-  sending to itself, `ClusterNode.queue_for(h, own_id)`) is one.
+  budget is effectively unbounded (2^60 bytes). The cluster node's loopback
+  link (a node sending to itself, `ClusterNode.queue_for(h, own_id)`) is
+  one. Each call allocates a new local id (-2, -3, ...); `close_fd` drops
+  the sink.
+
+      let q = NodeQueue.start_local(fn frame -> handle(frame))
   """
   fn start_local(sink : Bytes -> Unit) do
     let id = -1 - Vault.incr(table(), "local", 1)
@@ -426,8 +443,27 @@ mod NodeQueue do
     start(id, 1152921504606846976)
   end
 
-  -- Queue one frame under [policy]. Synchronous: returns as soon as the
-  -- frame is admitted or refused; the write happens in the writer's turn.
+  doc """
+  Queue one already-framed [frame] (message [seq]) on [q] under [policy].
+  Returns as soon as the frame is admitted or refused (a `BlockSender`
+  call waits up to its timeout); the write happens in the writer's turn,
+  when credit allows. `Ok(())` means admitted, not written.
+
+  The frame is admitted outright when it fits the budget, or when nothing
+  is queued. Otherwise: `DropNew` returns `Err(Backpressure)`; `DropOld`
+  admits it and evicts the oldest queued frames until it fits (see
+  `take_evicted`); `Unbounded` admits it past the budget; `BlockSender(ms)`
+  waits for room, then `Err(Backpressure)` on timeout (the frame is
+  withdrawn) or `Err(NoConnection)` when the queue is closed meanwhile.
+  On a dead or closed connection a frame can still be admitted (`Ok`) but is
+  never written.
+
+      match NodeQueue.enqueue(q, 7, frame, NodeQueue.BlockSender(500)) do
+        Ok(_) -> "queued"
+        Err(NodeQueue.Backpressure) -> "peer too slow"
+        Err(_) -> "connection gone"
+      end
+  """
   fn enqueue(q, seq : Int, frame : Bytes, policy : Policy) : Result((), EnqueueError) do
     match q do
       (w, fd) ->
@@ -467,21 +503,29 @@ mod NodeQueue do
     end
   end
 
-  -- An ACTOR_MSG through the queue: NodeSend's frame, NetFrame-encoded,
-  -- as Bytes. The remote-send path a program should use once it has a
-  -- queue for the peer; NodeSend.cast writes straight to a socket.
+  doc """
+  An ACTOR_MSG for message [seq] to [to] through the queue [q] under
+  [policy]: NodeSend's frame, NetFrame-encoded, as Bytes (`enqueue`). The
+  remote-send path a program should use once it has a queue for the peer;
+  `NodeSend.cast` writes straight to a socket. No certificate-mode raw-send
+  check is made here (ClusterNode makes it before queueing).
+  """
   fn cast(q, seq : Int, to : Pid, type_tag : String, payload : List(Int), policy : Policy) : Result((), EnqueueError) do
     cast_schema(q, seq, to, type_tag, "", payload, policy)
   end
 
-  -- `cast` with the message type's schema hash in the frame (build step 9).
+  doc "`cast` with the message type's schema hash [schema] in the frame (build step 9; `\"\"` for none)."
   fn cast_schema(q, seq : Int, to : Pid, type_tag : String, schema : String, payload : List(Int), policy : Policy) : Result((), EnqueueError) do
     enqueue(q, seq, Bytes.from_list(NetFrame.encode(NodeSend.encode_msg_schema(seq, to, type_tag, schema, payload))), policy)
   end
 
-  -- `close`, and close the connection's fd through its writer (after every
-  -- write queued before this call). For a local queue (`start_local`) the
-  -- sink is dropped instead: nothing is handed to it afterwards.
+  doc """
+  `close`, and close the connection's fd through its writer, in mailbox
+  order: every frame the writer has written before this message is on the
+  wire, and nothing is written after. Frames still waiting for credit are
+  dropped. For a local queue (`start_local`) the sink is dropped instead:
+  nothing is handed to it afterwards. Asynchronous: returns at once.
+  """
   fn close_fd(q) : () do
     match q do
       (w, _) ->
@@ -490,12 +534,22 @@ mod NodeQueue do
     end
   end
 
-  -- Bytes queued and not yet written (the monitoring probe).
+  doc "Bytes queued on [q] and not yet written (the monitoring probe); 0 for a queue never started."
   fn depth(q) : Int do
     match q do (_, fd) -> Vault.get_or(table(), "q" ++ int_to_string(fd), 0) end
   end
 
-  -- Apply a CREDIT frame's total to the writer.
+  doc """
+  Apply a CREDIT frame's [total_consumed] to [q]'s writer: it may now have
+  up to `total_consumed + budget` bytes written in all, and writes what
+  that allows. A total lower than one already applied changes nothing.
+  Asynchronous: returns at once.
+
+      match NodeQueue.decode_credit(frame) do
+        Ok(total) -> NodeQueue.credit(q, total)
+        Err(_) -> ()
+      end
+  """
   fn credit(q, total_consumed : Int) : () do
     match q do
       (w, _) ->
@@ -504,8 +558,12 @@ mod NodeQueue do
     end
   end
 
-  -- The connection is gone (its owner shut it down): stop writing, and
-  -- answer every caller blocked in `BlockSender` with `NoConnection` now.
+  doc """
+  The connection is gone (its owner shut it down): [q]'s writer stops
+  writing, drops what is queued, and answers every caller blocked in
+  `BlockSender` with `NoConnection` now. Later frames are never written. Does not
+  close the fd (see `close_fd`). Asynchronous: returns at once.
+  """
   fn close(q) : () do
     match q do
       (w, _) ->
@@ -514,7 +572,11 @@ mod NodeQueue do
     end
   end
 
-  -- The seqs drop_old has evicted since the last call.
+  doc """
+  The seqs `DropOld` has evicted from [q] since the last call, oldest
+  first, and forget them. Asks the writer (waits up to 5 s); `[]` when it
+  does not answer in time.
+  """
   fn take_evicted(q) : List(Int) do
     match q do
       (w, _) ->
@@ -526,9 +588,13 @@ mod NodeQueue do
   end
 
   -- ── receiver API ────────────────────────────────────────────────────────
-  -- Account [len] consumed bytes from the peer whose control fd is
-  -- [control_fd]; every budget/4 bytes, announce the running total with a
-  -- CREDIT frame. Returns the total consumed so far.
+  doc """
+  The receiver's half: account [len] consumed bytes from the peer whose
+  control connection is [control_fd]. Whenever at least budget/4 bytes have
+  been consumed since the last announcement, send the running total in a
+  CREDIT frame on [control_fd] (a failed write is ignored). Returns the
+  total consumed so far on that connection.
+  """
   fn consumed(control_fd : Int, budget : Int, len : Int) : Int do
     let t = table()
     let total = Vault.incr(t, "c" ++ int_to_string(control_fd), len)

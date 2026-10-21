@@ -10,6 +10,8 @@
 -- HTTPS requests use the certificate-verifying TLS client.  The fd-oriented
 -- APIs deliberately remain plain HTTP only: a raw fd carries no TLS context,
 -- so accepting an HTTPS request there could leak a request in plaintext.
+--
+-- doc: try
 
 mod HttpTransport do
 
@@ -34,11 +36,24 @@ mod HttpTransport do
   end
 
   doc """
-  Open a TCP connection to the request's host:port.
-  Returns Ok(fd) or Err(TransportError).
+  Open a TCP connection to the request's host and port (80 when the
+  request has none). Returns `Ok(fd)`, or `Err(ConnectionRefused(msg))` if
+  the connection fails. The caller owns the fd and must `tcp_close` it.
 
   Refuses https:// requests with `SchemeNotSupported` — use the Tls
   module for TLS-enabled connections.
+
+  ## Examples
+
+      let req = Result.unwrap(Http.get("http://example.com/"))
+      match HttpTransport.connect(req) do
+        Ok(fd) -> HttpTransport.request_on(fd, Http.set_body(req, ""))
+        Err(e) -> Err(e)
+      end
+
+      march> let sreq = Http.set_body(Result.unwrap(Http.get("https://example.com/")), "")
+      march> HttpTransport.connect(sreq)
+      Err(SchemeNotSupported("https:// not supported by HttpTransport; use the Tls module"))
   """
   fn connect(req) do
     match require_plain_http(req) do
@@ -60,11 +75,21 @@ mod HttpTransport do
   doc """
   Send a request and receive the response on an existing fd.
   Does NOT close the connection — caller manages the fd lifetime.
-  Suitable for keep-alive connection reuse.
+  Suitable for keep-alive connection reuse. No `Connection: close` header
+  is added. The response is read with a 1 MiB limit.
+
+  Returns `Ok(Response(...))`, or `SendError` / `RecvError` /
+  `ConnParseError` for a failed send, receive or unparseable response.
 
   Refuses https:// requests with `SchemeNotSupported` even when an fd is
   provided, because this module uses plain `tcp_send_all` that would
   bypass TLS on a TLS-wrapped fd.  Use the Tls module for HTTPS.
+
+  ## Examples
+
+      let r1 = HttpTransport.request_on(fd, users_req)
+      let r2 = HttpTransport.request_on(fd, posts_req)
+      tcp_close(fd)
   """
   fn request_on(fd, req) do
     match require_plain_http(req) do
@@ -101,9 +126,15 @@ mod HttpTransport do
 
   doc """
   Send a request on an existing fd and stream the response body.
-  Calls on_chunk(chunk_string) for each body chunk as it arrives.
-  Returns Ok((status_code, headers, last_chunk_result)) or Err.
-  Does NOT close the connection.
+  Calls `on_chunk(chunk_string)` for each body chunk as it arrives (chunked
+  transfer-encoding frames, or reads of a Content-Length body).
+  Returns `Ok((status_code, headers, ()))`: the values returned by
+  `on_chunk` are discarded. Errors are `SendError` / `RecvError` /
+  `ConnParseError`. Does NOT close the connection.
+
+  ## Examples
+
+      HttpTransport.stream_request_on(fd, req, fn chunk -> println(chunk))
 
   Refuses https:// requests with `SchemeNotSupported`.  Use the Tls
   module for streaming over TLS.
@@ -145,6 +176,12 @@ mod HttpTransport do
     end
   end
 
+  doc """
+  Read chunked-encoding frames from `fd`, calling `on_chunk` on each, until
+  the terminating empty frame. Returns `Ok((status_code, resp_headers, ()))`
+  or `Err(RecvError(msg))`. Used by `stream_request_on` after the headers
+  have been read.
+  """
   fn stream_chunked_body(fd, on_chunk, status_code, resp_headers) do
     match tcp_recv_chunked_frame(fd) do
     Err(msg) -> Err(RecvError(msg))
@@ -156,6 +193,12 @@ mod HttpTransport do
     end
   end
 
+  doc """
+  Read a Content-Length body of `remaining` bytes from `fd`, calling
+  `on_chunk` on each piece received. Stops when `remaining` reaches 0 or the
+  peer closes early (both give `Ok((status_code, resp_headers, ()))`), or
+  returns `Err(RecvError(msg))`. Used by `stream_request_on`.
+  """
   fn stream_fixed_body(fd, remaining, on_chunk, status_code, resp_headers) do
     if remaining == 0 do Ok((status_code, resp_headers, ()))
     else
@@ -229,6 +272,19 @@ mod HttpTransport do
   In js_of_ocaml builds (where `http_fetch_available()` is true) the request
   is routed through a synchronous XHR instead, which handles both http and
   https; the socket path below is skipped.
+
+  Default ports are 80 / 443. The response is read with a 1 MiB limit (plain
+  HTTP also uses a 30 s receive timeout). Errors: `ConnectionRefused` for a
+  failed TCP connect or TLS setup/handshake, `SendError`, `RecvError`, and
+  `ConnParseError` for an unparseable response.
+
+  ## Examples
+
+      let req = Result.unwrap(Http.get("https://example.com/"))
+      match HttpTransport.request(Http.set_body(req, "")) do
+        Ok(resp) -> Http.response_status_code(resp)
+        Err(_) -> 0
+      end
   """
   fn request(req) do
     if http_fetch_available() do
@@ -352,8 +408,16 @@ mod HttpTransport do
   end
 
   doc """
-  Convenience wrapper: parse a URL and send a GET request.
-  Returns a TransportError if the URL is invalid or the request fails.
+  Convenience wrapper: parse a URL and send a GET request (empty body)
+  with `request`. A URL that does not parse gives `Err(ConnParseError(...))`
+  without touching the network; otherwise the result of `request`.
+
+  ## Examples
+
+      HttpTransport.simple_get("http://example.com/")
+
+      march> HttpTransport.simple_get("ftp://example.com/")
+      Err(ConnParseError("invalid scheme: ftp://example.com/"))
   """
   fn simple_get(url) do
     match Http.get(url) do

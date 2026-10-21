@@ -40,32 +40,51 @@ mod Membership do
     end
   end
 
-  -- Observation constructors (origin-less: creation 0, name = id, addr "").
+  doc """
+  An `Alive` observation of [node_id] at [incarnation], origin-less: creation 0, name = [node_id], addr "".
+  """
   fn alive(node_id : String, incarnation : Int) : Member do
     { node_id: node_id, status: Alive, incarnation: incarnation, creation: 0, name: node_id, addr: "" }
   end
+  doc """
+  A `Suspect` observation of [node_id] at [incarnation], origin-less: creation 0, name = [node_id], addr "".
+  """
   fn suspect(node_id : String, incarnation : Int) : Member do
     { node_id: node_id, status: Suspect, incarnation: incarnation, creation: 0, name: node_id, addr: "" }
   end
+  doc """
+  A `Dead` observation of [node_id] at [incarnation], origin-less: creation 0, name = [node_id], addr "".
+  """
   fn dead(node_id : String, incarnation : Int) : Member do
     { node_id: node_id, status: Dead, incarnation: incarnation, creation: 0, name: node_id, addr: "" }
   end
 
-  -- A member with every field given.
+  doc """
+  A member observation with every field given: [name] is the human node name,
+  [addr] its advertised "host:port" ("" when unknown), [creation] its restart
+  counter.
+  """
   fn member(node_id : String, name : String, addr : String, creation : Int,
             status : MemberStatus, incarnation : Int) : Member do
     { node_id: node_id, status: status, incarnation: incarnation, creation: creation, name: name, addr: addr }
   end
 
-  -- [m] with a new status and incarnation, keeping its origin fields.
+  doc """
+  [m] with a new [status] and [incarnation], keeping its node_id, name, addr
+  and creation.
+  """
   fn with_status(m : Member, status : MemberStatus, incarnation : Int) : Member do
     member(m.node_id, m.name, m.addr, m.creation, status, incarnation)
   end
 
-  -- A verdict about [node_id] at [incarnation], carrying the origin fields
-  -- this view already holds for it (so a Suspect/Dead about creation 5 is
-  -- about creation 5, not a creation-0 observation the known member
-  -- outranks). An unknown node gets the origin-less shape.
+  doc """
+  A verdict about [node_id] at [incarnation], carrying the origin fields
+  (name, addr, creation) this view already holds for it, so a Suspect/Dead
+  about creation 5 is about creation 5 rather than a creation-0 observation
+  the known member outranks. An unknown node gets the origin-less shape
+  (creation 0, name = [node_id], addr ""). The view is not modified; pass the
+  result to `observe` to record it.
+  """
   fn verdict(ms : Members, node_id : String, status : MemberStatus, incarnation : Int) : Member do
     match get(ms, node_id) do
       Some(m) -> with_status(m, status, incarnation)
@@ -73,11 +92,18 @@ mod Membership do
     end
   end
 
+  doc "An empty member view."
   fn empty() : Members do Members(Map.empty()) end
+  doc "The number of distinct node ids in the view (members of every status, Dead included)."
   fn size(ms : Members) : Int do match ms do Members(m) -> Map.size(m) end end
+  doc "The current winning observation for [node_id], or `None` if the view has never seen it."
   fn get(ms : Members, node_id : String) : Option(Member) do
     match ms do Members(m) -> Map.get(m, node_id, Map.str_cmp) end
   end
+  doc """
+  Every member in the view, of every status (Dead and Suspect included), in
+  unspecified (hash) order.
+  """
   fn members(ms : Members) : List(Member) do
     match ms do Members(m) -> Map.values(m) end
   end
@@ -99,7 +125,19 @@ mod Membership do
     end
   end
 
-  -- Fold one observation into the view, keeping the winner for that NodeId.
+  doc """
+  Fold one observation into the view, keeping the winner for its node id.
+  The winner is the lexicographic max over (creation, incarnation, severity)
+  with Dead > Suspect > Alive; on a full tie [obs] replaces the stored entry
+  (so its name/addr win). An unknown node id is simply added.
+
+  ## Examples
+
+      let v = Membership.observe(Membership.empty(), Membership.alive("n1", 1))
+      let v = Membership.observe(v, Membership.suspect("n1", 1))   -- same inc: Suspect wins
+      let v = Membership.observe(v, Membership.alive("n1", 0))     -- older inc: ignored
+      -- Membership.get(v, "n1") is Some(suspect("n1", 1))
+  """
   fn observe(ms : Members, obs : Member) : Members do
     match ms do
       Members(m) ->
@@ -111,13 +149,19 @@ mod Membership do
     end
   end
 
-  -- CRDT join of two member views: observe every member of [b] into [a].
+  doc """
+  CRDT join of two member views: every member of [b] is observed into [a].
+  The result keeps, per node id, the winner under the `observe` order, so
+  merging is associative and idempotent and, up to the name/addr of exact
+  ties, commutative.
+  """
   fn merge(a : Members, b : Members) : Members do
     match b do
       Members(mb) -> Map.fold(mb, a, fn (acc, _k, member) -> observe(acc, member))
     end
   end
 
+  doc "The members whose status is `Alive`, in unspecified (hash) order."
   fn alive_members(ms : Members) : List(Member) do
     List.filter(members(ms), fn m ->
       match m.status do

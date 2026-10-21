@@ -657,9 +657,19 @@ mod SessionNode do
     end
   end
 
-  -- Run the continuation installed on [ep] with [msg] from [from], then drain
-  -- whatever the new continuation is now willing to take. A delivery nobody
-  -- expects yet is parked, not dropped.
+  doc """
+  Deliver [msg] from role [from] to local endpoint [ep]: run the
+  continuation installed on [ep] with it, then drain whatever parked
+  messages the new continuation is now willing to take. Returns [ep].
+
+  A delivery nobody expects yet (no continuation installed, the installed
+  one waits on a different role, or an older message from the same sender is
+  still parked) is parked, not dropped. If [ep] has already closed or been
+  cancelled the message is discarded, except on a drained endpoint, where it
+  goes back to its sender. Normally called from the party's endpoint actor
+  when a "SessionNode.Deliver" frame arrives; it must run in that actor's
+  turn.
+  """
   fn deliver(p : Party, ep : Int, from : Int, msg : Bytes) : Int do
     let want = Vault.get_or(p.waiting, ekey(ep), 0)
     if ep_done(p) do
@@ -1672,6 +1682,12 @@ mod SessionNode do
   --   own certificate does not let it offer [role].
   type RunError = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String) | NoOffer(Int, String) | AlreadyOffered(Int) | Unauthorized(Int, String)
 
+  doc """
+  A one-line, human-readable description of [e], prefixed
+  `"session_node: "`, with roles shown as their numbers (see
+  `run_error_message_named` for role names). For example
+  `Connect(2, "refused")` gives `"session_node: connect to role 2: refused"`.
+  """
   fn run_error_message(e : RunError) : String do
     run_error_message_named(e, fn i -> int_to_string(i))
   end
@@ -1705,6 +1721,7 @@ mod SessionNode do
     List.filter(peers, fn r -> r > my_role)
   end
 
+  doc "The first entry in [addrs] for [role], or `None` if it has none."
   fn addr_of(addrs : List(Addr), role : Int) : Option(Addr) do
     List.find(addrs, fn a -> a.role == role)
   end
@@ -2099,6 +2116,99 @@ mod SessionNode do
 
   pfn role_name(session : String, role : Int) : String do
     "session:" ++ session ++ "/" ++ int_to_string(role)
+  end
+
+  -- The protocol fingerprint rides the registry as a second name beside the
+  -- role's, "session:<sid>/<role>#<fingerprint>", bound to the same endpoint:
+  -- a registry binding carries a pid and nothing else, and `cluster_<Role>`
+  -- has no hello of its own to put it in (todo 2026-09-21, the cluster half
+  -- of 2026-09-21-protocol-fingerprint-payload-definitions). Registered
+  -- BEFORE the role's own name, so a peer that found the role finds this
+  -- too, or does shortly after (`check_peer_fingerprints` waits a little).
+  pfn fingerprint_name(session : String, role : Int, fingerprint : String) : String do
+    role_name(session, role) ++ "#" ++ fingerprint
+  end
+
+  -- The fingerprint role [role] of [session] registered, if any.
+  pfn peer_fingerprint(node : Cap(ClusterNode.Live), session : String, role : Int) : Option(String) do
+    let prefix = role_name(session, role) ++ "#"
+    let n = String.byte_size(prefix)
+    match List.find(ClusterNode.names(node), fn nm -> String.starts_with(nm, prefix)) do
+      Some(nm) -> Some(String.slice_bytes(nm, n, String.byte_size(nm) - n))
+      None -> None
+    end
+  end
+
+  doc """
+  Whether every peer in [found] registered the fingerprint [mine]: the
+  `cluster_<Role>` counterpart of `hello_verdict`. `""` checks nothing (an
+  access point's session: its Invite already carried the fingerprint, and
+  its compatibility table may admit a different one). A peer that registered
+  none within [left] ms was built before the check and is refused, as a
+  hello with no fingerprint is. `Err((role, why))` names the first peer
+  refused.
+  """
+  pfn check_peer_fingerprints(node : Cap(ClusterNode.Live), session : String, found : List((Int, GlobalPid.Pid)),
+                              mine : String, left : Int) : Result((), (Int, String)) do
+    if mine == "" do Ok(())
+    else
+      let bad = List.find(found, fn rg ->
+        match rg do (r, _g) -> peer_fingerprint(node, session, r) != Some(mine) end)
+      match bad do
+        None -> Ok(())
+        Some((r, _g)) ->
+          match peer_fingerprint(node, session, r) do
+            Some(theirs) ->
+              Err((r, "role " ++ int_to_string(r) ++ "'s node was built from a DIFFERENT version of the "
+                      ++ "protocol (fingerprint " ++ mine ++ " here, " ++ theirs ++ " there). Rebuild both "
+                      ++ "from the same source."))
+            None ->
+              if left <= 0 do
+                Err((r, "role " ++ int_to_string(r) ++ "'s endpoint registered no protocol fingerprint, so "
+                        ++ "its node was built before cluster sessions carried one; the two sides cannot be "
+                        ++ "shown to run the same protocol. Rebuild both from the same source."))
+              else
+                sleep_ms(50)
+                check_peer_fingerprints(node, session, found, mine, left - 50)
+              end
+          end
+      end
+    end
+  end
+
+  -- Unregister role [me]'s names: the role's own, its fingerprint's, and
+  -- its refusal marker (`linger_refused`).
+  pfn unregister_role(node : Cap(ClusterNode.Live), me : String, fingerprint : String) : () do
+    ClusterNode.unregister(node, me)
+    if fingerprint == "" do ()
+    else
+      ClusterNode.unregister(node, me ++ "#" ++ fingerprint)
+      ClusterNode.unregister(node, me ++ "!refused")
+    end
+  end
+
+  -- Having refused role [r] on its fingerprint, keep this role's names for
+  -- up to [left] ms before tearing down, so that [r] finds them and makes
+  -- the same check. Without it, a party that found its peer first refused
+  -- and unregistered before the peer's registry ever showed it, and the
+  -- peer waited out `find_peers`' 30 s for "no endpoint registered" instead
+  -- of reporting the skew. "<me>!refused" says this role has refused: the
+  -- peer, refusing in turn, stops waiting the moment it sees it, so two
+  -- checking parties do not each wait out the other. Ends early once [r]'s
+  -- role name is gone (it refused and left) or [r] has refused too.
+  pfn linger_refused(node : Cap(ClusterNode.Live), p : Party, me : String, session : String, r : Int, left : Int) : () do
+    let _ = ClusterNode.register(node, me ++ "!refused", p.ep)
+    linger_wait(node, role_name(session, r), left)
+  end
+
+  pfn linger_wait(node : Cap(ClusterNode.Live), peer : String, left : Int) : () do
+    if left <= 0 do ()
+    else if Option.is_none(ClusterNode.lookup(node, peer)) do ()
+    else if Option.is_some(ClusterNode.lookup(node, peer ++ "!refused")) do ()
+    else
+      sleep_ms(50)
+      linger_wait(node, peer, left - 50)
+    end end end
   end
 
   -- Report [role] ended to the endpoint actor, once.
@@ -2523,12 +2633,21 @@ mod SessionNode do
   to 30 s), then [body] drives it exactly as for `run`. A peer is gone when
   it closes or is cancelled, or when its node's data connection ends --
   SWIM declared the node dead ("node <name> dead: <cause>") or the
-  connection was lost. Every role must be on a different node. The generated
-  `<P>_Run.cluster_<Role>` supplies the role and its peers.
+  connection was lost. Every role must be on a different node.
+
+  [fingerprint] is the protocol's (`<P>_Msg.role_fingerprint(role)`): each
+  role registers it beside its endpoint, and a peer that registered a
+  different one, or none (a node built before the check), is refused with
+  `Err(Connect(role, why))` before the session forms, as the direct runner
+  refuses it at the hello. `""` checks nothing. The generated
+  `<P>_Run.cluster_<Role>` supplies the role, its peers and the fingerprint.
   """
   fn run_cluster(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
-                 on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
-    counted(node, fn () -> run_cluster_with(io, node, my_role, peers, session, on_close, body, fn _ -> false, no_holder_check))
+                 fingerprint : String, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
+      : Result(Session.Outcome, RunError) do
+    counted(node, fn () ->
+      run_cluster_party(io, node, my_role, peers, session, fingerprint, on_close, fn (_p, s) -> body(s), fn _ -> false,
+                        no_holder_check))
   end
 
   doc """
@@ -2576,7 +2695,7 @@ mod SessionNode do
   pfn run_cluster_with(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                        on_close : Int -> Unit, body : Cap(Session.Live) -> Unit, abandoned : Int -> Bool,
                        holder_ok : Int -> String -> Result((), String)) : Result(Session.Outcome, RunError) do
-    run_cluster_party(io, node, my_role, peers, session, on_close, fn (_p, s) -> body(s), abandoned, holder_ok)
+    run_cluster_party(io, node, my_role, peers, session, "", on_close, fn (_p, s) -> body(s), abandoned, holder_ok)
   end
 
   doc """
@@ -2587,15 +2706,16 @@ mod SessionNode do
   [cancel] a cancellation, `(s, role, cause, ep)`. The host is monitored:
   its `Down` ends the session with `Err(HostGone(ep))`. The generated
   `<P>_Run.cluster_hosted_<Role>` supplies the role and its peers and adds
-  the session id to every callback.
+  the session id to every callback. [fingerprint] is checked as for
+  `run_cluster`.
   """
   fn run_cluster_hosted(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
-                        on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
+                        fingerprint : String, on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                         deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                         cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Session.Outcome, RunError) do
     counted(node, fn () ->
-      run_cluster_hosted_with(io, node, my_role, peers, session, on_close, host, start, deliver, cancel, fn _ -> false,
-                              no_holder_check))
+      run_cluster_party(io, node, my_role, peers, session, fingerprint, on_close,
+                        fn (p, s) -> host_party(p, s, host, start, deliver, cancel), fn _ -> false, no_holder_check))
   end
 
   -- `run_cluster_hosted`, abandoned while still finding its peers once
@@ -2607,14 +2727,14 @@ mod SessionNode do
                               cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit,
                               abandoned : Int -> Bool, holder_ok : Int -> String -> Result((), String))
       : Result(Session.Outcome, RunError) do
-    run_cluster_party(io, node, my_role, peers, session, on_close,
+    run_cluster_party(io, node, my_role, peers, session, "", on_close,
                       fn (p, s) -> host_party(p, s, host, start, deliver, cancel), abandoned, holder_ok)
   end
 
   -- The cluster runner proper: form the party under [session], then [drive]
   -- it (a callback body, or a hosted party's setup) and serve it to its end.
   pfn run_cluster_party(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
-                        on_close : Int -> Unit, drive : Party -> Cap(Session.Live) -> Unit,
+                        fingerprint : String, on_close : Int -> Unit, drive : Party -> Cap(Session.Live) -> Unit,
                         abandoned : Int -> Bool, holder_ok : Int -> String -> Result((), String))
       : Result(Session.Outcome, RunError) do
     let p0 = party(my_role, ClusterNode.node_id(node), on_close)
@@ -2622,7 +2742,19 @@ mod SessionNode do
     let slot = Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep)))
     let route_key = ClusterNode.route_session(node, pid_to_int(p0.ep), fn d -> cluster_frame(slot, p0, session, d))
     let me = role_name(session, my_role)
-    match ClusterNode.register(node, me, p0.ep) do
+    let fp_ok = if fingerprint == "" do Ok(())
+                else ClusterNode.register(node, fingerprint_name(session, my_role, fingerprint), p0.ep) end
+    let registered = match fp_ok do
+      Err(e) -> Err(e)
+      Ok(_) ->
+        match ClusterNode.register(node, me, p0.ep) do
+          Err(e) ->
+            if fingerprint == "" do () else ClusterNode.unregister(node, fingerprint_name(session, my_role, fingerprint)) end
+            Err(e)
+          Ok(u) -> Ok(u)
+        end
+    end
+    match registered do
       Err(_) ->
         ClusterNode.unroute(node, route_key)
         end_party(p0)
@@ -2641,7 +2773,7 @@ mod SessionNode do
                           "session " ++ session ++ ": " ++ (if missing == 0 do "withdrawn by its initiator"
                                                             else "no endpoint registered for role " ++ int_to_string(missing) end))
             ClusterNode.unroute(node, route_key)
-            ClusterNode.unregister(node, me)
+            unregister_role(node, me, fingerprint)
             ClusterNode.off_session_failed(node, skey)
             end_party(p0)
             close_cluster_party(p0, slot)
@@ -2658,12 +2790,20 @@ mod SessionNode do
             -- the peers that had already found this endpoint formed and
             -- waited on it for ever (specs/progress/2026-10-12-cert-mode-
             -- offer-to-offer-session-hang.md).
-            let linked = match cluster_links(node, found0, 30000) do
-              Err(missing) -> Err((missing, "no link to role " ++ int_to_string(missing) ++ "'s node"))
-              Ok(ls) ->
-                match check_holders(found0, holder_ok) do
-                  Err(e) -> Err(e)
-                  Ok(_) -> Ok(ls)
+            -- The protocol fingerprint first: a peer from another version of
+            -- the protocol is refused before anything is linked or sent.
+            let linked = match check_peer_fingerprints(node, session, found0, fingerprint, 2000) do
+              Err((r, why)) ->
+                linger_refused(node, p0, me, session, r, 2000)
+                Err((r, why))
+              Ok(_) ->
+                match cluster_links(node, found0, 30000) do
+                  Err(missing) -> Err((missing, "no link to role " ++ int_to_string(missing) ++ "'s node"))
+                  Ok(ls) ->
+                    match check_holders(found0, holder_ok) do
+                      Err(e) -> Err(e)
+                      Ok(_) -> Ok(ls)
+                    end
                 end
             end
             match linked do
@@ -2673,7 +2813,7 @@ mod SessionNode do
                 -- would wait for ever.
                 abandon_found(node, p0, found0, "session " ++ session ++ ": " ++ why)
                 ClusterNode.unroute(node, route_key)
-                ClusterNode.unregister(node, me)
+                unregister_role(node, me, fingerprint)
                 ClusterNode.off_session_failed(node, skey)
                 end_party(p0)
                 close_cluster_party(p0, slot)
@@ -2706,7 +2846,7 @@ mod SessionNode do
                 ClusterNode.off_peer_closed(node, closer)
                 ClusterNode.off_session_failed(node, skey)
                 ClusterNode.unroute(node, route_key)
-                ClusterNode.unregister(node, me)
+                unregister_role(node, me, fingerprint)
                 end_party(p)
                 let r = run_result(p, my_role)
                 close_cluster_party(p, slot)

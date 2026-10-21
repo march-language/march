@@ -322,7 +322,7 @@ fn Bytes.get(b : '_, i : '_) : '_ =
 let v : '_ = string_byte_at(s, i) in
 let $t81 : '_ = <(v, 0) in
 case $t81 of
-  True() -> __panic_site("stdlib/bytes.march", 110);
+  True() -> __panic_site("stdlib/bytes.march", 180);
 panic("Bytes.get: index out of bounds")
   _ -> v
   _ -> panic("non-exhaustive pattern match")
@@ -646,7 +646,7 @@ fn List.head(xs : List('a)) : 'a =
   case xs of
   Cons($f288, $f289) -> let h : '_ = $f288 in
 h
-  Nil() -> __panic_site("stdlib/list.march", 107);
+  Nil() -> __panic_site("stdlib/list.march", 130);
 panic("List.head: empty list")
   _ -> panic("non-exhaustive pattern match")
 
@@ -674,7 +674,7 @@ fn List.is_empty(xs : List('a)) : Bool =
 ## List.last
 fn List.last(xs : List('a)) : 'a =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 138);
+  Nil() -> __panic_site("stdlib/list.march", 199);
 panic("List.last: empty list")
   Cons($f312, $f313) -> case $f313 of
   Nil() -> let x : '_ = $f312 in
@@ -705,7 +705,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 815);
+  Nil() -> __panic_site("stdlib/list.march", 1183);
 panic("List.maximum_int: empty list")
   Cons($f755, $f756) -> let t : '_ = $f756 in
 let h : '_ = $f755 in
@@ -723,7 +723,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 801);
+  Nil() -> __panic_site("stdlib/list.march", 1162);
 panic("List.minimum_int: empty list")
   Cons($f742, $f743) -> let t : '_ = $f743 in
 let h : '_ = $f742 in
@@ -733,7 +733,7 @@ go(t, h)
 ## List.nth
 fn List.nth(xs : List('a), n : Int) : 'a =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 155);
+  Nil() -> __panic_site("stdlib/list.march", 223);
 panic("List.nth: index out of bounds")
   Cons($f324, $f325) -> let t : '_ = $f325 in
 let h : '_ = $f324 in
@@ -947,7 +947,7 @@ fn List.tail(xs : List('a)) : List('a) =
   case xs of
   Cons($f294, $f295) -> let t : '_ = $f295 in
 t
-  Nil() -> __panic_site("stdlib/list.march", 115);
+  Nil() -> __panic_site("stdlib/list.march", 148);
 panic("List.tail: empty list")
   _ -> panic("non-exhaustive pattern match")
 

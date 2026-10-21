@@ -34,6 +34,8 @@
 --   "notify:" matches exactly "notify:"
 --
 -- See also: channel_server.march (runtime loop), presence.march.
+--
+-- doc: try
 
 mod Channel do
 
@@ -53,32 +55,92 @@ mod Channel do
     String                -- join_ref
   )
 
-  doc "Return the topic of a socket."
+  doc """
+  The topic the socket joined, e.g. `"room:lobby"`.
+
+  ## Examples
+
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.socket_topic(sock)
+      "room:lobby"
+  """
   fn socket_topic(sock) do
     match sock do | Socket(t, _, _, _, _) -> t end
   end
 
-  doc "Return the channel pid of a socket."
+  doc """
+  The pid of the channel process (green thread) serving this join.
+
+  ## Examples
+
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.socket_channel_pid(sock)
+      10
+  """
   fn socket_channel_pid(sock) do
     match sock do | Socket(_, cp, _, _, _) -> cp end
   end
 
-  doc "Return the transport pid of a socket."
+  doc """
+  The pid of the transport (WebSocket frame loop) the socket belongs to.
+
+  ## Examples
+
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.socket_transport_pid(sock)
+      11
+  """
   fn socket_transport_pid(sock) do
     match sock do | Socket(_, _, tp, _, _) -> tp end
   end
 
-  doc "Return the assigns list of a socket."
+  doc """
+  The socket's assigns as `(key, value)` pairs, most recently assigned
+  first. A key assigned twice appears twice (the newer pair first).
+
+  ## Examples
+
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.socket_assigns(sock)
+      []
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.socket_assigns(Channel.assign(Channel.assign(sock, "user", "alice"), "role", "admin"))
+      [("role", "admin"), ("user", "alice")]
+  """
   fn socket_assigns(sock) do
     match sock do | Socket(_, _, _, a, _) -> a end
   end
 
-  doc "Return the join_ref of a socket."
+  doc """
+  The `ref` of the client's original join message, which replies on this
+  channel echo back as `join_ref`.
+
+  ## Examples
+
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.socket_join_ref(sock)
+      "0"
+  """
   fn socket_join_ref(sock) do
     match sock do | Socket(_, _, _, _, jr) -> jr end
   end
 
-  doc "Look up a value in socket assigns by key. Returns Some(val) or None."
+  doc """
+  The value most recently assigned to `key`, as `Some(value)`, or `None`
+  when the key was never assigned. O(number of assigns).
+
+  ## Examples
+
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.get_assign(Channel.assign(sock, "user", "alice"), "user")
+      Some("alice")
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.get_assign(Channel.assign(Channel.assign(sock, "user", "alice"), "user", "bob"), "user")
+      Some("bob")
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.get_assign(sock, "user")
+      None
+  """
   fn get_assign(sock, key) do
     fn find(pairs) do
       match pairs do
@@ -90,7 +152,17 @@ mod Channel do
     find(socket_assigns(sock))
   end
 
-  doc "Assign a key-value pair to the socket. Returns an updated socket."
+  doc """
+  Return a socket with `key` set to `value` (both Strings). The pair is
+  prepended, so it shadows any earlier value for the same key; the old pair
+  stays in `socket_assigns`.
+
+  ## Examples
+
+      march> let sock = Channel.new_socket("room:lobby", 10, 11, "0")
+      march> Channel.get_assign(Channel.assign(sock, "user", "alice"), "user")
+      Some("alice")
+  """
   fn assign(sock, key, value) do
     match sock do
     Socket(t, cp, tp, a, jr) ->
@@ -98,7 +170,15 @@ mod Channel do
     end
   end
 
-  doc "Create a new socket with the given topic, channel pid, transport pid."
+  doc """
+  A socket for one channel join on `topic`, served by `channel_pid` over
+  `transport_pid`, with no assigns and the given `join_ref`.
+
+  ## Examples
+
+      march> Channel.socket_topic(Channel.new_socket("room:42", 1, 2, "7"))
+      "room:42"
+  """
   fn new_socket(topic, channel_pid, transport_pid, join_ref) do
     Socket(topic, channel_pid, transport_pid, Nil, join_ref)
   end
@@ -111,17 +191,41 @@ mod Channel do
   --   Stop(reason, state)           — close this channel with a reason string
   type HandleResult(a) = Reply(String, String, a) | NoReply(a) | Stop(String, a)
 
-  doc "Construct a Reply result: reply to the client with status and JSON payload."
+  doc """
+  `Reply(status, payload, st)`: reply to the client's ref with `status`
+  (conventionally `"ok"` or `"error"`) and the JSON `payload`, and continue
+  with state `st`.
+
+  ## Examples
+
+      march> Channel.reply("ok", "{}", 5)
+      Reply("ok", "{}", 5)
+  """
   fn reply(status, payload, st) do
     Reply(status, payload, st)
   end
 
-  doc "Construct a NoReply result: no response to the client."
+  doc """
+  `NoReply(st)`: send nothing back to the client and continue with `st`.
+
+  ## Examples
+
+      march> Channel.noreply(5)
+      NoReply(5)
+  """
   fn noreply(st) do
     NoReply(st)
   end
 
-  doc "Construct a Stop result: close the channel."
+  doc """
+  `Stop(reason, st)`: close this channel with `reason`; `st` is the final
+  state handed to the leave callback.
+
+  ## Examples
+
+      march> Channel.stop("kicked", 5)
+      Stop("kicked", 5)
+  """
   fn stop(reason, st) do
     Stop(reason, st)
   end
@@ -129,18 +233,24 @@ mod Channel do
   -- ── Push / broadcast helpers ───────────────────────────────────────────────
 
   doc """
-  Push a message directly to this client only.
-  Sends an actor message to the transport pid: Push(event, payload).
+  Push a message directly to this client only: casts
+  `ChannelPush(event, payload)` to the socket's transport pid. Fire and
+  forget; returns whatever `actor_cast` returns.
   Requires actor runtime.
+
+      Channel.push(sock, "new_msg", "{\"body\":\"hi\"}")
   """
   fn push(sock, event, payload) do
     actor_cast(socket_transport_pid(sock), ChannelPush(event, payload))
   end
 
   doc """
-  Broadcast event+payload to ALL subscribers of the socket's topic (including self).
-  Routes through the PubSub shard.
+  Broadcast event+payload to ALL subscribers of the socket's topic (including
+  self). Casts `ChannelBroadcast(topic, event, payload)` to the socket's own
+  channel pid, whose loop is expected to route it through the PubSub shard.
   Requires actor runtime.
+
+      Channel.broadcast(sock, "new_msg", "{\"body\":\"hi\"}")
   """
   fn broadcast(sock, event, payload) do
     actor_cast(socket_channel_pid(sock),
@@ -149,8 +259,12 @@ mod Channel do
 
   doc """
   Broadcast event+payload to all subscribers of the socket's topic EXCEPT the
-  sender (this channel process).
+  sender (this channel process). Casts
+  `ChannelBroadcastFrom(topic, channel_pid, event, payload)` to the socket's
+  own channel pid.
   Requires actor runtime.
+
+      Channel.broadcast_from(sock, "typing", "{}")
   """
   fn broadcast_from(sock, event, payload) do
     actor_cast(socket_channel_pid(sock),
@@ -202,17 +316,40 @@ mod Channel do
   --   handler  — the name of the channel handler module (as a string)
   type ChannelRoute = ChannelRoute(String, String)
 
-  doc "Construct a ChannelRoute. Pattern may end in '*' for prefix matching."
+  doc """
+  A route sending topics that match `pattern` to the handler named
+  `handler_name`. A pattern ending in `*` matches by prefix at a segment
+  boundary (see `PubSub.topic_matches`); any other pattern matches exactly.
+
+  ## Examples
+
+      march> Channel.route_pattern(Channel.channel_route("room:*", "RoomChannel"))
+      "room:*"
+  """
   fn channel_route(pattern, handler_name) do
     ChannelRoute(pattern, handler_name)
   end
 
-  doc "Return the pattern part of a ChannelRoute."
+  doc """
+  The topic pattern of a route.
+
+  ## Examples
+
+      march> Channel.route_pattern(Channel.channel_route("notify:user", "NotifyChannel"))
+      "notify:user"
+  """
   fn route_pattern(r) do
     match r do | ChannelRoute(p, _) -> p end
   end
 
-  doc "Return the handler name part of a ChannelRoute."
+  doc """
+  The handler module name of a route.
+
+  ## Examples
+
+      march> Channel.route_handler(Channel.channel_route("room:*", "RoomChannel"))
+      "RoomChannel"
+  """
   fn route_handler(r) do
     match r do | ChannelRoute(_, h) -> h end
   end
@@ -228,32 +365,80 @@ mod Channel do
   --   payload  — JSON-encoded payload string
   type ChannelMsg = ChannelMsg(String, String, String, String, String)
 
-  doc "Construct a ChannelMsg."
+  doc """
+  A wire message from its five fields, in wire order: `join_ref`, `ref`,
+  `topic`, `event`, `payload` (a JSON value as text).
+
+  ## Examples
+
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
+      march> Channel.msg_event(cm)
+      "new_msg"
+  """
   fn make_msg(join_ref, ref, topic, event, payload) do
     ChannelMsg(join_ref, ref, topic, event, payload)
   end
 
-  doc "Return the join_ref of a ChannelMsg."
+  doc """
+  The `join_ref` field of a message.
+
+  ## Examples
+
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
+      march> Channel.msg_join_ref(cm)
+      "0"
+  """
   fn msg_join_ref(m) do
     match m do | ChannelMsg(jr, _, _, _, _) -> jr end
   end
 
-  doc "Return the ref of a ChannelMsg."
+  doc """
+  The per-message `ref` field (the client correlates replies by it).
+
+  ## Examples
+
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
+      march> Channel.msg_ref(cm)
+      "1"
+  """
   fn msg_ref(m) do
     match m do | ChannelMsg(_, r, _, _, _) -> r end
   end
 
-  doc "Return the topic of a ChannelMsg."
+  doc """
+  The `topic` field of a message.
+
+  ## Examples
+
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
+      march> Channel.msg_topic(cm)
+      "room:lobby"
+  """
   fn msg_topic(m) do
     match m do | ChannelMsg(_, _, t, _, _) -> t end
   end
 
-  doc "Return the event of a ChannelMsg."
+  doc """
+  The `event` field of a message, e.g. `"phx_join"` or an application event.
+
+  ## Examples
+
+      march> Channel.msg_event(Channel.close_msg("0", "room:lobby"))
+      "phx_close"
+  """
   fn msg_event(m) do
     match m do | ChannelMsg(_, _, _, e, _) -> e end
   end
 
-  doc "Return the payload string of a ChannelMsg."
+  doc """
+  The payload of a message: JSON text, kept verbatim.
+
+  ## Examples
+
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
+      march> Channel.msg_payload(cm)
+      "{}"
+  """
   fn msg_payload(m) do
     match m do | ChannelMsg(_, _, _, _, p) -> p end
   end
@@ -271,7 +456,14 @@ mod Channel do
   Serialize a ChannelMsg to a JSON string conforming to the Phoenix channel wire
   format:
     {"join_ref":"0","ref":"1","topic":"room:lobby","event":"new_msg","payload":{}}
-  The payload field is embedded verbatim (it should already be a JSON value).
+  The four string fields are escaped for `"` and backslash only (control
+  characters are not escaped); the payload is embedded verbatim and must
+  already be valid JSON.
+
+  ## Examples
+
+      march> Channel.serialize(Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}"))
+      "{\"join_ref\":\"0\",\"ref\":\"1\",\"topic\":\"room:lobby\",\"event\":\"new_msg\",\"payload\":{}}"
   """
   fn serialize(m) do
     match m do
@@ -303,7 +495,25 @@ mod Channel do
   doc """
   Parse a JSON channel message string into a ChannelMsg.
   Returns Some(msg) on success, None on parse failure.
-  Performs minimal parsing: extracts the five fields using string search.
+  Performs minimal parsing: extracts the five fields using string search,
+  not a JSON parser, so it only accepts the shape `serialize` produces:
+  - each string field must appear as `"key":"value"` with no space after the
+    colon; a `null` field (Phoenix sends `"join_ref":null`) or any spacing
+    gives `None`;
+  - a string value ends at the first `"`, so escaped quotes are not
+    supported and escapes are not decoded;
+  - the payload is everything after `"payload":` up to the end of the input,
+    minus one trailing `}`, so `payload` must be the last field.
+
+  ## Examples
+
+      march> Channel.parse("{\"join_ref\":\"0\",\"ref\":\"1\",\"topic\":\"room:lobby\",\"event\":\"new_msg\",\"payload\":{\"body\":\"hi\"}}")
+      Some(ChannelMsg("0", "1", "room:lobby", "new_msg", "{\"body\":\"hi\"}"))
+      march> let cm = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{}")
+      march> Channel.parse(Channel.serialize(cm)) == Some(cm)
+      true
+      march> Channel.parse("{\"join_ref\": \"0\"}")
+      None
   """
   fn parse(json_str) do
     -- Helper: extract value between two delimiters after a key
@@ -364,7 +574,16 @@ mod Channel do
 
   -- ── System event helpers ───────────────────────────────────────────────────
 
-  doc "Construct a phx_reply message (sent by server in response to a client ref)."
+  doc """
+  A `phx_reply` message answering the client's `ref` on `topic`, with payload
+  `{"status":<status>,"response":<response_payload>}` (`response_payload`
+  embedded verbatim as JSON).
+
+  ## Examples
+
+      march> Channel.msg_payload(Channel.reply_msg("0", "1", "room:lobby", "ok", "{}"))
+      "{\"status\":\"ok\",\"response\":{}}"
+  """
   fn reply_msg(join_ref, ref, topic, status, response_payload) do
     let payload = string_concat(
       string_concat(
@@ -374,7 +593,15 @@ mod Channel do
     ChannelMsg(join_ref, ref, topic, "phx_reply", payload)
   end
 
-  doc "Construct a phx_error message (sent on join rejection or handler Stop)."
+  doc """
+  A `phx_error` message for the client's `ref` on `topic`, with payload
+  `{"reason":<reason>}` (sent on join rejection or handler Stop).
+
+  ## Examples
+
+      march> Channel.msg_payload(Channel.error_msg("0", "1", "room:lobby", "unauthorized"))
+      "{\"reason\":\"unauthorized\"}"
+  """
   fn error_msg(join_ref, ref, topic, reason) do
     let payload = string_concat(
       string_concat("{\"reason\":\"", json_escape(reason)),
@@ -382,7 +609,15 @@ mod Channel do
     ChannelMsg(join_ref, ref, topic, "phx_error", payload)
   end
 
-  doc "Construct a phx_close message (sent when the channel is closed)."
+  doc """
+  A `phx_close` message for `topic`, with an empty `ref` and payload `{}`
+  (sent when the channel is closed).
+
+  ## Examples
+
+      march> Channel.serialize(Channel.close_msg("0", "room:lobby"))
+      "{\"join_ref\":\"0\",\"ref\":\"\",\"topic\":\"room:lobby\",\"event\":\"phx_close\",\"payload\":{}}"
+  """
   fn close_msg(join_ref, topic) do
     ChannelMsg(join_ref, "", topic, "phx_close", "{}")
   end

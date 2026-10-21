@@ -463,7 +463,17 @@ mod Regex do
 
   Same answer as `matches`, without the backtracking blowup: this simulates
   the set of reachable NFA states, so the work per input byte is bounded by
-  the pattern length no matter what the input is.
+  the pattern length no matter what the input is. An invalid pattern
+  (e.g. an unterminated `[` class) gives `false`.
+
+  ## Examples
+
+      march> Regex.matches_linear("[0-9]+", "abc123")
+      true
+      march> Regex.matches_linear("^a*$", "aaab")
+      false
+      march> Regex.matches_linear("[a", "[a")
+      false
   """
   fn matches_linear(pattern : String, s : String) : Bool do
     match compile(pattern) do
@@ -706,7 +716,17 @@ mod Regex do
   --   behaviour is not yet implemented.
   type RegexOpts = { case_insensitive : Bool, multiline : Bool }
 
-  doc "Default options: all flags disabled (case-sensitive, single-line)."
+  doc """
+  Default options: all flags disabled (case-sensitive, single-line).
+  Update a field to turn a flag on.
+
+  ## Examples
+
+      march> Regex.default_opts() == { case_insensitive: false, multiline: false }
+      true
+      march> Regex.matches_opts("ABC", "abc", { Regex.default_opts() with case_insensitive: true })
+      true
+  """
   fn default_opts() : RegexOpts do
     { case_insensitive: false, multiline: false }
   end
@@ -740,6 +760,10 @@ mod Regex do
   doc """
   Like `matches`, but accepts a `RegexOpts` record for per-call flags.
 
+  `case_insensitive` lowercases the whole pattern and input (ASCII only)
+  before matching, so the uppercase escapes `\D`, `\W`, `\S` are folded to
+  `\d`, `\w`, `\s` and change meaning. `multiline` currently has no effect.
+
       march> Regex.matches_opts("HELLO", "hello world", { case_insensitive: true, multiline: false })
       true
   """
@@ -754,11 +778,22 @@ mod Regex do
   end
 
   doc """
-  The original backtracking `matches`, retained for differential testing.
+  The original backtracking `find`, retained for differential testing.
 
-  Kept public and named so the parity tests can compare the two engines; a
-  test that compared the linear engine against itself would prove nothing.
-  Do not use it on untrusted input — see `matches_linear` for why.
+  Returns the same leftmost match as `find` (`Some(substring)`, `None` when
+  nothing matches or the pattern is invalid), but via a backtracking
+  matcher whose running time can grow exponentially with the input on
+  nested-quantifier patterns. Kept public and named so the parity tests can
+  compare the two engines; a test that compared the linear engine against
+  itself would prove nothing. Do not use it on untrusted input — see
+  `matches_linear` for why.
+
+  ## Examples
+
+      march> Regex.find_backtracking("a+", "baaab")
+      Some("aaa")
+      march> Regex.find_backtracking("\\d", "abc")
+      None
   """
   fn find_backtracking(pattern : String, string : String) : Option(String) do
     match compile(pattern) do
@@ -774,8 +809,20 @@ mod Regex do
   end
 
   doc """
-  The original backtracking `find`, retained for differential testing only.
-  Do not use it on untrusted input.
+  The linear-time (NFA simulation) `find`: the engine `find` itself uses,
+  exposed under an explicit name for differential testing against
+  `find_backtracking`. Returns `Some(substring)` for the leftmost match,
+  or `None` when nothing matches or the pattern is invalid. Safe on
+  untrusted input.
+
+  ## Examples
+
+      march> Regex.find_linear("a+", "baaab")
+      Some("aaa")
+      march> Regex.find_linear("a*", "")
+      Some("")
+      march> Regex.find_linear("[a", "[a")
+      None
   """
   fn find_linear(pattern : String, string : String) : Option(String) do
     match compile(pattern) do
@@ -790,6 +837,21 @@ mod Regex do
     end
   end
 
+  doc """
+  The original backtracking `matches`, retained for differential testing.
+
+  Same answer as `matches` (`false` for an invalid pattern), but its running
+  time can grow exponentially with the input on nested-quantifier patterns.
+  Kept public and named so the parity tests can compare the two engines.
+  Do not use it on untrusted input — see `matches_linear` for why.
+
+  ## Examples
+
+      march> Regex.matches_backtracking("^a+$", "aaa")
+      true
+      march> Regex.matches_backtracking("^a+$", "aab")
+      false
+  """
   fn matches_backtracking(pattern : String, string : String) : Bool do
     match compile(pattern) do
     Err(_) -> false
@@ -878,10 +940,17 @@ mod Regex do
 
   doc """
   Replace all non-overlapping matches of `pattern` in `string` with `replacement`.
-  Returns the resulting string.
+  Returns the resulting string; `string` unchanged when nothing matches or
+  the pattern is invalid. `replacement` is literal (no group references).
+  A pattern that matches the empty string (e.g. `x*`) skips one input byte
+  after each empty match, and that byte is dropped from the result.
 
       march> Regex.replace_all("\\d", "X", "a1b2c3")
       "aXbXcX"
+      march> Regex.replace_all("\\s+", " ", "a  b\t\tc")
+      "a b c"
+      march> Regex.replace_all("z", "X", "abc")
+      "abc"
   """
   fn replace_all(pattern, replacement, string) do
     match compile(pattern) do
@@ -913,12 +982,19 @@ mod Regex do
 
   doc """
   Split `string` on matches of `pattern`.
-  Returns the list of substrings between matches.
+  Returns the list of substrings between matches, including empty strings
+  for adjacent or leading/trailing matches; `[string]` when nothing matches
+  or the pattern is invalid. As with `replace_all`, a pattern that matches
+  the empty string drops the byte after each empty match.
 
       march> Regex.split("\\s+", "hello   world  foo")
       ["hello", "world", "foo"]
       march> Regex.split(",", "a,b,c")
       ["a", "b", "c"]
+      march> Regex.split(",", ",a,,b")
+      ["", "a", "", "b"]
+      march> Regex.split(";", "abc")
+      ["abc"]
   """
   fn split(pattern, string) do
     match compile(pattern) do

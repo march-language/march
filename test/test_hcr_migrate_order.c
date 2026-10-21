@@ -150,7 +150,7 @@ void *new_actor(uint32_t slot) {
     int64_t *s = (int64_t *)march_alloc(24);
     s[1] = 1; s[2] = 0;
     a[4] = (int64_t)(uintptr_t)s;
-    march_actor_set_dispatch_id(a, slot);
+    march_actor_set_dispatch_id(a, slot, 0);
     march_spawn(a);
     return a;
 }

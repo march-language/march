@@ -226,6 +226,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="Math.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Math.html">Math</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Membership.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Membership.html">Membership</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Merkle.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Merkle.html">Merkle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlDsa.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlDsa.html">MlDsa</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlKem.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlKem.html">MlKem</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Msgpack.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Msgpack.html">Msgpack</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div></div>
@@ -300,12 +302,85 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
   <span class="tok-str">&quot;Proto.Role:offer&quot;</span> <span class="tok-kw">for</span> the role it offers, before inviting it
   (<span class="tok-ty">SessionNode</span>.candidates). <span class="tok-ty">Offers</span> are registered under names any member
   can write, so the check is <span class="tok-kw">on</span> the certificate of the node that holds
-  the offer, never <span class="tok-kw">on</span> the registry entry.</code></pre><p>Everything here is pure: the certificate is the one ClusterNode verified in its handshake (<code>ClusterNode.peer_cert</code>). Checks apply in CERTIFICATE mode only; a shared-secret node has no certificates and checks nothing (specs/lang/clustering.md, &quot;Authorization&quot;).</p></div><h2>Functions</h2><div class="item" id="fn-authorize"><div class="ih"><span class="badge bfn">fn</span><span class="name">authorize</span><span class="sig">authorize(cert : Option(NodeCert.Cert), proto : String, role : String, mode : String) : Result((), String)</span><a class="anchor-link" href="#fn-authorize" title="Link">#</a></div><div class="ib"><p>May the node that presented [cert] play role [role] of protocol [proto] in [mode] (<code>offer_mode()</code> or <code>initiate_mode()</code>)? <code>Ok(())</code>, or <code>Err(why)</code>: &quot;presented no certificate&quot; when the peer presented none (a certificate-mode node never links to such a peer, so this is a peer this node has not verified), else &quot;not authorized for Proto.Role&quot;. A caller in shared-secret mode does not call this at all.</p></div></div>
-<div class="item" id="fn-initiate_mode"><div class="ih"><span class="badge bfn">fn</span><span class="name">initiate_mode</span><span class="sig">initiate_mode() : String do &quot;initiate&quot; end</span><a class="anchor-link" href="#fn-initiate_mode" title="Link">#</a></div><div class="ib"><p>The mode an initiating node's certificate must name for a role.</p></div></div>
-<div class="item" id="fn-offer_mode"><div class="ih"><span class="badge bfn">fn</span><span class="name">offer_mode</span><span class="sig">offer_mode() : String do &quot;offer&quot; end</span><a class="anchor-link" href="#fn-offer_mode" title="Link">#</a></div><div class="ib"><p>The mode an offering node's certificate must name for a role.</p></div></div>
-<div class="item" id="fn-permission"><div class="ih"><span class="badge bfn">fn</span><span class="name">permission</span><span class="sig">permission(proto : String, role : String, mode : String) : String</span><a class="anchor-link" href="#fn-permission" title="Link">#</a></div><div class="ib"><p>The permission a certificate must carry: \</p></div></div>
-<div class="item" id="fn-role_label"><div class="ih"><span class="badge bfn">fn</span><span class="name">role_label</span><span class="sig">role_label(proto : String, role : String) : String do proto ++ &quot;.&quot; ++ role end</span><a class="anchor-link" href="#fn-role_label" title="Link">#</a></div><div class="ib"><p>A role's certificate name: &quot;Proto.Role&quot; for protocol [proto] and role name [role] (the names <code>forge cluster cert --roles</code> takes, before <code>:mode</code>).</p></div></div>
-<div class="item" id="fn-role_name"><div class="ih"><span class="badge bfn">fn</span><span class="name">role_name</span><span class="sig">role_name(roles : List((String, Int)), i : Int) : String</span><a class="anchor-link" href="#fn-role_name" title="Link">#</a></div><div class="ib"><p>The name of role number [i] in [roles] (a protocol's <code>&lt;P&gt;_Msg.role_names()</code>), or its number as text when the table does not have it (a peer built from a protocol with other role numbers: its fingerprint differs, so the session is refused for that first).</p></div></div></main></div><script>
+  the offer, never <span class="tok-kw">on</span> the registry entry.</code></pre><p>Everything here is pure: the certificate is the one ClusterNode verified in its handshake (<code>ClusterNode.peer_cert</code>). Checks apply in CERTIFICATE mode only; a shared-secret node has no certificates and checks nothing (specs/lang/clustering.md, &quot;Authorization&quot;).</p></div><h2>Functions</h2><div class="item" id="fn-authorize"><div class="ih"><span class="badge bfn">fn</span><span class="name">authorize</span><span class="sig">authorize(cert : Option(NodeCert.Cert), proto : String, role : String, mode : String) : Result((), String)</span><a class="anchor-link" href="#fn-authorize" title="Link">#</a></div><div class="ib"><p>May the node that presented [cert] play role [role] of protocol [proto] in [mode] (<code>offer_mode()</code> or <code>initiate_mode()</code>)? <code>Ok(())</code>, or <code>Err(why)</code>: &quot;presented no certificate&quot; when the peer presented none (a certificate-mode node never links to such a peer, so this is a peer this node has not verified), else &quot;not authorized for Proto.Role&quot;. A caller in shared-secret mode does not call this at all. The check is an exact match of <code>permission(proto, role, mode)</code> against the certificate's role list (<code>NodeCert.has_role</code>).</p><h3>Examples</h3><pre data-try="SessionAP.authorize(None, &quot;Chat&quot;, &quot;Client&quot;, SessionAP.offer_mode())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">SessionAP</span>.authorize(<span class="tok-ty">None</span>, <span class="tok-str">&quot;Chat&quot;</span>, <span class="tok-str">&quot;Client&quot;</span>, <span class="tok-ty">SessionAP</span>.offer_mode())
+<span class="tok-ty">Err</span>(<span class="tok-str">&quot;presented no certificate&quot;</span>)</code></pre></div></div>
+<div class="item" id="fn-initiate_mode"><div class="ih"><span class="badge bfn">fn</span><span class="name">initiate_mode</span><span class="sig">initiate_mode() : String do &quot;initiate&quot; end</span><a class="anchor-link" href="#fn-initiate_mode" title="Link">#</a></div><div class="ib"><p>The mode an initiating node's certificate must name for a role: <code>&quot;initiate&quot;</code>.</p><h3>Examples</h3><pre data-try="SessionAP.initiate_mode()" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">SessionAP</span>.initiate_mode()
+<span class="tok-str">&quot;initiate&quot;</span></code></pre></div></div>
+<div class="item" id="fn-offer_mode"><div class="ih"><span class="badge bfn">fn</span><span class="name">offer_mode</span><span class="sig">offer_mode() : String do &quot;offer&quot; end</span><a class="anchor-link" href="#fn-offer_mode" title="Link">#</a></div><div class="ib"><p>The mode an offering node's certificate must name for a role: <code>&quot;offer&quot;</code>.</p><h3>Examples</h3><pre data-try="SessionAP.offer_mode()" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">SessionAP</span>.offer_mode()
+<span class="tok-str">&quot;offer&quot;</span></code></pre></div></div>
+<div class="item" id="fn-permission"><div class="ih"><span class="badge bfn">fn</span><span class="name">permission</span><span class="sig">permission(proto : String, role : String, mode : String) : String</span><a class="anchor-link" href="#fn-permission" title="Link">#</a></div><div class="ib"><p>The permission a certificate must carry: &quot;Proto.Role:mode&quot;.</p><h3>Examples</h3><pre data-try="SessionAP.permission(&quot;Chat&quot;, &quot;Client&quot;, SessionAP.initiate_mode())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">SessionAP</span>.permission(<span class="tok-str">&quot;Chat&quot;</span>, <span class="tok-str">&quot;Client&quot;</span>, <span class="tok-ty">SessionAP</span>.initiate_mode())
+<span class="tok-str">&quot;Chat.Client:initiate&quot;</span></code></pre></div></div>
+<div class="item" id="fn-role_label"><div class="ih"><span class="badge bfn">fn</span><span class="name">role_label</span><span class="sig">role_label(proto : String, role : String) : String do proto ++ &quot;.&quot; ++ role end</span><a class="anchor-link" href="#fn-role_label" title="Link">#</a></div><div class="ib"><p>A role's certificate name: &quot;Proto.Role&quot; for protocol [proto] and role name [role] (the names <code>forge cluster cert --roles</code> takes, before <code>:mode</code>). The parts are joined as given, with no validation.</p><h3>Examples</h3><pre data-try="SessionAP.role_label(&quot;Chat&quot;, &quot;Client&quot;)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">SessionAP</span>.role_label(<span class="tok-str">&quot;Chat&quot;</span>, <span class="tok-str">&quot;Client&quot;</span>)
+<span class="tok-str">&quot;Chat.Client&quot;</span></code></pre></div></div>
+<div class="item" id="fn-role_name"><div class="ih"><span class="badge bfn">fn</span><span class="name">role_name</span><span class="sig">role_name(roles : List((String, Int)), i : Int) : String</span><a class="anchor-link" href="#fn-role_name" title="Link">#</a></div><div class="ib"><p>The name of role number [i] in [roles] (a protocol's <code>&lt;P&gt;_Msg.role_names()</code>), or its number as text when the table does not have it (a peer built from a protocol with other role numbers: its fingerprint differs, so the session is refused for that first). The first entry with number [i] wins.</p><h3>Examples</h3><pre data-try="SessionAP.role_name([(&quot;Client&quot;, 1), (&quot;Server&quot;, 2)], 2)
+SessionAP.role_name([(&quot;Client&quot;, 1), (&quot;Server&quot;, 2)], 9)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">SessionAP</span>.role_name([(<span class="tok-str">&quot;Client&quot;</span>, <span class="tok-num">1</span>), (<span class="tok-str">&quot;Server&quot;</span>, <span class="tok-num">2</span>)], <span class="tok-num">2</span>)
+<span class="tok-str">&quot;Server&quot;</span>
+march&gt; <span class="tok-ty">SessionAP</span>.role_name([(<span class="tok-str">&quot;Client&quot;</span>, <span class="tok-num">1</span>), (<span class="tok-str">&quot;Server&quot;</span>, <span class="tok-num">2</span>)], <span class="tok-num">9</span>)
+<span class="tok-str">&quot;9&quot;</span></code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

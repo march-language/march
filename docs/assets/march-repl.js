@@ -3,7 +3,8 @@
  *
  * Usage:
  *   var repl = new MarchRepl({ wrapId, historyId, inputId, loadingId, cls });
- *   repl.submit()           — eval whatever is in the textarea
+ *   repl.submit()           — eval whatever is in the textarea (a pasted
+ *                             "march> " transcript runs one prompt line at a time)
  *   repl.run(code)          — eval code as if typed (queued: runs in order)
  *   repl.load(code)         — HTML-decode and load code into the textarea
  *   repl.loadThen(s, code)  — silently eval s, then load code into the textarea
@@ -413,15 +414,41 @@
     return true;
   };
 
+  // Split a pasted stdlib-doc transcript into its inputs.
+  //
+  // The stdlib pages' Copy button copies the whole doctest transcript, prompts
+  // ("march> ...") and expected-output lines alike, and the "march> " shown in
+  // the REPL history is a CSS ::before, so a pasted prompt line looks harmless.
+  // On Sort.html a reader edited the first line to
+  // "march> Sort.heapsort_by([8, 5, 2, 9999999, 1, 2], fn a -> fn b -> a <= b)"
+  // and left the transcript's output line "[1, 2, 2, 5, 8]" under it; March
+  // evaluated the two lines as one block and printed the value of the LAST
+  // expression, the literal list, which looked exactly like heapsort dropping
+  // 9999999. So when any line begins with "march> ", the text is a transcript:
+  // each prompt line (prefix stripped) is one input, in order, and every other
+  // line is expected output and is dropped. Text with no prompt line is
+  // returned as the single input it always was.
+  MarchRepl.splitTranscript = function (code) {
+    var lines = code.split("\n");
+    var inputs = [];
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/^\s*march>(?:\s(.*))?$/);
+      if (m) inputs.push(m[1] || "");
+    }
+    return inputs.length ? inputs : [code];
+  };
+
   // Evaluate code as if the reader had typed it (used by "Try it" buttons).
   MarchRepl.prototype.run = function (code) { this._run(code); };
 
-  // Submit whatever is currently in the textarea.
+  // Submit whatever is currently in the textarea. A pasted doc transcript runs
+  // one prompt line at a time (see splitTranscript).
   MarchRepl.prototype.submit = function () {
     var code = this._input.value;
     this._input.value = "";
     this._resize();
-    this._run(code);
+    var inputs = MarchRepl.splitTranscript(code);
+    for (var i = 0; i < inputs.length; i++) this._run(inputs[i]);
   };
 
   // Remove every transcript entry except the one holding the loading-status

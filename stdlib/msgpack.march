@@ -527,11 +527,19 @@ mod Msgpack do
 
   doc """
   Encode a `Value` to a list of bytes (0-255) in MessagePack format.
+  Always picks the smallest encoding: integers use fixint, then the
+  narrowest int8/16/32 (negative) or uint8/16/32/64 (non-negative) form;
+  strings (UTF-8 byte length), binaries, arrays and maps use the fix/8/16/32
+  header for their length. Map pairs are written in list order. `Bin`
+  elements are emitted as given and are not range-checked.
 
-      Msgpack.encode(Msgpack.Null)         -- [192]
-      Msgpack.encode(Msgpack.Bool(true))   -- [195]
-      Msgpack.encode(Msgpack.Int(42))      -- [42]
-      Msgpack.encode(Msgpack.Str("hi"))    -- [162, 104, 105]
+      Msgpack.encode(Msgpack.null())        -- [192]
+      Msgpack.encode(Msgpack.bool(true))    -- [195]
+      Msgpack.encode(Msgpack.int(42))       -- [42]
+      Msgpack.encode(Msgpack.int(-1))       -- [255]
+      Msgpack.encode(Msgpack.int(300))      -- [205, 1, 44]
+      Msgpack.encode(Msgpack.str("hi"))     -- [162, 104, 105]
+      Msgpack.encode(Msgpack.str("é"))      -- [162, 195, 169]
   """
   fn encode(v : Value) : List(Int) do
     encode_val(v)
@@ -540,12 +548,17 @@ mod Msgpack do
   doc """
   Decode a MessagePack byte list to a `Value`.
   Returns `Err` if the input is empty, truncated, has trailing bytes,
-  or contains an unsupported format byte (float, ext).
+  or contains an unsupported format byte (float, ext). Every input
+  produced by `encode` round-trips. A uint64 above the 63-bit Int range
+  wraps rather than failing.
 
       Msgpack.decode([192])                -- Ok(Null)
       Msgpack.decode([42])                 -- Ok(Int(42))
       Msgpack.decode([195])                -- Ok(Bool(true))
+      Msgpack.decode([205, 1, 44])         -- Ok(Int(300))
       Msgpack.decode([])                   -- Err("unexpected end of input")
+      Msgpack.decode([42, 1])              -- Err("trailing bytes after value")
+      Msgpack.decode([202, 0, 0, 0, 0])    -- Err("float32 is not supported")
   """
   fn decode(bs : List(Int)) : Result(Value, String) do
     match decode_one(bs) do
@@ -563,7 +576,8 @@ mod Msgpack do
 
   doc """
   Decode zero or more concatenated MessagePack values from `bs`.
-  Returns `Ok([])` on empty input. Useful for framing protocols.
+  Returns `Ok([])` on empty input, or the first error (a truncated final
+  value is an error, not a partial result). Useful for framing protocols.
 
       Msgpack.decode_all([195, 42, 194])
       -- Ok([Bool(true), Int(42), Bool(false)])
@@ -572,25 +586,59 @@ mod Msgpack do
     decode_all_loop(bs, Nil)
   end
 
-  doc "Construct a MessagePack null value."
+  doc """
+  Construct a MessagePack null value (`Null`, encoded as `[192]`).
+
+      Msgpack.encode(Msgpack.null())   -- [192]
+  """
   fn null() : Value do Null end
 
-  doc "Construct a MessagePack boolean value."
+  doc """
+  Construct a MessagePack boolean value (encoded as 195 for true, 194
+  for false).
+
+      Msgpack.encode(Msgpack.bool(false))   -- [194]
+  """
   fn bool(b : Bool) : Value do Bool(b) end
 
-  doc "Construct a MessagePack integer value."
+  doc """
+  Construct a MessagePack integer value. Any March Int is accepted;
+  `encode` chooses the narrowest wire format.
+
+      Msgpack.encode(Msgpack.int(-33))   -- [208, 223]
+  """
   fn int(n : Int) : Value do Int(n) end
 
-  doc "Construct a MessagePack string value."
+  doc """
+  Construct a MessagePack string value. It is encoded as its UTF-8
+  bytes, with a length header counting bytes, not characters.
+
+      Msgpack.encode(Msgpack.str("a"))   -- [161, 97]
+  """
   fn str(s : String) : Value do Str(s) end
 
-  doc "Construct a MessagePack binary value from a list of byte ints (0-255)."
+  doc """
+  Construct a MessagePack binary value from a list of byte ints (0-255).
+  The values are not validated; anything outside 0-255 produces an
+  invalid encoding.
+
+      Msgpack.encode(Msgpack.bin([1, 2]))   -- [196, 2, 1, 2]
+  """
   fn bin(bs : List(Int)) : Value do Bin(bs) end
 
-  doc "Construct a MessagePack array value."
+  doc """
+  Construct a MessagePack array value from a list of values.
+
+      Msgpack.encode(Msgpack.array([Msgpack.bool(true), Msgpack.int(1)]))   -- [146, 195, 1]
+  """
   fn array(xs : List(Value)) : Value do Array(xs) end
 
-  doc "Construct a MessagePack map value from a list of (key, value) pairs."
+  doc """
+  Construct a MessagePack map value from a list of (key, value) pairs.
+  Keys may be any `Value`; order is kept and duplicates are not removed.
+
+      Msgpack.encode(Msgpack.map([(Msgpack.str("a"), Msgpack.null())]))   -- [129, 161, 97, 192]
+  """
   fn map(kvs : List((Value, Value))) : Value do Map(kvs) end
 
 end

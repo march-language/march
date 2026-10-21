@@ -11,51 +11,118 @@
 --   size                    O(1)
 --   concat                  O(|d2|) amortised
 --   to_list / from_list     O(n)
+--
+-- doc: try
 
 mod Deque do
 
   -- Internal: Deque(size, front, back) — front is in order, back is reversed.
   ptype Deque(a) = Deque(Int, List(a), List(a))
 
-  doc "An empty deque."
+  doc """
+  An empty deque.
+
+  ## Examples
+
+      march> Deque.to_list(Deque.empty())
+      []
+      march> Deque.size(Deque.empty())
+      0
+  """
   fn empty() : Deque(a) do
     Deque(0, Nil, Nil)
   end
 
-  doc "A deque containing exactly one element."
+  doc """
+  A deque containing exactly one element.
+
+  ## Examples
+
+      march> Deque.to_list(Deque.singleton(7))
+      [7]
+  """
   fn singleton(x : a) : Deque(a) do
     Deque(1, Cons(x, Nil), Nil)
   end
 
-  doc "True when the deque contains no elements."
+  doc """
+  True when the deque contains no elements. O(1).
+
+  ## Examples
+
+      march> Deque.is_empty(Deque.empty())
+      true
+      march> Deque.is_empty(Deque.singleton(1))
+      false
+  """
   fn is_empty(d : Deque(a)) : Bool do
     match d do
     Deque(n, _, _) -> n == 0
     end
   end
 
-  doc "Number of elements. O(1)."
+  doc """
+  Number of elements. O(1): the size is stored, not counted.
+
+  ## Examples
+
+      march> Deque.size(Deque.from_list([1, 2, 3]))
+      3
+      march> Deque.size(Deque.empty())
+      0
+  """
   fn size(d : Deque(a)) : Int do
     match d do
     Deque(n, _, _) -> n
     end
   end
 
-  doc "Add an element to the front of the deque. O(1)."
+  doc """
+  Add an element to the front of the deque. O(1).
+
+  ## Examples
+
+      march> Deque.to_list(Deque.push_front(Deque.from_list([2, 3]), 1))
+      [1, 2, 3]
+      march> Deque.to_list(Deque.push_front(Deque.empty(), 1))
+      [1]
+  """
   fn push_front(d : Deque(a), x : a) : Deque(a) do
     match d do
     Deque(n, f, b) -> Deque(n + 1, Cons(x, f), b)
     end
   end
 
-  doc "Add an element to the back of the deque. O(1)."
+  doc """
+  Add an element to the back of the deque. O(1).
+
+  ## Examples
+
+      march> Deque.to_list(Deque.push_back(Deque.from_list([1, 2]), 3))
+      [1, 2, 3]
+      march> Deque.to_list(Deque.push_back(Deque.empty(), 1))
+      [1]
+  """
   fn push_back(d : Deque(a), x : a) : Deque(a) do
     match d do
     Deque(n, f, b) -> Deque(n + 1, f, Cons(x, b))
     end
   end
 
-  doc "Return Some(front element) without removing, or None if empty. O(1) amortised."
+  doc """
+  Return `Some(front element)` without removing it, or `None` if empty. O(1) amortised
+  (O(n) when the front list is empty and the back list must be reversed; the reversal is
+  not kept).
+
+  ## Examples
+
+      march> Deque.peek_front(Deque.from_list([1, 2, 3]))
+      Some(1)
+      march> Deque.peek_front(Deque.push_back(Deque.empty(), 5))
+      Some(5)
+      march> Deque.peek_front(Deque.empty())
+      None
+  """
   fn peek_front(d : Deque(a)) : Option(a) do
     match d do
     Deque(0, _, _) -> None
@@ -68,7 +135,20 @@ mod Deque do
     end
   end
 
-  doc "Return Some(back element) without removing, or None if empty. O(1) amortised."
+  doc """
+  Return `Some(back element)` without removing it, or `None` if empty. O(1) amortised
+  (O(n) when the back list is empty and the front list must be reversed; the reversal is
+  not kept).
+
+  ## Examples
+
+      march> Deque.peek_back(Deque.from_list([1, 2, 3]))
+      Some(3)
+      march> Deque.peek_back(Deque.push_front(Deque.empty(), 5))
+      Some(5)
+      march> Deque.peek_back(Deque.empty())
+      None
+  """
   fn peek_back(d : Deque(a)) : Option(a) do
     match d do
     Deque(0, _, _) -> None
@@ -81,7 +161,18 @@ mod Deque do
     end
   end
 
-  doc "Remove the front element. Returns (Some(elem), rest) or (None, empty). O(1) amortised."
+  doc """
+  Remove the front element. Returns `(Some(elem), rest)`, or `(None, empty())` if the deque
+  is empty. O(1) amortised: when the front list is exhausted the back list is reversed once
+  into the front.
+
+  ## Examples
+
+      march> match Deque.pop_front(Deque.from_list([1, 2, 3])) do (x, rest) -> (x, Deque.to_list(rest)) end
+      (Some(1), [2, 3])
+      march> match Deque.pop_front(Deque.empty()) do (x, rest) -> (x, Deque.size(rest)) end
+      (None, 0)
+  """
   fn pop_front(d : Deque(a)) : (Option(a), Deque(a)) do
     match d do
     Deque(0, _, _) -> (None, empty())
@@ -94,7 +185,18 @@ mod Deque do
     end
   end
 
-  doc "Remove the back element. Returns (rest, Some(elem)) or (empty, None). O(1) amortised."
+  doc """
+  Remove the back element. Returns `(rest, Some(elem))`, or `(empty(), None)` if the deque
+  is empty. Note the tuple order is the mirror of `pop_front`. O(1) amortised: when the back
+  list is exhausted the front list is reversed once into the back.
+
+  ## Examples
+
+      march> match Deque.pop_back(Deque.from_list([1, 2, 3])) do (rest, x) -> (Deque.to_list(rest), x) end
+      ([1, 2], Some(3))
+      march> match Deque.pop_back(Deque.empty()) do (rest, x) -> (Deque.size(rest), x) end
+      (0, None)
+  """
   fn pop_back(d : Deque(a)) : (Deque(a), Option(a)) do
     match d do
     Deque(0, _, _) -> (empty(), None)
@@ -107,19 +209,46 @@ mod Deque do
     end
   end
 
-  doc "Elements from front to back as a list. O(n)."
+  doc """
+  Elements from front to back as a list. O(n).
+
+  ## Examples
+
+      march> Deque.to_list(Deque.push_front(Deque.push_back(Deque.empty(), 2), 1))
+      [1, 2]
+      march> Deque.to_list(Deque.empty())
+      []
+  """
   fn to_list(d : Deque(a)) : List(a) do
     match d do
     Deque(_, f, b) -> List.append(f, List.reverse(b))
     end
   end
 
-  doc "Build a deque from a list. First element becomes the front. O(n)."
+  doc """
+  Build a deque from a list. The first element becomes the front. O(n).
+
+  ## Examples
+
+      march> Deque.peek_front(Deque.from_list([1, 2, 3]))
+      Some(1)
+      march> Deque.size(Deque.from_list([]))
+      0
+  """
   fn from_list(xs : List(a)) : Deque(a) do
     List.fold_left(xs, empty(), fn (acc, x) -> push_back(acc, x))
   end
 
-  doc "Apply f to every element, returning a new deque in the same order. O(n)."
+  doc """
+  Apply `f` to every element, returning a new deque in the same order. O(n).
+
+  ## Examples
+
+      march> Deque.to_list(Deque.map(Deque.from_list([1, 2, 3]), fn x -> x * 10))
+      [10, 20, 30]
+      march> Deque.to_list(Deque.map(Deque.empty(), fn x -> x + 1))
+      []
+  """
   fn map(d : Deque(a), f : a -> b) : Deque(b) do
     match d do
     Deque(n, front, back) -> Deque(n, List.map(front, f), List.map(back, f))
@@ -127,10 +256,17 @@ mod Deque do
   end
 
   doc """
-  Keep only elements satisfying pred, in the same order. O(n).
+  Keep only the elements satisfying `pred`, preserving order. O(n).
   Every element of the result satisfies `pred` (an abstract refinement `p`,
   as for `List.filter`): `Deque.to_list(Deque.filter(d, fn y -> y > 0))` is a
   `List({Int | _ > 0})`.
+
+  ## Examples
+
+      march> Deque.to_list(Deque.filter(Deque.from_list([1, 2, 3, 4]), fn x -> x % 2 == 0))
+      [2, 4]
+      march> Deque.size(Deque.filter(Deque.from_list([1, 3]), fn x -> x > 5))
+      0
   """
   fn filter(d : Deque(a), pred : a -> Bool[p]) : Deque(a[p]) do
     match d do
@@ -156,27 +292,75 @@ mod Deque do
     end
   end
 
-  doc "Left fold over elements from front to back. O(n)."
+  doc """
+  Left fold over the elements from front to back; `f` is called as `f(acc, x)`. O(n).
+
+  ## Examples
+
+      march> Deque.fold_left(Deque.from_list([1, 2, 3]), 0, fn (acc, x) -> acc * 10 + x)
+      123
+      march> Deque.fold_left(Deque.empty(), 5, fn (acc, x) -> acc + x)
+      5
+  """
   fn fold_left(d : Deque(a), acc : b, f : b -> a -> b) : b do
     List.fold_left(to_list(d), acc, f)
   end
 
-  doc "Right fold over elements from back to front. O(n)."
+  doc """
+  Right fold: processes elements from back to front; `f` is called as `f(x, acc)`. O(n).
+
+  ## Examples
+
+      march> Deque.fold_right(Deque.from_list([1, 2, 3]), 0, fn (x, acc) -> acc * 10 + x)
+      321
+      march> Deque.fold_right(Deque.from_list([1, 2, 3]), [], fn (x, acc) -> Cons(x, acc))
+      [1, 2, 3]
+  """
   fn fold_right(d : Deque(a), acc : b, f : a -> b -> b) : b do
     List.fold_right(to_list(d), acc, f)
   end
 
-  doc "Append all elements of d2 after d1. O(|d2|) amortised."
+  doc """
+  Append all elements of `d2` after `d1`. O(|d2|): each element of `d2` is pushed onto the
+  back of `d1`.
+
+  ## Examples
+
+      march> Deque.to_list(Deque.concat(Deque.from_list([1, 2]), Deque.from_list([3, 4])))
+      [1, 2, 3, 4]
+      march> Deque.to_list(Deque.concat(Deque.empty(), Deque.singleton(1)))
+      [1]
+  """
   fn concat(d1 : Deque(a), d2 : Deque(a)) : Deque(a) do
     List.fold_left(to_list(d2), d1, fn (acc, x) -> push_back(acc, x))
   end
 
-  doc "True when f returns true for at least one element."
+  doc """
+  True when `f` returns true for at least one element (false for an empty deque).
+
+  ## Examples
+
+      march> Deque.any(Deque.from_list([1, 2, 3]), fn x -> x > 2)
+      true
+      march> Deque.any(Deque.empty(), fn x -> x > 2)
+      false
+  """
   fn any(d : Deque(a), f : a -> Bool) : Bool do
     List.any(to_list(d), f)
   end
 
-  doc "True when f returns true for all elements (vacuously true for empty)."
+  doc """
+  True when `f` returns true for every element (vacuously true for an empty deque).
+
+  ## Examples
+
+      march> Deque.all(Deque.from_list([2, 4]), fn x -> x % 2 == 0)
+      true
+      march> Deque.all(Deque.from_list([2, 3]), fn x -> x % 2 == 0)
+      false
+      march> Deque.all(Deque.empty(), fn x -> x > 100)
+      true
+  """
   fn all(d : Deque(a), f : a -> Bool) : Bool do
     List.all(to_list(d), f)
   end

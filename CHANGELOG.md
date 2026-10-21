@@ -39,6 +39,27 @@ git log is authoritative for exact commits.
   alias). The editor offers
   "Infer refinements for `f`" / "in this file" with identical edits, and
   `--refine-report --refine-infer` adds the if-applied ledger line.
+- **TLS uses post-quantum key exchange by default.** Every client and server context
+  offers the hybrid X25519MLKEM768 first (classical X25519 / P-256 / P-384 / P-521 after
+  it), so sessions with a peer that supports it are safe from record-now, decrypt-later
+  attacks. Needs OpenSSL 3.5+ linked; an older OpenSSL keeps its default groups and
+  handshakes still succeed. New: `Tls.negotiated_group(conn)`, `Tls.is_post_quantum(conn)`,
+  `Tls.post_quantum_available()`, and `Tls.set_groups(ctx, groups)` to override the list
+  (e.g. require post-quantum).
+- **Post-quantum cryptography: `MlKem` (ML-KEM-768, FIPS 203) and `MlDsa` (ML-DSA-65,
+  FIPS 204).** `MlKem.keypair()`, `encapsulate(pk)` -> `(ciphertext, shared_secret)` and
+  `decapsulate(sk, ct)` give two parties a 32-byte secret no quantum computer is known to
+  recover; `MlDsa.keypair()`, `sign(sk, msg)` (hedged), `sign_deterministic` and
+  `verify(pk, msg, sig)` sign and check. Seeded variants (`keypair_from_seed`,
+  `encapsulate_with_coins`) reproduce published vectors. Backed by the vendored, portable-C
+  mlkem-native / mldsa-native (no OpenSSL needed); the compiled and interpreted backends run
+  the same code, and the outputs match OpenSSL's byte for byte.
+- `march --compile --static` builds a self-contained executable: on Linux a fully
+  static binary that runs in a `scratch` image (musl hosts such as Alpine; refused on
+  glibc), on macOS one that loads nothing outside `/usr/lib` and `/System`. A missing
+  static library is an error naming the package to install, and the compiler checks
+  the finished binary before keeping it. See "Static binaries" in the tooling docs,
+  including how a static binary finds TLS certificates.
 - **Refinements: a lambda passed for an abstract refinement may now have a real
   body.** `List.filter(ys, fn y -> is_pos(y) && y < 100)`, an `if` or a `match`
   on a Bool, `fn y -> gt(y, 0)` (a several-parameter helper with a proved
@@ -195,6 +216,17 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- A compiled program that uses `Compress.Zstd` or `Compress.Brotli` on a build host
+  without that library now fails to compile with a message naming the package to
+  install, instead of building a binary whose codec returns `Err("... not available")`
+  at run time. Each codec is linked only when the program uses it, so a gzip program
+  loads zlib alone.
+- A compiled program now loads OpenSSL only when it uses TLS, and zlib/zstd/brotli
+  only when it uses `Compress`: a hello-world depends on libc alone, where it used to
+  need six libraries. `--hot-reload` builds still link the whole runtime.
+- `SessionNode.run_cluster` and `SessionNode.run_cluster_hosted` take a `fingerprint`
+  argument after `session` (the generated `cluster_<Role>` runners pass the
+  protocol's); pass `""` to check nothing.
 - **Stdlib: the collection folds declare their types.** `Map.fold(m : Map(k, v),
   acc : b, f : b -> k -> v -> b) : b`, likewise `HashMap.fold`; `Set.fold(s :
   Set(a), acc : b, f : b -> a -> b) : b`; `Array.fold_left(v : PVec(a), acc : b,
@@ -212,6 +244,34 @@ git log is authoritative for exact commits.
   unit; such a proposal is reported as `refused (caller-violation)` with the call it would break.
   A hypothesis is also judged site by site (it must prove something, break nothing and create no
   violation), and one that makes the parameters unsatisfiable is rejected.
+- The in-browser REPL (stdlib "Try it" pages, playground, landing page) now runs a
+  pasted doc transcript one `march> ` line at a time and ignores the expected-output
+  lines between them. Pasting a transcript whole used to evaluate it as one block and
+  print the value of its last line, the transcript's own expected output, which on
+  Sort.html made `Sort.heapsort_by` look as if it dropped the largest element.
+- `march --compile` no longer serves a cached binary that was linked under a different
+  host library probe: whether the build host has OpenSSL, zstd or brotli decides what
+  the binary links and whether its zstd/brotli codecs work, and is now part of the
+  build cache key.
+- A hot deploy that changed an actor's state no longer hands an actor spawned by
+  not-yet-redeployed code (such as a closure `main` built) an old-layout state to run
+  the new handlers on, which read garbage fields and could crash: the state is now
+  migrated from the version of the code that built it before the actor's first
+  message.
+- On macOS, `forge deploy hot` now finds a patch's `migrate_state`: it looked for the
+  `__migrate_<Actor>` symbol with `nm -D`, which lists nothing for a Mach-O library,
+  so every deploy that changed an actor's state was refused as missing its migration.
+- Two nodes built from different versions of a protocol no longer form a session
+  through `<P>_Run.cluster_<Role>` and find the skew mid-session: each role registers
+  its protocol fingerprint beside its endpoint, and a peer with a different one, or
+  none (a node built before the check), is refused with `Err(Connect(...))` before the
+  session forms, as the direct runner already refused it at the hello.
+- `--hot-reload` programs built with `--cap-sandbox` now keep their reload and observe
+  sockets when they withhold `IO.NetListen`: the reload server's listener is bound
+  before the sandbox is installed instead of racing it on its own thread, and the
+  observe socket starts before the install instead of after it (where its bind was
+  always refused). An over-long reload socket path is now refused instead of silently
+  truncated.
 - **Refinements: a correct call under a condition the checker cannot read is no
   longer a violation.** With `k : {Int | _ <= 100}` and
   `xs : List({Int | _ < k})`, `if small(k) do need_lt5(xs) else 0 end` (where
@@ -334,6 +394,13 @@ git log is authoritative for exact commits.
   was proved against a caller's `k : {Int | _ > 0}`).
 
 ### Documentation
+
+- **Every public stdlib function is documented, and about 1,500 doc examples have a Try it
+  button.** 468 undocumented public functions now have docs, and 1,240 more functions gained
+  `march>` examples that are checked natively and in the browser REPL. 87 modules (was 32)
+  opt into Try it. Functions that do IO, use the network or actors, or live in modules the
+  browser cannot load get plain usage snippets instead. Several wrong docs were corrected
+  along the way, such as the stability claims for the sorts.
 
 - **An upgrade guide for 0.6.0.** `docs/upgrading-to-0-6-0.md` covers the two
   security fixes, the `send_wrong_actor` check and the RFC 3986 `Uri` changes. The

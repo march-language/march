@@ -1,0 +1,64 @@
+-- Scenario "hcr_spawn_site_layout", version 1. See scenario.sh.
+mod SpawnSite do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Mut
+
+  pfn tally() : Vault(Int) do Vault.open("spawn_site_tally") end
+
+  actor C do
+    state { count : Int }
+    init { count: 7 }
+    on Show(path : String) do
+      let _ = Vault.incr(tally(), path ++ " v1", 1)
+      state
+    end
+  end
+
+  -- Spawn site 1: a function reached through its dispatch slot, which the
+  -- patch replaces (its impl hash moves with C's init, which is inlined).
+  pfn spawn_by_slot() : Unit do
+    let c = spawn(C)
+    send(c, Show("slot"))
+    ()
+  end
+
+  -- Spawn site 2: a task started before the deploy, looping in its own
+  -- function: it runs at the epoch it was spawned at.
+  pfn old_task_loop(i : Int, n : Int) : Int do
+    if i >= n do 0
+    else
+      let c = spawn(C)
+      send(c, Show("task"))
+      sleep_ms(150)
+      old_task_loop(i + 1, n)
+    end
+  end
+
+  pfn report(t : Vault(Int), path : String) : Unit do
+    let seen = fn k -> if Vault.get_or(t, path ++ k, 0) > 0 do "true" else "false" end
+    println(path ++ ": v1 " ++ seen(" v1") ++ ", v2 fresh " ++ seen(" v2 fresh")
+            ++ ", v2 migrated " ++ seen(" v2 migrated")
+            ++ ", v2 bad " ++ int_to_string(Vault.get_or(t, path ++ " v2 BAD", 0)))
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock), _m : Cap(IO.Mut)) : Unit do
+    println("node-a: version 1 up")
+    let n = 50
+    let t = task_spawn(fn _ -> old_task_loop(0, n))
+    -- Spawn site 3: main's own closure. main follows the current epoch,
+    -- but this closure's code is the version that built it.
+    List.each(List.range(0, n), fn _ ->
+      let c = spawn(C)
+      send(c, Show("main"))
+      spawn_by_slot()
+      sleep_ms(150))
+    let _ = task_await_unwrap(t)
+    sleep_ms(500)
+    let tl = tally()
+    report(tl, "slot")
+    report(tl, "task")
+    report(tl, "main")
+  end
+end

@@ -2,6 +2,13 @@
 -- Seq(a) wraps fn(b, fn(b, a) -> b) -> b.
 -- Enum operates eagerly on Lists; Seq operates lazily over I/O or generated sequences.
 --
+-- Transformations (map, filter, take, ...) only build a new fold; nothing runs
+-- until a consumer (to_list, fold, count, find, ...) folds the sequence.
+-- Every fold visits the whole source: take, find, any, all and fold_while stop
+-- using elements early but never stop the iteration itself, so they do not
+-- terminate on an unbounded source (an `unfold` whose `next` never returns
+-- `None`). Bound such sources with `unfold_until`, `repeat` or `iterate`.
+--
 --     march> let evens = Seq.filter(Seq.from_list([1, 2, 3, 4, 5, 6]), fn x -> x % 2 == 0)
 --     march> Seq.to_list(Seq.map(evens, fn x -> x * 10))
 --     [20, 40, 60]
@@ -30,6 +37,14 @@ mod Seq do
 
   -- Construction
 
+  doc """
+  A seq over the elements of a list, in order.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.from_list([1, 2, 3]))
+      [1, 2, 3]
+  """
   fn from_list(xs) do
     fn go(lst, a, f) do
       match lst do
@@ -40,10 +55,32 @@ mod Seq do
     Seq(fn(acc, f) -> go(xs, acc, f))
   end
 
+  doc """
+  The empty seq: folding it returns the start accumulator unchanged.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.empty())
+      []
+      march> Seq.count(Seq.empty())
+      0
+  """
   fn empty() do
     Seq(fn(acc, ig) -> acc)
   end
 
+  doc """
+  A seq generated from `seed`: `next(seed)` returns `Some((value, seed2))`
+  to yield `value` and continue from `seed2`, or `None` to stop. `next` is
+  re-run from `seed` every time the seq is folded. If `next` never returns
+  `None` the seq is unbounded and no consumer terminates on it (see
+  `unfold_until`).
+
+  ## Examples
+
+      march> Seq.to_list(Seq.unfold(1, fn n -> if n > 4 do None else Some((n, n + 1)) end))
+      [1, 2, 3, 4]
+  """
   fn unfold(seed, next) do
     fn go(s, a, f) do
       match next(s) do
@@ -57,6 +94,14 @@ mod Seq do
     Seq(fn(acc, f) -> go(seed, acc, f))
   end
 
+  doc """
+  The elements of `s1` followed by the elements of `s2`.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.concat(Seq.from_list([1, 2]), Seq.from_list([3])))
+      [1, 2, 3]
+  """
   fn concat(s1, s2) do
     fn run_concat(fold1, fold2, acc, f) do
       let mid = fold1(acc, f)
@@ -74,6 +119,15 @@ mod Seq do
 
   -- Transformation (lazy)
 
+  doc """
+  Lazily applies `f` to each element. `f` runs once per element each time the
+  result is folded.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.map(Seq.from_list([1, 2, 3]), fn x -> x * 10))
+      [10, 20, 30]
+  """
   fn map(seq, f) do
     match seq do
     Seq(fold) ->
@@ -81,6 +135,14 @@ mod Seq do
     end
   end
 
+  doc """
+  Lazily keeps only the elements for which `pred` returns true.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.filter(Seq.from_list([1, 2, 3, 4]), fn x -> x % 2 == 0))
+      [2, 4]
+  """
   fn filter(seq, pred) do
     match seq do
     Seq(fold) -> do
@@ -91,6 +153,15 @@ mod Seq do
     end
   end
 
+  doc """
+  Lazily applies `f` (which returns a Seq) to each element and concatenates
+  the resulting seqs.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.flat_map(Seq.from_list([1, 2]), fn x -> Seq.from_list([x, x])))
+      [1, 1, 2, 2]
+  """
   fn flat_map(seq, f) do
     match seq do
     Seq(fold) -> do
@@ -105,6 +176,18 @@ mod Seq do
     end
   end
 
+  doc """
+  The first `n` elements (all of them if there are fewer; none if `n <= 0`).
+  The source is still folded to its end, the extra elements just ignored,
+  so `take` does not make an unbounded seq finite: use `unfold_until`.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.take(Seq.from_list([1, 2, 3]), 2))
+      [1, 2]
+      march> Seq.to_list(Seq.take(Seq.from_list([1, 2, 3]), 0))
+      []
+  """
   fn take(seq, n) do
     fn step_take(pair, x, f) do
       let (a, count) = pair
@@ -122,6 +205,17 @@ mod Seq do
     end
   end
 
+  doc """
+  All but the first `n` elements (empty if `n >= length`; the whole seq if
+  `n <= 0`).
+
+  ## Examples
+
+      march> Seq.to_list(Seq.drop(Seq.from_list([1, 2, 3]), 2))
+      [3]
+      march> Seq.to_list(Seq.drop(Seq.from_list([1, 2, 3]), 5))
+      []
+  """
   fn drop(seq, n) do
     fn step_drop(pair, x, f) do
       let (a, skipped) = pair
@@ -139,6 +233,16 @@ mod Seq do
     end
   end
 
+  doc """
+  Pairs elements of `s1` with elements of `s2`, stopping at the shorter one.
+  `s2` is materialised to a list (via `to_list`) each time the result is
+  folded, so it must be finite; `s1` drives the iteration.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.zip(Seq.from_list([1, 2, 3]), Seq.from_list(["a", "b"])))
+      [(1, "a"), (2, "b")]
+  """
   fn zip(s1, s2) do
     fn step_zip(pair, x, f) do
       let (a, remaining) = pair
@@ -163,6 +267,17 @@ mod Seq do
     end
   end
 
+  doc """
+  Groups elements into lists of `n` (which must be positive); the last batch
+  holds the remainder and may be shorter. An empty seq yields no batches.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.batch(Seq.from_list([1, 2, 3, 4, 5]), 2))
+      [[1, 2], [3, 4], [5]]
+      march> Seq.to_list(Seq.batch(Seq.empty(), 2))
+      []
+  """
   fn batch(seq, n : {Int | _ > 0}) do
     -- Group elements into lists of size n.
     fn step_batch(triple, x, f) do
@@ -192,6 +307,14 @@ mod Seq do
 
   -- Consumption (eager)
 
+  doc """
+  Folds the seq into a list, in order.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.map(Seq.from_list([1, 2]), fn x -> x + 1))
+      [2, 3]
+  """
   fn to_list(seq) do
     match seq do
     Seq(fold) ->
@@ -199,6 +322,17 @@ mod Seq do
     end
   end
 
+  doc """
+  Folds the seq left to right: `f(acc, x)` returns the next accumulator,
+  starting from `start`. Returns `start` for an empty seq.
+
+  ## Examples
+
+      march> Seq.fold(Seq.from_list([1, 2, 3]), 0, fn (acc, x) -> acc + x)
+      6
+      march> Seq.fold(Seq.empty(), 5, fn (acc, x) -> acc + x)
+      5
+  """
   fn fold(seq, start, f) do
     match seq do
     Seq(folder) -> folder(start, f)
@@ -209,6 +343,17 @@ mod Seq do
   -- With church-encoded folds, all elements are visited but accumulation
   -- is skipped after Halt. For file streaming, the file is read to EOF
   -- even after Halt. This is a known limitation of the fold-based model.
+  doc """
+  Folds with early exit: `f(acc, x)` returns `Continue(acc2)` to keep going
+  or `Halt(result)` to stop accumulating; the result is the last
+  `Continue`/`Halt` payload. The remaining elements are still visited (and
+  ignored) after a `Halt`, so this does not terminate on an unbounded seq.
+
+  ## Examples
+
+      march> Seq.fold_while(Seq.from_list([1, 2, 3, 4]), 0, fn (acc, x) -> if acc + x > 5 do Halt(acc) else Continue(acc + x) end)
+      3
+  """
   fn fold_while(seq, start, f) do
     fn step_fold_while(step, x, f) do
       match step do
@@ -227,6 +372,16 @@ mod Seq do
     end
   end
 
+  doc """
+  Calls `f` on each element for its side effects and returns `:ok`.
+  `f`'s result is discarded, but the current typing threads it as the
+  accumulator, so `f` must return an Atom (e.g. `:ok`).
+
+      Seq.each(Seq.from_list(["a", "b"]), fn s -> do
+        println(s)
+        :ok
+      end)
+  """
   fn each(seq, f) do
     match seq do
     Seq(folder) -> do
@@ -236,6 +391,16 @@ mod Seq do
     end
   end
 
+  doc """
+  The number of elements in the seq.
+
+  ## Examples
+
+      march> Seq.count(Seq.from_list([1, 2, 3]))
+      3
+      march> Seq.count(Seq.empty())
+      0
+  """
   fn count(seq) do
     match seq do
     Seq(folder) ->
@@ -259,10 +424,19 @@ mod Seq do
   -- planned Phase B follow-up if real partial-consumption matters.
 
   doc """
-  Build a `Seq(String)` from a string by splitting on newline.
-  A single trailing newline does not produce a final empty element
-  (so `from_string_lines("a\\nb\\n")` yields `["a", "b"]`, not
-  `["a", "b", ""]`).  Blank lines in the middle are preserved.
+  Build a `Seq(String)` from a string by splitting on `"\\n"` (a `"\\r"`
+  before it is kept). Trailing empty lines are dropped, so neither
+  `"a\\nb\\n"` nor `"a\\nb\\n\\n"` produces a final `""`; blank lines in
+  the middle are preserved. The empty string yields an empty seq.
+
+  ## Examples
+
+      march> Seq.to_list(Seq.from_string_lines("a\nb\n"))
+      ["a", "b"]
+      march> Seq.to_list(Seq.from_string_lines("a\n\nb"))
+      ["a", "", "b"]
+      march> Seq.to_list(Seq.from_string_lines(""))
+      []
   """
   fn from_string_lines(s) do
     let lines = string_split(s, "\n")
@@ -431,6 +605,17 @@ mod Seq do
     unfold((seed, 0), step_unfold_until)
   end
 
+  doc """
+  The first element satisfying `pred` as `Some`, or `None`. Built on
+  `fold_while`, so the whole seq is still visited.
+
+  ## Examples
+
+      march> Seq.find(Seq.from_list([1, 2, 3, 4]), fn x -> x > 2)
+      Some(3)
+      march> Seq.find(Seq.from_list([1, 2]), fn x -> x > 5)
+      None
+  """
   fn find(seq, pred) do
     fold_while(seq, None, fn(ig, x) -> do
       if pred(x) do Halt(Some(x))
@@ -440,6 +625,17 @@ mod Seq do
   end
 
   -- Note: March identifiers cannot contain '?', so these are named `any` and `all`
+  doc """
+  True if any element satisfies `pred`; false for an empty seq. `pred` is not
+  called again after the first match, but the whole seq is still visited.
+
+  ## Examples
+
+      march> Seq.any(Seq.from_list([1, 2, 3]), fn x -> x > 2)
+      true
+      march> Seq.any(Seq.empty(), fn x -> x > 2)
+      false
+  """
   fn any(seq, pred) do
     fold_while(seq, false, fn(ig, x) -> do
       if pred(x) do Halt(true)
@@ -448,6 +644,17 @@ mod Seq do
     )
   end
 
+  doc """
+  True if every element satisfies `pred`; true for an empty seq. `pred` is not
+  called again after the first failure, but the whole seq is still visited.
+
+  ## Examples
+
+      march> Seq.all(Seq.from_list([1, 2, 3]), fn x -> x > 0)
+      true
+      march> Seq.all(Seq.empty(), fn x -> x > 0)
+      true
+  """
   fn all(seq, pred) do
     fold_while(seq, true, fn(ig, x) -> do
       if pred(x) do Continue(true)

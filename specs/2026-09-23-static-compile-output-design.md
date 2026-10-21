@@ -1,7 +1,13 @@
 # Static and self-contained `march --compile` output
 
 **Date:** 2026-09-23
-**Status:** design. Nothing here is implemented.
+**Status:** design; Stages 0 and 1 landed, Stages 2-6 follow the decisions in §0 (approved 2026-10-18).
+Stage 1 (vendored portable BLAKE3, `runtime/third_party/blake3/`, so no user binary
+links libblake3) landed 2026-09-23 in `8b25477ec`; Stage 0 (the host library probe
+in the CAS key) landed 2026-10-18
+(`specs/progress/2026-10-18-libprobe-in-cas-key.md`). Re-measured 2026-10-18 on macOS
+arm64: a hello-world still loads libssl, libcrypto, libz, libzstd and
+libbrotli{enc,dec}, which is Stage 2's job.
 **Closes (when all stages land):** `specs/todos/2026-09-02-march-compile-output-is-not-static.md` [P2]
 **Unblocks:** the `scratch` deploy variant that `specs/docker_images.md` defers
 (its §"Non-goals" bullet and open item 6 both point at the todo above).
@@ -16,6 +22,12 @@ under Docker, no QEMU).
 ## 0. Decisions needed
 
 Each is a question, a recommendation, and the reason. §4 has the alternatives.
+
+**Decided 2026-10-18 (owner): every recommendation below, as written.** D1, D3 and
+D6 (runtime archive, library selection from `called_c_symbols`, per-codec
+compression with a compile-time error, hot-reload builds exempt); D4 and D5
+(`--static` is musl-only on Linux and "self-contained" on macOS); D7 (no embedded CA
+bundle, document `SSL_CERT_FILE`). D2 was carried out as Stage 1 on 2026-09-23.
 
 **D1. What decides which runtime pieces and libraries a program links?**
 *Recommendation:* the linker decides for objects, and the compiler's record of

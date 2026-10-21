@@ -214,8 +214,60 @@ let test_global_store_write_through () =
   Alcotest.(check bool) "the hit warmed project B's local store" true
     (Sys.file_exists (Filename.concat b ".march/cas/artifacts-v2"))
 
+(* The host-library probe (OpenSSL prefix, zstd/brotli headers) is part of
+   the CAS key.  The probe decides the binary's dependency set and, for
+   zstd/brotli, whether those codecs work at all, but the whole-binary key
+   omitted it: a build after the host lost zstd.h was served the binary
+   linked against libzstd, and the other way round
+   (specs/2026-09-23-static-compile-output-design.md §2.4, Stage 0).
+   MARCH_TEST_LIBPROBE_ROOT makes the probe find nothing without touching
+   the host; the probed build may then fail to link, which does not matter:
+   the key is printed before any of that. *)
+let casflags_line out =
+  String.split_on_char '\n' out
+  |> List.find_opt (fun l -> contains l "MARCH_CASFLAGS: ")
+  |> Option.value ~default:""
+
+let field_of line key =
+  (* "... key=VALUE ..." -> VALUE *)
+  match String.split_on_char ' ' line
+        |> List.find_opt (fun w -> String.length w > String.length key
+                                   && String.sub w 0 (String.length key) = key) with
+  | Some w -> String.sub w (String.length key) (String.length w - String.length key)
+  | None -> ""
+
+let test_libprobe_in_cas_key () =
+  require_compiler ();
+  with_scratch @@ fun dir ->
+  write_file (Filename.concat dir "m.march")
+    "mod M do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n    println(\"hi\")\n  end\nend\n";
+  let run ~probe_root log =
+    let cmd = Printf.sprintf
+        "cd %s && env HOME=%s MARCH_DEBUG_CASFLAGS=1 %s %s --compile -o out m.march > %s 2>&1"
+        (Filename.quote dir) (Filename.quote (Filename.concat dir "home"))
+        (match probe_root with Some r -> "MARCH_TEST_LIBPROBE_ROOT=" ^ Filename.quote r | None -> "")
+        (Filename.quote compiler_exe) (Filename.quote log) in
+    ignore (Sys.command cmd);
+    read_file log
+  in
+  let host = run ~probe_root:None (Filename.concat dir "host.log") in
+  let none = run ~probe_root:(Some (Filename.concat dir "no-such-root"))
+      (Filename.concat dir "none.log") in
+  let lh = casflags_line host and ln = casflags_line none in
+  Alcotest.(check bool) ("the key names the probe\n" ^ host) true (contains lh "libprobe:");
+  Alcotest.(check bool)
+    (Printf.sprintf "an empty probe changes the probe tag\n%s\n%s" lh ln) true
+    (field_of lh "flags=" <> field_of ln "flags=");
+  Alcotest.(check bool)
+    (Printf.sprintf "and the compilation hash\n%s\n%s" lh ln) true
+    (field_of lh "ch=" <> "" && field_of lh "ch=" <> field_of ln "ch=");
+  Alcotest.(check bool) ("the second build is not a cache hit\n" ^ none) false
+    (contains none "(cached)")
+
 let tests =
-  [ Alcotest.test_case "B7.3: a build writes through to ~/.march/cas; another project hits it" `Slow
+  [ Alcotest.test_case "Stage 0: the host library probe is part of the CAS key" `Slow
+      test_libprobe_in_cas_key;
+    Alcotest.test_case "B7.3: a build writes through to ~/.march/cas; another project hits it" `Slow
       test_global_store_write_through;
     Alcotest.test_case "B7.1: a cache hit replays the build's warnings" `Slow
       test_replay_diagnostics_on_hit;

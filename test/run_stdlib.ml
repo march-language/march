@@ -6,4 +6,4 @@
 let () =
   Alcotest.run "march-stdlib"
     (Test_stdlib_suite.stdlib_suites @ Test_http_native.suites
-     @ Test_socket_timeout.suites)
+     @ Test_socket_timeout.suites @ Test_tls_groups.suites)

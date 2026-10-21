@@ -354,12 +354,30 @@ mod Array do
 
   -- ── Public API ─────────────────────────────────────────────────────────────
 
-  doc "Returns an empty persistent vector."
+  doc """
+  Returns an empty persistent vector.
+
+  ## Examples
+
+      march> Array.length(Array.empty())
+      0
+      march> Array.to_list(Array.empty())
+      []
+  """
   fn empty() : {PVec(a) | pvec_length(_) == 0} do
     PVec(0, 0, TrieEmpty, Nil)
   end
 
-  doc "Returns the number of elements. O(1)."
+  doc """
+  Returns the number of elements. O(1): the size is stored.
+
+  ## Examples
+
+      march> Array.length(Array.from_list([1, 2, 3]))
+      3
+      march> Array.length(Array.from_list(List.range(0, 100)))
+      100
+  """
   fn length(v) do
     match v do
     PVec(n, _, _, _) -> n
@@ -381,7 +399,16 @@ mod Array do
     end
   end
 
-  doc "Returns true if the vector is empty."
+  doc """
+  Returns true if the vector has no elements. O(1).
+
+  ## Examples
+
+      march> Array.is_empty(Array.empty())
+      true
+      march> Array.is_empty(Array.push(Array.empty(), 1))
+      false
+  """
   fn is_empty(v) do
     match v do
     PVec(n, _, _, _) -> n == 0
@@ -389,8 +416,15 @@ mod Array do
   end
 
   doc """
-  Returns the element at index idx (0-based). O(log₃₂ n).
-  Panics if idx is out of range.
+  Returns the element at index `idx` (0-based). O(log₃₂ n).
+  Panics if `idx` is negative or `>= length(v)` (also a refinement precondition).
+
+  ## Examples
+
+      march> Array.get(Array.from_list([10, 20, 30]), 0)
+      10
+      march> Array.get(Array.from_list(List.range(0, 100)), 70)
+      70
   """
   fn get(v : PVec(a), idx : {Int | _ >= 0 && _ < pvec_length(v)}) do
     match v do
@@ -409,8 +443,16 @@ mod Array do
   end
 
   doc """
-  Returns a new vector with element at idx replaced by val. O(log₃₂ n).
-  Panics if idx is out of range.
+  Returns a new vector with the element at `idx` replaced by `val`; the original is
+  unchanged. O(log₃₂ n). Panics if `idx` is negative or `>= length(v)` (also a
+  refinement precondition): `set` never grows the vector, use `push` for that.
+
+  ## Examples
+
+      march> Array.to_list(Array.set(Array.from_list([1, 2, 3]), 1, 20))
+      [1, 20, 3]
+      march> Array.get(Array.set(Array.from_list(List.range(0, 100)), 50, -1), 50)
+      -1
   """
   -- Assumed, not proved: the checker cannot reflect the nested `if` that
   -- picks tail vs trie.  Witnessed in test/stdlib/test_array.march.
@@ -431,7 +473,17 @@ mod Array do
     end
   end
 
-  doc "Appends an element at the end. O(1) amortized."
+  doc """
+  Appends an element at the end, returning a new vector. O(1) amortized (O(log₃₂ n)
+  when the 32-element tail buffer is full and is flushed into the trie).
+
+  ## Examples
+
+      march> Array.to_list(Array.push(Array.from_list([1, 2]), 3))
+      [1, 2, 3]
+      march> Array.length(Array.push(Array.from_list(List.range(0, 32)), 32))
+      33
+  """
   -- Assumed, not proved (the tail-full branch goes through push_leaf's
   -- tuple).  Witnessed in test/stdlib/test_array.march.
   @[assume]
@@ -477,8 +529,15 @@ mod Array do
   end
 
   doc """
-  Removes the last element. Returns (new_vector, last_element).
-  Panics if the vector is empty.
+  Removes the last element. Returns `(new_vector, last_element)`.
+  Panics if the vector is empty (also a refinement precondition).
+
+  ## Examples
+
+      march> match Array.pop(Array.from_list([1, 2, 3])) do (rest, x) -> (Array.to_list(rest), x) end
+      ([1, 2], 3)
+      march> match Array.pop(Array.from_list(List.range(0, 33))) do (rest, x) -> (Array.length(rest), x) end
+      (32, 32)
   """
   fn pop(v : {PVec(a) | pvec_length(_) > 0}) do
     match v do
@@ -514,7 +573,17 @@ mod Array do
     end
   end
 
-  doc "Applies f to each element, returning a new vector with the results. O(n)."
+  doc """
+  Applies `f` to each element, returning a new vector of the results in the same order.
+  O(n).
+
+  ## Examples
+
+      march> Array.to_list(Array.map(Array.from_list([1, 2, 3]), fn x -> x * 2))
+      [2, 4, 6]
+      march> Array.length(Array.map(Array.empty(), fn x -> x + 1))
+      0
+  """
   -- Assumed, not proved (rebuilds through to_list/from_list).  Witnessed in
   -- test/stdlib/test_array.march.
   @[assume]
@@ -531,9 +600,16 @@ mod Array do
 
   doc """
   Left fold over all elements in index order: collection first, init
-  second, callback last (uncurried).  `f(acc, elem) = new_acc`.
+  second, callback last (uncurried).  `f(acc, elem) = new_acc`. O(n).
   Generic in the accumulator `b`, so a refinement demanded of the result
   is checked as an invariant of `acc` (see docs/refinement-types.md, "Folds").
+
+  ## Examples
+
+      march> Array.fold_left(Array.from_list([1, 2, 3]), 0, fn (acc, x) -> acc * 10 + x)
+      123
+      march> Array.fold_left(Array.from_list(List.range(1, 101)), 0, fn (acc, x) -> acc + x)
+      5050
   """
   fn fold_left(v : PVec(a), acc : b, f : b -> a -> b) : b do
     match v do
@@ -550,7 +626,16 @@ mod Array do
     end
   end
 
-  doc "Returns all elements as a list in index order. O(n)."
+  doc """
+  Returns all elements as a list in index order. O(n).
+
+  ## Examples
+
+      march> Array.to_list(Array.push(Array.push(Array.empty(), "a"), "b"))
+      ["a", "b"]
+      march> Array.to_list(Array.empty())
+      []
+  """
   fn to_list(v) do
     let rev = fold_left(v, Nil, fn (acc, x) -> Cons(x, acc))
     lst_rev(rev)
@@ -629,6 +714,13 @@ mod Array do
   Test hook: true when two vectors have the same trie shape -- size, shift,
   tail length, and the same branch fan-out and leaf lengths all the way
   down. Elements are not compared.
+
+  ## Examples
+
+      march> Array.debug_same_shape(Array.from_list([1, 2]), Array.from_list([3, 4]))
+      true
+      march> Array.debug_same_shape(Array.from_list([1, 2]), Array.from_list([1, 2, 3]))
+      false
   """
   fn debug_same_shape(a : PVec(a), b : PVec(a)) : Bool do
     match (a, b) do
@@ -655,7 +747,17 @@ mod Array do
     end
   end
 
-  doc "Builds a persistent vector from a list. O(n)."
+  doc """
+  Builds a persistent vector from a list, preserving order. O(n): the trie is built
+  in bulk, with the same shape repeated `push` would produce.
+
+  ## Examples
+
+      march> Array.to_list(Array.from_list([3, 1, 2]))
+      [3, 1, 2]
+      march> Array.get(Array.from_list(List.range(0, 1000)), 999)
+      999
+  """
   -- Built in bulk rather than by n pushes (each push copied the up-to-32
   -- element tail list: ~540 ns per element at n = 100k). The result is the
   -- same trie push would build: a tail of the last 1..32 elements, full
@@ -700,6 +802,11 @@ mod Array do
   Test hook: builds the vector by pushing one element at a time, the
   construction `from_list` replaced. Compare the two with
   `debug_same_shape` (test/native/array_sort_by.march does).
+
+  ## Examples
+
+      march> Array.debug_same_shape(Array.from_list(List.range(0, 100)), Array.debug_from_list_by_push(List.range(0, 100)))
+      true
   """
   fn debug_from_list_by_push(xs : List(a)) : PVec(a) do
     fn go(lst, acc) do

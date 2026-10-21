@@ -26,7 +26,8 @@ mod Duration do
   Create a Duration from an amount and a unit atom.
 
   Supported units: `:ms` (milliseconds), `:s` (seconds), `:m` (minutes),
-  `:h` (hours), `:d` (days), `:w` (weeks).
+  `:h` (hours), `:d` (days), `:w` (weeks).  Any other atom is a
+  match failure at runtime.
 
       march> Duration.new(30, :s)  -- 30 seconds
       Duration(30000)
@@ -46,22 +47,68 @@ mod Duration do
     end
   end
 
-  doc "Create a Duration of n milliseconds."
+  doc """
+  Create a Duration of n milliseconds. n may be negative.
+
+  ## Examples
+
+      march> Duration.milliseconds(1500)
+      Duration(1500)
+      march> Duration.format(Duration.milliseconds(-250))
+      "-250 milliseconds"
+  """
   fn milliseconds(n) do Duration(n) end
 
-  doc "Create a Duration of n seconds."
+  doc """
+  Create a Duration of n seconds (stored as `n * 1000` milliseconds).
+
+  ## Examples
+
+      march> Duration.seconds(2)
+      Duration(2000)
+      march> Duration.seconds(-1)
+      Duration(-1000)
+  """
   fn seconds(n) do Duration(n * 1000) end
 
-  doc "Create a Duration of n minutes."
+  doc """
+  Create a Duration of n minutes (stored as `n * 60000` milliseconds).
+
+  ## Examples
+
+      march> Duration.minutes(90) == Duration.add(Duration.hours(1), Duration.minutes(30))
+      true
+  """
   fn minutes(n) do Duration(n * 60000) end
 
-  doc "Create a Duration of n hours."
+  doc """
+  Create a Duration of n hours (stored as `n * 3600000` milliseconds).
+
+  ## Examples
+
+      march> Duration.to_milliseconds(Duration.hours(1))
+      3600000
+  """
   fn hours(n) do Duration(n * 3600000) end
 
-  doc "Create a Duration of n days (24-hour days)."
+  doc """
+  Create a Duration of n days (24-hour days, `n * 86400000` milliseconds).
+
+  ## Examples
+
+      march> Duration.format(Duration.days(3))
+      "3 days"
+  """
   fn days(n) do Duration(n * 86400000) end
 
-  doc "Create a Duration of n weeks (7 days each)."
+  doc """
+  Create a Duration of n weeks (7 days each, `n * 604800000` milliseconds).
+
+  ## Examples
+
+      march> Duration.weeks(1) == Duration.days(7)
+      true
+  """
   fn weeks(n) do Duration(n * 604800000) end
 
   -- ── Conversion ────────────────────────────────────────────────────────────

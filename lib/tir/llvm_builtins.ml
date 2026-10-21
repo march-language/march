@@ -463,6 +463,20 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_ed25519_verify(ptr %pk, ptr %msg, ptr %sig)" };
   { march_name = "x25519"; c_name = Some "march_x25519"; ret_ty = Some (Tir.TCon ("Bytes", []));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_x25519(ptr %k, ptr %u)" };
+  (* ML-KEM-768 / ML-DSA-65 over the vendored mlkem-native / mldsa-native
+     (runtime/pqc.c, runtime/march_pqc.c). *)
+  { march_name = "mlkem768_keypair"; c_name = Some "march_mlkem768_keypair"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mlkem768_keypair(ptr %seed)" };
+  { march_name = "mlkem768_encaps"; c_name = Some "march_mlkem768_encaps"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mlkem768_encaps(ptr %pk, ptr %coins)" };
+  { march_name = "mlkem768_decaps"; c_name = Some "march_mlkem768_decaps"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mlkem768_decaps(ptr %sk, ptr %ct)" };
+  { march_name = "mldsa65_keypair"; c_name = Some "march_mldsa65_keypair"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mldsa65_keypair(ptr %seed)" };
+  { march_name = "mldsa65_sign"; c_name = Some "march_mldsa65_sign"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mldsa65_sign(ptr %sk, ptr %msg, ptr %rnd)" };
+  { march_name = "mldsa65_verify"; c_name = Some "march_mldsa65_verify"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_mldsa65_verify(ptr %pk, ptr %msg, ptr %sig)" };
   { march_name = "pbkdf2_sha256"; c_name = Some "march_pbkdf2_sha256"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)" };
   { march_name = "base64_encode"; c_name = Some "march_base64_encode"; ret_ty = Some Tir.TString;
@@ -774,6 +788,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_negotiated_alpn(i64 %ssl_handle)" };
   { march_name = "tls_peer_cn"; c_name = Some "march_tls_peer_cn"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_peer_cn(i64 %ssl_handle)" };
+  { march_name = "tls_ctx_set_groups"; c_name = Some "march_tls_ctx_set_groups"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_ctx_set_groups(i64 %ctx_handle, ptr %groups)" };
+  { march_name = "tls_negotiated_group"; c_name = Some "march_tls_negotiated_group"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_negotiated_group(i64 %ssl_handle)" };
+  { march_name = "tls_pq_available"; c_name = Some "march_tls_pq_available"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_tls_pq_available()" };
   { march_name = "typed_array_create"; c_name = Some "march_typed_array_create"; ret_ty = Some (Tir.TVar "a");
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_typed_array_create(i64 %len, ptr %default_val)" };
   { march_name = "typed_array_from_list"; c_name = Some "march_typed_array_from_list"; ret_ty = Some (Tir.TVar "a");
@@ -1296,7 +1316,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_dispatch_register_name", "declare void @march_dispatch_register_name(i32, ptr)");
   ("march_dispatch_name_to_id", "declare i32  @march_dispatch_name_to_id(ptr, ptr)");
   ("march_reload_server_start", "declare void @march_reload_server_start(ptr)");
-  ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)");
+  ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id, i32 %build_epoch)");
   ("march_actor_set_call_tags", "declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)");
   ("getenv", "declare ptr  @getenv(ptr)");
   ("march_alloc", "declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)");
@@ -1614,6 +1634,12 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_ed25519_sign";
   PDeclare "march_ed25519_verify";
   PDeclare "march_x25519";
+  PDeclare "march_mlkem768_keypair";
+  PDeclare "march_mlkem768_encaps";
+  PDeclare "march_mlkem768_decaps";
+  PDeclare "march_mldsa65_keypair";
+  PDeclare "march_mldsa65_sign";
+  PDeclare "march_mldsa65_verify";
   PDeclare "march_pbkdf2_sha256";
   PDeclare "march_base64_encode";
   PDeclare "march_base64_decode";
@@ -1804,6 +1830,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_tls_ctx_free";
   PDeclare "march_tls_negotiated_alpn";
   PDeclare "march_tls_peer_cn";
+  PDeclare "march_tls_ctx_set_groups";
+  PDeclare "march_tls_negotiated_group";
+  PDeclare "march_tls_pq_available";
   PComment "; TypedArray builtins";
   PDeclare "march_typed_array_create";
   PDeclare "march_typed_array_from_list";

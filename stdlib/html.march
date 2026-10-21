@@ -69,45 +69,112 @@ mod Html do
 
   Prefer building markup with the ~H sigil, which needs no trust at all. Reach
   for this only when a string genuinely is markup from a source you control.
+  The string is stored as given: nothing is checked or escaped.
+
+  ## Examples
+
+      march> Html.trust_html("<b>bold</b>")
+      TrustedHtml("<b>bold</b>")
   """
   fn trust_html(s : String) : TrustedHtml do TrustedHtml(s) end
 
-  doc "Trust a string as an ordinary attribute value. See `trust_html`."
+  doc """
+  Trust a string as an ordinary attribute value. See `trust_html`.
+
+  ## Examples
+
+      march> Html.trust_attr("btn primary")
+      TrustedAttr("btn primary")
+  """
   fn trust_attr(s : String) : TrustedAttr do TrustedAttr(s) end
 
   doc """
   Trust a string as a URL. It bypasses the scheme allowlist, so only use it on a
   URL you constructed yourself. See `trust_html`.
+
+  ## Examples
+
+      march> Html.trust_url("/search?q=1")
+      TrustedUrl("/search?q=1")
   """
   fn trust_url(s : String) : TrustedUrl do TrustedUrl(s) end
 
-  doc "Trust a string as CSS. See `trust_html`."
+  doc """
+  Trust a string as CSS. See `trust_html`.
+
+  ## Examples
+
+      march> Html.trust_css("color: red")
+      TrustedCss("color: red")
+  """
   fn trust_css(s : String) : TrustedCss do TrustedCss(s) end
 
-  doc "Trust a string as JavaScript. See `trust_html`."
+  doc """
+  Trust a string as JavaScript. See `trust_html`.
+
+  ## Examples
+
+      march> Html.trust_js("init();")
+      TrustedJs("init();")
+  """
   fn trust_js(s : String) : TrustedJs do TrustedJs(s) end
 
-  doc "Unwrap trusted HTML back to a plain String."
+  doc """
+  Unwrap trusted HTML back to a plain String. The string is returned unchanged (not escaped).
+
+  ## Examples
+
+      march> Html.untrust_html(Html.trust_html("<b>bold</b>"))
+      "<b>bold</b>"
+  """
   fn untrust_html(t : TrustedHtml) : String do
     match t do TrustedHtml(s) -> s end
   end
 
-  doc "Unwrap a trusted attribute value back to a plain String."
+  doc """
+  Unwrap a trusted attribute value back to a plain String. The string is returned unchanged (not escaped).
+
+  ## Examples
+
+      march> Html.untrust_attr(Html.trust_attr("btn"))
+      "btn"
+  """
   fn untrust_attr(t : TrustedAttr) : String do
     match t do TrustedAttr(s) -> s end
   end
 
-  doc "Unwrap a trusted URL back to a plain String."
+  doc """
+  Unwrap a trusted URL back to a plain String. The string is returned unchanged (not escaped).
+
+  ## Examples
+
+      march> Html.untrust_url(Html.trust_url("/home"))
+      "/home"
+  """
   fn untrust_url(t : TrustedUrl) : String do
     match t do TrustedUrl(s) -> s end
   end
 
-  doc "Unwrap trusted CSS back to a plain String."
+  doc """
+  Unwrap trusted CSS back to a plain String. The string is returned unchanged (not escaped).
+
+  ## Examples
+
+      march> Html.untrust_css(Html.trust_css("color: red"))
+      "color: red"
+  """
   fn untrust_css(t : TrustedCss) : String do
     match t do TrustedCss(s) -> s end
   end
 
-  doc "Unwrap trusted JavaScript back to a plain String."
+  doc """
+  Unwrap trusted JavaScript back to a plain String. The string is returned unchanged (not escaped).
+
+  ## Examples
+
+      march> Html.untrust_js(Html.trust_js("init();"))
+      "init();"
+  """
   fn untrust_js(t : TrustedJs) : String do
     match t do TrustedJs(s) -> s end
   end

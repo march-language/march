@@ -488,32 +488,94 @@ mod Uri do
 
   -- ── Field accessors ───────────────────────────────────────────────────────
 
-  doc "Extract the scheme component (e.g. \"https\")."
+  doc """
+  Extract the scheme component, e.g. `"https"`; `""` for a scheme-less
+  reference.
+
+  ## Examples
+
+      march> Uri.scheme(Uri.parse("https://example.com/a"))
+      "https"
+      march> Uri.scheme(Uri.parse("/relative"))
+      ""
+  """
   fn scheme(uri) do
     match uri do URI(s, _, _, _, _, _) -> s end
   end
 
-  doc "Extract the host component (e.g. \"example.com\")."
+  doc """
+  Extract the host component, e.g. `"example.com"`; `""` when the URI has
+  no authority. An authority whose port is not an integer is kept whole
+  as the host.
+
+  ## Examples
+
+      march> Uri.host(Uri.parse("https://example.com:8080/a"))
+      "example.com"
+      march> Uri.host(Uri.parse("a/b"))
+      ""
+      march> Uri.host(Uri.parse("http://h:abc/x"))
+      "h:abc"
+  """
   fn host(uri) do
     match uri do URI(_, h, _, _, _, _) -> h end
   end
 
-  doc "Extract the port as Some(n) or None."
+  doc """
+  Extract the explicit port as `Some(n)`, or `None` when the authority
+  has none (no default port is inferred from the scheme).
+
+  ## Examples
+
+      march> Uri.port(Uri.parse("http://localhost:4000/"))
+      Some(4000)
+      march> Uri.port(Uri.parse("https://example.com/"))
+      None
+  """
   fn port(uri) do
     match uri do URI(_, _, p, _, _, _) -> p end
   end
 
-  doc "Extract the path component (e.g. \"/api/users\")."
+  doc """
+  Extract the path component, including its leading `/` when absolute;
+  `""` for an authority with no path.
+
+  ## Examples
+
+      march> Uri.path(Uri.parse("https://example.com/api/users?x=1"))
+      "/api/users"
+      march> Uri.path(Uri.parse("https://example.com"))
+      ""
+  """
   fn path(uri) do
     match uri do URI(_, _, _, p, _, _) -> p end
   end
 
-  doc "Extract the raw query string (e.g. \"q=hello&page=2\")."
+  doc """
+  Extract the raw (still percent-encoded) query string, without the `?`;
+  `""` when absent. Use `decode_query` to split it into pairs.
+
+  ## Examples
+
+      march> Uri.query(Uri.parse("/search?q=a%20b&page=2#top"))
+      "q=a%20b&page=2"
+      march> Uri.query(Uri.parse("/search"))
+      ""
+  """
   fn query(uri) do
     match uri do URI(_, _, _, _, q, _) -> q end
   end
 
-  doc "Extract the fragment identifier (e.g. \"section-1\")."
+  doc """
+  Extract the fragment identifier, without the `#`; `""` when absent.
+
+  ## Examples
+
+      march> Uri.fragment(Uri.parse("/doc?x=1#section-1"))
+      "section-1"
+      march> Uri.fragment(Uri.parse("/doc"))
+      ""
+  """
   fn fragment(uri) do
     match uri do URI(_, _, _, _, _, f) -> f end
   end

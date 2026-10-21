@@ -246,6 +246,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="Math.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Math.html">Math</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Membership.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Membership.html">Membership</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Merkle.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Merkle.html">Merkle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlDsa.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlDsa.html">MlDsa</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlKem.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlKem.html">MlKem</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Msgpack.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Msgpack.html">Msgpack</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div></div>
@@ -310,26 +312,182 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="WebSocket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WebSocket.html">WebSocket</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="WorkDispatch.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WorkDispatch.html">WorkDispatch</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Xml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Xml.html">Xml</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>BigInt</span></nav><h1>BigInt</h1><div class="mdoc"><p>BigInt module: arbitrary-precision integers.</p><p>Representation: BigInt(sign, digits) where sign   : Bool   — true = non-negative, false: negative digits : List(Int) — little-endian base-10000 digit list (least significant limb first) BigInt(true, Nil) represents zero.</p><p>Base 10000 is convenient: each limb stores 4 decimal digits, so to_string is straightforward without requiring integer logarithms.</p><p>Interface implementations: impl Eq(BigInt)  — eq/2, == impl Ord(BigInt) — compare/2, &lt; impl Show(BigInt) — show/1</p></div><h2>Types</h2><div class="item" id="type-BigInt"><div class="ih"><span class="badge bpt">ptype</span><span class="name">BigInt</span><span class="sig"><a href="#type-BigInt">BigInt</a> = <a href="#type-BigInt">BigInt</a>(Bool, List(Int))</span><a class="anchor-link" href="#type-BigInt" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-abs"><div class="ih"><span class="badge bfn">fn</span><span class="name">abs</span><span class="sig">abs(n : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-abs" title="Link">#</a></div><div class="ib"><p>Returns the absolute value of a BigInt.</p></div></div>
-<div class="item" id="fn-add"><div class="ih"><span class="badge bfn">fn</span><span class="name">add</span><span class="sig">add(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-add" title="Link">#</a></div><div class="ib"><p>Adds two BigInts.</p></div></div>
-<div class="item" id="fn-compare"><div class="ih"><span class="badge bfn">fn</span><span class="name">compare</span><span class="sig">compare(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Int</span><a class="anchor-link" href="#fn-compare" title="Link">#</a></div><div class="ib"><p>Compares two BigInts. Returns -1 (a &lt; b), 0 (a == b), or 1 (a &gt; b).</p></div></div>
-<div class="item" id="fn-div"><div class="ih"><span class="badge bfn">fn</span><span class="name">div</span><span class="sig">div(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-div" title="Link">#</a></div><div class="ib"><p>Divides a by b.  Uses truncation toward zero: <code>div(-17, 3) == -5</code>, <code>div(17, -3) == -5</code>, <code>div(-17, -3) == 5</code>.  Panics if b is zero.</p><p><strong>Limitation:</strong> only single-limb divisors (|b| &lt; <code>base()</code>, roughly 10^9) are supported in the current implementation.  Multi-limb divisors raise <code>BigInt.div: multi-limb divisor not yet supported</code> — this is a loud failure, not a silent wrong result, but callers must guard against it until long division lands.  Most practical use cases (dividing by small denominators, modular arithmetic) fit within the limb bound.</p></div></div>
-<div class="item" id="fn-eq"><div class="ih"><span class="badge bfn">fn</span><span class="name">eq</span><span class="sig">eq(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-eq" title="Link">#</a></div><div class="ib"><p>Returns true if a equals b.</p></div></div>
-<div class="item" id="fn-from_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_int</span><span class="sig">from_int(n : Int) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-from_int" title="Link">#</a></div><div class="ib"><p>Converts a native Int to BigInt.</p></div></div>
-<div class="item" id="fn-gt"><div class="ih"><span class="badge bfn">fn</span><span class="name">gt</span><span class="sig">gt(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-gt" title="Link">#</a></div><div class="ib"><p>Returns true if a &gt; b.</p></div></div>
-<div class="item" id="fn-gte"><div class="ih"><span class="badge bfn">fn</span><span class="name">gte</span><span class="sig">gte(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-gte" title="Link">#</a></div><div class="ib"><p>Returns true if a &gt;= b.</p></div></div>
-<div class="item" id="fn-is_negative"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_negative</span><span class="sig">is_negative(n : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-is_negative" title="Link">#</a></div><div class="ib"><p>Returns true if the BigInt is negative.</p></div></div>
-<div class="item" id="fn-is_positive"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_positive</span><span class="sig">is_positive(n : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-is_positive" title="Link">#</a></div><div class="ib"><p>Returns true if the BigInt is positive (&gt; 0).</p></div></div>
-<div class="item" id="fn-is_zero"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_zero</span><span class="sig">is_zero(n : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-is_zero" title="Link">#</a></div><div class="ib"><p>Returns true if the BigInt is zero.</p></div></div>
-<div class="item" id="fn-lt"><div class="ih"><span class="badge bfn">fn</span><span class="name">lt</span><span class="sig">lt(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-lt" title="Link">#</a></div><div class="ib"><p>Returns true if a &lt; b.</p></div></div>
-<div class="item" id="fn-lte"><div class="ih"><span class="badge bfn">fn</span><span class="name">lte</span><span class="sig">lte(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-lte" title="Link">#</a></div><div class="ib"><p>Returns true if a &lt;= b.</p></div></div>
-<div class="item" id="fn-mod_"><div class="ih"><span class="badge bfn">fn</span><span class="name">mod_</span><span class="sig">mod_(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-mod_" title="Link">#</a></div><div class="ib"><p>Computes a mod b (truncated modulo, same sign as a).  The identity <code>a == div(a, b) * b + mod_(a, b)</code> always holds.  Examples: <code>mod_(-17, 3) == -2</code>, <code>mod_(17, 3) == 2</code>.  Panics if b is zero.</p><p><strong>Limitation:</strong> only single-limb divisors (|b| &lt; <code>base()</code>, roughly 10^9) are supported.  Multi-limb divisors raise <code>BigInt.mod: multi-limb divisor not yet supported</code>.</p></div></div>
-<div class="item" id="fn-mul"><div class="ih"><span class="badge bfn">fn</span><span class="name">mul</span><span class="sig">mul(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-mul" title="Link">#</a></div><div class="ib"><p>Multiplies two BigInts.</p></div></div>
-<div class="item" id="fn-negate"><div class="ih"><span class="badge bfn">fn</span><span class="name">negate</span><span class="sig">negate(a : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-negate" title="Link">#</a></div><div class="ib"><p>Negates a BigInt.</p></div></div>
-<div class="item" id="fn-one"><div class="ih"><span class="badge bfn">fn</span><span class="name">one</span><span class="sig">one() : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-one" title="Link">#</a></div><div class="ib"><p>Returns BigInt one.</p></div></div>
-<div class="item" id="fn-sub"><div class="ih"><span class="badge bfn">fn</span><span class="name">sub</span><span class="sig">sub(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-sub" title="Link">#</a></div><div class="ib"><p>Subtracts b from a.</p></div></div>
-<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(n : <a href="#type-BigInt">BigInt</a>) : String</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Converts a BigInt to its decimal string representation.</p><p>The digits are stored in base 10^4 (little-endian), so each limb contributes 4 decimal characters (with leading zeros on all but the most-significant limb).  Pieces are collected into a list and <code>string_join</code>-ed once at the end, making the routine O(number of limbs) rather than the quadratic behaviour of repeated <code>++</code>.</p></div></div>
-<div class="item" id="fn-zero"><div class="ih"><span class="badge bfn">fn</span><span class="name">zero</span><span class="sig">zero() : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-zero" title="Link">#</a></div><div class="ib"><p>Returns BigInt zero.</p></div></div></main></div><script>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>BigInt</span></nav><h1>BigInt</h1><div class="mdoc"><p>BigInt module: arbitrary-precision integers.</p><p>Representation: BigInt(sign, digits) where sign   : Bool   — true = non-negative, false: negative digits : List(Int) — little-endian base-10000 digit list (least significant limb first) BigInt(true, Nil) represents zero.</p><p>Base 10000 is convenient: each limb stores 4 decimal digits, so to_string is straightforward without requiring integer logarithms.</p><p>Interface implementations: impl Eq(BigInt)  — eq/2, == impl Ord(BigInt) — compare/2, &lt; impl Show(BigInt) — show/1</p></div><h2>Types</h2><div class="item" id="type-BigInt"><div class="ih"><span class="badge bpt">ptype</span><span class="name">BigInt</span><span class="sig"><a href="#type-BigInt">BigInt</a> = <a href="#type-BigInt">BigInt</a>(Bool, List(Int))</span><a class="anchor-link" href="#type-BigInt" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-abs"><div class="ih"><span class="badge bfn">fn</span><span class="name">abs</span><span class="sig">abs(n : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-abs" title="Link">#</a></div><div class="ib"><p>Returns the absolute value of a BigInt.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.abs(BigInt.from_int(-123)))
+BigInt.to_string(BigInt.abs(BigInt.from_int(123)))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.abs(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">123</span>)))
+<span class="tok-str">&quot;123&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.abs(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">123</span>)))
+<span class="tok-str">&quot;123&quot;</span></code></pre></div></div>
+<div class="item" id="fn-add"><div class="ih"><span class="badge bfn">fn</span><span class="name">add</span><span class="sig">add(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-add" title="Link">#</a></div><div class="ib"><p>Adds two BigInts. A result of zero is always non-negative.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.add(BigInt.from_int(9999), BigInt.from_int(1)))
+BigInt.to_string(BigInt.add(BigInt.from_int(5), BigInt.from_int(-12)))
+BigInt.to_string(BigInt.add(BigInt.mul(BigInt.from_int(2000000000), BigInt.from_int(2000000000)), BigInt.one()))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.add(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">9999</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">1</span>)))
+<span class="tok-str">&quot;10000&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.add(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">5</span>), <span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">12</span>)))
+<span class="tok-str">&quot;-7&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.add(<span class="tok-ty">BigInt</span>.mul(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">2000000000</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">2000000000</span>)), <span class="tok-ty">BigInt</span>.one()))
+<span class="tok-str">&quot;4000000000000000001&quot;</span></code></pre></div></div>
+<div class="item" id="fn-compare"><div class="ih"><span class="badge bfn">fn</span><span class="name">compare</span><span class="sig">compare(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Int</span><a class="anchor-link" href="#fn-compare" title="Link">#</a></div><div class="ib"><p>Compares two BigInts. Returns -1 (a &lt; b), 0 (a == b), or 1 (a &gt; b).</p><h3>Examples</h3><pre data-try="BigInt.compare(BigInt.from_int(-5), BigInt.from_int(3))
+BigInt.compare(BigInt.from_int(10000), BigInt.from_int(9999))
+BigInt.compare(BigInt.zero(), BigInt.negate(BigInt.zero()))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.compare(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">5</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">3</span>))
+-<span class="tok-num">1</span>
+march&gt; <span class="tok-ty">BigInt</span>.compare(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">10000</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">9999</span>))
+<span class="tok-num">1</span>
+march&gt; <span class="tok-ty">BigInt</span>.compare(<span class="tok-ty">BigInt</span>.zero(), <span class="tok-ty">BigInt</span>.negate(<span class="tok-ty">BigInt</span>.zero()))
+<span class="tok-num">0</span></code></pre></div></div>
+<div class="item" id="fn-div"><div class="ih"><span class="badge bfn">fn</span><span class="name">div</span><span class="sig">div(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-div" title="Link">#</a></div><div class="ib"><p>Divides a by b, truncating toward zero: <code>div(-17, 3) == -5</code>, <code>div(17, -3) == -5</code>, <code>div(-17, -3) == 5</code>. Panics if b is zero.</p><p><strong>Limitation:</strong> only single-limb divisors (|b| &lt; 10000, one base-10000 limb) are supported in the current implementation. Any larger divisor panics with <code>BigInt.div: multi-limb divisor not yet supported</code> (a loud failure, not a silent wrong result), so callers must guard against it until long division lands. The dividend may be arbitrarily large.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.div(BigInt.from_int(-17), BigInt.from_int(3)))
+BigInt.to_string(BigInt.div(BigInt.from_int(17), BigInt.from_int(-3)))
+BigInt.to_string(BigInt.div(BigInt.mul(BigInt.from_int(123456789), BigInt.from_int(987654321)), BigInt.from_int(9999)))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.div(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">17</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">3</span>)))
+<span class="tok-str">&quot;-5&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.div(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">17</span>), <span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">3</span>)))
+<span class="tok-str">&quot;-5&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.div(<span class="tok-ty">BigInt</span>.mul(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">123456789</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">987654321</span>)), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">9999</span>)))
+<span class="tok-str">&quot;12194482559519&quot;</span></code></pre></div></div>
+<div class="item" id="fn-eq"><div class="ih"><span class="badge bfn">fn</span><span class="name">eq</span><span class="sig">eq(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-eq" title="Link">#</a></div><div class="ib"><p>Returns true if a equals b (also available as <code>==</code>).</p><h3>Examples</h3><pre data-try="BigInt.eq(BigInt.from_int(7), BigInt.add(BigInt.from_int(3), BigInt.from_int(4)))
+BigInt.eq(BigInt.from_int(7), BigInt.from_int(-7))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.eq(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">7</span>), <span class="tok-ty">BigInt</span>.add(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">3</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">4</span>)))
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">BigInt</span>.eq(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">7</span>), <span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">7</span>))
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-from_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_int</span><span class="sig">from_int(n : Int) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-from_int" title="Link">#</a></div><div class="ib"><p>Converts a native Int to a BigInt. Negative values keep their sign.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.from_int(1234567))
+BigInt.to_string(BigInt.from_int(-42))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">1234567</span>))
+<span class="tok-str">&quot;1234567&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">42</span>))
+<span class="tok-str">&quot;-42&quot;</span></code></pre></div></div>
+<div class="item" id="fn-gt"><div class="ih"><span class="badge bfn">fn</span><span class="name">gt</span><span class="sig">gt(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-gt" title="Link">#</a></div><div class="ib"><p>Returns true if a &gt; b.</p><h3>Examples</h3><pre data-try="BigInt.gt(BigInt.from_int(10000), BigInt.from_int(9999))
+BigInt.gt(BigInt.from_int(-1), BigInt.zero())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.gt(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">10000</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">9999</span>))
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">BigInt</span>.gt(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">1</span>), <span class="tok-ty">BigInt</span>.zero())
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-gte"><div class="ih"><span class="badge bfn">fn</span><span class="name">gte</span><span class="sig">gte(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-gte" title="Link">#</a></div><div class="ib"><p>Returns true if a &gt;= b.</p><h3>Examples</h3><pre data-try="BigInt.gte(BigInt.zero(), BigInt.from_int(-3))
+BigInt.gte(BigInt.from_int(-4), BigInt.from_int(-3))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.gte(<span class="tok-ty">BigInt</span>.zero(), <span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">3</span>))
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">BigInt</span>.gte(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">4</span>), <span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">3</span>))
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-is_negative"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_negative</span><span class="sig">is_negative(n : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-is_negative" title="Link">#</a></div><div class="ib"><p>Returns true if the BigInt is negative (&lt; 0). Zero is not negative.</p><h3>Examples</h3><pre data-try="BigInt.is_negative(BigInt.from_int(-1))
+BigInt.is_negative(BigInt.zero())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.is_negative(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">1</span>))
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">BigInt</span>.is_negative(<span class="tok-ty">BigInt</span>.zero())
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-is_positive"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_positive</span><span class="sig">is_positive(n : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-is_positive" title="Link">#</a></div><div class="ib"><p>Returns true if the BigInt is positive (&gt; 0). Zero is not positive.</p><h3>Examples</h3><pre data-try="BigInt.is_positive(BigInt.from_int(1))
+BigInt.is_positive(BigInt.zero())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.is_positive(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">1</span>))
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">BigInt</span>.is_positive(<span class="tok-ty">BigInt</span>.zero())
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-is_zero"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_zero</span><span class="sig">is_zero(n : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-is_zero" title="Link">#</a></div><div class="ib"><p>Returns true if the BigInt is zero.</p><h3>Examples</h3><pre data-try="BigInt.is_zero(BigInt.sub(BigInt.one(), BigInt.one()))
+BigInt.is_zero(BigInt.one())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.is_zero(<span class="tok-ty">BigInt</span>.sub(<span class="tok-ty">BigInt</span>.one(), <span class="tok-ty">BigInt</span>.one()))
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">BigInt</span>.is_zero(<span class="tok-ty">BigInt</span>.one())
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-lt"><div class="ih"><span class="badge bfn">fn</span><span class="name">lt</span><span class="sig">lt(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-lt" title="Link">#</a></div><div class="ib"><p>Returns true if a &lt; b.</p><h3>Examples</h3><pre data-try="BigInt.lt(BigInt.from_int(-10), BigInt.from_int(-2))
+BigInt.lt(BigInt.one(), BigInt.one())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.lt(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">10</span>), <span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">2</span>))
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">BigInt</span>.lt(<span class="tok-ty">BigInt</span>.one(), <span class="tok-ty">BigInt</span>.one())
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-lte"><div class="ih"><span class="badge bfn">fn</span><span class="name">lte</span><span class="sig">lte(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : Bool</span><a class="anchor-link" href="#fn-lte" title="Link">#</a></div><div class="ib"><p>Returns true if a &lt;= b.</p><h3>Examples</h3><pre data-try="BigInt.lte(BigInt.one(), BigInt.one())
+BigInt.lte(BigInt.from_int(2), BigInt.one())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.lte(<span class="tok-ty">BigInt</span>.one(), <span class="tok-ty">BigInt</span>.one())
+<span class="tok-kw">true</span>
+march&gt; <span class="tok-ty">BigInt</span>.lte(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">2</span>), <span class="tok-ty">BigInt</span>.one())
+<span class="tok-kw">false</span></code></pre></div></div>
+<div class="item" id="fn-mod_"><div class="ih"><span class="badge bfn">fn</span><span class="name">mod_</span><span class="sig">mod_(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-mod_" title="Link">#</a></div><div class="ib"><p>Computes a mod b (truncated modulo: the result has the sign of a, or is zero). The identity <code>a == div(a, b) * b + mod_(a, b)</code> always holds. Panics if b is zero.</p><p><strong>Limitation:</strong> only single-limb divisors (|b| &lt; 10000) are supported. Any larger divisor panics with <code>BigInt.mod: multi-limb divisor not yet supported</code>.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.mod_(BigInt.from_int(17), BigInt.from_int(3)))
+BigInt.to_string(BigInt.mod_(BigInt.from_int(-17), BigInt.from_int(3)))
+BigInt.to_string(BigInt.mod_(BigInt.from_int(17), BigInt.from_int(-3)))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.mod_(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">17</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">3</span>)))
+<span class="tok-str">&quot;2&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.mod_(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">17</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">3</span>)))
+<span class="tok-str">&quot;-2&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.mod_(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">17</span>), <span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">3</span>)))
+<span class="tok-str">&quot;2&quot;</span></code></pre></div></div>
+<div class="item" id="fn-mul"><div class="ih"><span class="badge bfn">fn</span><span class="name">mul</span><span class="sig">mul(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-mul" title="Link">#</a></div><div class="ib"><p>Multiplies two BigInts (schoolbook, O(n*m) in the number of base-10000 limbs). The product never overflows.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.mul(BigInt.from_int(123456789), BigInt.from_int(987654321)))
+BigInt.to_string(BigInt.mul(BigInt.from_int(-25), BigInt.from_int(4)))
+BigInt.to_string(BigInt.mul(BigInt.from_int(-25), BigInt.zero()))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.mul(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">123456789</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">987654321</span>)))
+<span class="tok-str">&quot;121932631112635269&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.mul(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">25</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">4</span>)))
+<span class="tok-str">&quot;-100&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.mul(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">25</span>), <span class="tok-ty">BigInt</span>.zero()))
+<span class="tok-str">&quot;0&quot;</span></code></pre></div></div>
+<div class="item" id="fn-negate"><div class="ih"><span class="badge bfn">fn</span><span class="name">negate</span><span class="sig">negate(a : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-negate" title="Link">#</a></div><div class="ib"><p>Negates a BigInt. The negation of zero is zero.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.negate(BigInt.from_int(15)))
+BigInt.to_string(BigInt.negate(BigInt.zero()))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.negate(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">15</span>)))
+<span class="tok-str">&quot;-15&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.negate(<span class="tok-ty">BigInt</span>.zero()))
+<span class="tok-str">&quot;0&quot;</span></code></pre></div></div>
+<div class="item" id="fn-one"><div class="ih"><span class="badge bfn">fn</span><span class="name">one</span><span class="sig">one() : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-one" title="Link">#</a></div><div class="ib"><p>Returns BigInt one.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.one())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.one())
+<span class="tok-str">&quot;1&quot;</span></code></pre></div></div>
+<div class="item" id="fn-sub"><div class="ih"><span class="badge bfn">fn</span><span class="name">sub</span><span class="sig">sub(a : <a href="#type-BigInt">BigInt</a>, b : <a href="#type-BigInt">BigInt</a>) : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-sub" title="Link">#</a></div><div class="ib"><p>Subtracts b from a.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.sub(BigInt.from_int(5), BigInt.from_int(12)))
+BigInt.is_zero(BigInt.sub(BigInt.from_int(-3), BigInt.from_int(-3)))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.sub(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">5</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">12</span>)))
+<span class="tok-str">&quot;-7&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.is_zero(<span class="tok-ty">BigInt</span>.sub(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">3</span>), <span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">3</span>)))
+<span class="tok-kw">true</span></code></pre></div></div>
+<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(n : <a href="#type-BigInt">BigInt</a>) : String</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Converts a BigInt to its decimal string representation, with a leading <code>-</code> for negative values and <code>&quot;0&quot;</code> for zero.</p><p>The digits are stored in base 10^4 (little-endian), so each limb contributes 4 decimal characters (with leading zeros on all but the most-significant limb). Pieces are collected into a list and <code>string_join</code>-ed once at the end, making the routine O(number of limbs) rather than the quadratic behaviour of repeated <code>++</code>.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.from_int(100020003))
+BigInt.to_string(BigInt.mul(BigInt.from_int(-1000000), BigInt.from_int(1000000)))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">100020003</span>))
+<span class="tok-str">&quot;100020003&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.mul(<span class="tok-ty">BigInt</span>.from_int(-<span class="tok-num">1000000</span>), <span class="tok-ty">BigInt</span>.from_int(<span class="tok-num">1000000</span>)))
+<span class="tok-str">&quot;-1000000000000&quot;</span></code></pre></div></div>
+<div class="item" id="fn-zero"><div class="ih"><span class="badge bfn">fn</span><span class="name">zero</span><span class="sig">zero() : <a href="#type-BigInt">BigInt</a></span><a class="anchor-link" href="#fn-zero" title="Link">#</a></div><div class="ib"><p>Returns BigInt zero.</p><h3>Examples</h3><pre data-try="BigInt.to_string(BigInt.zero())
+BigInt.is_zero(BigInt.zero())" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">BigInt</span>.to_string(<span class="tok-ty">BigInt</span>.zero())
+<span class="tok-str">&quot;0&quot;</span>
+march&gt; <span class="tok-ty">BigInt</span>.is_zero(<span class="tok-ty">BigInt</span>.zero())
+<span class="tok-kw">true</span></code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

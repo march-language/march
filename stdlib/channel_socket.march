@@ -11,10 +11,12 @@
 --
 --   fn my_router() do
 --     HttpServer.new(4000)
---     |> HttpServer.plug(ChannelSocket.handler("/socket", my_routes, connect_fn))
+--     |> HttpServer.plug(ChannelSocket.plug_for(ChannelSocket.make_config("/socket", my_routes, connect_fn)))
 --     |> HttpServer.listen()
 --   end
 --
+--   -- NOTE: connect_fn is stored in the config but nothing in this module
+--   -- calls it yet; connections are not authenticated.
 --   fn connect_fn(params, socket) do
 --     match verify_token(params) do
 --     | Ok(user) -> Ok(Channel.assign(socket, "user", user))
@@ -51,27 +53,42 @@ mod ChannelSocket do
     List(Int)                        -- shard pids
   )
 
-  doc "Construct a SocketConfig."
+  doc """
+  A SocketConfig for the endpoint at `path` with `routes` and `connect_fn`,
+  and no PubSub shards yet.
+
+      let cfg = ChannelSocket.make_config("/socket", [Channel.channel_route("room:*", "RoomChannel")], connect_fn)
+      ChannelSocket.config_shards(cfg)   -- []
+  """
   fn make_config(path, routes, connect_fn) do
     SocketConfig(path, routes, connect_fn, Nil)
   end
 
-  doc "Construct a SocketConfig with pre-started shard pids."
+  doc """
+  A SocketConfig like `make_config`, with the pids of already-started PubSub
+  shard actors.
+
+      let cfg = ChannelSocket.make_config_with_shards("/socket", routes, connect_fn, [shard1, shard2])
+  """
   fn make_config_with_shards(path, routes, connect_fn, shards) do
     SocketConfig(path, routes, connect_fn, shards)
   end
 
-  doc "Return the path of a SocketConfig."
+  doc """
+  The URL path prefix of a SocketConfig.
+
+      ChannelSocket.config_path(ChannelSocket.make_config("/socket", [], connect_fn))   -- "/socket"
+  """
   fn config_path(cfg) do
     match cfg do | SocketConfig(p, _, _, _) -> p end
   end
 
-  doc "Return the routes of a SocketConfig."
+  doc "The ChannelRoute list of a SocketConfig, in the order given."
   fn config_routes(cfg) do
     match cfg do | SocketConfig(_, r, _, _) -> r end
   end
 
-  doc "Return the shard pids of a SocketConfig."
+  doc "The PubSub shard pids of a SocketConfig (`[]` from `make_config`)."
   fn config_shards(cfg) do
     match cfg do | SocketConfig(_, _, _, s) -> s end
   end
@@ -79,8 +96,13 @@ mod ChannelSocket do
   -- ── Topic routing ─────────────────────────────────────────────────────────
 
   doc """
-  Find the first ChannelRoute whose pattern matches `topic`.
+  Find the first ChannelRoute whose pattern matches `topic`
+  (`PubSub.topic_matches`), so list more specific routes first.
   Returns Some(route) if found, None otherwise.
+
+      let routes = [Channel.channel_route("room:lobby", "Lobby"), Channel.channel_route("room:*", "Room")]
+      Option.map(ChannelSocket.find_route(routes, "room:42"), Channel.route_handler)   -- Some("Room")
+      ChannelSocket.find_route(routes, "game:1")                                       -- None
   """
   fn find_route(routes, topic) do
     match routes do
@@ -93,6 +115,8 @@ mod ChannelSocket do
 
   doc """
   True when any route in `routes` matches `topic`.
+
+      ChannelSocket.has_route([Channel.channel_route("room:*", "Room")], "room:1")   -- true
   """
   fn has_route(routes, topic) do
     match find_route(routes, topic) do
@@ -110,12 +134,22 @@ mod ChannelSocket do
 
   pfn str_cmp_cs(a) do fn b -> a < b end
 
-  doc "Empty active channels map."
+  doc """
+  An empty active-channels registry.
+
+      ChannelSocket.all_channels(ChannelSocket.empty_channels())   -- []
+  """
   fn empty_channels() do
     ActiveChannels(Map.empty())
   end
 
-  doc "Register a channel process pid for a topic."
+  doc """
+  Record `pid` as the channel process for `topic`, replacing any pid already
+  registered for it.
+
+      let ac = ChannelSocket.register_channel(ChannelSocket.empty_channels(), "room:1", 42)
+      ChannelSocket.lookup_channel(ac, "room:1")   -- Some(42)
+  """
   fn register_channel(ac, topic, pid) do
     match ac do
     ActiveChannels(m) ->
@@ -123,14 +157,24 @@ mod ChannelSocket do
     end
   end
 
-  doc "Look up the channel process pid for a topic."
+  doc """
+  The channel process pid registered for `topic`, or `None` when the topic
+  is not joined on this connection.
+
+      ChannelSocket.lookup_channel(ChannelSocket.empty_channels(), "room:1")   -- None
+  """
   fn lookup_channel(ac, topic) do
     match ac do
     ActiveChannels(m) -> Map.get(m, topic, str_cmp_cs)
     end
   end
 
-  doc "Remove a channel from the registry (after leave)."
+  doc """
+  Remove `topic` from the registry (after leave). A topic that is not
+  registered leaves it unchanged.
+
+      ChannelSocket.lookup_channel(ChannelSocket.deregister_channel(ac, "room:1"), "room:1")   -- None
+  """
   fn deregister_channel(ac, topic) do
     match ac do
     ActiveChannels(m) ->
@@ -138,7 +182,7 @@ mod ChannelSocket do
     end
   end
 
-  doc "Return all (topic, pid) pairs in the active channels map."
+  doc "All `(topic, pid)` pairs in the registry, in the map's hash-traversal order."
   fn all_channels(ac) do
     match ac do
     ActiveChannels(m) -> Map.entries(m)
@@ -151,7 +195,20 @@ mod ChannelSocket do
   Route a parsed ChannelMsg to the appropriate channel process or handle it
   as a socket-level message (phx_join, phx_leave, phx_heartbeat).
   Returns an updated ActiveChannels or triggers side effects.
+  By event:
+  - `phx_join`: with no matching route, pushes a phx_error ("unmatched
+    topic") to `transport_pid`; with one, registers `transport_pid` itself as
+    the topic's channel pid. No channel process is spawned and no join reply
+    is sent yet.
+  - `phx_leave`: casts `ChannelLeave("user_left")` to the topic's channel and
+    deregisters it (no-op when not joined).
+  - `phx_heartbeat`: pushes a phx_reply with status "ok" on topic "phoenix".
+  - anything else: casts `ChannelIn(ref, event, payload)` to the topic's
+    channel, or pushes a phx_error ("not joined") when there is none.
+  `routes` is used; `cfg` is not.
   Requires actor runtime.
+
+      let active2 = ChannelSocket.route_msg(active, msg, routes, cfg, transport_pid)
   """
   fn route_msg(ac, msg, routes, cfg, transport_pid) do
     let topic     = Channel.msg_topic(msg)
@@ -222,14 +279,22 @@ mod ChannelSocket do
 
   doc """
   Parse a WebSocket TextFrame string as a ChannelMsg.
-  Returns Some(msg) or None on parse failure.
+  Returns Some(msg) or None on parse failure. Same as `Channel.parse`, with
+  its limits (no spaces after colons, no null fields, payload last).
+
+      ChannelSocket.parse_frame("{\"join_ref\":\"0\",\"ref\":\"1\",\"topic\":\"room:1\",\"event\":\"phx_join\",\"payload\":{}}")
+      -- Some(ChannelMsg("0", "1", "room:1", "phx_join", "{}"))
   """
   fn parse_frame(frame_text) do
     Channel.parse(frame_text)
   end
 
   doc """
-  Serialize a ChannelMsg for sending as a WebSocket TextFrame.
+  Serialize a ChannelMsg for sending as a WebSocket TextFrame. Same as
+  `Channel.serialize`.
+
+      ChannelSocket.serialize_msg(Channel.close_msg("0", "room:1"))
+      -- "{\"join_ref\":\"0\",\"ref\":\"\",\"topic\":\"room:1\",\"event\":\"phx_close\",\"payload\":{}}"
   """
   fn serialize_msg(msg) do
     Channel.serialize(msg)
@@ -242,10 +307,13 @@ mod ChannelSocket do
   socket path.  Mount with HttpServer.plug/2.
 
   The plug:
-    1. Checks that the request path starts with `socket_path`.
+    1. Checks that the request path starts with `socket_path` (a plain
+       string prefix: "/socket" also matches "/socketfoo"); any other
+       request passes through unchanged.
     2. Upgrades to WebSocket.
     3. In the WS handler loop: reads frames, parses them as ChannelMsgs,
-       and routes them.
+       and routes them; unparseable frames are ignored, and on Close every
+       active channel is sent `ChannelLeave("disconnect")`.
 
   Usage:
     HttpServer.new(4000)

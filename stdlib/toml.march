@@ -935,7 +935,14 @@ mod Toml do
   end
 
   doc """
-  Parse TOML, panicking on error. Useful for compile-time literals.
+  Parse TOML like `parse`, returning the value directly. Panics with
+  `TOML parse error at LINE:COL: MESSAGE` if the document is invalid, so
+  use it only for trusted, known-good input such as embedded literals.
+
+  ## Examples
+
+      march> Toml.parse_exn("x = 1\ny = 'lit'")
+      TTable([("x", TInt(1)), ("y", TStr("lit"))])
   """
   fn parse_exn(src : String) : TomlValue do
     match parse(src) do
@@ -949,10 +956,18 @@ mod Toml do
   end
 
   doc """
-  Convert a TomlValue to a string representation.
+  Convert a TomlValue to a compact, single-line string representation:
+  tables are rendered as inline tables `{ k = v, ... }` (including the
+  top-level document), arrays as `[a, b]`. Strings are wrapped in double
+  quotes WITHOUT escaping, and `TNull` renders as `null`, so the output is
+  meant for display and is not guaranteed to be valid TOML.
+
+  ## Examples
 
       march> Toml.to_string(Toml.parse_exn("port = 8080"))
       "{ port = 8080 }"
+      march> Toml.to_string(Toml.parse_exn("a = [1, 2]\n[t]\nb = true"))
+      "{ a = [1, 2], t = { b = true } }"
   """
   fn to_string(v : TomlValue) : String do
     match v do
@@ -1008,7 +1023,18 @@ mod Toml do
     end
   end
 
-  doc "Get a string value by key, or None if absent or wrong type."
+  doc """
+  Get a string value by key, or None if the key is absent or its value
+  is not a string (no conversion is attempted). None when `v` is not a
+  table.
+
+  ## Examples
+
+      march> Toml.get_str(Toml.parse_exn("name = \"app\""), "name")
+      Some("app")
+      march> Toml.get_str(Toml.parse_exn("port = 8080"), "port")
+      None
+  """
   fn get_str(v : TomlValue, key : String) : Option(String) do
     match get(v, key) do
     Some(TStr(s)) -> Some(s)
@@ -1016,7 +1042,17 @@ mod Toml do
     end
   end
 
-  doc "Get an integer value by key, or None if absent or wrong type."
+  doc """
+  Get an integer value by key, or None if the key is absent or its value
+  is not an integer (a float such as `0.5` is not converted).
+
+  ## Examples
+
+      march> Toml.get_int(Toml.parse_exn("port = 8080"), "port")
+      Some(8080)
+      march> Toml.get_int(Toml.parse_exn("ratio = 0.5"), "ratio")
+      None
+  """
   fn get_int(v : TomlValue, key : String) : Option(Int) do
     match get(v, key) do
     Some(TInt(n)) -> Some(n)
@@ -1024,7 +1060,17 @@ mod Toml do
     end
   end
 
-  doc "Get a float value by key, or None if absent or wrong type."
+  doc """
+  Get a float value by key, or None if the key is absent or its value is
+  not a float (an integer such as `8080` is not converted).
+
+  ## Examples
+
+      march> Toml.get_float(Toml.parse_exn("ratio = 0.5"), "ratio")
+      Some(0.5)
+      march> Toml.get_float(Toml.parse_exn("port = 8080"), "port")
+      None
+  """
   fn get_float(v : TomlValue, key : String) : Option(Float) do
     match get(v, key) do
     Some(TFloat(f)) -> Some(f)
@@ -1032,7 +1078,17 @@ mod Toml do
     end
   end
 
-  doc "Get a boolean value by key, or None if absent or wrong type."
+  doc """
+  Get a boolean value by key, or None if the key is absent or its value
+  is not a boolean.
+
+  ## Examples
+
+      march> Toml.get_bool(Toml.parse_exn("debug = true"), "debug")
+      Some(true)
+      march> Toml.get_bool(Toml.parse_exn("debug = true"), "verbose")
+      None
+  """
   fn get_bool(v : TomlValue, key : String) : Option(Bool) do
     match get(v, key) do
     Some(TBool(b)) -> Some(b)
@@ -1040,7 +1096,17 @@ mod Toml do
     end
   end
 
-  doc "Get a table value by key, or None if absent or wrong type."
+  doc """
+  Get a table value (a `[section]` or inline table) by key, still wrapped
+  as `TTable`, or None if the key is absent or its value is not a table.
+
+  ## Examples
+
+      march> Toml.get_table(Toml.parse_exn("[db]\nurl = \"pg\""), "db")
+      Some(TTable([("url", TStr("pg"))]))
+      march> Toml.get_table(Toml.parse_exn("name = \"app\""), "name")
+      None
+  """
   fn get_table(v : TomlValue, key : String) : Option(TomlValue) do
     match get(v, key) do
     Some(t) ->
@@ -1052,7 +1118,17 @@ mod Toml do
     end
   end
 
-  doc "Get an array value by key, or None if absent or wrong type."
+  doc """
+  Get an array value by key as a list of its elements, or None if the
+  key is absent or its value is not an array.
+
+  ## Examples
+
+      march> Toml.get_array(Toml.parse_exn("tags = [\"a\", \"b\"]"), "tags")
+      Some([TStr("a"), TStr("b")])
+      march> Toml.get_array(Toml.parse_exn("tags = \"a\""), "tags")
+      None
+  """
   fn get_array(v : TomlValue, key : String) : Option(List(TomlValue)) do
     match get(v, key) do
     Some(TArray(xs)) -> Some(xs)

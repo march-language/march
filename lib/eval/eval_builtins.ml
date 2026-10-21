@@ -2283,6 +2283,56 @@ let base_env : env =
            | Ok _, Ok _ -> march_bytes_of_string ""
            | Error e, _ | _, Error e -> eval_error "x25519: %s" e)
         | _ -> eval_error "x25519(scalar: Bytes, point: Bytes): Bytes"))
+    (* ---- ML-KEM-768 / ML-DSA-65 (lib/pqc, the same vendored C the native
+       runtime links via runtime/march_pqc.c). Parity with the runtime: a
+       wrong-length argument or a rejected key gives EMPTY Bytes (verify:
+       false), never an error. ---- *)
+  ; ("mlkem768_keypair", VBuiltin ("mlkem768_keypair", function
+        | [seed_v] ->
+          (match march_val_to_raw seed_v with
+           | Ok seed ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mlkem768_keypair seed))
+           | Error e -> eval_error "mlkem768_keypair: %s" e)
+        | _ -> eval_error "mlkem768_keypair(seed: Bytes): Bytes"))
+  ; ("mlkem768_encaps", VBuiltin ("mlkem768_encaps", function
+        | [pk_v; coins_v] ->
+          (match march_val_to_raw pk_v, march_val_to_raw coins_v with
+           | Ok pk, Ok coins ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mlkem768_encaps pk coins))
+           | Error e, _ | _, Error e -> eval_error "mlkem768_encaps: %s" e)
+        | _ -> eval_error "mlkem768_encaps(pk: Bytes, coins: Bytes): Bytes"))
+  ; ("mlkem768_decaps", VBuiltin ("mlkem768_decaps", function
+        | [sk_v; ct_v] ->
+          (match march_val_to_raw sk_v, march_val_to_raw ct_v with
+           | Ok sk, Ok ct ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mlkem768_decaps sk ct))
+           | Error e, _ | _, Error e -> eval_error "mlkem768_decaps: %s" e)
+        | _ -> eval_error "mlkem768_decaps(sk: Bytes, ct: Bytes): Bytes"))
+  ; ("mldsa65_keypair", VBuiltin ("mldsa65_keypair", function
+        | [seed_v] ->
+          (match march_val_to_raw seed_v with
+           | Ok seed ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mldsa65_keypair seed))
+           | Error e -> eval_error "mldsa65_keypair: %s" e)
+        | _ -> eval_error "mldsa65_keypair(seed: Bytes): Bytes"))
+  ; ("mldsa65_sign", VBuiltin ("mldsa65_sign", function
+        | [sk_v; msg_v; rnd_v] ->
+          (match march_val_to_raw sk_v, march_val_to_raw msg_v, march_val_to_raw rnd_v with
+           | Ok sk, Ok msg, Ok rnd ->
+             march_bytes_of_string
+               (Option.value ~default:"" (March_pqc.Pqc.mldsa65_sign sk msg rnd))
+           | Error e, _, _ | _, Error e, _ | _, _, Error e -> eval_error "mldsa65_sign: %s" e)
+        | _ -> eval_error "mldsa65_sign(sk: Bytes, msg: Bytes, rnd: Bytes): Bytes"))
+  ; ("mldsa65_verify", VBuiltin ("mldsa65_verify", function
+        | [pk_v; msg_v; sig_v] ->
+          (match march_val_to_raw pk_v, march_val_to_raw msg_v, march_val_to_raw sig_v with
+           | Ok pk, Ok msg, Ok sg -> VBool (March_pqc.Pqc.mldsa65_verify pk msg sg)
+           | Error e, _, _ | _, Error e, _ | _, _, Error e -> eval_error "mldsa65_verify: %s" e)
+        | _ -> eval_error "mldsa65_verify(pk: Bytes, msg: Bytes, sig: Bytes): Bool"))
     (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->
@@ -3142,6 +3192,23 @@ let base_env : env =
   ; ("tls_peer_cn", VBuiltin ("tls_peer_cn", function
         | [VInt _ssl] -> VCon ("None", [])
         | _ -> eval_error "tls_peer_cn(ssl_handle)"))
+
+  (* tls_ctx_set_groups(ctx_handle, groups) → Ok(Int)|Err(String);
+     tls_negotiated_group(ssl_handle) → Option(String);
+     tls_pq_available() → Bool.  No real TLS in the interpreter: the
+     context stub accepts any list, no handshake ever agreed a group, and
+     there is no OpenSSL to offer the post-quantum group. *)
+  ; ("tls_ctx_set_groups", VBuiltin ("tls_ctx_set_groups", function
+        | [VInt _ctx; VString g] ->
+          if g = "" then VCon ("Err", [VString "set_groups: empty group list"])
+          else VCon ("Ok", [VInt 0])
+        | _ -> eval_error "tls_ctx_set_groups(ctx_handle, groups)"))
+  ; ("tls_negotiated_group", VBuiltin ("tls_negotiated_group", function
+        | [VInt _ssl] -> VCon ("None", [])
+        | _ -> eval_error "tls_negotiated_group(ssl_handle)"))
+  ; ("tls_pq_available", VBuiltin ("tls_pq_available", function
+        | args when args = [] || args = [VUnit] -> VBool false
+        | _ -> eval_error "tls_pq_available: takes no arguments"))
 
   (* ---- Option combinators ---- *)
   ; ("Option.map", VBuiltin ("Option.map", function

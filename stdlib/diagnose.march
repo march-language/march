@@ -10,6 +10,8 @@
 -- against forge/test/fixtures/diagnose (expected.txt names each fixture's
 -- findings), so a threshold changed in one place and not the other fails a
 -- test. Change them together.
+--
+-- doc: try
 mod Diagnose do
   needs Actor.Introspect
 
@@ -278,6 +280,33 @@ mod Diagnose do
   `observe_query` returns them), `before` taken a window ahead of `after`.
   Nil means none fired; probes this backend cannot run (cluster suspicion,
   lost global names) are not in the list at all.
+
+  The checks, in order: `mailbox.growth` (an actor's waiting work grew to 10
+  or more; critical when it holds over half of a node queue of 100+),
+  `mailbox.over_limit` (actors at a drop-policy limit while the node
+  dropped), `sched.saturated` and `sched.idle_imbalance` (scheduler
+  utilisation over the window), `crash.loop` (a supervisor's children
+  crashed 3+ times: critical within a minute of `after`, warning within an
+  hour), `rc.climb` (live heap objects up over 10% with the actor count
+  flat) and `epoch.stuck` / `epoch.old_units`. A missing section or field
+  reads as empty or 0, so a malformed envelope yields no findings rather
+  than an error.
+
+  ## Examples
+
+  Three crashes under supervisor 7 inside the last minute:
+
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> let looping = Result.unwrap_or(Json.parse("{\"at_ms\": 1000, \"data\": {\"crashes\": {\"total\": 5, \"crashes\": [{\"supervisor\": 7, \"at_ms\": 900}, {\"supervisor\": 7, \"at_ms\": 950}, {\"supervisor\": 7, \"at_ms\": 990}]}}}"), Json.Null)
+      march> Diagnose.ids_of(Diagnose.findings(quiet, looping))
+      ["crash.loop/critical"]
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> let looping = Result.unwrap_or(Json.parse("{\"at_ms\": 1000, \"data\": {\"crashes\": {\"total\": 5, \"crashes\": [{\"supervisor\": 7, \"at_ms\": 900}, {\"supervisor\": 7, \"at_ms\": 950}, {\"supervisor\": 7, \"at_ms\": 990}]}}}"), Json.Null)
+      march> List.map(Diagnose.findings(quiet, looping), fn f -> f.rows)
+      [[7]]
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> List.length(Diagnose.findings(quiet, quiet))
+      0
   """
   fn findings(before : Json.JsonValue, after : Json.JsonValue) : List(Finding) do
     List.concat([mailbox_growth(before, after), mailbox_over_limit(before, after),
@@ -285,7 +314,24 @@ mod Diagnose do
                  rc_climb(before, after), epoch_findings(before, after)])
   end
 
-  doc "Reports actor or crash sections truncated in either SNAPSHOT envelope."
+  doc """
+  Reports actor or crash sections truncated in either SNAPSHOT envelope: at
+  most one line for actors and one for crashes (`before` checked first),
+  so a finding computed over a truncated list is not mistaken for the whole
+  picture. Nil when nothing was truncated.
+
+  ## Examples
+
+  Using `quiet` and `looping` from `findings` (the crash ring shows 3 of 5):
+
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> let looping = Result.unwrap_or(Json.parse("{\"at_ms\": 1000, \"data\": {\"crashes\": {\"total\": 5, \"crashes\": [{\"supervisor\": 7, \"at_ms\": 900}, {\"supervisor\": 7, \"at_ms\": 950}, {\"supervisor\": 7, \"at_ms\": 990}]}}}"), Json.Null)
+      march> Diagnose.coverage(quiet, looping)
+      ["crashes: shown 3 of 5"]
+      march> let quiet = Result.unwrap_or(Json.parse("{\"at_ms\": 0, \"data\": {}}"), Json.Null)
+      march> Diagnose.coverage(quiet, quiet)
+      []
+  """
   fn coverage(before : Json.JsonValue, after : Json.JsonValue) : List(String) do
     let coverage_rows =
       match actor_coverage(before) do
@@ -308,7 +354,8 @@ mod Diagnose do
 
   doc """
   Run the findings on this program: two snapshots `window_ms` apart, with
-  this green thread asleep between them.
+  this green thread asleep between them. Nil when nothing fired, or when
+  either snapshot cannot be parsed.
 
       match Diagnose.run(c, 1000) do
         Nil -> ()
@@ -327,7 +374,16 @@ mod Diagnose do
     end
   end
 
-  doc "\"id/severity\" for each finding, sorted: the form forge's fixture test compares."
+  doc """
+  "id/severity" for each finding, sorted: the form forge's fixture test compares.
+
+  ## Examples
+
+      march> Diagnose.ids_of([{ id: "sched.saturated", severity: "warning", rows: [0], next: "" }, { id: "crash.loop", severity: "critical", rows: [7], next: "" }])
+      ["crash.loop/critical", "sched.saturated/warning"]
+      march> Diagnose.ids_of([])
+      []
+  """
   fn ids_of(fs : List(Finding)) : List(String) do
     List.sort_by(List.map(fs, fn f -> f.id ++ "/" ++ f.severity), fn (x, y) -> x < y)
   end

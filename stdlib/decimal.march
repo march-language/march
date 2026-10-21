@@ -16,6 +16,8 @@
 --   impl Eq(Decimal)   — eq/2
 --   impl Ord(Decimal)  — compare/2
 --   impl Show(Decimal) — show/1
+--
+-- doc: try
 
 mod Decimal do
 
@@ -61,7 +63,24 @@ mod Decimal do
 
   -- ---- Construction ----
 
-  doc "Creates a Decimal from a string like \"1.23\", \"-0.5\", \"100\"."
+  doc """
+  Creates a Decimal from a string like `"1.23"`, `"-0.5"`, `"100"`. The
+  scale is the number of characters after the first `.`; a leading `+`,
+  or an empty integer part (`".5"`), is accepted. Input that does not
+  parse yields a zero coefficient (no error is reported): `"abc"` gives
+  `0`, and `"1.2.3"` gives `0.000`.
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.from_string("-0.05"))
+      "-0.05"
+      march> Decimal.scale(Decimal.from_string("1.230"))
+      3
+      march> Decimal.to_string(Decimal.from_string(".5"))
+      "0.5"
+      march> Decimal.is_zero(Decimal.from_string("abc"))
+      true
+  """
   fn from_string(s : String) : Decimal do
     -- Find the decimal point position
     fn find_dot(chars : List(String), pos : Int) : Option(Int) do
@@ -102,31 +121,77 @@ mod Decimal do
     end
   end
 
-  doc "Creates a Decimal from a native Int with a given scale."
+  doc """
+  Creates a Decimal from a native Int coefficient and a scale, i.e. the
+  value `n / 10^scale`. A negative scale is clamped to 0.
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.from_int_scaled(12345, 2))
+      "123.45"
+      march> Decimal.to_string(Decimal.from_int_scaled(5, 3))
+      "0.005"
+      march> Decimal.to_string(Decimal.from_int_scaled(5, -3))
+      "5"
+  """
   fn from_int_scaled(n : Int, scale : Int) : Decimal do
     Decimal(n, if scale < 0 do 0 else scale end)
   end
 
-  doc "Creates a Decimal from a native Int (scale 0)."
+  doc """
+  Creates a Decimal from a native Int (scale 0).
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.from_int(-42))
+      "-42"
+  """
   fn from_int(n : Int) : Decimal do
     Decimal(n, 0)
   end
 
   -- ---- Arithmetic ----
 
-  doc "Adds two Decimals. Result has the larger of the two scales."
+  doc """
+  Adds two Decimals. Result has the larger of the two scales.
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.add(Decimal.from_string("0.1"), Decimal.from_string("0.25")))
+      "0.35"
+      march> Decimal.to_string(Decimal.add(Decimal.from_string("1.50"), Decimal.from_string("-1.5")))
+      "0.00"
+  """
   fn add(a : Decimal, b : Decimal) : Decimal do
     let (ca, cb, s) = align(a, b)
     Decimal(ca + cb, s)
   end
 
-  doc "Subtracts b from a. Result has the larger of the two scales."
+  doc """
+  Subtracts b from a. Result has the larger of the two scales.
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.sub(Decimal.from_string("1"), Decimal.from_string("0.01")))
+      "0.99"
+      march> Decimal.to_string(Decimal.sub(Decimal.from_string("0.5"), Decimal.from_string("2")))
+      "-1.5"
+  """
   fn sub(a : Decimal, b : Decimal) : Decimal do
     let (ca, cb, s) = align(a, b)
     Decimal(ca - cb, s)
   end
 
-  doc "Multiplies two Decimals. Result scale is the sum of the two scales."
+  doc """
+  Multiplies two Decimals exactly. Result scale is the sum of the two scales.
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.mul(Decimal.from_string("1.5"), Decimal.from_string("-0.25")))
+      "-0.375"
+      march> Decimal.to_string(Decimal.mul(Decimal.from_string("2.50"), Decimal.from_int(4)))
+      "10.00"
+  """
   fn mul(a : Decimal, b : Decimal) : Decimal do
     match a do
     Decimal(ca, sa) -> do
@@ -139,11 +204,21 @@ mod Decimal do
   end
 
   doc """
-  Divides a by b to `precision` decimal places using truncation toward
-  zero.  Panics if b is zero.
+  Divides a by b, keeping `precision` extra decimal places beyond the
+  scale of a (the result scale is `scale(a) + precision`), truncating
+  toward zero. Panics if b is zero.
 
   For half-up rounding (e.g. money arithmetic where 0.5 should round
   away from zero), use `div_round` instead.
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.div(Decimal.from_int(1), Decimal.from_int(3), 2))
+      "0.33"
+      march> Decimal.to_string(Decimal.div(Decimal.from_string("1.00"), Decimal.from_int(3), 2))
+      "0.3333"
+      march> Decimal.to_string(Decimal.div(Decimal.from_int(-7), Decimal.from_int(2), 0))
+      "-3"
   """
   fn div(a : Decimal, b : Decimal, precision : {Int | _ >= 0}) : Decimal do
     match a do
@@ -163,11 +238,18 @@ mod Decimal do
   end
 
   doc """
-  Divides a by b to `precision` decimal places using half-up rounding:
-  0.5 rounds away from zero.  Panics if b is zero.
+  Divides a by b to exactly `precision` decimal places using half-up
+  rounding: 0.5 rounds away from zero. Panics if b is zero.
 
-  Equivalent to `round(div(a, b, precision + 1), precision)` but avoids
-  the intermediate allocation and re-scaling.
+  Equivalent to `round(div(a, b, precision + 1), precision)`. Unlike
+  `div`, the result scale is `precision` regardless of the scale of a.
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.div_round(Decimal.from_string("2.00"), Decimal.from_int(3), 2))
+      "0.67"
+      march> Decimal.to_string(Decimal.div_round(Decimal.from_int(-7), Decimal.from_int(2), 0))
+      "-4"
   """
   fn div_round(a : Decimal, b : Decimal, precision : Int) : Decimal do
     -- Compute to one extra decimal place via truncating div, then
@@ -177,7 +259,19 @@ mod Decimal do
 
   doc """
   Rounds a Decimal to `places` decimal places using half-up rounding
-  (0.5 rounds away from zero).
+  (0.5 rounds away from zero). A Decimal whose scale is already
+  `places` or less is returned unchanged (it is not padded).
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.round(Decimal.from_string("2.345"), 2))
+      "2.35"
+      march> Decimal.to_string(Decimal.round(Decimal.from_string("-2.345"), 2))
+      "-2.35"
+      march> Decimal.to_string(Decimal.round(Decimal.from_string("2.344"), 2))
+      "2.34"
+      march> Decimal.to_string(Decimal.round(Decimal.from_string("1.5"), 3))
+      "1.5"
   """
   fn round(d : Decimal, places : Int) : Decimal do
     match d do
@@ -213,29 +307,75 @@ mod Decimal do
     else 0 end end
   end
 
-  doc "Compares two Decimals. Returns -1, 0, or 1."
+  doc """
+  Compares two Decimals by value (scale-independent). Returns -1, 0, or 1.
+
+  ## Examples
+
+      march> Decimal.compare(Decimal.from_string("1.10"), Decimal.from_string("1.1"))
+      0
+      march> Decimal.compare(Decimal.from_string("-0.5"), Decimal.from_string("0.25"))
+      -1
+  """
   fn compare(a : Decimal, b : Decimal) : Int do
     cmp(a, b)
   end
 
-  doc "Returns true if two Decimals are equal."
+  doc """
+  Returns true if two Decimals have the same value, regardless of scale
+  (also available as `==`).
+
+  ## Examples
+
+      march> Decimal.eq(Decimal.from_string("1.0"), Decimal.from_string("1.00"))
+      true
+      march> Decimal.eq(Decimal.from_string("1.01"), Decimal.from_int(1))
+      false
+  """
   fn eq(a : Decimal, b : Decimal) : Bool do
     cmp(a, b) == 0
   end
 
-  doc "Returns true if a < b."
+  doc """
+  Returns true if a < b.
+
+  ## Examples
+
+      march> Decimal.lt(Decimal.from_string("0.09"), Decimal.from_string("0.1"))
+      true
+  """
   fn lt(a : Decimal, b : Decimal) : Bool do
     cmp(a, b) < 0
   end
 
-  doc "Returns true if a > b."
+  doc """
+  Returns true if a > b.
+
+  ## Examples
+
+      march> Decimal.gt(Decimal.from_string("-1.5"), Decimal.from_int(-2))
+      true
+      march> Decimal.gt(Decimal.from_string("2.0"), Decimal.from_int(2))
+      false
+  """
   fn gt(a : Decimal, b : Decimal) : Bool do
     cmp(a, b) > 0
   end
 
   -- ---- Conversion ----
 
-  doc "Converts a Decimal to its string representation (e.g. \"1.23\", \"-0.50\")."
+  doc """
+  Converts a Decimal to its string representation, always showing exactly
+  `scale` fractional digits (e.g. `"1.23"`, `"-0.50"`); a scale-0 Decimal
+  has no decimal point.
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.from_int_scaled(-50, 2))
+      "-0.50"
+      march> Decimal.to_string(Decimal.from_int_scaled(7, 0))
+      "7"
+  """
   fn to_string(d : Decimal) : String do
     match d do
     Decimal(coef, scale) -> do
@@ -268,28 +408,58 @@ mod Decimal do
     end
   end
 
-  doc "Returns the scale (number of decimal places) of a Decimal."
+  doc """
+  Returns the scale (number of decimal places) of a Decimal.
+
+  ## Examples
+
+      march> Decimal.scale(Decimal.from_string("3.140"))
+      3
+  """
   fn scale(d : Decimal) : Int do
     match d do
     Decimal(_, s) -> s
     end
   end
 
-  doc "Returns the unscaled Int coefficient."
+  doc """
+  Returns the unscaled Int coefficient.
+
+  ## Examples
+
+      march> Decimal.coefficient(Decimal.from_string("-3.140"))
+      -3140
+  """
   fn coefficient(d : Decimal) : Int do
     match d do
     Decimal(c, _) -> c
     end
   end
 
-  doc "Returns true if the Decimal is zero."
+  doc """
+  Returns true if the Decimal is zero (at any scale).
+
+  ## Examples
+
+      march> Decimal.is_zero(Decimal.from_string("0.000"))
+      true
+      march> Decimal.is_zero(Decimal.from_string("0.001"))
+      false
+  """
   fn is_zero(d : Decimal) : Bool do
     match d do
     Decimal(c, _) -> c == 0
     end
   end
 
-  doc "Returns the absolute value."
+  doc """
+  Returns the absolute value, keeping the scale.
+
+  ## Examples
+
+      march> Decimal.to_string(Decimal.abs(Decimal.from_string("-0.50")))
+      "0.50"
+  """
   fn abs(d : Decimal) : Decimal do
     match d do
     Decimal(c, s) -> Decimal(if c < 0 do 0 - c else c end, s)

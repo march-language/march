@@ -63,6 +63,11 @@ mod Task do
 
       let t = Task.async(fn () -> slow_query())
       Task.await_ms(t, 10000)  -- wait up to 10 seconds
+
+  ## Examples
+
+      march> Task.await_ms(Task.async(fn () -> 5 * 5), 1000)
+      Ok(25)
   """
   fn await_ms(task, _timeout_ms) do
     task_await(task)
@@ -98,7 +103,15 @@ mod Task do
   doc """
   Await all tasks with an explicit timeout in milliseconds.
   Returns results in the same order as the input list.
-  Each element is Ok(v) or Err(reason).
+  Each element is Ok(v) or Err(reason). As with `await_ms`, the timeout is
+  accepted for API compatibility and not yet enforced.
+
+  ## Examples
+
+      march> Task.await_many_ms([Task.async(fn () -> 1), Task.async(fn () -> 2)], 1000)
+      [Ok(1), Ok(2)]
+      march> Task.await_many_ms([], 1000)
+      []
   """
   fn await_many_ms(tasks, _timeout_ms) do
     List.map(tasks, fn t -> task_await(t))

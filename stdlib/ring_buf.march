@@ -52,6 +52,7 @@ mod RingBuf do
       ()
       march> let (c, rb) = RingBuf.cap(RingBuf.make(16))
       march> RingBuf.drop(rb)
+      march> let (c, rb) = RingBuf.cap(RingBuf.make(16))
       march> c
       16
   """
@@ -84,6 +85,7 @@ mod RingBuf do
 
       march> let (x, rb) = RingBuf.pop(RingBuf.make(4))
       march> RingBuf.drop(rb)
+      march> let (x, rb) = RingBuf.pop(RingBuf.make(4))
       march> x
       None
   """
@@ -102,6 +104,7 @@ mod RingBuf do
 
       march> let (x, rb) = RingBuf.get(RingBuf.push(RingBuf.make(4), 7), 0)
       march> RingBuf.drop(rb)
+      march> let (x, rb) = RingBuf.get(RingBuf.push(RingBuf.make(4), 7), 0)
       march> x
       Some(7)
   """
@@ -117,6 +120,7 @@ mod RingBuf do
 
       march> let (x, rb) = RingBuf.peek_oldest(RingBuf.make(4))
       march> RingBuf.drop(rb)
+      march> let (x, rb) = RingBuf.peek_oldest(RingBuf.make(4))
       march> x
       None
   """
@@ -132,6 +136,7 @@ mod RingBuf do
 
       march> let (x, rb) = RingBuf.peek_newest(RingBuf.push(RingBuf.make(4), 9))
       march> RingBuf.drop(rb)
+      march> let (x, rb) = RingBuf.peek_newest(RingBuf.push(RingBuf.make(4), 9))
       march> x
       Some(9)
   """
@@ -149,6 +154,7 @@ mod RingBuf do
 
       march> let (n, rb) = RingBuf.size(RingBuf.make(8))
       march> RingBuf.drop(rb)
+      march> let (n, rb) = RingBuf.size(RingBuf.make(8))
       march> n
       0
   """
@@ -164,6 +170,7 @@ mod RingBuf do
 
       march> let (c, rb) = RingBuf.cap(RingBuf.make(8))
       march> RingBuf.drop(rb)
+      march> let (c, rb) = RingBuf.cap(RingBuf.make(8))
       march> c
       8
   """
@@ -178,6 +185,7 @@ mod RingBuf do
 
       march> let (e, rb) = RingBuf.is_empty(RingBuf.make(4))
       march> RingBuf.drop(rb)
+      march> let (e, rb) = RingBuf.is_empty(RingBuf.make(4))
       march> e
       true
   """
@@ -194,6 +202,7 @@ mod RingBuf do
 
       march> let (f, rb) = RingBuf.is_full(RingBuf.make(4))
       march> RingBuf.drop(rb)
+      march> let (f, rb) = RingBuf.is_full(RingBuf.make(4))
       march> f
       false
   """
@@ -228,6 +237,7 @@ mod RingBuf do
 
       march> let (xs, rb) = RingBuf.snapshot(RingBuf.push(RingBuf.make(4), 1))
       march> RingBuf.drop(rb)
+      march> let (xs, rb) = RingBuf.snapshot(RingBuf.push(RingBuf.make(4), 1))
       march> xs
       [1]
   """

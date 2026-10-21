@@ -1,0 +1,72 @@
+-- Two-node harness, scenario "cluster_fingerprint_skew": `fingerprint_skew`
+-- over a running cluster node (`cluster_<Role>`) instead of the direct
+-- runner. Two sessions, both of which must be refused before either body
+-- runs (neither node may print "RAN THE BODY"):
+--   s1: node-a's `Thing` is `{ x : Int }`, node-b's `{ x : String }`, so the
+--       protocol `Q` has a different fingerprint on each node;
+--   s2: protocol `R` is the same on both, but node-b plays the OLD peer, one
+--       built before cluster sessions registered a fingerprint (it calls
+--       `SessionNode.run_cluster` with `""`, which registers none). node-a,
+--       the checking side, refuses it.
+-- specs/progress/2026-09-21-cluster-runner-does-not-exchange-the-protocol-fingerprint.md
+mod ClusterFpSkewA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  type Thing = { x : Int }
+  derive Json for Thing
+
+  @[endpoints]
+  protocol Q do
+    A -> B : Thing
+    B -> A : Int
+  end
+
+  @[endpoints]
+  protocol R do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  -- The messages carry both fingerprints, which are digests: assert on the
+  -- sentence, not on the hex.
+  pfn verdict(who : String, m : String) : String do
+    if String.contains(m, "built from a DIFFERENT version of the protocol") do
+      who ++ ": refused at setup: the protocol versions differ"
+    else if String.contains(m, "registered no protocol fingerprint") do
+      who ++ ": refused at setup: the peer registered no fingerprint"
+    else who ++ ": " ++ m end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "fp-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
+        let q = Q_Run.cluster_A(c, h, "s1", fn (s, st) ->
+          println("A s1: RAN THE BODY")
+          Q_A.recv_Msg_B_A_1(s, Q_A.send_Msg_A_B_1(s, st, { x: 1 }), fn (_n, st2) -> Q_A.close(s, st2)))
+        match q do
+          Ok(_) -> println("A s1: ok")
+          Err(e) -> println(verdict("A s1", Q_Run.error_message(e)))
+        end
+        let r = R_Run.cluster_A(c, h, "s2", fn (s, st) ->
+          println("A s2: RAN THE BODY")
+          R_A.recv_Msg_B_A_1(s, R_A.send_Msg_A_B_1(s, st, 1), fn (_n, st2) -> R_A.close(s, st2)))
+        match r do
+          Ok(_) -> println("A s2: ok")
+          Err(e) -> println(verdict("A s2", R_Run.error_message(e)))
+        end
+        ClusterNode.stop(h)
+    end
+  end
+end

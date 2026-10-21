@@ -123,6 +123,50 @@ for (const c of CASES) {
   }
 }
 
+// ── Pasted doc transcript ───────────────────────────────────────────────────
+// docs/assets/march-repl.js (hand-maintained, so always read from the repo, not
+// from ASSETS_DIR) splits a pasted stdlib-doc transcript into one input per
+// "march> " line and drops the expected-output lines. The Sort.html report:
+// the pasted output line "[1, 2, 2, 5, 8]" was the block's last expression, so
+// the REPL printed it as if heapsort had dropped 9999999.
+const TRANSCRIPT_CASES = [
+  { paste: "march> Sort.heapsort_by([8, 5, 2, 9999999, 1, 2], fn a -> fn b -> a <= b)\n[1, 2, 2, 5, 8]",
+    inputs: ["Sort.heapsort_by([8, 5, 2, 9999999, 1, 2], fn a -> fn b -> a <= b)"],
+    outputs: ["[1, 2, 2, 5, 8, 9999999]\n"] },
+  // Several prompts, each with its output, in order; leading indentation and a
+  // blank line survive the paste.
+  { paste: "  march> let xs = [3, 1, 2]\n  [3, 1, 2]\n\n  march> List.sort(xs)\n  [1, 2, 3]\n",
+    inputs: ["let xs = [3, 1, 2]", "List.sort(xs)"],
+    outputs: ["", "[1, 2, 3]\n"] },
+  // No prompt line: the text is one input, unchanged (a multi-line block).
+  { paste: "let y = 40\ny + 2",
+    inputs: ["let y = 40\ny + 2"],
+    outputs: ["42\n"] },
+  // A single line is unchanged too.
+  { paste: "1 + 1", inputs: ["1 + 1"], outputs: ["2\n"] },
+];
+{
+  const replCtx = { window: null };
+  replCtx.window = replCtx;
+  vm.createContext(replCtx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'docs', 'assets', 'march-repl.js'), 'utf8'),
+                  replCtx, { filename: 'march-repl.js' });
+  const split = replCtx.MarchRepl && replCtx.MarchRepl.splitTranscript;
+  if (typeof split !== 'function') { console.error('FAIL march-repl.js does not export MarchRepl.splitTranscript'); process.exit(1); }
+  repl.reset();
+  for (const c of TRANSCRIPT_CASES) {
+    const inputs = split(c.paste);
+    if (print) console.log(JSON.stringify({ paste: c.paste, inputs }));
+    else check(`splitTranscript(${JSON.stringify(c.paste)})`, JSON.stringify(c.inputs), JSON.stringify(inputs));
+    inputs.forEach((input, i) => {
+      const r = repl.run(input);
+      if (print) { console.log(JSON.stringify({ input, output: r.output, error: r.error })); return; }
+      check(`transcript ${JSON.stringify(input)}.output`, c.outputs[i], r.output);
+      check(`transcript ${JSON.stringify(input)}.error`, null, r.error);
+    });
+  }
+}
+
 // ── Live compiler ───────────────────────────────────────────────────────────
 const comp = browserContext();
 load(comp, 'march_stdlib.js');
@@ -137,5 +181,5 @@ else if (!out.js || errs.length) { failures++; console.error(`FAIL marchCompileT
 
 if (!print) {
   if (failures) { console.error(`browser-repl-smoke: ${failures} failure(s)`); process.exit(1); }
-  console.log(`browser-repl-smoke: ${CASES.length + 1} cases passed (${assets})`);
+  console.log(`browser-repl-smoke: ${CASES.length + TRANSCRIPT_CASES.length + 1} cases passed (${assets})`);
 }

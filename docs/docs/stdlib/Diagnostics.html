@@ -239,6 +239,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="Math.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Math.html">Math</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Membership.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Membership.html">Membership</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Merkle.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Merkle.html">Merkle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlDsa.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlDsa.html">MlDsa</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlKem.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlKem.html">MlKem</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Msgpack.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Msgpack.html">Msgpack</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div></div>
@@ -311,12 +313,90 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="type-CrashReport"><div class="ih"><span class="badge bty">type</span><span class="name">CrashReport</span><span class="sig"><a href="#type-CrashReport">CrashReport</a> = {</span><a class="anchor-link" href="#type-CrashReport" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-ObserverHandle"><div class="ih"><span class="badge bty">type</span><span class="name">ObserverHandle</span><span class="sig"><a href="#type-ObserverHandle">ObserverHandle</a> = <a href="#type-ObserverHandle">ObserverHandle</a>(Int)</span><a class="anchor-link" href="#type-ObserverHandle" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-DiagFrame"><div class="ih"><span class="badge bty">type</span><span class="name">DiagFrame</span><span class="sig"><a href="#type-DiagFrame">DiagFrame</a> = <a href="#type-DiagFrame">DiagFrame</a>(String, String, Int)</span><a class="anchor-link" href="#type-DiagFrame" title="Link">#</a></div><div class="ib"><p>What the runtime passes an observer's wrapper (march_runtime.c's diag_crash_cell / the interpreter's diag_dispatch): single-constructor types, tag 0, Ints stored raw, so the C runtime can build them.  <code>kind</code> is 0 Panic, 1 ActorCrashed, 2 TaskFailed; the last two fields are the panic call's recorded site (&quot;&quot; and 0 when there is none).  The names are unique on purpose: a colliding constructor name gets global tags.</p></div></div>
-<div class="item" id="type-DiagCrash"><div class="ih"><span class="badge bty">type</span><span class="name">DiagCrash</span><span class="sig"><a href="#type-DiagCrash">DiagCrash</a> = <a href="#type-DiagCrash">DiagCrash</a>(Int, String, List(<a href="#type-DiagFrame">DiagFrame</a>), Int, Int, List((String, <a href="#type-DiagnosticValue">DiagnosticValue</a>)), String, Int)</span><a class="anchor-link" href="#type-DiagCrash" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-current_context"><div class="ih"><span class="badge bfn">fn</span><span class="name">current_context</span><span class="sig">current_context() : List((String, <a href="#type-DiagnosticValue">DiagnosticValue</a>))</span><a class="anchor-link" href="#fn-current_context" title="Link">#</a></div><div class="ib"><p>The context a crash on this actor or task would report right now, innermost scope first.</p></div></div>
-<div class="item" id="fn-kind_to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">kind_to_string</span><span class="sig">kind_to_string(k : <a href="#type-CrashKind">CrashKind</a>) : String</span><a class="anchor-link" href="#fn-kind_to_string" title="Link">#</a></div><div class="ib"><p>The name of a crash kind: \</p></div></div>
-<div class="item" id="fn-observe_crashes"><div class="ih"><span class="badge bfn">fn</span><span class="name">observe_crashes</span><span class="sig">observe_crashes(observer : <a href="#type-CrashReport">CrashReport</a> -&gt; Unit) : <a href="#type-ObserverHandle">ObserverHandle</a></span><a class="anchor-link" href="#fn-observe_crashes" title="Link">#</a></div><div class="ib"><p>Call <code>observer</code> with a <code>CrashReport</code> for every unhandled panic from now on, until <code>unobserve</code>.  Observers run in registration order, inline on the failing thread: hand the report off and return, never block.</p><pre><code><span class="tok-kw">let</span> h = <span class="tok-ty">Diagnostics</span>.observe_crashes(<span class="tok-kw">fn</span> r -&gt; <span class="tok-kw">send</span>(reporter, <span class="tok-ty">Report</span>(r)))</code></pre></div></div>
-<div class="item" id="fn-unobserve"><div class="ih"><span class="badge bfn">fn</span><span class="name">unobserve</span><span class="sig">unobserve(handle : <a href="#type-ObserverHandle">ObserverHandle</a>) : Unit</span><a class="anchor-link" href="#fn-unobserve" title="Link">#</a></div><div class="ib"><p>Stop calling the observer <code>handle</code> registered.  Removing one twice, or during a dispatch, is harmless; a dispatch already under way still calls it.</p></div></div>
+<div class="item" id="type-DiagCrash"><div class="ih"><span class="badge bty">type</span><span class="name">DiagCrash</span><span class="sig"><a href="#type-DiagCrash">DiagCrash</a> = <a href="#type-DiagCrash">DiagCrash</a>(Int, String, List(<a href="#type-DiagFrame">DiagFrame</a>), Int, Int, List((String, <a href="#type-DiagnosticValue">DiagnosticValue</a>)), String, Int)</span><a class="anchor-link" href="#type-DiagCrash" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-current_context"><div class="ih"><span class="badge bfn">fn</span><span class="name">current_context</span><span class="sig">current_context() : List((String, <a href="#type-DiagnosticValue">DiagnosticValue</a>))</span><a class="anchor-link" href="#fn-current_context" title="Link">#</a></div><div class="ib"><p>The context a crash on this actor or task would report right now, innermost scope first.  Empty outside every <code>with_context</code>.</p><h3>Examples</h3><pre data-try="List.length(Diagnostics.current_context())
+Diagnostics.with_context([(&quot;job&quot;, Diagnostics.DInt(7))], fn -&gt; List.length(Diagnostics.current_context()))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">List</span>.length(<span class="tok-ty">Diagnostics</span>.current_context())
+<span class="tok-num">0</span>
+march&gt; <span class="tok-ty">Diagnostics</span>.with_context([(<span class="tok-str">&quot;job&quot;</span>, <span class="tok-ty">Diagnostics</span>.<span class="tok-ty">DInt</span>(<span class="tok-num">7</span>))], <span class="tok-kw">fn</span> -&gt; <span class="tok-ty">List</span>.length(<span class="tok-ty">Diagnostics</span>.current_context()))
+<span class="tok-num">1</span></code></pre></div></div>
+<div class="item" id="fn-kind_to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">kind_to_string</span><span class="sig">kind_to_string(k : <a href="#type-CrashKind">CrashKind</a>) : String</span><a class="anchor-link" href="#fn-kind_to_string" title="Link">#</a></div><div class="ib"><p>The name of a crash kind: &quot;panic&quot;, &quot;actor_crashed&quot; or &quot;task_failed&quot;.</p><h3>Examples</h3><pre data-try="Diagnostics.kind_to_string(Diagnostics.ActorCrashed)
+Diagnostics.kind_to_string(Diagnostics.Panic)" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Diagnostics</span>.kind_to_string(<span class="tok-ty">Diagnostics</span>.<span class="tok-ty">ActorCrashed</span>)
+<span class="tok-str">&quot;actor_crashed&quot;</span>
+march&gt; <span class="tok-ty">Diagnostics</span>.kind_to_string(<span class="tok-ty">Diagnostics</span>.<span class="tok-ty">Panic</span>)
+<span class="tok-str">&quot;panic&quot;</span></code></pre></div></div>
+<div class="item" id="fn-observe_crashes"><div class="ih"><span class="badge bfn">fn</span><span class="name">observe_crashes</span><span class="sig">observe_crashes(observer : <a href="#type-CrashReport">CrashReport</a> -&gt; Unit) : <a href="#type-ObserverHandle">ObserverHandle</a></span><a class="anchor-link" href="#fn-observe_crashes" title="Link">#</a></div><div class="ib"><p>Call <code>observer</code> with a <code>CrashReport</code> for every unhandled panic from now on, until <code>unobserve</code>.  Observers run in registration order, inline on the failing thread: hand the report off and return, never block.</p><pre><code><span class="tok-kw">let</span> h = <span class="tok-ty">Diagnostics</span>.observe_crashes(<span class="tok-kw">fn</span> r -&gt; <span class="tok-kw">send</span>(reporter, <span class="tok-ty">Report</span>(r)))
+<span class="tok-com">-- r.kind, r.message, r.location, r.backtrace, r.process, r.context</span></code></pre><p>The handle is opaque; keep it to pass to <code>unobserve</code>.</p></div></div>
+<div class="item" id="fn-unobserve"><div class="ih"><span class="badge bfn">fn</span><span class="name">unobserve</span><span class="sig">unobserve(handle : <a href="#type-ObserverHandle">ObserverHandle</a>) : Unit</span><a class="anchor-link" href="#fn-unobserve" title="Link">#</a></div><div class="ib"><p>Stop calling the observer <code>handle</code> registered.  Removing one twice, or during a dispatch, is harmless; a dispatch already under way still calls it.</p><h3>Examples</h3><pre data-try="Diagnostics.unobserve(Diagnostics.observe_crashes(fn _ -&gt; ()))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Diagnostics</span>.unobserve(<span class="tok-ty">Diagnostics</span>.observe_crashes(<span class="tok-kw">fn</span> _ -&gt; ()))
+()</code></pre></div></div>
 <div class="item" id="fn-with_context"><div class="ih"><span class="badge bfn">fn</span><span class="name">with_context</span><span class="sig">with_context(values : List((String, <a href="#type-DiagnosticValue">DiagnosticValue</a>)), thunk : () -&gt; a) : a</span><a class="anchor-link" href="#fn-with_context" title="Link">#</a></div><div class="ib"><p>Run <code>thunk</code> with <code>values</code> added to this actor's or task's crash context, and restore the previous context when it returns or panics.  Inner scopes come first in a report's <code>context</code>, so they win for a repeated key.</p><pre><code><span class="tok-ty">Diagnostics</span>.with_context([(<span class="tok-str">&quot;request_id&quot;</span>, <span class="tok-ty">Diagnostics</span>.<span class="tok-ty">DStr</span>(id))],
-                         <span class="tok-kw">fn</span> -&gt; handle(req))</code></pre></div></div></main></div><script>
+                         <span class="tok-kw">fn</span> -&gt; handle(req))</code></pre><h3>Examples</h3><p>Returns the thunk's value; nested scopes list the inner keys first:</p><pre data-try="Diagnostics.with_context([(&quot;job&quot;, Diagnostics.DInt(7))], fn -&gt; 40 + 2)
+Diagnostics.with_context([(&quot;a&quot;, Diagnostics.DStr(&quot;x&quot;))], fn -&gt; Diagnostics.with_context([(&quot;b&quot;, Diagnostics.DBool(true))], fn -&gt; List.map(Diagnostics.current_context(), fn p -&gt; match p do (k, _) -&gt; k end)))" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Diagnostics</span>.with_context([(<span class="tok-str">&quot;job&quot;</span>, <span class="tok-ty">Diagnostics</span>.<span class="tok-ty">DInt</span>(<span class="tok-num">7</span>))], <span class="tok-kw">fn</span> -&gt; <span class="tok-num">40</span> + <span class="tok-num">2</span>)
+<span class="tok-num">42</span>
+march&gt; <span class="tok-ty">Diagnostics</span>.with_context([(<span class="tok-str">&quot;a&quot;</span>, <span class="tok-ty">Diagnostics</span>.<span class="tok-ty">DStr</span>(<span class="tok-str">&quot;x&quot;</span>))], <span class="tok-kw">fn</span> -&gt; <span class="tok-ty">Diagnostics</span>.with_context([(<span class="tok-str">&quot;b&quot;</span>, <span class="tok-ty">Diagnostics</span>.<span class="tok-ty">DBool</span>(<span class="tok-kw">true</span>))], <span class="tok-kw">fn</span> -&gt; <span class="tok-ty">List</span>.map(<span class="tok-ty">Diagnostics</span>.current_context(), <span class="tok-kw">fn</span> p -&gt; <span class="tok-kw">match</span> p <span class="tok-kw">do</span> (k, _) -&gt; k <span class="tok-kw">end</span>)))
+[<span class="tok-str">&quot;b&quot;</span>, <span class="tok-str">&quot;a&quot;</span>]</code></pre></div></div><style>
+/* Try it */
+.try-btn{position:absolute;top:8px;right:70px;background:var(--card);color:var(--acc);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;transition:all .15s;z-index:1}
+.try-btn:hover{color:var(--bright);border-color:var(--acc)}
+.pre-wrap.try-only .try-btn{right:10px}
+/* march-repl.js colours input with the site's --syn-* tokens: map them to this page's highlight tokens */
+#try-panel{--syn-kw:var(--hl-kw);--syn-tp:var(--hl-ty);--syn-st:var(--hl-str);--syn-nm:var(--hl-num);--syn-cm:var(--hl-com);--syn-id:var(--text);--syn-op:var(--dim)}
+#try-panel{position:fixed;top:60px;right:0;bottom:0;width:440px;max-width:100vw;background:var(--sb);border-left:1px solid var(--bdr);display:none;flex-direction:column;z-index:90}
+#try-panel.open{display:flex}
+body.try-open .content-wrap{margin-right:440px}
+.try-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bdr);flex-shrink:0}
+.try-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);letter-spacing:.04em}
+.try-hbtn{background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace}
+.try-hbtn:hover{border-color:var(--acc);color:var(--text)}
+#try-history{flex:1;overflow-y:auto;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+.try-entry{white-space:pre-wrap;word-break:break-word}
+.try-iline{color:var(--text);white-space:pre-wrap!important}.try-iline::before{content:'march> ';color:var(--dim)}
+.try-out{color:var(--fn)}.try-err{color:oklch(68% .17 25)}.try-info{color:var(--dim);font-style:italic}
+.try-input-row{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-top:1px solid var(--bdr);flex-shrink:0}
+.try-prompt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--dim);padding-top:3px}
+#try-input{flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.55}
+@media(max-width:900px){#try-panel{width:100vw}body.try-open .content-wrap{margin-right:0}}
+</style><aside id="try-panel" data-base="" aria-label="March REPL"><div class="try-head"><span class="try-title">march — try it</span><button class="try-hbtn" id="try-clear" type="button" title="Clear the screen; definitions stay (Ctrl+L)">clear</button><button class="try-hbtn" id="try-reset" type="button" title="Clear the screen and forget every definition">reset</button><button class="try-hbtn" id="try-close" type="button">close</button></div><div id="try-history"><div class="try-entry"><span class="try-info" id="try-loading"></span></div></div><div class="try-input-row"><span class="try-prompt">march&gt;</span><textarea id="try-input" rows="1" placeholder="try something…" autocomplete="off" spellcheck="false"></textarea><button class="try-hbtn" id="try-run" type="button">run</button></div></aside><script>
+(function(){
+function init(){
+var panel=document.getElementById('try-panel');if(!panel)return;
+var base=panel.getAttribute('data-base')||'';
+var repl=null,loading=false,waiting=[];
+var status=document.getElementById('try-loading');
+function open(){panel.classList.add('open');document.body.classList.add('try-open');}
+function close(){panel.classList.remove('open');document.body.classList.remove('try-open');}
+document.getElementById('try-close').addEventListener('click',close);
+document.getElementById('try-clear').addEventListener('click',function(){if(repl)repl.clear();});
+document.getElementById('try-reset').addEventListener('click',function(){if(repl)repl.reset();});
+function withRepl(cb){
+if(repl){cb();return;}
+waiting.push(cb);if(loading)return;loading=true;
+status.textContent='Loading the March REPL…';
+var s=document.createElement('script');s.src=base+'/assets/march-repl.js';
+s.onload=function(){
+repl=new MarchRepl({wrapId:'try-panel',historyId:'try-history',inputId:'try-input',loadingId:'try-loading',
+cls:{entry:'try-entry',inputLine:'try-iline',output:'try-out',error:'try-err',info:'try-info'}});
+document.getElementById('try-run').addEventListener('click',function(){repl.submit();});
+var w=waiting;waiting=[];w.forEach(function(f){f();});};
+s.onerror=function(){loading=false;waiting=[];status.textContent='Could not load the March REPL.';};
+document.head.appendChild(s);}
+function run(pre){
+open();
+withRepl(function(){
+var src=pre.getAttribute('data-try')||'';
+if(pre.getAttribute('data-try-kind')==='transcript'){src.split(String.fromCharCode(10)).forEach(function(l){if(l.trim())repl.run(l);});}
+else{repl.run(src);}});}
+document.querySelectorAll('pre[data-try]').forEach(function(pre){
+var wrap=pre.parentNode;
+if(!wrap||!wrap.classList||!wrap.classList.contains('pre-wrap')){
+wrap=document.createElement('div');wrap.className='pre-wrap try-only';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);}
+var b=document.createElement('button');b.type='button';b.className='try-btn';
+b.textContent='Try it';b.title='Run this example in the March REPL';
+b.addEventListener('click',function(){run(pre);});
+wrap.appendChild(b);});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+})();
+</script></main></div><script>
 /* Theme toggle */
 /* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}

@@ -203,7 +203,7 @@ fn List.head(xs : List('a)) : 'a =
   case xs of
   Cons($f21, $f22) -> let h : '_ = $f21 in
 h
-  Nil() -> __panic_site("stdlib/list.march", 107);
+  Nil() -> __panic_site("stdlib/list.march", 130);
 panic("List.head: empty list")
   _ -> panic("non-exhaustive pattern match")
 
@@ -231,7 +231,7 @@ fn List.is_empty(xs : List('a)) : Bool =
 ## List.last
 fn List.last(xs : List('a)) : 'a =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 138);
+  Nil() -> __panic_site("stdlib/list.march", 199);
 panic("List.last: empty list")
   Cons($f45, $f46) -> case $f46 of
   Nil() -> let x : '_ = $f45 in
@@ -262,7 +262,7 @@ fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 815);
+  Nil() -> __panic_site("stdlib/list.march", 1183);
 panic("List.maximum_int: empty list")
   Cons($f488, $f489) -> let t : '_ = $f489 in
 let h : '_ = $f488 in
@@ -280,7 +280,7 @@ fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = letrec [go] in
 go in
 case xs of
-  Nil() -> __panic_site("stdlib/list.march", 801);
+  Nil() -> __panic_site("stdlib/list.march", 1162);
 panic("List.minimum_int: empty list")
   Cons($f475, $f476) -> let t : '_ = $f476 in
 let h : '_ = $f475 in
@@ -290,7 +290,7 @@ go(t, h)
 ## List.nth
 fn List.nth(xs : List('a), n : Int) : 'a =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 155);
+  Nil() -> __panic_site("stdlib/list.march", 223);
 panic("List.nth: index out of bounds")
   Cons($f57, $f58) -> let t : '_ = $f58 in
 let h : '_ = $f57 in
@@ -504,7 +504,7 @@ fn List.tail(xs : List('a)) : List('a) =
   case xs of
   Cons($f27, $f28) -> let t : '_ = $f28 in
 t
-  Nil() -> __panic_site("stdlib/list.march", 115);
+  Nil() -> __panic_site("stdlib/list.march", 148);
 panic("List.tail: empty list")
   _ -> panic("non-exhaustive pattern match")
 

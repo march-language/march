@@ -730,7 +730,7 @@ typedef struct {
 /* Set the dispatch-table NAME_ID for a hot-reload actor.  Must be called
  * immediately after march_spawn().  name_id is the slot ID registered for
  * the actor's _dispatch function.  No-op if actor has no meta entry. */
-void march_actor_set_dispatch_id(void *actor, uint32_t name_id);
+void march_actor_set_dispatch_id(void *actor, uint32_t name_id, uint32_t build_epoch);
 
 /* Register the global tag of the actor's FIRST message constructor (its
  * "call tag base").  Emitted by codegen right after the actor record's
@@ -1124,6 +1124,14 @@ void   *march_ed25519_seed_keypair(void *seed);
 void   *march_ed25519_sign(void *sk, void *msg);
 int64_t march_ed25519_verify(void *pk, void *msg, void *sig);
 void   *march_x25519(void *scalar, void *point);
+/* ML-KEM-768 / ML-DSA-65 over the vendored mlkem-native / mldsa-native
+ * (runtime/pqc.c, builtins in runtime/march_pqc.c). */
+void   *march_mlkem768_keypair(void *seed);
+void   *march_mlkem768_encaps(void *pk, void *coins);
+void   *march_mlkem768_decaps(void *sk, void *ct);
+void   *march_mldsa65_keypair(void *seed);
+void   *march_mldsa65_sign(void *sk, void *msg, void *rnd);
+int64_t march_mldsa65_verify(void *pk, void *msg, void *sig);
 void   *march_pbkdf2_sha256(void *pass, void *salt, int64_t iters, int64_t dklen);
 void   *march_base64_encode(void *input);
 void   *march_base64_decode(void *str);

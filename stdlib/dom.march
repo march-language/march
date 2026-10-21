@@ -1,20 +1,26 @@
 -- Dom — browser DOM bindings for March compiled with --target js.
 --
--- Provides typed wrappers over the browser's Document Object Model.
--- Requires --target js; calling these functions from a native build panics.
+-- Provides typed wrappers over the browser's Document Object Model. Each
+-- function is a thin call onto the matching DOM API (named in its doc), so
+-- browser semantics apply, including the browser's exceptions: an invalid
+-- CSS selector or tag name, or removing a node from the wrong parent, throws
+-- a JS exception rather than returning an error value. Lookups that can come
+-- up empty return `Option`; lists of nodes come back in document order.
+-- Requires --target js; the native compiler and REPL have no implementation
+-- of these externs.
 --
 -- Usage:
 --   match Js.Dom.find("counter") do
 --     None    -> ()
 --     Some(el) ->
 --       Js.Dom.set_text(el, "0")
---       Js.Dom.on(el, "click", fn _ -> Js.Dom.set_text(el, "clicked!"))
+--       Js.Dom.listen(el, "click", fn _ -> Js.Dom.set_text(el, "clicked!"))
 --   end
 --
 -- Note: set_timeout/set_interval/on_frame take a zero-arg callback typed
--- `Unit -> Unit` — pass a 0-arg lambda `fn -> ...`. (The typechecker accepts
+-- `Unit -> Unit` — pass a 0-arg lambda `fn -> ...` (the typechecker accepts
 -- `fn -> body` against a `Unit -> Unit` parameter, treating it as a
--- unit-consuming thunk.)
+-- unit-consuming thunk); a 1-arg `fn _ -> ...` is accepted too.
 
 mod Js.Dom do
   needs Ffi
@@ -111,163 +117,277 @@ mod Js.Dom do
 
   -- ── Public API ─────────────────────────────────────────────────────────
 
-  doc "Look up an element by its `id` attribute. Returns `None` if no element with that id exists."
+  doc "Look up an element by its `id` attribute (`document.getElementById`). Returns `None` if no element in the document has that id; detached elements are not found."
   fn find(id)                          do dom_get_element_by_id(id) end
 
-  doc "Find the first element matching a CSS selector string (e.g. \".my-class\", \"h1\", \"[data-foo]\"). Returns `None` if nothing matches."
+  doc """
+  Find the first element in document order matching a CSS selector
+  (`document.querySelector`), e.g. ".my-class", "h1", "[data-foo]" or
+  "#board .cell". Returns `None` if nothing matches. An invalid selector
+  throws.
+
+  ## Examples
+
+      match Js.Dom.select("#scoreboard .points") do
+        Some(el) -> Js.Dom.set_text(el, "0")
+        None -> ()
+      end
+  """
   fn select(selector)                  do dom_query_selector(selector) end
 
-  doc "Find all elements matching a CSS selector. Returns a `List(Node)`, empty when nothing matches."
+  doc """
+  Find every element matching a CSS selector (`document.querySelectorAll`), as
+  a `List(Node)` in document order; empty when nothing matches. The list is a
+  snapshot: later DOM changes do not update it. An invalid selector throws.
+
+  ## Examples
+
+      List.each(Js.Dom.select_all(".cell"), fn c -> Js.Dom.remove_class(c, "lit"))
+  """
   fn select_all(selector)              do dom_query_selector_all(selector) end
 
-  doc "The document `<body>` element."
+  doc "The document's `<body>` element (`document.body`)."
   fn body()                            do dom_body() end
 
-  doc "Create a new element with the given HTML tag name (e.g. \"div\", \"span\", \"button\"). The element is detached until appended to the tree."
+  doc """
+  Create a new element with the given HTML tag name (`document.createElement`),
+  e.g. "div", "span", "button". The element is detached until `append`ed or
+  `prepend`ed into the tree. A string that is not a valid tag name throws.
+
+  ## Examples
+
+      let btn = Js.Dom.create("button")
+      Js.Dom.set_text(btn, "Start")
+      Js.Dom.add_class(btn, "primary")
+      Js.Dom.append(Js.Dom.body(), btn)
+  """
   fn create(tag)                       do dom_create_element(tag) end
 
-  doc "Create a text node containing the given string. Use `append` to attach it to an element."
+  doc "Create a detached text node containing `text` (`document.createTextNode`); the string is never parsed as HTML. Attach it with `append` or `prepend`."
   fn text_node(text)                   do dom_create_text_node(text) end
 
-  doc "Return a deep clone of `el` (all descendants included), detached from the tree."
+  doc "Return a deep clone of `el` (`cloneNode(true)`: attributes and all descendants), detached from the tree. Event listeners are not copied, and an `id` attribute is duplicated, so change it before inserting the clone."
   fn clone(el)                         do dom_clone(el) end
 
-  doc "Append `child` as the last child of `parent`. If `child` is already in the tree it is moved."
+  doc "Append `child` as the last child of `parent` (`appendChild`). If `child` is already in the tree it is moved, not copied."
   fn append(parent, child)             do dom_append_child(parent, child) end
 
-  doc "Insert `child` before all existing children of `parent`. If `child` is already in the tree it is moved."
+  doc "Insert `child` before all existing children of `parent` (`prepend`). If `child` is already in the tree it is moved, not copied."
   fn prepend(parent, child)            do dom_prepend_child(parent, child) end
 
-  doc "Remove `child` from `parent`. Panics if `child` is not a direct child of `parent`; prefer `remove` when the parent is unknown."
+  doc "Remove `child` from `parent` (`removeChild`). Throws a `NotFoundError` DOM exception if `child` is not a direct child of `parent`; prefer `remove` when the parent is unknown."
   fn remove_child(parent, child)       do dom_remove_child(parent, child) end
 
-  doc "Detach `el` from its parent and remove it from the DOM. No-op if `el` has no parent."
+  doc "Detach `el` from its parent, removing it (and its subtree) from the DOM (`el.remove()`). No-op if `el` has no parent. The node stays usable and can be re-inserted."
   fn remove(el)                        do dom_remove(el) end
 
-  doc "Return the direct parent element of `el`, or `None` if `el` is the root or detached."
+  doc "Return the parent element of `el` (`parentElement`), or `None` if `el` is the root `<html>` element, is detached, or its parent is not an element (e.g. a document fragment)."
   fn parent(el)                        do dom_parent(el) end
 
-  doc "Return a `List(Node)` of the direct element children of `el` (text nodes excluded)."
+  doc "Return the direct element children of `el` (`el.children`) as a `List(Node)` in document order. Text and comment nodes are excluded; empty if there are none."
   fn children(el)                      do dom_children(el) end
 
-  doc "Return the first element child of `el`, or `None` if `el` has no element children."
+  doc "Return the first element child of `el` (`firstElementChild`), or `None` if `el` has no element children. Text nodes are skipped."
   fn first_child(el)                   do dom_first_child(el) end
 
-  doc "Return the last element child of `el`, or `None` if `el` has no element children."
+  doc "Return the last element child of `el` (`lastElementChild`), or `None` if `el` has no element children. Text nodes are skipped."
   fn last_child(el)                    do dom_last_child(el) end
 
-  doc "Remove all child nodes from `el`, leaving it empty."
+  doc "Remove all child nodes from `el` (elements and text alike, via `replaceChildren()`), leaving it empty."
   fn clear(el)                         do dom_clear_children(el) end
 
-  doc "Return the `textContent` of `el` (all descendant text, concatenated)."
+  doc "Return the `textContent` of `el`: the text of all its descendants concatenated, with no markup (hidden elements included). An element with no text gives \"\"."
   fn get_text(el)                      do dom_get_text(el) end
 
-  doc "Set the `textContent` of `el`. Replaces all children with a single text node; HTML is not interpreted."
+  doc "Set the `textContent` of `el`, replacing all of its children with a single text node. The string is not interpreted as HTML, so this is the safe way to show untrusted text."
   fn set_text(el, text)                do dom_set_text(el, text) end
 
-  doc "Return the `innerHTML` of `el` as a string."
+  doc "Return the `innerHTML` of `el`: its children serialized as an HTML string."
   fn get_html(el)                      do dom_get_html(el) end
 
-  doc "Set the `innerHTML` of `el`. The string is parsed as HTML; use `set_text` when the content is plain text."
+  doc "Set the `innerHTML` of `el`, replacing its children with the result of parsing `html` as HTML. Never pass untrusted text (it can inject markup); use `set_text` for plain text."
   fn set_html(el, html)                do dom_set_html(el, html) end
 
-  doc "Return the value of the named attribute, or `None` if the attribute is absent."
+  doc """
+  Return the value of the named attribute (`getAttribute`), or `None` if `el`
+  does not have it. Present-but-empty attributes give `Some("")`.
+
+  ## Examples
+
+      let score = match Js.Dom.get_attr(el, "data-score") do
+        Some(s) -> s
+        None -> "0"
+      end
+  """
   fn get_attr(el, name)                do dom_get_attribute(el, name) end
 
-  doc "Set the value of the named attribute on `el` (e.g. `set_attr(el, \"href\", \"#top\")`)."
+  doc "Set the named attribute on `el` to `val` (`setAttribute`), adding it or overwriting its old value, e.g. `set_attr(el, \"href\", \"#top\")`. Attributes such as `data-*` are a handy place to keep state on the page."
   fn set_attr(el, name, val)           do dom_set_attribute(el, name, val) end
 
-  doc "Remove the named attribute from `el`. No-op if the attribute is absent."
+  doc "Remove the named attribute from `el` (`removeAttribute`). No-op if the attribute is absent."
   fn remove_attr(el, name)             do dom_remove_attribute(el, name) end
 
-  doc "Return `true` if `el` has the named attribute, `false` otherwise."
+  doc "Return `true` if `el` has the named attribute, even with an empty value (`hasAttribute`), `false` otherwise."
   fn has_attr(el, name)                do dom_has_attribute(el, name) end
 
-  doc "Add CSS class `cls` to `el`'s classList. No-op if already present."
+  doc "Add CSS class `cls` to `el`'s `classList`. No-op if already present. `cls` must be a single class name: an empty string or one containing whitespace throws."
   fn add_class(el, cls)                do dom_class_add(el, cls) end
 
-  doc "Remove CSS class `cls` from `el`'s classList. No-op if absent."
+  doc "Remove CSS class `cls` from `el`'s `classList`. No-op if absent."
   fn remove_class(el, cls)             do dom_class_remove(el, cls) end
 
   doc "Toggle CSS class `cls` on `el`: add it if absent, remove it if present."
   fn toggle_class(el, cls)             do dom_class_toggle(el, cls) end
 
-  doc "Return `true` if `el`'s classList contains `cls`."
+  doc "Return `true` if `el`'s `classList` contains `cls`, `false` otherwise."
   fn has_class(el, cls)                do dom_class_contains(el, cls) end
 
-  doc "Set an inline CSS property on `el` (e.g. `set_style(el, \"color\", \"red\")` or `set_style(el, \"transform\", \"translateX(40px)\")`). Pass an empty string to remove the property."
+  doc """
+  Set an inline CSS property on `el` (`el.style.setProperty`). `prop` uses the
+  CSS (kebab-case) name, e.g. "background-color", not the JS camelCase one,
+  which is silently ignored. Pass an empty string as `val` to remove the
+  property; an invalid value is ignored and leaves the old one.
+
+  ## Examples
+
+      Js.Dom.set_style(el, "color", "red")
+      Js.Dom.set_style(el, "transform", "translateX(40px)")
+      Js.Dom.set_style(el, "background", "")      -- remove it again
+  """
   fn set_style(el, prop, val)          do dom_set_style(el, prop, val) end
 
-  doc "Return the inline CSS value for `prop` on `el`. Returns an empty string if the property is not set inline."
+  doc "Return the inline CSS value of `prop` on `el` (`el.style.getPropertyValue`, kebab-case names), or \"\" if it is not set inline. Styles from stylesheets are not seen: this is not the computed style."
   fn get_style(el, prop)               do dom_get_style(el, prop) end
 
-  doc "Return the current `value` property of a form input, textarea, or select element."
+  doc "Return the current `value` property of a form `<input>`, `<textarea>` or `<select>` (what the user typed or picked, not the `value` attribute). Returns \"\" for an element with no `value` property. A checkbox gives its `value` (\"on\" by default), not whether it is checked."
   fn get_value(el)                     do dom_get_value(el) end
 
-  doc "Set the `value` property of a form input, textarea, or select element."
+  doc "Set the `value` property of a form `<input>`, `<textarea>` or `<select>`. This does not fire `input`/`change` events."
   fn set_value(el, val)                do dom_set_value(el, val) end
 
-  doc "Attach `handler` to `el` for DOM event `event` (e.g. \"click\", \"input\", \"keydown\", \"mouseover\"). The handler receives the `Event` object. Use `event_target` to get the element that triggered it."
+  doc """
+  Attach `handler` to `el` for DOM event `event` (`addEventListener`), e.g.
+  "click", "input", "keydown", "pointerdown". The handler receives the `Event`;
+  use `event_target`, `event_key`, `event_x`/`event_y` on it. Each call adds
+  another listener (attaching the same handler twice runs it twice), and there
+  is currently no way to detach one (see `unlisten`).
+
+  ## Examples
+
+      Js.Dom.listen(Js.Dom.body(), "keydown", fn ev ->
+        if Js.Dom.event_key(ev) == "Escape" do Js.Dom.prevent_default(ev) else () end)
+  """
   fn listen(el, event, handler)        do dom_add_event_listener(el, event, handler) end
 
-  doc "Remove a previously attached event listener. `handler` must be the same function value passed to `listen`."
+  doc "Intended to remove a listener attached with `listen`, but currently does nothing: `listen` registers a fresh JS wrapper function around `handler`, and this call removes another fresh wrapper that was never registered, so the original listener stays attached. To stop reacting to an event, have the handler check a flag (e.g. a `data-*` attribute) instead."
   fn unlisten(el, event, handler)      do dom_remove_event_listener(el, event, handler) end
 
-  doc "Return the element that triggered `ev` (the `event.target` node)."
+  doc "Return the element the event was dispatched to (`event.target`). For a listener on a container this is the innermost element that was clicked, not necessarily the element `listen` was called on."
   fn event_target(ev)                  do dom_event_target(ev) end
 
-  doc "Return the event type string for `ev` (e.g. \"click\", \"input\")."
+  doc "Return the event type string for `ev` (`event.type`, e.g. \"click\", \"input\")."
   fn event_type(ev)                    do dom_event_type(ev) end
 
-  doc "Return the key that triggered a `\"keydown\"`/`\"keyup\"` event (e.g. \"ArrowLeft\", \"a\", \" \" for space)."
+  doc "Return the key of a `\"keydown\"`/`\"keyup\"` event (`event.key`, e.g. \"ArrowLeft\", \"a\", \"A\" with shift, \" \" for space, \"Enter\"). Returns \"\" for events that carry no key."
   fn event_key(ev)                     do dom_event_key(ev) end
 
-  doc "Prevent the browser's default action for `ev` (e.g. stop a link from navigating, a form from submitting)."
+  doc "Prevent the browser's default action for `ev` (`preventDefault`), e.g. stop a link from navigating, a form from submitting, or arrow keys from scrolling the page."
   fn prevent_default(ev)               do dom_prevent_default(ev) end
 
-  doc "Stop `ev` from bubbling up to parent elements."
+  doc "Stop `ev` from bubbling up to listeners on ancestor elements (`stopPropagation`). Other listeners on the same element still run."
   fn stop_propagation(ev)              do dom_stop_propagation(ev) end
 
-  doc "Return the x-coordinate of `ev` relative to the target element (`event.offsetX`). Useful for hit-testing pointer/click events against a `<canvas>`."
+  doc "Return the x-coordinate of a mouse/pointer event relative to the target element's padding edge (`event.offsetX`), truncated toward zero to an Int. Useful for hit-testing clicks on a `<canvas>`. Only meaningful for mouse and pointer events; on others (e.g. key events) the result is not a valid number."
   fn event_x(ev)                       do dom_event_x(ev) end
 
-  doc "Return the y-coordinate of `ev` relative to the target element (`event.offsetY`)."
+  doc "Return the y-coordinate of a mouse/pointer event relative to the target element (`event.offsetY`), truncated toward zero; see `event_x`."
   fn event_y(ev)                       do dom_event_y(ev) end
 
-  doc "Drain and return the pointer taps (pointerdown events) on `el` since the last call, as element-relative `(x, y)` integer pairs. The first call installs the buffering listener. Poll this once per animation frame for game input."
+  doc """
+  Drain and return the pointer taps on `el` since the last call, oldest first,
+  as element-relative `(x, y)` Int pairs. The first call installs a buffering
+  `pointerdown` listener (mouse, touch and pen alike; `mousedown`/`touchstart`
+  on engines without Pointer Events) and so returns `[]`; call it once at
+  startup. Each tap is delivered exactly once. Poll once per animation frame
+  for game input.
+
+  ## Examples
+
+      List.each(Js.Dom.taps(canvas), fn tap -> handle_tap(tap))   -- tap : (Int, Int)
+  """
   fn taps(el)                          do dom_taps(el) end
 
-  doc "Drain and return the keyboard keys (keydown `event.key` strings, e.g. \" \", \"ArrowLeft\", \"a\") pressed since the last call. The first call installs a document-level buffering listener which prevents the browser default ONLY for space and arrow keys (so game input doesn't scroll the page). Poll once per animation frame."
+  doc """
+  Drain and return the keys pressed since the last call (`event.key` strings
+  of document-level `keydown` events, e.g. " ", "ArrowLeft", "a"), oldest
+  first; a held key shows up repeatedly as the browser auto-repeats it. The
+  first call installs the buffering listener and returns `[]`. That listener
+  prevents the browser default ONLY for space and arrow keys, so game input
+  does not scroll the page. Poll once per animation frame.
+  """
   fn key_presses()                     do dom_key_presses() end
 
-  doc "Read `key` from the browser's localStorage. Returns `None` if the key is absent or storage is unavailable (e.g. private browsing)."
+  doc "Read `key` from the browser's localStorage (per-origin, persists across page loads). Returns `None` if the key is absent or storage is unavailable (e.g. blocked in private browsing)."
   fn store_get(key)                    do dom_store_get(key) end
 
-  doc "Write `val` under `key` in the browser's localStorage. Silently does nothing if storage is unavailable."
+  doc """
+  Write `val` under `key` in the browser's localStorage, replacing any old
+  value. Silently does nothing if storage is unavailable or full. Values are
+  strings: encode numbers or records yourself.
+
+  ## Examples
+
+      Js.Dom.store_set("best", int_to_string(score))
+      let best = match Js.Dom.store_get("best") do
+        Some(s) -> s
+        None -> "0"
+      end
+  """
   fn store_set(key, val)               do dom_store_set(key, val) end
 
-  doc "The live cursor position over `el` as element-relative `(x, y)` integers, updated by a `mousemove` listener installed on the first call. Defaults to `el`'s center before any movement. Unlike `taps`, this reads the current position rather than draining a buffer."
+  doc "The live cursor position over `el` as element-relative `(x, y)` Ints, tracked by a `mousemove` listener installed on the first call. Until the mouse first moves over `el` it is `el`'s center (as measured on that first call). Touch input does not update it; use `taps`. Unlike `taps`, this reads the current position rather than draining a buffer."
   fn pointer_pos(el)                   do dom_pointer_pos(el) end
 
-  doc "The browser window's inner size (`window.innerWidth`/`innerHeight`) in CSS pixels, as `(w, h)`. No devicePixelRatio handling."
+  doc "The browser window's inner size (`window.innerWidth`/`innerHeight`) in CSS pixels, as `(w, h)` Ints. No devicePixelRatio handling."
   fn window_size()                     do dom_window_size() end
 
-  doc "Show a blocking browser `alert()` dialog with `msg`."
+  doc "Show a browser `alert()` dialog with `msg`. Blocks the whole page, including timers and animation frames, until the user dismisses it."
   fn alert(msg)                        do dom_alert(msg) end
 
-  doc "Return the current page URL (`window.location.href`)."
+  doc "Return the current page URL (`window.location.href`), including any query string and fragment."
   fn href()                            do dom_href() end
 
-  doc "Navigate to `url` by setting `window.location.href`. This replaces the current page."
+  doc "Navigate to `url` by setting `window.location.href`. Unless `url` only changes the fragment (\"#...\"), the current page and the running program are unloaded."
   fn navigate(url)                     do dom_set_href(url) end
 
-  doc "Call `cb` once after `ms` milliseconds (non-blocking, runs on the event loop). Equivalent to `setTimeout`. `cb` is a zero-arg callback — pass `fn -> ...`."
+  doc """
+  Call `cb` once after `ms` milliseconds (`setTimeout`). Non-blocking: it
+  returns immediately and `cb` runs later on the event loop. Returns no handle,
+  so a timeout cannot be cancelled. `cb` is a zero-arg callback; pass
+  `fn -> ...`.
+
+  ## Examples
+
+      Js.Dom.set_timeout(1500, fn -> Js.Dom.remove_class(banner, "visible"))
+  """
   fn set_timeout(ms, cb)               do dom_set_timeout(ms, cb) end
 
-  doc "Call `cb` repeatedly every `ms` milliseconds. Equivalent to `setInterval`. Returns no handle — cancel by keeping a flag in the DOM. `cb` is a zero-arg callback — pass `fn -> ...`."
+  doc "Call `cb` every `ms` milliseconds, forever (`setInterval`). Returns no handle, so it cannot be cancelled: to stop the work, have `cb` check a flag (e.g. a `data-*` attribute) and do nothing. For variable delays, re-arm a `set_timeout` from its own callback instead. `cb` is a zero-arg callback; pass `fn -> ...`."
   fn set_interval(ms, cb)              do dom_set_interval(ms, cb) end
 
-  doc "Schedule `cb` to run before the next browser repaint (`requestAnimationFrame`). Use for smooth 60 fps animations. `cb` is a zero-arg callback — pass `fn -> ...`."
+  doc """
+  Schedule `cb` to run once before the next browser repaint
+  (`requestAnimationFrame`), typically about 60 times a second; browsers pause
+  it in background tabs. For a continuous animation loop, call `on_frame`
+  again from inside `cb`. `cb` is a zero-arg callback; pass `fn -> ...`.
+
+  ## Examples
+
+      fn frame() do
+        draw()
+        Js.Dom.on_frame(fn -> frame())
+      end
+  """
   fn on_frame(cb)                      do dom_request_animation_frame(cb) end
 
 end

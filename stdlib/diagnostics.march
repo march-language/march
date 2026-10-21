@@ -35,6 +35,8 @@
 -- handler inlined into its actor's dispatch can leave no frame at all.
 -- `CrashKind.TaskFailed` is reserved: a compiled panic in a task exits the
 -- process and is reported as `Panic`.
+--
+-- doc: try
 mod Diagnostics do
 
   type CrashKind = Panic | ActorCrashed | TaskFailed
@@ -116,6 +118,9 @@ mod Diagnostics do
   failing thread: hand the report off and return, never block.
 
       let h = Diagnostics.observe_crashes(fn r -> send(reporter, Report(r)))
+      -- r.kind, r.message, r.location, r.backtrace, r.process, r.context
+
+  The handle is opaque; keep it to pass to `unobserve`.
   """
   fn observe_crashes(observer : CrashReport -> Unit) : ObserverHandle do
     ObserverHandle(diag_observe(fn call -> deliver(observer, call)))
@@ -124,6 +129,11 @@ mod Diagnostics do
   doc """
   Stop calling the observer `handle` registered.  Removing one twice, or
   during a dispatch, is harmless; a dispatch already under way still calls it.
+
+  ## Examples
+
+      march> Diagnostics.unobserve(Diagnostics.observe_crashes(fn _ -> ()))
+      ()
   """
   fn unobserve(handle : ObserverHandle) : Unit do
     match handle do
@@ -133,7 +143,14 @@ mod Diagnostics do
 
   doc """
   The context a crash on this actor or task would report right now,
-  innermost scope first.
+  innermost scope first.  Empty outside every `with_context`.
+
+  ## Examples
+
+      march> List.length(Diagnostics.current_context())
+      0
+      march> Diagnostics.with_context([("job", Diagnostics.DInt(7))], fn -> List.length(Diagnostics.current_context()))
+      1
   """
   fn current_context() : List((String, DiagnosticValue)) do
     diag_context_get()
@@ -146,6 +163,15 @@ mod Diagnostics do
 
       Diagnostics.with_context([("request_id", Diagnostics.DStr(id))],
                                fn -> handle(req))
+
+  ## Examples
+
+  Returns the thunk's value; nested scopes list the inner keys first:
+
+      march> Diagnostics.with_context([("job", Diagnostics.DInt(7))], fn -> 40 + 2)
+      42
+      march> Diagnostics.with_context([("a", Diagnostics.DStr("x"))], fn -> Diagnostics.with_context([("b", Diagnostics.DBool(true))], fn -> List.map(Diagnostics.current_context(), fn p -> match p do (k, _) -> k end)))
+      ["b", "a"]
   """
   fn with_context(values : List((String, DiagnosticValue)), thunk : () -> a) : a do
     let saved = diag_context_get()
@@ -153,7 +179,16 @@ mod Diagnostics do
     try_finally(fn _ -> thunk(), fn _ -> diag_context_set(saved))
   end
 
-  doc "The name of a crash kind: \"panic\", \"actor_crashed\" or \"task_failed\"."
+  doc """
+  The name of a crash kind: "panic", "actor_crashed" or "task_failed".
+
+  ## Examples
+
+      march> Diagnostics.kind_to_string(Diagnostics.ActorCrashed)
+      "actor_crashed"
+      march> Diagnostics.kind_to_string(Diagnostics.Panic)
+      "panic"
+  """
   fn kind_to_string(k : CrashKind) : String do
     match k do
     Panic -> "panic"

@@ -21,6 +21,8 @@
 --
 -- This module is self-contained: it does not depend on List.* or String.*
 -- being loaded, so it can be tested or used in isolation.
+--
+-- doc: try
 
 mod Bytes do
 
@@ -50,7 +52,18 @@ mod Bytes do
     end
   end
 
-  doc "Wrap a List(Int) of byte values (0–255) as Bytes. O(n)."
+  doc """
+  Wrap a List(Int) of byte values (0-255) as Bytes. O(n).
+  Values outside 0-255 are not supported: the native backends keep only
+  the low 8 bits, while the in-browser REPL raises an error.
+
+  ## Examples
+
+      march> Bytes.to_list(Bytes.from_list([72, 105, 0, 255]))
+      [72, 105, 0, 255]
+      march> Bytes.to_string(Bytes.from_list([72, 105]))
+      "Hi"
+  """
   fn from_list(xs) do
     Bytes(string_from_chars(from_list_go(xs, Nil)))
   end
@@ -61,20 +74,51 @@ mod Bytes do
     end
   end
 
-  doc "Unwrap Bytes to a List(Int). O(n)."
+  doc """
+  Unwrap Bytes to a List(Int) of byte values (each 0-255). O(n).
+
+  ## Examples
+
+      march> Bytes.to_list(Bytes.from_string("hé"))
+      [104, 195, 169]
+      march> Bytes.to_list(Bytes.empty())
+      []
+  """
   fn to_list(b) do
     match b do
     Bytes(s) -> to_list_go(s, string_byte_length(s) - 1, Nil)
     end
   end
 
-  doc "An empty Bytes value."
+  doc """
+  An empty Bytes value.
+
+  ## Examples
+
+      march> Bytes.length(Bytes.empty())
+      0
+  """
   fn empty() do Bytes("") end
 
-  doc "Convert a String to Bytes (raw UTF-8 byte values, each 0–255). O(1)."
+  doc """
+  Convert a String to Bytes (its raw UTF-8 byte values, each 0-255). O(1).
+
+  ## Examples
+
+      march> Bytes.length(Bytes.from_string("héllo"))
+      6
+  """
   fn from_string(s) do Bytes(s) end
 
-  doc "Convert Bytes back to a String (bytes interpreted as UTF-8). O(1)."
+  doc """
+  Convert Bytes back to a String (bytes interpreted as UTF-8, not
+  validated). O(1).
+
+  ## Examples
+
+      march> Bytes.to_string(Bytes.from_list([109, 97, 114, 99, 104]))
+      "march"
+  """
   fn to_string(b) do
     match b do
     Bytes(s) -> s
@@ -83,14 +127,32 @@ mod Bytes do
 
   -- ---- Measurement ----
 
-  doc "Number of bytes. O(1)."
+  doc """
+  Number of bytes (not characters). O(1).
+
+  ## Examples
+
+      march> Bytes.length(Bytes.from_list([1, 2, 3]))
+      3
+      march> Bytes.length(Bytes.from_string("é"))
+      2
+  """
   fn length(b) do
     match b do
     Bytes(s) -> string_byte_length(s)
     end
   end
 
-  doc "True if the Bytes is empty. O(1)."
+  doc """
+  True if the Bytes is empty. O(1).
+
+  ## Examples
+
+      march> Bytes.is_empty(Bytes.empty())
+      true
+      march> Bytes.is_empty(Bytes.from_list([0]))
+      false
+  """
   fn is_empty(b) do
     match b do
     Bytes(s) -> string_is_empty(s)
@@ -99,7 +161,15 @@ mod Bytes do
 
   -- ---- Access ----
 
-  doc "Byte at position i (0-based). Panics if out of bounds. O(1)."
+  doc """
+  Byte at position i (0-based), as an Int 0-255. Panics if i is negative
+  or >= `length(b)`. O(1).
+
+  ## Examples
+
+      march> Bytes.get(Bytes.from_string("abc"), 1)
+      98
+  """
   fn get(b, i) do
     match b do
     Bytes(s) -> do
@@ -112,7 +182,21 @@ mod Bytes do
     end
   end
 
-  doc "Sub-slice: bytes from position start with given length. O(len)."
+  doc """
+  Sub-slice: `len` bytes starting at position `start`. Out-of-range
+  arguments are clamped rather than panicking: a negative `start` is
+  treated as 0, a slice running past the end is cut short, and a `start`
+  at or past the end gives empty Bytes. O(len).
+
+  ## Examples
+
+      march> Bytes.to_string(Bytes.slice(Bytes.from_string("hello world"), 6, 5))
+      "world"
+      march> Bytes.to_string(Bytes.slice(Bytes.from_string("hello"), 3, 10))
+      "lo"
+      march> Bytes.is_empty(Bytes.slice(Bytes.from_string("hello"), 9, 2))
+      true
+  """
   fn slice(b, start, len) do
     match b do
     -- string_slice clamps start and len to the buffer, which is the same
@@ -123,7 +207,14 @@ mod Bytes do
 
   -- ---- Combination ----
 
-  doc "Concatenate two Bytes values. O(n)."
+  doc """
+  Concatenate two Bytes values. O(n).
+
+  ## Examples
+
+      march> Bytes.to_list(Bytes.concat(Bytes.from_list([1, 2]), Bytes.from_list([3])))
+      [1, 2, 3]
+  """
   fn concat(b1, b2) do
     match (b1, b2) do
     (Bytes(x), Bytes(y)) -> Bytes(string_concat(x, y))
@@ -132,18 +223,48 @@ mod Bytes do
 
   -- ---- NativeU8Arr bridge ----
 
-  doc "Copy [b]'s bytes into a fresh NativeU8Arr for SIMD/numeric work. O(n) copy — the layouts cannot be shared."
+  doc """
+  Copy [b]'s bytes into a fresh NativeU8Arr for SIMD/numeric work. O(n) copy: the layouts cannot be shared.
+
+  ## Examples
+
+      march> Bytes.to_list(Bytes.from_u8_arr(Bytes.to_u8_arr(Bytes.from_list([1, 2, 3]))))
+      [1, 2, 3]
+  """
   fn to_u8_arr(b) do bytes_to_u8_arr(b) end
 
-  doc "Copy [a]'s bytes into a fresh immutable Bytes. O(n) copy."
+  doc """
+  Copy [a]'s bytes into a fresh immutable Bytes. O(n) copy.
+
+  ## Examples
+
+      march> Bytes.length(Bytes.from_u8_arr(Bytes.to_u8_arr(Bytes.from_string("abcd"))))
+      4
+  """
   fn from_u8_arr(a) do u8_arr_to_bytes(a) end
 
   -- ---- UTF-8 encoding ----
 
-  doc "Encode a String as UTF-8 bytes. Equivalent to from_string for March strings."
+  doc """
+  Encode a String as UTF-8 bytes. Equivalent to `from_string` for March strings.
+
+  ## Examples
+
+      march> Bytes.to_list(Bytes.encode_utf8("ü"))
+      [195, 188]
+  """
   fn encode_utf8(s) do from_string(s) end
 
-  doc "Decode UTF-8 bytes to a String. Returns Ok(s) always (same as to_string)."
+  doc """
+  Decode UTF-8 bytes to a String. Always returns `Ok(s)` (same as
+  `to_string`): the bytes are not validated, so invalid UTF-8 is not
+  reported as an error.
+
+  ## Examples
+
+      march> Bytes.decode_utf8(Bytes.from_list([104, 105]))
+      Ok("hi")
+  """
   fn decode_utf8(b) do Ok(to_string(b)) end
 
   -- ---- Hex encoding ----
@@ -164,7 +285,16 @@ mod Bytes do
     end
   end
 
-  doc "Encode Bytes as a lowercase hexadecimal string."
+  doc """
+  Encode Bytes as a lowercase hexadecimal string, two digits per byte.
+
+  ## Examples
+
+      march> Bytes.to_hex(Bytes.from_list([0, 15, 171, 255]))
+      "000fabff"
+      march> Bytes.to_hex(Bytes.empty())
+      ""
+  """
   fn to_hex(b) do
     match b do
     Bytes(s) -> join_strings(to_hex_go(s, string_byte_length(s) - 1, Nil))
@@ -189,7 +319,21 @@ mod Bytes do
     end
   end
 
-  doc "Parse a hex string to Bytes. Returns Err if the input is not valid hex."
+  doc """
+  Parse a hex string (upper- or lowercase digits, no `0x` prefix or
+  separators) to Bytes. Returns `Err("hex string must have even length")`
+  for an odd-length input and `Err("invalid hex character")` for any
+  non-hex character.
+
+  ## Examples
+
+      march> Result.map(Bytes.from_hex("00ffAb"), Bytes.to_list)
+      Ok([0, 255, 171])
+      march> Bytes.from_hex("abc")
+      Err("hex string must have even length")
+      march> Bytes.from_hex("zz")
+      Err("invalid hex character")
+  """
   fn from_hex(s) do
     let n = string_byte_length(s)
     if n % 2 != 0 do Err("hex string must have even length")
@@ -233,7 +377,18 @@ mod Bytes do
     end end end
   end
 
-  doc "Encode Bytes as a Base64 string (with padding)."
+  doc """
+  Encode Bytes as a standard Base64 string (`+`, `/` alphabet, with `=` padding).
+
+  ## Examples
+
+      march> Bytes.encode_base64(Bytes.from_string("Man"))
+      "TWFu"
+      march> Bytes.encode_base64(Bytes.from_string("M"))
+      "TQ=="
+      march> Bytes.encode_base64(Bytes.empty())
+      ""
+  """
   fn encode_base64(b) do
     match b do
     Bytes(s) -> encode_base64_go(s, 0, string_byte_length(s), Nil)
@@ -289,7 +444,21 @@ mod Bytes do
     end
   end
 
-  doc "Decode a Base64 string to Bytes. Returns Err on invalid input."
+  doc """
+  Decode a padded standard Base64 string to Bytes. Returns `Err` if the
+  length is not a multiple of 4 or a character is outside the Base64
+  alphabet. Decoding stops at the first padded group, so anything after
+  it is ignored.
+
+  ## Examples
+
+      march> Result.map(Bytes.decode_base64("TWE="), Bytes.to_string)
+      Ok("Ma")
+      march> Bytes.decode_base64("TWF")
+      Err("invalid base64: length must be a multiple of 4")
+      march> Bytes.decode_base64("T!Fu")
+      Err("invalid base64 character")
+  """
   fn decode_base64(s) do
     let n = string_byte_length(s)
     if n % 4 != 0 do Err("invalid base64: length must be a multiple of 4")

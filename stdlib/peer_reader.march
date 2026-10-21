@@ -28,11 +28,16 @@
 -- loop (the reason is returned); returning `Ok(false)` stops it cleanly.
 mod PeerReader do
 
-  -- The tag reported for a frame that is not a msgpack array whose first
-  -- element is an Int (an RPC request, or garbage).
+  doc "The tag (-1) reported for a frame that is not a MessagePack array whose first element is an Int: an RPC request, or garbage."
   fn untagged() : Int do -1 end
 
-  -- The frame's tag without decoding the rest of it.
+  doc """
+  The frame's tag: the Int first element of its MessagePack array, or
+  `untagged()` for invalid MessagePack, a non-array, an empty array, or a
+  non-Int first element. The whole frame is decoded to find it. An RPC reply
+  (a bare correlation number first) is not distinguishable from a tagged
+  frame.
+  """
   fn tag_of(frame : List(Int)) : Int do
     match Msgpack.decode(frame) do
       Ok(Msgpack.Array(Cons(Msgpack.Int(tag), _))) -> tag
@@ -40,13 +45,24 @@ mod PeerReader do
     end
   end
 
-  -- Read frames off [fd] until the connection closes, an I/O error occurs,
-  -- or [on_frame] asks to stop. [buf] carries bytes read past a frame
-  -- boundary from one frame to the next -- the leftover every ad-hoc reader
-  -- dropped (NodeCall.serve_one, NodeSend.serve_one), which lost any frame
-  -- that arrived in the same recv() as its predecessor.
-  --   Ok(true)  -> keep reading      Ok(false) -> stop, return Ok(())
-  --   Err(e)    -> stop, return Err(e)
+  doc """
+  Read frames off [fd] until the connection closes, an I/O error occurs, or
+  [on_frame] asks to stop, calling `on_frame(tag_of(frame), frame)` for each.
+  [buf] holds bytes already read past a frame boundary (pass `Nil` to start);
+  the leftover after each frame is carried into the next read, so frames that
+  arrive in the same recv() are not lost.
+
+  - `Ok(true)` from [on_frame]: keep reading.
+  - `Ok(false)`: stop and return `Ok(())`.
+  - `Err(e)`: stop and return `Err(e)`.
+
+  A read error or closed connection returns the `Err` from `NetKernel.recv_frame`.
+
+  ## Examples
+
+      PeerReader.serve(fd, Nil, fn (tag, frame) ->
+        if tag == 8 do handle_fire(frame) else Ok(true) end)
+  """
   fn serve(fd : Int, buf : List(Int), on_frame : Int -> List(Int) -> Result(Bool, String)) : Result((), String) do
     match NetKernel.recv_frame(fd, buf) do
       Err(e) -> Err(e)

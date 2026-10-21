@@ -3,18 +3,43 @@
 -- A range is a record {start: Int, stop: Int, step: Int}.
 -- Ranges are half-open: [start, stop) when step > 0,
 --                       (stop, start] when step < 0.
--- step must be non-zero; new/1 defaults to step = 1.
+-- step must be non-zero; new/2 defaults to step = 1.
+--
+-- doc: try
 
 mod Range do
 
   -- ---- Construction ----
 
-  doc "Creates a range [start, stop) with step 1."
+  doc """
+  Creates the half-open range `[start, stop)` with step 1. The range is empty when
+  `stop <= start`.
+
+  ## Examples
+
+      march> Range.to_list(Range.new(0, 4))
+      [0, 1, 2, 3]
+      march> Range.to_list(Range.new(3, 3))
+      []
+  """
   fn new(start : Int, stop : Int) : {start: Int, stop: Int, step: Int} do
     {start: start, stop: stop, step: 1}
   end
 
-  doc "Creates a range with an explicit step. Step must be non-zero."
+  doc """
+  Creates a range with an explicit step. With `step > 0` it covers `[start, stop)`
+  counting up; with `step < 0` it covers `(stop, start]` counting down. Panics if
+  `step` is zero (also a refinement precondition).
+
+  ## Examples
+
+      march> Range.to_list(Range.new_step(0, 10, 3))
+      [0, 3, 6, 9]
+      march> Range.to_list(Range.new_step(5, 0, -2))
+      [5, 3, 1]
+      march> Range.to_list(Range.new_step(0, 5, -1))
+      []
+  """
   fn new_step(start : Int, stop : Int, step : {Int | _ != 0}) : {start: Int, stop: Int, step: Int} do
     if step == 0 do
       panic("Range.new_step: step must be non-zero")
@@ -25,7 +50,16 @@ mod Range do
 
   -- ---- Conversion ----
 
-  doc "Converts the range to a list of integers."
+  doc """
+  Converts the range to a list of integers, in iteration order. O(n).
+
+  ## Examples
+
+      march> Range.to_list(Range.new(1, 4))
+      [1, 2, 3]
+      march> Range.to_list(Range.new_step(3, 0, -1))
+      [3, 2, 1]
+  """
   fn to_list(r : {start: Int, stop: Int, step: Int}) : List(Int) do
     fn go(i : Int, acc : List(Int)) : List(Int) do
       if r.step > 0 do
@@ -39,7 +73,21 @@ mod Range do
 
   -- ---- Queries ----
 
-  doc "Returns true if n is within the range."
+  doc """
+  Returns true if `n` is one of the range's elements: within the bounds and on a step
+  boundary. O(1).
+
+  ## Examples
+
+      march> Range.contains(Range.new_step(0, 10, 3), 6)
+      true
+      march> Range.contains(Range.new_step(0, 10, 3), 7)
+      false
+      march> Range.contains(Range.new(0, 5), 5)
+      false
+      march> Range.contains(Range.new_step(5, 0, -1), 1)
+      true
+  """
   fn contains(r : {start: Int, stop: Int, step: Int}, n : Int) : Bool do
     if r.step > 0 do
       if n >= r.start && n < r.stop do
@@ -56,7 +104,18 @@ mod Range do
     end
   end
 
-  doc "Returns the number of elements in the range."
+  doc """
+  Returns the number of elements in the range, computed arithmetically in O(1).
+
+  ## Examples
+
+      march> Range.size(Range.new(0, 10))
+      10
+      march> Range.size(Range.new_step(0, 10, 3))
+      4
+      march> Range.size(Range.new(5, 2))
+      0
+  """
   fn size(r : {start: Int, stop: Int, step: Int}) : Int do
     if r.step > 0 do
       if r.stop <= r.start do
@@ -73,19 +132,46 @@ mod Range do
     end
   end
 
-  doc "Returns true if the range contains no elements."
+  doc """
+  Returns true if the range contains no elements. O(1).
+
+  ## Examples
+
+      march> Range.is_empty(Range.new(2, 2))
+      true
+      march> Range.is_empty(Range.new_step(2, 0, -1))
+      false
+  """
   fn is_empty(r : {start: Int, stop: Int, step: Int}) : Bool do
     size(r) == 0
   end
 
   -- ---- Higher-order operations ----
 
-  doc "Applies f to each element, returning a list of results."
+  doc """
+  Applies `f` to each element in iteration order, returning a list of results.
+
+  ## Examples
+
+      march> Range.map(Range.new(1, 4), fn x -> x * x)
+      [1, 4, 9]
+      march> Range.map(Range.new(1, 1), fn x -> x * x)
+      []
+  """
   fn map(r : {start: Int, stop: Int, step: Int}, f : Int -> b) : List(b) do
     List.map(to_list(r), f)
   end
 
-  doc "Returns a list of elements satisfying predicate f, in order. Every element of the result is known to satisfy `f` (an abstract refinement `p`, as for `List.filter`)."
+  doc """
+  Returns the list of elements satisfying predicate `f`, in iteration order.
+  Every element of the result is known to satisfy `f` (an abstract
+  refinement `p`, as for `List.filter`).
+
+  ## Examples
+
+      march> Range.filter(Range.new(0, 10), fn x -> x % 4 == 0)
+      [0, 4, 8]
+  """
   fn filter(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool[p]) : List(Int[p]) do
     filter_list(to_list(r), f)
   end
@@ -103,7 +189,14 @@ mod Range do
     end
   end
 
-  doc "Calls f for each element in the range (for side effects)."
+  doc """
+  Calls `f` on each element in iteration order, for side effects. Returns `()`.
+
+  ## Examples
+
+      Range.each(Range.new(0, 3), fn i -> println(int_to_string(i)))
+      -- prints 0, 1 and 2 on separate lines
+  """
   fn each(r : {start: Int, stop: Int, step: Int}, f : Int -> Unit) : Unit do
     fn go(i : Int) : Unit do
       if r.step > 0 do
@@ -125,12 +218,34 @@ mod Range do
     go(r.start)
   end
 
-  doc "Folds over the range: f(acc, element) -> acc."
+  doc """
+  Left fold over the range in iteration order; `f` is called as `f(acc, element)`.
+
+  ## Examples
+
+      march> Range.reduce(Range.new(1, 5), 1, fn (acc, x) -> acc * x)
+      24
+      march> Range.reduce(Range.new_step(3, 0, -1), [], fn (acc, x) -> Cons(x, acc))
+      [1, 2, 3]
+  """
   fn reduce(r : {start: Int, stop: Int, step: Int}, acc : b, f : b -> Int -> b) : b do
     List.fold_left(to_list(r), acc, fn (a, x) -> f(a, x))
   end
 
-  doc "Returns a new range iterating in the opposite direction."
+  doc """
+  Returns a range with the same elements iterated in the opposite direction
+  (start becomes the last element, step is negated). An empty range is returned unchanged.
+  O(n): the elements are materialised to find the last one.
+
+  ## Examples
+
+      march> Range.to_list(Range.reverse(Range.new(0, 4)))
+      [3, 2, 1, 0]
+      march> Range.to_list(Range.reverse(Range.new_step(0, 10, 3)))
+      [9, 6, 3, 0]
+      march> Range.to_list(Range.reverse(Range.new(2, 2)))
+      []
+  """
   fn reverse(r : {start: Int, stop: Int, step: Int}) : {start: Int, stop: Int, step: Int} do
     let lst = to_list(r)
     match lst do
@@ -142,12 +257,33 @@ mod Range do
     end
   end
 
-  doc "Returns Some of the first element, or None if empty."
+  doc """
+  Returns `Some` of the first element (`start`), or `None` if the range is empty.
+
+  ## Examples
+
+      march> Range.first(Range.new(3, 6))
+      Some(3)
+      march> Range.first(Range.new(6, 3))
+      None
+  """
   fn first(r : {start: Int, stop: Int, step: Int}) : Option(Int) do
     if is_empty(r) do None else Some(r.start) end
   end
 
-  doc "Returns Some of the last element, or None if empty."
+  doc """
+  Returns `Some` of the last element, or `None` if the range is empty. O(1); the last
+  element is the final step boundary, not necessarily `stop - 1`.
+
+  ## Examples
+
+      march> Range.last(Range.new(3, 6))
+      Some(5)
+      march> Range.last(Range.new_step(0, 10, 3))
+      Some(9)
+      march> Range.last(Range.new(6, 3))
+      None
+  """
   fn last(r : {start: Int, stop: Int, step: Int}) : Option(Int) do
     let n = size(r)
     if n == 0 do
@@ -157,17 +293,46 @@ mod Range do
     end
   end
 
-  doc "Returns true if all elements satisfy f."
+  doc """
+  Returns true if every element satisfies `f` (true for an empty range).
+
+  ## Examples
+
+      march> Range.all(Range.new(1, 5), fn x -> x > 0)
+      true
+      march> Range.all(Range.new(0, 0), fn x -> x > 100)
+      true
+  """
   fn all(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool) : Bool do
     List.all(to_list(r), f)
   end
 
-  doc "Returns true if any element satisfies f."
+  doc """
+  Returns true if at least one element satisfies `f` (false for an empty range).
+
+  ## Examples
+
+      march> Range.any(Range.new(1, 5), fn x -> x == 4)
+      true
+      march> Range.any(Range.new(1, 5), fn x -> x == 5)
+      false
+  """
   fn any(r : {start: Int, stop: Int, step: Int}, f : Int -> Bool) : Bool do
     List.any(to_list(r), f)
   end
 
-  doc "Returns the sum of all elements in the range."
+  doc """
+  Returns the sum of all elements in the range (0 for an empty range).
+
+  ## Examples
+
+      march> Range.sum(Range.new(1, 101))
+      5050
+      march> Range.sum(Range.new_step(10, 0, -5))
+      15
+      march> Range.sum(Range.new(5, 5))
+      0
+  """
   fn sum(r : {start: Int, stop: Int, step: Int}) : Int do
     reduce(r, 0, fn (acc, x) -> acc + x)
   end

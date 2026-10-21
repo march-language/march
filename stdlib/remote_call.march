@@ -48,25 +48,40 @@ mod RemoteCall do
 
   -- ── Constructors ──────────────────────────────────────────────────────────
 
+  doc "A reference to the remote target [module_name].[fn_name] with the given signature and implementation hashes."
   fn remote_ref(module_name : String, fn_name : String, sig_hash : String, impl_hash : String) : RemoteRef do
     { module_name: module_name, fn_name: fn_name, sig_hash: sig_hash, impl_hash: impl_hash }
   end
 
+  doc """
+  A call request for [fref] with MessagePack-encoded [args], replying to
+  [reply_to], giving up at [deadline] (absolute unix ms) and matched to its
+  reply by [correlation].
+  """
   fn request(fref : RemoteRef, args : List(Int), reply_to : Pid, deadline : Int, correlation : Int) : CallRequest do
     { fref: fref, args: args, reply_to: reply_to, deadline: deadline, correlation: correlation }
   end
 
+  doc "A successful reply to request [correlation]: `Returned(payload)`."
   fn ok_reply(correlation : Int, payload : List(Int)) : CallReply do
     { correlation: correlation, result: Returned(payload) }
   end
 
+  doc "A failed reply to request [correlation]: `Failed(e)`."
   fn err_reply(correlation : Int, e : CallError) : CallReply do
     { correlation: correlation, result: Failed(e) }
   end
 
   -- ── The safety core ───────────────────────────────────────────────────────
 
-  -- CAS admission: does the inbound ref agree with the local target's hashes?
+  doc """
+  CAS admission: does the inbound [fref] agree with the local target's
+  hashes? `Reject(TypeMismatch)` when the sig_hash differs (checked first),
+  `Reject(VersionSkew)` when only the impl_hash differs, else `Accept`. The
+  names are not compared.
+
+      RemoteCall.verify("s1", "i1", RemoteCall.remote_ref("M", "f", "s1", "i2")) == Reject(VersionSkew)
+  """
   fn verify(local_sig : String, local_impl : String, fref : RemoteRef) : Verdict do
     if fref.sig_hash != local_sig do
       Reject(TypeMismatch)
@@ -79,6 +94,7 @@ mod RemoteCall do
     end
   end
 
+  doc "Is [v] `Accept`?"
   fn is_accept(v : Verdict) : Bool do
     match v do
       Accept    -> true
@@ -86,6 +102,10 @@ mod RemoteCall do
     end
   end
 
+  doc """
+  A one-line, human-readable description of [e], e.g. "deadline exceeded" or,
+  for `RemoteExit(reason)`, "remote process exited: <reason>".
+  """
   fn error_message(e : CallError) : String do
     match e do
       DeadlineExceeded -> "deadline exceeded"
@@ -144,6 +164,11 @@ mod RemoteCall do
     end
   end
 
+  doc """
+  The MessagePack wire bytes of [req] (frame them with `NetFrame.encode`):
+  [[module, fn, sig_hash, impl_hash], Bin(args), reply_to, deadline,
+  correlation], `reply_to` in `GlobalPid`'s encoding.
+  """
   fn encode_request(req : CallRequest) : List(Int) do
     Msgpack.encode(Msgpack.array(
       Cons(ref_to_value(req.fref),
@@ -153,6 +178,12 @@ mod RemoteCall do
       Cons(Msgpack.int(req.correlation), Nil)))))))
   end
 
+  doc """
+  Decode the bytes of `encode_request`. `Err` for bytes that are not
+  MessagePack, a value of the wrong shape ("RemoteCall: malformed
+  CallRequest" / "malformed RemoteRef"), or a reply-to pid `GlobalPid`
+  cannot decode.
+  """
   fn decode_request(bytes : List(Int)) : Result(CallRequest, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
@@ -176,6 +207,11 @@ mod RemoteCall do
     end
   end
 
+  doc """
+  The MessagePack wire bytes of [rep]: [correlation, [0, Bin(payload)]] for a
+  returned value, [correlation, [1, error]] for a failure, the error as
+  [code] or [2, reason] for `RemoteExit`.
+  """
   fn encode_reply(rep : CallReply) : List(Int) do
     let rv = match rep.result do
       Returned(payload) -> Msgpack.array(Cons(Msgpack.int(0), Cons(Msgpack.bin(payload), Nil)))
@@ -184,6 +220,11 @@ mod RemoteCall do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(rep.correlation), Cons(rv, Nil))))
   end
 
+  doc """
+  Decode the bytes of `encode_reply`. `Err` for bytes that are not
+  MessagePack or a value of the wrong shape (including an unknown error
+  code).
+  """
   fn decode_reply(bytes : List(Int)) : Result(CallReply, String) do
     match Msgpack.decode(bytes) do
       Err(e) -> Err(e)
