@@ -87,9 +87,27 @@ let scope_names (s : IS.slot) : string list =
     | IS.Return -> ps
     | _ -> [])
 
+(* Is [e] well sorted for a value of the slot's base?  An ill-sorted
+   candidate can never be proved, and it costs a solver timeout to find out. *)
+let rec sorted_for (k : PI.kind) (e : A.expr) : bool =
+  let on_hole = function A.EVar { A.txt = "_"; _ } -> true | _ -> false in
+  match e with
+  | A.ELit (A.LitFloat _, _) -> k = PI.KFloat
+  | A.EApp (A.EVar { A.txt = h; _ }, [ x ], _) when on_hole x && not (List.mem h [ "not"; "!" ]) ->
+    (* A measure or tester applied to the value itself. *)
+    (k = PI.KList || k = PI.KString) && h = "len"
+  | A.EApp (A.EVar { A.txt = op; _ }, [ a; b ], _) when List.mem op [ "<"; "<="; ">"; ">="; "=="; "!=" ] ->
+    let int_lit = function A.ELit (A.LitInt _, _) -> true | _ -> false in
+    (not (k = PI.KFloat && ((on_hole a && int_lit b) || (on_hole b && int_lit a))))
+    && (not ((k = PI.KList || k = PI.KString) && (on_hole a || on_hole b)))
+    && sorted_for k a && sorted_for k b
+  | A.EApp (_, xs, _) -> List.for_all (sorted_for k) xs
+  | _ -> true
+
 let admissible_text (s : IS.slot) (c : PI.candidate) : bool =
   let e = c.PI.c_pred A.dummy_span in
   let allowed = "_" :: scope_names s in
+  (List.mem IS.K6 s.IS.kinds || sorted_for (PI.kind_of_ty s.IS.base) e) &&
   List.for_all (fun n -> List.mem n allowed) (names_of [] e)
   && List.for_all
        (fun h ->
@@ -119,7 +137,7 @@ let demands (s : IS.slot) (ledger : Ob.t list) : string list =
     ledger
 
 (* Every refinement written in a signature of the unit, binder renamed `_`. *)
-let house (decls : A.decl list) : string list =
+let house ?(keep = fun (_ : string) (_ : A.fn_def) -> true) (decls : A.decl list) : string list =
   let out = ref [] in
   let rec ty (t : A.ty) =
     match t with
@@ -137,11 +155,13 @@ let house (decls : A.decl list) : string list =
     | _ -> ()
   in
   List.iter
-    (fun (_, (fd : A.fn_def)) ->
+    (fun ((_, (fd : A.fn_def)) as pf) ->
+      if keep (PI.qualified_of pf) fd then begin
       Option.iter ty fd.A.fn_ret_ty;
       match fd.A.fn_clauses with
       | c :: _ -> List.iter (fun (_, t) -> ty t) (PI.named_params c)
-      | [] -> ())
+      | [] -> ()
+      end)
     (PI.enum_fns [] decls);
   List.rev !out
 
@@ -221,7 +241,14 @@ let mine_full (s : IS.slot) ~(ledger : Ob.t list) ~(unit_decls : A.decl list) : 
   let of_texts src ts = List.filter_map (fun t -> Option.map (fun c -> { c; source = src }) (candidate_of_text t)) ts in
   let all =
     of_texts Demand (demands s ledger)
-    @ of_texts House (house unit_decls)
+    @ of_texts House
+        (house
+           ~keep:(fun q (fd : A.fn_def) ->
+             (* user code (empty or the slot's own file), or a function the
+                slot's function calls *)
+             fd.A.fn_name.A.span.A.file = s.IS.fd.A.fn_name.A.span.A.file
+             || PI.fn_calls (match List.rev (String.split_on_char '.' q) with x :: _ -> x | [] -> q) s.IS.fd)
+           unit_decls)
     @ of_texts Body (body s)
     @ List.map (fun c -> { c; source = Fixed }) (fixed s)
   in

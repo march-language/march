@@ -24132,6 +24132,64 @@ let infer_fixpoint_suite =
           (fun r ->
             Alcotest.(check bool) "noted" true
               (List.exists (fun (fn, n) -> (fn = "ev" || fn = "od") && n = "scc-unsupported") r.RI.notes)))
+    ;
+    gated "JSON v1 schema (E2)" (fun () ->
+        infer_run ~stdlib:true
+          (m "J1" "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  fn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n")
+          (fun r ->
+            let j = March_refinecheck.Infer_json.to_string r in
+            List.iter
+              (fun frag -> Alcotest.(check bool) ("has " ^ frag) true (Astring_contains.contains j frag))
+              [ "\"version\": 1"; "\"kind\": \"element-return\""; "\"slot\": \"return/elem\"";
+                "\"annotation\": \"List({Int | _ > 0})\""; "\"user_skips_after\": 0" ]));
+    gated "JSON output is stable across runs" (fun () ->
+        let src = m "J2" "  fn abs1(n : Int) : Int do if n > 0 do n else 1 end end\n  fn g(n : Int) : Int do need_pos(abs1(n)) end\n  fn h(k : Int) : Int do need_pos(k) end\n  fn i(k : Int) : Int do need_pos(k) end\n" in
+        let once () = let out = ref "" in infer_run src (fun r -> out := March_refinecheck.Infer_json.to_string r); !out in
+        Alcotest.(check string) "identical" (once ()) (once ()));
+    gated "JSON reason values come from the closed set" (fun () ->
+        infer_run ~stdlib:true
+          (m "J3" "  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\n  fn sum_lt(k : Int, xs : List({Int | _ < k})) : Int do 0 end\n  fn small(xs : List(Int), n : Int) : List(Int) do List.filter(xs, fn y -> y < n) end\n  fn go2(ys : List(Int)) : Int do sum_lt(10, small(ys, 10)) end\n")
+          (fun r ->
+            let j = March_refinecheck.Infer_json.to_string r in
+            let closed = [ "not-true"; "not-useful"; "opens-site"; "caller-violation"; "unsatisfiable"; "handled-case"; "unannotated-signature"; "scc-unsupported"; "budget" ] in
+            let re = Str.regexp "\"reason\": \"\\([^\"]*\\)\"" in
+            let rec all i acc = match Str.search_forward re j i with
+              | exception Not_found -> acc
+              | k -> all (k + 1) (Str.matched_group 1 j :: acc) in
+            let reasons = all 0 [] in
+            Alcotest.(check bool) "some reasons" true (reasons <> []);
+            List.iter (fun x -> Alcotest.(check bool) ("closed: " ^ x) true (List.mem x closed)) reasons))
+  ]
+
+
+let march_exe_rel () = Filename.concat (Filename.dirname Sys.executable_name) "../bin/main.exe"
+
+let run_cli args src =
+  with_temp_root "infercli" (fun dir ->
+      let f = Filename.concat dir "m.march" in
+      Out_channel.with_open_bin f (fun oc -> output_string oc src);
+      let out = Filename.concat dir "out.txt" in
+      let cmd =
+        Printf.sprintf "cd %s && HOME=%s %s %s m.march > %s 2>&1" (Filename.quote dir) (Filename.quote dir)
+          (Filename.quote (march_exe_rel ())) args (Filename.quote out)
+      in
+      let code = Sys.command cmd in
+      (code, In_channel.with_open_bin out In_channel.input_all))
+
+let infer_cli_suite =
+  [ gated "--refine-infer on a file with a type error: non-zero, no proposals" (fun () ->
+        let code, out = run_cli "--check --refine-infer-json" "mod T do\n  fn f(x : Int) : Int do \"s\" end\nend\n" in
+        Alcotest.(check bool) "non-zero" true (code <> 0);
+        Alcotest.(check bool) "no proposals emitted" false (Astring_contains.contains out "\"proposals\""));
+    gated "--refine-infer proposes E1's element precondition" (fun () ->
+        let _, out = run_cli "--check --refine-infer" "mod E1 do\n  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn total(xs : List(Int)) : Int do sum_pos(xs) end\nend\n" in
+        Alcotest.(check bool) "annotation printed" true (Astring_contains.contains out "List({Int | _ > 0})"));
+    gated "--refine-suggest-all --refine-suggest-json for S1 is byte-identical to the pinned golden" (fun () ->
+        let _, out = run_cli "--check --refine-suggest-all --refine-suggest-json" "mod S1 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn safe(a : Int, b : Int) : Int do a + need_nz(b) end\nend\n" in
+        let first = List.hd (String.split_on_char '\n' out) in
+        Alcotest.(check string) "golden"
+          "{\"suggestions\":[{\"fn\":\"safe\",\"file\":\"m.march\",\"line\":3,\"col\":5,\"status\":\"solved\",\"debt_before\":1,\"debt_after\":0,\"queries\":10,\"suggestions\":[{\"param\":\"b\",\"base\":\"Int\",\"predicate\":\"_ != 0\",\"discharged\":1,\"annotation\":\"{Int | _ != 0}\"}]}]}"
+          first)
   ]
 
 let () =
@@ -24282,6 +24340,7 @@ let () =
       ("infer-abstract", infer_abstract_suite);
       ("infer-accumulator", infer_accumulator_suite);
       ("infer-fixpoint", infer_fixpoint_suite);
+      ("infer-cli", infer_cli_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

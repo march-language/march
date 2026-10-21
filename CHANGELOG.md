@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`march --refine-infer` proposes every refinement the checker can verify,
+  module-wide.** Beyond the sign contracts `--refine-suggest-all` proposes, it
+  finds element refinements (`xs : List({Int | _ > 0})`, element and tuple
+  returns), relational preconditions (`i : {Int | _ < n}`, taken from the demand a
+  callee makes), abstract refinements for `filter`-shaped helpers
+  (`pred : a -> Bool[p]` with `List(a[p])`, `Option(a[p])` or `partition`'s pair)
+  and fold accumulator invariants. Candidates are mined from the program, every
+  proposal is proved by the real checker and must help some caller, and a
+  precondition that would break an existing caller is refused with that call.
+  `--refine-infer-json` emits JSON v1.
 - **Refinements: a lambda passed for an abstract refinement may now have a real
   body.** `List.filter(ys, fn y -> is_pos(y) && y < 100)`, an `if` or a `match`
   on a Bool, `fn y -> gt(y, 0)` (a several-parameter helper with a proved

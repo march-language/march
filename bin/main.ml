@@ -826,6 +826,7 @@ let print_refine_audit ~filename ~user_files
 let refine_suggest_active () =
   !refine_suggest_target <> None || !refine_suggest_all
   || !refine_suggest_post <> None || !refine_suggest_post_all
+  || !refine_infer || !refine_infer_json
 
 let json_escape s =
   let b = Buffer.create (String.length s + 8) in
@@ -840,6 +841,52 @@ let json_escape s =
       | c -> Buffer.add_char b c)
     s;
   Buffer.contents b
+
+let print_refine_infer ~filename ~user_files desugared =
+  let module RI = March_refinecheck.Refine_infer in
+  let module IS = March_refinecheck.Infer_slot in
+  let module IJ = March_refinecheck.Infer_json in
+  let is_user (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || List.mem f user_files
+  in
+  let kinds =
+    match !refine_infer_kinds with
+    | None -> RI.all_kinds
+    | Some ks ->
+      List.filter_map
+        (fun k -> List.find_opt (fun x -> IS.kind_name x = String.trim k) RI.all_kinds)
+        (String.split_on_char ',' ks)
+  in
+  let r =
+    RI.run ~root:(Sys.getcwd ()) ~kinds ~budget:!refine_infer_budget
+      ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib ~is_user desugared
+  in
+  if !refine_infer_json then print_endline (IJ.to_string r)
+  else begin
+    let skips snap = List.length (List.filter (fun (_, v) -> match v with March_refinecheck.Obligation.Skipped _ -> true | _ -> false) snap) in
+    Printf.printf "inferred refinements: %d proposed, %d refused; user skips %d -> %d (%d probes, %d rounds)\n"
+      (List.length r.RI.proposals) (List.length r.RI.refused) (skips r.RI.before) (skips r.RI.after) r.RI.probes r.RI.rounds;
+    List.iter
+      (fun (p : RI.proposal) ->
+        let sp = p.RI.slot.IS.fd.March_ast.Ast.fn_name.March_ast.Ast.span in
+        Printf.printf "  %s (%s:%d)  %s : %s  [%s, closes %d]%s\n" p.RI.slot.IS.fn sp.March_ast.Ast.file
+          sp.March_ast.Ast.start_line (IJ.path_text p.RI.slot.IS.path) p.RI.annotation (IJ.kind_text p.RI.slot)
+          (List.length p.RI.closes)
+          (if p.RI.external_callers then "  (external callers: not applied without --apply-public)" else ""))
+      r.RI.proposals;
+    List.iter
+      (fun ((s : IS.slot), pred, (rf : March_refinecheck.Precond_infer.refusal)) ->
+        Printf.printf "  %s: refused (%s) %s : %s%s\n" s.IS.fn rf.March_refinecheck.Precond_infer.rf_reason
+          (IJ.path_text s.IS.path) pred
+          (String.concat ""
+             (List.map
+                (fun (sp : March_ast.Ast.span) ->
+                  Printf.sprintf "\n    would break the call at %s:%d:%d" sp.March_ast.Ast.file sp.March_ast.Ast.start_line sp.March_ast.Ast.start_col)
+                rf.March_refinecheck.Precond_infer.rf_sites)))
+      r.RI.refused;
+    List.iter (fun (fn, n) -> Printf.printf "  %s: %s\n" fn n) r.RI.notes
+  end
 
 let print_refine_suggestions ~filename ~user_files desugared =
   let module PI = March_refinecheck.Precond_infer in
@@ -3159,6 +3206,13 @@ let compile filename =
     print_refine_suggestions ~filename ~user_files desugared;
   if !refine_suggest_post <> None || !refine_suggest_post_all then
     print_refine_postconditions ~filename ~user_files desugared;
+  (* Never propose on a program that does not check: the tree may be half
+     typed, and a proposal would describe a program that does not exist. *)
+  if (!refine_infer || !refine_infer_json) then begin
+    if March_errors.Errors.has_errors errors then
+      prerr_endline "--refine-infer: skipped, the program has errors (fix them first)"
+    else print_refine_infer ~filename ~user_files desugared
+  end;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
   March_refinecheck.Cap_infer.check_module errors desugared;
   (* A promoted call-site failure (a requirement the enclosing function
@@ -6349,6 +6403,16 @@ let () =
      "<fn>  Propose the return refinement that lets <fn>'s callers discharge their obligations");
     ("--refine-suggest-post-all", Arg.Set refine_suggest_post_all,
      " Propose return refinements for every function in user code whose callers have unproven obligations");
+    ("--refine-infer", Arg.Set refine_infer,
+     " Propose every refinement the checker can verify (scalar, element, relational, abstract, accumulator), module-wide");
+    ("--refine-infer-json", Arg.Set refine_infer_json, " Emit --refine-infer results as JSON v1 on stdout");
+    ("--refine-infer-kinds", Arg.String (fun s -> refine_infer_kinds := Some s),
+     "<k1,..,k7>  Restrict --refine-infer to these candidate kinds");
+    ("--refine-infer-budget", Arg.Set_int refine_infer_budget, "<N>  Global probe budget for --refine-infer (default 3000)");
+    ("--refine-infer-stdlib", Arg.Set refine_infer_stdlib, " Let --refine-infer also target stdlib functions");
+    ("--allow-caller-violations", Arg.Set allow_caller_violations,
+     " Let --refine-infer propose a precondition that turns an existing caller into a violation");
+    ("--apply-public", Arg.Set apply_public, " With --apply: also apply proposals on public functions with no in-unit callers");
     ("--refine-suggest-budget", Arg.Set_int refine_suggest_budget,
      "<N>  Cap the hypothesis re-checks --refine-suggest may spend per function (default 200)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
