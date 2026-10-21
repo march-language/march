@@ -2857,6 +2857,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           - discharge(goal=G) Verified  => G always holds        => pass
           - else discharge(goal=¬G) Verified => G never holds     => violation
           - otherwise (G depends on unknowns / solver unsure)     => skip *)
+       (* One abstract symbol at two sort tuples cannot be declared (multi-arg
+          design §3a): refused, like any other sort conflict. *)
+       if abs_sort_conflict vc then note (Obligation.Skipped Obligation.Sort_conflict)
+       else
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved
         | first ->

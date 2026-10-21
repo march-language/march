@@ -2374,8 +2374,9 @@ fn filter(xs : List(a), pred : ({x : a | true}) -> {Bool | _ == p(x)})
   argument keeps the name (`({v : Int | v > 0}) -> Bool[p]`); a domain refined
   over `_` must name it, and a callback of several arguments (`(a, a) -> Bool[p]`)
   cannot define one. Both are parse errors that say so.
-- A curried callback (`a -> b -> Bool[p]`) is not modelled: it instantiates
-  nothing and proves nothing.
+- The shorthand on a curried callback (`a -> b -> Bool[p]`) is an error: it
+  applies `p` to the last argument only, and a callback of two arguments
+  defines a `p` of two. Write the long form (**Two arguments**, below).
 
 So
 with `sum_pos(xs : List({Int | _ > 0}))`:
@@ -2557,6 +2558,70 @@ accumulator: a top-level `partition_go` whose `yes : List(a[p])` and
 `no : List({a | !p(_)})` parameters are checked at every push, so both halves
 are proved on its definition side.
 
+**Two arguments: a relation between sibling slots.** A callback of two arguments defines a `p` of two. In March a two-argument
+callback is a curried chain `D1 -> D2 -> Bool` (a tuple domain `(D1, D2) -> Bool`
+is ONE argument). The definer applies `p` to both domain binders, in order, and
+an occurrence relates two sibling slots of one type application, as a
+[relational element refinement](#relational-element-refinements) does:
+
+```march
+type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+fn filt(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)})
+    : Assoc({x : k | true}, {y : v | p(x, y)}) do
+  match a do
+    ANil -> ANil
+    ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end
+  end
+end
+```
+
+The return says: every entry `(x, y)` of the result satisfies `p(x, y)`. Inside
+`filt`, `p` is an uninterpreted function of two arguments and `keep(k, v)` is
+`p(k, v)`, so the body proves its return. At a call `p` is what the passed
+callable computes, and the produced relation is compared with the demand
+(projected onto one slot where the demand is about one slot):
+
+```march
+fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
+fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+need_pos(filt(a, fn (_k, v) -> v > 0))           -- proved
+need_arel(filt(a, fn (k, v) -> v > k))           -- proved: the relation itself
+need_pos(filt(a, fn (k, v) -> k > 0 && v > k))   -- proved: projected onto the values
+need_pos(filt(a, fn (k, v) -> v > k))            -- skip: too weak (a negative key)
+need_pos(filt(a, fn (_k, v) -> v >= 0))          -- skip: too weak
+```
+
+What instantiates a two-argument `p`: an uncurried lambda `fn (k, v) -> …` for
+a combinator that calls its callback `keep(k, v)`, a curried one `fn k -> fn v
+-> …` for one that calls it in two steps (today that counts only for a
+parameter's `p`; see "Not yet" below), either bound by `let`, a function
+with a proved `{Bool | _ == e}` return over two parameters (`fn above(k : Int,
+v : Int) : {Bool | _ == (v > k)}`), and a callback parameter whose chain type
+ends in `{Bool | _ == e}`. Anything else is `abstract-refinement-uninstantiated`,
+naming why. A parameter may carry `p` too (`need(a : Assoc({x : k | true}, {y
+: v | p(x, y)}), keep : …)`): the argument's entries must then meet the
+instantiated relation. The input's own slot facts carry over, as for one
+argument (`a : Assoc(Int, {Int | _ > 0})` through `filt(a, fn (_k, v) -> v <
+100)` meets `_ > 0 && _ < 100`), but the input's *relations* do not: the
+result's entries are not the input's, and a function generic in `k` and `v`
+may pair the key of one entry with the value of another.
+
+The signature is checked (each an error, `abstract_refinement_misuse`, with
+the fix in the message): the definer applies `p` to every binder of its chain,
+once each, in order (`p(y)` under a two-argument callback is an error, and so
+is `p(y, x)`); an occurrence names distinct binders of sibling slots (a single
+slot, `Assoc(k, {v | p(_)})`, is an error); each argument has one type across
+the definer and every occurrence; the container is entry-shaped (every
+constructor holds one `k` and one `v`, or neither); and one `p` has one arity.
+
+Not yet: inside a body, a callback called in two steps (`let g = keep(k)` then
+`g(v)`) gives `g(v)` no fact, so a combinator written that way does not prove
+its relational return, and its calls instantiate nothing. (`keep(k)(v)` is not
+March syntax.) The shorthand `k -> v -> Bool[p]` and `Assoc(k[p], v[p])` is not
+yet read as the two-argument form: today each is one of the errors above.
+
 What it does not do (reason `abstract-refinement-uninstantiated` where a
 demand meets one of these):
 
@@ -2580,9 +2645,10 @@ demand meets one of these):
   good as the obligation at each place `keep_pos` is called, and passing a
   callable whose return is not known to meet it is a skip there today, not a
   violation.
-- **One argument only.** `Map.filter`'s `(k, v) -> Bool` would need a
-  two-argument `p(k, v)`. (A fold's accumulator invariant needs no abstract
-  refinement at all; see [Folds](#folds-an-accumulator-invariant).)
+- **`Map.filter` does not carry it yet.** Its callback decides on a key and
+  a value together, which needs the two-argument `p(k, v)` above; `Map`'s
+  signature does not declare one. (A fold's accumulator invariant needs no
+  abstract refinement at all; see [Folds](#folds-an-accumulator-invariant).)
 - **Not every combinator.** `drop_while` (`List`, `Enum`) keeps no element
   fact: its result starts at the first element that FAILS `pred`, so nothing
   holds of all of it. `List.filter_map`'s callback returns an `Option`, not a

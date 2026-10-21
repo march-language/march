@@ -24125,6 +24125,297 @@ let relational_elements_suite =
         in
         Alcotest.(check bool) ("error: " ^ t) true (has "cannot verify" t)) ]
 
+(* ── Two-argument abstract refinements (multi-arg design 2026-10-18 §3-§5,
+   phase 2, long form) ────────────────────────────────────────────────────
+   A definer on a curried callback chain, `keep : ({x : k | true}) -> ({y : v |
+   true}) -> {Bool | _ == p(x, y)}`, and its occurrence as a relation over two
+   sibling slots, `Assoc({x : k | true}, {y : v | p(x, y)})`. *)
+let abstract_multiarg_suite =
+  let chain = "({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}" in
+  let filt_ret = "Assoc({x : k | true}, {y : v | p(x, y)})" in
+  let prelude =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n\
+    \  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n\
+    \  fn need_key(_a : Assoc({Int | _ > 0}, Int)) : Int do 0 end\n\
+    \  fn need_band(_a : Assoc(Int, {Int | _ > 0 && _ < 100})) : Int do 0 end\n\
+    \  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n"
+    ^ "  fn filt(a : Assoc(k, v), keep : " ^ chain ^ ") : " ^ filt_ret ^ " do\n\
+      \    match a do\n\
+      \      ANil -> ANil\n\
+      \      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end\n\
+      \    end\n\
+      \  end\n"
+  in
+  let m ?(verified = false) name body =
+    "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ prelude ^ body ^ "end\n"
+  in
+  let run src =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          ( o.callee, verdict_name o.verdict
+          , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+          , (match o.verdict with Skipped r -> reason_detail r | _ -> "") ))
+        (March_refinecheck.Obligation.all ())
+    in
+    (ctx.March_errors.Errors.diagnostics, obs)
+  in
+  let of_sev sev ds =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.severity = sev then Some d.March_errors.Errors.message else None)
+      ds
+  in
+  let errors src = of_sev March_errors.Errors.Error (fst (run src)) in
+  let misuse src =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.code = March_errors.Errors.Code.abstract_refinement_misuse
+        then Some d.March_errors.Errors.message
+        else None)
+      (fst (run src))
+  in
+  let has needle hay = Astring_contains.contains hay needle in
+  (* (verdict, reason) of every obligation recorded under [callee]. *)
+  let at callee src =
+    List.filter_map (fun (c, v, r, _) -> if c = callee then Some (v, r) else None) (snd (run src))
+  in
+  let details callee src =
+    List.filter_map (fun (c, _, _, d) -> if c = callee then Some d else None) (snd (run src))
+  in
+  let ps = Alcotest.(list (pair string string)) in
+  let proved = [ ("proved", "") ] in
+  let weak = [ ("skipped", "abstract-refinement-too-weak") ] in
+  let uninst = [ ("skipped", "abstract-refinement-uninstantiated") ] in
+  let all_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.check ps name (List.map (fun _ -> ("proved", "")) vs) vs
+  in
+  let not_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.(check bool) (name ^ ": not all proved") true (List.exists (fun (v, _) -> v <> "proved") vs)
+  in
+  let a = "a : Assoc(Int, Int)" in
+  let call ?(params = a) demand arg = Printf.sprintf "  fn go(%s) : Int do %s(filt(a, %s)) end\n" params demand arg in
+  let filt2 =
+    "  fn filt2(a : Assoc(k, v), keep : " ^ chain ^ ") : " ^ filt_ret ^ " do\n\
+    \    match a do\n\
+    \      ANil -> ANil\n\
+    \      ACons(k, v, t) ->\n\
+    \        let g = keep(k)\n\
+    \        if g(v) do ACons(k, v, filt2(t, keep)) else filt2(t, keep) end\n\
+    \    end\n\
+    \  end\n"
+  in
+  let need_neg =
+    "  fn need_neg(_a : " ^ filt_ret ^ ", keep : " ^ chain ^ ") : Int do 0 end\n"
+  in
+  [ Alcotest.test_case "s1: a two-argument definer declares p, with no unknown-predicate warning" `Quick (fun () ->
+        let src = m "S1" "" in
+        Alcotest.check
+          Alcotest.(list (pair string (list string)))
+          "roles" [ ("p", [ "+"; "D=" ]) ] (abstract_roles src "filt");
+        let ws = of_sev March_errors.Errors.Warning (fst (run src)) in
+        Alcotest.(check (list string)) "no unknown-predicate warning" []
+          (List.filter (has "`p` is not a measure") ws));
+    Alcotest.test_case "W1 (s5): p applied to one of a two-argument chain's binders is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W1"
+                  "  fn s5(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(y)}) : Assoc(k, {v | p(_)}) do a end\n"))
+        in
+        Alcotest.(check bool) ("arity: " ^ t) true (has "`p` is applied to 1 of the callback's 2 arguments" t);
+        Alcotest.(check bool) ("fix: " ^ t) true (has "write `p(x, y)`" t));
+    Alcotest.test_case "W1: the chain's binders out of order is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W1B"
+                  ("  fn sw(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(y, x)}) : "
+                  ^ filt_ret ^ " do a end\n")))
+        in
+        Alcotest.(check bool) ("order: " ^ t) true (has "write `p(x, y)`" t));
+    Alcotest.test_case "W2: a two-argument p on a single slot is an error naming the relation" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse (m "W2" ("  fn one(a : Assoc(k, v), keep : " ^ chain ^ ") : Assoc(k, {v | p(_)}) do a end\n")))
+        in
+        Alcotest.(check bool) ("single slot: " ^ t) true (has "relates 2 slots of one type application" t);
+        Alcotest.(check bool) ("fix: " ^ t) true (has "Assoc({x : k | true}, {y : v | p(x, y)})" t));
+    Alcotest.test_case "W2: arguments that are not distinct sibling binders are an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W2B"
+                  ("  fn dup(a : Assoc(k, v), keep : " ^ chain
+                 ^ ") : Assoc({x : k | true}, {y : v | p(y, y)}) do a end\n")))
+        in
+        Alcotest.(check bool) ("siblings: " ^ t) true (has "distinct binders of sibling slots" t));
+    Alcotest.test_case "W3: one position at two types is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W3"
+                  ("  fn st(a : Assoc(k, v), keep : ({x : Int | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}) : "
+                  ^ filt_ret ^ " do a end\n")))
+        in
+        Alcotest.(check bool) ("sorts: " ^ t) true (has "argument 1 of `p` is used at more than one type" t));
+    Alcotest.test_case "W4: a container that is not entry-shaped is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W4"
+                  ("  type Two(k, v) = K(k) | V(v)\n\
+                   \  fn tw(t : Two(k, v), keep : " ^ chain
+                 ^ ") : Two({x : k | true}, {y : v | p(x, y)}) do t end\n")))
+        in
+        Alcotest.(check bool) ("shape: " ^ t) true (has "has no entries to hold of" t));
+    Alcotest.test_case "W5: one p at two arities is an error" `Quick (fun () ->
+        let t =
+          String.concat "\n"
+            (misuse
+               (m "W5"
+                  ("  fn mx(a : Assoc(k, v), keep : " ^ chain
+                 ^ ", one : ({z : k | true}) -> {Bool | _ == p(z)}) : " ^ filt_ret ^ " do a end\n")))
+        in
+        Alcotest.(check bool) ("arity: " ^ t) true (has "is used with 1 and 2 arguments" t));
+    Alcotest.test_case "the well-formed definer has no misuse error" `Quick (fun () ->
+        Alcotest.(check (list string)) "no misuse" [] (misuse (m "WF" "")));
+    gated "a1: filt's own body proves its relational return" (fun () ->
+        all_proved "return of filt" (at "return of filt" (m "A1" "")));
+    gated "a1-bad: returning the input does not prove the relation" (fun () ->
+        not_proved "return of bad"
+          (at "return of bad"
+             (m "A1B" ("  fn bad(a : Assoc(k, v), keep : " ^ chain ^ ") : " ^ filt_ret ^ " do a end\n"))));
+    gated "partial_call_no_fact: a two-step call `keep(k)` then `g(v)` proves nothing" (fun () ->
+        not_proved "return of filt2" (at "return of filt2" (m "PC" filt2)));
+    gated "a2: a value demand through filt is proved" (fun () ->
+        Alcotest.check ps "need_pos" proved (at "need_pos" (m "A2" (call "need_pos" "fn (_k, v) -> v > 0"))));
+    gated "curried_lambda: a curried lambda instantiates a negative occurrence" (fun () ->
+        let src =
+          m "CL"
+            (need_neg
+            ^ "  fn ok() : Int do need_neg(ACons(1, 2, ANil), fn _k -> fn v -> v > 0) end\n\
+               \  fn no() : Int do need_neg(ACons(1, 0, ANil), fn _k -> fn v -> v > 0) end\n")
+        in
+        let vs = at "need_neg" src in
+        Alcotest.(check bool) "proved" true (List.mem ("proved", "") vs);
+        Alcotest.(check bool) "violated" true (List.mem ("violated", "") vs));
+    gated "curried_lambda: through a two-step callee the return lends nothing (§5.6)" (fun () ->
+        let src = m "CL2" (filt2 ^ "  fn go(a : Assoc(Int, Int)) : Int do need_pos(filt2(a, fn _k -> fn v -> v > 0)) end\n") in
+        Alcotest.check ps "need_pos" uninst (at "need_pos" src);
+        Alcotest.(check bool) "names the unproved body" true
+          (List.exists (has "`filt2`'s own body is not proved") (details "need_pos" src)));
+    gated "key_projection: a key demand is proved" (fun () ->
+        Alcotest.check ps "need_key" proved (at "need_key" (m "KP" (call "need_key" "fn (k, _v) -> k > 0"))));
+    gated "rel_demand: a relational demand is proved" (fun () ->
+        Alcotest.check ps "need_arel" proved (at "need_arel" (m "RD" (call "need_arel" "fn (k, v) -> v > k"))));
+    gated "projection_fresh_k (m5): k > 0 && v > k proves v > 0" (fun () ->
+        Alcotest.check ps "need_pos" proved
+          (at "need_pos" (m "PF" (call "need_pos" "fn (k, v) -> k > 0 && v > k"))));
+    gated "projection_too_weak (m6): v > k alone is too weak for v > 0" (fun () ->
+        Alcotest.check ps "need_pos" weak (at "need_pos" (m "PW" (call "need_pos" "fn (k, v) -> v > k"))));
+    gated "too_weak (m4): the detail names the lambda" (fun () ->
+        let src = m "TW" (call "need_pos" "fn (_k, v) -> v >= 0") in
+        Alcotest.check ps "need_pos" weak (at "need_pos" src);
+        let d = String.concat "\n" (details "need_pos" src) in
+        Alcotest.(check bool) ("lambda: " ^ d) true (has "fn (_k, v) -> v >= 0" d));
+    gated "capture (m7): a lambda naming an outer value is uninstantiated" (fun () ->
+        Alcotest.check ps "need_pos" uninst
+          (at "need_pos" (m "CP" (call ~params:"a : Assoc(Int, Int), now : Int" "need_pos" "fn (_k, v) -> v > now"))));
+    gated "opaque: a callback with no contract is uninstantiated" (fun () ->
+        Alcotest.check ps "need_pos" uninst
+          (at "need_pos" (m "OP" (call ~params:"a : Assoc(Int, Int), kk : Int -> Int -> Bool" "need_pos" "kk"))));
+    gated "wrong_arity_lambda: a one-parameter lambda is uninstantiated" (fun () ->
+        let src = m "WA" (call "need_pos" "fn v -> v > 0") in
+        Alcotest.check ps "need_pos" uninst (at "need_pos" src));
+    gated "named2: a proved two-parameter predicate instantiates p; an unproved one does not" (fun () ->
+        let src =
+          m "N2"
+            "  fn above(k : Int, v : Int) : {Bool | _ == (v > k)} do v > k end\n\
+            \  fn lies(k : Int, v : Int) : {Bool | _ == (v > k)} do v >= k end\n\
+            \  fn go(a : Assoc(Int, Int)) : Int do need_arel(filt(a, above)) end\n\
+            \  fn go2(a : Assoc(Int, Int)) : Int do need_arel(filt(a, lies)) + 0 end\n"
+        in
+        Alcotest.check ps "need_arel" (proved @ uninst) (at "need_arel" src));
+    gated "cb_passthrough: a chain-typed callback parameter passed on is proved" (fun () ->
+        Alcotest.check ps "need_arel" proved
+          (at "need_arel"
+             (m "CB"
+                "  fn go(a : Assoc(Int, Int), kk : ({x : Int | true}) -> ({y : Int | true}) -> {Bool | _ == (y > x)}) : Int do\n\
+                \    need_arel(filt(a, kk))\n\
+                \  end\n")));
+    gated "let_lambda: a let-bound lambda instantiates p; rebinding retires it" (fun () ->
+        let src =
+          m "LL"
+            "  fn go(a : Assoc(Int, Int)) : Int do\n\
+            \    let kk = fn (k, v) -> v > k\n\
+            \    need_arel(filt(a, kk))\n\
+            \  end\n\
+            \  fn go2(a : Assoc(Int, Int), other : Int -> Int -> Bool) : Int do\n\
+            \    let kk = fn (k, v) -> v > k\n\
+            \    let kk = other\n\
+            \    need_arel(filt(a, kk))\n\
+            \  end\n"
+        in
+        Alcotest.check ps "need_arel" (proved @ uninst) (at "need_arel" src));
+    gated "conjunction: the input's slot fact joins the lambda's" (fun () ->
+        Alcotest.check ps "need_band" proved
+          (at "need_band"
+             (m "CJ" (call ~params:"a : Assoc(Int, {Int | _ > 0})" "need_band" "fn (_k, v) -> v < 100"))));
+    gated "conjunction control: an unrefined input lends nothing" (fun () ->
+        Alcotest.check ps "need_band" weak (at "need_band" (m "CJC" (call "need_band" "fn (_k, v) -> v < 100"))));
+    gated "conjunction_drops_input_rel: the input's relation is not carried" (fun () ->
+        let params = "a : Assoc({x : Int | true}, {y : Int | y > x && y > 0})" in
+        Alcotest.check ps "need_arel" weak
+          (at "need_arel" (m "CR" (call ~params "need_arel" "fn (_k, v) -> v < 100")));
+        (* Control: the same input's SLOT fact is carried. *)
+        Alcotest.check ps "need_band" proved
+          (at "need_band" (m "CR2" (call ~params "need_band" "fn (_k, v) -> v < 100"))));
+    gated "negative_occurrence: refined proved, literal violated, unrefined skipped, opaque uninstantiated" (fun () ->
+        let src =
+          m "NO"
+            (need_neg
+            ^ "  fn r(b : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_neg(b, fn (k, v) -> v > k) end\n\
+               \  fn l() : Int do need_neg(ACons(5, 2, ANil), fn (k, v) -> v > k) end\n\
+               \  fn u(b : Assoc(Int, Int)) : Int do need_neg(b, fn (k, v) -> v > k) end\n\
+               \  fn o(b : Assoc({x : Int | true}, {y : Int | y > x}), kk : Int -> Int -> Bool) : Int do need_neg(b, kk) end\n")
+        in
+        (* Element subtyping records under the subject (`b`), a literal or a
+           skip under the callee. *)
+        let obs = at "need_neg" src @ at "b" src in
+        let vs = List.map fst obs and rs = List.map snd obs in
+        Alcotest.(check bool) ("proved: " ^ String.concat "," vs) true (List.mem "proved" vs);
+        Alcotest.(check bool) "violated" true (List.mem "violated" vs);
+        Alcotest.(check bool) "skipped" true (List.mem "skipped" vs);
+        Alcotest.(check bool) "uninstantiated" true (List.mem "abstract-refinement-uninstantiated" rs));
+    gated "cache: two lambdas differing only in the relation keep their own verdicts" (fun () ->
+        let two first second =
+          m "CA"
+            (Printf.sprintf
+               "  fn go(a : Assoc(Int, Int)) : Int do need_arel(filt(a, fn (k, v) -> %s)) + need_arel(filt(a, fn (k, v) -> %s)) end\n"
+               first second)
+        in
+        Alcotest.check ps "> then >=" (proved @ weak) (at "need_arel" (two "v > k" "v >= k"));
+        Alcotest.check ps ">= then >" (weak @ proved) (at "need_arel" (two "v >= k" "v > k")));
+    gated "a4 / cap verified: no definer obligation; a proved demand is no error" (fun () ->
+        let src =
+          m ~verified:true "A4"
+            ("  fn count(_a : Assoc(k, v), _keep : " ^ chain ^ ") : Int do 0 end\n\
+              \  fn gc(a : Assoc(Int, Int)) : Int do count(a, fn (k, v) -> v > k) end\n"
+            ^ call "need_pos" "fn (_k, v) -> v > 0")
+        in
+        Alcotest.(check (list string)) "no errors" [] (errors src));
+    gated "cap verified: a too-weak demand is an error" (fun () ->
+        let t = String.concat "\n" (errors (m ~verified:true "A4W" (call "need_pos" "fn (_k, v) -> v >= 0"))) in
+        Alcotest.(check bool) ("error: " ^ t) true (has "cannot verify" t)) ]
 
 let () =
   Alcotest.run "march-refinecheck"
@@ -24272,4 +24563,5 @@ let () =
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("element-entries", element_entries_suite);
       ("relational-elements", relational_elements_suite);
+      ("abstract-multiarg", abstract_multiarg_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

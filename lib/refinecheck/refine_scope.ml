@@ -307,8 +307,13 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
   (* An abstract refinement of the function being checked: uninterpreted
      (design 2026-09-20 §2a).  Only inside its declaring definition —
      [current_abstracts] is empty everywhere else. *)
-  | A.EApp (A.EVar { A.txt = p; _ }, [ a ], _) when List.mem p !current_abstracts ->
-    Result.map (fun t -> Smt.App (abs_sym p, [ t ])) (r a)
+  | A.EApp (A.EVar { A.txt = p; _ }, (_ :: _ as args), _) when List.mem p !current_abstracts ->
+    (* n-ary (multi-arg design §3a): one argument per position. *)
+    let rec all = function
+      | [] -> Ok []
+      | a :: rest -> (match r a with Ok t -> Result.map (fun ts -> t :: ts) (all rest) | Error e -> Error e)
+    in
+    Result.map (fun ts -> Smt.App (abs_sym p, ts)) (all args)
   | A.EApp (A.EVar { A.txt = m0; _ }, [ a ], _)
     when is_measure_app m0 && (vocab || not (is_builtin_set_measure (measure_name m0))) ->
     (* One normalization point for BOTH sides: a path condition and a predicate
@@ -868,7 +873,74 @@ let dom_binder (dom : A.ty) : string option =
   | A.TyRefine (_, Some n, _) when n.A.txt <> "_" -> Some n.A.txt
   | _ -> None
 
+(* A callback CHAIN `D1 -> … -> Dn -> {Bool | _ == e}` (n ≥ 2, multi-arg
+   design §5.3) as an n-parameter signature `[$cb_arg; $cb_arg2; …]`: the
+   domains its parameters, each domain binder renamed to its position's
+   name in [e] (and in a later domain's refinement), [e] the result's
+   definition.  ONLY this final-codomain shape — a definer of a current
+   abstract refinement, or a predicate contract — so no other chain gains
+   an obligation or a fact; every other chain keeps the one-parameter
+   signature below.  A call through it with all n arguments, `keep(k, v)`,
+   reflects to `keep$ret == e[k, v]` ([postcond_of]); a call with fewer has
+   no actual for a parameter [e] names, so it gets no fact. *)
+let chain_sig_of_ty (t : A.ty) : fn_sig option =
+  let rec doms (t : A.ty) acc =
+    match t with A.TyArrow (d, c) -> doms c (d :: acc) | c -> (List.rev acc, c)
+  in
+  match t with
+  | A.TyArrow _ ->
+    let ds, cod = doms t [] in
+    (match unlinear cod with
+     | A.TyRefine (base, b, (A.EApp (A.EVar { A.txt = "=="; _ }, [ l; r ], _) as pred))
+       when List.length ds >= 2 && is_bool_base base ->
+       let bn = binder_name b in
+       let is_b = function A.EVar { A.txt; _ } -> txt = bn || txt = "_" | _ -> false in
+       if not (is_b l || is_b r) then None
+       else
+         let names =
+           List.mapi
+             (fun i _ -> if i = 0 then callback_param_name else callback_param_name ^ string_of_int (i + 1))
+             ds
+         in
+         let env =
+           List.concat
+             (List.map2
+                (fun d n ->
+                  match dom_binder d with
+                  | Some x when x <> bn -> [ (x, A.EVar { A.txt = n; A.span = A.dummy_span }) ]
+                  | _ -> [])
+                ds names)
+         in
+         let refined =
+           List.concat
+             (List.mapi
+                (fun i d ->
+                  match refined_param_ty (Some d) with
+                  | Some (binder, p, sort) ->
+                    let env' = List.filter (fun (x, _) -> x <> binder) env in
+                    [ { idx = i; binder; pred = subst_params env' p; sort } ]
+                  | None -> [])
+                ds)
+         in
+         let sort_at i = List.find_map (fun (rp : rparam) -> if rp.idx = i then Some rp.sort else None) refined in
+         Some
+           { param_names = names
+           ; param_str = List.mapi (fun i _ -> sort_at i = Some (Some str_sort)) ds
+           ; param_scalar =
+               List.mapi (fun i _ -> match sort_at i with Some s -> scalar_sort_or_int s | None -> Smt.SInt) ds
+           ; param_tys = List.map (fun d -> Some d) ds
+           ; refined
+           ; ret = Some (bn, subst_params env pred)
+           ; ret_sort = Some bool_sort
+           ; ret_ty = Some cod
+           }
+     | _ -> None)
+  | _ -> None
+
 let callback_sig_of_ty (t : A.ty) : fn_sig option =
+  match chain_sig_of_ty t with
+  | Some sg -> Some sg
+  | None ->
   match t with
   | A.TyArrow (dom, cod) ->
     (* The CODOMAIN's refinement is the callback's postcondition (P3 design
@@ -1651,9 +1723,27 @@ let abstract_tyvar_slot (arg : A.ty) : (string * A.expr * string option) option 
   | A.TyRefine (A.TyVar _, binder, pred)
     when !current_abstracts <> []
          && List.exists (fun (n, _, _) -> List.mem n !current_abstracts)
-              (Refine_abstract.applications pred) ->
+              (Refine_abstract.applications_n pred) ->
     Some (binder_name binder, pred, None)
   | _ -> None
+
+(* The binders an application of a current abstract refinement names, over
+   every slot predicate of one type application (multi-arg design §5.2): a
+   type-variable slot `{x : k | true}` whose binder a sibling's `p(x, y)`
+   names is a slot of the relation, inside the declaring definition only. *)
+let abstract_rel_binders (args : A.ty list) : string list =
+  if !current_abstracts = [] then []
+  else
+    List.concat_map
+      (fun (t : A.ty) ->
+        match unlinear t with
+        | A.TyRefine (_, _, pred) ->
+          List.concat_map
+            (fun (n, xs, _) ->
+              if List.mem n !current_abstracts && List.length xs >= 2 then List.filter_map Fun.id xs else [])
+            (Refine_abstract.applications_n pred)
+        | _ -> [])
+      args
 
 (* The span of a slot predicate, for a declaration warning; [fallback] (the
    container name's) for a shape with no span of its own. *)
@@ -1688,18 +1778,28 @@ let pred_span (fallback : A.span) (e : A.expr) : A.span =
    the same slots, [rels = []]. *)
 let rec elem_app (cname : A.name) (args : A.ty list) : entry option * (A.span * string) list =
   let c = cname.A.txt in
-  let read (arg : A.ty) : elem option =
+  let rel_binders = abstract_rel_binders args in
+  (* A type-variable slot admitted only because a sibling's abstract
+     relation names its binder (§5.2); a literally-`true` one is emptied
+     once the relations are read. *)
+  let via_rel = ref [] in
+  let read (i : int) (arg : A.ty) : elem option =
     match refined_param_ty (Some arg) with
     | Some r -> Some (Refined r)
     | None ->
       match abstract_tyvar_slot arg with
       | Some r -> Some (Refined r)
       | None ->
-        (match elem_refinement (Some arg) with
-         | Some inner -> Some (Container inner)
-         | None -> None)
+        (match unlinear arg with
+         | A.TyRefine (A.TyVar _, Some { A.txt = b; _ }, pred) when b <> "_" && List.mem b rel_binders ->
+           via_rel := i :: !via_rel;
+           Some (Refined (b, pred, None))
+         | _ ->
+           (match elem_refinement (Some arg) with
+            | Some inner -> Some (Container inner)
+            | None -> None))
   in
-  let slots = Array.of_list (List.map read args) in
+  let slots = Array.of_list (List.mapi read args) in
   let n = Array.length slots in
   let issues = ref [] in
   let warn sp text = issues := (sp, "This relation is not checked: " ^ text) :: !issues in
@@ -1788,6 +1888,12 @@ let rec elem_app (cname : A.name) (args : A.ty list) : entry option * (A.span * 
         end
       | _ -> ())
     slots;
+  List.iter
+    (fun i ->
+      match slots.(i) with
+      | Some (Refined (_, A.ELit (A.LitBool true, _), _)) -> slots.(i) <- None
+      | _ -> ())
+    !via_rel;
   let slots = Array.to_list slots and rels = List.rev !rels in
   ( (if List.exists Option.is_some slots || rels <> [] then Some (normalize_entry { cont = c; slots; rels })
      else None)

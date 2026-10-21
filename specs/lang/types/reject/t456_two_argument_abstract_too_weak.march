@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: abstract-refinement-too-weak: `fn (_k, v) -> v >= 0` does not imply `_ > 0`
+-- Two-argument abstract refinements (2026-10-21, multi-arg design phase 2),
+-- row m4: the lambda instantiating `filt`'s two-argument `p` keeps entries
+-- with `v >= 0`, which does not give the demanded `v > 0`.  At a call the
+-- instantiation is checked in a scratch ledger, so a refutation is a
+-- too-weak SKIP, never a violation; `cap verified` makes the skip an error.
+-- Before phase 2 the call was a `parametric-source-unproved` skip (an error
+-- here for another reason).  Accept twin: t455.
+mod TwoArgAbstractWeak do
+  cap verified
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
+  fn filt(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)})
+      : Assoc({x : k | true}, {y : v | p(x, y)}) do
+    match a do
+      ANil -> ANil
+      ACons(k, v, t) -> if keep(k, v) do ACons(k, v, filt(t, keep)) else filt(t, keep) end
+    end
+  end
+  fn m4(a : Assoc(Int, Int)) : Int do need_pos(filt(a, fn (_k, v) -> v >= 0)) end
+end

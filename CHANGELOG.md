@@ -21,6 +21,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements: two-argument abstract refinements.** A callback of two arguments
+  can define an abstract refinement `p` of two, and the return can relate two
+  sibling slots through it (long form):
+  `fn filt(a : Assoc(k, v), keep : ({x : k | true}) -> ({y : v | true}) -> {Bool | _ == p(x, y)}) : Assoc({x : k | true}, {y : v | p(x, y)})`.
+  The body proves the return (`keep(k, v)` is `p(k, v)`); at a call `p` is what the
+  passed lambda, `let`-bound lambda, named predicate or callback computes, so
+  `need_pos(filt(a, fn (_k, v) -> v > 0))` and
+  `need_arel(filt(a, fn (k, v) -> v > k))` are proved and a weaker lambda is an
+  `abstract-refinement-too-weak` skip. A parameter can carry the relation too.
+  Malformed signatures are `abstract_refinement_misuse` errors: `p` applied to
+  only some of the callback's arguments (this includes the shorthand
+  `a -> b -> Bool[p]`, which applied `p` to the last argument only and was
+  silently inert), `p` on a single slot, one argument at two types, a container
+  that is not entry-shaped, or one `p` at two arities. `Map.filter` does not
+  carry it yet. See "Two arguments" under abstract refinements in the refinement
+  types reference.
 - **Refinements: relational element refinements.** A slot predicate may name a
   sibling slot's binder, relating the two components of every entry:
   `Assoc({x : Int | true}, {y : Int | y > x})` reads "each entry's value exceeds

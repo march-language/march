@@ -239,8 +239,8 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   let m = mentions_str is_str in
   match t with
   | Smt.App (f, [ _ ]) when f = strlen_fn -> false
-  (* Bool-valued; its argument's sort is [abstract_preamble]'s concern. *)
-  | Smt.App (f, [ _ ]) when is_abs_sym f -> false
+  (* Bool-valued; its arguments' sorts are [abstract_preamble]'s concern. *)
+  | Smt.App (f, _) when is_abs_sym f -> false
   | Smt.Const c -> is_str c
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   (* A datatype tester ranges over an ADT sort, never over `Str`; it only
@@ -276,8 +276,8 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> true
   | Smt.App (f, [ a ]) when f = strlen_fn ->
     (match a with Smt.Const c -> is_str c | _ -> false)
-  (* Declared at its argument's own sort by [abstract_preamble]. *)
-  | Smt.App (f, [ _ ]) when is_abs_sym f -> true
+  (* Declared at its arguments' own sorts by [abstract_preamble]. *)
+  | Smt.App (f, _) when is_abs_sym f -> true
   | Smt.App (_, args) -> List.for_all int_side args
   (* A constructor field may be a `Str` constant (a `String` payload) as
      readily as an Int term; each argument is checked on its own. *)
@@ -324,11 +324,12 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   (* An Int whose operand is a set term. *)
   | Smt.SetCard (_, a) -> w a
 
-(* Every abstract-refinement application in [t], with its argument. *)
-let rec abs_apps (t : Smt.term) : (string * Smt.term) list =
+(* Every abstract-refinement application in [t], with its arguments (one
+   per position: an arity-n `p` is n-ary, multi-arg design §3a). *)
+let rec abs_apps (t : Smt.term) : (string * Smt.term list) list =
   let m = abs_apps in
   match t with
-  | Smt.App (f, [ a ]) when is_abs_sym f -> (f, a) :: m a
+  | Smt.App (f, args) when is_abs_sym f -> (f, args) :: List.concat_map m args
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.concat_map m args
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) -> m a
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ | Smt.SetEmpty _ -> []
@@ -350,22 +351,31 @@ let rec abs_apps (t : Smt.term) : (string * Smt.term) list =
    LAST to a preamble, so a `$Str` or datatype argument sort is already
    declared.  [""] for a query that mentions none, so every other query keeps
    its exact text and cache key. *)
+let abs_sorts (vc : Smt.vc) : (string * Smt.sort list) list =
+  let sort_of (a : Smt.term) =
+    match a with
+    | Smt.Const c -> (match List.assoc_opt c vc.Smt.decls with Some s -> s | None -> Smt.SInt)
+    | _ -> Smt.SInt
+  in
+  List.map (fun (f, args) -> (f, List.map sort_of args)) (List.concat_map abs_apps (vc.Smt.goal :: vc.Smt.assumptions))
+
+(* Does [vc] apply one abstract symbol at two different sort tuples (or
+   arities)?  Such a query cannot be declared ([abstract_preamble] declares
+   one signature per symbol) and is refused as [sort_conflict]; W3 makes it
+   unreachable from a well-formed signature. *)
+let abs_sort_conflict (vc : Smt.vc) : bool =
+  let ds = abs_sorts vc in
+  List.exists (fun (f, ss) -> List.exists (fun (f', ss') -> f = f' && ss <> ss') ds) ds
+
 let abstract_preamble (vc : Smt.vc) : string =
-  let seen : (string * Smt.sort) list ref = ref [] in
+  let seen : (string * Smt.sort list) list ref = ref [] in
   List.iter
-    (fun (f, a) ->
-      if not (List.mem_assoc f !seen) then begin
-        let s =
-          match a with
-          | Smt.Const c -> (match List.assoc_opt c vc.Smt.decls with Some s -> s | None -> Smt.SInt)
-          | _ -> Smt.SInt
-        in
-        seen := (f, s) :: !seen
-      end)
-    (List.concat_map abs_apps (vc.Smt.goal :: vc.Smt.assumptions));
+    (fun (f, ss) -> if not (List.mem_assoc f !seen) then seen := (f, ss) :: !seen)
+    (abs_sorts vc);
   String.concat ""
     (List.rev_map
-       (fun (f, s) -> Printf.sprintf "(declare-fun %s (%s) Bool)\n" f (Smt.string_of_sort s))
+       (fun (f, ss) ->
+         Printf.sprintf "(declare-fun %s (%s) Bool)\n" f (String.concat " " (List.map Smt.string_of_sort ss)))
        !seen)
 
 (* ── Float: the IEEE rewrite and its well-sortedness guard ─────────────────
@@ -471,7 +481,7 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
   | Smt.Ite (_, a, b) -> w a && w b
   (* An abstract refinement is the one uninterpreted function declared at
      `Bool` ([abstract_preamble]). *)
-  | Smt.App (f, [ _ ]) when is_abs_sym f -> true
+  | Smt.App (f, _) when is_abs_sym f -> true
   (* Nothing else in this checker declares an uninterpreted function at `Bool`
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
@@ -3361,7 +3371,7 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       IBool
     | Smt.App (f, [ a ]) when f = strlen_fn ->
       unify (infer a) (INamed (str_sort, [])); IInt
-    | Smt.App (f, [ a ]) when is_abs_sym f -> ignore (infer a); IBool
+    | Smt.App (f, args) when is_abs_sym f -> List.iter (fun a -> ignore (infer a)) args; IBool
     | Smt.App (m, [ a ]) when is_list_structure_measure m ->
       let params, it = fresh_instance list_adt in
       unify (infer a) it;

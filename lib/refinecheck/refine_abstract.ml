@@ -45,6 +45,18 @@ type occurrence = {
   occ_arg : string;         (* the name it is applied to, "_" for the wildcard *)
   occ_binder : string;      (* the binder in scope at that occurrence *)
   occ_base : string;        (* rendered base type, for the same-sort rule *)
+  (* Multi-arg design 2026-10-18 §5.1.  [occ_args]: every argument, in order
+     ("$computed" for a computed one; one element for an arity-1 application,
+     where it equals [occ_arg]).  [occ_scope]: for a DEFINER, the callback
+     chain's domains as (binder, base), "_" for a domain with no binder; for a
+     slot occurrence, every slot of the enclosing type application as
+     (binder, base).  [occ_slot]: the index of the slot the occurrence sits in
+     ([None] outside a type application's argument).  [occ_cont]: that
+     application's constructor. *)
+  occ_args : string list;
+  occ_scope : (string * string) list;
+  occ_slot : int option;
+  occ_cont : string option;
 }
 
 (* A rendered key for the base type an occurrence sits at.  Deliberately
@@ -85,6 +97,20 @@ let rec applications (e : A.expr) : (string * string option * A.span) list =
   | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) ->
     List.concat_map applications es
   | A.EAnnot (e, _, _) -> applications e
+  | _ -> []
+
+(* Applications of ANY arity ≥ 1 (multi-arg design 2026-10-18 §5.1), as
+   (name, arguments, span), each argument classified as [applications] does.
+   Its arity-1 entries are exactly [applications]'s; the walk is the same. *)
+let rec applications_n (e : A.expr) : (string * string option list * A.span) list =
+  match e with
+  | A.EApp (A.EVar { A.txt = f; _ }, (_ :: _ as args), span) ->
+    let cls (arg : A.expr) = match arg with A.EVar { A.txt; _ } -> Some txt | _ -> None in
+    (f, List.map cls args, span) :: List.concat_map applications_n args
+  | A.EApp (f, args, _) -> applications_n f @ List.concat_map applications_n args
+  | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) ->
+    List.concat_map applications_n es
+  | A.EAnnot (e, _, _) -> applications_n e
   | _ -> []
 
 (* Nested application of a candidate inside another's argument (`p(q(_))`),
@@ -156,43 +182,102 @@ let rec subst_abstract ~(subst : (string * A.expr) list -> A.expr -> A.expr) (p 
   | A.EAnnot (e, t, sp) -> A.EAnnot (go e, t, sp)
   | e -> e
 
+(* The arity-n [subst_abstract]: every `p(a1, …, an)` replaced by [q] with
+   [ys := as] (simultaneously, [subst]).  An application of [p] at another
+   arity is left alone (W5 makes it unreachable from a well-formed
+   signature). *)
+let rec subst_abstract_n ~(subst : (string * A.expr) list -> A.expr -> A.expr) (p : string)
+    ((ys, q) : string list * A.expr) (s : A.expr) : A.expr =
+  let go = subst_abstract_n ~subst p (ys, q) in
+  match s with
+  | A.EApp (A.EVar { A.txt; _ }, args, _) when txt = p && List.length args = List.length ys ->
+    subst (List.combine ys args) q
+  | A.EApp (f, args, sp) -> A.EApp (go f, List.map go args, sp)
+  | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)
+  | A.ECon (c, es, sp) -> A.ECon (c, List.map go es, sp)
+  | A.EAtom (a, es, sp) -> A.EAtom (a, List.map go es, sp)
+  | A.EAnnot (e, t, sp) -> A.EAnnot (go e, t, sp)
+  | e -> e
+
 (* Walk one declared type, collecting occurrences at [role].
 
    [dom_binder] is the binder of the arrow domain whose codomain we are
    inside, so a definer's argument can be checked against it; it is [None]
-   everywhere else. *)
+   everywhere else.
+
+   [chain] (multi-arg design §5.1): the domains of the callback CHAIN whose
+   final codomain we are inside, as (binder, base), so a definer records the
+   whole binder list (`D1 -> … -> Dn -> C`); the per-arrow [dom_binder] is
+   its last element.  [app]: the enclosing type application's slots and the
+   index of the slot being walked, for an occurrence directly in a slot's
+   refinement (W2's sibling binders). *)
 let rec walk_ty ~(role : role) ?(dom_binder : string option)
-    ?(dom_base : string option) (t : A.ty) (acc : occurrence list ref) : unit =
+    ?(dom_base : string option) ?(chain : (string * string) list = [])
+    ?(app : (string * (string * string) list * int) option) (t : A.ty)
+    (acc : occurrence list ref) : unit =
   match t with
   | A.TyRefine (base, binder, pred) ->
     let b = binder_of binder in
     List.iter
-      (fun (f, arg, span) ->
-        acc :=
-          { occ_name = f;
-            occ_role = role;
-            occ_span = span;
-            occ_arg = Option.value arg ~default:"$computed";
-            occ_binder = (match dom_binder with Some d -> d | None -> b);
-            (* A DEFINER sits on a `Bool` codomain but is ABOUT the callback's
-               domain: `{Bool | _ == p(x)}` says what `p` means for an `x`.
-               Recording `Bool` here made rule 4 fire on the canonical
-               signature (`Bool` vs `a`), which is the whole feature. *)
-            occ_base = (match dom_base with Some d -> d | None -> base_key base) }
-          :: !acc)
-      (applications pred);
-    walk_ty ~role ?dom_binder ?dom_base base acc
-  | A.TyCon (_, args) -> List.iter (fun a -> walk_ty ~role ?dom_binder ?dom_base a acc) args
+      (fun (f, args, span) ->
+        let arg_strs = List.map (fun a -> Option.value a ~default:"$computed") args in
+        let n = List.length args in
+        (* An application of several arguments is a DEFINER only on a chain
+           of at least two domains: a tuple domain `((x, y)) -> {Bool | _ ==
+           p(x, y)}` is ONE argument and defines nothing new (§1.1, s4), so it
+           is left exactly as it was — no occurrence at all. *)
+        let ident = String.length f > 0 && (match f.[0] with 'a' .. 'z' | '_' -> true | _ -> false) in
+        if n >= 2 && not ident then ()
+        else if role = Definer && n >= 2 && List.length chain < 2 then ()
+        else
+          acc :=
+            { occ_name = f;
+              occ_role = role;
+              occ_span = span;
+              occ_arg =
+                (if n = 1 then List.hd arg_strs else String.concat ", " arg_strs);
+              occ_binder =
+                (match role, n with
+                 | Definer, n when n >= 2 -> String.concat ", " (List.map fst chain)
+                 | _ -> (match dom_binder with Some d -> d | None -> b));
+              (* A DEFINER sits on a `Bool` codomain but is ABOUT the callback's
+                 domain: `{Bool | _ == p(x)}` says what `p` means for an `x`.
+                 Recording `Bool` here made rule 4 fire on the canonical
+                 signature (`Bool` vs `a`), which is the whole feature. *)
+              occ_base = (match dom_base with Some d -> d | None -> base_key base);
+              occ_args = arg_strs;
+              occ_scope =
+                (match role, app with
+                 | Definer, _ -> chain
+                 | _, Some (_, slots, _) -> slots
+                 | _, None -> []);
+              occ_slot = (match role, app with Definer, _ -> None | _, Some (_, _, i) -> Some i | _ -> None);
+              occ_cont = (match role, app with Definer, _ -> None | _, Some (c, _, _) -> Some c | _ -> None) }
+            :: !acc)
+      (List.filter (fun (_, args, _) -> args <> []) (applications_n pred));
+    walk_ty ~role ?dom_binder ?dom_base ~chain base acc
+  | A.TyCon ({ A.txt = c; _ }, args) ->
+    let slot_of (t : A.ty) =
+      match t with
+      | A.TyRefine (b, binder, _) -> (binder_of binder, base_key b)
+      | t -> ("_", base_key t)
+    in
+    let slots = List.map slot_of args in
+    List.iteri
+      (fun i a -> walk_ty ~role ?dom_binder ?dom_base ~app:(c, slots, i) a acc)
+      args
   | A.TyArrow (dom, cod) ->
     (* The domain of an arrow parameter is where the callback RECEIVES values,
        so a refinement there is an obligation on the callee, not a definer;
        its own binder is what a codomain definer may name. *)
     let db = match dom with A.TyRefine (_, b, _) -> Some (binder_of b) | _ -> None in
+    let link = (Option.value db ~default:"_", base_key dom) in
+    let chain' = (if role = Definer then chain else []) @ [ link ] in
     walk_ty ~role:(match role with Negative -> Positive | _ -> Negative) ?dom_binder ?dom_base dom acc;
-    walk_ty ~role:Definer ?dom_binder:db ~dom_base:(base_key dom) cod acc
+    walk_ty ~role:Definer ?dom_binder:db ~dom_base:(base_key dom) ~chain:chain' cod acc
   | A.TyTuple ts -> List.iter (fun t -> walk_ty ~role ?dom_binder ?dom_base t acc) ts
   | A.TyRecord fs -> List.iter (fun (_, t) -> walk_ty ~role ?dom_binder ?dom_base t acc) fs
-  | A.TyLinear (_, t) -> walk_ty ~role ?dom_binder ?dom_base t acc
+  | A.TyLinear (_, t) -> walk_ty ~role ?dom_binder ?dom_base ~chain t acc
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
 (* Every declared type of [fd]: each clause's parameter annotations, then the
@@ -251,13 +336,204 @@ let collect ~(is_known : string -> bool) (fd : A.fn_def) :
 let names ~(is_known : string -> bool) (fd : A.fn_def) : string list =
   List.map fst (collect ~is_known fd)
 
+(* Is [occs] (one name's occurrences) about an arity-n abstract refinement
+   (multi-arg design §1.4): some application of several arguments, or a
+   definer under a callback chain of several domains?  Such a name is checked
+   by W1-W5 ([check_nary]) instead of the arity-1 rules 2 and 4, which read a
+   single argument against a single binder. *)
+let is_nary (occs : occurrence list) : bool =
+  List.exists
+    (fun o -> List.length o.occ_args >= 2 || (o.occ_role = Definer && List.length o.occ_scope >= 2))
+    occs
+
+(* The number of arguments [p]'s definer applies it to (§5.1), or [None] when
+   [p] is not an abstract refinement of [fd]. *)
+let arity_of ~(is_known : string -> bool) (fd : A.fn_def) (p : string) : int option =
+  match List.assoc_opt p (collect ~is_known fd) with
+  | None -> None
+  | Some occs ->
+    List.find_map (fun o -> if o.occ_role = Definer then Some (List.length o.occ_args) else None) occs
+
+let is_container_base (b : string) : bool = String.contains b '('
+
+(* W1-W5 for one name of arity n (multi-arg design §1.4), hard errors
+   [abstract_refinement_misuse].  [entry_shaped c s] is
+   [Refine_encode.entry_shaped] (passed in: this module sits below it). *)
+let check_nary (errctx : Err.ctx) ~(entry_shaped : name_of:(int -> string) -> string -> int list -> (unit, string) result)
+    (name : string) (occs : occurrence list) : unit =
+  let misuse span msg = Err.error ~code:Err.Code.abstract_refinement_misuse errctx ~span msg in
+  let definers = List.filter (fun o -> o.occ_role = Definer) occs in
+  let consumers = List.filter (fun o -> o.occ_role <> Definer) occs in
+  let arity o = List.length o.occ_args in
+  (* W1: the definer applies [p] to exactly the chain's binders, each once,
+     in chain order (decision D3). *)
+  let w1_bad =
+    List.filter
+      (fun o ->
+        let binders = List.map fst o.occ_scope in
+        let n = List.length binders in
+        let named = List.for_all (fun b -> b <> "_") binders in
+        let fix =
+          if named then Printf.sprintf "write `%s(%s)`" name (String.concat ", " binders)
+          else
+            Printf.sprintf
+              "name every argument of the callback (`({x : %s | true}) -> …`) and apply `%s` to \
+               all %d of them, in order"
+              (match o.occ_scope with (_, b) :: _ -> b | [] -> "a") name n
+        in
+        if arity o <> n then begin
+          misuse o.occ_span
+            (Printf.sprintf "abstract refinement `%s` is applied to %d of the callback's %d arguments; %s."
+               name (arity o) n fix);
+          true
+        end
+        else if (not named) || o.occ_args <> binders then begin
+          misuse o.occ_span
+            (Printf.sprintf
+               "abstract refinement `%s` must be applied to the callback's arguments, each once, \
+                in order; %s."
+               name fix);
+          true
+        end
+        else false)
+      definers
+  in
+  match List.sort_uniq compare (List.map arity definers) with
+  | _ :: _ :: _ as ns ->
+    (* W5: one name, one arity. *)
+    misuse (List.hd definers).occ_span
+      (Printf.sprintf
+         "abstract refinement `%s` is used with %s arguments. One abstract refinement has one \
+          arity: define it by one callback."
+         name (String.concat " and " (List.map string_of_int ns)))
+  | [ n ] when w1_bad = [] ->
+    let d = List.hd definers in
+    let dbinders = List.map fst d.occ_scope and dbases = List.map snd d.occ_scope in
+    List.iter
+      (fun o ->
+        let k = arity o in
+        (* The long form of the occurrence a single slot should have been. *)
+        let fix () =
+          let c = Option.value o.occ_cont ~default:"C" in
+          let slots = if o.occ_scope = [] then List.map (fun b -> ("_", b)) dbases else o.occ_scope in
+          let bs = List.mapi (fun i b -> if b = "_" then Printf.sprintf "x%d" i else b) dbinders in
+          let shown =
+            List.mapi
+              (fun i (_, base) ->
+                if i < n - 1 then Printf.sprintf "{%s : %s | true}" (List.nth bs i) base
+                else if i = n - 1 then
+                  Printf.sprintf "{%s : %s | %s(%s)}" (List.nth bs i) base name (String.concat ", " bs)
+                else base)
+              slots
+          in
+          Printf.sprintf "%s(%s)" c (String.concat ", " shown)
+        in
+        if k = 1 && n >= 2 then
+          (* W2: a single slot cannot carry a relation. *)
+          misuse o.occ_span
+            (Printf.sprintf
+               "abstract refinement `%s` takes %d arguments, so it relates %d slots of one type \
+                application, not one slot: write `%s`."
+               name n n (fix ()))
+        else if k <> n then
+          misuse o.occ_span
+            (Printf.sprintf
+               "abstract refinement `%s` is used with %d and %d arguments. One abstract \
+                refinement has one arity: apply it to %d sibling binders."
+               name (min k n) (max k n) n)
+        else if n >= 2 then begin
+          let w2 () =
+            misuse o.occ_span
+              (Printf.sprintf
+                 "abstract refinement `%s` relates the slots of one type application: its \
+                  arguments must be %d distinct binders of sibling slots, as in `%s`."
+                 name n (fix ()))
+          in
+          match o.occ_slot with
+          | None -> w2 ()
+          | Some i ->
+            let slots = o.occ_scope in
+            let resolve a =
+              if a = "_" || a = fst (List.nth slots i) then Some i
+              else
+                match List.filter (fun (_, (b, _)) -> b = a) (List.mapi (fun j s -> (j, s)) slots) with
+                | [ (j, _) ] -> Some j
+                | _ -> None
+            in
+            let idxs = List.map resolve o.occ_args in
+            if List.exists Option.is_none idxs
+               || List.length (List.sort_uniq compare idxs) <> List.length idxs
+            then w2 ()
+            else
+              let idxs = List.map Option.get idxs in
+              match List.find_opt (fun j -> is_container_base (snd (List.nth slots j))) idxs with
+              | Some j ->
+                misuse o.occ_span
+                  (Printf.sprintf
+                     "abstract refinement `%s` relates scalar slots (a type variable, Int, Bool, \
+                      String, Float or a record), and `%s` is a nested container."
+                     name (snd (List.nth slots j)))
+              | None ->
+                (* W3: each position at one base. *)
+                let mism =
+                  List.find_opt
+                    (fun (pos, j) -> List.nth_opt dbases pos <> Some (snd (List.nth slots j)))
+                    (List.mapi (fun pos j -> (pos, j)) idxs)
+                in
+                (match mism with
+                 | Some (pos, j) ->
+                   misuse o.occ_span
+                     (Printf.sprintf
+                        "argument %d of `%s` is used at more than one type (`%s`, `%s`). Each \
+                         argument of an abstract refinement has one type: the callback's domain \
+                         and the slot it relates must agree."
+                        (pos + 1) name
+                        (Option.value ~default:"?" (List.nth_opt dbases pos))
+                        (snd (List.nth slots j)))
+                 | None ->
+                   (* W4: the container is entry-shaped for the related slots. *)
+                   (match o.occ_cont with
+                    | Some c ->
+                      let name_of j = fst (List.nth slots j) in
+                      (match entry_shaped ~name_of c (List.sort_uniq compare idxs) with
+                       | Ok () -> ()
+                       | Error why ->
+                         misuse o.occ_span
+                           (Printf.sprintf "abstract refinement `%s` relates slots of `%s`, but %s." name c why))
+                    | None -> ()))
+        end)
+      consumers;
+    if consumers = [] then
+      List.iter
+        (fun o ->
+          Err.warning ~code:Err.Code.abstract_refinement_unused errctx ~span:o.occ_span
+            (Printf.sprintf
+               "abstract refinement `%s` is defined by this callback but never used in the \
+                signature, so it states nothing. Use it as a relation between sibling slots of \
+                the return, e.g. `%s`."
+               name
+               (let bs = List.mapi (fun i b -> if b = "_" then Printf.sprintf "x%d" i else b) dbinders in
+                let shown =
+                  List.mapi
+                    (fun i base ->
+                      if i < n - 1 then Printf.sprintf "{%s : %s | true}" (List.nth bs i) base
+                      else Printf.sprintf "{%s : %s | %s(%s)}" (List.nth bs i) base name (String.concat ", " bs))
+                    dbases
+                in
+                Printf.sprintf "T(%s)" (String.concat ", " shown))))
+        definers
+  | _ -> ()
+
 (* Design §1's rules, as diagnostics.  Rules 2, 3 (no definer), 4 and 5 are
    hard errors; rule 3's other half (a definer nobody consumes) is a warning,
-   because a vacuous refinement is useless rather than wrong. *)
-let check (errctx : Err.ctx) ~(is_known : string -> bool) (fd : A.fn_def) : unit =
+   because a vacuous refinement is useless rather than wrong.  A name of
+   arity n ([is_nary]) is checked by [check_nary] instead. *)
+let check ?(entry_shaped = fun ~name_of:_ _ _ -> Ok ()) (errctx : Err.ctx) ~(is_known : string -> bool)
+    (fd : A.fn_def) : unit =
   let declared = collect ~is_known fd in
   List.iter
     (fun (name, occs) ->
+      if is_nary occs then check_nary errctx ~entry_shaped name occs else
       let definers = List.filter (fun o -> o.occ_role = Definer) occs in
       let positives = List.filter (fun o -> o.occ_role = Positive) occs in
       (* A NEGATIVE occurrence (an obligation on the caller) is a use too: the
@@ -384,3 +660,27 @@ let positive_base ~(is_known : string -> bool) (fd : A.fn_def) (p : string) : st
   | None -> None
   | Some occs ->
     List.find_map (fun o -> if o.occ_role = Positive then Some o.occ_base else None) occs
+
+(* The element type at each position [p] relates in the RETURN (§5.1): for an
+   arity-1 [p] [positive_base]'s one base; for an arity-n [p] the base of the
+   slot each argument of its first Positive occurrence names. *)
+let positive_bases ~(is_known : string -> bool) (fd : A.fn_def) (p : string) : string list option =
+  match List.assoc_opt p (collect ~is_known fd) with
+  | None -> None
+  | Some occs ->
+    List.find_map
+      (fun o ->
+        if o.occ_role <> Positive then None
+        else
+          match o.occ_args, o.occ_slot with
+          | [ _ ], _ -> Some [ o.occ_base ]
+          | args, Some i ->
+            let slots = o.occ_scope in
+            let base a =
+              if a = "_" || a = fst (List.nth slots i) then Some (snd (List.nth slots i))
+              else List.find_map (fun (b, t) -> if b = a then Some t else None) slots
+            in
+            let bs = List.map base args in
+            if List.for_all Option.is_some bs then Some (List.map Option.get bs) else None
+          | _, None -> None)
+      occs
