@@ -142,6 +142,8 @@ let cap_table : (string * string) list = [
   ("tls_write",             "IO.NetConnect.TLS");
   ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
   ("tls_peer_cn",           "IO.NetConnect.TLS");
+  ("tls_ctx_set_groups",    "IO.NetConnect.TLS");
+  ("tls_negotiated_group",  "IO.NetConnect.TLS");
 ]
 
 let cap_of_call name = List.assoc_opt name cap_table

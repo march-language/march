@@ -158,6 +158,7 @@ let builtin_names : StringSet.t =
       "tls_connect"; "tls_accept"; "tls_close"; "tls_read"; "tls_read_timeout"; "tls_write";
       "tls_client_ctx"; "tls_server_ctx"; "tls_ctx_free";
       "tls_negotiated_alpn"; "tls_peer_cn";
+      "tls_ctx_set_groups"; "tls_negotiated_group"; "tls_pq_available";
       (* Actor builtins *)
       "actor_call"; "actor_cast"; "actor_reply"; "actor_reply_retain"; "self"; "receive";
       (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-

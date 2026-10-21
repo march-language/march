@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **TLS uses post-quantum key exchange by default.** Every client and server context
+  offers the hybrid X25519MLKEM768 first (classical X25519 / P-256 / P-384 / P-521 after
+  it), so sessions with a peer that supports it are safe from record-now, decrypt-later
+  attacks. Needs OpenSSL 3.5+ linked; an older OpenSSL keeps its default groups and
+  handshakes still succeed. New: `Tls.negotiated_group(conn)`, `Tls.is_post_quantum(conn)`,
+  `Tls.post_quantum_available()`, and `Tls.set_groups(ctx, groups)` to override the list
+  (e.g. require post-quantum).
 - **Post-quantum cryptography: `MlKem` (ML-KEM-768, FIPS 203) and `MlDsa` (ML-DSA-65,
   FIPS 204).** `MlKem.keypair()`, `encapsulate(pk)` -> `(ciphertext, shared_secret)` and
   `decapsulate(sk, ct)` give two parties a 32-byte secret no quantum computer is known to

@@ -788,6 +788,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_negotiated_alpn(i64 %ssl_handle)" };
   { march_name = "tls_peer_cn"; c_name = Some "march_tls_peer_cn"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_peer_cn(i64 %ssl_handle)" };
+  { march_name = "tls_ctx_set_groups"; c_name = Some "march_tls_ctx_set_groups"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_ctx_set_groups(i64 %ctx_handle, ptr %groups)" };
+  { march_name = "tls_negotiated_group"; c_name = Some "march_tls_negotiated_group"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_negotiated_group(i64 %ssl_handle)" };
+  { march_name = "tls_pq_available"; c_name = Some "march_tls_pq_available"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_tls_pq_available()" };
   { march_name = "typed_array_create"; c_name = Some "march_typed_array_create"; ret_ty = Some (Tir.TVar "a");
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_typed_array_create(i64 %len, ptr %default_val)" };
   { march_name = "typed_array_from_list"; c_name = Some "march_typed_array_from_list"; ret_ty = Some (Tir.TVar "a");
@@ -1824,6 +1830,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_tls_ctx_free";
   PDeclare "march_tls_negotiated_alpn";
   PDeclare "march_tls_peer_cn";
+  PDeclare "march_tls_ctx_set_groups";
+  PDeclare "march_tls_negotiated_group";
+  PDeclare "march_tls_pq_available";
   PComment "; TypedArray builtins";
   PDeclare "march_typed_array_create";
   PDeclare "march_typed_array_from_list";

@@ -1,8 +1,8 @@
 # Post-quantum primitives: ML-KEM-768 and ML-DSA-65 (phase 1)
 
 **Plan:** [../plans/post-quantum-crypto-plan.md](../plans/post-quantum-crypto-plan.md), phase 1.
-Phases 2 (explicit PQ TLS groups) and 3 (hybrid cluster handshake) remain open:
-[../todos/2026-10-21-post-quantum-crypto-tls-and-cluster.md](../todos/2026-10-21-post-quantum-crypto-tls-and-cluster.md).
+Phase 2 (PQ TLS groups) landed later ([2026-10-21-post-quantum-crypto-phase2-tls.md](2026-10-21-post-quantum-crypto-phase2-tls.md)); phase 3 (hybrid cluster handshake) remains open:
+[../todos/2026-10-21-post-quantum-crypto-cluster.md](../todos/2026-10-21-post-quantum-crypto-cluster.md).
 
 - **Vendored** mlkem-native v2.0.0 and mldsa-native v2.0.0 (PQ Code Package,
   Apache-2.0/ISC/MIT) under `runtime/third_party/{mlkem,mldsa}-native/`:

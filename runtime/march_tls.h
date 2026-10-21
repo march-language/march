@@ -38,6 +38,15 @@ void *march_tls_client_ctx(void *ca_file, void *alpn_list,
 void *march_tls_server_ctx(void *cert_file, void *key_file, void *ca_file,
                             void *alpn_list, int64_t min_tls_ver);
 
+/* Replace a context's key-exchange groups (an OpenSSL group list such as
+ * "X25519MLKEM768:X25519").  New contexts already offer the hybrid
+ * post-quantum X25519MLKEM768 first when the linked OpenSSL has it.
+ * Returns Ok(0) or Err(String); on Err the context is unchanged. */
+void *march_tls_ctx_set_groups(int64_t ctx_handle, void *groups);
+
+/* 1 if the linked OpenSSL supports X25519MLKEM768 (so new contexts offer it). */
+int64_t march_tls_pq_available(void);
+
 /* ── Handshake ───────────────────────────────────────────────────────── */
 
 /* Client-side TLS handshake on an already-connected TCP fd.
@@ -79,3 +88,7 @@ void *march_tls_negotiated_alpn(int64_t ssl_handle);
 
 /* Return the peer certificate's Common Name as a march_string*, or NULL. */
 void *march_tls_peer_cn(int64_t ssl_handle);
+
+/* Return the negotiated key-exchange group's name as a march_string*
+ * (e.g. "X25519MLKEM768"), or NULL if unavailable. */
+void *march_tls_negotiated_group(int64_t ssl_handle);

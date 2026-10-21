@@ -144,6 +144,8 @@ let table : (string * string) list = [
   ("march_tls_write",              "IO.NetConnect.TLS");
   ("march_tls_negotiated_alpn",    "IO.NetConnect.TLS");
   ("march_tls_peer_cn",            "IO.NetConnect.TLS");
+  ("march_tls_ctx_set_groups",     "IO.NetConnect.TLS");
+  ("march_tls_negotiated_group",   "IO.NetConnect.TLS");
 ]
 
 (* March-name builtins from builtin_cap_table with NO compiled lowering.
