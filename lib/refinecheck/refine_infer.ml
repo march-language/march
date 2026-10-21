@@ -43,6 +43,10 @@ type result = {
   notes : (string * string) list;                          (* fn, note *)
   before : LD.snapshot;
   after : LD.snapshot;
+  after_counts : int * int;
+    (* Raw user-code (skipped, violated) obligation counts of the final
+       hypothesis tree — what `--check --refine-report` will print once the
+       proposals are applied (the snapshot dedupes sites; the report does not). *)
   probes : int;
   rounds : int;
 }
@@ -355,12 +359,20 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
     end
   in
   let rounds_run = loop 1 in
-  let after, _ = user_snapshot () in
+  let after, after_obs = user_snapshot () in
+  let after_counts =
+    List.fold_left
+      (fun (sk, vi) (o : Ob.t) ->
+        if not (is_user o.Ob.span) then (sk, vi)
+        else match o.Ob.verdict with Ob.Skipped _ -> (sk + 1, vi) | Ob.Violated -> (sk, vi + 1) | _ -> (sk, vi))
+      (0, 0) after_obs
+  in
   { proposals = List.rev !proposals;
     rejected = List.rev !rejected;
     refused = List.rev !refused;
     notes = List.rev !notes;
     before;
     after;
+    after_counts;
     probes = start_budget - !budget;
     rounds = rounds_run }

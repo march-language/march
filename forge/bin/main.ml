@@ -415,12 +415,21 @@ let refine_cmd =
            ~doc:"Propose RETURN refinements instead: the contract that lets a \
                  function's CALLERS discharge their obligations. Preconditions \
                  propagate up the call graph; postconditions propagate down.") in
-  let run t a ap fx po b =
-    if t = "" && not a then begin
-      Printf.eprintf "error: forge refine needs a function name, or --all\n%!";
-      exit 1
-    end;
-    handle_msg (Cmd_refine.run ~all:a ~apply:ap ~fixpoint:fx ~postconditions:po ~budget:b ~target:t ())
+  let infer =
+    Arg.(value & flag & info ["infer"]
+           ~doc:"Propose every refinement the checker can verify, module-wide (march --refine-infer); \
+                 with --apply, write them and re-check") in
+  let diff =
+    Arg.(value & flag & info ["diff"] ~doc:"With --infer: print the edits as a diff without writing") in
+  let run t a ap fx po b inf df =
+    if inf || fx then handle_msg (Cmd_refine.run ~infer:inf ~diff:df ~apply:ap ~fixpoint:fx ~target:t ())
+    else begin
+      if t = "" && not a then begin
+        Printf.eprintf "error: forge refine needs a function name, or --all\n%!";
+        exit 1
+      end;
+      handle_msg (Cmd_refine.run ~all:a ~apply:ap ~fixpoint:fx ~postconditions:po ~budget:b ~target:t ())
+    end
   in
   Cmd.v
     (Cmd.info "refine"
@@ -431,7 +440,7 @@ let refine_cmd =
                   A suggestion is only made when the checker itself proves the \
                   obligations under it, so `march check` after --apply agrees \
                   with what was printed." ])
-    Term.(const run $ target $ all $ apply $ fixpoint $ postconditions $ budget)
+    Term.(const run $ target $ all $ apply $ fixpoint $ postconditions $ budget $ infer $ diff)
 
 (* -------------------------------------------------------------- forge refactor *)
 

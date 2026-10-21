@@ -3094,7 +3094,13 @@ inferred refinements: 2 proposed, 1 refused; user skips 3 -> 1 (58 probes, 2 rou
     would break the call at app.march:9:21
 ```
 
-`--refine-infer-json` emits the same as JSON (version 1). `--refine-infer-kinds
+`--refine-infer-diff` prints the edits as a diff; `--refine-infer-apply` writes
+them (through the same splicer the editor's code action uses), then re-checks the
+program and, if the result is not exactly the predicted one, reverts every edit
+and exits 3 — a mismatch is a bug in the tool, never something to reconcile by
+hand. A second run after applying proposes nothing. `forge refine --infer
+[--apply] [--diff]` runs it over every file of a project (and `--fixpoint` is
+now the same thing). `--refine-infer-json` emits the same as JSON (version 1). `--refine-infer-kinds
 k1,k4` restricts the kinds, `--refine-infer-budget N` caps the probes (default
 3000), and `--allow-caller-violations` accepts a refused precondition. A
 proposal on a public function with no caller in the unit is marked: its real

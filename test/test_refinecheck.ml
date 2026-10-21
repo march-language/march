@@ -24176,6 +24176,81 @@ let run_cli args src =
       let code = Sys.command cmd in
       (code, In_channel.with_open_bin out In_channel.input_all))
 
+let run_cli_in ?(env = "") dir args =
+  let out = Filename.concat dir "out.txt" in
+  let cmd =
+    Printf.sprintf "cd %s && %s HOME=%s %s %s m.march > %s 2>&1" (Filename.quote dir) env (Filename.quote dir)
+      (Filename.quote (march_exe_rel ())) args (Filename.quote out)
+  in
+  let code = Sys.command cmd in
+  (code, In_channel.with_open_bin out In_channel.input_all)
+
+let with_src_dir src f =
+  with_temp_root "inferapply" (fun dir ->
+      let file = Filename.concat dir "m.march" in
+      Out_channel.with_open_bin file (fun oc -> output_string oc src);
+      f dir (fun () -> In_channel.with_open_bin file In_channel.input_all))
+
+let count_sub hay needle =
+  let n = String.length needle in
+  let rec go i acc = if i + n > String.length hay then acc else if String.sub hay i n = needle then go (i + 1) (acc + 1) else go (i + 1) acc in
+  go 0 0
+
+let infer_apply_suite =
+  let pre = "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n" in
+  let e2 = "mod E2 do\n" ^ pre ^ "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn main() : Int do go([1]) end\nend\n" in
+  [ gated "apply E2, then check: the annotation is written and nothing is left unproven" (fun () ->
+        with_src_dir e2 (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) "written" true (Astring_contains.contains (contents ()) "fn pos_only(xs : List(Int)) : List({Int | _ > 0})");
+            let _, rep = run_cli_in dir "--check --refine-report" in
+            Alcotest.(check bool) ("no user skips: " ^ rep) true (Astring_contains.contains rep "0 violated, 0 trusted, 0 skipped")));
+    gated "apply twice in the same root: the second run proposes nothing (idempotent, warm VC cache)" (fun () ->
+        with_src_dir e2 (fun dir contents ->
+            ignore (run_cli_in dir "--check --refine-infer --refine-infer-apply");
+            let after1 = contents () in
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) "exit 0" 0 code;
+            Alcotest.(check bool) ("0 proposed: " ^ out) true (Astring_contains.contains out "0 proposed");
+            Alcotest.(check string) "unchanged" after1 (contents ())));
+    gated "a prediction mismatch reverts every edit and exits 3" (fun () ->
+        with_src_dir e2 (fun dir contents ->
+            let before = contents () in
+            let code, _ = run_cli_in ~env:"MARCH_INFER_CORRUPT_PREDICTION=1" dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) "exit 3" 3 code;
+            Alcotest.(check string) "file restored" before (contents ())));
+    gated "a multi-line signature with a comment: bytes replaced exactly or apply-by-hand" (fun () ->
+        let src = "mod ML do\n" ^ pre ^ "  pfn total(xs :\n      List(Int), -- note\n    n : Int) : Int do sum_pos(xs) + n end\n  fn main() : Int do total([1], 2) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let _, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            let c = contents () in
+            Alcotest.(check bool) "comment survives" true (Astring_contains.contains c "-- note");
+            Alcotest.(check bool) ("replaced or apply-by-hand: " ^ out) true
+              (count_sub c "List({Int | _ > 0})" >= 2 || Astring_contains.contains out "apply by hand")));
+    gated "an external-callers proposal is not applied without --apply-public" (fun () ->
+        let src = "mod EX do\n" ^ pre ^ "  fn total(xs : List(Int)) : Int do sum_pos(xs) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let before = contents () in
+            let _, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check string) "unchanged" before (contents ());
+            Alcotest.(check bool) "said why" true (Astring_contains.contains out "external");
+            ignore (run_cli_in dir "--check --refine-infer --refine-infer-apply --apply-public");
+            Alcotest.(check bool) "applied with --apply-public" true (count_sub (contents ()) "List({Int | _ > 0})" >= 2)));
+    gated "--refine-infer-apply never writes the stdlib without --refine-infer-stdlib" (fun () ->
+        let staged = Filename.concat (Filename.dirname (march_exe_rel ())) "../stdlib/list.march" in
+        let before = In_channel.with_open_bin staged In_channel.input_all in
+        with_src_dir e2 (fun dir _ -> ignore (run_cli_in dir "--check --refine-infer --refine-infer-apply"));
+        Alcotest.(check bool) "stdlib copy unchanged" true (before = In_channel.with_open_bin staged In_channel.input_all));
+    gated "--refine-infer-diff prints the edit without writing" (fun () ->
+        with_src_dir e2 (fun dir contents ->
+            let before = contents () in
+            let _, out = run_cli_in dir "--check --refine-infer --refine-infer-diff" in
+            Alcotest.(check bool) ("diff shows the new line: " ^ out) true
+              (Astring_contains.contains out "+  fn pos_only(xs : List(Int)) : List({Int | _ > 0})");
+            Alcotest.(check string) "not written" before (contents ())))
+  ]
+
 let infer_cli_suite =
   [ gated "--refine-infer on a file with a type error: non-zero, no proposals" (fun () ->
         let code, out = run_cli "--check --refine-infer-json" "mod T do\n  fn f(x : Int) : Int do \"s\" end\nend\n" in
@@ -24341,6 +24416,7 @@ let () =
       ("infer-accumulator", infer_accumulator_suite);
       ("infer-fixpoint", infer_fixpoint_suite);
       ("infer-cli", infer_cli_suite);
+      ("infer-apply", infer_apply_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

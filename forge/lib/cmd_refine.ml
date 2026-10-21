@@ -439,7 +439,29 @@ let run_once ~root ~lib_path_env ~files ~all ~apply ~budget ~target ~quiet :
    exists.  So exhausting the cap is its own message. *)
 let max_rounds = 10
 
+(* `forge refine --infer` (design specs/2026-10-20-refinement-suggest-lite-design.md
+   §4.1): each project file through `march --check --refine-infer`, which runs
+   the whole module-wide fixpoint in-process (no cold re-run per round, unlike
+   `--fixpoint` over the per-function suggester), with `--apply` / `--diff`
+   passed through.  The compiler re-checks after applying and reverts on a
+   mismatch (exit 3), so nothing is re-verified here. *)
+let run_infer ~lib_path_env ~files ~apply ~diff : (int, string) result =
+  let flags =
+    String.concat ""
+      [ " --check --refine-infer"; (if apply then " --refine-infer-apply" else ""); (if diff then " --refine-infer-diff" else "") ]
+  in
+  let failures = ref [] in
+  List.iter
+    (fun f ->
+      let cmd = Printf.sprintf "%smarch%s %s" lib_path_env flags (Filename.quote f) in
+      let rc, out = run_capturing_stdout cmd in
+      print_string out;
+      if rc = 3 then failures := Printf.sprintf "%s: the re-check after applying did not match; edits reverted" f :: !failures)
+    files;
+  match !failures with [] -> Ok 0 | fs -> Error (String.concat "\n" (List.rev fs))
+
 let run ?(all = false) ?(apply = false) ?(fixpoint = false) ?(postconditions = false)
+    ?(infer = false) ?(diff = false)
     ?(budget = default_budget) ~(target : string) () : (string, string) result =
   match P.load () with
   | Error msg -> Error msg
@@ -458,6 +480,13 @@ let run ?(all = false) ?(apply = false) ?(fixpoint = false) ?(postconditions = f
     if files = [] then Error (Printf.sprintf "no .march files found under %s" root)
     else begin
       let lib_path_env = Cmd_build.lib_path_env proj in
+      (* `--fixpoint` is an alias of `--infer` once inference-lite's fixpoint
+         exists (design §4.1). *)
+      if infer || fixpoint then
+        (match run_infer ~lib_path_env ~files ~apply ~diff with
+         | Ok _ -> Ok "refine --infer: done"
+         | Error e -> Error e)
+      else
       let once ?(quiet = false) () =
         if postconditions then
           run_posts ~root ~lib_path_env ~files ~all ~apply ~budget ~target
