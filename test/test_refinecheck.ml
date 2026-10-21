@@ -23837,6 +23837,24 @@ module IV = March_refinecheck.Infer_vocab
 let slots_of (src : string) : IS.slot list =
   IS.enumerate ~is_user:(fun _ -> true) (March_desugar.Desugar.desugar_module (parse src)).March_ast.Ast.mod_decls
 
+module IO = March_refinecheck.Infer_oracle
+
+let run_best ?(budget = 200) (fx : infer_fixture) ~(fn : string) ~(path : IS.path) =
+  let decls = fx.fx_m.March_ast.Ast.mod_decls in
+  let slot =
+    List.find (fun (s : IS.slot) -> s.IS.fn = fn && s.IS.path = path)
+      (IS.enumerate ~is_user:(fun _ -> true) decls)
+  in
+  let cands =
+    IO.ordered_candidates ~root:fx.fx_root ~ledger:(Ob.all ()) ~unit_decls:decls slot
+  in
+  IO.best_for_slot ~root:fx.fx_root ~decls slot cands ~budget:(ref budget)
+
+let best_text fx ~fn ~path =
+  match fst (run_best fx ~fn ~path) with
+  | Some (c, _) -> Some c.IV.c.PI.c_text
+  | None -> None
+
 let infer_vocab_suite =
   [ Alcotest.test_case "slot: an element parameter is a K3 slot" `Quick (fun () ->
         let ss = slots_of "mod S do\n  fn total(xs : List(Int)) : Int do 0 end\nend\n" in
@@ -23909,6 +23927,27 @@ let infer_vocab_suite =
             | Some c -> Alcotest.(check string) ("round trip " ^ t) t (March_refinecheck.Refine_scope.pred_str (c.PI.c_pred March_ast.Ast.dummy_span))
             | None -> Alcotest.failf "%S does not parse" t)
           [ "_ < n"; "_ >= 0 && _ < len(xs)"; "_ != 0" ])
+    ;
+    gated "oracle: R1 proposes i : {Int | _ < n}" (fun () ->
+        with_infer_fixture
+          "mod R1 do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n, i) end\nend\n"
+          (fun fx -> Alcotest.(check (option string)) "best" (Some "_ < n") (best_text fx ~fn:"g" ~path:(IS.Param "i"))));
+    gated "oracle: weakest first among closing candidates (_ <= n over _ < n)" (fun () ->
+        with_infer_fixture
+          "mod W do\n  fn need_le(n : Int, i : {Int | _ <= n}) : Int do i end\n  fn other(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_le(n, i) end\nend\n"
+          (fun fx -> Alcotest.(check (option string)) "best" (Some "_ <= n") (best_text fx ~fn:"g" ~path:(IS.Param "i"))));
+    gated "oracle: a return takes the candidate that closes the most callers" (fun () ->
+        with_infer_fixture
+          "mod K2 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  fn f(x : Int) : Int do 5 end\n  fn c1() : Int do need_nz(f(1)) end\n  fn c2() : Int do need_pos(f(1)) end\n  fn c3() : Int do need_pos(f(2)) end\n  fn c4() : Int do need_pos(f(3)) end\nend\n"
+          (fun fx -> Alcotest.(check (option string)) "best" (Some "_ > 0") (best_text fx ~fn:"f" ~path:IS.Return)));
+    gated "oracle: an exhausted budget is reported, not folded into no-candidate" (fun () ->
+        with_infer_fixture
+          "mod B do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n, i) end\nend\n"
+          (fun fx ->
+            let best, vs = run_best ~budget:0 fx ~fn:"g" ~path:(IS.Param "i") in
+            Alcotest.(check bool) "no proposal" true (best = None);
+            Alcotest.(check bool) "budget reported" true
+              (List.exists (function IO.Reject ("budget", _) -> true | _ -> false) vs)))
   ]
 
 let () =
