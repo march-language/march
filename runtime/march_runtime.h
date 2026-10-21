@@ -1124,6 +1124,14 @@ void   *march_ed25519_seed_keypair(void *seed);
 void   *march_ed25519_sign(void *sk, void *msg);
 int64_t march_ed25519_verify(void *pk, void *msg, void *sig);
 void   *march_x25519(void *scalar, void *point);
+/* ML-KEM-768 / ML-DSA-65 over the vendored mlkem-native / mldsa-native
+ * (runtime/pqc.c, builtins in runtime/march_pqc.c). */
+void   *march_mlkem768_keypair(void *seed);
+void   *march_mlkem768_encaps(void *pk, void *coins);
+void   *march_mlkem768_decaps(void *sk, void *ct);
+void   *march_mldsa65_keypair(void *seed);
+void   *march_mldsa65_sign(void *sk, void *msg, void *rnd);
+int64_t march_mldsa65_verify(void *pk, void *msg, void *sig);
 void   *march_pbkdf2_sha256(void *pass, void *salt, int64_t iters, int64_t dklen);
 void   *march_base64_encode(void *input);
 void   *march_base64_decode(void *str);

@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Post-quantum cryptography: `MlKem` (ML-KEM-768, FIPS 203) and `MlDsa` (ML-DSA-65,
+  FIPS 204).** `MlKem.keypair()`, `encapsulate(pk)` -> `(ciphertext, shared_secret)` and
+  `decapsulate(sk, ct)` give two parties a 32-byte secret no quantum computer is known to
+  recover; `MlDsa.keypair()`, `sign(sk, msg)` (hedged), `sign_deterministic` and
+  `verify(pk, msg, sig)` sign and check. Seeded variants (`keypair_from_seed`,
+  `encapsulate_with_coins`) reproduce published vectors. Backed by the vendored, portable-C
+  mlkem-native / mldsa-native (no OpenSSL needed); the compiled and interpreted backends run
+  the same code, and the outputs match OpenSSL's byte for byte.
 - `march --compile --static` builds a self-contained executable: on Linux a fully
   static binary that runs in a `scratch` image (musl hosts such as Alpine; refused on
   glibc), on macOS one that loads nothing outside `/usr/lib` and `/System`. A missing

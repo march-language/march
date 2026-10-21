@@ -1418,6 +1418,19 @@ let builtin_bindings : (string * scheme) list =
         TArrow (TCon ("Bytes", []), t_bool)))));
     ("x25519",          Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
         TCon ("Bytes", [])))));
+    (* ML-KEM-768 / ML-DSA-65 (runtime/march_pqc.c). Randomness is an
+       argument; a wrong-length argument or rejected key gives EMPTY Bytes
+       (verify: false). stdlib/ml_kem.march and ml_dsa.march check. *)
+    ("mlkem768_keypair", Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
+    ("mlkem768_encaps",  Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
+    ("mlkem768_decaps",  Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
+    ("mldsa65_keypair",  Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
+    ("mldsa65_sign",     Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TArrow (TCon ("Bytes", []), TCon ("Bytes", []))))));
+    ("mldsa65_verify",   Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TArrow (TCon ("Bytes", []), t_bool)))));
     ("pbkdf2_sha256",   Mono (TArrow (t_string, TArrow (TCon ("Bytes", []),
         TArrow (t_int, TArrow (t_int,
         TCon ("Result", [TCon ("Bytes", []); t_string])))))));

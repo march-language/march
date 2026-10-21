@@ -50,6 +50,8 @@ march_hcr_identity.c         hcr             -
 march_cap_lattice.c          hcr             -
 tweetnacl.c                  core            jit
 march_nacl.c                 core            jit
+pqc.c                        core            jit
+march_pqc.c                  core            jit
 march_gc.c                   unit-test-only  jit
 march_heap.c                 unit-test-only  jit
 march_message.c              unit-test-only  jit

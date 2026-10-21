@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings generated from source, lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 133 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 135 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement: use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -32,6 +32,7 @@ You know the task; this maps it to the module(s) that do it. (Don't see your tas
 | Read environment variables | `Env`, `Config` | [Config](/docs/cookbook/config/) |
 | Run a subprocess | `Process` (`run`, `run_stream`) | none |
 | Hash / encode data | `Crypto`, `Base64` | none |
+| Post-quantum key exchange / signatures | `MlKem`, `MlDsa` | none |
 | Work with dates / durations | `DateTime`, `Duration` | none |
 | Structured logging | `Logger` | none |
 | Run work concurrently | `Task`, `actor`, `Flow` | [Concurrency](/docs/cookbook/concurrency/) |
@@ -511,6 +512,36 @@ Crypto.base64_url_decode(s)         -- Ok(Bytes)
 -- Constant-time comparison (use for secrets / MACs)
 Crypto.secure_compare(a, b)         -- Bool
 ```
+
+---
+
+## MlKem and MlDsa (post-quantum)
+
+`ml_kem.march`, `ml_dsa.march`: the NIST post-quantum standards, ML-KEM-768
+(FIPS 203) for key agreement and ML-DSA-65 (FIPS 204) for signatures. Keys,
+ciphertexts and signatures are `Bytes`. Both modules `needs IO.Random`.
+
+```march
+-- Key agreement: the receiver publishes kp.public_key (1184 bytes)
+let kp = MlKem.keypair()
+match MlKem.encapsulate(kp.public_key) do         -- sender side
+  Ok((ct, secret)) ->                             -- send ct (1088 bytes)
+    MlKem.decapsulate(kp.secret_key, ct)          -- Ok(secret), receiver side
+  Err(e) -> Err(e)
+end
+
+-- Signatures: hedged by default; sign_deterministic for the deterministic variant
+let sk = MlDsa.keypair()
+match MlDsa.sign(sk.secret_key, Bytes.from_string("msg")) do
+  Ok(s) -> MlDsa.verify(sk.public_key, Bytes.from_string("msg"), s)   -- true
+  Err(e) -> false
+end
+```
+
+Seeded variants (`MlKem.keypair_from_seed`, `MlKem.encapsulate_with_coins`,
+`MlDsa.keypair_from_seed`) reproduce published test vectors. A ciphertext made for
+another key does not fail to decapsulate: it yields an unrelated secret (ML-KEM's
+implicit rejection), so authenticate whatever you derive from it.
 
 ---
 

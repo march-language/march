@@ -149,6 +149,8 @@ let all_stdlib_decls =
     "html.march";
     "sigil.march";
     "crypto.march";
+    "ml_kem.march";
+    "ml_dsa.march";
     "deque.march";
     "ordered_map.march";
     "sorted_set.march";
@@ -597,6 +599,10 @@ let () =
     ("node_identity", [
       Alcotest.test_case "NodeIdentity module"
         `Quick (run_stdlib_test "test_node_identity.march" "TestNodeIdentity");
+    ]);
+    ("pqc", [
+      Alcotest.test_case "MlKem / MlDsa + mlkem768_*/mldsa65_* builtins"
+        `Quick (run_stdlib_test "test_pqc.march" "TestPqc");
     ]);
     ("cluster", [
       Alcotest.test_case "Cluster module"
