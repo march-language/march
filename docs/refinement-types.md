@@ -3100,7 +3100,13 @@ program and, if the result is not exactly the predicted one, reverts every edit
 and exits 3 — a mismatch is a bug in the tool, never something to reconcile by
 hand. A second run after applying proposes nothing. `forge refine --infer
 [--apply] [--diff]` runs it over every file of a project (and `--fixpoint` is
-now the same thing). `--refine-infer-json` emits the same as JSON (version 1). `--refine-infer-kinds
+now the same thing). `--refine-infer-json` emits the same as JSON (version 1). With `--refine-report`,
+the report also prints the ledger as it will be once the proposals are applied
+(`refinement obligations (user code, if applied): …`), and for a `cap verified`
+module how many of its errors they close. In the editor, the code actions "Infer
+refinements for `f`" and "Infer refinements in this file" run the same inference
+and apply the same bytes; a precondition that adds unproven obligations at its
+callers is marked as needing confirmation. `--refine-infer-kinds
 k1,k4` restricts the kinds, `--refine-infer-budget N` caps the probes (default
 3000), and `--allow-caller-violations` accepts a refused precondition. A
 proposal on a public function with no caller in the unit is marked: its real

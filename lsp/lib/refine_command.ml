@@ -317,3 +317,109 @@ let run_post ~(file : string) ~(fn : string) :
              ( msg ~kind:"suggestPostcondition" "ok" ~edit:we
                  (Printf.sprintf "returns %s — %s" p.pp_annotation tail),
                Some we ))))
+
+
+(* ── `march.inferRefinements` (design 2026-10-20 §4.4) ───────────────────────
+   Runs `march --check --refine-infer-json` and builds the WorkspaceEdit from
+   each proposal's `edit` — the byte range the compiler computed with the same
+   [Refine_edit] splice `--refine-infer-apply` writes, so the editor and the CLI
+   produce identical bytes.  A precondition that adds unproven obligations at
+   its callers goes in as an annotated edit that needs the user's confirmation. *)
+
+type byte_edit = {
+  be_file : string;
+  be_start : int;
+  be_end : int;
+  be_text : string;
+  be_fn : string;
+  be_confirm : string option;
+}
+
+let infer_byte_edits ?(fn : string option) ~(json : string) () : byte_edit list =
+  match Yojson.Safe.from_string json with
+  | exception _ -> []
+  | `Assoc top -> (
+    let member k o = try List.assoc k o with Not_found -> `Null in
+    let str = function `String s -> s | _ -> "" in
+    let int = function `Int n -> n | _ -> 0 in
+    match member "proposals" top with
+    | `List ps ->
+      List.filter_map
+        (function
+          | `Assoc p -> (
+            let pfn = str (member "fn" p) in
+            let wanted =
+              match fn with None -> true | Some f -> f = pfn || short_name f = short_name pfn
+            in
+            match member "edit" p with
+            | `Assoc e when wanted ->
+              let kind = str (member "kind" p) in
+              let new_skipped = match member "caller_impact" p with `Assoc c -> int (member "new_skipped" c) | _ -> 0 in
+              let confirm =
+                if List.mem kind [ "precondition"; "element-param"; "accumulator" ] && new_skipped > 0 then
+                  Some (Printf.sprintf "adds an unproven obligation at %d callers" new_skipped)
+                else None
+              in
+              Some
+                { be_file = str (member "file" e); be_start = int (member "start" e); be_end = int (member "end" e);
+                  be_text = str (member "text" e); be_fn = pfn; be_confirm = confirm }
+            | _ -> None)
+          | _ -> None)
+        ps
+    | _ -> [])
+  | _ -> []
+
+let run_infer_compiler ~(file : string) : string =
+  let tmp = Filename.temp_file "march_lsp_infer" ".json" in
+  ignore
+    (Sys.command
+       (Printf.sprintf "march --check --refine-infer-json %s >%s 2>/dev/null" (Filename.quote file) (Filename.quote tmp)));
+  let out = Option.value ~default:"" (read_all tmp) in
+  (try Sys.remove tmp with Sys_error _ -> ());
+  out
+
+let workspace_edit_of (edits : byte_edit list) : Types.WorkspaceEdit.t option =
+  let by_file = Hashtbl.create 4 in
+  List.iter (fun e -> Hashtbl.replace by_file e.be_file (e :: Option.value ~default:[] (Hashtbl.find_opt by_file e.be_file))) edits;
+  let docs =
+    Hashtbl.fold
+      (fun file es acc ->
+        match read_all file with
+        | None -> acc
+        | Some src ->
+          let range e =
+            let sl, sc = March_refactor.Refine_edit.position_of_offset src e.be_start in
+            let el, ec = March_refactor.Refine_edit.position_of_offset src e.be_end in
+            Types.Range.create ~start:(Types.Position.create ~line:sl ~character:sc)
+              ~end_:(Types.Position.create ~line:el ~character:ec)
+          in
+          let tes =
+            List.map
+              (fun e ->
+                match e.be_confirm with
+                | Some _ -> `AnnotatedTextEdit (Types.AnnotatedTextEdit.create ~annotationId:"refine-infer-caller-impact" ~newText:e.be_text ~range:(range e))
+                | None -> `TextEdit (Types.TextEdit.create ~newText:e.be_text ~range:(range e)))
+              (List.rev es)
+          in
+          `TextDocumentEdit
+            (Types.TextDocumentEdit.create ~edits:tes
+               ~textDocument:(Types.OptionalVersionedTextDocumentIdentifier.create ~uri:(Types.DocumentUri.of_path file) ()))
+          :: acc)
+      by_file []
+  in
+  if docs = [] then None
+  else
+    let annotations =
+      match List.find_opt (fun e -> e.be_confirm <> None) edits with
+      | Some { be_confirm = Some label; _ } ->
+        Some [ ("refine-infer-caller-impact", Types.ChangeAnnotation.create ~label ~needsConfirmation:true ()) ]
+      | _ -> None
+    in
+    Some (Types.WorkspaceEdit.create ?changeAnnotations:annotations ~documentChanges:docs ())
+
+let run_infer ~(file : string) ?(fn : string option) () : Yojson.Safe.t * Types.WorkspaceEdit.t option =
+  let edits = infer_byte_edits ?fn ~json:(run_infer_compiler ~file) () in
+  match workspace_edit_of edits with
+  | None -> (msg ~kind:"inferRefinements" "ok" "No refinement to propose here (or `march` is not on PATH).", None)
+  | Some we ->
+    (msg ~kind:"inferRefinements" "ok" (Printf.sprintf "Proposed %d refinement edit(s)." (List.length edits)), Some we)

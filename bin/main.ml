@@ -960,7 +960,25 @@ let print_refine_infer ~filename ~user_files desugared =
     RI.run ~root:(Sys.getcwd ()) ~kinds ~budget:!refine_infer_budget
       ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib ~is_user desugared
   in
-  if !refine_infer_json then print_endline (IJ.to_string r)
+  (* JSON `edit`: the same splice `--refine-infer-apply` performs, as the
+     minimal byte range against the ORIGINAL file (so every edit is
+     independent of the others, as a WorkspaceEdit requires). *)
+  let edit_of (p : RI.proposal) =
+    let file = p.RI.slot.IS.fd.March_ast.Ast.fn_name.March_ast.Ast.span.March_ast.Ast.file in
+    match In_channel.with_open_bin file In_channel.input_all with
+    | exception _ -> None
+    | src -> (
+      match infer_edit src p with
+      | None -> None
+      | Some dst ->
+        let la = String.length src and lb = String.length dst in
+        let pre = ref 0 in
+        while !pre < la && !pre < lb && src.[!pre] = dst.[!pre] do incr pre done;
+        let suf = ref 0 in
+        while !suf < la - !pre && !suf < lb - !pre && src.[la - 1 - !suf] = dst.[lb - 1 - !suf] do incr suf done;
+        Some (file, !pre, la - !suf, String.sub dst !pre (lb - !suf - !pre)))
+  in
+  if !refine_infer_json then print_endline (IJ.to_string ~edit_of r)
   else begin
     let skips snap = List.length (List.filter (fun (_, v) -> match v with March_refinecheck.Obligation.Skipped _ -> true | _ -> false) snap) in
     Printf.printf "inferred refinements: %d proposed, %d refused; user skips %d -> %d (%d probes, %d rounds)\n"
@@ -983,7 +1001,24 @@ let print_refine_infer ~filename ~user_files desugared =
                   Printf.sprintf "\n    would break the call at %s:%d:%d" sp.March_ast.Ast.file sp.March_ast.Ast.start_line sp.March_ast.Ast.start_col)
                 rf.March_refinecheck.Precond_infer.rf_sites)))
       r.RI.refused;
-    List.iter (fun (fn, n) -> Printf.printf "  %s: %s\n" fn n) r.RI.notes
+    List.iter (fun (fn, n) -> Printf.printf "  %s: %s\n" fn n) r.RI.notes;
+    (* `--refine-report --refine-infer` (design §4.5): the ledger as it will be
+       once the proposals are applied, in the report's own words. *)
+    if !refine_report then begin
+      let sk, vi = r.RI.after_counts in
+      Printf.printf "refinement obligations (user code, if applied): %d violated, %d skipped\n" vi sk;
+      let before_sk = skips r.RI.before in
+      let verified =
+        match In_channel.with_open_bin filename In_channel.input_all with
+        | exception _ -> false
+        | src ->
+          let n = String.length "cap verified" in
+          let rec has i = i + n <= String.length src && (String.sub src i n = "cap verified" || has (i + 1)) in
+          has 0
+      in
+      if verified then
+        Printf.printf "  closes %d of %d `cap verified` error(s)\n" (max 0 (before_sk - sk)) before_sk
+    end
   end;
   if !refine_infer_apply || !refine_infer_diff then apply_refine_infer ~filename ~user_files r
 

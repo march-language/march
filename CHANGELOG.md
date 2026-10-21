@@ -33,7 +33,9 @@ git log is authoritative for exact commits.
   `--refine-infer-json` emits JSON v1. `--refine-infer-apply` writes the
   proposals, re-checks, and reverts everything (exit 3) if the result differs
   from the prediction; `--refine-infer-diff` previews them; `forge refine --infer`
-  runs it over a project (`--fixpoint` is now an alias).
+  runs it over a project (`--fixpoint` is now an alias). The editor offers
+  "Infer refinements for `f`" / "in this file" with identical edits, and
+  `--refine-report --refine-infer` adds the if-applied ledger line.
 - **Refinements: a lambda passed for an abstract refinement may now have a real
   body.** `List.filter(ys, fn y -> is_pos(y) && y < 100)`, an `if` or a `match`
   on a Bool, `fn y -> gt(y, 0)` (a several-parameter helper with a proved

@@ -511,6 +511,67 @@ let refine_action_at src needle =
          | Some c -> c.Lsp.Types.Command.command = "march.suggestRefinement"
          | None -> false)
 
+let infer_action_at src needle =
+  let a = analyse src in
+  let (line, col) = pos_of src needle in
+  An.code_actions_at a ~line ~character:col ()
+  |> List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+         match ca.Lsp.Types.CodeAction.command with
+         | Some c -> c.Lsp.Types.Command.command = "march.inferRefinements"
+         | None -> false)
+
+let test_infer_action_offered () =
+  let src = "mod IA do\n  fn total(xs : List(Int)) : Int do 0 end\nend\n" in
+  match infer_action_at src "total" with
+  | None -> Alcotest.fail "expected an inferRefinements action on `total`"
+  | Some ca ->
+    Alcotest.(check bool) "carries no eager edit" true (ca.Lsp.Types.CodeAction.edit = None);
+    (match ca.Lsp.Types.CodeAction.command with
+     | Some c ->
+       Alcotest.(check int) "command carries file and fn" 2
+         (List.length (Option.value ~default:[] c.Lsp.Types.Command.arguments))
+     | None -> Alcotest.fail "expected a command")
+
+let apply_byte_edits src edits =
+  List.fold_left
+    (fun acc (a, b, t) -> String.sub acc 0 a ^ t ^ String.sub acc b (String.length acc - b))
+    src (List.sort (fun (a, _, _) (b, _, _) -> compare b a) edits)
+
+(* The editor's edit and the CLI's --refine-infer-apply produce the same bytes. *)
+let test_infer_action_bytes_equal_cli () =
+  let exe = Filename.concat (Sys.getcwd ()) "_build/default/bin/main.exe" in
+  if not (Sys.file_exists exe) then Alcotest.fail ("build bin/main.exe first: " ^ exe);
+  let dir = Filename.temp_dir "lspinfer" "" in
+  let src =
+    "mod E2 do\n  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn main() : Int do go([1]) end\nend\n"
+  in
+  let f = Filename.concat dir "m.march" in
+  let write s = Out_channel.with_open_bin f (fun oc -> output_string oc s) in
+  write src;
+  let run args =
+    let out = Filename.concat dir "out.txt" in
+    ignore (Sys.command (Printf.sprintf "cd %s && HOME=%s %s %s m.march > %s 2>/dev/null" (Filename.quote dir) (Filename.quote dir) (Filename.quote exe) args (Filename.quote out)));
+    In_channel.with_open_bin out In_channel.input_all
+  in
+  let json = run "--check --refine-infer-json" in
+  let edits = March_lsp_lib.Refine_command.infer_byte_edits ~json () in
+  Alcotest.(check bool) "some edit" true (edits <> []);
+  let editor = apply_byte_edits src (List.map (fun (e : March_lsp_lib.Refine_command.byte_edit) -> (e.be_start, e.be_end, e.be_text)) edits) in
+  ignore (run "--check --refine-infer --refine-infer-apply");
+  let cli = In_channel.with_open_bin f In_channel.input_all in
+  Alcotest.(check string) "same bytes" cli editor
+
+(* A precondition that adds an unproven obligation at its callers needs the
+   user's confirmation in the editor. *)
+let test_infer_needs_confirmation () =
+  let json =
+    {|{"version": 1, "summary": {}, "proposals": [{"id": "P1", "kind": "precondition", "fn": "go", "slot": "param n", "annotation": "{Int | _ > 0}", "external_callers": false, "caller_impact": {"new_proved": 0, "new_skipped": 2, "new_violated": 0, "sites": []}, "edit": {"file": "/tmp/x.march", "start": 10, "end": 13, "text": "{Int | _ > 0}"}}], "rejected": [], "refused": [], "notes": []}|}
+  in
+  match March_lsp_lib.Refine_command.infer_byte_edits ~json () with
+  | [ e ] ->
+    Alcotest.(check (option string)) "confirmation label" (Some "adds an unproven obligation at 2 callers") e.be_confirm
+  | es -> Alcotest.failf "expected one edit, got %d" (List.length es)
+
 let test_refine_action_offered_on_annotated_param () =
   let src = {|
 mod RA do

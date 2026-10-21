@@ -305,6 +305,35 @@ let code_actions_at (a : t) ~line ~character
                  ~arguments:[ `String a.filename; `String qname ] ())
             ())
         (collect_ret "" a.decls)
+    (* Module-wide inference (`march --refine-infer`, design 2026-10-20 §4.4):
+       one action for the function under the cursor and one for the whole
+       file.  Commands, not edits — the inference runs only when picked. *)
+    @ (let rec on_fn prefix (decls : Ast.decl list) =
+         List.concat_map
+           (function
+             | Ast.DFn (fd, _) when Pos.span_contains fd.Ast.fn_name.Ast.span ~line ~character ->
+               [ (if prefix = "" then fd.Ast.fn_name.Ast.txt else prefix ^ "." ^ fd.Ast.fn_name.Ast.txt) ]
+             | Ast.DMod (n, _, inner, _) ->
+               on_fn (if prefix = "" then n.Ast.txt else prefix ^ "." ^ n.Ast.txt) inner
+             | _ -> [])
+           decls
+       in
+       match on_fn "" a.decls with
+       | [] -> []
+       | qname :: _ ->
+         [ CodeAction.create
+             ~title:(Printf.sprintf "Infer refinements for `%s`" qname)
+             ~kind:CodeActionKind.RefactorRewrite
+             ~command:
+               (Command.create ~title:"Infer refinements" ~command:"march.inferRefinements"
+                  ~arguments:[ `String a.filename; `String qname ] ())
+             ();
+           CodeAction.create ~title:"Infer refinements in this file"
+             ~kind:CodeActionKind.RefactorRewrite
+             ~command:
+               (Command.create ~title:"Infer refinements in this file" ~command:"march.inferRefinements"
+                  ~arguments:[ `String a.filename ] ())
+             () ])
   in
   (* ---- Add-type-annotation actions (P1.7 enhanced) ---- *)
   (* Look up the smallest type_map entry containing a point. *)

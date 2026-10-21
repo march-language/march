@@ -24242,6 +24242,24 @@ let infer_apply_suite =
         let before = In_channel.with_open_bin staged In_channel.input_all in
         with_src_dir e2 (fun dir _ -> ignore (run_cli_in dir "--check --refine-infer --refine-infer-apply"));
         Alcotest.(check bool) "stdlib copy unchanged" true (before = In_channel.with_open_bin staged In_channel.input_all));
+    gated "--refine-report --refine-infer: the if-applied line equals the report after --apply" (fun () ->
+        with_src_dir e2 (fun dir _ ->
+            let _, out = run_cli_in dir "--check --refine-report --refine-infer" in
+            let re = Str.regexp "refinement obligations (user code, if applied): \\([0-9]+\\) violated, \\([0-9]+\\) skipped" in
+            let pred =
+              match Str.search_forward re out 0 with
+              | exception Not_found -> Alcotest.fail ("no if-applied line: " ^ out)
+              | _ -> (Str.matched_group 1 out, Str.matched_group 2 out)
+            in
+            ignore (run_cli_in dir "--check --refine-infer --refine-infer-apply");
+            let _, rep = run_cli_in dir "--check --refine-report" in
+            let re2 = Str.regexp "refinement obligations (user code): [0-9]+ proved, \\([0-9]+\\) violated, [0-9]+ trusted, \\([0-9]+\\) skipped" in
+            let act =
+              match Str.search_forward re2 rep 0 with
+              | exception Not_found -> Alcotest.fail ("no report: " ^ rep)
+              | _ -> (Str.matched_group 1 rep, Str.matched_group 2 rep)
+            in
+            Alcotest.(check (pair string string)) "if applied = after apply" act pred));
     gated "--refine-infer-diff prints the edit without writing" (fun () ->
         with_src_dir e2 (fun dir contents ->
             let before = contents () in
