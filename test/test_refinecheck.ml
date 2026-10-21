@@ -23739,6 +23739,77 @@ let infer_guards_suite =
               Alcotest.(check (list (pair string string))) "suggestion" [ ("b", "_ != 0") ]
                 (List.map (fun s -> (s.PI.sg_param, s.PI.sg_pred)) r.PI.rs_suggestions)
             | _ -> Alcotest.failf "expected one result for safe, got %d" (List.length rs)))
+    ;
+    gated "G0: a precondition that breaks a caller is refused, naming the caller's site" (fun () ->
+        with_infer_fixture
+          "mod G0 do\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\nend\n"
+          (fun fx ->
+            match PI.suggest ~root:fx.fx_root ~is_user:(fun _ -> true) ~target:"go" fx.fx_m with
+            | [ r ] ->
+              Alcotest.(check string) "status" "refused" (PI.status_name r.PI.rs_status);
+              Alcotest.(check int) "no suggestion" 0 (List.length r.PI.rs_suggestions);
+              (match r.PI.rs_status with
+               | PI.Refused rf ->
+                 Alcotest.(check string) "reason" "caller-violation" rf.PI.rf_reason;
+                 Alcotest.(check (list int)) "site is caller's call (line 4)" [ 4 ]
+                   (List.map (fun (sp : March_ast.Ast.span) -> sp.March_ast.Ast.start_line) rf.PI.rf_sites)
+               | _ -> Alcotest.fail "expected Refused")
+            | rs -> Alcotest.failf "expected one result, got %d" (List.length rs)));
+    gated "G0 with --allow-caller-violations: proposed" (fun () ->
+        with_infer_fixture
+          "mod G0b do\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\nend\n"
+          (fun fx ->
+            match PI.suggest ~allow_caller_violations:true ~root:fx.fx_root ~is_user:(fun _ -> true) ~target:"go" fx.fx_m with
+            | [ r ] ->
+              Alcotest.(check (list (pair string string))) "suggestion" [ ("n", "_ > 0") ]
+                (List.map (fun s -> (s.PI.sg_param, s.PI.sg_pred)) r.PI.rs_suggestions)
+            | rs -> Alcotest.failf "expected one result, got %d" (List.length rs)));
+    gated "satisfiable: a contradictory clause is not" (fun () ->
+        (* Like every inference entry point, [satisfiable] requires the
+           module to have been through [check_module] (registration globals). *)
+        let fd_of src =
+          let m = parse src in
+          March_refinecheck.Refine_check.check_module (March_errors.Errors.create ()) m;
+          match m.March_ast.Ast.mod_decls with
+          | [ March_ast.Ast.DFn (fd, _) ] -> fd
+          | _ -> Alcotest.fail "one fn"
+        in
+        Alcotest.(check bool) "sat" true
+          (PI.satisfiable (fd_of "mod U1 do\n  fn f(a : {Int | _ > 5}, b : Int) : Int do a end\nend\n"));
+        Alcotest.(check bool) "unsat" false
+          (PI.satisfiable (fd_of "mod U2 do\n  fn f(a : {Int | _ > 5}, b : {Int | _ < a && _ > a}) : Int do a end\nend\n")));
+    gated "same name in two modules: each go judged by its own callers" (fun () ->
+        with_infer_fixture
+          "mod T do\n  mod A do\n    fn need_pos(n : {Int | _ > 0}) : Int do n end\n    fn go(n : Int) : Int do need_pos(n) end\n    fn ok() : Int do go(5) end\n  end\n  mod B do\n    fn need_pos(n : {Int | _ > 0}) : Int do n end\n    fn go(n : Int) : Int do need_pos(n) end\n    fn caller() : Int do go(0 - 5) end\n  end\nend\n"
+          (fun fx ->
+            let rs = infer_suggest_all fx in
+            let find n = List.find_opt (fun r -> r.PI.rs_fn = n) rs in
+            (match find "A.go" with
+             | Some r -> Alcotest.(check string) "A.go proposed" "solved" (PI.status_name r.PI.rs_status)
+             | None -> Alcotest.fail "A.go missing");
+            match find "B.go" with
+            | Some { PI.rs_status = PI.Refused rf; _ } ->
+              Alcotest.(check (list int)) "B.go's site is B.caller (line 10)" [ 10 ]
+                (List.map (fun (sp : March_ast.Ast.span) -> sp.March_ast.Ast.start_line) rf.PI.rf_sites)
+            | _ -> Alcotest.fail "B.go should be refused"));
+    gated "a caller in a sibling module (another unit file) is seen" (fun () ->
+        with_infer_fixture
+          "mod T2 do\n  mod A do\n    fn need_pos(n : {Int | _ > 0}) : Int do n end\n    fn go(n : Int) : Int do need_pos(n) end\n  end\n  mod B do\n    fn caller() : Int do A.go(0 - 5) end\n  end\nend\n"
+          (fun fx ->
+            match List.find_opt (fun r -> r.PI.rs_fn = "A.go") (infer_suggest_all fx) with
+            | Some { PI.rs_status = PI.Refused rf; _ } ->
+              Alcotest.(check string) "reason" "caller-violation" rf.PI.rf_reason
+            | _ -> Alcotest.fail "A.go should be refused for B.caller"));
+    gated "a public fn with no in-unit callers is marked external-callers" (fun () ->
+        with_infer_fixture
+          "mod E1 do\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  fn go(n : Int) : Int do need_pos(n) end\nend\n"
+          (fun fx ->
+            match PI.suggest ~root:fx.fx_root ~is_user:(fun _ -> true) ~target:"go" fx.fx_m with
+            | [ r ] ->
+              Alcotest.(check (list (pair string string))) "still proposed" [ ("n", "_ > 0") ]
+                (List.map (fun s -> (s.PI.sg_param, s.PI.sg_pred)) r.PI.rs_suggestions);
+              Alcotest.(check bool) "external-callers" true r.PI.rs_external_callers
+            | rs -> Alcotest.failf "expected one result, got %d" (List.length rs)))
   ]
 
 let () =

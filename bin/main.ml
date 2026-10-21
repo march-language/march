@@ -899,6 +899,14 @@ let print_refine_suggestions ~filename ~user_files desugared =
             "%s: search stopped at the probe budget with %d obligation(s) still unproven — \
              re-run with a larger --refine-suggest-budget\n"
             r.PI.rs_fn r.PI.rs_debt_after
+        | PI.Refused rf ->
+          Printf.printf "%s: refused (%s)%s\n" r.PI.rs_fn rf.PI.rf_reason
+            (String.concat ""
+               (List.map
+                  (fun (sp : March_ast.Ast.span) ->
+                    Printf.sprintf "\n    would break the call at %s:%d:%d" sp.March_ast.Ast.file
+                      sp.March_ast.Ast.start_line sp.March_ast.Ast.start_col)
+                  rf.PI.rf_sites))
         | PI.Solved | PI.Partial ->
           Printf.printf "%s (%s:%d)\n" r.PI.rs_fn
             r.PI.rs_span.March_ast.Ast.file r.PI.rs_span.March_ast.Ast.start_line;

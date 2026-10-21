@@ -294,6 +294,79 @@ let rec prune (path : string list) (name : string) (decls : A.decl list) :
     in
     find decls
 
+(* Does [e] call [name]?  Syntactic and deliberately over-approximate (a bare
+   [name] or any qualified [M.name]): a false positive costs one more function
+   in the probe walk, a false negative hides exactly the caller a hypothesis
+   would break. *)
+let rec calls_name (name : string) (e : A.expr) : bool =
+  let any = List.exists (calls_name name) in
+  let is_target = function
+    | A.EVar n -> n.A.txt = name || Filename.check_suffix n.A.txt ("." ^ name)
+    | _ -> false
+  in
+  match e with
+  | A.EApp (f, args, _) -> is_target f || calls_name name f || any args
+  | A.EBlock (es, _) -> any es
+  | A.ELet (b, _) -> calls_name name b.A.bind_expr
+  | A.EIf (c, t, f, _) -> calls_name name c || calls_name name t || calls_name name f
+  | A.EMatch (s, brs, _) ->
+    calls_name name s
+    || List.exists (fun (br : A.branch) -> calls_name name br.A.branch_body) brs
+  | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> any es
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) -> calls_name name e
+  | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> calls_name name b
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> calls_name name a || calls_name name b
+  | A.ERecord (fs, _) -> List.exists (fun (_, v) -> calls_name name v) fs
+  | A.ERecordUpdate (r, fs, _) ->
+    calls_name name r || List.exists (fun (_, v) -> calls_name name v) fs
+  | A.EField (e, _, _) -> calls_name name e
+  | _ -> false
+
+let fn_calls (name : string) (fd : A.fn_def) : bool =
+  List.exists (fun (c : A.fn_clause) -> calls_name name c.A.fc_body) fd.A.fn_clauses
+
+(* Like [prune], but the rebuilt tree also keeps every function ANYWHERE in the
+   unit that calls the target (other modules included), each at its own place,
+   with the context decls of every module on the way.  A precondition's cost
+   lands at its callers, so a probe that cannot see them cannot see what it
+   breaks (design 2026-10-20 §0 row G0, §5.1).  Over-approximate by name:
+   an extra function only costs walk time. *)
+let prune_with_callers (path : string list) (name : string) (decls : A.decl list) :
+    (A.fn_def * (A.fn_def -> A.decl list)) option =
+  match prune path name decls with
+  | None -> None
+  | Some (fd0, _) ->
+    let rec has_fn = function
+      | [] -> false
+      | A.DFn _ :: _ -> true
+      | A.DMod (_, _, inner, _) :: tl -> has_fn inner || has_fn tl
+      | _ :: tl -> has_fn tl
+    in
+    let rec filt (prefix : string list) (fd' : A.fn_def) (decls : A.decl list) : A.decl list =
+      context_decls decls
+      @ List.filter_map
+          (function
+            | A.DFn (f, sp) when prefix = path && f.A.fn_name.A.txt = name -> Some (A.DFn (fd', sp))
+            | A.DFn (f, sp) when fn_calls name f -> Some (A.DFn (f, sp))
+            | A.DMod (n, vis, inner, sp) ->
+              let inner' = filt (prefix @ [ n.A.txt ]) fd' inner in
+              if has_fn inner' then Some (A.DMod (n, vis, inner', sp)) else None
+            | _ -> None)
+          decls
+    in
+    Some (fd0, fun fd' -> filt [] fd' decls)
+
+(* Does any function of the unit other than [path]/[name] call it? *)
+let has_in_unit_callers (path : string list) (name : string) (decls : A.decl list) : bool =
+  let rec go prefix = function
+    | [] -> false
+    | A.DFn (f, _) :: tl ->
+      ((not (prefix = path && f.A.fn_name.A.txt = name)) && fn_calls name f) || go prefix tl
+    | A.DMod (n, _, inner, _) :: tl -> go (prefix @ [ n.A.txt ]) inner || go prefix tl
+    | _ :: tl -> go prefix tl
+  in
+  go [] decls
+
 (* ── Debt ─────────────────────────────────────────────────────────────────── *)
 
 (* [debt] counts obligations that are NOT discharged.  [Trusted] is not debt: it
@@ -361,6 +434,13 @@ type status =
      complete one.  Raise --budget and ask again. *)
   | Budget_exhausted
   | Not_found      (* the named function is not a module-level fn in user code *)
+  (* Some candidate would have discharged the body's debt, but only by turning
+     a CALLER's call into a violation (or making the clause unsatisfiable).
+     Reported, with the sites, instead of being proposed
+     (design 2026-10-20 §5.1; decision D2). *)
+  | Refused of refusal
+
+and refusal = { rf_reason : string; rf_sites : A.span list }
 
 type t = {
   rs_fn : string;                    (* qualified name *)
@@ -370,9 +450,15 @@ type t = {
   rs_debt_after : int;
   rs_suggestions : suggestion list;
   rs_queries : int;                  (* probes spent, for the budget report *)
+  (* A public function with no caller anywhere in the unit: its callers are
+     external, so the caller impact of a proposed precondition is unknown
+     (decision D3: proposed, marked; `--apply` skips it without
+     `--apply-public`). *)
+  rs_external_callers : bool;
 }
 
 let status_name = function
+  | Refused _ -> "refused"
   | No_debt -> "no-debt"
   | Solved -> "solved"
   | Partial -> "partial"
@@ -401,20 +487,97 @@ let candidates_for ~(measurable : string list) ~(fd : A.fn_def)
        candidate never spends budget. *)
     List.filter (fun c -> not (contradicts_handled_case fd ~param c)) all
 
-let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
-    ~(budget : int ref) (fn_name : string) : t option =
+(* Is the conjunction of [fd]'s (first clause's) parameter refinements
+   satisfiable?  Asked of the REAL checker rather than a hand-built query: a
+   probe function with [fd]'s parameters calls a callee demanding [false]; that
+   obligation is proved exactly when the parameters admit no value, i.e. when
+   a proposal would make the body vacuously proved and every caller a
+   violation in waiting (design 2026-10-20 §2). *)
+let satisfiable ?(root = Sys.getcwd ()) (fd : A.fn_def) : bool =
+  let never = "__refine_sat_never__" in
+  let callee =
+    match
+      (March_parser.Parse.module_of_lexbuf
+         (Lexing.from_string
+            (Printf.sprintf "mod SatProbe do\n  fn %s(x : {Int | _ < 0 && _ > 0}) : Int do x end\nend\n" never)))
+        .A.mod_decls
+    with
+    | [ d ] -> d
+    | _ -> failwith "satisfiable: probe callee did not parse"
+  in
+  (* One call per Int parameter, the parameter itself as the subject: a goal
+     loads the facts of the names its subject (and their refinements) mention,
+     so a contradiction among parameters is reached through those mentions. *)
+  let int_params =
+    match fd.A.fn_clauses with
+    | c :: _ ->
+      let rec base = function A.TyRefine (t, _, _) -> base t | t -> t in
+      List.filter_map
+        (function
+          | A.FPNamed { A.param_name; param_ty = Some t; _ }
+          | A.FPDefault ({ A.param_name; param_ty = Some t; _ }, _)
+            when kind_of_ty (base t) = KInt -> Some param_name
+          | _ -> None)
+        c.A.fc_params
+    | [] -> []
+  in
+  (* The subject carries the PARAMETER's own span: a fact is admitted by the
+     sort the typechecker recorded at a span, and a dummy span has none. *)
+  let call_of (n : A.name) =
+    A.EApp
+      ( A.EVar { A.txt = never; A.span = n.A.span },
+        [ A.EVar { A.txt = n.A.txt; A.span = n.A.span } ],
+        n.A.span )
+  in
+  let call = A.EBlock (List.map call_of int_params, A.dummy_span) in
+  let probe =
+    { fd with
+      A.fn_name = { fd.A.fn_name with A.txt = "__refine_sat_probe__" };
+      A.fn_ret_ty = None;
+      A.fn_clauses =
+        (match fd.A.fn_clauses with
+         | c :: _ -> [ { c with A.fc_guard = None; A.fc_body = call } ]
+         | [] -> []) }
+  in
+  let decls = [ callee; A.DFn (probe, A.dummy_span) ] in
+  if int_params = [] then true else
+  Ob.with_scratch @@ fun () ->
+  let defs = RC.collect_all_defs decls in
+  let snap = walk_ledger ~root ~defs decls in
+  not (List.exists (fun ((k : Ledger_diff.key), v) -> k.Ledger_diff.callee = never && v = Ob.Proved) snap)
+
+let infer_fn ?(allow_caller_violations = false) ~root ~defs ~(decls : A.decl list)
+    ~(path : string list) ~(budget : int ref) (fn_name : string) : t option =
   let qualified = String.concat "." (path @ [ fn_name ]) in
-  match prune path fn_name decls with
+  match prune_with_callers path fn_name decls with
   | None -> None
   | Some (fd0, rebuild) ->
     let span = fd0.A.fn_name.A.span in
+    let external_callers =
+      fd0.A.fn_vis = A.Public && not (has_in_unit_callers path fn_name decls)
+    in
+    (* Sites inside the target's own clauses; every other site is a caller's. *)
+    let in_body (sp : A.span) =
+      List.exists
+        (fun (c : A.fn_clause) ->
+          let o = c.A.fc_span in
+          sp.A.file = o.A.file
+          && (sp.A.start_line, sp.A.start_col) >= (o.A.start_line, o.A.start_col)
+          && (sp.A.end_line, sp.A.end_col) <= (o.A.end_line, o.A.end_col))
+        fd0.A.fn_clauses
+    in
     let base = walk_ledger ~root ~defs (rebuild fd0) in
     let mk_result ?(suggestions = []) ~after status =
       Some
         { rs_fn = qualified; rs_span = span; rs_status = status;
           rs_debt_before = Ledger_diff.debt base; rs_debt_after = after;
-          rs_suggestions = suggestions; rs_queries = 0 }
+          rs_suggestions = suggestions; rs_queries = 0;
+          rs_external_callers = external_callers }
     in
+    (* Caller violations a candidate would create, recorded so that a search
+       that proposes nothing can say WHY instead of "no candidate". *)
+    let refused_sites = ref [] in
+    let refused_unsat = ref false in
     if Ledger_diff.debt base = 0 then mk_result ~after:0 No_debt
     else begin
       (* Parameters are taken from the first clause: a multi-clause function
@@ -448,14 +611,48 @@ let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
                     decr budget;
                     incr queries;
                     let hyp = with_refinement acc_fd ~param:pname ~mk:cand.c_pred in
-                    let d = walk_ledger ~root ~defs (rebuild hyp) in
+                    (* The callers resolve the target through [defs], built
+                       once from the unmodified module: give them the
+                       hypothesised signature or they never see it. *)
+                    let defs_h = Hashtbl.copy defs in
+                    Hashtbl.replace defs_h qualified (RC.entry_of_sig (RC.sig_of_fn hyp));
+                    let d = walk_ledger ~root ~defs:defs_h (rebuild hyp) in
                     let delta = Ledger_diff.diff ~before:cur ~after:d in
                     let gained = List.length (Ledger_diff.closed delta) in
-                    (* Admissible only per [admissible]: it closes a site,
-                       opens none, and creates no violation.  A candidate that
-                       turns a silent skip into a proved-false obligation is a
-                       wrong contract, however much else it discharges. *)
-                    if admissible delta then
+                    (* A new violation at a CALLER is the precondition's cost
+                       landing where it is owed: refused unless the user asked
+                       for it (D2), and never silently.  Everything else must
+                       pass [admissible]: close a site, open none, no
+                       violation. *)
+                    let caller_viol =
+                      List.filter (fun (k : Ledger_diff.key) -> not (in_body k.Ledger_diff.span))
+                        (Ledger_diff.new_violated delta)
+                    in
+                    let delta_wo_callers =
+                      List.filter
+                        (fun ((k : Ledger_diff.key), c) ->
+                          not (c = Ledger_diff.New_violated && not (in_body k.Ledger_diff.span)))
+                        delta
+                    in
+                    let ok =
+                      if caller_viol = [] then admissible delta
+                      else if admissible delta_wo_callers then begin
+                        if allow_caller_violations then true
+                        else begin
+                          refused_sites :=
+                            List.map (fun (k : Ledger_diff.key) -> k.Ledger_diff.span) caller_viol
+                            @ !refused_sites;
+                          false
+                        end
+                      end
+                      else false
+                    in
+                    let ok =
+                      ok
+                      && (satisfiable ~root hyp
+                          || (refused_unsat := true; false))
+                    in
+                    if ok then
                       match !best with
                       | Some (g, _, _, _, _) when g >= gained -> ()
                       | _ -> best := Some (gained, pname, pty, cand, d)
@@ -485,13 +682,20 @@ let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
       let status =
         if Ledger_diff.debt final = 0 then Solved
         else if starved then Budget_exhausted
+        else if sugs = [] && !refused_sites <> [] then
+          Refused
+            { rf_reason = "caller-violation";
+              rf_sites = List.sort_uniq compare !refused_sites }
+        else if sugs = [] && !refused_unsat then
+          Refused { rf_reason = "unsatisfiable"; rf_sites = [] }
         else if sugs = [] then No_candidate
         else Partial
       in
       Some
         { rs_fn = qualified; rs_span = span; rs_status = status;
           rs_debt_before = Ledger_diff.debt base; rs_debt_after = Ledger_diff.debt final;
-          rs_suggestions = sugs; rs_queries = !queries }
+          rs_suggestions = sugs; rs_queries = !queries;
+          rs_external_callers = external_callers }
     end
 
 (* ── Entry points ─────────────────────────────────────────────────────────── *)
@@ -533,7 +737,7 @@ let default_budget = 200
     The caller MUST have run [Refine_check.check_module] on [m] first — the
     registration globals it populates (ADT tables, measure preamble, alias
     gates) are what every probe here reflects against. *)
-let suggest ?(root = Sys.getcwd ()) ?(budget = default_budget)
+let suggest ?(allow_caller_violations = false) ?(root = Sys.getcwd ()) ?(budget = default_budget)
     ~(is_user : A.span -> bool) ~(target : string) (m : A.module_) : t list =
   (* [Ob.with_scratch]: every probe below [Ob.reset]s and refills the ledger
      AND the per-call-site index from a hypothesis module.  Leaving that
@@ -567,7 +771,7 @@ let suggest ?(root = Sys.getcwd ()) ?(budget = default_budget)
   | [] ->
     [ { rs_fn = target; rs_span = A.dummy_span; rs_status = Not_found;
         rs_debt_before = 0; rs_debt_after = 0; rs_suggestions = [];
-        rs_queries = 0 } ]
+        rs_queries = 0; rs_external_callers = false } ]
   | hits ->
     List.filter_map
       (fun (path, (fd : A.fn_def)) ->
@@ -575,13 +779,13 @@ let suggest ?(root = Sys.getcwd ()) ?(budget = default_budget)
            target matches several functions, and a shared pool would starve
            whichever ones sort last for a reason unrelated to their code. *)
         let budget = ref budget in
-        infer_fn ~root ~defs ~decls:m.A.mod_decls ~path ~budget
+        infer_fn ~allow_caller_violations ~root ~defs ~decls:m.A.mod_decls ~path ~budget
           fd.A.fn_name.A.txt)
       hits
 
 (** Sweep every user function.  Reports only functions that HAVE a suggestion:
     a project-wide listing of "no debt" lines would bury the signal. *)
-let suggest_all ?(root = Sys.getcwd ()) ?(budget = default_budget)
+let suggest_all ?(allow_caller_violations = false) ?(root = Sys.getcwd ()) ?(budget = default_budget)
     ~(is_user : A.span -> bool) (m : A.module_) : t list =
   (* Scratch ledger+index for the whole sweep — see [suggest] above. *)
   Ob.with_scratch @@ fun () ->
@@ -596,10 +800,12 @@ let suggest_all ?(root = Sys.getcwd ()) ?(budget = default_budget)
             exactly like a real answer. *)
          let budget = ref budget in
          match
-           infer_fn ~root ~defs ~decls:m.A.mod_decls ~path ~budget
+           infer_fn ~allow_caller_violations ~root ~defs ~decls:m.A.mod_decls ~path ~budget
              fd.A.fn_name.A.txt
          with
          | Some r when r.rs_suggestions <> [] -> Some r
+         (* A refusal is an answer, not silence: report it (D4). *)
+         | Some ({ rs_status = Refused _; _ } as r) -> Some r
          | _ -> None)
 
 (* ── Attaching the suggestion to a promoted call-site failure ─────────────── *)
@@ -699,7 +905,7 @@ let attach_promoted_fixes ?(root = Sys.getcwd ()) ?(budget = default_budget)
                  being reported. *)
               match r.rs_status with
               | Solved -> Some r.rs_suggestions
-              | Partial | No_debt | No_candidate | Budget_exhausted | Not_found
+              | Partial | No_debt | No_candidate | Budget_exhausted | Not_found | Refused _
                 -> None)
             | Some None | None -> None
           in

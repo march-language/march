@@ -119,36 +119,7 @@ let fn_calls (name : string) (fd : A.fn_def) : bool =
    context-bearing decls at each level — the postcondition analogue of
    [Precond_infer.prune].  The callers are the point: they are where the debt a
    postcondition discharges actually lives. *)
-let rec prune_with_callers (path : string list) (name : string)
-    (decls : A.decl list) : (A.fn_def * (A.fn_def -> A.decl list)) option =
-  match path with
-  | [] ->
-    let ctx = PI.context_decls decls in
-    let callers =
-      List.filter
-        (function
-          | A.DFn (fd, _) -> fd.A.fn_name.A.txt <> name && fn_calls name fd
-          | _ -> false)
-        decls
-    in
-    let rec find = function
-      | [] -> None
-      | A.DFn (fd, sp) :: _ when fd.A.fn_name.A.txt = name ->
-        Some (fd, fun fd' -> ctx @ (A.DFn (fd', sp) :: callers))
-      | _ :: tl -> find tl
-    in
-    find decls
-  | m :: rest ->
-    let rec find = function
-      | [] -> None
-      | A.DMod (n, vis, inner, sp) :: _ when n.A.txt = m ->
-        (match prune_with_callers rest name inner with
-         | None -> None
-         | Some (fd, mk) ->
-           Some (fd, fun fd' -> PI.context_decls decls @ [ A.DMod (n, vis, mk fd', sp) ]))
-      | _ :: tl -> find tl
-    in
-    find decls
+let prune_with_callers = PI.prune_with_callers
 
 (* ── Probing ──────────────────────────────────────────────────────────────── *)
 
