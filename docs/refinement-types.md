@@ -2097,6 +2097,77 @@ unless no value of it could work (`need_ge(below(n), n)` against
 like a name the slot mentions (`Cons(n, _)` over `List({Int | _ < n})`) gets no
 fact from it.
 
+### Relational element refinements
+
+Inside one type application, a slot's predicate can name the binder of a
+**sibling** slot. The result is a relation between the components of every
+**entry** of the container:
+
+```march
+type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+
+-- every entry's value exceeds its key
+fn need_arel(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do … end
+```
+
+A slot sees the binders of all its siblings, in any order. A sibling binder
+shadows a value parameter of the same name: in
+`fn f(x : Int, a : Assoc({x : Int | true}, {y : Int | y > x}))` the `x` in
+`y > x` is the key, not the parameter. Conjuncts of a slot predicate that name
+no sibling (`y > 0` in `{y : Int | y > 0 && y > x}`) stay an ordinary slot fact,
+so a predicate over one slot is always an ordinary element refinement.
+
+An entry of an ADT container is one constructor occurrence's values for the
+related slots: the `k` and `v` fields of one `ACons`. A relation is checked and
+assumed per entry:
+
+- **Constructing** an entry owes the relation once, over the constructor's
+  fields: `need_arel(ACons(1, 2, ANil))` is proved, and
+  `need_arel(ACons(5, 2, ANil))` is a violation ("the entry (5, 2) passed to
+  `need_arel` does not satisfy precondition `y > x`"). A constructor holding
+  none of the related slots (`ANil`) owes nothing. A constructor whose only
+  field is another container holding all the related slots
+  (`type Outer(k, v) = O(Assoc(k, v))`) passes the relation to that container.
+- **Matching** an entry gives its binders the relation: in
+  `match a do ACons(k, v, _) -> need_gt(k, v)`, with
+  `need_gt(k : Int, v : {Int | _ > k})`, the call is proved. The binders must
+  be direct pattern variables of one constructor occurrence;
+  `ACons(k, _, ACons(_, v, _))` relates nothing.
+- **Projecting**: a value whose declared entry carries a relation meets a
+  demand on fewer slots when the relation implies it.
+  `a : Assoc({x : Int | x > 0}, {y : Int | y > x})` meets
+  `Assoc(Int, {Int | _ > 0})`, and meets a relational demand spelled with
+  other binders (`Assoc({a : Int | true}, {b : Int | b > a})`).
+  `Assoc({x : Int | true}, {y : Int | y > x})` does not meet
+  `Assoc(Int, {Int | _ > 0})`: the violation's example is `x = -1, y = 0`.
+- A proved annotated `let`, a proved declared return, and the recursive call of
+  the function being checked carry the relation like any element refinement,
+  so a recursive `bump` that returns `ACons(k, v + 1, bump(t))` keeps
+  `Assoc({x : Int | true}, {y : Int | y > x})`.
+
+**What is not checked.**
+
+- **A relation does not flow through a polymorphic call.** A function
+  parametric in `k` and `v` carries each slot's fact to its result, but it may
+  pair the key of one entry with the value of another, so the result does not
+  carry the relation. `need_arel(rev(a))` for a generic
+  `rev : Assoc(k, v) -> Assoc(k, v)` is a recorded skip, and a demanded relation
+  traced into such a call is a `parametric-source-unproved` skip ("a relation
+  between `k` and `v` cannot be traced through separate sources", or "is not
+  preserved through `rev`").
+- **The container must be entry-shaped for the related slots:** every
+  constructor holds one value for each of them, or none of them. Otherwise the
+  checker warns `refinement_unchecked` ("This relation is not checked: `Two`'s
+  constructor `K` carries a value for `x` without one for `y`, …") and the
+  relation is treated as not written: never assumed, never owed. The same
+  warning covers a relation over a slot whose type is itself a container
+  (`{xs : List(Int) | true}`), a slot inside a nested container naming an
+  outer binder (`Assoc({x : Int | true}, List({y : Int | y > x}))`), and a
+  constructor that holds some of the related values directly and others
+  inside a nested container (`type Mix(k, v) = MX(k, List(v))`).
+- A relation over type-variable slots, and a relation between two different
+  entries (sortedness), cannot be written.
+
 ### Through a polymorphic call
 
 A function that is generic in its element type cannot invent an element, so its
@@ -2777,9 +2848,11 @@ refinement instead (`xs : List({Int | _ > 0})`), and `x` gets it.
   tail is `go(t)` is a skip. A local returning a tuple of element-refined
   containers has every component of every tail checked, but lends nothing at
   its calls.
-- **A predicate relating elements to each other** (sortedness, distinctness)
-  cannot be written; see [Set Refinements](#set-refinements) for what a
-  predicate can say about a collection's elements as a set.
+- **A predicate relating different elements to each other** (sortedness,
+  distinctness) cannot be written. A relation between the components of ONE
+  entry can ([Relational element refinements](#relational-element-refinements));
+  see [Set Refinements](#set-refinements) for what a predicate can say about a
+  collection's elements as a set.
 - **A parameter inside another container is followed one level, and only
   as a bare argument.** A constructor field `C(…)` of another registered
   container (`List`, `Option`, `Result`, or a variant type of the program)

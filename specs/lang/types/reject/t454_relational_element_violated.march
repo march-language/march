@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: the entry (5, 2) passed to `need_arel` does not satisfy precondition `y > x`
+-- Relational element refinements (2026-10-21, multi-arg design phase 1b),
+-- row r2: a constructed entry whose value does not exceed its key, against
+-- `Assoc({x : Int | true}, {y : Int | y > x})`.  The relation is one
+-- obligation over the constructor's two fields; before phase 1b the sibling
+-- `x` was a free name and the call was an undecided skip, accepted outside
+-- `cap verified`.  Accept twin: t453.
+mod RelationalElemsBad do
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+  fn r2() : Int do need_arel(ACons(5, 2, ANil)) end
+end

@@ -556,6 +556,15 @@ let classify (site : site) : disposition =
   | Iface_method name ->
     inert_signature_verdict "warn_iface_method_refinement"
       (Printf.sprintf "the interface signature of `%s`" name) site
+  (* A RELATION between element slots that is not well-formed (multi-arg
+     design §1.4, W2/W4) is dropped by [Refine_scope.elem_app], so it is
+     neither assumed nor obliged anywhere; [Refine_check.warn_predicate_ty]
+     warns `refinement_unchecked` at exactly this predicate.  A well-formed
+     relation is one contract site like a slot, enforced by the rule below. *)
+  | (Param _ | Return _ | Let_annot _ | Field _)
+    when site.position = Type_arg
+         && List.exists (fun (sp, _) -> sp = site.span) (Refine_post.relation_issues_deep site.origin_ty) ->
+    Inert_warned "refinement_unchecked: this relation between element slots is not checked, and the warning fires at it"
   (* Container subtyping (2026-09-13): a refinement one layer down inside a
      `List(…)` / `Option(…)` type argument, at a parameter, return, `let`
      annotation or field, IS enforced — every value flowing into the

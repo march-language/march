@@ -1,0 +1,26 @@
+-- Relational element refinements (2026-10-21, multi-arg design
+-- specs/2026-10-18-abstract-refinements-multi-arg-design.md phase 1b): a
+-- slot predicate naming a SIBLING slot's binder relates the two components
+-- of every entry.  `Assoc({x : Int | true}, {y : Int | y > x})` reads "each
+-- entry's value exceeds its key".  Every obligation below is PROVED, so
+-- `cap verified` accepts the module:
+--   r1  a literal entry meeting the relation (one obligation per relation);
+--   r3  projection: `x > 0 && y > x` per entry implies every value is > 0
+--       (a FALSE violation before phase 1b: the sibling `x` was free);
+--   r5  `match` binders of one entry carry the relation as a path fact.
+-- Reject twin: t454 (r2).
+mod RelationalElems do
+  cap verified
+  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))
+  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end
+  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+  fn need_gt(k : Int, v : {Int | _ > k}) : Int do k + v end
+  fn r1() : Int do need_arel(ACons(1, 2, ACons(5, 9, ANil))) end
+  fn r3(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do need_pos(a) end
+  fn r5(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do
+    match a do
+      ACons(k, v, _) -> need_gt(k, v)
+      ANil -> 0
+    end
+  end
+end

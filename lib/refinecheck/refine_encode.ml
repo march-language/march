@@ -1492,6 +1492,7 @@ let sort_of_ctor (ctor : string) : string option =
 
 
 
+
 (* declare-datatypes preamble for TDRecord types; included in every VC that
    refines over a record value.  Built after measure_preamble so sort
    deduplication (measure_preamble_sorts) works. *)
@@ -1563,6 +1564,116 @@ let adt_canonical : (string, string) Hashtbl.t = Hashtbl.create 8
 let adt_sort_name (march_name : string) : string =
   let bare = "M_" ^ march_name in
   match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare
+
+(* W4, ENTRY SHAPE (multi-arg design 2026-10-18 §1.4, §2.2): can a relation
+   between the slots [s] of container [c] hold "per entry"?  An entry is one
+   constructor occurrence's values for those slots, so every constructor must
+   hold, for each slot of [s], the same number of [Param] fields, and that
+   number 0 or 1 (`Assoc`'s `ACons(k, v, …)` and `ANil`).  `type Two(k, v) =
+   K(k) | V(v)` is not entry-shaped: `V(0 - 5)` is in no entry, yet
+   projecting `x > 0 && y > x` onto `v` would claim `-5 > 0`.
+
+   - a [Within (c', m)] field holding EVERY slot of [s] (and no [Param] field
+     of the constructor holding one) puts the entries in the nested container,
+     which must be entry-shaped for the mapped slots in turn; a [Within] field
+     holding only some of them, or beside a [Param] field holding another, is
+     not an entry (leftovers phase E's rule: a [Within] field is never paired
+     with a direct field position-by-position);
+   - a field that HIDES one of the slots ([ctor_field_params]: inside a
+     function, tuple or other type) holds values in no entry;
+   - an OPAQUE container (no constructor has a [Param] or [Within] field at
+     all: stdlib `Map`'s `HamtMap(HEntry(k, v))`) is entry-shaped vacuously:
+     its entries are abstract, never constructed or destructed by the
+     checker (its constructions are phase 0's recorded skip).
+
+   [name_of j]: how slot [j] is named in a message (the relation's binder).
+   [Error why] completes "This relation is not checked: …". *)
+let rec entry_shaped ?(depth = 0) ~(name_of : int -> string) (c : string) (s : int list)
+  : (unit, string) result =
+  let key = adt_sort_name c in
+  let quote j = "`" ^ name_of j ^ "`" in
+  match Hashtbl.find_opt adt_ctors key with
+  | None | Some [] -> Error (Printf.sprintf "`%s` is not a container the checker models" c)
+  | Some ctors ->
+    let roles k = Option.value ~default:[] (Hashtbl.find_opt ctor_param_fields k) in
+    let opaque =
+      List.for_all (fun k -> List.for_all (function Param _ | Within _ -> false | Self | Other -> true) (roles k)) ctors
+    in
+    if opaque then Ok ()
+    else if depth > 8 then Error (Printf.sprintf "`%s`'s nesting is too deep to read its entries" c)
+    else
+      let check_ctor (k : string) : (unit, string) result =
+        let rs = roles k in
+        let hid = Option.value ~default:[] (Hashtbl.find_opt ctor_field_params k) in
+        match List.find_opt (fun (ps, _) -> List.exists (fun (j, _) -> List.mem j s) ps) hid with
+        | Some (ps, fty) ->
+          let j = fst (List.find (fun (j, _) -> List.mem j s) ps) in
+          Error
+            (Printf.sprintf
+               "`%s`'s constructor `%s` holds the value for %s inside `%s`, which is in no entry, so a \
+                relation between the slots has no entries to hold of"
+               c k (quote j) fty)
+        | None ->
+          let count j = List.length (List.filter (function Param i -> i = j | _ -> false) rs) in
+          let counts = List.map (fun j -> (j, count j)) s in
+          let withins =
+            List.filter_map
+              (function
+                | Within (c', m) when List.exists (function Some j -> List.mem j s | None -> false) m ->
+                  Some (c', m)
+                | _ -> None)
+              rs
+          in
+          if withins <> [] then
+            if List.exists (fun (_, n) -> n > 0) counts then
+              Error
+                (Printf.sprintf
+                   "`%s`'s constructor `%s` holds some of the related values directly and others inside \
+                    a nested container, so a relation between them has no entries to hold of"
+                   c k)
+            else
+              List.fold_left
+                (fun acc (c', m) ->
+                  match acc with
+                  | Error _ -> acc
+                  | Ok () ->
+                    let at j = List.find_index (( = ) (Some j)) m in
+                    if List.exists (fun j -> at j = None) s then
+                      Error
+                        (Printf.sprintf
+                           "`%s`'s constructor `%s` holds only some of the related values inside `%s`, \
+                            so a relation between them has no entries to hold of"
+                           c k c')
+                    else
+                      let s' = List.map (fun j -> Option.get (at j)) s in
+                      let name_of' k' =
+                        match List.nth_opt m k' with Some (Some j) -> name_of j | _ -> string_of_int k'
+                      in
+                      entry_shaped ~depth:(depth + 1) ~name_of:name_of' c' s')
+                (Ok ()) withins
+          else
+            match counts with
+            | [] -> Ok ()
+            | (j0, n0) :: _ ->
+              (match List.find_opt (fun (_, n) -> n > 1) counts with
+               | Some (j, _) ->
+                 Error
+                   (Printf.sprintf
+                      "`%s`'s constructor `%s` holds more than one value for %s, so it is not one \
+                       entry"
+                      c k (quote j))
+               | None ->
+                 (match List.find_opt (fun (_, n) -> n <> n0) counts with
+                  | Some (j, _) ->
+                    let with_, without = if n0 = 1 then (j0, j) else (j, j0) in
+                    Error
+                      (Printf.sprintf
+                         "`%s`'s constructor `%s` carries a value for %s without one for %s, so a \
+                          relation between them has no entries to hold of"
+                         c k (quote with_) (quote without))
+                  | None -> Ok ()))
+      in
+      List.fold_left (fun acc k -> match acc with Error _ -> acc | Ok () -> check_ctor k) (Ok ()) ctors
 
 (* Finalize the bare-name -> qualified-key resolution once [register_adt_names]
    (pass 1) has seen every declaration.  Must run before [register_field_sorts]

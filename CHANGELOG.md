@@ -21,6 +21,21 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements: relational element refinements.** A slot predicate may name a
+  sibling slot's binder, relating the two components of every entry:
+  `Assoc({x : Int | true}, {y : Int | y > x})` reads "each entry's value exceeds
+  its key". A construction owes the relation once per entry
+  (`need_arel(ACons(5, 2, ANil))` is a violation naming the entry `(5, 2)`), a
+  `match` gives its binders the relation (`ACons(k, v, _) -> need_gt(k, v)` is
+  proved), and a declared relation implies a demand on fewer slots
+  (`Assoc({x : Int | x > 0}, {y : Int | y > x})` meets `Assoc(Int, {Int | _ > 0})`).
+  Before, the sibling name was a free variable, which gave false violations
+  (that projection, with `x = -1`) and undecided skips. A relation the checker
+  cannot hold per entry (a constructor carrying one of the related values without
+  the other, a container-typed slot, a slot inside a nested container) is warned
+  `refinement_unchecked` and ignored. A relation does not flow through a
+  polymorphic call (a recorded skip). See "Relational element refinements" in the
+  refinement types reference.
 - `march --compile --static` builds a self-contained executable: on Linux a fully
   static binary that runs in a `scratch` image (musl hosts such as Alpine; refused on
   glibc), on macOS one that loads nothing outside `/usr/lib` and `/System`. A missing

@@ -23754,6 +23754,378 @@ let fold_invariants_3_suite =
       "parametric-source-unproved" ]
 
 
+(* Multi-arg design (specs/2026-10-18-abstract-refinements-multi-arg-design.md)
+   phase 1b: RELATIONAL element refinements.  A slot predicate naming a
+   sibling slot's binder (`Assoc({x : Int | true}, {y : Int | y > x})`) is a
+   relation over the entry's components: obliged per construction (one
+   obligation per relation), assumed per entry (projection by fresh slot
+   constants, and a path fact over a `match`'s binders).  Before phase 1b the
+   sibling name was FREE: r1/r2/r5 were undecided, r3/r4 false violations. *)
+let relational_elements_suite =
+  let assoc =
+    "  type Assoc(k, v) = ANil | ACons(k, v, Assoc(k, v))\n\
+    \  fn need_pos(_a : Assoc(Int, {Int | _ > 0})) : Int do 0 end\n\
+    \  fn need_arel(_a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n\
+    \  fn need_gt(k : Int, v : {Int | _ > k}) : Int do k + v end\n"
+  in
+  let m ?(verified = false) name body =
+    "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ assoc ^ body ^ "end\n"
+  in
+  (* A typed check: (diagnostics, obligations as (callee, verdict, reason, predicate)). *)
+  let run src =
+    March_refinecheck.Obligation.reset ();
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          ( o.callee, verdict_name o.verdict
+          , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+          , o.predicate ))
+        (March_refinecheck.Obligation.all ())
+    in
+    (ctx.March_errors.Errors.diagnostics, obs)
+  in
+  let details src =
+    ignore (run src);
+    List.filter_map
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Skipped r ->
+          Some (o.March_refinecheck.Obligation.callee, March_refinecheck.Obligation.reason_detail r)
+        | _ -> None)
+      (March_refinecheck.Obligation.all ())
+  in
+  let of_sev sev ds =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.severity = sev then Some d.March_errors.Errors.message else None)
+      ds
+  in
+  let errors src = of_sev March_errors.Errors.Error (fst (run src)) in
+  let warnings src =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if d.March_errors.Errors.severity = March_errors.Errors.Warning
+           && d.March_errors.Errors.code = March_errors.Errors.Code.refinement_unchecked
+        then Some d.March_errors.Errors.message
+        else None)
+      (fst (run src))
+  in
+  (* Element SUBTYPING records under the subject (`a`, `mk(…)`), a literal
+     or a skip under the callee: the verdicts of every name in [callees]. *)
+  let verdicts src (callees : string list) =
+    List.filter_map (fun (c, v, _, _) -> if List.mem c callees then Some v else None) (snd (run src))
+  in
+  let all_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.(check (list string)) name (List.map (fun _ -> "proved") vs) vs
+  in
+  let some_violated name vs =
+    Alcotest.(check bool) (name ^ ": violated") true (List.mem "violated" vs)
+  in
+  let not_proved name vs =
+    Alcotest.(check bool) (name ^ ": has obligations") true (vs <> []);
+    Alcotest.(check bool) (name ^ ": not all proved") true (List.exists (( <> ) "proved") vs)
+  in
+  let has needle hay = Astring_contains.contains hay needle in
+  let r5 =
+    "  fn r5(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do\n\
+    \    match a do\n\
+    \      ACons(k, v, _) -> need_gt(k, v)\n\
+    \      ANil -> 0\n\
+    \    end\n\
+    \  end\n"
+  in
+  [ gated "r1: a literal entry meeting the relation is proved" (fun () ->
+        let _, obs = run (m "R1" "  fn r1() : Int do need_arel(ACons(1, 2, ANil)) end\n") in
+        all_proved "need_arel" (List.filter_map (fun (c, v, _, _) -> if c = "need_arel" then Some v else None) obs);
+        Alcotest.(check bool) "the relation is its own obligation" true
+          (List.exists (fun (c, v, _, p) -> c = "need_arel" && v = "proved" && p = "y > x") obs));
+    gated "r2: a literal entry breaking the relation is a violation naming both fields" (fun () ->
+        let src = m "R2" "  fn r2() : Int do need_arel(ACons(5, 2, ANil)) end\n" in
+        some_violated "need_arel" (verdicts src [ "need_arel" ]);
+        let t = String.concat "\n" (errors src) in
+        Alcotest.(check bool) ("names the entry: " ^ t) true (has "the entry (5, 2)" t);
+        Alcotest.(check bool) "names the relation" true (has "y > x" t));
+    gated "r3: a relation projects onto one slot (was a false violation)" (fun () ->
+        all_proved "need_pos"
+          (verdicts
+             (m "R3" "  fn r3(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do need_pos(a) end\n")
+             [ "need_pos"; "a" ]));
+    gated "r4: an alpha-renamed relational demand is implied (was a false violation)" (fun () ->
+        all_proved "need_arel2"
+          (verdicts
+             (m "R4"
+                "  fn need_arel2(_a : Assoc({a : Int | true}, {b : Int | b > a})) : Int do 0 end\n\
+                \  fn r4(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do need_arel2(a) end\n")
+             [ "need_arel2"; "a" ]));
+    gated "r4' control: the same-name spelling is still proved" (fun () ->
+        all_proved "need_arel"
+          (verdicts
+             (m "R4P" "  fn r4p(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do need_arel(a) end\n")
+             [ "need_arel"; "a" ]));
+    gated "r5: match binders of one entry carry the relation as a path fact" (fun () ->
+        all_proved "need_gt" (verdicts (m "R5" r5) [ "need_gt" ]));
+    gated "r5 control: binders from two different entries carry no relation" (fun () ->
+        not_proved "need_gt"
+          (verdicts
+             (m "R5C"
+                "  fn r5c(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do\n\
+                \    match a do\n\
+                \      ACons(k, _, ACons(_, v, _)) -> need_gt(k, v)\n\
+                \      _ -> 0\n\
+                \    end\n\
+                \  end\n")
+             [ "need_gt" ]));
+    gated "r6: a weaker relation is still a violation" (fun () ->
+        some_violated "need_arel"
+          (verdicts
+             (m "R6" "  fn r6(a : Assoc({x : Int | true}, {y : Int | y >= x})) : Int do need_arel(a) end\n")
+             [ "need_arel"; "a" ]));
+    gated "proj_insufficient: a relation alone does not imply a positive value slot" (fun () ->
+        some_violated "need_pos"
+          (verdicts
+             (m "PI" "  fn pi(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_pos(a) end\n")
+             [ "need_pos"; "a" ]));
+    gated "two_not_entry_shaped: warned, neither assumed nor obliged" (fun () ->
+        let src =
+          m "TW"
+            "  type Two(k, v) = K(k) | V(v)\n\
+            \  fn need_tv(_t : Two(Int, {Int | _ > 0})) : Int do 0 end\n\
+            \  fn want_rel(_t : Two({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n\
+            \  fn have(t : Two({x : Int | x > 0}, {y : Int | y > x})) : Int do need_tv(t) end\n\
+            \  fn lit() : Int do want_rel(V(0 - 5)) end\n"
+        in
+        let ws = warnings src in
+        Alcotest.(check bool) ("warned: " ^ String.concat " | " ws) true
+          (List.exists (fun w -> has "This relation is not checked" w && has "`K`" w) ws);
+        not_proved "need_tv" (verdicts src [ "need_tv"; "t" ]);
+        Alcotest.(check bool) "want_rel owes no relation" false
+          (List.exists (fun (c, _, _, p) -> c = "want_rel" && p = "y > x") (snd (run src))));
+    gated "two_not_entry_shaped (Within): a Param slot related to a nested-list slot is warned" (fun () ->
+        let ws =
+          warnings
+            (m "TM"
+               "  type Mix(k, v) = MX(k, List(v))\n\
+               \  fn need_m(_t : Mix({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n")
+        in
+        Alcotest.(check bool) ("warned: " ^ String.concat " | " ws) true
+          (List.exists (fun w -> has "This relation is not checked" w) ws));
+    gated "nested_slot_rel: a relation naming a nested-container slot is warned and unchecked" (fun () ->
+        let src =
+          m "NS"
+            "  type P2(a, b) = P2(a, b)\n\
+            \  fn need_n(_p : P2({xs : List(Int) | true}, {y : Int | y > len(xs)})) : Int do 0 end\n\
+            \  fn go() : Int do need_n(P2([], 0 - 1)) end\n"
+        in
+        let ws = warnings src in
+        Alcotest.(check bool) ("warned: " ^ String.concat " | " ws) true
+          (List.exists (fun w -> has "This relation is not checked" w) ws);
+        Alcotest.(check bool) "no violation" false (List.mem "violated" (verdicts src [ "need_n" ])));
+    gated "nested_slot_rel: a slot inside a nested container naming an outer sibling is warned" (fun () ->
+        let ws =
+          warnings (m "NS2" "  fn need_l(_a : Assoc({x : Int | true}, List({y : Int | y > x}))) : Int do 0 end\n")
+        in
+        Alcotest.(check bool) ("warned: " ^ String.concat " | " ws) true
+          (List.exists (fun w -> has "This relation is not checked" w) ws));
+    (* Ruling (progress note): a function parametric in `k` and `v` may pair
+       the components of DIFFERENT entries (`shift` below), so parametricity
+       preserves slot facts but not relations.  The design's "reverse keeps
+       the relation" row would prove `shift`'s result too, falsely. *)
+    gated "rel_through_reverse: a parametric callee does not carry the relation (shift is why)" (fun () ->
+        let src =
+          m "RV"
+            "  fn rev_onto(a : Assoc(k, v), acc : Assoc(k, v)) : Assoc(k, v) do\n\
+            \    match a do\n\
+            \      ANil -> acc\n\
+            \      ACons(k, v, t) -> rev_onto(t, ACons(k, v, acc))\n\
+            \    end\n\
+            \  end\n\
+            \  fn shift(a : Assoc(k, v)) : Assoc(k, v) do\n\
+            \    match a do\n\
+            \      ACons(k1, _, ACons(k2, v2, t)) -> ACons(k1, v2, shift(ACons(k2, v2, t)))\n\
+            \      _ -> ANil\n\
+            \    end\n\
+            \  end\n\
+            \  fn use_rev(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_arel(rev_onto(a, ANil)) end\n\
+            \  fn use_shift(a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do need_arel(shift(a)) end\n\
+            \  fn use_lit() : Int do need_arel(shift(ACons(5, 6, ACons(0, 1, ANil)))) end\n"
+        in
+        let _, obs = run src in
+        let callers =
+          List.filter (fun (c, _, _, _) -> List.mem c [ "need_arel"; "rev_onto(…)"; "shift(…)" ]) obs
+        in
+        (* Each of the three demands is a skip (a `true` slot goal may still
+           prove, recorded under the subject); the RELATION is never proved. *)
+        Alcotest.(check int) "three skips" 3
+          (List.length (List.filter (fun (_, v, _, _) -> v = "skipped") callers));
+        Alcotest.(check bool) "the relation is never proved" false
+          (List.exists (fun (_, v, _, p) -> v = "proved" && p = "y > x") callers));
+    gated "rel_two_sources: a relation across two sources is a parametric-source skip" (fun () ->
+        let src =
+          m "TS"
+            "  fn zipkv(ks : Assoc(k, w), vs : Assoc(w2, v)) : Assoc(k, v) do\n\
+            \    match ks do\n\
+            \      ANil -> ANil\n\
+            \      ACons(k, _, kt) ->\n\
+            \        match vs do\n\
+            \          ANil -> ANil\n\
+            \          ACons(_, v, vt) -> ACons(k, v, zipkv(kt, vt))\n\
+            \        end\n\
+            \    end\n\
+            \  end\n\
+            \  fn go(ks : Assoc(Int, Int), vs : Assoc(Int, Int)) : Int do need_arel(zipkv(ks, vs)) end\n"
+        in
+        let _, obs = run src in
+        Alcotest.(check (list (pair string string))) "the demand"
+          [ ("skipped", "parametric-source-unproved") ]
+          (List.filter_map (fun (c, v, r, _) -> if c = "need_arel" then Some (v, r) else None) obs);
+        Alcotest.(check bool) "names the separate sources" true
+          (List.exists
+             (fun (c, d) -> c = "need_arel" && has "cannot be traced through separate sources" d)
+             (details src)));
+    gated "sibling_shadows_param: the sibling binder is meant, not the parameter" (fun () ->
+        some_violated "need_pos"
+          (verdicts
+             (m "SP"
+                "  fn f(x : {Int | _ > 100}, a : Assoc({x : Int | true}, {y : Int | y > x})) : Int do\n\
+                \    x + need_pos(a)\n\
+                \  end\n")
+             [ "need_pos"; "a" ]));
+    gated "unary_rel_is_slot: a binder-named one-slot predicate is the plain unary slot" (fun () ->
+        let go name ty = snd (run (m name ("  fn f(a : " ^ ty ^ ") : Int do need_pos(a) end\n"))) in
+        let named = go "U1" "Assoc({x : Int | x > 0}, {y : Int | y > 0})" in
+        let plain = go "U2" "Assoc({Int | _ > 0}, {Int | _ > 0})" in
+        Alcotest.(check (list (pair string string))) "ledger"
+          (List.map (fun (c, v, _, p) -> (c, v ^ " " ^ p)) plain)
+          (List.map (fun (c, v, _, p) -> (c, v ^ " " ^ p)) named);
+        Alcotest.(check (list (pair string string))) "proved" [ ("a", "proved _ > 0") ]
+          (List.map (fun (c, v, _, p) -> (c, v ^ " " ^ p)) named));
+    gated "a relation through a Within field is the nested container's own" (fun () ->
+        let src =
+          m "WI"
+            "  type Outer(k, v) = O(Assoc(k, v))\n\
+            \  fn need_o(_o : Outer({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n\
+            \  fn ok() : Int do need_o(O(ACons(1, 2, ANil))) end\n\
+            \  fn bad() : Int do need_o(O(ACons(5, 2, ANil))) end\n"
+        in
+        let vs = verdicts src [ "need_o" ] in
+        Alcotest.(check bool) "proved" true (List.mem "proved" vs);
+        some_violated "need_o" vs);
+    gated "an annotated let admits the relation into the container env" (fun () ->
+        all_proved "need_arel"
+          (verdicts
+             (m "LT"
+                "  fn go() : Int do\n\
+                \    let b : Assoc({x : Int | true}, {y : Int | y > x}) = ACons(1, 2, ANil)\n\
+                \    need_arel(b)\n\
+                \  end\n")
+             [ "need_arel"; "b" ]));
+    gated "a proved relational return is a fact at its call; a violated one is not" (fun () ->
+        let src =
+          m "DR"
+            "  fn mk() : Assoc({x : Int | true}, {y : Int | y > x}) do ACons(1, 2, ANil) end\n\
+            \  fn mk_bad() : Assoc({x : Int | true}, {y : Int | y > x}) do ACons(5, 2, ANil) end\n\
+            \  fn ok() : Int do need_arel(mk()) end\n\
+            \  fn bad() : Int do need_arel(mk_bad()) end\n"
+        in
+        let _, obs = run src in
+        let of_c c = List.filter_map (fun (c', v, _, _) -> if c' = c then Some v else None) obs in
+        some_violated "return of mk_bad" (of_c "return of mk_bad");
+        all_proved "mk() into need_arel" (of_c "mk(…)");
+        Alcotest.(check bool) "mk_bad() into need_arel is not proved" false
+          (List.mem "proved" (of_c "mk_bad(…)" @ of_c "need_arel")));
+    gated "a recursive map keeping the relation is proved by the self-call hypothesis" (fun () ->
+        let src =
+          m "RC"
+            "  fn bump(a : Assoc({x : Int | true}, {y : Int | y > x})) : Assoc({x : Int | true}, {y : Int | y > x}) do\n\
+            \    match a do\n\
+            \      ANil -> ANil\n\
+            \      ACons(k, v, t) -> ACons(k, v + 1, bump(t))\n\
+            \    end\n\
+            \  end\n\
+            \  fn bump_bad(a : Assoc({x : Int | true}, {y : Int | y > x})) : Assoc({x : Int | true}, {y : Int | y > x}) do\n\
+            \    match a do\n\
+            \      ANil -> ANil\n\
+            \      ACons(k, v, t) -> ACons(k, v - 1, bump_bad(t))\n\
+            \    end\n\
+            \  end\n"
+        in
+        let _, obs = run src in
+        let of_c c = List.filter_map (fun (c', v, _, _) -> if c' = c then Some v else None) obs in
+        all_proved "return of bump" (of_c "return of bump");
+        not_proved "return of bump_bad" (of_c "return of bump_bad"));
+    gated "a slot conjunct naming no sibling stays the slot's own fact" (fun () ->
+        let src =
+          m "CJ"
+            "  fn f(a : Assoc({x : Int | true}, {y : Int | y > 0 && y > x})) : Int do need_pos(a) end\n\
+            \  fn g(a : Assoc({x : Int | true}, {y : Int | y > 0 && y > x})) : Int do need_arel(a) end\n"
+        in
+        all_proved "need_pos / need_arel" (verdicts src [ "need_pos"; "need_arel"; "a" ]));
+    gated "a relation demanded through a one-source parametric call names the cause" (fun () ->
+        let src =
+          m "SS"
+            "  fn shift(a : Assoc(k, v)) : Assoc(k, v) do\n\
+            \    match a do\n\
+            \      ACons(k1, _, ACons(k2, v2, t)) -> ACons(k1, v2, shift(ACons(k2, v2, t)))\n\
+            \      _ -> ANil\n\
+            \    end\n\
+            \  end\n\
+            \  fn use_lit() : Int do need_arel(shift(ACons(5, 6, ACons(0, 1, ANil)))) end\n"
+        in
+        Alcotest.(check bool) "not preserved through `shift`" true
+          (List.exists
+             (fun (c, d) -> c = "need_arel" && has "is not preserved through `shift`" d)
+             (details src)));
+    gated "a callable passed for a relational codomain owes the relation at each tail" (fun () ->
+        let src =
+          m "PS"
+            "  fn apply(f : Int -> Assoc({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n\
+            \  fn ok() : Int do apply(fn n -> ACons(n, n + 1, ANil)) end\n\
+            \  fn bad() : Int do apply(fn n -> ACons(n, n, ANil)) end\n"
+        in
+        let vs = verdicts src [ "return of <lambda>" ] in
+        Alcotest.(check bool) ("proved: " ^ String.concat "," vs) true (List.mem "proved" vs);
+        some_violated "return of <lambda>" vs);
+    gated "audit: a well-formed relation is Enforced, a dropped one Inert_warned" (fun () ->
+        let src =
+          m "AU"
+            "  type Two(k, v) = K(k) | V(v)\n\
+            \  fn need_tw(_t : Two({x : Int | true}, {y : Int | y > x})) : Int do 0 end\n"
+        in
+        let dm = March_desugar.Desugar.desugar_module (parse src) in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx dm;
+        let of_pred fn_ p =
+          List.filter_map
+            (fun (st : RAudit.site) ->
+              match st.RAudit.origin with
+              | RAudit.Param (f, _) when f = fn_ && st.RAudit.predicate = p -> Some (disposition_tag (RAudit.classify st))
+              | _ -> None)
+            (RAudit.sites dm.March_ast.Ast.mod_decls)
+        in
+        Alcotest.(check (list string)) "need_arel's relation" [ "Enforced" ] (of_pred "need_arel" "y > x");
+        Alcotest.(check (list string)) "need_tw's relation" [ "Inert_warned" ] (of_pred "need_tw" "y > x"));
+    gated "cap verified: r1, r3 and r5 leave nothing unverified" (fun () ->
+        let src =
+          m ~verified:true "CV"
+            ("  fn r1() : Int do need_arel(ACons(1, 2, ANil)) end\n\
+             \  fn r3(a : Assoc({x : Int | x > 0}, {y : Int | y > x})) : Int do need_pos(a) end\n"
+            ^ r5)
+        in
+        Alcotest.(check (list string)) "no errors" [] (errors src));
+    gated "cap verified control: an unrefined source into a relational demand is an error" (fun () ->
+        let t =
+          String.concat "\n"
+            (errors (m ~verified:true "CV2" "  fn f(a : Assoc(Int, Int)) : Int do need_arel(a) end\n"))
+        in
+        Alcotest.(check bool) ("error: " ^ t) true (has "cannot verify" t)) ]
+
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -23899,4 +24271,5 @@ let () =
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("element-entries", element_entries_suite);
+      ("relational-elements", relational_elements_suite);
       ("z3-well-formed", z3_wellformed_suite) ]
