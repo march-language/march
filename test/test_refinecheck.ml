@@ -23676,6 +23676,71 @@ let fold_invariants_3_suite =
       "parametric-source-unproved" ]
 
 
+
+(* ── inference-lite (specs/2026-10-20-refinement-suggest-lite-design.md) ──
+   Shared fixture: parse, desugar and refine-check a module in a FRESH temp
+   root, so no VC cache is shared between tests (a warm cache masks
+   regressions). *)
+module PI = March_refinecheck.Precond_infer
+module LD = March_refinecheck.Ledger_diff
+module Ob = March_refinecheck.Obligation
+
+type infer_fixture = { fx_root : string; fx_m : March_ast.Ast.module_ }
+
+let with_infer_fixture (src : string) (f : infer_fixture -> 'a) : 'a =
+  with_temp_root "infer" (fun root ->
+      let m = March_desugar.Desugar.desugar_module (parse src) in
+      let errctx = March_errors.Errors.create () in
+      March_refinecheck.Refine_check.check_module ~root errctx m;
+      f { fx_root = root; fx_m = m })
+
+let infer_suggest_all (fx : infer_fixture) : PI.t list =
+  PI.suggest_all ~root:fx.fx_root ~is_user:(fun _ -> true) fx.fx_m
+
+let ld_key line callee : LD.key =
+  let sp = { March_ast.Ast.dummy_span with March_ast.Ast.start_line = line } in
+  { LD.span = sp; callee; predicate = "_ > 0"; kind = Ob.Precondition }
+
+let skipped = Ob.Skipped Ob.Solver_undecided
+
+let infer_guards_suite =
+  let changes = Alcotest.(list string) in
+  let show d = List.map (fun (k, c) -> Printf.sprintf "%s:%s" k.LD.callee (LD.change_name c)) d in
+  [ Alcotest.test_case "ledger diff classifies each site" `Quick (fun () ->
+        let a = ld_key 1 "a" and b = ld_key 2 "b" and c = ld_key 3 "c" and d = ld_key 4 "d" in
+        let before = LD.of_list [ (a, skipped); (b, Ob.Proved); (c, Ob.Proved) ] in
+        let after = LD.of_list [ (a, Ob.Proved); (b, skipped); (c, Ob.Proved); (d, Ob.Violated) ] in
+        Alcotest.check changes "diff"
+          [ "a:closed"; "b:opened"; "c:unchanged"; "d:new-violated" ]
+          (show (LD.diff ~before ~after)));
+    Alcotest.test_case "proves two, opens one: rejected (count-based scoring said +1)" `Quick (fun () ->
+        let a = ld_key 1 "a" and b = ld_key 2 "b" and c = ld_key 3 "c" in
+        let before = LD.of_list [ (a, skipped); (b, skipped); (c, Ob.Proved) ] in
+        let after = LD.of_list [ (a, Ob.Proved); (b, Ob.Proved); (c, skipped) ] in
+        Alcotest.(check bool) "not admissible" false (PI.admissible (LD.diff ~before ~after)));
+    Alcotest.test_case "closes one, opens nothing: admissible" `Quick (fun () ->
+        let a = ld_key 1 "a" and c = ld_key 3 "c" in
+        let before = LD.of_list [ (a, skipped); (c, Ob.Proved) ] in
+        let after = LD.of_list [ (a, Ob.Proved); (c, Ob.Proved) ] in
+        Alcotest.(check bool) "admissible" true (PI.admissible (LD.diff ~before ~after)));
+    Alcotest.test_case "a new skip is paid for by a close (net >= 0)" `Quick (fun () ->
+        let a = ld_key 1 "a" and n = ld_key 5 "n" in
+        let before = LD.of_list [ (a, skipped) ] in
+        let after = LD.of_list [ (a, Ob.Proved); (n, skipped) ] in
+        Alcotest.(check bool) "admissible" true (PI.admissible (LD.diff ~before ~after)));
+    gated "S1 unchanged: b : {Int | _ != 0}, solved" (fun () ->
+        with_infer_fixture
+          "mod S1 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn safe(a : Int, b : Int) : Int do a + need_nz(b) end\nend\n"
+          (fun fx ->
+            let rs = List.filter (fun r -> r.PI.rs_fn = "safe") (infer_suggest_all fx) in
+            match rs with
+            | [ r ] ->
+              Alcotest.(check string) "status" "solved" (PI.status_name r.PI.rs_status);
+              Alcotest.(check (list (pair string string))) "suggestion" [ ("b", "_ != 0") ]
+                (List.map (fun s -> (s.PI.sg_param, s.PI.sg_pred)) r.PI.rs_suggestions)
+            | _ -> Alcotest.failf "expected one result for safe, got %d" (List.length rs)))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -23818,6 +23883,7 @@ let () =
       ("abstract-leftovers-d", abstract_leftovers_d_suite);
       ("abstract-sugar", abstract_sugar_suite);
       ("hidden-field-elements", hidden_field_elements_suite);
+      ("infer-guards", infer_guards_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

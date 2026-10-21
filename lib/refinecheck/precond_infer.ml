@@ -299,17 +299,18 @@ let rec prune (path : string list) (name : string) (decls : A.decl list) :
 (* [debt] counts obligations that are NOT discharged.  [Trusted] is not debt: it
    is a deliberate, declared hole (`@[trusted]`), and proposing a contract to
    close something the author already waved through would be noise. *)
-type debt = { d_total : int; d_violated : int }
-
-let count_debt () : debt =
-  List.fold_left
-    (fun acc (o : Ob.t) ->
-      match o.Ob.verdict with
-      | Ob.Proved | Ob.Trusted -> acc
-      | Ob.Violated -> { d_total = acc.d_total + 1; d_violated = acc.d_violated + 1 }
-      | Ob.Skipped _ -> { acc with d_total = acc.d_total + 1 })
-    { d_total = 0; d_violated = 0 }
-    (Ob.all ())
+(* Admissibility of a hypothesis, from the per-site diff it produced against
+   the ledger it was tried on (design 2026-10-20 §2): it must CLOSE at least
+   one site, OPEN none (a previously settled site that is now anything else),
+   create no violation, and pay for every new skip with a close.  The count
+   this replaced scored "proved two, broke one" as +1 and accepted it. *)
+let admissible (d : (Ledger_diff.key * Ledger_diff.change) list) : bool =
+  let n = List.length in
+  let closed = Ledger_diff.closed d in
+  closed <> []
+  && Ledger_diff.opened d = []
+  && Ledger_diff.new_violated d = []
+  && n closed - n (Ledger_diff.new_skipped d) >= 0
 
 (* One probe: re-walk the pruned tree and read the ledger back.
 
@@ -318,7 +319,7 @@ let count_debt () : debt =
    same reason: a hypothesised signature is compiler input the author never
    wrote, and a crash while exploring it should cost that candidate, not the
    command. *)
-let walk_debt ~root ~defs (decls : A.decl list) : debt =
+let walk_ledger ~root ~defs (decls : A.decl list) : Ledger_diff.snapshot =
   Ob.reset ();
   let errctx = Err.create () in
   (try RC.visit_decls ~root errctx defs RC.rctx0 decls
@@ -337,7 +338,7 @@ let walk_debt ~root ~defs (decls : A.decl list) : debt =
        { A.mod_name = { A.txt = "<probe>"; A.span = A.dummy_span }
        ; A.mod_decls = decls }
    with _ -> ());
-  count_debt ()
+  Ledger_diff.snapshot ()
 
 (* ── Results ──────────────────────────────────────────────────────────────── *)
 
@@ -407,14 +408,14 @@ let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
   | None -> None
   | Some (fd0, rebuild) ->
     let span = fd0.A.fn_name.A.span in
-    let base = walk_debt ~root ~defs (rebuild fd0) in
+    let base = walk_ledger ~root ~defs (rebuild fd0) in
     let mk_result ?(suggestions = []) ~after status =
       Some
         { rs_fn = qualified; rs_span = span; rs_status = status;
-          rs_debt_before = base.d_total; rs_debt_after = after;
+          rs_debt_before = Ledger_diff.debt base; rs_debt_after = after;
           rs_suggestions = suggestions; rs_queries = 0 }
     in
-    if base.d_total = 0 then mk_result ~after:0 No_debt
+    if Ledger_diff.debt base = 0 then mk_result ~after:0 No_debt
     else begin
       (* Parameters are taken from the first clause: a multi-clause function
          shares one signature, and March's desugar has already collapsed
@@ -434,8 +435,8 @@ let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
          parameter — the loop never conjoins two proposals onto one parameter,
          so it cannot synthesise a contradictory contract that "proves"
          everything vacuously. *)
-      let rec round acc_fd acc_sugs (cur : debt) (remaining : (string * A.ty) list) =
-        if cur.d_total = 0 || remaining = [] || !budget <= 0 then
+      let rec round acc_fd acc_sugs (cur : Ledger_diff.snapshot) (remaining : (string * A.ty) list) =
+        if Ledger_diff.debt cur = 0 || remaining = [] || !budget <= 0 then
           (acc_sugs, cur)
         else begin
           let best = ref None in
@@ -447,13 +448,14 @@ let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
                     decr budget;
                     incr queries;
                     let hyp = with_refinement acc_fd ~param:pname ~mk:cand.c_pred in
-                    let d = walk_debt ~root ~defs (rebuild hyp) in
-                    let gained = cur.d_total - d.d_total in
-                    (* Admissible only if it strictly shrinks the debt AND
-                       introduces no new violation.  A candidate that turns a
-                       silent skip into a proved-false obligation is a wrong
-                       contract, however much else it discharges. *)
-                    if gained > 0 && d.d_violated <= cur.d_violated then
+                    let d = walk_ledger ~root ~defs (rebuild hyp) in
+                    let delta = Ledger_diff.diff ~before:cur ~after:d in
+                    let gained = List.length (Ledger_diff.closed delta) in
+                    (* Admissible only per [admissible]: it closes a site,
+                       opens none, and creates no violation.  A candidate that
+                       turns a silent skip into a proved-false obligation is a
+                       wrong contract, however much else it discharges. *)
+                    if admissible delta then
                       match !best with
                       | Some (g, _, _, _, _) when g >= gained -> ()
                       | _ -> best := Some (gained, pname, pty, cand, d)
@@ -479,16 +481,16 @@ let infer_fn ~root ~defs ~(decls : A.decl list) ~(path : string list)
       let (sugs, final) = round fd0 [] base params in
       (* A budget that ran out means the search was TRUNCATED, so neither
          "nothing fits" nor "this is all that fits" is an honest report. *)
-      let starved = !budget <= 0 && final.d_total > 0 in
+      let starved = !budget <= 0 && Ledger_diff.debt final > 0 in
       let status =
-        if final.d_total = 0 then Solved
+        if Ledger_diff.debt final = 0 then Solved
         else if starved then Budget_exhausted
         else if sugs = [] then No_candidate
         else Partial
       in
       Some
         { rs_fn = qualified; rs_span = span; rs_status = status;
-          rs_debt_before = base.d_total; rs_debt_after = final.d_total;
+          rs_debt_before = Ledger_diff.debt base; rs_debt_after = Ledger_diff.debt final;
           rs_suggestions = sugs; rs_queries = !queries }
     end
 
