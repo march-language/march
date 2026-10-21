@@ -23830,6 +23830,39 @@ let infer_guards_suite =
             | os -> Alcotest.failf "expected one need_below obligation, got %d" (List.length os)))
   ]
 
+
+module IS = March_refinecheck.Infer_slot
+
+let slots_of (src : string) : IS.slot list =
+  IS.enumerate ~is_user:(fun _ -> true) (March_desugar.Desugar.desugar_module (parse src)).March_ast.Ast.mod_decls
+
+let infer_vocab_suite =
+  [ Alcotest.test_case "slot: an element parameter is a K3 slot" `Quick (fun () ->
+        let ss = slots_of "mod S do\n  fn total(xs : List(Int)) : Int do 0 end\nend\n" in
+        Alcotest.(check bool) "Elem(Param xs) with K3" true
+          (List.exists
+             (fun (s : IS.slot) -> s.IS.fn = "total" && s.IS.path = IS.Elem (IS.Param "xs") && List.mem IS.K3 s.IS.kinds)
+             ss));
+    Alcotest.test_case "slot: an already-refined element is not a slot" `Quick (fun () ->
+        let ss = slots_of "mod S do\n  fn total(xs : List({Int | _ > 0})) : Int do 0 end\nend\n" in
+        Alcotest.(check bool) "no Elem(Param xs)" false
+          (List.exists (fun (s : IS.slot) -> s.IS.path = IS.Elem (IS.Param "xs")) ss));
+    Alcotest.test_case "slot: a trusted function has no slots" `Quick (fun () ->
+        let ss = slots_of "mod S do\n  @[trusted]\n  fn total(xs : List(Int), n : Int) : Int do 0 end\nend\n" in
+        Alcotest.(check int) "none" 0 (List.length ss));
+    Alcotest.test_case "slot: an unannotated signature is reported" `Quick (fun () ->
+        let m = March_desugar.Desugar.desugar_module (parse "mod S do\n  fn filter(m, pred) do m end\nend\n") in
+        Alcotest.(check (list string)) "unannotated" [ "filter" ]
+          (List.map fst (IS.unannotated m.March_ast.Ast.mod_decls)));
+    Alcotest.test_case "slot: respell a tuple component's element" `Quick (fun () ->
+        let ss = slots_of "mod S do\n  fn part(xs : List(a), f : a -> Bool) : (List(a), List(a)) do (xs, xs) end\nend\n" in
+        match List.find_opt (fun (s : IS.slot) -> s.IS.path = IS.Elem (IS.Tuple (1, IS.Return))) ss with
+        | Some s ->
+          Alcotest.(check (option string)) "respelled" (Some "(List(a), List({a | !p(_)}))")
+            (IS.respell s ~pred:"!p(_)")
+        | None -> Alcotest.fail "no Elem(Tuple(1, Return)) slot")
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -23973,6 +24006,7 @@ let () =
       ("abstract-sugar", abstract_sugar_suite);
       ("hidden-field-elements", hidden_field_elements_suite);
       ("infer-guards", infer_guards_suite);
+      ("infer-vocab", infer_vocab_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]
