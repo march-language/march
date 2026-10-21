@@ -254,12 +254,86 @@ end
                   List.map (fun (c : A.fn_clause) -> { c with A.fc_params = List.map upd_fp c.A.fc_params }) fd.A.fn_clauses })
         | _ -> None))
 
+(* ── K7: fold accumulators (design §1.2 row K7) ──────────────────────────── *)
+
+(* A generic pre-order map over the expression forms a fold call site can sit
+   under.  Forms it does not descend into are returned unchanged (a lambda
+   hidden there is simply not a candidate). *)
+let rec map_expr (f : A.expr -> A.expr option) (e : A.expr) : A.expr =
+  match f e with
+  | Some e' -> e'
+  | None -> (
+    let go = map_expr f in
+    match e with
+    | A.EApp (h, xs, sp) -> A.EApp (go h, List.map go xs, sp)
+    | A.EBlock (es, sp) -> A.EBlock (List.map go es, sp)
+    | A.ELet (b, sp) -> A.ELet ({ b with A.bind_expr = go b.A.bind_expr }, sp)
+    | A.EIf (c, t, e, sp) -> A.EIf (go c, go t, go e, sp)
+    | A.EMatch (sc, brs, sp) ->
+      A.EMatch (go sc, List.map (fun (br : A.branch) -> { br with A.branch_body = go br.A.branch_body }) brs, sp)
+    | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)
+    | A.ELam (ps, b, sp) -> A.ELam (ps, go b, sp)
+    | A.EPipe (a, b, sp) -> A.EPipe (go a, go b, sp)
+    | A.EAnnot (x, t, sp) -> A.EAnnot (go x, t, sp)
+    | other -> other)
+
+let iter_expr (f : A.expr -> unit) (e : A.expr) : unit =
+  ignore (map_expr (fun x -> f x; None) e)
+
+(* The callee [name] resolves to, among the unit's functions (bare or by its
+   last qualified component). *)
+let find_fn (unit_decls : A.decl list) (name : string) : A.fn_def option =
+  List.find_map
+    (fun ((_, (fd : A.fn_def)) as pf) ->
+      if PI.qualified_of pf = name || ((not (String.contains name '.')) && fd.A.fn_name.A.txt = name) then Some fd
+      else None)
+    (PI.enum_fns [] unit_decls)
+
+(* A fold-shaped call: the callee returns a bare type variable [b]; one
+   argument is a lambda whose FIRST parameter is unannotated and sits at a
+   callback position whose domain is [b]; and the argument at the [b]-typed
+   parameter is an Int literal (v1 reads the accumulator's base type from
+   it). *)
+let k7_slots ~(unit_decls : A.decl list) ~(fn : string) (fd : A.fn_def) : slot list =
+  let out = ref [] in
+  let visit (e : A.expr) =
+    match e with
+    | A.EApp (A.EVar { A.txt = callee; _ }, args, _) -> (
+      match find_fn unit_decls callee with
+      | Some ({ A.fn_ret_ty = Some (A.TyVar b); A.fn_clauses = c :: _; _ }) ->
+        let ps = PI.named_params c in
+        if List.length ps = List.length args then
+          let init_ok =
+            List.exists2
+              (fun (_, t) a ->
+                match t, a with A.TyVar v, A.ELit (A.LitInt _, _) -> v.A.txt = b.A.txt | _ -> false)
+              ps args
+          in
+          List.iter2
+            (fun (_, t) a ->
+              match t, a with
+              | A.TyArrow (A.TyVar d, _), A.ELam ((p0 : A.param) :: _ :: _, _, sp)
+                when init_ok && d.A.txt = b.A.txt && p0.A.param_ty = None ->
+                out :=
+                  { fn; fd;
+                    path = Lambda_param { line = sp.A.start_line; col = sp.A.start_col; param = p0.A.param_name.A.txt };
+                    base = A.TyCon ({ A.txt = "Int"; A.span = A.dummy_span }, []);
+                    kinds = [ K7 ] }
+                  :: !out
+              | _ -> ())
+            ps args
+      | _ -> ())
+    | _ -> ()
+  in
+  if not (excluded fd) then List.iter (fun (c : A.fn_clause) -> iter_expr visit c.A.fc_body) fd.A.fn_clauses;
+  List.rev !out
+
 let enumerate ~(is_user : A.span -> bool) (decls : A.decl list) : slot list =
   PI.enum_fns [] decls
   |> List.filter (fun (_, (fd : A.fn_def)) -> is_user fd.A.fn_name.A.span)
   |> List.concat_map (fun ((_, fd) as pf) ->
          let fn = PI.qualified_of pf in
-         slots_of_fn ~fn fd @ k6_slots ~fn fd)
+         slots_of_fn ~fn fd @ k6_slots ~fn fd @ k7_slots ~unit_decls:decls ~fn fd)
 
 (* Functions with a parameter that has no annotation: no base to refine
    (reported `unannotated-signature`, §1.1). *)
@@ -312,4 +386,20 @@ let install (s : slot) ~(mk : A.span -> A.expr) : A.fn_def =
     { fd with
       A.fn_clauses =
         List.map (fun (c : A.fn_clause) -> { c with A.fc_params = List.map upd_fp c.A.fc_params }) fd.A.fn_clauses }
+  | Lambda_param { line; col; param } ->
+    let mk_ty base = A.TyRefine (base, None, mk A.dummy_span) in
+    let rewrite (e : A.expr) =
+      match e with
+      | A.ELam (ps, b, sp) when sp.A.start_line = line && sp.A.start_col = col ->
+        Some
+          (A.ELam
+             ( List.map
+                 (fun (p : A.param) ->
+                   if p.A.param_name.A.txt = param then { p with A.param_ty = Some (mk_ty s.base) } else p)
+                 ps,
+               b, sp ))
+      | _ -> None
+    in
+    { fd with
+      A.fn_clauses = List.map (fun (c : A.fn_clause) -> { c with A.fc_body = map_expr rewrite c.A.fc_body }) fd.A.fn_clauses }
   | _ -> fd

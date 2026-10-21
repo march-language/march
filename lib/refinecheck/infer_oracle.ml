@@ -119,6 +119,29 @@ let elem_return ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
     else if not (PI.admissible delta) then Reject ("not-useful", "closes no caller site")
     else Accept { closes = LD.closed delta; new_skipped = LD.new_skipped delta }
 
+(* K7: an annotated accumulator.  TRUE: the annotation's own obligation (base
+   and step) is proved — an `accumulator-base-unproved` /
+   `accumulator-step-unproved` skip rejects.  USEFUL: a site in the step or on
+   the fold result closes; nothing opens; no violation. *)
+let accumulator ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
+  let after = PI.walk_ledger ~root ~defs:(defs_with cx hyp) (cx.rebuild hyp) in
+  let acc_skip =
+    List.exists
+      (fun (_, v) ->
+        match v with
+        | Obligation.Skipped r ->
+          let n = Obligation.reason_name r in
+          n = "accumulator-base-unproved" || n = "accumulator-step-unproved"
+        | _ -> false)
+      after
+  in
+  let delta = LD.diff ~before:cx.base ~after in
+  if acc_skip then Reject ("not-true", "the accumulator invariant's base or step is not proved")
+  else if LD.new_violated delta <> [] then Reject ("not-true", "creates a violation")
+  else if LD.opened delta <> [] then Reject ("opens-site", "a previously proved obligation is no longer proved")
+  else if not (PI.admissible delta) then Reject ("not-useful", "closes no site")
+  else Accept { closes = LD.closed delta; new_skipped = LD.new_skipped delta }
+
 (* The checker reads a callee's DEFINITION (not only its signature) from
    [Refine_param.fn_defs_tbl], registered once by [check_module] from the
    unhypothesised function — that is where a caller finds a proved element
@@ -153,6 +176,7 @@ let probe ~(root : string) (cx : ctx) (s : IS.slot) (c : IV.cand) : verdict =
     match s.IS.path with
     | IS.Return -> return_ ~root cx hyp
     | IS.Param _ -> precondition ~root cx hyp
+    | IS.Lambda_param _ -> accumulator ~root cx hyp
     | p -> (
       match IS.root p with
       | IS.Param _ -> precondition ~root cx hyp

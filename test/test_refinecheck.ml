@@ -24044,6 +24044,43 @@ let infer_abstract_suite =
       ~fn:"bad" ~expect:None
   ]
 
+
+let k7_best (fx : infer_fixture) ~(fn : string) : string option =
+  let decls = fx.fx_m.March_ast.Ast.mod_decls in
+  match List.find_opt (fun (s : IS.slot) -> s.IS.fn = fn && List.mem IS.K7 s.IS.kinds) (IS.enumerate ~is_user:(fun _ -> true) decls) with
+  | None -> None
+  | Some slot ->
+    let cands = IO.ordered_candidates ~root:fx.fx_root ~ledger:(Ob.all ()) ~unit_decls:decls slot in
+    (match fst (IO.best_for_slot ~root:fx.fx_root ~decls slot cands ~budget:(ref 100)) with
+     | Some (c, _) -> Some c.IV.c.PI.c_text
+     | None -> None)
+
+let infer_accumulator_suite =
+  let pre = "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n" in
+  let m body = "mod K7 do\n" ^ pre ^ body ^ "end\n" in
+  let fold init step =
+    Printf.sprintf "  fn go(ys : List(Int)) : Int do\n    List.fold_left(ys, %s, fn (acc, _x) ->\n      let _u = need_pos(acc)\n      %s)\n  end\n" init step
+  in
+  [ gated "F1: an annotated accumulator is proposed" (fun () ->
+        with_infer_fixture ~stdlib:true (m (fold "1" "acc + 1")) (fun fx ->
+            Alcotest.(check (option string)) "proposal" (Some "_ > 0") (k7_best fx ~fn:"go")));
+    gated "a failing base (init 0) is not proposed" (fun () ->
+        with_infer_fixture ~stdlib:true (m (fold "0" "acc + 1")) (fun fx ->
+            Alcotest.(check (option string)) "proposal" None (k7_best fx ~fn:"go")));
+    gated "a failing step (acc - 1) is not proposed" (fun () ->
+        with_infer_fixture ~stdlib:true (m (fold "1" "acc - 1")) (fun fx ->
+            Alcotest.(check (option string)) "proposal" None (k7_best fx ~fn:"go")));
+    Alcotest.test_case "splice_lambda_param: parenthesised" `Quick (fun () ->
+        let src = "fn go(ys) do\n  List.fold_left(ys, 1, fn (acc, x) -> acc + x)\nend\n" in
+        Alcotest.(check (option string)) "spliced"
+          (Some "fn go(ys) do\n  List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, x) -> acc + x)\nend\n")
+          (March_refactor.Refine_edit.splice_lambda_param ~src ~line:2 ~col:24 ~param:"acc" ~annotation:"{Int | _ > 0}"));
+    Alcotest.test_case "splice_lambda_param: unparenthesised is None" `Quick (fun () ->
+        let src = "fn go(ys) do\n  Enum.fold(ys, 1, fn acc -> fn x -> acc + x)\nend\n" in
+        Alcotest.(check (option string)) "none" None
+          (March_refactor.Refine_edit.splice_lambda_param ~src ~line:2 ~col:19 ~param:"acc" ~annotation:"{Int | _ > 0}"))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -24190,6 +24227,7 @@ let () =
       ("infer-vocab", infer_vocab_suite);
       ("infer-elements", infer_elements_suite);
       ("infer-abstract", infer_abstract_suite);
+      ("infer-accumulator", infer_accumulator_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

@@ -203,3 +203,62 @@ let position_of_offset (src : string) (ofs : int) : int * int =
        src
    with Exit -> ());
   (!line, !col)
+
+(** [splice_lambda_param ~src ~line ~col ~param ~annotation] writes
+    [param : annotation] for a parameter of the lambda whose `fn` starts at
+    1-based [line] and column [col] (the parser's lambda span; a column off
+    by one is tolerated by scanning from [col - 1]).  Only a PARENTHESISED
+    parameter list is edited: `fn acc -> …` has nowhere to put an
+    annotation without rewriting the lambda, so it returns [None] and the
+    caller reports "apply by hand" (design 2026-10-20 §4.3).  A parameter
+    that already carries an annotation also returns [None]. *)
+let splice_lambda_param ~(src : string) ~(line : int) ~(col : int) ~(param : string)
+    ~(annotation : string) : string option =
+  let n = String.length src in
+  let rec line_start i l = if l <= 1 then Some i else
+      match String.index_from_opt src i '\n' with
+      | Some j -> line_start (j + 1) (l - 1)
+      | None -> None
+  in
+  match line_start 0 line with
+  | None -> None
+  | Some ls ->
+    let from = max ls (ls + col - 1) in
+    let rec find_fn i =
+      if i + 1 >= n || src.[i] = '\n' then None
+      else if src.[i] = 'f' && src.[i + 1] = 'n'
+              && (i = 0 || not (is_word src.[i - 1]))
+              && (i + 2 >= n || not (is_word src.[i + 2]))
+      then Some (i + 2)
+      else find_fn (i + 1)
+    in
+    let rec skip_ws i = if i < n && (src.[i] = ' ' || src.[i] = '\t') then skip_ws (i + 1) else i in
+    match find_fn from with
+    | None -> None
+    | Some after_fn ->
+      let i = skip_ws after_fn in
+      if i >= n || src.[i] <> '(' then None
+      else
+        (* Walk the parameter list at depth 1, looking for [param] as a whole
+           word that starts an element (after '(' or ',') and is followed by
+           ',' or ')' — i.e. not already annotated. *)
+        let plen = String.length param in
+        let rec scan j depth at_elem_start =
+          if j >= n then None
+          else
+            let c = src.[j] in
+            if c = '(' then scan (j + 1) (depth + 1) false
+            else if c = ')' then (if depth = 1 then None else scan (j + 1) (depth - 1) false)
+            else if depth = 1 && c = ',' then scan (j + 1) depth true
+            else if depth = 1 && at_elem_start && (c = ' ' || c = '\t' || c = '\n') then scan (j + 1) depth true
+            else if depth = 1 && at_elem_start
+                    && j + plen <= n && String.sub src j plen = param
+                    && (j + plen >= n || not (is_word src.[j + plen]))
+            then
+              let k = skip_ws (j + plen) in
+              if k < n && (src.[k] = ',' || src.[k] = ')') then
+                Some (String.sub src 0 (j + plen) ^ " : " ^ annotation ^ String.sub src (j + plen) (n - j - plen))
+              else None
+            else scan (j + 1) depth false
+        in
+        scan (i + 1) 1 true
