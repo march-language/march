@@ -1124,7 +1124,7 @@ jobs:
     name: property-oracle (${{ matrix.shard }}/2)
     needs: ocaml-build
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 42
     strategy:
       fail-fast: false
       matrix:
@@ -1211,7 +1211,15 @@ jobs:
           fi
 
       - name: Differential oracle (shard ${{ matrix.shard }}/2, cases ${{ matrix.cases }})
-        timeout-minutes: 25
+        # Sized from measured runs, not the case split: on 2026-10-21 every
+        # list on one main runner took 17-25 min (cases 0,20: 1480 s, the step
+        # finishing at 24:59 of a 25 min cap) while the same lists took 11-16
+        # min on the other runner, and the next PR run timed out at 25 with no
+        # case failing. The slow runner flips between shards from run to run
+        # (shard 2 was the slower one on 2026-10-20), so re-balancing the lists
+        # does not help: it is per-runner speed. 33 leaves ~30% headroom over
+        # the slowest observed list; the job cap below covers setup on top.
+        timeout-minutes: 33
         run: |
           # One process per case list, all at once, each with its own alcotest
           # log dir. Every process is waited for and every log printed, so one
