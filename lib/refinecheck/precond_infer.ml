@@ -464,6 +464,13 @@ let admissible (d : (Ledger_diff.key * Ledger_diff.change) list) : bool =
    command. *)
 let walk_ledger ~root ~defs (decls : A.decl list) : Ledger_diff.snapshot =
   Ob.reset ();
+  (* Each walk predicts what a fresh `--check` of the hypothesis program will
+     report, and a fresh check starts the witness executor with its whole
+     module budget: a skip it can promote to a demonstrated violation (by
+     running the enclosing function) is promoted there.  Without the reset
+     the earlier probes spend the budget, a later walk files the same site as
+     a skip, and the applied program's re-check disagrees. *)
+  Witness.wall_budget := Witness.initial_wall_budget;
   let errctx = Err.create () in
   (try RC.visit_decls ~root errctx defs RC.rctx0 decls
    with _ -> ());
@@ -475,12 +482,13 @@ let walk_ledger ~root ~defs (decls : A.decl list) : Ledger_diff.snapshot =
      would report [No_candidate], and the whole feature would still be dead
      while looking wired up.
      [context_decls] keeps `DOpts`, so the pruned tree still carries the
-     `cap no_panic` that makes these obligations exist at all. *)
-  (try
-     Division_safety.check_module ~root errctx
-       { A.mod_name = { A.txt = "<probe>"; A.span = A.dummy_span }
-       ; A.mod_decls = decls }
-   with _ -> ());
+     `cap no_panic` that makes these obligations exist at all.
+     [check_decls], not [check_module]: the latter registers its module with
+     the witness executor, and the executor must keep the REAL program — a
+     pruned probe tree has lost the stdlib, so every later witness run (the
+     one that promotes a skip to a demonstrated violation) would fail and the
+     probe would predict a skip the applied program does not have. *)
+  (try Division_safety.check_decls ~root errctx decls with _ -> ());
   Ledger_diff.snapshot ()
 
 (* ── Results ──────────────────────────────────────────────────────────────── *)

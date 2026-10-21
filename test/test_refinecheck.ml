@@ -24323,6 +24323,14 @@ let infer_apply_suite =
             let _, out = run_cli_in dir "--check --refine-infer" in
             Alcotest.(check bool) ("not skipped: " ^ out) false (Astring_contains.contains out "skipped, the program has errors");
             Alcotest.(check bool) ("pos_only proposed: " ^ out) true (Astring_contains.contains out "1 proposed")));
+    gated "a caller's caller makes the requirement concrete: predicted, not a mismatch (evaluation)" (fun () ->
+        (* `pop_n(j : {Int | _ == 0})` costs `legs` a skip in a probe that sees
+           only direct callers; `main`'s literal call turns it into a
+           violation once applied.  The probe must see the caller's callers. *)
+        let src = "mod TR do\n  pfn pop_n(j : Int, v) do\n    if j == 0 do v\n    else\n      let (smaller, _) = Array.pop(v)\n      pop_n(j - 1, smaller)\n    end\n  end\n  pfn legs(cut : Int, xs : List(Int)) : Int do Array.length(pop_n(cut, Array.from_list(xs))) end\n  fn main() : Int do legs(1, []) end\nend\n" in
+        with_src_dir src (fun dir _ ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check bool) ("no prediction mismatch: " ^ out) true (code <> 3)));
     gated "--refine-infer-diff prints the edit without writing" (fun () ->
         with_src_dir e2 (fun dir contents ->
             let before = contents () in
