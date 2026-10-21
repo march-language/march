@@ -14,3 +14,13 @@ reduce" stdlib/*.march`) found three it did not:
 - `JsonStream.fold(chunks, z, f)` and `Flow.reduce(stage, start, f)` delegate to `Seq.fold`,
   so they stay skips for the same reason `Seq.fold` does (church-encoded; decision 5). No
   change planned; listed here so the next survey does not rediscover them.
+
+**Closed 2026-10-21** by the stdlib refinement sweep
+(`specs/progress/2026-10-21-stdlib-refinement-sweep.md`). `Hamt.fold` now declares
+`fold(node : HEntry(k, v), acc : b, f : b -> k -> v -> b) : b`. The arrow is right-associative,
+so `b -> k -> v -> b` IS `b -> (k -> (v -> b))`, the same spelling `Enum.fold` uses for its
+curried `b -> a -> b`; the stdlib typechecks with it (full `scripts/run-tests.sh`, including the
+compiler suite). The checker peels the curried step `fn acc -> fn k -> fn v -> …`, so
+`need_nn(Hamt.fold(h, 0, fn acc -> fn _k -> fn _v -> acc + 1))` is proved and an `acc - 1` step
+is `accumulator-step-unproved` (group `stdlib-refine-sweep`). The `JsonStream.fold` /
+`Flow.reduce` note above is unchanged: they stay skips.

@@ -680,7 +680,7 @@ mod Enum do
       march> Enum.scan([], 0, fn acc -> fn x -> acc + x)
       [0]
   """
-  fn scan(xs, zero, f) do
+  fn scan(xs : List(a), zero : b, f : b -> a -> b) : List(b) do
     fn go(lst, acc, result) do
       match lst do
       Nil        -> rev(result)

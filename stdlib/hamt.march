@@ -505,7 +505,7 @@ mod Hamt do
       march> Hamt.fold(h3, 0, fn acc -> fn k -> fn v -> acc + k + v)
       33
   """
-  fn fold(node, acc, f) do
+  fn fold(node : HEntry(k, v), acc : b, f : b -> k -> v -> b) : b do
     hamt_fold(acc, node, f)
   end
 
