@@ -3045,7 +3045,7 @@ let with_fake_march ~stderr_line ~rc f =
 
 let test_refine_infer_reports_march_failure () =
   with_fake_march ~stderr_line:"march: unknown option '--refine-infer'." ~rc:2 (fun env ->
-      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "a.march" ] ~apply:false ~diff:false with
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "a.march" ] ~apply:false ~diff:false () with
       | Ok [ (f, why) ] ->
         Alcotest.(check string) "file" "a.march" f;
         Alcotest.(check bool) "reason names the compiler's message" true
@@ -3055,7 +3055,7 @@ let test_refine_infer_reports_march_failure () =
 
 let test_refine_infer_reports_unchecked_file () =
   with_fake_march ~stderr_line:"--refine-infer: skipped, the program has errors (fix them first)" ~rc:1 (fun env ->
-      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "b.march" ] ~apply:false ~diff:false with
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "b.march" ] ~apply:false ~diff:false () with
       | Ok [ ("b.march", why) ] ->
         Alcotest.(check bool) "reason is the skip line" true
           (try ignore (Str.search_forward (Str.regexp_string "the program has errors") why 0); true with Not_found -> false)
@@ -3064,16 +3064,77 @@ let test_refine_infer_reports_unchecked_file () =
 
 let test_refine_infer_clean_run_skips_nothing () =
   with_fake_march ~stderr_line:"" ~rc:0 (fun env ->
-      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "c.march" ] ~apply:false ~diff:false with
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "c.march" ] ~apply:false ~diff:false () with
       | Ok [] -> ()
       | Ok l -> Alcotest.failf "expected nothing skipped, got %d" (List.length l)
       | Error e -> Alcotest.failf "unexpected error: %s" e)
 
 let test_refine_infer_mismatch_is_an_error () =
   with_fake_march ~stderr_line:"--refine-infer: the re-check did not match" ~rc:3 (fun env ->
-      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "d.march" ] ~apply:true ~diff:false with
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "d.march" ] ~apply:true ~diff:false () with
       | Error _ -> ()
       | Ok _ -> Alcotest.fail "a reverted apply must be an error")
+
+(* `forge refine --infer --apply` checks the project as ONE unit.  One run per
+   file used the file as the entry, and the resolver loads only the modules an
+   entry names: a caller in another file was invisible, so `total` below was
+   withheld as having only external callers, or not, depending on which file
+   happened to be the entry. *)
+let infer_project () =
+  let root = Filename.temp_dir "forge_infer_" "" in
+  let lib = Filename.concat root "lib" in
+  let sub = Filename.concat lib "inferdemo" in
+  Unix.mkdir lib 0o755;
+  Unix.mkdir sub 0o755;
+  let write f s = Out_channel.with_open_bin f (fun oc -> output_string oc s) in
+  let main = Filename.concat lib "inferdemo.march" and user = Filename.concat sub "user.march" in
+  write main
+    "mod Inferdemo do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n  fn total(xs : List(Int)) : Int do sum_pos(xs) end\n  fn lonely(xs : List(Int)) : Int do sum_pos(xs) end\nend\n";
+  write user "mod Inferdemo.User do\n  fn run() : Int do Inferdemo.total([1, 2]) end\nend\n";
+  let env =
+    Printf.sprintf "HOME=%s MARCH_LIB_PATH=%s " (Filename.quote root) (Filename.quote (lib ^ ":" ^ sub))
+  in
+  (root, env, main, [ main; user ])
+
+let z3_on_path () = Sys.command "command -v z3 > /dev/null 2>&1" = 0
+
+let read_all f = In_channel.with_open_bin f In_channel.input_all
+
+let contains hay needle =
+  try ignore (Str.search_forward (Str.regexp_string needle) hay 0); true with Not_found -> false
+
+(* A project that does not check as one unit falls back to one run per file,
+   so the files that do check still get inference. *)
+let test_refine_infer_falls_back_per_file () =
+  with_fake_march ~stderr_line:"--refine-infer: skipped, the program has errors (fix them first)" ~rc:1 (fun env ->
+      let dir = Filename.temp_dir "forge_infer_fb_" "" in
+      let mk n m = let f = Filename.concat dir n in Out_channel.with_open_bin f (fun oc -> Printf.fprintf oc "mod %s do\nend\n" m); f in
+      let a = mk "a.march" "A" and b = mk "b.march" "B" in
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ a; b ] ~apply:false ~diff:false () with
+      | Ok sk -> Alcotest.(check (list string)) "each file tried on its own" [ a; b ] (List.map fst sk)
+      | Error e -> Alcotest.failf "unexpected error: %s" e)
+
+let test_refine_infer_apply_whole_project () =
+  if not (z3_on_path ()) then Alcotest.skip ();
+  with_dev_march_on_path (fun () ->
+      let _, env, main, files = infer_project () in
+      (match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files ~apply:true ~diff:false () with
+       | Ok [] -> ()
+       | Ok sk -> Alcotest.failf "skipped: %s" (String.concat "; " (List.map snd sk))
+       | Error e -> Alcotest.failf "error: %s" e);
+      let src = read_all main in
+      Alcotest.(check bool) ("total written (its caller is in another file): " ^ src) true
+        (contains src "fn total(xs : List({Int | _ > 0}))");
+      Alcotest.(check bool) "lonely withheld without --apply-public" true
+        (contains src "fn lonely(xs : List(Int))"))
+
+let test_refine_infer_apply_public () =
+  if not (z3_on_path ()) then Alcotest.skip ();
+  with_dev_march_on_path (fun () ->
+      let _, env, main, files = infer_project () in
+      ignore (March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files ~apply:true ~diff:false ~apply_public:true ());
+      Alcotest.(check bool) "lonely written with --apply-public" true
+        (contains (read_all main) "fn lonely(xs : List({Int | _ > 0}))"))
 
 let () =
   Alcotest.run "forge" [
@@ -3090,6 +3151,9 @@ let () =
       Alcotest.test_case "a file that does not check is reported" `Quick test_refine_infer_reports_unchecked_file;
       Alcotest.test_case "a clean run skips nothing" `Quick test_refine_infer_clean_run_skips_nothing;
       Alcotest.test_case "a reverted apply is an error" `Quick test_refine_infer_mismatch_is_an_error;
+      Alcotest.test_case "a project that does not check as a unit falls back per file" `Quick test_refine_infer_falls_back_per_file;
+      Alcotest.test_case "--apply checks the project as one unit" `Slow test_refine_infer_apply_whole_project;
+      Alcotest.test_case "--apply-public is passed through" `Slow test_refine_infer_apply_public;
     ];
     "protocols", [
       Alcotest.test_case "build passes protocol baselines only when a protocol exists" `Quick test_protocol_flags;

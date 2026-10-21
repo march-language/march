@@ -1037,7 +1037,7 @@ let print_refine_infer ~filename ~user_files desugared =
         Printf.printf "  %s (%s:%d)  %s : %s  [%s, closes %d]%s\n" p.RI.slot.IS.fn sp.March_ast.Ast.file
           sp.March_ast.Ast.start_line (IJ.path_text p.RI.slot.IS.path) p.RI.annotation (IJ.kind_text p.RI.slot)
           (List.length p.RI.closes)
-          (if p.RI.external_callers then "  (external callers: not applied without --apply-public)" else ""))
+          (if p.RI.external_callers && not !apply_public then "  (external callers: not applied without --apply-public)" else ""))
       r.RI.proposals;
     List.iter
       (fun ((s : IS.slot), pred, (rf : March_refinecheck.Precond_infer.refusal)) ->

@@ -404,9 +404,18 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
         else match o.Ob.verdict with Ob.Skipped _ -> (sk + 1, vi) | Ob.Violated -> (sk, vi + 1) | _ -> (sk, vi))
       (0, 0) after_obs
   in
+  (* A refusal found again in a later round is the same refusal. *)
+  let dedupe_refused rs =
+    let seen = Hashtbl.create 16 in
+    List.filter
+      (fun ((s : IS.slot), pred, (rf : PI.refusal)) ->
+        let k = (s.IS.fn, s.IS.path, pred, rf.PI.rf_reason) in
+        if Hashtbl.mem seen k then false else (Hashtbl.replace seen k (); true))
+      rs
+  in
   { proposals = List.rev !proposals;
     rejected = List.rev !rejected;
-    refused = List.rev !refused;
+    refused = dedupe_refused (List.rev !refused);
     notes = List.rev !notes;
     before;
     after;

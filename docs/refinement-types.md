@@ -3099,8 +3099,10 @@ them (through the same splicer the editor's code action uses), then re-checks th
 program and, if the result is not exactly the predicted one, reverts every edit
 and exits 3 — a mismatch is a bug in the tool, never something to reconcile by
 hand. A second run after applying proposes nothing. `forge refine --infer
-[--apply] [--diff]` runs it over every file of a project (and `--fixpoint` is
-now the same thing). `--refine-infer-json` emits the same as JSON (version 1). With `--refine-report`,
+[--apply] [--diff]` runs it over the whole project as one checked unit, so a
+caller in another file counts (a project that does not check as a unit is tried
+one file at a time); `--apply-public` and `--allow-caller-violations` pass
+through, and `--fixpoint` is now the same thing. `--refine-infer-json` emits the same as JSON (version 1). With `--refine-report`,
 the report also prints the ledger as it will be once the proposals are applied
 (`refinement obligations (user code, if applied): …`), and for a `cap verified`
 module how many of its errors they close. In the editor, the code actions "Infer

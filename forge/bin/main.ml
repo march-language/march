@@ -421,8 +421,19 @@ let refine_cmd =
                  with --apply, write them and re-check") in
   let diff =
     Arg.(value & flag & info ["diff"] ~doc:"With --infer: print the edits as a diff without writing") in
-  let run t a ap fx po b inf df =
-    if inf || fx then handle_msg (Cmd_refine.run ~infer:inf ~diff:df ~apply:ap ~fixpoint:fx ~target:t ())
+  let apply_public =
+    Arg.(value & flag & info ["apply-public"]
+           ~doc:"With --infer --apply: also write preconditions on public functions with no \
+                 caller in the project (a library's API; its callers are elsewhere)") in
+  let allow_caller_violations =
+    Arg.(value & flag & info ["allow-caller-violations"]
+           ~doc:"With --infer: accept a precondition that turns an existing caller into a \
+                 violation (the caller is then yours to fix)") in
+  let run t a ap fx po b inf df apub acv =
+    if inf || fx then
+      handle_msg
+        (Cmd_refine.run ~infer:inf ~diff:df ~apply:ap ~fixpoint:fx ~apply_public:apub
+           ~allow_caller_violations:acv ~target:t ())
     else begin
       if t = "" && not a then begin
         Printf.eprintf "error: forge refine needs a function name, or --all\n%!";
@@ -440,7 +451,7 @@ let refine_cmd =
                   A suggestion is only made when the checker itself proves the \
                   obligations under it, so `march check` after --apply agrees \
                   with what was printed." ])
-    Term.(const run $ target $ all $ apply $ fixpoint $ postconditions $ budget $ infer $ diff)
+    Term.(const run $ target $ all $ apply $ fixpoint $ postconditions $ budget $ infer $ diff $ apply_public $ allow_caller_violations)
 
 (* -------------------------------------------------------------- forge refactor *)
 

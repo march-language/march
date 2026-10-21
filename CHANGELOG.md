@@ -32,8 +32,11 @@ git log is authoritative for exact commits.
   precondition that would break an existing caller is refused with that call.
   `--refine-infer-json` emits JSON v1. `--refine-infer-apply` writes the
   proposals, re-checks, and reverts everything (exit 3) if the result differs
-  from the prediction; `--refine-infer-diff` previews them; `forge refine --infer`
-  runs it over a project (`--fixpoint` is now an alias). The editor offers
+  from the prediction; `--refine-infer-diff` previews them; `forge refine --infer
+  [--diff|--apply]` runs it over the whole project as one checked unit, so a caller
+  in another file counts, passes `--apply-public` / `--allow-caller-violations`
+  through, and names every file it could not infer for (`--fixpoint` is now an
+  alias). The editor offers
   "Infer refinements for `f`" / "in this file" with identical edits, and
   `--refine-report --refine-infer` adds the if-applied ledger line.
 - **Refinements: a lambda passed for an abstract refinement may now have a real

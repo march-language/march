@@ -1,4 +1,4 @@
-# `[P4]` `--refine-infer` notes `scc-unsupported` for SCCs with nothing to infer, and repeats refusals
+# `[P4]` `--refine-infer` notes `scc-unsupported` for SCCs with nothing to infer
 
 Filed 2026-10-21 from the inference-lite evaluation
 (`specs/progress/2026-10-21-refinement-suggest-lite-evaluation.md`).
@@ -7,6 +7,4 @@ Filed 2026-10-21 from the inference-lite evaluation
 prints 966 `scc-unsupported` notes: every SCC of size > 1 that got no proposal is noted, even
 when none of its members has an open site. Only SCCs with an unsettled site should be noted.
 
-Separately, a refusal found in round 1 is reported again in round 2 (the JSON `refused` array
-lists `pop_n param j _ == 0 caller-violation` twice). Refusals should be deduplicated by
-(slot, predicate).
+(The repeated-refusal half of this item, a refusal listed once per round, is fixed: refusals are deduplicated by slot, predicate and reason.)
