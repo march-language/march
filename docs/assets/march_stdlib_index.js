@@ -1236,7 +1236,8 @@ window.marchModuleIndex = {
     "HttpTransport",
     "IO",
     "Result",
-    "Socket"
+    "Socket",
+    "String"
    ]
   },
   "Toml": {
