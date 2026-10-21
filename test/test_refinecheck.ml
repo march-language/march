@@ -23832,6 +23832,7 @@ let infer_guards_suite =
 
 
 module IS = March_refinecheck.Infer_slot
+module IV = March_refinecheck.Infer_vocab
 
 let slots_of (src : string) : IS.slot list =
   IS.enumerate ~is_user:(fun _ -> true) (March_desugar.Desugar.desugar_module (parse src)).March_ast.Ast.mod_decls
@@ -23861,6 +23862,53 @@ let infer_vocab_suite =
           Alcotest.(check (option string)) "respelled" (Some "(List(a), List({a | !p(_)}))")
             (IS.respell s ~pred:"!p(_)")
         | None -> Alcotest.fail "no Elem(Tuple(1, Return)) slot")
+    ;
+    gated "vocab: R1's demand is the first candidate for g.i" (fun () ->
+        with_infer_fixture
+          "mod R1 do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n, i) end\nend\n"
+          (fun fx ->
+            let slot =
+              List.find (fun (s : IS.slot) -> s.IS.fn = "g" && s.IS.path = IS.Param "i")
+                (IS.enumerate ~is_user:(fun _ -> true) fx.fx_m.March_ast.Ast.mod_decls)
+            in
+            match IV.mine slot ~ledger:(Ob.all ()) ~unit_decls:fx.fx_m.March_ast.Ast.mod_decls with
+            | c :: _ ->
+              Alcotest.(check string) "text" "_ < n" c.IV.c.PI.c_text;
+              Alcotest.(check bool) "source = Demand" true (c.IV.source = IV.Demand)
+            | [] -> Alcotest.fail "no candidates"));
+    Alcotest.test_case "vocab: capped at 12, truncation reported" `Quick (fun () ->
+        let body = String.concat " + " (List.init 20 (fun i -> Printf.sprintf "(if x > %d do 1 else 0 end)" (i + 1))) in
+        let src = Printf.sprintf "mod C do\n  fn f(x : Int) : Int do %s end\nend\n" body in
+        let m = March_desugar.Desugar.desugar_module (parse src) in
+        let slot = List.find (fun (s : IS.slot) -> s.IS.path = IS.Param "x") (IS.enumerate ~is_user:(fun _ -> true) m.March_ast.Ast.mod_decls) in
+        let cs, truncated = IV.mine_full slot ~ledger:[] ~unit_decls:m.March_ast.Ast.mod_decls in
+        Alcotest.(check int) "12" 12 (List.length cs);
+        Alcotest.(check bool) "truncated" true truncated);
+    Alcotest.test_case "vocab: p(_) is not a candidate outside K6" `Quick (fun () ->
+        let src = "mod H do\n  fn keep(xs : List(a), f : a -> Bool[p]) : List(a[p]) do List.filter(xs, f) end\n  fn g(x : Int) : Int do x end\nend\n" in
+        let m = March_desugar.Desugar.desugar_module (parse src) in
+        let slot = List.find (fun (s : IS.slot) -> s.IS.fn = "g" && s.IS.path = IS.Param "x") (IS.enumerate ~is_user:(fun _ -> true) m.March_ast.Ast.mod_decls) in
+        let cs = IV.mine slot ~ledger:[] ~unit_decls:m.March_ast.Ast.mod_decls in
+        Alcotest.(check bool) "no p(_)" false
+          (List.exists (fun c -> Astring_contains.contains c.IV.c.PI.c_text "p(") cs));
+    gated "vocab: implication order, weakest first; equivalents deduplicated" (fun () ->
+        with_infer_fixture "mod O do\n  fn f(x : Int) : Int do x end\nend\n" (fun fx ->
+            let cand t = { IV.c = Option.get (IV.candidate_of_text t); source = IV.Fixed } in
+            let order ts =
+              List.map (fun c -> c.IV.c.PI.c_text)
+                (IV.order ~root:fx.fx_root ~scope:[] ~base:(March_ast.Ast.TyCon ({ March_ast.Ast.txt = "Int"; span = March_ast.Ast.dummy_span }, []))
+                   (List.map cand ts))
+            in
+            let o = order [ "_ > 0"; "_ >= 0"; "_ != 0" ] in
+            Alcotest.(check string) "strongest last" "_ > 0" (List.nth o 2);
+            Alcotest.(check (list string)) "equivalents deduplicated" [ "_ >= 0" ] (order [ "_ > 0 - 1"; "_ >= 0" ])));
+    Alcotest.test_case "vocab: every mined text parses back to its AST" `Quick (fun () ->
+        List.iter
+          (fun t ->
+            match IV.candidate_of_text t with
+            | Some c -> Alcotest.(check string) ("round trip " ^ t) t (March_refinecheck.Refine_scope.pred_str (c.PI.c_pred March_ast.Ast.dummy_span))
+            | None -> Alcotest.failf "%S does not parse" t)
+          [ "_ < n"; "_ >= 0 && _ < len(xs)"; "_ != 0" ])
   ]
 
 let () =
