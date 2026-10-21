@@ -335,6 +335,18 @@ type byte_edit = {
   be_confirm : string option;
 }
 
+(* [f] names [pfn]: equal, or one is a dotted suffix of the other (the code
+   action passes `T.B.go`, the JSON says `B.go`).  Never a bare short-name
+   match between two qualified names: `A.go` is not `B.go`. *)
+let names_fn f pfn =
+  let suffix a b = String.length b > String.length a && Filename.check_suffix b ("." ^ a) in
+  f = pfn || suffix pfn f || suffix f pfn
+
+(* The proposals' edits a WorkspaceEdit should carry.  A per-function action
+   ([~fn]) also brings every proposal its proposals depend on (a demand
+   chain's callee link).  Dropped, with everything that depends on them: a
+   proposal with no edit (apply by hand) and an external-callers
+   precondition, which the CLI also withholds without --apply-public. *)
 let infer_byte_edits ?(fn : string option) ~(json : string) () : byte_edit list =
   match Yojson.Safe.from_string json with
   | exception _ -> []
@@ -344,26 +356,42 @@ let infer_byte_edits ?(fn : string option) ~(json : string) () : byte_edit list 
     let int = function `Int n -> n | _ -> 0 in
     match member "proposals" top with
     | `List ps ->
+      let ps = List.filter_map (function `Assoc p -> Some p | _ -> None) ps in
+      let id p = str (member "id" p) in
+      let deps p = match member "depends_on" p with `List l -> List.map str l | _ -> [] in
+      let by_id = List.map (fun p -> (id p, p)) ps in
+      let rec usable seen p =
+        member "external_callers" p <> `Bool true
+        && (match member "edit" p with `Assoc _ -> true | _ -> false)
+        && List.for_all
+             (fun d ->
+               List.mem d seen
+               || match List.assoc_opt d by_id with Some q -> usable (d :: seen) q | None -> false)
+             (deps p)
+      in
+      let wanted p = match fn with None -> true | Some f -> names_fn f (str (member "fn" p)) in
+      let rec close acc = function
+        | [] -> acc
+        | p :: tl ->
+          if List.mem (id p) acc then close acc tl
+          else close (id p :: acc) (List.filter_map (fun d -> List.assoc_opt d by_id) (deps p) @ tl)
+      in
+      let chosen = close [] (List.filter (fun p -> wanted p && usable [ id p ] p) ps) in
       List.filter_map
-        (function
-          | `Assoc p -> (
+        (fun p ->
+          match member "edit" p with
+          | `Assoc e when List.mem (id p) chosen ->
             let pfn = str (member "fn" p) in
-            let wanted =
-              match fn with None -> true | Some f -> f = pfn || short_name f = short_name pfn
+            let kind = str (member "kind" p) in
+            let new_skipped = match member "caller_impact" p with `Assoc c -> int (member "new_skipped" c) | _ -> 0 in
+            let confirm =
+              if List.mem kind [ "precondition"; "element-param"; "accumulator" ] && new_skipped > 0 then
+                Some (Printf.sprintf "adds an unproven obligation at %d callers" new_skipped)
+              else None
             in
-            match member "edit" p with
-            | `Assoc e when wanted ->
-              let kind = str (member "kind" p) in
-              let new_skipped = match member "caller_impact" p with `Assoc c -> int (member "new_skipped" c) | _ -> 0 in
-              let confirm =
-                if List.mem kind [ "precondition"; "element-param"; "accumulator" ] && new_skipped > 0 then
-                  Some (Printf.sprintf "adds an unproven obligation at %d callers" new_skipped)
-                else None
-              in
-              Some
-                { be_file = str (member "file" e); be_start = int (member "start" e); be_end = int (member "end" e);
-                  be_text = str (member "text" e); be_fn = pfn; be_confirm = confirm }
-            | _ -> None)
+            Some
+              { be_file = str (member "file" e); be_start = int (member "start" e); be_end = int (member "end" e);
+                be_text = str (member "text" e); be_fn = pfn; be_confirm = confirm }
           | _ -> None)
         ps
     | _ -> [])

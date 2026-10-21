@@ -20,6 +20,12 @@ let is_word c =
   (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
   || c = '_' || c = '\''
 
+(* A `--` comment or a string literal inside the text a scanner walks: the
+   scanners count brackets and split on commas without lexing, so a comma or
+   paren inside either would mis-delimit the annotation.  Such a signature is
+   reported as "apply by hand" ([None]) rather than guessed at. *)
+let unlexed src i = src.[i] = '"' || (src.[i] = '-' && i + 1 < String.length src && src.[i + 1] = '-')
+
 (** [byte_range_of_param ~src ~line ~fn ~param] locates [param]'s type
     annotation inside [fn]'s parameter list, searching from 1-based [line].
     Returns the half-open byte range of the annotation TEXT (everything after
@@ -79,6 +85,7 @@ let byte_range_of_param ~(src : string) ~(line : int) ~(fn : string)
              | Some ci when name_ok -> Some (seg_start + ci + 1, seg_end)
              | _ -> k ()
            in
+           if unlexed src i then None else
            match src.[i] with
            | '(' | '[' | '{' -> scan (i + 1) (depth + 1) seg_start
            | ')' when depth = 1 -> close i (fun () -> None)
@@ -147,7 +154,7 @@ let byte_range_of_return ~(src : string) ~(line : int) ~(fn : string) :
        (* Closing paren of the PARAMETER LIST, tracking depth so a parenthesised
           parameter type does not terminate the scan early. *)
        let rec close i depth =
-         if i >= n then None
+         if i >= n || unlexed src i then None
          else
            match src.[i] with
            | '(' | '[' | '{' -> close (i + 1) (depth + 1)
@@ -166,7 +173,7 @@ let byte_range_of_return ~(src : string) ~(line : int) ~(fn : string) :
           else
             let ty_start = i + 1 in
             let rec find_do j depth =
-              if j + 2 > n then None
+              if j + 2 > n || unlexed src j then None
               else
                 match src.[j] with
                 | '(' | '[' | '{' -> find_do (j + 1) (depth + 1)
@@ -244,7 +251,7 @@ let splice_lambda_param ~(src : string) ~(line : int) ~(col : int) ~(param : str
            ',' or ')' — i.e. not already annotated. *)
         let plen = String.length param in
         let rec scan j depth at_elem_start =
-          if j >= n then None
+          if j >= n || unlexed src j then None
           else
             let c = src.[j] in
             if c = '(' then scan (j + 1) (depth + 1) false

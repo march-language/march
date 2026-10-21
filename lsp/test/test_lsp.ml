@@ -456,6 +456,8 @@ let () =
       "offered on a function",                         `Quick, test_infer_action_offered;
       "editor edit bytes equal --refine-infer-apply",  `Quick, test_infer_action_bytes_equal_cli;
       "caller-impacting precondition needs confirmation", `Quick, test_infer_needs_confirmation;
+      "per-function action matches the qualified name", `Quick, test_infer_per_fn_qualified;
+      "depends_on is followed, external callers withheld", `Quick, test_infer_depends_and_external;
     ];
     "perf insights phase 2: indirect calls + recursive alloc", [
       "calling a parameter is indirect",              `Quick, test_perf_indirect_call_on_param;

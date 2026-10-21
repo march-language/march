@@ -356,12 +356,82 @@ let prune_with_callers (path : string list) (name : string) (decls : A.decl list
     in
     Some (fd0, fun fd' -> filt [] fd' decls)
 
-(* Does any function of the unit other than [path]/[name] call it? *)
+(* ── Resolving a call to the function it names ─────────────────────────── *)
+
+(* Every function of [decls], as "M.N.f". *)
+let defined_fns (decls : A.decl list) : (string, unit) Hashtbl.t =
+  let t = Hashtbl.create 256 in
+  let rec go prefix = function
+    | [] -> ()
+    | A.DFn (f, _) :: tl -> Hashtbl.replace t (String.concat "." (prefix @ [ f.A.fn_name.A.txt ])) (); go prefix tl
+    | A.DMod (n, _, inner, _) :: tl -> go (prefix @ [ n.A.txt ]) inner; go prefix tl
+    | _ :: tl -> go prefix tl
+  in
+  go [] decls;
+  t
+
+(* The function a reference [r] ("go", "B.go", "T.B.go") written in module
+   [caller] names: lexical scoping, innermost enclosing module first.  A
+   leading segment that names no module of the unit (the top-level module's
+   own name) is dropped if the reference does not resolve with it.  [None]
+   for a reference that names no function of the unit (an alias, a local
+   binder, a builtin). *)
+let resolve_call ~(defined : (string, unit) Hashtbl.t) ~(caller : string list) (r : string) : string option =
+  let rec scopes p = p :: (match List.rev p with [] -> [] | _ :: tl -> scopes (List.rev tl)) in
+  let try_rs rs =
+    List.find_map
+      (fun k -> let q = String.concat "." (k @ rs) in if Hashtbl.mem defined q then Some q else None)
+      (scopes caller)
+  in
+  let rs = String.split_on_char '.' r in
+  match try_rs rs with
+  | Some q -> Some q
+  | None -> (match rs with _ :: (_ :: _ as tl) -> try_rs tl | _ -> None)
+
+(* Does [e], written in module [caller], call the function [target]
+   ("M.f")?  A QUALIFIED reference that resolves to nothing in the unit is
+   counted when its last segment is [target]'s (an alias may hide the
+   module); an unresolved BARE name is a local binder (`let go = …`, a
+   parameter) or a builtin, never another module's function. *)
+let rec calls_target ~defined ~(caller : string list) ~(target : string) (e : A.expr) : bool =
+  let last q = match List.rev (String.split_on_char '.' q) with x :: _ -> x | [] -> q in
+  let any = List.exists (calls_target ~defined ~caller ~target) in
+  let is_target = function
+    | A.EVar n -> (
+      match resolve_call ~defined ~caller n.A.txt with
+      | Some q -> q = target
+      | None -> String.contains n.A.txt '.' && last n.A.txt = last target)
+    | _ -> false
+  in
+  let go = calls_target ~defined ~caller ~target in
+  match e with
+  | A.EApp (f, args, _) -> is_target f || go f || any args
+  | A.EBlock (es, _) -> any es
+  | A.ELet (b, _) -> go b.A.bind_expr
+  | A.EIf (c, t, f, _) -> go c || go t || go f
+  | A.EMatch (s, brs, _) -> go s || List.exists (fun (br : A.branch) -> go br.A.branch_body) brs
+  | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> any es
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) -> go e
+  | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> go b
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go a || go b
+  | A.ERecord (fs, _) -> List.exists (fun (_, v) -> go v) fs
+  | A.ERecordUpdate (r, fs, _) -> go r || List.exists (fun (_, v) -> go v) fs
+  | A.EField (e, _, _) -> go e
+  | _ -> false
+
+let fn_calls_target ~defined ~caller ~target (fd : A.fn_def) : bool =
+  List.exists (fun (c : A.fn_clause) -> calls_target ~defined ~caller ~target c.A.fc_body) fd.A.fn_clauses
+
+(* Does any function of the unit other than [path]/[name] call it?  Calls are
+   resolved: `B.go`'s callers are not `A.go`'s. *)
 let has_in_unit_callers (path : string list) (name : string) (decls : A.decl list) : bool =
+  let defined = defined_fns decls in
+  let target = String.concat "." (path @ [ name ]) in
   let rec go prefix = function
     | [] -> false
     | A.DFn (f, _) :: tl ->
-      ((not (prefix = path && f.A.fn_name.A.txt = name)) && fn_calls name f) || go prefix tl
+      ((not (prefix = path && f.A.fn_name.A.txt = name)) && fn_calls_target ~defined ~caller:prefix ~target f)
+      || go prefix tl
     | A.DMod (n, _, inner, _) :: tl -> go (prefix @ [ n.A.txt ]) inner || go prefix tl
     | _ :: tl -> go prefix tl
   in

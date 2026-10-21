@@ -73,9 +73,19 @@ let find_fd (decls : A.decl list) (q : string) : A.fn_def option =
 
 (* Strongly connected components of the user call graph, callees first
    (Tarjan emits them in reverse topological order). *)
-let sccs (fns : (string * A.fn_def) list) : string list list =
-  let last q = match List.rev (String.split_on_char '.' q) with x :: _ -> x | [] -> q in
-  let calls f g = PI.fn_calls (last g) f in
+let sccs ?(defined : (string, unit) Hashtbl.t option) (fns : (string * A.fn_def) list) : string list list =
+  let defined =
+    match defined with
+    | Some d -> d
+    | None -> let t = Hashtbl.create 16 in List.iter (fun (q, _) -> Hashtbl.replace t q ()) fns; t
+  in
+  let path_of q = match List.rev (String.split_on_char '.' q) with _ :: tl -> List.rev tl | [] -> [] in
+  let caller_of = Hashtbl.create 16 in
+  List.iter (fun (q, fd) -> Hashtbl.replace caller_of fd.A.fn_name.A.span (path_of q)) fns;
+  let calls (f : A.fn_def) g =
+    let caller = Option.value (Hashtbl.find_opt caller_of f.A.fn_name.A.span) ~default:[] in
+    PI.fn_calls_target ~defined ~caller ~target:g f
+  in
   let index = Hashtbl.create 16 and low = Hashtbl.create 16 and on = Hashtbl.create 16 in
   let stack = ref [] and counter = ref 0 and out = ref [] in
   let rec strong (v, fd) =
@@ -122,6 +132,7 @@ let tail_callee (fd : A.fn_def) : string option =
 
 let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
     ?(rounds = default_rounds) ?(allow_caller_violations = false) ?(stdlib = false)
+    ?(applicable : proposal -> accepted:proposal list -> string option = fun _ ~accepted:_ -> None)
     ~(is_user : A.span -> bool) (m : A.module_) : result =
   let is_target sp = stdlib || is_user sp in
   Ob.with_scratch @@ fun () ->
@@ -169,9 +180,13 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
     | IS.Lambda_param _ -> Printf.sprintf "{Int | %s}" pred
     | _ -> Option.value (IS.respell s ~pred) ~default:pred
   in
-  let record ~round ~(s : IS.slot) ~pred ~annotation ~source ~depends ~(v : IO.verdict) =
-    incr next_id;
-    let id = Printf.sprintf "P%d" !next_id in
+  (* [applicable] (the driver's, under --refine-infer-apply/-diff) withholds a
+     proposal that will not be written — external callers without
+     --apply-public, an edit that must be made by hand — BEFORE it is
+     installed, so no later probe and no prediction counts on it.  A withheld
+     proposal is reported as refused with that reason. *)
+  let proposal_of ~round ~(s : IS.slot) ~pred ~annotation ~source ~depends ~(v : IO.verdict) =
+    let id = Printf.sprintf "P%d" (!next_id + 1) in
     let closes, new_skipped = match v with IO.Accept { closes; new_skipped } -> (closes, new_skipped) | _ -> ([], []) in
     let path, name = IO.split_qualified s.IS.fn in
     let external_callers =
@@ -179,10 +194,19 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
       && s.IS.fd.A.fn_vis = A.Public
       && not (PI.has_in_unit_callers path name !decls)
     in
-    proposals :=
-      { id; round; slot = s; pred; annotation; source; depends_on = depends; closes; new_skipped; external_callers }
-      :: !proposals;
-    id
+    { id; round; slot = s; pred; annotation; source; depends_on = depends; closes; new_skipped; external_callers }
+  in
+  let withheld (p : proposal) =
+    match applicable p ~accepted:(List.rev !proposals) with
+    | None -> false
+    | Some why ->
+      refused := (p.slot, p.pred, { PI.rf_reason = why; rf_sites = [] }) :: !refused;
+      true
+  in
+  let commit (p : proposal) =
+    incr next_id;
+    proposals := p :: !proposals;
+    p.id
   in
   let note_verdicts (s : IS.slot) (pairs : (string * IO.verdict) list) =
     List.iter
@@ -204,33 +228,25 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
       let cands = IV.order ~root ~scope:(IO.scope_types s) ~base:s.IS.base cands in
       let per_fn = ref (min !budget (if IO.is_return s then 60 else 200)) in
       let used0 = !per_fn in
-      let best, verdicts = IO.best_for_slot ~root ~decls:!decls s cands ~budget:per_fn in
+      (* [~allow_caller_violations] (D2's override): a candidate refused only
+         for the callers it would break is taken as if admissible — still
+         only if some value satisfies it. *)
+      let best, verdicts = IO.best_for_slot ~allow_caller_violations ~root ~decls:!decls s cands ~budget:per_fn in
       budget := !budget - (used0 - !per_fn);
       let pairs = List.mapi (fun i v -> ((match List.nth_opt cands i with Some c -> c.IV.c.PI.c_text | None -> ""), v)) verdicts in
-      (* [~allow_caller_violations] (D2's override): a candidate refused only
-         for the callers it would break is taken as if admissible. *)
-      let best =
-        match best with
-        | None when allow_caller_violations ->
-          List.find_map
-            (fun ((pred, v) : string * IO.verdict) ->
-              match v with
-              | IO.Refuse _ ->
-                Option.map (fun c -> (c, IO.Accept { closes = []; new_skipped = [] }))
-                  (List.find_opt (fun c -> c.IV.c.PI.c_text = pred) cands)
-              | _ -> None)
-            pairs
-        | b -> b
-      in
       match best with
       | Some (c, v) ->
-        let hyp = IS.install s ~mk:c.IV.c.PI.c_pred in
-        install s hyp;
-        ignore
-          (record ~round ~s ~pred:c.IV.c.PI.c_text
-             ~annotation:(annotation_of s c.IV.c.PI.c_text)
-             ~source:c.IV.source ~depends:[] ~v);
-        true
+        let p =
+          proposal_of ~round ~s ~pred:c.IV.c.PI.c_text ~annotation:(annotation_of s c.IV.c.PI.c_text)
+            ~source:c.IV.source ~depends:[] ~v
+        in
+        if withheld p then false
+        else begin
+          let hyp = IS.install s ~mk:c.IV.c.PI.c_pred in
+          install s hyp;
+          ignore (commit p);
+          true
+        end
       | None ->
         (* Demand chain (§3.3): a return candidate that is not TRUE because
            its tail calls a user function whose own return could carry it. *)
@@ -239,10 +255,11 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
           && (match tail_callee s.IS.fd with
               | None -> false
               | Some callee ->
+                let caller, _ = IO.split_qualified s.IS.fn in
+                let callee = PI.resolve_call ~defined:(PI.defined_fns !decls) ~caller callee in
                 let callee_slot =
                   List.find_opt
-                    (fun (t : IS.slot) ->
-                      (t.IS.fn = callee || Filename.check_suffix t.IS.fn ("." ^ callee)) && t.IS.path = s.IS.path)
+                    (fun (t : IS.slot) -> Some t.IS.fn = callee && t.IS.path = s.IS.path)
                     (IS.enumerate ~is_user:is_target !decls)
                 in
                 match callee_slot with
@@ -267,18 +284,33 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
                             install csf chyp;
                             let b2 = ref 1 in
                             match IO.best_for_slot ~root ~decls:!decls s [ c ] ~budget:b2 with
-                            | Some (_, v2), _ ->
-                              let dep =
-                                record ~round ~s:csf ~pred ~annotation:(Option.value (IS.respell csf ~pred) ~default:pred)
-                                  ~source:c.IV.source ~depends:[] ~v:(IO.Accept { closes = []; new_skipped = [] })
-                              in
-                              let hyp = IS.install s ~mk:c.IV.c.PI.c_pred in
-                              install s hyp;
-                              ignore
-                                (record ~round ~s ~pred ~annotation:(Option.value (IS.respell s ~pred) ~default:pred)
-                                   ~source:c.IV.source ~depends:[ dep ] ~v:v2);
+                            | Some (_, v2), _
+                              when (let dp =
+                                      proposal_of ~round ~s:csf ~pred
+                                        ~annotation:(Option.value (IS.respell csf ~pred) ~default:pred)
+                                        ~source:c.IV.source ~depends:[] ~v:(IO.Accept { closes = []; new_skipped = [] })
+                                    in
+                                    not (withheld dp)
+                                    && (let dep = commit dp in
+                                        let mp =
+                                          proposal_of ~round ~s ~pred
+                                            ~annotation:(Option.value (IS.respell s ~pred) ~default:pred)
+                                            ~source:c.IV.source ~depends:[ dep ] ~v:v2
+                                        in
+                                        if withheld mp then begin
+                                          (* The link alone closes nothing: take it back. *)
+                                          proposals := List.tl !proposals;
+                                          decr next_id;
+                                          false
+                                        end
+                                        else begin
+                                          let hyp = IS.install s ~mk:c.IV.c.PI.c_pred in
+                                          install s hyp;
+                                          ignore (commit mp);
+                                          true
+                                        end)) ->
                               true
-                            | None, _ ->
+                            | _, _ ->
                               decls := saved_decls;
                               (match saved_tbl with
                                | Some v -> Hashtbl.replace Refine_param.fn_defs_tbl cs.IS.fn v
@@ -304,11 +336,16 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
       | Some (shape, v) -> (
         match IS.graft s shape with
         | Some hyp ->
-          install s hyp;
-          ignore
-            (record ~round ~s ~pred:"p" ~annotation:(shape.IS.k6_callback ^ " / " ^ shape.IS.k6_return)
-               ~source:IV.House ~depends:[] ~v);
-          true
+          let p =
+            proposal_of ~round ~s ~pred:"p" ~annotation:(shape.IS.k6_callback ^ " / " ^ shape.IS.k6_return)
+              ~source:IV.House ~depends:[] ~v
+          in
+          if withheld p then false
+          else begin
+            install s hyp;
+            ignore (commit p);
+            true
+          end
         | None -> false)
       | None ->
         note_verdicts s (List.map (fun v -> ("p", v)) verdicts);
@@ -327,7 +364,7 @@ let run ?(root = Sys.getcwd ()) ?(kinds = all_kinds) ?(budget = default_budget)
           (fun ((_, fd) as pf) -> if is_target fd.A.fn_name.A.span then Some (PI.qualified_of pf, fd) else None)
           (PI.enum_fns [] !decls)
       in
-      let order = sccs user_fns in
+      let order = sccs ~defined:(PI.defined_fns !decls) user_fns in
       let rank = Hashtbl.create 16 in
       List.iteri (fun i comp -> List.iter (fun f -> Hashtbl.replace rank f i) comp) order;
       let by_order ss =

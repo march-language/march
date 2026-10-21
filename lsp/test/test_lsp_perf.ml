@@ -572,6 +572,43 @@ let test_infer_needs_confirmation () =
     Alcotest.(check (option string)) "confirmation label" (Some "adds an unproven obligation at 2 callers") e.be_confirm
   | es -> Alcotest.failf "expected one edit, got %d" (List.length es)
 
+let infer_json_of (ps : string list) =
+  Printf.sprintf {|{"version": 1, "summary": {}, "proposals": [%s], "rejected": [], "refused": [], "notes": []}|}
+    (String.concat ", " ps)
+
+let infer_prop ?(deps = "[]") ?(external_ = false) ?(edit = true) ~id ~fn ~start () =
+  Printf.sprintf
+    {|{"id": "%s", "kind": "return", "fn": "%s", "slot": "return", "annotation": "{Int | _ > 0}", "depends_on": %s, "external_callers": %b, "caller_impact": {"new_proved": 1, "new_skipped": 0, "new_violated": 0, "sites": []}, "edit": %s}|}
+    id fn deps external_
+    (if edit then Printf.sprintf {|{"file": "/tmp/x.march", "start": %d, "end": %d, "text": "T"}|} start (start + 1) else "null")
+
+let infer_edit_fns ?fn json =
+  List.sort compare
+    (List.map (fun (e : March_lsp_lib.Refine_command.byte_edit) -> e.be_fn)
+       (March_lsp_lib.Refine_command.infer_byte_edits ?fn ~json ()))
+
+(* "Infer refinements for `B.go`" (the action passes the name with the
+   top-level module, `T.B.go`) must not apply `A.go`'s edit (review #7). *)
+let test_infer_per_fn_qualified () =
+  let json = infer_json_of [ infer_prop ~id:"P1" ~fn:"A.go" ~start:10 (); infer_prop ~id:"P2" ~fn:"B.go" ~start:20 () ] in
+  Alcotest.(check (list string)) "only B.go" [ "B.go" ] (infer_edit_fns ~fn:"T.B.go" json)
+
+(* A per-function action brings the callee links its proposal depends on, and
+   drops a proposal whose link has no edit; external-callers proposals are
+   never applied from the editor, as the CLI withholds them without
+   --apply-public (review #8). *)
+let test_infer_depends_and_external () =
+  let json =
+    infer_json_of
+      [ infer_prop ~id:"P1" ~fn:"helper" ~start:10 ();
+        infer_prop ~id:"P2" ~fn:"go" ~deps:{|["P1"]|} ~start:20 ();
+        infer_prop ~id:"P3" ~fn:"pub" ~external_:true ~start:30 ();
+        infer_prop ~id:"P4" ~fn:"link" ~edit:false ~start:40 ();
+        infer_prop ~id:"P5" ~fn:"other" ~deps:{|["P4"]|} ~start:50 () ]
+  in
+  Alcotest.(check (list string)) "go brings helper" [ "go"; "helper" ] (infer_edit_fns ~fn:"go" json);
+  Alcotest.(check (list string)) "whole file: no external, no broken chain" [ "go"; "helper" ] (infer_edit_fns json)
+
 let test_refine_action_offered_on_annotated_param () =
   let src = {|
 mod RA do

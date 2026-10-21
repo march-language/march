@@ -883,36 +883,91 @@ let print_region_diff file (a : string) (b : string) =
   for i = !pre to na - 1 - !suf do Printf.printf "-%s\n" la.(i) done;
   for i = !pre to nb - 1 - !suf do Printf.printf "+%s\n" lb.(i) done
 
-let apply_refine_infer ~filename ~user_files (r : March_refinecheck.Refine_infer.result) =
+(* A proposal's edit as ONE minimal byte range of the ORIGINAL file
+   (common prefix/suffix of [src] and the spliced text).  Every edit is
+   computed against the original, never against a buffer an earlier edit
+   changed: a splice locates its function by line, and an earlier edit that
+   joins two lines would send the later search to the wrong definition.  It
+   is also what a WorkspaceEdit (the JSON `edit`, the LSP) requires. *)
+let infer_edit_range (src : string) (p : March_refinecheck.Refine_infer.proposal) : (int * int * string) option =
+  match infer_edit src p with
+  | None -> None
+  | Some dst ->
+    let la = String.length src and lb = String.length dst in
+    let pre = ref 0 in
+    while !pre < la && !pre < lb && src.[!pre] = dst.[!pre] do incr pre done;
+    let suf = ref 0 in
+    while !suf < la - !pre && !suf < lb - !pre && src.[la - 1 - !suf] = dst.[lb - 1 - !suf] do incr suf done;
+    Some (!pre, la - !suf, String.sub dst !pre (lb - !suf - !pre))
+
+let proposal_file (p : March_refinecheck.Refine_infer.proposal) =
+  p.March_refinecheck.Refine_infer.slot.March_refinecheck.Infer_slot.fd.March_ast.Ast.fn_name.March_ast.Ast.span.March_ast.Ast.file
+
+let read_file_opt f = match In_channel.with_open_bin f In_channel.input_all with s -> Some s | exception _ -> None
+
+(* Under --refine-infer-apply/-diff, which proposals will actually be written
+   (handed to Refine_infer.run so the prediction covers exactly those): not an
+   external-callers precondition without --apply-public, and not one whose
+   edit cannot be made textually or overlaps an edit already accepted. *)
+let infer_applicable (p : March_refinecheck.Refine_infer.proposal)
+    ~(accepted : March_refinecheck.Refine_infer.proposal list) : string option =
+  let module RI = March_refinecheck.Refine_infer in
+  if p.RI.external_callers && not !apply_public then Some "external-callers"
+  else
+    let file = proposal_file p in
+    match read_file_opt file with
+    | None -> Some "apply-by-hand"
+    | Some src -> (
+      match infer_edit_range src p with
+      | None -> Some "apply-by-hand"
+      | Some (a, b, _) ->
+        let overlaps (q : RI.proposal) =
+          proposal_file q = file
+          && (match infer_edit_range src q with Some (c, d, _) -> a < d && c < b || (a = c && b = d) | None -> false)
+        in
+        if List.exists overlaps accepted then Some "apply-by-hand" else None)
+
+let apply_refine_infer ~filename (r : March_refinecheck.Refine_infer.result) =
   let module RI = March_refinecheck.Refine_infer in
   let module IS = March_refinecheck.Infer_slot in
   let read f = In_channel.with_open_bin f In_channel.input_all in
   let write f s = Out_channel.with_open_bin f (fun oc -> output_string oc s) in
-  let originals = Hashtbl.create 4 and current = Hashtbl.create 4 in
-  let src_of f =
-    match Hashtbl.find_opt current f with
-    | Some s -> s
-    | None -> let s = read f in Hashtbl.replace originals f s; Hashtbl.replace current f s; s
-  in
-  let applied = ref 0 in
+  List.iter
+    (fun ((s : IS.slot), pred, (rf : March_refinecheck.Precond_infer.refusal)) ->
+      match rf.March_refinecheck.Precond_infer.rf_reason with
+      | "external-callers" -> Printf.printf "  %s: not applied (external callers; pass --apply-public)\n" s.IS.fn
+      | "apply-by-hand" -> Printf.printf "  %s: apply by hand (%s)\n" s.IS.fn pred
+      | _ -> ())
+    r.RI.refused;
+  (* Every proposal [run] kept is one [infer_applicable] accepted. *)
+  let by_file = Hashtbl.create 4 in
   List.iter
     (fun (p : RI.proposal) ->
-      let file = p.RI.slot.IS.fd.March_ast.Ast.fn_name.March_ast.Ast.span.March_ast.Ast.file in
-      let user = file = filename || List.mem file user_files in
-      if p.RI.external_callers && not !apply_public then
-        Printf.printf "  %s: not applied (external callers; pass --apply-public)\n" p.RI.slot.IS.fn
-      else if (not user) && not !refine_infer_stdlib then ()
-      else if not (Sys.file_exists file) then ()
-      else
-        match infer_edit (src_of file) p with
-        | Some s -> Hashtbl.replace current file s; incr applied
-        | None -> Printf.printf "  %s: apply by hand (%s)\n" p.RI.slot.IS.fn p.RI.annotation)
+      let file = proposal_file p in
+      match read_file_opt file with
+      | None -> ()
+      | Some src ->
+        (match infer_edit_range src p with
+         | Some e -> Hashtbl.replace by_file file (src, e :: (match Hashtbl.find_opt by_file file with Some (_, es) -> es | None -> []))
+         | None -> ()))
     r.RI.proposals;
-  let changed = Hashtbl.fold (fun f s acc -> if Hashtbl.find originals f <> s then (f, s) :: acc else acc) current [] in
-  let changed = List.sort compare changed in
-  if !refine_infer_diff then List.iter (fun (f, s) -> print_region_diff f (Hashtbl.find originals f) s) changed;
+  let changed =
+    Hashtbl.fold
+      (fun f (src, es) acc ->
+        let es = List.sort (fun (a, _, _) (b, _, _) -> compare b a) es in
+        let dst =
+          List.fold_left
+            (fun s (a, b, t) -> String.sub s 0 a ^ t ^ String.sub s b (String.length s - b))
+            src es
+        in
+        if dst <> src then (f, src, dst) :: acc else acc)
+      by_file []
+    |> List.sort compare
+  in
+  let applied = List.length r.RI.proposals in
+  if !refine_infer_diff then List.iter (fun (f, a, b) -> print_region_diff f a b) changed;
   if !refine_infer_apply && changed <> [] then begin
-    List.iter (fun (f, s) -> write f s) changed;
+    List.iter (fun (f, _, s) -> write f s) changed;
     let pred_sk, pred_vi = r.RI.after_counts in
     let pred_sk = if Sys.getenv_opt "MARCH_INFER_CORRUPT_PREDICTION" <> None then pred_sk + 1 else pred_sk in
     let out = Filename.temp_file "refine-infer" ".txt" in
@@ -930,14 +985,14 @@ let apply_refine_infer ~filename ~user_files (r : March_refinecheck.Refine_infer
       | _ -> Some (int_of_string (Str.matched_group 2 rep), int_of_string (Str.matched_group 1 rep))
     in
     if code = 2 || actual <> Some (pred_sk, pred_vi) then begin
-      List.iter (fun (f, _) -> write f (Hashtbl.find originals f)) changed;
+      List.iter (fun (f, orig, _) -> write f orig) changed;
       Printf.eprintf
         "--refine-infer: the re-check did not match the prediction (predicted %d skipped / %d violated, got %s); every edit was reverted. This is a bug in --refine-infer.\n"
         pred_sk pred_vi
         (match actual with Some (s, v) -> Printf.sprintf "%d skipped / %d violated" s v | None -> "no report");
       exit 3
     end;
-    Printf.printf "applied %d proposal(s) to %d file(s); the re-check matches the prediction\n" !applied (List.length changed)
+    Printf.printf "applied %d proposal(s) to %d file(s); the re-check matches the prediction\n" applied (List.length changed)
   end
 
 let print_refine_infer ~filename ~user_files desugared =
@@ -958,25 +1013,18 @@ let print_refine_infer ~filename ~user_files desugared =
   in
   let r =
     RI.run ~root:(Sys.getcwd ()) ~kinds ~budget:!refine_infer_budget
-      ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib ~is_user desugared
+      ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib
+      ?applicable:(if !refine_infer_apply || !refine_infer_diff then Some infer_applicable else None)
+      ~is_user desugared
   in
   (* JSON `edit`: the same splice `--refine-infer-apply` performs, as the
      minimal byte range against the ORIGINAL file (so every edit is
      independent of the others, as a WorkspaceEdit requires). *)
   let edit_of (p : RI.proposal) =
-    let file = p.RI.slot.IS.fd.March_ast.Ast.fn_name.March_ast.Ast.span.March_ast.Ast.file in
-    match In_channel.with_open_bin file In_channel.input_all with
-    | exception _ -> None
-    | src -> (
-      match infer_edit src p with
-      | None -> None
-      | Some dst ->
-        let la = String.length src and lb = String.length dst in
-        let pre = ref 0 in
-        while !pre < la && !pre < lb && src.[!pre] = dst.[!pre] do incr pre done;
-        let suf = ref 0 in
-        while !suf < la - !pre && !suf < lb - !pre && src.[la - 1 - !suf] = dst.[lb - 1 - !suf] do incr suf done;
-        Some (file, !pre, la - !suf, String.sub dst !pre (lb - !suf - !pre)))
+    let file = proposal_file p in
+    match read_file_opt file with
+    | None -> None
+    | Some src -> Option.map (fun (a, b, t) -> (file, a, b, t)) (infer_edit_range src p)
   in
   if !refine_infer_json then print_endline (IJ.to_string ~edit_of r)
   else begin
@@ -1020,7 +1068,7 @@ let print_refine_infer ~filename ~user_files desugared =
         Printf.printf "  closes %d of %d `cap verified` error(s)\n" (max 0 (before_sk - sk)) before_sk
     end
   end;
-  if !refine_infer_apply || !refine_infer_diff then apply_refine_infer ~filename ~user_files r
+  if !refine_infer_apply || !refine_infer_diff then apply_refine_infer ~filename r
 
 let print_refine_suggestions ~filename ~user_files desugared =
   let module PI = March_refinecheck.Precond_infer in
@@ -3300,6 +3348,11 @@ let compile filename =
     else
       March_typecheck.Typecheck.check_module_full desugared
   in
+  (* Whether the program parses and typechecks — what --refine-infer needs.
+     Taken BEFORE the refinement passes, whose own findings (an unproven
+     obligation under `cap verified`, a violation) are exactly what inference
+     is for and must not gate it. *)
+  let typed_ok = not (March_errors.Errors.has_errors errors) in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   let audit_result = ref [] in
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
@@ -3343,7 +3396,7 @@ let compile filename =
   (* Never propose on a program that does not check: the tree may be half
      typed, and a proposal would describe a program that does not exist. *)
   if (!refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff) then begin
-    if March_errors.Errors.has_errors errors then
+    if not typed_ok then
       prerr_endline "--refine-infer: skipped, the program has errors (fix them first)"
     else print_refine_infer ~filename ~user_files desugared
   end;

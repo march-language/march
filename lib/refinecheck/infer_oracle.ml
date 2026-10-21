@@ -57,7 +57,7 @@ let defs_with (cx : ctx) (hyp : A.fn_def) =
   Hashtbl.replace d cx.qualified (RC.entry_of_sig (RC.sig_of_fn hyp));
   d
 
-let precondition ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
+let precondition ?(allow_caller_violations = false) ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
   let after = PI.walk_ledger ~root ~defs:(defs_with cx hyp) (cx.rebuild hyp) in
   let delta = LD.diff ~before:cx.base ~after in
   let caller_viol =
@@ -69,11 +69,15 @@ let precondition ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
       delta
   in
   if caller_viol <> [] then
-    if PI.admissible without_callers then
+    if not (PI.admissible without_callers) then Reject ("not-useful", "creates violations and closes nothing in the body")
+    else if not (PI.satisfiable ~root hyp) then Reject ("unsatisfiable", "the parameters admit no value")
+    else if allow_caller_violations then
+      (* D2's override: admissible but for the callers it breaks. *)
+      Accept { closes = LD.closed without_callers; new_skipped = LD.new_skipped without_callers }
+    else
       Refuse
         { PI.rf_reason = "caller-violation";
           rf_sites = List.sort_uniq compare (List.map (fun (k : LD.key) -> k.LD.span) caller_viol) }
-    else Reject ("not-useful", "creates violations and closes nothing in the body")
   else if LD.opened delta <> [] then Reject ("opens-site", "a previously proved obligation is no longer proved")
   else if not (PI.admissible delta) then Reject ("not-useful", "closes no site")
   else if not (PI.satisfiable ~root hyp) then Reject ("unsatisfiable", "the parameters admit no value")
@@ -168,18 +172,18 @@ let with_hyp_def (cx : ctx) (hyp : A.fn_def) (f : unit -> 'a) : 'a =
     f
 
 (* A probe that raises costs that candidate, never the command. *)
-let probe ~(root : string) (cx : ctx) (s : IS.slot) (c : IV.cand) : verdict =
+let probe ?allow_caller_violations ~(root : string) (cx : ctx) (s : IS.slot) (c : IV.cand) : verdict =
   try
     let s = { s with IS.fd = cx.fd0 } in
     let hyp = IS.install s ~mk:c.IV.c.PI.c_pred in
     with_hyp_def cx hyp @@ fun () ->
     match s.IS.path with
     | IS.Return -> return_ ~root cx hyp
-    | IS.Param _ -> precondition ~root cx hyp
+    | IS.Param _ -> precondition ?allow_caller_violations ~root cx hyp
     | IS.Lambda_param _ -> accumulator ~root cx hyp
     | p -> (
       match IS.root p with
-      | IS.Param _ -> precondition ~root cx hyp
+      | IS.Param _ -> precondition ?allow_caller_violations ~root cx hyp
       | IS.Return -> elem_return ~root cx hyp
       | _ -> Reject ("not-useful", "kind not implemented"))
   with e -> Reject ("not-true", "probe raised: " ^ Printexc.to_string e)
@@ -202,7 +206,7 @@ let is_return (s : IS.slot) = match IS.root s.IS.path with IS.Return -> true | _
    (closes − new skips), a return the most closed caller sites — ties to the
    earlier (weaker, higher-rank) candidate (design §1.4).  An exhausted budget
    is recorded as [Reject ("budget", _)], never folded into "no candidate". *)
-let best_for_slot ~(root : string) ~(decls : A.decl list) (s : IS.slot) (cands : IV.cand list)
+let best_for_slot ?allow_caller_violations ~(root : string) ~(decls : A.decl list) (s : IS.slot) (cands : IV.cand list)
     ~(budget : int ref) : (IV.cand * verdict) option * verdict list =
   Obligation.with_scratch @@ fun () ->
   match prepare ~root ~decls s with
@@ -218,7 +222,7 @@ let best_for_slot ~(root : string) ~(decls : A.decl list) (s : IS.slot) (cands :
       | _ :: _ when !budget <= 0 -> (best, List.rev (Reject ("budget", "probe budget exhausted") :: verdicts))
       | c :: tl ->
         decr budget;
-        let v = probe ~root cx s c in
+        let v = probe ?allow_caller_violations ~root cx s c in
         let best =
           match v, best with
           | Accept _, None -> Some (c, v)

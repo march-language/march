@@ -24055,6 +24055,29 @@ let k7_best (fx : infer_fixture) ~(fn : string) : string option =
      | Some (c, _) -> Some c.IV.c.PI.c_text
      | None -> None)
 
+(* `--allow-caller-violations` (D2's override) admits a precondition that
+   breaks a caller, never one no value satisfies: a contradictory
+   precondition proves the body vacuously, and the override existed to let
+   exactly that through (review #6). *)
+let infer_override_suite =
+  let src =
+    "mod OV do\n  fn need_pos(k : {Int | _ > 0}) : Int do k end\n  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\nend\n"
+  in
+  let best text =
+    with_infer_fixture src (fun fx ->
+        let decls = fx.fx_m.March_ast.Ast.mod_decls in
+        let slot = List.find (fun (s : IS.slot) -> s.IS.fn = "go" && s.IS.path = IS.Param "n") (IS.enumerate ~is_user:(fun _ -> true) decls) in
+        let c = { IV.c = Option.get (IV.candidate_of_text text); source = IV.Fixed } in
+        fst (IO.best_for_slot ~allow_caller_violations:true ~root:fx.fx_root ~decls slot [ c ] ~budget:(ref 10)))
+  in
+  [ gated "override: a caller-violating but satisfiable precondition is accepted, with what it closes" (fun () ->
+        match best "_ > 0" with
+        | Some (_, IO.Accept { closes; _ }) -> Alcotest.(check bool) "closes the body site" true (closes <> [])
+        | _ -> Alcotest.fail "expected an accepted candidate");
+    gated "override: a contradictory precondition is still rejected" (fun () ->
+        Alcotest.(check bool) "rejected" true (best "_ > 0 && _ < 0" = None))
+  ]
+
 let infer_accumulator_suite =
   let pre = "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n" in
   let m body = "mod K7 do\n" ^ pre ^ body ^ "end\n" in
@@ -24260,6 +24283,46 @@ let infer_apply_suite =
               | _ -> (Str.matched_group 1 rep, Str.matched_group 2 rep)
             in
             Alcotest.(check (pair string string)) "if applied = after apply" act pred));
+    gated "a withheld external-callers proposal does not break the apply of the rest (review #1)" (fun () ->
+        let src = "mod E2 do\n" ^ pre ^ "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn total(xs : List(Int)) : Int do sum_pos(xs) end\n  fn main() : Int do go([1]) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            let c = contents () in
+            Alcotest.(check bool) "pos_only written" true (Astring_contains.contains c "fn pos_only(xs : List(Int)) : List({Int | _ > 0})");
+            Alcotest.(check bool) "total untouched" true (Astring_contains.contains c "fn total(xs : List(Int))")));
+    gated "edits after a multi-line signature land on the right function (review #2)" (fun () ->
+        let src = "mod ML do\n" ^ pre ^ "  pfn total(xs :\n      List(Int),\n    n : Int) : Int do sum_pos(xs) + n end\n  pfn two(xs : List(Int), ys : List(Int)) : Int do sum_pos(xs) + sum_pos(ys) end\n  fn main() : Int do total([1], 2) + two([1],[2]) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            let c = contents () in
+            Alcotest.(check bool) ("two's params both written: " ^ c) true
+              (Astring_contains.contains c "pfn two(xs : List({Int | _ > 0}), ys : List({Int | _ > 0}))");
+            Alcotest.(check bool) "main untouched" true (Astring_contains.contains c "two([1],[2])")));
+    gated "a comment inside the annotation: apply by hand, and no JSON edit (review #3)" (fun () ->
+        let src = "mod ML do\n" ^ pre ^ "  pfn total(xs : -- the list, nonempty\n      List(Int)) : Int do sum_pos(xs) end\n  fn main() : Int do total([1]) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let before = contents () in
+            let _, j = run_cli_in dir "--check --refine-infer-json" in
+            Alcotest.(check bool) ("no edit: " ^ j) true (Astring_contains.contains j "\"edit\": null");
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("apply by hand: " ^ out) true (Astring_contains.contains out "apply by hand");
+            Alcotest.(check string) "file unchanged" before (contents ())));
+    gated "same-named functions: A.go has no in-unit callers even though B.go does (review #4)" (fun () ->
+        let src = "mod T do\n  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  mod A do\n    fn go(xs : List(Int)) : Int do T.sum_pos(xs) end\n  end\n  mod B do\n    fn go(n : Int) : Int do n end\n    fn caller() : Int do go(1) end\n  end\n  fn main() : Int do B.caller() end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let before = contents () in
+            let _, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check string) ("A.go not applied: " ^ out) before (contents ());
+            Alcotest.(check bool) ("said external: " ^ out) true (Astring_contains.contains out "external")));
+    gated "a cap verified module with an unproven obligation still gets inference (review #5)" (fun () ->
+        let src = "mod V do\n  cap verified\n" ^ pre ^ "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn main() : Int do go([1]) end\nend\n" in
+        with_src_dir src (fun dir _ ->
+            let _, out = run_cli_in dir "--check --refine-infer" in
+            Alcotest.(check bool) ("not skipped: " ^ out) false (Astring_contains.contains out "skipped, the program has errors");
+            Alcotest.(check bool) ("pos_only proposed: " ^ out) true (Astring_contains.contains out "1 proposed")));
     gated "--refine-infer-diff prints the edit without writing" (fun () ->
         with_src_dir e2 (fun dir contents ->
             let before = contents () in
@@ -24432,6 +24495,7 @@ let () =
       ("infer-elements", infer_elements_suite);
       ("infer-abstract", infer_abstract_suite);
       ("infer-accumulator", infer_accumulator_suite);
+      ("infer-override", infer_override_suite);
       ("infer-fixpoint", infer_fixpoint_suite);
       ("infer-cli", infer_cli_suite);
       ("infer-apply", infer_apply_suite);
