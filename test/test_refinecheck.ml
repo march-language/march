@@ -24081,6 +24081,59 @@ let infer_accumulator_suite =
           (March_refactor.Refine_edit.splice_lambda_param ~src ~line:2 ~col:19 ~param:"acc" ~annotation:"{Int | _ > 0}"))
   ]
 
+
+module RI = March_refinecheck.Refine_infer
+
+let infer_run ?(stdlib = false) src (f : RI.result -> unit) =
+  with_infer_fixture ~stdlib src (fun fx ->
+      f (RI.run ~root:fx.fx_root ~is_user:(fun (sp : March_ast.Ast.span) -> sp.March_ast.Ast.file = "") fx.fx_m))
+
+let props (r : RI.result) = List.map (fun (p : RI.proposal) -> (p.RI.slot.IS.fn, p.RI.annotation)) r.RI.proposals
+
+let infer_fixpoint_suite =
+  let pre = "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn need_pos(k : {Int | _ > 0}) : Int do k end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
+  let sp = Alcotest.(list (pair string string)) in
+  [ gated "two-hop element chain found in one run" (fun () ->
+        infer_run ~stdlib:true
+          (m "TH" "  fn h1(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  fn h2(xs : List(Int)) : List(Int) do h1(xs) end\n  fn go(ys : List(Int)) : Int do sum_pos(h2(ys)) end\n")
+          (fun r ->
+            Alcotest.check sp "both returns" [ ("h1", "List({Int | _ > 0})"); ("h2", "List({Int | _ > 0})") ]
+              (List.sort compare (props r));
+            Alcotest.(check int) "no user skips after" 0 (March_refinecheck.Ledger_diff.debt r.RI.after)));
+    gated "a fact (return) is proposed before a demand (precondition) in a round" (fun () ->
+        infer_run
+          (m "FD" "  fn abs1(n : Int) : Int do if n > 0 do n else 1 end end\n  fn g(n : Int) : Int do need_pos(abs1(n)) end\n  fn h(k : Int) : Int do need_pos(k) end\n")
+          (fun r ->
+            let fns = List.map (fun (p : RI.proposal) -> p.RI.slot.IS.fn) r.RI.proposals in
+            Alcotest.(check (list string)) "order" [ "abs1"; "h" ] fns));
+    gated "C1: the chain is tried and the gap recorded (not-true at b)" (fun () ->
+        infer_run
+          (m "C1" "  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn go() : Int do need_pos(b(3)) end\n")
+          (fun r ->
+            Alcotest.(check bool) "b's return not proposed" false (List.mem_assoc "b" (props r));
+            Alcotest.(check bool) "rejection recorded for b" true
+              (List.exists (fun ((s : IS.slot), _, reason, _) -> s.IS.fn = "b" && reason = "not-true") r.RI.rejected)));
+    gated "G1: nothing proposed" (fun () ->
+        infer_run
+          (m "G1" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : Int) : Int do need_pos(inc(n)) end\n  fn caller() : Int do go(0 - 5) end\n")
+          (fun r -> Alcotest.check sp "none" [] (props r)));
+    gated "terminates within the round cap; G0 is refused, not proposed" (fun () ->
+        infer_run
+          (m "TR" "  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\n")
+          (fun r ->
+            Alcotest.(check bool) "rounds <= 10" true (r.RI.rounds <= 10);
+            Alcotest.check sp "no proposal" [] (props r);
+            Alcotest.(check bool) "refused" true
+              (List.exists (fun ((s : IS.slot), _, (rf : PI.refusal)) -> s.IS.fn = "go" && rf.PI.rf_reason = "caller-violation") r.RI.refused)));
+    gated "an SCC whose members fail alone is noted scc-unsupported" (fun () ->
+        infer_run
+          (m "SC" "  fn ev(xs : List(Int)) : List(Int) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> od(t)\n    end\n  end\n  fn od(xs : List(Int)) : List(Int) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if h > 0 do Cons(h, ev(t)) else ev(t) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do sum_pos(ev(ys)) end\n")
+          (fun r ->
+            Alcotest.(check bool) "noted" true
+              (List.exists (fun (fn, n) -> (fn = "ev" || fn = "od") && n = "scc-unsupported") r.RI.notes)))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -24228,6 +24281,7 @@ let () =
       ("infer-elements", infer_elements_suite);
       ("infer-abstract", infer_abstract_suite);
       ("infer-accumulator", infer_accumulator_suite);
+      ("infer-fixpoint", infer_fixpoint_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

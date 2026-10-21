@@ -266,3 +266,22 @@ let best_k6 ~(root : string) ~(decls : A.decl list) (s : IS.slot) ~(budget : int
         go best (v :: verdicts) tl
     in
     go None [] (IS.k6_shapes s)
+
+(* TRUE only (no USEFUL): does the checker prove [c] at return slot [s]?  The
+   demand-chain step of the fixpoint (design §3.3) asks this of a callee link
+   before installing it tentatively. *)
+let holds ~(root : string) ~(decls : A.decl list) (s : IS.slot) (c : IV.cand) : bool =
+  Obligation.with_scratch @@ fun () ->
+  match prepare ~root ~decls s with
+  | None -> false
+  | Some cx -> (
+    let s = { s with IS.fd = cx.fd0 } in
+    let hyp = IS.install s ~mk:c.IV.c.PI.c_pred in
+    try
+      with_hyp_def cx hyp @@ fun () ->
+      match s.IS.path with
+      | IS.Return -> PO.post_holds ~root hyp
+      | p when IS.root p = IS.Return ->
+        with_elem_table (fun () -> elem_ret_holds ~root ~defs:(defs_with cx hyp) (cx.rebuild hyp) ~fn:cx.qualified)
+      | _ -> false
+    with _ -> false)
