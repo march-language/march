@@ -11045,7 +11045,7 @@ let vf_span : March_ast.Ast.span =
 let record_at ~callee ~kind ~verdict =
   March_refinecheck.Obligation.record
     { March_refinecheck.Obligation.span = vf_span; callee;
-      predicate = "len(_) > 0"; verdict; kind }
+      predicate = "len(_) > 0"; verdict; kind; inst = None }
 
 let vname = Option.map March_refinecheck.Obligation.verdict_name
 
@@ -23810,6 +23810,24 @@ let infer_guards_suite =
                 (List.map (fun s -> (s.PI.sg_param, s.PI.sg_pred)) r.PI.rs_suggestions);
               Alcotest.(check bool) "external-callers" true r.PI.rs_external_callers
             | rs -> Alcotest.failf "expected one result, got %d" (List.length rs)))
+    ;
+    gated "inst: R1's demand is transported into the caller's scope" (fun () ->
+        with_infer_fixture
+          "mod R1 do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n, i) end\nend\n"
+          (fun _ ->
+            match List.filter (fun o -> o.Ob.callee = "need_below") (Ob.all ()) with
+            | [ o ] ->
+              Alcotest.(check (option string)) "inst" (Some "_ < n") o.Ob.inst;
+              Alcotest.(check bool) "verdict unchanged (still a skip)" true
+                (match o.Ob.verdict with Ob.Skipped _ -> true | _ -> false)
+            | os -> Alcotest.failf "expected one need_below obligation, got %d" (List.length os)));
+    gated "inst: an expression actual is not transported" (fun () ->
+        with_infer_fixture
+          "mod R1b do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n + 1, i) end\nend\n"
+          (fun _ ->
+            match List.filter (fun o -> o.Ob.callee = "need_below") (Ob.all ()) with
+            | [ o ] -> Alcotest.(check (option string)) "inst" None o.Ob.inst
+            | os -> Alcotest.failf "expected one need_below obligation, got %d" (List.length os)))
   ]
 
 let () =

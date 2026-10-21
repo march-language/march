@@ -406,7 +406,7 @@ let rec check_var_divisor ~root errctx span var_name all_params (c : dctx) =
   in
   Obligation.record
     { Obligation.span; callee = var_name; predicate = "_ != 0"; verdict
-    ; kind = Obligation.Division }
+    ; kind = Obligation.Division; inst = None }
 
 and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
   let params =

@@ -187,6 +187,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--refine-suggest-all` no longer proposes a precondition that breaks a caller.** The
+  suggester re-checked only the target function, so for `go(n : Int) = need_pos(n)` with
+  `caller() = go(0 - 5)` it proposed `n : {Int | _ > 0}` and reported "discharges all", although
+  applying it turns `caller` into a refinement violation. Probes now include every caller in the
+  unit; such a proposal is reported as `refused (caller-violation)` with the call it would break.
+  A hypothesis is also judged site by site (it must prove something, break nothing and create no
+  violation), and one that makes the parameters unsatisfiable is rejected.
 - **Refinements: a correct call under a condition the checker cannot read is no
   longer a violation.** With `k : {Int | _ <= 100}` and
   `xs : List({Int | _ < k})`, `if small(k) do need_lt5(xs) else 0 end` (where
