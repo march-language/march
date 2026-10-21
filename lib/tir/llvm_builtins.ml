@@ -463,6 +463,20 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_ed25519_verify(ptr %pk, ptr %msg, ptr %sig)" };
   { march_name = "x25519"; c_name = Some "march_x25519"; ret_ty = Some (Tir.TCon ("Bytes", []));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_x25519(ptr %k, ptr %u)" };
+  (* ML-KEM-768 / ML-DSA-65 over the vendored mlkem-native / mldsa-native
+     (runtime/pqc.c, runtime/march_pqc.c). *)
+  { march_name = "mlkem768_keypair"; c_name = Some "march_mlkem768_keypair"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mlkem768_keypair(ptr %seed)" };
+  { march_name = "mlkem768_encaps"; c_name = Some "march_mlkem768_encaps"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mlkem768_encaps(ptr %pk, ptr %coins)" };
+  { march_name = "mlkem768_decaps"; c_name = Some "march_mlkem768_decaps"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mlkem768_decaps(ptr %sk, ptr %ct)" };
+  { march_name = "mldsa65_keypair"; c_name = Some "march_mldsa65_keypair"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mldsa65_keypair(ptr %seed)" };
+  { march_name = "mldsa65_sign"; c_name = Some "march_mldsa65_sign"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mldsa65_sign(ptr %sk, ptr %msg, ptr %rnd)" };
+  { march_name = "mldsa65_verify"; c_name = Some "march_mldsa65_verify"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_mldsa65_verify(ptr %pk, ptr %msg, ptr %sig)" };
   { march_name = "pbkdf2_sha256"; c_name = Some "march_pbkdf2_sha256"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)" };
   { march_name = "base64_encode"; c_name = Some "march_base64_encode"; ret_ty = Some Tir.TString;
@@ -1614,6 +1628,12 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_ed25519_sign";
   PDeclare "march_ed25519_verify";
   PDeclare "march_x25519";
+  PDeclare "march_mlkem768_keypair";
+  PDeclare "march_mlkem768_encaps";
+  PDeclare "march_mlkem768_decaps";
+  PDeclare "march_mldsa65_keypair";
+  PDeclare "march_mldsa65_sign";
+  PDeclare "march_mldsa65_verify";
   PDeclare "march_pbkdf2_sha256";
   PDeclare "march_base64_encode";
   PDeclare "march_base64_decode";

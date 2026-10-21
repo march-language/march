@@ -351,6 +351,12 @@ let extern_borrow_table : (string * bool list) list = [
   ("ed25519_sign",         [true; true]);
   ("ed25519_verify",       [true; true; true]);
   ("x25519",               [true; true]);
+  ("mlkem768_keypair",     [true]);
+  ("mlkem768_encaps",      [true; true]);
+  ("mlkem768_decaps",      [true; true]);
+  ("mldsa65_keypair",      [true]);
+  ("mldsa65_sign",         [true; true; true]);
+  ("mldsa65_verify",       [true; true; true]);
   ("base64_encode",        [true]);
   ("stdlib_base64_encode", [true]);
   ("base64_decode",        [true]);

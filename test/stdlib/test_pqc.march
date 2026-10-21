@@ -1,0 +1,114 @@
+mod TestPqc do
+
+  -- Vectors: seeds are byte ranges; every expected value below was produced
+  -- independently by OpenSSL 4.0.3 (`openssl genpkey -algorithm ML-KEM-768 /
+  -- ML-DSA-65 -pkeyopt hexseed:...`, `pkeyutl -encap -pkeyopt hexikme:...`,
+  -- `pkeyutl -sign -pkeyopt deterministic:1`). Long values are pinned as the
+  -- SHA-256 of their lowercase hex.
+  fn range_bytes(lo, n) do Bytes.from_list(List.map(List.range(0, n), fn i -> lo + i)) end
+  fn kem_seed() do range_bytes(0, 64) end
+  fn kem_coins() do range_bytes(128, 32) end
+  fn dsa_seed() do range_bytes(64, 32) end
+  fn msg() do Bytes.from_string("hello march") end
+  fn hex_digest(b) do Crypto.sha256(Bytes.to_hex(b)) end
+  fn flip_first(b) do
+    match Bytes.to_list(b) do
+      Cons(x, rest) -> Bytes.from_list(Cons(if x == 0 do 1 else 0 end, rest))
+      Nil -> b
+    end
+  end
+
+  fn kem_kp() do Result.unwrap(MlKem.keypair_from_seed(kem_seed())) end
+  fn dsa_kp() do Result.unwrap(MlDsa.keypair_from_seed(dsa_seed())) end
+
+  describe "ML-KEM-768" do
+    test "key pair from a seed matches OpenSSL" do
+      let kp = kem_kp()
+      assert (Bytes.length(kp.public_key) == MlKem.public_key_bytes())
+      assert (Bytes.length(kp.secret_key) == MlKem.secret_key_bytes())
+      assert (hex_digest(kp.public_key) == "6c4e46984b05407d80e576b5f488ef3cb0f6a48bfd29188ac02f3d17f9dacf54")
+      assert (hex_digest(kp.secret_key) == "1184e30b0b51ef8f0816670b9ca9717ecda8397e0d915edaf50f5b7b6801554a")
+    end
+
+    test "encapsulation with fixed coins matches OpenSSL, and decapsulation recovers the secret" do
+      let kp = kem_kp()
+      match MlKem.encapsulate_with_coins(kp.public_key, kem_coins()) do
+        Ok((ct, ss)) ->
+          assert (Bytes.length(ct) == MlKem.ciphertext_bytes())
+          assert (hex_digest(ct) == "115fddb24ad6209c0d236455c6e0e57e276458497c22ee0ba96297a5df3e2454")
+          assert (Bytes.to_hex(ss) == "ef91db44b6cd5b2c50f483481a3d6e2a08cc149764fcb8dc568851332da45ed9")
+          assert (MlKem.decapsulate(kp.secret_key, ct) == Ok(ss))
+        Err(e) -> assert (e == "")
+      end
+    end
+
+    test "random round trip agrees; a tampered ciphertext gives a different secret" do
+      let kp = MlKem.keypair()
+      match MlKem.encapsulate(kp.public_key) do
+        Ok((ct, ss)) ->
+          assert (MlKem.decapsulate(kp.secret_key, ct) == Ok(ss))
+          match MlKem.decapsulate(kp.secret_key, flip_first(ct)) do
+            Ok(other) -> assert (other != ss)
+            Err(e) -> assert (e == "")
+          end
+        Err(e) -> assert (e == "")
+      end
+    end
+
+    test "wrong lengths are errors, never crashes" do
+      assert (Result.is_err(MlKem.keypair_from_seed(range_bytes(0, 32))))
+      assert (Result.is_err(MlKem.encapsulate(Bytes.from_string("short"))))
+      let kp = kem_kp()
+      assert (Result.is_err(MlKem.decapsulate(kp.secret_key, Bytes.empty())))
+      assert (Bytes.is_empty(mlkem768_keypair(Bytes.empty())))
+      assert (Bytes.is_empty(mlkem768_encaps(Bytes.empty(), kem_coins())))
+      assert (Bytes.is_empty(mlkem768_decaps(Bytes.empty(), Bytes.empty())))
+    end
+
+    test "a public key failing the FIPS 203 modulus check is rejected" do
+      let bad = Bytes.from_list(List.map(List.range(0, 1184), fn _ -> 255))
+      assert (Result.is_err(MlKem.encapsulate(bad)))
+    end
+  end
+
+  describe "ML-DSA-65" do
+    test "key pair from a seed and the deterministic signature match OpenSSL" do
+      let kp = dsa_kp()
+      assert (Bytes.length(kp.public_key) == MlDsa.public_key_bytes())
+      assert (Bytes.length(kp.secret_key) == MlDsa.secret_key_bytes())
+      assert (hex_digest(kp.public_key) == "0c1f6e263abd9835a04d2a3746952ef809cede770ee2ddc4e76ba7821be75faa")
+      let sg = Result.unwrap(MlDsa.sign_deterministic(kp.secret_key, msg()))
+      assert (Bytes.length(sg) == MlDsa.signature_bytes())
+      assert (hex_digest(sg) == "406d5fb16c636b2aed747b4a57c104ebb5d4233a58ea432e967e68f9f52f51f6")
+      assert (MlDsa.verify(kp.public_key, msg(), sg))
+    end
+
+    test "hedged signatures differ and both verify; tampering is rejected" do
+      let kp = dsa_kp()
+      let s1 = Result.unwrap(MlDsa.sign(kp.secret_key, msg()))
+      let s2 = Result.unwrap(MlDsa.sign(kp.secret_key, msg()))
+      assert (s1 != s2)
+      assert (MlDsa.verify(kp.public_key, msg(), s1))
+      assert (MlDsa.verify(kp.public_key, msg(), s2))
+      assert (not(MlDsa.verify(kp.public_key, Bytes.from_string("hello marcH"), s1)))
+      assert (not(MlDsa.verify(kp.public_key, msg(), flip_first(s1))))
+      let other = MlDsa.keypair()
+      assert (not(MlDsa.verify(other.public_key, msg(), s1)))
+    end
+
+    test "the empty message signs and verifies" do
+      let kp = dsa_kp()
+      let sg = Result.unwrap(MlDsa.sign(kp.secret_key, Bytes.empty()))
+      assert (MlDsa.verify(kp.public_key, Bytes.empty(), sg))
+    end
+
+    test "wrong lengths are errors or false, never crashes" do
+      assert (Result.is_err(MlDsa.keypair_from_seed(range_bytes(0, 31))))
+      assert (Result.is_err(MlDsa.sign(Bytes.from_string("short"), msg())))
+      assert (not(MlDsa.verify(Bytes.empty(), msg(), Bytes.empty())))
+      let kp = dsa_kp()
+      assert (Bytes.is_empty(mldsa65_sign(kp.secret_key, msg(), Bytes.empty())))
+    end
+  end
+
+end
