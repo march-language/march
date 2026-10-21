@@ -445,20 +445,61 @@ let max_rounds = 10
    `--fixpoint` over the per-function suggester), with `--apply` / `--diff`
    passed through.  The compiler re-checks after applying and reverts on a
    mismatch (exit 3), so nothing is re-verified here. *)
-let run_infer ~lib_path_env ~files ~apply ~diff : (int, string) result =
+(* Like [run_capturing_stdout], but keeps stderr too: `--refine-infer` reports
+   a skipped file (the program has errors) and an unknown flag (an older
+   march) only there. *)
+let run_capturing cmd : int * string * string =
+  let read f =
+    try
+      let ic = open_in f in
+      let s = really_input_string ic (in_channel_length ic) in
+      close_in ic;
+      s
+    with Sys_error _ -> ""
+  in
+  let out = Filename.temp_file "forge_refine" ".out" and err = Filename.temp_file "forge_refine" ".err" in
+  let rc = Sys.command (Printf.sprintf "%s >%s 2>%s" cmd (Filename.quote out) (Filename.quote err)) in
+  let o = read out and e = read err in
+  List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ out; err ];
+  (rc, o, e)
+
+(* Why a file produced no inference: the compiler's own `--refine-infer:
+   skipped` line when it printed one, otherwise its exit code and first
+   stderr line. *)
+let skip_reason ~rc ~err =
+  let lines = List.filter (fun l -> String.trim l <> "") (String.split_on_char '\n' err) in
+  let mentions sub l = try ignore (Str.search_forward (Str.regexp_string sub) l 0); true with Not_found -> false in
+  match List.find_opt (mentions "--refine-infer: skipped") lines with
+  | Some l -> Some (String.trim l)
+  | None when rc = 0 -> None
+  | None ->
+    Some
+      (Printf.sprintf "march exited %d%s" rc
+         (match lines with l :: _ -> ": " ^ String.trim l | [] -> ""))
+
+(* One `march --refine-infer` per file.  [Ok skipped] lists the files the
+   compiler produced nothing for, with the reason; a re-check mismatch after
+   `--apply` (rc 3, every edit reverted) is an [Error]. *)
+let run_infer ~lib_path_env ~files ~apply ~diff : ((string * string) list, string) result =
   let flags =
     String.concat ""
       [ " --check --refine-infer"; (if apply then " --refine-infer-apply" else ""); (if diff then " --refine-infer-diff" else "") ]
   in
-  let failures = ref [] in
+  let failures = ref [] and skipped = ref [] in
   List.iter
     (fun f ->
       let cmd = Printf.sprintf "%smarch%s %s" lib_path_env flags (Filename.quote f) in
-      let rc, out = run_capturing_stdout cmd in
+      let rc, out, err = run_capturing cmd in
       print_string out;
-      if rc = 3 then failures := Printf.sprintf "%s: the re-check after applying did not match; edits reverted" f :: !failures)
+      if rc = 3 then failures := Printf.sprintf "%s: the re-check after applying did not match; edits reverted" f :: !failures
+      else
+        match skip_reason ~rc ~err with
+        | Some why ->
+          Printf.printf "%s: no inference — %s\n%!" f why;
+          skipped := (f, why) :: !skipped
+        | None -> ())
     files;
-  match !failures with [] -> Ok 0 | fs -> Error (String.concat "\n" (List.rev fs))
+  match !failures with [] -> Ok (List.rev !skipped) | fs -> Error (String.concat "\n" (List.rev fs))
 
 let run ?(all = false) ?(apply = false) ?(fixpoint = false) ?(postconditions = false)
     ?(infer = false) ?(diff = false)
@@ -484,7 +525,10 @@ let run ?(all = false) ?(apply = false) ?(fixpoint = false) ?(postconditions = f
          exists (design §4.1). *)
       if infer || fixpoint then
         (match run_infer ~lib_path_env ~files ~apply ~diff with
-         | Ok _ -> Ok "refine --infer: done"
+         | Ok [] -> Ok "refine --infer: done"
+         | Ok sk ->
+           Ok (Printf.sprintf "refine --infer: done; %d of %d file(s) produced no inference (see above)"
+                 (List.length sk) (List.length files))
          | Error e -> Error e)
       else
       let once ?(quiet = false) () =

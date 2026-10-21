@@ -3030,6 +3030,51 @@ let test_shell_force_flag () =
     (let a = args true and e = " " ^ Filename.quote "app.march" in
      String.sub a (String.length a - String.length e) (String.length e) = e)
 
+(* `forge refine --infer` shells out to `march` once per file.  A march that
+   fails (no --refine-infer flag, a file that does not check) must be reported
+   per file, never swallowed: stderr used to go to /dev/null and every rc but 3
+   was ignored, so the command printed nothing at all. *)
+let with_fake_march ~stderr_line ~rc f =
+  let dir = Filename.temp_dir "fake_march_" "" in
+  let script = Filename.concat dir "march" in
+  let oc = open_out script in
+  Printf.fprintf oc "#!/bin/sh\necho 'proposal text'\necho %s >&2\nexit %d\n" (Filename.quote stderr_line) rc;
+  close_out oc;
+  Unix.chmod script 0o755;
+  f (Printf.sprintf "PATH=%s:\"$PATH\" " (Filename.quote dir))
+
+let test_refine_infer_reports_march_failure () =
+  with_fake_march ~stderr_line:"march: unknown option '--refine-infer'." ~rc:2 (fun env ->
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "a.march" ] ~apply:false ~diff:false with
+      | Ok [ (f, why) ] ->
+        Alcotest.(check string) "file" "a.march" f;
+        Alcotest.(check bool) "reason names the compiler's message" true
+          (try ignore (Str.search_forward (Str.regexp_string "unknown option") why 0); true with Not_found -> false)
+      | Ok l -> Alcotest.failf "expected one skipped file, got %d" (List.length l)
+      | Error e -> Alcotest.failf "unexpected error: %s" e)
+
+let test_refine_infer_reports_unchecked_file () =
+  with_fake_march ~stderr_line:"--refine-infer: skipped, the program has errors (fix them first)" ~rc:1 (fun env ->
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "b.march" ] ~apply:false ~diff:false with
+      | Ok [ ("b.march", why) ] ->
+        Alcotest.(check bool) "reason is the skip line" true
+          (try ignore (Str.search_forward (Str.regexp_string "the program has errors") why 0); true with Not_found -> false)
+      | Ok l -> Alcotest.failf "expected b.march skipped, got %d" (List.length l)
+      | Error e -> Alcotest.failf "unexpected error: %s" e)
+
+let test_refine_infer_clean_run_skips_nothing () =
+  with_fake_march ~stderr_line:"" ~rc:0 (fun env ->
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "c.march" ] ~apply:false ~diff:false with
+      | Ok [] -> ()
+      | Ok l -> Alcotest.failf "expected nothing skipped, got %d" (List.length l)
+      | Error e -> Alcotest.failf "unexpected error: %s" e)
+
+let test_refine_infer_mismatch_is_an_error () =
+  with_fake_march ~stderr_line:"--refine-infer: the re-check did not match" ~rc:3 (fun env ->
+      match March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ "d.march" ] ~apply:true ~diff:false with
+      | Error _ -> ()
+      | Ok _ -> Alcotest.fail "a reverted apply must be an error")
+
 let () =
   Alcotest.run "forge" [
     "protocol split", [
@@ -3039,6 +3084,12 @@ let () =
       Alcotest.test_case "a monolith that chooses and receives splits into expand/contract" `Quick test_split_monolith;
       Alcotest.test_case "separate pools deploy once, receivers first" `Quick test_split_separate_pools;
       Alcotest.test_case "breaking and unchanged protocols" `Quick test_split_breaking_and_unchanged;
+    ];
+    "refine --infer", [
+      Alcotest.test_case "a failing march is reported per file" `Quick test_refine_infer_reports_march_failure;
+      Alcotest.test_case "a file that does not check is reported" `Quick test_refine_infer_reports_unchecked_file;
+      Alcotest.test_case "a clean run skips nothing" `Quick test_refine_infer_clean_run_skips_nothing;
+      Alcotest.test_case "a reverted apply is an error" `Quick test_refine_infer_mismatch_is_an_error;
     ];
     "protocols", [
       Alcotest.test_case "build passes protocol baselines only when a protocol exists" `Quick test_protocol_flags;
