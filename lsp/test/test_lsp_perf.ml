@@ -511,6 +511,106 @@ let refine_action_at src needle =
          | Some c -> c.Lsp.Types.Command.command = "march.suggestRefinement"
          | None -> false)
 
+let infer_action_at src needle =
+  let a = analyse src in
+  let (line, col) = pos_of src needle in
+  An.code_actions_at a ~line ~character:col ()
+  |> List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+         match ca.Lsp.Types.CodeAction.command with
+         | Some c -> c.Lsp.Types.Command.command = "march.inferRefinements"
+         | None -> false)
+
+let test_infer_action_offered () =
+  let src = "mod IA do\n  fn total(xs : List(Int)) : Int do 0 end\nend\n" in
+  match infer_action_at src "total" with
+  | None -> Alcotest.fail "expected an inferRefinements action on `total`"
+  | Some ca ->
+    Alcotest.(check bool) "carries no eager edit" true (ca.Lsp.Types.CodeAction.edit = None);
+    (match ca.Lsp.Types.CodeAction.command with
+     | Some c ->
+       Alcotest.(check int) "command carries file and fn" 2
+         (List.length (Option.value ~default:[] c.Lsp.Types.Command.arguments))
+     | None -> Alcotest.fail "expected a command")
+
+let apply_byte_edits src edits =
+  List.fold_left
+    (fun acc (a, b, t) -> String.sub acc 0 a ^ t ^ String.sub acc b (String.length acc - b))
+    src (List.sort (fun (a, _, _) (b, _, _) -> compare b a) edits)
+
+(* The editor's edit and the CLI's --refine-infer-apply produce the same bytes. *)
+let test_infer_action_bytes_equal_cli () =
+  (* Exe-relative, not cwd-relative: `dune runtest` runs this from
+     _build/default/lsp/test, the direct invocation from the repo root. *)
+  let exe = Filename.concat (Filename.dirname Sys.executable_name) "../../bin/main.exe" in
+  if not (Sys.file_exists exe) then Alcotest.fail ("build bin/main.exe first: " ^ exe);
+  let dir = Filename.temp_dir "lspinfer" "" in
+  let src =
+    "mod E2 do\n  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn main() : Int do go([1]) end\nend\n"
+  in
+  let f = Filename.concat dir "m.march" in
+  let write s = Out_channel.with_open_bin f (fun oc -> output_string oc s) in
+  write src;
+  let run args =
+    let out = Filename.concat dir "out.txt" in
+    ignore (Sys.command (Printf.sprintf "cd %s && HOME=%s %s %s m.march > %s 2>/dev/null" (Filename.quote dir) (Filename.quote dir) (Filename.quote exe) args (Filename.quote out)));
+    In_channel.with_open_bin out In_channel.input_all
+  in
+  let json = run "--check --refine-infer-json" in
+  let edits = March_lsp_lib.Refine_command.infer_byte_edits ~json () in
+  Alcotest.(check bool) "some edit" true (edits <> []);
+  let editor = apply_byte_edits src (List.map (fun (e : March_lsp_lib.Refine_command.byte_edit) -> (e.be_start, e.be_end, e.be_text)) edits) in
+  ignore (run "--check --refine-infer --refine-infer-apply");
+  let cli = In_channel.with_open_bin f In_channel.input_all in
+  Alcotest.(check string) "same bytes" cli editor
+
+(* A precondition that adds an unproven obligation at its callers needs the
+   user's confirmation in the editor. *)
+let test_infer_needs_confirmation () =
+  let json =
+    {|{"version": 1, "summary": {}, "proposals": [{"id": "P1", "kind": "precondition", "fn": "go", "slot": "param n", "annotation": "{Int | _ > 0}", "external_callers": false, "caller_impact": {"new_proved": 0, "new_skipped": 2, "new_violated": 0, "sites": []}, "edit": {"file": "/tmp/x.march", "start": 10, "end": 13, "text": "{Int | _ > 0}"}}], "rejected": [], "refused": [], "notes": []}|}
+  in
+  match March_lsp_lib.Refine_command.infer_byte_edits ~json () with
+  | [ e ] ->
+    Alcotest.(check (option string)) "confirmation label" (Some "adds an unproven obligation at 2 callers") e.be_confirm
+  | es -> Alcotest.failf "expected one edit, got %d" (List.length es)
+
+let infer_json_of (ps : string list) =
+  Printf.sprintf {|{"version": 1, "summary": {}, "proposals": [%s], "rejected": [], "refused": [], "notes": []}|}
+    (String.concat ", " ps)
+
+let infer_prop ?(deps = "[]") ?(external_ = false) ?(edit = true) ~id ~fn ~start () =
+  Printf.sprintf
+    {|{"id": "%s", "kind": "return", "fn": "%s", "slot": "return", "annotation": "{Int | _ > 0}", "depends_on": %s, "external_callers": %b, "caller_impact": {"new_proved": 1, "new_skipped": 0, "new_violated": 0, "sites": []}, "edit": %s}|}
+    id fn deps external_
+    (if edit then Printf.sprintf {|{"file": "/tmp/x.march", "start": %d, "end": %d, "text": "T"}|} start (start + 1) else "null")
+
+let infer_edit_fns ?fn json =
+  List.sort compare
+    (List.map (fun (e : March_lsp_lib.Refine_command.byte_edit) -> e.be_fn)
+       (March_lsp_lib.Refine_command.infer_byte_edits ?fn ~json ()))
+
+(* "Infer refinements for `B.go`" (the action passes the name with the
+   top-level module, `T.B.go`) must not apply `A.go`'s edit (review #7). *)
+let test_infer_per_fn_qualified () =
+  let json = infer_json_of [ infer_prop ~id:"P1" ~fn:"A.go" ~start:10 (); infer_prop ~id:"P2" ~fn:"B.go" ~start:20 () ] in
+  Alcotest.(check (list string)) "only B.go" [ "B.go" ] (infer_edit_fns ~fn:"T.B.go" json)
+
+(* A per-function action brings the callee links its proposal depends on, and
+   drops a proposal whose link has no edit; external-callers proposals are
+   never applied from the editor, as the CLI withholds them without
+   --apply-public (review #8). *)
+let test_infer_depends_and_external () =
+  let json =
+    infer_json_of
+      [ infer_prop ~id:"P1" ~fn:"helper" ~start:10 ();
+        infer_prop ~id:"P2" ~fn:"go" ~deps:{|["P1"]|} ~start:20 ();
+        infer_prop ~id:"P3" ~fn:"pub" ~external_:true ~start:30 ();
+        infer_prop ~id:"P4" ~fn:"link" ~edit:false ~start:40 ();
+        infer_prop ~id:"P5" ~fn:"other" ~deps:{|["P4"]|} ~start:50 () ]
+  in
+  Alcotest.(check (list string)) "go brings helper" [ "go"; "helper" ] (infer_edit_fns ~fn:"go" json);
+  Alcotest.(check (list string)) "whole file: no external, no broken chain" [ "go"; "helper" ] (infer_edit_fns json)
+
 let test_refine_action_offered_on_annotated_param () =
   let src = {|
 mod RA do

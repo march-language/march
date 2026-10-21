@@ -131,6 +131,18 @@ let refine_suggest_budget = ref March_refinecheck.Precond_infer.default_budget
 (* --refine-suggest-post: propose the RETURN refinement that lets a function's
    CALLERS discharge obligations.  Separate from the precondition flags because
    it answers a different question — see lib/refinecheck/postcond_infer.ml. *)
+(* --refine-infer (design specs/2026-10-20-refinement-suggest-lite-design.md
+   §4.1): every candidate kind, module-wide fixpoint; see
+   lib/refinecheck/refine_infer.ml. *)
+let refine_infer           = ref false
+let refine_infer_json      = ref false
+let refine_infer_kinds     : string option ref = ref None
+let refine_infer_budget    = ref March_refinecheck.Refine_infer.default_budget
+let refine_infer_stdlib    = ref false
+let allow_caller_violations = ref false
+let apply_public           = ref false
+let refine_infer_apply     = ref false
+let refine_infer_diff      = ref false
 let refine_suggest_post : string option ref = ref None
 let refine_suggest_post_all = ref false
 

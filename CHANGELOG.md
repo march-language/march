@@ -21,6 +21,24 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`march --refine-infer` proposes every refinement the checker can verify,
+  module-wide.** Beyond the sign contracts `--refine-suggest-all` proposes, it
+  finds element refinements (`xs : List({Int | _ > 0})`, element and tuple
+  returns), relational preconditions (`i : {Int | _ < n}`, taken from the demand a
+  callee makes), abstract refinements for `filter`-shaped helpers
+  (`pred : a -> Bool[p]` with `List(a[p])`, `Option(a[p])` or `partition`'s pair)
+  and fold accumulator invariants. Candidates are mined from the program, every
+  proposal is proved by the real checker and must help some caller, and a
+  precondition that would break an existing caller is refused with that call.
+  `--refine-infer-json` emits JSON v1. `--refine-infer-apply` writes the
+  proposals, re-checks, and reverts everything (exit 3) if the result differs
+  from the prediction; `--refine-infer-diff` previews them; `forge refine --infer
+  [--diff|--apply]` runs it over the whole project as one checked unit, so a caller
+  in another file counts, passes `--apply-public` / `--allow-caller-violations`
+  through, and names every file it could not infer for (`--fixpoint` is now an
+  alias). The editor offers
+  "Infer refinements for `f`" / "in this file" with identical edits, and
+  `--refine-report --refine-infer` adds the if-applied ledger line.
 - **Refinements: a lambda passed for an abstract refinement may now have a real
   body.** `List.filter(ys, fn y -> is_pos(y) && y < 100)`, an `if` or a `match`
   on a Bool, `fn y -> gt(y, 0)` (a several-parameter helper with a proved
@@ -187,6 +205,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--refine-suggest-all` no longer proposes a precondition that breaks a caller.** The
+  suggester re-checked only the target function, so for `go(n : Int) = need_pos(n)` with
+  `caller() = go(0 - 5)` it proposed `n : {Int | _ > 0}` and reported "discharges all", although
+  applying it turns `caller` into a refinement violation. Probes now include every caller in the
+  unit; such a proposal is reported as `refused (caller-violation)` with the call it would break.
+  A hypothesis is also judged site by site (it must prove something, break nothing and create no
+  violation), and one that makes the parameters unsatisfiable is rejected.
 - **Refinements: a correct call under a condition the checker cannot read is no
   longer a violation.** With `k : {Int | _ <= 100}` and
   `xs : List({Int | _ < k})`, `if small(k) do need_lt5(xs) else 0 end` (where

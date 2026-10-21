@@ -11045,7 +11045,7 @@ let vf_span : March_ast.Ast.span =
 let record_at ~callee ~kind ~verdict =
   March_refinecheck.Obligation.record
     { March_refinecheck.Obligation.span = vf_span; callee;
-      predicate = "len(_) > 0"; verdict; kind }
+      predicate = "len(_) > 0"; verdict; kind; inst = None }
 
 let vname = Option.map March_refinecheck.Obligation.verdict_name
 
@@ -23676,6 +23676,686 @@ let fold_invariants_3_suite =
       "parametric-source-unproved" ]
 
 
+
+(* ── inference-lite (specs/2026-10-20-refinement-suggest-lite-design.md) ──
+   Shared fixture: parse, desugar and refine-check a module in a FRESH temp
+   root, so no VC cache is shared between tests (a warm cache masks
+   regressions). *)
+module PI = March_refinecheck.Precond_infer
+module LD = March_refinecheck.Ledger_diff
+module Ob = March_refinecheck.Obligation
+
+type infer_fixture = { fx_root : string; fx_m : March_ast.Ast.module_ }
+
+let with_infer_fixture ?(stdlib = false) (src : string) (f : infer_fixture -> 'a) : 'a =
+  with_temp_root "infer" (fun root ->
+      let m = March_desugar.Desugar.desugar_module (parse src) in
+      (* [~stdlib]: `list.march` as a sibling module, the shape the driver
+         produces, so `List.filter`'s signature is in the checker's defs. *)
+      let m =
+        if stdlib then { m with March_ast.Ast.mod_decls = fst (Lazy.force stdlib_list_mod) :: m.March_ast.Ast.mod_decls }
+        else m
+      in
+      (* Typechecked, with the span -> type table handed over exactly as the
+         driver does: element slots read element sorts from it. *)
+      let _tc_errors, type_map = March_typecheck.Typecheck.check_module m in
+      let errctx = March_errors.Errors.create () in
+      March_refinecheck.Refine_check.check_module ~root ~type_map errctx m;
+      f { fx_root = root; fx_m = m })
+
+let infer_suggest_all (fx : infer_fixture) : PI.t list =
+  PI.suggest_all ~root:fx.fx_root ~is_user:(fun _ -> true) fx.fx_m
+
+let ld_key line callee : LD.key =
+  let sp = { March_ast.Ast.dummy_span with March_ast.Ast.start_line = line } in
+  { LD.span = sp; callee; predicate = "_ > 0"; kind = Ob.Precondition }
+
+let skipped = Ob.Skipped Ob.Solver_undecided
+
+let infer_guards_suite =
+  let changes = Alcotest.(list string) in
+  let show d = List.map (fun (k, c) -> Printf.sprintf "%s:%s" k.LD.callee (LD.change_name c)) d in
+  [ Alcotest.test_case "ledger diff classifies each site" `Quick (fun () ->
+        let a = ld_key 1 "a" and b = ld_key 2 "b" and c = ld_key 3 "c" and d = ld_key 4 "d" in
+        let before = LD.of_list [ (a, skipped); (b, Ob.Proved); (c, Ob.Proved) ] in
+        let after = LD.of_list [ (a, Ob.Proved); (b, skipped); (c, Ob.Proved); (d, Ob.Violated) ] in
+        Alcotest.check changes "diff"
+          [ "a:closed"; "b:opened"; "c:unchanged"; "d:new-violated" ]
+          (show (LD.diff ~before ~after)));
+    Alcotest.test_case "proves two, opens one: rejected (count-based scoring said +1)" `Quick (fun () ->
+        let a = ld_key 1 "a" and b = ld_key 2 "b" and c = ld_key 3 "c" in
+        let before = LD.of_list [ (a, skipped); (b, skipped); (c, Ob.Proved) ] in
+        let after = LD.of_list [ (a, Ob.Proved); (b, Ob.Proved); (c, skipped) ] in
+        Alcotest.(check bool) "not admissible" false (PI.admissible (LD.diff ~before ~after)));
+    Alcotest.test_case "closes one, opens nothing: admissible" `Quick (fun () ->
+        let a = ld_key 1 "a" and c = ld_key 3 "c" in
+        let before = LD.of_list [ (a, skipped); (c, Ob.Proved) ] in
+        let after = LD.of_list [ (a, Ob.Proved); (c, Ob.Proved) ] in
+        Alcotest.(check bool) "admissible" true (PI.admissible (LD.diff ~before ~after)));
+    Alcotest.test_case "a new skip is paid for by a close (net >= 0)" `Quick (fun () ->
+        let a = ld_key 1 "a" and n = ld_key 5 "n" in
+        let before = LD.of_list [ (a, skipped) ] in
+        let after = LD.of_list [ (a, Ob.Proved); (n, skipped) ] in
+        Alcotest.(check bool) "admissible" true (PI.admissible (LD.diff ~before ~after)));
+    gated "S1 unchanged: b : {Int | _ != 0}, solved" (fun () ->
+        with_infer_fixture
+          "mod S1 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn safe(a : Int, b : Int) : Int do a + need_nz(b) end\nend\n"
+          (fun fx ->
+            let rs = List.filter (fun r -> r.PI.rs_fn = "safe") (infer_suggest_all fx) in
+            match rs with
+            | [ r ] ->
+              Alcotest.(check string) "status" "solved" (PI.status_name r.PI.rs_status);
+              Alcotest.(check (list (pair string string))) "suggestion" [ ("b", "_ != 0") ]
+                (List.map (fun s -> (s.PI.sg_param, s.PI.sg_pred)) r.PI.rs_suggestions)
+            | _ -> Alcotest.failf "expected one result for safe, got %d" (List.length rs)))
+    ;
+    gated "G0: a precondition that breaks a caller is refused, naming the caller's site" (fun () ->
+        with_infer_fixture
+          "mod G0 do\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\nend\n"
+          (fun fx ->
+            match PI.suggest ~root:fx.fx_root ~is_user:(fun _ -> true) ~target:"go" fx.fx_m with
+            | [ r ] ->
+              Alcotest.(check string) "status" "refused" (PI.status_name r.PI.rs_status);
+              Alcotest.(check int) "no suggestion" 0 (List.length r.PI.rs_suggestions);
+              (match r.PI.rs_status with
+               | PI.Refused rf ->
+                 Alcotest.(check string) "reason" "caller-violation" rf.PI.rf_reason;
+                 Alcotest.(check (list int)) "site is caller's call (line 4)" [ 4 ]
+                   (List.map (fun (sp : March_ast.Ast.span) -> sp.March_ast.Ast.start_line) rf.PI.rf_sites)
+               | _ -> Alcotest.fail "expected Refused")
+            | rs -> Alcotest.failf "expected one result, got %d" (List.length rs)));
+    gated "G0 with --allow-caller-violations: proposed" (fun () ->
+        with_infer_fixture
+          "mod G0b do\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\nend\n"
+          (fun fx ->
+            match PI.suggest ~allow_caller_violations:true ~root:fx.fx_root ~is_user:(fun _ -> true) ~target:"go" fx.fx_m with
+            | [ r ] ->
+              Alcotest.(check (list (pair string string))) "suggestion" [ ("n", "_ > 0") ]
+                (List.map (fun s -> (s.PI.sg_param, s.PI.sg_pred)) r.PI.rs_suggestions)
+            | rs -> Alcotest.failf "expected one result, got %d" (List.length rs)));
+    gated "satisfiable: a contradictory clause is not" (fun () ->
+        (* Like every inference entry point, [satisfiable] requires the
+           module to have been through [check_module] (registration globals). *)
+        let fd_of src =
+          let m = parse src in
+          March_refinecheck.Refine_check.check_module (March_errors.Errors.create ()) m;
+          match m.March_ast.Ast.mod_decls with
+          | [ March_ast.Ast.DFn (fd, _) ] -> fd
+          | _ -> Alcotest.fail "one fn"
+        in
+        Alcotest.(check bool) "sat" true
+          (PI.satisfiable (fd_of "mod U1 do\n  fn f(a : {Int | _ > 5}, b : Int) : Int do a end\nend\n"));
+        Alcotest.(check bool) "unsat" false
+          (PI.satisfiable (fd_of "mod U2 do\n  fn f(a : {Int | _ > 5}, b : {Int | _ < a && _ > a}) : Int do a end\nend\n")));
+    gated "same name in two modules: each go judged by its own callers" (fun () ->
+        with_infer_fixture
+          "mod T do\n  mod A do\n    fn need_pos(n : {Int | _ > 0}) : Int do n end\n    fn go(n : Int) : Int do need_pos(n) end\n    fn ok() : Int do go(5) end\n  end\n  mod B do\n    fn need_pos(n : {Int | _ > 0}) : Int do n end\n    fn go(n : Int) : Int do need_pos(n) end\n    fn caller() : Int do go(0 - 5) end\n  end\nend\n"
+          (fun fx ->
+            let rs = infer_suggest_all fx in
+            let find n = List.find_opt (fun r -> r.PI.rs_fn = n) rs in
+            (match find "A.go" with
+             | Some r -> Alcotest.(check string) "A.go proposed" "solved" (PI.status_name r.PI.rs_status)
+             | None -> Alcotest.fail "A.go missing");
+            match find "B.go" with
+            | Some { PI.rs_status = PI.Refused rf; _ } ->
+              Alcotest.(check (list int)) "B.go's site is B.caller (line 10)" [ 10 ]
+                (List.map (fun (sp : March_ast.Ast.span) -> sp.March_ast.Ast.start_line) rf.PI.rf_sites)
+            | _ -> Alcotest.fail "B.go should be refused"));
+    gated "a caller in a sibling module (another unit file) is seen" (fun () ->
+        with_infer_fixture
+          "mod T2 do\n  mod A do\n    fn need_pos(n : {Int | _ > 0}) : Int do n end\n    fn go(n : Int) : Int do need_pos(n) end\n  end\n  mod B do\n    fn caller() : Int do A.go(0 - 5) end\n  end\nend\n"
+          (fun fx ->
+            match List.find_opt (fun r -> r.PI.rs_fn = "A.go") (infer_suggest_all fx) with
+            | Some { PI.rs_status = PI.Refused rf; _ } ->
+              Alcotest.(check string) "reason" "caller-violation" rf.PI.rf_reason
+            | _ -> Alcotest.fail "A.go should be refused for B.caller"));
+    gated "a public fn with no in-unit callers is marked external-callers" (fun () ->
+        with_infer_fixture
+          "mod E1 do\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  fn go(n : Int) : Int do need_pos(n) end\nend\n"
+          (fun fx ->
+            match PI.suggest ~root:fx.fx_root ~is_user:(fun _ -> true) ~target:"go" fx.fx_m with
+            | [ r ] ->
+              Alcotest.(check (list (pair string string))) "still proposed" [ ("n", "_ > 0") ]
+                (List.map (fun s -> (s.PI.sg_param, s.PI.sg_pred)) r.PI.rs_suggestions);
+              Alcotest.(check bool) "external-callers" true r.PI.rs_external_callers
+            | rs -> Alcotest.failf "expected one result, got %d" (List.length rs)))
+    ;
+    gated "inst: R1's demand is transported into the caller's scope" (fun () ->
+        with_infer_fixture
+          "mod R1 do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n, i) end\nend\n"
+          (fun _ ->
+            match List.filter (fun o -> o.Ob.callee = "need_below") (Ob.all ()) with
+            | [ o ] ->
+              Alcotest.(check (option string)) "inst" (Some "_ < n") o.Ob.inst;
+              Alcotest.(check bool) "verdict unchanged (still a skip)" true
+                (match o.Ob.verdict with Ob.Skipped _ -> true | _ -> false)
+            | os -> Alcotest.failf "expected one need_below obligation, got %d" (List.length os)));
+    gated "inst: an expression actual is not transported" (fun () ->
+        with_infer_fixture
+          "mod R1b do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n + 1, i) end\nend\n"
+          (fun _ ->
+            match List.filter (fun o -> o.Ob.callee = "need_below") (Ob.all ()) with
+            | [ o ] -> Alcotest.(check (option string)) "inst" None o.Ob.inst
+            | os -> Alcotest.failf "expected one need_below obligation, got %d" (List.length os)))
+  ]
+
+
+module IS = March_refinecheck.Infer_slot
+module IV = March_refinecheck.Infer_vocab
+
+let slots_of (src : string) : IS.slot list =
+  IS.enumerate ~is_user:(fun _ -> true) (March_desugar.Desugar.desugar_module (parse src)).March_ast.Ast.mod_decls
+
+module IO = March_refinecheck.Infer_oracle
+
+let run_best ?(budget = 200) (fx : infer_fixture) ~(fn : string) ~(path : IS.path) =
+  let decls = fx.fx_m.March_ast.Ast.mod_decls in
+  let slot =
+    List.find (fun (s : IS.slot) -> s.IS.fn = fn && s.IS.path = path)
+      (IS.enumerate ~is_user:(fun _ -> true) decls)
+  in
+  let cands =
+    IO.ordered_candidates ~root:fx.fx_root ~ledger:(Ob.all ()) ~unit_decls:decls slot
+  in
+  IO.best_for_slot ~root:fx.fx_root ~decls slot cands ~budget:(ref budget)
+
+let best_text fx ~fn ~path =
+  let r = run_best fx ~fn ~path in
+  match fst r with
+  | Some (c, _) -> Some c.IV.c.PI.c_text
+  | None -> None
+
+let infer_vocab_suite =
+  [ Alcotest.test_case "slot: an element parameter is a K3 slot" `Quick (fun () ->
+        let ss = slots_of "mod S do\n  fn total(xs : List(Int)) : Int do 0 end\nend\n" in
+        Alcotest.(check bool) "Elem(Param xs) with K3" true
+          (List.exists
+             (fun (s : IS.slot) -> s.IS.fn = "total" && s.IS.path = IS.Elem (IS.Param "xs") && List.mem IS.K3 s.IS.kinds)
+             ss));
+    Alcotest.test_case "slot: an already-refined element is not a slot" `Quick (fun () ->
+        let ss = slots_of "mod S do\n  fn total(xs : List({Int | _ > 0})) : Int do 0 end\nend\n" in
+        Alcotest.(check bool) "no Elem(Param xs)" false
+          (List.exists (fun (s : IS.slot) -> s.IS.path = IS.Elem (IS.Param "xs")) ss));
+    Alcotest.test_case "slot: a trusted function has no slots" `Quick (fun () ->
+        let ss = slots_of "mod S do\n  @[trusted]\n  fn total(xs : List(Int), n : Int) : Int do 0 end\nend\n" in
+        Alcotest.(check int) "none" 0 (List.length ss));
+    Alcotest.test_case "slot: an unannotated signature is reported" `Quick (fun () ->
+        let m = March_desugar.Desugar.desugar_module (parse "mod S do\n  fn filter(m, pred) do m end\nend\n") in
+        Alcotest.(check (list string)) "unannotated" [ "filter" ]
+          (List.map fst (IS.unannotated m.March_ast.Ast.mod_decls)));
+    Alcotest.test_case "slot: respell a tuple component's element" `Quick (fun () ->
+        let ss = slots_of "mod S do\n  fn part(xs : List(a), f : a -> Bool) : (List(a), List(a)) do (xs, xs) end\nend\n" in
+        match List.find_opt (fun (s : IS.slot) -> s.IS.path = IS.Elem (IS.Tuple (1, IS.Return))) ss with
+        | Some s ->
+          Alcotest.(check (option string)) "respelled" (Some "(List(a), List({a | !p(_)}))")
+            (IS.respell s ~pred:"!p(_)")
+        | None -> Alcotest.fail "no Elem(Tuple(1, Return)) slot")
+    ;
+    gated "vocab: R1's demand is the first candidate for g.i" (fun () ->
+        with_infer_fixture
+          "mod R1 do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n, i) end\nend\n"
+          (fun fx ->
+            let slot =
+              List.find (fun (s : IS.slot) -> s.IS.fn = "g" && s.IS.path = IS.Param "i")
+                (IS.enumerate ~is_user:(fun _ -> true) fx.fx_m.March_ast.Ast.mod_decls)
+            in
+            match IV.mine slot ~ledger:(Ob.all ()) ~unit_decls:fx.fx_m.March_ast.Ast.mod_decls with
+            | c :: _ ->
+              Alcotest.(check string) "text" "_ < n" c.IV.c.PI.c_text;
+              Alcotest.(check bool) "source = Demand" true (c.IV.source = IV.Demand)
+            | [] -> Alcotest.fail "no candidates"));
+    Alcotest.test_case "vocab: capped at 12, truncation reported" `Quick (fun () ->
+        let body = String.concat " + " (List.init 20 (fun i -> Printf.sprintf "(if x > %d do 1 else 0 end)" (i + 1))) in
+        let src = Printf.sprintf "mod C do\n  fn f(x : Int) : Int do %s end\nend\n" body in
+        let m = March_desugar.Desugar.desugar_module (parse src) in
+        let slot = List.find (fun (s : IS.slot) -> s.IS.path = IS.Param "x") (IS.enumerate ~is_user:(fun _ -> true) m.March_ast.Ast.mod_decls) in
+        let cs, truncated = IV.mine_full slot ~ledger:[] ~unit_decls:m.March_ast.Ast.mod_decls in
+        Alcotest.(check int) "12" 12 (List.length cs);
+        Alcotest.(check bool) "truncated" true truncated);
+    Alcotest.test_case "vocab: p(_) is not a candidate outside K6" `Quick (fun () ->
+        let src = "mod H do\n  fn keep(xs : List(a), f : a -> Bool[p]) : List(a[p]) do List.filter(xs, f) end\n  fn g(x : Int) : Int do x end\nend\n" in
+        let m = March_desugar.Desugar.desugar_module (parse src) in
+        let slot = List.find (fun (s : IS.slot) -> s.IS.fn = "g" && s.IS.path = IS.Param "x") (IS.enumerate ~is_user:(fun _ -> true) m.March_ast.Ast.mod_decls) in
+        let cs = IV.mine slot ~ledger:[] ~unit_decls:m.March_ast.Ast.mod_decls in
+        Alcotest.(check bool) "no p(_)" false
+          (List.exists (fun c -> Astring_contains.contains c.IV.c.PI.c_text "p(") cs));
+    gated "vocab: implication order, weakest first; equivalents deduplicated" (fun () ->
+        with_infer_fixture "mod O do\n  fn f(x : Int) : Int do x end\nend\n" (fun fx ->
+            let cand t = { IV.c = Option.get (IV.candidate_of_text t); source = IV.Fixed } in
+            let order ts =
+              List.map (fun c -> c.IV.c.PI.c_text)
+                (IV.order ~root:fx.fx_root ~scope:[] ~base:(March_ast.Ast.TyCon ({ March_ast.Ast.txt = "Int"; span = March_ast.Ast.dummy_span }, []))
+                   (List.map cand ts))
+            in
+            let o = order [ "_ > 0"; "_ >= 0"; "_ != 0" ] in
+            Alcotest.(check string) "strongest last" "_ > 0" (List.nth o 2);
+            Alcotest.(check (list string)) "equivalents deduplicated" [ "_ >= 0" ] (order [ "_ > 0 - 1"; "_ >= 0" ])));
+    Alcotest.test_case "vocab: every mined text parses back to its AST" `Quick (fun () ->
+        List.iter
+          (fun t ->
+            match IV.candidate_of_text t with
+            | Some c -> Alcotest.(check string) ("round trip " ^ t) t (March_refinecheck.Refine_scope.pred_str (c.PI.c_pred March_ast.Ast.dummy_span))
+            | None -> Alcotest.failf "%S does not parse" t)
+          [ "_ < n"; "_ >= 0 && _ < len(xs)"; "_ != 0" ])
+    ;
+    gated "oracle: R1 proposes i : {Int | _ < n}" (fun () ->
+        with_infer_fixture
+          "mod R1 do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n, i) end\nend\n"
+          (fun fx -> Alcotest.(check (option string)) "best" (Some "_ < n") (best_text fx ~fn:"g" ~path:(IS.Param "i"))));
+    gated "oracle: weakest first among closing candidates (_ <= n over _ < n)" (fun () ->
+        with_infer_fixture
+          "mod W do\n  fn need_le(n : Int, i : {Int | _ <= n}) : Int do i end\n  fn other(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_le(n, i) end\nend\n"
+          (fun fx -> Alcotest.(check (option string)) "best" (Some "_ <= n") (best_text fx ~fn:"g" ~path:(IS.Param "i"))));
+    gated "oracle: a return takes the candidate that closes the most callers" (fun () ->
+        with_infer_fixture
+          "mod K2 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn need_pos(n : {Int | _ > 0}) : Int do n end\n  fn f(x : Int) : Int do 5 end\n  fn c1() : Int do need_nz(f(1)) end\n  fn c2() : Int do need_pos(f(1)) end\n  fn c3() : Int do need_pos(f(2)) end\n  fn c4() : Int do need_pos(f(3)) end\nend\n"
+          (fun fx -> Alcotest.(check (option string)) "best" (Some "_ > 0") (best_text fx ~fn:"f" ~path:IS.Return)));
+    gated "oracle: an exhausted budget is reported, not folded into no-candidate" (fun () ->
+        with_infer_fixture
+          "mod B do\n  fn need_below(n : Int, i : {Int | _ < n}) : Int do i end\n  fn g(n : Int, i : Int) : Int do need_below(n, i) end\nend\n"
+          (fun fx ->
+            let best, vs = run_best ~budget:0 fx ~fn:"g" ~path:(IS.Param "i") in
+            Alcotest.(check bool) "no proposal" true (best = None);
+            Alcotest.(check bool) "budget reported" true
+              (List.exists (function IO.Reject ("budget", _) -> true | _ -> false) vs)))
+  ]
+
+
+let infer_elements_suite =
+  let pre = "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn need_nn(k : {Int | _ >= 0}) : Int do k end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
+  [ gated "E1: an element precondition is proposed" (fun () ->
+        with_infer_fixture (m "E1" "  fn total(xs : List(Int)) : Int do sum_pos(xs) end\n") (fun fx ->
+            Alcotest.(check (option string)) "best" (Some "_ > 0")
+              (best_text fx ~fn:"total" ~path:(IS.Elem (IS.Param "xs")))));
+    gated "E2: an element return is proposed" (fun () ->
+        with_infer_fixture ~stdlib:true
+          (m "E2" "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  fn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n")
+          (fun fx ->
+            Alcotest.(check (option string)) "best" (Some "_ > 0")
+              (best_text fx ~fn:"pos_only" ~path:(IS.Elem IS.Return))));
+    gated "tuple component: (List({Int | _ > 0}), Int)" (fun () ->
+        with_infer_fixture ~stdlib:true
+          (m "TC" "  fn split(xs : List(Int)) : (List(Int), Int) do (List.filter(xs, fn y -> y > 0), 0) end\n  fn go(ys : List(Int)) : Int do\n    let (a, _b) = split(ys)\n    sum_pos(a)\n  end\n")
+          (fun fx ->
+            Alcotest.(check (option string)) "best" (Some "_ > 0")
+              (best_text fx ~fn:"split" ~path:(IS.Elem (IS.Tuple (0, IS.Return))))));
+    gated "R2: a relational filter return is rejected as not-true" (fun () ->
+        with_infer_fixture ~stdlib:true
+          (m "R2" "  fn sum_lt(k : Int, xs : List({Int | _ < k})) : Int do 0 end\n  fn small(xs : List(Int), n : Int) : List(Int) do List.filter(xs, fn y -> y < n) end\n  fn go(ys : List(Int)) : Int do sum_lt(10, small(ys, 10)) end\n")
+          (fun fx ->
+            let best, vs = run_best fx ~fn:"small" ~path:(IS.Elem IS.Return) in
+            Alcotest.(check bool) "no proposal" true (best = None);
+            Alcotest.(check bool) "a not-true rejection" true
+              (List.exists (function IO.Reject ("not-true", _) -> true | _ -> false) vs)));
+    gated "O1: an Option return through a local fn is rejected as not-true" (fun () ->
+        with_infer_fixture ~stdlib:true
+          (m "O1"
+             "  fn fidx(xs : List(Int), pred : Int -> Bool) : Option(Int) do\n    fn go(lst : List(Int), i : {Int | _ >= 0}) : Option({Int | _ >= 0}) do\n      match lst do\n      Nil -> None\n      Cons(h, t) -> if pred(h) do Some(i) else go(t, i + 1) end\n      end\n    end\n    go(xs, 0)\n  end\n  fn user(xs : List(Int)) : Int do\n    match fidx(xs, fn y -> y > 0) do\n    Some(i) -> need_nn(i)\n    None -> 0\n    end\n  end\n")
+          (fun fx ->
+            let best, vs = run_best fx ~fn:"fidx" ~path:(IS.Elem IS.Return) in
+            Alcotest.(check bool) "no proposal" true (best = None);
+            Alcotest.(check bool) "a not-true rejection" true
+              (List.exists (function IO.Reject ("not-true", _) -> true | _ -> false) vs)))
+  ]
+
+
+
+let k6_best (fx : infer_fixture) ~(fn : string) : (string * string) option =
+  let decls = fx.fx_m.March_ast.Ast.mod_decls in
+  match List.find_opt (fun (s : IS.slot) -> s.IS.fn = fn && List.mem IS.K6 s.IS.kinds) (IS.enumerate ~is_user:(fun _ -> true) decls) with
+  | None -> None
+  | Some slot -> (
+    let r = IO.best_k6 ~root:fx.fx_root ~decls slot ~budget:(ref 50) in
+    match fst r with
+    | Some (shape, _) -> Some (shape.IS.k6_callback, shape.IS.k6_return)
+    | None -> None)
+
+let infer_abstract_suite =
+  let pre =
+    "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn sum_nonpos(xs : List({Int | _ <= 0})) : Int do 0 end\n  fn one_pos(o : Option({Int | _ > 0})) : Int do 0 end\n"
+  in
+  let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
+  let k6 ?(stdlib = false) name body ~fn ~expect =
+    gated name (fun () ->
+        with_infer_fixture ~stdlib (m "K6" body) (fun fx ->
+            Alcotest.(check (option (pair string string))) "proposal" expect (k6_best fx ~fn)))
+  in
+  [ k6 ~stdlib:true "A1: keep passes its callback to List.filter"
+      "  fn keep(xs : List(a), f : a -> Bool) : List(a) do List.filter(xs, f) end\n  fn go(ys : List(Int)) : Int do sum_pos(keep(ys, fn y -> y > 0)) end\n"
+      ~fn:"keep" ~expect:(Some ("a -> Bool[p]", "List(a[p])"));
+    k6 "rediscover filter"
+      "  fn filt(xs : List(a), pred : a -> Bool) : List(a) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if pred(h) do Cons(h, filt(t, pred)) else filt(t, pred) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do sum_pos(filt(ys, fn y -> y > 0)) end\n"
+      ~fn:"filt" ~expect:(Some ("a -> Bool[p]", "List(a[p])"));
+    k6 "rediscover find"
+      "  fn fnd(xs : List(a), pred : a -> Bool) : Option(a) do\n    match xs do\n    Nil -> None\n    Cons(h, t) -> if pred(h) do Some(h) else fnd(t, pred) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do one_pos(fnd(ys, fn y -> y > 0)) end\n"
+      ~fn:"fnd" ~expect:(Some ("a -> Bool[p]", "Option(a[p])"));
+    k6 "rediscover take_while"
+      "  fn tw(xs : List(a), pred : a -> Bool) : List(a) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if pred(h) do Cons(h, tw(t, pred)) else Nil end\n    end\n  end\n  fn go(ys : List(Int)) : Int do sum_pos(tw(ys, fn y -> y > 0)) end\n"
+      ~fn:"tw" ~expect:(Some ("a -> Bool[p]", "List(a[p])"));
+    k6 "rediscover partition (both halves)"
+      "  fn part(xs : List(a), pred : a -> Bool) : (List(a), List(a)) do\n    match xs do\n    Nil -> (Nil, Nil)\n    Cons(h, t) ->\n      let (yes, no) = part(t, pred)\n      if pred(h) do (Cons(h, yes), no) else (yes, Cons(h, no)) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do\n    let (pos, neg) = part(ys, fn y -> y > 0)\n    sum_pos(pos) + sum_nonpos(neg)\n  end\n"
+      ~fn:"part" ~expect:(Some ("a -> Bool[p]", "(List(a[p]), List({a | !p(_)}))"));
+    k6 "rediscover Option.filter"
+      "  fn ofilt(o : Option(a), pred : a -> Bool) : Option(a) do\n    match o do\n    None -> None\n    Some(x) -> if pred(x) do Some(x) else None end\n    end\n  end\n  fn go(o : Option(Int)) : Int do one_pos(ofilt(o, fn y -> y > 0)) end\n"
+      ~fn:"ofilt" ~expect:(Some ("a -> Bool[p]", "Option(a[p])"));
+    k6 "a wrong body (keeps rejected elements) is not proposed"
+      "  fn bad(xs : List(a), pred : a -> Bool) : List(a) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if pred(h) do Cons(h, bad(t, pred)) else Cons(h, bad(t, pred)) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do sum_pos(bad(ys, fn y -> y > 0)) end\n"
+      ~fn:"bad" ~expect:None
+  ]
+
+
+let k7_best (fx : infer_fixture) ~(fn : string) : string option =
+  let decls = fx.fx_m.March_ast.Ast.mod_decls in
+  match List.find_opt (fun (s : IS.slot) -> s.IS.fn = fn && List.mem IS.K7 s.IS.kinds) (IS.enumerate ~is_user:(fun _ -> true) decls) with
+  | None -> None
+  | Some slot ->
+    let cands = IO.ordered_candidates ~root:fx.fx_root ~ledger:(Ob.all ()) ~unit_decls:decls slot in
+    (match fst (IO.best_for_slot ~root:fx.fx_root ~decls slot cands ~budget:(ref 100)) with
+     | Some (c, _) -> Some c.IV.c.PI.c_text
+     | None -> None)
+
+(* `--allow-caller-violations` (D2's override) admits a precondition that
+   breaks a caller, never one no value satisfies: a contradictory
+   precondition proves the body vacuously, and the override existed to let
+   exactly that through (review #6). *)
+let infer_override_suite =
+  let src =
+    "mod OV do\n  fn need_pos(k : {Int | _ > 0}) : Int do k end\n  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\nend\n"
+  in
+  let best text =
+    with_infer_fixture src (fun fx ->
+        let decls = fx.fx_m.March_ast.Ast.mod_decls in
+        let slot = List.find (fun (s : IS.slot) -> s.IS.fn = "go" && s.IS.path = IS.Param "n") (IS.enumerate ~is_user:(fun _ -> true) decls) in
+        let c = { IV.c = Option.get (IV.candidate_of_text text); source = IV.Fixed } in
+        fst (IO.best_for_slot ~allow_caller_violations:true ~root:fx.fx_root ~decls slot [ c ] ~budget:(ref 10)))
+  in
+  [ gated "override: a caller-violating but satisfiable precondition is accepted, with what it closes" (fun () ->
+        match best "_ > 0" with
+        | Some (_, IO.Accept { closes; _ }) -> Alcotest.(check bool) "closes the body site" true (closes <> [])
+        | _ -> Alcotest.fail "expected an accepted candidate");
+    gated "override: a contradictory precondition is still rejected" (fun () ->
+        Alcotest.(check bool) "rejected" true (best "_ > 0 && _ < 0" = None))
+  ]
+
+let infer_accumulator_suite =
+  let pre = "  fn need_pos(k : {Int | _ > 0}) : Int do k end\n" in
+  let m body = "mod K7 do\n" ^ pre ^ body ^ "end\n" in
+  let fold init step =
+    Printf.sprintf "  fn go(ys : List(Int)) : Int do\n    List.fold_left(ys, %s, fn (acc, _x) ->\n      let _u = need_pos(acc)\n      %s)\n  end\n" init step
+  in
+  [ gated "F1: an annotated accumulator is proposed" (fun () ->
+        with_infer_fixture ~stdlib:true (m (fold "1" "acc + 1")) (fun fx ->
+            Alcotest.(check (option string)) "proposal" (Some "_ > 0") (k7_best fx ~fn:"go")));
+    gated "a failing base (init 0) is not proposed" (fun () ->
+        with_infer_fixture ~stdlib:true (m (fold "0" "acc + 1")) (fun fx ->
+            Alcotest.(check (option string)) "proposal" None (k7_best fx ~fn:"go")));
+    gated "a failing step (acc - 1) is not proposed" (fun () ->
+        with_infer_fixture ~stdlib:true (m (fold "1" "acc - 1")) (fun fx ->
+            Alcotest.(check (option string)) "proposal" None (k7_best fx ~fn:"go")));
+    Alcotest.test_case "splice_lambda_param: parenthesised" `Quick (fun () ->
+        let src = "fn go(ys) do\n  List.fold_left(ys, 1, fn (acc, x) -> acc + x)\nend\n" in
+        Alcotest.(check (option string)) "spliced"
+          (Some "fn go(ys) do\n  List.fold_left(ys, 1, fn (acc : {Int | _ > 0}, x) -> acc + x)\nend\n")
+          (March_refactor.Refine_edit.splice_lambda_param ~src ~line:2 ~col:24 ~param:"acc" ~annotation:"{Int | _ > 0}"));
+    Alcotest.test_case "splice_lambda_param: unparenthesised is None" `Quick (fun () ->
+        let src = "fn go(ys) do\n  Enum.fold(ys, 1, fn acc -> fn x -> acc + x)\nend\n" in
+        Alcotest.(check (option string)) "none" None
+          (March_refactor.Refine_edit.splice_lambda_param ~src ~line:2 ~col:19 ~param:"acc" ~annotation:"{Int | _ > 0}"))
+  ]
+
+
+module RI = March_refinecheck.Refine_infer
+
+let infer_run ?(stdlib = false) src (f : RI.result -> unit) =
+  with_infer_fixture ~stdlib src (fun fx ->
+      f (RI.run ~root:fx.fx_root ~is_user:(fun (sp : March_ast.Ast.span) -> sp.March_ast.Ast.file = "") fx.fx_m))
+
+let props (r : RI.result) = List.map (fun (p : RI.proposal) -> (p.RI.slot.IS.fn, p.RI.annotation)) r.RI.proposals
+
+let infer_fixpoint_suite =
+  let pre = "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn need_pos(k : {Int | _ > 0}) : Int do k end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
+  let sp = Alcotest.(list (pair string string)) in
+  [ gated "two-hop element chain found in one run" (fun () ->
+        infer_run ~stdlib:true
+          (m "TH" "  fn h1(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  fn h2(xs : List(Int)) : List(Int) do h1(xs) end\n  fn go(ys : List(Int)) : Int do sum_pos(h2(ys)) end\n")
+          (fun r ->
+            Alcotest.check sp "both returns" [ ("h1", "List({Int | _ > 0})"); ("h2", "List({Int | _ > 0})") ]
+              (List.sort compare (props r));
+            Alcotest.(check int) "no user skips after" 0 (March_refinecheck.Ledger_diff.debt r.RI.after)));
+    gated "a fact (return) is proposed before a demand (precondition) in a round" (fun () ->
+        infer_run
+          (m "FD" "  fn abs1(n : Int) : Int do if n > 0 do n else 1 end end\n  fn g(n : Int) : Int do need_pos(abs1(n)) end\n  fn h(k : Int) : Int do need_pos(k) end\n")
+          (fun r ->
+            let fns = List.map (fun (p : RI.proposal) -> p.RI.slot.IS.fn) r.RI.proposals in
+            Alcotest.(check (list string)) "order" [ "abs1"; "h" ] fns));
+    gated "C1: the chain is tried and the gap recorded (not-true at b)" (fun () ->
+        infer_run
+          (m "C1" "  fn a(x : {Int | _ > 0}) : Int do x + 1 end\n  fn b(x : {Int | _ > 0}) : Int do a(x) end\n  fn go() : Int do need_pos(b(3)) end\n")
+          (fun r ->
+            Alcotest.(check bool) "b's return not proposed" false (List.mem_assoc "b" (props r));
+            Alcotest.(check bool) "rejection recorded for b" true
+              (List.exists (fun ((s : IS.slot), _, reason, _) -> s.IS.fn = "b" && reason = "not-true") r.RI.rejected)));
+    gated "G1: nothing proposed" (fun () ->
+        infer_run
+          (m "G1" "  fn inc(x : Int) : Int do x + 1 end\n  fn go(n : Int) : Int do need_pos(inc(n)) end\n  fn caller() : Int do go(0 - 5) end\n")
+          (fun r -> Alcotest.check sp "none" [] (props r)));
+    gated "terminates within the round cap; G0 is refused, not proposed" (fun () ->
+        infer_run
+          (m "TR" "  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\n")
+          (fun r ->
+            Alcotest.(check bool) "rounds <= 10" true (r.RI.rounds <= 10);
+            Alcotest.check sp "no proposal" [] (props r);
+            Alcotest.(check bool) "refused" true
+              (List.exists (fun ((s : IS.slot), _, (rf : PI.refusal)) -> s.IS.fn = "go" && rf.PI.rf_reason = "caller-violation") r.RI.refused)));
+    gated "an SCC whose members fail alone is noted scc-unsupported" (fun () ->
+        infer_run
+          (m "SC" "  fn ev(xs : List(Int)) : List(Int) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> od(t)\n    end\n  end\n  fn od(xs : List(Int)) : List(Int) do\n    match xs do\n    Nil -> Nil\n    Cons(h, t) -> if h > 0 do Cons(h, ev(t)) else ev(t) end\n    end\n  end\n  fn go(ys : List(Int)) : Int do sum_pos(ev(ys)) end\n")
+          (fun r ->
+            Alcotest.(check bool) "noted" true
+              (List.exists (fun (fn, n) -> (fn = "ev" || fn = "od") && n = "scc-unsupported") r.RI.notes)))
+    ;
+    gated "JSON v1 schema (E2)" (fun () ->
+        infer_run ~stdlib:true
+          (m "J1" "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  fn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n")
+          (fun r ->
+            let j = March_refinecheck.Infer_json.to_string r in
+            List.iter
+              (fun frag -> Alcotest.(check bool) ("has " ^ frag) true (Astring_contains.contains j frag))
+              [ "\"version\": 1"; "\"kind\": \"element-return\""; "\"slot\": \"return/elem\"";
+                "\"annotation\": \"List({Int | _ > 0})\""; "\"user_skips_after\": 0" ]));
+    gated "JSON output is stable across runs" (fun () ->
+        let src = m "J2" "  fn abs1(n : Int) : Int do if n > 0 do n else 1 end end\n  fn g(n : Int) : Int do need_pos(abs1(n)) end\n  fn h(k : Int) : Int do need_pos(k) end\n  fn i(k : Int) : Int do need_pos(k) end\n" in
+        let once () = let out = ref "" in infer_run src (fun r -> out := March_refinecheck.Infer_json.to_string r); !out in
+        Alcotest.(check string) "identical" (once ()) (once ()));
+    gated "JSON reason values come from the closed set" (fun () ->
+        infer_run ~stdlib:true
+          (m "J3" "  fn go(n : Int) : Int do need_pos(n) end\n  fn caller() : Int do go(0 - 5) end\n  fn sum_lt(k : Int, xs : List({Int | _ < k})) : Int do 0 end\n  fn small(xs : List(Int), n : Int) : List(Int) do List.filter(xs, fn y -> y < n) end\n  fn go2(ys : List(Int)) : Int do sum_lt(10, small(ys, 10)) end\n")
+          (fun r ->
+            let j = March_refinecheck.Infer_json.to_string r in
+            let closed = [ "not-true"; "not-useful"; "opens-site"; "caller-violation"; "unsatisfiable"; "handled-case"; "unannotated-signature"; "scc-unsupported"; "budget" ] in
+            let re = Str.regexp "\"reason\": \"\\([^\"]*\\)\"" in
+            let rec all i acc = match Str.search_forward re j i with
+              | exception Not_found -> acc
+              | k -> all (k + 1) (Str.matched_group 1 j :: acc) in
+            let reasons = all 0 [] in
+            Alcotest.(check bool) "some reasons" true (reasons <> []);
+            List.iter (fun x -> Alcotest.(check bool) ("closed: " ^ x) true (List.mem x closed)) reasons))
+  ]
+
+
+let march_exe_rel () = Filename.concat (Filename.dirname Sys.executable_name) "../bin/main.exe"
+
+let run_cli args src =
+  with_temp_root "infercli" (fun dir ->
+      let f = Filename.concat dir "m.march" in
+      Out_channel.with_open_bin f (fun oc -> output_string oc src);
+      let out = Filename.concat dir "out.txt" in
+      let cmd =
+        Printf.sprintf "cd %s && HOME=%s %s %s m.march > %s 2>&1" (Filename.quote dir) (Filename.quote dir)
+          (Filename.quote (march_exe_rel ())) args (Filename.quote out)
+      in
+      let code = Sys.command cmd in
+      (code, In_channel.with_open_bin out In_channel.input_all))
+
+let run_cli_in ?(env = "") dir args =
+  let out = Filename.concat dir "out.txt" in
+  let cmd =
+    Printf.sprintf "cd %s && %s HOME=%s %s %s m.march > %s 2>&1" (Filename.quote dir) env (Filename.quote dir)
+      (Filename.quote (march_exe_rel ())) args (Filename.quote out)
+  in
+  let code = Sys.command cmd in
+  (code, In_channel.with_open_bin out In_channel.input_all)
+
+let with_src_dir src f =
+  with_temp_root "inferapply" (fun dir ->
+      let file = Filename.concat dir "m.march" in
+      Out_channel.with_open_bin file (fun oc -> output_string oc src);
+      f dir (fun () -> In_channel.with_open_bin file In_channel.input_all))
+
+let count_sub hay needle =
+  let n = String.length needle in
+  let rec go i acc = if i + n > String.length hay then acc else if String.sub hay i n = needle then go (i + 1) (acc + 1) else go (i + 1) acc in
+  go 0 0
+
+let infer_apply_suite =
+  let pre = "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n" in
+  let e2 = "mod E2 do\n" ^ pre ^ "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn main() : Int do go([1]) end\nend\n" in
+  [ gated "apply E2, then check: the annotation is written and nothing is left unproven" (fun () ->
+        with_src_dir e2 (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) "written" true (Astring_contains.contains (contents ()) "fn pos_only(xs : List(Int)) : List({Int | _ > 0})");
+            let _, rep = run_cli_in dir "--check --refine-report" in
+            Alcotest.(check bool) ("no user skips: " ^ rep) true (Astring_contains.contains rep "0 violated, 0 trusted, 0 skipped")));
+    gated "apply twice in the same root: the second run proposes nothing (idempotent, warm VC cache)" (fun () ->
+        with_src_dir e2 (fun dir contents ->
+            ignore (run_cli_in dir "--check --refine-infer --refine-infer-apply");
+            let after1 = contents () in
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) "exit 0" 0 code;
+            Alcotest.(check bool) ("0 proposed: " ^ out) true (Astring_contains.contains out "0 proposed");
+            Alcotest.(check string) "unchanged" after1 (contents ())));
+    gated "a prediction mismatch reverts every edit and exits 3" (fun () ->
+        with_src_dir e2 (fun dir contents ->
+            let before = contents () in
+            let code, _ = run_cli_in ~env:"MARCH_INFER_CORRUPT_PREDICTION=1" dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) "exit 3" 3 code;
+            Alcotest.(check string) "file restored" before (contents ())));
+    gated "a multi-line signature with a comment: bytes replaced exactly or apply-by-hand" (fun () ->
+        let src = "mod ML do\n" ^ pre ^ "  pfn total(xs :\n      List(Int), -- note\n    n : Int) : Int do sum_pos(xs) + n end\n  fn main() : Int do total([1], 2) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let _, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            let c = contents () in
+            Alcotest.(check bool) "comment survives" true (Astring_contains.contains c "-- note");
+            Alcotest.(check bool) ("replaced or apply-by-hand: " ^ out) true
+              (count_sub c "List({Int | _ > 0})" >= 2 || Astring_contains.contains out "apply by hand")));
+    gated "an external-callers proposal is not applied without --apply-public" (fun () ->
+        let src = "mod EX do\n" ^ pre ^ "  fn total(xs : List(Int)) : Int do sum_pos(xs) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let before = contents () in
+            let _, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check string) "unchanged" before (contents ());
+            Alcotest.(check bool) "said why" true (Astring_contains.contains out "external");
+            ignore (run_cli_in dir "--check --refine-infer --refine-infer-apply --apply-public");
+            Alcotest.(check bool) "applied with --apply-public" true (count_sub (contents ()) "List({Int | _ > 0})" >= 2)));
+    gated "--refine-infer-apply never writes the stdlib without --refine-infer-stdlib" (fun () ->
+        let staged = Filename.concat (Filename.dirname (march_exe_rel ())) "../stdlib/list.march" in
+        let before = In_channel.with_open_bin staged In_channel.input_all in
+        with_src_dir e2 (fun dir _ -> ignore (run_cli_in dir "--check --refine-infer --refine-infer-apply"));
+        Alcotest.(check bool) "stdlib copy unchanged" true (before = In_channel.with_open_bin staged In_channel.input_all));
+    gated "--refine-report --refine-infer: the if-applied line equals the report after --apply" (fun () ->
+        with_src_dir e2 (fun dir _ ->
+            let _, out = run_cli_in dir "--check --refine-report --refine-infer" in
+            let re = Str.regexp "refinement obligations (user code, if applied): \\([0-9]+\\) violated, \\([0-9]+\\) skipped" in
+            let pred =
+              match Str.search_forward re out 0 with
+              | exception Not_found -> Alcotest.fail ("no if-applied line: " ^ out)
+              | _ -> (Str.matched_group 1 out, Str.matched_group 2 out)
+            in
+            ignore (run_cli_in dir "--check --refine-infer --refine-infer-apply");
+            let _, rep = run_cli_in dir "--check --refine-report" in
+            let re2 = Str.regexp "refinement obligations (user code): [0-9]+ proved, \\([0-9]+\\) violated, [0-9]+ trusted, \\([0-9]+\\) skipped" in
+            let act =
+              match Str.search_forward re2 rep 0 with
+              | exception Not_found -> Alcotest.fail ("no report: " ^ rep)
+              | _ -> (Str.matched_group 1 rep, Str.matched_group 2 rep)
+            in
+            Alcotest.(check (pair string string)) "if applied = after apply" act pred));
+    gated "a withheld external-callers proposal does not break the apply of the rest (review #1)" (fun () ->
+        let src = "mod E2 do\n" ^ pre ^ "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn total(xs : List(Int)) : Int do sum_pos(xs) end\n  fn main() : Int do go([1]) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            let c = contents () in
+            Alcotest.(check bool) "pos_only written" true (Astring_contains.contains c "fn pos_only(xs : List(Int)) : List({Int | _ > 0})");
+            Alcotest.(check bool) "total untouched" true (Astring_contains.contains c "fn total(xs : List(Int))")));
+    gated "edits after a multi-line signature land on the right function (review #2)" (fun () ->
+        let src = "mod ML do\n" ^ pre ^ "  pfn total(xs :\n      List(Int),\n    n : Int) : Int do sum_pos(xs) + n end\n  pfn two(xs : List(Int), ys : List(Int)) : Int do sum_pos(xs) + sum_pos(ys) end\n  fn main() : Int do total([1], 2) + two([1],[2]) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            let c = contents () in
+            Alcotest.(check bool) ("two's params both written: " ^ c) true
+              (Astring_contains.contains c "pfn two(xs : List({Int | _ > 0}), ys : List({Int | _ > 0}))");
+            Alcotest.(check bool) "main untouched" true (Astring_contains.contains c "two([1],[2])")));
+    gated "a comment inside the annotation: apply by hand, and no JSON edit (review #3)" (fun () ->
+        let src = "mod ML do\n" ^ pre ^ "  pfn total(xs : -- the list, nonempty\n      List(Int)) : Int do sum_pos(xs) end\n  fn main() : Int do total([1]) end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let before = contents () in
+            let _, j = run_cli_in dir "--check --refine-infer-json" in
+            Alcotest.(check bool) ("no edit: " ^ j) true (Astring_contains.contains j "\"edit\": null");
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check int) ("exit 0: " ^ out) 0 code;
+            Alcotest.(check bool) ("apply by hand: " ^ out) true (Astring_contains.contains out "apply by hand");
+            Alcotest.(check string) "file unchanged" before (contents ())));
+    gated "same-named functions: A.go has no in-unit callers even though B.go does (review #4)" (fun () ->
+        let src = "mod T do\n  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  mod A do\n    fn go(xs : List(Int)) : Int do T.sum_pos(xs) end\n  end\n  mod B do\n    fn go(n : Int) : Int do n end\n    fn caller() : Int do go(1) end\n  end\n  fn main() : Int do B.caller() end\nend\n" in
+        with_src_dir src (fun dir contents ->
+            let before = contents () in
+            let _, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check string) ("A.go not applied: " ^ out) before (contents ());
+            Alcotest.(check bool) ("said external: " ^ out) true (Astring_contains.contains out "external")));
+    gated "a cap verified module with an unproven obligation still gets inference (review #5)" (fun () ->
+        let src = "mod V do\n  cap verified\n" ^ pre ^ "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn main() : Int do go([1]) end\nend\n" in
+        with_src_dir src (fun dir _ ->
+            let _, out = run_cli_in dir "--check --refine-infer" in
+            Alcotest.(check bool) ("not skipped: " ^ out) false (Astring_contains.contains out "skipped, the program has errors");
+            Alcotest.(check bool) ("pos_only proposed: " ^ out) true (Astring_contains.contains out "1 proposed")));
+    gated "a caller's caller makes the requirement concrete: predicted, not a mismatch (evaluation)" (fun () ->
+        (* `pop_n(j : {Int | _ == 0})` costs `legs` a skip in a probe that sees
+           only direct callers; `main`'s literal call turns it into a
+           violation once applied.  The probe must see the caller's callers. *)
+        let src = "mod TR do\n  pfn pop_n(j : Int, v) do\n    if j == 0 do v\n    else\n      let (smaller, _) = Array.pop(v)\n      pop_n(j - 1, smaller)\n    end\n  end\n  pfn legs(cut : Int, xs : List(Int)) : Int do Array.length(pop_n(cut, Array.from_list(xs))) end\n  fn main() : Int do legs(1, []) end\nend\n" in
+        with_src_dir src (fun dir _ ->
+            let code, out = run_cli_in dir "--check --refine-infer --refine-infer-apply" in
+            Alcotest.(check bool) ("no prediction mismatch: " ^ out) true (code <> 3)));
+    gated "--refine-infer-diff prints the edit without writing" (fun () ->
+        with_src_dir e2 (fun dir contents ->
+            let before = contents () in
+            let _, out = run_cli_in dir "--check --refine-infer --refine-infer-diff" in
+            Alcotest.(check bool) ("diff shows the new line: " ^ out) true
+              (Astring_contains.contains out "+  fn pos_only(xs : List(Int)) : List({Int | _ > 0})");
+            Alcotest.(check string) "not written" before (contents ())))
+  ]
+
+let infer_cli_suite =
+  [ gated "--refine-infer on a file with a type error: non-zero, no proposals" (fun () ->
+        let code, out = run_cli "--check --refine-infer-json" "mod T do\n  fn f(x : Int) : Int do \"s\" end\nend\n" in
+        Alcotest.(check bool) "non-zero" true (code <> 0);
+        Alcotest.(check bool) "no proposals emitted" false (Astring_contains.contains out "\"proposals\""));
+    gated "--refine-infer proposes E1's element precondition" (fun () ->
+        let _, out = run_cli "--check --refine-infer" "mod E1 do\n  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn total(xs : List(Int)) : Int do sum_pos(xs) end\nend\n" in
+        Alcotest.(check bool) "annotation printed" true (Astring_contains.contains out "List({Int | _ > 0})"));
+    gated "--refine-suggest-all --refine-suggest-json for S1 is byte-identical to the pinned golden" (fun () ->
+        let _, out = run_cli "--check --refine-suggest-all --refine-suggest-json" "mod S1 do\n  fn need_nz(n : {Int | _ != 0}) : Int do n end\n  fn safe(a : Int, b : Int) : Int do a + need_nz(b) end\nend\n" in
+        let first = List.hd (String.split_on_char '\n' out) in
+        Alcotest.(check string) "golden"
+          "{\"suggestions\":[{\"fn\":\"safe\",\"file\":\"m.march\",\"line\":3,\"col\":5,\"status\":\"solved\",\"debt_before\":1,\"debt_after\":0,\"queries\":10,\"suggestions\":[{\"param\":\"b\",\"base\":\"Int\",\"predicate\":\"_ != 0\",\"discharged\":1,\"annotation\":\"{Int | _ != 0}\"}]}]}"
+          first)
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -23818,6 +24498,15 @@ let () =
       ("abstract-leftovers-d", abstract_leftovers_d_suite);
       ("abstract-sugar", abstract_sugar_suite);
       ("hidden-field-elements", hidden_field_elements_suite);
+      ("infer-guards", infer_guards_suite);
+      ("infer-vocab", infer_vocab_suite);
+      ("infer-elements", infer_elements_suite);
+      ("infer-abstract", infer_abstract_suite);
+      ("infer-accumulator", infer_accumulator_suite);
+      ("infer-override", infer_override_suite);
+      ("infer-fixpoint", infer_fixpoint_suite);
+      ("infer-cli", infer_cli_suite);
+      ("infer-apply", infer_apply_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

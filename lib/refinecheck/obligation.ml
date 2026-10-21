@@ -186,6 +186,12 @@ type t =
   ; predicate : string
   ; verdict : verdict
   ; kind : kind
+  ; inst : string option
+    (* The predicate re-spelled in the CALLER's scope (formals replaced by the
+       call's actuals) when every free formal maps to an actual that is a plain
+       variable or a literal; [None] otherwise.  Record-only: no verdict reads
+       it.  Inference mines it as a candidate for the caller's own parameter
+       (design 2026-10-20 §1.3, "demand transport"). *)
   }
 
 let log : t list ref = ref []

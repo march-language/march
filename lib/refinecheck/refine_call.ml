@@ -804,9 +804,31 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       | Obligation.Skipped _ when !trusted_fn -> Obligation.Trusted
       | _ -> verdict
     in
+    (* Demand transport (design 2026-10-20 §1.3): the predicate in the
+       CALLER's scope, when every formal it mentions other than the checked
+       parameter itself is passed a plain variable or literal. *)
+    let inst =
+      let own = List.nth_opt sg.param_names rp.idx in
+      let mentioned =
+        List.filter
+          (fun (n, _) -> Some n <> own && n <> rp.binder && expr_mentions [ n ] rp.pred)
+          name_pos
+      in
+      let env =
+        List.map
+          (fun (n, i) ->
+            match List.nth_opt args i with
+            | Some ((A.EVar _ | A.ELit _) as a) -> Some (n, a)
+            | _ -> None)
+          mentioned
+      in
+      if List.for_all Option.is_some env then
+        Some (pred_str (subst_params (List.filter_map Fun.id env) rp.pred))
+      else None
+    in
     Obligation.record
       { Obligation.span; callee; predicate = pred_str rp.pred; verdict
-      ; kind = Obligation.Precondition };
+      ; kind = Obligation.Precondition; inst };
     Option.iter (fun r -> r := Some verdict) verdict_out;
     (* …except inside a `cap verified` module, where a skip is the very thing
        the user asked to be told about (see [strict_verified]).  `Proved` and

@@ -388,7 +388,7 @@ let check_impl_dispatch ~root errctx defs (ctx : rctx) path lets sc re ~(span : 
          (fun predicate ->
            Obligation.record
              { Obligation.span; callee = fname; predicate; verdict = Obligation.Skipped reason
-             ; kind = Obligation.Precondition };
+             ; kind = Obligation.Precondition; inst = None };
            if !strict_verified then
              Err.error ~code:Err.Code.refinement_unverified errctx ~span
                (Printf.sprintf
@@ -443,7 +443,7 @@ let record_skip_obligation errctx ~(span : A.span) ~(callee : string) ~(predicat
   let reason = Obligation.Unreflectable_subject what in
   Obligation.record
     { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
-    ; kind = Obligation.Precondition };
+    ; kind = Obligation.Precondition; inst = None };
   if !strict_verified then
     Err.error ~code:Err.Code.refinement_unverified errctx ~span
       (Printf.sprintf "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\nnote: %s"
@@ -592,7 +592,7 @@ let record_elem_skip errctx ~(span : A.span) ~(callee : string) ~(predicate : st
   let reason = Obligation.Unreflectable_subject what in
   Obligation.record
     { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
-    ; kind = Obligation.Precondition };
+    ; kind = Obligation.Precondition; inst = None };
   if !strict_verified then
     Err.error ~code:Err.Code.refinement_unverified errctx ~span
       (Printf.sprintf
@@ -1385,11 +1385,11 @@ let record_acc_invariant errctx ~(callee : string) (aa : annotated_acc)
   match v with
   | `Proved ->
     Obligation.record
-      { Obligation.span; callee; predicate; verdict = Obligation.Proved; kind = Obligation.Precondition }
+      { Obligation.span; callee; predicate; verdict = Obligation.Proved; kind = Obligation.Precondition; inst = None }
   | `Unproved reason ->
     Obligation.record
       { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
-      ; kind = Obligation.Precondition };
+      ; kind = Obligation.Precondition; inst = None };
     if !strict_verified then
       Err.error ~code:Err.Code.refinement_unverified errctx ~span
         (Printf.sprintf
@@ -1407,7 +1407,7 @@ let record_param_skip errctx ~(span : A.span) ~(callee : string) ~(predicate : s
     ~(reason : Obligation.reason) : unit =
   Obligation.record
     { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
-    ; kind = Obligation.Precondition };
+    ; kind = Obligation.Precondition; inst = None };
   if !strict_verified then
     Err.error ~code:Err.Code.refinement_unverified errctx ~span
       (Printf.sprintf
@@ -2109,7 +2109,7 @@ let record_abstract_verdict errctx ~(span : A.span) ~(callee : string) ~(predica
     | `Uninstantiated w -> Obligation.Skipped (Obligation.Abstract_uninstantiated w)
     | `Undecided -> Obligation.Skipped Obligation.Solver_undecided
   in
-  Obligation.record { Obligation.span; callee; predicate; verdict; kind = Obligation.Precondition };
+  Obligation.record { Obligation.span; callee; predicate; verdict; kind = Obligation.Precondition; inst = None };
   (match verdict with
    | Obligation.Skipped r when !strict_verified ->
      Err.error ~code:Err.Code.refinement_unverified errctx ~span
@@ -2377,7 +2377,7 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
            | `Proved ->
              Obligation.record
                { Obligation.span = xsp; callee; predicate = first_slot_pred slots
-               ; verdict = Obligation.Proved; kind = Obligation.Precondition };
+               ; verdict = Obligation.Proved; kind = Obligation.Precondition; inst = None };
              true
            | `Unproved reason ->
              record_param_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots) ~reason;

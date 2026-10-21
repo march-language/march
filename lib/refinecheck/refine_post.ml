@@ -468,7 +468,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     if record then
       Obligation.record
         { Obligation.span; callee = Option.value ~default:"" fn_name
-        ; predicate = pred_str ret_pred; verdict; kind = Obligation.Postcondition };
+        ; predicate = pred_str ret_pred; verdict; kind = Obligation.Postcondition; inst = None };
     (* `cap verified` escalates an undischarged POSTCONDITION exactly as
        [check_call] escalates an undischarged precondition — the last place a
        fact was granted without obliging anyone.  Gated on [record] (which
@@ -1737,7 +1737,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
             ; callee = self
             ; predicate = pred_str pred
             ; verdict = v
-            ; kind = Obligation.Postcondition };
+            ; kind = Obligation.Postcondition; inst = None };
         v = Obligation.Proved
       (* ── Shape 2: one clause whose whole body matches on a parameter ─────── *)
       | A.EMatch (A.EVar sv, branches, _) when List.mem sv.A.txt params -> (
@@ -1892,7 +1892,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                 ; callee = self
                 ; predicate = pred_str pred
                 ; verdict = v
-                ; kind = Obligation.Postcondition }
+                ; kind = Obligation.Postcondition; inst = None }
             end;
             ok
           end)
@@ -2003,7 +2003,7 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       Obligation.record
         { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
         ; predicate = pred_str pred; verdict = Obligation.Trusted
-        ; kind = Obligation.Postcondition };
+        ; kind = Obligation.Postcondition; inst = None };
     true
   | _ ->
   match return_refine_ext fd with
@@ -2027,7 +2027,7 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
       Obligation.record
         { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
         ; predicate = pred_str ret_pred; verdict = Obligation.Proved
-        ; kind = Obligation.Postcondition };
+        ; kind = Obligation.Postcondition; inst = None };
     true
   | Some (binder, ret_pred, marker) ->
     (* [record_sort] must carry only a DECLARED sort name.  A scalar marker
