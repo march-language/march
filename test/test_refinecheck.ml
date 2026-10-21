@@ -23687,11 +23687,20 @@ module Ob = March_refinecheck.Obligation
 
 type infer_fixture = { fx_root : string; fx_m : March_ast.Ast.module_ }
 
-let with_infer_fixture (src : string) (f : infer_fixture -> 'a) : 'a =
+let with_infer_fixture ?(stdlib = false) (src : string) (f : infer_fixture -> 'a) : 'a =
   with_temp_root "infer" (fun root ->
       let m = March_desugar.Desugar.desugar_module (parse src) in
+      (* [~stdlib]: `list.march` as a sibling module, the shape the driver
+         produces, so `List.filter`'s signature is in the checker's defs. *)
+      let m =
+        if stdlib then { m with March_ast.Ast.mod_decls = fst (Lazy.force stdlib_list_mod) :: m.March_ast.Ast.mod_decls }
+        else m
+      in
+      (* Typechecked, with the span -> type table handed over exactly as the
+         driver does: element slots read element sorts from it. *)
+      let _tc_errors, type_map = March_typecheck.Typecheck.check_module m in
       let errctx = March_errors.Errors.create () in
-      March_refinecheck.Refine_check.check_module ~root errctx m;
+      March_refinecheck.Refine_check.check_module ~root ~type_map errctx m;
       f { fx_root = root; fx_m = m })
 
 let infer_suggest_all (fx : infer_fixture) : PI.t list =
@@ -23851,7 +23860,8 @@ let run_best ?(budget = 200) (fx : infer_fixture) ~(fn : string) ~(path : IS.pat
   IO.best_for_slot ~root:fx.fx_root ~decls slot cands ~budget:(ref budget)
 
 let best_text fx ~fn ~path =
-  match fst (run_best fx ~fn ~path) with
+  let r = run_best fx ~fn ~path in
+  match fst r with
   | Some (c, _) -> Some c.IV.c.PI.c_text
   | None -> None
 
@@ -23949,6 +23959,46 @@ let infer_vocab_suite =
             Alcotest.(check bool) "budget reported" true
               (List.exists (function IO.Reject ("budget", _) -> true | _ -> false) vs)))
   ]
+
+
+let infer_elements_suite =
+  let pre = "  fn sum_pos(xs : List({Int | _ > 0})) : Int do 0 end\n  fn need_nn(k : {Int | _ >= 0}) : Int do k end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ pre ^ body ^ "end\n" in
+  [ gated "E1: an element precondition is proposed" (fun () ->
+        with_infer_fixture (m "E1" "  fn total(xs : List(Int)) : Int do sum_pos(xs) end\n") (fun fx ->
+            Alcotest.(check (option string)) "best" (Some "_ > 0")
+              (best_text fx ~fn:"total" ~path:(IS.Elem (IS.Param "xs")))));
+    gated "E2: an element return is proposed" (fun () ->
+        with_infer_fixture ~stdlib:true
+          (m "E2" "  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  fn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n")
+          (fun fx ->
+            Alcotest.(check (option string)) "best" (Some "_ > 0")
+              (best_text fx ~fn:"pos_only" ~path:(IS.Elem IS.Return))));
+    gated "tuple component: (List({Int | _ > 0}), Int)" (fun () ->
+        with_infer_fixture ~stdlib:true
+          (m "TC" "  fn split(xs : List(Int)) : (List(Int), Int) do (List.filter(xs, fn y -> y > 0), 0) end\n  fn go(ys : List(Int)) : Int do\n    let (a, _b) = split(ys)\n    sum_pos(a)\n  end\n")
+          (fun fx ->
+            Alcotest.(check (option string)) "best" (Some "_ > 0")
+              (best_text fx ~fn:"split" ~path:(IS.Elem (IS.Tuple (0, IS.Return))))));
+    gated "R2: a relational filter return is rejected as not-true" (fun () ->
+        with_infer_fixture ~stdlib:true
+          (m "R2" "  fn sum_lt(k : Int, xs : List({Int | _ < k})) : Int do 0 end\n  fn small(xs : List(Int), n : Int) : List(Int) do List.filter(xs, fn y -> y < n) end\n  fn go(ys : List(Int)) : Int do sum_lt(10, small(ys, 10)) end\n")
+          (fun fx ->
+            let best, vs = run_best fx ~fn:"small" ~path:(IS.Elem IS.Return) in
+            Alcotest.(check bool) "no proposal" true (best = None);
+            Alcotest.(check bool) "a not-true rejection" true
+              (List.exists (function IO.Reject ("not-true", _) -> true | _ -> false) vs)));
+    gated "O1: an Option return through a local fn is rejected as not-true" (fun () ->
+        with_infer_fixture ~stdlib:true
+          (m "O1"
+             "  fn fidx(xs : List(Int), pred : Int -> Bool) : Option(Int) do\n    fn go(lst : List(Int), i : {Int | _ >= 0}) : Option({Int | _ >= 0}) do\n      match lst do\n      Nil -> None\n      Cons(h, t) -> if pred(h) do Some(i) else go(t, i + 1) end\n      end\n    end\n    go(xs, 0)\n  end\n  fn user(xs : List(Int)) : Int do\n    match fidx(xs, fn y -> y > 0) do\n    Some(i) -> need_nn(i)\n    None -> 0\n    end\n  end\n")
+          (fun fx ->
+            let best, vs = run_best fx ~fn:"fidx" ~path:(IS.Elem IS.Return) in
+            Alcotest.(check bool) "no proposal" true (best = None);
+            Alcotest.(check bool) "a not-true rejection" true
+              (List.exists (function IO.Reject ("not-true", _) -> true | _ -> false) vs)))
+  ]
+
 
 let () =
   Alcotest.run "march-refinecheck"
@@ -24094,6 +24144,7 @@ let () =
       ("hidden-field-elements", hidden_field_elements_suite);
       ("infer-guards", infer_guards_suite);
       ("infer-vocab", infer_vocab_suite);
+      ("infer-elements", infer_elements_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

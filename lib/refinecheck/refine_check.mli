@@ -131,6 +131,12 @@ val sig_of_fn : A.fn_def -> fn_sig
     defined more than once ambiguously. *)
 val collect_all_defs : A.decl list -> (string, fn_sig option) Hashtbl.t
 
+(** One run of the element-return gate over [decls] (fixpoint rounds): every
+    function whose declared element return the checker proves is added to
+    [Refine_param.elem_ret_proved].  Exposed for inference-lite's TRUE test
+    (design 2026-10-20 §2, K4); the caller owns saving/restoring that table. *)
+val gate_elem_returns : root:string -> (string, fn_sig option) Hashtbl.t -> March_ast.Ast.decl list -> unit
+
 (** The signature a refined function-typed {i parameter} presents to calls made
     through it, or [None] when it has none. *)
 val entry_of_sig : fn_sig -> fn_sig option

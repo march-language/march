@@ -69,8 +69,43 @@ let classify (before : Ob.verdict option) (after : Ob.verdict) : change =
 (* Every key of [after], classified against [before].  A key present only in
    [before] has disappeared — its call no longer exists under the hypothesis —
    and owes nothing either way, so it is not reported. *)
+let same_site (a : key) (b : key) =
+  a.span = b.span && a.predicate = b.predicate && a.kind = b.kind
+
+(* A site is matched across the two snapshots by (span, predicate, kind); the
+   callee is a label only.  An element comparison is logged under the
+   container VARIABLE once that variable carries an element refinement (the
+   call `sum_pos(xs)` is `sum_pos` before the hypothesis and `xs` after it), so
+   matching on the callee would turn one site into a vanished one and a new
+   one, and hide exactly the close the hypothesis produced. *)
+let contains (o : A.span) (s : A.span) =
+  s.A.file = o.A.file
+  && (s.A.start_line, s.A.start_col) >= (o.A.start_line, o.A.start_col)
+  && (s.A.end_line, s.A.end_col) <= (o.A.end_line, o.A.end_col)
+
+(* Fallback: once an ARGUMENT carries an element entry, the same demand is
+   recorded at the argument's span (label `g(…)`) rather than the call's
+   (label `sum_pos`).  An after-site with no exact match is paired with a
+   before-site of the same predicate and kind whose span encloses it or that
+   it encloses, provided that before-site itself has no exact match. *)
+let nested_site (a : key) (b : key) =
+  a.predicate = b.predicate && a.kind = b.kind && (contains a.span b.span || contains b.span a.span)
+
 let diff ~(before : snapshot) ~(after : snapshot) : (key * change) list =
-  List.map (fun (k, v) -> (k, classify (List.assoc_opt k before) v)) after
+  let exact k = List.find_map (fun (k', v') -> if same_site k k' then Some v' else None) before in
+  let matched_exactly k' = List.exists (fun (k, _) -> same_site k k') after in
+  List.map
+    (fun (k, v) ->
+      let b =
+        match exact k with
+        | Some v' -> Some v'
+        | None ->
+          List.find_map
+            (fun (k', v') -> if nested_site k k' && not (matched_exactly k') then Some v' else None)
+            before
+      in
+      (k, classify b v))
+    after
 
 let keys_with c d = List.filter_map (fun (k, c') -> if c' = c then Some k else None) d
 let closed d = keys_with Closed d

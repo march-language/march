@@ -88,13 +88,69 @@ let return_ ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
     else if not (PI.admissible delta) then Reject ("not-useful", "closes no caller site")
     else Accept { closes = LD.closed delta; new_skipped = LD.new_skipped delta }
 
+(* An element return (K4) is TRUE when the checker's own element-return gate
+   admits it: one gate round over the hypothesis tree, read back from
+   [Refine_param.elem_ret_proved].  The table is global and the gate writes it,
+   so it is restored around the probe; while the probe's caller walk runs the
+   entry is present, which is what lets the callers USE the proved return. *)
+let with_elem_table (f : unit -> 'a) : 'a =
+  let saved = Hashtbl.copy Refine_param.elem_ret_proved in
+  Fun.protect
+    ~finally:(fun () ->
+      Hashtbl.reset Refine_param.elem_ret_proved;
+      Hashtbl.iter (fun k v -> Hashtbl.replace Refine_param.elem_ret_proved k v) saved)
+    f
+
+let elem_ret_holds ~(root : string) ~defs (decls : A.decl list) ~(fn : string) : bool =
+  Hashtbl.remove Refine_param.elem_ret_proved fn;
+  (try RC.gate_elem_returns ~root defs decls with _ -> ());
+  Hashtbl.mem Refine_param.elem_ret_proved fn
+
+let elem_return ~(root : string) (cx : ctx) (hyp : A.fn_def) : verdict =
+  with_elem_table @@ fun () ->
+  let defs = defs_with cx hyp in
+  let tree = cx.rebuild hyp in
+  if not (elem_ret_holds ~root ~defs tree ~fn:cx.qualified) then
+    Reject ("not-true", "the checker does not prove this element return")
+  else
+    let after = PI.walk_ledger ~root ~defs tree in
+    let delta = LD.diff ~before:cx.base ~after in
+    if LD.opened delta <> [] then Reject ("opens-site", "a previously proved obligation is no longer proved")
+    else if not (PI.admissible delta) then Reject ("not-useful", "closes no caller site")
+    else Accept { closes = LD.closed delta; new_skipped = LD.new_skipped delta }
+
+(* The checker reads a callee's DEFINITION (not only its signature) from
+   [Refine_param.fn_defs_tbl], registered once by [check_module] from the
+   unhypothesised function — that is where a caller finds a proved element
+   return ([Refine_check.declared_elem_return]).  A probe puts the hypothesis
+   there for its duration. *)
+let with_hyp_def (cx : ctx) (hyp : A.fn_def) (f : unit -> 'a) : 'a =
+  let key = cx.qualified in
+  let saved = Hashtbl.find_opt Refine_param.fn_defs_tbl key in
+  (match saved with
+   | Some (prefix, _) -> Hashtbl.replace Refine_param.fn_defs_tbl key (prefix, hyp)
+   | None -> ());
+  Fun.protect
+    ~finally:(fun () ->
+      match saved with
+      | Some v -> Hashtbl.replace Refine_param.fn_defs_tbl key v
+      | None -> ())
+    f
+
 (* A probe that raises costs that candidate, never the command. *)
 let probe ~(root : string) (cx : ctx) (s : IS.slot) (c : IV.cand) : verdict =
   try
+    let s = { s with IS.fd = cx.fd0 } in
+    let hyp = IS.install s ~mk:c.IV.c.PI.c_pred in
+    with_hyp_def cx hyp @@ fun () ->
     match s.IS.path with
-    | IS.Param x -> precondition ~root cx (PI.with_refinement cx.fd0 ~param:x ~mk:c.IV.c.PI.c_pred)
-    | IS.Return -> return_ ~root cx (PO.with_return_refinement cx.fd0 ~mk:c.IV.c.PI.c_pred)
-    | _ -> Reject ("not-useful", "kind not implemented")
+    | IS.Return -> return_ ~root cx hyp
+    | IS.Param _ -> precondition ~root cx hyp
+    | p -> (
+      match IS.root p with
+      | IS.Param _ -> precondition ~root cx hyp
+      | IS.Return -> elem_return ~root cx hyp
+      | _ -> Reject ("not-useful", "kind not implemented"))
   with e -> Reject ("not-true", "probe raised: " ^ Printexc.to_string e)
 
 let scope_types (s : IS.slot) : (string * A.ty) list =

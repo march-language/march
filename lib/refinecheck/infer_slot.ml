@@ -61,7 +61,7 @@ let rec walk ~fn ~fd ~elem_kind ~rel (p : path) (t : A.ty) : slot list =
   | A.TyRefine _ -> []
   | A.TyLinear (_, t) -> walk ~fn ~fd ~elem_kind ~rel p t
   | A.TyTuple ts -> List.concat (List.mapi (fun i t -> walk ~fn ~fd ~elem_kind ~rel (Tuple (i, p)) t) ts)
-  | A.TyCon ({ A.txt = c; _ }, args) when args <> [] && is_container c ->
+  | A.TyCon ({ A.txt = c; _ }, ([ _ ] as args)) when is_container c ->
     List.concat_map
       (fun e ->
         match e with
@@ -171,3 +171,41 @@ let respell (s : slot) ~(pred : string) : string option =
   match root_ty s with
   | Some t -> render ~at:(s.path, pred) (root s.path) t
   | None -> None
+
+(* ── Installing a hypothesis ─────────────────────────────────────────────── *)
+
+(* Steps from the root to the slot, root-first. *)
+let rec steps = function
+  | Param _ | Return | Lambda_param _ -> []
+  | Elem p -> steps p @ [ `Elem ]
+  | Tuple (i, p) -> steps p @ [ `Tuple i ]
+
+let rec refine_at (st : [ `Elem | `Tuple of int ] list) ~(mk : A.span -> A.expr) ~(sp : A.span) (t : A.ty) : A.ty =
+  match st, t with
+  | [], _ -> A.TyRefine (t, None, mk sp)
+  | _, A.TyLinear (l, t) -> A.TyLinear (l, refine_at st ~mk ~sp t)
+  | `Elem :: rest, A.TyCon (n, [ e ]) -> A.TyCon (n, [ refine_at rest ~mk ~sp e ])
+  | `Tuple i :: rest, A.TyTuple ts -> A.TyTuple (List.mapi (fun j t -> if j = i then refine_at rest ~mk ~sp t else t) ts)
+  | _ -> t
+
+(* [s.fd] with [mk]'s predicate written at the slot, in every clause. *)
+let install (s : slot) ~(mk : A.span -> A.expr) : A.fn_def =
+  let fd = s.fd in
+  let st = steps s.path in
+  match root s.path with
+  | Return ->
+    { fd with A.fn_ret_ty = Option.map (refine_at st ~mk ~sp:fd.A.fn_name.A.span) fd.A.fn_ret_ty }
+  | Param x ->
+    let upd (p : A.param) =
+      if p.A.param_name.A.txt <> x then p
+      else { p with A.param_ty = Option.map (refine_at st ~mk ~sp:p.A.param_name.A.span) p.A.param_ty }
+    in
+    let upd_fp = function
+      | A.FPNamed p -> A.FPNamed (upd p)
+      | A.FPDefault (p, e) -> A.FPDefault (upd p, e)
+      | other -> other
+    in
+    { fd with
+      A.fn_clauses =
+        List.map (fun (c : A.fn_clause) -> { c with A.fc_params = List.map upd_fp c.A.fc_params }) fd.A.fn_clauses }
+  | _ -> fd
