@@ -177,6 +177,17 @@ let impl_keys : (string, unit) Hashtbl.t = Hashtbl.create 16
    rounds. *)
 let elem_ret_proved : (string, unit) Hashtbl.t = Hashtbl.create 16
 
+(* Definitions whose declared element return is ASSUMED, not proved
+   (multi-arg design 2026-10-18 §7.2, phase 4): an `@[assume]` function whose
+   return carries an element entry (slots, relations or abstract
+   applications).  Its body's tails are not walked for that entry; the
+   definition records one `trusted` postcondition per entry instead.  Read by
+   exactly two consumers: [Refine_check.declared_elem_return] (a closed entry
+   free of the callee's abstract refinements) and the abstract-flow gates,
+   which ask only P1 of such a callee ([p1_ok]): there is no checked body for
+   P2 to be about.  Filled by [Refine_check.gate_elem_returns]. *)
+let elem_ret_assumed : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 (* The structural induction hypothesis for a container return (2026-09-18
    plan, Phase 2): while [visit_fn] walks a function [self] with a declared
    container return, a call [self(…)] whose argument at some parameter
@@ -249,6 +260,7 @@ let reset_param_tables () =
   elem_ret_hyp := None;
   gating_elem_returns := false;
   Hashtbl.reset elem_ret_proved;
+  Hashtbl.reset elem_ret_assumed;
   local_elem_ret_proved := [];
   Hashtbl.reset fn_defs_tbl;
   Hashtbl.reset safe_tbl;
@@ -539,6 +551,20 @@ let parametric_ok (ctx : rctx) (fname : string) (vs : string list) : bool =
      | Some (_, fd) ->
        (not (List.exists (fun ((b : A.name), _) -> List.mem b.A.txt vs) fd.A.fn_bounds))
        && parametric_safe key && generic_in_inferred fd vs)
+
+(* P1 alone ([generic_in_inferred], and no bound on the variables): the gate
+   for a callee whose element return is ASSUMED ([elem_ret_assumed], §4.2
+   step 2).  P2 is about a checked body, and an assumed callee's body is not
+   the source of the fact. *)
+let p1_ok (ctx : rctx) (fname : string) (vs : string list) : bool =
+  match resolve_key ctx fname with
+  | None -> false
+  | Some key ->
+    (match Hashtbl.find_opt fn_defs_tbl key with
+     | None -> false
+     | Some (_, fd) ->
+       (not (List.exists (fun ((b : A.name), _) -> List.mem b.A.txt vs) fd.A.fn_bounds))
+       && generic_in_inferred fd vs)
 
 (* The accumulator-invariant rule's extra callee gate (design 2026-10-18
    fold-accumulator invariants §2.2): the hypothesis a callback parameter may

@@ -1009,6 +1009,18 @@ and declared_elem_return ?(args : A.expr list option) (ctx : rctx) (cb : cbenv) 
             (match uniform_formals fd with Some formals -> relational ~formals entry | None -> None)
           | _ -> None)
        | None -> None)
+    (* An ASSUMED element return (multi-arg design §7.2): taken on trust,
+       counted `trusted` at the definition.  Only a closed entry free of the
+       callee's abstract refinements; a relational one is not lent (the
+       contract names no proof of how the parameters flow). *)
+    | Some key when Hashtbl.mem elem_ret_assumed key ->
+      (match Hashtbl.find_opt fn_defs_tbl key with
+       | Some (_, fd) ->
+         (match elem_refinement fd.A.fn_ret_ty with
+          | Some entry when entry_mentions (callee_abstracts ctx fname) entry -> None
+          | Some entry when entry_is_closed entry -> Some entry
+          | _ -> None)
+       | None -> None)
     | _ -> None
 
 (* The declared TUPLE element return of [fname] (leftovers design 2026-10-18
@@ -2062,13 +2074,17 @@ let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv
              comes from the callee's proved body alone, at the declared
              base's sort, never the demand's. *)
           let tyvar = sl.sl_base = `Tyvar in
-          if not (Hashtbl.mem elem_ret_proved key) then
+          (* §7.2: an ASSUMED element return gates on P1 only, and carries no
+             conjunction with the input (that would claim the body's
+             parametricity, which nothing checked). *)
+          let assumed = (not (Hashtbl.mem elem_ret_proved key)) && Hashtbl.mem elem_ret_assumed key in
+          if not (Hashtbl.mem elem_ret_proved key || assumed) then
             uninst
               (Printf.sprintf "`%s`'s own body is not proved to return elements satisfying `%s`" g
                  (if slot_is_exact sl then p else pred_str sl.sl_pred))
           else
             (match if tyvar then Refine_abstract.positive_base ~is_known fd p else None with
-             | Some a when not (parametric_ok ctx g [ a ]) ->
+             | Some a when not ((if assumed then p1_ok else parametric_ok) ctx g [ a ]) ->
                uninst (Printf.sprintf "`%s` is not known to be parametric in `%s`" g a)
              | _ ->
                let esort =
@@ -2092,7 +2108,7 @@ let abstract_flow ?component ~root defs (ctx : rctx) path lets sc re (cb : cbenv
                        `!(incoming && q)`, far weaker than what holds. *)
                     let body' =
                       match
-                        if not tyvar then None
+                        if (not tyvar) || assumed then None
                         else
                           Option.bind (callee_sig ctx defs cb g) (fun sg ->
                               Option.bind (Refine_abstract.positive_base ~is_known fd p) (sources_of sg))
@@ -2685,11 +2701,14 @@ let abstract_flow_n ?component ?(call : A.expr option) ~root defs (ctx : rctx) p
              if entry_mentions unary ent then
                uninst
                  (Printf.sprintf "`%s`'s element return applies abstract refinements of different arities" g)
-             else if not (Hashtbl.mem elem_ret_proved key) then
+             else if not (Hashtbl.mem elem_ret_proved key || Hashtbl.mem elem_ret_assumed key) then
                uninst
                  (Printf.sprintf "`%s`'s own body is not proved to return elements satisfying `%s`" g
                     (String.concat "`, `" nary))
              else
+               (* §4.2 step 2 / §7.2: an ASSUMED element return gates on P1
+                  only, and is never conjoined with an input's entry. *)
+               let assumed = not (Hashtbl.mem elem_ret_proved key) in
                let is_known = known_predicate_fn in
                let tyvars = slot_is_tyvar rt in
                let tyvar j = Option.value ~default:false (List.nth_opt tyvars j) in
@@ -2701,7 +2720,7 @@ let abstract_flow_n ?component ?(call : A.expr option) ~root defs (ctx : rctx) p
                       nary)
                  |> List.filter is_tv
                in
-               if bases <> [] && not (parametric_ok ctx g bases) then
+               if bases <> [] && not ((if assumed then p1_ok else parametric_ok) ctx g bases) then
                  uninst
                    (Printf.sprintf "`%s` is not known to be parametric in %s" g
                       (String.concat ", " (List.map (fun b -> "`" ^ b ^ "`") bases)))
@@ -2750,6 +2769,7 @@ let abstract_flow_n ?component ?(call : A.expr option) ~root defs (ctx : rctx) p
                           every entry it built). *)
                        let src_arg =
                          match callee_sig ctx defs cb g with
+                         | Some _ when assumed -> None
                          | Some sg ->
                            let srcs =
                              List.filter_map
@@ -5992,6 +6012,23 @@ let () = Refine_post.tail_demand_of := tail_demand_impl
    assume-without-check.  The POSTcondition check still sees the original
    [fd] — a return refinement is verified, not assumed, and verifying it
    against the declared parameters is exactly right. *)
+(* The predicate text a trusted element-return entry is recorded under: its
+   slot facts and relations, joined (a literal `true` slot says nothing). *)
+let entry_pred_str (e : entry) : string =
+  let rec go (e : entry) = List.concat_map slot e.slots @ List.map (fun (r : rel) -> pred_str r.rel_pred) e.rels
+  and slot = function
+    | None | Some (Refined (_, A.ELit (A.LitBool true, _), _)) -> []
+    | Some (Refined (_, p, _)) -> [ pred_str p ]
+    | Some (Container inner) -> go inner
+  in
+  match go e with [] -> "<element refinement>" | ps -> String.concat " && " ps
+
+(* An `@[assume]` function's element return (multi-arg design §7.2): its
+   entries, read under [fd]'s own abstract refinements (the caller sets
+   [current_abstracts]).  [None]: not assumed, or no element return. *)
+let assumed_elem_return (fd : A.fn_def) : ret_elems option =
+  if is_assumed fd then ret_elems_of_ty fd.A.fn_ret_ty else None
+
 let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_def) : unit =
   let is_trusted = List.mem "trusted" fd.A.fn_attrs in
   (* `@[trusted]` outside `cap verified` changes no behaviour at all — [note]
@@ -6011,7 +6048,11 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
      inherit this) never sees a stale `true` left behind by a caller. *)
   (* `@[assume]` on a function with no refined return assumes nothing — say
      so, exactly as the `@[trusted]` no-effect case above does. *)
-  if is_assumed fd && assumed_return fd = None then
+  if is_assumed fd && assumed_return fd = None
+     && (let saved = !current_abstracts in
+         current_abstracts := Refine_abstract.names ~is_known:known_predicate_fn fd;
+         Fun.protect ~finally:(fun () -> current_abstracts := saved)
+           (fun () -> assumed_elem_return fd = None)) then
     Err.warning ~code:Err.Code.attribute_no_effect errctx ~span:fd.A.fn_name.A.span
       (Printf.sprintf
          "`@[assume]` on `%s` has no effect: it declares no refined return \
@@ -6048,6 +6089,19 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd));
     let walked = if assume_params then fd else strip_param_refinements fd in
     last_elem_return_proved := ret_elems_of_ty fd.A.fn_ret_ty <> None;
+    (* An ASSUMED element return (§7.2): one `trusted` postcondition per
+       entry at the definition, and no tail is walked for it. *)
+    let assumed_er = assumed_elem_return fd in
+    (match assumed_er with
+     | Some er ->
+       List.iter
+         (fun e ->
+           Obligation.record
+             { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
+             ; predicate = entry_pred_str e; verdict = Obligation.Trusted
+             ; kind = Obligation.Postcondition })
+         (ret_entries er)
+     | None -> ());
     List.iter
       (fun (c : A.fn_clause) ->
         let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
@@ -6062,6 +6116,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         let label = Printf.sprintf "return of %s" fd.A.fn_name.A.txt in
         let demand =
           match ret_elems_of_ty fd.A.fn_ret_ty with
+          | Some _ when assumed_er <> None -> None
           | Some er ->
             let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
             let ts =
@@ -7115,7 +7170,10 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
       (function
         | A.DFn (fd, _) when has_elem_return fd ->
           let key = if ctx.modpath = "" then fd.A.fn_name.A.txt else ctx.modpath ^ "." ^ fd.A.fn_name.A.txt in
-          candidates := (key, ctx, fd) :: !candidates
+          (* An `@[assume]`d element return is taken on trust (§7.2), never
+             proved: its body is not walked for it. *)
+          if is_assumed fd then Hashtbl.replace elem_ret_assumed key ()
+          else candidates := (key, ctx, fd) :: !candidates
         | A.DMod (name, _, ds, _) ->
           collect { ctx with modpath = (if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt) } ds
         | _ -> ())

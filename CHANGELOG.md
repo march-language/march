@@ -21,6 +21,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements: `Map.filter` keeps what its predicate says.** `Map.filter(m, pred,
+  cmp)` is now `pred : k -> v -> Bool[p]` returning `{Map(k[p], v[p]) | subset(keys(_),
+  keys(m))}`, so `need_vals(Map.filter(m, fn _k -> fn v -> v > 0, cmp))` against
+  `Map(String, {Int | _ > 0})` is proved, as are a key demand and a relation between
+  key and value (`fn k -> fn v -> v > k` into `Map({x : Int | true}, {y : Int | y >
+  x})`); a weaker lambda is an `abstract-refinement-too-weak` skip. The entry fact is
+  ASSUMED, like every other `Map` contract: `@[assume]` on a function whose return
+  has element refinements now assumes them (one `trusted` postcondition per entry in
+  `--refine-report`, accepted under `cap verified`), and a property test in
+  `test/stdlib/test_map.march` checks it at run time. The input map's own element
+  facts are not carried through, and `Map`'s other functions (`insert`, `remove`,
+  `get`, `merge`, `map_values`), `HashMap.filter` and `OrderedMap.filter` carry no
+  element fact yet.
 - **Refinements: two-argument abstract refinements.** A callback of two arguments
   can define an abstract refinement `p` of two, and the return can relate two
   sibling slots through it:
@@ -41,9 +54,8 @@ git log is authoritative for exact commits.
   was silently inert), one argument at two types, a container that is not
   entry-shaped, or one `p` at two arities. `(a, a) -> Bool[p]` stays a parse
   error, whose message now says the tuple is ONE argument and writes
-  `a -> a -> Bool[p]`. `Map.filter` does not
-  carry it yet. See "Two arguments" under abstract refinements in the refinement
-  types reference.
+  `a -> a -> Bool[p]`. See "Two arguments" under abstract refinements in the
+  refinement types reference.
 - **Refinements: relational element refinements.** A slot predicate may name a
   sibling slot's binder, relating the two components of every entry:
   `Assoc({x : Int | true}, {y : Int | y > x})` reads "each entry's value exceeds

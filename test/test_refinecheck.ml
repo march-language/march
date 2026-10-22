@@ -24619,6 +24619,246 @@ let abstract_multiarg_sugar_suite =
         Alcotest.check ps "need_pos = long form" (at "need_pos" long) (at "need_pos" short);
         Alcotest.check ps "need_arel = long form" (at "need_arel" long) (at "need_arel" short)) ]
 
+(* ── `Map.filter`: an ASSUMED two-argument element return (multi-arg design
+   2026-10-18 §7.2, §9 "Phase 4") ──────────────────────────────────────────
+   `Map.filter(m, pred : k -> v -> Bool[p], cmp) : {Map(k[p], v[p]) | …}` is
+   `@[assume]`: its entry is taken on trust (one `trusted` postcondition at
+   the definition), gated on P1 only, and instantiated at each call like a
+   proved one.  Each case runs against the REAL `stdlib/map.march` (loaded
+   from `stdlib/` relative to the cwd), so it is RED on a base whose stdlib
+   lacks the signature.  Rows m1-m12 are the design's §0 table. *)
+let abstract_map_suite =
+  let load_mod name =
+    let m, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (m.March_ast.Ast.mod_name, March_ast.Ast.Public, m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods = List.map load_mod [ "list.march"; "map.march" ] in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  let user_file (o : March_refinecheck.Obligation.t) =
+    let f = o.March_refinecheck.Obligation.span.March_ast.Ast.file in
+    f = "" || f = "<unknown>"
+  in
+  let open March_refinecheck.Obligation in
+  (* Typecheck and refine-check [src] beside the stdlib modules: the user
+     module's diagnostics (errors and warnings), and every obligation. *)
+  let run (src : string) =
+    reset ();
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let m = { m with March_ast.Ast.mod_decls = mods @ prelude_decls @ m.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module m in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx m;
+    let diags sev =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          let f = d.March_errors.Errors.span.March_ast.Ast.file in
+          if d.March_errors.Errors.severity = sev && (f = "" || f = "<unknown>")
+          then Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    (diags March_errors.Errors.Error, diags March_errors.Errors.Warning, all (), paths)
+  in
+  let user obs = List.filter user_file obs in
+  (* (verdict, reason slug, reason detail) of every user obligation on [callee]. *)
+  let of_callee c obs =
+    List.filter_map
+      (fun o ->
+        if o.callee = c then
+          Some
+            ( verdict_name o.verdict
+            , (match o.verdict with Skipped r -> reason_name r | _ -> "")
+            , match o.verdict with Skipped r -> reason_detail r | _ -> "" )
+        else None)
+      (user obs)
+  in
+  let slugs c obs = List.map (fun (v, r, _) -> (v, r)) (of_callee c obs) in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, t, s) o ->
+        match o.verdict with
+        | Proved -> (p + 1, v, t, s)
+        | Violated -> (p, v + 1, t, s)
+        | Trusted -> (p, v, t + 1, s)
+        | Skipped _ -> (p, v, t, s + 1))
+      (0, 0, 0, 0) (user obs)
+  in
+  let ps = Alcotest.(list (pair string string)) in
+  let q4 = Alcotest.(pair (pair int int) (pair int int)) in
+  let q4v (a, b, c, d) = ((a, b), (c, d)) in
+  let proved = ("proved", "") in
+  let weak = ("skipped", "abstract-refinement-too-weak") in
+  let uninst = ("skipped", "abstract-refinement-uninstantiated") in
+  let has sub s =
+    let n = String.length sub and k = String.length s in
+    let rec go i = i + n <= k && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let m ?(verified = false) name body =
+    "mod " ^ name ^ " do\n" ^ (if verified then "  cap verified\n" else "") ^ body ^ "end\n"
+  in
+  let needs =
+    {|  fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+  fn need_ivals(_m : Map(Int, {Int | _ > 0})) : Int do 0 end
+  fn need_keys(_m : Map({Int | _ > 0}, String)) : Int do 0 end
+  fn need_rel(_m : Map({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+  fn need_band(_m : Map(String, {Int | _ > 0 && _ < 100})) : Int do 0 end
+|}
+  in
+  let row name ~demand ~body ~want =
+    gated name (fun () ->
+        let errs, _, obs, _ = run (m "M" (needs ^ body)) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check ps demand want (slugs demand obs))
+  in
+  [ row "m1: a value filter proves a value demand" ~demand:"need_vals" ~want:[ proved ]
+      ~body:"  fn go(m : Map(String, Int)) : Int do need_vals(Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp)) end\n";
+    row "m2: a key filter proves a key demand" ~demand:"need_keys" ~want:[ proved ]
+      ~body:"  fn go(m : Map(Int, String)) : Int do need_keys(Map.filter(m, fn k -> fn _v -> k > 0, Map.int_cmp)) end\n";
+    row "m3: a relational filter proves a relational demand" ~demand:"need_rel" ~want:[ proved ]
+      ~body:"  fn go(m : Map(Int, Int)) : Int do need_rel(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n";
+    gated "m4: a weaker filter is too-weak, naming the lambda" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "M"
+               (needs
+               ^ "  fn go(m : Map(String, Int)) : Int do need_vals(Map.filter(m, fn _k -> fn v -> v >= 0, Map.str_cmp)) end\n"))
+        in
+        Alcotest.check ps "need_vals" [ weak ] (slugs "need_vals" obs);
+        let d = String.concat "" (List.map (fun (_, _, d) -> d) (of_callee "need_vals" obs)) in
+        Alcotest.(check bool) ("detail: " ^ d) true (has "fn _k -> fn v -> v >= 0" d && has "_ > 0" d));
+    row "m5: a projection onto the value, through a fresh key" ~demand:"need_ivals" ~want:[ proved ]
+      ~body:
+        "  fn go(m : Map(Int, Int)) : Int do need_ivals(Map.filter(m, fn k -> fn v -> k > 0 && v > k, Map.int_cmp)) end\n";
+    row "m6: `v > k` alone does not make the value positive" ~demand:"need_ivals" ~want:[ weak ]
+      ~body:"  fn go(m : Map(Int, Int)) : Int do need_ivals(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n";
+    row "m7: a lambda capturing `now` is uninstantiated" ~demand:"need_vals" ~want:[ uninst ]
+      ~body:
+        "  fn go(m : Map(String, Int), now : Int) : Int do need_vals(Map.filter(m, fn _k -> fn v -> v > now, Map.str_cmp)) end\n";
+    row "m8: through a `let`" ~demand:"need_vals" ~want:[ proved ]
+      ~body:
+        "  fn go(m : Map(String, Int)) : Int do\n\
+        \    let m2 = Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp)\n\
+        \    need_vals(m2)\n\
+        \  end\n";
+    (* A variable argument's subtyping obligation is labelled by the variable. *)
+    row "m9: a refined parameter (unchanged)" ~demand:"m" ~want:[ proved ]
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(m) end\n";
+    row "m10 control: Map.insert carries no element fact (out of scope)" ~demand:"need_vals"
+      ~want:[ ("skipped", "parametric-source-unproved") ]
+      ~body:"  fn go(m : Map(String, {Int | _ > 0})) : Int do need_vals(Map.insert(m, \"b\", 5, Map.str_cmp)) end\n";
+    gated "the input's own facts are not conjoined through an assumed callee, and the detail says so" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "M"
+               (needs
+               ^ "  fn go(m : Map(String, {Int | _ > 0})) : Int do need_band(Map.filter(m, fn _k -> fn v -> v < 100, Map.str_cmp)) end\n"))
+        in
+        Alcotest.check ps "need_band" [ weak ] (slugs "need_band" obs);
+        let d = String.concat "" (List.map (fun (_, _, d) -> d) (of_callee "need_band" obs)) in
+        Alcotest.(check bool) ("detail: " ^ d) true
+          (has "`m`'s own element facts are not carried through `Map.filter`" d));
+    gated "m12: cap verified, a filter with no demand files nothing and errs nothing" (fun () ->
+        let errs, _, obs, _ =
+          run
+            (m ~verified:true "V"
+               "  fn go(m : Map(Int, Int)) : Int do Map.size(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n\
+               \  fn live(m : Map(String, Int), now : Int) : Int do Map.size(Map.filter(m, fn _a -> fn until -> until > now, Map.str_cmp)) end\n")
+        in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check q4 "user obligations" ((0, 0), (0, 0)) (q4v (triple obs)));
+    gated "cap verified: proved Map.filter demands leave nothing unverified" (fun () ->
+        let errs, _, _, _ =
+          run
+            (m ~verified:true "V2"
+               (needs
+               ^ "  fn go(m : Map(Int, Int)) : Int do need_rel(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n"))
+        in
+        Alcotest.(check (list string)) "no errors" [] errs);
+    gated "cap verified control: a too-weak Map.filter demand is an error" (fun () ->
+        let errs, _, _, _ =
+          run
+            (m ~verified:true "V3"
+               (needs
+               ^ "  fn go(m : Map(Int, Int)) : Int do need_ivals(Map.filter(m, fn k -> fn v -> v > k, Map.int_cmp)) end\n"))
+        in
+        let t = String.concat "\n" errs in
+        Alcotest.(check bool) ("error: " ^ t) true (has "abstract-refinement-too-weak" t));
+    gated "assumed_counted: one trusted entry at Map.filter's definition, its body not walked" (fun () ->
+        let _, _, obs, paths = run (m "C" needs) in
+        let path = List.find (fun p -> Filename.basename p = "map.march") paths in
+        let at_filter =
+          List.filter
+            (fun o -> o.span.March_ast.Ast.file = path && o.callee = "filter" && o.kind = Postcondition)
+            obs
+        in
+        let shown = List.map (fun o -> (verdict_name o.verdict, o.predicate)) at_filter in
+        Alcotest.check ps "Map.filter's postconditions"
+          [ ("trusted", "subset(keys(_), keys(m))"); ("trusted", "p($s0, $s1)") ]
+          shown;
+        Alcotest.(check int) "no element obligation from Map.filter's body" 0
+          (List.length
+             (List.filter (fun o -> o.span.March_ast.Ast.file = path && o.callee = "return of filter") obs)));
+    (* The assumed gate is P1, not nothing: an assumed element return whose
+       type variables the inferred type does not keep generic (an
+       unannotated parameter) is not instantiated. *)
+    gated "an assumed callee failing P1 is uninstantiated, naming parametricity" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "P"
+               (needs
+               ^ "  @[assume]\n\
+                 \  fn afilt(m, pred : k -> v -> Bool[p]) : Map(k[p], v[p]) do m end\n\
+                 \  fn go(m : Map(String, Int)) : Int do need_vals(afilt(m, fn _k -> fn v -> v > 0)) end\n"))
+        in
+        Alcotest.check ps "need_vals" [ uninst ] (slugs "need_vals" obs);
+        let d = String.concat "" (List.map (fun (_, _, d) -> d) (of_callee "need_vals" obs)) in
+        Alcotest.(check bool) ("detail: " ^ d) true (has "is not known to be parametric" d));
+    gated "control: the same signature without @[assume] and an unproved body carries nothing" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "P2"
+               (needs
+               ^ "  fn bfilt(m : Map(k, v), pred : k -> v -> Bool[p]) : Map(k[p], v[p]) do m end\n\
+                 \  fn go(m : Map(String, Int)) : Int do need_vals(bfilt(m, fn _k -> fn v -> v > 0)) end\n"))
+        in
+        Alcotest.check ps "need_vals" [ uninst ] (slugs "need_vals" obs);
+        let d = String.concat "" (List.map (fun (_, _, d) -> d) (of_callee "need_vals" obs)) in
+        Alcotest.(check bool) ("detail: " ^ d) true (has "own body is not proved" d));
+    gated "an assumed closed element return is a fact at a call (declared_elem_return)" (fun () ->
+        let _, warns, obs, _ =
+          run
+            (m "D"
+               (needs
+               ^ "  @[assume]\n\
+                 \  fn pos_map() : Map(String, {Int | _ > 0}) do Map.empty() end\n\
+                 \  fn go() : Int do need_vals(pos_map()) end\n"))
+        in
+        (* The argument's subtyping obligation is labelled by the call. *)
+        Alcotest.check ps "pos_map(…) into need_vals" [ proved ] (slugs "pos_map(…)" obs);
+        Alcotest.check q4 "user obligations: the demand, and one trusted entry" ((1, 0), (1, 0))
+          (q4v (triple obs));
+        Alcotest.(check bool) "no `@[assume] has no effect` warning" false
+          (List.exists (has "has no effect") warns));
+    gated "control: the same closed return without @[assume] is not a fact" (fun () ->
+        let _, _, obs, _ =
+          run
+            (m "D2"
+               (needs
+               ^ "  fn pos_map() : Map(String, {Int | _ > 0}) do Map.empty() end\n\
+                 \  fn go() : Int do need_vals(pos_map()) end\n"))
+        in
+        let vs = slugs "pos_map(…)" obs @ slugs "need_vals" obs in
+        Alcotest.(check bool) "the demand is recorded" true (vs <> []);
+        Alcotest.(check bool) "the demand is not proved" false (List.mem proved vs)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -24767,4 +25007,5 @@ let () =
       ("relational-elements", relational_elements_suite);
       ("abstract-multiarg", abstract_multiarg_suite);
       ("abstract-multiarg-sugar", abstract_multiarg_sugar_suite);
+      ("abstract-map", abstract_map_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

@@ -30,7 +30,8 @@ own style: `pred(k)` then `p(v)`) does not prove its relational return, so its
 calls are `abstract-refinement-uninstantiated` ("`filt2`'s own body is not proved
 …"). Since the typechecker makes a combinator that calls its callback in two steps
 take a CURRIED lambda (`callback_arity_mismatch`), a curried lambda instantiates a
-two-argument `p` today only for a parameter's (negative) occurrence.
+two-argument `p` today only for a parameter's (negative) occurrence and, since
+phase 4, for an ASSUMED return (`Map.filter`, whose body is not checked).
 
 Fix direction (design §5.6): record the partial application in the `lets` channel
 (`g = keep(k)`, retired when `g`, `keep` or `k` is rebound) and reflect `g(v)` as

@@ -1572,7 +1572,10 @@ element sets are stated rather than proved: every public `Set` operation
 `difference`, `contains`, `is_subset`, `is_empty`, `eq`, `to_list`,
 `from_list`) and the key-affecting `Map` operations (`empty`, `singleton`,
 `insert`, `remove`, `get`, `contains_key`, `is_empty`, `keys`, `map_values`,
-`filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`:
+`filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`.
+`Map.filter` also assumes an entry fact, `Map(k[p], v[p])`: every entry of its
+result satisfies `pred` (see [two-argument abstract
+refinements](#abstract-refinements-filter-keeps-what-its-predicate-says)).
 
 ```march
 @[assume]
@@ -2613,7 +2616,8 @@ need_pos(filt(a, fn (_k, v) -> v >= 0))          -- skip: too weak
 What instantiates a two-argument `p`: an uncurried lambda `fn (k, v) -> …` for
 a combinator that calls its callback `keep(k, v)`, a curried one `fn k -> fn v
 -> …` for one that calls it in two steps (today that counts only for a
-parameter's `p`; see "Not yet" below), either bound by `let`, a function
+parameter's `p` and for `Map.filter`'s assumed return, below; see "Not yet"),
+either bound by `let`, a function
 with a proved `{Bool | _ == e}` return over two parameters (`fn above(k : Int,
 v : Int) : {Bool | _ == (v > k)}`), and a callback parameter whose chain type
 ends in `{Bool | _ == e}`. Anything else is `abstract-refinement-uninstantiated`,
@@ -2639,6 +2643,39 @@ Not yet: inside a body, a callback called in two steps (`let g = keep(k)` then
 its relational return, and its calls instantiate nothing. (`keep(k)(v)` is not
 March syntax.)
 
+**`Map.filter` carries it, assumed.** Its callback is curried and decides on a
+key and a value together:
+
+```march
+@[assume]
+fn filter(m : Map(k, v), pred : k -> v -> Bool[p], cmp : k -> k -> Bool)
+    : {Map(k[p], v[p]) | subset(keys(_), keys(m))} do … end
+```
+
+```march
+fn need_vals(_m : Map(String, {Int | _ > 0})) : Int do 0 end
+fn need_rel(_m : Map({x : Int | true}, {y : Int | y > x})) : Int do 0 end
+
+need_vals(Map.filter(m, fn _k -> fn v -> v > 0, Map.str_cmp))   -- proved
+need_rel(Map.filter(n, fn k -> fn v -> v > k, Map.int_cmp))     -- proved
+need_vals(Map.filter(m, fn _k -> fn v -> v >= 0, Map.str_cmp))  -- skip: too weak
+```
+
+`Map`'s body goes through `entries(m)` (a list of tuples) and calls `pred` in
+two steps, so the checker cannot prove the entry fact; it is `@[assume]`d like
+every other `Map` contract. `@[assume]` on a function whose return has an
+element entry (slots, relations or abstract applications) assumes that entry:
+the body is not checked against it, the definition counts one `trusted`
+postcondition per entry in `--refine-report`, and it is accepted under
+`cap verified`. At a call the assumed entry is instantiated like a proved one,
+with one difference: an assumed callee is asked only that its type variables
+are generic in its inferred type (the parameters must be annotated), and the
+input's own element facts are not conjoined (`m : Map(String, {Int | _ > 0})`
+through `Map.filter(m, fn _k -> fn v -> v < 100, …)` does not meet `_ > 0 && _ <
+100`, and the too-weak detail says so). The property test in
+`test/stdlib/test_map.march` checks the fact at run time. `HashMap.filter`,
+`OrderedMap.filter` and a `List((k, v))` of pairs do not carry it yet.
+
 What it does not do (reason `abstract-refinement-uninstantiated` where a
 demand meets one of these):
 
@@ -2662,10 +2699,11 @@ demand meets one of these):
   good as the obligation at each place `keep_pos` is called, and passing a
   callable whose return is not known to meet it is a skip there today, not a
   violation.
-- **`Map.filter` does not carry it yet.** Its callback decides on a key and
-  a value together, which needs the two-argument `p(k, v)` above; `Map`'s
-  signature does not declare one. (A fold's accumulator invariant needs no
-  abstract refinement at all; see [Folds](#folds-an-accumulator-invariant).)
+- **`Map`'s other functions carry no element fact.** `Map.insert`,
+  `Map.remove`, `Map.get`, `Map.merge` and `Map.map_values` keep nothing of a
+  refined input (`Map.insert(pos_map, "b", 5, cmp)` into a positive-value
+  demand is a skip). (A fold's accumulator invariant needs no abstract
+  refinement at all; see [Folds](#folds-an-accumulator-invariant).)
 - **Not every combinator.** `drop_while` (`List`, `Enum`) keeps no element
   fact: its result starts at the first element that FAILS `pred`, so nothing
   holds of all of it. `List.filter_map`'s callback returns an `Option`, not a
@@ -2893,7 +2931,8 @@ refinement instead (`xs : List({Int | _ > 0})`), and `x` gets it.
   `List.find`, `List.take_while`, `Option.filter`, `List.partition` (per
   component), `Prelude.filter` (the bare `filter`), `Enum.filter`,
   `Enum.find`, `Enum.take_while`, `Iterable.filter`, `Iterable.find`,
-  `Range.filter` and `Deque.filter`. Each is instantiated from a lambda
+  `Range.filter`, `Deque.filter` and, over a key and a value together and
+  assumed rather than proved, `Map.filter`. Each is instantiated from a lambda
   (whose body may combine `&&`/`||`/`not`/`if` and calls to proved helpers),
   a named predicate with a proved contract, a callback parameter or a
   `let`-bound lambda; see [Abstract refinements](#abstract-refinements-filter-keeps-what-its-predicate-says).
