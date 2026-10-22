@@ -2608,10 +2608,14 @@ assumption) prove the same way. A curried step's inner parameter (`x` in
 **Which stdlib folds carry it.** `List.fold_left`, `List.fold_right`, the
 prelude's `fold_left`, `Enum.fold`, `Iterable.fold`, `Enum.reduce`,
 `Range.reduce`, `Map.fold`, `Set.fold`, `HashMap.fold`, `Array.fold_left`,
-`RRB.fold`, `RRB.fold_left`, `Deque.fold_left` and `Deque.fold_right`. Each
+`RRB.fold`, `RRB.fold_left`, `Deque.fold_left`, `Deque.fold_right` and
+`Hamt.fold` (whose callback is curried, `fn acc -> fn k -> fn v -> …`). Each
 declares its accumulator `b` and its callback's arrow (`f : b -> k -> v -> b`
 for the map folds, `f : b -> a -> b` or `f : a -> b -> b` for the rest), which
-is what the parametricity checks read:
+is what the parametricity checks read. `List.scan_left` and the curried
+`Enum.scan` return every accumulator value as a list (`List(b)`), so an
+element demand on their result is the same invariant
+(`sum_nn(Enum.scan(ys, 0, fn a -> fn _x -> a + 1))` is proved):
 
 ```march
 fn entries(m : Map(String, Int)) : Int do
@@ -2627,8 +2631,7 @@ These do **not**, and a demand through them stays a skip: the `NativeArray`
 folds (`fold_int` and the other element kinds; the body is one builtin, which
 the checks cannot see through), `Seq.fold` / `Seq.fold_while` and the folds
 built on them (`JsonStream.fold`, `Flow.reduce`; the accumulator travels
-through a closure stored in data), `Hamt.fold` (unannotated, curried callback),
-and, for now, `SortedSet.fold` and `OrderedMap.fold`: they are annotated, but
+through a closure stored in data), and, for now, `SortedSet.fold` and `OrderedMap.fold`: they are annotated, but
 their collection parameter is a record type, which the parametricity check does
 not yet walk. None of these is `@[assume]`d: parametricity is checked, never
 taken on trust.
@@ -2798,6 +2801,13 @@ refinement instead (`xs : List({Int | _ > 0})`), and `x` gets it.
   no element fact at its call sites, and a `match` binder at that field gets
   none. Element refinements say nothing about order or size: a `Dq(a[p])`
   with its two lists swapped is still one.
+- **A parameter typed with a module-qualified container is not yet a
+  source.** `q : Queue.Queue({Int | _ > 0})` (or `Deque.Deque(...)`) gives
+  `sum_pos(Queue.to_list(q))` no element fact (a `parametric-source-unproved`
+  skip), although the same shape over a type declared in the module under
+  check (`q : Lk({Int | _ > 0})`) proves. A queue built in the same function
+  does carry it: `sum_pos(Queue.to_list(Queue.push_back(Queue.from_list(pos), 3)))`
+  and `one_pos(Queue.peek_front(Queue.from_list(pos)))` are proved.
 
 ---
 

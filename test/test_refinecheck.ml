@@ -23675,6 +23675,143 @@ let fold_invariants_3_suite =
       "OrderedMap.fold(OrderedMap.from_list(xs, icmp), 0, fn (a, _k, _v) -> a + 1)"
       "parametric-source-unproved" ]
 
+(* The 2026-10-21 stdlib sweep (specs/progress/2026-10-21-stdlib-refinement-sweep.md):
+   stdlib signatures that now carry what the 2026-10-18 refinement features
+   (abstract refinements, element flow, fold invariants, `Within` fields) can
+   state and prove.  Every row goes through the REAL stdlib file, loaded from
+   `stdlib/` relative to the cwd as [fold_invariants_3_suite] does, so a proof
+   row is RED against a stdlib without the annotation (each was measured
+   skipping first; the base reason is in the comment above it). *)
+let stdlib_refine_sweep_suite =
+  let load_mod name =
+    let md, path = load_stdlib_march name in
+    ( March_ast.Ast.DMod
+        (md.March_ast.Ast.mod_name, March_ast.Ast.Public, md.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span),
+      path )
+  in
+  let stdlib =
+    lazy
+      (let mods =
+         List.map load_mod [ "list.march"; "option.march"; "result.march"; "enum.march"; "hamt.march";
+                             "queue.march" ]
+       in
+       let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+       (List.map fst mods, prelude_decls, prelude_path :: List.map snd mods))
+  in
+  (* Every obligation as (file basename, "" for the user module; line;
+     callee; verdict; reason). *)
+  let run (src : string) =
+    March_refinecheck.Obligation.reset ();
+    let md = March_desugar.Desugar.desugar_module (parse src) in
+    let mods, prelude_decls, paths = Lazy.force stdlib in
+    let md = { md with March_ast.Ast.mod_decls = mods @ prelude_decls @ md.March_ast.Ast.mod_decls } in
+    let _tc, type_map = March_typecheck.Typecheck.check_module md in
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ~stdlib_files:paths ctx md;
+    let errs =
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+          let f = d.March_errors.Errors.span.March_ast.Ast.file in
+          if d.March_errors.Errors.severity = March_errors.Errors.Error && (f = "" || f = "<unknown>")
+          then Some d.March_errors.Errors.message
+          else None)
+        ctx.March_errors.Errors.diagnostics
+    in
+    let obs =
+      List.map
+        (fun (o : March_refinecheck.Obligation.t) ->
+          let open March_refinecheck.Obligation in
+          let sp = o.span in
+          let f = sp.March_ast.Ast.file in
+          ( (if f = "" || f = "<unknown>" then "" else Filename.basename f), sp.March_ast.Ast.start_line, o.callee,
+            verdict_name o.verdict, match o.verdict with Skipped r -> reason_name r | _ -> "" ))
+        (March_refinecheck.Obligation.all ())
+    in
+    (errs, obs)
+  in
+  let user obs =
+    List.filter_map
+      (fun (f, _, c, v, r) -> if f = "" then Some (c, v, r) else None)
+      obs
+  in
+  let triple obs =
+    List.fold_left
+      (fun (p, v, s) (_, verdict, _) ->
+        match verdict with
+        | "proved" -> (p + 1, v, s)
+        | "violated" -> (p, v + 1, s)
+        | "skipped" -> (p, v, s + 1)
+        | _ -> (p, v, s))
+      (0, 0, 0) obs
+  in
+  let reasons obs = List.filter_map (fun (_, v, r) -> if v = "skipped" then Some r else None) obs in
+  let t3 = Alcotest.(triple int int int) in
+  let m body =
+    "mod SW do\n\
+    \  fn need_nn(k : {Int | _ >= 0}) : Int do k end\n\
+    \  fn sum_nn(_xs : List({Int | _ >= 0})) : Int do 0 end\n\
+    \  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n\
+    \  fn one_pos(_o : Option({Int | _ > 0})) : Int do 0 end\n"
+    ^ body ^ "end\n"
+  in
+  let go param call = m ("  fn go(" ^ param ^ ") : Int do " ^ call ^ " end\n") in
+  let proof name param call =
+    gated (name ^ ": the demand proves") (fun () ->
+        let errs, obs = run (go param call) in
+        Alcotest.(check (list string)) "no errors" [] errs;
+        Alcotest.check t3 call (1, 0, 0) (triple (user obs)))
+  in
+  let skip_with name param call reason =
+    gated (name ^ ": stays a skip (" ^ reason ^ ")") (fun () ->
+        let _, obs = run (go param call) in
+        let u = user obs in
+        Alcotest.check t3 call (0, 0, 1) (triple u);
+        Alcotest.(check (list string)) "reason" [ reason ] (reasons u))
+  in
+  [ (* ── Hamt.fold: the signature was unannotated (`fold(node, acc, f)`),
+       so P1 had no declared `b`; base: (0, 0, 1) unreflectable-subject.
+       Closes specs/todos/2026-10-18-refine-hamt-fold-unannotated.md. *)
+    proof "Hamt.fold" "h : Hamt.HEntry(Int, Int)"
+      "need_nn(Hamt.fold(h, 0, fn acc -> fn _k -> fn _v -> acc + 1))";
+    skip_with "Hamt.fold, a step that breaks the demand" "h : Hamt.HEntry(Int, Int)"
+      "need_nn(Hamt.fold(h, 0, fn acc -> fn _k -> fn _v -> acc - 1))" "accumulator-step-unproved";
+    (* ── Enum.scan: unannotated; base: (0, 0, 1) unreflectable-subject.
+       Every element of the result is an accumulator value, so an element
+       demand on it is the accumulator invariant (as for List.scan_left). *)
+    proof "Enum.scan" "ys : List(Int)" "sum_nn(Enum.scan(ys, 0, fn acc -> fn _x -> acc + 1))";
+    skip_with "Enum.scan, a step that breaks the demand" "ys : List(Int)"
+      "sum_nn(Enum.scan(ys, 0, fn acc -> fn _x -> acc - 1))" "accumulator-step-unproved";
+    skip_with "Enum.scan, a base that fails the demand" "ys : List(Int)"
+      "sum_nn(Enum.scan(ys, 0 - 1, fn acc -> fn _x -> acc + 1))" "accumulator-base-unproved";
+    (* ── Queue: every public function and private helper was unannotated,
+       so no call was a parametric source; base: (0, 0, 1)
+       unreflectable-subject each.  The `Queue(List(a), List(a))` fields are
+       `Within` roles (abstract-refinements leftovers phase E), so a queue
+       built from a refined list carries the list's element refinement. *)
+    proof "Queue.from_list then to_list" "xs : List({Int | _ > 0})"
+      "sum_pos(Queue.to_list(Queue.from_list(xs)))";
+    proof "Queue.peek_front" "xs : List({Int | _ > 0})" "one_pos(Queue.peek_front(Queue.from_list(xs)))";
+    proof "Queue.peek_back" "xs : List({Int | _ > 0})" "one_pos(Queue.peek_back(Queue.from_list(xs)))";
+    proof "Queue.push_back of a positive" "xs : List({Int | _ > 0})"
+      "sum_pos(Queue.to_list(Queue.push_back(Queue.from_list(xs), 3)))";
+    proof "Queue.push_front of a positive" "xs : List({Int | _ > 0})"
+      "sum_pos(Queue.to_list(Queue.push_front(Queue.from_list(xs), 3)))";
+    gated "Queue control: pushing a negative is not proved" (fun () ->
+        let _, obs = run (go "xs : List({Int | _ > 0})" "sum_pos(Queue.to_list(Queue.push_back(Queue.from_list(xs), 0 - 3)))") in
+        Alcotest.(check bool) "sum_pos not proved" false
+          (List.exists (fun (c, v, _) -> c = "sum_pos" && v = "proved") (user obs)));
+    gated "Queue control: a queue of an unrefined list is not proved" (fun () ->
+        let _, obs = run (go "xs : List(Int)" "sum_pos(Queue.to_list(Queue.from_list(xs)))") in
+        Alcotest.(check bool) "sum_pos not proved" false
+          (List.exists (fun (c, v, _) -> c = "sum_pos" && v = "proved") (user obs)));
+    (* Pinned gap, NOT a claim: a parameter typed with a module-qualified
+       container (`q : Queue.Queue({Int | _ > 0})`, and likewise
+       `Deque.Deque(...)`) gets no container entry, so its elements are not a
+       known source.  Filed:
+       specs/todos/2026-10-21-refine-qualified-container-param-entry.md. *)
+    skip_with "a Queue.Queue-typed parameter" "q : Queue.Queue({Int | _ > 0})"
+      "sum_pos(Queue.to_list(q))" "parametric-source-unproved" ]
+
 
 
 (* ── inference-lite (specs/2026-10-20-refinement-suggest-lite-design.md) ──
@@ -24521,4 +24658,5 @@ let () =
       ("infer-apply", infer_apply_suite);
       ("fold-invariants-3", fold_invariants_3_suite);
       ("abstract-leftovers-e", abstract_leftovers_e_suite);
+      ("stdlib-refine-sweep", stdlib_refine_sweep_suite);
       ("z3-well-formed", z3_wellformed_suite) ]

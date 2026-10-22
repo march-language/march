@@ -213,6 +213,17 @@ git log is authoritative for exact commits.
   an `accumulator-step-unproved` skip. `NativeArray`'s and `Seq`'s folds stay
   skips, as do `SortedSet.fold` and `OrderedMap.fold` for now (their record-typed
   collection parameter is not yet seen through).
+- **Refinements: `Hamt.fold`, `Enum.scan` and `Queue` now carry what the checker
+  can prove through them.** Their signatures were unannotated, so no demand
+  could pass through them; they now declare the types they already had.
+  `need_nn(Hamt.fold(h, 0, fn acc -> fn _k -> fn _v -> acc + 1))` and
+  `sum_nn(Enum.scan(ys, 0, fn acc -> fn _x -> acc + 1))` are proved as
+  accumulator invariants, and a queue built from a refined list keeps its
+  elements' refinement through `to_list`, `peek_front`, `peek_back`,
+  `push_back` and `push_front` (`sum_pos(Queue.to_list(Queue.from_list(pos)))`
+  is proved). Each was a skip before (an error under `cap verified`). Not yet:
+  a parameter typed `Queue.Queue({Int | _ > 0})` or `Deque.Deque(…)` gives no
+  element fact.
 
 ### Changed
 

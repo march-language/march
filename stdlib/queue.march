@@ -20,21 +20,21 @@ mod Queue do
 
   -- ── Private helpers ───────────────────────────────────────────────────────
 
-  pfn rev(xs, acc) do
+  pfn rev(xs : List(a), acc : List(a)) : List(a) do
     match xs do
     Nil -> acc
     Cons(h, t) -> rev(t, Cons(h, acc))
     end
   end
 
-  pfn list_len(xs, acc) do
+  pfn list_len(xs : List(a), acc : Int) : Int do
     match xs do
     Nil -> acc
     Cons(_, t) -> list_len(t, acc + 1)
     end
   end
 
-  pfn list_append(xs, ys) do
+  pfn list_append(xs : List(a), ys : List(a)) : List(a) do
     match xs do
     Nil -> ys
     Cons(h, t) -> Cons(h, list_append(t, ys))
@@ -53,7 +53,7 @@ mod Queue do
       march> Queue.is_empty(Queue.empty())
       true
   """
-  fn empty() do
+  fn empty() : Queue(a) do
     Queue(Nil, Nil)
   end
 
@@ -67,7 +67,7 @@ mod Queue do
       march> Queue.is_empty(Queue.push_back(Queue.empty(), 1))
       false
   """
-  fn is_empty(q) do
+  fn is_empty(q : Queue(a)) : Bool do
     match q do
     Queue(Nil, Nil) -> true
     _ -> false
@@ -82,7 +82,7 @@ mod Queue do
       march> Queue.to_list(Queue.push_back(Queue.from_list([1, 2]), 3))
       [1, 2, 3]
   """
-  fn push_back(q, x) do
+  fn push_back(q : Queue(a), x : a) : Queue(a) do
     match q do
     Queue(front, back) -> Queue(front, Cons(x, back))
     end
@@ -96,7 +96,7 @@ mod Queue do
       march> Queue.to_list(Queue.push_front(Queue.from_list([2, 3]), 1))
       [1, 2, 3]
   """
-  fn push_front(q, x) do
+  fn push_front(q : Queue(a), x : a) : Queue(a) do
     match q do
     Queue(front, back) -> Queue(Cons(x, front), back)
     end
@@ -114,7 +114,7 @@ mod Queue do
       march> Queue.pop_front(Queue.empty())
       None
   """
-  fn pop_front(q) do
+  fn pop_front(q : Queue(a)) : Option((a, Queue(a))) do
     match q do
     Queue(Nil, Nil) -> None
     Queue(Nil, back) -> do
@@ -140,7 +140,7 @@ mod Queue do
       march> Queue.pop_back(Queue.empty())
       None
   """
-  fn pop_back(q) do
+  fn pop_back(q : Queue(a)) : Option((a, Queue(a))) do
     match q do
     Queue(Nil, Nil) -> None
     Queue(front, Nil) -> do
@@ -165,7 +165,7 @@ mod Queue do
       march> Queue.peek_front(Queue.empty())
       None
   """
-  fn peek_front(q) do
+  fn peek_front(q : Queue(a)) : Option(a) do
     match q do
     Queue(Nil, Nil) -> None
     Queue(Cons(h, _), _) -> Some(h)
@@ -190,7 +190,7 @@ mod Queue do
       march> Queue.peek_back(Queue.push_front(Queue.empty(), 9))
       Some(9)
   """
-  fn peek_back(q) do
+  fn peek_back(q : Queue(a)) : Option(a) do
     match q do
     Queue(Nil, Nil) -> None
     Queue(_, Cons(h, _)) -> Some(h)
@@ -214,7 +214,7 @@ mod Queue do
       march> Queue.size(Queue.empty())
       0
   """
-  fn size(q) do
+  fn size(q : Queue(a)) : Int do
     match q do
     Queue(front, back) -> list_len(front, 0) + list_len(back, 0)
     end
@@ -228,7 +228,7 @@ mod Queue do
       march> Queue.to_list(Queue.push_front(Queue.push_back(Queue.empty(), 2), 1))
       [1, 2]
   """
-  fn to_list(q) do
+  fn to_list(q : Queue(a)) : List(a) do
     match q do
     Queue(front, back) -> list_append(front, rev(back, Nil))
     end
@@ -244,7 +244,7 @@ mod Queue do
       march> Queue.to_list(Queue.from_list([]))
       []
   """
-  fn from_list(xs) do
+  fn from_list(xs : List(a)) : Queue(a) do
     fn go(lst, q) do
       match lst do
       Nil -> q
